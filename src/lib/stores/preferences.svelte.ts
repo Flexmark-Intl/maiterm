@@ -90,7 +90,8 @@ function createPreferencesStore() {
   let commsPickupUsers = $state<string[]>([]);
   let commsInstructions = $state('');
   let composerDefaultOpen = $state(true);
-  let windowsShell = $state('powershell');
+  let windowsShell = $state('auto');
+  let claudeSetupPrompted = $state(false);
   let fileLinkAction = $state('modifier_click');
   let backupDirectory = $state<string | null>(null);
   let backupInterval = $state('off');
@@ -210,6 +211,7 @@ function createPreferencesStore() {
     get commsInstructions() { return commsInstructions; },
     get composerDefaultOpen() { return composerDefaultOpen; },
     get windowsShell() { return windowsShell; },
+    get claudeSetupPrompted() { return claudeSetupPrompted; },
     get fileLinkAction() { return fileLinkAction; },
     get backupDirectory() { return backupDirectory; },
     get backupInterval() { return backupInterval; },
@@ -319,7 +321,8 @@ function createPreferencesStore() {
       commsPickupUsers = prefs.comms_pickup_users ?? [];
       commsInstructions = prefs.comms_instructions ?? '';
       composerDefaultOpen = prefs.composer_default_open ?? true;
-      windowsShell = prefs.windows_shell ?? 'powershell';
+      windowsShell = prefs.windows_shell ?? 'auto';
+      claudeSetupPrompted = prefs.claude_setup_prompted ?? false;
       fileLinkAction = prefs.file_link_action ?? 'modifier_click';
       backupDirectory = prefs.backup_directory ?? null;
       backupInterval = prefs.backup_interval || 'off';
@@ -787,6 +790,11 @@ function createPreferencesStore() {
       await this.save();
     },
 
+    async setClaudeSetupPrompted(value: boolean) {
+      claudeSetupPrompted = value;
+      await this.save();
+    },
+
     async setFileLinkAction(value: string) {
       fileLinkAction = value;
       await this.save();
@@ -963,7 +971,8 @@ function createPreferencesStore() {
       commsPickupUsers = prefs.comms_pickup_users ?? [];
       commsInstructions = prefs.comms_instructions ?? '';
       composerDefaultOpen = prefs.composer_default_open ?? true;
-      windowsShell = prefs.windows_shell ?? 'powershell';
+      windowsShell = prefs.windows_shell ?? 'auto';
+      claudeSetupPrompted = prefs.claude_setup_prompted ?? false;
       fileLinkAction = prefs.file_link_action ?? 'modifier_click';
       backupDirectory = prefs.backup_directory ?? null;
       backupInterval = prefs.backup_interval || 'off';
@@ -1066,6 +1075,7 @@ function createPreferencesStore() {
         comms_instructions: commsInstructions.trim() || null,
         composer_default_open: composerDefaultOpen,
         windows_shell: windowsShell,
+        claude_setup_prompted: claudeSetupPrompted,
         file_link_action: fileLinkAction,
         backup_directory: backupDirectory,
         backup_interval: backupInterval === 'off' ? '' : backupInterval,

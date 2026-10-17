@@ -320,8 +320,18 @@ pub fn spawn_pty(
     #[cfg(windows)]
     let mut cmd = {
         let prefs = state.app_data.read().preferences.clone();
-        let shell_path = resolve_windows_shell(&prefs.windows_shell);
-        CommandBuilder::new(&shell_path)
+        let (shell_path, args) = resolve_windows_shell(&prefs.windows_shell);
+        let mut cmd = CommandBuilder::new(&shell_path);
+        cmd.args(args);
+        // claude's folder when its installer left it off PATH, and where Git Bash is for Claude
+        // (windows_setup.rs). Read from the builder's own environment, which portable-pty fills
+        // from the stored PATH and user variables on every spawn.
+        let path_now = cmd.get_env("PATH").map(|v| v.to_string_lossy().into_owned());
+        let has_bash_var = cmd.get_env("CLAUDE_CODE_GIT_BASH_PATH").is_some();
+        for (k, v) in crate::windows_setup::tab_env(path_now.as_deref(), has_bash_var) {
+            cmd.env(k, v);
+        }
+        cmd
     };
 
     // --- Cross-platform environment setup ---
@@ -1809,10 +1819,21 @@ fn get_foreground_command(shell_pid: u32) -> Option<String> {
     ssh_cmd
 }
 
-/// Resolve a Windows shell preference ID to an executable path.
+/// Resolve a Windows shell preference ID to an executable path and its arguments.
 /// Falls back to powershell.exe if the configured shell can't be found.
 #[cfg(windows)]
-fn resolve_windows_shell(id: &str) -> String {
+fn resolve_windows_shell(id: &str) -> (String, Vec<&'static str>) {
+    let git_bash = crate::windows_setup::git_bash();
+    match crate::windows_setup::resolve_shell(id, git_bash.is_some()) {
+        // A login, interactive shell, as Git's own Start-menu entry runs it: without --login
+        // the profile isn't read and Git's own folders aren't put on PATH.
+        "gitbash" => (git_bash.unwrap_or_default(), vec!["--login", "-i"]),
+        other => (resolve_windows_shell_path(other), vec![]),
+    }
+}
+
+#[cfg(windows)]
+fn resolve_windows_shell_path(id: &str) -> String {
     match id {
         "cmd" => {
             std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
@@ -1829,19 +1850,6 @@ fn resolve_windows_shell(id: &str) -> String {
                         .to_string();
                 }
             }
-            "powershell.exe".to_string()
-        }
-        "gitbash" => {
-            let paths = [
-                r"C:\Program Files\Git\bin\bash.exe",
-                r"C:\Program Files (x86)\Git\bin\bash.exe",
-            ];
-            for p in &paths {
-                if std::path::Path::new(p).exists() {
-                    return p.to_string();
-                }
-            }
-            // Git Bash not found, fall back to powershell
             "powershell.exe".to_string()
         }
         "wsl" => {

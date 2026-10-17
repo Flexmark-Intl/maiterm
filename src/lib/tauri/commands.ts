@@ -4,7 +4,7 @@ import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
-import type { AgentBridge, AgentRequest, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, FollowUp, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WatchStatus, WindowData, Workspace, WorkspaceNote } from './types';
+import type { AgentBridge, AgentRequest, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, FollowUp, ClaudeSetupReport, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WatchStatus, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
 export async function spawnTerminal(ptyId: string, tabId: string, cols: number, rows: number, cwd?: string | null): Promise<void> {
@@ -272,6 +272,19 @@ export async function readClipboardFilePaths(): Promise<string[]> {
 
 export async function detectWindowsShells(): Promise<ShellInfo[]> {
   return invoke('detect_windows_shells');
+}
+
+export async function detectClaudeSetup(): Promise<ClaudeSetupReport> {
+  return invoke('detect_claude_setup');
+}
+
+export async function claudeSetupAddToPath(): Promise<void> {
+  return invoke('claude_setup_add_to_path');
+}
+
+/** Opens the Claude setup wizard in the terminal window the user was last in. */
+export async function openClaudeSetup(): Promise<void> {
+  return invoke('open_claude_setup');
 }
 
 // Terminal backend commands (alacritty_terminal)

@@ -11,6 +11,7 @@ mod share;
 mod terminal;
 mod watch;
 mod relocate;
+mod windows_setup;
 
 pub const APP_DISPLAY_NAME: &str = if cfg!(debug_assertions) { "maiTermDev" } else { "maiTerm" };
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -123,7 +124,8 @@ static LAST_FOCUSED_WINDOW: parking_lot::RwLock<Option<String>> = parking_lot::R
 /// while Preferences or Help is key and while every window is minimized, and in
 /// both cases no terminal window reports focus — so fall back to the one they
 /// were last in, then to a lone window, and only then admit we don't know.
-fn emit_to_focused_window(app_handle: &tauri::AppHandle, event: &str) {
+/// Returns whether a window was found.
+pub(crate) fn emit_to_focused_window(app_handle: &tauri::AppHandle, event: &str) -> bool {
     let windows: Vec<_> = app_handle
         .webview_windows()
         .into_iter()
@@ -142,11 +144,15 @@ fn emit_to_focused_window(app_handle: &tauri::AppHandle, event: &str) {
     match target {
         Some((label, _)) => {
             let _ = app_handle.emit_to(label.as_str(), event, ());
+            true
         }
-        None => log::warn!(
-            "Menu event '{event}': no focused window among {} candidates",
-            windows.len()
-        ),
+        None => {
+            log::warn!(
+                "Menu event '{event}': no focused window among {} candidates",
+                windows.len()
+            );
+            false
+        }
     }
 }
 
@@ -668,6 +674,9 @@ pub fn run() {
             commands::terminal::list_live_ptys,
             commands::terminal::read_clipboard_file_paths,
             commands::terminal::detect_windows_shells,
+            windows_setup::detect_claude_setup,
+            windows_setup::claude_setup_add_to_path,
+            windows_setup::open_claude_setup,
             commands::terminal::scroll_terminal,
             commands::terminal::scroll_terminal_to,
             commands::terminal::get_terminal_scrollback_info,

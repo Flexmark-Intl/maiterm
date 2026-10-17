@@ -1294,8 +1294,10 @@ fn default_notification_mode() -> String {
     "auto".to_string()
 }
 
+/// Git Bash when Git for Windows is installed, else PowerShell (windows_setup::resolve_shell).
+/// Saved preferences from before this default keep the "powershell" they were written with.
 fn default_windows_shell() -> String {
-    "powershell".to_string()
+    "auto".to_string()
 }
 
 fn default_file_link_action() -> String {
@@ -1878,9 +1880,13 @@ pub struct Preferences {
     /// Default open state for the composer dock on tabs that haven't been explicitly toggled.
     #[serde(default = "default_true")]
     pub composer_default_open: bool,
-    /// Windows shell preference: "powershell", "pwsh", "cmd", "gitbash", "wsl"
+    /// Windows shell preference: "auto" (default), "powershell", "pwsh", "cmd", "gitbash", "wsl"
     #[serde(default = "default_windows_shell")]
     pub windows_shell: String,
+    /// The Windows Claude setup wizard has opened by itself once: it does so only on the first
+    /// launch that finds something missing; Preferences opens it any time.
+    #[serde(default)]
+    pub claude_setup_prompted: bool,
     /// File link click behavior: "click", "modifier_click", "alt_click", "disabled"
     #[serde(default = "default_file_link_action")]
     pub file_link_action: String,
@@ -2182,6 +2188,7 @@ impl Default for Preferences {
             codex_hooks_bypass_trust: false,
             composer_default_open: true,
             windows_shell: default_windows_shell(),
+            claude_setup_prompted: false,
             file_link_action: default_file_link_action(),
             backup_directory: None,
             backup_interval: String::new(),

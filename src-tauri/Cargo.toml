@@ -78,6 +78,13 @@ keyring = "4"
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 tauri-plugin-single-instance = "2"
 
+# The Windows Claude setup wizard (windows_setup.rs): read the stored PATH, append claude's
+# folder to the user's, and tell running programs the environment changed. Both versions are
+# already in the tree through tauri.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
 # Window/webview base colour (commands::window::set_window_background). Same versions
 # wry already pulls in; default features off so only the two bindings we call land.
 [target.'cfg(target_os = "macos")'.dependencies]

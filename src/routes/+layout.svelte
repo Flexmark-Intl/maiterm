@@ -51,6 +51,8 @@
   // Side-effect import: subscribes to activity store for OS notifications
   import '$lib/stores/notifications.svelte';
   import { updaterStore } from '$lib/stores/updater.svelte';
+  import { claudeSetupStore } from '$lib/stores/claudeSetup.svelte';
+  import ClaudeSetupModal from '$lib/components/ClaudeSetupModal.svelte';
 
   interface Props {
     children: import('svelte').Snippet;
@@ -551,6 +553,15 @@
     listen('check-for-updates', () => {
       updaterStore.checkForUpdates(false);
     }, { target: appWindow.label }).then(unlisten => { unlistenCheckUpdates = unlisten; });
+
+    // Windows Claude setup wizard: Preferences' "Check Claude setup" (lands in the last terminal
+    // window), and once by itself on the first Windows launch that finds something missing —
+    // from the main window only, so two restored windows don't both open it.
+    let unlistenClaudeSetup: (() => void) | undefined;
+    listen('open-claude-setup', () => {
+      claudeSetupStore.show();
+    }, { target: appWindow.label }).then(unlisten => { unlistenClaudeSetup = unlisten; });
+    if (appWindow.label === 'main') void claudeSetupStore.maybeAutoOpen();
 
     // Periodic silent update check — the startup check only runs once, so a
     // long-running window would otherwise never notice a new release. Re-reads
@@ -1394,6 +1405,7 @@
       unlistenWindowMoves?.();
       unlistenStateImported?.();
       unlistenCheckUpdates?.();
+      unlistenClaudeSetup?.();
       unlistenClearNavHistory?.();
       unlistenClaudeTool?.();
       unlistenClaudeConnection?.();
@@ -1497,6 +1509,9 @@
   onEnabled={() => { showMeshCockpit = true; }}
 />
 <OverlordRuleChangeModal />
+{#if claudeSetupStore.open}
+  <ClaudeSetupModal />
+{/if}
 <!-- Right-edge pull-tab: appears when the active workspace is a mesh and the cockpit is closed. -->
 {#if workspacesStore.activeWorkspace?.bridge_all && !showMeshCockpit && meshSetupWorkspaceId === null}
   <button

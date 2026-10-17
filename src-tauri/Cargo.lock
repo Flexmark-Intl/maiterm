@@ -100,6 +100,8 @@ dependencies = [
  "toml_edit 0.22.27",
  "tower",
  "uuid",
+ "windows-sys 0.59.0",
+ "winreg 0.55.0",
 ]
 
 [[package]]

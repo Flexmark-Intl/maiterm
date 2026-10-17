@@ -666,6 +666,7 @@ export interface Preferences {
   codex_hooks_bypass_trust: boolean;
   composer_default_open: boolean;
   windows_shell: string;
+  claude_setup_prompted?: boolean;
   file_link_action: string;
   backup_directory: string | null;
   backup_interval: string;
@@ -795,6 +796,26 @@ export interface ShellInfo {
   id: string;
   name: string;
   path: string;
+}
+
+/** What the Windows Claude setup wizard found (src-tauri/src/windows_setup.rs). Off Windows
+ *  `windows` is false and everything else is empty. */
+export interface ClaudeSetupReport {
+  windows: boolean;
+  /** Git for Windows' bin\bash.exe; null = Git for Windows isn't installed. */
+  git_bash: string | null;
+  claude: string | null;
+  claude_version: string | null;
+  /** `claude` works in a new terminal outside maiTerm; maiTerm's tabs find it either way. */
+  claude_on_path: boolean;
+  /** An older Claude Desktop's Claude.exe that comes first on PATH. */
+  claude_shadowed_by: string | null;
+  /** Default WSL distro's version (1 or 2); null when WSL has no distro. */
+  wsl_version: number | null;
+  winget: boolean;
+  shell_pref: string;
+  /** The shell new tabs actually get. */
+  shell: string;
 }
 
 // Terminal backend types (alacritty_terminal)

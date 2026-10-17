@@ -293,20 +293,13 @@ fn detect_windows_shells_impl() -> Vec<ShellInfo> {
         }
     }
 
-    // Git Bash — check common install paths
-    let git_bash_paths = [
-        r"C:\Program Files\Git\bin\bash.exe",
-        r"C:\Program Files (x86)\Git\bin\bash.exe",
-    ];
-    for p in &git_bash_paths {
-        if std::path::Path::new(p).exists() {
-            shells.push(ShellInfo {
-                id: "gitbash".to_string(),
-                name: "Git Bash".to_string(),
-                path: p.to_string(),
-            });
-            break;
-        }
+    // Git Bash — wherever Git for Windows is installed (windows_setup.rs)
+    if let Some(path) = crate::windows_setup::git_bash() {
+        shells.push(ShellInfo {
+            id: "gitbash".to_string(),
+            name: "Git Bash".to_string(),
+            path,
+        });
     }
 
     // WSL

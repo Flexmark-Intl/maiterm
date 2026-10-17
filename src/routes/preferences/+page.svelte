@@ -8,7 +8,7 @@
   import Tooltip from '$lib/components/Tooltip.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import { modLabel, altLabel, isModKey, isMac } from '$lib/utils/platform';
-  import { getAllWorkspaces, getAllTabs, listSystemSounds, playSystemSound, detectWindowsShells, exportState, importState, pickBackupDirectory, backupFilename, previewImport, checkFullDiskAccess, openFullDiskAccessSettings, mailinkCreatePairing, mailinkListDevices, mailinkRemoveDevice, commsTestConnection, deshittifyStatus, deshittifySetRule, deshittifySetRules } from '$lib/tauri/commands';
+  import { getAllWorkspaces, getAllTabs, listSystemSounds, playSystemSound, detectWindowsShells, openClaudeSetup, exportState, importState, pickBackupDirectory, backupFilename, previewImport, checkFullDiskAccess, openFullDiskAccessSettings, mailinkCreatePairing, mailinkListDevices, mailinkRemoveDevice, commsTestConnection, deshittifyStatus, deshittifySetRule, deshittifySetRules } from '$lib/tauri/commands';
   import type { ImportPreview, DeshittifyStatus } from '$lib/tauri/commands';
   import qrcode from 'qrcode-generator';
   import ImportPreviewModal from '$lib/components/ImportPreviewModal.svelte';
@@ -892,6 +892,7 @@
               value={preferencesStore.windowsShell}
               onchange={(e) => preferencesStore.setWindowsShell(e.currentTarget.value)}
             >
+              <option value="auto">Automatic (Git Bash when installed)</option>
               {#each windowsShells as shell}
                 <option value={shell.id}>{shell.name}</option>
               {/each}
@@ -902,6 +903,13 @@
               {windowsShells.find(s => s.id === preferencesStore.windowsShell)?.path}
             </p>
           {/if}
+          <div class="setting">
+            <div>
+              <span>Claude setup</span>
+              <p class="setting-hint">Checks Git for Windows, Claude Code and PATH, and fixes what's missing.</p>
+            </div>
+            <button class="backup-btn" onclick={() => openClaudeSetup()}>Check Claude setup…</button>
+          </div>
         {/if}
 
         <h3 class="section-heading" style="margin-top: 20px;">Shell Integration</h3>
