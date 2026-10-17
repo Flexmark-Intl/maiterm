@@ -809,7 +809,7 @@ fn claim_pending_index(
 /// routes as usual and is refused there as not found.
 fn target_owner_window(state: &Arc<AppState>, tool_name: &str, arguments: &Value) -> Option<String> {
     match tool_name {
-        "moveTab" => find_window_for_tab(state, arguments.get("tab_id")?.as_str()?),
+        "moveTab" | "reloadTab" => find_window_for_tab(state, arguments.get("tab_id")?.as_str()?),
         "moveWorkspace" | "setMesh" | "linkMeshes" | "unlinkMesh" | "createTab" => {
             let ws = arguments.get("workspace_id")?.as_str()?;
             let app_data = state.app_data.read();
@@ -2598,7 +2598,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 46] = [
+const PEER_ADDRESSING_TOOLS: [&str; 48] = [
     // A mute aimed at a guessed tab silences notifications the human wants (docs/mute.md).
     "setMuted",
     // Agent requests and the moves (agent_requests.rs, docs/agent-requests.md): a request is
@@ -2613,6 +2613,8 @@ const PEER_ADDRESSING_TOOLS: [&str; 46] = [
     "bridgeWith",
     "disconnectBridge",
     "restartMaiterm",
+    "reloadTab",
+    "reloadWindow",
     "addMcpServer",
     "getRequestStatus",
     // Files leave the machine for the human's phone and land in a named tab's chat. An
@@ -2676,7 +2678,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 46] = [
 /// The agent-request tools (agent_requests.rs) are here for the same reason from the other side:
 /// a request is shown to the human as "the agent in <tab> asks…", so the tab named must be the
 /// caller, and a request's status is only its own tab's to read.
-const OWN_TAB_ONLY_TOOLS: [&str; 14] = [
+const OWN_TAB_ONLY_TOOLS: [&str; 16] = [
     "createFollowUp",
     "listFollowUps",
     "cancelFollowUp",
@@ -2689,6 +2691,8 @@ const OWN_TAB_ONLY_TOOLS: [&str; 14] = [
     "bridgeWith",
     "disconnectBridge",
     "restartMaiterm",
+    "reloadTab",
+    "reloadWindow",
     "addMcpServer",
     "getRequestStatus",
 ];

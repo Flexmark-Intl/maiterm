@@ -512,6 +512,18 @@ pub fn reset_window(window: tauri::Window, state: State<'_, Arc<AppState>>) -> R
     Ok(())
 }
 
+/// Reload one app window's webview, as the menu's Reload Current Window does: its PTYs live on
+/// and its tabs reattach. For an agent's approved `reloadWindow` (agent_requests.rs) aimed at a
+/// window other than the one carrying it out.
+#[tauri::command]
+pub fn reload_window(app: tauri::AppHandle, label: String) -> Result<(), String> {
+    if label == "preferences" || label == "help" {
+        return Err("not an app window".into());
+    }
+    let win = app.get_webview_window(&label).ok_or("the window is gone")?;
+    win.eval("window.location.reload()").map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn get_window_count(app: tauri::AppHandle) -> usize {
     app.webview_windows().iter()

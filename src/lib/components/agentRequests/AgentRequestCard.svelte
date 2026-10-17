@@ -52,6 +52,8 @@
       : r.kind === 'tab_create' ? 'Allow this new agent?'
         : r.kind === 'bridge_fork' ? 'Allow this new agent and bridge?'
           : r.kind === 'mcp_add' ? 'Add this MCP server for every agent?'
+          : r.kind === 'tab_reload' ? 'Allow this reload?'
+          : r.kind === 'window_reload' ? 'Reload this window?'
           : r.kind.startsWith('bridge') ? 'Allow this bridge change?'
             : r.kind.startsWith('mesh') ? 'Allow this mesh change?' : 'Allow this move?',
   );

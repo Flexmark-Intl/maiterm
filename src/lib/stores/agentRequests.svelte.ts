@@ -34,6 +34,7 @@ import { moveTabToWindow, moveWorkspaceToWindow } from '$lib/stores/windowMove';
 import { getDescriptor } from '$lib/agents/descriptor';
 import type { AgentRuntime } from '$lib/agents/types';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
+import { isEditorDirty } from '$lib/stores/editorRegistry.svelte';
 
 type ToolResult = Record<string, unknown>;
 
@@ -401,6 +402,83 @@ async function restartMaiterm(a: { tabId?: string; update?: boolean; reason?: st
   return file(a.tabId, 'restart', { update: true, version }, `Install maiTerm ${version ? `v${version} ` : 'update '}and restart`, effects, a.reason);
 }
 
+// ── Reloads ─────────────────────────────────────────────────────────────────────────────────
+
+/** Whether a reloaded tab's agent comes back: the replacement types the tab's auto-resume
+ *  command on mount (TerminalPane), and nothing else restarts it. */
+const resumesOnReload = (t: Tab) => t.auto_resume_enabled !== false && !!t.auto_resume_command;
+
+/** Reload a terminal tab as Cmd+Shift+R does (a replacement under a new id). The caller's OWN tab
+ *  goes at once — it is the one interrupted — but only when it will come back; anyone else's
+ *  interrupts another agent, so it is asked. */
+async function reloadTab(a: { tabId?: string; tab_id?: string; reason?: string }): Promise<ToolResult> {
+  if (!a.tabId) return { error: 'No tab identity: run /maiterm init.' };
+  const target = a.tab_id || a.tabId;
+  const own = target === a.tabId;
+  const at = locateTab(target);
+  if (!at) return { error: own ? 'Your tab is not in this window.' : 'Tab not found (listWorkspaces gives tab ids).' };
+  if (at.tab.service_id) return { error: `“${at.tab.name}” runs a stack service; use restartService.` };
+  if ((at.tab.tab_type ?? 'terminal') !== 'terminal') return { error: `“${at.tab.name}” is not a terminal tab.` };
+  // A suspended or never-opened tab has no shell to restart; reloading it would spawn one nobody asked for.
+  if (!terminalsStore.get(target)) return { error: `“${at.tab.name}” has no running terminal (it is suspended or not opened yet), so there is nothing to reload.` };
+  const resumes = resumesOnReload(at.tab);
+  if (own) {
+    if (!resumes) return { error: 'Your tab has no auto-resume, so a reload would end your session for good. Turn it on with setAutoResume first.' };
+    // Requests are keyed by the asking tab's id, which a reload replaces: the outcome of one still
+    // open would reach no one, and getRequestStatus from the new id would not find it.
+    const open = (await commands.listAgentRequests().catch(() => [])).filter((r) => r.tab_id === target && (r.status === 'pending' || r.status === 'approved'));
+    if (open.length) return { error: `You have ${count(open.length, 'request')} waiting on the human (${open.map((r) => r.summary).join('; ')}). A reload gives your tab a new id, and you would not be told the outcome; reload once they are answered.` };
+    // A reload kills the box with the shell: never take a human's draft with it.
+    const hasDraft = async () => (await commands.agentInputBox(target).catch(() => 'unknown')) === 'has_text';
+    if (await hasDraft()) return { error: 'The human has a draft typed in your input box; a reload would lose it. Not reloaded.' };
+    // After this answer is on its way: the reload kills the shell this call came from.
+    setTimeout(async () => {
+      const now = locateTab(target);
+      if (!now) return;
+      if (await hasDraft()) {
+        logInfo(`agentRequests: own reload of ${target.slice(0, 8)} dropped, a draft appeared in its input box`);
+        return;
+      }
+      workspacesStore.reloadTab(now.ws.id, now.paneId, target)
+        .catch((e) => logError(`agentRequests: reloading own tab ${target.slice(0, 8)} failed: ${e}`));
+    }, 1500);
+    return { reloading: true, note: 'Your tab reloads in a moment under a new tab id, and its auto-resume brings you back with this conversation. Do not start anything else now: it would be interrupted.' };
+  }
+  const effects = [
+    resumes
+      ? `Its shell restarts under a new tab id in the same place, keeping its name, notes and tasks. Whatever runs there now is interrupted; its agent comes back through the tab's auto-resume.`
+      : `Its shell restarts under a new tab id in the same place, keeping its name, notes and tasks. It has no auto-resume: whatever runs there now is stopped and nothing restarts it.`,
+  ];
+  return file(a.tabId, 'tab_reload', { tab_id: target, resumes }, `Reload “${at.tab.name}” in “${at.ws.name}”`, effects, a.reason);
+}
+
+/** Reload a window's webview, as Reload Current Window does. Always asked: PTYs live on, but what
+ *  only the interface holds (unsaved editors, open panels and dialogs) does not. */
+async function reloadWindow(a: { tabId?: string; window_id?: string; reason?: string }): Promise<ToolResult> {
+  if (!a.tabId) return { error: 'No tab identity: run /maiterm init.' };
+  const windows = await moveTargets();
+  const target = a.window_id ? windows.find((w) => w.id === a.window_id || w.label === a.window_id) : windows.find((w) => w.is_current);
+  if (!target) return { error: 'Window not found (listWindows gives their ids).' };
+  const shown = target.name ?? target.active_workspace_name ?? target.label;
+  const effects = [
+    'Its shells and agents keep running, and every tab reattaches once the window is back.',
+  ];
+  let dirty: string[] | null = null;
+  if (target.is_current) {
+    const tabs = dirtyEditors();
+    dirty = tabs.map((t) => t.id);
+    effects.push(tabs.length ? `Unsaved changes in ${count(tabs.length, 'editor tab')} are lost: ${names(tabs)}.` : 'No editor tab in it has unsaved changes.');
+  } else {
+    effects.push('Unsaved changes in its editor tabs are lost.');
+  }
+  return file(a.tabId, 'window_reload', { window: target.label, dirty }, `Reload the maiTerm window ${target.name ? `“${target.name}”` : `showing “${shown}”`}`, effects, a.reason);
+}
+
+/** This window's editor tabs with unsaved changes, sorted by id (compared on approval). */
+function dirtyEditors(): Tab[] {
+  return workspacesStore.workspaces.flatMap((w) => w.panes.flatMap((p) => p.tabs)).filter((t) => isEditorDirty(t.id)).sort((x, y) => x.id.localeCompare(y.id));
+}
+
 // ── MCP servers through maiTerm (docs/mcp-proxy.md §7) ──────────────────────────────────────
 
 /** A path segment that reads as a key rather than a word: long, and letters mixed with digits
@@ -661,10 +739,46 @@ async function execute(r: AgentRequest): Promise<string> {
       await updaterStore.restart();
       throw new Error('the relaunch failed (see the log)');
     }
+    case 'tab_reload': {
+      const at = locateTab(s('tab_id'));
+      if (!at) throw new Error('the tab is gone');
+      if (!terminalsStore.get(at.tab.id)) throw new Error(`“${at.tab.name}” is no longer running; nothing was done`);
+      // The card said whether its agent comes back.
+      if (resumesOnReload(at.tab) !== r.args.resumes) throw new Error(`“${at.tab.name}”’s auto-resume changed after it was asked; nothing was done, ask again`);
+      const id = await workspacesStore.reloadTab(at.ws.id, at.paneId, at.tab.id);
+      if (!id) throw new Error(`“${at.tab.name}” could not be reloaded`);
+      return `reloaded; “${at.tab.name}” is now tab ${id}`;
+    }
+    case 'window_reload': {
+      const label = s('window');
+      if (label !== getCurrentWindow().label) {
+        await commands.reloadWindow(label);
+        return 'the window is reloading';
+      }
+      // The card counted this window's unsaved editors; an edit made while it waited is a different question.
+      const was = (r.args.dirty as string[] | null) ?? [];
+      const now = dirtyEditors().map((t) => t.id);
+      if (now.length !== was.length || now.some((id, i) => id !== was[i])) {
+        throw new Error('editor tabs in this window were edited or saved after it was asked, so the card no longer says what would be lost; nothing was done, ask again');
+      }
+      // This window goes with it: settle first, as a restart does.
+      await commands.settleAgentRequest(r.id, true, 'the window is reloading').catch(() => {});
+      window.location.reload();
+      return 'the window is reloading';
+    }
   }
 }
 
-async function onApproved(r: AgentRequest) {
+/** Approved requests run one at a time: two approved together (a tab reload and a new tab in the
+ *  same pane) each rewrite the pane's tab list from their own read of it. */
+let executing: Promise<void> = Promise.resolve();
+
+function onApproved(r: AgentRequest): Promise<void> {
+  executing = executing.then(() => carryOut(r));
+  return executing;
+}
+
+async function carryOut(r: AgentRequest) {
   logInfo(`agentRequests: carrying out ${r.kind} ${r.id}`);
   let ok = false;
   let outcome: string;
@@ -692,6 +806,8 @@ async function onSettled(r: AgentRequest) {
   }
   // The restart is its own outcome; a notice typed now would race the shutdown.
   if (r.kind === 'restart' && r.status === 'done') return;
+  // So is a reload of the window the asker is in.
+  if (r.kind === 'window_reload' && r.status === 'done' && r.args.window === r.window_label) return;
   const by = r.decided_by === 'phone' ? ' (from their phone)' : '';
   const text =
     r.status === 'done'
@@ -745,6 +861,8 @@ function createAgentRequestsStore() {
     bridgeWith,
     disconnectBridge,
     restartMaiterm,
+    reloadTab,
+    reloadWindow,
     listMcpServers,
     addMcpServer,
     async init() {

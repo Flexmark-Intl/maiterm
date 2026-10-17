@@ -18,6 +18,8 @@ and "for organization and read operations it doesn't require the prompt".
 | `bridgeWith` (a 1:1 Agent Bridge with another tab in the caller's window; `fork: true` bridges with a copy of its conversation in a new tab) | never: a request |
 | `disconnectBridge` | never: a request, unless the partner's tab is gone (then at once) |
 | `restartMaiterm` (`update: true` installs the update first) | never: a request |
+| `reloadTab` (a terminal tab restarted as Cmd+Shift+R does, under a new tab id) | the caller's OWN tab at once (refused without auto-resume); another tab never: a request |
+| `reloadWindow` (a window's webview reloaded, as Reload Current Window does) | never: a request |
 | `addMcpServer` (a remote MCP server maiTerm signs in to and serves to every agent, docs/mcp-proxy.md §7) | never: a request |
 | `listMcpServers` | yes: read-only |
 | `getRequestStatus` | yes: read-only, the caller's own requests only |
@@ -83,6 +85,26 @@ human sees agents being started. How it works:
   named tab in a mesh workspace has the joining mesh's snapshot on its card, checked like a
   move's.
 - The asking agent is told the new tab's id.
+
+**Reloads** (`reloadTab` / `reloadWindow`, added 2026-10-16 on Darryl's ask, beside the restart):
+- **An agent reloads its own tab at once.** It is the one interrupted, so nobody else's work is at
+  stake. The reload runs 1.5 s after the tool answers (it kills the shell the call came from), and
+  is refused when the tab has no auto-resume: the replacement would come up at a shell prompt and
+  the agent's session would end for good. Also refused while the tab has a request still open
+  (requests are keyed by the asking tab's id, which the reload replaces, so the outcome would
+  reach no one) and while the human has a draft in its input box (read again when it fires).
+- **The replacement of a live tab is mounted** (`activate-tab`, without focus), in a workspace
+  nobody is looking at too: otherwise its shell and auto-resume waited until someone viewed it.
+- **Approved requests run one at a time** in a window (`onApproved` chains them). A tab reload and
+  a new tab approved together in one pane each rewrote the pane's order from their own read of
+  it, and the new tab was deleted (2026-10-16; `reorder_tabs` now keeps unlisted tabs too).
+- **Another tab is asked.** Whatever runs there is interrupted. The card says whether its agent
+  comes back (the tab's auto-resume), and that is checked again before it runs. A service tab is
+  refused (that is `restartService`), and so is a tab with no live terminal (nothing to restart).
+- **A window reload is always asked.** Its PTYs live on and every tab reattaches, but what only the
+  webview holds does not: unsaved editor buffers (counted on the card for the asker's own window),
+  open panels and dialogs. Reloading the asker's own window settles first and tells the agent
+  nothing, as a restart does; getRequestStatus has it.
 
 ## 2. Where the approval lives
 

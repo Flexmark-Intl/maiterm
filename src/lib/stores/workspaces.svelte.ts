@@ -2514,6 +2514,7 @@ function createWorkspacesStore() {
         const idx = workspaces.findIndex(w => w.id === workspaceId);
         if (idx >= 0) workspaces[idx] = updatedWs;
       }
+      return newTab.id;
     },
 
     /**
@@ -2609,20 +2610,21 @@ function createWorkspacesStore() {
       return newTab.id;
     },
 
-    async reloadTab(workspaceId: string, paneId: string, tabId: string) {
+    /** The replacement's id, or null when nothing was replaced (not found, or not a terminal). */
+    async reloadTab(workspaceId: string, paneId: string, tabId: string): Promise<string | null> {
       const ws = workspaces.find(w => w.id === workspaceId);
       const pane = ws?.panes.find(p => p.id === paneId);
       const sourceTab = pane?.tabs.find(t => t.id === tabId);
-      if (!ws || !pane || !sourceTab) return;
+      if (!ws || !pane || !sourceTab) return null;
 
       // Editor tabs: re-read file from disk
       if (sourceTab.tab_type === 'editor') {
         window.dispatchEvent(new CustomEvent('editor-reload', { detail: { tabId } }));
-        return;
+        return null;
       }
 
       // Diff tabs: nothing to reload (content is ephemeral from Claude)
-      if (sourceTab.tab_type === 'diff') return;
+      if (sourceTab.tab_type === 'diff') return null;
 
       // Board tabs: same — the Overlord board renders live from the store, it has no PTY
       // and nothing to restart. It reached the duplicate path only because the early
@@ -2630,7 +2632,7 @@ function createWorkspacesStore() {
       // tab silently turning into a blank terminal. Now that `tab_type` is carried, it
       // would instead land on a tab whose TerminalPane has already begun mounting and
       // destroy it mid-init — leaking the PTY that init goes on to spawn.
-      if (sourceTab.tab_type === 'board') return;
+      if (sourceTab.tab_type === 'board') return null;
 
       // Terminal tabs: duplicate + delete for full PTY restart.
       // Remember the position before duplication; the name (and the rest of the record)
@@ -2638,19 +2640,25 @@ function createWorkspacesStore() {
       const sourceIndex = pane.tabs.findIndex(t => t.id === tabId);
       // Captured BEFORE the duplicate, which activates what it creates.
       const wasActiveBeforeDuplicate = pane.active_tab_id === tabId;
+      // A live tab must come back live. In a workspace nobody is looking at, nothing mounts the
+      // replacement until it is viewed, so its shell and auto-resume wait for that: an agent
+      // reloaded there (an account switch, an agent's reloadTab) sat dead until someone looked.
+      const wasLive = !!terminalsStore.get(tabId);
 
       // Deep duplicate: clones scrollback, CWD, SSH, notes, history, auto-resume, variables
-      await this.duplicateTab(workspaceId, paneId, tabId);
+      const dupId = await this.duplicateTab(workspaceId, paneId, tabId);
 
       // Reload state to get the new tab
       const freshData = await commands.getWindowData();
       const freshWs = freshData.workspaces.find(w => w.id === workspaceId);
       const freshPane = freshWs?.panes.find(p => p.id === paneId);
-      if (!freshWs || !freshPane) return;
+      if (!freshWs || !freshPane) return null;
 
-      // Find the new tab (duplicateTab places it right after source)
-      const newTab = freshPane.tabs[sourceIndex + 1];
-      if (!newTab) return;
+      // By id, never by position: a tab created in this pane meanwhile (an agent's createTab
+      // approved at the same moment) sat at `sourceIndex + 1` and was taken for the replacement —
+      // given this tab's state, and the original deleted (found live, 2026-10-16).
+      const newTab = freshPane.tabs.find(t => t.id === dupId);
+      if (!newTab) return null;
 
       // Mark split context so auto-resume command fires on mount (reload = full restore).
       // Reload destination follows the auto_resume_pinned lever:
@@ -2734,6 +2742,9 @@ function createWorkspacesStore() {
       // by the dedup, so the resumed session would mirror its whole list a second time
       // on the very next tick, and again on every subsequent reload.
       import('$lib/stores/tasks.svelte').then(m => m.tasksStore.remapTab(tabId, newTab.id)).catch(() => {});
+      // Mounts it without focusing it (+page.svelte `handleActivateTab`).
+      if (wasLive) window.dispatchEvent(new CustomEvent('activate-tab', { detail: newTab.id }));
+      return newTab.id;
     },
 
     async duplicateWindow() {

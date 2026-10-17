@@ -32,7 +32,7 @@ const MAX_PENDING_PER_TAB: usize = 5;
 
 /// What a request asks for. A string on the wire (never a serde enum: an unknown variant in
 /// stored state wipes it on a downgrade), checked against this list when filed.
-pub const KINDS: [&str; 12] = [
+pub const KINDS: [&str; 14] = [
     "mesh_enable",
     "mesh_disable",
     "mesh_link",
@@ -41,6 +41,10 @@ pub const KINDS: [&str; 12] = [
     "workspace_move",
     "tab_create",
     "restart",
+    // Reloading another agent's tab interrupts it; reloading a window drops its interface state
+    // (editor buffers). An agent's reload of its OWN tab is not asked (it is the one interrupted).
+    "tab_reload",
+    "window_reload",
     // A 1:1 Agent Bridge (bridgeWith / disconnectBridge): the other way two agents come to
     // message each other. The phone draws a kind from its text fields, so new kinds need no
     // protocol change (docs/mailink-protocol.md §4.4).

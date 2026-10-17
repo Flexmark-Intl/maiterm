@@ -414,6 +414,12 @@ function createClaudeCodeStore() {
         case 'restartMaiterm':
           result = await agentRequestsStore.restartMaiterm(args as Parameters<typeof agentRequestsStore.restartMaiterm>[0]);
           break;
+        case 'reloadTab':
+          result = await agentRequestsStore.reloadTab(args as Parameters<typeof agentRequestsStore.reloadTab>[0]);
+          break;
+        case 'reloadWindow':
+          result = await agentRequestsStore.reloadWindow(args as Parameters<typeof agentRequestsStore.reloadWindow>[0]);
+          break;
         case 'listMcpServers':
           result = await agentRequestsStore.listMcpServers();
           break;

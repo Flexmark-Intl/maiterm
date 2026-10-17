@@ -1267,6 +1267,11 @@ export async function getWindowCount(): Promise<number> {
   return invoke('get_window_count');
 }
 
+/** Reload another app window's webview (its PTYs live on). */
+export async function reloadWindow(label: string): Promise<void> {
+  return invoke('reload_window', { label });
+}
+
 export async function openPreferencesWindow(): Promise<void> {
   return invoke('open_preferences_window');
 }

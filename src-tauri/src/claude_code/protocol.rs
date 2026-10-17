@@ -1238,6 +1238,31 @@ pub fn tool_list_response(
             }
         },
         {
+            "name": "reloadTab",
+            "description": format!("Reload a terminal tab, as the human's Cmd+Shift+R does: its shell is restarted under a NEW tab id in the same place, keeping its name, folder, notes and tasks, and its agent comes back through the tab's auto-resume. Without `tab_id` it reloads your own tab at once, a moment after this returns, and you are resumed (refused when your tab has no auto-resume, which would end your session for good). Reloading another tab interrupts whatever runs there, so for another tab it does not act:{AWAITS}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Your own tab (auto-injected)" },
+                    "tab_id": { "type": "string", "description": "Another tab to reload (from listWorkspaces). Omit to reload your own." },
+                    "reason": { "type": "string", "description": "One line: why, shown to the human (needed for another tab)" }
+                }
+            }
+        },
+        {
+            "name": "reloadWindow",
+            "description": format!("Reload a maiTerm window's interface, as the human's Reload Current Window does. Its shells and agents keep running and every tab reattaches; unsaved changes in its editor tabs are lost. Without `window_id` it is your own window; then you are not told the outcome (the window reloads around you), and getRequestStatus reads it.{AWAITS}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Your own tab (auto-injected)" },
+                    "window_id": { "type": "string", "description": "Another window to reload (from listWindows). Omit for your own." },
+                    "reason": { "type": "string", "description": "One line: why, shown to the human" }
+                },
+                "required": ["reason"]
+            }
+        },
+        {
             "name": "listMcpServers",
             "description": "The remote MCP servers maiTerm manages for every agent (the human manages them in maiTerm → Preferences → MCP servers): each one's name (the MCP server name agents see it under), URL, status (connected, needs_sign_in, unreachable, disabled) and tools, plus any copy also installed directly in an agent. Read-only. Use it before proposing one with addMcpServer, and to explain a failing proxied tool to the human.",
             "inputSchema": {
@@ -1263,7 +1288,7 @@ pub fn tool_list_response(
         },
         {
             "name": "getRequestStatus",
-            "description": "What became of a request you filed (setMesh, linkMeshes, unlinkMesh, createTab, bridgeWith, disconnectBridge, restartMaiterm, addMcpServer, or a moveTab/moveWorkspace that needed approval): pending, approved (being carried out), done, failed, denied or expired, with the outcome.",
+            "description": "What became of a request you filed (setMesh, linkMeshes, unlinkMesh, createTab, bridgeWith, disconnectBridge, restartMaiterm, reloadTab, reloadWindow, addMcpServer, or a moveTab/moveWorkspace that needed approval): pending, approved (being carried out), done, failed, denied or expired, with the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

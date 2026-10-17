@@ -855,6 +855,7 @@ pub fn run() {
             commands::window::set_window_background,
             commands::window::reset_window,
             commands::window::get_window_count,
+            commands::window::reload_window,
             commands::window::open_preferences_window,
             commands::window::open_help_window,
             commands::editor::read_file,
