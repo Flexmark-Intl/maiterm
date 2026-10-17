@@ -574,6 +574,14 @@ pub fn open_preferences_window(window: tauri::WebviewWindow, app: tauri::AppHand
             .fullscreen(false)
             .background_color(DEFAULT_WINDOW_BG);
 
+        // The page draws the title bar (as the main window does): a native one shows no title
+        #[cfg(target_os = "macos")]
+        {
+            builder = builder
+                .hidden_title(true)
+                .title_bar_style(tauri::TitleBarStyle::Overlay);
+        }
+
         if let Some((x, y)) = position {
             builder = builder.position(x, y);
         }
