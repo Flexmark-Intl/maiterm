@@ -1679,7 +1679,9 @@ function createWorkspacesStore() {
         const reordered = tabIds
           .map(id => pane.tabs.find(t => t.id === id))
           .filter((t): t is Tab => t !== undefined);
-        pane.tabs.splice(0, pane.tabs.length, ...reordered);
+        // As Rust's `reorder_tabs` does: a tab the list leaves out is kept at the end, not dropped.
+        const unlisted = pane.tabs.filter(t => !tabIds.includes(t.id));
+        pane.tabs.splice(0, pane.tabs.length, ...reordered, ...unlisted);
       }
       await commands.reorderTabs(workspaceId, paneId, tabIds);
     },

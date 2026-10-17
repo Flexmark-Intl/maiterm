@@ -1601,6 +1601,21 @@ pub fn set_tab_runtime(
     Ok(())
 }
 
+/// `tabs` in the order `ids` names them, then any tab `ids` leaves out, in their current order.
+/// A caller's list is its own READ of the pane, which can predate a tab another path added
+/// meanwhile: dropping the unlisted deleted that tab outright (a tab reload racing an agent's
+/// approved createTab, 2026-10-16). Unknown ids are ignored.
+fn reorder_keeping_unlisted(tabs: &[crate::state::Tab], ids: &[String]) -> Vec<crate::state::Tab> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<crate::state::Tab> = ids
+        .iter()
+        .filter(|id| seen.insert(id.as_str()))
+        .filter_map(|id| tabs.iter().find(|t| &t.id == id).cloned())
+        .collect();
+    out.extend(tabs.iter().filter(|t| !ids.contains(&t.id)).cloned());
+    out
+}
+
 #[tauri::command]
 pub fn reorder_tabs(
     window: tauri::Window,
@@ -1615,13 +1630,7 @@ pub fn reorder_tabs(
         let win = app_data.window_mut(&label).ok_or("Window not found")?;
         if let Some(workspace) = win.workspaces.iter_mut().find(|w| w.id == workspace_id) {
             if let Some(pane) = workspace.panes.iter_mut().find(|p| p.id == pane_id) {
-                let mut reordered = Vec::with_capacity(tab_ids.len());
-                for id in &tab_ids {
-                    if let Some(tab) = pane.tabs.iter().find(|t| &t.id == id) {
-                        reordered.push(tab.clone());
-                    }
-                }
-                pane.tabs = reordered;
+                pane.tabs = reorder_keeping_unlisted(&pane.tabs, &tab_ids);
             }
         }
         app_data.clone()
@@ -3595,6 +3604,30 @@ pub fn read_app_logs(lines: Option<usize>, level: Option<String>, search: Option
         "lines": result,
         "truncated": truncated,
     }))
+}
+
+#[cfg(test)]
+mod reorder_tests {
+    use super::reorder_keeping_unlisted;
+    use crate::state::Tab;
+
+    fn tabs(ids: &[&str]) -> Vec<Tab> {
+        ids.iter().map(|id| { let mut t = Tab::new(id.to_string()); t.id = id.to_string(); t }).collect()
+    }
+    fn ids(t: &[Tab]) -> Vec<&str> { t.iter().map(|t| t.id.as_str()).collect() }
+    fn s(v: &[&str]) -> Vec<String> { v.iter().map(|x| x.to_string()).collect() }
+
+    #[test]
+    fn a_tab_the_caller_did_not_list_is_kept_at_the_end() {
+        let t = tabs(&["a", "b", "new"]);
+        assert_eq!(ids(&reorder_keeping_unlisted(&t, &s(&["b", "a"]))), ["b", "a", "new"]);
+    }
+
+    #[test]
+    fn unknown_and_repeated_ids_are_ignored() {
+        let t = tabs(&["a", "b"]);
+        assert_eq!(ids(&reorder_keeping_unlisted(&t, &s(&["gone", "b", "a", "b"]))), ["b", "a"]);
+    }
 }
 
 #[cfg(test)]
