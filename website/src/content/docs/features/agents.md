@@ -258,7 +258,7 @@ maiTerm integrates with each agent's hook system for real-time session awareness
 
 ### The maiTerm mod (Claude Code)
 
-Every Claude tab — local, or on a host you've reached over the [SSH bridge](#ssh-mcp-bridge) — also loads a small Claude Code **mod** called `maiterm-tab`. maiTerm points each tab's shell at it, so any `claude` you start there picks it up; over SSH the bridge copies it to the host (into `~/.maiterm/claude-mod/`) and the remote shell is pointed at that copy. It comes with **Enable Hooks Integration**, and only Claude Code versions that support mods load it. An older Claude ignores it and runs on the settings hooks exactly as before.
+Every Claude tab — local, or on a host you've reached over the [SSH bridge](#ssh-mcp-bridge) — also loads a small Claude Code **mod** called `maiterm-tab`. maiTerm points each tab's shell at it, so any `claude` you start there picks it up; over SSH the bridge copies it to the host (into `~/.maiterm/claude-mod/`) and the remote shell is pointed at that copy. It comes with **Enable Hooks Integration**, and only Claude Code versions that support mods load it. An older Claude ignores it and runs on the settings hooks exactly as before. On Windows the mod isn't loaded yet, so Claude tabs there run on the settings hooks too.
 
 The mod works from inside Claude Code rather than by pressing keys in its terminal, which changes a few things you'll notice:
 

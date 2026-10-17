@@ -68,6 +68,10 @@ const FAQS = [
     a: 'macOS (Apple Silicon only — there is no Intel build), Windows 10 and later as a 64-bit installer, and Linux as an AppImage or .deb built against webkit2gtk-4.1 on Ubuntu 24.04.',
   },
   {
+    q: 'Does the Claude Code integration work on Windows?',
+    a: 'Yes, with Git for Windows installed: Claude Code runs its commands through Git Bash, and so do the hooks that tell maiTerm which tab a session is in. A setup wizard checks for Git, Claude Code and whether claude is on your PATH, and installs or fixes what is missing in visible tabs. New tabs use Git Bash when it is installed. Windows support for Claude is new and less used than macOS, and the Claude Code mod is not loaded there yet.',
+  },
+  {
     q: 'Does it phone home?',
     a: 'Only the update check, and it is counted. That check reaches a small Cloudflare Worker which records one row per unique user per day — a salted hash of IP and user-agent, where the salt is random, rotates daily and is then discarded, so it cannot be reversed or linked across days. No IP, user-agent, cookie or device ID is stored, and nothing about your projects, tabs, terminal output or agents ever leaves the machine. There is no other analytics, no error uploads and no account. maiTerm also ships a Preferences section that switches off the telemetry and error reporting in the agent CLIs it launches, and it turns Claude Code’s Remote Control off by default, so your sessions are not exposed to claude.ai or the Claude mobile app unless you switch it back on.',
   },
