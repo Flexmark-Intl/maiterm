@@ -660,10 +660,6 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="window">
-  <div class="titlebar">
-    <span class="title">Preferences</span>
-  </div>
-
   <div class="body">
     <nav class="sidebar">
       {#each sections as section (section.id)}
@@ -2951,25 +2947,6 @@
     flex-direction: column;
     height: 100vh;
     background: var(--bg-medium);
-  }
-
-  .titlebar {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 38px;
-    flex-shrink: 0;
-    border-bottom: 1px solid var(--bg-light);
-    -webkit-app-region: drag;
-    padding-left: 78px; /* space for macOS traffic lights */
-    padding-right: 78px;
-    user-select: none;
-  }
-
-  .title {
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--fg);
   }
 
   .body {

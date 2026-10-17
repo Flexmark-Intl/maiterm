@@ -574,11 +574,6 @@ pub fn open_preferences_window(window: tauri::WebviewWindow, app: tauri::AppHand
             .fullscreen(false)
             .background_color(DEFAULT_WINDOW_BG);
 
-        #[cfg(target_os = "macos")]
-        {
-            builder = builder.hidden_title(true);
-        }
-
         if let Some((x, y)) = position {
             builder = builder.position(x, y);
         }
