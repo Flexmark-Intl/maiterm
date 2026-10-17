@@ -495,7 +495,7 @@ mod platform {
 }
 
 #[cfg(windows)]
-pub use platform::{add_claude_to_user_path, git_bash, git_bash_for_spawn, tab_env};
+pub use platform::{git_bash, git_bash_for_spawn, tab_env};
 
 #[tauri::command]
 pub async fn detect_claude_setup(state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>) -> Result<ClaudeSetupReport, String> {
