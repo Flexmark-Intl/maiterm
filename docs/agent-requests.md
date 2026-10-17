@@ -14,7 +14,7 @@ and "for organization and read operations it doesn't require the prompt".
 | `setMesh` | never: a request |
 | `linkMeshes` | never: a request |
 | `unlinkMesh` | never: a request |
-| `createTab` (a new agent tab in a workspace and local folder) | never: a request |
+| `createTab` (a new agent tab in a workspace, in a local folder or over ssh on a host) | never: a request |
 | `bridgeWith` (a 1:1 Agent Bridge with another tab in the caller's window; `fork: true` bridges with a copy of its conversation in a new tab) | never: a request |
 | `disconnectBridge` | never: a request, unless the partner's tab is gone (then at once) |
 | `restartMaiterm` (`update: true` installs the update first) | never: a request |
@@ -79,8 +79,15 @@ human sees agents being started. How it works:
 - It opens in the workspace's active pane, in the background, and starts the agent through the
   same launch as the phone's "new conversation" (`workspacesStore.openAgentTab`). The launch
   rides the auto-resume replay.
-- Only local folders are supported. The folder must exist when the agent files the request and
-  again when the request is carried out.
+- A local folder must exist when the agent files the request and again when the request is
+  carried out.
+- **Over ssh** (`ssh`, added 2026-10-16 on Darryl's ask; agents used to fake it by setting the new
+  tab's auto-resume by hand): `cwd` is then the folder on the host, which can't be checked from
+  here. The new tab's auto-resume gets the ssh command, the remote folder and the launch, so it
+  starts exactly as an ssh tab is brought back: ssh hop, bridge, then the agent. The target is
+  parsed, not cleaned (`utils/sshTarget.ts`): `[ssh] [-p|-l|-i|-J value] [user@]host` and nothing
+  after the host. A trailing word would be a remote command and `-o` can run a LOCAL one
+  (ProxyCommand), either of which would make the card's "runs on that host" untrue.
 - A `name` makes it a custom-named tab, which is what makes an agent tab a mesh member. So a
   named tab in a mesh workspace has the joining mesh's snapshot on its card, checked like a
   move's.

@@ -2590,15 +2590,20 @@ function createWorkspacesStore() {
      *
      * Returns the new tab id, or null when the workspace is gone.
      */
-    async openAgentTab(workspaceId: string, cwd: string, runtime: AgentRuntime, name: string | null): Promise<string | null> {
+    async openAgentTab(workspaceId: string, cwd: string, runtime: AgentRuntime, name: string | null, sshCommand: string | null = null): Promise<string | null> {
       const ws = workspaces.find(w => w.id === workspaceId);
       const paneId = ws?.active_pane_id ?? ws?.panes[0]?.id;
       if (!ws || !paneId) return null;
       const newTab = await commands.createTab(workspaceId, paneId, name ?? getDescriptor(runtime).displayName);
       if (name) await commands.renameTab(workspaceId, paneId, newTab.id, name, true);
       terminalsStore.markSpawning(newTab.id);
-      terminalsStore.setSplitContext(newTab.id, { cwd, sshCommand: null, remoteCwd: null, fireAutoResume: true });
-      await this.setTabAutoResumeContext(workspaceId, paneId, newTab.id, cwd, null, null, launchCommand(runtime), false);
+      // Over ssh, `cwd` is the folder on the host: the tab's own shell starts in home, types the
+      // ssh hop (which cds there), and the launch follows once the bridge is up — the same path
+      // an ssh tab's auto-resume takes.
+      const local = sshCommand ? null : cwd;
+      const remote = sshCommand ? cwd : null;
+      terminalsStore.setSplitContext(newTab.id, { cwd: local, sshCommand, remoteCwd: remote, fireAutoResume: true });
+      await this.setTabAutoResumeContext(workspaceId, paneId, newTab.id, local, sshCommand, remote, launchCommand(runtime), false);
       await commands.setTabRuntime(workspaceId, paneId, newTab.id, runtime);
       const data = await commands.getWindowData();
       const updatedWs = data.workspaces.find(w => w.id === workspaceId);

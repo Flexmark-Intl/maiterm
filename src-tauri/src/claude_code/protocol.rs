@@ -1184,13 +1184,14 @@ pub fn tool_list_response(
         },
         {
             "name": "createTab",
-            "description": format!("Open a new agent tab in a workspace (in this window or another), in a folder on this machine, and start a fresh agent session there (Claude by default). Give it a `name` to make it a named agent: in a Mesh Workspace a named tab joins the mesh. When it is done you are told the new tab's id, and its agent comes up on its own (allow it a few seconds). Local folders only, not ssh hosts.{AWAITS}"),
+            "description": format!("Open a new agent tab in a workspace (in this window or another), in a folder on this machine, and start a fresh agent session there (Claude by default). Give it a `name` to make it a named agent: in a Mesh Workspace a named tab joins the mesh. When it is done you are told the new tab's id, and its agent comes up on its own (allow it a few seconds; over ssh, longer). With `ssh` it runs on that host instead, in `cwd` there, with maiTerm's tools reaching it over the same bridge as any ssh tab.{AWAITS}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "tabId": { "type": "string", "description": "Your own tab (auto-injected)" },
                     "workspace_id": { "type": "string", "description": "The workspace to open it in (from getMeshLayout / listWorkspaces)" },
-                    "cwd": { "type": "string", "description": "Absolute path of an existing folder on this machine" },
+                    "cwd": { "type": "string", "description": "Absolute path of an existing folder on this machine; with `ssh`, an absolute or ~/ path on that host" },
+                    "ssh": { "type": "string", "description": "Optional: run it on a remote host, as [user@]host or an ssh config alias, optionally with -p port, -l user, -i keyfile or -J jumphost (e.g. `ews@nova`). Nothing after the host." },
                     "runtime": { "type": "string", "enum": ["claude", "codex", "gemini"], "description": "The agent to start (default claude)" },
                     "name": { "type": "string", "description": "The tab's name, e.g. its role. Optional; required to be a mesh member" },
                     "reason": { "type": "string", "description": "One line: why, shown to the human" }
