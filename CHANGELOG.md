@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.8.0
+
+Agents can start agents on your ssh hosts and reload tabs, and a round of fixes.
+
+### Agents
+
+- **An agent can ask for a new agent tab on an ssh host**, in a folder there. The approval card says it runs on that host, and the tab comes back after a restart like any ssh tab: the connection, the bridge and the agent.
+- **Agents can reload a tab or a window.** An agent reloads its own tab at once, as Cmd+Shift+R would, and only when it will come back on its own and you have nothing typed in its box. Reloading another agent's tab, or a window, is a request you approve; the card says whether the agent comes back and warns about unsaved editors, naming them in the agent's own window.
+
+### Fixes
+
+- **A `!` command sent from your phone runs as a shell command** in Claude's bash mode, instead of reaching the agent as words.
+- **A new tab no longer vanishes** when another tab in the same pane is reloaded at the same moment.
+- **Preferences:** the sidebar scrolls when its sections don't fit the window, and the window has a single title bar.
+- **Loom Focus:** the "how far back" picker is a visible button beside the Recent heading.
+- **The About box and installer name Flexmark International Inc.** as maiTerm's owner.
+
 ## v3.7.0
 
 MCP servers through maiTerm, muting a tab, and what an agent waits on shown on its own terminal.
