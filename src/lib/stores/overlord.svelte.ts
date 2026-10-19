@@ -2880,6 +2880,14 @@ function createOverlordStore() {
         w.sentAt = Math.min(now, w.sentAt + TICK_MS);
         continue;
       }
+      // Typed into a busy agent and the tab is still mid-turn: the directive is waiting its turn
+      // in the agent's own queue (or being worked on), not lost. Expiring here told the
+      // supervisor it "may never have landed" while the agent was working, and freed the slot
+      // for the re-drive that put a second copy in the queue.
+      if (w.anchored && st === 'active') {
+        w.sentAt = Math.min(now, w.sentAt + TICK_MS);
+        continue;
+      }
 
       if (now - w.sentAt > DRIVE_WATCH_MS) {
         driveWatch.delete(tabId);
@@ -5261,13 +5269,21 @@ function createOverlordStore() {
         readErrors: 0,
       });
       // Fire-and-forget from the engine's perspective; the ack/turn-end clears it.
-      // Not while it is still held: freeing the slot then let the supervisor send it again, and
-      // both copies were typed once the draft cleared. The drop/typed outcome settles a held one.
-      setTimeout(() => {
-        const d = outstanding.get(tabId);
-        if (driveWatch.get(tabId)?.heldMsgId) return;
-        if (d && d.text === text && Date.now() - d.sentAt > 15 * 60_000) clearOutstanding(tabId);
-      }, 15 * 60_000 + 1000);
+      // Measured on the WATCH's clock, which pauses while the directive is held or waiting behind
+      // a busy turn and restarts when it is typed — not on the original send. Re-armed while that
+      // watch is alive: freeing the slot early let the supervisor send it again (two copies in
+      // the agent's queue) or overwrite the watch, losing the first reply.
+      const backstop = () =>
+        setTimeout(() => {
+          const w = driveWatch.get(tabId);
+          if (w && w.text === text && Date.now() - w.sentAt <= DRIVE_WATCH_MS) {
+            backstop();
+            return;
+          }
+          const d = outstanding.get(tabId);
+          if (d && d.text === text && Date.now() - d.sentAt > DRIVE_WATCH_MS) clearOutstanding(tabId);
+        }, DRIVE_WATCH_MS + 1000);
+      backstop();
       if (r.status === 'held') {
         heldOutcome.set(r.msg_id, {
           // Typed at last: the reply clock starts now, not when it was held.
