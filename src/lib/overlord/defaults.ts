@@ -19,7 +19,7 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
     cooldown: 1800,
     when: { event: 'context_pct', at_or_above: 55 },
     guards: {
-      agent_state: ['idle'],
+      agent_state: ['idle', 'active'],
       min_quiet_ms: 3000,
       require_live_repl: true,
       max_per_hour: 1,
@@ -56,7 +56,7 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
     cooldown: 3600,
     when: { event: 'commit' },
     guards: {
-      agent_state: ['idle'],
+      agent_state: ['idle', 'active'],
       min_quiet_ms: 3000,
       require_live_repl: true,
       max_per_hour: 2,
@@ -97,7 +97,7 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
     cooldown: 14400,
     when: { event: 'no_todo_list' },
     guards: {
-      agent_state: ['idle'],
+      agent_state: ['idle', 'active'],
       min_quiet_ms: 3000,
       require_live_repl: true,
       max_per_hour: 1,
@@ -167,6 +167,90 @@ const PREVIOUS_DEFAULT_OVERLORD_RULES: Record<string, OverlordRuleTemplate[]> = 
           await: { until: 'context_below', pct: 30 },
           timeout_seconds: 300,
           on_timeout: 'notify_human',
+        },
+      ],
+    },
+    // Until 2026-10-19: idle-only. A busy agent now takes a rule's message (docs/overlord.md §3).
+    {
+      name: 'Checkpoint before compaction',
+      description:
+        'At ~55% context, have the agent update docs/memory, prepare for compaction, then compact — instead of hitting the auto-compact wall mid-thought.',
+      cooldown: 1800,
+      when: { event: 'context_pct', at_or_above: 55 },
+      guards: {
+        agent_state: ['idle'],
+        min_quiet_ms: 3000,
+        require_live_repl: true,
+        max_per_hour: 1,
+        only_if_no_outstanding: true,
+      },
+      sequence: [
+        {
+          kind: 'process',
+          text: 'Prepare for compaction: make sure any relevant docs, memory, code comments and tasks are updated if needed.',
+          await: { until: 'turn_end' },
+          timeout_seconds: 900,
+          on_timeout: 'abort',
+        },
+        {
+          kind: 'slash',
+          text: '/compact',
+          runtimes: ['claude'],
+          await: { until: 'context_below', pct: 30 },
+          timeout_seconds: 300,
+          on_timeout: 'notify_human',
+        },
+      ],
+    },
+  ],
+  review_after_commit: [
+    // Until 2026-10-19: idle-only.
+    {
+      name: 'Review after commit',
+      description:
+        'After a commit lands, nudge the agent to have non-trivial work reviewed by a subagent before moving on.',
+      cooldown: 3600,
+      when: { event: 'commit' },
+      guards: {
+        agent_state: ['idle'],
+        min_quiet_ms: 3000,
+        require_live_repl: true,
+        max_per_hour: 2,
+        only_if_no_outstanding: true,
+      },
+      sequence: [
+        {
+          kind: 'process',
+          text: 'If that commit was non-trivial, spin up a subagent to review it for correctness before moving on. If it was a trivial change, skip the review and carry on.',
+          await: { until: 'turn_end' },
+          timeout_seconds: 1800,
+          on_timeout: 'continue',
+        },
+      ],
+    },
+  ],
+  todo_hygiene: [
+    // Until 2026-10-19: idle-only.
+    {
+      name: 'Keep a task list',
+      description:
+        'A tab doing sustained work with nothing on the maiTerm task list gets nudged to record it.',
+      cooldown: 14400,
+      when: { event: 'no_todo_list' },
+      guards: {
+        agent_state: ['idle'],
+        min_quiet_ms: 3000,
+        require_live_repl: true,
+        max_per_hour: 1,
+        only_if_no_outstanding: true,
+      },
+      sequence: [
+        {
+          kind: 'process',
+          text: "If the current work is multi-step, track it: call createTasks with what you're actually working on, so nothing gets lost and your human can see it. If it's a one-off, ignore this.",
+          await: { until: 'turn_end' },
+          timeout_seconds: 600,
+          on_timeout: 'continue',
         },
       ],
     },

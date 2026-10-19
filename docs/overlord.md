@@ -154,7 +154,7 @@ The "one injection tool" both callers share, made concrete:
 
 ```ts
 driveTab({ tab_id: string, kind: 'process' | 'slash', text: string })
-→ { sent: true }
+→ { sent: true, queued?: true, detail?: string }
   | { sent: false,
       reason: 'no_live_repl' | 'outstanding_directive' | 'already_running'
             | 'agent_busy' | 'awaiting_permission' | 'not_registered'
@@ -162,6 +162,15 @@ driveTab({ tab_id: string, kind: 'process' | 'slash', text: string })
       detail?: string }
 ```
 
+- **A busy tab is not a refusal (2026-10-19).** A `process` directive goes through the one
+  gate for everything maiTerm types (`deliver_to_agent`, `src-tauri/src/mailink/draft_hold.rs`):
+  an agent mid-turn takes it the way it takes a message the human types while it works, and
+  the result says `queued: true`. It is HELD, not refused, while a dialog is open or the human
+  is typing or has a draft, and typed when that clears. Refusing busy tabs left the agent
+  retrying on a timer, and the directive landed after the target had moved on to the very
+  thing it was meant to stop (Humberto's "wrap up": finish, commit, push, start no review —
+  the review had already started). `agent_busy` now applies only to `slash`: Claude runs some
+  slash commands (`/model`, `/effort`) the moment they are typed, even mid-turn.
 - Guards are evaluated **inside** the tool — a guard failure comes back to the
   agent as a structured refusal, never a silent drop, and both paths ledger.
 - **A refusal must say what is holding the tab.** The ritual branch was once the
@@ -739,19 +748,29 @@ than as the answer you were hoping for.
 
 `turn_end` is defined as the tab's agentState transition `active` → `idle`
 (hook-driven for Claude/Codex), with the transcript-tail last-real-turn
-timestamp as the fallback for hook-less runtimes.
+timestamp as the fallback for hook-less runtimes. A step **typed while the agent was busy**
+(`OutstandingDirective.typedBusy`) waits instead for its own turn in the transcript and a turn
+after it to end — the running turn ending is not its answer (same anchor as driveTab's return
+leg, §11).
 
 ### Guards
 
 ```ts
 export interface OverlordGuards {
-  agent_state?: ('idle' | 'active' | 'permission')[];  // default ['idle']
-  min_quiet_ms?: number;             // reuse deliverInit's detect; default 3000
+  agent_state?: ('idle' | 'active' | 'permission')[];  // default ['idle', 'active']
+  min_quiet_ms?: number;             // at an idle agent only; default 3000
   require_live_repl: boolean;        // the shell-injection gate — see §3
   max_per_hour?: number;             // per tab
   only_if_no_outstanding: boolean;   // serialize directives per tab
 }
 ```
+
+**Busy is allowed by default (2026-10-19).** A rule naming no `agent_state` may fire while
+the agent is mid-turn, and the shipped defaults list `['idle', 'active']` (older untouched
+copies migrate; an edited rule keeps what its human chose). An agent mid-turn takes a typed
+directive the way it takes the human's own, and the idle-only default delivered "review that
+commit before moving on" after it had moved on. A **slash step** still waits for idle whatever
+the guard says (`waitInjectable`): Claude runs some slash commands at once mid-turn.
 
 ### Steps
 
@@ -1350,9 +1369,18 @@ The fix is a **watch registered at send time** (`driveWatch`), harvested each ti
    SSH tab's transcript is written on the **remote host**, so the two clocks aren't
    comparable.
 2. Each tick, a watched tab whose `last_turn_ts` has moved past its baseline **and** is no
-   longer `active` (mid-turn would harvest half a thought) has answered.
-3. `get_agent_reply_since` reads everything the agent said after the baseline, via the
-   same `transcript::turns_for` tail maiLink's phone chat uses.
+   longer `active` (mid-turn would harvest half a thought) may have answered.
+3. `get_agent_reply_after_prompt` finds **the directive's own turn** in the transcript and
+   reads everything the agent said after it, via the same `transcript::turns_for` tail
+   maiLink's phone chat uses. Anchoring on the directive, not on the send time, is what makes
+   a directive typed into a BUSY agent safe (2026-10-19): Claude records a message typed
+   mid-turn either as a user turn at the turn boundary or as a `queued_command` attachment
+   folded into the running turn (`turns_for` renders both as user turns). "Everything since
+   the send" would have handed back the end of the work the agent was already doing — and an
+   `idle` between that turn ending and the queued directive starting is exactly when it would
+   have been read. Until the directive shows up, there is no answer. Once a turn after it has
+   ended, the tab's `outstanding` slot is released here, even on an empty read; the tick's
+   "any turn after `sentAt`" release no longer applies to a watched directive.
 4. The reply is queued as an escalation with kind **`drive_reply`**, so it rides the
    existing doorbell + `listEscalations` plumbing — no new MCP surface.
 

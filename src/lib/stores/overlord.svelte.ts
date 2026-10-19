@@ -21,12 +21,13 @@ import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { bracketedPasteSubmit, deliverPrompt } from '$lib/utils/agentPrompt';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { pruneHiddenDefaultOverlordRules, seedDefaultOverlordRules } from '$lib/overlord/defaults';
-import { guardsForCondition } from '$lib/overlord/format';
+import { DEFAULT_AGENT_STATES, guardsForCondition } from '$lib/overlord/format';
 import { getVariables, interpolateVariables, setVariable } from '$lib/stores/triggers.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { summarizeBatch, type TabBatchRow, type TabBatchResult } from '$lib/stores/tabBatch';
 import { answerBlocker as answerBlockerText, dismissBlocker as dismissBlockerCheck, appendNote, findImportedDuplicate, isInFlight, isParked, isRetired, makeTask, normalizeTitle, statusFromAgent, type BlockerAnswer, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
+import { listen } from '@tauri-apps/api/event';
 
 /**
  * Overlord-the-engine (docs/overlord.md §2) — the deterministic, headless, per-window
@@ -127,6 +128,11 @@ export interface OutstandingDirective {
    *  measures from `max(sentAt, lastActiveAt)`, so its clock only runs while the agent is
    *  NOT demonstrably working — see the tick's escalate site. */
   lastActiveAt?: number;
+  /** Typed while the agent was mid-turn. Its `turn_end` is then the end of the turn that TOOK
+   *  it, found by its own turn in the transcript — the running turn ending says nothing. */
+  typedBusy?: boolean;
+  /** The Overlord transcript baseline (`last_turn_ts`) when it was typed, for that search. */
+  baseline?: number;
 }
 
 export interface OverlordProposal {
@@ -463,7 +469,7 @@ const RECOVERED_STATES = new Set(['working', 'done', 'idle']);
  *  guards are human-only, unreachable from the MCP surface. Exported so the approval modal
  *  can warn about the rule the human would ACTUALLY get, not the one the agent asked for. */
 export const AGENT_RULE_GUARDS = {
-  agent_state: ['idle'] as ('idle' | 'active' | 'permission')[],
+  agent_state: ['idle', 'active'] as ('idle' | 'active' | 'permission')[],
   min_quiet_ms: 3000,
   require_live_repl: true,
   max_per_hour: 1,
@@ -682,6 +688,13 @@ function createOverlordStore() {
     baseline: number;
     sentAt: number;
     text: string;
+    /** Typed into a busy agent, or held: the reply is read from after the directive's own turn
+     *  (`getAgentReplyAfterPrompt`). Typed at an idle agent, everything since the baseline IS
+     *  the reply, so the plain read is used — it has no window to fall out of. */
+    anchored: boolean;
+    /** Held behind a dialog or the human's draft and not typed yet: the give-up clock is
+     *  paused, as for a permission prompt — the directive isn't stale, it hasn't landed. */
+    heldMsgId?: string;
     /** Raised the permission escalation once — the prompt sits until a human answers, and
      *  re-escalating every tick would bury the supervisor in its own alarm. */
     permissionNotified?: boolean;
@@ -876,7 +889,7 @@ function createOverlordStore() {
    * admits `permission` was written to fire there and goes through to the handoff.
    */
   function permissionBlocks(rule: OverlordRule, tabId: string): boolean {
-    return mappedState(tabId) === 'permission' && !(rule.guards.agent_state ?? ['idle']).includes('permission');
+    return mappedState(tabId) === 'permission' && !(rule.guards.agent_state ?? DEFAULT_AGENT_STATES).includes('permission');
   }
 
   /** Enabled rules that apply to a tab's workspace, with supersedes resolved. */
@@ -903,20 +916,21 @@ function createOverlordStore() {
     const key = `${rule.id}|${tabId}`;
     const last = lastFiredAt.get(key) ?? 0;
     if (rule.cooldown > 0 && now - last < rule.cooldown * 1000) return false;
-    // agent_state (default idle-only). agent_unready rules are the exception: the
-    // condition MEANS "no live agent state", so requiring one would make the rule
-    // dead-on-arrival — for those, pass only when no state exists.
+    // agent_state (default idle or busy, `DEFAULT_AGENT_STATES`). agent_unready rules are the
+    // exception: the condition MEANS "no live agent state", so requiring one would make the
+    // rule dead-on-arrival — for those, pass only when no state exists.
     const st = mappedState(tabId);
     if (rule.when.event === 'agent_unready') {
       if (st) return false;
     } else {
-      const allowed = g.agent_state ?? ['idle'];
+      const allowed = g.agent_state ?? DEFAULT_AGENT_STATES;
       if (!st || !allowed.includes(st)) return false;
     }
-    // min_quiet_ms (default 3000)
+    // min_quiet_ms (default 3000): a turn that just ENDED is still printing. Not mid-turn,
+    // where a working agent's output never goes quiet — that would make `active` unreachable.
     const quiet = g.min_quiet_ms ?? 3000;
     const lastOut = terminalsStore.getLastOutputAt(tabId) ?? 0;
-    if (now - lastOut < quiet) return false;
+    if (st !== 'active' && now - lastOut < quiet) return false;
     // only_if_no_outstanding: serialize per tab (rituals count as outstanding)
     if (g.only_if_no_outstanding && (outstanding.has(tabId) || rituals.has(tabId))) return false;
     // max_per_hour per (rule, tab)
@@ -999,13 +1013,18 @@ function createOverlordStore() {
     return run.humanFired && st === 'active' && claudeStateStore.onlySubagentsActive(run.tabId) ? 'idle' : st;
   }
 
-  async function waitInjectable(run: RitualRun, guards: OverlordGuards): Promise<boolean> {
-    // Every step waits for the main agent's turn to end (Darryl: "wait for turn to end, so long
-    // as a subagent is not seen as still in turn" — `ritualState`). A human-fired run doesn't
-    // also wait for the screen to go quiet — a background subagent keeps it repainting — but for
-    // the TURN to have stayed closed a moment: a turn queued behind it (a task-notification, a
-    // message) starts milliseconds after the Stop, and its prompt hook reaches us later still.
-    const allowed = guards.agent_state ?? ['idle'];
+  async function waitInjectable(run: RitualRun, guards: OverlordGuards, slash: boolean): Promise<boolean> {
+    // A step goes in whatever state the rule allows — busy included by default: a message typed
+    // mid-turn is taken the way the human's own is. A SLASH step waits for the main agent's turn
+    // to end (Darryl: "wait for turn to end, so long as a subagent is not seen as still in turn"
+    // — `ritualState`): Claude runs some slash commands the moment they are typed, mid-turn. A
+    // human-fired run doesn't also wait for the screen to go quiet — a background subagent keeps
+    // it repainting — but for the TURN to have stayed closed a moment: a turn queued behind it (a
+    // task-notification, a message) starts milliseconds after the Stop, and its prompt hook
+    // reaches us later still.
+    const allowed: AgentState[] = slash
+      ? (guards.agent_state ?? DEFAULT_AGENT_STATES).filter((s) => s !== 'active')
+      : (guards.agent_state ?? DEFAULT_AGENT_STATES);
     const quiet = run.humanFired ? 0 : (guards.min_quiet_ms ?? 3000);
     const settled = () => {
       if (!run.humanFired) return true;
@@ -1033,7 +1052,10 @@ function createOverlordStore() {
       // After a draft-wait, an empty box may be the draft just SENT, its turn not yet reported
       // (the prompt hook lands well after the Enter — later still over ssh). Give it time to.
       const keyed = draftWait && Date.now() - (terminalsStore.getLastTakeoverInputAt(run.tabId) ?? 0) < DRAFT_SEND_SETTLE_MS;
-      if (stateOk && !keyed && Date.now() - lastOut >= quiet && settled()) {
+      // Quiet and settled are about a turn that just ENDED; mid-turn the output never stops.
+      const calm = st === 'active' || (Date.now() - lastOut >= quiet && settled());
+      // A dialog on screen the hooks haven't reported yet holds it like a prompt — no abort.
+      if (stateOk && !keyed && calm && !(await commands.agentDialogOpen(run.tabId).catch(() => true))) {
         if (!(await boxHasText(run.tabId))) return true;
         // A draft in the box. An automatic run gives the tab back (§7: the human is using
         // it); one the human fired waits for them to send or clear it (the cap still applies).
@@ -1060,6 +1082,21 @@ function createOverlordStore() {
       const st = ritualState(run);
       switch (gate.until) {
         case 'turn_end': {
+          // Typed into a busy agent: the running turn ending is not this step's answer, and
+          // an `idle` before the queued step starts is exactly the gap that would read as one.
+          // Wait for the step's own turn in the transcript, and for a turn after it to end.
+          // Without a readable transcript (an SSH Codex/Gemini tab) fall through to the
+          // state-based proof below.
+          if (directive.typedBusy && directive.baseline !== undefined) {
+            const ts = facts.get(run.tabId)?.last_turn_ts;
+            if (st === 'idle' && ts !== undefined && ts > directive.baseline) {
+              const read = await commands
+                .getAgentReplyAfterPrompt(run.tabId, directive.text, directive.baseline)
+                .catch(() => null);
+              if (read?.prompt_ts != null && ts > read.prompt_ts) return 'ok';
+            }
+            break;
+          }
           // Wait for the directive's turn to start, then finish. 'permission' pauses the
           // ritual (it resumes when the gate clears) — deliberately not a failure.
           if (st === 'active') sawActive = true;
@@ -1110,45 +1147,53 @@ function createOverlordStore() {
     return next;
   }
 
+  /** What to do when a held message is finally typed, or dropped instead, by `msg_id`. */
+  const heldOutcome = new Map<string, { typed?: () => void; dropped?: () => void }>();
+  let inboxListening = false;
+  function listenForInboxOutcomes() {
+    if (inboxListening) return;
+    inboxListening = true;
+    // Broadcast to every window; only the one that holds the msg_id acts on it.
+    void listen<commands.AgentInboxOutcome>('agent-inbox-outcome', ({ payload: o }) => {
+      const cb = heldOutcome.get(o.msg_id);
+      heldOutcome.delete(o.msg_id);
+      if (o.outcome === 'dropped') cb?.dropped?.();
+      else cb?.typed?.();
+    });
+  }
+
   /**
-   * Type a board notice at a tab with the HUMAN's authority. Returns whether it landed.
+   * Tell a tab's agent something with the HUMAN's authority (a board answer, a "Do it", a
+   * notice). Returns whether it was delivered or is held to be — `false` only when nothing in
+   * the tab can take it (the agent exited, no terminal).
    *
-   * Shared by every board action that has something to tell the tab carrying a task, so
-   * they cannot drift on the one thing that is easy to get wrong here — WHEN it is safe to
-   * type. Idle only, and re-checked AFTER the liveness round trip:
+   * Through the one gate (`deliverToAgent`, mailink/draft_hold.rs): a BUSY agent takes it the
+   * way it takes the human's own typing, so busy never holds it. Only a dialog, the human's
+   * draft or their typing in the last 2 s does, and then it waits in the tab's queue and is
+   * typed when that clears. Waiting for idle here is what lost a blocker answer for good on
+   * 2026-10-19: it fell to the Overlord agent, whose driveTab refused the busy tab too.
    *
-   * `hasLiveRepl` says a process is alive; it says nothing about whether the tab can take
-   * typed text. It returns true for `active` (the notice would land mid-turn, which every
-   * rule-driven injection waits to avoid) and for `permission` — the one state driveTab,
-   * runSequence and answerPrompt all refuse, because a permission prompt is a keystroke
-   * menu where pasted prose is swallowed or corrupts the selection.
+   * `onDropped`: the held message expired or its terminal went before it could be typed.
    *
-   * Serialized per tab, because `bracketedPasteSubmit` is write → settle → CR: two notices
-   * for the same tab clicked inside that window would merge into one prompt and leave a
-   * stray carriage return behind. The checks run INSIDE the chain, so the second notice
-   * re-tests a tab the first one has just typed into.
-   *
-   * A notice is not a directive: it asks for nothing back, so it deliberately does NOT take
-   * the tab's outstanding slot, which would block every `only_if_no_outstanding` rule behind
-   * it for something nobody is waiting on.
+   * Serialized per tab, because a typed delivery is write → settle → CR: two clicked inside
+   * that window would merge into one prompt. A notice is not a directive: it asks for nothing
+   * back, so it does NOT take the tab's outstanding slot.
    */
-  async function noticeToTab(tabId: string, text: string, what: string): Promise<boolean> {
-    const inst = terminalsStore.get(tabId);
+  async function deliverHuman(tabId: string, text: string, what: string, onDropped?: () => void): Promise<boolean> {
+    listenForInboxOutcomes();
     return serializeNotice(tabId, async () => {
-      if (!inst) return false;
-      if (mappedState(tabId) !== 'idle') return false;
-      if (!(await hasLiveRepl(tabId))) return false;
-      // State can move during the liveness round trip.
-      if (mappedState(tabId) !== 'idle') return false;
-      if (Date.now() - (terminalsStore.getLastOutputAt(tabId) ?? 0) < 1500) return false;
-      try {
-        // An idle agent is exactly where the human leaves a half-typed next message: typed, the
-        // notice would send it. The tab's mod submits around it instead.
-        return (await deliverPrompt(tabId, inst.ptyId, text, () => noDraft(tabId, true))) !== false;
-      } catch (e) {
-        logError(`overlord: ${what} notice failed for ${tabId.slice(0, 8)}: ${e}`);
+      const r = await commands
+        .deliverToAgent(tabId, text, what)
+        .catch((e): commands.AgentDelivery => ({ status: 'refused', reason: String(e) }));
+      if (r.status === 'refused') {
+        logInfo(`overlord: ${what} for ${tabId.slice(0, 8)} not delivered (${r.reason})`);
         return false;
       }
+      if (r.status === 'held') {
+        logInfo(`overlord: ${what} for ${tabId.slice(0, 8)} held (${r.reason}) — typed when that clears`);
+        if (onDropped) heldOutcome.set(r.msg_id, { dropped: onDropped });
+      }
+      return true;
     });
   }
 
@@ -1509,39 +1554,6 @@ function createOverlordStore() {
   }
 
   /**
-   * The HUMAN's words to a tab that is busy (an answer, a "Do it"): typed in now, the way
-   * the Loom composer sends, so the agent takes them when its turn ends. `noticeToTab` waits for
-   * idle, which is right for the supervisor's own notices but left a human answer sent while the
-   * tab was still busy with the previous one to the Overlord relay. `send_tab_message` refuses
-   * at any open dialog, so this never types into a prompt. Serialized with the notices.
-   */
-  function queueToBusyTab(tabId: string, text: string): Promise<boolean> {
-    // `idle` too: a turn that has just ended (or one whose start the hooks haven't reported
-    // yet) is still printing, which `noticeToTab`'s quiet check refuses.
-    const typeable = () => mappedState(tabId) === 'active' || mappedState(tabId) === 'idle';
-    if (!typeable()) return Promise.resolve(false);
-    // Claude only: it queues text typed mid-turn, and its input box can be READ off the screen
-    // (other runtimes differ on mid-turn input, docs/follow-ups.md §6.1). An empty box only —
-    // a human's half-typed draft at the desktop would be submitted along with this.
-    if (workspacesStore.getTabRuntime(tabId) !== 'claude') return Promise.resolve(false);
-    return serializeNotice(tabId, async () => {
-      if (!typeable()) return false;
-      // The hook state outlives an agent killed without a Stop (OOM, kill -9): CR at a shell
-      // runs the answer as a command. Ask the process, as noticeToTab does. NOT closed over ssh:
-      // there "ssh is in the foreground" counts as live, and a remote agent's last frame (an
-      // empty box) can stay on screen above the shell prompt that replaced it — the same gap
-      // noticeToTab and follow-ups have (followUps `holdReason`).
-      if (!(await hasLiveRepl(tabId)) || !typeable()) return false;
-      // The tab's mod, when it takes it (between turns), submits it around any draft. Otherwise
-      // it is typed, and every typing guard applies.
-      if (await commands.submitPromptToAgent(tabId, text).catch(() => false)) return true;
-      if (!(await noDraft(tabId, false))) return false;
-      const r = await commands.sendTabMessage(tabId, text).catch(() => null);
-      return r?.status === 'delivered';
-    });
-  }
-
-  /**
    * Nothing of the human's would be submitted along with what is typed next: the agent's input
    * box READ off the screen is not holding text, and nobody has typed in the last 2 s — a
    * keystroke that recent may not have echoed into the box yet (the follow-ups rule,
@@ -1880,7 +1892,7 @@ function createOverlordStore() {
       `A deterministic engine handles the routine supervision; you handle what it can't resolve, plus conversation with your human.\n\n` +
       `How this works:\n` +
       `  - The engine queues escalations and rings you with a one-line nudge. When that happens, call listEscalations for the content, then resolve each one.\n` +
-      `  - To direct another tab, use driveTab — your text is typed into that tab with the human's full authority (the agent there cannot tell it from the human, so write exactly as the human would). Guard refusals (busy, no live REPL, outstanding directive) come back structured; wait and retry or escalate.\n` +
+      `  - To direct another tab, use driveTab — your text is typed into that tab with the human's full authority (the agent there cannot tell it from the human, so write exactly as the human would). A busy tab is NOT a refusal: it takes your directive the way it takes a message the human types while it works, and the answer reaches you when the turn that took it ends (\`queued: true\`) — so never set a timer to retry one. Guard refusals (a prompt open, no live REPL, outstanding directive, a slash command at a busy tab) come back structured; act on their \`detail\` or escalate.\n` +
       `  - You WILL get the answer back: when a tab you drove finishes its turn, its reply is queued for you and you are rung the same way as an escalation. So it is fine to ask a tab a question and wait — you do not need to ask it to report back, and you should not poll it.\n` +
       `  - If that tab stops at a prompt instead, you are told. Call getTabPrompt to see it, then ANSWER IT with answerTabPrompt — unblocking your own fleet is your job, and a tab left sitting at a prompt is the failure you exist to prevent. Pass back the prompt_id you were given.\n` +
       `  - A decision is CONSEQUENTIAL when it is destructive or irreversible (deleting data, force-push, dropping a database, rm -rf), touches money, credentials, production, or an external party, or is about what the human actually WANTS rather than how to carry out what they already asked for. Routine approvals in service of work already underway are yours to make. If you are genuinely unsure which side a decision falls on, treat it as consequential.\n` +
@@ -2027,7 +2039,7 @@ function createOverlordStore() {
           ledger(tabId, rule.id, origin, i, step, 'blocked_no_repl');
           return;
         }
-        if (!(await waitInjectable(run, rule.guards))) {
+        if (!(await waitInjectable(run, rule.guards, step.kind === 'slash'))) {
           ledger(tabId, rule.id, origin, i, step, 'aborted');
           return;
         }
@@ -2095,10 +2107,18 @@ function createOverlordStore() {
         // (waitInjectable waits one out; this catches one typed since). Only a box that READS as
         // holding text: an unreadable one (Codex) is left to `humanTypedSince`, as before — the
         // keystrokes-since-idle fallback aborted Codex rituals on a recalled-then-cleared line.
+        const typedBusy = mappedState(tabId) === 'active';
+        const baseline = facts.get(tabId)?.last_turn_ts;
         try {
-          const via = await deliverPrompt(tabId, inst.ptyId, step.text, async () => !(await boxHasText(tabId)));
+          // And no dialog opened since the wait (read off the screen: the hooks lag it ~6 s).
+          const via = await deliverPrompt(
+            tabId,
+            inst.ptyId,
+            step.text,
+            async () => !(await commands.agentDialogOpen(tabId).catch(() => true)) && !(await boxHasText(tabId)),
+          );
           if (via === false) {
-            logInfo(`overlord: "${rule.name}" on ${tabId.slice(0, 8)} stopped — a draft is in the agent's input box`);
+            logInfo(`overlord: "${rule.name}" on ${tabId.slice(0, 8)} stopped — a draft or a dialog is in the way`);
             ledger(tabId, rule.id, origin, i, step, 'aborted');
             return;
           }
@@ -2116,6 +2136,8 @@ function createOverlordStore() {
           text: step.text,
           sentAt: run.lastInjectionAt,
           acked: false,
+          typedBusy,
+          baseline,
         };
         if (step.await) setOutstanding(tabId, directive);
         run.stepIndex = i;
@@ -2852,6 +2874,13 @@ function createOverlordStore() {
       // telling it not to poll.
       w.permissionNotified = false;
 
+      // Held behind the human's draft or a dialog: not typed yet, so not stale either. The
+      // clock restarts when it is typed (`heldOutcome`); a drop ends the watch there too.
+      if (w.heldMsgId) {
+        w.sentAt = Math.min(now, w.sentAt + TICK_MS);
+        continue;
+      }
+
       if (now - w.sentAt > DRIVE_WATCH_MS) {
         driveWatch.delete(tabId);
         // Release the slot HERE, not a second later. `driveTab` arms a `setTimeout` for
@@ -2918,30 +2947,41 @@ function createOverlordStore() {
       }
       const ts = facts.get(tabId)?.last_turn_ts;
       if (!ts || ts <= w.baseline) continue;
+      // Mid-turn: the turn carrying the answer hasn't ended (harvesting now captures half a
+      // thought). The directive may have been typed into this very turn — that is allowed now.
       if (st === 'active') continue;
 
-      let reply: string | null = null;
-      let readFailed = false;
+      // Anchored on the directive's own turn, not on when it was typed: it can be typed into a
+      // BUSY agent, and everything after the send would then begin with the end of whatever
+      // the agent was already doing. Until the directive shows up as a user turn (still queued
+      // behind the running turn, or held for the human's draft) there is no answer to read —
+      // and an `idle` between the old turn ending and the queued directive starting is exactly
+      // when a time-based read would have taken the previous task's conclusion for the reply.
+      //
+      // Typed at an idle agent there is nothing before it to mistake, so the plain read since the
+      // baseline is used, with the directive's turn standing in as the anchor.
+      let read: { prompt_ts: number | null; reply: string | null } | null = null;
       w.reads++;
       try {
-        reply = await commands.getAgentReplySince(tabId, w.baseline);
+        read = w.anchored
+          ? await commands.getAgentReplyAfterPrompt(tabId, w.text, w.baseline)
+          : { prompt_ts: w.baseline, reply: await commands.getAgentReplySince(tabId, w.baseline) };
       } catch (e) {
-        readFailed = true;
         w.readErrors++;
         logError(`overlord: reply read failed for ${tabId.slice(0, 8)}: ${e}`);
       }
-      // KEEP the watch on an empty or failed read and try again next tick. A turn can be
-      // recorded before the agent's prose lands (the pasted directive is itself a user turn,
-      // so `last_turn_ts` moves on delivery), and deleting here on the first unproductive
-      // read permanently ended the return leg for a reply that arrived seconds later.
-      if (readFailed || !reply?.trim()) continue;
+      if (!read || read.prompt_ts === null || ts <= read.prompt_ts) continue;
+      // The turn that took the directive has run: the tab no longer owes it. Released here even
+      // on an empty read, as the tick used to on any turn — the tick now leaves a watched
+      // directive to this loop, because any turn after the SEND says nothing once a directive
+      // can land mid-turn.
+      if (outstanding.get(tabId)?.text === w.text) clearOutstanding(tabId);
+      const reply = read.reply;
+      // KEEP the watch on an empty read and try again next tick: the turn can be recorded
+      // before the agent's prose lands, and deleting here on the first unproductive read
+      // permanently ended the return leg for a reply that arrived seconds later.
+      if (!reply?.trim()) continue;
       driveWatch.delete(tabId);
-
-      // The answer is proof the directive completed. Clearing here matters beyond
-      // tidiness: a driveTab directive otherwise holds the tab's outstanding slot for a
-      // full 15 minutes after it was already served, blocking every rule with
-      // only_if_no_outstanding and every further driveTab at that tab.
-      clearOutstanding(tabId);
 
       // Truncate from the FRONT, keeping the tail. An agent narrates as it works and states
       // its conclusion last, so cutting the end throws away the answer and hands the
@@ -3120,7 +3160,15 @@ function createOverlordStore() {
         // branches below read it, and mutated in place like `acked`/`unackedNotified`.
         if (od && st === 'active') od.lastActiveAt = now;
         const unackedFor = od ? now - Math.max(od.sentAt, od.lastActiveAt ?? 0) : 0;
-        if (od && od.ruleId === null && (od.acked || (f?.last_turn_ts !== undefined && f.last_turn_ts > od.sentAt))) {
+        // A WATCHED driveTab directive is released by `harvestDriveReplies`, once the turn that
+        // took it has run: it can be typed into a busy agent, whose running turn moves
+        // `last_turn_ts` past `sentAt` before the directive has even been read.
+        if (
+          od &&
+          od.ruleId === null &&
+          (od.acked ||
+            (!driveWatch.has(tab.id) && f?.last_turn_ts !== undefined && f.last_turn_ts > od.sentAt))
+        ) {
           clearOutstanding(tab.id);
         } else if (
           od &&
@@ -3474,30 +3522,32 @@ function createOverlordStore() {
         `have never seen it, there is nothing to do and nothing was missed: it was created ` +
         `and removed between your reads of the board. Either way, don't add it later.`;
       const step: OverlordStep = { kind: 'process', text };
-      const sent = await noticeToTab(tabId, text, 'drop');
-      if (sent) {
+      // The RELAY is the supervisor's, and only it. Same split `startTask` makes, and for
+      // the same reason — see the comment on the direct notice above.
+      const relay = async (): Promise<'agent' | 'nobody'> => {
+        if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
+          return 'nobody';
+        }
+        escalate(
+          tabId,
+          null,
+          'task_dropped',
+          `The human deleted the task "${task.title}" from the board. ${tabDisplayName(tabId)} was ` +
+            `carrying it and could not be told directly. Tell it when it is reachable: the task is ` +
+            `off the board, it should drop it from its own list and not re-add it. Word that for a ` +
+            `tab that may never have heard of the task — a row can be created and deleted between ` +
+            `an agent's reads of the board, and nothing here knows whether it was ever delivered. ` +
+            `"Drop it if you have it, and don't add it later" is right; "you were asked to do this ` +
+            `and now you aren't" sends an agent that never saw it looking for what it missed.`,
+        );
+        return 'agent';
+      };
+      if (await deliverHuman(tabId, text, 'notice', () => void relay())) {
         ledger(tabId, null, 'human', 0, step, 'sent');
         return { removed: true, told: 'tab' };
       }
       ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
-      // The RELAY is the supervisor's, and only it. Same split `startTask` makes, and for
-      // the same reason — see the comment on the direct notice above.
-      if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
-        return { removed: true, told: 'nobody' };
-      }
-      escalate(
-        tabId,
-        null,
-        'task_dropped',
-        `The human deleted the task "${task.title}" from the board. ${tabDisplayName(tabId)} was ` +
-          `carrying it and could not be told directly. Tell it when it is reachable: the task is ` +
-          `off the board, it should drop it from its own list and not re-add it. Word that for a ` +
-          `tab that may never have heard of the task — a row can be created and deleted between ` +
-          `an agent's reads of the board, and nothing here knows whether it was ever delivered. ` +
-          `"Drop it if you have it, and don't add it later" is right; "you were asked to do this ` +
-          `and now you aren't" sends an agent that never saw it looking for what it missed.`,
-      );
-      return { removed: true, told: 'agent' };
+      return { removed: true, told: await relay() };
     },
 
     /**
@@ -3541,14 +3591,10 @@ function createOverlordStore() {
         `current as you go. If you are mid-way through something else, finish that first ` +
         `and come to this next rather than abandoning it.`;
       const step: OverlordStep = { kind: 'process', text };
-      if ((await noticeToTab(tabId, text, 'start')) || (await queueToBusyTab(tabId, text))) {
-        ledger(tabId, null, 'human', 0, step, 'sent');
-        return { started: true, told: 'tab' };
-      }
-      ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
-      // Busy, at a prompt, or unmounted. The supervisor relays it when the tab is reachable
-      // — the same act-or-escalate shape every other board action uses. With no supervisor
-      // to relay it, say so rather than reporting a delivery that did not happen.
+      // No agent can take it (exited, no terminal), or it was held and then dropped. The
+      // supervisor relays it when the tab is reachable — the same act-or-escalate shape every
+      // other board action uses. With no supervisor to relay it, say so rather than reporting a
+      // delivery that did not happen.
       //
       // An EXEMPT tab has no supervisor either, whatever the preference says: the handoff is
       // agent-only, so it is consumed off the board by `listEscalations` and never seen by a
@@ -3556,22 +3602,38 @@ function createOverlordStore() {
       // escalating here would delete the card into an agent that is forbidden to use it, and
       // report a relay that cannot happen. It would also hand the exempt tab's name and the
       // task's detail to the supervisor, which is the exact thing exemption promises not to do.
-      if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
-        return { started: true, told: 'nobody' };
+      const relay = async (): Promise<'agent' | 'nobody'> => {
+        if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
+          return 'nobody';
+        }
+        escalate(
+          tabId,
+          null,
+          'task_handoff',
+          `The human pressed "Do it" on the task "${task.title}" (id ${task.id}), which is ` +
+            `carried by ${tabDisplayName(tabId)}. No agent in that tab could take it — it has ` +
+            `exited, or its terminal is gone — so it has NOT been told. It is already marked ` +
+            `Active on the board. Tell it once an agent is running there: start on this now, and ` +
+            `keep the task's status current.` +
+            (task.detail ? `\n\nWhat the task says:\n${task.detail}` : ''),
+          task.id,
+        );
+        return 'agent';
+      };
+      if (await deliverHuman(tabId, text, 'start', () => void relay())) {
+        ledger(tabId, null, 'human', 0, step, 'sent');
+        return { started: true, told: 'tab' };
       }
-      escalate(
-        tabId,
-        null,
-        'task_handoff',
-        `The human pressed "Do it" on the task "${task.title}" (id ${task.id}), which is ` +
-          `carried by ${tabDisplayName(tabId)}. That tab could not be typed into just then — ` +
-          `it was mid-turn, stopped at a prompt, or not mounted — so it has NOT been told. ` +
-          `It is already marked Active on the board. Tell it when it is reachable: start on ` +
-          `this now, and keep the task's status current.` +
-          (task.detail ? `\n\nWhat the task says:\n${task.detail}` : ''),
-        task.id,
-      );
-      return { started: true, told: 'agent' };
+      ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
+      return { started: true, told: await relay() };
+    },
+
+    /** Tell a tab's agent something with the human's authority, by the same rules as a board
+     *  notice (`deliverHuman`: busy or idle, held only for a dialog, a draft or the human's
+     *  typing). Used for the outcome of an agent request (agentRequests.svelte.ts). Resolves
+     *  whether it was delivered or is held to be. */
+    async tellTab(tabId: string, text: string, _what: string): Promise<boolean> {
+      return deliverHuman(tabId, text, 'request');
     },
 
     /**
@@ -3587,14 +3649,6 @@ function createOverlordStore() {
      * losing it because a paste couldn't land would be worse. `told` says what reached the
      * agent, with the same Overlord relay fallback as "Do it".
      */
-    /** Tell a tab's agent something with the human's authority, by the same rules as a board
-     *  notice: idle, or typed into a busy Claude tab's empty box, never over a draft
-     *  (noticeToTab / queueToBusyTab). Used for the outcome of an agent request
-     *  (agentRequests.svelte.ts). Resolves whether it landed. */
-    async tellTab(tabId: string, text: string, what: string): Promise<boolean> {
-      return (await noticeToTab(tabId, text, what)) || (await queueToBusyTab(tabId, text));
-    },
-
     async answerBlocker(
       id: string,
       answer: BlockerAnswer,
@@ -3610,26 +3664,30 @@ function createOverlordStore() {
       if (!tabId) return { answered: true, told: 'nobody' };
 
       const step: OverlordStep = { kind: 'process', text: r.message };
-      // Mid-turn (often still on the answer before this one): queued like a composer message.
-      if ((await noticeToTab(tabId, r.message, 'answer')) || (await queueToBusyTab(tabId, r.message))) {
+      // Same three conditions as startTask's fallback, for the same reasons.
+      const relay = async (): Promise<'agent' | 'nobody'> => {
+        if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
+          return 'nobody';
+        }
+        escalate(
+          tabId,
+          null,
+          'task_handoff',
+          `The human answered a blocked task carried by ${tabDisplayName(tabId)}, but no agent in ` +
+            `that tab could take it — it has exited, or its terminal is gone — so it has NOT been ` +
+            `told. Pass this on once an agent is running there:\n\n${r.message}`,
+          task.id,
+        );
+        return 'agent';
+      };
+      // Mid-turn (often still on the answer before this one) is fine: the agent takes it like
+      // the human's own typing.
+      if (await deliverHuman(tabId, r.message, 'answer', () => void relay())) {
         ledger(tabId, null, 'human', 0, step, 'sent');
         return { answered: true, told: 'tab' };
       }
       ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
-      // Same three conditions as startTask's fallback, for the same reasons.
-      if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
-        return { answered: true, told: 'nobody' };
-      }
-      escalate(
-        tabId,
-        null,
-        'task_handoff',
-        `The human answered a blocked task carried by ${tabDisplayName(tabId)}, but that tab ` +
-          `could not be typed into just then, so it has NOT been told. Pass this on when it is ` +
-          `reachable:\n\n${r.message}`,
-        task.id,
-      );
-      return { answered: true, told: 'agent' };
+      return { answered: true, told: await relay() };
     },
 
     /** Close a task's question without telling the agent (the human answered it in the tab).
@@ -3667,23 +3725,26 @@ function createOverlordStore() {
         `kind 'external'; if it waits on another task, use block_on; if it is not blocked any ` +
         `more, move it to its real status.`;
       const step: OverlordStep = { kind: 'process', text };
-      if (await noticeToTab(tabId, text, 'blocker-reason')) {
+      const relay = async (): Promise<'agent' | 'nobody'> => {
+        if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
+          return 'nobody';
+        }
+        escalate(
+          tabId,
+          null,
+          'task_handoff',
+          `The human asked ${tabDisplayName(tabId)} why a task is Blocked, but no agent in that ` +
+            `tab could take it. Pass this on once an agent is running there:\n\n${text}`,
+          task.id,
+        );
+        return 'agent';
+      };
+      if (await deliverHuman(tabId, text, 'notice', () => void relay())) {
         ledger(tabId, null, 'human', 0, step, 'sent');
         return { asked: true, told: 'tab' };
       }
       ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
-      if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
-        return { asked: true, told: 'nobody' };
-      }
-      escalate(
-        tabId,
-        null,
-        'task_handoff',
-        `The human asked ${tabDisplayName(tabId)} why a task is Blocked, but that tab could not ` +
-          `be typed into just then. Pass this on when it is reachable:\n\n${text}`,
-        task.id,
-      );
-      return { asked: true, told: 'agent' };
+      return { asked: true, told: await relay() };
     },
 
     /** Hand a board task to the Overlord agent to carry (the card's "Send").
@@ -4971,7 +5032,7 @@ function createOverlordStore() {
       tabId: string,
       kind: 'process' | 'slash',
       text: string,
-    ): Promise<{ sent: boolean; reason?: string; detail?: string }> {
+    ): Promise<{ sent: boolean; queued?: boolean; reason?: string; detail?: string }> {
       if (isExemptTab(tabId)) return { sent: false, reason: 'exempt', detail: EXEMPT_DETAIL };
       const step: OverlordStep = { kind, text };
       if (kind === 'slash') {
@@ -5069,23 +5130,34 @@ function createOverlordStore() {
         };
       }
       const st = mappedState(tabId);
+      // A prompt is not "busy": busy no longer refuses at all, and retrying never clears a gate
+      // that is waiting on a person. Name the actual state so the supervisor stops guessing.
+      if (st === 'permission') {
+        ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_guard');
+        return {
+          sent: false,
+          reason: 'awaiting_permission',
+          detail:
+            'That tab is stopped at a prompt, so there is nothing to type a directive ' +
+            'into — retrying will not clear it. Use getTabPrompt to see what it is ' +
+            'asking and answerTabPrompt to answer it — unless the decision is ' +
+            'consequential, in which case leave it: the prompt is already in front of the ' +
+            'human, and do not ask them about it yourself. The tab resumes once it is answered.',
+        };
+      }
+      if (kind === 'process') return this.driveProcess(tabId, text, step, st === 'active');
+      // A slash command still waits for idle: Claude runs some of them (`/model`, `/effort`)
+      // the moment they are typed, even mid-turn, instead of queueing them like a message.
       if (st !== 'idle') {
         ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_guard');
-        // "busy" is wrong for a tab stopped at a permission prompt, and wrong in the way
-        // that matters: busy invites a retry, and retrying never clears a gate that is
-        // waiting on a person. Name the actual state so the supervisor stops guessing.
-        return st === 'permission'
-          ? {
-              sent: false,
-              reason: 'awaiting_permission',
-              detail:
-                'That tab is stopped at a prompt, so there is nothing to type a directive ' +
-                'into — retrying will not clear it. Use getTabPrompt to see what it is ' +
-                'asking and answerTabPrompt to answer it — unless the decision is ' +
-                'consequential, in which case leave it: the prompt is already in front of the ' +
-                'human, and do not ask them about it yourself. The tab resumes once it is answered.',
-            }
-          : { sent: false, reason: 'agent_busy' };
+        return {
+          sent: false,
+          reason: 'agent_busy',
+          detail:
+            'That agent is mid-turn, and a slash command is sent only between turns. Retry ' +
+            'once it is idle. A process directive does not need to wait: it is typed into a ' +
+            'busy agent, which takes it the way it takes the human\'s own typing.',
+        };
       }
       const inst = terminalsStore.get(tabId);
       if (!inst) return { sent: false, reason: 'no_live_repl' };
@@ -5131,7 +5203,37 @@ function createOverlordStore() {
       // hold the slot only on a step that sets `await`; this is the same rule. What stops the
       // next send landing mid-turn is the `idle` check above, which a slash that starts a
       // turn (`/compact`, a skill) trips on its own.
-      if (kind === 'slash') return { sent: true };
+      return { sent: true };
+    },
+
+    /**
+     * driveTab's `process` directive: through the one gate (`deliverToAgent`), so a BUSY agent
+     * takes it the way it takes the human's own typing — queued by its runtime, or folded into
+     * the running turn — instead of the supervisor being refused and left to retry on a timer
+     * (by which time the agent had moved on to the very thing the directive was meant to stop).
+     * Held only for a dialog, the human's draft or their typing, and typed when that clears.
+     * Its answer is read from after the directive's own turn (`harvestDriveReplies`).
+     */
+    async driveProcess(
+      tabId: string,
+      text: string,
+      step: OverlordStep,
+      busy: boolean,
+    ): Promise<{ sent: boolean; queued?: boolean; reason?: string; detail?: string }> {
+      listenForInboxOutcomes();
+      const r = await commands
+        .deliverToAgent(tabId, text, 'directive')
+        .catch((e): commands.AgentDelivery => ({ status: 'refused', reason: String(e) }));
+      if (r.status === 'refused') {
+        ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_no_repl');
+        return {
+          sent: false,
+          reason: 'no_live_repl',
+          detail: `Nothing in that tab can take a directive right now (${r.reason}): the agent has exited or its terminal is gone. It needs restarting before it can be driven.`,
+        };
+      }
+      ledger(tabId, null, 'overlord_judgment', 0, step, 'sent');
+      withdrawAnsweredReports(tabId);
       setOutstanding(tabId, {
         id: crypto.randomUUID(),
         ruleId: null,
@@ -5153,15 +5255,60 @@ function createOverlordStore() {
         baseline: facts.get(tabId)?.last_turn_ts ?? Date.now(),
         sentAt: Date.now(),
         text,
+        anchored: busy || r.status === 'held',
+        heldMsgId: r.status === 'held' ? r.msg_id : undefined,
         reads: 0,
         readErrors: 0,
       });
       // Fire-and-forget from the engine's perspective; the ack/turn-end clears it.
+      // Not while it is still held: freeing the slot then let the supervisor send it again, and
+      // both copies were typed once the draft cleared. The drop/typed outcome settles a held one.
       setTimeout(() => {
         const d = outstanding.get(tabId);
+        if (driveWatch.get(tabId)?.heldMsgId) return;
         if (d && d.text === text && Date.now() - d.sentAt > 15 * 60_000) clearOutstanding(tabId);
       }, 15 * 60_000 + 1000);
-      return { sent: true };
+      if (r.status === 'held') {
+        heldOutcome.set(r.msg_id, {
+          // Typed at last: the reply clock starts now, not when it was held.
+          typed: () => {
+            const w = driveWatch.get(tabId);
+            if (w?.heldMsgId === r.msg_id) {
+              w.heldMsgId = undefined;
+              w.sentAt = Date.now();
+            }
+          },
+          // Never typed after all (the human's draft sat for 30 minutes, or the terminal went):
+          // nothing is owed, and the supervisor is told rather than left waiting on a reply.
+          dropped: () => {
+            if (driveWatch.get(tabId)?.text === text) driveWatch.delete(tabId);
+            if (outstanding.get(tabId)?.text === text) clearOutstanding(tabId);
+            escalate(
+              tabId,
+              null,
+              'drive_reply',
+              `Your directive ${JSON.stringify(text.slice(0, 120))} to ${tabDisplayName(tabId)} was ` +
+                `never typed: it waited for the human's draft or an open dialog in that tab, and ` +
+                `gave up after 30 minutes (or the tab's terminal went). Send it again if it still matters.`,
+            );
+          },
+        });
+        return {
+          sent: true,
+          queued: true,
+          detail:
+            r.reason === 'dialog'
+              ? 'Held: a dialog is open in that tab. It is typed as soon as the dialog closes, and its answer reaches you as usual.'
+              : 'Held: your human is typing in that tab or has a draft in its input box. It is typed as soon as they send or clear it, and its answer reaches you as usual.',
+        };
+      }
+      return busy
+        ? {
+            sent: true,
+            queued: true,
+            detail: 'That agent is mid-turn: it takes this the way it takes a message the human types while it works. Its answer reaches you once that turn is done.',
+          }
+        : { sent: true };
     },
   };
 }

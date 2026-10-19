@@ -1312,7 +1312,7 @@ async fn post_message(
         };
         if body.submit && draft_hold::must_hold(&s.app, &tab_id) {
             let msg_id = draft_hold::new_msg_id();
-            draft_hold::hold(s.app.clone(), &tab_id, draft_hold::Held { msg_id: msg_id.clone(), paths, text: body.text.clone(), what: "phone message" });
+            draft_hold::hold(s.app.clone(), &tab_id, draft_hold::Held { msg_id: msg_id.clone(), paths, text: body.text.clone(), what: "phone message", desktop: false }, "draft");
             return Ok(Json(held_reply(msg_id, woke)));
         }
         inject_image_paths_and_text(&s.app, &pty, &paths, &body)
@@ -1329,7 +1329,7 @@ async fn post_message(
     if body.submit {
         let hold = |s: &ApiState| {
             let msg_id = draft_hold::new_msg_id();
-            draft_hold::hold(s.app.clone(), &tab_id, draft_hold::Held { msg_id: msg_id.clone(), paths: Vec::new(), text: body.text.clone(), what: "phone message" });
+            draft_hold::hold(s.app.clone(), &tab_id, draft_hold::Held { msg_id: msg_id.clone(), paths: Vec::new(), text: body.text.clone(), what: "phone message", desktop: false }, "draft");
             Ok(Json(held_reply(msg_id, woke)))
         };
         if draft_hold::has_held(&tab_id) || draft_blocks_prompt(&s.app, &tab_id, crate::claude_code::mod_inbox::offerable(&body.text)) {
@@ -5935,6 +5935,52 @@ pub(crate) fn agent_reply_since(app: &AppState, tab_id: &str, since_ms: i64) -> 
     Some(parts.join("\n\n"))
 }
 
+/// The answer to a directive, anchored on the directive itself: `(prompt_ts, reply)`, where
+/// `prompt_ts` is when the directive shows up as a user turn at or after `since_ms` (`None`: not
+/// yet) and `reply` is everything the agent said after it.
+///
+/// A directive is typed into a BUSY agent too, so "everything since it was sent" would hand back
+/// the end of whatever the agent was already doing. Claude records a message typed mid-turn either
+/// as a user turn at the turn boundary or as a `queued_command` attachment folded into the running
+/// turn — `turns_for` renders both as user turns — so the reply starts after that turn.
+pub(crate) fn agent_reply_after_prompt(
+    app: &AppState,
+    tab_id: &str,
+    prompt: &str,
+    since_ms: i64,
+) -> (Option<i64>, Option<String>) {
+    let Some((rt, sid)) = resolved_session_for_tab(app, tab_id) else { return (None, None) };
+    // The whole cached window (`transcript::TURNS_KEEP`): a long reply after the directive must
+    // not push the directive out of sight, or its answer is never found.
+    let Some(turns) = transcript::turns_for(rt, &sid, 200, transcript::ToolRender::Marker) else {
+        return (None, None);
+    };
+    let ts = |t: &Value| t.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+    let text = |t: &Value| t.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // The LAST matching user turn: the same directive sent twice answers to the newer one.
+    let Some(at) = turns.iter().rposition(|t| {
+        t.get("role").and_then(|r| r.as_str()) == Some("user") && ts(t) >= since_ms && prompt_matches(prompt, &text(t))
+    }) else {
+        return (None, None);
+    };
+    let parts: Vec<String> = turns[at + 1..]
+        .iter()
+        .filter(|t| t.get("role").and_then(|r| r.as_str()) == Some("agent"))
+        .map(text)
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    (Some(ts(&turns[at])), (!parts.is_empty()).then(|| parts.join("\n\n")))
+}
+
+/// Is this user turn the directive that was typed? Compared on collapsed whitespace and the
+/// directive's opening (a runtime may reflow a long paste or prefix it), never on the whole text.
+fn prompt_matches(prompt: &str, turn: &str) -> bool {
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let p = norm(prompt);
+    let head: String = p.chars().take(160).collect();
+    !head.is_empty() && norm(turn).contains(&head)
+}
+
 /// Per-tab agent facts for the Overlord engine (docs/overlord.md §5 detection table) — the
 /// cheap, cached signals the frontend rules engine polls: context gauge, last-real-turn
 /// timestamp, runtime, session id. Everything comes from the (mtime,len)-gated tail-facts
@@ -6774,6 +6820,19 @@ async fn ring_devices(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_directive_is_found_in_its_own_turn_however_it_was_wrapped() {
+        let d = "[Overlord] Relaying Darryl's answer:\n  please install the cron";
+        // Typed whole, or reflowed into one line by the runtime.
+        assert!(prompt_matches(d, d));
+        assert!(prompt_matches(d, "[Overlord] Relaying Darryl's answer: please install the cron"));
+        // Folded into a turn with a prefix the runtime added.
+        assert!(prompt_matches(d, "⟦queued⟧ [Overlord] Relaying Darryl's answer: please   install the cron"));
+        // Another message is not it, and an empty directive matches nothing.
+        assert!(!prompt_matches(d, "please install the cron"));
+        assert!(!prompt_matches("   ", "anything"));
+    }
 
     /// `/keys` sends all of a list or none of it: one unknown name must not leave the phone
     /// having pressed the keys before it.

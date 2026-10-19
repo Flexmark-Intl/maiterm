@@ -146,7 +146,18 @@ pub fn write_terminal(
     state: State<'_, Arc<AppState>>,
     pty_id: String,
     data: Vec<u8>,
+    human: Option<bool>,
 ) -> Result<(), String> {
+    // `human`: the human typed this into the terminal and it is not an answer to a permission
+    // prompt. Messages maiTerm types for others hold behind it (mailink::draft_hold).
+    if human == Some(true) {
+        if let Some(s) = state.pty_stats.read().get(&pty_id) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            s.last_human_key_ms.store(now, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     pty::write_pty(&*state, &pty_id, &data)
 }
 

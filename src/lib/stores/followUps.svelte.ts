@@ -353,9 +353,13 @@ function createFollowUpsStore() {
   /** Why this tab can't take a follow-up right now, or null. Every check is one a live
    *  delivery has to pass — the order is cheapest first, and the one async probe last. */
   /** The synchronous part of the gate: what the tab itself is doing, in words that are TRUE of
-   *  it. Checked most-absent first — no terminal, then no agent, then a prompt, then busy —
-   *  because "no session" read as "not idle" once told a human with no agent running that it
-   *  would go "when this turn ends". Null: the tab is idle, the async checks decide. */
+   *  it. Checked most-absent first — no terminal, then no agent, then a prompt — because "no
+   *  session" read as "not idle" once told a human with no agent running that it would go "when
+   *  this turn ends". Null: an agent is there, idle or busy; the async checks decide.
+   *
+   *  BUSY IS NOT A HOLD (§6.1): an agent mid-turn takes a typed message the way it takes the
+   *  human's own — queued, or folded into the running turn. Holding a follow-up until the turn
+   *  ended delivered it after the agent had already moved on to whatever it was meant to stop. */
   function tabHold(tab: Tab): string | null {
     // No instance covers suspended and archived tabs AND an ordinary one not opened since launch
     // (terminals mount lazily) — so name none of them.
@@ -363,9 +367,6 @@ function createFollowUpsStore() {
     const st = agentStateStore.getState(tab.id);
     if (!st) return NO_AGENT;
     if (st.state === 'permission') return 'the agent is waiting on a permission prompt';
-    // Between turns only (§6.1): the delivery controller would deliver mid-turn, which suits a
-    // peer's reply; a follow-up is never urgent, and runtimes differ on input typed mid-turn.
-    if (st.state !== 'idle') return 'the agent is busy — it goes when this turn ends';
     return null;
   }
 
@@ -378,8 +379,9 @@ function createFollowUpsStore() {
     // Typing right now: a keystroke this recent may not have reached the screen yet.
     const typed = terminalsStore.getLastTakeoverInputAt(tab.id);
     if (!toAgent && typed !== undefined && Date.now() - typed < 2000) return 'someone is typing in the tab';
-    // And the screen has settled — the same 1.5 s the Overlord's own notices wait for.
-    if (Date.now() - (terminalsStore.getLastOutputAt(tab.id) ?? 0) < 1500) return 'output still arriving';
+    // And, at an idle agent, the screen has settled: a turn that just ended is still printing.
+    // Not mid-turn, where output never stops — the box is read off each frame regardless.
+    if (st.state === 'idle' && Date.now() - (terminalsStore.getLastOutputAt(tab.id) ?? 0) < 1500) return 'output still arriving';
     // No draft in the input box. Typing into an agent's input fires no hook, so nothing reports
     // a draft, and a paste plus CR would submit it with the follow-up glued on. The box is READ
     // off the screen (mailink/input_box.rs): keystroke timestamps ALONE were tried first and
@@ -396,6 +398,9 @@ function createFollowUpsStore() {
       return 'something was typed in the tab since the agent went idle, and its input box can’t be read';
     }
     if (!agentDelivery.canDeliverNow(tab.id)) return 'another message is being delivered';
+    // A dialog on screen the hooks haven't reported yet (a permission Notification lags ~6 s):
+    // a busy agent is fine, but the paste's CR there would approve it.
+    if (await commands.agentDialogOpen(tab.id).catch(() => true)) return 'the agent is waiting on a prompt';
     // A session entry is not an agent: it is cleared by the SessionEnd hook, which never comes
     // when the process is killed or its ssh tunnel is down. Without a live process the paste
     // lands in a shell. Same evidence the Overlord (replState) and comms rely on — and the same
@@ -556,7 +561,7 @@ function createFollowUpsStore() {
       .filter(f => isDue(f, now) || (wantedEarly.has(f.id) && !isExpired(f, now)))
       .sort((a, b) => (dueAt(a) ?? now) - (dueAt(b) ?? now));
     if (due.length === 0) return;
-    const f = due[0]; // one per tab per tick: the next waits for this turn to end
+    const f = due[0]; // one per tab per tick: the next goes on a later tick, in due order
     await deliverOne(tab, f, now, !isDue(f, now));
   }
 
@@ -575,15 +580,20 @@ function createFollowUpsStore() {
     // Where the tab's mod submits it (`toAgent`, decided here at the gate), keys don't count: it
     // goes around the box. But Rust decides again when it is handed over, and if the mod doesn't
     // take it then, it is TYPED — so the typed fallback gets every guard the gate skipped on the
-    // mod's account (`typeable`): no keystroke since the gate, none in the last 2 s, and still
-    // between turns. The box itself is read again by the injector (agentDeliveryLive).
+    // mod's account (`typeable`): no keystroke since the gate, none in the last 2 s, and no
+    // prompt opened meanwhile (busy is fine, §6.1). The box itself is read again by the
+    // injector (agentDeliveryLive).
     const keysAtGate = terminalsStore.getLastTakeoverInputAt(tab.id);
     const toAgent = await commands.agentTakesPrompt(tab.id).catch(() => false);
     const untouched = () => terminalsStore.getLastTakeoverInputAt(tab.id) === keysAtGate;
-    const typeable = () =>
-      untouched() &&
-      (keysAtGate === undefined || Date.now() - keysAtGate >= 2000) &&
-      agentStateStore.getState(tab.id)?.state === 'idle';
+    const typeable = () => {
+      const s = agentStateStore.getState(tab.id)?.state;
+      return (
+        untouched() &&
+        (keysAtGate === undefined || Date.now() - keysAtGate >= 2000) &&
+        (s === 'idle' || s === 'active')
+      );
+    };
     try {
       const reason = await holdReason(tab, toAgent);
       // The agent has exited: restart it (§6.2), and the tick delivers once it is up.

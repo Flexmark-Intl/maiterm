@@ -4,7 +4,7 @@ import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { getAdapter } from '$lib/agents/adapter';
 import { deliverPrompt } from '$lib/utils/agentPrompt';
 import { createDeliveryController } from '$lib/stores/agentDelivery';
-import { agentInputBox, trustDialogOpen } from '$lib/tauri/commands';
+import { agentDialogOpen, agentInputBox, trustDialogOpen } from '$lib/tauri/commands';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 /**
@@ -63,12 +63,18 @@ export async function injectPrompt(
 export const agentDelivery = createDeliveryController({
   // A peer's message is held (queued; the drain retries) while the human has a draft in a
   // Claude agent's input box: its CR would submit the draft along with it. Read off the screen,
-  // so only Claude's box counts — another runtime's doesn't parse ('unknown'). Not held where the
-  // tab's mod submits it around the draft.
+  // so only Claude's box counts — another runtime's doesn't parse ('unknown'), and there the
+  // human's last 2 s of typing is the only evidence of one (it may not have echoed yet anywhere).
+  // Not held where the tab's mod submits it around the draft. Never held for a busy agent.
   inject: (tabId, text, beforePaste) =>
-    injectPrompt(tabId, text, beforePaste, async () =>
-      !(workspacesStore.getTabRuntime(tabId) === 'claude' && (await agentInputBox(tabId).catch(() => 'unknown')) === 'has_text'),
-    ),
+    injectPrompt(tabId, text, beforePaste, async () => {
+      const keys = terminalsStore.getLastTakeoverInputAt(tabId);
+      if (keys !== undefined && Date.now() - keys < 2000) return false;
+      // A dialog the hooks haven't reported yet (a permission Notification lags ~6 s): typed
+      // into a busy agent, the paste's CR would approve it.
+      if (await agentDialogOpen(tabId).catch(() => true)) return false;
+      return !(workspacesStore.getTabRuntime(tabId) === 'claude' && (await agentInputBox(tabId).catch(() => 'unknown')) === 'has_text');
+    }),
   liveState: (tabId) => !!claudeStateStore.getState(tabId),
   awaitingHuman: (tabId) => {
     const st = claudeStateStore.getState(tabId);

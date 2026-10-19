@@ -572,12 +572,21 @@ Two notes on the controller:
   follow-up store therefore reads readiness from the agent state store directly rather than
   from the slot.
 
-**Follow-ups wait for the agent to be idle**, where bridge messages don't. `agentDelivery`
-delivers to a live session mid-turn, which suits a peer's reply. A follow-up is never urgent,
-and some runtimes take input typed mid-turn differently from Claude Code's queueing (Codex is
-unverified here). So the store's gate is: agent state `idle` (`agentState.svelte.ts`), not
-awaiting the human, and `tryDeliverNow` accepts. Waiting for a completed turn costs a little
-latency and removes the question.
+**Busy is not a hold (revised 2026-10-19).** Follow-ups first waited for the agent to be idle,
+on the reasoning that a follow-up is never urgent. In practice the wait was the bug: a note
+like "stop and commit before you start anything new" arrived after the agent had started
+something new. An agent mid-turn takes a typed message the way it takes the human's own
+(Claude queues it, or folds it into the running turn), so a follow-up now goes to a busy agent
+as readily as to an idle one. The same rule now covers everything maiTerm types for someone
+else (`src-tauri/src/mailink/draft_hold.rs`, the one gate). What still holds a follow-up:
+- a permission prompt or question (`awaitingHuman`), which typing would answer;
+- a draft in the box, read off the screen (below), and the human's typing in the last 2 s;
+- no agent at all (§6.2 restarts one).
+
+The 1.5 s "output still arriving" wait applies only at an idle agent, where a turn that just
+ended is still printing. Mid-turn the output never stops, and the box is read off each frame
+regardless. Codex and Gemini take the same rule, with the 2 s typing guard as their only draft
+evidence, since their box can't be read.
 
 The tick runs in the frontend, where delivery has to happen anyway (it needs agent state,
 the adapter's `isAwaitingHumanInput`, and the PTY). Because WKWebView throttles timers in an
@@ -908,9 +917,8 @@ remains.
 
 ## 11. Open questions
 
-- **Idle gate for Claude Code.** If mid-turn delivery proves harmless for Claude Code (it
-  queues typed input), should the idle wait apply to Codex/Gemini only? Start strict; relax
-  per runtime with evidence.
+- **Idle gate — settled 2026-10-19: none.** Follow-ups deliver to a busy agent on every
+  runtime (§6.1). Still unverified: how Codex and Gemini treat input typed mid-turn.
 - **Minimum delay.** One minute is a guess. An agent that wants "in 30 seconds" probably
   wants `waitForService` or its own next turn, but that is untested.
 - **Should an agent see follow-ups it didn't create?** `listFollowUps` returns every

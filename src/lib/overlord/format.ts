@@ -15,6 +15,14 @@ import type {
  * prompt — so a rule never reads differently depending on where you meet it.
  */
 
+/**
+ * The agent states a rule may fire in when it names none: idle AND busy. An agent mid-turn
+ * takes a typed directive the way it takes the human's own typing (queued, or folded into the
+ * running turn), so waiting for idle only delivered "commit and push, don't start anything new"
+ * after the agent had started something new. A `permission` prompt is never typed into.
+ */
+export const DEFAULT_AGENT_STATES: ('idle' | 'active' | 'permission')[] = ['idle', 'active'];
+
 // ── Conditions ────────────────────────────────────────────────────────────────
 
 /** Full clause: "context reaches 55%". Reads after the word "When". */
@@ -143,7 +151,7 @@ export function guardsForCondition(
   if (event === 'agent_unready') return { ...guards, require_live_repl: false };
   // The condition needs the agent stopped at a prompt, which `idle` excludes.
   if (event === 'permission_pending') {
-    const st = guards.agent_state ?? ['idle'];
+    const st = guards.agent_state ?? DEFAULT_AGENT_STATES;
     return st.includes('permission') ? guards : { ...guards, agent_state: [...st, 'permission'] };
   }
   // The condition needs an outstanding directive; "serialize" requires there be none.
@@ -155,7 +163,7 @@ export function guardsForCondition(
  *  can never be silently dead (the engine inverts agent_state for agent_unready). */
 export function ruleWarnings(rule: OverlordRule): string[] {
   const out: string[] = [];
-  const states = rule.guards.agent_state ?? ['idle'];
+  const states = rule.guards.agent_state ?? DEFAULT_AGENT_STATES;
   if (rule.when.event === 'permission_pending' && !states.includes('permission')) {
     out.push('This never fires: the condition needs the agent in “permission”, but the guard excludes it.');
   }

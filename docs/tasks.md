@@ -374,8 +374,9 @@ move it out of Blocked within seconds.
 "Done by the human"), moves the task to Active (which clears the blocker by the rule
 above), and types a `[maiTerm] The human answered…` message into the carrying tab. It works
 like "Do it": no MCP tool reaches it, because the text is typed with the human's authority.
-The move happens even if the paste can't land, and `told` reports `tab` / `agent` (the
-Overlord relays it) / `nobody`. The answer names the question it answers (`asked_at`), and
+The move happens even if the paste can't land, and `told` reports `tab` (delivered, or held
+behind a dialog or the human's draft and typed when it clears — a busy agent takes it at
+once) / `agent` (no agent in the tab, so the Overlord relays it) / `nobody`. The answer names the question it answers (`asked_at`), and
 a mismatch is refused as `stale`: an agent can re-ask between the human reading and
 tapping, and an answer delivered against a different question is worse than none. The task
 panel, the Loom's decisions queue and the phone (`POST /tasks/{id}/answer`, protocol 0.13)
@@ -811,11 +812,19 @@ this is not the same as parking it."*
   acting for a supervisor that has been switched off. Only the relay-when-unreachable
   fallback belongs to Overlord, and it is skipped when there is no agent tab.
 - The row reports **what actually reached the agent**. "Active on the board" and "the agent
-  has been told" are different facts — the tab can be mid-turn, at a permission prompt, or
-  unmounted, all of which refuse a paste — and a button that implies the second while doing
-  only the first is how a task sits Active for an hour with nobody working on it. The status
-  moves either way: the human has said what they want, and that stays true whether or not a
-  paste could land at that instant.
+  has been told" are different facts, and a button that implies the second while doing only
+  the first is how a task sits Active for an hour with nobody working on it. The status moves
+  either way: the human has said what they want, and that stays true whether or not a paste
+  could land at that instant.
+- **A busy agent is told at once (2026-10-19).** Every board notice — Do it, a blocker answer,
+  a delete, "ask why it's blocked", a request outcome — goes through the one gate
+  (`deliver_to_agent`, `src-tauri/src/mailink/draft_hold.rs`). An agent mid-turn takes it the
+  way it takes the human's own typing. It is held, never refused, while a dialog is open or the
+  human is typing or has a draft, and typed when that clears. Only a tab with no agent in it
+  (exited, no terminal) falls back to the Overlord relay, and so does a held notice that is
+  dropped after 30 minutes. The old rule waited for idle and handed a busy tab to the
+  Overlord agent, whose `driveTab` refused it as busy too; a blocker answer was lost that way
+  on 2026-10-19.
 
 **All three are held while a prerequisite is unfinished.** They write the STORED status
 while the row displays the EFFECTIVE one, so on a dependency-blocked row the chip does not

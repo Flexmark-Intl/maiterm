@@ -416,7 +416,7 @@
     if (paths.length > 0) {
       const escaped = paths.map(escapePathForTerminal).join(' ');
       const bytes = Array.from(new TextEncoder().encode(escaped));
-      await writeTerminal(ptyId, bytes);
+      await writeTerminal(ptyId, bytes, true);
       return;
     }
 
@@ -438,7 +438,7 @@
               const basename = localPath.split('/').pop() ?? localPath;
               const remotePath = `${AGENT_UPLOAD_DIR}/${basename}`;
               const bytes = Array.from(new TextEncoder().encode(remotePath));
-              await writeTerminal(ptyId, bytes);
+              await writeTerminal(ptyId, bytes, true);
               toastStore.addToast('Screenshot', 'Screenshot uploaded', 'success');
             } else if (outcome.status === 'error') {
               toastStore.addToast('Screenshot Upload Failed', outcome.error ?? 'Upload failed', 'error');
@@ -446,7 +446,7 @@
           } else {
             // Local Claude session — paste local temp path
             const bytes = Array.from(new TextEncoder().encode(localPath));
-            await writeTerminal(ptyId, bytes);
+            await writeTerminal(ptyId, bytes, true);
           }
           return;
         }
@@ -458,7 +458,7 @@
     const text = await clipboardReadText();
     if (text) {
       const bytes = Array.from(new TextEncoder().encode(text));
-      await writeTerminal(ptyId, bytes);
+      await writeTerminal(ptyId, bytes, true);
     }
   }
 
@@ -1145,15 +1145,18 @@
       // xterm routes DECSET-1004 focus reports (ESC[I / ESC[O) through onData alongside
       // real keystrokes. They are not human input: counting them would make merely
       // clicking into a tab abort an in-flight Overlord ritual.
+      let takeover = false;
       if (data !== '\x1b[I' && data !== '\x1b[O') {
-        terminalsStore.noteUserInput(tabId, claudeStateStore.classifyKeystroke(tabId, data));
+        const answeringPrompt = claudeStateStore.classifyKeystroke(tabId, data);
+        terminalsStore.noteUserInput(tabId, answeringPrompt);
+        takeover = !answeringPrompt;
       }
       if (hasRustSelection) {
         clearSelection(ptyId).then(applyFrame).catch(() => {});
       }
       const bytes = Array.from(new TextEncoder().encode(data));
       try {
-        await writeTerminal(ptyId, bytes);
+        await writeTerminal(ptyId, bytes, takeover);
       } catch (e) {
         logError(`Failed to write to PTY: ${e}`);
       }
@@ -1345,7 +1348,7 @@
                     const path = `${AGENT_UPLOAD_DIR}/${basenames[i]}`;
                     const bytes = Array.from(new TextEncoder().encode(path + ' '));
                     if (i > 0) await new Promise(r => setTimeout(r, 200));
-                    await writeTerminal(ptyId, bytes);
+                    await writeTerminal(ptyId, bytes, true);
                   }
                   toastStore.addToast('SCP Upload', `${count} file${count > 1 ? 's' : ''} uploaded`, 'success');
                 } else {
@@ -1374,13 +1377,13 @@
               for (let i = 0; i < paths.length; i++) {
                 const bytes = Array.from(new TextEncoder().encode(paths[i] + ' '));
                 if (i > 0) await new Promise(r => setTimeout(r, 200));
-                await writeTerminal(ptyId, bytes);
+                await writeTerminal(ptyId, bytes, true);
               }
             } else {
               // Local session — paste escaped file paths
               const escaped = paths.map(escapePathForTerminal).join(' ');
               const bytes = Array.from(new TextEncoder().encode(escaped));
-              await writeTerminal(ptyId, bytes);
+              await writeTerminal(ptyId, bytes, true);
             }
           })().catch(e => logError(`drag-drop failed: ${e}`));
         } else {

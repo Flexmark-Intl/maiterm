@@ -248,8 +248,10 @@ export async function getPtyForeground(ptyId: string, fresh = false): Promise<st
   return cmd ? cleanSshCommand(cmd) : null;
 }
 
-export async function writeTerminal(ptyId: string, data: number[]): Promise<void> {
-  return invoke('write_terminal', { ptyId, data });
+/** `human`: the human typed this (not an answer to a permission prompt). Rust holds what maiTerm
+ *  types for others behind it — the last key must be stamped where the gate reads it. */
+export async function writeTerminal(ptyId: string, data: number[], human = false): Promise<void> {
+  return invoke('write_terminal', { ptyId, data, human });
 }
 
 export async function resizeTerminal(ptyId: string, cols: number, rows: number): Promise<void> {
@@ -414,6 +416,17 @@ export async function getAgentReplySince(tabId: string, sinceMs: number): Promis
   return invoke('get_agent_reply_since', { tabId, sinceMs });
 }
 
+/** The answer to a directive, anchored on the directive's own turn in the transcript (it may have
+ *  been typed into a busy agent): `prompt_ts` null until it shows up, `reply` null until the agent
+ *  says something after it. */
+export async function getAgentReplyAfterPrompt(
+  tabId: string,
+  prompt: string,
+  sinceMs: number,
+): Promise<{ prompt_ts: number | null; reply: string | null }> {
+  return invoke('get_agent_reply_after_prompt', { tabId, prompt, sinceMs });
+}
+
 /** One question's answer: chosen option labels, and/or free text via the Other row. */
 export interface PromptAnswer {
   selected?: string[];
@@ -457,6 +470,36 @@ export async function agentTakesPrompt(tabId: string): Promise<boolean> {
  *  nothing was sent: type it, under the caller's own checks. Use `deliverPrompt`. */
 export async function submitPromptToAgent(tabId: string, text: string): Promise<boolean> {
   return invoke('submit_prompt_to_agent', { tabId, text });
+}
+
+/** What `deliverToAgent` did. `held`: waiting for a dialog, a draft or the human's typing to
+ *  clear — never for a busy agent; its outcome follows as an `agent-inbox-outcome` event keyed by
+ *  `msg_id`. `refused`: nothing there can take it (`no_agent`, `no_terminal`, `type_failed`). */
+export type AgentDelivery =
+  | { status: 'delivered'; via: 'agent' | 'keys' }
+  | { status: 'held'; msg_id: string; reason: string }
+  | { status: 'refused'; reason: string };
+
+/** `agent-inbox-outcome`: what became of a held desktop message. */
+export interface AgentInboxOutcome {
+  tab_id: string;
+  msg_id: string;
+  outcome: 'typed' | 'dropped';
+  why: string | null;
+}
+
+/** A dialog is open in this tab, read off the screen as well as the hooks (whose permission
+ *  state lags the dialog by ~6 s). Anything typed into a busy agent must ask this first: a
+ *  paste's CR at a permission dialog approves it. */
+export async function agentDialogOpen(tabId: string): Promise<boolean> {
+  return invoke('agent_dialog_open', { tabId });
+}
+
+/** Deliver a message to a tab's agent — the one gate for everything the desktop types for someone
+ *  else (src-tauri/src/mailink/draft_hold.rs). `what` labels the log: answer, start, notice,
+ *  directive, request, follow-up, rule. */
+export async function deliverToAgent(tabId: string, text: string, what: string): Promise<AgentDelivery> {
+  return invoke('deliver_to_agent', { tabId, text, what });
 }
 
 /** Whether Claude's workspace-trust dialog is open on this tab. Every automated path that types

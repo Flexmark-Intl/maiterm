@@ -31,6 +31,10 @@ pub struct PtyStats {
     /// Millis since UNIX_EPOCH of the last PTY read. Used to detect an
     /// actively-drawing TUI so resizes can be coalesced (see resize_pty).
     pub last_read_ms: AtomicU64,
+    /// Millis since UNIX_EPOCH of the last key the HUMAN typed into this terminal (not one
+    /// answering a permission prompt), stamped by `write_terminal`. Anything maiTerm types for
+    /// someone else holds while it is under 2 s old (`mailink::draft_hold`).
+    pub last_human_key_ms: AtomicU64,
 }
 
 /// A resize waiting for the trailing debounce while the PTY is streaming.

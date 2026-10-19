@@ -101,13 +101,25 @@ describe('seedDefaultOverlordRules — a flagged rule that is still ours', () =>
     return rule({ ...structuredClone(tmpl), default_id: ID, ...over });
   }
 
+  /** Every default was idle-only until 2026-10-19. */
+  const IDLE_ONLY = { ...tmpl.guards, agent_state: ['idle'] } as OverlordRule['guards'];
+
   it('migrates a flagged copy of a previous version, keeping scope and enabled', () => {
-    const r = shipped({ sequence: OLD_SEQUENCE, user_modified: true, enabled: false, workspaces: ['ws-1'] });
+    const r = shipped({ sequence: OLD_SEQUENCE, guards: IDLE_ONLY, user_modified: true, enabled: false, workspaces: ['ws-1'] });
     const row = seedDefaultOverlordRules([r], [])!.find((x) => x.default_id === ID)!;
     expect(row.sequence).toEqual(tmpl.sequence);
+    expect(row.guards).toEqual(tmpl.guards);
     expect(row.user_modified).toBe(false);
     expect(row.enabled).toBe(false);
     expect(row.workspaces).toEqual(['ws-1']);
+  });
+
+  it('moves every untouched idle-only default onto busy-or-idle', () => {
+    for (const [id, t] of Object.entries(DEFAULT_OVERLORD_RULES)) {
+      const old = rule({ ...structuredClone(t), default_id: id, guards: { ...t.guards, agent_state: ['idle'] } });
+      const row = seedDefaultOverlordRules([old], [])!.find((x) => x.default_id === id)!;
+      expect(row.guards.agent_state).toEqual(['idle', 'active']);
+    }
   });
 
   it('clears the flag on a copy identical to the current template', () => {

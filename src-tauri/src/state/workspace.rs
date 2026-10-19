@@ -1489,7 +1489,9 @@ pub enum OverlordCondition {
 /// preferences UI writes them (docs/overlord.md §10 field tiers).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlordGuards {
-    /// Agent states the target tab may be in ("idle" | "active" | "permission"); default idle-only.
+    /// Agent states the target tab may be in ("idle" | "active" | "permission"); default idle or
+    /// active (`DEFAULT_AGENT_STATES` in src/lib/overlord/format.ts — a busy agent takes a typed
+    /// message the way it takes the human's own).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_state: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

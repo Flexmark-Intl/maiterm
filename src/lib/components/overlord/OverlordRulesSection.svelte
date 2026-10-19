@@ -6,7 +6,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import {
-    conditionChip, conditionSource, describeCondition, describeGate,
+    conditionChip, conditionSource, describeCondition, describeGate, DEFAULT_AGENT_STATES,
     fmtSeconds, guardsForCondition, ruleWarnings, scopeLabel, sequenceSummary,
   } from '$lib/overlord/format';
   import '$lib/overlord/deck.css';
@@ -263,7 +263,7 @@
   const AGENT_STATES: OverlordAgentStateName[] = ['idle', 'active', 'permission'];
 
   function toggleGuardState(rule: OverlordRule, st: OverlordAgentStateName) {
-    const cur = rule.guards.agent_state ?? ['idle'];
+    const cur = rule.guards.agent_state ?? DEFAULT_AGENT_STATES;
     const next = cur.includes(st) ? cur.filter((s) => s !== st) : [...cur, st];
     updateRule(rule.id, { guards: { ...rule.guards, agent_state: next.length ? next : ['idle'] } });
   }
@@ -744,7 +744,7 @@
             <div class="row">
               <span class="ov-label">Inject only while the agent is</span>
               {#each AGENT_STATES as st (st)}
-                <button class="scope-chip small" class:on={(rule.guards.agent_state ?? ['idle']).includes(st)}
+                <button class="scope-chip small" class:on={(rule.guards.agent_state ?? DEFAULT_AGENT_STATES).includes(st)}
                         onclick={() => toggleGuardState(rule, st)}>{st}</button>
               {/each}
             </div>

@@ -595,9 +595,15 @@ words and never run) and empty text on the keyboard.
 
 Callers go through one function per side:
 - Rust: `mailink::submit_prompt`. Used by the phone's text send, the draft-hold worker, the Loom
-  composer and both comms paths.
+  composer, both comms paths, and `deliver_to_agent` (`draft_hold::deliver_or_hold`) — which
+  is how board notices and driveTab's `process` directives reach a tab (2026-10-19).
 - Frontend: `agentPrompt.ts::deliverPrompt`. Used by `injectPrompt` (mesh, bridge and
-  follow-ups), driveTab, ritual steps, board notices and the Overlord's own nudges.
+  follow-ups), driveTab's `slash` sends, ritual steps and the Overlord's own nudges.
+
+**Mid-turn is not a hold for any caller** (2026-10-19). When the mod doesn't take a prompt (it
+never does mid-turn), the prompt is typed into the busy agent's box, which takes it like the
+human's own typing. What holds is a dialog, a draft or the human's last 2 s of typing
+(`draft_hold.rs`). A slash command still waits for idle.
 
 The draft gates (`draft_blocks_prompt`, follow-ups' `holdReason`, driveTab's `noDraft`) stand down
 when the mod takes the prompt. **A prompt the mod didn't take after all is typed under every guard

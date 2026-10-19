@@ -78,6 +78,24 @@ pub async fn get_agent_reply_since(
     .map_err(|e| format!("agent reply read failed to run: {}", e))
 }
 
+/// The answer to a directive typed at `since_ms`, anchored on the directive's own turn in the
+/// transcript (`mailink::agent_reply_after_prompt`): `{prompt_ts, reply}`, both null until seen.
+#[tauri::command]
+pub async fn get_agent_reply_after_prompt(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    prompt: String,
+    since_ms: i64,
+) -> Result<Value, String> {
+    let app_state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (prompt_ts, reply) = crate::mailink::agent_reply_after_prompt(&app_state, &tab_id, &prompt, since_ms);
+        serde_json::json!({ "prompt_ts": prompt_ts, "reply": reply })
+    })
+    .await
+    .map_err(|e| format!("agent reply read failed to run: {}", e))
+}
+
 /// A tab's chat as the phone sees it (`mailink::tab_transcript`), for the Workstream Loom's
 /// Focus view. Up to an 8 MiB transcript tail read, so it runs on the blocking pool.
 #[tauri::command]
@@ -195,6 +213,48 @@ pub async fn submit_prompt_to_agent(state: State<'_, Arc<AppState>>, tab_id: Str
         log::info!("[overlord] prompt for tab {tab_id} → the agent ({} chars)", text.chars().count());
     }
     Ok(taken)
+}
+
+/// A dialog is open in this tab — hooked, or only on screen, or the trust dialog
+/// (`draft_hold::dialog_open`). For the frontend paths that type into a busy agent themselves
+/// (ritual steps, follow-ups, bridge and mesh): the hook state reads `active` for ~6 s after a
+/// permission dialog opens, and a paste's CR there approves it.
+#[tauri::command]
+pub fn agent_dialog_open(state: State<'_, Arc<AppState>>, tab_id: String) -> bool {
+    crate::mailink::draft_hold::dialog_open(state.inner(), &tab_id)
+}
+
+/// Deliver a message to a tab's agent now, or hold it until it can take it — never refused for
+/// being busy (`mailink::draft_hold`, the one gate). `{status:"delivered", via:"agent"|"keys"}`,
+/// `{status:"held", msg_id, reason}` (its outcome follows as an `agent-inbox-outcome` event), or
+/// `{status:"refused", reason}` when nothing there can take it (`no_agent`, `no_terminal`).
+#[tauri::command]
+pub async fn deliver_to_agent(
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    text: String,
+    what: String,
+) -> Result<Value, String> {
+    use crate::mailink::draft_hold::{deliver_or_hold, Delivery};
+    let app = state.inner().clone();
+    // `what` only labels the log lines; a static set keeps it out of an allocation per hold.
+    let what: &'static str = match what.as_str() {
+        "answer" => "board answer",
+        "start" => "board start",
+        "notice" => "board notice",
+        "directive" => "Overlord directive",
+        "request" => "request outcome",
+        "follow-up" => "follow-up",
+        "rule" => "Overlord rule",
+        _ => "desktop message",
+    };
+    Ok(match deliver_or_hold(&app, &app_handle, &tab_id, &text, what).await {
+        Delivery::Delivered(d) => serde_json::json!({ "status": "delivered",
+            "via": if d == crate::mailink::Delivered::Agent { "agent" } else { "keys" } }),
+        Delivery::Held { msg_id, reason } => serde_json::json!({ "status": "held", "msg_id": msg_id, "reason": reason }),
+        Delivery::Refused(reason) => serde_json::json!({ "status": "refused", "reason": reason }),
+    })
 }
 
 /// Is this agent session's transcript on THIS machine — i.e. could a resume typed into a local

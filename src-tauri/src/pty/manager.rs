@@ -450,6 +450,7 @@ pub fn spawn_pty(
             bytes_written: AtomicU64::new(0),
             bytes_read: AtomicU64::new(0),
             last_read_ms: AtomicU64::new(0),
+            last_human_key_ms: AtomicU64::new(0),
         });
     }
 
