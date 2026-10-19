@@ -28,6 +28,11 @@ pub enum InputBox {
 
 const PROMPT: char = '\u{276F}'; // ❯
 
+/// Text Claude Code puts in its empty input box at full brightness. Captured on 2.1.303: once a
+/// message typed mid-turn is queued, the box reads "Press up to edit queued messages" until the
+/// turn takes it — read as a draft, it held every later message until the turn ended.
+const PLACEHOLDERS: &[&str] = &["Press up to edit queued messages"];
+
 /// A box rule: `─` from COLUMN 0. Never trimmed — Claude indents every line of a draft by two
 /// columns, so a `──` line the human typed or pasted sits at column 2 and must not pass for the
 /// box's own rule. Trimming first is what let a pasted screen tail read as an empty box.
@@ -42,24 +47,47 @@ fn is_box_prompt(line: &str) -> bool {
     line.starts_with(PROMPT)
 }
 
-pub fn parse(screen: &str) -> InputBox {
+/// The box's lines, the prompt marker stripped from the first: `None` when the screen isn't the
+/// layout this knows.
+fn box_lines(screen: &str) -> Option<Vec<&str>> {
     let lines: Vec<&str> = screen.lines().collect();
-    let Some(start) = (1..lines.len())
-        .rev()
-        .find(|&i| is_box_prompt(lines[i]) && is_rule(lines[i - 1]))
-    else {
-        return InputBox::Unknown;
-    };
+    let start = (1..lines.len()).rev().find(|&i| is_box_prompt(lines[i]) && is_rule(lines[i - 1]))?;
     // The box runs from the prompt line to the next rule. No closing rule means the screen
     // isn't the layout this knows (or is mid-redraw): don't claim either way.
-    let Some(end) = (start + 1..lines.len()).find(|&i| is_rule(lines[i])) else {
-        return InputBox::Unknown;
-    };
-    let first = lines[start].trim_start_matches(PROMPT);
-    let typed = std::iter::once(first)
-        .chain(lines[start + 1..end].iter().copied())
-        .any(|l| !l.trim().is_empty());
-    if typed { InputBox::HasText } else { InputBox::Empty }
+    let end = (start + 1..lines.len()).find(|&i| is_rule(lines[i]))?;
+    let mut out = vec![lines[start].trim_start_matches(PROMPT)];
+    out.extend_from_slice(&lines[start + 1..end]);
+    Some(out)
+}
+
+pub fn parse(screen: &str) -> InputBox {
+    let Some(lines) = box_lines(screen) else { return InputBox::Unknown };
+    // Claude's own hints in an EMPTY box, should one arrive undimmed. Whole-line match only: a
+    // draft that merely starts the same way is still the human's.
+    if lines.len() == 1 && PLACEHOLDERS.contains(&lines[0].trim()) {
+        return InputBox::Empty;
+    }
+    if lines.iter().any(|l| !l.trim().is_empty()) { InputBox::HasText } else { InputBox::Empty }
+}
+
+/// `parse` on the undimmed screen, knowing what the full screen shows. Claude draws a hint the
+/// way Ink draws any placeholder: its first letter inverse (the cursor sitting on it), the rest
+/// dim — so the undimmed screen shows "❯ P", which alone reads as a one-letter draft. The full
+/// screen tells them apart: there the box holds exactly a known hint, and the undimmed box only
+/// its opening. A real "P" typed by the human shows as "P" on both.
+pub fn parse_screens(undimmed: &str, full: &str) -> InputBox {
+    let r = parse(undimmed);
+    if r != InputBox::HasText {
+        return r;
+    }
+    let (Some(u), Some(f)) = (box_lines(undimmed), box_lines(full)) else { return r };
+    if u.len() == 1 && f.len() == 1 {
+        let (u, f) = (u[0].trim(), f[0].trim());
+        if PLACEHOLDERS.contains(&f) && f.len() > u.len() && f.starts_with(u) {
+            return InputBox::Empty;
+        }
+    }
+    r
 }
 
 #[cfg(test)]
@@ -152,6 +180,40 @@ mod tests {
         // Blank first line, then a user rule: the user's `──` must not close the box.
         let s = screen(&[RULE, "❯", "  ──────────────────", "  notes", RULE, "  status"]);
         assert_eq!(parse(&s), InputBox::HasText);
+    }
+
+    #[test]
+    fn the_queued_messages_hint_is_an_empty_box() {
+        // Claude Code 2.1.303 mid-turn, one message queued (captured 2026-10-19).
+        let s = screen(&[
+            "❯ MIDTURN-TEST: when you are done, also reply with the word PINEAPPLE.",
+            "  ctrl+x ctrl+s to send now",
+            "✽ Percolating… (38s · ↓ 433 tokens)",
+            RULE,
+            "❯ Press up to edit queued messages",
+            RULE,
+            "  DMAC dprusak[…/IDE/maiSoft/maiTerm] (main) haiku-5-5 medium 25.9%",
+        ]);
+        assert_eq!(parse(&s), InputBox::Empty);
+        // The same words with more after them are the human's.
+        let s = screen(&[RULE, "❯ Press up to edit queued messages", "  and then this", RULE]);
+        assert_eq!(parse(&s), InputBox::HasText);
+        let s = screen(&[RULE, "❯ Press up to edit queued messages please", RULE]);
+        assert_eq!(parse(&s), InputBox::HasText);
+    }
+
+    #[test]
+    fn an_ink_placeholder_with_its_cursor_letter_is_empty() {
+        // Inverse first letter (kept by the undimmed read), the rest dim (blanked).
+        let full = screen(&[RULE, "❯\u{a0}Press up to edit queued messages", RULE, "  status"]);
+        let undimmed = screen(&[RULE, "❯\u{a0}P", RULE, "  status"]);
+        assert_eq!(parse_screens(&undimmed, &full), InputBox::Empty);
+        // A human who typed "P" sees "P" in both reads.
+        let typed = screen(&[RULE, "❯\u{a0}P", RULE, "  status"]);
+        assert_eq!(parse_screens(&typed, &typed), InputBox::HasText);
+        // A draft that is NOT a known hint stays a draft however it is dimmed.
+        let full = screen(&[RULE, "❯\u{a0}Please fix the tests", RULE]);
+        assert_eq!(parse_screens(&undimmed, &full), InputBox::HasText);
     }
 
     #[test]

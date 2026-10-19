@@ -4539,7 +4539,10 @@ pub(crate) fn agent_input_box(app: &AppState, tab_id: &str) -> input_box::InputB
     let Some(pty) = pty_for_tab(app, tab_id) else { return input_box::InputBox::Unknown };
     let registry = app.terminal_registry.read();
     let Some(handle) = registry.get(&pty) else { return input_box::InputBox::Unknown };
-    input_box::parse(&crate::terminal::render::screen_text_undimmed(&handle.term))
+    input_box::parse_screens(
+        &crate::terminal::render::screen_text_undimmed(&handle.term),
+        &crate::terminal::render::screen_text(&handle.term),
+    )
 }
 
 /// The tab's live screen as text (not the scrolled viewport).
