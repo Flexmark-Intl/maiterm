@@ -156,37 +156,45 @@ code {
 }
 
 /* --- Wordmark ------------------------------------------------------------
-   Same 764-byte six-glyph subset the docs use. See custom.css for why the
-   family is named for the wordmark and must never be reached for as a body
-   font: any other text takes its missing letters from the fallback stack and
-   comes out in two sets of letterforms.
+   The same two Poppins subsets the docs use (one per weight). See custom.css
+   for why the family is named for the wordmark and must never be reached for
+   as a body font: any other text takes its missing letters from the fallback
+   stack and comes out in two sets of letterforms.
 -------------------------------------------------------------------------- */
 
 @font-face {
   font-family: 'maiTerm Wordmark';
-  src: url('/fonts/maiterm-wordmark.woff2') format('woff2');
-  font-weight: 400;
+  src: url('/fonts/maiterm-wordmark-bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'maiTerm Wordmark';
+  src: url('/fonts/maiterm-wordmark-semibold.woff2') format('woff2');
+  font-weight: 600;
   font-style: normal;
   font-display: swap;
 }
 
 .ln-wordmark {
-  font-family: 'maiTerm Wordmark', var(--ln-mono);
-  font-weight: 400;
+  font-family: 'maiTerm Wordmark', ui-sans-serif, system-ui, sans-serif;
   font-synthesis: none;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.025em;
 }
 .ln-wordmark .wm-mai {
+  font-weight: 700;
   color: var(--ln-wm-mai);
 }
 .ln-wordmark .wm-term {
+  font-weight: 600;
+  text-transform: lowercase;
   color: var(--ln-wm-term);
 }
-/* The two pairs the app ships (scripts/generate-app-icons.sh). The tones need
-   luminance separation, not just hue, or they read as a single colour. */
+/* The two pairs the app ships (scripts/make-brand.py): stone + the page's ink. */
 :root {
-  --ln-wm-mai: light-dark(#5c6173, #8b93a7);
-  --ln-wm-term: light-dark(#5965d6, #a8bcff);
+  --ln-wm-mai: light-dark(#78716c, #a8a29e);
+  --ln-wm-term: light-dark(#221812, #f3ede9);
 }
 
 /* --- Layout primitives --------------------------------------------------- */

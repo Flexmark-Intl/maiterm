@@ -158,66 +158,77 @@ a.platform:hover {
 }
 
 /* ---------------------------------------------------------------------------
-   Wordmark — IBM Plex Mono Regular, duo-tone, matching the app and the README.
+   Wordmark — the maiSoft house style, matching the app icon and the in-app
+   wordmark (scripts/make-brand.py): "mai" in Poppins Bold in maiTerm's stone,
+   "term" in Poppins SemiBold, lowercase, in the page's ink; tracking-tight.
 
-   The face is a 764-byte subset holding exactly the six glyphs in "maiTerm"
-   (T a e i m r), cut from scripts/assets/fonts/IBMPlexMono-Regular.ttf with:
+   Two tiny subsets, one per weight, holding only the glyphs each half uses,
+   cut from scripts/assets/fonts/ with:
 
-     pyftsubset IBMPlexMono-Regular.ttf --text="maiTerm" --flavor=woff2 \
-       --layout-features='' --no-hinting --desubroutinize --name-IDs='' \
-       --output-file=website/public/fonts/maiterm-wordmark.woff2
+     python3 -m fontTools.subset Poppins-Bold.otf --text=mai --flavor=woff2 \
+       --layout-features=kern --no-hinting --desubroutinize --name-IDs='' \
+       --output-file=website/public/fonts/maiterm-wordmark-bold.woff2
+     (and Poppins-SemiBold.otf --text=term → maiterm-wordmark-semibold.woff2)
 
-   It is deliberately NOT general-purpose IBM Plex Mono. Font matching is
+   It is deliberately NOT general-purpose Poppins. Font matching is
    per-character, so any other text set in it silently takes its missing
    letters from the fallback stack and comes out in two sets of letterforms.
    That is why the family is named for the wordmark rather than for the
    typeface — so nobody reaches for it as a body font.
-   IBM Plex is OFL-1.1; the licence ships beside the font at /fonts/OFL.txt.
+   Poppins is OFL-1.1; the licence ships beside the fonts at /fonts/OFL.txt.
 --------------------------------------------------------------------------- */
 @font-face {
   font-family: 'maiTerm Wordmark';
-  src: url('/fonts/maiterm-wordmark.woff2') format('woff2');
-  font-weight: 400;
+  src: url('/fonts/maiterm-wordmark-bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'maiTerm Wordmark';
+  src: url('/fonts/maiterm-wordmark-semibold.woff2') format('woff2');
+  font-weight: 600;
   font-style: normal;
   font-display: swap;
 }
 
 .wordmark {
-  font-family: 'maiTerm Wordmark', ui-monospace, SFMono-Regular, Menlo, monospace;
-  /* Only Regular is subset — let nothing synthesise a bold or an oblique.
-     The header sets font-weight 600 on .site-title, which this must beat. */
-  font-weight: 400;
+  font-family: 'maiTerm Wordmark', ui-sans-serif, system-ui, sans-serif;
   font-synthesis: none;
+  letter-spacing: -0.025em;
 }
 .wordmark .wm-mai {
+  font-weight: 700;
   color: var(--wordmark-mai);
 }
 .wordmark .wm-term {
+  font-weight: 600;
+  text-transform: lowercase;
   color: var(--wordmark-term);
 }
 
-/* The two pairs the app ships (scripts/generate-app-icons.sh). The tones need
-   luminance separation, not just hue, or they read as a single colour.
+/* The two pairs the app ships (scripts/make-brand.py): stone-400 + the dark
+   foreground, stone-500 + the light one (stone-500 fails AA as small text on dark).
    Dark goes on bare :root because Starlight's ThemeProvider always writes a
    literal light/dark before first paint, and with JS off the site has no
    prefers-color-scheme fallback at all — it is unconditionally dark. */
 :root {
-  --wordmark-mai: #8b93a7;
-  --wordmark-term: #a8bcff;
+  --wordmark-mai: #a8a29e;
+  --wordmark-term: #f3ede9;
 }
 :root[data-theme='light'] {
-  --wordmark-mai: #5c6173;
-  --wordmark-term: #5965d6;
+  --wordmark-mai: #78716c;
+  --wordmark-term: #221812;
 }
 
 /* Starlight's print stylesheet forces a light page whatever the theme, but it
    only remaps its own --sl-color-* tokens — these would survive unchanged and
-   print #a8bcff on near-white at 1.7:1, on the landing h1 and every page's
-   header. Print always gets the light pair. */
+   print the near-white "term" on a white page, on the landing h1 and every
+   page's header. Print always gets the light pair. */
 @media print {
   :root,
   :root[data-theme='dark'] {
-    --wordmark-mai: #5c6173;
-    --wordmark-term: #5965d6;
+    --wordmark-mai: #78716c;
+    --wordmark-term: #221812;
   }
 }

@@ -46,7 +46,14 @@ const canonical = new URL(path, Astro.site ?? 'https://maiterm.dev').href;
         in the first frame — without this it swaps in late and the nav jumps. */}
     <link
       rel="preload"
-      href="/fonts/maiterm-wordmark.woff2"
+      href="/fonts/maiterm-wordmark-bold.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      href="/fonts/maiterm-wordmark-semibold.woff2"
       as="font"
       type="font/woff2"
       crossorigin
