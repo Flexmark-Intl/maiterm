@@ -748,7 +748,7 @@
 
   .loading-logo {
     height: 48px;
-    aspect-ratio: 1725 / 320;
+    aspect-ratio: 1661 / 320;
     opacity: 0.5;
     background: var(--logo-url, url(/logo-light.png)) center / contain no-repeat;
   }

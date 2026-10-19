@@ -1,14 +1,17 @@
 {
-  "fill": { "automatic-gradient": "extended-srgb:0.47059,0.50196,0.74510,1.00000" },
+  "fill": { "automatic-gradient": "extended-srgb:0.13333,0.13725,0.14118,1.00000" },
   "groups": [
     {
       "layers": [
-        { "blend-mode": "normal", "fill": "automatic", "glass": true, "hidden": false,
-          "image-name": "mark.png", "name": "mark",
+        { "blend-mode": "normal", "glass": true, "hidden": false,
+          "image-name": "word.png", "name": "word",
+          "position": { "scale": 1, "translation-in-points": [0, 0] } },
+        { "blend-mode": "normal", "glass": true, "hidden": false,
+          "image-name": "mai.png", "name": "mai",
           "position": { "scale": 1, "translation-in-points": [0, 0] } }
       ],
       "shadow": { "kind": "neutral", "opacity": 0.5 },
-      "translucency": { "enabled": true, "value": 0.5 }
+      "translucency": { "enabled": false, "value": 0.5 }
     }
   ],
   "supported-platforms": { "circles": ["watchOS"], "squares": "shared" }

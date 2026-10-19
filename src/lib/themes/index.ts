@@ -770,9 +770,9 @@ export function applyUiTheme(ui: UiColors): void {
   root.style.setProperty('--tab-border-active', ui.tab_border_active);
   root.style.setProperty('--tab-border-activity', ui.tab_border_activity);
 
-  // Logo adapts to theme: the IBM Plex Mono wordmark, duo-tone in both renditions
-  // ("mai" slate + "Term" periwinkle), darkened for light themes. Two real assets
-  // rather than a brightness() filter, which can't recolor two tones correctly.
+  // Logo adapts to theme: the maiSoft house wordmark (Poppins, "mai" in stone + "term"
+  // in the foreground), darkened for light themes. Two real assets rather than a
+  // brightness() filter, which can't recolor two tones correctly.
   const isLight = luminance(ui.bg_dark) > 0.2;
   root.style.setProperty('--logo-url', isLight ? 'url(/logo-dark.png)' : 'url(/logo-light.png)');
 

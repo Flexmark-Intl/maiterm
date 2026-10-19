@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 #
-# Generates maiTerm's brand assets: the IBM Plex Mono wordmark, the macOS 26
+# Generates maiTerm's brand assets: the Poppins wordmark, the macOS 26
 # "Liquid Glass" app icon (Icon Composer .icon), and the website logo/favicon.
 #
 # On macOS 26+ (Xcode 26 / actool >= 26), Tauri 2.11+ compiles the .icon listed
 # in tauri.conf `bundle > icon` into an Assets.car and wires CFBundleIconName, so
 # the dock/Finder icon adapts across Default / Dark / Tinted / Clear appearances
 # automatically. Older macOS, Windows and Linux fall back to the classic flat
-# navy icon (icon.icns / icon.png), which Tauri still generates from the PNGs.
+# flat icon (icon.icns / icon.png), which Tauri still generates from the PNGs.
 #
-# Design (approved): periwinkle automatic-gradient glass tile + the white "m"
-# mark as a single glass layer (system-managed monochrome, subtle in dark).
+# Design: the maiSoft house icon (2026-10-19) — "mai" over "term" in Poppins, stone
+# (#a8a29e) on a dark stone ground. It replaced the dots emblem (scripts/generate-emblem.py;
+# to roll back, check out this script, that one and src-tauri/icons from before the switch).
 #
-# Requires: ImageMagick, Xcode 26 (provides actool + Icon Composer's `ictool`).
+# Requires: ImageMagick, python3 with Pillow + numpy, Xcode 26 (actool + `ictool`).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,82 +22,54 @@ STATIC="$ROOT/static"
 WEB="$ROOT/website"
 ICON="$ICONS/AppIcon.icon"
 ICTOOL="/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
-PLEX="$ROOT/scripts/assets/fonts/IBMPlexMono-Regular.ttf"   # vendored, OFL-1.1 (see OFL.txt)
+BRAND="$ROOT/scripts/make-brand.py"          # draws every piece; fonts vendored beside it
 
-EMBLEM="$ROOT/scripts/generate-emblem.py"    # the mark, drawn parametrically
-# Periwinkle #7880BE in extended-srgb (system derives the gradient + appearances)
-BG_FILL='extended-srgb:0.47059,0.50196,0.74510,1.00000'
-MARK_W=600                                   # mark width on the 1024 canvas (~58%)
+# --- the art: scripts/make-brand.py draws every piece in the maiSoft house style ---
+# ("mai" in Poppins Bold in the product colour over "term" in Poppins SemiBold, on a
+# ground tinted toward it — maiProjects/brand/make-icon.py is the family's reference).
+# This script only turns those pieces into the files that ship.
+command -v magick >/dev/null 2>&1 || { echo "ERROR: ImageMagick (magick) not found" >&2; exit 1; }
+ART="$(mktemp -d)"
+python3 "$BRAND" "$ART"
 
 # --- wordmark: static/logo-light.png (dark themes) + logo-dark.png (light themes) ---
-# IBM Plex Mono Regular, duo-tone. "mai" recedes, "Term" carries the accent.
-# The in-app "mai" is deliberately LIGHTER than the marketing value (#5C6173):
-# the loading and empty-pane logos knock it back with CSS opacity (.5 and .3) and
-# a slate that dark dissolves at .3.
-# The two tones need LUMINANCE separation, not just a hue difference. #87A0E6 sat
-# at nearly the same brightness as the "mai" slate (1.20:1) and read as one colour
-# at 13px; #A8BCFF lifts that to 1.65:1. The light-theme pair is unaffected — its
-# Term is a much deeper #5965D6, which needs to stay dark against cream.
-# Ratio feeds the hardcoded `aspect-ratio` in WorkspaceSidebar/.sidebar-logo,
-# +page/.loading-logo and SplitPane/.empty-logo — update all three if the glyph
-# set or size changes.
-if command -v magick >/dev/null 2>&1 && [ -f "$PLEX" ]; then
-  wordmark() {  # $1=mai colour  $2=Term colour  $3=output
-    local t; t="$(mktemp -d)"
-    magick -background none -fill "$1" -font "$PLEX" -pointsize 700 label:'mai'  "$t/a.png"
-    magick -background none -fill "$2" -font "$PLEX" -pointsize 700 label:'Term' "$t/b.png"
-    # +repage after +append: the appended image keeps the FIRST frame's page
-    # geometry, and any later -flatten would crop back to it.
-    magick "$t/a.png" "$t/b.png" +append +repage -trim +repage \
-      -background none -alpha background -colorspace RGB -resize x320 -colorspace sRGB \
-      +repage -strip "$3"
-    rm -rf "$t"
-  }
-  wordmark '#8B93A7' '#A8BCFF' "$STATIC/logo-light.png"
-  wordmark '#5C6173' '#5965D6' "$STATIC/logo-dark.png"
-  echo "wrote $STATIC/logo-light.png + logo-dark.png ($(magick identify -format '%wx%h' "$STATIC/logo-light.png"))"
-else
-  echo "WARN: magick or vendored Plex Mono missing; skipped wordmark" >&2
-fi
+# Horizontal "mai" + "term". Its ratio feeds the hardcoded `aspect-ratio` in
+# WorkspaceSidebar/.sidebar-logo, +page/.loading-logo and SplitPane/.empty-logo —
+# update all three if the lettering or size changes.
+magick "$ART/logo-light.png" -strip "$STATIC/logo-light.png"
+magick "$ART/logo-dark.png" -strip "$STATIC/logo-dark.png"
+echo "wrote $STATIC/logo-light.png + logo-dark.png ($(magick identify -format '%wx%h' "$STATIC/logo-light.png"))"
 
-# --- author the .icon (icon.json + Assets/mark.png) ---
-# The mark is drawn white-on-transparent: Icon Composer shapes and lights the
-# GLASS LAYER from its alpha, so the alpha has to be the true silhouette. It adds
-# its own specular, blur and shadow -- nothing here may carry baked lighting.
-# Everything this needs is checked BEFORE the rm -rf: AppIcon.icon/{icon.json,
-# Assets/mark.png} are tracked files, and wiping them before knowing we can
-# rebuild them turns a missing dependency into a deleted build input.
-if ! command -v rsvg-convert >/dev/null 2>&1; then
-  echo "ERROR: rsvg-convert not found (brew install librsvg) — cannot render the emblem" >&2; exit 1
-fi
-if ! python3 "$EMBLEM" --fg '#ffffff' --transparent > /dev/null 2>&1; then
-  echo "ERROR: $EMBLEM failed under $(python3 -V 2>&1) — cannot render the emblem" >&2; exit 1
-fi
-EMW="$(mktemp -d)"
+# --- author the .icon (icon.json + Assets/mai.png + Assets/word.png) ---
+# Two glass layers carrying their own colour ("mai" in the stone gradient, "term" in
+# white) over the dark stone ground. Icon Composer adds specular, blur and shadow from
+# each layer's alpha, so nothing here may carry baked lighting; the tinted and clear
+# appearances drop the colour and keep the lettering, which still reads as the name.
 rm -rf "$ICON"; mkdir -p "$ICON/Assets"
-python3 "$EMBLEM" --fg '#ffffff' --transparent > "$EMW/emblem.svg"
-rsvg-convert -w 1024 -h 1024 "$EMW/emblem.svg" -o "$EMW/emblem.png"
-magick "$EMW/emblem.png" -trim +repage -resize ${MARK_W}x \
-  -background none -gravity center -extent 1024x1024 -strip "$ICON/Assets/mark.png"
-rm -rf "$EMW"
+magick "$ART/glass-mai.png" -strip "$ICON/Assets/mai.png"
+magick "$ART/glass-word.png" -strip "$ICON/Assets/word.png"
+BG_FILL="$(cat "$ART/glass-ground.txt")"
 cat > "$ICON/icon.json" <<JSON
 {
   "fill": { "automatic-gradient": "$BG_FILL" },
   "groups": [
     {
       "layers": [
-        { "blend-mode": "normal", "fill": "automatic", "glass": true, "hidden": false,
-          "image-name": "mark.png", "name": "mark",
+        { "blend-mode": "normal", "glass": true, "hidden": false,
+          "image-name": "word.png", "name": "word",
+          "position": { "scale": 1, "translation-in-points": [0, 0] } },
+        { "blend-mode": "normal", "glass": true, "hidden": false,
+          "image-name": "mai.png", "name": "mai",
           "position": { "scale": 1, "translation-in-points": [0, 0] } }
       ],
       "shadow": { "kind": "neutral", "opacity": 0.5 },
-      "translucency": { "enabled": true, "value": 0.5 }
+      "translucency": { "enabled": false, "value": 0.5 }
     }
   ],
   "supported-platforms": { "circles": ["watchOS"], "squares": "shared" }
 }
 JSON
-echo "wrote $ICON (icon.json + Assets/mark.png)"
+echo "wrote $ICON (icon.json + Assets/mai.png + word.png)"
 
 # --- compile the .icon into a precompiled Assets.car (committed build input) ---
 # We ship the prebuilt Assets.car rather than letting `tauri build` invoke actool,
@@ -123,73 +96,59 @@ else
 fi
 
 # --- FLAT tiles: the non-Liquid-Glass icon, for Windows, Linux, pre-macOS-26 ---
-# Also the website header, which Starlight swaps by theme (cream on light pages,
-# navy on dark). Flat tiles read better than the glass render on a flat header.
-#
-# The navy master used to be a committed, hand-made PNG; it is generated now, so
-# the emblem has exactly one source. Both tiles stay MONOCHROME on their ground,
-# matching what the old "m" did — the active/idle distinction is carried by node
-# size, so no accent colour is needed here any more than in the glass layer.
-NAVY="$ICONS/icon-source-1024.png"
-if command -v magick >/dev/null 2>&1 && command -v rsvg-convert >/dev/null 2>&1; then
-  FW="$(mktemp -d)"
-  # tile silhouette (the slight downward offset is the original's, kept for continuity)
-  magick -size 1024x1024 xc:black -fill white -draw 'roundrectangle 88,72 935,919 165,165' "$FW/mask.png"
-  # Soft ground shadow, from the same silhouette. The -colorspace sRGB here and in
-  # the composite below are load-bearing: a drawn mask is a GRAYSCALE image, and the
-  # first image in a composite sets the output colorspace — without these the whole
-  # tile is written greyscale and every colour collapses to its red channel
-  # (#2A2F4D -> #282828, #5965D6 -> #595959).
-  # NO -negate here. The mask is white INSIDE the silhouette, which is already the
-  # alpha a drop shadow wants; negating it paints opaque black everywhere OUTSIDE
-  # the tile instead, giving a black square with the tile inset in it. That shipped
-  # once — corner alpha 0 -> 1 on every tile and both favicons.
-  magick "$FW/mask.png" -blur 0x26 -roll +0+16 "$FW/sm.png"
-  magick -size 1024x1024 xc:'#000' -colorspace sRGB "$FW/sm.png" -alpha off \
-    -compose CopyOpacity -composite -channel A -evaluate multiply 0.42 +channel \
-    -colorspace sRGB -type TrueColorAlpha "$FW/shadow.png"
+# Also the website header, which Starlight swaps by theme (the light tile on light
+# pages, the dark one on dark). The full-bleed art is masked into the rounded tile
+# with its margin and drop shadow, because nothing masks it for us on these platforms.
+NAVY="$ICONS/icon-source-1024.png"   # the name predates the stone ground; it is the dark master
+FW="$(mktemp -d)"
+# tile silhouette (the slight downward offset is the original's, kept for continuity)
+magick -size 1024x1024 xc:black -fill white -draw 'roundrectangle 88,72 935,919 165,165' "$FW/mask.png"
+# Soft ground shadow, from the same silhouette. The -colorspace sRGB here and in
+# the composite below are load-bearing: a drawn mask is a GRAYSCALE image, and the
+# first image in a composite sets the output colorspace — without these the whole
+# tile is written greyscale and every colour collapses to its red channel.
+# NO -negate here. The mask is white INSIDE the silhouette, which is already the
+# alpha a drop shadow wants; negating it paints opaque black everywhere OUTSIDE
+# the tile instead, giving a black square with the tile inset in it. That shipped
+# once — corner alpha 0 -> 1 on every tile and both favicons.
+magick "$FW/mask.png" -blur 0x26 -roll +0+16 "$FW/sm.png"
+magick -size 1024x1024 xc:'#000' -colorspace sRGB "$FW/sm.png" -alpha off \
+  -compose CopyOpacity -composite -channel A -evaluate multiply 0.42 +channel \
+  -colorspace sRGB -type TrueColorAlpha "$FW/shadow.png"
 
-  flat_tile() {  # $1=gradient stops  $2=mark colour  $3=output
-    python3 "$EMBLEM" --fg "$2" --transparent > "$FW/e.svg"
-    rsvg-convert -w 1024 -h 1024 "$FW/e.svg" -o "$FW/e.png"
-    magick "$FW/e.png" -trim +repage -resize 500x "$FW/mk.png"
-    magick -size 1024x1024 canvas:none -sparse-color barycentric "$1" "$FW/g.png"
-    magick "$FW/g.png" -colorspace sRGB "$FW/mask.png" -alpha off \
-      -compose CopyOpacity -composite -colorspace sRGB -type TrueColorAlpha "$FW/t.png"
-    magick "$FW/shadow.png" -colorspace sRGB -type TrueColorAlpha \
-      "$FW/t.png" -compose over -composite "$FW/ts.png"
-    # tile centre, not canvas centre: the silhouette sits 16px above centre
-    # (its box is 88,72-935,919, so its middle is y=495.5 against a canvas 512).
-    # -strip on every output: without it ImageMagick embeds a png:tIME chunk and
-    # the file churns on every run even when the pixels are identical.
-    magick "$FW/ts.png" "$FW/mk.png" -gravity center -geometry +0-16 \
-      -compose over -composite -type TrueColorAlpha -strip "$3"
-  }
+flat_tile() {  # $1=full-bleed art  $2=output
+  # The art fills the silhouette's box (848 square at 88,72), then takes its corners.
+  magick -size 1024x1024 xc:none -colorspace sRGB \
+    \( "$1" -resize 848x848 \) -geometry +88+72 -compose over -composite "$FW/a.png"
+  magick "$FW/a.png" -colorspace sRGB "$FW/mask.png" -alpha off \
+    -compose CopyOpacity -composite -colorspace sRGB -type TrueColorAlpha "$FW/t.png"
+  # -strip on every output: without it ImageMagick embeds a png:tIME chunk and
+  # the file churns on every run even when the pixels are identical.
+  magick "$FW/shadow.png" -colorspace sRGB -type TrueColorAlpha \
+    "$FW/t.png" -compose over -composite -type TrueColorAlpha -strip "$2"
+}
 
-  flat_tile '0,0 #2A2F4D 1023,1023 #1E2133' '#E1E3F0' "$NAVY"
-  flat_tile '0,0 #FFFDF7 1023,1023 #F2E9D6' '#5965D6' "$WEB/src/assets/icon-light.png"
-  cp "$NAVY" "$WEB/src/assets/icon-dark.png"
-  magick "$NAVY" -resize 256x256 -strip "$WEB/public/favicon.png"
-  magick "$NAVY" -resize 256x256 -strip "$STATIC/favicon.png"
+flat_tile "$ART/art-dark.png" "$NAVY"
+flat_tile "$ART/art-light.png" "$WEB/src/assets/icon-light.png"
+cp "$NAVY" "$WEB/src/assets/icon-dark.png"
+magick "$NAVY" -resize 256x256 -strip "$WEB/public/favicon.png"
+magick "$NAVY" -resize 256x256 -strip "$STATIC/favicon.png"
 
-  # The files tauri.conf.json `bundle.icon` actually ships. Regenerating only the
-  # 1024 master leaves these stale: the bundler synthesises the macOS .icns and the
-  # Windows .ico from THIS list, not from the master, so a rebrand that skips them
-  # ships the old mark everywhere except macOS 26's Assets.car.
-  # icon.png is 512, NOT 1024. The bundler maps each of these to an icns type by
-  # (pixel size, density), and density is 1 unless the NAME says @2x — so 512 is the
-  # largest a plain name can be. At 1024 it matches nothing and the macOS bundle dies
-  # on "No matching IconType", taking the whole build with it.
-  for spec in "32x32.png 32" "64x64.png 64" "128x128.png 128" "128x128@2x.png 256" "icon.png 512"; do
-    set -- $spec
-    magick "$NAVY" -resize "$2x$2" -strip "$ICONS/$1"
-  done
-  magick "$NAVY" -define icon:auto-resize=256,128,64,48,32,16 -strip "$ICONS/icon.ico"
-  rm -rf "$FW"
-  echo "wrote $NAVY + bundle PNGs + icon.ico + website icon-light/icon-dark/favicon + static/favicon"
-else
-  echo "WARN: magick or rsvg-convert missing; skipped flat tiles" >&2
-fi
+# The files tauri.conf.json `bundle.icon` actually ships. Regenerating only the
+# 1024 master leaves these stale: the bundler synthesises the macOS .icns and the
+# Windows .ico from THIS list, not from the master, so a rebrand that skips them
+# ships the old mark everywhere except macOS 26's Assets.car.
+# icon.png is 512, NOT 1024. The bundler maps each of these to an icns type by
+# (pixel size, density), and density is 1 unless the NAME says @2x — so 512 is the
+# largest a plain name can be. At 1024 it matches nothing and the macOS bundle dies
+# on "No matching IconType", taking the whole build with it.
+for spec in "32x32.png 32" "64x64.png 64" "128x128.png 128" "128x128@2x.png 256" "icon.png 512"; do
+  set -- $spec
+  magick "$NAVY" -resize "$2x$2" -strip "$ICONS/$1"
+done
+magick "$NAVY" -define icon:auto-resize=256,128,64,48,32,16 -strip "$ICONS/icon.ico"
+rm -rf "$FW" "$ART"
+echo "wrote $NAVY + bundle PNGs + icon.ico + website icon-light/icon-dark/favicon + static/favicon"
 
 # --- optional Liquid Glass appearance preview sheet for iteration ---
 if [ "${PREVIEW:-0}" = "1" ] && [ -x "$ICTOOL" ]; then

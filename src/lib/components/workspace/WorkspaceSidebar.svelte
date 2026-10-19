@@ -936,7 +936,7 @@
      keep theirs — they are meant to be ghosts, not identity. */
   .sidebar-logo {
     height: 13px;
-    aspect-ratio: 1725 / 320;
+    aspect-ratio: 1661 / 320;
     pointer-events: none;
     background: var(--logo-url, url(/logo-light.png)) center / contain no-repeat;
   }
