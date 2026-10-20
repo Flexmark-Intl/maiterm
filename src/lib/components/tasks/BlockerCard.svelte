@@ -83,7 +83,7 @@
         r.told === 'tab'
           ? 'Answer sent to the agent.'
           : r.told === 'agent'
-            ? 'Answered. The tab was busy, so Overlord will pass it on.'
+            ? 'Answered. No agent in the tab could take it, so Overlord will pass it on once one is running.'
             : 'Answered and moved to Active, but the agent could not be told. The tab is not reachable.',
       );
     } finally {

@@ -336,7 +336,7 @@
       r.told === 'tab'
         ? 'Agent told.'
         : r.told === 'agent'
-          ? 'Tab was busy — Overlord will pass it on.'
+          ? 'No agent in the tab could take it — Overlord will pass it on.'
           : 'Marked Active. Nothing could be told — the tab is not reachable.',
     );
   }

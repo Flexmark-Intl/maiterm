@@ -1221,8 +1221,8 @@ function createClaudeCodeStore() {
         note: awaiting
           ? 'Your human has been asked to approve the script; it does not run until they do. Carry on with other work, or end your turn — you are not woken until it passes. Cancel with cancelFollowUp if it stops mattering.'
           : script
-            ? 'The script runs on its schedule without waking you; you are woken, between turns, only when it passes (or breaks). Cancel with cancelFollowUp if it stops mattering.'
-            : 'Delivered back into this tab between turns, framed as ⟦FOLLOW-UP⟧. Cancel with cancelFollowUp if it stops mattering.',
+            ? 'The script runs on its schedule without waking you; you are woken only when it passes (or breaks). Cancel with cancelFollowUp if it stops mattering.'
+            : 'Delivered back into this tab when due, even mid-turn, framed as ⟦FOLLOW-UP⟧. Cancel with cancelFollowUp if it stops mattering.',
       };
     } catch (e) {
       return { error: String(e) };
