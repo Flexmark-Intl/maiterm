@@ -2922,6 +2922,18 @@ async fn post_push_register(
     let hash = sha256_hex(bearer_token(&headers).as_bytes());
     let data_clone = {
         let mut data = s.app.app_data.write();
+        // A push token names one app install. When a phone re-pairs (a new device row) its old
+        // row keeps the same token, and `ring_devices` rings every row, so the phone got every
+        // ring twice. The newest registration owns the token; any other row holding it loses it.
+        if data.preferences.mailink_devices.iter().any(|d| d.token_hash == hash) {
+            for d in data.preferences.mailink_devices.iter_mut() {
+                if d.token_hash != hash && d.push_token.as_deref() == Some(body.token.as_str()) {
+                    log::info!("[maiLink] push token moved from device {:?} to its re-pairing", d.name);
+                    d.push_token = None;
+                    d.push_cap = None;
+                }
+            }
+        }
         match data
             .preferences
             .mailink_devices
