@@ -53,7 +53,12 @@ pub(crate) mod transcript;
 
 /// Default LAN port. The pairing QR carries the actual host:port, so this is just a
 /// sensible default until a `mailink_port` preference is wired (P2b).
-const DEFAULT_PORT: u16 = 8765;
+///
+/// Not a port any common tool defaults to: it was 8765 until 2026-10-20, when an agent's test
+/// server shared that port and its `kill $(lsof -ti:8765)` cleanup quit maiTerm too. Below 32768,
+/// so Linux never hands it out to an outgoing connection. Changing it cuts off every paired
+/// phone until it scans a new code (the phone stores the port from the QR).
+const DEFAULT_PORT: u16 = 27365;
 
 /// Everything the async listener needs, resolved synchronously during app setup.
 pub struct MailinkConfig {

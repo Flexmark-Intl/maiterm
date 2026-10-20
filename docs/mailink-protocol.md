@@ -476,7 +476,10 @@ QR payload (JSON, displayed by Prefs ▸ maiLink ▸ "Pair new device")
   "name": "Darryl's MacBook" }
 ```
 
-1. App scans QR, dials `https://host:port` pinning `fp`.
+1. App scans QR, dials `https://host:port` pinning `fp`. **Always take the port from the QR**,
+   never a default: the desktop's port moved from 8765 to 27365 on 2026-10-20 (8765 is a
+   common test-server default, and a test server's kill-by-port cleanup quit maiTerm), and a
+   phone paired before that re-pairs.
 2. `POST /mailink/v1/pair  { code, device_name, app_info }`
    → desktop validates `code` (unexpired, unused) → mints a long-lived **bearer token**,
    stores `MailinkDevice{ token_hash, name }`, returns `{ device_id, token, server_name }`.
