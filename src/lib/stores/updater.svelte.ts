@@ -391,6 +391,9 @@ function createUpdaterStore() {
   async function flushBeforeExit() {
     const flush = (async () => {
       try {
+        // First, before anything slow: every window, not just this one, has to stop closing
+        // tabs for shells that die on the way out (commands/workspace.rs `begin_shutdown`).
+        await commands.beginShutdown().catch((e) => logError(`begin_shutdown failed: ${e}`));
         // 0 is "no answer" (displays asleep, list unreadable) and saveWindowGeometry
         // refuses it — never fabricate a count here, or the update plants a layout the
         // user never arranged under a real monitor-count key.

@@ -716,6 +716,12 @@ export async function saveAllScrollback(): Promise<number> {
   return invoke('save_all_scrollback');
 }
 
+/** The process is about to end: Rust refuses tab/pane deletes from here on and tells EVERY
+ *  window (`app-shutting-down`) to stop acting on its dying shells' pty-close. */
+export async function beginShutdown(): Promise<void> {
+  return invoke('begin_shutdown');
+}
+
 export async function restoreTerminalFromSaved(ptyId: string, tabId: string): Promise<void> {
   return invoke('restore_terminal_from_saved', { ptyId, tabId });
 }

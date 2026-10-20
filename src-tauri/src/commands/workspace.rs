@@ -33,6 +33,31 @@ fn migrate_imported_scrollback(data: &mut crate::state::AppData, db: &Scrollback
     }
 }
 
+/// Set once the process is on its way out (a restart's pre-relaunch flush, or any quit), and
+/// never cleared. From then on `delete_tab` / `delete_pane` refuse: every shell is about to
+/// die, and each dying shell's `pty-close` asks its window to close the tab. The frontend's
+/// guard against that (`terminalsStore.shuttingDown`) is per-WEBVIEW, so a restart carried out
+/// by one window left every other window deleting tabs in the seconds before exit — and those
+/// deletes were saved, so the tabs were simply gone after the relaunch (2026-10-14 and -15, one
+/// ENAGIC tab each time, both restarts filed from the second window). Refusing here covers every
+/// window and every exit path at once, whatever order their events arrive in.
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn is_shutting_down() -> bool {
+    SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// A restart is about to end the process: refuse tab/pane deletes from here on, and tell every
+/// window to stand down its own pty-close handling too. If the relaunch then fails, the refusal
+/// stays for the rest of the session — the updater already tells the human to quit and reopen,
+/// and a tab that closes without being deleted just comes back on that next launch.
+#[tauri::command]
+pub fn begin_shutdown(app: tauri::AppHandle) {
+    SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    log::info!("begin_shutdown: tab and pane deletes are refused until exit");
+    let _ = app.emit("app-shutting-down", ());
+}
+
 #[tauri::command]
 pub fn exit_app(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) {
     log::info!("exit_app called — cleaning up and terminating process");
@@ -64,6 +89,8 @@ pub fn exit_app(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) {
 pub fn run_shutdown_cleanup(state: &Arc<AppState>) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static DONE: AtomicBool = AtomicBool::new(false);
+    // Before anything below kills a PTY: each kill is a pty-close some window would act on.
+    SHUTTING_DOWN.store(true, Ordering::SeqCst);
     if DONE.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -254,6 +281,10 @@ pub fn delete_pane(
     workspace_id: String,
     pane_id: String,
 ) -> Result<(), String> {
+    if is_shutting_down() {
+        log::info!("delete_pane: refused pane {pane_id} — the app is shutting down");
+        return Ok(());
+    }
     let label = window.label().to_string();
     let (data_clone, tab_ids) = {
         let mut app_data = state.app_data.write();
@@ -424,6 +455,10 @@ pub fn delete_tab(
     pane_id: String,
     tab_id: String,
 ) -> Result<(), String> {
+    if is_shutting_down() {
+        log::info!("delete_tab: refused tab {tab_id} — the app is shutting down");
+        return Ok(());
+    }
     let label = window.label().to_string();
     let data_clone = {
         let mut app_data = state.app_data.write();

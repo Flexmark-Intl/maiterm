@@ -240,6 +240,12 @@
       };
     }
 
+    // Another window is restarting the app: our shells die with it, and their pty-close must
+    // not close our tabs (commands/workspace.rs `begin_shutdown`).
+    let unlistenShuttingDown: (() => void) | undefined;
+    listen('app-shutting-down', () => terminalsStore.markShuttingDown())
+      .then(unlisten => { unlistenShuttingDown = unlisten; });
+
     // Listen for app-wide quit (Cmd+Q / Quit menu).
     // All windows save scrollback, then exit — no window data is removed.
     let unlistenQuit: (() => void) | undefined;
@@ -1386,6 +1392,7 @@
       window.removeEventListener('keyup', handleKeyupAlt, true);
       unlistenClose?.();
       unlistenQuit?.();
+      unlistenShuttingDown?.();
       unlistenDuplicateWindow?.();
       unlistenReloadTab?.();
       unlistenAccountReload?.();

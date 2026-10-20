@@ -107,6 +107,9 @@ function createTerminalsStore() {
   return {
     get instances() { return instances; },
     get shuttingDown() { return _shuttingDown; },
+    /** Another window is ending the process (`app-shutting-down`): this window's shells are
+     *  about to die too, and their pty-close must not close tabs. */
+    markShuttingDown() { _shuttingDown = true; },
     get searchVisibleFor() { return searchVisibleFor; },
     isCanvasRenderer(tabId: string) { return canvasTabs.has(tabId); },
     markDirty(tabId: string) { dirtyTabs.add(tabId); lastOutputAt.set(tabId, Date.now()); },

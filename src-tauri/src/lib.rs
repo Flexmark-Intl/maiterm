@@ -743,6 +743,7 @@ pub fn run() {
             commands::workspace::reorder_workspaces,
             commands::workspace::duplicate_workspace,
             commands::workspace::exit_app,
+            commands::workspace::begin_shutdown,
             commands::workspace::sync_state,
             commands::workspace::get_preferences,
             commands::workspace::set_preferences,
