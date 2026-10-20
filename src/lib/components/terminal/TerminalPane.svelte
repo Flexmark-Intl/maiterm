@@ -131,11 +131,11 @@
   let sawNonSshForeground = false;
   /**
    * maiTerm itself typed an ssh command with the env baked in (split clone / new tab), so the
-   * next ssh the title watcher sees is OURS, not a user's `ssh host`. Without this the watcher
-   * sees shell → ssh, calls it fresh, wins `enableBridge`'s in-flight slot ahead of the clone
-   * path's `freshSsh=false` call, and types a second, redundant export into the remote shell.
-   * Consumed by that first ssh sighting, and dropped when the clone path's own poll ends, so a
-   * clone that never connects can't swallow a later manual ssh.
+   * next ssh the title watcher sees is OURS, not a user's `ssh host`, and the watcher leaves
+   * bridging it to the clone path. Without this the watcher sees shell → ssh, calls it fresh,
+   * wins `enableBridge`'s in-flight slot ahead of the clone path, and types a second, redundant
+   * export into the remote shell. Consumed by that first ssh sighting, and dropped when the clone
+   * path's own poll ends, so a clone that never connects can't swallow a later manual ssh.
    */
   let typedBakedSsh = false;
   // Last title set while ssh was confirmed foreground — the remote (Claude) title
@@ -728,7 +728,9 @@
             sawNonSshForeground = true;
           }
           // Fresh only on the transition into ssh, and only if we saw the other side of it.
-          const freshSsh = !!isInteractiveSsh && !sshForeground && sawNonSshForeground && !typedBakedSsh;
+          const freshSsh = !!isInteractiveSsh && !sshForeground && sawNonSshForeground;
+          // The ssh maiTerm just typed: its own poll bridges it, holding the port it baked.
+          const clonedSsh = !!isInteractiveSsh && typedBakedSsh;
           if (isInteractiveSsh) {
             typedBakedSsh = false;
             // Track the live ssh session + its remote title so we can preserve
@@ -765,6 +767,10 @@
               // Hopping hosts within one tab is a connection we just watched happen.
               .then(() => enableBridge(tabId, cmd as string, ptyId, true))
               .catch(() => {});
+          } else if (clonedSsh) {
+            // Left to the clone path rather than called with freshSsh=false: enableBridge's first
+            // caller sets the arguments, and only the clone path has the `bakedPort` that lets it
+            // correct a stale MAITERM_PORT in the remote shell.
           } else if (isInteractiveSsh && bridgeStatus !== 'connected' && bridgeStatus !== 'pending') {
             enableBridge(tabId, cmd, ptyId, freshSsh).catch(() => {});
           } else if (!cmd && hasBridge(tabId)) {
