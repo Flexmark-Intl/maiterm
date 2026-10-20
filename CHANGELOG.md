@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.10.0
+
+A new icon and wordmark, and messages reach a busy agent instead of waiting for it.
+
+### A new look
+
+- **maiTerm has a new icon and wordmark**, in the same style as the rest of maiSoft's apps: "mai" in warm stone over "term", in Poppins. They replace the dots icon and the old monospace wordmark, in the Dock, the sidebar and the installers.
+
+### Messages to busy agents
+
+- **A busy agent gets your message now, not when its turn ends.** A task answer from the Loom or a corner card, an Overlord directive, a follow-up or a rule step is typed into an agent mid-turn, which queues it or takes it into the work it's doing, just as when you type it yourself. A message waits only when a dialog is open in the agent's tab, when you have a draft in its box, or while you're typing.
+- **An Overlord directive sent to a long-running turn waits for that turn's reply**, instead of giving up after 15 minutes and sending the directive again.
+- **Claude's "Press up to edit queued messages" hint no longer counts as a draft**, which held every later message until the turn ended.
+
 ## v3.9.0
 
 Claude on Windows: a setup wizard, Git Bash by default, and maiTerm now knows which tab a Claude session is in.
