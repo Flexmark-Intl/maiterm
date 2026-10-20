@@ -71,9 +71,9 @@ Approval is for that script **in that folder**: change one character and it's a 
 
 ## How it's delivered
 
-A follow-up is delivered to the agent **between turns** — never mid-turn, never at a permission prompt, never into something you've typed into its input box — and only once.
+A follow-up is delivered **when it's due**, whether the agent is between turns or busy. An agent mid-turn takes it the way it takes your own typing: Claude queues it, or takes it into the work it's already doing. That matters for a note like *commit before you start anything new*, which is no use once the agent has started something new. It's never typed into a permission prompt or a question, never into something you've typed into its input box, and never while you're typing there. Each one is delivered once.
 
-In a Claude tab running [maiTerm's mod](/features/agents/#the-maiterm-mod-claude-code), it isn't typed at all: the mod submits it, so a draft you've left in the box doesn't hold it up and stays where it is. Without the mod — Codex, or an older Claude Code — it's typed, and waits while you have a draft there.
+Between turns, in a Claude tab running [maiTerm's mod](/features/agents/#the-maiterm-mod-claude-code), it isn't typed at all: the mod submits it, so a draft you've left in the box doesn't hold it up and stays where it is. Mid-turn, or without the mod (Codex, or an older Claude Code), it's typed, and waits while you have a draft there.
 
 It arrives framed as `⟦FOLLOW-UP⟧`, saying when it was scheduled and for when, so the agent reads it as its own earlier note rather than as you having just typed it. One delivered more than five minutes late says by how much, so the agent can tell "the deploy should be done by now" from "this was yesterday's deploy". One you added yourself says so.
 

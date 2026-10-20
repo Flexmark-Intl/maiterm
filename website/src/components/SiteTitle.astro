@@ -12,10 +12,11 @@ import config from 'virtual:starlight/user-config';
 
 const { siteTitle, siteTitleHref } = Astro.locals.starlightRoute;
 
-// "mai" in slate, "Term" in blue — the same split the app and the README use.
-// Matched exactly, not by prefix: the face is subset to the six glyphs in
-// "maiTerm", so a sibling name like "maiLink" would take `mai` and the `i`
-// from Plex Mono and the rest from the fallback stack — one word, two sets of
+// "mai" in Poppins Bold in stone, "term" in Poppins SemiBold (lowercased in CSS)
+// in ink — the house-style split the app icon uses (scripts/make-brand.py).
+// Matched exactly, not by prefix: each face is subset to its half's glyphs
+// ("mai", "term"), so a sibling name like "maiLink" would take `mai` from
+// Poppins and the rest from the fallback stack — one word, two sets of
 // letterforms. Any other title falls through to plain text instead.
 const wordmark = siteTitle === 'maiTerm' ? ['mai', 'Term'] : null;
 ---
