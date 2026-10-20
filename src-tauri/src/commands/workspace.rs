@@ -454,12 +454,22 @@ pub fn delete_tab(
     workspace_id: String,
     pane_id: String,
     tab_id: String,
+    replaced_by: Option<String>,
 ) -> Result<(), String> {
-    if is_shutting_down() {
-        log::info!("delete_tab: refused tab {tab_id} — the app is shutting down");
-        return Ok(());
-    }
     let label = window.label().to_string();
+    if is_shutting_down() {
+        // A reload's original goes even now: its replacement is already saved, so refusing
+        // would bring back BOTH (two tabs resuming one session).
+        let replacement_saved = replaced_by.as_deref().is_some_and(|new_id| {
+            state.app_data.read().window(&label).is_some_and(|win| {
+                win.workspaces.iter().flat_map(|w| w.panes.iter()).flat_map(|p| p.tabs.iter()).any(|t| t.id == new_id)
+            })
+        });
+        if !replacement_saved {
+            log::info!("delete_tab: refused tab {tab_id} — the app is shutting down");
+            return Ok(());
+        }
+    }
     let data_clone = {
         let mut app_data = state.app_data.write();
         let win = app_data.window_mut(&label).ok_or("Window not found")?;

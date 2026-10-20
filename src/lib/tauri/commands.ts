@@ -786,8 +786,10 @@ export async function createTab(workspaceId: string, paneId: string, name: strin
   return invoke('create_tab', { workspaceId, paneId, name, afterTabId });
 }
 
-export async function deleteTab(workspaceId: string, paneId: string, tabId: string): Promise<void> {
-  return invoke('delete_tab', { workspaceId, paneId, tabId });
+/** `replacedBy`: the tab that replaces this one (a reload), already saved — lets the delete
+ *  through even while the app is shutting down, since nothing is lost by it. */
+export async function deleteTab(workspaceId: string, paneId: string, tabId: string, replacedBy?: string): Promise<void> {
+  return invoke('delete_tab', { workspaceId, paneId, tabId, replacedBy: replacedBy ?? null });
 }
 
 export async function moveTabToWorkspaceCmd(sourceWorkspaceId: string, sourcePaneId: string, tabId: string, targetWorkspaceId: string): Promise<void> {

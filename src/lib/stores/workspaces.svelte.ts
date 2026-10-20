@@ -1056,6 +1056,12 @@ function createWorkspacesStore() {
     },
 
     async deletePane(workspaceId: string, paneId: string) {
+      // Rust refuses this while the app is shutting down (commands/workspace.rs
+      // `begin_shutdown`); see deleteTab for why the frontend refuses too.
+      if (terminalsStore.shuttingDown) {
+        logWarn(`deletePane: refused pane ${paneId} — the app is shutting down`);
+        return;
+      }
       // The pane's tabs go without passing through deleteTab — including the common case, the
       // last tab of a split pane closed with Cmd+W (closeTabOrPane) or by its shell exiting.
       const doomed = workspaces.find(w => w.id === workspaceId)?.panes.find(p => p.id === paneId)?.tabs ?? [];
@@ -1258,6 +1264,15 @@ function createWorkspacesStore() {
     },
 
     async deleteTab(workspaceId: string, paneId: string, tabId: string) {
+      // Rust refuses the delete while the app is shutting down (commands/workspace.rs
+      // `begin_shutdown`), so refuse here BEFORE the side effects below: releasing the tasks,
+      // tearing down bridge/mesh and migrating notes would all persist, and the tab would come
+      // back on the next launch stripped of them. Only reachable while still running if a
+      // Windows install failed after the flush; the updater has told the human to quit.
+      if (terminalsStore.shuttingDown) {
+        logWarn(`deleteTab: refused tab ${tabId} — the app is shutting down`);
+        return;
+      }
       // Tear down any agent bridge on this tab BEFORE it's removed from state, so the
       // surviving partner isn't left "bridged to a ghost" (a dangling bridge to a
       // closed tab would hide the survivor from the Agent Bridge picker).
@@ -2723,7 +2738,9 @@ function createWorkspacesStore() {
       if (!reloadingService && wasActive) {
         await commands.setActiveTab(workspaceId, paneId, newTab.id);
       }
-      await commands.deleteTab(workspaceId, paneId, tabId);
+      // Names the replacement so the delete still goes through if a shutdown began mid-reload:
+      // the duplicate is already saved, and refusing would bring back both.
+      await commands.deleteTab(workspaceId, paneId, tabId, newTab.id);
 
       // Final state reload
       const data = await commands.getWindowData();

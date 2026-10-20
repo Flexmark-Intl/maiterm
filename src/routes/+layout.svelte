@@ -801,6 +801,8 @@
         } else if (count <= 1) {
           // Last window on Windows/Linux: exit the app
           logInfo('Last window — exiting app');
+          // Before the kills: each one is a pty-close that would otherwise delete its tab.
+          await commands.beginShutdown().catch(() => {});
           await terminalsStore.killAllTerminals();
           await invoke('exit_app');
         } else {
