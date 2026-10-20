@@ -129,6 +129,15 @@
    * false and we never type into a session that has been running (and may now be an agent).
    */
   let sawNonSshForeground = false;
+  /**
+   * maiTerm itself typed an ssh command with the env baked in (split clone / new tab), so the
+   * next ssh the title watcher sees is OURS, not a user's `ssh host`. Without this the watcher
+   * sees shell → ssh, calls it fresh, wins `enableBridge`'s in-flight slot ahead of the clone
+   * path's `freshSsh=false` call, and types a second, redundant export into the remote shell.
+   * Consumed by that first ssh sighting, and dropped when the clone path's own poll ends, so a
+   * clone that never connects can't swallow a later manual ssh.
+   */
+  let typedBakedSsh = false;
   // Last title set while ssh was confirmed foreground — the remote (Claude) title
   // we preserve on the tab when the connection drops.
   let lastRemoteTitle: string | null = null;
@@ -719,8 +728,9 @@
             sawNonSshForeground = true;
           }
           // Fresh only on the transition into ssh, and only if we saw the other side of it.
-          const freshSsh = !!isInteractiveSsh && !sshForeground && sawNonSshForeground;
+          const freshSsh = !!isInteractiveSsh && !sshForeground && sawNonSshForeground && !typedBakedSsh;
           if (isInteractiveSsh) {
+            typedBakedSsh = false;
             // Track the live ssh session + its remote title so we can preserve
             // the title and replay the connection if it drops unexpectedly.
             sshForeground = { cmd, host: parseSshHost(cmd) };
@@ -973,6 +983,7 @@
             const accountExport = await remoteAccountExport(tabId, ctx.sshCommand!);
             const cmd = buildSshCommand(ctx.sshCommand, ctx.remoteCwd, tabId, bridgeEnv, accountExport);
             const bytes = Array.from(new TextEncoder().encode(cmd + '\n'));
+            typedBakedSsh = true;
             await writeTerminal(ptyId, bytes);
           } catch (e) {
             logError(`Failed to replay SSH command: ${e}`);
@@ -994,13 +1005,14 @@
                 const info = await getPtyInfo(ptyId);
                 if (info.foreground_command) break;
               } catch { return; } // tab gone
-              if (i === maxAttempts - 1) return; // timed out
+              if (i === maxAttempts - 1) { typedBakedSsh = false; return; } // timed out
             }
             if (destroyed) return;
             // The edge maiLink §14 binds on: the ssh this path typed is up. Always runs, so the
             // account a phone is shown never depends on whether a phone was watching.
             void bindRemoteAccount(tabId).catch(() => {});
             await enableBridge(tabId, ctx.sshCommand!, ptyId, false, bakedPort).catch(() => {});
+            typedBakedSsh = false;
             if (destroyed) return;
             if (splitCtx?.launchCommand) {
               await typeLaunch(splitCtx);
