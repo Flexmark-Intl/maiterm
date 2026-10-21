@@ -131,8 +131,18 @@ flat_tile() {  # $1=full-bleed art  $2=output
 flat_tile "$ART/art-dark.png" "$NAVY"
 flat_tile "$ART/art-light.png" "$WEB/src/assets/icon-light.png"
 cp "$NAVY" "$WEB/src/assets/icon-dark.png"
-magick "$NAVY" -resize 256x256 -strip "$WEB/public/favicon.png"
 magick "$NAVY" -resize 256x256 -strip "$STATIC/favicon.png"
+# The site's icon is served under a name that changes with the mark (maiterm-icon-<n>.png):
+# Google keeps a favicon by its URL and was still showing the dots a release after the
+# rebrand, so a new mark needs a new URL. Bump WEB_ICON here, and the two places that link
+# it (astro.config.mjs `favicon`, layouts/Landing.astro), when the mark changes again.
+# favicon.ico at the root is what crawlers and old browsers fetch without asking the page;
+# apple-touch-icon is full-bleed and opaque because iOS draws its own corners.
+WEB_ICON=maiterm-icon-2.png
+rm -f "$WEB/public"/maiterm-icon-*.png "$WEB/public/favicon.png"
+magick "$NAVY" -resize 256x256 -strip "$WEB/public/$WEB_ICON"
+magick "$NAVY" -define icon:auto-resize=48,32,16 -strip "$WEB/public/favicon.ico"
+magick "$ART/art-dark.png" -resize 180x180 -strip "$WEB/public/apple-touch-icon.png"
 
 # The files tauri.conf.json `bundle.icon` actually ships. Regenerating only the
 # 1024 master leaves these stale: the bundler synthesises the macOS .icns and the
@@ -148,7 +158,7 @@ for spec in "32x32.png 32" "64x64.png 64" "128x128.png 128" "128x128@2x.png 256"
 done
 magick "$NAVY" -define icon:auto-resize=256,128,64,48,32,16 -strip "$ICONS/icon.ico"
 rm -rf "$FW" "$ART"
-echo "wrote $NAVY + bundle PNGs + icon.ico + website icon-light/icon-dark/favicon + static/favicon"
+echo "wrote $NAVY + bundle PNGs + icon.ico + website icon-light/icon-dark/$WEB_ICON/favicon.ico/apple-touch-icon + static/favicon"
 
 # --- optional Liquid Glass appearance preview sheet for iteration ---
 if [ "${PREVIEW:-0}" = "1" ] && [ -x "$ICTOOL" ]; then

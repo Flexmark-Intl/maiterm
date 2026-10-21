@@ -34,7 +34,9 @@ const canonical = new URL(path, Astro.site ?? 'https://maiterm.dev').href;
     <title>{title}</title>
     <meta name="description" content={description} />
     <link rel="canonical" href={canonical} />
-    <link rel="icon" href="/favicon.png" />
+    {/* Named per mark so Google refetches it (scripts/generate-app-icons.sh, WEB_ICON). */}
+    <link rel="icon" type="image/png" href="/maiterm-icon-2.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 
     <meta property="og:type" content="website" />
     <meta property="og:title" content={title} />

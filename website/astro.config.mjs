@@ -14,7 +14,11 @@ export default defineConfig({
         light: './src/assets/icon-light.png',
         dark: './src/assets/icon-dark.png',
       },
-      favicon: '/favicon.png',
+      // Named per mark so Google refetches it (scripts/generate-app-icons.sh, WEB_ICON).
+      favicon: '/maiterm-icon-2.png',
+      head: [
+        { tag: 'link', attrs: { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' } },
+      ],
       components: {
         // Duo-tone wordmark in the header — see the component for why an
         // override is needed rather than CSS.
