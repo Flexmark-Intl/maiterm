@@ -46,6 +46,7 @@ Execute the maiTerm MCP tool for the requested operation. Use whichever maiterm 
 | `sessions` | getClaudeSessions | `{}` |
 | `reply <text>` | postCommsReply | `{ "message": "<text>" }` |
 | `thread` | readCommsThread | `{}` |
+| `channel <url>` | readCommsChannel | `{ "channel": "<url>" }` — newest threads first; pass `before` = the result's `next_before` for older ones |
 | `raise <text>` | startCommsThread | `{ "message": "<text>" }` |
 | `unbind` | unbindCommsThread | `{}` |
 | `init` | initSession | `{ "tabId": "$MAITERM_TAB_ID", "sessionId": "<from SessionStart hook>" }` |

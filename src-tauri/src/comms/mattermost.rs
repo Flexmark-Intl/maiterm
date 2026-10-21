@@ -28,6 +28,9 @@ pub struct Post {
     pub file_ids: Vec<String>,
     #[serde(default)]
     pub metadata: PostMetadata,
+    /// Replies under this post (a root); the server fills it on channel fetches, 0 when absent.
+    #[serde(default)]
+    pub reply_count: i64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -270,6 +273,53 @@ impl MattermostClient {
         let mut posts: Vec<Post> = list.posts.into_values().collect();
         posts.sort_by_key(|p| (p.create_at, p.id.clone()));
         Ok(posts)
+    }
+
+    /// A channel by its URL names: `<team>` and `<channel>` in `https://server/<team>/channels/<channel>`.
+    pub async fn channel_by_name(&self, team: &str, channel: &str) -> Result<Channel, CommsError> {
+        self.send(self.http.get(format!(
+            "{}/api/v4/teams/name/{team}/channels/name/{channel}",
+            self.base
+        )))
+        .await
+    }
+
+    pub async fn channel_by_id(&self, channel_id: &str) -> Result<Channel, CommsError> {
+        self.send(
+            self.http
+                .get(format!("{}/api/v4/channels/{channel_id}", self.base)),
+        )
+        .await
+    }
+
+    /// One page of a channel's posts, newest first (replies included, as the server
+    /// interleaves them). `before` is the id of the oldest post already seen; the page
+    /// holds the `per_page` posts older than it. The second value is `true` when older
+    /// posts remain.
+    pub async fn channel_posts_page(
+        &self,
+        channel_id: &str,
+        before: Option<&str>,
+        per_page: u32,
+    ) -> Result<(Vec<Post>, bool), CommsError> {
+        let mut url = format!(
+            "{}/api/v4/channels/{channel_id}/posts?per_page={per_page}",
+            self.base
+        );
+        if let Some(b) = before {
+            url.push_str(&format!("&before={b}"));
+        }
+        let list: PostList = self.send(self.http.get(url)).await?;
+        let mut posts: Vec<Post> = list
+            .order
+            .iter()
+            .filter_map(|id| list.posts.get(id).cloned())
+            .collect();
+        posts.sort_by(|a, b| (b.create_at, &b.id).cmp(&(a.create_at, &a.id)));
+        // A full page means there may be more; the server's `prev_post_id` isn't modelled
+        // because a short page is the reliable end signal.
+        let more = list.order.len() as u32 >= per_page;
+        Ok((posts, more))
     }
 
     pub async fn users_by_ids(&self, ids: &[String]) -> Result<Vec<User>, CommsError> {

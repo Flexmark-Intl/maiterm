@@ -81,6 +81,88 @@ pub fn parse_permalink(url: &str) -> Result<ParsedPermalink, CommsError> {
     }
 }
 
+/// What a caller of readCommsChannel named: a channel by its URL names, or by id.
+#[derive(Debug, PartialEq)]
+pub enum ChannelRef {
+    /// `host` is empty for the bare `team/channel` form.
+    Names { host: String, team: String, channel: String },
+    Id(String),
+}
+
+/// Parse a channel reference: `https://<host>/<team>/channels/<name>`, `<team>/<name>`,
+/// or a 26-character channel id.
+pub fn parse_channel_ref(input: &str) -> Result<ChannelRef, CommsError> {
+    const EXPECTED: &str =
+        "expected a channel URL like https://<server>/<team>/channels/<channel>, <team>/<channel>, or a channel id";
+    let trimmed = input.trim().trim_start_matches('~');
+    let bad = || CommsError::BadUrl(EXPECTED.to_string());
+    if trimmed.len() == 26 && trimmed.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Ok(ChannelRef::Id(trimmed.to_string()));
+    }
+    let name_ok = |s: &str| {
+        !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    let (host, rest) = match trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+    {
+        Some(r) => {
+            let r = r.split(['?', '#']).next().unwrap_or_default();
+            let (h, p) = r.split_once('/').ok_or_else(bad)?;
+            (h.to_string(), p.to_string())
+        }
+        None => (String::new(), trimmed.to_string()),
+    };
+    let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    let (team, channel) = match segs.as_slice() {
+        [team, "channels", channel] if !host.is_empty() => (*team, *channel),
+        [team, channel] if host.is_empty() => (*team, *channel),
+        _ => return Err(bad()),
+    };
+    if !name_ok(team) || !name_ok(channel) {
+        return Err(bad());
+    }
+    Ok(ChannelRef::Names { host, team: team.to_string(), channel: channel.to_string() })
+}
+
+/// One thread's worth of a channel page: its root (when the page or a fetch supplied it)
+/// and the replies that appeared in the page.
+pub struct ThreadGroup<'a> {
+    pub root_id: String,
+    pub root_in_page: bool,
+    pub root: Option<&'a mattermost::Post>,
+    /// Newest first, as the page lists them.
+    pub replies: Vec<&'a mattermost::Post>,
+}
+
+/// Group a newest-first channel page by thread, threads ordered by their newest post in
+/// the page (a reply to an old thread surfaces that thread, as in the Mattermost UI).
+pub fn group_by_thread(page: &[mattermost::Post]) -> Vec<ThreadGroup<'_>> {
+    let mut groups: Vec<ThreadGroup> = Vec::new();
+    for p in page {
+        let root_id = if p.root_id.is_empty() { p.id.clone() } else { p.root_id.clone() };
+        let idx = match groups.iter().position(|g| g.root_id == root_id) {
+            Some(i) => i,
+            None => {
+                groups.push(ThreadGroup {
+                    root_id: root_id.clone(),
+                    root_in_page: false,
+                    root: None,
+                    replies: Vec::new(),
+                });
+                groups.len() - 1
+            }
+        };
+        if p.root_id.is_empty() {
+            groups[idx].root = Some(p);
+            groups[idx].root_in_page = true;
+        } else {
+            groups[idx].replies.push(p);
+        }
+    }
+    groups
+}
+
 /// Build a client from the configured preferences. `http` clones share reqwest's pool.
 pub fn client_from_prefs(
     app: &AppState,
@@ -461,6 +543,92 @@ pub async fn build_transcript(
         transcript.push('\n');
     }
     transcript.trim_end().to_string()
+}
+
+/// Longest message body shown in a channel feed; the full thread is one `thread` call away.
+const FEED_BODY_CHARS: usize = 1500;
+
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}… [clipped — pass thread to read it whole]")
+}
+
+/// Render one channel page as a thread-oriented feed, newest activity first. A thread whose
+/// root is older than the page is shown with its root fetched (best effort) and only the
+/// replies the page contained.
+pub async fn build_channel_feed(
+    client: &MattermostClient,
+    page: &[mattermost::Post],
+) -> (String, usize) {
+    let groups = group_by_thread(page);
+    // Roots the page didn't contain: fetch so a reply is never shown without its subject.
+    let mut fetched: HashMap<String, mattermost::Post> = HashMap::new();
+    for g in groups.iter().filter(|g| g.root.is_none()).take(30) {
+        if let Ok(p) = client.get_post(&g.root_id).await {
+            fetched.insert(g.root_id.clone(), p);
+        }
+    }
+    let author_ids: Vec<String> = page
+        .iter()
+        .chain(fetched.values())
+        .map(|p| p.user_id.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let users: HashMap<String, User> = client
+        .users_by_ids(&author_ids)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|u| (u.id.clone(), u))
+        .collect();
+    let who = |p: &mattermost::Post| match users.get(&p.user_id) {
+        Some(u) => format!("{} (@{}, {})", display_name(u), u.username, format_ts_ms(p.create_at)),
+        None => format!("{} ({})", p.user_id, format_ts_ms(p.create_at)),
+    };
+    let files = |p: &mattermost::Post| {
+        if p.file_ids.is_empty() {
+            String::new()
+        } else {
+            format!(" [{} attachment(s)]", p.file_ids.len())
+        }
+    };
+
+    let mut out = String::new();
+    for g in &groups {
+        let root = g.root.or_else(|| fetched.get(&g.root_id));
+        match root {
+            Some(r) => {
+                let replies = if r.reply_count > 0 {
+                    format!(" · {} repl{}", r.reply_count, if r.reply_count == 1 { "y" } else { "ies" })
+                } else {
+                    String::new()
+                };
+                out.push_str(&format!(
+                    "## thread {} — {}{replies}\n{}{}\n",
+                    g.root_id,
+                    who(r),
+                    clip(body_or_placeholder(r), FEED_BODY_CHARS),
+                    files(r)
+                ));
+            }
+            None => out.push_str(&format!("## thread {} — (root post unavailable)\n", g.root_id)),
+        }
+        // Replies read top-down chronologically, like the thread does.
+        for p in g.replies.iter().rev() {
+            out.push_str(&format!(
+                "  ↳ {}:\n    {}{}\n",
+                who(p),
+                clip(body_or_placeholder(p), FEED_BODY_CHARS).replace('\n', "\n    "),
+                files(p)
+            ));
+        }
+        out.push('\n');
+    }
+    (out.trim_end().to_string(), groups.len())
 }
 
 /// True if `message` @mentions `username` — case-insensitive, with a right boundary so
@@ -1712,7 +1880,53 @@ mod tests {
             create_at: at,
             file_ids: Vec::new(),
             metadata: Default::default(),
+            reply_count: 0,
         }
+    }
+
+    #[test]
+    fn channel_refs_parse() {
+        assert_eq!(
+            parse_channel_ref("https://mattermost.flyingman.biz:8065/fmp/channels/ews-updates").unwrap(),
+            ChannelRef::Names {
+                host: "mattermost.flyingman.biz:8065".into(),
+                team: "fmp".into(),
+                channel: "ews-updates".into()
+            }
+        );
+        // query/fragment and a trailing slash are noise
+        assert_eq!(
+            parse_channel_ref("http://h/t/channels/c/?x=1#y").unwrap(),
+            ChannelRef::Names { host: "h".into(), team: "t".into(), channel: "c".into() }
+        );
+        assert_eq!(
+            parse_channel_ref("fmp/ews-updates").unwrap(),
+            ChannelRef::Names { host: String::new(), team: "fmp".into(), channel: "ews-updates".into() }
+        );
+        assert_eq!(
+            parse_channel_ref("abcdefghijklmnopqrstuvwxyz").unwrap(),
+            ChannelRef::Id("abcdefghijklmnopqrstuvwxyz".into())
+        );
+        // a permalink is a thread, not a channel
+        assert!(parse_channel_ref("https://h/t/pl/abc").is_err());
+        assert!(parse_channel_ref("ews-updates").is_err());
+    }
+
+    #[test]
+    fn channel_feed_groups_replies_under_their_thread() {
+        let mut root = post("r1", "u", "root", 100);
+        root.reply_count = 2;
+        let mut reply = post("p2", "u", "reply", 300);
+        reply.root_id = "r1".into();
+        let lone = post("r3", "u", "lone", 200);
+        // newest first, as the API returns them
+        let page = [reply, lone, root];
+        let groups = group_by_thread(&page);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].root_id, "r1");
+        assert_eq!(groups[0].replies.len(), 1);
+        assert_eq!(groups[1].root_id, "r3");
+        assert!(groups[1].root_in_page);
     }
 
     #[test]
