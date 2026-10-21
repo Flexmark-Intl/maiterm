@@ -1925,6 +1925,9 @@ async fn handle_read_comms_channel(arguments: &Value, state: &Arc<AppState>) -> 
         } else {
             t.to_string()
         };
+        if !comms::is_mattermost_id(&post_id) {
+            return serde_json::json!({ "error": "thread must be a post id (26 letters/digits) or a permalink https://<server>/<team>/pl/<post-id>" });
+        }
         let thread = match client.get_thread(&post_id).await {
             Ok(t) => t,
             Err(e) => return serde_json::json!({ "error": e.to_string() }),
@@ -1965,12 +1968,16 @@ async fn handle_read_comms_channel(arguments: &Value, state: &Arc<AppState>) -> 
         Ok(c) => c,
         Err(e) => return serde_json::json!({ "error": e.to_string() }),
     };
+    // Some clients send numbers as strings; take either rather than silently using the default.
     let per_page = arguments
         .get("per_page")
-        .and_then(|v| v.as_u64())
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())))
         .unwrap_or(30)
         .clamp(1, 100) as u32;
     let before = str_arg("before");
+    if before.is_some_and(|b| !comms::is_mattermost_id(b)) {
+        return serde_json::json!({ "error": "before must be the next_before value from the previous page (a post id)" });
+    }
     let (page, has_more, extra) = match client.channel_posts_page(&channel.id, before, per_page).await {
         Ok(p) => p,
         Err(e) => return serde_json::json!({ "error": e.to_string() }),

@@ -96,7 +96,7 @@ pub fn parse_channel_ref(input: &str) -> Result<ChannelRef, CommsError> {
         "expected a channel URL like https://<server>/<team>/channels/<channel>, <team>/<channel>, or a channel id";
     let trimmed = input.trim().trim_start_matches('~');
     let bad = || CommsError::BadUrl(EXPECTED.to_string());
-    if trimmed.len() == 26 && trimmed.chars().all(|c| c.is_ascii_alphanumeric()) {
+    if is_mattermost_id(trimmed) {
         return Ok(ChannelRef::Id(trimmed.to_string()));
     }
     let name_ok = |s: &str| {
@@ -127,6 +127,12 @@ pub fn parse_channel_ref(input: &str) -> Result<ChannelRef, CommsError> {
     Ok(ChannelRef::Names { host, team: team.to_string(), channel: channel.to_string() })
 }
 
+/// True for a Mattermost object id (26 ASCII letters/digits) — what may be
+/// interpolated into a request path or query.
+pub fn is_mattermost_id(s: &str) -> bool {
+    s.len() == 26 && s.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
 /// True when `host` (as a URL names it, port included) is the host of the configured
 /// server `base`, ignoring any subpath the server is mounted under.
 pub fn same_server_host(base: &str, host: &str) -> bool {
@@ -147,9 +153,10 @@ pub struct ThreadGroup<'a> {
 
 /// Group a newest-first channel page by thread, threads ordered by their newest post in
 /// the page (a reply to an old thread surfaces that thread, as in the Mattermost UI).
+/// System notices (joins, leaves, header changes) are left out.
 pub fn group_by_thread(page: &[mattermost::Post]) -> Vec<ThreadGroup<'_>> {
     let mut groups: Vec<ThreadGroup> = Vec::new();
-    for p in page {
+    for p in page.iter().filter(|p| !p.post_type.starts_with("system_")) {
         let root_id = if p.root_id.is_empty() { p.id.clone() } else { p.root_id.clone() };
         let idx = match groups.iter().position(|g| g.root_id == root_id) {
             Some(i) => i,
@@ -1900,6 +1907,7 @@ mod tests {
             file_ids: Vec::new(),
             metadata: Default::default(),
             reply_count: 0,
+            post_type: String::new(),
         }
     }
 
@@ -1957,6 +1965,21 @@ mod tests {
         assert_eq!(groups[0].replies.len(), 1);
         assert_eq!(groups[1].root_id, "r3");
         assert!(groups[1].root_in_page);
+
+        let mut joined = post("s1", "u", "u joined the channel.", 400);
+        joined.post_type = "system_join_channel".into();
+        let page = [joined, post("r4", "u", "hi", 350)];
+        let groups = group_by_thread(&page);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].root_id, "r4");
+    }
+
+    #[test]
+    fn only_mattermost_ids_pass() {
+        assert!(is_mattermost_id("abcdefghijklmnopqrstuvwxyz"));
+        assert!(!is_mattermost_id("../../users/me/abcdefghijk"));
+        assert!(!is_mattermost_id("abcdefghijklmnopqrstuvwxy&"));
+        assert!(!is_mattermost_id("short"));
     }
 
     #[test]

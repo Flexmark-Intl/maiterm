@@ -31,6 +31,9 @@ pub struct Post {
     /// Replies under this post (a root); the server fills it on channel fetches, 0 when absent.
     #[serde(default)]
     pub reply_count: i64,
+    /// Empty for a person's post; `system_*` for join/leave/header-change notices.
+    #[serde(rename = "type", default)]
+    pub post_type: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
