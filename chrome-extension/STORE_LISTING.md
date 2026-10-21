@@ -149,7 +149,11 @@ Built by `node chrome-extension/scripts/store-assets.mjs` into `store-assets/` (
 REAL popup in Chrome for Testing, talking to a stand-in maiTerm with a staged cast, so no real tab
 names, hosts or paths reach a shot. Re-run it after any popup change.
 
-- Icon 128×128: `icons/icon128.png`
+- Store icon 128×128: `store-assets/store-icon-128.png` (96px artwork, 16px transparent padding)
 - Screenshot 1: `store-assets/screenshot-1-link.png` — picking the agent
 - Screenshot 2: `store-assets/screenshot-2-linked.png` — linked, beside a page with a failing request
-- Small promo tile 440×280: optional, not made.
+- Small promo tile 440×280: `store-assets/promo-small-440x280.png`
+- Marquee promo tile 1400×560: `store-assets/promo-marquee-1400x560.png`
+
+The icon and tiles come from `python3 chrome-extension/scripts/store-brand.py`, drawn from the app
+icon and `scripts/make-brand.py`'s wordmark, so a rebrand re-runs into them.
