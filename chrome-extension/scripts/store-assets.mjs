@@ -120,10 +120,17 @@ function wsServer(token) {
 // ── Chrome for Testing, with our host registered in its own profile ────────────
 
 async function findChrome() {
-  const cache = join(homedir(), 'Library/Caches/ms-playwright');
+  const cache = process.platform === 'darwin' ? join(homedir(), 'Library/Caches/ms-playwright') : join(homedir(), '.cache/ms-playwright');
   for (const d of (await readdir(cache).catch(() => [])).filter((d) => d.startsWith('chromium-')).sort().reverse()) {
-    const p = join(cache, d, 'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing');
-    if (await readFile(p).then(() => true, () => false)) return p;
+    for (const p of [
+      'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
+      'chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
+      'chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
+      'chrome-linux64/chrome',
+      'chrome-linux/chrome',
+    ].map((rel) => join(cache, d, rel))) {
+      if (await readFile(p).then(() => true, () => false)) return p;
+    }
   }
   throw new Error('Chrome for Testing not found: run  npx playwright install chromium');
 }
@@ -190,6 +197,8 @@ function canvasHtml(shot, popupPng, size, pagePng) {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
+// Found first: nothing is written to disk until we know there is a browser to run.
+const chromePath = await findChrome();
 const token = randomBytes(20).toString('hex');
 const { server, port } = await wsServer(token);
 const work = await mkdtemp(join(tmpdir(), 'maiterm-store-'));
@@ -219,7 +228,7 @@ await writeFile(
   JSON.stringify({ name: HOST, description: 'store-asset stand-in', path: hostSh, type: 'stdio', allowed_origins: [`chrome-extension://${EXT_ID}/`] }),
 );
 
-const chrome = spawn(await findChrome(), [
+const chrome = spawn(chromePath, [
   `--user-data-dir=${profile}`,
   '--remote-debugging-port=0',
   `--load-extension=${ROOT}`,
@@ -249,17 +258,21 @@ try {
   // Wait for the extension to connect to the stand-in.
   const popupUrl = `chrome-extension://${EXT_ID}/popup.html`;
   let page = await open(popupUrl);
-  for (let i = 0; i < 50; i++) {
-    const s = await evaluate(page, `chrome.runtime.sendMessage({type:'state'}).then(s=>s.instances.find(i=>i.host==='${HOST}')?.status)`).catch(() => null);
-    if (s === 'connected') break;
-    await sleep(200);
+  // Never shoot a popup that isn't connected: that would overwrite the committed shots with a
+  // "not running" one and still exit 0.
+  let status;
+  for (let i = 0; i < 50 && status !== 'connected'; i++) {
+    status = await evaluate(page, `chrome.runtime.sendMessage({type:'state'}).then(s=>s.instances.find(i=>i.host==='${HOST}')?.status)`).catch(() => null);
+    if (status !== 'connected') await sleep(200);
   }
+  if (status !== 'connected') throw new Error(`the extension never connected to the stand-in (last status: ${status}); no shots written`);
 
   for (const shot of SHOTS) {
     if (shot.state === 'linked') {
       // Link this very tab: the popup draws a link the same whatever page it is on.
-      await evaluate(page, `(async()=>{const [t]=await chrome.tabs.query({active:true,currentWindow:true});
+      const linked = await evaluate(page, `(async()=>{const [t]=await chrome.tabs.query({active:true,currentWindow:true});
         return chrome.runtime.sendMessage({type:'link',host:'${HOST}',maitermTab:{id:'t-web',name:'web-ui'},chromeTab:{id:t.id,title:'Staging · Orders',url:'https://staging.example.com/orders'}})})()`);
+      if (!linked?.ok) throw new Error(`linking failed: ${JSON.stringify(linked)}; stopped before ${shot.file}`);
     }
     await page.call('Emulation.setDeviceMetricsOverride', { width: 340, height: 900, deviceScaleFactor: 2, mobile: false });
     await page.call('Page.reload');
