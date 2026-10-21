@@ -79,6 +79,10 @@ function createAgentMeshStore() {
   // Mesh workspaces we've already offered an auto re-check for this session (so switching
   // between workspaces doesn't re-prompt). Cleared on destroy.
   const autoRechecked = new Set<string>();
+  // maybeAutoRecheck's settle window: how long agents get to come back before the readiness
+  // modal opens, and how often it looks in the meantime.
+  const AUTO_RECHECK_SETTLE_MS = 30_000;
+  const AUTO_RECHECK_POLL_MS = 1000;
   // Recipient-keyed FIFO mailbox: the ONE live controller (agentDeliveryLive.ts), shared
   // with the 1:1 bridge — a tab can be on a mesh AND hold a bridge, and one PTY needs one
   // inject guard. This store's slots are held under OWNER.
@@ -674,9 +678,14 @@ function createAgentMeshStore() {
     },
 
     /** On load / activation of a mesh workspace (e.g. after an app restart), give auto-resume
-     *  a few seconds to bring agents back, then — if any agent dropped — open the readiness
+     *  time to bring agents back, then — if any agent is still missing — open the readiness
      *  modal so the human can wake/re-init it. Guarded to fire at most once per workspace per
-     *  session, and only while that workspace is still the active one. */
+     *  session, and only while that workspace is still the active one.
+     *
+     *  Not one look at a fixed delay: a resumed Claude can take well past 5 s to register, and
+     *  a single check then opened the modal on agents that all turned READY a moment later.
+     *  Watch for a settle window instead — any moment the roster is whole ends the check
+     *  quietly; only one still incomplete at the deadline opens the modal. */
     maybeAutoRecheck(wsId: string) {
       const ws = getWorkspace(wsId);
       // A suspended workspace has no agents to be ready — its PTYs are gone by
@@ -685,14 +694,18 @@ function createAgentMeshStore() {
       // Guard before the latch so a later resume still gets its recheck.
       if (!ws?.bridge_all || ws.suspended || autoRechecked.has(wsId)) return;
       autoRechecked.add(wsId);
-      setTimeout(() => {
+      const deadline = Date.now() + AUTO_RECHECK_SETTLE_MS;
+      const id = setInterval(() => {
         const w = getWorkspace(wsId);
-        if (!w?.bridge_all || w.suspended) return;
-        if (workspacesStore.activeWorkspaceId !== wsId) return; // user navigated away
-        if (hasUnreadyMembers(w)) {
-          window.dispatchEvent(new CustomEvent('open-mesh-setup', { detail: wsId }));
+        if (!w?.bridge_all || w.suspended || workspacesStore.activeWorkspaceId !== wsId // user navigated away
+            || !hasUnreadyMembers(w)) {
+          clearInterval(id);
+          return;
         }
-      }, 5000);
+        if (Date.now() < deadline) return;
+        clearInterval(id);
+        window.dispatchEvent(new CustomEvent('open-mesh-setup', { detail: wsId }));
+      }, AUTO_RECHECK_POLL_MS);
     },
 
     /** Headless mesh readiness pass — maiLink's one-tap "Initialize all" (`mailink-mesh-init`
