@@ -367,7 +367,27 @@ while [ ! -d "$probe" ]; do
 done
 real=$(cd -P "$probe" 2>/dev/null && pwd -P) || exit 0
 real=${{real%/}}${{dir#"$probe"}}/${{path##*/}}
-in_memory_dir "$real" "$(realroot "$cfg")" "$(realroot "$HOME/.claude")" || exit 0
+
+# The memory directory itself may be a link: some keep a project's memory in its
+# repo (memory -> <repo>/.claude/memory). Approved only when the project directory
+# above the link is where it should be, the link leads to a directory named memory
+# (never a repo root, whose CLAUDE.md is Markdown too), and nothing below it is a link.
+linked_memory() {{
+  for r in "$cfg" "$HOME/.claude"; do
+    [ -n "$r" ] || continue
+    rest=${{path#"${{r%/}}"/projects/}}
+    [ "$rest" != "$path" ] || continue
+    mem=${{r%/}}/projects/${{rest%%/*}}/memory
+    [ -L "$mem" ] && [ -d "$mem" ] || continue
+    proj=$(cd -P "${{mem%/memory}}" 2>/dev/null && pwd -P) || continue
+    in_memory_dir "$proj/memory/x.md" "$(realroot "$cfg")" "$(realroot "$HOME/.claude")" || continue
+    target=$(cd -P "$mem" 2>/dev/null && pwd -P) || continue
+    [ "${{target##*/}}" = memory ] || continue
+    [ "$real" = "$target${{path#"$mem"}}" ] && return 0
+  done
+  return 1
+}}
+in_memory_dir "$real" "$(realroot "$cfg")" "$(realroot "$HOME/.claude")" || linked_memory || exit 0
 
 printf '%s\n' '{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{{"behavior":"allow"}}}}}}'
 "#
@@ -1783,6 +1803,23 @@ mod tests {
         let linked = real_projects.join("-linked/memory/x.md");
         fs::create_dir_all(home.join("outside/memory")).unwrap();
         assert!(!memory_hook_allows(&home, None, &write_req(&linked)), "followed a linked project dir out");
+
+        // The memory directory itself linked into the repo it is about.
+        let repo = home.join("repo");
+        fs::create_dir_all(repo.join(".claude/memory/sub")).unwrap();
+        fs::create_dir_all(real_projects.join("-in-repo")).unwrap();
+        std::os::unix::fs::symlink(repo.join(".claude/memory"), real_projects.join("-in-repo/memory")).unwrap();
+        let in_repo = account.join("projects/-in-repo/memory/note.md");
+        assert!(memory_hook_allows(&home, Some(&account), &write_req(&in_repo)), "a memory dir linked into its repo was not approved");
+        assert!(memory_hook_allows(&home, None, &write_req(&real_projects.join("-in-repo/memory/sub/note.md"))));
+        // ...but not a link below it, nor a memory link to anything not named memory.
+        std::os::unix::fs::symlink(home.join("outside"), repo.join(".claude/memory/out")).unwrap();
+        let below = real_projects.join("-in-repo/memory/out/x.md");
+        assert!(!memory_hook_allows(&home, None, &write_req(&below)), "followed a link below a linked memory dir");
+        fs::create_dir_all(real_projects.join("-repo-root")).unwrap();
+        std::os::unix::fs::symlink(&repo, real_projects.join("-repo-root/memory")).unwrap();
+        let root = real_projects.join("-repo-root/memory/CLAUDE.md");
+        assert!(!memory_hook_allows(&home, None, &write_req(&root)), "a memory link to a repo root was approved");
 
         // Another tool, or a forged file_path inside agent-written content.
         let mut bash = write_req(&via_account);
