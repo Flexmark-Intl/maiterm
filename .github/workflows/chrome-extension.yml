@@ -1,0 +1,109 @@
+name: Chrome extension
+
+# Tag a version to run this:  git tag ext-v0.1.1 && git push origin ext-v0.1.1
+# (chrome-extension/manifest.json's "version" must match the tag.)
+#
+# On a tag the package is uploaded to the Chrome Web Store as a DRAFT. It is published to users
+# only when the repository variable CWS_AUTO_PUBLISH is "true", because publishing queues a review
+# that CI cannot cancel and whose outcome arrives by email. "Run workflow" publishes on purpose,
+# to trusted testers or everyone. See chrome-extension/PUBLISHING.md.
+#
+# Deliberately NO GitHub release: the website's download page and the app updater read the repo's
+# LATEST release, and an "ext-v*" one would become it. The zip is a workflow artifact instead.
+# The app's own build workflows trigger on "v*", which "ext-v*" does not match.
+
+on:
+  push:
+    tags: ['ext-v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish after uploading (otherwise leave it as a draft)
+        type: boolean
+        default: false
+      target:
+        description: Who the published version goes to
+        type: choice
+        options: [trustedTesters, default]
+        default: trustedTesters
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: chrome-extension
+
+jobs:
+  release:
+    name: Package and upload
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check the tag matches the manifest version
+        if: startsWith(github.ref, 'refs/tags/ext-v')
+        run: |
+          TAG="${GITHUB_REF_NAME#ext-v}"
+          MANIFEST=$(node -p "require('./manifest.json').version")
+          if [ "$TAG" != "$MANIFEST" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match chrome-extension/manifest.json version $MANIFEST"
+            exit 1
+          fi
+          echo "version $MANIFEST"
+
+      - name: Syntax-check the extension
+        run: |
+          for f in background.js driver.js popup.js; do node --input-type=module --check < "$f"; done
+          node -e 'JSON.parse(require("fs").readFileSync("manifest.json","utf8"))'
+
+      - name: Build the store package
+        run: bash scripts/package.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: maiterm-chrome
+          path: chrome-extension/dist/*.zip
+
+      - name: Are Web Store credentials configured?
+        id: creds
+        env:
+          CWS_CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
+        run: |
+          if [ -n "$CWS_CLIENT_ID" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Web Store secrets are not set, so the upload is skipped. See chrome-extension/PUBLISHING.md."
+          fi
+
+      - name: Decide upload mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PUBLISH="${{ inputs.publish }}"
+            TARGET="${{ inputs.target }}"
+          else
+            PUBLISH="${{ vars.CWS_AUTO_PUBLISH == 'true' }}"
+            TARGET="default"
+          fi
+          if [ "$PUBLISH" = "true" ]; then
+            echo "args=--target=$TARGET" >> "$GITHUB_OUTPUT"
+            echo "::notice::Uploading and publishing to '$TARGET'."
+          else
+            echo "args=--upload-only" >> "$GITHUB_OUTPUT"
+            echo "::notice::Uploading as a draft only."
+          fi
+
+      - name: Upload to the Chrome Web Store
+        if: steps.creds.outputs.configured == 'true'
+        env:
+          CWS_CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
+          CWS_CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
+          CWS_REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+          CWS_ITEM_ID: ${{ secrets.CWS_ITEM_ID }}
+        run: node scripts/publish.mjs ${{ steps.mode.outputs.args }}

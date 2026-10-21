@@ -26,6 +26,7 @@ Test without touching your own browser: Chrome for Testing (Playwright's) still 
 
 ## Releasing
 
-Version is `manifest.json`'s `version`, tagged `ext-v<version>`. Not in the Chrome Web Store yet;
-when it is, add the store's id to `ALLOWED_EXTENSION_IDS` (`src-tauri/src/browser_link/mod.rs`),
-which also puts it in the host manifest's `allowed_origins`.
+[PUBLISHING.md](PUBLISHING.md): tag `ext-v<version>` and `.github/workflows/chrome-extension.yml`
+uploads a draft to the Chrome Web Store. The store item doesn't exist yet; its first upload must
+carry the private key so the store keeps the id maiTerm trusts. [STORE_LISTING.md](STORE_LISTING.md)
+and [PRIVACY.md](PRIVACY.md) are the dashboard copy.
