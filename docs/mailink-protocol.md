@@ -2260,7 +2260,7 @@ interface OutstandingDirective {
   (A first draft skipped unchanged publishes; that froze an idle board's `asOf` at launch and
   made a quiet desktop indistinguishable from a sleeping one.)
 - **Only human-addressed escalations cross.** The engine also raises agent-only kinds
-  (`drive_reply`, `permission_stuck`, `task_handoff`, `task_dropped`, `rebind_failed`); the
+  (`drive_reply`, `permission_stuck`, `task_handoff`, `task_dropped`); the
   desktop deck hides them because nobody can dismiss them. On the phone they would light a badge
   nothing clears. The frontend publishes `humanEscalations`, and the union above is the whole
   list the phone can receive.

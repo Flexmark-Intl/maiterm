@@ -187,12 +187,12 @@
     if (supervisorBlocked) {
       out.push({ sev: -1, id: `perm-sup-${supervisorBlocked.tab.id}`, type: 'permission', u: supervisorBlocked, supervisor: true });
     }
-    // A finished session that has also gone dormant is not offered a re-bind: its agent
+    // A finished session that has also gone dormant is not offered a restart: its agent
     // EXITED having done everything asked of it, so packing it away is the useful move.
     //
     // This is only safe because `spentTabs` admits a stateless tab solely when it is
-    // classified `stopped`. An `unbound` tab still has a live agent process, and hiding
-    // its re-bind here while the deck offers Archive/Close would hand the human a button
+    // classified `stopped`. An `unbound` tab may still have a live agent process, and hiding
+    // its card here while the deck offers Archive/Close would hand the human a button
     // that kills a running agent. Do not widen that predicate without revisiting this.
     const spentIds = new Set(spent.map((s) => s.tabId));
     // Some escalations are addressed to the Overlord AGENT, not to the human — a tab
@@ -269,7 +269,6 @@
 
   // ── Recovery ───────────────────────────────────────────────────────────────
   let recovering = $state<string | null>(null);
-  let recoveringAll = $state(false);
   let recoverNote = $state<string | null>(null);
 
   async function recover(tabId: string) {
@@ -284,29 +283,22 @@
           ? 'That tab is mid-output — try again in a moment.'
           : r.reason === 'no_session_id'
             ? "No saved session for that tab, so there's nothing to resume."
-            : `Couldn't recover that tab (${r.reason}).`;
+            : (r.detail ?? `Couldn't recover that tab (${r.reason}).`);
     } finally {
       recovering = null;
     }
   }
 
-  const unboundCount = $derived(
-    fleet.filter((u) => u.state === 'dormant' && overlordStore.unreadyKind(u.tab.id) === 'unbound').length,
-  );
-
-  async function recoverAll() {
-    recoveringAll = true;
+  /** The human's remedy for an agent that runs but never registered: a fresh shell, and
+   *  the tab's auto-resume brings the agent back — this time with its hooks. */
+  async function reloadStuck(u: { ws: { id: string }; tab: { id: string } }) {
+    const pane = u.ws && workspacesStore.workspaces.find((w) => w.id === u.ws.id)?.panes.find((p) => p.tabs.some((t) => t.id === u.tab.id));
+    if (!pane) return;
+    recovering = u.tab.id;
     try {
-      const r = await overlordStore.recoverAllUnbound();
-      // Says what it KNOWS. This claimed "Re-bound N" the instant the last paste went out,
-      // which is delivery, not outcome — and a re-bind typed at a tab whose agent is gone
-      // is delivered perfectly. Unlike Run all, this button doesn't hold open to verify
-      // (it's usually a tab or two, and a 45s spinner would be worse); the cards say.
-      recoverNote = r.sent
-        ? `Sent /maiterm init to ${r.sent} tab${r.sent === 1 ? '' : 's'} — any that don't answer come back as needing a restart.`
-        : 'Nothing could be re-bound.';
+      if (!(await workspacesStore.reloadTab(u.ws.id, pane.id, u.tab.id))) recoverNote = "Couldn't reload that tab.";
     } finally {
-      recoveringAll = false;
+      recovering = null;
     }
   }
 
@@ -384,19 +376,10 @@
     } finally { archivingAll = false; }
   }
 
-  /** Reports the OUTCOME, not the delivery. "Sent 69" was true and useless: a re-bind typed
-   *  at a tab whose agent is gone is delivered perfectly and achieves nothing, which is the
-   *  normal failure for SSH tabs. The tabs that never answered are named as needing a
-   *  restart, because that is the remedy their cards now offer. */
   async function runAll() {
     const r = await overlordStore.runTriage();
     if (r.sent === 0 && r.skipped === 0) { recoverNote = null; return; }
-    const parts = [`Run all: sent ${r.sent}`];
-    if (r.skipped) parts.push(`skipped ${r.skipped}`);
-    if (r.bound) parts.push(`re-bound ${r.bound}`);
-    recoverNote = r.silent
-      ? `${parts.join(', ')} — ${r.silent} never answered and ${r.silent === 1 ? 'needs' : 'need'} a restart.`
-      : `${parts.join(', ')}.`;
+    recoverNote = `Run all: sent ${r.sent}${r.skipped ? `, skipped ${r.skipped}` : ''}.`;
   }
 
   function pctTone(pct: number | null): string {
@@ -432,13 +415,6 @@
         {/each}
       </nav>
 
-      {#if unboundCount > 1}
-        <Tooltip text="Send /maiterm init to every tab whose agent is running but unbound. Nothing is sent to tabs that aren't running an agent.">
-          <button class="ov-btn scan-btn" onclick={recoverAll} disabled={recoveringAll}>
-            {recoveringAll ? 'Re-binding…' : `Re-bind ${unboundCount}`}
-          </button>
-        </Tooltip>
-      {/if}
       <Tooltip text="Read every running agent tab and populate the board from it. Safe to repeat — nothing is typed into any tab.">
         <button class="ov-btn scan-btn" onclick={runScan} disabled={overlordStore.scanning}>
           {overlordStore.scanning ? 'Scanning…' : 'Scan tabs'}
@@ -522,7 +498,6 @@
             <span class="ov-label runbar-lead">
               {#if runProgress.phase === 'running'}sending
               {:else if runProgress.phase === 'waiting'}pacing
-              {:else if runProgress.phase === 'verifying'}verifying
               {:else}holding{/if}
             </span>
             <span class="ov-mono runbar-count">{runProgress.done}/{runProgress.total}</span>
@@ -531,10 +506,6 @@
                 {runProgress.label ?? ''}
               {:else if runProgress.phase === 'waiting'}
                 wave {runProgress.wave} of {runProgress.waves} done · next in {resumeIn}s
-              {:else if runProgress.phase === 'verifying'}
-                <!-- Everything is sent; this is watching whether it took. A re-bind that
-                     lands on a tab whose agent is gone looks identical to one that works. -->
-                {runProgress.label ?? ''} · giving up in {resumeIn}s
               {:else}
                 waiting for the fleet to drain before the next wave
               {/if}
@@ -550,8 +521,6 @@
           <div class="runbar-line">
             <button class="ov-btn ov-btn-primary" onclick={runAll}>Run all {runnable.total}</button>
             <span class="runbar-what">
-              {#if runnable.rebinds}re-bind {runnable.rebinds} agent{runnable.rebinds === 1 ? '' : 's'}{/if}
-              {#if runnable.rebinds && runnable.proposals}, then {/if}
               {#if runnable.proposals}send {runnable.proposals} proposed directive{runnable.proposals === 1 ? '' : 's'}{/if}
               · 10 at a time, 1s apart, 5s between waves
             </span>
@@ -862,25 +831,24 @@
               </div>
               {#if overlordStore.unreadyKind(s.u.tab.id) === 'unbound'}
                 <p class="signal-text">
-                  Its agent is running but isn't bound to maiTerm, so tools and replies don't
-                  reach it. Re-binding is one command.
+                  Something is running in this tab, but no agent there has registered with
+                  maiTerm, so tools and replies don't reach it. A starting agent registers on
+                  its own within seconds. Over ssh, an agent that exited looks like this too:
+                  Restart agent relaunches it if the tab is at a shell, and says so if not.
+                  Reloading the tab restarts its shell and resumes the agent.
                 </p>
                 <div class="signal-actions">
-                  <button class="ov-btn ov-btn-primary" disabled={recovering === s.u.tab.id}
+                  <button class="ov-btn" disabled={recovering === s.u.tab.id}
                           onclick={() => recover(s.u.tab.id)}>
-                    {recovering === s.u.tab.id ? 'Re-binding…' : 'Re-bind'}
+                    {recovering === s.u.tab.id ? 'Restarting…' : 'Restart agent'}
                   </button>
+                  <button class="ov-btn" disabled={recovering === s.u.tab.id}
+                          onclick={() => reloadStuck(s.u)}>Reload tab</button>
                 </div>
               {:else if overlordStore.unreadyKind(s.u.tab.id) === 'stopped'}
                 <p class="signal-text">
-                  {#if overlordStore.rebindDidNotTake(s.u.tab.id)}
-                    Re-binding was tried here and nothing came back, so the agent is gone
-                    rather than unbound — on an SSH tab that is invisible from this side
-                    until it's attempted. Restarting resumes its own session, not a fresh one.
-                  {:else}
-                    Nothing is running in this tab — the agent exited. Restarting resumes its
-                    own session, not a fresh one.
-                  {/if}
+                  Nothing is running in this tab — the agent exited. Restarting resumes its
+                  own session, not a fresh one.
                 </p>
                 <div class="signal-actions">
                   <button class="ov-btn" disabled={recovering === s.u.tab.id}

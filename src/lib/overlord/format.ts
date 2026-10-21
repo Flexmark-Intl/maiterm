@@ -87,7 +87,6 @@ export function escalationLabel(kind: string): string {
     case 'step_timeout': return 'timed out';
     case 'directive_unacked': return 'unacked';
     case 'agent_report': return 'from agent';
-    case 'rebind_failed': return 're-bind failed';
     default: return 'escalation';
   }
 }
@@ -246,9 +245,9 @@ export function fmtAge(at: number | string | undefined | null): string {
 export function fireRefusal(reason: string | undefined, what = 'that'): string {
   switch (reason) {
     case 'tab_unbound':
-      return "That tab's agent is running but hasn't run /maiterm init, so nothing can be sent to it yet — re-bind it first.";
+      return "That tab's agent is running but hasn't registered with maiTerm, so nothing can be sent to it yet. A starting agent registers on its own within seconds.";
     case 'tab_ready':
-      return "That tab's agent is already bound and running. This rule re-binds one that isn't.";
+      return "That tab's agent is already registered and running. This rule is for one that isn't.";
     case 'tab_permission':
       return 'That tab is stopped at a permission prompt. Answer it first — this rule waits for the agent to be idle.';
     case 'tab_stopped':

@@ -86,9 +86,8 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
   //     proposeRuleChanges schema — a user or agent can still build a rule on it, and all
   //     the engine machinery below is keyed on the event (or on the text typed), never on
   //     this rule's id, so it stays correct for one;
-  //   - `recoverTab` and the triage re-bind sweep, which type the same line on PURPOSE
-  //     when a human or the Overlord agent asks for a repair. Removing the automatic rule
-  //     is not removing the remedy; it removes maiTerm volunteering it.
+  // `recoverTab` and the triage deck's re-bind sweep went later (2026-10-21): recoverTab now
+  // only relaunches a stopped agent, and nothing in maiTerm types `/maiterm init`.
 
   todo_hygiene: {
     name: 'Keep a task list',

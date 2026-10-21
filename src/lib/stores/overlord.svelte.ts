@@ -12,7 +12,7 @@ import type {
   Tab,
   Workspace,
 } from '$lib/tauri/types';
-import type { AgentState } from '$lib/agents/types';
+import type { AgentRuntime, AgentState } from '$lib/agents/types';
 import { workspacesStore, tabDisplayName, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { resumePane } from '$lib/stores/resumeGate.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -168,12 +168,7 @@ export interface OverlordEscalation {
     | 'task_handoff'
     /** The human deleted a task and the owning tab could not be told directly — the agent
      *  relays it, so the tab stops believing in work that is off the board. */
-    | 'task_dropped'
-    /** A `/maiterm init` was typed at an unbound tab and the tab never bound. `recoverTab`
-     *  can only report that it TYPED the line; whether the agent on the far side was in a
-     *  state to receive it is knowable only afterwards, and only by watching. This carries
-     *  that verdict back to whoever asked for the recovery. */
-    | 'rebind_failed';
+    | 'task_dropped';
   detail: string;
   /** The board task this is about (`task_handoff`), so the card's "Sent" receipt can be
    *  withdrawn if the handoff is ever swept undelivered. */
@@ -278,9 +273,8 @@ export interface TriageRunProgress {
   skipped: number;
   wave: number;
   waves: number;
-  /** `waiting` is the pacing gap; `holding` is waiting on the fleet to drain;
-   *  `verifying` is watching the re-bound tabs actually come back. */
-  phase: 'running' | 'waiting' | 'holding' | 'verifying';
+  /** `waiting` is the pacing gap; `holding` is waiting on the fleet to drain. */
+  phase: 'running' | 'waiting' | 'holding';
   /** Epoch ms the pacing gap ends — a countdown, so a paused deck isn't mistaken for a
    *  hung one. Null while running or holding (a hold has no predictable end). */
   resumeAt: number | null;
@@ -288,19 +282,10 @@ export interface TriageRunProgress {
   label: string | null;
 }
 
-/** What a "run all" pass actually achieved.
- *
- *  `sent` is delivery; `bound` is OUTCOME. They are different numbers and the gap between
- *  them is the interesting one: a `/maiterm init` typed at a tab whose agent is gone is
- *  delivered perfectly and achieves nothing. `silent` counts exactly those — re-binds that
- *  landed and were never answered. Zero after a cancelled run, which has no verdict. */
+/** What a "run all" pass did: proposals started, and ones that no longer held. */
 export interface TriageResult {
   sent: number;
   skipped: number;
-  /** Re-bind targets that registered before the run gave up watching. */
-  bound: number;
-  /** Re-bind targets that never came back — each now a `stopped` card wanting a restart. */
-  silent: number;
 }
 
 export interface ScanSummary {
@@ -360,8 +345,12 @@ const OVERLORD_PRIMED_VAR = 'overlordPrimed';
  *  v10 is who answers a tab's decision (§9.1.2). An agent on v9 holds "ESCALATE … to the
  *  human via AskUserQuestion" for consequential prompts — the line that made it ask the human
  *  a second time about a question the tab was already putting to them. The escalation switch
- *  itself is not versioned here: `doctrineKey` appends it, so flipping it re-primes too. */
-const DOCTRINE_VERSION = '10';
+ *  itself is not versioned here: `doctrineKey` appends it, so flipping it re-primes too.
+ *
+ *  v11 is recoverTab (2026-10-21). An agent on v10 holds "'unbound' → recoverTab (re-binds
+ *  …)" and expects a rebind_failed escalation to correct a re-bind that didn't take; neither
+ *  exists any more — recoverTab only relaunches, and refuses a running agent. */
+const DOCTRINE_VERSION = '11';
 
 /** Escalation kinds addressed to the Overlord AGENT rather than the human. The deck hides
  *  these, so nobody will ever dismiss one — `consumeEscalations` therefore DELETES them on
@@ -371,10 +360,6 @@ const AGENT_ONLY_ESCALATIONS = new Set<OverlordEscalation['kind']>([
   'permission_stuck',
   'task_handoff',
   'task_dropped',
-  // The human already has this one: the tab reclassifies to `stopped` in the same pass, so
-  // the deck raises its own re-bind card. This copy is addressed to the agent, which asked
-  // for the recovery and is the only party holding the belief that it worked.
-  'rebind_failed',
 ]);
 
 /** Escalations that carry a HUMAN's board action to the agent rather than the engine's own
@@ -721,28 +706,17 @@ function createOverlordStore() {
    *  "Dormant" conflates two situations with opposite remedies, and treating them as one
    *  is why the triage deck could only ever print advice:
    *
-   *    unbound — the agent process IS running; maiTerm just has no MCP binding for it
-   *              (the usual case after a restart, resume or fork). One `/maiterm init`
-   *              fixes it, and that is something Overlord can simply do.
-   *    stopped — nothing is running; the tab is sitting at a shell. Re-initializing would
-   *              type a slash command into bash. The remedy is to relaunch the agent,
-   *              which is a bigger action and stays opt-in.
+   *    unbound — something is running (a local agent, or ssh) but no agent session is
+   *              registered. An agent registers itself at start (the SessionStart hook), so
+   *              this is either one still starting or one whose hooks don't reach maiTerm.
+   *              Nothing typed fixes that; `/maiterm init` used to, before identity rode
+   *              the transport. An SSH tab whose REMOTE agent exited also reads this way —
+   *              `recoverTab` tells those apart by reading the screen.
+   *    stopped — nothing is running; the tab is sitting at a shell. The remedy is to
+   *              relaunch the agent (`recoverTab`), and it stays an explicit call.
    */
   type UnreadyKind = 'unbound' | 'stopped';
   const liveness = new Map<string, { kind: UnreadyKind; at: number }>();
-  /** Tabs typed `/maiterm init` at, waiting to see whether a binding actually arrives. */
-  const rebindWatch = new Map<string, number>(); // tabId → sentAt
-  /** Tabs where it demonstrably did not: treated as `stopped` from then on, whatever the
-   *  process probe says (see the classification in `probeLiveness`). */
-  const rebindFailed = new Set<string>();
-  /** How long a re-bind gets. An agent that is alive and merely unbound answers a slash
-   *  command in a second or two; this is slack for a busy TUI, not for a resume. */
-  const REBIND_VERIFY_MS = 45_000;
-  /** The one line that re-binds a running agent. Watching is keyed on THIS TEXT having been
-   *  typed, never on the rule that typed it: `agent_unready` is a selectable event with a
-   *  free-text sequence, so a rule whose step says anything else would otherwise be watched
-   *  for a binding it cannot produce. */
-  const REBIND_COMMAND = '/maiterm init';
 
   /** Board tasks the human handed to the agent ("Send" on a card) → when. In memory only,
    *  like `escalations` itself: the handoff IS the escalation, and once the agent has
@@ -956,6 +930,31 @@ function createOverlordStore() {
    * dead. `unbound` is a different problem with a different, one-line remedy.
    */
   type ReplState = 'ready' | 'unbound' | 'stopped' | 'unknown' | 'no_terminal';
+
+  /** For an `unbound` tab: why a relaunch must NOT be typed there (an agent is, or may be,
+   *  running), or null when the tab is at a shell after all. Read at the moment of asking,
+   *  not from the tick's probe: this decides whether keystrokes go into a live agent. */
+  async function agentStillRunning(tabId: string, ptyId: string, runtime: AgentRuntime): Promise<string | null> {
+    const UNREGISTERED =
+      'Agents register with maiTerm on their own when they start, so it is most likely still starting: retry in a few seconds. ' +
+      'If it stays this way its hooks are not reaching maiTerm; leave it on the human\'s board. Nothing was typed: a resume command typed into a live agent arrives as a prompt.';
+    let live: { agent_running: boolean; ssh_foreground: boolean };
+    try {
+      live = await commands.getAgentLiveness(ptyId);
+    } catch {
+      return 'That tab\'s processes could not be read just now, so whether its agent is running is unknown. Nothing was typed; retry in a few seconds.';
+    }
+    if (live.agent_running) return `An agent is running in that tab but has not registered. ${UNREGISTERED}`;
+    if (!live.ssh_foreground) return null;
+    // ssh is up; what runs on the far side is invisible from here. Claude draws its input box
+    // when it is running, so its absence means a remote shell — the agent exited.
+    if (runtime !== 'claude') {
+      return 'That tab is over ssh, and whether its agent is still running on the far side cannot be seen from here. Nothing was typed; the human can relaunch it.';
+    }
+    const box = await commands.agentInputBox(tabId).catch(() => 'unknown' as const);
+    if (box !== 'unknown') return `Claude is on that tab's screen over ssh but has not registered. ${UNREGISTERED}`;
+    return null;
+  }
 
   async function replState(tabId: string): Promise<ReplState> {
     const inst = terminalsStore.get(tabId);
@@ -1653,7 +1652,7 @@ function createOverlordStore() {
     // "Send", a deleted task) are relays the human just clicked, and sweeping them turned a
     // "Sent" receipt back into "Send" five seconds later with the supervisor already woken
     // to find nothing. Those survive exemption; the engine's own (permission handoffs,
-    // drive replies, re-bind failures) do not. And an escalation with NO tab — "Send" on an
+    // drive replies) do not. And an escalation with NO tab — "Send" on an
     // unassigned task passes '' — belongs to nobody's tab and must not die with one.
     const deadEscalations = escalations.filter((e) => {
       if (!e.tabId) return false;
@@ -1705,8 +1704,6 @@ function createOverlordStore() {
       permissionHandoff.delete(id);
       outstanding.delete(id);
       liveness.delete(id);
-      rebindWatch.delete(id);
-      rebindFailed.delete(id);
       // A watch on a closed tab expires into "no reply could be read", which is true and
       // useless: the human closed it. Drop it without the escalation.
       driveWatch.delete(id);
@@ -1777,9 +1774,7 @@ function createOverlordStore() {
    *  NO agent tab at all → agent-only items are swept after 30 min rather than waiting
    *  forever, so nothing may be accepted here on the promise that it will be delivered. */
   /** One doorbell at a time. Everything before the first `await` here is synchronous, so N
-   *  escalations raised in one synchronous loop — which is now the ordinary case, since a
-   *  restart leaves several tabs unbound and their re-bind watches expire in the same probe
-   *  pass — all read `idle` and an unread queue, then all reach `bracketedPasteSubmit` on the
+   *  escalations raised in one synchronous loop all read `idle` and an unread queue, then all reach `bracketedPasteSubmit` on the
    *  SAME supervisor PTY. That helper writes the text, settles ~100ms, then writes the CR
    *  separately, so the later pastes land inside that window: the supervisor's input box gets
    *  the nudge concatenated N times, submitted by the first CR, followed by stray Enters. */
@@ -1900,7 +1895,7 @@ function createOverlordStore() {
       escalationDoctrine() +
       `  - Your human can also hand you a board task directly ("Send" on a card): it arrives as a task_handoff escalation naming the task and the tab that owns it. Carry it — drive that tab, drive a better one, or do it yourself — and keep its status current with updateTasks so the board follows along. A task_dropped escalation is the reverse: the human deleted a task and the tab carrying it could not be told, so tell it yourself when it is reachable.\n` +
       `  - Use listWorkspaces to see the tabs; every injection you make is recorded verbatim in the ledger. Each agent tab reports THREE independent facts: \`pty\` ('live' | 'suspended' | 'none' — the terminal underneath), \`state\` (what the agent is doing, meaningful only over a live pty), and \`loaded\` (whether anything can reach it at all). Read all three. An 'idle' agent with loaded:false is healthy and undrivable; a suspended tab is not a dead one.\n` +
-      `  - Every state has one action, and you have all of them: 'idle'/'active' → driveTab · 'permission' → getTabPrompt + answerTabPrompt · 'unbound' or 'stopped' → recoverTab (re-binds or restarts, chosen from the process state) · pty 'suspended' → resumeTab · a tab in a suspended WORKSPACE → resumeWorkspace · a tab in that workspace's archivedTabs[] → restoreArchivedTab. Nothing in this window has to stay stuck.\n` +
+      `  - Every state has one action, and you have all of them: 'idle'/'active' → driveTab · 'permission' → getTabPrompt + answerTabPrompt · 'stopped' → recoverTab (relaunches its agent, resuming its own session) · 'unbound' → wait: an agent registers itself when it starts, and if one stays unbound recoverTab relaunches it when the tab is really at a shell (an ssh tab whose remote agent exited reads 'unbound') and says why not otherwise · pty 'suspended' → resumeTab · a tab in a suspended WORKSPACE → resumeWorkspace · a tab in that workspace's archivedTabs[] → restoreArchivedTab. Nothing in this window has to stay stuck.\n` +
       `  - Four things that get confused, and are reported separately: a SUSPENDED TAB (pty:'suspended') sits in the pane tree of an ACTIVE workspace with its terminal killed — suspending every tab but the active one is routine, so most of these are perfectly ordinary; a SUSPENDED WORKSPACE parks all of its tabs at once; ARCHIVED tabs are lifted out of the pane tree entirely; loaded:false only means the pane is not mounted right now, and can be true of a tab whose agent is alive and working. Never describe one as another — say which one you mean.\n` +
       `  - A tab or workspace marked \`overlordExempt: true\` in listWorkspaces is off limits: the human exempted it. The engine runs nothing on it, it has no card, and every tool refuses it with reason 'exempt'. Do not drive, recover, answer, archive, close or resume it, and do not raise it to the human — being left alone is what they asked for.\n` +
       `  - Judging a tab's age: listWorkspaces gives \`lastTurnAt\` (its last real turn) and \`contextPct\` for agent tabs whose session could be resolved, plus \`suspendedAt\` for suspended ones. Both are absent — not zero — when there is no readable transcript for that tab (no live session and no remembered session id), which is itself worth knowing: nothing can be read back from that tab. Archived tabs carry \`archivedAt\`, and getTabNotes reads an archived tab's notes without restoring it — read those before deciding what a session was for.\n` +
@@ -1977,10 +1972,10 @@ function createOverlordStore() {
    * agent-state and quiet window, so clicking while the agent is mid-turn queues the
    * sequence rather than typing over its output.
    *
-   * The readiness test depends on the rule. An `agent_unready` rule is FOR an unbound tab —
-   * its sequence re-binds one — so fired at a bound agent it would type `/maiterm init` into
-   * a session that already has one, and fired at a stopped tab it would type into bash.
-   * Every other rule needs the agent bound and running. Same distinction the deck and
+   * The readiness test depends on the rule. An `agent_unready` rule is FOR an unbound tab
+   * (a user's own rule: nothing maiTerm ships fires on it), so fired at a registered agent
+   * or a stopped tab it would type its sequence somewhere it was never written for. Every
+   * other rule needs the agent registered and running. Same distinction the deck and
    * driveTab make: an unbound tab is not a dead one.
    */
   async function fireRuleNow(rule: OverlordRule, tabId: string): Promise<{ started: boolean; reason?: string }> {
@@ -2144,36 +2139,6 @@ function createOverlordStore() {
         bumpLive();
         ledger(tabId, rule.id, origin, i, step, 'sent');
         const res = await awaitGate(run, step, directive);
-        // A rule re-binding an unready tab gets the same verification `recoverTab` gets:
-        // both type the identical line at the identical tab for the identical reason, and
-        // only one of them was watching, so a rule-driven re-bind that never took ended at
-        // a silent `timed_out` (an `on_timeout: 'continue'` step swallows it).
-        //
-        // Two things this must NOT do, both found in review. It is keyed on the text typed,
-        // not on `run.targetsUnready` — that flag is the rule's EVENT and says nothing about
-        // the step, so a custom agent_unready rule with any other prose would have been
-        // watched for a binding it could never produce, then declared failed. That verdict
-        // is not cosmetic: `rebindFailed` pins the tab to `stopped`, which is the one state
-        // that stops any `agent_unready` rule from firing there again and turns the card's
-        // only remaining action into a resume typed at a live agent.
-        //
-        // And it arms AFTER this step's gate rather than at injection, so the rule's own
-        // tolerance gets the first say. Armed at injection it set a 45s verdict against a
-        // step the rule gives 120s, and an init turn slow to reach its initSession call —
-        // rate-limit backoff, a remote agent still replaying its transcript — was declared
-        // failed while the ritual was still well inside its budget and about to succeed.
-        //
-        // `aborted` is excluded, and it is the branch that made this guarantee a half one.
-        // A gate aborts when the HUMAN types into the tab — likely, when they are looking at
-        // the tab they just watched a command appear in — and the init then never got the
-        // tolerance this line was moved here to give it. Arming anyway declared a re-bind
-        // failed 45s after an interruption, which pins the tab to `stopped` and offers a
-        // resume typed at a live agent. Only a gate that ran to its own conclusion, or that
-        // timed out having given the step its full budget, has anything to say about whether
-        // the binding took. Trimmed, because the step text is a free textarea in the rules
-        // editor and a trailing space would silently drop the verification while still
-        // re-binding — the exact silent-failure this whole path exists to end.
-        if (res !== 'aborted' && step.text.trim() === REBIND_COMMAND) rebindWatch.set(tabId, Date.now());
         if (outstanding.get(tabId)?.id === directive.id) clearOutstanding(tabId);
         if (res === 'aborted') {
           ledger(tabId, rule.id, origin, i, step, 'aborted');
@@ -2293,9 +2258,8 @@ function createOverlordStore() {
           (t) => isInFlight(t) && now - Date.parse(t.updated_at) >= w.days * 86_400_000,
         );
       case 'agent_unready':
-        // Narrowed to the case a directive can actually fix: the agent is running but
-        // unbound. Firing on a tab sitting at a shell would type `/maiterm init` into
-        // bash — noise in the user's terminal, and no closer to recovery.
+        // Narrowed to a running-but-unregistered agent. Firing on a tab sitting at a shell
+        // would type the rule's text into bash — noise in the user's terminal.
         return unreadyKind(tab.id) === 'unbound';
       case 'no_todo_list': {
         // "No maiTerm tasks", not "no Claude todos". Reading the runtime's private store
@@ -2697,42 +2661,6 @@ function createOverlordStore() {
     for (const id of [...liveness.keys()]) {
       if (!live.has(id)) { liveness.delete(id); changed = true; }
     }
-    // A tab that came back (or closed) settles its re-bind verdict — it is no longer a
-    // candidate, so nothing below would ever clear these.
-    for (const id of [...rebindWatch.keys()]) if (!live.has(id)) rebindWatch.delete(id);
-    for (const id of [...rebindFailed]) if (!live.has(id)) rebindFailed.delete(id);
-    // Re-binds that never landed. `/maiterm init` is a cheap, safe thing to type at an
-    // agent that is running unbound — and a no-op typed at a shell prompt, which is what
-    // an SSH tab whose REMOTE agent has exited looks like from here (see the classification
-    // below). Waiting for the outcome is the only way to tell those apart from this side.
-    for (const [id, sentAt] of [...rebindWatch]) {
-      if (now - sentAt < REBIND_VERIFY_MS) continue;
-      rebindWatch.delete(id);
-      rebindFailed.add(id);
-      changed = true;
-      logInfo(`overlord: re-bind on ${id.slice(0, 8)} did not take — reclassifying as stopped`);
-      // Carry the verdict back to whoever asked for the recovery. `recoverTab` can only ever
-      // report that it TYPED `/maiterm init`; whether the far side was in a state to receive
-      // it is knowable only here, seconds later. Without this the caller keeps `sent: true`
-      // and nothing ever corrects it — the Payment Server tab sat unbound for 1h45m on
-      // 2026-08-29 after a recovery that reported success, and only came back when an app
-      // restart respawned it. A recovery that silently didn't happen is worse than one that
-      // fails loudly.
-      escalate(
-        id,
-        null,
-        'rebind_failed',
-        `The /maiterm init sent to ${tabDisplayName(id)} did not take — ${REBIND_VERIFY_MS / 1000}s later ` +
-          `that tab still has not registered, so it is NOT recovered however the recoverTab call read. ` +
-          `It is now classified 'stopped' rather than 'unbound' on the evidence: the cheap remedy was ` +
-          `typed and watched, and nothing happened. Common causes are an agent still mid-resume when the ` +
-          `line was typed (especially over SSH, where a remote agent that is replaying its transcript ` +
-          `swallows it), or a remote agent that has actually exited, leaving ssh in the foreground at a ` +
-          `shell prompt. Call recoverTab on it again — now that it reads 'stopped' that types the ` +
-          `runtime's resume command and relaunches the agent, rather than re-typing an init that has ` +
-          `already been shown not to work.`,
-      );
-    }
     if (!candidates.length) {
       if (changed) bumpLive();
       return;
@@ -2743,25 +2671,9 @@ function createOverlordStore() {
         const l = res[ptyId];
         if (!l) continue;
         // ssh_foreground stands in for a remote agent we cannot see in the local process
-        // tree — an SSH tab with a live session is treated as unbound, which is the case
-        // that actually happens after a restart.
-        //
-        // But it is a GUESS, and a systematically wrong one for a whole class: `ssh` being
-        // the foreground job says nothing about what runs on the far side, so an SSH tab
-        // sitting at a REMOTE SHELL PROMPT — agent long gone — is indistinguishable from a
-        // live remote agent that merely lost its binding. Both read `unbound`, both get
-        // `/maiterm init`, and for the dead one that is a line of junk typed at bash. It
-        // can never be classified `stopped`, so the remedy that would actually fix it
-        // (replay auto-resume) is unreachable, and every run-all re-types the same no-op.
-        //
-        // `rebindFailed` is the correction, and it is evidence rather than inference: we
-        // typed the cheap remedy, watched, and it did not take. Verdict wins over the
-        // guess until the tab is no longer dormant.
-        const kind: UnreadyKind = rebindFailed.has(tab.id)
-          ? 'stopped'
-          : l.agent_running || l.ssh_foreground
-            ? 'unbound'
-            : 'stopped';
+        // tree. It is a guess: an SSH tab at a REMOTE shell prompt, its agent long gone,
+        // reads the same. `recoverTab` settles it from the screen before typing anything.
+        const kind: UnreadyKind = l.agent_running || l.ssh_foreground ? 'unbound' : 'stopped';
         if (liveness.get(tab.id)?.kind !== kind) changed = true;
         liveness.set(tab.id, { kind, at: now });
       }
@@ -2771,37 +2683,9 @@ function createOverlordStore() {
     if (changed) bumpLive();
   }
 
-  /**
-   * The triage worklist, shared by the run-all button's label and the run itself.
-   *
-   * `superseded` is the collision that made this a shared function: an `agent_unready` rule
-   * fires on the same signal the re-bind reads, so an unbound tab produces BOTH a re-bind job
-   * and a proposal whose sequence is very likely the identical `/maiterm init`. (The default
-   * that did this shipped until 2026-09-21 — see `defaults.ts`. The event is still selectable,
-   * so a hand-written or agent-proposed rule collides the same way and this still earns its
-   * keep.) Running both types it twice — or, once the re-bind lands and
-   * the tab is no longer unready, leaves `waitInjectable` spinning for its full five-minute
-   * cap while holding the tab's ritual lock, blocking every `only_if_no_outstanding` rule
-   * and stalling the run's own drain check on rituals that will never inject.
-   *
-   * The re-bind wins: it is the same remedy delivered by the path that actually works on an
-   * unbound tab (it bypasses guards that are false by definition there).
-   */
-  function triageJobs(): { rebinds: string[]; proposalIds: string[]; superseded: string[] } {
-    const rebinds: string[] = [];
-    for (const [tabId, e] of liveness) if (e.kind === 'unbound') rebinds.push(tabId);
-    const rebinding = new Set(rebinds);
-    const proposalIds: string[] = [];
-    const superseded: string[] = [];
-    for (const p of proposals) {
-      const rule = preferencesStore.overlordRules.find((r) => r.id === p.ruleId);
-      if (rebinding.has(p.tabId) && rule?.when.event === 'agent_unready') {
-        superseded.push(p.id);
-        continue;
-      }
-      proposalIds.push(p.id);
-    }
-    return { rebinds, proposalIds, superseded };
+  /** The triage worklist, shared by the run-all button's label and the run itself. */
+  function triageJobs(): { proposalIds: string[] } {
+    return { proposalIds: proposals.map((p) => p.id) };
   }
 
   /** The enabled `context_pct` rule that would checkpoint this tab — lowest threshold
@@ -3093,7 +2977,7 @@ function createOverlordStore() {
       if (kind === 'unbound') {
         return {
           reason: 'agent_running_unbound',
-          detail: 'An agent IS running in that tab; it just has not run /maiterm init. Archiving or closing kills its PTY, so this would end a live session. Use recoverTab to re-bind it, then decide.',
+          detail: 'Something is running in that tab that has not registered with maiTerm — most likely an agent still starting. Archiving or closing kills its PTY, so this could end a live session. Retry in a few seconds; if it stays unregistered, call recoverTab, which relaunches the agent if the tab turns out to be at a shell.',
         };
       }
       if (kind !== 'stopped') {
@@ -3995,14 +3879,6 @@ function createOverlordStore() {
      *  which remedy it offers — the two must agree. */
     unreadyKind,
 
-    /** Was this tab classified `stopped` because a re-bind was tried and didn't land,
-     *  rather than because the process probe saw nothing? The card says which, since
-     *  "the agent exited" is not what the human sees on an SSH tab whose ssh is alive. */
-    rebindDidNotTake(tabId: string): boolean {
-      void liveVersion;
-      return rebindFailed.has(tabId);
-    },
-
     /**
      * Is this tab loaded in the DOM — i.e. can anything here classify or recover it?
      *
@@ -4105,27 +3981,30 @@ function createOverlordStore() {
       return { ok: true };
     },
 
-    /** Recover a tab that was an agent and isn't responding.
+    /** Relaunch the agent of a tab whose agent has stopped: the runtime's resume command,
+     *  typed at the shell, resuming the tab's own session.
      *
-     *  This is the point of a supervisor: the deck used to print "resume it or run
-     *  /maiterm init" and leave the human to do it, on every dormant tab, forever. The
-     *  remedy is chosen from the process state, not guessed:
+     *  This is the point of a supervisor: the deck used to print "resume it" and leave the
+     *  human to do it, on every dormant tab, forever.
      *
-     *    unbound — agent alive, no binding → type `/maiterm init`. Cheap and safe.
-     *    stopped — nothing running → type the runtime's resume command, relaunching the
-     *              agent. Bigger, so it is never automatic: only this explicit call.
+     *  An `unbound` tab is refused — something is running there, and a resume command typed
+     *  into a live agent is a prompt, not a relaunch — with one exception: an SSH tab whose
+     *  remote agent exited reads `unbound` too (`ssh` is the foreground job either way). For
+     *  a Claude tab the screen settles it: no Claude input box on screen means the far side
+     *  is a shell, so it is relaunched like a stopped one. Other runtimes have no box to
+     *  read, so their SSH tabs are refused rather than guessed.
      *
      *  Deliberately does NOT go through driveTab, whose guards require a live REPL and an
      *  idle agent — both false here by definition. It keeps the quiescence rule (never
      *  type over a repaint) and ledgers verbatim like every other injection. */
     async recoverTab(
       tabId: string,
-    ): Promise<{ sent: boolean; kind?: UnreadyKind; verified?: boolean; reason?: string; detail?: string }> {
+    ): Promise<{ sent: boolean; kind?: UnreadyKind; reason?: string; detail?: string }> {
       if (isExemptTab(tabId)) return { sent: false, reason: 'exempt', detail: EXEMPT_DETAIL };
       // Terminal first. A tab with no mounted pane has no liveness entry either — the probe
       // only considers tabs it can reach — so asking `unreadyKind` first answered
       // `not_unready`, which reads as "nothing wrong with that tab" for a tab nothing can
-      // reach. The description promised the opposite; now it is true.
+      // reach.
       const inst = terminalsStore.get(tabId);
       if (!inst) {
         return {
@@ -4137,27 +4016,25 @@ function createOverlordStore() {
         };
       }
       const kind = unreadyKind(tabId);
-      if (!kind) return { sent: false, reason: 'not_unready', detail: 'That tab is not classified as unready — its agent is running and bound, so there is nothing to recover.' };
-      // Claude's workspace-trust dialog reads as an unbound agent, and both recoveries end in an
+      if (!kind) return { sent: false, reason: 'not_unready', detail: 'That tab is not classified as unready — its agent is running and registered, so there is nothing to recover.' };
+      // Claude's workspace-trust dialog reads as an unbound agent, and a relaunch ends in an
       // Enter that would confirm its "No, exit". It is the human's decision, not a recovery.
       if (await commands.trustDialogOpen(tabId)) {
         return { sent: false, kind, reason: 'trust_dialog',
           detail: "That tab is at Claude's workspace-trust dialog, asking whether to trust its folder. Trusting a folder is the human's decision, and the dialog is already in front of them as a permission on their board: leave it, and do not ask them about it yourself. Nothing was typed." };
       }
-
-      let text: string;
+      const runtime = workspacesStore.getTabRuntime(tabId);
+      if (!runtime) return { sent: false, kind, reason: 'unknown_runtime' };
       if (kind === 'unbound') {
-        text = REBIND_COMMAND;
-      } else {
-        const runtime = workspacesStore.getTabRuntime(tabId);
-        if (!runtime) return { sent: false, reason: 'unknown_runtime' };
-        // Interpolates %<runtime>SessionId from the tab's trigger variables, the same way
-        // auto-resume does — so this resumes the tab's own session, not a fresh one.
-        text = interpolateVariables(tabId, resumeCommandFor(runtime));
-        if (text.includes('%')) return { sent: false, reason: 'no_session_id' };
+        const running = await agentStillRunning(tabId, inst.ptyId, runtime);
+        if (running) return { sent: false, kind, reason: 'agent_running', detail: running };
       }
+      // Interpolates %<runtime>SessionId from the tab's trigger variables, the same way
+      // auto-resume does — so this resumes the tab's own session, not a fresh one.
+      const text = interpolateVariables(tabId, resumeCommandFor(runtime));
+      if (text.includes('%')) return { sent: false, kind, reason: 'no_session_id' };
 
-      const step: OverlordStep = { kind: kind === 'unbound' ? 'slash' : 'process', text };
+      const step: OverlordStep = { kind: 'process', text };
       const lastOut = terminalsStore.getLastOutputAt(tabId) ?? 0;
       if (Date.now() - lastOut < 1500) {
         ledger(tabId, null, 'human', 0, step, 'blocked_guard');
@@ -4172,41 +4049,12 @@ function createOverlordStore() {
       }
       ledger(tabId, null, 'human', 0, step, 'sent');
       logInfo(`overlord: recover ${tabId.slice(0, 8)} (${kind}) — sent ${JSON.stringify(text)}`);
-      if (kind === 'unbound') {
-        // Watch for the outcome. Without this the deck could only ever re-ask the process
-        // probe, which returns the same `unbound` guess forever for an SSH tab whose remote
-        // agent is gone — so run-all reported "sent 69, skipped 0" while a dozen tabs took
-        // a line of junk at a bash prompt and nothing ever said so.
-        rebindWatch.set(tabId, Date.now());
-      } else {
-        // A resume was just typed; give the previous verdict up so the next probe judges
-        // the tab on what happens now.
-        rebindFailed.delete(tabId);
-      }
       // Clear the classification so the deck stops showing it immediately; the next tick
-      // re-probes and will re-raise it if the remedy didn't take.
+      // re-probes and re-raises it if the relaunch didn't take, which is visible as the tab
+      // staying dormant.
       liveness.delete(tabId);
       bumpLive();
-      // `sent` means the bytes were written, and that is ALL it has ever meant. For a
-      // re-bind that is not the same as recovered: a resuming agent can swallow the line
-      // and nothing here can tell. Say so at the call site rather than letting the caller
-      // read `sent: true` as a result, and name the watch that will correct it — the
-      // verdict lands as a `rebind_failed` escalation about 45s from now if it didn't take.
-      // A `stopped` recovery needs no such hedge: it relaunches the agent, and a relaunch
-      // that fails is visible as the tab staying dormant.
-      return kind === 'unbound'
-        ? {
-            sent: true,
-            kind,
-            verified: false,
-            detail:
-              `/maiterm init was typed into that tab. That is NOT confirmation it bound — an agent ` +
-              `still coming up, especially a remote one over SSH, swallows it silently. maiTerm ` +
-              `watches for ${REBIND_VERIFY_MS / 1000}s and raises a rebind_failed escalation if it ` +
-              `did not take. Until then treat the tab as still unbound: do not report it recovered, ` +
-              `and re-read its state from listWorkspaces before relying on it.`,
-          }
-        : { sent: true, kind, verified: false };
+      return { sent: true, kind };
     },
 
     // ── Context pressure: checkpoint ─────────────────────────────────────────
@@ -4569,14 +4417,10 @@ function createOverlordStore() {
 
     /** What "run all" would do right now, for the button's own label. The count and the
      *  run read the SAME list, so the label can't promise work the run then skips. */
-    get triageActionable(): { rebinds: number; proposals: number; total: number } {
+    get triageActionable(): { proposals: number; total: number } {
       void liveVersion;
       const j = triageJobs();
-      return {
-        rebinds: j.rebinds.length,
-        proposals: j.proposalIds.length,
-        total: j.rebinds.length + j.proposalIds.length,
-      };
+      return { proposals: j.proposalIds.length, total: j.proposalIds.length };
     },
 
     cancelTriageRun() { triageCancelled = true; },
@@ -4584,12 +4428,7 @@ function createOverlordStore() {
     /**
      * Clear the triage deck in one pass, paced for an API rate limit.
      *
-     * Only the two actions that are Overlord's own call to make:
-     *   1. re-bind every `unbound` agent, and
-     *   2. approve every pending proposal.
-     *
-     * Re-binds go FIRST because a proposal aimed at an unbound tab lands nowhere — fixing
-     * the binding first is what makes the directives that follow it worth sending.
+     * Only the action that is Overlord's own call to make: approve every pending proposal.
      *
      * Deliberately NOT included: restarting `stopped` agents (relaunching a fleet is not a
      * one-click action), and the stale-task and escalation buttons — marking work done,
@@ -4601,32 +4440,15 @@ function createOverlordStore() {
      * dismissed thirty seconds ago would be indistinguishable from ignoring them.
      */
     async runTriage(opts?: { batch?: number; gapMs?: number }): Promise<TriageResult> {
-      if (triageRun) return { sent: 0, skipped: 0, bound: 0, silent: 0 };
+      if (triageRun) return { sent: 0, skipped: 0 };
       const batch = Math.max(1, opts?.batch ?? TRIAGE_BATCH);
       const gapMs = Math.max(0, opts?.gapMs ?? TRIAGE_GAP_MS);
 
-      type Job = { kind: 'rebind'; tabId: string } | { kind: 'proposal'; id: string };
-      const { rebinds, proposalIds, superseded } = triageJobs();
-      const jobs: Job[] = [
-        ...rebinds.map((tabId): Job => ({ kind: 'rebind', tabId })),
-        ...proposalIds.map((id): Job => ({ kind: 'proposal', id })),
-      ];
-      if (!jobs.length) return { sent: 0, skipped: 0, bound: 0, silent: 0 };
-
-      // Drop the proposals the re-bind replaces, rather than leaving stale cards on the
-      // deck offering a remedy this run is about to deliver a better way.
-      if (superseded.length) {
-        const drop = new Set(superseded);
-        proposals = proposals.filter((p) => !drop.has(p.id));
-        logInfo(`overlord: run-all — ${superseded.length} agent_unready proposal(s) superseded by re-bind`);
-      }
+      const jobs = triageJobs().proposalIds;
+      if (!jobs.length) return { sent: 0, skipped: 0 };
 
       triageCancelled = false;
       let sent = 0, skipped = 0;
-      /** Re-bind targets whose injection was delivered — the set we will actually verify.
-       *  Entries are removed as they register, so what remains at the end is the silence. */
-      const awaitingRebind = new Set<string>();
-      let rebindSent = 0;
       const waves = Math.ceil(jobs.length / batch);
       triageRun = {
         total: jobs.length, done: 0, sent: 0, skipped: 0,
@@ -4637,16 +4459,11 @@ function createOverlordStore() {
         for (let w = 0; w < waves && !triageCancelled; w++) {
           for (const job of jobs.slice(w * batch, (w + 1) * batch)) {
             if (triageCancelled) break;
-            const label = job.kind === 'rebind'
-              ? `re-bind ${tabDisplayName(job.tabId)}`
-              : (proposals.find((p) => p.id === job.id)?.ruleName ?? 'proposal');
+            const label = proposals.find((p) => p.id === job)?.ruleName ?? 'proposal';
             triageRun = { ...triageRun!, wave: w + 1, phase: 'running', resumeAt: null, label };
 
             let ok = false;
-            if (job.kind === 'rebind') {
-              ok = (await this.recoverTab(job.tabId)).sent;
-              if (ok) { awaitingRebind.add(job.tabId); rebindSent++; }
-            } else {
+            {
               // Re-read: the human may have dismissed it, or the rule may have been edited
               // away, since the snapshot. And re-CHECK: run all is exactly where a stale
               // proposal does the most damage, since it fires a whole queue at once without
@@ -4655,7 +4472,7 @@ function createOverlordStore() {
               // "Send it" refuses it: the proposal is still true, it just can't be typed
               // until the human answers, and firing it would hold that tab's ritual slot
               // for the whole waitInjectable cap while counting here as sent.
-              const p = proposals.find((x) => x.id === job.id);
+              const p = proposals.find((x) => x.id === job);
               const rule = p && preferencesStore.overlordRules.find((r) => r.id === p.ruleId);
               if (p && rule && !rituals.has(p.tabId) && !permissionBlocks(rule, p.tabId) && proposalStillHolds(p, Date.now())) {
                 proposals = proposals.filter((x) => x.id !== p.id);
@@ -4682,60 +4499,10 @@ function createOverlordStore() {
             await sleep(1_000);
           }
         }
-
-        // ── Verify ────────────────────────────────────────────────────────────
-        //
-        // "Sent" is not an outcome. A `/maiterm init` typed at a tab whose agent is gone
-        // is delivered perfectly and achieves nothing — and for an SSH tab that is the
-        // NORMAL failure, because `ssh_foreground` cannot see the far side (§9.4). A real
-        // run over 69 tabs reported "sent 69, skipped 0" while 14 never came back.
-        //
-        // So the run stays open until every re-bind target has either registered or run out
-        // of time. Only re-binds are verifiable this way: a proposal starts a ritual whose
-        // completion is a different thing entirely, and is reported as sent.
-        if (awaitingRebind.size) {
-          const until = Date.now() + REBIND_VERIFY_MS;
-          while (!triageCancelled && Date.now() < until) {
-            for (const id of [...awaitingRebind]) {
-              if (claudeStateStore.getState(id)) awaitingRebind.delete(id);
-            }
-            if (!awaitingRebind.size) break;
-            triageRun = {
-              ...triageRun!,
-              phase: 'verifying',
-              resumeAt: until,
-              label: `${awaitingRebind.size} tab${awaitingRebind.size === 1 ? '' : 's'} still coming back`,
-            };
-            await sleep(1_000);
-          }
-        }
       } finally {
         triageRun = null;
       }
-      // Cancelling stops the watching, not the tabs — a cancelled run has no verdict to
-      // report, so it says how many were sent and leaves the deck to classify the rest.
-      const silent = triageCancelled ? 0 : awaitingRebind.size;
-      const bound = Math.max(0, rebindSent - silent);
-      logInfo(
-        `overlord: run-all — sent ${sent}, skipped ${skipped}` +
-          (triageCancelled ? ' (cancelled)' : `, re-bound ${bound}, no answer from ${silent}`),
-      );
-      return { sent, skipped, bound, silent };
-    },
-
-    /** Recover every unready tab in one pass — the deck's bulk action. Staggered so a
-     *  window with dozens of dormant tabs doesn't hammer every PTY at once. */
-    async recoverAllUnbound(): Promise<{ sent: number; skipped: number }> {
-      let sent = 0, skipped = 0;
-      for (const [tabId, entry] of [...liveness]) {
-        // Only the safe remedy in bulk. Relaunching agents en masse is not something to
-        // trigger from one button click.
-        if (entry.kind !== 'unbound') continue;
-        const r = await this.recoverTab(tabId);
-        if (r.sent) sent++;
-        else skipped++;
-        await sleep(400);
-      }
+      logInfo(`overlord: run-all — sent ${sent}, skipped ${skipped}${triageCancelled ? ' (cancelled)' : ''}`);
       return { sent, skipped };
     },
 
@@ -5099,29 +4866,17 @@ function createOverlordStore() {
       if (repl !== 'ready') {
         ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_no_repl');
         if (repl === 'unbound') {
-          // An agent IS running there; it just hasn't told maiTerm which tab it is, so
+          // Something IS running there; it just hasn't told maiTerm which tab it is, so
           // nothing can be routed to or from it. Saying "no live REPL" here is what sent
           // everyone looking for a dead terminal.
-          //
-          // And then say it with the block already clearing: `recoverTab` types the one
-          // line that fixes it, exactly as the deck's Re-bind button does, and refuses to
-          // type over live output. Describing this and leaving it is the failure mode this
-          // subsystem keeps repeating — the remedy is one call away and the supervisor has
-          // no other way to reach an unregistered tab, because driveTab is that way.
-          const recent = rebindWatch.get(tabId);
-          const fresh = recent !== undefined && Date.now() - recent < REBIND_VERIFY_MS;
-          const r = fresh ? { sent: false, reason: 'already_sent' } : await this.recoverTab(tabId);
           return {
             sent: false,
             reason: 'not_registered',
             detail:
-              `An agent is running in that tab, but it has not run /maiterm init since it ` +
-              `started, so maiTerm cannot route to it — the tab is not dead. ` +
-              (r.sent || fresh
-                ? `/maiterm init has been sent for you; retry this directive in a few seconds. ` +
-                  `If it still refuses, the agent is gone rather than unbound and the tab needs restarting.`
-                : `Sending /maiterm init failed (${r.reason}) — use the Re-bind action on the ` +
-                  `triage deck, or ask the human to run it in the tab.`),
+              'Something is running in that tab, but no agent session there has registered with maiTerm, ' +
+              'so nothing can be routed to it — the tab is not dead. An agent registers itself when it ' +
+              'starts, so retry in a few seconds. If it still refuses, call recoverTab: it relaunches the ' +
+              'agent when the tab turns out to be at a shell, and says why not otherwise.',
           };
         }
         return {

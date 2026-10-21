@@ -1139,8 +1139,21 @@ have opposite remedies:
 
 | Kind | Process state | Remedy |
 |---|---|---|
-| `unbound` | agent alive (or an SSH session in the foreground) | `/maiterm init` — restores tool routing and reply delivery |
-| `stopped` | nothing running; the tab is at a shell — **or** a re-bind was tried and never landed | relaunch the agent with its resume command |
+| `unbound` | something running (an agent, or an SSH session in the foreground), no agent registered | usually an agent still starting, which registers itself: wait. `recoverTab` relaunches one whose ssh tab turns out to be at a remote shell |
+| `stopped` | nothing running; the tab is at a shell | relaunch the agent with its resume command (`recoverTab`) |
+
+**Since 2026-10-21 nothing types `/maiterm init`.** An agent registers itself at start (the
+SessionStart hook and the `x-maiterm-tab` header), so the re-bind remedy this section's history
+describes is gone: `recoverTab` only relaunches, the triage deck's re-bind sweep and *Re-bind all*
+are gone, and so are `rebindWatch`/`rebindFailed` and the `rebind_failed` escalation. What the
+re-bind era learned about SSH tabs still holds — `ssh` in the foreground says nothing about the
+far side — so `recoverTab` settles an `unbound` SSH tab from the SCREEN before typing: no Claude
+input box on screen means a remote shell, and the agent is relaunched; a box means Claude is
+there (refused `agent_running`). Other runtimes have no box to read, so their SSH tabs are refused
+rather than guessed. A local `unbound` tab (an agent process is visible) is always refused: a
+resume command typed into a live agent arrives as a prompt. The deck's `unbound` card offers
+*Restart agent* (the same call) and *Reload tab* (a fresh shell; the tab's auto-resume brings the
+agent back). Doctrine v11.
 
 The engine classifies with `get_agent_liveness_batch` over the dormant candidates only
 (a full process-tree walk per tab per tick is the shape that froze the UI once already —
@@ -1499,7 +1512,7 @@ The deck's standing rule, learned twice the hard way (the `unready` cards that p
 | permission | Open tab — *see below* |
 | pressure | **Checkpoint now** |
 | stale | Mark done / Park / Drop |
-| unready | Re-bind (`unbound`) / Restart agent (`stopped`) — raised only for tabs whose pane is mounted, since nothing can probe or type into the others |
+| unready | Restart agent / Reload tab (`unbound`), Restart agent (`stopped`) — raised only for tabs whose pane is mounted, since nothing can probe or type into the others |
 | spent | Archive / Close / Keep |
 
 #### The declared-but-unproduced sweep (2026-08-24)
@@ -1704,8 +1717,7 @@ pure and unit-tested (`tabBatch.test.ts`), separate from the store for the same
 reason `meshRouting.ts` is separate from `agentMesh.svelte.ts`.
 
 `recoverTab` and `resumeTab` are deliberately **not** batched. Both write into a
-live PTY and carry their own per-tab watch (recoverTab's 45s `rebind_failed`);
-fanning typing out over a list is a different risk from removing tabs, and the
+live PTY; fanning typing out over a list is a different risk from removing tabs, and the
 fleet views already drive those one at a time.
 
 ### Suspended tab, suspended workspace, archived, not loaded — four things
@@ -1759,7 +1771,8 @@ whole job is that nothing in the window stays stuck:
 |---|---|
 | `idle` / `active` | `driveTab` |
 | `permission` | `getTabPrompt` + `answerTabPrompt` |
-| `unbound` / `stopped` | `recoverTab` — re-binds or restarts, chosen from the process state |
+| `stopped` | `recoverTab` — relaunches the agent with its resume command |
+| `unbound` | wait (an agent registers itself); `recoverTab` if it stays, which relaunches an ssh tab found at a shell and refuses otherwise |
 | `pty: 'suspended'` | `resumeTab` |
 | in a suspended workspace | `resumeWorkspace` |
 | in `archivedTabs[]` | `restoreArchivedTab`, or `deleteArchivedTab` to prune it |
@@ -2026,16 +2039,12 @@ already runs rules on it.
 ### Triage: run all
 
 One button clears the deck of everything Overlord already decided on — added
-2026-08-23, `overlordStore.runTriage()`. It covers exactly two actions:
-
-1. re-bind every `unbound` agent, then
-2. approve every pending proposal.
-
-Re-binds go **first**: a directive aimed at an unbound tab lands nowhere, so
-fixing the binding is what makes the proposals behind it worth sending.
+2026-08-23, `overlordStore.runTriage()`. It approves every pending proposal. (Until
+2026-10-21 it also re-bound every `unbound` agent first, and verified those re-binds; that
+went with `/maiterm init`.)
 
 Deliberately excluded: restarting `stopped` agents (relaunching a fleet is not a
-one-click action — same reasoning as `recoverAllUnbound`), and the stale-task and
+one-click action), and the stale-task and
 escalation buttons. Marking work done, parking it, dropping it, or clearing an
 escalation are judgement calls; a bulk control that quietly made them would be
 the worst kind of convenience.
@@ -2054,37 +2063,8 @@ The hold is the one that matters: turns run for minutes, so a gap alone just
 spreads the starts and the waves stack into the burst the pacing existed to
 avoid. It is capped so one wedged ritual cannot strand the rest of the run.
 
-**Sent is not an outcome.** After the last wave the run enters a fourth phase,
-`verifying`, and stays open until every re-bind target has either registered or
-run out of time (`REBIND_VERIFY_MS`). This exists because a `/maiterm init`
-typed at a tab whose agent is gone is *delivered perfectly and achieves nothing*
-— and for SSH tabs that is the normal failure, since `ssh_foreground` cannot see
-the far side (§9.4). The run that exposed this reported **"sent 69, skipped 0"**
-while 14 tabs never came back, 13 of them SSH.
-
-So `runTriage` returns `{ sent, skipped, bound, silent }`: `sent` is delivery,
-`bound` is outcome, and `silent` is the gap — re-binds that landed and were never
-answered, each of which is now a `stopped` card offering a restart. The deck says
-so: *"sent 69, re-bound 55 — 14 never answered and need a restart."* A cancelled
-run has no verdict and reports only what it sent.
-
-Only re-binds are verifiable this way. A proposal starts a ritual whose completion
-is a different thing entirely, and is reported as sent.
-
-`recoverAllUnbound` (the smaller "Re-bind all" button) deliberately does **not**
-hold open — it is usually a tab or two, and a 45s spinner would be worse than the
-cards correcting themselves. It now says what it knows ("sent … — any that don't
-answer come back as needing a restart") rather than claiming it re-bound them.
-
 One worklist function (`triageJobs`) backs both the button's label and the run, so the
-label cannot promise work the run then skips. It also resolves a collision: an
-`agent_unready` rule fires on the same signal the re-bind reads, so an unbound tab yields
-BOTH a re-bind job and a proposal whose sequence is very likely the identical
-`/maiterm init`. Running both types it twice — or, once the re-bind lands and the tab is no
-longer unready, leaves `waitInjectable` spinning for its full 5-minute cap while holding
-the tab's ritual lock, blocking every `only_if_no_outstanding` rule and stalling the run's
-own drain check on rituals that will never inject. The re-bind wins (it bypasses guards
-that are false by definition on an unbound tab) and the superseded proposals are dropped.
+label cannot promise work the run then skips.
 
 The worklist is snapshotted up front and **re-validated at send time** — a run
 takes minutes and the deck changes underneath it, so firing a proposal the human
