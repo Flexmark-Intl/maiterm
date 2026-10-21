@@ -143,10 +143,13 @@ used for creditworthiness or lending.
 
 ---
 
-## Graphics (required)
+## Graphics
+
+Built by `node chrome-extension/scripts/store-assets.mjs` into `store-assets/` (1280×800): the
+REAL popup in Chrome for Testing, talking to a stand-in maiTerm with a staged cast, so no real tab
+names, hosts or paths reach a shot. Re-run it after any popup change.
 
 - Icon 128×128: `icons/icon128.png`
-- At least one screenshot, 1280×800 or 640×400: the popup linking a tab, and maiTerm's
-  Preferences → Chrome extension pane. Not made yet — follow the screenshot staging playbook
-  (no real names, hosts or paths in the shot).
-- Small promo tile 440×280: optional.
+- Screenshot 1: `store-assets/screenshot-1-link.png` — picking the agent
+- Screenshot 2: `store-assets/screenshot-2-linked.png` — linked, beside a page with a failing request
+- Small promo tile 440×280: optional, not made.
