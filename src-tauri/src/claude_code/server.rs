@@ -1912,7 +1912,14 @@ async fn handle_read_comms_channel(arguments: &Value, state: &Arc<AppState>) -> 
     if let Some(t) = str_arg("thread") {
         let post_id = if t.starts_with("http") {
             match comms::parse_permalink(t) {
-                Ok(p) => p.post_id,
+                Ok(p) if comms::same_server_host(client.base_url(), &p.host) => p.post_id,
+                Ok(p) => {
+                    return serde_json::json!({ "error": format!(
+                        "that permalink is on {}, but maiTerm's Mattermost integration is configured for {}",
+                        p.host,
+                        client.base_url()
+                    ) })
+                }
                 Err(e) => return serde_json::json!({ "error": e.to_string() }),
             }
         } else {
@@ -1944,10 +1951,10 @@ async fn handle_read_comms_channel(arguments: &Value, state: &Arc<AppState>) -> 
         Ok(ChannelRef::Id(id)) => client.channel_by_id(&id).await,
         Ok(ChannelRef::Names { host, team, channel }) => {
             // The bot's token goes only to the configured server; a URL naming another host is a mistake.
-            let configured = client.base_url().split("://").nth(1).unwrap_or_default();
-            if !host.is_empty() && !host.eq_ignore_ascii_case(configured.trim_end_matches('/')) {
+            if !host.is_empty() && !comms::same_server_host(client.base_url(), &host) {
                 return serde_json::json!({ "error": format!(
-                    "that URL is on {host}, but maiTerm's Mattermost integration is configured for {configured}"
+                    "that URL is on {host}, but maiTerm's Mattermost integration is configured for {}",
+                    client.base_url()
                 ) });
             }
             client.channel_by_name(&team, &channel).await
@@ -1964,11 +1971,11 @@ async fn handle_read_comms_channel(arguments: &Value, state: &Arc<AppState>) -> 
         .unwrap_or(30)
         .clamp(1, 100) as u32;
     let before = str_arg("before");
-    let (page, has_more) = match client.channel_posts_page(&channel.id, before, per_page).await {
+    let (page, has_more, extra) = match client.channel_posts_page(&channel.id, before, per_page).await {
         Ok(p) => p,
         Err(e) => return serde_json::json!({ "error": e.to_string() }),
     };
-    let (feed, thread_count) = comms::build_channel_feed(&client, &page).await;
+    let (feed, thread_count) = comms::build_channel_feed(&client, &page, &extra).await;
     let mut result = serde_json::json!({
         "channel": channel.display_name,
         "channel_name": channel.name,

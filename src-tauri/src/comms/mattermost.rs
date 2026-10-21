@@ -301,7 +301,7 @@ impl MattermostClient {
         channel_id: &str,
         before: Option<&str>,
         per_page: u32,
-    ) -> Result<(Vec<Post>, bool), CommsError> {
+    ) -> Result<(Vec<Post>, bool, Vec<Post>), CommsError> {
         let mut url = format!(
             "{}/api/v4/channels/{channel_id}/posts?per_page={per_page}",
             self.base
@@ -319,7 +319,16 @@ impl MattermostClient {
         // A full page means there may be more; the server's `prev_post_id` isn't modelled
         // because a short page is the reliable end signal.
         let more = list.order.len() as u32 >= per_page;
-        Ok((posts, more))
+        // The server also puts the roots of replies in `order` into `posts`; keep them so
+        // the feed needn't fetch each one.
+        let in_order: std::collections::HashSet<&String> = list.order.iter().collect();
+        let extra: Vec<Post> = list
+            .posts
+            .values()
+            .filter(|p| !in_order.contains(&p.id))
+            .cloned()
+            .collect();
+        Ok((posts, more, extra))
     }
 
     pub async fn users_by_ids(&self, ids: &[String]) -> Result<Vec<User>, CommsError> {

@@ -114,8 +114,10 @@ pub fn parse_channel_ref(input: &str) -> Result<ChannelRef, CommsError> {
         None => (String::new(), trimmed.to_string()),
     };
     let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    // A server hosted under a subpath (https://example.com/mattermost/<team>/channels/<c>)
+    // has leading segments, so match the shape from the end.
     let (team, channel) = match segs.as_slice() {
-        [team, "channels", channel] if !host.is_empty() => (*team, *channel),
+        [.., team, "channels", channel] if !host.is_empty() => (*team, *channel),
         [team, channel] if host.is_empty() => (*team, *channel),
         _ => return Err(bad()),
     };
@@ -123,6 +125,14 @@ pub fn parse_channel_ref(input: &str) -> Result<ChannelRef, CommsError> {
         return Err(bad());
     }
     Ok(ChannelRef::Names { host, team: team.to_string(), channel: channel.to_string() })
+}
+
+/// True when `host` (as a URL names it, port included) is the host of the configured
+/// server `base`, ignoring any subpath the server is mounted under.
+pub fn same_server_host(base: &str, host: &str) -> bool {
+    let after = base.split("://").nth(1).unwrap_or(base);
+    let configured = after.split('/').next().unwrap_or_default();
+    configured.eq_ignore_ascii_case(host)
 }
 
 /// One thread's worth of a channel page: its root (when the page or a fetch supplied it)
@@ -562,11 +572,20 @@ fn clip(s: &str, max: usize) -> String {
 pub async fn build_channel_feed(
     client: &MattermostClient,
     page: &[mattermost::Post],
+    extra: &[mattermost::Post],
 ) -> (String, usize) {
     let groups = group_by_thread(page);
-    // Roots the page didn't contain: fetch so a reply is never shown without its subject.
-    let mut fetched: HashMap<String, mattermost::Post> = HashMap::new();
-    for g in groups.iter().filter(|g| g.root.is_none()).take(30) {
+    // Roots the page didn't contain: the server usually ships them alongside the page
+    // (`extra`); fetch only what it didn't, so a reply is never shown without its subject.
+    let mut fetched: HashMap<String, mattermost::Post> = extra
+        .iter()
+        .filter(|p| p.root_id.is_empty())
+        .map(|p| (p.id.clone(), p.clone()))
+        .collect();
+    for g in groups.iter().filter(|g| g.root.is_none()) {
+        if fetched.contains_key(&g.root_id) {
+            continue;
+        }
         if let Ok(p) = client.get_post(&g.root_id).await {
             fetched.insert(g.root_id.clone(), p);
         }
@@ -1910,6 +1929,17 @@ mod tests {
         // a permalink is a thread, not a channel
         assert!(parse_channel_ref("https://h/t/pl/abc").is_err());
         assert!(parse_channel_ref("ews-updates").is_err());
+    }
+
+    #[test]
+    fn channel_refs_parse_under_a_subpath_and_hosts_compare() {
+        assert_eq!(
+            parse_channel_ref("https://example.com/mattermost/team/channels/c").unwrap(),
+            ChannelRef::Names { host: "example.com".into(), team: "team".into(), channel: "c".into() }
+        );
+        assert!(same_server_host("https://example.com/mattermost", "example.com"));
+        assert!(same_server_host("https://Example.com:8065/", "example.com:8065"));
+        assert!(!same_server_host("https://example.com", "other.com"));
     }
 
     #[test]
