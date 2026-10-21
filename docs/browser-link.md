@@ -30,7 +30,9 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    persisted on a `Tab`. The extension keeps its links in `chrome.storage.session` (lives as long
    as the browser) and re-announces them on every (re)connect; maiTerm accepts a re-announced
    link only for a maiTerm tab that still exists. A maiTerm tab RELOAD carries its link to the new
-   id (`browser_link::remap_tab`, called from `reloadTab`'s remaps).
+   id (`browser_link::remap_tab`, called from `reloadTab`'s remaps). Every reload's old→new id is remembered (`Registry.renamed`), and both a re-announced
+   link and the 5 s prune follow that chain, so a link that missed the remap (the extension was
+   disconnected, or its `hello` was in flight) still reaches the reloaded tab.
 
 ## 2. Discovery and authentication (native messaging)
 

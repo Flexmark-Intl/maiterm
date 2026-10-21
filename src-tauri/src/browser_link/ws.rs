@@ -88,11 +88,16 @@ async fn run(socket: WebSocket, state: Arc<AppState>, app: AppHandle) {
 
     // The links it already holds (it kept them across a service-worker restart or our relaunch).
     // Only for maiTerm tabs that still exist: a link to a closed tab must not come back.
+    // A link whose tab was reloaded while we were apart comes back under the new id.
     let mut accepted = Vec::new();
+    let mut renamed = Vec::new();
     for l in p.get("links").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-        if let Some(link) = parse_link(&l, &conn_id, &browser) {
-            if tab_exists(&state, &link.maiterm_tab_id) {
+        if let Some(mut link) = parse_link(&l, &conn_id, &browser) {
+            if let Some(changed) = super::resolve_announced(&state, &mut link) {
                 accepted.push(link.chrome_tab_id);
+                if changed {
+                    renamed.push(link.clone());
+                }
                 set_link(link);
             }
         }
@@ -105,6 +110,12 @@ async fn run(socket: WebSocket, state: Arc<AppState>, app: AppHandle) {
     if write.send(WsMessage::Text(reply(&hid, Ok(welcome)).into())).await.is_err() {
         drop_conn(&conn_id, &app);
         return;
+    }
+    {
+        let reg = REG.lock();
+        for l in &renamed {
+            super::notify_relinked(&reg, l, super::tab_name(&state, &l.maiterm_tab_id).as_deref());
+        }
     }
     emit_changed(&app);
 

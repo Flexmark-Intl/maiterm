@@ -130,7 +130,14 @@ struct Registry {
     /// Commands awaiting the extension, with the connection each went to.
     pending: HashMap<u64, (String, oneshot::Sender<Result<Value, String>>)>,
     next_id: u64,
+    /// Every reload's old tab id → new one. A link can miss its remap (the extension was
+    /// disconnected, or its `hello` was in flight), and both the re-announce and `prune` follow
+    /// this chain rather than treating the old id as a closed tab.
+    renamed: HashMap<String, String>,
 }
+
+/// Kept small: an entry only matters until the extension next reconnects.
+const RENAMED_KEEP: usize = 500;
 
 static REG: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registry::default()));
 
@@ -150,30 +157,53 @@ fn emit_changed(app: &AppHandle) {
 }
 
 /// A reload replaces the tab under a new id (CLAUDE.md, "Reload replaces a tab"); its link goes
-/// with it. Called from `carry_tab_state_on_reload`. The extension is told too: it re-announces
-/// its links on every reconnect, and one still naming the old id would be refused as a closed tab.
+/// with it. Called from `carry_tab_state_on_reload`. The extension is told too (`relinked`): it
+/// re-announces its links on every reconnect, and the old id would read as a closed tab. The
+/// rename is remembered even when no link holds it now, for a link that is re-announced later.
 pub fn remap_tab(app: &AppHandle, from: &str, to: &str) {
     use tauri::Manager;
     let name = app.try_state::<Arc<AppState>>().and_then(|s| tab_name(&s, to));
     let mut reg = REG.lock();
-    let mut moved = Vec::new();
-    for l in reg.links.iter_mut().filter(|l| l.maiterm_tab_id == from) {
-        l.maiterm_tab_id = to.to_string();
-        moved.push(l.clone());
+    if reg.renamed.len() >= RENAMED_KEEP {
+        reg.renamed.clear();
     }
-    for l in &moved {
-        if let Some(c) = reg.conns.get(&l.conn_id) {
-            let frame = serde_json::json!({
-                "method": "relinked",
-                "params": { "chromeTabId": l.chrome_tab_id, "maitermTabId": to, "maitermTabName": name },
-            });
-            let _ = c.tx.send(frame.to_string());
+    reg.renamed.insert(from.to_string(), to.to_string());
+    let mut moved = false;
+    for i in 0..reg.links.len() {
+        if reg.links[i].maiterm_tab_id == from {
+            reg.links[i].maiterm_tab_id = to.to_string();
+            notify_relinked(&reg, &reg.links[i], name.as_deref());
+            moved = true;
         }
     }
     drop(reg);
-    if !moved.is_empty() {
+    if moved {
         emit_changed(app);
     }
+}
+
+/// Tell the extension a link now belongs to its maiTerm tab's new id.
+fn notify_relinked(reg: &Registry, link: &Link, name: Option<&str>) {
+    if let Some(c) = reg.conns.get(&link.conn_id) {
+        let frame = serde_json::json!({
+            "method": "relinked",
+            "params": { "chromeTabId": link.chrome_tab_id, "maitermTabId": link.maiterm_tab_id, "maitermTabName": name },
+        });
+        let _ = c.tx.send(frame.to_string());
+    }
+}
+
+/// The live tab an id now names: itself, or where its reloads led. None for a closed tab.
+fn current_id(state: &Arc<AppState>, reg: &Registry, id: &str) -> Option<String> {
+    let mut id = id.to_string();
+    // Bounded: a chain is one hop per reload, and a cycle must not hang the lock.
+    for _ in 0..16 {
+        if tab_exists(state, &id) {
+            return Some(id);
+        }
+        id = reg.renamed.get(&id)?.clone();
+    }
+    None
 }
 
 /// The human turned the feature off: every link ends now (the extension detaches and Chrome's
@@ -211,16 +241,39 @@ fn tab_exists(state: &Arc<AppState>, tab_id: &str) -> bool {
 /// Chrome tab stops being debugged without waiting for someone to look.
 fn prune(state: &Arc<AppState>, app: &AppHandle) {
     let mut reg = REG.lock();
-    let (keep, gone): (Vec<Link>, Vec<Link>) =
-        std::mem::take(&mut reg.links).into_iter().partition(|l| tab_exists(state, &l.maiterm_tab_id));
-    reg.links = keep;
-    for l in &gone {
-        notify_unlinked(&reg, l, "The maiTerm tab was closed.");
+    let mut changed = false;
+    let mut kept = Vec::new();
+    for mut l in std::mem::take(&mut reg.links) {
+        match current_id(state, &reg, &l.maiterm_tab_id) {
+            Some(id) if id == l.maiterm_tab_id => kept.push(l),
+            // Reloaded while this link missed the remap: follow it.
+            Some(id) => {
+                l.maiterm_tab_id = id;
+                notify_relinked(&reg, &l, tab_name(state, &l.maiterm_tab_id).as_deref());
+                kept.push(l);
+                changed = true;
+            }
+            None => {
+                notify_unlinked(&reg, &l, "The maiTerm tab was closed.");
+                changed = true;
+            }
+        }
     }
+    reg.links = kept;
     drop(reg);
-    if !gone.is_empty() {
+    if changed {
         emit_changed(app);
     }
+}
+
+/// A link the extension re-announces on `hello`, under the id its maiTerm tab has now; None when
+/// that tab is closed. A changed id is sent back as `relinked` once the welcome is out.
+fn resolve_announced(state: &Arc<AppState>, link: &mut Link) -> Option<bool> {
+    let reg = REG.lock();
+    let id = current_id(state, &reg, &link.maiterm_tab_id)?;
+    let changed = id != link.maiterm_tab_id;
+    link.maiterm_tab_id = id;
+    Some(changed)
 }
 
 /// Make a link, replacing whatever either side was linked to (one-to-one, §1.3).
@@ -392,5 +445,37 @@ mod tests {
         set_link(link("tab-c", "c2", 2));
         assert_eq!(REG.lock().links.len(), 2);
         REG.lock().links.clear();
+    }
+
+    /// A link that missed a reload's remap (the extension was away) follows the rename chain to
+    /// the live tab; one whose chain ends at a closed tab resolves to nothing.
+    #[test]
+    fn announced_links_follow_reloads() {
+        use crate::state::{WindowData, Workspace};
+        let state = Arc::new(AppState::new());
+        let live = {
+            let mut data = state.app_data.write();
+            let mut win = WindowData::new("main".into());
+            let ws = Workspace::new("Proj".into());
+            let id = ws.panes[0].tabs[0].id.clone();
+            win.workspaces.push(ws);
+            data.windows.push(win);
+            id
+        };
+        {
+            let mut reg = REG.lock();
+            reg.renamed.insert("orig".into(), "mid".into());
+            reg.renamed.insert("mid".into(), live.clone());
+            reg.renamed.insert("loop-a".into(), "loop-b".into());
+            reg.renamed.insert("loop-b".into(), "loop-a".into());
+        }
+        let mut l = link("orig", "c1", 7);
+        assert_eq!(resolve_announced(&state, &mut l), Some(true));
+        assert_eq!(l.maiterm_tab_id, live);
+        let mut same = link(&live, "c1", 8);
+        assert_eq!(resolve_announced(&state, &mut same), Some(false));
+        assert_eq!(resolve_announced(&state, &mut link("closed", "c1", 9)), None);
+        assert_eq!(resolve_announced(&state, &mut link("loop-a", "c1", 10)), None);
+        REG.lock().renamed.clear();
     }
 }

@@ -42,12 +42,19 @@ pub fn browser_link_unlink(app: AppHandle, maiterm_tab_id: String) -> bool {
 pub async fn browser_link_open_extensions_page() -> bool {
     tauri::async_runtime::spawn_blocking(|| {
         #[cfg(target_os = "macos")]
-        let r = std::process::Command::new("open").args(["-a", "Google Chrome", "chrome://extensions"]).status();
+        let opened = std::process::Command::new("open")
+            .args(["-a", "Google Chrome", "chrome://extensions"])
+            .status()
+            .is_ok_and(|s| s.success());
+        // Launched, not waited on: on Linux the browser process IS the command.
         #[cfg(target_os = "linux")]
-        let r = std::process::Command::new("google-chrome").arg("chrome://extensions").spawn().map(|_| Default::default());
+        let opened = std::process::Command::new("google-chrome").arg("chrome://extensions").spawn().is_ok();
         #[cfg(windows)]
-        let r = std::process::Command::new("cmd").args(["/C", "start", "chrome", "chrome://extensions"]).status();
-        r.map(|s| s.success()).unwrap_or(false)
+        let opened = std::process::Command::new("cmd")
+            .args(["/C", "start", "chrome", "chrome://extensions"])
+            .status()
+            .is_ok_and(|s| s.success());
+        opened
     })
     .await
     .unwrap_or(false)
