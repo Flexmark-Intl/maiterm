@@ -653,6 +653,8 @@ export interface Preferences {
   follow_ups_resume_agent: boolean;
   /** Run agents' watch scripts without asking (§5.1). Off by default; never settable over MCP. */
   follow_ups_scripts_unattended: boolean;
+  /** The Chrome extension link (docs/browser-link.md): host manifests + the browser MCP tools. */
+  browser_link_enabled: boolean;
   overlord_rules: OverlordRule[];
   hidden_default_overlord_rules: string[];
   claude_ide: boolean;

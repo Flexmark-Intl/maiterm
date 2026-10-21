@@ -50,12 +50,14 @@ impl JsonRpcResponse {
 /// for follow-ups, whose flag is `Preferences::follow_ups_live()` — the Overlord AND its
 /// follow-ups toggle. `escalations_to_overlord` (`Preferences::escalations_to_overlord()`)
 /// only changes what `replyToOverlord` tells an agent about escalating — the tool itself is
-/// always there, since `ready`/`ack`/`status` don't depend on it.
+/// always there, since `ready`/`ack`/`status` don't depend on it. `browser_link` lists the
+/// browser tools (docs/browser-link.md §4).
 pub fn tool_list_response(
     tasks_enabled: bool,
     stack_enabled: bool,
     follow_ups_live: bool,
     escalations_to_overlord: bool,
+    browser_link: bool,
 ) -> Value {
     // Tools are built in batches to stay under the serde_json::json! macro recursion limit (128).
     // Each batch is a small Vec<Value> that gets extended into the final tools array.
@@ -1301,7 +1303,141 @@ pub fn tool_list_response(
         }
     ]).as_array().unwrap().clone());
 
+    if browser_link {
+        tools.extend(browser_tools());
+    }
+
     serde_json::json!({ "tools": tools })
+}
+
+/// The browser-link tools (docs/browser-link.md §4): diagnose and drive the ONE Chrome tab the
+/// human linked to the caller's tab, in the human's own browser and logins.
+fn browser_tools() -> Vec<Value> {
+    const LINKED: &str = "Acts on the Chrome tab your human linked to your maiTerm tab (in their own browser, signed in as them); call browserStatus first if you don't know whether you have one. Only your human can link a tab.";
+    let tab_id = serde_json::json!({ "type": "string", "description": "Your own tab (auto-injected)" });
+    serde_json::json!([
+        {
+            "name": "browserStatus",
+            "description": "Whether your maiTerm tab is linked to a Chrome tab, and if so its title and URL. A linked tab is yours to diagnose and drive: read its console errors (browserConsole) and requests (browserNetwork), read the page (browserSnapshot), and act in it (browserClick, browserType, browserPressKey, browserNavigate) — for example to reproduce a bug in the human's own session, check a fix in the real app, or walk a flow. When it isn't linked, the answer says what to ask your human: only they can link one, from the maiTerm Chrome extension.",
+            "inputSchema": { "type": "object", "properties": { "tabId": tab_id } }
+        },
+        {
+            "name": "browserNavigate",
+            "description": format!("Load a URL in your linked Chrome tab, or go back, forward or reload. Waits for the page to load (up to 15 s). {LINKED}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": tab_id,
+                    "url": { "type": "string", "description": "The URL to open, or one of: back, forward, reload" }
+                },
+                "required": ["url"]
+            }
+        },
+        {
+            "name": "browserSnapshot",
+            "description": format!("Read your linked Chrome tab as an accessibility tree: one line per element (role, name, value, state), indented by nesting. Elements you can act on carry [ref=eN]; pass that ref to browserClick or browserType. Take a fresh snapshot after the page changes. {LINKED}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": tab_id,
+                    "max_chars": { "type": "number", "description": "Cut the tree off after this many characters (default 40000)" }
+                }
+            }
+        },
+        {
+            "name": "browserClick",
+            "description": format!("Click an element of your linked Chrome tab by its ref from browserSnapshot: it is scrolled into view and clicked with real mouse events. {LINKED}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": tab_id,
+                    "ref": { "type": "string", "description": "The element's ref from browserSnapshot, e.g. e42" },
+                    "double": { "type": "boolean", "description": "Double-click (default false)" }
+                },
+                "required": ["ref"]
+            }
+        },
+        {
+            "name": "browserType",
+            "description": format!("Type text into an element of your linked Chrome tab (by ref from browserSnapshot), or into the focused element when no ref is given. Clears the field first unless clear is false. {LINKED}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": tab_id,
+                    "ref": { "type": "string", "description": "The element's ref from browserSnapshot; omit to type into whatever has focus" },
+                    "text": { "type": "string", "description": "The text to type" },
+                    "clear": { "type": "boolean", "description": "Empty the field first (default true)" },
+                    "submit": { "type": "boolean", "description": "Press Enter afterwards (default false)" }
+                },
+                "required": ["text"]
+            }
+        },
+        {
+            "name": "browserPressKey",
+            "description": format!("Press one key in your linked Chrome tab: Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space, or a single character. {LINKED}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": tab_id,
+                    "key": { "type": "string", "description": "The key, e.g. Enter" }
+                },
+                "required": ["key"]
+            }
+        },
+        {
+            "name": "browserScreenshot",
+            "description": format!("A screenshot of what your linked Chrome tab shows, returned as an image. Prefer browserSnapshot for reading and acting; use this to check how a page looks. {LINKED}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": tab_id,
+                    "full_page": { "type": "boolean", "description": "The whole page rather than the visible part (default false)" }
+                }
+            }
+        },
+        {
+            "name": "browserEval",
+            "description": format!("Evaluate a JavaScript expression in your linked Chrome tab's page and return its value (JSON-serialisable values only; a promise is awaited). It runs as the page, with the human's session: never use it to read or send their credentials or cookies. {LINKED}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": tab_id,
+                    "expression": { "type": "string", "description": "A JavaScript expression, e.g. document.title" }
+                },
+                "required": ["expression"]
+            }
+        },
+        {
+            "name": "browserConsole",
+            "description": format!("Diagnose your linked Chrome tab: its console messages, uncaught exceptions (with the source file:line) and the browser's own warnings (CSP violations, failed loads) since maiTerm attached to it, the last 200. Capture starts at attach, so to see what a page logs while loading, browserNavigate \"reload\" first. {LINKED}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": tab_id,
+                    "errors_only": { "type": "boolean", "description": "Only errors and exceptions (default false)" },
+                    "clear": { "type": "boolean", "description": "Empty the buffer after reading, so the next read shows only what is new (default false)" }
+                }
+            }
+        },
+        {
+            "name": "browserNetwork",
+            "description": format!("Diagnose your linked Chrome tab's network: the requests it made since maiTerm attached (method, URL, type, status, failure, size, ms; the last 100 of up to 300 kept, images/fonts/styles left out unless they failed). Pass request_id to read one response's body, e.g. the error an API returned. Capture starts at attach, so browserNavigate \"reload\" first to see a page's loading requests. {LINKED}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": tab_id,
+                    "failed_only": { "type": "boolean", "description": "Only requests that failed or answered 4xx/5xx (default false)" },
+                    "filter": { "type": "string", "description": "Only URLs containing this text" },
+                    "include_static": { "type": "boolean", "description": "Include images, fonts, stylesheets and media (default false)" },
+                    "request_id": { "type": "string", "description": "Return this request with its response body (up to 20000 characters)" },
+                    "clear": { "type": "boolean", "description": "Empty the log after reading (default false)" }
+                }
+            }
+        }
+    ])
+    .as_array()
+    .unwrap()
+    .clone()
 }
 
 /// `replyToOverlord`'s description, which is where a supervised agent learns who answers its

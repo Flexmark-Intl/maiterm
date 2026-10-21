@@ -2631,6 +2631,8 @@ pub fn carry_tab_state_on_reload(
 
     let data_clone = app_data.clone();
     drop(app_data);
+    // The Chrome tab linked to it goes with it (docs/browser-link.md §1.5).
+    crate::browser_link::remap_tab(tauri::Manager::app_handle(&window), &from_tab_id, &to_tab_id);
     save_state(&data_clone)
 }
 

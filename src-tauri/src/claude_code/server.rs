@@ -354,6 +354,7 @@ pub fn prepare_server(state: &Arc<AppState>) -> Option<ServerSetup> {
     // Proxied MCP servers' entries name this port too, so they are written before any tab
     // spawns as well (docs/mcp-proxy.md §6).
     crate::mcp_proxy::entries::sync(port, &auth, &prefs);
+    crate::browser_link::write_discovery(port);
 
     log::info!("Claude Code IDE server bound on http://127.0.0.1:{}", port);
 
@@ -473,6 +474,9 @@ pub async fn serve_server(app_handle: AppHandle, state: Arc<AppState>, setup: Se
         // The browser's return from an MCP server sign-in (docs/mcp-proxy.md §5). No auth header
         // can ride a browser redirect; the one-time `state` is what it must match.
         .route("/oauth/callback", get(oauth_callback_handler))
+        // The maiTerm Chrome extension (docs/browser-link.md §3). Authenticated by its Origin and
+        // the token it got over native messaging, not by the MCP auth header.
+        .route("/browser-link", get(browser_link_handler))
         .with_state(server_state);
 
     log::info!("Claude Code IDE server listening on http://127.0.0.1:{}", setup.port);
@@ -1010,6 +1014,7 @@ async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<App
         "sendFilesToPhone" => Some(handle_send_files_to_phone(arguments, state).await),
         "getMeshLayout" => Some(mesh_layout(state)),
         "getRequestStatus" => Some(request_status(arguments)),
+        t if crate::browser_link::is_browser_tool(t) => Some(crate::browser_link::handle_tool(t, arguments, state, app_handle).await),
         "postCommsReply" => Some(handle_post_comms_reply(arguments, state, app_handle).await),
         "startCommsThread" => Some(handle_start_comms_thread(arguments, state, app_handle).await),
         "unbindCommsThread" => {
@@ -2185,6 +2190,10 @@ async fn ws_upgrade_handler(
     ws.on_upgrade(move |socket| handle_ws_connection(socket, srv, declared))
 }
 
+async fn browser_link_handler(ws: WebSocketUpgrade, State(srv): State<ServerState>, headers: HeaderMap) -> Response {
+    crate::browser_link::upgrade(ws, headers, srv.state.clone(), srv.app_handle.clone())
+}
+
 async fn handle_ws_connection(socket: WebSocket, srv: ServerState, ws_declared_tab: Option<String>) {
     let ws_connection_id = format!("ws-{}", uuid::Uuid::new_v4());
     log::debug!("Claude Code WS client connected ({})", &ws_connection_id[..11]);
@@ -2598,7 +2607,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 48] = [
+const PEER_ADDRESSING_TOOLS: [&str; 58] = [
     // A mute aimed at a guessed tab silences notifications the human wants (docs/mute.md).
     "setMuted",
     // Agent requests and the moves (agent_requests.rs, docs/agent-requests.md): a request is
@@ -2668,6 +2677,18 @@ const PEER_ADDRESSING_TOOLS: [&str; 48] = [
     "createFollowUp",
     "listFollowUps",
     "cancelFollowUp",
+    // Browser link (docs/browser-link.md §1.2): these drive the Chrome tab the human linked to
+    // the caller, signed in as the human. On a guessed identity they would drive someone else's.
+    "browserStatus",
+    "browserNavigate",
+    "browserSnapshot",
+    "browserClick",
+    "browserType",
+    "browserPressKey",
+    "browserScreenshot",
+    "browserEval",
+    "browserConsole",
+    "browserNetwork",
 ];
 
 /// Tools that may only ever address the CALLING tab (docs/follow-ups.md §2). Elsewhere an
@@ -2678,7 +2699,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 48] = [
 /// The agent-request tools (agent_requests.rs) are here for the same reason from the other side:
 /// a request is shown to the human as "the agent in <tab> asks…", so the tab named must be the
 /// caller, and a request's status is only its own tab's to read.
-const OWN_TAB_ONLY_TOOLS: [&str; 16] = [
+const OWN_TAB_ONLY_TOOLS: [&str; 26] = [
     "createFollowUp",
     "listFollowUps",
     "cancelFollowUp",
@@ -2695,6 +2716,17 @@ const OWN_TAB_ONLY_TOOLS: [&str; 16] = [
     "reloadWindow",
     "addMcpServer",
     "getRequestStatus",
+    // A link is the CALLER's (docs/browser-link.md §1.2): another tab's is not its to drive.
+    "browserStatus",
+    "browserNavigate",
+    "browserSnapshot",
+    "browserClick",
+    "browserType",
+    "browserPressKey",
+    "browserScreenshot",
+    "browserEval",
+    "browserConsole",
+    "browserNetwork",
 ];
 
 /// Tools gated on the caller BEING the Overlord agent (docs/overlord.md). The gate is judged on
@@ -2882,11 +2914,11 @@ async fn process_message(
         }
         "notifications/initialized" => None,
         "tools/list" => {
-            let (tasks_enabled, stack_enabled, follow_ups_live, escalations_to_overlord) = {
+            let (tasks_enabled, stack_enabled, follow_ups_live, escalations_to_overlord, browser_link) = {
                 let prefs = &state.app_data.read().preferences;
-                (prefs.tasks_enabled, prefs.stack_enabled, prefs.follow_ups_live(), prefs.escalations_to_overlord())
+                (prefs.tasks_enabled, prefs.stack_enabled, prefs.follow_ups_live(), prefs.escalations_to_overlord(), prefs.browser_link_enabled)
             };
-            let resp = JsonRpcResponse::success(id, tool_list_response(tasks_enabled, stack_enabled, follow_ups_live, escalations_to_overlord));
+            let resp = JsonRpcResponse::success(id, tool_list_response(tasks_enabled, stack_enabled, follow_ups_live, escalations_to_overlord, browser_link));
             Some(serde_json::to_string(&resp).unwrap())
         }
         "tools/call" => {
@@ -3412,13 +3444,13 @@ async fn process_message(
 
                 // Backend-only tools: handle directly without emitting to frontend
                 if let Some(result) = handle_backend_tool(&tool_name, &arguments, state, app_handle).await {
-                    let content_text = serde_json::to_string(&result).unwrap_or_default();
-                    let resp = JsonRpcResponse::success(
-                        id,
-                        serde_json::json!({
-                            "content": [{ "type": "text", "text": content_text }]
-                        }),
-                    );
+                    // `__mcp_content`: the tool built its own content array (an image, or text
+                    // that would read badly as escaped JSON).
+                    let content = match result.get("__mcp_content") {
+                        Some(c) if c.is_array() => c.clone(),
+                        _ => serde_json::json!([{ "type": "text", "text": serde_json::to_string(&result).unwrap_or_default() }]),
+                    };
+                    let resp = JsonRpcResponse::success(id, serde_json::json!({ "content": content }));
                     Some(serde_json::to_string(&resp).unwrap())
                 } else {
                     // Frontend-handled tools: emit to the correct window

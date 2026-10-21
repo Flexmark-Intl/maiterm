@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod browser_link;
 pub mod claude_code;
 pub mod comms;
 pub mod deshittify;

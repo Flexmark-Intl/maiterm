@@ -1,5 +1,6 @@
 mod accounts;
 mod agent_requests;
+mod browser_link;
 mod claude_code;
 mod commands;
 mod comms;
@@ -154,6 +155,16 @@ pub(crate) fn emit_to_focused_window(app_handle: &tauri::AppHandle, event: &str)
             false
         }
     }
+}
+
+/// Chrome launched this binary as the browser link's native-messaging host
+/// (docs/browser-link.md §2): answer it and return true, before anything of the app starts.
+pub fn run_browser_link_host_if_requested() -> bool {
+    if !browser_link::native_host::requested() {
+        return false;
+    }
+    browser_link::native_host::main();
+    true
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -542,6 +553,18 @@ pub fn run() {
                 });
             }
 
+            // The Chrome extension's native-messaging host (docs/browser-link.md §2), rewritten
+            // each launch so a moved or updated app heals itself.
+            if app_state.app_data.read().preferences.browser_link_enabled {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    browser_link::install::sync(true);
+                    if let Err(e) = browser_link::install::refresh_unpacked_copy(&handle) {
+                        log::warn!("[browser-link] {e}");
+                    }
+                });
+            }
+
             // Shadowed SSH transcripts outlive whichever feature wrote them, so pruning is
             // the app's job, not maiLink's. It used to run inside `mailink::start`, which
             // meant an Overlord-only user — who now populates the same directory — kept
@@ -849,6 +872,11 @@ pub fn run() {
             agent_requests::list_agent_requests,
             agent_requests::decide_agent_request,
             agent_requests::settle_agent_request,
+            commands::browser_link::browser_link_status,
+            commands::browser_link::browser_link_sync,
+            commands::browser_link::browser_link_unlink,
+            commands::browser_link::browser_link_prepare_unpacked,
+            commands::browser_link::browser_link_open_extensions_page,
             mcp_proxy::mcp_servers_list,
             mcp_proxy::mcp_server_add,
             mcp_proxy::mcp_server_remove,

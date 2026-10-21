@@ -2,5 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    if aiterm_lib::run_browser_link_host_if_requested() {
+        return;
+    }
     aiterm_lib::run()
 }

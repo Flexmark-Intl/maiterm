@@ -2375,3 +2375,49 @@ export async function mcpServerSignIn(id: string): Promise<string> {
 export async function mcpServerAdoptNative(id: string): Promise<string[]> {
   return invoke('mcp_server_adopt_native', { id });
 }
+
+// ── Browser link: the maiTerm Chrome extension (docs/browser-link.md) ──
+
+export interface BrowserLinkView {
+  maiterm_tab_id: string;
+  chrome_tab_id: number;
+  browser: string;
+  title: string;
+  url: string;
+  /** null when the maiTerm tab is gone (it is pruned on the next read). */
+  tab_name: string | null;
+}
+
+export interface BrowserLinkStatus {
+  enabled: boolean;
+  /** One per connected browser profile. */
+  connections: { browser: string; version: string }[];
+  links: BrowserLinkView[];
+  /** Browsers whose native-messaging folder holds maiTerm's host manifest. */
+  installed_in: string[];
+  /** The folder "Load unpacked" points the browser at. */
+  extension_dir: string | null;
+  extension_id: string;
+}
+
+export async function browserLinkStatus(): Promise<BrowserLinkStatus> {
+  return invoke('browser_link_status');
+}
+
+/** Write or remove the host manifests to match the saved preference. */
+export async function browserLinkSync(): Promise<void> {
+  return invoke('browser_link_sync');
+}
+
+export async function browserLinkUnlink(maitermTabId: string): Promise<boolean> {
+  return invoke('browser_link_unlink', { maitermTabId });
+}
+
+/** Refresh the unpacked extension folder; returns its path. */
+export async function browserLinkPrepareUnpacked(): Promise<string> {
+  return invoke('browser_link_prepare_unpacked');
+}
+
+export async function browserLinkOpenExtensionsPage(): Promise<boolean> {
+  return invoke('browser_link_open_extensions_page');
+}

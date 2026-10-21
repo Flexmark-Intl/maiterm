@@ -1844,6 +1844,10 @@ pub struct Preferences {
     /// over setPreference could approve its own scripts.
     #[serde(default)]
     pub follow_ups_scripts_unattended: bool,
+    /// The Chrome extension link (docs/browser-link.md): installs the native-messaging host and
+    /// lists the browser tools to agents. Not in `preference_meta` — the human turns it on.
+    #[serde(default)]
+    pub browser_link_enabled: bool,
     /// Overlord ruleset. Global across windows; workspace-scoped rules bind via rule.workspaces.
     #[serde(default)]
     pub overlord_rules: Vec<OverlordRule>,
@@ -2177,6 +2181,7 @@ impl Default for Preferences {
             follow_ups_enabled: true,
             follow_ups_resume_agent: true,
             follow_ups_scripts_unattended: false,
+            browser_link_enabled: false,
             overlord_rules: Vec::new(),
             hidden_default_overlord_rules: Vec::new(),
             claude_ide: true,

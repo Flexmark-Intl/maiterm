@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <img src="icons/icon32.png" alt="" width="20" height="20" />
+      <h1>Link this tab to an agent</h1>
+    </header>
+    <section id="instances"></section>
+    <section id="current"></section>
+    <section id="picker" hidden>
+      <input id="filter" type="search" placeholder="Filter agent tabs" autocomplete="off" />
+      <div id="groups"></div>
+    </section>
+    <p id="error" class="error" hidden></p>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

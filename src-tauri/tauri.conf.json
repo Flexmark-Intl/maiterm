@@ -43,6 +43,9 @@
       "icons/icon.png",
       "icons/Assets.car"
     ],
+    "resources": {
+      "../chrome-extension/": "chrome-extension/"
+    },
     "fileAssociations": [
       {
         "ext": ["maiterm-workspace"],
