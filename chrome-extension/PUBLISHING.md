@@ -44,10 +44,15 @@ repo. Put a copy in the password manager: it is the only way to recreate the id.
 Reuse the Google Cloud project and OAuth client from safe-auto-refresh if you still have them
 (its secrets are the same four names). Otherwise:
 
-1. [Google Cloud console](https://console.cloud.google.com/) → enable the **Chrome Web Store API**.
-2. OAuth consent screen → **publish it ("In production")**. In "Testing", refresh tokens expire
-   after 7 days and the pipeline breaks with `invalid_grant` a week later.
-3. Credentials → OAuth client ID → **Desktop app** (a Web client refuses the localhost redirect).
+1. [Google Cloud console](https://console.cloud.google.com/) → APIs & Services → Library →
+   enable the **Chrome Web Store API**.
+2. Google Auth Platform (what "OAuth consent screen" opens) → **Get started**: any app name, your
+   email, then Audience **Internal** if it's offered (a Workspace project: no expiry, no
+   verification). Otherwise **External**, and afterwards Audience → **Publish app** ("In
+   production"): in "Testing", refresh tokens expire after 7 days and the pipeline breaks with
+   `invalid_grant` a week later. Data Access needs no scopes; the script asks for its one.
+3. Clients → Create client → **Desktop app** (a Web client refuses the localhost redirect). Copy
+   its client id and secret.
 4. Mint the token with the account that owns the item:
 
 ```bash
