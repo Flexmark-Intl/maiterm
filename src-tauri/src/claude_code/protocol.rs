@@ -1328,7 +1328,7 @@ pub fn tool_list_response(
 /// The browser-link tools (docs/browser-link.md §4): diagnose and drive the ONE Chrome tab the
 /// human linked to the caller's tab, in the human's own browser and logins.
 fn browser_tools() -> Vec<Value> {
-    const LINKED: &str = "Acts on a Chrome tab your human linked to your maiTerm tab (in their own browser, signed in as them): the one you name with tab, else your current one (the last you named). Call browserStatus first if you don't know what you have. Only your human can link a tab.";
+    const LINKED: &str = "Acts on a Chrome tab your human linked to your maiTerm tab (in their own browser, signed in as them): the one you name with tab, else your current one (the last you named, or your first link). With several and none current (after a restart, or when it closed), name one. Call browserStatus first if you don't know what you have. Only your human can link a tab.";
     let tab_id = serde_json::json!({ "type": "string", "description": "Your own tab (auto-injected)" });
     let tab = serde_json::json!({ "type": "string", "description": "Which of your linked Chrome tabs, by handle from browserStatus (b1, b2…); it becomes your current one. Default: your current one" });
     serde_json::json!([

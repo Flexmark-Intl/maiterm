@@ -113,7 +113,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>, app: AppHandle) {
     for l in p.get("links").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
         if let Some(mut link) = parse_link(&l, &conn_id, &browser) {
             if let Some(changed) = super::resolve_announced(&state, &mut link) {
-                let Ok(stored) = set_link(link) else { continue };
+                let Ok(stored) = set_link(link, false) else { continue };
                 accepted.push(stored.chrome_tab_id);
                 handles.insert(stored.chrome_tab_id.to_string(), Value::String(stored.handle.clone()));
                 if changed {
@@ -234,7 +234,7 @@ fn handle(v: &Value, conn_id: &str, browser: &str, version: &str, state: &Arc<Ap
             } else if opener.is_some() && opener_link.as_ref().is_none_or(|l| l.maiterm_tab_id != link.maiterm_tab_id) {
                 Err("The tab that opened this one isn't linked to that agent.".into())
             } else {
-                match set_link(link) {
+                match set_link(link, true) {
                     Err(e) => Err(e),
                     Ok(stored) => {
                         if !holds_several(version) {

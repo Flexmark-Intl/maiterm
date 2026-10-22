@@ -336,12 +336,11 @@ fn prune(state: &Arc<AppState>, app: &AppHandle) {
         }
     }
     reg.links = kept;
-    // A closed tab's bookkeeping goes with it; a live tab keeps its counter even with no links,
-    // so its handles are never reused.
-    let gone: Vec<String> = reg.handles.keys().filter(|id| !tab_exists(state, id)).cloned().collect();
+    // A gone tab's notices and current tab go with it. Its handle counter stays (a few bytes): an
+    // ARCHIVED tab leaves the tree and comes back under the same id, and must not reuse a handle.
+    let gone: Vec<String> = reg.news.keys().chain(reg.current.keys()).filter(|id| !tab_exists(state, id)).cloned().collect();
     for id in gone {
         if current_id(state, &reg, &id).is_none() {
-            reg.handles.remove(&id);
             reg.news.remove(&id);
             reg.current.remove(&id);
         }
@@ -364,9 +363,11 @@ fn resolve_announced(state: &Arc<AppState>, link: &mut Link) -> Option<bool> {
 
 /// Make a link (§1.3): a Chrome tab belongs to one agent, so linking it again moves it, and keeps
 /// its handle when it stays with the same agent. A link that carries a handle (re-announced on
-/// `hello`) keeps it unless that agent already uses it. An agent's first link becomes its
-/// current tab; later ones don't (`Registry.current`). Returns the link as stored.
-fn set_link(mut link: Link) -> Result<Link, String> {
+/// `hello`) keeps it unless that agent already uses it. With `fresh` (the human linked it now,
+/// not a re-announce) an agent's first link becomes its current tab; nothing else does
+/// (`Registry.current`): a reconnect must not pick a current tab the agent never named. Returns
+/// the link as stored.
+fn set_link(mut link: Link, fresh: bool) -> Result<Link, String> {
     let mut reg = REG.lock();
     let same = |l: &Link| l.conn_id == link.conn_id && l.chrome_tab_id == link.chrome_tab_id;
     if let Some(i) = reg.links.iter().position(|l| same(l) && l.maiterm_tab_id == link.maiterm_tab_id) {
@@ -395,7 +396,7 @@ fn set_link(mut link: Link) -> Result<Link, String> {
             link.handle = format!("b{n}");
         }
     }
-    if held == 0 && !reg.current.contains_key(&tab) {
+    if fresh && held == 0 && !reg.current.contains_key(&tab) {
         reg.current.insert(tab, link.handle.clone());
     }
     reg.links.push(link.clone());
@@ -689,14 +690,14 @@ mod tests {
     fn links_share_an_agent_not_a_chrome_tab() {
         let _serial = SERIAL.lock();
         reset();
-        assert_eq!(set_link(link("tab-a", "c1", 1)).unwrap().handle, "b1");
-        assert_eq!(set_link(link("tab-a", "c1", 2)).unwrap().handle, "b2");
+        assert_eq!(set_link(link("tab-a", "c1", 1), true).unwrap().handle, "b1");
+        assert_eq!(set_link(link("tab-a", "c1", 2), true).unwrap().handle, "b2");
         // The same Chrome tab again, same agent: the same handle, no new link.
-        assert_eq!(set_link(link("tab-a", "c1", 1)).unwrap().handle, "b1");
+        assert_eq!(set_link(link("tab-a", "c1", 1), true).unwrap().handle, "b1");
         assert_eq!(links_of("tab-a").len(), 2);
         pick("tab-a", Some("b2")).unwrap().unwrap(); // b2 is now tab-a's current tab
         // Moved to another agent: gone from tab-a, which hears about it.
-        assert_eq!(set_link(link("tab-b", "c1", 2)).unwrap().handle, "b1");
+        assert_eq!(set_link(link("tab-b", "c1", 2), true).unwrap().handle, "b1");
         assert_eq!(links_of("tab-a").iter().map(|l| l.handle.as_str()).collect::<Vec<_>>(), ["b1"]);
         assert_eq!(take_news("tab-a").len(), 1);
         // tab-a's current tab moved away: no stale current is left, and its one remaining tab serves.
@@ -704,9 +705,9 @@ mod tests {
         assert_eq!(current_handle("tab-a").as_deref(), Some("b1"));
         assert!(take_news("tab-a").is_empty());
         // tab-a's next link is b3, not a reused b2.
-        assert_eq!(set_link(link("tab-a", "c1", 3)).unwrap().handle, "b3");
+        assert_eq!(set_link(link("tab-a", "c1", 3), true).unwrap().handle, "b3");
         // Chrome tab ids are per browser: the same number in another connection is another tab.
-        set_link(link("tab-c", "c2", 2)).unwrap();
+        set_link(link("tab-c", "c2", 2), true).unwrap();
         assert_eq!(links_of("tab-b").len(), 1);
         reset();
     }
@@ -718,15 +719,15 @@ mod tests {
         reset();
         let mut l = link("tab-r", "c9", 5);
         l.handle = "b4".into();
-        assert_eq!(set_link(l).unwrap().handle, "b4");
+        assert_eq!(set_link(l, true).unwrap().handle, "b4");
         let mut clash = link("tab-r", "c9", 6);
         clash.handle = "b4".into();
-        assert_eq!(set_link(clash).unwrap().handle, "b5");
+        assert_eq!(set_link(clash, true).unwrap().handle, "b5");
         for chrome in 7..13 {
-            set_link(link("tab-r", "c9", chrome)).unwrap();
+            set_link(link("tab-r", "c9", chrome), true).unwrap();
         }
         assert_eq!(links_of("tab-r").len(), MAX_LINKS_PER_TAB);
-        assert!(set_link(link("tab-r", "c9", 99)).is_err());
+        assert!(set_link(link("tab-r", "c9", 99), true).is_err());
         reset();
     }
 
@@ -736,15 +737,15 @@ mod tests {
     fn untargeted_calls_go_to_the_current_tab_only() {
         let _serial = SERIAL.lock();
         reset();
-        set_link(link("tab-p", "c3", 1)).unwrap();
-        set_link(link("tab-p", "c3", 2)).unwrap();
+        set_link(link("tab-p", "c3", 1), true).unwrap();
+        set_link(link("tab-p", "c3", 2), true).unwrap();
         assert_eq!(pick("tab-p", None).unwrap().unwrap().handle, "b1"); // the first link, not the newest
         assert_eq!(pick("tab-p", Some("b2")).unwrap().unwrap().handle, "b2");
         assert_eq!(pick("tab-p", None).unwrap().unwrap().handle, "b2");
         assert!(pick("tab-p", Some("b9")).unwrap().is_err());
         assert!(pick("tab-none", None).is_none());
         // The current tab closes: with one left that one; with several, the agent must say.
-        set_link(link("tab-p", "c3", 3)).unwrap();
+        set_link(link("tab-p", "c3", 3), true).unwrap();
         remove_link_by_chrome("c3", 2, "was closed");
         assert!(pick("tab-p", None).unwrap().is_err());
         assert_eq!(current_handle("tab-p"), None);
@@ -760,11 +761,27 @@ mod tests {
         let _serial = SERIAL.lock();
         reset();
         assert!(!holds_several("0.1.0") && holds_several("0.2.0") && holds_several("1.0"));
-        set_link(link("tab-o", "c5", 1)).unwrap();
-        let second = set_link(link("tab-o", "c5", 2)).unwrap();
+        set_link(link("tab-o", "c5", 1), true).unwrap();
+        let second = set_link(link("tab-o", "c5", 2), true).unwrap();
         drop_others_for_one_tab_extension(&second);
         assert_eq!(links_of("tab-o").iter().map(|l| l.chrome_tab_id).collect::<Vec<_>>(), [2]);
         assert_eq!(pick("tab-o", None).unwrap().unwrap().chrome_tab_id, 2);
+        reset();
+    }
+
+    /// A re-announced link (a reconnect, a maiTerm restart) never becomes current on its own: an
+    /// agent with several tabs must name one rather than land on whichever was announced first.
+    #[test]
+    fn a_reconnect_picks_no_current_tab() {
+        let _serial = SERIAL.lock();
+        reset();
+        let mut a = link("tab-s", "c6", 1);
+        a.handle = "b1".into();
+        let mut b = link("tab-s", "c6", 2);
+        b.handle = "b2".into();
+        set_link(a, false).unwrap();
+        set_link(b, false).unwrap();
+        assert!(pick("tab-s", None).unwrap().is_err());
         reset();
     }
 
@@ -776,8 +793,8 @@ mod tests {
         reserve_handles("tab-q", 3);
         let mut l = link("tab-q", "c4", 1);
         l.handle = "b1".into();
-        set_link(l).unwrap();
-        assert_eq!(set_link(link("tab-q", "c4", 2)).unwrap().handle, "b4");
+        set_link(l, true).unwrap();
+        assert_eq!(set_link(link("tab-q", "c4", 2), true).unwrap().handle, "b4");
         reset();
     }
 

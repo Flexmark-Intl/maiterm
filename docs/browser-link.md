@@ -27,7 +27,7 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    gets a handle, `b1`, `b2`…, never reused within its maiTerm tab, so a stale handle fails
    instead of reaching another page. Linking a Chrome tab again moves it; the agent that lost it
    is told. A tool without `tab` acts on the agent's CURRENT tab (`Registry.current`): set by its
-   first link and by naming a tab, and by nothing else — a tab the human links beside it, or one
+   first link the human makes (never a re-announced one) and by naming a tab, and by nothing else — a tab the human links beside it, or one
    that joins, must not become where an untargeted click lands. When the current tab goes and
    several remain (or maiTerm restarted), an untargeted call is refused until the agent names one.
    Refs carry their tab (`b1:e42`, written by the snapshot), so a ref always acts where it was read.
@@ -48,7 +48,7 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
 6. **A tab a linked page opens joins that page's agent** (the extension, `tabs.onCreated` with an
    `openerTabId` it holds): when it is a popup window (a sign-in window), or an action that can
    open a tab (click, type, press, navigate, eval — never a read) is running on the opener or
-   finished under 2 s ago. A tab the HUMAN opens from a linked page (a middle-click) stays theirs,
+   finished under 2 s ago (a running one counts for at most 30 s: an eval may never settle). A tab the HUMAN opens from a linked page (a middle-click) stays theirs,
    even while the agent reads that page. maiTerm refuses an opener that isn't the same agent's link.
    An extension older than 0.2.0 (still running in a Chrome that hasn't reloaded it) keeps one tab
    per agent: maiTerm drops that agent's other links when it links one, as that extension does.

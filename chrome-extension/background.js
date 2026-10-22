@@ -193,14 +193,17 @@ async function onFrame(host, raw) {
     const link = (await getLinks()).find((l) => l.host === host && l.chromeTabId === chromeTabId);
     if (!link) return reply({ error: 'That Chrome tab is no longer linked.' });
     const acts = OPENING_ACTIONS.has(action);
-    if (acts) agentActing.set(chromeTabId, (agentActing.get(chromeTabId) ?? 0) + 1);
+    const started = Date.now();
+    if (acts) agentActing.set(chromeTabId, [...(agentActing.get(chromeTabId) ?? []), started]);
     try {
       reply({ result: await runAction(chromeTabId, action, args ?? {}) });
     } catch (e) {
       reply({ error: String(e?.message ?? e) });
     } finally {
       if (acts) {
-        agentActing.set(chromeTabId, agentActing.get(chromeTabId) - 1);
+        const left = (agentActing.get(chromeTabId) ?? []).filter((t) => t !== started);
+        if (left.length) agentActing.set(chromeTabId, left);
+        else agentActing.delete(chromeTabId);
         agentActed.set(chromeTabId, Date.now());
       }
     }
@@ -308,8 +311,11 @@ async function link(host, maitermTab, chromeTab, openerChromeTabId) {
  *  can't, so it never counts: an agent polling the console must not sweep up the tabs the human
  *  opens from that page. */
 const OPENING_ACTIONS = new Set(['click', 'type', 'press', 'navigate', 'eval']);
-/** chromeTabId → opening actions running on it now. */
+/** chromeTabId → start times of opening actions running on it now. One counts for at most
+ *  ACTING_MAX_MS: an eval awaiting a promise that never settles must not keep every tab the human
+ *  opens from that page joining the agent (maiTerm gave up on it after 30 s anyway). */
 const agentActing = new Map();
+const ACTING_MAX_MS = 30000;
 /** chromeTabId → when an opening action on it last finished. A page opens its tab while the
  *  click is handled or just after; 2 s covers that without reaching a human's later middle-click. */
 const agentActed = new Map();
@@ -319,7 +325,9 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   if (tab.openerTabId == null) return;
   const opener = (await getLinks()).find((l) => l.chromeTabId === tab.openerTabId);
   if (!opener) return;
-  const recent = (agentActing.get(tab.openerTabId) ?? 0) > 0 || Date.now() - (agentActed.get(tab.openerTabId) ?? 0) < AGENT_OPENED_MS;
+  const now = Date.now();
+  const acting = (agentActing.get(tab.openerTabId) ?? []).some((t) => now - t < ACTING_MAX_MS);
+  const recent = acting || now - (agentActed.get(tab.openerTabId) ?? 0) < AGENT_OPENED_MS;
   const win = await chrome.windows.get(tab.windowId).catch(() => null);
   if (!recent && win?.type !== 'popup') return;
   await link(opener.host, { id: opener.maitermTabId, name: opener.maitermTabName }, tab, opener.chromeTabId).catch(() => {});
