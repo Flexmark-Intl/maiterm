@@ -185,10 +185,23 @@ button.primary {
   overflow-wrap: anywhere;
 }
 
-.tab .meta {
+.tab .meta,
+.card .meta {
   color: var(--dim);
   font-size: 11px;
   overflow-wrap: anywhere;
+}
+
+/* The agent tab a maiTerm window shows in front: most likely the one the human means. */
+.tab .front {
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--dim);
+  font-size: 10px;
+  font-weight: 500;
+  margin-left: 6px;
+  padding: 0 4px;
+  vertical-align: 1px;
 }
 
 .error {

@@ -10,7 +10,10 @@ use std::time::Duration;
 use tauri::AppHandle;
 use tokio::sync::mpsc;
 
-use super::{emit_changed, prune, remove_link_by_chrome, set_link, tab_exists, token, Conn, Link, ALLOWED_EXTENSION_IDS, PROTOCOL, REG};
+use super::{
+    emit_changed, front_tab, prune, remove_link_by_chrome, set_link, tab_exists, tab_used, tell, token, Conn, Link, ALLOWED_EXTENSION_IDS,
+    PROTOCOL, REG,
+};
 use crate::state::AppState;
 
 /// How long a fresh connection has to say `hello` before it is dropped.
@@ -90,15 +93,18 @@ async fn run(socket: WebSocket, state: Arc<AppState>, app: AppHandle) {
     // Only for maiTerm tabs that still exist: a link to a closed tab must not come back.
     // A link whose tab was reloaded while we were apart comes back under the new id.
     let mut accepted = Vec::new();
+    // Beside `accepted`, not in it: an extension from before handles reads `accepted` as ids.
+    let mut handles = serde_json::Map::new();
     let mut renamed = Vec::new();
     for l in p.get("links").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
         if let Some(mut link) = parse_link(&l, &conn_id, &browser) {
             if let Some(changed) = super::resolve_announced(&state, &mut link) {
-                accepted.push(link.chrome_tab_id);
+                let Ok(stored) = set_link(link) else { continue };
+                accepted.push(stored.chrome_tab_id);
+                handles.insert(stored.chrome_tab_id.to_string(), Value::String(stored.handle.clone()));
                 if changed {
-                    renamed.push(link.clone());
+                    renamed.push(stored);
                 }
-                set_link(link);
             }
         }
     }
@@ -106,6 +112,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>, app: AppHandle) {
         "instance": super::instance_label(),
         "protocol": PROTOCOL,
         "accepted": accepted,
+        "handles": handles,
     });
     if write.send(WsMessage::Text(reply(&hid, Ok(welcome)).into())).await.is_err() {
         drop_conn(&conn_id, &app);
@@ -168,10 +175,13 @@ fn parse_link(v: &Value, conn_id: &str, browser: &str) -> Option<Link> {
     Some(Link {
         maiterm_tab_id: v.get("maitermTabId")?.as_str()?.to_string(),
         chrome_tab_id: v.get("chromeTabId")?.as_i64()?,
+        handle: v.get("handle").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+        opened_by: v.get("openedBy").and_then(|t| t.as_str()).map(str::to_string),
         conn_id: conn_id.to_string(),
         browser: browser.to_string(),
         title: v.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
         url: v.get("url").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+        used: 0,
     })
 }
 
@@ -196,21 +206,48 @@ fn handle(v: &Value, conn_id: &str, browser: &str, state: &Arc<AppState>, app: &
         "ping" => Ok(serde_json::json!({})),
         "listTabs" => Ok(list_tabs(state, app)),
         "link" => {
-            let Some(link) = parse_link(&params, conn_id, browser) else {
+            let Some(mut link) = parse_link(&params, conn_id, browser) else {
                 return id.map(|i| reply(&i, Err("link needs maitermTabId and chromeTabId".into())));
             };
+            // A tab a linked tab opened (§1.3): it joins only the opener's own agent.
+            let opener = params.get("openerChromeTabId").and_then(|v| v.as_i64());
+            let opener_link = opener.and_then(|o| {
+                REG.lock().links.iter().find(|l| l.conn_id == conn_id && l.chrome_tab_id == o).cloned()
+            });
+            link.handle.clear();
+            link.opened_by = opener_link.as_ref().map(|l| l.handle.clone());
             if !tab_exists(state, &link.maiterm_tab_id) {
                 Err("That maiTerm tab no longer exists.".into())
+            } else if opener.is_some() && opener_link.as_ref().is_none_or(|l| l.maiterm_tab_id != link.maiterm_tab_id) {
+                Err("The tab that opened this one isn't linked to that agent.".into())
             } else {
-                log::info!("[browser-link] {browser} tab {} linked to maiTerm tab {}", link.chrome_tab_id, link.maiterm_tab_id);
-                set_link(link);
-                emit_changed(app);
-                Ok(serde_json::json!({ "ok": true }))
+                match set_link(link) {
+                    Err(e) => Err(e),
+                    Ok(stored) => {
+                        log::info!("[browser-link] {browser} tab {} linked to maiTerm tab {} as {}", stored.chrome_tab_id, stored.maiterm_tab_id, stored.handle);
+                        let msg = match &stored.opened_by {
+                            Some(by) => format!(
+                                "{by} opened a new tab (a popup, or a page it opened); it is linked to you as {}. browserStatus shows where it is.",
+                                stored.handle
+                            ),
+                            None => format!("Your human linked a Chrome tab to you: {}.", stored.describe()),
+                        };
+                        tell(&stored.maiterm_tab_id, msg);
+                        emit_changed(app);
+                        Ok(serde_json::json!({ "ok": true, "handle": stored.handle }))
+                    }
+                }
             }
         }
         "unlink" => {
             let chrome = params.get("chromeTabId").and_then(|v| v.as_i64()).unwrap_or(-1);
-            if remove_link_by_chrome(conn_id, chrome) {
+            let why = match params.get("reason").and_then(|v| v.as_str()) {
+                Some("closed") => "was closed",
+                Some("cancelled") => "was unlinked: your human cancelled Chrome's debugging bar",
+                Some("moved") => "was linked to an agent in another maiTerm",
+                _ => "was unlinked by your human",
+            };
+            if remove_link_by_chrome(conn_id, chrome, why) {
                 emit_changed(app);
             }
             Ok(serde_json::json!({ "ok": true }))
@@ -239,31 +276,48 @@ fn handle(v: &Value, conn_id: &str, browser: &str, state: &Arc<AppState>, app: &
     id.map(|i| reply(&i, result))
 }
 
-/// The agent tabs the popup offers to link to, with what each is linked to now.
+/// The agent tabs the popup offers to link to, with what each holds now. Most recently used first,
+/// and each window's front tab above everything else: the agent the human is looking at is the one
+/// they most likely mean.
 fn list_tabs(state: &Arc<AppState>, app: &AppHandle) -> Value {
     prune(state, app);
     let links = REG.lock().links.clone();
     let data = state.app_data.read();
     let mut tabs = Vec::new();
     for w in data.windows.iter().filter(|w| w.label != "preferences" && w.label != "help") {
+        let front = front_tab(w);
+        let window = w.name.clone().unwrap_or_else(|| w.label.clone());
         for ws in &w.workspaces {
             for t in ws.panes.iter().flat_map(|p| p.tabs.iter()) {
                 if t.runtime.is_none() || t.service_id.is_some() {
                     continue;
                 }
-                let linked = links.iter().find(|l| l.maiterm_tab_id == t.id);
-                tabs.push(serde_json::json!({
-                    "id": t.id,
-                    "name": t.name,
-                    "workspace": ws.name,
-                    "window": w.name.clone().unwrap_or_else(|| w.label.clone()),
-                    "runtime": t.runtime,
-                    "linked": linked.map(|l| serde_json::json!({ "browser": l.browser, "chromeTabId": l.chrome_tab_id, "title": l.title })),
-                }));
+                let linked: Vec<Value> = links
+                    .iter()
+                    .filter(|l| l.maiterm_tab_id == t.id)
+                    .map(|l| serde_json::json!({ "handle": l.handle, "title": l.title, "browser": l.browser }))
+                    .collect();
+                let is_front = front == Some(t.id.as_str());
+                tabs.push((
+                    is_front,
+                    tab_used(&t.id),
+                    serde_json::json!({
+                        "id": t.id,
+                        "name": t.name,
+                        "workspace": ws.name,
+                        "window": window,
+                        "runtime": t.runtime,
+                        "front": is_front,
+                        "linked": linked,
+                    }),
+                ));
             }
         }
     }
-    serde_json::json!({ "tabs": tabs })
+    // Stable: tabs never used since launch keep their tree order below the rest.
+    tabs.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    let windows = data.windows.iter().filter(|w| w.label != "preferences" && w.label != "help").count();
+    serde_json::json!({ "tabs": tabs.into_iter().map(|t| t.2).collect::<Vec<_>>(), "windows": windows })
 }
 
 #[cfg(test)]

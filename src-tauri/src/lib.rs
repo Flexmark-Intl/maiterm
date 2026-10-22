@@ -275,6 +275,9 @@ pub fn run() {
                 let label = window.label();
                 if label != "preferences" && label != "help" {
                     *LAST_FOCUSED_WINDOW.write() = Some(label.to_string());
+                    if let Some(state) = window.try_state::<Arc<AppState>>() {
+                        browser_link::touch_window(&state, label);
+                    }
                 }
             }
         })

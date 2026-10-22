@@ -1,7 +1,7 @@
-# Browser link — an agent diagnoses and drives ONE Chrome tab (2026-10-20)
+# Browser link — an agent diagnoses and drives the Chrome tabs its human linked (2026-10-20)
 
-A maiTerm agent tab can be linked to one tab in the human's own Chrome (or Brave, Edge, Arc —
-any Chromium browser), and the agent then diagnoses and drives that tab over MCP: its console
+A maiTerm agent tab can be linked to tabs in the human's own Chrome (or Brave, Edge, Arc — any
+Chromium browser), and the agent then diagnoses and drives them over MCP: its console
 errors and network requests, the page itself, and clicking, typing and navigating in it. It is the human's real browser with its real logins, not a separate
 automation profile, which is why the extension route was chosen over `--remote-debugging-port`
 (Chrome refuses remote debugging on the default profile, so that route gets an empty one).
@@ -17,12 +17,18 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
 
 1. **Only the human links.** A link is made by a click in the extension's popup, on the Chrome
    tab being linked. No MCP tool creates, moves or widens a link. An agent that has no link is
-   told to ask its human for one.
-2. **An agent drives only its own link.** Every browser tool acts on the link of the CALLING
+   told to ask its human for one. The one exception is a tab a linked page OPENS (§1.6), which
+   comes from a page the human already handed over.
+2. **An agent drives only its own links.** Every browser tool acts on the links of the CALLING
    tab, from its stated identity (`OWN_TAB_ONLY_TOOLS` + `PEER_ADDRESSING_TOOLS`): there is no
-   `chromeTabId` argument and an explicit `tabId` naming another tab is refused.
-3. **One Chrome tab per maiTerm tab, one maiTerm tab per Chrome tab.** Linking either side again
-   replaces the old link.
+   `chromeTabId` argument, an explicit `tabId` naming another tab is refused, and `tab` is a
+   handle among the caller's OWN links.
+3. **A Chrome tab has one agent; an agent may hold several** (`MAX_LINKS_PER_TAB` = 8). Each link
+   gets a handle, `b1`, `b2`…, never reused within its maiTerm tab, so a stale handle fails
+   instead of reaching another page. Linking a Chrome tab again moves it; the agent that lost it
+   is told. A tool without `tab` acts on the link the agent used last (or was linked last).
+   What changed that the agent didn't do (a tab joined, closed, moved, was unlinked) is held and
+   handed over as `linked_tabs_changed` on its next browser tool call.
 4. **The human can always see and stop it.** Chrome's own "is debugging this browser" bar shows
    while a linked tab is attached. Cancelling that bar UNLINKS the tab (it is the human saying
    stop — re-attaching silently would overrule them). Closing the Chrome tab unlinks it.
@@ -33,6 +39,15 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    id (`browser_link::remap_tab`, called from `reloadTab`'s remaps). Every reload's old→new id is remembered (`Registry.renamed`), and both a re-announced
    link and the 5 s prune follow that chain, so a link that missed the remap (the extension was
    disconnected, or its `hello` was in flight) still reaches the reloaded tab.
+6. **A tab a linked page opens joins that page's agent** (the extension, `tabs.onCreated` with an
+   `openerTabId` it holds): when it is a popup window (a sign-in window), or the agent acted on
+   the opener in the last 5 s (its click opened it). A tab the HUMAN opens from a linked page (a
+   middle-click while the agent is idle) stays theirs. maiTerm refuses an opener that isn't the
+   same agent's link.
+7. **The popup lists agent tabs most recently used first**, each window's front tab (active
+   workspace → active pane → active tab) above all. Recency is in memory (`browser_link::touch_tab`,
+   from `set_active_tab` / `set_active_pane` / `set_active_workspace` and window focus); after a
+   restart the tree order stands in.
 
 ## 2. Discovery and authentication (native messaging)
 
@@ -68,10 +83,10 @@ Extension → maiTerm:
 
 | method | params | result |
 |---|---|---|
-| `hello` (first frame, within 5 s) | `{token, protocol, version, browser, links:[Link]}` | `{instance, protocol, accepted:[chromeTabId]}` |
-| `listTabs` | — | `{tabs:[{id, name, workspace, window, runtime, linkedChromeTab?}]}` agent tabs only |
-| `link` | `{maitermTabId, chromeTabId, title, url}` | `{ok}` / error |
-| `unlink` | `{chromeTabId}` | `{ok}` |
+| `hello` (first frame, within 5 s) | `{token, protocol, version, browser, links:[Link]}` | `{instance, protocol, accepted:[chromeTabId], handles:{chromeTabId: handle}}` (handles beside `accepted`, not in it: an older extension reads `accepted` as ids) |
+| `listTabs` | — | `{tabs:[{id, name, workspace, window, runtime, front, linked:[{handle, title, browser}]}], windows}` agent tabs only, in §1.7 order |
+| `link` | `{maitermTabId, chromeTabId, title, url, openerChromeTabId?}` | `{ok, handle}` / error (cap, closed tab, opener not that agent's) |
+| `unlink` | `{chromeTabId, reason?}` — `unlinked` \| `closed` \| `cancelled` \| `moved`, for the agent's notice | `{ok}` |
 | `tabUpdated` (notif) | `{chromeTabId, title, url}` | |
 | `ping` | — | `{}` (keeps the MV3 service worker alive) |
 
@@ -91,7 +106,7 @@ is read → await → write, and two interleaved lost the newer write (a re-link
 `unlinked`, every connection closed, a new `hello` is refused, and the tools refuse too — an
 agent's tool list is cached, so hiding the tools alone left them working.
 
-`Link = {maitermTabId, chromeTabId, title, url}`.
+`Link = {maitermTabId, chromeTabId, handle, openedBy?, title, url}`. The toolbar badge shows a linked tab's handle.
 
 A major-version mismatch in `protocol` is refused with a sentence the popup shows ("update the
 extension" / "update maiTerm"). Additive changes don't bump it.
@@ -99,10 +114,12 @@ extension" / "update maiTerm"). Additive changes don't bump it.
 ## 4. Actions and MCP tools
 
 The extension does all CDP work (`chrome-extension/driver.js`); Rust relays and times out (30 s).
+Every action tool takes an optional `tab` (a handle, §1.3), and every result names the tab it came
+from (`tab`, or a `Tab: bN` line on the snapshot and screenshot).
 
 | MCP tool | action | notes |
 |---|---|---|
-| `browserStatus` | — (Rust only) | connected? linked? to which title/url; how to get linked |
+| `browserStatus` | — (Rust only) | every linked tab: handle, title, url, `opened_by`, which is `current`; or how to get linked |
 | `browserNavigate` | `navigate` | `url`, or `back`/`forward`/`reload`; waits for load (≤15 s) |
 | `browserSnapshot` | `snapshot` | accessibility tree as indented text; interactive/named nodes carry `[ref=eN]` |
 | `browserClick` | `click` | `ref`; real mouse events at the element's centre, `this.click()` fallback |

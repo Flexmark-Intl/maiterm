@@ -1,5 +1,6 @@
-//! Browser link (docs/browser-link.md): an agent tab drives the ONE Chrome tab its human linked
-//! to it, through the maiTerm Chrome extension.
+//! Browser link (docs/browser-link.md): an agent tab drives the Chrome tabs its human linked to
+//! it, through the maiTerm Chrome extension. Each linked Chrome tab belongs to one agent; an agent
+//! may hold several, which it names by handle (`b1`, `b2`…).
 //!
 //! The extension connects to `/browser-link` on the local MCP server, having learnt the port and
 //! this launch's token over Chrome native messaging (`native_host`). Everything here is in memory:
@@ -23,6 +24,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot};
@@ -40,6 +42,10 @@ pub const ALLOWED_EXTENSION_IDS: [&str; 1] = ["mdaccealpnngffgibmnijfgakddfgjpa"
 /// The tools a browser action may take before the agent is told it timed out. Navigation waits
 /// up to 15 s for the load inside the extension, so this sits above that.
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Linked Chrome tabs one agent tab may hold. Each is a debugger attachment and a log buffer in
+/// the human's browser, and a handle the agent has to keep straight.
+pub const MAX_LINKS_PER_TAB: usize = 8;
 
 /// This launch's secret, handed to the extension by the native host and checked on `hello`.
 fn token() -> &'static str {
@@ -116,11 +122,30 @@ struct Conn {
 pub struct Link {
     pub maiterm_tab_id: String,
     pub chrome_tab_id: i64,
+    /// What the agent calls this tab: `b1`, `b2`…, never reused within its maiTerm tab, so a stale
+    /// handle fails instead of reaching another page.
+    pub handle: String,
+    /// The handle of the linked tab that opened this one (a sign-in popup), when it joined that way.
+    pub opened_by: Option<String>,
     #[serde(skip)]
     conn_id: String,
     pub browser: String,
     pub title: String,
     pub url: String,
+    /// When the agent last acted on it (or it was linked): the tab a tool uses when given none.
+    #[serde(skip)]
+    used: u64,
+}
+
+impl Link {
+    fn describe(&self) -> String {
+        let what = if self.title.is_empty() { &self.url } else { &self.title };
+        format!("{} ({what})", self.handle)
+    }
+}
+
+fn handle_number(h: &str) -> Option<u32> {
+    h.strip_prefix('b')?.parse().ok()
 }
 
 #[derive(Default)]
@@ -134,6 +159,26 @@ struct Registry {
     /// disconnected, or its `hello` was in flight), and both the re-announce and `prune` follow
     /// this chain rather than treating the old id as a closed tab.
     renamed: HashMap<String, String>,
+    /// The last handle number given out per maiTerm tab.
+    handles: HashMap<String, u32>,
+    /// What changed about each agent's linked tabs that it didn't cause (one joined, closed, was
+    /// unlinked), told with its next browser tool call.
+    news: HashMap<String, Vec<String>>,
+    seq: u64,
+}
+
+impl Registry {
+    fn tell(&mut self, maiterm_tab_id: &str, msg: String) {
+        let v = self.news.entry(maiterm_tab_id.to_string()).or_default();
+        if v.len() < 20 {
+            v.push(msg);
+        }
+    }
+
+    fn bump(&mut self) -> u64 {
+        self.seq += 1;
+        self.seq
+    }
 }
 
 /// Kept small: an entry only matters until the extension next reconnects.
@@ -168,6 +213,12 @@ pub fn remap_tab(app: &AppHandle, from: &str, to: &str) {
         reg.renamed.clear();
     }
     reg.renamed.insert(from.to_string(), to.to_string());
+    if let Some(n) = reg.handles.remove(from) {
+        reg.handles.insert(to.to_string(), n);
+    }
+    if let Some(n) = reg.news.remove(from) {
+        reg.news.insert(to.to_string(), n);
+    }
     let mut moved = false;
     for i in 0..reg.links.len() {
         if reg.links[i].maiterm_tab_id == from {
@@ -276,34 +327,77 @@ fn resolve_announced(state: &Arc<AppState>, link: &mut Link) -> Option<bool> {
     Some(changed)
 }
 
-/// Make a link, replacing whatever either side was linked to (one-to-one, §1.3).
-fn set_link(link: Link) {
+/// Make a link (§1.3): a Chrome tab belongs to one agent, so linking it again moves it, and keeps
+/// its handle when it stays with the same agent. A link that carries a handle (re-announced on
+/// `hello`) keeps it unless that agent already uses it. Returns the link as stored.
+fn set_link(mut link: Link) -> Result<Link, String> {
     let mut reg = REG.lock();
-    let (gone, keep): (Vec<Link>, Vec<Link>) = std::mem::take(&mut reg.links).into_iter().partition(|l| {
-        l.maiterm_tab_id == link.maiterm_tab_id || (l.conn_id == link.conn_id && l.chrome_tab_id == link.chrome_tab_id)
-    });
-    reg.links = keep;
-    for l in gone.iter().filter(|l| !(l.conn_id == link.conn_id && l.chrome_tab_id == link.chrome_tab_id)) {
-        notify_unlinked(&reg, l, "Its maiTerm tab was linked to another Chrome tab.");
+    let same = |l: &Link| l.conn_id == link.conn_id && l.chrome_tab_id == link.chrome_tab_id;
+    if let Some(i) = reg.links.iter().position(|l| same(l) && l.maiterm_tab_id == link.maiterm_tab_id) {
+        let used = reg.bump();
+        let l = &mut reg.links[i];
+        l.used = used;
+        l.title = link.title;
+        l.url = link.url;
+        return Ok(l.clone());
     }
-    reg.links.push(link);
+    let held = reg.links.iter().filter(|l| l.maiterm_tab_id == link.maiterm_tab_id).count();
+    if held >= MAX_LINKS_PER_TAB {
+        return Err(format!(
+            "That agent tab already has {MAX_LINKS_PER_TAB} linked Chrome tabs. Unlink one of them first."
+        ));
+    }
+    if let Some(i) = reg.links.iter().position(|l| same(l)) {
+        let old = reg.links.remove(i);
+        reg.tell(&old.maiterm_tab_id, format!("{} was linked to another agent and is no longer yours.", old.describe()));
+    }
+    let taken = reg.links.iter().any(|l| l.maiterm_tab_id == link.maiterm_tab_id && l.handle == link.handle);
+    let counter = reg.handles.entry(link.maiterm_tab_id.clone()).or_insert(0);
+    match handle_number(&link.handle) {
+        Some(n) if !taken => *counter = (*counter).max(n),
+        _ => {
+            *counter += 1;
+            link.handle = format!("b{counter}");
+        }
+    }
+    link.used = reg.bump();
+    reg.links.push(link.clone());
+    Ok(link)
 }
 
-fn remove_link_by_chrome(conn_id: &str, chrome_tab_id: i64) -> bool {
-    let mut reg = REG.lock();
-    let before = reg.links.len();
-    reg.links.retain(|l| !(l.conn_id == conn_id && l.chrome_tab_id == chrome_tab_id));
-    before != reg.links.len()
+/// Tell an agent about a change to its linked tabs it didn't make.
+fn tell(maiterm_tab_id: &str, msg: String) {
+    REG.lock().tell(maiterm_tab_id, msg);
 }
 
-/// The human unlinked a tab from maiTerm's side (Preferences).
-pub fn unlink_maiterm_tab(app: &AppHandle, maiterm_tab_id: &str) -> bool {
+/// What changed since the agent's last browser tool call; reading it clears it.
+fn take_news(maiterm_tab_id: &str) -> Vec<String> {
+    REG.lock().news.remove(maiterm_tab_id).unwrap_or_default()
+}
+
+/// The extension dropped a link (the human unlinked it, closed the tab, cancelled the debugging
+/// bar). `why` finishes "b2 (title) …" for the agent.
+fn remove_link_by_chrome(conn_id: &str, chrome_tab_id: i64, why: &str) -> bool {
     let mut reg = REG.lock();
-    let (gone, keep): (Vec<Link>, Vec<Link>) =
-        std::mem::take(&mut reg.links).into_iter().partition(|l| l.maiterm_tab_id == maiterm_tab_id);
+    let Some(i) = reg.links.iter().position(|l| l.conn_id == conn_id && l.chrome_tab_id == chrome_tab_id) else {
+        return false;
+    };
+    let gone = reg.links.remove(i);
+    reg.tell(&gone.maiterm_tab_id, format!("{} {why}.", gone.describe()));
+    true
+}
+
+/// The human unlinked from maiTerm's side (Preferences): one of a tab's links, or all of them.
+pub fn unlink_maiterm_tab(app: &AppHandle, maiterm_tab_id: &str, handle: Option<&str>) -> bool {
+    let mut reg = REG.lock();
+    let (gone, keep): (Vec<Link>, Vec<Link>) = std::mem::take(&mut reg.links)
+        .into_iter()
+        .partition(|l| l.maiterm_tab_id == maiterm_tab_id && handle.is_none_or(|h| l.handle == h));
     reg.links = keep;
     for l in &gone {
         notify_unlinked(&reg, l, "Unlinked in maiTerm.");
+        let msg = format!("{} was unlinked by your human.", l.describe());
+        reg.tell(maiterm_tab_id, msg);
     }
     drop(reg);
     if !gone.is_empty() {
@@ -312,9 +406,37 @@ pub fn unlink_maiterm_tab(app: &AppHandle, maiterm_tab_id: &str) -> bool {
     !gone.is_empty()
 }
 
-/// The link a tab's agent drives, if any.
-fn link_for(maiterm_tab_id: &str) -> Option<Link> {
-    REG.lock().links.iter().find(|l| l.maiterm_tab_id == maiterm_tab_id).cloned()
+/// A tab's linked Chrome tabs, b1 first.
+fn links_of(maiterm_tab_id: &str) -> Vec<Link> {
+    let mut v: Vec<Link> = REG.lock().links.iter().filter(|l| l.maiterm_tab_id == maiterm_tab_id).cloned().collect();
+    v.sort_by_key(|l| handle_number(&l.handle).unwrap_or(u32::MAX));
+    v
+}
+
+/// The linked tab a tool acts on: the one named, else the one the agent used last; it becomes the
+/// last used. None when the agent has no linked tab; Err for a handle it doesn't hold.
+fn pick(maiterm_tab_id: &str, handle: Option<&str>) -> Option<Result<Link, String>> {
+    let mut reg = REG.lock();
+    let mine = |l: &&mut Link| l.maiterm_tab_id == maiterm_tab_id;
+    if !reg.links.iter_mut().any(|l| mine(&l)) {
+        return None;
+    }
+    let used = reg.bump();
+    let chosen = match handle {
+        Some(h) => reg.links.iter_mut().filter(mine).find(|l| l.handle == h),
+        None => reg.links.iter_mut().filter(mine).max_by_key(|l| l.used),
+    };
+    Some(match chosen {
+        Some(l) => {
+            l.used = used;
+            Ok(l.clone())
+        }
+        None => {
+            drop(reg);
+            let held: Vec<String> = links_of(maiterm_tab_id).iter().map(Link::describe).collect();
+            Err(format!("You have no linked tab {}. Yours: {}.", handle.unwrap_or(""), held.join(", ")))
+        }
+    })
 }
 
 fn connected() -> bool {
@@ -379,6 +501,40 @@ pub struct StatusView {
     pub extension_id: &'static str,
 }
 
+/// When each maiTerm tab was last brought to the front (activated, or its window focused): the
+/// popup lists agent tabs most recently used first. In memory; after a restart the tree order
+/// stands in until tabs are used again.
+static TAB_USED: LazyLock<Mutex<HashMap<String, u64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static CLOCK: AtomicU64 = AtomicU64::new(0);
+
+pub fn touch_tab(tab_id: &str) {
+    let t = CLOCK.fetch_add(1, Ordering::Relaxed) + 1;
+    let mut used = TAB_USED.lock();
+    if used.len() > 2000 {
+        used.clear();
+    }
+    used.insert(tab_id.to_string(), t);
+}
+
+fn tab_used(tab_id: &str) -> u64 {
+    TAB_USED.lock().get(tab_id).copied().unwrap_or(0)
+}
+
+/// The tab a window shows in front: its active workspace's active pane's active tab.
+fn front_tab(w: &crate::state::WindowData) -> Option<&str> {
+    let ws = w.workspaces.iter().find(|ws| Some(&ws.id) == w.active_workspace_id.as_ref())?;
+    let pane = ws.panes.iter().find(|p| Some(&p.id) == ws.active_pane_id.as_ref())?;
+    pane.active_tab_id.as_deref()
+}
+
+/// A window came to the front: so did its front tab.
+pub fn touch_window(state: &Arc<AppState>, label: &str) {
+    let data = state.app_data.read();
+    if let Some(id) = data.window(label).and_then(front_tab) {
+        touch_tab(id);
+    }
+}
+
 fn tab_name(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
     let data = state.app_data.read();
     data.windows
@@ -424,27 +580,82 @@ mod tests {
         Link {
             maiterm_tab_id: tab.into(),
             chrome_tab_id: chrome,
+            handle: String::new(),
+            opened_by: None,
             conn_id: conn.into(),
             browser: "Chrome".into(),
             title: String::new(),
             url: String::new(),
+            used: 0,
         }
     }
 
-    /// §1.3: linking either side again replaces the old link, never adds a second.
+    /// The registry is one global and tests run in parallel: each test holds this while it uses it.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn reset() {
+        let mut reg = REG.lock();
+        reg.links.clear();
+        reg.handles.clear();
+        reg.news.clear();
+    }
+
+    /// §1.3: an agent tab holds several Chrome tabs; a Chrome tab belongs to one agent, and
+    /// linking it again moves it (telling the agent that lost it). Handles are never reused.
     #[test]
-    fn links_are_one_to_one() {
-        REG.lock().links.clear();
-        set_link(link("tab-a", "c1", 1));
-        set_link(link("tab-a", "c1", 2)); // the same agent tab, another Chrome tab
-        assert_eq!(link_for("tab-a").map(|l| l.chrome_tab_id), Some(2));
-        set_link(link("tab-b", "c1", 2)); // the same Chrome tab, another agent tab
-        assert!(link_for("tab-a").is_none());
-        assert_eq!(link_for("tab-b").map(|l| l.chrome_tab_id), Some(2));
+    fn links_share_an_agent_not_a_chrome_tab() {
+        let _serial = SERIAL.lock();
+        reset();
+        assert_eq!(set_link(link("tab-a", "c1", 1)).unwrap().handle, "b1");
+        assert_eq!(set_link(link("tab-a", "c1", 2)).unwrap().handle, "b2");
+        // The same Chrome tab again, same agent: the same handle, no new link.
+        assert_eq!(set_link(link("tab-a", "c1", 1)).unwrap().handle, "b1");
+        assert_eq!(links_of("tab-a").len(), 2);
+        // Moved to another agent: gone from tab-a, which hears about it.
+        assert_eq!(set_link(link("tab-b", "c1", 2)).unwrap().handle, "b1");
+        assert_eq!(links_of("tab-a").iter().map(|l| l.handle.as_str()).collect::<Vec<_>>(), ["b1"]);
+        assert_eq!(take_news("tab-a").len(), 1);
+        assert!(take_news("tab-a").is_empty());
+        // tab-a's next link is b3, not a reused b2.
+        assert_eq!(set_link(link("tab-a", "c1", 3)).unwrap().handle, "b3");
         // Chrome tab ids are per browser: the same number in another connection is another tab.
-        set_link(link("tab-c", "c2", 2));
-        assert_eq!(REG.lock().links.len(), 2);
-        REG.lock().links.clear();
+        set_link(link("tab-c", "c2", 2)).unwrap();
+        assert_eq!(links_of("tab-b").len(), 1);
+        reset();
+    }
+
+    /// A re-announced link keeps its handle; a clash is renumbered. The cap holds.
+    #[test]
+    fn handles_survive_reannounce_and_the_cap_holds() {
+        let _serial = SERIAL.lock();
+        reset();
+        let mut l = link("tab-r", "c9", 5);
+        l.handle = "b4".into();
+        assert_eq!(set_link(l).unwrap().handle, "b4");
+        let mut clash = link("tab-r", "c9", 6);
+        clash.handle = "b4".into();
+        assert_eq!(set_link(clash).unwrap().handle, "b5");
+        for chrome in 7..13 {
+            set_link(link("tab-r", "c9", chrome)).unwrap();
+        }
+        assert_eq!(links_of("tab-r").len(), MAX_LINKS_PER_TAB);
+        assert!(set_link(link("tab-r", "c9", 99)).is_err());
+        reset();
+    }
+
+    /// No handle: the tab the agent used last. A handle: that one, which becomes the last used.
+    #[test]
+    fn tools_act_on_the_last_used_tab_unless_named() {
+        let _serial = SERIAL.lock();
+        reset();
+        set_link(link("tab-p", "c3", 1)).unwrap();
+        set_link(link("tab-p", "c3", 2)).unwrap();
+        assert_eq!(pick("tab-p", None).unwrap().unwrap().handle, "b2");
+        assert_eq!(pick("tab-p", Some("b1")).unwrap().unwrap().handle, "b1");
+        assert_eq!(pick("tab-p", None).unwrap().unwrap().handle, "b1");
+        assert!(pick("tab-p", Some("b9")).unwrap().is_err());
+        assert!(pick("tab-none", None).is_none());
+        reset();
     }
 
     /// A link that missed a reload's remap (the extension was away) follows the rename chain to

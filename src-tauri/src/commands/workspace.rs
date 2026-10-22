@@ -750,6 +750,7 @@ pub fn set_active_workspace(window: tauri::Window, state: State<'_, Arc<AppState
     let data_clone = app_data.clone();
     drop(app_data);
     let _ = save_state(&data_clone);
+    crate::browser_link::touch_window(&state, &label);
     Ok(())
 }
 
@@ -813,6 +814,8 @@ pub fn set_active_pane(
     if let Some(workspace) = win.workspaces.iter_mut().find(|w| w.id == workspace_id) {
         workspace.active_pane_id = Some(pane_id);
     }
+    drop(app_data);
+    crate::browser_link::touch_window(&state, &label);
     Ok(())
 }
 
@@ -836,6 +839,7 @@ pub fn set_active_tab(
             }
         }
     }
+    crate::browser_link::touch_tab(&tab_id);
     Ok(())
 }
 

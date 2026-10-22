@@ -1,6 +1,7 @@
 // The maiTerm extension's service worker (docs/browser-link.md): finds each running maiTerm over
 // native messaging, holds one WebSocket to each, keeps the human's links, and runs the actions
-// maiTerm relays from an agent on that agent's linked tab.
+// maiTerm relays from an agent on its linked tabs. A Chrome tab is linked to one agent; an agent
+// can hold several, each under a handle (b1, b2…) maiTerm gives it.
 
 import { runAction, detach, forget } from './driver.js';
 
@@ -18,7 +19,7 @@ const conns = new Map(HOSTS.map((h) => [h, { status: 'disconnected', pending: ne
 
 // ── links (chrome.storage.session: survives a service-worker restart, not the browser) ─────
 
-/** @returns {Promise<Array<{host, maitermTabId, maitermTabName, chromeTabId, title, url}>>} */
+/** @returns {Promise<Array<{host, maitermTabId, maitermTabName, chromeTabId, handle, openedBy, title, url}>>} */
 async function getLinks() {
   const { links } = await chrome.storage.session.get('links');
   return links ?? [];
@@ -45,8 +46,9 @@ function mutateLinks(fn) {
 async function paintBadges(links) {
   const tabs = await chrome.tabs.query({});
   for (const t of tabs) {
-    const linked = links.some((l) => l.chromeTabId === t.id);
-    chrome.action.setBadgeText({ tabId: t.id, text: linked ? 'ON' : '' }).catch(() => {});
+    // The handle the agent knows the tab by, so the human can tell which page it means.
+    const link = links.find((l) => l.chromeTabId === t.id);
+    chrome.action.setBadgeText({ tabId: t.id, text: link ? link.handle || 'ON' : '' }).catch(() => {});
   }
   chrome.action.setBadgeBackgroundColor({ color: '#78716c' }).catch(() => {});
 }
@@ -106,11 +108,14 @@ async function connect(host) {
         c.status = 'connected';
         c.instance = r.instance;
         c.error = undefined;
-        // Links maiTerm didn't take back (their tab closed meanwhile) are gone.
+        // Links maiTerm didn't take back (their tab closed meanwhile) are gone; the rest carry
+        // the handle maiTerm kept or gave them.
         const accepted = new Set(r.accepted ?? []);
+        const handles = r.handles ?? {};
         await mutateLinks(async (all) => {
           const kept = all.filter((l) => l.host !== host || accepted.has(l.chromeTabId));
           for (const l of all.filter((l) => !kept.includes(l))) await detach(l.chromeTabId);
+          for (const l of kept) if (l.host === host) l.handle = handles[l.chromeTabId] ?? l.handle;
           return kept;
         });
       },
@@ -129,7 +134,7 @@ async function connect(host) {
           protocol: PROTOCOL,
           version: VERSION,
           browser: browserName(),
-          links: links.map(({ maitermTabId, chromeTabId, title, url }) => ({ maitermTabId, chromeTabId, title, url })),
+          links: links.map(({ maitermTabId, chromeTabId, handle, openedBy, title, url }) => ({ maitermTabId, chromeTabId, handle, openedBy, title, url })),
         },
       }),
     );
@@ -167,10 +172,13 @@ async function onFrame(host, raw) {
     // maiTerm only relays for a link, but the link must be OURS and still to this instance.
     const link = (await getLinks()).find((l) => l.host === host && l.chromeTabId === chromeTabId);
     if (!link) return reply({ error: 'That Chrome tab is no longer linked.' });
+    agentActed.set(chromeTabId, Date.now());
     try {
       reply({ result: await runAction(chromeTabId, action, args ?? {}) });
     } catch (e) {
       reply({ error: String(e?.message ?? e) });
+    } finally {
+      agentActed.set(chromeTabId, Date.now());
     }
   } else if (msg.method === 'unlinked') {
     const { chromeTabId } = msg.params ?? {};
@@ -213,37 +221,75 @@ ensureConnected();
 
 // ── linking (only from the popup: the human's click) ────────────────────────
 
-async function unlinkChromeTab(chromeTabId, { tellMaiterm = true } = {}) {
+/** Unlink a Chrome tab. `reason` tells its agent why: unlinked | closed | cancelled | moved. */
+async function unlinkChromeTab(chromeTabId, reason = 'unlinked') {
   await mutateLinks(async (links) => {
     const gone = links.filter((l) => l.chromeTabId === chromeTabId);
     if (!gone.length) return null;
-    if (tellMaiterm) for (const l of gone) await request(l.host, 'unlink', { chromeTabId }).catch(() => {});
+    for (const l of gone) await request(l.host, 'unlink', { chromeTabId, reason }).catch(() => {});
     await detach(chromeTabId);
     return links.filter((l) => l.chromeTabId !== chromeTabId);
   });
 }
 
-async function link(host, maitermTab, chromeTab) {
-  // Inside the queue, so maiTerm's `unlinked` for the old tab (queued behind this reply) applies
+/** Link a Chrome tab to an agent. An agent may hold several Chrome tabs; a Chrome tab has one
+ *  agent, so linking it again moves it (§1.3). `openerChromeTabId`: it joins the agent of the
+ *  linked tab that opened it. */
+async function link(host, maitermTab, chromeTab, openerChromeTabId) {
+  // Inside the queue, so a frame from maiTerm about this tab (queued behind the reply) applies
   // after the new link is written, not over it.
   await mutateLinks(async (all) => {
-    await request(host, 'link', { maitermTabId: maitermTab.id, chromeTabId: chromeTab.id, title: chromeTab.title ?? '', url: chromeTab.url ?? '' });
-    // One maiTerm tab per Chrome tab and one Chrome tab per maiTerm tab (§1.3). That maiTerm
-    // already dropped its side; this drops ours, and another maiTerm's hold on this Chrome tab.
-    const replaced = all.filter((l) => l.chromeTabId === chromeTab.id || (l.host === host && l.maitermTabId === maitermTab.id));
-    const links = all.filter((l) => !replaced.includes(l));
-    for (const l of replaced) {
-      if (l.chromeTabId !== chromeTab.id) await detach(l.chromeTabId);
-      else if (l.host !== host) await request(l.host, 'unlink', { chromeTabId: l.chromeTabId }).catch(() => {});
-    }
-    links.push({ host, maitermTabId: maitermTab.id, maitermTabName: maitermTab.name, chromeTabId: chromeTab.id, title: chromeTab.title ?? '', url: chromeTab.url ?? '' });
-    return links;
+    const r = await request(host, 'link', {
+      maitermTabId: maitermTab.id,
+      chromeTabId: chromeTab.id,
+      title: chromeTab.title ?? '',
+      url: chromeTab.url ?? '',
+      ...(openerChromeTabId != null ? { openerChromeTabId } : {}),
+    });
+    // This maiTerm already moved the tab on its side; another maiTerm holding it is told.
+    const previous = all.filter((l) => l.chromeTabId === chromeTab.id);
+    for (const l of previous) if (l.host !== host) await request(l.host, 'unlink', { chromeTabId: l.chromeTabId, reason: 'moved' }).catch(() => {});
+    const opener = all.find((l) => l.chromeTabId === openerChromeTabId);
+    return [
+      ...all.filter((l) => !previous.includes(l)),
+      {
+        host,
+        maitermTabId: maitermTab.id,
+        maitermTabName: maitermTab.name,
+        chromeTabId: chromeTab.id,
+        handle: r?.handle ?? '',
+        openedBy: opener?.handle,
+        title: chromeTab.title ?? '',
+        url: chromeTab.url ?? '',
+      },
+    ];
   });
 }
 
+// ── tabs a linked page opens ────────────────────────────────────────────────
+// A sign-in popup, or a page an agent's click opened, joins the agent of the tab that opened it:
+// it comes from a page the human already handed over, and the flow can't finish without it. A tab
+// the HUMAN opens from a linked page (a middle-click while the agent is idle) stays theirs: it
+// joins only when it is a popup window, or the agent acted on the opener in the last few seconds.
+
+/** chromeTabId → when an agent's action on it last started or finished. */
+const agentActed = new Map();
+const AGENT_OPENED_MS = 5000;
+
+chrome.tabs.onCreated.addListener(async (tab) => {
+  if (tab.openerTabId == null) return;
+  const opener = (await getLinks()).find((l) => l.chromeTabId === tab.openerTabId);
+  if (!opener) return;
+  const recent = Date.now() - (agentActed.get(tab.openerTabId) ?? 0) < AGENT_OPENED_MS;
+  const win = await chrome.windows.get(tab.windowId).catch(() => null);
+  if (!recent && win?.type !== 'popup') return;
+  await link(opener.host, { id: opener.maitermTabId, name: opener.maitermTabName }, tab, opener.chromeTabId).catch(() => {});
+});
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   forget(tabId);
-  unlinkChromeTab(tabId);
+  agentActed.delete(tabId);
+  unlinkChromeTab(tabId, 'closed');
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
@@ -267,7 +313,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId == null) return;
   forget(source.tabId);
-  if (reason === 'canceled_by_user') unlinkChromeTab(source.tabId);
+  if (reason === 'canceled_by_user') unlinkChromeTab(source.tabId, 'cancelled');
 });
 
 // ── popup ───────────────────────────────────────────────────────────────────
@@ -290,7 +336,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           if (c.status !== 'connected') continue;
           try {
             const r = await request(h, 'listTabs');
-            out.push({ host: h, instance: c.instance, tabs: r.tabs ?? [] });
+            out.push({ host: h, instance: c.instance, tabs: r.tabs ?? [], windows: r.windows ?? 1 });
           } catch (e) {
             out.push({ host: h, instance: c.instance, tabs: [], error: String(e?.message ?? e) });
           }

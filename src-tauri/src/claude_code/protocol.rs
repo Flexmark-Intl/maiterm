@@ -1328,12 +1328,13 @@ pub fn tool_list_response(
 /// The browser-link tools (docs/browser-link.md §4): diagnose and drive the ONE Chrome tab the
 /// human linked to the caller's tab, in the human's own browser and logins.
 fn browser_tools() -> Vec<Value> {
-    const LINKED: &str = "Acts on the Chrome tab your human linked to your maiTerm tab (in their own browser, signed in as them); call browserStatus first if you don't know whether you have one. Only your human can link a tab.";
+    const LINKED: &str = "Acts on a Chrome tab your human linked to your maiTerm tab (in their own browser, signed in as them): the one you used last, or the one you name with tab. Call browserStatus first if you don't know what you have. Only your human can link a tab.";
     let tab_id = serde_json::json!({ "type": "string", "description": "Your own tab (auto-injected)" });
+    let tab = serde_json::json!({ "type": "string", "description": "Which of your linked Chrome tabs, by handle from browserStatus (b1, b2…). Default: the one you used last" });
     serde_json::json!([
         {
             "name": "browserStatus",
-            "description": "Whether your maiTerm tab is linked to a Chrome tab, and if so its title and URL. A linked tab is yours to diagnose and drive: read its console errors (browserConsole) and requests (browserNetwork), read the page (browserSnapshot), and act in it (browserClick, browserType, browserPressKey, browserNavigate) — for example to reproduce a bug in the human's own session, check a fix in the real app, or walk a flow. When it isn't linked, the answer says what to ask your human: only they can link one, from the maiTerm Chrome extension.",
+            "description": "The Chrome tabs linked to your maiTerm tab, each with its handle (b1, b2…), title and URL, and which is current (the one tools use when you don't pass tab). A tab a linked page opens (a sign-in popup, say) joins you as a new handle, and tool results tell you when one does. A linked tab is yours to diagnose and drive: read its console errors (browserConsole) and requests (browserNetwork), read the page (browserSnapshot), and act in it (browserClick, browserType, browserPressKey, browserNavigate) — for example to reproduce a bug in the human's own session, check a fix in the real app, or walk a flow. When it isn't linked, the answer says what to ask your human: only they can link one, from the maiTerm Chrome extension.",
             "inputSchema": { "type": "object", "properties": { "tabId": tab_id } }
         },
         {
@@ -1343,6 +1344,7 @@ fn browser_tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "tabId": tab_id,
+                    "tab": tab,
                     "url": { "type": "string", "description": "The URL to open, or one of: back, forward, reload" }
                 },
                 "required": ["url"]
@@ -1355,6 +1357,7 @@ fn browser_tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "tabId": tab_id,
+                    "tab": tab,
                     "max_chars": { "type": "number", "description": "Cut the tree off after this many characters (default 40000)" }
                 }
             }
@@ -1366,6 +1369,7 @@ fn browser_tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "tabId": tab_id,
+                    "tab": tab,
                     "ref": { "type": "string", "description": "The element's ref from browserSnapshot, e.g. e42" },
                     "double": { "type": "boolean", "description": "Double-click (default false)" }
                 },
@@ -1379,6 +1383,7 @@ fn browser_tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "tabId": tab_id,
+                    "tab": tab,
                     "ref": { "type": "string", "description": "The element's ref from browserSnapshot; omit to type into whatever has focus" },
                     "text": { "type": "string", "description": "The text to type" },
                     "clear": { "type": "boolean", "description": "Empty the field first (default true)" },
@@ -1394,6 +1399,7 @@ fn browser_tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "tabId": tab_id,
+                    "tab": tab,
                     "key": { "type": "string", "description": "The key, e.g. Enter" }
                 },
                 "required": ["key"]
@@ -1406,6 +1412,7 @@ fn browser_tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "tabId": tab_id,
+                    "tab": tab,
                     "full_page": { "type": "boolean", "description": "The whole page rather than the visible part (default false)" }
                 }
             }
@@ -1417,6 +1424,7 @@ fn browser_tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "tabId": tab_id,
+                    "tab": tab,
                     "expression": { "type": "string", "description": "A JavaScript expression, e.g. document.title" }
                 },
                 "required": ["expression"]
@@ -1429,6 +1437,7 @@ fn browser_tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "tabId": tab_id,
+                    "tab": tab,
                     "errors_only": { "type": "boolean", "description": "Only errors and exceptions (default false)" },
                     "clear": { "type": "boolean", "description": "Empty the buffer after reading, so the next read shows only what is new (default false)" }
                 }
@@ -1441,6 +1450,7 @@ fn browser_tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "tabId": tab_id,
+                    "tab": tab,
                     "failed_only": { "type": "boolean", "description": "Only requests that failed or answered 4xx/5xx (default false)" },
                     "filter": { "type": "string", "description": "Only URLs containing this text" },
                     "include_static": { "type": "boolean", "description": "Include images, fonts, stylesheets and media (default false)" },

@@ -31,9 +31,10 @@ pub async fn browser_link_sync(state: State<'_, Arc<AppState>>, app: AppHandle) 
     .map_err(|e| e.to_string())?
 }
 
+/// Unlink one of a tab's Chrome tabs (by handle), or all of them.
 #[tauri::command]
-pub fn browser_link_unlink(app: AppHandle, maiterm_tab_id: String) -> bool {
-    browser_link::unlink_maiterm_tab(&app, &maiterm_tab_id)
+pub fn browser_link_unlink(app: AppHandle, maiterm_tab_id: String, handle: Option<String>) -> bool {
+    browser_link::unlink_maiterm_tab(&app, &maiterm_tab_id, handle.as_deref())
 }
 
 /// Open Chrome on its extensions page. A `chrome://` URL can't be handed to the OS's URL opener,

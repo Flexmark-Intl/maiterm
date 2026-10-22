@@ -1,5 +1,6 @@
-// The popup: the ONE place a link is made (docs/browser-link.md §1.1) — the human, on the Chrome
-// tab being linked, picks the maiTerm agent tab that may drive it.
+// The popup: the ONE place the human links a tab (docs/browser-link.md §1.1) — on the Chrome tab
+// being linked, they pick the maiTerm agent tab that may drive it. Agent tabs are listed most
+// recently used first, each window's front tab on top (maiTerm orders them).
 
 const $ = (id) => document.getElementById(id);
 const ask = (msg) => chrome.runtime.sendMessage(msg);
@@ -61,6 +62,9 @@ async function render() {
         { class: 'card' },
         el('span', { class: 'label' }, `Linked · ${where}`),
         el('span', { class: 'name' }, link.maitermTabName ?? 'an agent tab'),
+        link.handle
+          ? el('span', { class: 'meta' }, [`The agent knows this tab as ${link.handle}`, link.openedBy ? `opened by ${link.openedBy}` : null].filter(Boolean).join(' · '))
+          : null,
         el('span', { class: 'hint' }, 'That agent can diagnose this tab (console, network) and drive it (read, click, type). Chrome shows a debugging bar while it works; cancelling the bar also unlinks.'),
         el('button', { class: 'primary', onclick: unlink }, 'Unlink'),
       ),
@@ -70,7 +74,7 @@ async function render() {
   }
 
   $('current').replaceChildren(
-    el('p', { class: 'hint' }, 'Choose the maiTerm agent tab that may diagnose and drive this page. It will act in this tab only, signed in as you.'),
+    el('p', { class: 'hint' }, 'Choose the maiTerm agent tab that may diagnose and drive this page, signed in as you. An agent can hold several linked tabs; tabs this page opens for it (a sign-in popup) join it too.'),
   );
   if (!known.some((i) => i.status === 'connected')) {
     $('picker').hidden = true;
@@ -88,34 +92,29 @@ function drawGroups() {
   const multi = groups.length > 1;
   const out = [];
   for (const g of groups) {
-    const byWs = new Map();
-    for (const t of g.tabs) {
-      const hay = `${t.name} ${t.workspace} ${t.window}`.toLowerCase();
-      if (q && !hay.includes(q)) continue;
-      if (!byWs.has(t.workspace)) byWs.set(t.workspace, []);
-      byWs.get(t.workspace).push(t);
-    }
-    for (const [ws, tabs] of byWs) {
-      out.push(
-        el(
-          'div',
-          { class: 'group' },
-          el('h2', {}, multi ? `${g.instance} · ${ws}` : ws),
-          ...tabs.map((t) =>
-            el(
-              'button',
-              { class: 'tab', onclick: () => doLink(g.host, t) },
-              el('span', { class: 'name' }, t.name),
-              el(
-                'span',
-                { class: 'meta' },
-                [RUNTIME[t.runtime] ?? t.runtime, t.linked ? `now linked to “${t.linked.title || 'another tab'}”` : null].filter(Boolean).join(' · '),
-              ),
-            ),
-          ),
-        ),
-      );
-    }
+    const tabs = g.tabs.filter((t) => !q || `${t.name} ${t.workspace} ${t.window}`.toLowerCase().includes(q));
+    if (!tabs.length && !g.error) continue;
+    out.push(
+      el(
+        'div',
+        { class: 'group' },
+        multi ? el('h2', {}, g.instance) : null,
+        ...tabs.map((t) => {
+          const linked = t.linked ?? [];
+          const meta = [
+            RUNTIME[t.runtime] ?? t.runtime,
+            g.windows > 1 ? `${t.workspace} · ${t.window}` : t.workspace,
+            linked.length ? `${linked.length} linked tab${linked.length > 1 ? 's' : ''}` : null,
+          ];
+          return el(
+            'button',
+            { class: 'tab', onclick: () => doLink(g.host, t) },
+            el('span', { class: 'name' }, t.name, t.front ? el('span', { class: 'front' }, 'in front') : null),
+            el('span', { class: 'meta' }, meta.filter(Boolean).join(' · ')),
+          );
+        }),
+      ),
+    );
     if (g.error) out.push(el('p', { class: 'error' }, `${g.instance}: ${g.error}`));
   }
   if (!out.length) out.push(el('p', { class: 'hint' }, q ? 'No agent tab matches.' : 'No agent tabs are open in maiTerm.'));

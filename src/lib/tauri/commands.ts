@@ -2381,6 +2381,10 @@ export async function mcpServerAdoptNative(id: string): Promise<string[]> {
 export interface BrowserLinkView {
   maiterm_tab_id: string;
   chrome_tab_id: number;
+  /** What the agent calls this Chrome tab: b1, b2… (an agent tab can hold several). */
+  handle: string;
+  /** The handle of the linked tab that opened this one, when it joined that way. */
+  opened_by: string | null;
   browser: string;
   title: string;
   url: string;
@@ -2409,8 +2413,9 @@ export async function browserLinkSync(): Promise<void> {
   return invoke('browser_link_sync');
 }
 
-export async function browserLinkUnlink(maitermTabId: string): Promise<boolean> {
-  return invoke('browser_link_unlink', { maitermTabId });
+/** Unlink one of a tab's Chrome tabs by handle, or all of them when none is given. */
+export async function browserLinkUnlink(maitermTabId: string, handle?: string): Promise<boolean> {
+  return invoke('browser_link_unlink', { maitermTabId, handle: handle ?? null });
 }
 
 /** Refresh the unpacked extension folder; returns its path. */
