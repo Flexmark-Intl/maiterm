@@ -26,12 +26,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // The cast (the same names the website's and maiLink's shots use).
 const TABS = [
-  { id: 't-web', name: 'web-ui', workspace: 'web-ui', runtime: 'claude' },
-  { id: 't-e2e', name: 'e2e checks', workspace: 'web-ui', runtime: 'claude' },
-  { id: 't-api', name: 'api-gateway', workspace: 'api-gateway', runtime: 'codex' },
-  { id: 't-rel', name: 'release-bot', workspace: 'api-gateway', runtime: 'claude', linked: { title: 'Staging · Orders' } },
-  { id: 't-doc', name: 'docs-site', workspace: 'docs-site', runtime: 'claude' },
-].map((t) => ({ window: 'main', linked: null, ...t }));
+  // In maiTerm's order: the front tab, then most recently used.
+  { id: 't-web', name: 'web-ui', workspace: 'Storefront', runtime: 'claude', front: true },
+  { id: 't-e2e', name: 'e2e checks', workspace: 'Storefront', runtime: 'claude' },
+  { id: 't-rel', name: 'release-bot', workspace: 'Platform', runtime: 'claude', linked: [{ handle: 'b1', title: 'Staging · Orders' }, { handle: 'b2', title: 'Staging · Admin' }] },
+  { id: 't-api', name: 'api-gateway', workspace: 'Platform', runtime: 'codex' },
+  { id: 't-doc', name: 'docs-site', workspace: 'Docs', runtime: 'claude' },
+].map((t) => ({ window: 'main', linked: [], front: false, ...t }));
 
 const SHOTS = [
   {
@@ -39,7 +40,7 @@ const SHOTS = [
     state: 'picker',
     eyebrow: 'Link a tab',
     title: 'Pick the agent that may work in this tab.',
-    sub: 'Only you link a tab, and each agent can use only the one linked to it.',
+    sub: 'Only you link a tab, and each agent can use only the tabs linked to it.',
   },
   {
     file: 'screenshot-2-linked.png',
@@ -109,7 +110,8 @@ function wsServer(token) {
         if (msg.method === 'hello') {
           if (msg.params?.token !== token) return send({ id: msg.id, error: 'bad token' });
           reply({ instance: 'maiTerm', protocol: 1, accepted: (msg.params.links ?? []).map((l) => l.chromeTabId) });
-        } else if (msg.method === 'listTabs') reply({ tabs: TABS });
+        } else if (msg.method === 'listTabs') reply({ tabs: TABS, windows: 1 });
+        else if (msg.method === 'link') reply({ ok: true, handle: 'b1' });
         else if (msg.id != null) reply({ ok: true });
       }
     });

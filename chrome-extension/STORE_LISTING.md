@@ -25,7 +25,7 @@ maiTerm
 **Summary** (132 characters max)
 
 ```
-Let a maiTerm AI agent debug and drive one browser tab you link to it: console, network, page, clicks and typing.
+Let a maiTerm AI agent debug and drive the browser tabs you link to it: console, network, page, clicks and typing.
 ```
 
 **Category:** Developer Tools
@@ -34,7 +34,7 @@ Let a maiTerm AI agent debug and drive one browser tab you link to it: console, 
 **Detailed description**
 
 ```
-maiTerm for Chrome connects one browser tab to one AI agent running in maiTerm, the terminal for working with coding agents (https://maiterm.dev). You choose the tab and the agent; the agent can then diagnose and drive that tab, in your own browser with your own logins.
+maiTerm for Chrome connects browser tabs you choose to an AI agent running in maiTerm, the terminal for working with coding agents (https://maiterm.dev). You choose the tabs and the agent; the agent can then diagnose and drive them, in your own browser with your own logins.
 
 DIAGNOSE
 - Console errors and warnings, with the file and line they came from
@@ -50,7 +50,7 @@ Typical uses: an agent fixing a bug reproduces it in your real, signed-in app an
 
 YOU STAY IN CONTROL
 - Only you link a tab, from this extension's icon. An agent cannot pick or reach any other tab.
-- Each agent can use only the tab linked to it.
+- Each agent can use only the tabs linked to it. A popup a linked page opens for it, such as a sign-in window, joins it too.
 - Chrome shows its "is debugging this browser" bar while a tab is in use. Cancel it, close the tab, click Unlink, or turn the feature off in maiTerm, and the link ends.
 - It works in the background: you can keep using other tabs while an agent works in its own.
 
@@ -76,7 +76,7 @@ https://maiterm.dev/chrome-extension/privacy/
 **Single purpose**
 
 ```
-Lets an AI agent running in the maiTerm desktop app diagnose and operate one browser tab that the user has explicitly linked to that agent.
+Lets an AI agent running in the maiTerm desktop app diagnose and operate the browser tabs that the user has explicitly linked to that agent, and popup windows those tabs open.
 ```
 
 **Permission justifications**
@@ -84,7 +84,7 @@ Lets an AI agent running in the maiTerm desktop app diagnose and operate one bro
 `debugger`
 
 ```
-This is how the agent works in the tab the user linked, and only that tab. Through the DevTools Protocol it reads the page's accessibility tree, console errors and network requests (including a failing request's response body, which is how a developer finds why an API call broke), takes screenshots, and sends clicks and key presses. Content scripts cannot do this: they cannot read network traffic or uncaught errors from other scripts, and their synthetic events are untrusted, so pages ignore them. The debugger is attached only to a tab the user linked through the extension's popup; Chrome's "is debugging this browser" bar shows while it is attached, and cancelling it unlinks the tab.
+This is how the agent works in the tabs the user linked (and popup windows those tabs open), and only those. Through the DevTools Protocol it reads the page's accessibility tree, console errors and network requests (including a failing request's response body, which is how a developer finds why an API call broke), takes screenshots, and sends clicks and key presses. Content scripts cannot do this: they cannot read network traffic or uncaught errors from other scripts, and their synthetic events are untrusted, so pages ignore them. The debugger is attached only to a tab the user linked through the extension's popup; Chrome's "is debugging this browser" bar shows while it is attached, and cancelling it unlinks the tab.
 ```
 
 `nativeMessaging`
