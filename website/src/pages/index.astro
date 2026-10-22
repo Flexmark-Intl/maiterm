@@ -42,13 +42,21 @@ const description =
  */
 const KEY_FEATURES = [
   {
+    id: 'browser',
+    // v3.11.0. Backed by features/chrome-extension.md, checked against src-tauri/src/browser_link/
+    // and chrome-extension/. "Your" browser is literal: the extension drives the human's own
+    // Chrome profile through chrome.debugger — not a new headless one. Only the human links.
+    title: 'Your browser, linked',
+    blurb: 'Agents debug the tab you hand them',
+    new: true,
+  },
+  {
     id: 'mcp',
     // v3.7.0. Backed by features/mcp-servers.md. Names the runtimes, per the rule above: Claude
     // Code under every managed account and Codex locally, Claude Code on ssh hosts. NOT Gemini
     // and NOT Codex over ssh (docs/mcp-proxy.md §2) — don't widen the blurb to "every agent".
     title: 'One MCP sign-in',
     blurb: 'Claude Code and Codex, every account and host',
-    new: true,
   },
   {
     id: 'requests',
@@ -206,10 +214,70 @@ const EVERYTHING = [
     </div>
   </section>
 
+  {/* ------------------------------------------------------- Browser link */}
+  {/* The release slot (v3.11.0): the hero rail's top entry links here. --raised, right after the
+      --flush hero; inserting it flipped every band down to the --sunken compat strip.
+
+      Every claim here is backed by features/chrome-extension.md and checked against
+      src-tauri/src/browser_link/ (tools.rs: the ten browser* tools; OWN_TAB_ONLY_TOOLS) and
+      chrome-extension/ (driver.js: chrome.debugger, focus emulation at attach, so a background
+      tab takes clicks and keys):
+      - Only the human links, from the extension popup; each agent reaches only its own link.
+      - Tools are listed only while Preferences -> Chrome extension is on.
+      - Not on the Chrome Web Store yet: installed from maiTerm with Load unpacked. Say so.
+      - Chromium browsers only (install.rs: Chrome, Chromium, Brave, Edge, Vivaldi, Arc). */}
+  <section class="ln-band ln-band--raised" id="browser">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">Chrome extension</p>
+      <h2 class="ln-h2 ln-h2--wide">Hand an agent the browser tab with the bug in it.</h2>
+      <p class="ln-lead">
+        An agent fixing a web app usually can't see the bug. It reads the code, guesses, and asks
+        you to reload and say what happened. Browser tools for agents give it a fresh browser:
+        none of your logins, none of your data, rarely the state the bug needs.
+      </p>
+      <p class="ln-lead">
+        Link one tab in <strong>your own</strong> Chrome to an agent instead, from the maiTerm
+        extension's icon. The agent reads the console and the failing requests, with the body
+        the server sent back, reads the page, and clicks, types, navigates and takes screenshots
+        in it — signed in as you, and in the background while you work in another tab.
+      </p>
+
+      <div class="ln-cards">
+        <div class="ln-card">
+          <h3>Diagnose, then fix</h3>
+          <p>
+            Console errors with the file and line they came from, each request's status and
+            timing, and the response a broken call returned: usually enough for the agent to go
+            straight to the code.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Only the tab you link</h3>
+          <p>
+            No agent can link a tab, pick one or see your others. Each agent works only the tab
+            linked to it, and Chrome shows its debugging bar while it does. Unlink, close the tab
+            or cancel the bar, and it ends.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Stays on your machine</h3>
+          <p>
+            The extension talks only to maiTerm on your own computer. What the agent reads goes to
+            that agent, like anything else it reads.
+          </p>
+        </div>
+      </div>
+      <p class="ln-note band-note">
+        Turn it on in Preferences → Chrome extension. Chrome and other Chromium browsers — Brave
+        and Edge, and Arc on macOS. Until its Chrome Web Store listing is live, maiTerm walks you through loading
+        it unpacked.
+      </p>
+      <a class="ln-cta-link" href="/features/chrome-extension/">How the Chrome extension works</a>
+    </div>
+  </section>
+
   {/* ---------------------------------------------------------- MCP servers */}
-  {/* The release slot (v3.7.0): the hero rail's top entry links here. --raised, right after
-      the --flush hero (which has the plain background); inserting it flipped every band down
-      to the --sunken compat strip, which resets parity.
+  {/* The release slot until v3.11.0 (v3.7.0). Plain since the browser band went in above it.
 
       Every claim here is backed by features/mcp-servers.md and checked against
       src-tauri/src/mcp_proxy/ + components/mcp/McpServersPane.svelte:
@@ -219,7 +287,7 @@ const EVERYTHING = [
       - A down upstream keeps its catalog; a call answers isError with a sentence.
       - Claude re-lists on list_changed; Codex 0.157 ignores it until its next session.
       - addMcpServer files an mcp_add request; it never signs in. Streamable HTTP + tools only. */}
-  <section class="ln-band ln-band--raised" id="mcp">
+  <section class="ln-band" id="mcp">
     <div class="ln-inner">
       <p class="ln-eyebrow">MCP servers</p>
       <h2 class="ln-h2 ln-h2--wide">Sign in to an MCP server once. Every agent gets it.</h2>
@@ -273,7 +341,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------ Requests */}
-  {/* The release slot until v3.7.0 (v3.5.0). Plain since the MCP servers band went in above it.
+  {/* The release slot until v3.7.0 (v3.5.0). --raised since v3.11.0's browser band flipped the page.
 
       Every claim here is backed by features/agents.md "Organising tabs, meshes and maiTerm"
       and checked against src/lib/stores/agentRequests.svelte.ts + src-tauri/src/agent_requests.rs:
@@ -286,7 +354,7 @@ const EVERYTHING = [
       - Approval is only the card (Loom Decisions) or a PAIRED phone (authorize_human refuses
         the dev token). AskUserQuestion and Claude's permission dialog are not approval.
       - Pending requests lapse after 30 min (PENDING_TTL_MS). */}
-  <section class="ln-band" id="requests">
+  <section class="ln-band ln-band--raised" id="requests">
     <div class="ln-inner">
       <p class="ln-eyebrow">Agents that ask first</p>
       <h2 class="ln-h2 ln-h2--wide">Your agents can tidy up. Who talks to whom is still your call.</h2>
@@ -329,8 +397,8 @@ const EVERYTHING = [
   </section>
 
   {/* -------------------------------------------------------------- Inside */}
-  {/* The release slot until v3.5.0 (v3.4.0). --raised since v3.7.0's MCP servers band
-      flipped the page.
+  {/* The release slot until v3.5.0 (v3.4.0). Plain since v3.11.0's browser band flipped the
+      page.
 
       Every claim here is backed by features/agents.md "The maiTerm mod (Claude Code)"
       and checked against src-tauri/src/claude_code/{mod_asks,mod_inbox}.rs:
@@ -339,7 +407,7 @@ const EVERYTHING = [
       - Prompts go around a draft only BETWEEN TURNS (mod_inbox::takes_now); mid-turn a
         draft still holds them. "Reach an idle agent" is the honest wording.
       - Cross-session refusal is outbound from maiTerm tabs only. */}
-  <section class="ln-band ln-band--raised" id="inside">
+  <section class="ln-band" id="inside">
     <div class="ln-inner">
       <p class="ln-eyebrow">Inside Claude Code</p>
       <h2 class="ln-h2 ln-h2--wide">It works with Claude Code from the inside, not through its keyboard.</h2>
@@ -388,7 +456,7 @@ const EVERYTHING = [
 
       No screenshot yet: a real Focus view is a list of real tab names and transcripts.
       A staged one belongs here once the screenshot playbook has been run for it. */}
-  <section class="ln-band" id="loom">
+  <section class="ln-band ln-band--raised" id="loom">
     <div class="ln-inner">
       <p class="ln-eyebrow">Workstream Loom</p>
       <h2 class="ln-h2 ln-h2--wide">Every agent in the window. None of their terminals.</h2>
@@ -445,7 +513,7 @@ const EVERYTHING = [
       No screenshot on purpose: the Accounts pane is a list of real email
       addresses and organisation names. Every honest shot of it leaks an identity,
       and a staged one would be a fake account list. */}
-  <section class="ln-band ln-band--raised" id="accounts">
+  <section class="ln-band" id="accounts">
     <div class="ln-inner">
       <p class="ln-eyebrow">Agent accounts</p>
       <h2 class="ln-h2 ln-h2--wide">Claude Code has one login slot. Your week does not.</h2>
@@ -509,7 +577,7 @@ const EVERYTHING = [
   </section>
 
   {/* --------------------------------------------------------- Progression */}
-  <section class="ln-band">
+  <section class="ln-band ln-band--raised">
     <div class="ln-inner">
       <p class="ln-eyebrow">Start with what you know</p>
       <h2 class="ln-h2 ln-h2--wide">It is a terminal first. The rest waits until you want it.</h2>
@@ -551,7 +619,7 @@ const EVERYTHING = [
   {/* --------------------------------------------------------------- Stack */}
   {/* .ln-cards sits OUTSIDE the text block on purpose: `.ln-stack > :first-child`
       caps at 46rem, which drops the three-card grid to two columns. */}
-  <section class="ln-band ln-band--raised" id="stack">
+  <section class="ln-band" id="stack">
     <div class="ln-inner ln-stack">
     <div>
       <p class="ln-eyebrow">Workspace stack</p>
@@ -626,7 +694,7 @@ const EVERYTHING = [
   </section>
 
   {/* --------------------------------------------------------------- Tasks */}
-  <section class="ln-band" id="board">
+  <section class="ln-band ln-band--raised" id="board">
     <div class="ln-inner ln-stack">
       <div>
         <p class="ln-eyebrow">Task board</p>
@@ -688,7 +756,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------ Overlord */}
-  <section class="ln-band ln-band--raised" id="overlord">
+  <section class="ln-band" id="overlord">
     <div class="ln-inner">
       <p class="ln-eyebrow">Overlord</p>
       <h2 class="ln-h2">A supervisor for a window full of agents</h2>
@@ -743,7 +811,7 @@ const EVERYTHING = [
   </section>
 
   {/* ---------------------------------------------------------------- Mesh */}
-  <section class="ln-band" id="mesh">
+  <section class="ln-band ln-band--raised" id="mesh">
     <div class="ln-inner ln-stack">
       <div>
         <p class="ln-eyebrow">Mesh workspace</p>
@@ -779,7 +847,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------- maiLink */}
-  <section class="ln-band ln-band--raised" id="mailink">
+  <section class="ln-band" id="mailink">
     <div class="ln-inner ln-split">
       <div>
         <p class="ln-eyebrow">maiLink companion</p>
@@ -836,7 +904,7 @@ const EVERYTHING = [
       No screenshot here on purpose — a real Mattermost thread is a customer bug
       report with real usernames on it, and staging a fake one convincingly is a
       bigger job than this band is worth. */}
-  <section class="ln-band" id="comms">
+  <section class="ln-band ln-band--raised" id="comms">
     <div class="ln-inner">
       <p class="ln-eyebrow">Chat threads</p>
       <h2 class="ln-h2 ln-h2--wide">The bug report never has to leave the thread it landed in.</h2>
@@ -892,12 +960,12 @@ const EVERYTHING = [
   </section>
 
   {/* ---------------------------------------------------------- Follow-ups */}
-  {/* --raised, the last band before the --sunken compat strip: Chat threads above it is
-      plain (since v3.7.0's MCP servers band flipped the page), and the sunken strip resets
+  {/* Plain, the last band before the --sunken compat strip: Chat threads above it is
+      --raised (since v3.11.0's browser band flipped the page), and the sunken strip resets
       parity below.
       Follow-ups only run while the Overlord is on (Preferences.follow_ups_live()),
       so the note says so rather than letting the band read as always-on. */}
-  <section class="ln-band ln-band--raised" id="follow-ups">
+  <section class="ln-band" id="follow-ups">
     <div class="ln-inner">
       <p class="ln-eyebrow">Follow-ups</p>
       <h2 class="ln-h2 ln-h2--wide">An agent that comes back to it, without you remembering to ask.</h2>

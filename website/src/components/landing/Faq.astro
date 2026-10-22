@@ -24,6 +24,10 @@ const FAQS = [
     a: 'The remote ones, if you want it to. Add a server in Preferences → MCP servers and sign in once: maiTerm keeps the sign-in in your system\'s credential store, refreshes it, and serves the server to Claude Code under every account, to Codex, and to Claude Code on your SSH hosts — where, on a machine several people share, each person\'s agents use their own sign-in. A server that goes down keeps its tools instead of vanishing mid-task. It is opt-in per server, and servers you installed directly keep working untouched. Local servers started with a command, Codex over SSH and Gemini aren\'t covered yet.',
   },
   {
+    q: 'Can my agent see what is going wrong in my browser?',
+    a: 'Yes, in one tab you hand it. With the maiTerm extension for Chrome (and other Chromium browsers), you link a tab to an agent from the extension\'s icon, and that agent can read the tab\'s console errors, its failing requests and the responses they got back, and the page itself, and can click, type, navigate and take screenshots in it — in your own signed-in session, in the background. No agent can link a tab or see your others, and each agent works only the tab linked to it. The extension talks only to maiTerm on your own computer. Turn it on in Preferences → Chrome extension; until its Chrome Web Store listing is live, maiTerm walks you through loading it unpacked.',
+  },
+  {
     q: 'Can I be signed in to two Claude accounts at once?',
     a: 'Yes, and Claude Code on its own cannot — it has a single login slot, shared by every terminal you open. maiTerm gives each account its own configuration directory and starts each new tab under whichever account you have made active, so a client\'s account can be working in one tab while your own runs in the next. For those local tabs it never holds the credential: the agent does its own sign-in, refresh and sign-out, and maiTerm owns only the folder. SSH tabs can run as the active account too, on hosts you choose — that needs a long-lived token, which maiTerm keeps in your system keychain, so it is opt-in per account. Off by default, macOS and Linux for now.',
   },

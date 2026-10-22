@@ -38,13 +38,13 @@ All of it in your real, signed-in session, and in the background: the tab doesn'
 The extension needs the maiTerm app; on its own it does nothing.
 
 :::note
-The Chrome extension arrives in the maiTerm release after 3.10.0.
+The Chrome extension needs maiTerm 3.11.0 or later. Its Chrome Web Store listing isn't live yet, so for now you load it from maiTerm as below.
 :::
 
 1. In maiTerm, open **Preferences → Chrome extension** and turn on **Let agents diagnose and drive linked browser tabs**. This gives agents the browser tools and lets the extension find maiTerm.
 2. Install the extension. Until its Chrome Web Store listing is live, click **Load unpacked…** there: Chrome opens on its extensions page with the folder shown in Finder. Turn on **Developer mode**, click **Load unpacked**, and choose that folder. You do this once per browser.
 
-It works in Chrome and other Chromium browsers: Brave, Edge and Arc. Within 30 seconds the browser appears under **Connected browsers**.
+It works in Chrome and other Chromium browsers: Brave, Edge, Vivaldi, and Arc on macOS. Within 30 seconds the browser appears under **Connected browsers**.
 
 ## Linking a tab
 

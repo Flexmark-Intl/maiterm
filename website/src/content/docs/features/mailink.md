@@ -37,9 +37,13 @@ maiLink deliberately has no cloud rendezvous, so out of the box it works within 
 
 Pairing is a QR scan, and you stay in control of every device:
 
-1. Enable the maiLink bridge in **Preferences → AI Agents → maiLink Mobile Companion**.
+1. Enable the maiLink bridge in **Preferences → maiLink**.
 2. Click **Pair a phone** — maiTerm displays a one-time QR code carrying the host, port, certificate fingerprint, and a single-use pairing code that expires in two minutes.
 3. Scan it with the maiLink app. The phone verifies the pinned certificate and redeems the code for its own device token.
+
+:::note[Updating from 3.10 or earlier]
+maiLink moved to port **27365** in maiTerm 3.11.0 (it was 8765, a common default for test servers, and stopping one by its port could quit maiTerm). A phone paired before the update can't reach the new port: **pair it again** after updating. The new QR code carries the new port.
+:::
 
 Every paired phone appears in the **Paired devices** list with its name and platform, and each is **individually revocable** — revoke one and it can no longer connect or ring, without disturbing the others. Each device holds its own token; there is no shared secret to rotate.
 
@@ -98,7 +102,7 @@ maiLink stays responsive on real workloads — a hundred-tab window and sessions
   <figcaption>Every reachable agent — a live transcript you can pick up and resume.</figcaption>
 </figure>
 
-maiLink only ever surfaces **agent tabs** (Claude Code, Codex) — never plain shells. Which of those are reachable is up to you, under **Preferences → AI Agents → maiLink Mobile Companion**:
+maiLink only ever surfaces **agent tabs** (Claude Code, Codex) — never plain shells. Which of those are reachable is up to you, under **Preferences → maiLink**:
 
 - **Default-on** — every agent tab is available, except ones you exclude with **Make unavailable in maiLink** in the tab's right-click menu.
 - **Opt-in** — flip off *Make all tabs available in maiLink*, and only tabs (or whole workspaces) you explicitly mark **Make available in maiLink** appear on your phone.

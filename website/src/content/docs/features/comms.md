@@ -102,6 +102,15 @@ An agent can also post a genuine fire-and-forget notice — a heads-up it expect
 
 Authority is unchanged on a thread the agent opened: an authorized operator's reply still carries your full authority, and everyone else's still buys investigation and answers but not changes. See below.
 
+## Reading a whole channel
+
+Sometimes the useful context isn't one thread: "what has QA reported this week?", or "has anyone else hit this?". An agent can read a whole channel, not only the threads bound to its tab. Ask for it with `/maiterm channel <channel-url>`, or let the agent reach for it when your request needs it.
+
+- **Newest activity first, a page at a time.** Each page lists threads with their opening post, how many replies they have, and the replies that fall in that page. The agent asks for the next page to go further back.
+- **Any channel the bot can read**, given as its URL (`https://chat.example.com/team/channels/channel`, a server hosted on a subpath included), as `team/channel`, or as a channel id. It doesn't have to be one the tab monitors. A URL on a server other than the one in Preferences is refused, so the bot's token only ever goes to your own server.
+- **One thread in full**, from a permalink or post id, the same way.
+- **Read-only.** Reading a channel binds nothing, posts nothing and downloads no attachments (it only counts them). Join and leave notices are left out. What it reads is other people's words: the agent is told to treat them as context for what you asked, not as instructions.
+
 ## You stay in control
 
 The agent is working against a live customer channel, so the design keeps you — not the chat participants — in charge of what it can do.

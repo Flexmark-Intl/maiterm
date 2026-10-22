@@ -55,7 +55,7 @@ Guards are **human-only**. The supervisor agent can propose changes to a rule's 
 
 They behave like [triggers](/features/triggers/): seeded on first run, individually toggleable, editable in place, hideable and restorable, and auto-updated with new versions of maiTerm until you edit one — at which point your wording is frozen and left alone. If a later version retires a default you had edited, your copy stays, as a rule of your own.
 
-There used to be a fourth, **Re-bind a running agent**, which typed `/maiterm init` into any tab whose agent was running but not connected. Agents bind themselves now, from their first request, so maiTerm no longer volunteers it. The **Agent running but unbound** condition is still there for a rule of your own, and the deck still offers the re-bind as a one-click repair.
+There used to be a fourth, **Re-bind a running agent**, which typed `/maiterm init` into any tab whose agent was running but not connected. Agents bind themselves now, from their first request, so maiTerm no longer volunteers it. Since 3.11.0 the deck no longer types it either: an agent registers itself when it starts. The **Agent running but unbound** condition is still there for a rule of your own, and a tab stuck that way gets a card on the deck offering **Restart agent** and **Reload tab**.
 
 Every rule is scoped **Everywhere** in the window by default, or to specific workspaces. A workspace rule is *additional* unless you mark it as superseding the global one.
 
@@ -70,7 +70,7 @@ With Overlord enabled, a **♔ Overlord** row appears above the workspace list i
 ![The Overlord deck showing the Board view — workstreams from four workspaces indexed down the left, and task cards laid out across the backlog, active and blocked lanes](/screenshots/overlord-board.webp)
 
 - **Loom** — the home view, and where `Cmd+Shift+J` lands: work with each agent without going into its terminal. A condensed chat with a composer, its permission prompts and questions answered in place, its state, model, context and any sequence in flight in the chat header, and a picture of who is working on what. It replaced the old **Fleet** grid of agent cards. See [Workstream Loom](/features/loom/).
-- **Triage** — one severity-ordered queue of everything wanting a person: proposals, escalations, permission prompts, context pressure, stale work, [work one agent handed to another tab](/features/tasks/#handing-work-to-another-tab), tabs that have stopped answering. Not six stacked lists. Every card carries its own remedy, and a **Run all** clears the two things that need no judgement — re-bind every unbound agent, then approve every pending proposal — paced so a deck of forty signals doesn't become forty simultaneous API streams. It reports what came back, not what it typed: a `/maiterm init` typed at a tab whose agent is gone is delivered perfectly and achieves nothing, so the run stays open until each target has either re-bound or run out of time, and says how many never answered.
+- **Triage** — one severity-ordered queue of everything wanting a person: proposals, escalations, permission prompts, context pressure, stale work, [work one agent handed to another tab](/features/tasks/#handing-work-to-another-tab), tabs that have stopped answering. Not six stacked lists. Every card carries its own remedy, and a **Run all** clears the one thing that needs no judgement — approving every pending proposal — paced so a deck of forty proposals doesn't become forty simultaneous API streams. A tab whose agent has exited gets **Restart agent**, which resumes its own session; one where something is running but no agent has registered gets **Restart agent** and **Reload tab**. A starting agent registers on its own within seconds, so that card usually clears itself; over SSH an agent that exited looks the same, and **Restart agent** relaunches it if the tab is at a shell and says so if it isn't.
 - **Board** — the [task board](/features/tasks/) for the whole window, indexed by workstream rather than by workspace. Drag a card between lanes, or onto a workstream in the index to move it to that job; `Escape` cancels a drag mid-flight.
 - **Ledger** — a verbatim record of every directive sent: which tab, which rule (or you, or the agent), the exact bytes, and what came of it. Because injections are by design indistinguishable from you typing, this is the only way to reconstruct who told a project to do something at 3am.
 
@@ -80,7 +80,7 @@ With Overlord enabled, a **♔ Overlord** row appears above the workspace list i
 
 **A blocked card withdraws itself** when the tab it's about reports that it isn't blocked any more, rather than sitting on the deck until someone dismisses a problem that already went away.
 
-Two buttons sit in the command bar: **Scan tabs**, which reads every running agent tab and populates the board from it (safe to repeat — nothing is typed into anything), and **Re-bind *N***, which appears when more than one tab's agent is running unbound.
+**Scan tabs** in the command bar reads every running agent tab and populates the board from it (safe to repeat — nothing is typed into anything).
 
 The deck takes its colours from whichever [theme](/features/themes/) you're running, and goes still under reduced-motion.
 
@@ -127,7 +127,7 @@ Clicking the Overlord row creates the Overlord workspace if it doesn't exist yet
 | `getTabPrompt` / `answerTabPrompt` | See what a tab is stopped at, and answer it |
 | `proposeRuleChanges` | Propose rule edits, or entries for its [playbook](#letting-the-agent-answer-escalations), for you to approve or reject |
 | `archiveTab` / `closeTab` / `deleteArchivedTab` | Put a finished session away — one tab or a list of them in a single call |
-| `recoverTab` / `resumeTab` / `resumeWorkspace` | Get a tab responding again, whatever state it's in |
+| `recoverTab` / `resumeTab` / `resumeWorkspace` | Get a tab responding again: relaunch an agent that stopped, or resume a suspended tab or workspace |
 
 Supervised agents — every other agent tab in the window — get one tool in return, `replyToOverlord`, to report ready, acknowledge a finished directive, or escalate a problem. A decision only you can make is asked of you directly, unless you've [handed those to the supervisor](#letting-the-agent-answer-escalations).
 
