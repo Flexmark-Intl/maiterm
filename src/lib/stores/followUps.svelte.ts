@@ -176,7 +176,7 @@ function createFollowUpsStore() {
   }
 
   /** Tell the human about each script waiting for them, once: a notification that stays until
-   *  the script is answered, and opens the Decisions queue. Also at launch, for scripts left
+   *  the script is answered, and opens it where it waits (`openApprovals`). Also at launch, for scripts left
    *  waiting when maiTerm last closed. */
   function announceApprovals() {
     if (!preferencesStore.followUpsLive) return;
@@ -194,8 +194,22 @@ function createFollowUpsStore() {
     const { title, body } = approvalsNotice();
     void notify(title, body, 'info', { tabId: source.tabId }, {
       key: APPROVALS_KEY,
-      action: () => window.dispatchEvent(new CustomEvent('open-loom', { detail: { mode: 'decisions' } })),
+      action: openApprovals,
     });
+  }
+
+  /** The notice's click: scripts all in one tab open on that tab's corner card; spread over
+   *  several, the Loom's Decisions list them together. Read at click time, since the notice
+   *  is re-worded as scripts come and go. Dynamic: waiting.svelte imports this store. */
+  function openApprovals() {
+    const shown = pendingApprovals().filter(p => announced.has(p.followUp.id));
+    const tabs = new Set(shown.map(p => p.tabId));
+    if (tabs.size !== 1) {
+      window.dispatchEvent(new CustomEvent('open-loom', { detail: { mode: 'decisions' } }));
+      return;
+    }
+    const first = shown[0];
+    void import('$lib/stores/waiting.svelte').then(({ waitingStore }) => waitingStore.openOnTab(first.tabId, first.followUp.id));
   }
 
   /** "Allow a watch script?" + the tab; for several, how many and where. */

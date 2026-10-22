@@ -13,6 +13,7 @@ import { tasksStore } from '$lib/stores/tasks.svelte';
 import { followUpsStore, type PendingApproval } from '$lib/stores/followUps.svelte';
 import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
 import { decisionsQueue } from '$lib/loom/model';
+import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { SvelteMap } from 'svelte/reactivity';
 import type { AgentRequest, Task } from '$lib/tauri/types';
 
@@ -110,6 +111,19 @@ function createWaitingStore() {
      *  opened by itself would take the keyboard from a terminal they are typing in. */
     open(tabId: string, focus: string | null = null, extraTaskId: string | null = null) {
       open = { ...open, [tabId]: { focus, extraTaskId, seq: ++seq } };
+    },
+    /** A notification's click: go to the tab and open its card there, on `focus`. The tab
+     *  first, because a terminal focuses itself when it becomes visible and the card has to
+     *  take focus after that (as the tab strip badge does). A tab not in a pane (archived,
+     *  closed) has no corner, so the Loom's Decisions take it instead. */
+    async openOnTab(tabId: string, focus: string | null = null) {
+      const inPane = workspacesStore.workspaces.some((ws) => ws.panes.some((p) => p.tabs.some((t) => t.id === tabId && !t.service_id)));
+      if (!inPane) {
+        window.dispatchEvent(new CustomEvent('open-loom', { detail: { mode: 'decisions' } }));
+        return;
+      }
+      await navigateToTab(tabId);
+      this.open(tabId, focus);
     },
     close(tabId: string) {
       if (!(tabId in open)) return;

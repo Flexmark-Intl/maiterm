@@ -125,11 +125,12 @@ async function file(
   }
 }
 
-/** One request notice per request, in the window that filed it; clicking opens the Decisions. */
+/** One request notice per request, in the window that filed it; clicking opens the asking tab's
+ *  corner card on it. Dynamic: waiting.svelte imports this store. */
 function announce(r: AgentRequest) {
   void notify('An agent asks for your approval', r.summary, 'info', { tabId: r.tab_id }, {
     key: `agent-request:${r.id}`,
-    action: () => window.dispatchEvent(new CustomEvent('open-loom', { detail: { mode: 'decisions' } })),
+    action: () => void import('$lib/stores/waiting.svelte').then(({ waitingStore }) => waitingStore.openOnTab(r.tab_id, r.id)),
   });
 }
 

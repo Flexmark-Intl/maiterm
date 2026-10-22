@@ -469,7 +469,9 @@ anything. So:
     a new one rings again) — a single request toast
     (`toastStore.addRequest`, yellow-edged, no countdown) that stays until the script is
     answered anywhere, the phone included (`settleApprovalNotices` runs on every mirror and
-    tick). Clicking it opens the Loom's Decisions (`open-loom`). Each script is announced once a
+    tick). Clicking it opens the script's tab with its corner card on the script
+    (`waitingStore.openOnTab`); scripts waiting in several tabs open the Loom's Decisions
+    (`open-loom`) instead. Each script is announced once a
     run, including ones left waiting when maiTerm last closed. The toast queue had to learn
     about it: the countdown ran only on the head toast, so a request at the head stalled every
     toast behind it, and overflow evicted the head — the request, for good. Now the active toast
