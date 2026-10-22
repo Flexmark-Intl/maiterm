@@ -97,13 +97,13 @@ async fn run(socket: WebSocket, state: Arc<AppState>, app: AppHandle) {
     if let Some(floors) = p.get("handleFloors").and_then(|v| v.as_object()) {
         for (id, n) in floors {
             let n = n.as_u64().unwrap_or(0).min(u32::MAX as u64) as u32;
-            let id = {
+            // Under the id the tab has now; a tab maiTerm can't see now (archived) comes back under
+            // the same id, so its floor is kept as it is.
+            let now = {
                 let reg = REG.lock();
                 super::current_id(&state, &reg, id)
             };
-            if let Some(id) = id {
-                reserve_handles(&id, n);
-            }
+            reserve_handles(now.as_deref().unwrap_or(id), n);
         }
     }
     let mut accepted = Vec::new();

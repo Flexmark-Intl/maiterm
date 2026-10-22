@@ -193,7 +193,8 @@ async function onFrame(host, raw) {
     const link = (await getLinks()).find((l) => l.host === host && l.chromeTabId === chromeTabId);
     if (!link) return reply({ error: 'That Chrome tab is no longer linked.' });
     const acts = OPENING_ACTIONS.has(action);
-    const started = Date.now();
+    // Its own token: two actions can start in the same millisecond, and one ending must not end both.
+    const started = { at: Date.now() };
     if (acts) agentActing.set(chromeTabId, [...(agentActing.get(chromeTabId) ?? []), started]);
     try {
       reply({ result: await runAction(chromeTabId, action, args ?? {}) });
@@ -311,7 +312,7 @@ async function link(host, maitermTab, chromeTab, openerChromeTabId) {
  *  can't, so it never counts: an agent polling the console must not sweep up the tabs the human
  *  opens from that page. */
 const OPENING_ACTIONS = new Set(['click', 'type', 'press', 'navigate', 'eval']);
-/** chromeTabId → start times of opening actions running on it now. One counts for at most
+/** chromeTabId → the opening actions running on it now ({at: start time}). One counts for at most
  *  ACTING_MAX_MS: an eval awaiting a promise that never settles must not keep every tab the human
  *  opens from that page joining the agent (maiTerm gave up on it after 30 s anyway). */
 const agentActing = new Map();
@@ -326,7 +327,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   const opener = (await getLinks()).find((l) => l.chromeTabId === tab.openerTabId);
   if (!opener) return;
   const now = Date.now();
-  const acting = (agentActing.get(tab.openerTabId) ?? []).some((t) => now - t < ACTING_MAX_MS);
+  const acting = (agentActing.get(tab.openerTabId) ?? []).some((a) => now - a.at < ACTING_MAX_MS);
   const recent = acting || now - (agentActed.get(tab.openerTabId) ?? 0) < AGENT_OPENED_MS;
   const win = await chrome.windows.get(tab.windowId).catch(() => null);
   if (!recent && win?.type !== 'popup') return;
