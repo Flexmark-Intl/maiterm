@@ -221,6 +221,10 @@ An agent can reload its own tab straight away — it's the one interrupted — b
 
 A bridge follows the [Agent Bridge picker](/features/agent-bridge/#bridging-two-agents)'s rules: an agent already bridged with a third is neither connected to nor forked, and only Claude Code and Codex can be forked. If the asking agent is bridged with someone else, the card says that bridge closes. A fork's card says where the copy will run: on this machine, or — when the agent being forked is over SSH — on that host, showing the ssh command it will run through. If that has changed by the time you approve, nothing is done. A bridge to a tab that has since closed carries nothing, so `disconnectBridge` closes that one at once.
 
+### Browser
+
+With **Preferences → Chrome extension** on, an agent gets ten `browser…` tools for the one Chrome tab you linked to it: read its console errors and failing requests (with their responses), read the page, click, type, navigate and take screenshots, signed in as you. Only you link a tab. See [Chrome Extension](/features/chrome-extension/#the-tools).
+
 ### Supervision
 
 If [Overlord](/features/overlord/) is enabled and this window has an Overlord workspace, every supervised agent also gets `replyToOverlord`, and the supervisor agent gets a set of tools of its own — driving another tab, answering a prompt it's stuck at, proposing rule changes, and putting a finished session away. See [Overlord](/features/overlord/).

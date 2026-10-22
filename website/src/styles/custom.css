@@ -232,3 +232,9 @@ a.platform:hover {
     --wordmark-term: #221812;
   }
 }
+
+/* A tool or command name in a table's first column stays on one line: the narrow first column
+   otherwise breaks `browserScreenshot` mid-word. Starlight scrolls a table too wide for a phone. */
+.sl-markdown-content td:first-child > code {
+  white-space: nowrap;
+}

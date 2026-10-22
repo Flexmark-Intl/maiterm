@@ -1,7 +1,10 @@
 # Chrome Web Store submission
 
 Copy-paste source for the developer dashboard. Keep it in sync with `manifest.json`,
-`PRIVACY.md` and `docs/browser-link.md`: if they disagree, the listing is wrong.
+`PRIVACY.md` and `docs/browser-link.md`: if they disagree, the listing is wrong. The store
+points at two website pages: `website/src/content/docs/features/chrome-extension.md` and
+`website/src/content/docs/chrome-extension/privacy.md`, which is `PRIVACY.md` with a title, so
+change both together.
 
 Upload artifact: `dist/maiterm-chrome-<version>.zip` (`scripts/package.sh`). The FIRST upload is
 `scripts/package.sh --with-key ~/.config/maiterm/chrome-extension-key.pem`, so the store keeps
@@ -68,10 +71,10 @@ your local maiTerm and to that agent. Full policy: see the privacy link on this 
 **Privacy policy URL**
 
 ```
-https://github.com/Flexmark-Intl/maiterm/blob/main/chrome-extension/PRIVACY.md
+https://maiterm.dev/chrome-extension/privacy/
 ```
 
-**Homepage URL:** `https://maiterm.dev`
+**Homepage URL:** `https://maiterm.dev/features/chrome-extension/`
 
 ---
 
