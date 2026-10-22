@@ -1328,13 +1328,13 @@ pub fn tool_list_response(
 /// The browser-link tools (docs/browser-link.md §4): diagnose and drive the ONE Chrome tab the
 /// human linked to the caller's tab, in the human's own browser and logins.
 fn browser_tools() -> Vec<Value> {
-    const LINKED: &str = "Acts on a Chrome tab your human linked to your maiTerm tab (in their own browser, signed in as them): the one you used last, or the one you name with tab. Call browserStatus first if you don't know what you have. Only your human can link a tab.";
+    const LINKED: &str = "Acts on a Chrome tab your human linked to your maiTerm tab (in their own browser, signed in as them): the one you name with tab, else your current one (the last you named). Call browserStatus first if you don't know what you have. Only your human can link a tab.";
     let tab_id = serde_json::json!({ "type": "string", "description": "Your own tab (auto-injected)" });
-    let tab = serde_json::json!({ "type": "string", "description": "Which of your linked Chrome tabs, by handle from browserStatus (b1, b2…). Default: the one you used last" });
+    let tab = serde_json::json!({ "type": "string", "description": "Which of your linked Chrome tabs, by handle from browserStatus (b1, b2…); it becomes your current one. Default: your current one" });
     serde_json::json!([
         {
             "name": "browserStatus",
-            "description": "The Chrome tabs linked to your maiTerm tab, each with its handle (b1, b2…), title and URL, and which is current (the one tools use when you don't pass tab). A tab a linked page opens (a sign-in popup, say) joins you as a new handle, and tool results tell you when one does. A linked tab is yours to diagnose and drive: read its console errors (browserConsole) and requests (browserNetwork), read the page (browserSnapshot), and act in it (browserClick, browserType, browserPressKey, browserNavigate) — for example to reproduce a bug in the human's own session, check a fix in the real app, or walk a flow. When it isn't linked, the answer says what to ask your human: only they can link one, from the maiTerm Chrome extension.",
+            "description": "The Chrome tabs linked to your maiTerm tab, each with its handle (b1, b2…), title and URL, and which is current (the one tools use when you don't pass tab; only naming a tab changes it). A tab a linked page opens (a sign-in popup, say) joins you as a new handle, and tool results tell you when one does. A linked tab is yours to diagnose and drive: read its console errors (browserConsole) and requests (browserNetwork), read the page (browserSnapshot), and act in it (browserClick, browserType, browserPressKey, browserNavigate) — for example to reproduce a bug in the human's own session, check a fix in the real app, or walk a flow. When it isn't linked, the answer says what to ask your human: only they can link one, from the maiTerm Chrome extension.",
             "inputSchema": { "type": "object", "properties": { "tabId": tab_id } }
         },
         {
@@ -1352,7 +1352,7 @@ fn browser_tools() -> Vec<Value> {
         },
         {
             "name": "browserSnapshot",
-            "description": format!("Read your linked Chrome tab as an accessibility tree: one line per element (role, name, value, state), indented by nesting. Elements you can act on carry [ref=eN]; pass that ref to browserClick or browserType. Take a fresh snapshot after the page changes. {LINKED}"),
+            "description": format!("Read your linked Chrome tab as an accessibility tree: one line per element (role, name, value, state), indented by nesting. Elements you can act on carry [ref=bN:eM] (the tab, then the element); pass that ref to browserClick or browserType and it acts in that tab. Take a fresh snapshot after the page changes. {LINKED}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1370,7 +1370,7 @@ fn browser_tools() -> Vec<Value> {
                 "properties": {
                     "tabId": tab_id,
                     "tab": tab,
-                    "ref": { "type": "string", "description": "The element's ref from browserSnapshot, e.g. e42" },
+                    "ref": { "type": "string", "description": "The element's ref from browserSnapshot, e.g. b1:e42" },
                     "double": { "type": "boolean", "description": "Double-click (default false)" }
                 },
                 "required": ["ref"]
@@ -1384,7 +1384,7 @@ fn browser_tools() -> Vec<Value> {
                 "properties": {
                     "tabId": tab_id,
                     "tab": tab,
-                    "ref": { "type": "string", "description": "The element's ref from browserSnapshot; omit to type into whatever has focus" },
+                    "ref": { "type": "string", "description": "The element's ref from browserSnapshot (e.g. b1:e42); omit to type into whatever has focus" },
                     "text": { "type": "string", "description": "The text to type" },
                     "clear": { "type": "boolean", "description": "Empty the field first (default true)" },
                     "submit": { "type": "boolean", "description": "Press Enter afterwards (default false)" }

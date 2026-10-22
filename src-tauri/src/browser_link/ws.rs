@@ -11,8 +11,8 @@ use tauri::AppHandle;
 use tokio::sync::mpsc;
 
 use super::{
-    emit_changed, front_tab, prune, remove_link_by_chrome, set_link, tab_exists, tab_used, tell, token, Conn, Link, ALLOWED_EXTENSION_IDS,
-    PROTOCOL, REG,
+    drop_others_for_one_tab_extension, emit_changed, front_tab, holds_several, prune, remove_link_by_chrome, reserve_handles, set_link,
+    tab_exists, tab_used, tell, token, Conn, Link, ALLOWED_EXTENSION_IDS, PROTOCOL, REG,
 };
 use crate::state::AppState;
 
@@ -92,6 +92,20 @@ async fn run(socket: WebSocket, state: Arc<AppState>, app: AppHandle) {
     // The links it already holds (it kept them across a service-worker restart or our relaunch).
     // Only for maiTerm tabs that still exist: a link to a closed tab must not come back.
     // A link whose tab was reloaded while we were apart comes back under the new id.
+    // The highest handle each agent tab has had, kept by the extension: a restart must not hand a
+    // closed tab's handle to a new page while the agent may still have the old one in mind.
+    if let Some(floors) = p.get("handleFloors").and_then(|v| v.as_object()) {
+        for (id, n) in floors {
+            let n = n.as_u64().unwrap_or(0).min(u32::MAX as u64) as u32;
+            let id = {
+                let reg = REG.lock();
+                super::current_id(&state, &reg, id)
+            };
+            if let Some(id) = id {
+                reserve_handles(&id, n);
+            }
+        }
+    }
     let mut accepted = Vec::new();
     // Beside `accepted`, not in it: an extension from before handles reads `accepted` as ids.
     let mut handles = serde_json::Map::new();
@@ -134,7 +148,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>, app: AppHandle) {
             msg = read.next() => match msg {
                 Some(Ok(WsMessage::Text(t))) => {
                     let Ok(v) = serde_json::from_str::<Value>(&t) else { continue };
-                    if let Some(out) = handle(&v, &conn_id, &browser, &state, &app) {
+                    if let Some(out) = handle(&v, &conn_id, &browser, &version, &state, &app) {
                         if write.send(WsMessage::Text(out.into())).await.is_err() {
                             break;
                         }
@@ -181,12 +195,11 @@ fn parse_link(v: &Value, conn_id: &str, browser: &str) -> Option<Link> {
         browser: browser.to_string(),
         title: v.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
         url: v.get("url").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-        used: 0,
     })
 }
 
 /// One frame from the extension. Returns the frame to send back, if any.
-fn handle(v: &Value, conn_id: &str, browser: &str, state: &Arc<AppState>, app: &AppHandle) -> Option<String> {
+fn handle(v: &Value, conn_id: &str, browser: &str, version: &str, state: &Arc<AppState>, app: &AppHandle) -> Option<String> {
     let id = v.get("id").cloned();
     let Some(method) = v.get("method").and_then(|m| m.as_str()) else {
         // An answer to one of our commands.
@@ -224,6 +237,9 @@ fn handle(v: &Value, conn_id: &str, browser: &str, state: &Arc<AppState>, app: &
                 match set_link(link) {
                     Err(e) => Err(e),
                     Ok(stored) => {
+                        if !holds_several(version) {
+                            drop_others_for_one_tab_extension(&stored);
+                        }
                         log::info!("[browser-link] {browser} tab {} linked to maiTerm tab {} as {}", stored.chrome_tab_id, stored.maiterm_tab_id, stored.handle);
                         let msg = match &stored.opened_by {
                             Some(by) => format!(

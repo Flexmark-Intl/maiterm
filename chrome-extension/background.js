@@ -26,8 +26,26 @@ async function getLinks() {
 }
 
 async function setLinks(links) {
-  await chrome.storage.session.set({ links });
+  // The highest handle each agent tab has had, per maiTerm: sent on `hello` so a restarted maiTerm
+  // never gives a closed tab's handle to a new page.
+  const { handleFloors = {} } = await chrome.storage.session.get('handleFloors');
+  for (const l of links) {
+    const n = Number(/^b(\d+)$/.exec(l.handle ?? '')?.[1] ?? 0);
+    const key = `${l.host} ${l.maitermTabId}`;
+    if (n > (handleFloors[key] ?? 0)) handleFloors[key] = n;
+  }
+  await chrome.storage.session.set({ links, handleFloors });
   await paintBadges(links);
+}
+
+async function handleFloorsFor(host) {
+  const { handleFloors = {} } = await chrome.storage.session.get('handleFloors');
+  const out = {};
+  for (const [key, n] of Object.entries(handleFloors)) {
+    const [h, id] = key.split(' ');
+    if (h === host) out[id] = n;
+  }
+  return out;
 }
 
 /** Every change to the links runs here, one at a time. Each one reads, awaits and writes, and two
@@ -102,6 +120,7 @@ async function connect(host) {
   c.ws = ws;
   ws.onopen = async () => {
     const links = (await getLinks()).filter((l) => l.host === host);
+    const handleFloors = await handleFloorsFor(host);
     const id = c.nextId++;
     c.pending.set(id, {
       resolve: async (r) => {
@@ -135,6 +154,7 @@ async function connect(host) {
           version: VERSION,
           browser: browserName(),
           links: links.map(({ maitermTabId, chromeTabId, handle, openedBy, title, url }) => ({ maitermTabId, chromeTabId, handle, openedBy, title, url })),
+          handleFloors,
         },
       }),
     );
@@ -172,13 +192,17 @@ async function onFrame(host, raw) {
     // maiTerm only relays for a link, but the link must be OURS and still to this instance.
     const link = (await getLinks()).find((l) => l.host === host && l.chromeTabId === chromeTabId);
     if (!link) return reply({ error: 'That Chrome tab is no longer linked.' });
-    agentActed.set(chromeTabId, Date.now());
+    const acts = OPENING_ACTIONS.has(action);
+    if (acts) agentActing.set(chromeTabId, (agentActing.get(chromeTabId) ?? 0) + 1);
     try {
       reply({ result: await runAction(chromeTabId, action, args ?? {}) });
     } catch (e) {
       reply({ error: String(e?.message ?? e) });
     } finally {
-      agentActed.set(chromeTabId, Date.now());
+      if (acts) {
+        agentActing.set(chromeTabId, agentActing.get(chromeTabId) - 1);
+        agentActed.set(chromeTabId, Date.now());
+      }
     }
   } else if (msg.method === 'unlinked') {
     const { chromeTabId } = msg.params ?? {};
@@ -190,9 +214,17 @@ async function onFrame(host, raw) {
   } else if (msg.method === 'relinked') {
     // Its maiTerm tab was reloaded under a new id; the link follows it.
     const { chromeTabId, maitermTabId, maitermTabName } = msg.params ?? {};
-    await mutateLinks((links) => {
+    await mutateLinks(async (links) => {
       const l = links.find((x) => x.host === host && x.chromeTabId === chromeTabId);
       if (!l) return null;
+      // Its handle floor moves with it (inside the queue: setLinks writes the same key).
+      const { handleFloors = {} } = await chrome.storage.session.get('handleFloors');
+      const from = `${host} ${l.maitermTabId}`;
+      const to = `${host} ${maitermTabId}`;
+      if (handleFloors[from] != null) {
+        handleFloors[to] = Math.max(handleFloors[from], handleFloors[to] ?? 0);
+        await chrome.storage.session.set({ handleFloors });
+      }
       l.maitermTabId = maitermTabId;
       if (maitermTabName) l.maitermTabName = maitermTabName;
       return links;
@@ -272,15 +304,22 @@ async function link(host, maitermTab, chromeTab, openerChromeTabId) {
 // the HUMAN opens from a linked page (a middle-click while the agent is idle) stays theirs: it
 // joins only when it is a popup window, or the agent acted on the opener in the last few seconds.
 
-/** chromeTabId → when an agent's action on it last started or finished. */
+/** Actions that can make a page open a tab. Reading (console, network, snapshot, screenshot)
+ *  can't, so it never counts: an agent polling the console must not sweep up the tabs the human
+ *  opens from that page. */
+const OPENING_ACTIONS = new Set(['click', 'type', 'press', 'navigate', 'eval']);
+/** chromeTabId → opening actions running on it now. */
+const agentActing = new Map();
+/** chromeTabId → when an opening action on it last finished. A page opens its tab while the
+ *  click is handled or just after; 2 s covers that without reaching a human's later middle-click. */
 const agentActed = new Map();
-const AGENT_OPENED_MS = 5000;
+const AGENT_OPENED_MS = 2000;
 
 chrome.tabs.onCreated.addListener(async (tab) => {
   if (tab.openerTabId == null) return;
   const opener = (await getLinks()).find((l) => l.chromeTabId === tab.openerTabId);
   if (!opener) return;
-  const recent = Date.now() - (agentActed.get(tab.openerTabId) ?? 0) < AGENT_OPENED_MS;
+  const recent = (agentActing.get(tab.openerTabId) ?? 0) > 0 || Date.now() - (agentActed.get(tab.openerTabId) ?? 0) < AGENT_OPENED_MS;
   const win = await chrome.windows.get(tab.windowId).catch(() => null);
   if (!recent && win?.type !== 'popup') return;
   await link(opener.host, { id: opener.maitermTabId, name: opener.maitermTabName }, tab, opener.chromeTabId).catch(() => {});
@@ -289,6 +328,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   forget(tabId);
   agentActed.delete(tabId);
+  agentActing.delete(tabId);
   unlinkChromeTab(tabId, 'closed');
 });
 

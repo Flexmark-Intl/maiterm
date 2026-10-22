@@ -26,7 +26,13 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
 3. **A Chrome tab has one agent; an agent may hold several** (`MAX_LINKS_PER_TAB` = 8). Each link
    gets a handle, `b1`, `b2`…, never reused within its maiTerm tab, so a stale handle fails
    instead of reaching another page. Linking a Chrome tab again moves it; the agent that lost it
-   is told. A tool without `tab` acts on the link the agent used last (or was linked last).
+   is told. A tool without `tab` acts on the agent's CURRENT tab (`Registry.current`): set by its
+   first link and by naming a tab, and by nothing else — a tab the human links beside it, or one
+   that joins, must not become where an untargeted click lands. When the current tab goes and
+   several remain (or maiTerm restarted), an untargeted call is refused until the agent names one.
+   Refs carry their tab (`b1:e42`, written by the snapshot), so a ref always acts where it was read.
+   Handles are never reused: the extension keeps each agent tab's highest handle
+   (`handleFloors`, sent on `hello`), since a maiTerm restart empties the counter.
    What changed that the agent didn't do (a tab joined, closed, moved, was unlinked) is held and
    handed over as `linked_tabs_changed` on its next browser tool call.
 4. **The human can always see and stop it.** Chrome's own "is debugging this browser" bar shows
@@ -40,10 +46,12 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    link and the 5 s prune follow that chain, so a link that missed the remap (the extension was
    disconnected, or its `hello` was in flight) still reaches the reloaded tab.
 6. **A tab a linked page opens joins that page's agent** (the extension, `tabs.onCreated` with an
-   `openerTabId` it holds): when it is a popup window (a sign-in window), or the agent acted on
-   the opener in the last 5 s (its click opened it). A tab the HUMAN opens from a linked page (a
-   middle-click while the agent is idle) stays theirs. maiTerm refuses an opener that isn't the
-   same agent's link.
+   `openerTabId` it holds): when it is a popup window (a sign-in window), or an action that can
+   open a tab (click, type, press, navigate, eval — never a read) is running on the opener or
+   finished under 2 s ago. A tab the HUMAN opens from a linked page (a middle-click) stays theirs,
+   even while the agent reads that page. maiTerm refuses an opener that isn't the same agent's link.
+   An extension older than 0.2.0 (still running in a Chrome that hasn't reloaded it) keeps one tab
+   per agent: maiTerm drops that agent's other links when it links one, as that extension does.
 7. **The popup lists agent tabs most recently used first**, each window's front tab (active
    workspace → active pane → active tab) above all. Recency is in memory (`browser_link::touch_tab`,
    from `set_active_tab` / `set_active_pane` / `set_active_workspace` and window focus); after a
@@ -83,7 +91,7 @@ Extension → maiTerm:
 
 | method | params | result |
 |---|---|---|
-| `hello` (first frame, within 5 s) | `{token, protocol, version, browser, links:[Link]}` | `{instance, protocol, accepted:[chromeTabId], handles:{chromeTabId: handle}}` (handles beside `accepted`, not in it: an older extension reads `accepted` as ids) |
+| `hello` (first frame, within 5 s) | `{token, protocol, version, browser, links:[Link], handleFloors?:{maitermTabId: n}}` | `{instance, protocol, accepted:[chromeTabId], handles:{chromeTabId: handle}}` (handles beside `accepted`, not in it: an older extension reads `accepted` as ids) |
 | `listTabs` | — | `{tabs:[{id, name, workspace, window, runtime, front, linked:[{handle, title, browser}]}], windows}` agent tabs only, in §1.7 order |
 | `link` | `{maitermTabId, chromeTabId, title, url, openerChromeTabId?}` | `{ok, handle}` / error (cap, closed tab, opener not that agent's) |
 | `unlink` | `{chromeTabId, reason?}` — `unlinked` \| `closed` \| `cancelled` \| `moved`, for the agent's notice | `{ok}` |

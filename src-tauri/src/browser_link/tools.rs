@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tauri::AppHandle;
 
-use super::{command, connected, links_of, pick, prune, tab_name, take_news, Link};
+use super::{command, connected, current_handle, links_of, pick, prune, tab_name, take_news, Link};
 use crate::state::AppState;
 
 /// The tool → extension action table. `browserStatus` never reaches the extension.
@@ -60,6 +60,15 @@ fn with_news(mut v: Value, news: Vec<String>) -> Value {
     v
 }
 
+/// A ref names its tab (`b1:e42`, as browserSnapshot writes them), so a ref from one page can't
+/// land on another when the agent's current tab has moved. A bare `e42` is taken as before.
+fn split_ref(r: &str) -> (Option<&str>, &str) {
+    match r.split_once(':') {
+        Some((tab, rest)) if tab.starts_with('b') && tab[1..].chars().all(|c| c.is_ascii_digit()) => (Some(tab), rest),
+        _ => (None, r),
+    }
+}
+
 fn tab_line(l: &Link) -> String {
     format!("Tab {}: {} — {}", l.handle, l.title, l.url)
 }
@@ -84,7 +93,7 @@ pub async fn handle_tool(tool: &str, arguments: &Value, state: &Arc<AppState>, a
             let v = serde_json::json!({ "linked": false, "extension_connected": connected(), "how": not_linked(state, tab_id) });
             return with_news(v, news);
         }
-        let current = pick(tab_id, None).and_then(Result::ok).map(|l| l.handle);
+        let current = current_handle(tab_id);
         let tabs: Vec<Value> = links
             .iter()
             .map(|l| {
@@ -101,7 +110,7 @@ pub async fn handle_tool(tool: &str, arguments: &Value, state: &Arc<AppState>, a
         let v = serde_json::json!({
             "linked": true,
             "tabs": tabs,
-            "note": "Every browser tool acts on the current tab (the one you used last) unless you pass tab. browserSnapshot reads a page; its [ref=…] values are what browserClick and browserType take, in that same tab.",
+            "note": "A browser tool acts on the tab you name with tab, which then becomes current, or else on the current one. A tab your human links later, or one a page opens, doesn't become current until you name it. Refs from browserSnapshot carry their tab (b1:e42), so a click or type with one goes to that tab.",
         });
         return with_news(v, news);
     }
@@ -109,7 +118,14 @@ pub async fn handle_tool(tool: &str, arguments: &Value, state: &Arc<AppState>, a
     let Some(action) = action_for(tool) else {
         return error(format!("unknown browser tool {tool}"));
     };
-    let link = match pick(tab_id, handle) {
+    let raw_ref = arguments.get("ref").and_then(|v| v.as_str());
+    let (ref_tab, bare_ref) = raw_ref.map(split_ref).unwrap_or((None, ""));
+    if let (Some(t), Some(r)) = (handle, ref_tab) {
+        if t != r {
+            return with_news(error(format!("ref {} is from tab {r}, not {t}.", raw_ref.unwrap_or(""))), news);
+        }
+    }
+    let link = match pick(tab_id, handle.or(ref_tab)) {
         None => return with_news(error(not_linked(state, tab_id)), news),
         Some(Err(e)) => return with_news(error(e), news),
         Some(Ok(l)) => l,
@@ -118,6 +134,9 @@ pub async fn handle_tool(tool: &str, arguments: &Value, state: &Arc<AppState>, a
     if let Some(o) = args.as_object_mut() {
         o.remove("tabId");
         o.remove("tab");
+        if raw_ref.is_some() {
+            o.insert("ref".into(), Value::String(bare_ref.to_string()));
+        }
     }
     let out = match command(&link, action, args).await {
         Err(e) => serde_json::json!({ "tab": link.handle, "error": e }),
@@ -136,7 +155,7 @@ pub async fn handle_tool(tool: &str, arguments: &Value, state: &Arc<AppState>, a
                     r.get("title").and_then(|v| v.as_str()).unwrap_or(""),
                     r.get("url").and_then(|v| v.as_str()).unwrap_or("")
                 );
-                let body = r.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let body = r.get("text").and_then(|v| v.as_str()).unwrap_or("").replace("[ref=e", &format!("[ref={}:e", link.handle));
                 serde_json::json!({ "__mcp_content": [{ "type": "text", "text": format!("{head}{body}") }] })
             }
             _ => match r {
