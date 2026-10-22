@@ -11,7 +11,7 @@
 -->
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
-  import { waitingStore, waitingTone, type WaitingItem } from '$lib/stores/waiting.svelte';
+  import { waitingStore, waitingTone, blockerDrafts, type WaitingItem } from '$lib/stores/waiting.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { BLOCKER_LABEL } from '$lib/tasks/model';
@@ -37,6 +37,8 @@
   });
   const items = $derived(extra ? [extra, ...waiting] : waiting);
   const tone = $derived(waitingTone(items));
+  /** An answer typed and not sent: the card closed when the tab was left, the text did not. */
+  const hasDraft = $derived(items.some((i) => i.kind === 'task' && blockerDrafts.holds(i.task)));
 
   function label(i: WaitingItem): string {
     if (i.kind === 'task') return BLOCKER_LABEL[i.task.blocker!.kind];
@@ -157,7 +159,7 @@
     {:else}
       <button class="pill" data-tone={tone} onclick={() => waitingStore.open(tabId)}>
         <span class="dot"></span>
-        {items.length === 1 ? label(items[0]) : `${items.length} waiting on you`}
+        {items.length === 1 ? label(items[0]) : `${items.length} waiting on you`}{hasDraft ? ' · your draft is kept' : ''}
       </button>
     {/if}
   </div>

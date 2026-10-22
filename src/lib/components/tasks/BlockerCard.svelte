@@ -5,6 +5,7 @@
 -->
 <script lang="ts">
   import { overlordStore } from '$lib/stores/overlord.svelte';
+  import { blockerDrafts } from '$lib/stores/waiting.svelte';
   import { BLOCKER_LABEL } from '$lib/tasks/model';
   import { fmtAge } from '$lib/overlord/format';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -25,8 +26,11 @@
 
   /** Free text typed under the question. It belongs to the question it was typed against:
    *  when the agent re-asks, the draft is dropped (and the field empties) rather than carried
-   *  over to a question the human never answered. Only text that is on screen is ever sent. */
-  let draft = $state<{ askedAt: string; text: string }>({ askedAt: '', text: '' });
+   *  over to a question the human never answered. Only text that is on screen is ever sent.
+   *  Held in `blockerDrafts`, not here, so it outlives this card (a corner card closes when its
+   *  tab is left). */
+  const draft = $derived(blockerDrafts.get(task.id) ?? { askedAt: '', text: '' });
+  const setDraft = (d: { askedAt: string; text: string }) => blockerDrafts.set(task.id, d);
   const draftText = $derived(draft.askedAt === b?.asked_at ? draft.text : '');
 
   /** Nothing answers a question in its first moments on screen. Measured from the question's own
@@ -51,7 +55,7 @@
 
   $effect.pre(() => {
     const a = b?.asked_at;
-    if (a && draft.askedAt && draft.askedAt !== a) draft = { askedAt: '', text: '' };
+    if (a && draft.askedAt && draft.askedAt !== a) setDraft({ askedAt: '', text: '' });
   });
 
   let sending = $state(false);
@@ -78,7 +82,7 @@
         onnote?.(r.detail ?? 'Could not answer.');
         return;
       }
-      draft = { askedAt: '', text: '' };
+      setDraft({ askedAt: '', text: '' });
       onnote?.(
         r.told === 'tab'
           ? 'Answer sent to the agent.'
@@ -141,7 +145,7 @@
             onnote?.('The agent just changed its question. Read it again before answering.');
             return;
           }
-          draft = { askedAt: b.asked_at, text: e.currentTarget.value };
+          setDraft({ askedAt: b.asked_at, text: e.currentTarget.value });
         }}
         onkeydown={(e) => {
           if (e.key === 'Enter' && (b.kind !== 'decision' || draftText.trim())) answer(undefined);

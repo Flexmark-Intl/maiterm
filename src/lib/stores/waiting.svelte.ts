@@ -13,6 +13,7 @@ import { tasksStore } from '$lib/stores/tasks.svelte';
 import { followUpsStore, type PendingApproval } from '$lib/stores/followUps.svelte';
 import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
 import { decisionsQueue } from '$lib/loom/model';
+import { SvelteMap } from 'svelte/reactivity';
 import type { AgentRequest, Task } from '$lib/tauri/types';
 
 export type WaitingItem =
@@ -64,6 +65,31 @@ export interface OpenCorner {
   /** Bumped on every open, so a second open of a card already open still scrolls to it. */
   seq: number;
 }
+
+/** What the human has typed under a question, by task id, with the `asked_at` it was typed
+ *  against (BlockerCard drops it when the agent re-asks). Kept here rather than in the card:
+ *  the corner card closes when its tab is left (see `open` below), and a draft the card held
+ *  died with it. Every surface's BlockerCard reads the same draft. */
+export interface BlockerDraft {
+  askedAt: string;
+  text: string;
+}
+const drafts = new SvelteMap<string, BlockerDraft>();
+
+export const blockerDrafts = {
+  get(taskId: string): BlockerDraft | null {
+    return drafts.get(taskId) ?? null;
+  },
+  set(taskId: string, draft: BlockerDraft) {
+    if (draft.text) drafts.set(taskId, draft);
+    else drafts.delete(taskId);
+  },
+  /** Text typed under the question the task is asking now. */
+  holds(task: Task): boolean {
+    const d = drafts.get(task.id);
+    return !!d && d.askedAt === task.blocker?.asked_at && !!d.text.trim();
+  },
+};
 
 function createWaitingStore() {
   /** Open corner cards by tab id. A tab's card shows only while the tab is its pane's active
