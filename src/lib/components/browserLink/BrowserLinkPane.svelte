@@ -12,6 +12,8 @@
   import * as commands from '$lib/tauri/commands';
   import type { BrowserLinkStatus } from '$lib/tauri/commands';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
+  import { writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
+  import { isMac } from '$lib/utils/platform';
 
   let status = $state<BrowserLinkStatus | null>(null);
   let feedback = $state<{ text: string; error: boolean } | null>(null);
@@ -44,23 +46,38 @@
     busy = false;
   }
 
-  async function loadUnpacked() {
-    busy = true;
+  // Chrome installs an unpacked extension only by hand, so the card is the steps themselves; these
+  // run the parts maiTerm can. Each refreshes the folder first, so step 3 always finds it current.
+  let openFailed = $state(false);
+  let copied = $state(false);
+
+  async function prepare(): Promise<string | null> {
     feedback = null;
     try {
-      const dir = await commands.browserLinkPrepareUnpacked();
-      await commands.revealInFileManager(dir);
-      const opened = await commands.browserLinkOpenExtensionsPage();
-      feedback = {
-        text: opened
-          ? 'Chrome is open on its extensions page. Turn on Developer mode (top right), click “Load unpacked”, and choose the folder shown in Finder.'
-          : 'Open chrome://extensions in Chrome, turn on Developer mode, click “Load unpacked”, and choose the folder shown.',
-        error: false,
-      };
+      return await commands.browserLinkPrepareUnpacked();
     } catch (e) {
       feedback = { text: String(e), error: true };
+      return null;
     }
+  }
+
+  async function openExtensionsPage() {
+    busy = true;
+    if (await prepare()) openFailed = !(await commands.browserLinkOpenExtensionsPage());
     busy = false;
+  }
+
+  async function copyPath() {
+    const dir = await prepare();
+    if (!dir) return;
+    await clipboardWriteText(dir);
+    copied = true;
+    setTimeout(() => (copied = false), 2000);
+  }
+
+  async function showFolder() {
+    const dir = await prepare();
+    if (dir) await commands.revealInFileManager(dir);
   }
 
   async function unlink(tabId: string) {
@@ -99,23 +116,64 @@
   {#if preferencesStore.browserLinkEnabled && status}
     <div class="card">
       <div class="label">Install the extension</div>
-      <p class="hint">
-        Not in the Chrome Web Store yet, so it is loaded from a folder maiTerm keeps up to date.
-        You do this once per browser.
-      </p>
-      {#if status.extension_dir}
-        <code class="path">{status.extension_dir}</code>
-      {/if}
-      <div>
-        <Button onclick={loadUnpacked} disabled={busy}>Load unpacked…</Button>
-      </div>
-      <p class="hint">
-        {#if status.installed_in.length}
-          Set up for {status.installed_in.join(', ')}.
-        {:else}
+      {#if !status.installed_in.length}
+        <p class="hint">
           No Chromium browser found. Open Chrome once, then turn this off and on again.
+        </p>
+      {:else}
+        {#snippet steps(s: BrowserLinkStatus)}
+          <p class="hint">
+            It isn't in the Chrome Web Store yet, and Chrome lets no app install an extension for
+            you, so you add it by hand from a folder maiTerm keeps up to date. Once per browser
+            ({s.installed_in.join(', ')}); updates arrive with maiTerm.
+          </p>
+          <ol class="steps">
+            <li>
+              Open Chrome's extensions page.
+              <div class="actions">
+                <Button onclick={openExtensionsPage} disabled={busy}>Open in Chrome</Button>
+              </div>
+              {#if openFailed}
+                <p class="hint">Chrome didn't open. In your browser, go to <code>chrome://extensions</code>.</p>
+              {/if}
+            </li>
+            <li>Turn on <strong>Developer mode</strong>, the switch at the top right of that page.</li>
+            <li>
+              Click <strong>Load unpacked</strong> and choose this folder:
+              {#if s.extension_dir}
+                <code class="path">{s.extension_dir}</code>
+              {/if}
+              <div class="actions">
+                <Button variant="ghost" onclick={copyPath}>{copied ? 'Copied' : 'Copy path'}</Button>
+                <Button variant="ghost" onclick={showFolder}>Show in {isMac() ? 'Finder' : 'folder'}</Button>
+              </div>
+              {#if isMac() && s.extension_dir?.includes('/Library/')}
+                <p class="hint">
+                  The folder is inside your hidden Library. In Chrome's file picker, press ⌘⇧G, paste
+                  the path, press Return, then click Select.
+                </p>
+              {/if}
+            </li>
+            <li>
+              Pin it: click the puzzle-piece icon in Chrome's toolbar and pin <strong>maiTerm</strong>.
+              That icon is where you link a tab.
+            </li>
+          </ol>
+          <p class="hint">
+            Chrome then shows under Connected browsers within 30 seconds. If it doesn't, quit and
+            reopen Chrome.
+          </p>
+        {/snippet}
+        {#if status.connections.length}
+          <p class="hint">Installed and connected.</p>
+          <details>
+            <summary class="hint">Install it in another browser</summary>
+            {@render steps(status)}
+          </details>
+        {:else}
+          {@render steps(status)}
         {/if}
-      </p>
+      {/if}
     </div>
 
     <div class="card">
@@ -210,12 +268,43 @@
   }
 
   .path {
+    display: block;
     background: var(--bg-dark);
     border-radius: 4px;
     font-size: 0.8rem;
     overflow-wrap: anywhere;
     padding: 6px 8px;
     user-select: all;
+  }
+
+  .steps {
+    color: var(--fg);
+    display: flex;
+    flex-direction: column;
+    font-size: 0.85rem;
+    gap: 10px;
+    line-height: 1.5;
+    margin: 0;
+    padding-left: 20px;
+  }
+
+  .steps li {
+    list-style: decimal;
+  }
+
+  .steps li > * + * {
+    margin-top: 6px;
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  summary {
+    cursor: pointer;
+    margin-bottom: 8px;
   }
 
   .line {

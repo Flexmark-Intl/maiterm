@@ -131,7 +131,10 @@ The tools are listed only while `Preferences.browser_link_enabled` is on (not in
 
 ## 5. Installing
 
-Preferences → Chrome extension: the toggle writes the host manifests; "Load unpacked" copies the
-extension to the app data dir (`chrome-extension/`), reveals it and opens `chrome://extensions`.
-Once a store listing exists the button opens it instead. The pane shows each connected browser
+Preferences → Chrome extension: the toggle writes the host manifests. Chrome lets no app install an
+unpacked extension, so the install card IS the four manual steps (open `chrome://extensions`,
+Developer mode, Load unpacked + the folder, pin the icon), with buttons for the parts maiTerm can do;
+each refreshes the copy in the app data dir (`chrome-extension/`) first. Once connected the steps
+fold away under "Install it in another browser". Once a store listing exists, the card links to it
+instead. The pane shows each connected browser
 and every live link.
