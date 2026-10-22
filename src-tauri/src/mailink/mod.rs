@@ -6645,6 +6645,9 @@ async fn doorbell_loop(app: Arc<AppState>) {
     // rang for something that had been waiting all along (review of 7e4fc49).
     let mut seen_asks: HashMap<String, u64> = HashMap::new();
     let mut seen_scripts: HashMap<String, u64> = HashMap::new();
+    // tab_id → when it last rang for a wait (`waiting_ring_due`). Cleared while a phone is
+    // connected: once the human has looked, the next ask is news again.
+    let mut last_waiting_ring: HashMap<String, u64> = HashMap::new();
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(2000));
     // Anything queued for a loop that wasn't running is stale by definition — an escalation
     // raised while maiLink was off has been sitting on the desktop board since. Discard, don't
@@ -6680,6 +6683,11 @@ async fn doorbell_loop(app: Arc<AppState>) {
                 .load(std::sync::atomic::Ordering::SeqCst),
             now_ms(),
         );
+        let tick_ms = now_ms();
+        if covered {
+            last_waiting_ring.clear();
+        }
+        last_waiting_ring.retain(|_, at| tick_ms.saturating_sub(*at) < WAITING_RING_COLLAPSE_MS);
 
         // Overlord escalations queued by the publish path (mailink/overlord.rs) — rung HERE
         // because this loop is what knows coverage and holds the relay client. Covered means a
@@ -6688,7 +6696,7 @@ async fn doorbell_loop(app: Arc<AppState>) {
         // "Needs you" at time-sensitive until the relay's copy table learns the word, which is
         // the fallback direction that made adding a kind before a relay deploy safe.
         for (tab_id, title, kind) in overlord::take_pending_rings(&app) {
-            if !covered {
+            if !covered && waiting_ring_due(&mut last_waiting_ring, &tab_id, kind, tick_ms) {
                 ring_devices(&client, &app, &relay_url, &tab_id, &title, kind).await;
             }
         }
@@ -6704,7 +6712,6 @@ async fn doorbell_loop(app: Arc<AppState>) {
         // answered and another asked inside a tick leaves the count where it was.
         let mut asks = board::ask_keys_by_tab(&app);
         let mut scripts = follow_ups::waiting_ids_by_tab(&app);
-        let tick_ms = now_ms();
         seen_asks.retain(|_, at| tick_ms.saturating_sub(*at) < WAIT_SEEN_TTL_MS);
         seen_scripts.retain(|_, at| tick_ms.saturating_sub(*at) < WAIT_SEEN_TTL_MS);
         let mut current = std::collections::HashSet::new();
@@ -6720,10 +6727,10 @@ async fn doorbell_loop(app: Arc<AppState>) {
             let new_script = note_waits(first_sighting, &tab_scripts, &mut seen_scripts, tick_ms);
             if !covered {
                 let title = c["title"].as_str().unwrap_or_default();
-                if new_ask {
+                if new_ask && waiting_ring_due(&mut last_waiting_ring, &tab, "ask", tick_ms) {
                     ring_devices(&client, &app, &relay_url, &tab, title, "ask").await;
                 }
-                if new_script {
+                if new_script && waiting_ring_due(&mut last_waiting_ring, &tab, "script", tick_ms) {
                     ring_devices(&client, &app, &relay_url, &tab, title, "script").await;
                 }
             }
@@ -6752,7 +6759,9 @@ async fn doorbell_loop(app: Arc<AppState>) {
                     Some(_) => "permission",
                     None => "idle_done",
                 };
-                ring_devices(&client, &app, &relay_url, &tab, &title, kind).await;
+                if waiting_ring_due(&mut last_waiting_ring, &tab, kind, tick_ms) {
+                    ring_devices(&client, &app, &relay_url, &tab, &title, kind).await;
+                }
             }
         }
         last.retain(|k, _| current.contains(k));
@@ -6774,6 +6783,26 @@ fn note_waits(first_sighting: bool, keys: &HashSet<String>, seen: &mut HashMap<S
         }
     }
     new
+}
+
+/// How long after a tab rang for something waiting on the human another such ring is dropped.
+/// Agents ask one thing through two channels in one breath — a task blocker plus their own
+/// question dialog, or a blocker plus an escalation — and each channel rings: two pushes for
+/// one question, seen up to 24 s apart. One push reaches the chat, which shows all of it.
+const WAITING_RING_COLLAPSE_MS: u64 = 30_000;
+
+/// Whether a waiting ring (anything but `idle_done`) for `tab` goes out, recording it if so.
+/// `idle_done` always rings and is not recorded: "finished" is not a second ask.
+fn waiting_ring_due(last: &mut HashMap<String, u64>, tab: &str, kind: &str, now: u64) -> bool {
+    if kind == "idle_done" {
+        return true;
+    }
+    if last.get(tab).is_some_and(|at| now.saturating_sub(*at) < WAITING_RING_COLLAPSE_MS) {
+        log::info!("[maiLink] doorbell: tab {tab} rang for a wait under {}s ago, no second push ({kind})", WAITING_RING_COLLAPSE_MS / 1000);
+        return false;
+    }
+    last.insert(tab.to_string(), now);
+    true
 }
 
 /// POST the content-free wake to the shared relay, once per paired device that registered BOTH a
@@ -7466,6 +7495,22 @@ mod tests {
         // A reload: the new tab is first seen empty, then the same wait lands on it.
         assert!(!note_waits(true, &set(&[]), &mut seen, 6));
         assert!(!note_waits(false, &set(&["a"]), &mut seen, 7), "moved, not new");
+    }
+
+    #[test]
+    fn one_question_asked_two_ways_rings_once() {
+        let mut last = HashMap::new();
+        // A blocker, then the agent's own dialog for the same question a second later.
+        assert!(waiting_ring_due(&mut last, "t", "ask", 1_000));
+        assert!(!waiting_ring_due(&mut last, "t", "question", 2_000));
+        // An escalation of it inside the window: still the one push.
+        assert!(!waiting_ring_due(&mut last, "t", "escalation", 25_000));
+        // "Finished" is not a second ask.
+        assert!(waiting_ring_due(&mut last, "t", "idle_done", 26_000));
+        // Another tab is its own.
+        assert!(waiting_ring_due(&mut last, "u", "permission", 26_000));
+        // Past the window, measured from the ring that went out, a new ask rings.
+        assert!(waiting_ring_due(&mut last, "t", "permission", 31_000));
     }
 
     #[test]

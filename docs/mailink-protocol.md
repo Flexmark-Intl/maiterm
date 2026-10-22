@@ -660,6 +660,14 @@ SessionStart registers it as idle — an attention transition on every resumed t
 nothing can be covered because the desktop was down. Clients need no logic for this; it is stated
 so nobody re-derives the naive edge.
 
+**One push per ask, not per channel.** Once a tab has rung for something waiting on the human
+(any kind but `idle_done`), another waiting ring for that tab within 30 s is dropped
+(`waiting_ring_due`, desktop only — no wire change). Agents put one question through two channels
+in one breath — a task blocker plus their own question dialog (`ask` + `question`), or a blocker
+plus an escalation (`ask` + `escalation`) — and each rang: two pushes, differently worded, for one
+question. The chat the one push opens shows everything waiting. The window is forgotten while a
+phone is connected, so an ask after the human has looked rings again.
+
 **Clients MUST answer WebSocket Pings.** The desktop pings every 20s and closes the socket after
 one unanswered ping. This is load-bearing rather than hygiene: coverage suppresses the doorbell, so
 a socket that is dead-but-ESTABLISHED — an iOS app suspended in the background, a phone that walked
