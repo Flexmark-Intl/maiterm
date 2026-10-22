@@ -3,7 +3,7 @@ title: Privacy Policy — maiTerm for Chrome
 description: What the maiTerm Chrome extension reads, where it goes, and what it keeps.
 ---
 
-Last updated: 21 October 2026
+Last updated: 22 October 2026
 
 ## The short version
 
@@ -17,9 +17,15 @@ OpenAI, as part of its conversation. That provider's policy governs what happens
 
 ## Which tabs it touches
 
-Only tabs you link yourself. You click the extension's icon on a tab and choose one maiTerm
-agent tab, and that is the only way a link is made. An agent cannot link a tab, choose a tab or
-reach any other tab.
+Only tabs you link yourself, and the tabs those pages open for the agent:
+
+- **You link a tab** by clicking the extension's icon on it and choosing one maiTerm agent tab.
+  One agent can hold several linked tabs; each tab belongs to one agent.
+- **A tab a linked page opens joins that page's agent**: a popup window it opens (a sign-in
+  window, for example), or a tab it opens within a few seconds of the agent acting on it. A tab
+  you open yourself from a linked page, such as with a middle-click, is not linked.
+
+An agent cannot link a tab or choose one, and reaches only the tabs linked to it.
 
 The extension uses Chrome's debugger (the DevTools Protocol) on a linked tab, and Chrome shows
 its "is debugging this browser" bar while it does. Cancelling that bar, closing the tab, clicking

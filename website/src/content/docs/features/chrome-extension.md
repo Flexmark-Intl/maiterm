@@ -1,11 +1,11 @@
 ---
 title: Chrome Extension
-description: Link one tab in your own Chrome to one maiTerm agent, and it can diagnose and drive that tab — console errors, failing requests and their responses, the page itself, clicks and typing — signed in as you.
+description: Link tabs in your own Chrome to a maiTerm agent, and it can diagnose and drive them — console errors, failing requests and their responses, the page itself, clicks and typing — signed in as you.
 ---
 
 An agent fixing a bug in a web app usually can't see the bug. It reads the code, guesses, and asks you to reload the page and tell it what happened. Tools that give an agent a browser give it a *new* one: no logins, none of your data, often not the state the bug needs.
 
-The **maiTerm extension for Chrome** lets an agent work in **your** browser instead, in one tab you choose. Link a tab to an agent tab in maiTerm, and that agent can:
+The **maiTerm extension for Chrome** lets an agent work in **your** browser instead, in the tabs you choose. Link a tab to an agent tab in maiTerm, and that agent can:
 
 **Diagnose it**
 
@@ -29,7 +29,7 @@ All of it in your real, signed-in session, and in the background: the tab doesn'
 ## You stay in control
 
 - **Only you link a tab**, from the extension's icon in the browser. No agent can link one, pick one, or see your other tabs.
-- **One tab, one agent.** Each agent can use only the tab linked to it, and a tab is linked to one agent at a time.
+- **Each tab has one agent.** An agent can use only the tabs linked to it, and a tab is linked to one agent at a time. The one tab you don't link by hand is one a linked page opens for its agent, such as a sign-in popup ([below](#several-tabs-and-popups)).
 - **Chrome shows that it's happening.** While an agent is working, Chrome shows its "is debugging this browser" bar. **Cancel** it, close the tab, click **Unlink**, or turn the feature off in maiTerm, and the link ends.
 - **Nothing leaves your computer through the extension.** It talks only to maiTerm on your own machine. What the agent reads from the tab goes to that agent, as everything else it reads does. See the [privacy policy](/chrome-extension/privacy/).
 
@@ -60,20 +60,32 @@ It works in Chrome and other Chromium browsers: Brave, Edge, Vivaldi, and Arc on
 </figure>
 
 1. Open the page in your browser.
-2. Click the maiTerm icon in the toolbar. The popup lists your agent tabs in maiTerm, grouped by workspace, with a filter.
-3. Choose one. The page is now that agent's to use, and the extension's icon shows on the tab that it's linked.
+2. Click the maiTerm icon in the toolbar. The popup lists your agent tabs in maiTerm, the one in front in each maiTerm window first (marked **in front**), then the rest by when you last used them, with a filter.
+3. Choose one. The page is now that agent's to use, and the extension's icon shows on the tab the name the agent knows it by: **b1**, **b2** and so on.
 
 Tell the agent what to look at: "the orders page won't load, find out why" is enough for it to read the failing request and its response. To end it, click the icon again and **Unlink**, or click **Unlink** beside it in **Preferences → Chrome extension → Linked tabs**, which lists every link.
 
 A link follows the tab: navigating, or reloading the page, keeps it. Reloading the *agent's* tab in maiTerm keeps it too. Links don't outlive the browser: after a restart of Chrome, link the tab again.
 
+### Several tabs and popups
+
+An agent can hold up to eight linked tabs: an app and its admin panel, two users in a chat app, a page and the docs it's built from. Link each one as above. The agent knows them as **b1**, **b2** and so on, the name on each tab's maiTerm icon, and works in whichever one it names, or the one it used last.
+
+A tab a linked page opens joins that page's agent by itself, so a flow like "Sign in with Google" can finish in its popup. That happens when the page opens a popup window, or opens a tab within a few seconds of the agent clicking something in it. A tab you open yourself from a linked page, with a middle-click say, stays yours. The agent is told on its next step when a tab joins, closes, or is unlinked or moved to another agent.
+
+Linking a tab that's already linked to another agent moves it to the one you choose.
+
+:::note
+Several tabs per agent and popups joining need a maiTerm release after 3.11.0. In 3.11.0 an agent has one tab, and linking another replaces it.
+:::
+
 ## The tools
 
-Agents in an agent tab get these while the feature is on. Every one acts on the caller's own linked tab; an agent with no linked tab is told to ask you to link one.
+Agents in an agent tab get these while the feature is on. Every one acts on the caller's own linked tabs: the one it names with `tab` (**b1**, **b2**…), or the one it used last. An agent with no linked tab is told to ask you to link one.
 
 | Tool | What it does |
 |------|-------------|
-| `browserStatus` | Whether this agent has a linked tab, and its title and address |
+| `browserStatus` | This agent's linked tabs, each with its name, title and address, which one opened it, and which is current |
 | `browserConsole` | Console messages, uncaught exceptions with their source, and the browser's warnings since the link — or only errors |
 | `browserNetwork` | Requests since the link: method, address, status, failure, size and time; failed ones only, or one request's response body |
 | `browserSnapshot` | The page as an accessibility tree, each element it can act on numbered for the tools below |
@@ -90,4 +102,3 @@ Console and network records start when the agent first uses the tab, so for a bu
 
 - **It acts as you.** Clicking "Delete" in a linked tab deletes, in your account. Link a tab you're happy for the agent to work in, and say what it may and may not do.
 - **Agent tabs only.** The popup lists maiTerm tabs running an agent, not shells or stack services.
-- **One tab per agent.** Linking a second tab to the same agent moves the link; linking a tab already linked to another agent takes it from that one.
