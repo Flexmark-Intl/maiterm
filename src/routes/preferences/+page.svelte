@@ -84,7 +84,7 @@
     if (result) preferencesStore.setTriggers(result);
   }
 
-  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'notifications', 'triggers', 'overlord', 'claude_code', 'accounts', 'mcp', 'browser', 'deshittify', 'integrations', 'backup', 'updates', 'permissions'] as const;
+  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'notifications', 'triggers', 'overlord', 'claude_code', 'mailink', 'accounts', 'mcp', 'browser', 'deshittify', 'integrations', 'backup', 'updates', 'permissions'] as const;
   type SectionId = typeof sectionIds[number];
   const saved = localStorage.getItem('prefs-section');
   let activeSection = $state<SectionId>(
@@ -187,7 +187,7 @@
 
   // Refresh the device list whenever the maiLink section is open and the bridge is enabled.
   $effect(() => {
-    if (activeSection === 'claude_code' && preferencesStore.mailinkEnabled) {
+    if (activeSection === 'mailink' && preferencesStore.mailinkEnabled) {
       void loadMailinkDevices();
     }
   });
@@ -423,6 +423,7 @@
     { id: 'triggers' as const, label: 'Triggers' },
     { id: 'overlord' as const, label: 'Overlord' },
     { id: 'claude_code' as const, label: 'AI Agents' },
+    { id: 'mailink' as const, label: 'maiLink' },
     { id: 'accounts' as const, label: 'Accounts' },
     { id: 'mcp' as const, label: 'MCP servers' },
     { id: 'browser' as const, label: 'Chrome extension' },
@@ -2343,8 +2344,8 @@
             <button class="number-btn" onclick={() => preferencesStore.setMeshTopicTtlMinutes(preferencesStore.meshTopicTtlMinutes + 5)}>+</button>
           </div>
         </div>
-
-        <h3 class="section-heading" style="margin-top: 20px;">maiLink Mobile Companion</h3>
+      {:else if activeSection === 'mailink'}
+        <h3 class="section-heading">maiLink Mobile Companion</h3>
         <p class="section-desc">
           maiLink is a phone app that lets you answer your agents (approve a permission, reply to
           a question, nudge one forward) and drive them — over your local network or a
