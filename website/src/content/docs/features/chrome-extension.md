@@ -42,7 +42,13 @@ The Chrome extension needs maiTerm 3.11.0 or later. Its Chrome Web Store listing
 :::
 
 1. In maiTerm, open **Preferences → Chrome extension** and turn on **Let agents diagnose and drive linked browser tabs**. This gives agents the browser tools and lets the extension find maiTerm.
-2. Install the extension. Until its Chrome Web Store listing is live, click **Load unpacked…** there: Chrome opens on its extensions page with the folder shown in Finder. Turn on **Developer mode**, click **Load unpacked**, and choose that folder. You do this once per browser.
+2. Install the extension, once per browser. The same section walks you through it, because Chrome only lets you add an extension that isn't from its store by hand:
+   1. Click **Open in Chrome** to open Chrome's extensions page (`chrome://extensions`).
+   2. Turn on **Developer mode**, the switch at the top right.
+   3. Click **Load unpacked** and choose the folder maiTerm shows. **Copy path** and **Show in Finder** are beside it. The folder is inside your hidden Library: in Chrome's file picker, press ⌘⇧G, paste the path and press Return.
+   4. Click the puzzle-piece icon in Chrome's toolbar and pin **maiTerm**. That icon is where you link a tab.
+
+   maiTerm keeps that folder up to date, so the extension updates with maiTerm.
 
 It works in Chrome and other Chromium browsers: Brave, Edge, Vivaldi, and Arc on macOS. Within 30 seconds the browser appears under **Connected browsers**.
 
