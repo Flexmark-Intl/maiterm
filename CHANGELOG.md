@@ -1,5 +1,31 @@
 # Changelog
 
+## v3.11.0
+
+Agents can work in your own Chrome tab, browse a chat channel, and maiLink moves to a new port.
+
+### Chrome extension
+
+- **Link a tab in your own Chrome to an agent**, and it can diagnose and drive that tab: read the console and the network, including the body a failing request returned, read the page, click, type, navigate and take screenshots, all in your signed-in session and in the background. Only you link a tab, from the extension's icon; each agent can use only the tab linked to it. Turn it on in Preferences → Chrome extension; until the extension is on the Chrome Web Store, Load unpacked… there walks you through installing it. Works in Chrome and other Chromium browsers such as Brave and Edge, and Arc on macOS.
+
+### Agents
+
+- **Agents can read a whole Mattermost channel**, newest threads first and a page at a time, not only the threads bound to their tab.
+- **The Overlord's recovery only restarts an agent that has stopped.** It no longer types `/maiterm init` into tabs, since agents register themselves when they start. A tab whose agent isn't registered offers Restart agent and Reload tab instead of Re-bind.
+
+### maiLink
+
+- **maiLink now listens on port 27365 instead of 8765.** 8765 is a common default for test servers, and stopping one by its port could quit maiTerm. **Pair your phone again** after updating; the QR code carries the new port.
+- **maiLink has its own section in Preferences**, with the pairing button, instead of sitting inside AI Agents.
+- **A phone you paired again no longer gets every notification twice.**
+
+### Fixes
+
+- **The mesh readiness check no longer opens while agents are still coming back** after a restart.
+- **Restarting maiTerm from one window no longer lets other windows close tabs** on the way out.
+- **A new tab cloned from an ssh tab no longer types its setup into the remote shell twice.**
+- **Claude can save memories without asking** when its memory folder is a link into the project's repo.
+
 ## v3.10.0
 
 A new icon and wordmark, and messages reach a busy agent instead of waiting for it.
