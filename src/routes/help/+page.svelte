@@ -209,7 +209,7 @@
               maiTerm integrates with Claude Code's hook system for real-time session awareness. Hooks fire on lifecycle events and report state back to maiTerm automatically.
             </p>
             <div class="tip-box">
-              <strong>Note:</strong> Integration activates automatically — the SessionStart hook tells Claude to call <code>initSession</code> on every new, resumed, forked, or compacted session. If Claude ever misses it, run <code>/maiterm init</code> manually to re-register the tab.
+              <strong>Note:</strong> Integration activates automatically — the SessionStart hook registers every new, resumed, forked, or compacted session with its tab, so Claude needs no setup turn. If a maiTerm tool ever says it doesn't know the tab, run <code>/maiterm init</code> to re-register it.
             </div>
             <div class="trigger-list">
               <div class="trigger-item">
