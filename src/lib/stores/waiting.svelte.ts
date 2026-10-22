@@ -114,11 +114,14 @@ function createWaitingStore() {
     },
     /** A notification's click: go to the tab and open its card there, on `focus`. The tab
      *  first, because a terminal focuses itself when it becomes visible and the card has to
-     *  take focus after that (as the tab strip badge does). A tab not in a pane (archived,
-     *  closed) has no corner, so the Loom's Decisions take it instead. */
+     *  take focus after that (as the tab strip badge does). Only where a corner can mount:
+     *  a tab not in a pane (archived, closed), in a suspended workspace, or in a mesh shown
+     *  as a stage has none, and an `open` nothing shows would be left to open by itself, unasked,
+     *  when one next mounts. Those go to the Loom's Decisions. */
     async openOnTab(tabId: string, focus: string | null = null) {
-      const inPane = workspacesStore.workspaces.some((ws) => ws.panes.some((p) => p.tabs.some((t) => t.id === tabId && !t.service_id)));
-      if (!inPane) {
+      const { agentMeshStore } = await import('$lib/stores/agentMesh.svelte');
+      const ws = workspacesStore.workspaces.find((w) => w.panes.some((p) => p.tabs.some((t) => t.id === tabId && !t.service_id)));
+      if (!ws || ws.suspended || (ws.bridge_all && agentMeshStore.isStageView(ws.id))) {
         window.dispatchEvent(new CustomEvent('open-loom', { detail: { mode: 'decisions' } }));
         return;
       }
