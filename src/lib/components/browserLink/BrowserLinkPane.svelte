@@ -70,14 +70,23 @@
   async function copyPath() {
     const dir = await prepare();
     if (!dir) return;
-    await clipboardWriteText(dir);
-    copied = true;
-    setTimeout(() => (copied = false), 2000);
+    try {
+      await clipboardWriteText(dir);
+      copied = true;
+      setTimeout(() => (copied = false), 2000);
+    } catch (e) {
+      feedback = { text: String(e), error: true };
+    }
   }
 
   async function showFolder() {
     const dir = await prepare();
-    if (dir) await commands.revealInFileManager(dir);
+    if (!dir) return;
+    try {
+      await commands.revealInFileManager(dir);
+    } catch (e) {
+      feedback = { text: String(e), error: true };
+    }
   }
 
   async function unlink(tabId: string) {

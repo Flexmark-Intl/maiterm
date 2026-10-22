@@ -135,6 +135,6 @@ Preferences → Chrome extension: the toggle writes the host manifests. Chrome l
 unpacked extension, so the install card IS the four manual steps (open `chrome://extensions`,
 Developer mode, Load unpacked + the folder, pin the icon), with buttons for the parts maiTerm can do;
 each refreshes the copy in the app data dir (`chrome-extension/`) first. Once connected the steps
-fold away under "Install it in another browser". Once a store listing exists, the card links to it
-instead. The pane shows each connected browser
+fold away under "Install it in another browser". (Planned, not built: once the store listing is
+live, the card links to it.) The pane shows each connected browser
 and every live link.
