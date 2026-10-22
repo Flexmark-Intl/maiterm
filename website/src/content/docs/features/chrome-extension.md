@@ -69,9 +69,9 @@ A link follows the tab: navigating, or reloading the page, keeps it. Reloading t
 
 ### Several tabs and popups
 
-An agent can hold up to eight linked tabs: an app and its admin panel, two users in a chat app, a page and the docs it's built from. Link each one as above. The agent knows them as **b1**, **b2** and so on, the name on each tab's maiTerm icon, and works in whichever one it names, or the one it used last.
+An agent can hold up to eight linked tabs: an app and its admin panel, two users in a chat app, a page and the docs it's built from. Link each one as above. The agent knows them as **b1**, **b2** and so on, the name on each tab's maiTerm icon, and works in whichever one it names. Until it names another, it stays on the one it named last: a tab you link beside it, or one that joins, doesn't pull it away.
 
-A tab a linked page opens joins that page's agent by itself, so a flow like "Sign in with Google" can finish in its popup. That happens when the page opens a popup window, or opens a tab within a few seconds of the agent clicking something in it. A tab you open yourself from a linked page, with a middle-click say, stays yours. The agent is told on its next step when a tab joins, closes, or is unlinked or moved to another agent.
+A tab a linked page opens joins that page's agent by itself, so a flow like "Sign in with Google" can finish in its popup. That happens when the page opens a popup window, or opens a tab as the agent clicks, types or presses a key in it. A tab you open yourself from a linked page, with a middle-click say, stays yours, even while the agent is reading that page. The agent is told on its next step when a tab joins, closes, or is unlinked or moved to another agent.
 
 Linking a tab that's already linked to another agent moves it to the one you choose.
 
@@ -81,7 +81,7 @@ Several tabs per agent and popups joining need a maiTerm release after 3.11.0. I
 
 ## The tools
 
-Agents in an agent tab get these while the feature is on. Every one acts on the caller's own linked tabs: the one it names with `tab` (**b1**, **b2**…), or the one it used last. An agent with no linked tab is told to ask you to link one.
+Agents in an agent tab get these while the feature is on. Every one acts on the caller's own linked tabs: the one it names with `tab` (**b1**, **b2**…), or the one it named last. An agent with no linked tab is told to ask you to link one.
 
 | Tool | What it does |
 |------|-------------|
