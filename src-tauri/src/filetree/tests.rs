@@ -8,7 +8,7 @@
 //! Budget and idle tests are `#[ignore]`: they build large fixtures or wait 10 s. Run them with
 //! `cargo test --lib filetree::tests -- --ignored` (add `--release` for the real budgets).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,7 +19,7 @@ use rand::{Rng, SeedableRng};
 
 use super::hub::{RootHub, Sink, STALL_MESSAGES};
 use super::ignore_cache::IgnoreStack;
-use super::list::{self, entry_cmp};
+use super::list;
 use super::types::{DirReq, Entry, Envelope, TreeEvent};
 use super::FileTreeState;
 
@@ -44,7 +44,9 @@ fn temp_root(tag: &str) -> PathBuf {
 /// A client that follows the wire protocol, as the frontend's TreeModel will.
 #[derive(Default)]
 struct Client {
-    dirs: HashMap<String, (u64, BTreeMap<String, Entry>)>,
+    /// In the order the wire gave: the client never sorts (§12.1), so a wrong `Delta.at`
+    /// shows up as a folder out of order.
+    dirs: HashMap<String, (u64, Vec<Entry>)>,
     building: HashMap<String, (u64, u32, Vec<Entry>)>,
     expanded: BTreeSet<String>,
     need_refresh: BTreeSet<String>,
@@ -80,7 +82,7 @@ impl Client {
                 }
                 if last {
                     let (g, _, es) = self.building.remove(&rel).unwrap();
-                    self.dirs.insert(rel, (g, es.into_iter().map(|e| (e.n.clone(), e)).collect()));
+                    self.dirs.insert(rel, (g, es));
                 }
             }
             TreeEvent::NotModified { rel, gen } => {
@@ -88,13 +90,15 @@ impl Client {
                     self.need_refresh.insert(rel);
                 }
             }
-            TreeEvent::Delta { rel, from, gen, add, del, chg } => match self.dirs.get_mut(&rel) {
+            TreeEvent::Delta { rel, from, gen, add, del, chg, at } => match self.dirs.get_mut(&rel) {
                 Some(d) if d.0 == from => {
-                    for n in del {
-                        d.1.remove(&n);
-                    }
-                    for e in add.into_iter().chain(chg) {
-                        d.1.insert(e.n.clone(), e);
+                    assert_eq!(at.len(), add.len() + chg.len(), "one position per added or changed entry");
+                    let gone: BTreeSet<&str> = del.iter().map(|s| s.as_str()).chain(chg.iter().map(|e| e.n.as_str())).collect();
+                    d.1.retain(|e| !gone.contains(e.n.as_str()));
+                    let mut place: Vec<(u32, Entry)> = at.into_iter().zip(add.into_iter().chain(chg)).collect();
+                    place.sort_by_key(|p| p.0);
+                    for (i, e) in place {
+                        d.1.insert((i as usize).min(d.1.len()), e);
                     }
                     d.0 = gen;
                 }
@@ -319,8 +323,7 @@ fn converge(variant: Variant, seed: u64) {
             continue;
         }
         let held = client.dirs.get(rel).unwrap_or_else(|| panic!("{variant:?}: open folder {rel:?} is not held"));
-        let mut mine: Vec<Entry> = held.1.values().cloned().collect();
-        mine.sort_by(entry_cmp);
+        let mine = held.1.clone();
         let fresh = list::list_dir(&root, rel, &fresh_ignore).unwrap();
         assert_eq!(mine, fresh.entries, "{variant:?} seed {seed}: {rel:?} drifted from the disk");
     }

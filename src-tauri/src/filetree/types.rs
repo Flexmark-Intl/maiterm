@@ -159,8 +159,11 @@ pub enum TreeEvent {
     Dir { rel: String, gen: u64, chunk: u32, last: bool, total: u32, truncated: bool, entries: Vec<Entry> },
     /// The client's `known_gen` is current.
     NotModified { rel: String, gen: u64 },
-    /// Apply only when holding `gen == from`; otherwise `ft_refresh(rel)`.
-    Delta { rel: String, from: u64, gen: u64, add: Vec<Entry>, del: Vec<String>, chg: Vec<Entry> },
+    /// Apply only when holding `gen == from`; otherwise `ft_refresh(rel)`. `at` is where each
+    /// entry of `add` then `chg` sits in the folder AFTER the delta, so the client places rows
+    /// without a comparator of its own (listings are sorted only here, §12.1): drop `del` and
+    /// the `chg` names, then insert in ascending `at`.
+    Delta { rel: String, from: u64, gen: u64, add: Vec<Entry>, del: Vec<String>, chg: Vec<Entry>, at: Vec<u32> },
     /// "denied" | "gone" | "timeout" (a network folder not answering yet; its listing still
     /// arrives when it does).
     DirError { rel: String, code: String, msg: String },

@@ -1077,7 +1077,8 @@ export const TREE_FLAG_UNREADABLE = 8;
  *   "50,000 of {total} shown · search to find more".
  * - `not_modified`: the `known_gen` sent is current. If you don't hold that gen, `ftRefresh`.
  * - `delta`: apply only when holding `gen == from` (then hold `gen`); otherwise `ftRefresh(rel)`.
- *   Entries in `add`/`chg` go in sorted position (`chg` may change an entry's kind or flags).
+ *   `at[i]` is where entry i of `add` then `chg` sits AFTER the delta: drop `del` and the `chg`
+ *   names, then insert in ascending `at` (`chg` may change an entry's kind, and so its place).
  * - `dir_error`: 'denied' | 'gone' (drop the folder and `ftCollapse` it) | 'timeout' (a network
  *   folder not answering: show "not responding…"; its listing still arrives when it does).
  * - `health`: show `note` in the footer when set; absent note = healthy, no footer.
@@ -1088,7 +1089,7 @@ export const TREE_FLAG_UNREADABLE = 8;
 export type TreeEvent =
   | { t: 'dir'; rel: string; gen: number; chunk: number; last: boolean; total: number; truncated: boolean; entries: TreeEntry[] }
   | { t: 'not_modified'; rel: string; gen: number }
-  | { t: 'delta'; rel: string; from: number; gen: number; add: TreeEntry[]; del: string[]; chg: TreeEntry[] }
+  | { t: 'delta'; rel: string; from: number; gen: number; add: TreeEntry[]; del: string[]; chg: TreeEntry[]; at: number[] }
   | { t: 'dir_error'; rel: string; code: 'denied' | 'gone' | 'timeout'; msg: string }
   | { t: 'health'; watch: string; git: string; note: string | null }
   | { t: 'root_gone' };

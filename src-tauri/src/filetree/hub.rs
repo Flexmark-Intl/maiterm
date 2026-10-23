@@ -809,7 +809,8 @@ impl RootHub {
                         None => match old {
                             Some(o) if !o.truncated && !snap.truncated => {
                                 let (add, del, chg) = diff(&o.entries, &snap.entries);
-                                s.deliver(TreeEvent::Delta { rel: rel.to_string(), from: o.gen, gen, add, del, chg });
+                                let at = positions(&snap.entries, &add, &chg);
+                                s.deliver(TreeEvent::Delta { rel: rel.to_string(), from: o.gen, gen, add, del, chg, at });
                             }
                             _ => s.send_dir(rel, &snap),
                         },
@@ -875,9 +876,10 @@ impl RootHub {
         let from = snap.gen;
         snap.gen = next_gen();
         let gen = snap.gen;
+        let at = positions(&snap.entries, &add, &chg);
         let mut subs = self.subs.lock();
         for s in subs.values_mut().filter(|s| s.interest.contains(rel)) {
-            s.deliver(TreeEvent::Delta { rel: rel.to_string(), from, gen, add: add.clone(), del: del.clone(), chg: chg.clone() });
+            s.deliver(TreeEvent::Delta { rel: rel.to_string(), from, gen, add: add.clone(), del: del.clone(), chg: chg.clone(), at: at.clone() });
         }
         true
     }
@@ -1183,6 +1185,15 @@ fn diff(old: &[Entry], new: &[Entry]) -> (Vec<Entry>, Vec<String>, Vec<Entry>) {
     }
     let del = old.iter().filter(|e| !after.contains(e.n.as_str())).map(|e| e.n.clone()).collect();
     (add, del, chg)
+}
+
+/// Where each added then changed entry sits in the folder after a delta (`Delta.at`).
+fn positions(entries: &[Entry], add: &[Entry], chg: &[Entry]) -> Vec<u32> {
+    if add.is_empty() && chg.is_empty() {
+        return Vec::new();
+    }
+    let index: HashMap<&str, u32> = entries.iter().enumerate().map(|(i, e)| (e.n.as_str(), i as u32)).collect();
+    add.iter().chain(chg).map(|e| index.get(e.n.as_str()).copied().unwrap_or(u32::MAX)).collect()
 }
 
 /// One listing thread: takes folders off the hub's queue until it is empty. It holds the hub
