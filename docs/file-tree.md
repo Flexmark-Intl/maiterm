@@ -896,6 +896,51 @@
 >   exit-classification and 3.6-gate tests still run on Windows. The helper harness reads
 >   `helper.py` as UTF-8 (Windows Python's cp1252 default could not decode it).
 >   **The Windows client against a real host (the phase-6 dev check) is still unchecked.**
+>
+> **As built, final dev-check fixes (2026-10-23).** Where they changed the above:
+> - **An ssh tab known only by its prompt's folder asks the host.** A remote shell that sends no
+>   OSC 7 (nova) leaves the title's folder as the only candidate, and `place::pick` ended the
+>   chain before `resolve` could probe it. It now picks it (`source: "prompt"`) so the probe
+>   runs; unprobed (no helper in time, a passive resolve) a `prompt` pick is never rooted, and a
+>   prompt folder that isn't one on the host is "no folder yet", not a missing one. **A failed
+>   resolve shows its failure for that tab** (with Try again) instead of keeping the previous
+>   root on screen, and the tree keeps following that tab, so its next prompt asks again.
+> - **Following re-roots when the tab's root changes, not only when its folder leaves the
+>   root** (§4.2 amended). `TreePlace.project` says the root is a repository's top level;
+>   `filetree/follow.ts` `followStep` re-roots to another project even inside the current root
+>   (a home, `/`, a volume, a folder of checkouts), so a tree rooted at `~` reaches `~/proj`,
+>   forced Follow included. A plain folder inside the root still only moves the tick, and a cd
+>   within a project resolves to the same place (`same`).
+> - **`revealInTree` asks whether the path is there first** (`ft_exists`, new: on the root's
+>   machine, or this computer with the column closed). `filetree/reveal.ts` `revealEarly` holds
+>   the order: outside the root, then `not_found` (no chip), then `tree_closed` / human busy
+>   (chip); a filtered view (`plan === 'none'`) is reached only for a path on disk. Residual: a
+>   caller on an ssh host with the column closed can't be checked, and still gets the chip.
+> - **A root whose repository appears or goes is opened again.** New wire event
+>   `TreeEvent::Reopen`: the hub retires (no new subscriber gets it) and the client re-opens the
+>   same place, keeping its view. Triggers: the local watcher's `.git` marker at the root (or,
+>   for a root with no repository, anything under a new `.git`); the helper's inotify seeing the
+>   root's `.git` created or deleted, or its poll finding the root folder changed (each sends
+>   `repo`/`repo_now`); a helper reattach whose `root` answers another repository. A hub in its
+>   grace is checked before reuse (`repo_info` off the disk locally, one `root` call on a host),
+>   and the helper re-reads the repository on every `root` (ROOTS used to keep it for the
+>   helper's life). The grace reap compares the hub itself, so a retired hub's reap never takes
+>   its successor under the same key. A nested `.git` appearing below the root re-reads that
+>   folder's ignore rules in the helper.
+> - **The "ResizeObserver loop completed with undelivered notifications" log was the tab bar's,
+>   not Files'.** Opening or closing the column resizes every pane; `TerminalTabs`' observer
+>   recounted hidden tabs synchronously, and the count is drawn in the button beside the bar,
+>   so Svelte's microtask flush resized the observed bar inside the observation loop.
+>   Reproduced in headless Chromium with the same layout (TreeBody's observer, which changes
+>   nothing that sizes its element, did not reproduce it). The recount now runs on the next
+>   frame (`utils/frameResize.ts`); nothing is filtered in the `[WEBVIEW_ERROR]` forwarder.
+> - **Tests:** place (`an_ssh_tab_known_only_by_its_prompt_is_asked_of_the_host`,
+>   `a_place_says_whether_its_root_is_a_repository_top_level`), `follow.test.ts`,
+>   `reveal.test.ts`, `paths::on_disk`, `frameResize.test.ts`, a local hub through `git init`, a
+>   retired hub's reap and a `.git` removed in the grace, and a remote root through `git init`
+>   (by poll here) and a removal in the grace. The FSEvents-heavy suite still times out a
+>   watcher start now and then on a loaded machine (seen at the base too); it passes with
+>   `--test-threads=4`. **Not checked in the running app or on nova** (no dev run in this step).
 
 ## 1. Why
 
