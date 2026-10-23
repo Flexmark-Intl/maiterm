@@ -796,6 +796,7 @@ function createFileTreeStore() {
         else if (env.last) {
           onListed(env.rel);
           noteDiskChange(env.rel, null);
+          pruneEdit();
         }
         break;
       }
@@ -809,6 +810,7 @@ function createFileTreeStore() {
         if (m.applyDelta(env) === 'resync') commands.ftRefresh(sub, env.rel).catch(() => {});
         else {
           if ((selection.size || focusKey) && viewMode() === 'tree') pruneSelection();
+          pruneEdit();
           noteDiskChange(env.rel, [...env.add.map((e) => e.n), ...env.del, ...env.chg.map((e) => e.n)]);
         }
         break;
@@ -1434,7 +1436,34 @@ function createFileTreeStore() {
   function cancelEdit() {
     if (!edit) return;
     edit = null;
-    focusPending = true;
+    refocusAfterEdit();
+  }
+
+  /** An inline edit ended: the keyboard comes back to the tree unless it has gone somewhere
+   *  else. A blur onto a terminal or an editor is the human moving on, and pulling focus back
+   *  would send their next keys (Enter, Delete) to the tree. */
+  function refocusAfterEdit() {
+    const a = typeof document === 'undefined' ? null : document.activeElement;
+    if (!a || a === document.body || a.closest('[data-filetree]')) focusPending = true;
+  }
+
+  /** The row being renamed, or the folder a New input sits in, went away on disk (an agent
+   *  renamed or deleted it). The input unmounted with its row without a word, so the edit is
+   *  dropped with it: left set, it would block every drag in the tree. A commit already sent
+   *  settles itself. */
+  function pruneEdit() {
+    const e = edit;
+    const m = model;
+    if (!e || e.pending || !m) return;
+    // Known gone: its folder is listed without it, or that folder is itself gone.
+    const gone = (rel: string): boolean => {
+      if (rel === '') return false;
+      const x = m.entry(rel);
+      if (x) return !m.visible(x);
+      const d = m.dirs.get(parentRel(rel));
+      return d ? d.state === 'ok' : gone(parentRel(rel));
+    };
+    if (gone(e.mode === 'rename' ? e.rel : e.parent)) edit = null;
   }
 
   /** The rules the input checks as the human types. */
@@ -1488,7 +1517,7 @@ function createFileTreeStore() {
       return;
     }
     edit = null;
-    focusPending = true;
+    refocusAfterEdit();
     // A new file opens as a pinned editor tab (§10.4).
     const made = r.done[r.done.length - 1]?.from;
     if (e.mode === 'create' && e.kind === 'file' && made) void openFile(made, 'pin');
