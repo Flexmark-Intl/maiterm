@@ -599,6 +599,23 @@ export class TreeModel {
     return this.dirs.get(parentRel(rel))?.entries.get(baseName(rel));
   }
 
+  /** True only when the listings PROVE `rel` is gone from disk: a folder Rust is still
+   *  following is listed without it, or that holds for a folder above it. A collapsed
+   *  folder keeps its listing but gets no more deltas, so it proves nothing either way, and
+   *  an entry the filters hide is still on disk: Find and the Changed lens show both kinds of
+   *  row, and an edit started there must not be dropped by a delta somewhere else. */
+  knownGone(rel: string): boolean {
+    if (rel === '') return false;
+    const p = parentRel(rel);
+    const d = this.dirs.get(p);
+    if (d && d.state === 'ok' && this.interest.has(p)) {
+      if (d.entries.has(baseName(rel))) return false;
+      // A truncated listing leaves names out, so a missing one proves nothing about itself.
+      if (!d.truncated) return true;
+    }
+    return this.knownGone(p);
+  }
+
   /** The folders to ask again with their held generations: a returning view (§4.2). */
   restoreReqs(): DirReq[] {
     return [...this.interest].map((r) => this.reqFor(r));

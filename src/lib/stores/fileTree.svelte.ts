@@ -1477,15 +1477,15 @@ function createFileTreeStore() {
     const e = edit;
     const m = model;
     if (!e || e.pending || !m) return;
-    // Known gone: its folder is listed without it, or that folder is itself gone.
-    const gone = (rel: string): boolean => {
-      if (rel === '') return false;
-      const x = m.entry(rel);
-      if (x) return !m.visible(x);
-      const d = m.dirs.get(parentRel(rel));
-      return d ? d.state === 'ok' : gone(parentRel(rel));
-    };
-    if (gone(e.mode === 'rename' ? e.rel : e.parent)) edit = null;
+    const rel = e.mode === 'rename' ? e.rel : e.parent;
+    if (m.knownGone(rel)) {
+      edit = null;
+      return;
+    }
+    // In the real tree a row the filters now hide (it became ignored) unmounts its input just
+    // the same. Find and the Changed lens list such rows anyway, so there it stays.
+    const x = viewMode() === 'tree' ? m.entry(rel) : undefined;
+    if (x && !m.visible(x)) edit = null;
   }
 
   /** The rules the input checks as the human types. */

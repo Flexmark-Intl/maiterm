@@ -135,6 +135,29 @@ describe('TreeModel listing and expansion', () => {
     expect(keys(m.rows)).toContain('dist.js');
   });
 
+  it('knownGone trusts only listings Rust still follows, and never the filters', () => {
+    const disk = smallDisk();
+    const m = opened(disk);
+    expandAndList(m, disk, 'src');
+    m.setFilters(false, false);
+    // Hidden or ignored is still on disk (Find and the Changed lens list such rows).
+    expect(m.knownGone('dist.js')).toBe(false);
+    expect(m.knownGone('.env')).toBe(false);
+    expect(m.knownGone('dist.js/inner.js')).toBe(false);
+    // A followed folder listed without the name proves it gone, and so does every path below.
+    expect(m.knownGone('src/old.ts')).toBe(true);
+    expect(m.knownGone('gone/deeper/x.ts')).toBe(true);
+    // Collapsed: the listing is kept but no longer updated, so a missing name is unknown.
+    m.collapse('src');
+    expect(m.knownGone('src/new.ts')).toBe(false);
+    expect(m.knownGone('src/lib/z.ts')).toBe(false);
+    // Unless the collapsed folder itself left its followed parent.
+    const before = disk.get('')!;
+    const after = before.filter((e) => e.n !== 'src');
+    apply(m, [deltaOf('', m.dirs.get('')!.gen, before, after)]);
+    expect(m.knownGone('src/new.ts')).toBe(true);
+  });
+
   it('never opens a link loop', () => {
     const disk: Disk = new Map([['', [{ n: 'self', k: 'L', f: TREE_FLAG_LOOP }]]]);
     const m = opened(disk);
