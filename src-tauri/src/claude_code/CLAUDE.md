@@ -57,9 +57,9 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | openNotesPanel | Open/close/toggle the notes panel for the active tab |
 | setNotesScope | Switch notes panel between 'tab' and 'workspace' views |
 | getActiveTab | Get the currently active workspace, pane, and tab info |
-| setTriggerVariable | Set/clear a trigger variable (e.g. claudeSessionId) for a tab |
+| setTriggerVariable | Set/clear a trigger variable (e.g. claudeSessionId) for the CALLER's own tab. On `OWN_TAB_ONLY_TOOLS` + `PEER_ADDRESSING_TOOLS` (2026-10-23): variables are interpolated unescaped into the tab's auto-resume command, so another tab's would plant a command in its next spawn |
 | getTriggerVariables | Read all trigger variables for a tab |
-| setAutoResume | Enable/disable auto-resume with optional command/cwd/ssh overrides |
+| setAutoResume | Enable/disable auto-resume with optional command/cwd/ssh overrides, for the CALLER's own tab only (same two lists, same reason) |
 | getAutoResume | Get current auto-resume configuration for a tab |
 | findNotes | Search all tabs and workspaces for notes, returns previews |
 | sendNotification | Send in-app toast notification (title, body, type). Answers `sent: false, muted: true` for a muted tab rather than claiming it was shown |
