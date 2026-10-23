@@ -44,6 +44,9 @@ pub const MAX_FILES: usize = 20_000;
 const MAX_BASE_BYTES: usize = 10 << 20;
 /// Hover numstats kept per hub before the cache starts over.
 const NUMSTAT_CACHE: usize = 512;
+/// The two `ls-files -o` runs that list an untracked root's top level (`untracked_children`):
+/// pathspecs, and whether the run passes `--directory`.
+pub(super) const UNTRACKED_RUNS: [(&[&str], bool); 2] = [(&[":(glob)*", ":(exclude,glob)*/**"], false), (&[":(glob)*/**"], true)];
 
 /// The worker's clock. Fields so the slow-mode tests don't take ten seconds.
 #[derive(Debug, Clone, Copy)]
@@ -563,20 +566,24 @@ impl GitCore {
     /// from the repository's top: a folder holding only ignored files (or nothing) is left
     /// out. Two runs with fixed arguments, since `--directory` from inside an untracked
     /// folder collapses everything to `./`: `*` (which never crosses a `/` under `glob`)
-    /// lists the top-level files without descending, and `*/**` with `--directory` lists
-    /// each top-level folder holding something untracked, collapsed. Both cost one pass over
-    /// the folder: a pathspec per name made each run match every entry against every name,
-    /// seconds for a folder of 20k, and a batch of long names overran Windows' command line.
-    /// None (and the run keeps git's own entry) when either fails.
+    /// lists the top-level files, and `*/**` with `--directory` lists each top-level folder
+    /// holding something untracked, collapsed. `*` alone still descends into every folder
+    /// (git matches a folder's name against it and walks in), which made the first run cost
+    /// every file under the root, a whole unignored `node_modules` on each status run: the
+    /// `exclude` pathspec `*/**` is what stops that, since git prunes a folder an exclude
+    /// covers. Each run then costs the top level only: a pathspec per name made each run
+    /// match every entry against every name, seconds for a folder of 20k, and a batch of long
+    /// names overran Windows' command line. None (and the run keeps git's own entry) when
+    /// either fails.
     fn untracked_children(&self) -> Option<Vec<(String, bool)>> {
         let mut out = Vec::new();
-        for (spec, directory) in [(":(glob)*", false), (":(glob)*/**", true)] {
+        for (specs, directory) in UNTRACKED_RUNS {
             let mut c = self.cmd();
             c.args(["ls-files", "-o", "--exclude-standard", "-z"]);
             if directory {
                 c.args(["--directory", "--no-empty-directory"]);
             }
-            c.args(["--", spec]);
+            c.arg("--").args(specs);
             let o = match proc::output_timeout(&mut c, self.timing.timeout) {
                 Ok(o) if o.status.success() => o,
                 Ok(o) => {

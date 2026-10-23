@@ -366,6 +366,41 @@ fn a_root_inside_a_wholly_untracked_folder_decorates_its_contents() {
     let _ = std::fs::remove_dir_all(&r);
 }
 
+/// The untracked root's listing runs on every status run, so it must cost the root's top
+/// level, not every file under it: `:(glob)*` alone walked a whole unignored `node_modules`.
+/// Measured with git's own trace2 counters (a git too old to report them checks nothing).
+#[test]
+fn listing_an_untracked_root_never_walks_below_its_top_level() {
+    let r = repo("git-untracked-cost");
+    let root = r.join("new");
+    for d in 0..40 {
+        std::fs::create_dir_all(root.join(format!("deps/d{d}"))).unwrap();
+        for f in 0..50 {
+            std::fs::write(root.join(format!("deps/d{d}/f{f}")), "").unwrap();
+        }
+    }
+    std::fs::write(root.join("top.txt"), "t").unwrap();
+    let trace = r.join("trace2.txt");
+    for (specs, directory) in super::git::UNTRACKED_RUNS {
+        let _ = std::fs::remove_file(&trace);
+        let mut c = Command::new("git");
+        c.current_dir(&root).env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_TRACE2_PERF", &trace);
+        c.args(["ls-files", "-o", "--exclude-standard", "-z"]);
+        if directory {
+            c.args(["--directory", "--no-empty-directory"]);
+        }
+        let out = c.arg("--").args(specs).output().unwrap();
+        let listed = String::from_utf8_lossy(&out.stdout).to_string();
+        assert_eq!(listed, if directory { "deps/\0" } else { "top.txt\0" }, "{specs:?}");
+        let perf = std::fs::read_to_string(&trace).unwrap_or_default();
+        let visited: usize = perf.split("paths-visited:").skip(1).filter_map(|s| s.split(|c: char| !c.is_ascii_digit()).next()?.parse::<usize>().ok()).sum();
+        if perf.contains("paths-visited:") {
+            assert!(visited < 100, "{specs:?} visited {visited} paths for a two-entry root");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&r);
+}
+
 /// The hover's line counts: a file that stays `M` while it is edited changes no letter, so a
 /// cache kept only per git gen showed its first counts forever; and a staged rename named
 /// alone counted as wholly added.

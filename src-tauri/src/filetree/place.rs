@@ -377,50 +377,67 @@ pub fn resolve(state: &Arc<AppState>, tab_id: &str, hints: &PlaceHints) -> Resul
 mod tests {
     use super::*;
 
-    fn exists_in(set: &'static [&'static str]) -> impl Fn(&Path) -> bool {
+    /// An absolute local path on this platform. A POSIX literal like `/live` is not absolute
+    /// on Windows (it has no drive), and the resolver rightly drops it there.
+    fn abs(name: &str) -> String {
+        std::env::temp_dir().join("ft-place").join(name).to_string_lossy().into_owned()
+    }
+
+    fn exists_in(names: &[&str]) -> impl Fn(&Path) -> bool {
+        let set: Vec<String> = names.iter().map(|n| abs(n)).collect();
         move |p: &Path| set.iter().any(|s| Path::new(s) == p)
     }
 
-    fn local(i: &PlaceInputs, hints: &PlaceHints, set: &'static [&'static str]) -> Result<Pick, String> {
-        pick(i, hints, "mybox.local", &exists_in(set))
+    fn local(i: &PlaceInputs, hints: &PlaceHints, names: &[&str]) -> Result<Pick, String> {
+        pick(i, hints, "mybox.local", &exists_in(names))
     }
 
     #[test]
     fn local_precedence_and_existence() {
         let mut i = PlaceInputs {
-            live_cwd: Some("/live".into()),
-            agent_cwds: vec!["/agent".into()],
-            last_cwd: Some("/last".into()),
-            auto_resume_cwd: Some("/auto".into()),
-            restore_cwd: Some("/restore".into()),
+            live_cwd: Some(abs("live")),
+            agent_cwds: vec![abs("agent")],
+            last_cwd: Some(abs("last")),
+            auto_resume_cwd: Some(abs("auto")),
+            restore_cwd: Some(abs("restore")),
             ..Default::default()
         };
-        let osc = PlaceHints { osc_cwd: Some("/osc".into()), ..Default::default() };
-        let all: &[&str] = &["/live", "/osc", "/agent", "/last", "/auto", "/restore"];
+        let osc = PlaceHints { osc_cwd: Some(abs("osc")), ..Default::default() };
+        let all: &[&str] = &["live", "osc", "agent", "last", "auto", "restore"];
         assert_eq!(local(&i, &osc, all).unwrap().source, "pty");
         i.live_cwd = None;
         assert_eq!(local(&i, &osc, all).unwrap().source, "osc7");
         // OSC 7 from another machine (an ssh the process table didn't show) is not this disk.
-        let remote_osc = PlaceHints { osc_cwd: Some("/osc".into()), osc_host: Some("nova".into()), ..Default::default() };
+        let remote_osc = PlaceHints { osc_cwd: Some(abs("osc")), osc_host: Some("nova".into()), ..Default::default() };
         assert_eq!(local(&i, &remote_osc, all).unwrap().source, "agent");
-        let same_host = PlaceHints { osc_cwd: Some("/osc".into()), osc_host: Some("MyBox".into()), ..Default::default() };
+        let same_host = PlaceHints { osc_cwd: Some(abs("osc")), osc_host: Some("MyBox".into()), ..Default::default() };
         assert_eq!(local(&i, &same_host, all).unwrap().source, "osc7");
         // Candidates count only if they exist.
-        assert_eq!(local(&i, &osc, &["/last", "/restore"]).unwrap().source, "last_cwd");
-        assert_eq!(local(&i, &osc, &["/restore"]).unwrap().source, "restore");
+        assert_eq!(local(&i, &osc, &["last", "restore"]).unwrap().source, "last_cwd");
+        assert_eq!(local(&i, &osc, &["restore"]).unwrap().source, "restore");
         // Two agent sessions disagreeing: neither is "the" folder.
-        i.agent_cwds = vec!["/a1".into(), "/a2".into()];
-        assert_eq!(local(&i, &PlaceHints::default(), &["/a1", "/last"]).unwrap().source, "last_cwd");
+        i.agent_cwds = vec![abs("a1"), abs("a2")];
+        assert_eq!(local(&i, &PlaceHints::default(), &["a1", "last"]).unwrap().source, "last_cwd");
+    }
+
+    #[test]
+    fn a_relative_saved_folder_is_never_a_candidate() {
+        // Not a folder on this computer from any starting point: `proj`, and on Windows a
+        // rootless `\proj`, which names a different folder on every drive.
+        let rel = if cfg!(windows) { r"\proj" } else { "proj" };
+        let i = PlaceInputs { last_cwd: Some(rel.into()), restore_cwd: Some(abs("restore")), ..Default::default() };
+        assert_eq!(local(&i, &PlaceHints::default(), &[]).unwrap().cwd, abs("restore"));
     }
 
     #[test]
     fn a_missing_folder_is_reported_never_replaced_by_home() {
-        let i = PlaceInputs { last_cwd: Some("/gone/proj".into()), restore_cwd: Some("/gone/old".into()), ..Default::default() };
+        let (gone, old) = (abs("gone-proj"), abs("gone-old"));
+        let i = PlaceInputs { last_cwd: Some(gone.clone()), restore_cwd: Some(old), ..Default::default() };
         let p = local(&i, &PlaceHints::default(), &[]).unwrap();
-        assert_eq!(p, Pick { cwd: "/gone/proj".into(), source: "last_cwd", remote_host: None, missing: true });
+        assert_eq!(p, Pick { cwd: gone.clone(), source: "last_cwd", remote_host: None, missing: true });
         let place = place_for(Some(&p), None).unwrap();
-        assert_eq!(place.missing.as_deref(), Some("/gone/proj"));
-        assert_eq!(place.root, "/gone/proj");
+        assert_eq!(place.missing.as_deref(), Some(gone.as_str()));
+        assert_eq!(place.root, gone);
         let home = dirs::home_dir().unwrap().to_string_lossy().to_string();
         assert_ne!(place.root, home);
         assert!(local(&PlaceInputs::default(), &PlaceHints::default(), &[]).is_err(), "nothing known is an error, not home");
@@ -428,8 +445,8 @@ mod tests {
 
     #[test]
     fn a_service_tab_is_never_the_source() {
-        let i = PlaceInputs { is_service: true, live_cwd: Some("/live".into()), ..Default::default() };
-        assert!(local(&i, &PlaceHints::default(), &["/live"]).is_err());
+        let i = PlaceInputs { is_service: true, live_cwd: Some(abs("live")), ..Default::default() };
+        assert!(local(&i, &PlaceHints::default(), &["live"]).is_err());
     }
 
     #[test]
@@ -454,8 +471,8 @@ mod tests {
         i.tunnel_host = Some("ews@nova".into());
         assert_eq!(local(&i, &fresh, &[]).unwrap().remote_host.as_deref(), Some("ews@nova"));
         // A suspended ssh tab is still an ssh tab: its saved remote folder, never last_cwd.
-        let suspended = PlaceInputs { saved_ssh: Some("ews@nova".into()), last_cwd: Some("/Users/me".into()), restore_remote_cwd: Some("/srv/r".into()), ..Default::default() };
-        let p = local(&suspended, &PlaceHints::default(), &["/Users/me"]).unwrap();
+        let suspended = PlaceInputs { saved_ssh: Some("ews@nova".into()), last_cwd: Some(abs("me")), restore_remote_cwd: Some("/srv/r".into()), ..Default::default() };
+        let p = local(&suspended, &PlaceHints::default(), &["me"]).unwrap();
         assert_eq!((p.cwd.as_str(), p.remote_host.as_deref()), ("/srv/r", Some("ews@nova")));
         let place = place_for(Some(&p), None).unwrap();
         assert_eq!(place.place, "ews@nova:/srv/r");
@@ -471,8 +488,9 @@ mod tests {
         let place = place_for(Some(&pick), Some(&tmp.to_string_lossy())).unwrap();
         assert_eq!((place.source.as_str(), place.cwd_rel.as_deref()), ("pin", Some("sub")));
         assert_eq!(place.root, root.to_string_lossy());
-        let gone = place_for(Some(&pick), Some("/no/such/pinned/dir")).unwrap();
-        assert_eq!(gone.missing.as_deref(), Some("/no/such/pinned/dir"));
+        let no_such = tmp.join("no").join("such").to_string_lossy().into_owned();
+        let gone = place_for(Some(&pick), Some(&no_such)).unwrap();
+        assert_eq!(gone.missing.as_deref(), Some(no_such.as_str()));
         let remote = place_for(None, Some("ews@nova:/srv/app")).unwrap();
         assert_eq!((remote.kind.as_str(), remote.host_key.as_deref(), remote.root.as_str()), ("remote", Some("ews@nova"), "/srv/app"));
         std::fs::remove_dir_all(&tmp).unwrap();

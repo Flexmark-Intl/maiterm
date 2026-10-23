@@ -549,19 +549,22 @@ fn budgets_on_a_generated_fixture() {
 #[test]
 fn the_repository_is_found_on_disk_worktrees_included() {
     let t = temp_root("repo");
-    std::fs::create_dir_all(t.join("main/.git/worktrees/wt")).unwrap();
-    std::fs::create_dir_all(t.join("main/src")).unwrap();
-    std::fs::create_dir_all(t.join("wt")).unwrap();
-    std::fs::write(t.join("wt/.git"), format!("gitdir: {}\n", t.join("main/.git/worktrees/wt").display())).unwrap();
-    std::fs::write(t.join("main/.git/worktrees/wt/commondir"), "../..\n").unwrap();
-    let (info, git_dir) = super::hub::repo_info(&t.join("main")).unwrap();
+    // Native paths, joined a component at a time: `t.join("main/.git")` keeps the '/' on
+    // Windows, while repo_info answers canonical paths with native separators.
+    let at = |rel: &str| rel.split('/').fold(t.clone(), |p, c| p.join(c));
+    std::fs::create_dir_all(at("main/.git/worktrees/wt")).unwrap();
+    std::fs::create_dir_all(at("main/src")).unwrap();
+    std::fs::create_dir_all(at("wt")).unwrap();
+    std::fs::write(at("wt/.git"), format!("gitdir: {}\n", at("main/.git/worktrees/wt").display())).unwrap();
+    std::fs::write(at("main/.git/worktrees/wt/commondir"), "../..\n").unwrap();
+    let (info, git_dir) = super::hub::repo_info(&at("main")).unwrap();
     assert_eq!(info.toplevel_rel, "");
-    assert_eq!(git_dir, t.join("main/.git"));
-    let (info, _) = super::hub::repo_info(&t.join("main/src")).unwrap();
+    assert_eq!(git_dir, at("main/.git"));
+    let (info, _) = super::hub::repo_info(&at("main/src")).unwrap();
     assert_eq!(info.toplevel_rel, "..", "a root inside a repo points up to its top level");
-    let (info, git_dir) = super::hub::repo_info(&t.join("wt")).unwrap();
-    assert_eq!((info.toplevel_rel.as_str(), git_dir.clone()), ("", t.join("main/.git/worktrees/wt")));
-    assert_eq!(info.common_dir, t.join("main/.git").to_string_lossy());
+    let (info, git_dir) = super::hub::repo_info(&at("wt")).unwrap();
+    assert_eq!((info.toplevel_rel.as_str(), git_dir.clone()), ("", at("main/.git/worktrees/wt")));
+    assert_eq!(info.common_dir, at("main/.git").to_string_lossy());
     assert!(super::hub::repo_info(&t).is_none(), "a plain folder is in no repository");
     std::fs::remove_dir_all(&t).unwrap();
 }
