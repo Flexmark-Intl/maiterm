@@ -417,8 +417,14 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
 // The human cancelled Chrome's "is debugging this browser" bar: that is them saying stop (§1.4).
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId == null) return;
-  forget(source.tabId);
-  if (reason === 'canceled_by_user') unlinkChromeTab(source.tabId, 'cancelled');
+  if (reason === 'canceled_by_user') {
+    forget(source.tabId);
+    unlinkChromeTab(source.tabId, 'cancelled');
+  } else {
+    // Still linked (another extension's frame pushed us out, or the page's process was swapped):
+    // the next action re-attaches, and the record so far is kept.
+    forget(source.tabId, { keepLogs: true });
+  }
 });
 
 // ── popup ───────────────────────────────────────────────────────────────────

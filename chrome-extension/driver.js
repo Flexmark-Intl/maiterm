@@ -15,14 +15,31 @@ const netLog = new Map();
 
 const send = (tabId, method, params = {}) => chrome.debugger.sendCommand({ tabId }, method, params);
 
+/** Chrome refuses to debug a tab holding another extension's frame, and detaches a session the
+ *  moment one appears. In practice that is a password manager's autofill popup (1Password,
+ *  Bitwarden…), injected while a sign-in or secret field has focus, and gone when it loses it. */
+const OTHER_EXTENSION = /chrome-extension:\/\/ URL of different extension/i;
+const BLOCKED_HOW_LONG_MS = 4000;
+const BLOCKED =
+  "Another extension's frame is in this page, so Chrome won't let maiTerm in (it lets no extension debug a tab while one is there). " +
+  "It is almost always a password manager's autofill popup (1Password, Bitwarden…), shown while a sign-in or secret field has focus. " +
+  'Ask your human to dismiss it (Escape, or a click elsewhere on the page), then try again. A reload needs maiTerm in the page too, so it is no way round this.';
+
 export async function ensureAttached(tabId) {
   if (attached.has(tabId)) return;
-  try {
-    await chrome.debugger.attach({ tabId }, CDP_VERSION);
-  } catch (e) {
-    const msg = String(e?.message ?? e);
-    // Attached already (a service-worker restart forgot our Set): carry on.
-    if (!/already attached/i.test(msg)) throw new Error(`Could not attach to the tab: ${msg}`);
+  for (const start = Date.now(); ; ) {
+    try {
+      await chrome.debugger.attach({ tabId }, CDP_VERSION);
+      break;
+    } catch (e) {
+      const msg = String(e?.message ?? e);
+      // Attached already (a service-worker restart forgot our Set): carry on.
+      if (/already attached/i.test(msg)) break;
+      if (!OTHER_EXTENSION.test(msg)) throw new Error(`Could not attach to the tab: ${msg}`);
+      // The popup usually closes on its own when the field loses focus.
+      if (Date.now() - start > BLOCKED_HOW_LONG_MS) throw new Error(BLOCKED);
+      await sleep(400);
+    }
   }
   attached.add(tabId);
   if (!consoleBuf.has(tabId)) consoleBuf.set(tabId, []);
@@ -49,9 +66,12 @@ export async function detach(tabId) {
   }
 }
 
-/** Chrome detached us (tab closed, or the human cancelled the debugging bar). */
-export function forget(tabId) {
+/** Chrome detached us. `keepLogs` when the tab is still linked (another extension's frame pushed
+ *  us out): the console and network record so far is what the agent came for, and the next
+ *  action re-attaches and carries on adding to it. */
+export function forget(tabId, { keepLogs = false } = {}) {
   attached.delete(tabId);
+  if (keepLogs) return;
   consoleBuf.delete(tabId);
   netLog.delete(tabId);
 }
@@ -428,6 +448,25 @@ export async function runAction(tabId, action, args = {}) {
     // Navigating away is done through chrome.tabs, which needs no debugger.
     return navigate(tabId, args);
   }
+  try {
+    return await perform(tabId, action, args);
+  } catch (e) {
+    if (!/detached while handling command/i.test(String(e?.message ?? e))) throw e;
+    // Pushed out mid-command (another extension's frame appeared). A read is safe to repeat; an
+    // action may or may not have happened, so the agent is told to look before repeating it.
+    attached.delete(tabId);
+    if (READS.has(action)) return perform(tabId, action, args);
+    throw new Error(
+      `Chrome detached maiTerm from the tab during that ${action} (another extension's frame, usually a password manager's popup, appeared). ` +
+        'It may or may not have happened: take a snapshot before repeating it.',
+    );
+  }
+}
+
+/** Actions that change nothing, so repeating one after a detach is harmless. */
+const READS = new Set(['snapshot', 'screenshot', 'console', 'network']);
+
+async function perform(tabId, action, args) {
   await ensureAttached(tabId);
   switch (action) {
     case 'navigate':

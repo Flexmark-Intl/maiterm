@@ -175,6 +175,17 @@ key input to a hidden page (verified: the click "succeeded" and no handler ran),
 turns on `Emulation.setFocusEmulationEnabled` at attach; with it the page reads as visible and
 focused and input lands. The agent never needs the human to switch to its tab.
 
+**Another extension's frame locks maiTerm out** (2026-10-22, seen live on Google Cloud and
+Cloudflare): Chrome refuses `chrome.debugger` on a tab holding another extension's frame ("Cannot
+access a chrome-extension:// URL of different extension") and detaches a session the moment one
+appears ("Detached while handling command"). In practice it is a password manager's autofill popup
+(1Password), shown while a sign-in or secret field has focus. Nothing on our side can get past it.
+So the driver retries the attach for 4 s (the popup usually closes on blur), then tells the agent
+in plain words to ask its human to dismiss it (a reload needs the debugger too); a read that was
+detached mid-command is repeated once, an action is reported as "may or may not have happened";
+and a detach that isn't the human's Cancel keeps the console and network record. Turning off the
+password manager's in-page autofill menu stops it at the source.
+
 Refs are `e<backendDOMNodeId>`: stable for a node's life and needing no per-snapshot table, so a
 ref from an older snapshot still works if the node still exists, and fails cleanly if not.
 
