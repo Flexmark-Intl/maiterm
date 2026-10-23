@@ -1,5 +1,42 @@
 # Changelog
 
+## v3.12.0
+
+Files: a project tree beside your terminals that shows what your agents read and change. And an agent can work in several of your Chrome tabs.
+
+### Files
+
+- **A project tree beside the terminals.** Open it with Cmd+Shift+B (Ctrl+Shift+B on Windows and Linux) or the folder button at the top of the sidebar. It follows the folder of the tab you're in, and it works for ssh tabs too, browsing the folder on that host (with `python3` there; without it the tree is read-only). It opens, closes and changes width only when you do.
+- **Git at a glance.** Names are coloured by their git status, the branch shows at the top with how many files changed, and Changed narrows the tree to just those. Compare with HEAD shows a file's changes.
+- **Find any file** with `/` or Cmd+F in the tree, as you type.
+- **Work with files in place.** Make, rename, duplicate, cut, copy and paste files and folders, drag them between folders, or drop files in from Finder or Explorer. Delete (Cmd+Backspace on macOS) moves to the trash, and Shift+Delete (Cmd+Option+Backspace) deletes for good after you confirm. Cmd+Z undoes a rename, move, copy or new file, and a trash on Windows, Linux and ssh hosts; on macOS the trash note offers Show in Trash instead. Editor tabs follow a file you rename or move, and maiTerm asks before trashing unsaved work.
+- **Drag a file onto a terminal** to put its path on the command line, never sending it, or, for a file on this computer, onto the composer to attach it. Dropping files on an agent tab is refused while a permission or trust dialog is open, where the drop's keys used to answer it.
+- **See what your agents are doing.** A file lights up as an agent reads it, and marks show what each agent changed this turn and this session, in that agent's colour. A closed folder shows how many files inside it agents changed this turn. The Turn and Session views narrow the tree to those files, and for files on this computer, Compare with Turn Start or Session Start shows exactly what an agent changed.
+- **Agents can use it too:** show you a file in the tree, see what you've selected there, and ask which files were read or changed.
+- **Preview tabs.** A single click opens a file in an italic preview tab that the next click replaces; double-click the tab, or edit the file, to keep it. Turn this off in Preferences → Files → Preview Tabs. Reveal in Files on a tab's menu shows its file or folder in the tree.
+
+### Chrome extension
+
+- **It's on the Chrome Web Store.** Preferences → Chrome extension links to it; loading it unpacked is still there for a copy newer than the store's.
+- **An agent can work in several of your tabs.** You can link more than one tab to an agent, and a popup a linked page opens joins it. Each agent's linked tabs sit in a Chrome tab group named after it, and go back where they were when the link ends.
+- **maiTerm shows what's linked.** An agent's tab shows a browser mark, with the pages in its tooltip, and linking a tab posts a notification. The mark, or the extension's Linked tabs list, brings a linked tab to the front, and the extension lists the agent tabs you used most recently first.
+- **A password manager's autofill popup no longer ends an agent's session.** Chrome won't let the agent into a tab while the popup is open, so the agent waits a few seconds and then asks you to dismiss it.
+
+### Fixes
+
+- **Clicking a file path in a terminal opens the editor tab already showing it**, instead of a second tab, whatever way the path is spelled. The same path on an ssh host and on this computer are kept apart, and a file open in another workspace switches you there.
+- **Files on ssh hosts open in the editor** when the host is reached with options like `-p`, `-i` or `-J`, or with a password.
+- **Undo in an editor tab that was switched to another file** no longer brings back the previous file's text, which Cmd+S could then save over the new one.
+- **A second maiTerm can no longer start on the same data**, such as by running the app's binary directly, where it resumed every agent a second time.
+- **One question rings your phone once**, even when an agent asks it two ways at once.
+- **A notification about an agent's request or a watch script opens it on that tab's terminal**, not the Loom.
+- **An answer you were typing into a question's card survives leaving the tab.**
+- **Cloning an ssh tab into a folder with a space in its name** no longer ends the session.
+- **Pasting or dropping a file path into PowerShell or cmd quotes it the way they need.**
+- **Folders with accented names**, like `café`, show correctly in a tab's folder.
+- **An editor tab is retitled when its file is renamed**, unless you named the tab yourself.
+- **Double-clicking a menu item no longer clicks what was under the menu.**
+
 ## v3.11.0
 
 Agents can work in your own Chrome tab, browse a chat channel, and maiLink moves to a new port.
