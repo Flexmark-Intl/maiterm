@@ -58,7 +58,7 @@ jobs:
 
       - name: Syntax-check the extension
         run: |
-          for f in background.js driver.js popup.js; do node --input-type=module --check < "$f"; done
+          for f in background.js driver.js marker.js popup.js; do node --input-type=module --check < "$f"; done
           node -e 'JSON.parse(require("fs").readFileSync("manifest.json","utf8"))'
 
       - name: Build the store package

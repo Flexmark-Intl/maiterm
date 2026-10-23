@@ -17,6 +17,12 @@ pub fn browser_link_links(state: State<'_, Arc<AppState>>, app: AppHandle) -> Ve
     browser_link::links(&state, &app)
 }
 
+/// Bring a linked Chrome tab to the front (the tab strip's browser mark).
+#[tauri::command]
+pub async fn browser_link_reveal(maiterm_tab_id: String, handle: String) -> Result<(), String> {
+    browser_link::reveal(&maiterm_tab_id, &handle).await
+}
+
 /// Bring the host manifests in line with the (already saved) preference: written when on,
 /// removed when off. The pane calls this after saving the toggle.
 #[tauri::command]

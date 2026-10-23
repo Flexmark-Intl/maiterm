@@ -4,6 +4,7 @@
 // can hold several, each under a handle (b1, b2…) maiTerm gives it.
 
 import { runAction, detach, forget } from './driver.js';
+import { mark, unmark, retitle } from './marker.js';
 
 const PROTOCOL = 1;
 const VERSION = chrome.runtime.getManifest().version;
@@ -19,7 +20,7 @@ const conns = new Map(HOSTS.map((h) => [h, { status: 'disconnected', pending: ne
 
 // ── links (chrome.storage.session: survives a service-worker restart, not the browser) ─────
 
-/** @returns {Promise<Array<{host, maitermTabId, maitermTabName, chromeTabId, handle, openedBy, title, url}>>} */
+/** @returns {Promise<Array<{host, maitermTabId, maitermTabName, chromeTabId, handle, openedBy, title, url, placement?}>>} */
 async function getLinks() {
   const { links } = await chrome.storage.session.get('links');
   return links ?? [];
@@ -133,7 +134,10 @@ async function connect(host) {
         const handles = r.handles ?? {};
         await mutateLinks(async (all) => {
           const kept = all.filter((l) => l.host !== host || accepted.has(l.chromeTabId));
-          for (const l of all.filter((l) => !kept.includes(l))) await detach(l.chromeTabId);
+          for (const l of all.filter((l) => !kept.includes(l))) {
+            await detach(l.chromeTabId);
+            await unmark(l);
+          }
           for (const l of kept) if (l.host === host) l.handle = handles[l.chromeTabId] ?? l.handle;
           return kept;
         });
@@ -192,6 +196,16 @@ async function onFrame(host, raw) {
     // maiTerm only relays for a link, but the link must be OURS and still to this instance.
     const link = (await getLinks()).find((l) => l.host === host && l.chromeTabId === chromeTabId);
     if (!link) return reply({ error: 'That Chrome tab is no longer linked.' });
+    // The human, from maiTerm: show me that tab. Not an agent action, and needs no debugger.
+    if (action === 'reveal') {
+      try {
+        const t = await chrome.tabs.update(chromeTabId, { active: true });
+        await chrome.windows.update(t.windowId, { focused: true });
+        return reply({ result: { ok: true } });
+      } catch (e) {
+        return reply({ error: String(e?.message ?? e) });
+      }
+    }
     const acts = OPENING_ACTIONS.has(action);
     // Its own token: two actions can start in the same millisecond, and one ending must not end both.
     const started = { at: Date.now() };
@@ -211,9 +225,11 @@ async function onFrame(host, raw) {
   } else if (msg.method === 'unlinked') {
     const { chromeTabId } = msg.params ?? {};
     await mutateLinks(async (links) => {
-      if (!links.some((l) => l.host === host && l.chromeTabId === chromeTabId)) return null;
+      const gone = links.filter((l) => l.host === host && l.chromeTabId === chromeTabId);
+      if (!gone.length) return null;
       await detach(chromeTabId);
-      return links.filter((l) => !(l.host === host && l.chromeTabId === chromeTabId));
+      for (const l of gone) await unmark(l);
+      return links.filter((l) => !gone.includes(l));
     });
   } else if (msg.method === 'relinked') {
     // Its maiTerm tab was reloaded under a new id; the link follows it.
@@ -231,6 +247,7 @@ async function onFrame(host, raw) {
       }
       l.maitermTabId = maitermTabId;
       if (maitermTabName) l.maitermTabName = maitermTabName;
+      await retitle(l);
       return links;
     });
   }
@@ -264,6 +281,7 @@ async function unlinkChromeTab(chromeTabId, reason = 'unlinked') {
     if (!gone.length) return null;
     for (const l of gone) await request(l.host, 'unlink', { chromeTabId, reason }).catch(() => {});
     await detach(chromeTabId);
+    for (const l of gone) await unmark(l);
     return links.filter((l) => l.chromeTabId !== chromeTabId);
   });
 }
@@ -286,19 +304,23 @@ async function link(host, maitermTab, chromeTab, openerChromeTabId) {
     const previous = all.filter((l) => l.chromeTabId === chromeTab.id);
     for (const l of previous) if (l.host !== host) await request(l.host, 'unlink', { chromeTabId: l.chromeTabId, reason: 'moved' }).catch(() => {});
     const opener = all.find((l) => l.chromeTabId === openerChromeTabId);
-    return [
-      ...all.filter((l) => !previous.includes(l)),
-      {
-        host,
-        maitermTabId: maitermTab.id,
-        maitermTabName: maitermTab.name,
-        chromeTabId: chromeTab.id,
-        handle: r?.handle ?? '',
-        openedBy: opener?.handle,
-        title: chromeTab.title ?? '',
-        url: chromeTab.url ?? '',
-      },
-    ];
+    const rest = all.filter((l) => !previous.includes(l));
+    const entry = {
+      host,
+      maitermTabId: maitermTab.id,
+      maitermTabName: maitermTab.name,
+      chromeTabId: chromeTab.id,
+      handle: r?.handle ?? '',
+      openedBy: opener?.handle,
+      title: chromeTab.title ?? '',
+      url: chromeTab.url ?? '',
+    };
+    // Into its agent's tab group. Moving between agents carries where the human had it, so the
+    // final unlink still puts it back there; relinking to the same agent keeps its group as is.
+    const carried = previous.find((l) => l.placement)?.placement;
+    const sameAgent = previous.find((l) => l.host === host && l.maitermTabId === maitermTab.id);
+    entry.placement = sameAgent?.placement ?? (await mark(entry, rest, carried));
+    return [...rest, entry];
   });
 }
 

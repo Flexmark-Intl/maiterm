@@ -47,6 +47,7 @@
       "../chrome-extension/manifest.json": "chrome-extension/manifest.json",
       "../chrome-extension/background.js": "chrome-extension/background.js",
       "../chrome-extension/driver.js": "chrome-extension/driver.js",
+      "../chrome-extension/marker.js": "chrome-extension/marker.js",
       "../chrome-extension/popup.html": "chrome-extension/popup.html",
       "../chrome-extension/popup.css": "chrome-extension/popup.css",
       "../chrome-extension/popup.js": "chrome-extension/popup.js",

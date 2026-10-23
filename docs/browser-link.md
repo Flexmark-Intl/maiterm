@@ -58,6 +58,17 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    even while the agent reads that page. maiTerm refuses an opener that isn't the same agent's link.
    An extension older than 0.2.0 (still running in a Chrome that hasn't reloaded it) keeps one tab
    per agent: maiTerm drops that agent's other links when it links one, as that extension does.
+8. **A linked tab is marked in Chrome's own tab strip** (`chrome-extension/marker.js`), because
+   Chrome's debugging bar shows in every tab and says nothing about which one is linked: each
+   agent's linked tabs share a tab group per window, "maiTerm · <agent tab>", in a colour fixed
+   per agent. Every way a link ends (unlink in the popup or maiTerm, Cancel on the bar, the
+   feature off, the agent tab closed, a reconnect maiTerm doesn't accept) ungroups it and PUTS IT
+   BACK after the tab it followed (else at its old index) — the human asked for exactly that.
+   Moving a link between agents carries the original placement. Never touched: a tab already in
+   the human's own group (not grouped), pinned or popup-window tabs (not grouped), and a tab the
+   human has since dragged out of our group or to another window (ungrouped only, left where
+   they put it). maiTerm's tab-strip mark and the popup's "Linked tabs" list bring a linked tab
+   to the front (`reveal`, a command the extension runs without the debugger; no agent tool).
 7. **The popup lists agent tabs most recently used first**, each window's front tab (active
    workspace → active pane → active tab) above all. Recency is in memory (`browser_link::touch_tab`,
    from `set_active_tab` / `set_active_pane` / `set_active_workspace` and window focus); after a

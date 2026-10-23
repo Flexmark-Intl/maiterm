@@ -630,6 +630,19 @@ fn tab_name(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
         .map(|t| t.name.clone())
 }
 
+/// The human, from maiTerm's tab strip: bring that linked Chrome tab to the front. Not an agent
+/// tool (`tools::action_for` has no `reveal`), and the extension does it without the debugger.
+pub async fn reveal(maiterm_tab_id: &str, handle: &str) -> Result<(), String> {
+    let link = REG
+        .lock()
+        .links
+        .iter()
+        .find(|l| l.maiterm_tab_id == maiterm_tab_id && l.handle == handle)
+        .cloned()
+        .ok_or_else(|| "That Chrome tab is no longer linked.".to_string())?;
+    command(&link, "reveal", Value::Null).await.map(|_| ())
+}
+
 /// Every live link with its maiTerm tab's name: what the tab strip's browser indicator draws. The
 /// cheap half of `status` (no manifest scan), read on every `browser-link-changed`.
 pub fn links(state: &Arc<AppState>, app: &AppHandle) -> Vec<LinkView> {

@@ -210,3 +210,18 @@ button.primary {
   margin: 8px 0 0;
   overflow-wrap: anywhere;
 }
+
+#linked {
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+#linked h2 {
+  color: var(--dim);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  margin: 0 0 4px;
+  text-transform: uppercase;
+}

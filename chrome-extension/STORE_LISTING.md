@@ -99,6 +99,12 @@ Used once per connection to ask the maiTerm desktop app, through its registered 
 The popup needs the current tab's id, title and address to link it, and the extension shows a badge on linked tabs and tells the app when a linked tab navigates or closes. Titles and addresses are only ever sent to the user's own maiTerm app on 127.0.0.1, and only for linked tabs.
 ```
 
+`tabGroups`
+
+```
+Puts the tabs the user linked to an agent into a tab group named after that agent, so the user can see in their tab strip which tabs are linked (Chrome's debugging bar shows in every tab and can't say which). When the link ends, the tab is taken out of the group and put back where it was. Only linked tabs are grouped; tabs already in one of the user's own groups are left alone.
+```
+
 `storage`
 
 ```

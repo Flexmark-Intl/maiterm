@@ -568,6 +568,27 @@
   let splitOverlay: HTMLElement | null = null;
   // Tab right-click menu (move to split / other panes)
   let tabContextMenu = $state<{ x: number; y: number; tabId: string } | null>(null);
+  /** The browser mark's menu: which linked Chrome tab to bring to the front, when there are several. */
+  let chromeMenu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+
+  async function revealChromeTab(tabId: string, handle: string) {
+    try {
+      await commands.browserLinkReveal(tabId, handle);
+    } catch (e) {
+      toastStore.addToast('Could not show that Chrome tab', String(e), 'error');
+    }
+  }
+
+  function handleChromeMark(tabId: string, e: MouseEvent) {
+    e.stopPropagation();
+    const links = browserLinkStore.linksFor(tabId);
+    if (links.length === 1) return void revealChromeTab(tabId, links[0].handle);
+    chromeMenu = {
+      x: e.clientX,
+      y: e.clientY,
+      items: links.map((l) => ({ label: `${l.handle}: ${l.title || l.url}`, action: () => void revealChromeTab(tabId, l.handle) })),
+    };
+  }
   /** Windows/workspaces the menu's "Move to" can send to, fetched as the menu opens. */
   let moveTargets = $state<MoveTargetWindow[] | null>(null);
 
@@ -1366,8 +1387,8 @@
           {#if chromeLinks.length > 0}
             <!-- Linked Chrome tabs (docs/browser-link.md): the link is made in Chrome, so this is
                  where maiTerm shows it. -->
-            <Tooltip text={`Linked to Chrome — this agent can use ${chromeLinks.map((l) => `${l.handle}: ${l.title || l.url}`).join('; ')}. Unlink from the extension's icon in Chrome, or Preferences → Chrome extension.`}>
-              <span class="browser-link-indicator"><Icon name="browser" size={12} />{#if chromeLinks.length > 1}<span class="browser-link-count">{chromeLinks.length}</span>{/if}</span>
+            <Tooltip text={`Linked to Chrome — this agent can use ${chromeLinks.map((l) => `${l.handle}: ${l.title || l.url}`).join('; ')}. Click to show ${chromeLinks.length > 1 ? 'one' : 'it'} in Chrome. Unlink from the extension's icon in Chrome, or Preferences → Chrome extension.`}>
+              <button class="browser-link-indicator" onclick={(e) => handleChromeMark(tab.id, e)} aria-label="Show the linked Chrome tab"><Icon name="browser" size={12} />{#if chromeLinks.length > 1}<span class="browser-link-count">{chromeLinks.length}</span>{/if}</button>
             </Tooltip>
           {/if}
         {/if}
@@ -1513,6 +1534,10 @@
     </IconButton>
   {/if}
 </div>
+
+{#if chromeMenu}
+  <ContextMenu items={chromeMenu.items} x={chromeMenu.x} y={chromeMenu.y} onclose={() => (chromeMenu = null)} />
+{/if}
 
 {#if tabContextMenu}
   <ContextMenu
@@ -1750,6 +1775,10 @@
   /* Monitoring-but-idle: listening for summons, no thread bound yet. */
   .browser-link-indicator {
     align-items: center;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
     /* Accent: an outside tool attached to this agent, beside the green chat and amber bridge. */
     color: var(--accent);
     display: flex;

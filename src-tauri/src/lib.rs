@@ -916,6 +916,7 @@ pub fn run() {
             agent_requests::settle_agent_request,
             commands::browser_link::browser_link_status,
             commands::browser_link::browser_link_links,
+            commands::browser_link::browser_link_reveal,
             commands::browser_link::browser_link_sync,
             commands::browser_link::browser_link_unlink,
             commands::browser_link::browser_link_prepare_unpacked,

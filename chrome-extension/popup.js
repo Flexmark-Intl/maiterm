@@ -45,6 +45,7 @@ async function render() {
   const known = state.instances.filter((i) => i.status !== 'not_installed');
 
   $('instances').replaceChildren(...known.map(instanceLine));
+  drawLinked(state.links);
   if (!known.length) {
     $('current').replaceChildren(
       el('p', { class: 'hint' }, 'maiTerm isn’t set up for this browser yet. In maiTerm, open Preferences → Chrome extension and turn it on, then open this again.'),
@@ -85,6 +86,34 @@ async function render() {
   $('picker').hidden = false;
   drawGroups();
   $('filter').focus();
+}
+
+/** Every linked tab, from any page: which ones they are, and a way to get to each. */
+function drawLinked(links) {
+  const others = links.filter((l) => l.chromeTabId !== chromeTab?.id);
+  $('linked').hidden = !others.length;
+  if (!others.length) return;
+  $('linked').replaceChildren(
+    el('h2', {}, 'Linked tabs'),
+    ...others.map((l) =>
+      el(
+        'button',
+        { class: 'tab', onclick: () => goTo(l.chromeTabId) },
+        el('span', { class: 'name' }, l.title || l.url || 'A linked tab'),
+        el('span', { class: 'meta' }, [l.maitermTabName ?? 'an agent tab', l.handle].filter(Boolean).join(' · ')),
+      ),
+    ),
+  );
+}
+
+async function goTo(chromeTabId) {
+  try {
+    const t = await chrome.tabs.update(chromeTabId, { active: true });
+    await chrome.windows.update(t.windowId, { focused: true });
+    window.close();
+  } catch (e) {
+    showError(String(e?.message ?? e));
+  }
 }
 
 function drawGroups() {

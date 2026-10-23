@@ -2508,6 +2508,11 @@ export interface BrowserLinkStatus {
   extension_id: string;
 }
 
+/** Bring a linked Chrome tab to the front. */
+export async function browserLinkReveal(maitermTabId: string, handle: string): Promise<void> {
+  return invoke('browser_link_reveal', { maitermTabId, handle });
+}
+
 /** The live links alone (the tab strip's browser indicator); no manifest scan. */
 export async function browserLinkLinks(): Promise<BrowserLinkView[]> {
   return invoke('browser_link_links');

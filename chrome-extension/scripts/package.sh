@@ -29,6 +29,7 @@ OUT="dist/maiterm-chrome-${VERSION}.zip"
 FILES=(
   background.js
   driver.js
+  marker.js
   popup.html
   popup.css
   popup.js
