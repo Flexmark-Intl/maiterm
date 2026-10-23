@@ -27,6 +27,7 @@ import { editorFileInfo, localFileIdentities, openInEditor, sshCommandOfTab } fr
 import { editorTitleAfter } from '$lib/utils/editorTitle';
 import { isWindows } from '$lib/utils/platform';
 import { openReadOnlyDiff } from '$lib/utils/openGitDiff';
+import { fileTreeStore } from '$lib/stores/fileTree.svelte';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 export interface PendingSelection {
@@ -96,6 +97,18 @@ function createClaudeCodeStore() {
         case 'getLatestSelection':
           result = handleGetSelection();
           break;
+        // Files (docs/file-tree.md §9.6). Rust routed the call to the caller's own window and
+        // refused it when the human turned the tools off; both act on THIS window's column.
+        case 'getTreeSelection':
+          result = fileTreeStore.selectionForAgent();
+          break;
+        case 'revealInTree': {
+          const a = args as { tabId?: string; path?: unknown; select?: unknown };
+          result = typeof a.path === 'string' && a.path
+            ? await fileTreeStore.agentReveal(a.tabId, a.path, a.select === true)
+            : { error: 'path is required: the absolute path of a file or folder.' };
+          break;
+        }
         case 'openFile':
           result = await handleOpenFile(args as {
             filePath: string;
