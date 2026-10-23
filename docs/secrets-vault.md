@@ -29,8 +29,8 @@ So the vault stops **accidental and naive exposure** (an agent printing env, pas
 into chat, committing `.env`). It also stops **a prompt-injected agent sending a value
 somewhere directly**. It does **not** stop a same-user agent that is set on getting a value
 and knows where to look. For prod keys, the real boundary is running agents sandboxed (Claude
-Code's sandbox) or as a different OS user, and §5 seals prod values under a key that the
-keychain item alone does not open. Every card on a prod path says this in one line.
+Code's sandbox) or as a different OS user, and §5 puts prod values behind an unlock the OS
+enforces (how far that holds differs per platform; §5 says exactly). Every card on a prod path says this in one line.
 
 Everything else follows from the rule:
 
@@ -215,16 +215,55 @@ So:
   - `vault-dek` seals dev- and staging-tier values. It is the keychain item alone.
   - `vault-dek-prod` seals prod-tier values, and **the OS guards it**, not just a dialog (§16
     decision 2):
-    - **macOS**: a keychain item with a user-presence access control, so the keychain itself
-      refuses to release it without Touch ID or the login password, whoever asks. `keyring`
-      can't set an access control, so this one item uses the Security framework directly.
-    - **Windows**: unwrapped by a Windows Hello-protected key (`KeyCredentialManager`). Not
-      `UserConsentVerifier`, which only shows a prompt and protects nothing.
-    - **Linux, and the fallback anywhere**: a passphrase (Argon2id).
+    - **macOS**: an item in the **data-protection keychain** (`kSecUseDataProtectionKeychain`),
+      `AccessibleWhenUnlockedThisDeviceOnly` plus a user-presence access control. The keychain
+      itself then refuses to release it without Touch ID or the login password, and the
+      `security` CLI can't reach it at all (it reads only file-based keychains). Three costs:
+      - The data-protection keychain needs an `application-identifier` /
+        `keychain-access-groups` entitlement, so **a Developer ID provisioning profile embedded
+        in the release build**. maiTerm has neither today; that is release-pipeline work in
+        phase 3.
+      - **Ad-hoc dev builds can't use it** (errSecMissingEntitlement) and use the passphrase.
+      - `keyring`'s `protected` feature can require user presence, but pairs it with
+        `AccessibleWhenUnlocked`, not ThisDeviceOnly, which would let the item travel in a
+        backup. So this one item uses `security-framework` directly.
+    - **Windows**: a Windows Hello key (`KeyCredentialManager`) signs a fixed per-install
+      challenge, and HKDF over that signature (with a random per-install salt) is the key that
+      unwraps `vault-dek-prod`. Bitwarden desktop uses the same pattern. The rules:
+      - Enrollment signs twice and compares, so a change to randomized padding fails loudly
+        instead of locking the vault.
+      - The signature is the key: it is never persisted or logged.
 
-    Once unlocked it is held in memory until 15 minutes idle. This is what makes §1's promise
-    true for prod on Linux and Windows, where any same-user process can read a plain keychain
-    item without a prompt. A project can opt dev and staging into the same guard.
+      Two weaknesses to state on the card that turns prod on:
+      - **For an unpackaged app the Hello credential is not app-bound.** A same-user agent can
+        open the same credential and raise a Hello prompt that doesn't clearly name who is
+        asking. So: **refuse any Hello prompt maiTerm didn't just ask for.**
+      - **Windows has no hardened runtime.** While unlocked, any same-user process can read
+        maiTerm's memory (`ReadProcessMemory`), the unwrapped key included.
+
+      Not `UserConsentVerifier`, which only shows a prompt and releases no key material.
+    - **Linux, and dev builds anywhere**: a passphrase (Argon2id).
+
+    **Unlocked until 15 minutes idle, where idle means no human-initiated use**: an unlock, a
+    reveal or copy, a prod delivery approved by a click. Agent calls, the scanner and the
+    scrubber never count, so an agent can't hold it open.
+
+    **Phase 1 → phase 3 migration.** Phase 1 wraps the prod key with a passphrase everywhere.
+    When the OS guard becomes available, phase 3 **re-wraps the key under it and deletes the
+    passphrase wrap**. Otherwise a same-user agent can attack the passphrase blob offline, or
+    show a fake passphrase prompt, and the OS guard means nothing.
+
+    **Opting dev and staging into the guard is per project**: that project's dev and staging
+    values are then sealed under `vault-dek-prod` instead of `vault-dek`. Their "at once"
+    actions in §8 then need the unlock too, and wait for it like prod ones.
+
+    **What the lock does not cover: detection.** The scrubber (§10.1) and the scanner (§10.2)
+    need the values they look for. A service started while unlocked keeps printing after the
+    lock. So from the first prod unlock after launch, prod match tables stay in memory until
+    maiTerm quits; the lock governs **use** (delivery, reveal, export), not detection. The cost,
+    stated: on Windows those tables are readable by a same-user process like the unlocked key.
+    Before the first unlock after launch, prod values are not scanned; the first unlock rescans
+    the transcripts written in between.
 - **Storage sits behind a `ValueStore` interface** (read, write, list versions) from the first
   commit, so 1Password can be a second backend without a rewrite (§16 decision 3).
 - **Dev and prod builds get separate entries**, the same split as `accounts/vault.rs` rule 3.
@@ -240,15 +279,22 @@ So:
   Without that the vault is unavailable and says so.
 - **In memory**: delivery paths decrypt a value only for that delivery and hold it in a
   `Secret` type with a hand-written redacted `Debug`, `zeroize`d on drop. The existing `Secret`
-  grows into this. **The leak scanner is the exception** (§10.2): it keeps the values it looks
-  for in its own tables for as long as the vault is unlocked, and that memory is **not**
-  zeroized. Locking the vault drops it.
+  grows into this. **The scrubber and the leak scanner are the exception** (§10.1, §10.2): they
+  keep the values they look for in their own tables, and that memory is **not** zeroized. Dev and
+  staging tables live while the app runs; prod tables live from the first prod unlock until quit
+  (see "What the lock does not cover" above).
 - **Crates**: `chacha20poly1305`, `argon2`, `zeroize` (RustCrypto, pure Rust, all three
   platforms). No OpenSSL.
 
 **Backups.** A backup of `secrets.vault` alone is useless elsewhere. A backup that also carries
 the keychain (a full macOS backup includes `login.keychain-db`) is protected only by the login
-password for dev and staging values. Prod values also need the prod unlock. Moving the vault
+password for dev and staging values.
+
+**Prod values never travel with a backup, by design**: the macOS item is ThisDeviceOnly, and
+the Windows Hello key is held in the TPM. A new Mac, a reinstalled Windows, or a Hello or PIN
+reset loses every prod value **unless an Export vault was made**, and Export needs the prod
+unlock. The panel says this when prod is turned on and offers the export then. (A printable
+recovery key is proposed in §16.1.) Moving the vault
 on purpose is an explicit **Export vault** with a passphrase, in age's format so the file opens
 with the `age` CLI too. **Import vault** is the fifth way a value enters (§1).
 
@@ -634,7 +680,8 @@ must be checked against the provider's current docs when it is written**, not fr
 
 **A dedicated scanner**, not maiLink's tail: `mailink/transcript.rs` skips tool outputs (exactly
 where `cat .env` or `ps eww` output appears), reads only a tail, and runs only when maiLink asks.
-While the vault is unlocked, the scanner holds the values in memory (not zeroized, §5) and runs
+The scanner holds the values in memory (not zeroized; prod ones only from the first prod
+unlock after launch, §5) and runs
 one Aho-Corasick pass, in raw, JSON-escaped, URL-encoded, hex and three-alignment base64 forms,
 over:
 - Claude JSONL and Codex rollouts, read **whole and incrementally, `tool_result` included**,
@@ -664,13 +711,30 @@ under 12 characters are skipped, since they would match by accident. The panel n
   open (when maiTerm is down or the tunnel is dead, the call goes ahead), and string matching is
   easy to dodge (`cat .e""nv`). To verify: that a deciding `PreToolUse` works on every runtime
   we support (Codex hook parity is listed in docs/codex-integration-review.md).
-- **No `Read(.env)` rules are written into Claude's settings** (§16 decision 6). Such a rule
-  covers only the Read tool, so `cat .env` in Bash walks past it, and it costs a write to user
-  config.
+- The ledger-file part of this deny ships **with `writeEnvFile` and `adoptSecrets` (phase 4)**,
+  not with leak detection: from the moment maiTerm writes a file holding values, something must
+  stand in front of it.
+- **Claude's own `Read` deny rules** for the ledger's files and the vault file: **reopened, see
+  §16 decision 6.** They are stronger than the first draft said. Per Claude Code's permissions
+  docs they apply to the built-in file tools, to the file commands Claude Code recognizes in
+  Bash (`cat`, `head`, `tail`, `sed`, `tee`) and to redirection targets. What they miss is a
+  command that reads without naming the file (`grep -r`, a script). Unlike the hook, they hold
+  when maiTerm is down.
 - **For prod, the boundary that holds** is the agent's own sandbox or a separate OS user (§1).
-  Turning prod on offers "Run this project's agents sandboxed" as one click, **only once a
-  spike has proven** that Claude Code's sandbox blocks the keychain, other processes'
-  environments and the vault file (§16 decision 7). Until then the panel only says so.
+  Claude Code's sandbox **does nothing for this out of the box**: its default read policy is
+  "most of the machine, including credential files", sandboxed commands inherit the
+  environment, it does not cover the Read tool, hooks or MCP servers, and **it does not run on
+  native Windows** (WSL2 only). So the one-click "Run this project's agents sandboxed" offer
+  must write a specific config, in the project's local settings:
+  - `sandbox.credentials` entries (or `sandbox.filesystem.denyRead`) for the vault file and every
+    ledger file;
+  - `Read` deny rules for the same paths, since the sandbox doesn't cover the Read tool;
+  - `sandbox.credentials` `envVars` entries for the env var names the vault delivers, where an
+    agent's own shell might hold them.
+
+  The spike (§16 decision 7) proves that config blocks the vault file, the ledger files, the
+  keychain and other processes' environments. Its review needs a scratch HOME. Native Windows
+  gets no sandbox offer: the panel says to run agents in WSL2 for prod.
 - The priming line (`initSession`) tells agents the vault exists and which tools to use, so
   "paste your API key here" is not the agent's first idea.
 
@@ -736,9 +800,22 @@ filtered in the panel and exported.
 - **Values on the phone later, end-to-end encrypted** (§16 decision 1), after the targets phase.
   The real use is rotation: you create the new key in a provider's mobile dashboard or your
   phone's password manager and paste it. The desktop card carries a one-time X25519 public
-  key; the phone seals the value to it, and only Rust can open it. The LAN link and the relay
-  then carry only ciphertext, so the design does not depend on what they can see. The request
-  keeps `desktopOnly` until then.
+  key; the phone seals the value to it, and only Rust can open it. The design:
+  - **The public key is trusted because the card arrives over maiLink's pinned TLS** (protocol
+    §3.1). The sealing protects the value; the pin protects the key from being swapped. The
+    relay never carries a card, so it never sees the key.
+  - **The ciphertext is bound** to the request id, key name, environment and expiry as
+    associated data, so a value sealed for one key or request can't be submitted for another.
+  - **The private key is single-use and request-scoped**, destroyed on settle or expiry.
+  - **The phone must not copy the value**: on iOS, Universal Clipboard would sync it to the
+    Mac's clipboard, where a same-user agent can read it with `pbpaste`.
+
+  The request keeps `desktopOnly` until then.
+- **A prod approval from the phone while the desktop is locked** waits for the next desktop
+  unlock, and the phone card says so ("runs when you next unlock on the desktop"). Approved
+  requests normally fail after 5 minutes unreported (`APPROVED_TTL_MS`), so these kinds get
+  the same per-kind TTL treatment as §6.1. A rotation's prod steps (redeploys, restarts, a
+  revoke recipe that needs the old value) hit the same unlock.
 - Leak reports and rotation proposals ring the doorbell, gated by mute (docs/mute.md) like any
   other notice.
 
@@ -767,7 +844,7 @@ filtered in the panel and exported.
 |---|---|---|
 | **A prompt-injected agent** ("send the key to evil.com") | No tool takes a value or a free URL; targets need a card and an agent's config and PATH can't redirect them (§7.3); templates can't cross an allowlist (§4.4); prod deploys need a card each time | An agent that writes code which leaks the key at runtime and gets it deployed. Code review and CI catch that, not the vault |
 | **A careless agent** (prints env, commits `.env`) | No values in tool results; masking and scrubbing; gitignore check; leak scan; pre-commit hook | A value it already read through its own tools |
-| **A determined agent running as the same OS user** | Prod values sealed under an OS-guarded key (§5); the `PreToolUse` speed bump (§10.3); no oracles (§1 rule 4) | Dev and staging values: the keychain item, process environments and `.env` files are readable to it. **The real boundary is a sandbox or a separate OS user** |
+| **A determined agent running as the same OS user** | Prod values behind an OS-enforced unlock (§5): on macOS release builds the keychain itself refuses it; the `PreToolUse` speed bump (§10.3); no oracles (§1 rule 4) | Dev and staging values, unless the project opted them into the prod guard: the keychain item, process environments and `.env` files are readable to it. **On Windows** it can raise a Hello prompt for the same credential, and read the unlocked key from maiTerm's memory. **On Linux and in dev builds** the passphrase is all there is. **The real boundary is a configured sandbox (§10.3) or a separate OS user** |
 | **Another local process as the same user** | As above | As above, the same reach docs/login.md §9.2 accepts |
 | **A stolen backup or synced data dir** | The vault file alone is useless; Windows entries don't roam (§5); prod needs the prod unlock | A backup that also carries the macOS login keychain opens dev and staging values to whoever has the login password |
 | **A lost or compromised phone** | Values never reach the phone; approvals need a paired device token (docs/agent-requests.md §2) | A paired phone can approve a prod deploy, so unpairing is the response |
@@ -804,16 +881,21 @@ user.** Every card on a `run` or prod path says so in one line.
 ## 16. Decisions (Darryl, 2026-10-23)
 
 The first draft's open questions, each with the answer agreed and the reason it was chosen.
+**"v1" means the first release: phases 1–5 of §17.** A review of this section (of 8e872d5c)
+corrected the facts under decisions 2, 6 and 7. Decision 6's reason turned out to be wrong, so
+it is reopened in §16.1.
 
 1. **Phone value entry: not in v1; later, end-to-end encrypted** (§12). The need is real only
    once rotation exists (pasting a newly minted key from a mobile dashboard or a password
-   manager). Sealing the value to a one-time key on the desktop card means the LAN link and the
-   relay never need a review of what they can see.
-2. **Prod unlock: OS-enforced, not a dialog** (§5). macOS: a keychain access control requiring
-   user presence. Windows: a Hello-protected key. Linux and the fallback: a passphrase. Unlocked
-   for 15 minutes idle. Dev and staging can opt in per project, not by default. A passphrase on
-   every prod action gets turned off within a week, and only the OS-enforced form also stops a
-   same-user agent on macOS.
+   manager). Sealing the value to a one-time key on the desktop card protects the value; the
+   card's public key is protected by maiLink's pinned TLS, which the relay never carries.
+2. **Prod unlock: OS-enforced, not a dialog** (§5). macOS release builds: a data-protection
+   keychain item, ThisDeviceOnly, requiring user presence (needs a provisioning profile).
+   Windows: a key derived from a Hello signature. Linux and dev builds: a passphrase. Unlocked
+   until 15 minutes without human-initiated use. Dev and staging can opt in per project, not by
+   default. A passphrase on every prod action gets turned off within a week, and only the
+   OS-enforced form also stops a same-user agent, fully on macOS and partly on Windows (§5
+   lists the gaps).
 3. **1Password: designed for from phase 1, built right after targets.** Storage sits behind a
    `ValueStore` interface from the start (§5); the 1Password backend resolves with `op read` and
    writes back on rotation, while manifest, targets, ledger and runs stay in maiTerm. Doppler and
@@ -826,13 +908,15 @@ The first draft's open questions, each with the answer agreed and the reason it 
 5. **Prod `run`: off by default; enabled per project, then a card per run** (§8). Prod
    credentials on a laptop are the anti-pattern this ends; prod migrations belong in the deploy
    pipeline; the rare one-off ops job fits a card per run.
-6. **No `Read(.env)` rules in Claude's settings** (§10.3). They cover only the Read tool, so Bash
-   walks past them, and they cost a user-config write. The hook stays as a speed bump; the
-   sandbox is the real answer.
-7. **The sandbox is offered as one click, after a spike proves it** (§10.3). The spike checks that
-   Claude Code's sandbox blocks the keychain, other processes' environments and the vault file.
-   If it doesn't, the button would promise protection it doesn't give, so it ships only if the
-   spike passes.
+6. **Reopened, see §16.1.** It was "no `Read(.env)` rules in Claude's settings", because such a
+   rule "covers only the Read tool". That is false (§10.3).
+7. **The sandbox is offered as one click, after a spike proves it** (§10.3). Out of the box the
+   sandbox protects none of this, so the offer writes a specific config (credentials or
+   `denyRead` entries plus `Read` deny rules for the vault file and ledger files). The spike proves
+   that config blocks the vault file, the ledger files, the keychain and other processes'
+   environments. It ships only if the spike passes, since otherwise the button would promise
+   protection it doesn't give. Native Windows gets no offer: the sandbox runs only on macOS,
+   Linux and WSL2.
 8. **The panel is a full-window view like Preferences, with no shortcut and no new `tab_type`**
    (§11.1). The keys × environments grid needs width, it is an occasional screen mostly reached
    from a card, and a new `tab_type` value is the older-build-loads-empty risk for no gain.
@@ -840,6 +924,24 @@ The first draft's open questions, each with the answer agreed and the reason it 
    suggests AWS SSO (`aws sso login` already yields short-lived credentials) or OIDC for CI, as
    the OIDC advisor does (§7.3). The providers that support short-lived credentials ship the
    tooling; maiTerm's job is to stop the long-lived key being stored, not to reimplement STS.
+   (The SSO token cached in `~/.aws/sso/cache` is itself a bearer credential an agent can read;
+   the advice says so.)
+
+### 16.1 Waiting on Darryl
+
+1. **Decision 6, reopened: write `Read` deny rules for the vault file and the ledger's files?**
+   Recommended: **yes, into the project's local, uncommitted Claude settings**, written by
+   maiTerm when it first writes a file holding values. Claude enforces these rules itself, even
+   when maiTerm is down (the hook fails open), and they cover the built-in tools, `cat`/`head`/
+   `tail`/`sed`/`tee` and redirections. They miss indirect reads (`grep -r`, a script), which is
+   what the sandbox is for. The cost is that maiTerm writes Claude settings, so the change is
+   reviewed with a scratch HOME. These are the same rules the sandbox offer writes (decision 7),
+   so this applies them without the sandbox too.
+2. **A printable recovery key?** Prod values are lost with the device unless exported (§5). A
+   recovery key, made once at setup and printed or kept offline, would unwrap the data keys.
+   The trade-off: it is a second way in, so a same-user agent that finds it has everything,
+   which is the attack §5's migration closes for the passphrase. Recommended: offer it, never
+   store it on the machine, and say so where it is made.
 
 ## 17. Build order
 
@@ -853,20 +955,25 @@ The first draft's open questions, each with the answer agreed and the reason it 
    request TTLs and the reload remap (§6.1), the phone refusal and `desktopOnly` (§12), the
    ⟦SECRETS⟧ notice, `generateSecret`. **This is the first phase an agent can use, and it proves
    Darryl's flow end to end.**
-3. **Prod guards, before anything can deliver a prod value.** The OS-enforced prod unlock: the
-   macOS keychain access control and the Windows Hello-protected key (§5). The sandbox spike
-   (§10.3), and the one-click offer only if it passes.
+3. **Prod guards, before anything can deliver a prod value.** The OS-enforced prod unlock (§5):
+   on macOS the data-protection keychain item, **with the release pipeline's entitlement and
+   Developer ID provisioning profile**; on Windows the Hello-derived key. The re-wrap that
+   deletes phase 1's passphrase wrap. The detection-vs-use split for prod match tables. The
+   sandbox spike (§10.3), and the one-click offer only if it passes.
 4. **Local delivery.** The scrubber at every MCP and persistence boundary (§10.1) **first**,
    then `runWithSecrets` with masking, the `maiterm-run` shim with peer-verified tickets for
-   stack services (§7.1, §7.2), `writeEnvFile`, `adoptSecrets`.
+   stack services (§7.1, §7.2), `writeEnvFile`, `adoptSecrets`, and **the ledger-file
+   `PreToolUse` deny with them** (§10.3).
 5. **Targets.** `declareTargets`, `deploySecrets`, the ledger, adapters with pinned addresses and
-   binaries (§7.3): GitHub Actions, Cloudflare, Railway.
+   binaries (§7.3): GitHub Actions, Cloudflare, Railway. The OIDC / AWS SSO advice, which is
+   about targets. **The end of v1.**
 6. **1Password backend** on the `ValueStore` interface (§16 decision 3).
 7. **Rotation.** Runs with human mint and revoke, `requestRotation`, the run view, age and
    expiry proposals, the first provider packs (§9.5), end-to-end encrypted value entry on the
    phone (§12).
 8. **Leak detection.** The dedicated transcript scanner, scrollback and pre-commit scans,
-   leak-triggered rotation, the `PreToolUse` deny, the OIDC / AWS SSO advice.
+   leak-triggered rotation, the rest of the `PreToolUse` deny (keychain CLIs, process
+   environments).
 9. **Automation and reach.** Capture recipes with their oracle guards, adapter mint/revoke, ssh
    delivery, Vercel and Fly, then AWS and Kubernetes.
 
