@@ -128,6 +128,8 @@ would hand prod values to dev policy (`.env` writes and local runs at once).
 ```rust
 KeyDef {
     name,                           // "STRIPE_SECRET_KEY": the env var name, used everywhere
+    kind: String,                   // "string" | "file" (a service-account JSON, a .p8, a TLS key: §7.1)
+    path_var: Option<String>,       // file kind: the variable that gets the PATH, "GOOGLE_APPLICATION_CREDENTIALS"
     description: Option<String>,    // the AGENT'S words; always shown quoted, as agent text
     provider: Option<String>,       // "stripe" (declared, or detected from the value's format)
     format: Option<String>,         // a prefix or regex the value must match: "sk_(test|live)_"
@@ -293,8 +295,17 @@ password for dev and staging values.
 **Prod values never travel with a backup, by design**: the macOS item is ThisDeviceOnly, and
 the Windows Hello key is held in the TPM. A new Mac, a reinstalled Windows, or a Hello or PIN
 reset loses every prod value **unless an Export vault was made**, and Export needs the prod
-unlock. The panel says this when prod is turned on and offers the export then. (A printable
-recovery key is proposed in §16.1.) Moving the vault
+unlock. The panel says this when prod is turned on and offers the export then.
+
+**Recovery** (§16 decision 10). At setup, and when prod is first turned on, maiTerm offers a
+**recovery key**: 256 random bits shown once as words to print or keep offline, never stored on
+the machine. It wraps a copy of each data key, `vault-dek-prod` included, and the wrapped copies
+sit beside the vault file. Because the key is random rather than chosen, the wrapped copies can't be
+attacked offline the way the phase 1 passphrase wrap can, so keeping them on disk opens no new
+attack. Anyone who
+*finds* it, an agent included, can open the whole vault, and the screen that shows it says
+so. **It is not offered for values held in 1Password** (decision 3): their recovery belongs
+to 1Password. A project whose values are all there needs none. Moving the vault
 on purpose is an explicit **Export vault** with a passphrase, in age's format so the file opens
 with the `age` CLI too. **Import vault** is the fifth way a value enters (§1).
 
@@ -376,6 +387,21 @@ Svelte store, never logged (dev builds attach the console), never in an error me
 let an agent read the sheet's inputs and payloads. So the sheet **refuses prod-tier values in a
 build with the bridge**, and warns for dev and staging ones.
 
+### 6.2 First run: bringing existing secrets in
+
+The vault is worth something on day one only if existing secrets can come in. When the vault is
+first turned on, maiTerm offers a scan of the folders its tabs and workspaces already use for
+`.env`-style files (`.env`, `.env.*`, `*.env`, skipping `.env.example`). It shows **"Found 14
+keys in 6 projects"**, with names, files and a guessed tier (`.env.production` → prod, a
+`sk_test_` value → dev), and **no values**. Adopting is `adoptSecrets` in bulk:
+- one sheet;
+- the human ticks what comes in and confirms each tier;
+- Rust reads the files;
+- each file's lines become references on the human's say-so (§7.4's rules then apply to it).
+
+Nothing is scanned without the human starting it, and an agent can't start it: the scan reads
+files across projects, which is wider than any one agent's project (§3).
+
 ## 7. Delivery: getting a value where it needs to be
 
 Every delivery path follows the same four rules:
@@ -415,15 +441,34 @@ small shim that maiTerm types into the service's shell:
   `getServiceOutput`.
 - **A ticket is worth nothing to anyone but the shim.** On redemption maiTerm identifies the
   peer **from the OS, not from the message**: `LOCAL_PEERPID` (macOS), `SO_PEERCRED` (Linux),
-  `GetNamedPipeClientProcessId` (Windows). The peer's executable must be maiTerm's own
-  `maiterm-run`, and its argv and cwd are read from the OS. The values are released only to that
-  pid.
+  `GetNamedPipeClientProcessId` (Windows). The peer's argv and cwd are read from the OS, and the
+  values are released only to that pid.
+- **"maiTerm's own `maiterm-run`" is checked by code signature, not by path.** On many Macs the
+  app bundle is writable by the same user, so an agent could replace the file at that path. So
+  maiTerm checks the peer process's signature: `SecCodeCheckValidity` against maiTerm's
+  designated requirement on macOS, and `WinVerifyTrust` plus a match on maiTerm's own signer on
+  Windows. Linux has no platform signature, so the check is the binary's hash against the one
+  maiTerm shipped. Dev builds are ad-hoc signed and fall back to that hash too.
 - **On Unix** the shim `exec`s `sh -c`, so the process tree is exactly what it would be without
   it. **On Windows** there is no `exec`: the shim spawns the child (through `cmd /c`), forwards
   Ctrl-C/Ctrl-Break and returns the child's exit code.
 - **On a TTY** (an interactive dev server) the shim can't mask without breaking the terminal,
   so masking is off there. That output still reaches agents only through the scrubbed MCP
   boundary (§10.1).
+
+**Secrets that are files** (`kind: "file"`, §4.2). A service-account JSON, an Apple `.p8` or
+`.p12`, a TLS or SSH key: most of these are read from a path, not from a variable. For a file
+key, the runner (agent runs and the shim alike):
+- writes the value into a fresh per-run directory, mode 0700/0600. That is
+  `$XDG_RUNTIME_DIR` (memory-backed) on Linux, and the per-user temp directory on macOS and
+  Windows;
+- sets `path_var` to the file's path;
+- deletes the directory when the process exits.
+
+A crash can leave a directory behind, so maiTerm sweeps its runtime directories at startup.
+The ledger records the run, not a lasting file. Rotation needs nothing extra, since each run
+gets the current version. Targets take file keys as their contents (a GitHub secret holding
+the JSON).
 
 **What an approval does NOT cover, said plainly on the card:** it binds the command line, not
 the code it runs. An agent that can edit `scripts/seed.js` can make the approved
@@ -447,6 +492,12 @@ scrollback, the shell history and the scrollback database. So:
   otherwise be split by the shell, and everything after the first `&&` would run without
   secrets. The plain `env` exports stay as they are for non-secret values.
 - A rotation restarts every service in its ledger (§9.2).
+- **A service that needs prod values waits for the unlock.** After a relaunch, `was_running`
+  services start on their own (docs/stack.md §5), and an overnight restart or a deploy with the
+  screens off can't do Touch ID. Such a service shows **waiting for unlock** rather than
+  crashed, sends one notice (gated by mute), and starts when the human unlocks. Dev and staging
+  services start as usual. The state is transient, like all service status, and never
+  persisted.
 - The shell underneath never holds the values. Only the service process does, so a Ctrl-C in
   the console leaves nothing behind.
 
@@ -714,11 +765,8 @@ under 12 characters are skipped, since they would match by accident. The panel n
 - The ledger-file part of this deny ships **with `writeEnvFile` and `adoptSecrets` (phase 4)**,
   not with leak detection: from the moment maiTerm writes a file holding values, something must
   stand in front of it.
-- **Claude's own `Read` deny rules** for the ledger's files and the vault file: **reopened, see
-  §16 decision 6.** They are stronger than the first draft said. Per Claude Code's permissions
-  docs they apply to the built-in file tools, to the file commands Claude Code recognizes in
-  Bash (`cat`, `head`, `tail`, `sed`, `tee`) and to redirection targets. What they miss is a
-  command that reads without naming the file (`grep -r`, a script). Unlike the hook, they hold
+- **Each runtime's own read-deny rules** for the vault file and the ledger's files, written by
+  maiTerm into every runtime it supports (§10.4, §16 decision 6). Unlike the hook, they hold
   when maiTerm is down.
 - **For prod, the boundary that holds** is the agent's own sandbox or a separate OS user (§1).
   Claude Code's sandbox **does nothing for this out of the box**: its default read policy is
@@ -738,6 +786,55 @@ under 12 characters are skipped, since they would match by accident. The panel n
 - The priming line (`initSession`) tells agents the vault exists and which tools to use, so
   "paste your API key here" is not the agent's first idea.
 
+### 10.4 Read-deny rules in every runtime, written with precision
+
+Darryl (2026-10-23): yes, "so long as it's done with precision so maiTerm doesn't have any
+chance of corrupting settings", and not only for Claude. maiTerm supports four runtimes
+(`accounts/mod.rs`: Claude, Codex, Gemini, Grok), and each needs its own mechanism. What
+each offers, read from its docs on 2026-10-23. **Every row must be verified against the
+installed version before its writer ships.**
+
+| Runtime | Mechanism | What maiTerm writes | Strength |
+|---|---|---|---|
+| **Claude Code** | `permissions.deny` `Read(<path>)` rules. These cover the built-in file tools, the file commands Claude recognizes in Bash (`cat`, `head`, `tail`, `sed`, `tee`) and redirection targets. They miss reads that don't name the file (`grep -r`, a script) | Rules in the project's **`.claude/settings.local.json`** (local and uncommitted, never the shared `.claude/settings.json`) | Good. Enforced by Claude, not by maiTerm |
+| **Grok Build** | Its own allow/ask/deny rules, and it **also reads Claude's settings files**, translating `permissions.deny` into native rules. Its `Read` deny rules also cover file paths that shell commands touch | Nothing extra: the Claude file covers it, **once a test proves Grok picks up those rules**. Otherwise a rule in the project's `.grok/config.toml` | Good, if the translation holds |
+| **Gemini CLI** | No deny setting. `.geminiignore` is filtering, not a boundary: a file named directly still loads. The **policy engine** takes TOML rules (`toolName = "read_file"`, `argsPattern`, `decision = "deny"`) from files in `~/.gemini/policies/` | **A file maiTerm owns outright**: `~/.gemini/policies/maiterm-vault[-dev].toml`, one `read_file` rule per path. Plus `run_shell_command` rules for the common readers | Medium: a user-tier rule is reported to be overridden in YOLO mode, and shell coverage is only by command prefix |
+| **Codex CLI** | Filesystem permission profiles (`[permissions.<name>.filesystem]`, `deny`), which are **beta**. The active profile is chosen by `default_permissions`, which is the human's own choice. Project `.codex/config.toml` loads only for trusted projects | **Nothing until a test settles it.** maiTerm must not change which profile a human runs under. The candidate is a project-level profile layered on the human's, offered on a card that names the change | Unknown |
+
+**What "precision" means here.** These rules come from the existing writers (the MCP entries in
+`mcp_proxy/entries.rs`), tightened where those fall short:
+
+1. **Own a file outright wherever the runtime allows it** (Gemini's policies directory). A file
+   only maiTerm writes can't corrupt anyone else's settings.
+2. **When the file is shared, edit only what maiTerm added.** JSON arrays can't carry a marker,
+   so maiTerm keeps a record of each exact rule it added, per file. It removes only those rules,
+   and **never adopts or removes a rule that was already there**, even an identical one.
+3. **Keep the rest of the file exactly as it was.** Use `toml_edit` for TOML. For JSON, keep key
+   order: today's writer re-sorts keys, because `serde_json` is built without `preserve_order`,
+   so it needs that feature or a surgical edit. A re-read must parse to the original plus
+   maiTerm's change, and nothing else.
+4. **An unparseable file is left alone**, and the panel shows why (as `entries.rs` already
+   does). maiTerm never "repairs" a file.
+5. **Back up before the first write** to each file, beside it as `<name>.maiterm-backup`, once.
+6. **Write atomically under maiTerm's own temp name**, holding one writer lock (as
+   `write_toml` does), and **through symlinks**: managed account roots symlink these files
+   (docs/login.md §5.4), and renaming over a symlink would replace the link with a file and
+   detach that account. maiTerm resolves the link and writes the target.
+7. **Compare before writing**: if the file's hash changed between maiTerm's read and its write
+   (the runtime or the human saved it in between), re-read and redo the edit.
+8. **Verify after writing**: re-read and parse. If the result isn't exactly what was intended,
+   restore the backup and report it.
+9. **Keep the rules out of git.** If `.claude/settings.local.json` isn't already ignored, add it
+   to **`.git/info/exclude`** (local) rather than to `.gitignore`, which is shared.
+10. **Dev and prod flavours don't touch each other's rules.** Gemini's file name and the rule
+    record carry `app_data_slug()`.
+11. **Remove the rules when they stop being true**: when a ledger file is deleted, when the vault
+    is turned off, and at uninstall. A drift check reasserts them like the MCP entries' 30-second
+    loop, but only rules maiTerm still has on record.
+12. **Test with a scratch HOME**, against real files from each runtime (memory: "Reviewers must
+    isolate HOME"). Those include JSON with comments, CRLF line endings and symlinked account
+    roots.
+
 ## 11. UI
 
 ### 11.1 The Secrets panel
@@ -750,7 +847,11 @@ dock:
   required), pending (a rotation in progress), overdue, or expiring;
 - expanding a key shows its description (quoted as the agent's), provider, template, targets,
   version history (no values), consumers from the ledger, and its audit rows;
-- actions: Set, Generate, Rotate, Remove from target, Reveal, Copy.
+- actions: Set, Generate, Rotate, Remove from target, Reveal, Copy;
+- **unused keys**: each key shows when it was **last delivered** (from the ledger). A key with
+  no delivery for 90 days is flagged "unused?", and the panel suggests removing it from its
+  targets and the vault. Unused keys are the ones nobody remembers to rotate. This is only a
+  suggestion: the ledger can't see a key the human copied somewhere by hand.
 
 **Reveal** shows the value for 10 seconds. **Copy** clears the clipboard after 30 seconds if it
 still holds that value, and keeps the value out of clipboard history:
@@ -767,6 +868,19 @@ decision in a card's first 1.5 s, the second click of a double-click ignored):
 `secret_rotation`, plus the rotation steps that need the human. As with every card: **the words
 are maiTerm's, the agent's only as a quoted `reason`; they must be true about what runs and
 where; and they never carry a value**, since cards reach the phone.
+
+**No agent approves a secrets card, the Overlord included.** Only `decide`, reached by the
+human's click or a paired phone, moves a request out of pending (docs/agent-requests.md §2).
+This holds today. It gets a test anyway, so a later change can't loosen it: with
+`overlord_answers_escalations` on, the Overlord agent answers escalations, and a secrets card
+must never be one of them.
+
+**A card says when the ask came after a mesh message.** An agent can be asked by a peer to
+deploy prod, and the card then names the agent that filed it, which is true but hides who
+started it. maiTerm delivers mesh and bridge messages itself, so it knows the last one this tab
+received. A secrets card filed within 10 minutes of one says **"after a message from
+'<peer name>' (2 min ago)"**. Those are maiTerm's words, built from its own record, never
+from the message text.
 
 ### 11.3 Rotation progress
 
@@ -882,8 +996,8 @@ user.** Every card on a `run` or prod path says so in one line.
 
 The first draft's open questions, each with the answer agreed and the reason it was chosen.
 **"v1" means the first release: phases 1–5 of §17.** A review of this section (of 8e872d5c)
-corrected the facts under decisions 2, 6 and 7. Decision 6's reason turned out to be wrong, so
-it is reopened in §16.1.
+corrected the facts under decisions 2, 6 and 7. Decision 6's reason turned out to be wrong, and
+Darryl re-decided it the same day.
 
 1. **Phone value entry: not in v1; later, end-to-end encrypted** (§12). The need is real only
    once rotation exists (pasting a newly minted key from a mobile dashboard or a password
@@ -908,15 +1022,21 @@ it is reopened in §16.1.
 5. **Prod `run`: off by default; enabled per project, then a card per run** (§8). Prod
    credentials on a laptop are the anti-pattern this ends; prod migrations belong in the deploy
    pipeline; the rare one-off ops job fits a card per run.
-6. **Reopened, see §16.1.** It was "no `Read(.env)` rules in Claude's settings", because such a
-   rule "covers only the Read tool". That is false (§10.3).
+6. **Read-deny rules: yes, for every runtime, written with precision** (§10.4; re-decided
+   2026-10-23). The first version said no, because a Claude rule "covers only the Read tool".
+   That was false: it also covers `cat`-style Bash commands and redirections. These rules hold
+   even when maiTerm is down, unlike the hook. Darryl's conditions were "no chance of
+   corrupting settings", which became §10.4's twelve rules, and "think more broadly beyond
+   Claude", which covers Codex, Gemini and Grok. Each runtime's writer ships only after its row
+   in §10.4 is verified; Codex waits on a test.
 7. **The sandbox is offered as one click, after a spike proves it** (§10.3). Out of the box the
    sandbox protects none of this, so the offer writes a specific config (credentials or
    `denyRead` entries plus `Read` deny rules for the vault file and ledger files). The spike proves
    that config blocks the vault file, the ledger files, the keychain and other processes'
    environments. It ships only if the spike passes, since otherwise the button would promise
    protection it doesn't give. Native Windows gets no offer: the sandbox runs only on macOS,
-   Linux and WSL2.
+   Linux and WSL2. Following decision 6, the spike covers Codex's and Gemini's sandboxes too,
+   so the offer is made per runtime where one proves out.
 8. **The panel is a full-window view like Preferences, with no shortcut and no new `tab_type`**
    (§11.1). The keys × environments grid needs width, it is an occasional screen mostly reached
    from a card, and a new `tab_type` value is the older-build-loads-empty risk for no gain.
@@ -927,46 +1047,55 @@ it is reopened in §16.1.
    (The SSO token cached in `~/.aws/sso/cache` is itself a bearer credential an agent can read;
    the advice says so.)
 
-### 16.1 Waiting on Darryl
+10. **A recovery key, for the values maiTerm stores itself** (§5 "Recovery"). Darryl: yes, "but
+    it depends. If we are integrating with another password manager, then I'd say no, as the
+    recovery is tied to that password manager." So it is offered when the local store holds
+    values, and not for values that live in 1Password (decision 3), whose recovery is
+    1Password's. It is 256 random bits, so unlike a passphrase it can't be guessed offline. It is
+    never stored on the machine.
 
-1. **Decision 6, reopened: write `Read` deny rules for the vault file and the ledger's files?**
-   Recommended: **yes, into the project's local, uncommitted Claude settings**, written by
-   maiTerm when it first writes a file holding values. Claude enforces these rules itself, even
-   when maiTerm is down (the hook fails open), and they cover the built-in tools, `cat`/`head`/
-   `tail`/`sed`/`tee` and redirections. They miss indirect reads (`grep -r`, a script), which is
-   what the sandbox is for. The cost is that maiTerm writes Claude settings, so the change is
-   reviewed with a scratch HOME. These are the same rules the sandbox offer writes (decision 7),
-   so this applies them without the sandbox too.
-2. **A printable recovery key?** Prod values are lost with the device unless exported (§5). A
-   recovery key, made once at setup and printed or kept offline, would unwrap the data keys.
-   The trade-off: it is a second way in, so a same-user agent that finds it has everything,
-   which is the attack §5's migration closes for the passphrase. Recommended: offer it, never
-   store it on the machine, and say so where it is made.
+### 16.1 Added 2026-10-23: considerations raised after the decisions
+
+Darryl asked what else should be asked. Each item was then written into its section:
+- recovery (§5, decision 10);
+- secrets that are files (§4.2, §7.1);
+- services waiting on the prod unlock after a restart (§7.2);
+- checking the shim's code signature, not its path (§7.1);
+- the Overlord and mesh peers never approving, and cards naming a mesh origin (§11.2);
+- unused keys (§11.1);
+- bringing existing secrets in (§6.2);
+- what shipping a secrets manager asks of maiTerm itself (§18).
+
+Free or paid is Darryl's product call and doesn't change the design.
 
 ## 17. Build order
 
 1. **Vault core.** `src-tauri/src/secrets/`: the envelope store behind the `ValueStore`
    interface, with the two data keys and local-only Windows persistence (§5), the passphrase
    unlock (the Linux path and the fallback everywhere), the data model, the Secrets panel as a
-   full-window view with human entry, environments, the audit log. `accounts/vault.rs`'s `Secret`
-   grows `zeroize` and moves to a shared module.
+   full-window view with human entry, environments, the audit log, **the recovery key** (§5).
+   `accounts/vault.rs`'s `Secret` grows `zeroize` and moves to a shared module.
 2. **The agent manifest.** `listSecrets`, `declareSecrets` with its locked fields,
    `requestSecretValues`, the entry sheet, the combined store-approve-settle Done, per-kind
    request TTLs and the reload remap (§6.1), the phone refusal and `desktopOnly` (§12), the
-   ⟦SECRETS⟧ notice, `generateSecret`. **This is the first phase an agent can use, and it proves
-   Darryl's flow end to end.**
+   ⟦SECRETS⟧ notice, `generateSecret`, the "no agent approves" test and the mesh-origin line on
+   cards (§11.2). **This is the first phase an agent can use, and it proves Darryl's flow end to
+   end.**
 3. **Prod guards, before anything can deliver a prod value.** The OS-enforced prod unlock (§5):
    on macOS the data-protection keychain item, **with the release pipeline's entitlement and
    Developer ID provisioning profile**; on Windows the Hello-derived key. The re-wrap that
    deletes phase 1's passphrase wrap. The detection-vs-use split for prod match tables. The
    sandbox spike (§10.3), and the one-click offer only if it passes.
 4. **Local delivery.** The scrubber at every MCP and persistence boundary (§10.1) **first**,
-   then `runWithSecrets` with masking, the `maiterm-run` shim with peer-verified tickets for
-   stack services (§7.1, §7.2), `writeEnvFile`, `adoptSecrets`, and **the ledger-file
-   `PreToolUse` deny with them** (§10.3).
+   then `runWithSecrets` with masking and file keys, the `maiterm-run` shim with peer-verified,
+   **signature-checked** tickets for stack services, and "waiting for unlock" (§7.1, §7.2),
+   `writeEnvFile`, `adoptSecrets` with the first-run scan (§6.2), and with them **the
+   ledger-file `PreToolUse` deny and the read-deny writers** (§10.3, §10.4): Claude and
+   Gemini first, Grok once its translation is proven, Codex once its test settles the approach.
 5. **Targets.** `declareTargets`, `deploySecrets`, the ledger, adapters with pinned addresses and
    binaries (§7.3): GitHub Actions, Cloudflare, Railway. The OIDC / AWS SSO advice, which is
-   about targets. **The end of v1.**
+   about targets. "Last delivered" and the unused-key flag (§11.1). **The end of v1**, followed
+   by §18 before it is advertised.
 6. **1Password backend** on the `ValueStore` interface (§16 decision 3).
 7. **Rotation.** Runs with human mint and revoke, `requestRotation`, the run view, age and
    expiry proposals, the first provider packs (§9.5), end-to-end encrypted value entry on the
@@ -977,6 +1106,19 @@ it is reopened in §16.1.
 9. **Automation and reach.** Capture recipes with their oracle guards, adapter mint/revoke, ssh
    delivery, Vercel and Fly, then AWS and Kubernetes.
 
-Each phase is reviewed before the next. The shim and the adapters must be reviewed with a
-scratch HOME. **Two tests must exist before the first adapter ships**: no value in argv, and no
-change to an agent-writable file or PATH entry moves where a push goes.
+Each phase is reviewed before the next. The shim, the adapters and the read-deny writers must be
+reviewed with a scratch HOME. **Two tests must exist before the first adapter ships**: no value
+in argv, and no change to an agent-writable file or PATH entry moves where a push goes.
+
+## 18. Before it ships: what a secrets manager asks of maiTerm itself
+
+Shipping a secrets manager raises the bar for the whole product. Before the vault is
+advertised on maiterm.dev:
+- **An outside security review of phases 1–5** (v1), with the threat model (§14) as its brief.
+- **A `SECURITY.md`** with a way to report vulnerabilities privately, and a stated response time.
+- **Nothing about the vault leaves the machine.** No key name, project name, count or event
+  reaches the updater's usage count (memory: "Usage stats / MAU") or any other service.
+- **The website copy stays true** (website/CLAUDE.md): it says what §1 and §14 say, including
+  that the vault does not contain an agent running as the same OS user, and that prod protection
+  differs by platform. It makes no "military-grade"-style claims.
+- **Free or paid** is Darryl's call, and doesn't change the design.
