@@ -21,7 +21,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot};
 
 use super::lockfile::cleanup_stale_lockfiles;
-use super::protocol::{initialize_response, tool_list_response, JsonRpcRequest, JsonRpcResponse};
+use super::protocol::{initialize_response, tool_list_response, JsonRpcRequest, JsonRpcResponse, ToolGates};
 use super::registrar;
 use crate::state::AppState;
 
@@ -3030,11 +3030,8 @@ async fn process_message(
         }
         "notifications/initialized" => None,
         "tools/list" => {
-            let (tasks_enabled, stack_enabled, follow_ups_live, escalations_to_overlord, browser_link) = {
-                let prefs = &state.app_data.read().preferences;
-                (prefs.tasks_enabled, prefs.stack_enabled, prefs.follow_ups_live(), prefs.escalations_to_overlord(), prefs.browser_link_enabled)
-            };
-            let resp = JsonRpcResponse::success(id, tool_list_response(tasks_enabled, stack_enabled, follow_ups_live, escalations_to_overlord, browser_link));
+            let gates = ToolGates::from_prefs(&state.app_data.read().preferences);
+            let resp = JsonRpcResponse::success(id, tool_list_response(gates));
             Some(serde_json::to_string(&resp).unwrap())
         }
         "tools/call" => {

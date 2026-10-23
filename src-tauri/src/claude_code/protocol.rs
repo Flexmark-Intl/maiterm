@@ -44,21 +44,40 @@ impl JsonRpcResponse {
     }
 }
 
-/// `tasks_enabled` gates the four task tools (docs/tasks.md §4). An agent that is never
-/// primed to use them shouldn't be carrying their schemas in context either, so the
-/// preference removes the surface rather than just the instruction. Same for the stack, and
-/// for follow-ups, whose flag is `Preferences::follow_ups_live()` — the Overlord AND its
-/// follow-ups toggle. `escalations_to_overlord` (`Preferences::escalations_to_overlord()`)
-/// only changes what `replyToOverlord` tells an agent about escalating — the tool itself is
-/// always there, since `ready`/`ack`/`status` don't depend on it. `browser_link` lists the
-/// browser tools (docs/browser-link.md §4).
-pub fn tool_list_response(
-    tasks_enabled: bool,
-    stack_enabled: bool,
-    follow_ups_live: bool,
-    escalations_to_overlord: bool,
-    browser_link: bool,
-) -> Value {
+/// Which optional tool groups `tools/list` carries, read from the preferences once per call.
+/// Named fields rather than positional bools: five of them in a row were one transposition away
+/// from listing the browser tools under the stack's switch.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ToolGates {
+    /// The task tools (docs/tasks.md §4). An agent that is never primed to use them shouldn't
+    /// be carrying their schemas in context either, so the preference removes the surface
+    /// rather than just the instruction. Same for the stack.
+    pub tasks: bool,
+    pub stack: bool,
+    /// `Preferences::follow_ups_live()`: the Overlord AND its follow-ups toggle.
+    pub follow_ups_live: bool,
+    /// `Preferences::escalations_to_overlord()`. Only changes what `replyToOverlord` tells an
+    /// agent about escalating; the tool itself is always there, since `ready`/`ack`/`status`
+    /// don't depend on it.
+    pub escalations_to_overlord: bool,
+    /// The browser tools (docs/browser-link.md §4).
+    pub browser_link: bool,
+}
+
+impl ToolGates {
+    pub fn from_prefs(prefs: &crate::state::workspace::Preferences) -> Self {
+        ToolGates {
+            tasks: prefs.tasks_enabled,
+            stack: prefs.stack_enabled,
+            follow_ups_live: prefs.follow_ups_live(),
+            escalations_to_overlord: prefs.escalations_to_overlord(),
+            browser_link: prefs.browser_link_enabled,
+        }
+    }
+}
+
+pub fn tool_list_response(gates: ToolGates) -> Value {
+    let ToolGates { tasks: tasks_enabled, stack: stack_enabled, follow_ups_live, escalations_to_overlord, browser_link } = gates;
     // Tools are built in batches to stay under the serde_json::json! macro recursion limit (128).
     // Each batch is a small Vec<Value> that gets extended into the final tools array.
 
