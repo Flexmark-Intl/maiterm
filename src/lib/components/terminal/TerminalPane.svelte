@@ -28,7 +28,8 @@
   import { getCompiledPatterns } from '$lib/utils/promptPattern';
   import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
-  import { isModKey, modSymbol } from '$lib/utils/platform';
+  import { isModKey, isWindows, modSymbol } from '$lib/utils/platform';
+  import { shellQuote, localShellKind } from '$lib/utils/shellQuote';
   import { buildShellIntegrationSnippet, buildInstallSnippet } from '$lib/utils/shellIntegration';
   import ResizableTextarea from '$lib/components/ResizableTextarea.svelte';
   import { processOutput, cleanupTab, loadTabVariables, interpolateVariables, getVariables, clearTabVariables, suppressTab, unsuppressTab, replayAutoResume } from '$lib/stores/triggers.svelte';
@@ -411,9 +412,9 @@
   // it resolves and misroute an SSH/agent drop into the local-paste branch.
   let dragInfoPromise: Promise<void> | null = null;
 
-  // Escape a file path for pasting into a terminal (backslash-escape shell metacharacters)
-  function escapePathForTerminal(p: string): string {
-    return p.replace(/([^a-zA-Z0-9_\-.,/:@+])/g, '\\$1');
+  // Quote a local path for this tab's own shell (POSIX, or on Windows PowerShell/cmd).
+  function quoteLocalPath(p: string): string {
+    return shellQuote(p, localShellKind(isWindows(), preferencesStore.windowsShell));
   }
 
   // Paste from clipboard using native Tauri APIs (bypasses WKWebView paste popup).
@@ -423,7 +424,7 @@
     // but we want the full path from NSPasteboard)
     const paths = await readClipboardFilePaths();
     if (paths.length > 0) {
-      const escaped = paths.map(escapePathForTerminal).join(' ');
+      const escaped = paths.map(quoteLocalPath).join(' ');
       const bytes = Array.from(new TextEncoder().encode(escaped));
       await writeTerminal(ptyId, bytes, true);
       return;
@@ -1371,7 +1372,7 @@
                   toastStore.addToast('SCP Upload', `${count} file${count > 1 ? 's' : ''} uploaded`, 'success');
                 } else {
                   // Non-Claude: clickable toast to list uploaded files (no echo to prompt)
-                  const lCmd = `l ${basenames.map(escapePathForTerminal).join(' ')}\n`;
+                  const lCmd = `l ${basenames.map(b => shellQuote(b, 'posix')).join(' ')}\n`;
                   toastStore.addToast(
                     'SCP Upload',
                     `${count} file${count > 1 ? 's' : ''} uploaded — click to list`,
@@ -1399,7 +1400,7 @@
               }
             } else {
               // Local session — paste escaped file paths
-              const escaped = paths.map(escapePathForTerminal).join(' ');
+              const escaped = paths.map(quoteLocalPath).join(' ');
               const bytes = Array.from(new TextEncoder().encode(escaped));
               await writeTerminal(ptyId, bytes, true);
             }
