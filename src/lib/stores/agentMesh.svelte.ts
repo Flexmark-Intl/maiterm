@@ -475,10 +475,15 @@ function createAgentMeshStore() {
     const spans = member.workspace
       ? ` This mesh spans several workspaces, so every agent is named "Workspace/Tab" (you are "${member.role}"). A bare tab name also works while no other workspace has a tab by that name.`
       : '';
-    // One channel per question. Agents put the same question to the human as a task blocker
-    // AND with AskUserQuestion, and the human was notified once per channel; with the task
-    // tools there, the blocker is the one (the session priming says the same, server.rs).
-    const reachHuman = preferencesStore.tasksEnabled
+    // One channel per question, the same one the session priming names (server.rs
+    // `session_priming_text`). Agents put the same question to the human as a task blocker AND
+    // with AskUserQuestion, and the human was notified once per channel. Where this window's
+    // Overlord answers escalations, a tab escalates and waits instead (docs/overlord.md §9.1.2);
+    // naming the blocker here too had it do both (review of fce826b0).
+    const overlordAnswers = preferencesStore.escalationsToOverlord && workspacesStore.workspaces.some((w) => w.overlord);
+    const reachHuman = overlordAnswers
+      ? `when you need a decision before you can go on, escalate it with replyToOverlord (kind 'escalate', needs_human) and wait: this window's Overlord answers it, typed into your tab, and asks your human itself only when it has to. Do NOT also ask your human the same question, and do NOT just print it to the terminal or write a "status" or "NEEDS DECISION" note. If you have nothing that needs deciding, stay silent.`
+      : preferencesStore.tasksEnabled
       ? `when you need a decision, or are blocked on something only the human can resolve, put your task in Blocked with a \`blocker\` (updateTasks, or createTasks for a new one) — that is the ONE way to ask them: it reaches their board, the tab and their phone, and their answer is typed back to you. Do NOT also ask the same thing with AskUserQuestion, and do NOT just print the question to the terminal or write a "status" or "NEEDS DECISION" note — those are noise the human won't act on. If you have nothing the human must decide, stay silent.`
       : `when you need a decision, or are blocked on something only the human can resolve, ASK with the AskUserQuestion tool — that is the ONE channel that reaches them (it also rings their phone via maiLink). Do NOT just print the question to the terminal, and do NOT write a "status" or "NEEDS DECISION" note — those are noise the human won't act on. If you have nothing the human must decide, stay silent.`;
     return (
