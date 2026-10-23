@@ -1383,10 +1383,17 @@ brief, role, acceptance criteria and folders, plus what's known about earlier at
 | Question | Type | Levels (each a concrete situation, as the Score docs advise) |
 |---|---|---|
 | `reasoning_depth` | Score | mechanical edit or rename · routine change that follows an existing pattern · new logic in one area that needs several files understood · a design across subsystems, concurrency, or state that must not be lost · open-ended research or architecture with no pattern to follow |
-| `ambiguity` | Score | fully specified with checkable criteria · mostly specified, small gaps a reasonable reading fills · the goal is clear but the approach is open · only a goal: the worker decides what to build |
-| `blast_radius` | Score | docs, tests or scratch only · one module, trivially reverted · shared code with many callers · persisted state, auth, money, secrets or migrations |
+| `ambiguity` | Score | the brief names the exact change and how to check it's done · the brief names the change; a few details are left to a reasonable reading · the brief names the problem or goal; the worker chooses the approach · the brief names only an area or aim; the worker decides what the problem even is |
+| `blast_radius` | Score | docs, tests or scratch only · one module, trivially reverted · shared code with many callers · persisted state, auth, money, secrets or migrations; startup or single-instance logic, where a mistake stops the app running; a security boundary (what runs where, who can reach whom) |
 | `context_breadth` | Score | one file · one module · several subsystems · most of the codebase |
 | `needs_taste` | Noul | Does doing this well depend on aesthetic or editorial judgment (visual direction, copy, tone, a final pick among renders)? |
+| `is_design` | Noul | Is the deliverable a design, plan or decision document that later work will build on, rather than code or a routine docs update? |
+
+The `ambiguity` wording above replaced a first draft ("fully specified with checkable
+criteria…"). The new wording asks what the brief leaves to the worker, and it halved Jev's
+low-confidence answers on that question (20 of 36 down to 9) in spike 12. The two extra
+`blast_radius` hazards at the top level are untested wording, added because spike 12's
+single-instance-lock and run-where-it-shouldn't fixes scored only 1.7–2.2.
 
 **The policy (code, in Hive settings, defaults shown):**
 
@@ -1402,11 +1409,24 @@ brief, role, acceptance criteria and folders, plus what's known about earlier at
    change. The defaults are the current Haiku 5.5, Sonnet 5.5 and Opus 5.5.
 3. Hard rules, applied after the sum, because "any serious risk" is a condition, not a weight (the
    docs' warning about compensating scores):
+   - `reasoning_depth` at 2.9 or above → **Max**. The weighted sum can't reach Max in practice:
+     the highest seen in spike 12 was 0.70. Every under-routed hard code task there (an SSH helper,
+     file operations with safety rules, an OAuth client, coalesced state saves) scored 2.90–3.02.
+   - `is_design` above 0.7 → **Max**. A design doc touches only docs, so `blast_radius` pulled design
+     work down a tier, while what it governs is everything built after it. In spike 12 the two
+     design docs scored 0.92 and 0.97, and nothing else scored above 0.45;
    - `blast_radius` at its top level → at least **Strong**;
    - `needs_taste` above 0.7 → at least **Strong**;
    - a reviewer runs at least the tier of the worker it reviews.
-4. **Uncertainty rounds up.** Any Score with confidence below 0.5 moves the tier up one. Jev
-   telling us it can't tell is a reason to spend more, not to guess cheap.
+4. **Uncertainty doesn't buy a bigger model.** A first draft moved the tier up one whenever any
+   Score's confidence was under 0.5. Spike 12 showed that rule caused most of the routing error:
+   it fired on 20 of 33 tasks, turned a right answer into an over-route 11 times, and fixed a wrong
+   one only 4 times. Dropping it alone raised agreement from 11 to 18 of 33. So:
+   - one low-confidence Score changes nothing;
+   - three or more low-confidence Scores mean Jev can't tell what the task is (it happened on a
+     release note). The worker gets the Hive's default tier, marked "routed by default", and the
+     coordinator may choose instead. Guessing up from "I can't tell" picked the most expensive
+     tier for a version bump.
 5. **The cascade.** A worker that fails review, or reports `blocked` because the task is beyond
    it, comes back on its next attempt one tier up (the docs' cascade pattern). Three attempts
    (§7.7) can therefore run Standard → Strong → Max.
@@ -2106,9 +2126,22 @@ Each is an hour or less, and each can change the design:
 11. **Launching on a tier**: a hidden worker tab starts Claude on a chosen model and effort
     (`--model`, and effort through `--settings` or the first `/effort`), and the transcript
     confirms both (§7.9).
-12. **Router on real tasks**: run the five questions over ~30 finished tasks from this repo's own
-    task board, whose outcomes are known, and check that the tiers the policy picks look right
-    to the human before any Hive relies on them (§7.9).
+12. **Router on real tasks** (§7.9). **First run done 2026-10-23**: results at
+    `/private/tmp/claude-503/hive-spikes/router/results.md`.
+    - **What it used:** 33 of this repo's public commits, each treated as a brief, sent to
+      `jev-latest` (`jev-1.14.0`).
+    - **First draft:** 11 of 33 tiers matched a human label. The low-confidence bump caused most of
+      the misses.
+    - **With the changes now in §7.9:** 22 of 33, with none off by two tiers. Those changes are the
+      reworded `ambiguity`, no bump, `reasoning_depth` ≥ 2.9 → Max, and `is_design`.
+    - **Latency and cost:** p50 157 ms, p95 199 ms; about 800 input tokens a call.
+    - **Caveats:** a commit message is written after the work and usually states the fix, so it
+      reads easier and better specified than a real brief. The tuned rules were also fitted to the
+      same 33 labels.
+    - **Still to do:** a second run on briefs written before the work, with known outcomes (the task
+      board), confirms or corrects the rules out of sample. That needs the human's say-so for
+      sending task-board text off the machine: the first attempt to use it was stopped by the
+      auto-mode safety check.
 13. **The coordinator, restricted** (§7.1): launched with its sandbox profile and tool set, it
     can still plan, spawn, read a worker's diff, review and land, and cannot run general Bash,
     WebFetch, or write outside its home and memory folder.
