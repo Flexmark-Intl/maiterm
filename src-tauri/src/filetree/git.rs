@@ -513,6 +513,7 @@ impl GitCore {
     fn cmd(&self) -> std::process::Command {
         let mut c = proc::git_at(&self.program);
         c.arg("--no-optional-locks").arg("-C").arg(&self.root);
+        untranslated(&mut c);
         c
     }
 
@@ -769,6 +770,15 @@ impl GitCore {
         }
         Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
     }
+}
+
+/// git's messages in English: `diff_base` tells "not at that base" from a real failure, and
+/// `failure_from_stderr` spots `safe.directory`, by reading stderr. A Linux git with
+/// translations under a German desktop would otherwise answer in German, and a new file's
+/// Compare with HEAD would fail instead of diffing against nothing. LC_ALL, because it beats
+/// a LC_MESSAGES or LANGUAGE the user set; the -z output this module parses is bytes either way.
+fn untranslated(c: &mut std::process::Command) {
+    c.env("LC_ALL", "C");
 }
 
 /// `added\tdeleted\tpath\0` for one file; a binary file's `-\t-` counts nothing.
@@ -1069,6 +1079,12 @@ mod tests {
         assert_eq!(parse_numstat(b"12\t3\tsrc/a.ts\0"), Some((12, 3)));
         assert_eq!(parse_numstat(b"-\t-\timg.png\0"), None);
         assert_eq!(parse_numstat(b""), None);
+    }
+
+    #[test]
+    fn git_answers_in_english_whatever_the_desktop_language() {
+        let c = core(Path::new("/r"), Path::new("/r")).cmd();
+        assert!(c.get_envs().any(|(k, v)| k == "LC_ALL" && v == Some(std::ffi::OsStr::new("C"))));
     }
 
     #[test]
