@@ -246,9 +246,12 @@ function createFileTreeStore() {
 
   async function resolveNow(fresh: boolean, force = false) {
     if (!attached || !preferencesStore.fileTreeEnabled) return;
-    const token = ++resolveSeq;
+    // Every outcome that acts takes a token, so an older resolve still in flight yields to
+    // it. The follow-off no-op does not: it would supersede a forced resolve (Reveal in
+    // Files) and then do nothing, leaving the tree on the previous tab's folder.
     const ws = workspacesStore.activeWorkspace;
     if (!ws) {
+      ++resolveSeq;
       status = 'none';
       statusText = null;
       return;
@@ -258,12 +261,14 @@ function createFileTreeStore() {
     if (!tabId) {
       // An editor, diff or board tab: reveal its file, never re-root (§4.2).
       if (place && sameWorkspace && !force) {
+        ++resolveSeq;
         void revealActiveEditor();
         return;
       }
       tabId = fallbackTab();
     }
     if (!tabId) {
+      ++resolveSeq;
       if (!place || !sameWorkspace) {
         status = 'none';
         statusText = 'Open a terminal tab, or pick a folder.';
@@ -273,6 +278,7 @@ function createFileTreeStore() {
     // Follow off: the root stays where it is until the human moves it, unless there is none
     // yet or the workspace changed (a pin is per workspace).
     if (!force && !preferencesStore.fileTreeFollow && place && sameWorkspace) return;
+    const token = ++resolveSeq;
 
     const osc = terminalsStore.getOsc(tabId);
     if (!place) status = 'resolving';
