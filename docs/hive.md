@@ -2262,9 +2262,106 @@ interactive run through `expect`.
   installed maiTerm received hook events, including permission requests, from about 35 scratch
   sessions. Later spikes run with `disableAllHooks` unless hooks are what they test.
 
+**Spikes 9, 10 and 13** were run on Claude Code 2.1.309 with `claude -p --setting-sources project
+--strict-mcp-config`. Logs and settings are in `/private/tmp/claude-503/hive-spikes/enforce/logs/`.
+
+- **9, the PreToolUse deny: partial.**
+  - **Fail-closed works.** With `onFailure:"block"`, a closed port, a timeout and an HTTP 500 all
+    blocked the call. Without it, the call ran.
+  - **A cooperative model stops**, and the obvious wrappers are caught: `sh -c`, `bash -lc`,
+    `env X=…`, aliases, full paths. Sonnet refused to route around the deny and named the bypasses
+    instead.
+  - **It isn't a wall.** These ran anyway:
+    - a split string, `c=car; ${c}go test`;
+    - `base64 -d | sh`;
+    - `cargo t`;
+    - a script written with the Write tool and then run, where the hook sees only `./t.sh`;
+    - `git send-pack`.
+
+    `permissions.deny` on `git push` let `sh -c 'git push'`, `git -C . push` and
+    `git -c x=y push` all reach a local bare remote.
+  - **The sandbox breaks localhost http hooks.** With the sandbox on, every `type:"http"` hook to
+    127.0.0.1 fails, so `onFailure:block` blocks every Bash call, and PostToolUse/Stop events never
+    arrive. maiTerm's own global hooks are `type:"http"` (`lockfile.rs`), so in a sandboxed tab they
+    would fail silently.
+  - **What works is a `type:"command"` hook.** Hooks run outside the sandbox. A maiTerm-owned script
+    that forwards to maiTerm and exits 2 on any failure works with the sandbox on, with no
+    allowlist entry, and fails closed.
+
+    The alternative is to allowlist exactly `127.0.0.1:<port>`. Bash can then reach that one port
+    through the proxy, so it needs auth, and it must never be the MCP or maiLink port. Bare
+    `127.0.0.1` opens every port.
+- **10, the sandbox: partial.**
+  - **The key names in §6.7 and §14.16 are right.** `strictAllowlist` is honoured from `--settings`.
+  - **The host allowlist works.** A host off the list gets a 403 and a `<sandbox_violations>`
+    note, with no retry and no prompt. Without `strictAllowlist`, auto mode widened
+    `allowed_domains` per call and got through.
+  - **WebFetch escapes it.** In auto mode WebFetch fetched an unlisted host despite an allow rule
+    for one domain. `deny:["WebFetch(domain:*)"]` also kills the sandbox's network. So: remove
+    WebFetch from workers that don't need it, or put a PreToolUse hook on it.
+  - **The blocked-host detector must be a `PostToolUseFailure` command hook.** PostToolUse doesn't
+    fire for the failure, and http hooks don't arrive.
+  - **Repo internals:**
+    - The **primary** repo's `.git/hooks`, `config` and `.claude/settings.json` are protected by
+      Claude.
+    - A **secondary** (`--add-dir`) repo's are NOT. Bash wrote its hook and config, and the Write
+      tool overwrote its `.git/config`. An explicit `denyWrite` on `<repo>/.git/{hooks,config,info}`
+      blocks this, and commits there still work.
+  - **The Write tool ignores the sandbox.** In auto mode it wrote `.claude/settings.json` and
+    another repo's `.git/config` with no prompt. A `Write(//abs/**)` deny rule blocked it. So the
+    Write/Edit deny rules for `.claude/**`, `.mcp.json` and every repo's `.git/{config,hooks/**,
+    info/**}` are mandatory.
+  - **`/tmp/claude-<uid>/` is shared and writable by every sandboxed session.** Sandboxed Bash gets
+    `TMPDIR` there, which makes it a cross-worker channel. Worktrees and scratch must never live
+    under it, and a worker's temp must be its own folder. This also meant the outside-cwd and
+    secondary-objects checks couldn't be tested cleanly. **They need a re-run with a scratch root
+    outside `/tmp/claude-<uid>`.**
+  - **Other results:**
+    - Localhost is closed by default, and `allowLocalBinding:true` opens every port.
+    - ffmpeg works inside the working dir.
+    - Commits in the primary and secondary worktrees work in auto mode.
+    - `failIfUnavailable` couldn't be proven: the availability check couldn't be made to fail on
+      macOS.
+- **13, the restricted coordinator: fails as §7.1 specifies it, passes with the corrected
+  settings.**
+  - **`--tools` takes tool names only.** `Bash(git diff:*)` there silently dropped Bash.
+  - **`autoAllowBashIfSandboxed` defaults to true.** Any sandboxed Bash command then ran regardless
+    of the git allow rules, and auto mode let Write go anywhere.
+  - **What worked:**
+    - `--tools "Read,Grep,Glob,Bash,Write,Edit" --permission-mode dontAsk --add-dir <home>`;
+    - sandbox `{autoAllowBashIfSandboxed:false, allowWrite:[<home>], denyWrite:[<repos>],
+      network:{allowedDomains:[], strictAllowlist:true}}`;
+    - `permissions.allow` for `Bash(git diff *)`, `Bash(git log *)`, `Bash(git show *)` and
+      home Write/Edit;
+    - `deny` for WebFetch and WebSearch.
+
+    `dontAsk` is what makes the allow list the whole list.
+  - **Still to add:** `mcp__maiterm__*` allow entries (dontAsk denies unlisted tools), and either
+    a cwd in the repo or `Bash(git -C * diff *)`-style rules for reviews. AskUserQuestion is always
+    denied in dontAsk, which fits the blocker-only rule.
+
+**What these spikes change in the spec**, listed here and still to be applied to the sections
+themselves:
+- **§6.8 "It's enforced":** the deny is a `type:"command"` hook, outside every writable path and
+  on `denyWrite`, that exits 2 on failure. It's a speed bump plus an audit log, NOT a guarantee:
+  drop "doesn't route around it". The real limits are the sandbox and the resources.
+- **§11.1:** every hook in a sandboxed Hive tab is command-type, including maiTerm's state,
+  permission-ledger and PreModelSwitch hooks. Otherwise they fail silently.
+- **§7.3 push:** no deny rule stops a push. What stops it is that no remote is reachable: network
+  remotes are off the allowlist, and a local-path remote is under `denyWrite`.
+- **§6.7:**
+  - Write/Edit deny rules are mandatory.
+  - Secondary repos get an explicit `denyWrite`.
+  - WebFetch is removed or hooked.
+  - The blocked-host detector is a `PostToolUseFailure` command hook.
+  - `/tmp/claude-<uid>` is shared: worktrees and scratch never live there.
+  - Localhost is opened by port, never by host.
+- **§7.1:** the coordinator's launch settings are the working set above. Note that `--tools`
+  doesn't take patterns.
+
 **Not yet run:**
-- 9, 10 and 13 (enforcement) were still running when this was written.
-- 4, 7 and 8 (measurements), then 2 (the live trust write), run after them, each alone.
+- **4, 7 and 8 (measurements)**, then **2 (the live trust write)**, each alone.
+- **The spike 10 re-run** outside `/tmp/claude-<uid>`.
 
 ## 14. Decisions
 
