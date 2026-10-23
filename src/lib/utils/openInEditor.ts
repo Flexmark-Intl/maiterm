@@ -11,7 +11,7 @@ import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { editorFileIdentities, getPtyInfo, sshArgsOf } from '$lib/tauri/commands';
 import { detectLanguageFromPath } from './languageDetect';
 import { findOpenEditor, localEditorPaths, revealsWorkspace } from './editorDedupe';
-import { basenameOf } from './pathForm';
+import { editorTitleAfter, editorTitleFor } from './editorTitle';
 import { isWindows } from './platform';
 
 export interface OpenInEditorArgs {
@@ -114,15 +114,16 @@ export async function openInEditor(args: OpenInEditorArgs): Promise<OpenInEditor
     }
     return { tabId: hit.tabId, existing: true };
   }
-  const name = args.remote ? abs.split('/').pop() || abs : basenameOf(abs, isWindows());
   const replace = args.replaceTabId ? workspacesStore._locateTab(args.replaceTabId) : null;
   if (replace && replace.tab.tab_type === 'editor') {
-    await workspacesStore.updateEditorTabFile(replace.tab.id, name, fileInfo);
+    const title = editorTitleAfter(replace.tab.name, replace.tab.editor_file, fileInfo, isWindows());
+    await workspacesStore.updateEditorTabFile(replace.tab.id, title, fileInfo);
     window.dispatchEvent(new CustomEvent('editor-replace-file', { detail: { tabId: replace.tab.id } }));
     await workspacesStore.setActiveTab(replace.workspaceId, replace.paneId, replace.tab.id);
     return { tabId: replace.tab.id, existing: false, replaced: true };
   }
   // EditorPane shows its own loading state and errors, so the tab is created at once.
+  const name = editorTitleFor(abs, !!args.remote, isWindows());
   const tab = await workspacesStore.createEditorTab(args.workspaceId, args.paneId, name, fileInfo, args.afterTabId);
   return { tabId: tab.id, existing: false };
 }

@@ -49,6 +49,7 @@ import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { getEditorByTabId, isEditorDirty } from '$lib/stores/editorRegistry.svelte';
 import { openInEditor, editorFileInfo } from '$lib/utils/openInEditor';
+import { editorTitleAfter } from '$lib/utils/editorTitle';
 import { insertPathsIntoTab } from '$lib/utils/insertPaths';
 
 /** What the column shows when it isn't a tree. */
@@ -1291,7 +1292,8 @@ function createFileTreeStore() {
         const f = loc?.tab.editor_file;
         if (!loc || loc.tab.tab_type !== 'editor' || !f || f.is_remote) continue;
         const info = { ...f, file_path: abs, language: editorFileInfo(abs).language ?? f.language };
-        const name = loc.tab.custom_name ? loc.tab.name : lastSegment(abs);
+        // A title that is still the file's name follows it; one the human typed stays.
+        const name = editorTitleAfter(loc.tab.name, f, info, isWindows());
         try {
           await workspacesStore.updateEditorTabFile(tabId, name, info);
           window.dispatchEvent(new CustomEvent('editor-retarget-file', { detail: { tabId } }));

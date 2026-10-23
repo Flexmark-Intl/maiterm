@@ -24,6 +24,8 @@ import { navHistoryStore } from '$lib/stores/navHistory.svelte';
 import { getEditorRegistrySizes } from '$lib/stores/editorRegistry.svelte';
 import { getListenerStats } from '$lib/utils/listenCounter';
 import { editorFileInfo, localFileIdentities, openInEditor, sshCommandOfTab } from '$lib/utils/openInEditor';
+import { editorTitleAfter } from '$lib/utils/editorTitle';
+import { isWindows } from '$lib/utils/platform';
 import { openReadOnlyDiff } from '$lib/utils/openGitDiff';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
@@ -630,7 +632,6 @@ function createClaudeCodeStore() {
     endText?: string;
   }) {
     const { filePath, tabId, targetTabId, startLine, endLine, startText, endText } = args;
-    const fileName = filePath.split('/').pop() ?? filePath;
 
     // The session's terminal tab says which machine the path is on.
     const sshCommand = tabId ? await sshCommandOfTab(tabId) : null;
@@ -644,7 +645,9 @@ function createClaudeCodeStore() {
         for (const pane of ws.panes) {
           const tab = pane.tabs.find(t => t.id === targetTabId && t.tab_type === 'editor');
           if (tab) {
-            await workspacesStore.updateEditorTabFile(targetTabId, fileName, fileInfo);
+            // Same rule as a Files rename: a title the human typed stays on the tab.
+            const title = editorTitleAfter(tab.name, tab.editor_file, fileInfo, isWindows());
+            await workspacesStore.updateEditorTabFile(targetTabId, title, fileInfo);
             window.dispatchEvent(new CustomEvent('editor-replace-file', { detail: { tabId: targetTabId } }));
             await workspacesStore.setActiveTab(ws.id, pane.id, targetTabId);
             found = true;
