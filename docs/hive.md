@@ -2308,10 +2308,13 @@ Each is an hour or less, and each can change the design:
     - **Caveats:** a commit message is written after the work and usually states the fix, so it
       reads easier and better specified than a real brief. The tuned rules were also fitted to the
       same 33 labels.
-    - **Still to do:** a second run on briefs written before the work, with known outcomes (the task
-      board), confirms or corrects the rules out of sample. That needs the human's say-so for
-      sending task-board text off the machine: the first attempt to use it was stopped by the
-      auto-mode safety check.
+    - **No second offline run (decided 2026-10-23).** A re-run on task-board briefs would only
+      have measured agreement with one person's tier labels, and it meant sending board text,
+      including unfixed security findings, to TypeSafe before routing is even on. The
+      out-of-sample check is the routing log instead (§7.9 "It learns from outcomes"): every
+      routed spawn records the router's answers next to the real outcome (first-attempt pass,
+      attempts, tokens, time). Before trusting the default weights, read that report after the
+      first few dozen routed workers.
 13. **The coordinator, restricted** (§7.1): launched with its sandbox profile and tool set, it
     can still plan, spawn, read a worker's diff, review and land, and cannot run general Bash,
     WebFetch, or write outside its home and memory folder.
