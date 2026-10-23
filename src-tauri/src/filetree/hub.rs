@@ -26,6 +26,11 @@
 //! subscription holding the previous generation, and as everything (`full`) to any other — a
 //! new one, or one that was paused or stalled through a change.
 //!
+//! **Remote roots (§15).** A hub whose root is on an ssh host holds a `RemoteRoot`: listings,
+//! stat, git and the find index go through the host's helper, its watch events arrive as
+//! `remote_changed`, and nothing local (watcher, coalescer, ignore files) is read. Snapshots are
+//! never served without asking the host (one round trip, answered NotModified when unchanged).
+//!
 //! Lock order, always: jobs → dirs → subs → git data → watch. The git data lock is never held
 //! while taking subs. No lock is held across another hub's.
 
@@ -41,6 +46,7 @@ use super::git::{Failure, GitConfig, GitCore, Status, Trigger};
 use super::ignore_cache::IgnoreStack;
 use super::list::{self, ListError, Listing, CHUNK};
 use super::paths::{self, join_rel, name_key, rel_to_native, split_rel};
+use super::remote::RemoteRoot;
 use super::search::SearchState;
 use super::types::{AgentMark, Caps, DirReq, Entry, Envelope, GitUpdate, OpenAck, RepoInfo, SearchResult, StatInfo, TreeEvent};
 use super::watch::{self, HubWatch, RawSender, WatchContext, WatchError};
@@ -347,6 +353,8 @@ pub struct HubInit {
     pub git_slots: Arc<Slots>,
     /// The agent ledger: shell writes are attributed to it and its marks primed from it (§9).
     pub agents: Arc<AgentFiles>,
+    /// The root is on an ssh host (§15); `root` is then its real POSIX path there.
+    pub remote: Option<Arc<RemoteRoot>>,
 }
 
 pub struct RootHub {
@@ -359,6 +367,8 @@ pub struct RootHub {
     pub fs_class: &'static str,
     pub repo: Option<RepoInfo>,
     pub(super) agents: Arc<AgentFiles>,
+    /// A root on an ssh host: everything that reads or watches the disk goes through it.
+    pub(crate) remote: Option<Arc<RemoteRoot>>,
     git_dir: Option<PathBuf>,
     /// The repository's git dir and (when different) common dir: events under them are git
     /// signals, wherever they are.
@@ -425,9 +435,17 @@ pub(super) fn repo_info(root: &Path) -> Option<(RepoInfo, PathBuf)> {
 impl RootHub {
     pub fn new(init: HubInit, slots: Arc<Slots>, focus: Arc<Focus>, ctx: Arc<WatchContext>) -> Arc<RootHub> {
         let network = init.fs_class == fsclass::NETWORK;
-        let repo = repo_info(&init.root);
+        let remote = init.remote.clone();
+        // A remote root's repository is the helper's answer; nothing local is read for it.
+        let repo = match &remote {
+            Some(r) => r.repo.clone().map(|ri| {
+                let g = PathBuf::from(&ri.git_dir);
+                (ri, g)
+            }),
+            None => repo_info(&init.root),
+        };
         let git_dir = repo.as_ref().map(|(_, g)| g.clone());
-        let ignore = IgnoreStack::new(&init.root, git_dir.as_deref(), &init.user_excludes);
+        let ignore = if remote.is_some() { IgnoreStack::inert(&init.root) } else { IgnoreStack::new(&init.root, git_dir.as_deref(), &init.user_excludes) };
         let (raw, rx, overflow) = watch::channel(init.raw_capacity);
         let (root, shallow) = (init.root.clone(), init.shallow);
         // The top level, from the `..` steps: a root inside a larger repo strips its prefix
@@ -446,19 +464,22 @@ impl RootHub {
         }
         // A home or volume root decorates only when it is itself a repository (§6.5).
         let git_on = repo.as_ref().is_some_and(|(r, _)| !shallow || r.toplevel_rel.is_empty());
-        let fold = crate::relocate::case_insensitive(&init.root);
+        // An ssh host's volume is assumed case-sensitive (Linux); probing it from here would
+        // probe this computer's disk at the same path.
+        let fold = remote.is_none() && crate::relocate::case_insensitive(&init.root);
         let hub = Arc::new_cyclic(|me: &Weak<RootHub>| RootHub {
             me: me.clone(),
             place: init.place,
             fold,
             git: match (&top, git_on) {
-                (Some(top), true) => Some(GitCore::new(me.clone(), &init.git, &init.root, top, network, init.git_slots.clone())),
+                (Some(top), true) => Some(GitCore::new_with(me.clone(), &init.git, &init.root, top, network, init.git_slots.clone(), remote.clone())),
                 _ => None,
             },
-            search: SearchState::new(me.clone(), &init.root, repo.is_some(), shallow, fold),
+            search: SearchState::new_with(me.clone(), &init.root, repo.is_some(), shallow, fold, remote.clone()),
             root: init.root,
             fs_class: init.fs_class,
             agents: init.agents,
+            remote: remote.clone(),
             repo: repo.map(|(r, _)| r),
             git_dir,
             git_dirs,
@@ -471,7 +492,7 @@ impl RootHub {
             focus,
             watch: Mutex::new(WatchState {
                 hw: HubWatch::None,
-                pending: !network,
+                pending: !network && remote.is_none(),
                 order: VecDeque::new(),
                 polled: BTreeSet::new(),
                 poll_mtimes: HashMap::new(),
@@ -485,6 +506,12 @@ impl RootHub {
             wakeups: Arc::new(AtomicU64::new(0)),
             grace_token: AtomicU64::new(0),
         });
+        if let Some(r) = &remote {
+            // The host's helper watches; there is nothing here for a coalescer to drain.
+            drop(rx);
+            r.attach(Arc::downgrade(&hub));
+            return hub;
+        }
         super::coalesce::spawn(Arc::downgrade(&hub), rx, hub.wakeups.clone());
         if !network {
             // The watcher starts off the open path: FSEvents' stream start blocks for seconds
@@ -563,6 +590,10 @@ impl RootHub {
 
     /// `path` (absolute) is inside the repository this hub decorates, or inside its root.
     pub fn covers(&self, path: &Path) -> bool {
+        // A path here is never inside a folder on an ssh host, whatever its spelling.
+        if self.remote.is_some() {
+            return false;
+        }
         if paths::strip_root(path, &self.root, self.fold).is_some() {
             return true;
         }
@@ -626,6 +657,19 @@ impl RootHub {
     }
 
     pub fn open_ack(&self, sub_id: u64) -> OpenAck {
+        if let Some(r) = &self.remote {
+            let writable = r.writable();
+            return OpenAck {
+                sub_id,
+                root_native: r.root.clone(),
+                sep: "/".into(),
+                case_insensitive: false,
+                nfc_names: false,
+                repo: self.repo.clone(),
+                caps: Caps { watch: self.watch_kind(), git: self.git.as_ref().is_some_and(|g| g.enabled()), trash: writable, remote: true, writable },
+                remote_hostname: r.conn.hello().map(|h| h.hostname).filter(|h| !h.is_empty()),
+            };
+        }
         OpenAck {
             sub_id,
             root_native: self.root.to_string_lossy().into_owned(),
@@ -634,6 +678,7 @@ impl RootHub {
             nfc_names: super::paths::NORMALIZATION_INSENSITIVE,
             repo: self.repo.clone(),
             caps: Caps { watch: self.watch_kind(), git: self.git.as_ref().is_some_and(|g| g.enabled()), trash: true, remote: false, writable: true },
+            remote_hostname: None,
         }
     }
 
@@ -725,7 +770,11 @@ impl RootHub {
                 vec![r]
             }
             None => {
-                // Refresh everything: the decorations too.
+                // Refresh everything: the decorations too, and a host's helper that gave up
+                // (no key, no python3) tries again.
+                if let Some(r) = &self.remote {
+                    r.conn.retry();
+                }
                 self.git_signal(Trigger::Manual);
                 self.subs.lock().get(&sub).map(|s| s.interest.iter().cloned().collect()).unwrap_or_default()
             }
@@ -848,8 +897,29 @@ impl RootHub {
     }
 
     pub fn set_user_excludes(&self, excludes: &[String]) {
-        self.ignore.lock().invalidate_all(self.git_dir(), Some(excludes));
+        match &self.remote {
+            Some(r) => r.set_excludes(excludes),
+            None => self.ignore.lock().invalidate_all(self.git_dir(), Some(excludes)),
+        }
         self.revalidate_under("");
+    }
+
+    /// The host's helper saw these open folders change: list each again (or have its running
+    /// listing run again), which sends the difference as a Delta.
+    pub(crate) fn remote_changed(&self, rels: &[String]) {
+        for rel in rels {
+            if self.note_inflight_change(rel) {
+                continue;
+            }
+            if self.dirs.lock().contains_key(rel.as_str()) {
+                self.request(rel, None);
+            }
+        }
+    }
+
+    /// Every folder some subscriber has open.
+    pub(crate) fn open_dirs(&self) -> BTreeSet<String> {
+        self.subs.lock().values().flat_map(|s| s.interest.iter().cloned()).collect()
     }
 
     // ── Listing jobs ─────────────────────────────────────────────────────────────────────
@@ -1109,6 +1179,9 @@ impl RootHub {
 
     /// "live" | "partial" | "poll" | "none".
     fn watch_kind(&self) -> String {
+        if let Some(r) = &self.remote {
+            return r.health().0.to_string();
+        }
         let ws = self.watch.lock();
         let kind = match &ws.hw {
             _ if self.is_network() => "poll",
@@ -1123,7 +1196,9 @@ impl RootHub {
 
     pub fn health_event(&self) -> TreeEvent {
         let watch = self.watch_kind();
-        let note = {
+        let note = if let Some(r) = &self.remote {
+            r.health().1
+        } else {
             let ws = self.watch.lock();
             if self.is_network() {
                 Some("network mount: not watched".to_string())
@@ -1142,7 +1217,7 @@ impl RootHub {
         TreeEvent::Health { watch, git: git.into(), note }
     }
 
-    fn broadcast_health(&self) {
+    pub(crate) fn broadcast_health(&self) {
         let ev = self.health_event();
         let mut subs = self.subs.lock();
         for s in subs.values_mut() {
@@ -1153,7 +1228,9 @@ impl RootHub {
     /// Can a snapshot of `rel` be served without reading the disk? Only when a watcher has been
     /// covering it: never on a network mount, never for a polled folder.
     fn snapshot_trusted(&self, rel: &str) -> bool {
-        if self.is_network() {
+        // A remote folder is always asked again: one round trip, NotModified when unchanged,
+        // and never a listing a dropped connection let go stale.
+        if self.is_network() || self.remote.is_some() {
             return false;
         }
         let ws = self.watch.lock();
@@ -1165,6 +1242,10 @@ impl RootHub {
     }
 
     fn watch_dir(&self, rel: &str) {
+        if let Some(r) = &self.remote {
+            r.watch(rel);
+            return;
+        }
         let Ok(abs) = rel_to_native(&self.root, rel) else { return };
         // The mtime the poller compares against, should this folder end up polled. Read before
         // the listing starts and outside the lock (a network stat can be slow), so a change
@@ -1232,6 +1313,10 @@ impl RootHub {
     }
 
     fn unwatch_dir(&self, rel: &str) {
+        if let Some(r) = &self.remote {
+            r.unwatch(rel);
+            return;
+        }
         let health_changed = {
             let mut ws = self.watch.lock();
             ws.poll_mtimes.remove(rel);
@@ -1310,6 +1395,10 @@ impl RootHub {
     }
 
     fn locate_one(&self, abs: &str) -> Option<String> {
+        if let Some(r) = &self.remote {
+            // A remote editor's path is the host's own; names are as the host spells them.
+            return r.locate(abs);
+        }
         let comps = paths::locate_components(&self.root, self.fold, abs)?;
         let mut rel = String::new();
         for c in comps {
@@ -1349,6 +1438,14 @@ impl RootHub {
 
     /// `ft_stat`: what the hover tooltip shows.
     pub fn stat(&self, rel: &str) -> Result<StatInfo, String> {
+        if let Some(r) = &self.remote {
+            split_rel(rel)?;
+            let (mut info, is_file, stamp) = r.stat(rel)?;
+            if is_file {
+                info.numstat = self.git.as_ref().and_then(|g| g.numstat(rel, stamp));
+            }
+            return Ok(info);
+        }
         let abs = rel_to_native(&self.root, rel)?;
         let lm = std::fs::symlink_metadata(&abs).map_err(|e| e.to_string())?;
         let is_link = lm.file_type().is_symlink();
@@ -1479,6 +1576,12 @@ impl RootHub {
     /// below a folder nobody has open: marks arrive on every Read, and `ft_locate`'s look at
     /// the disk for each name would cost a folder listing per mark there.
     pub(crate) fn locate_agent_path(&self, abs: &str) -> Option<String> {
+        if let Some(r) = &self.remote {
+            // An ssh tab's ledger path is `host:/abs`, keyed by the same connect args as the
+            // place (§15.3): only that host's paths are under this root.
+            let path = abs.strip_prefix(r.host.as_str())?.strip_prefix(':')?;
+            return r.locate(path);
+        }
         if !Path::new(abs).is_absolute() {
             return None;
         }
@@ -1514,13 +1617,17 @@ impl RootHub {
         if !self.agents.routing() {
             return Vec::new();
         }
-        self.agents.standing_marks(None).into_iter().filter_map(|m| self.locate_agent_path(&m.path).map(|rel| m.with_rel(rel))).collect()
+        let host = self.remote.as_ref().map(|r| r.host.as_str());
+        self.agents.standing_marks_on(None, host).into_iter().filter_map(|m| self.locate_agent_path(&m.path).map(|rel| m.with_rel(rel))).collect()
     }
 
     /// How much of a shell call's writes this tree can see (§9.2): "full" with one recursive
     /// watcher, "expanded_only" when only opened folders are watched (Linux, a home or volume
     /// root), "none" with no watcher (a network mount).
     pub fn coverage(&self) -> &'static str {
+        if let Some(r) = &self.remote {
+            return r.coverage();
+        }
         if self.is_network() {
             return "none";
         }
@@ -1671,11 +1778,15 @@ fn worker(me: Weak<RootHub>) {
             });
         }
         let mut early = None;
-        let result = {
-            let _slot = hub.slots.acquire();
-            list::list_dir_with(&hub.root, &rel, &hub.ignore, &mut |head, total, truncated| {
-                early = hub.early_head(&rel, head, total, truncated);
-            })
+        let result = match &hub.remote {
+            // A round trip, not local IO: no global IO slot held while it waits.
+            Some(r) => r.list(&rel),
+            None => {
+                let _slot = hub.slots.acquire();
+                list::list_dir_with(&hub.root, &rel, &hub.ignore, &mut |head, total, truncated| {
+                    early = hub.early_head(&rel, head, total, truncated);
+                })
+            }
         };
         hub.complete(&rel, result, early);
     }

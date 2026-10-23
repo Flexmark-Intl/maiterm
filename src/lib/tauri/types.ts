@@ -1115,6 +1115,10 @@ export interface OpenAck {
   nfc_names: boolean;
   repo: RepoInfo | null;
   caps: Caps;
+  /** A remote root: the host's own name as its Files helper reported it, for the wrong-host
+   *  warning when the tab's OSC 7 names another machine. null locally and until the helper
+   *  has said. On a remote root `root_native` is the POSIX path there and `sep` is '/'. */
+  remote_hostname: string | null;
 }
 
 /** Hover-only details (`ftStat`). */

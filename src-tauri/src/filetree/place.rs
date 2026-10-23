@@ -6,8 +6,11 @@
 //!
 //! Local tab: live shell cwd → OSC 7 → the agent's cwd → `last_cwd` → `auto_resume_cwd` →
 //! `restore_cwd`. ssh tab: the agent's cwd → OSC 7 (unless it is just the local shell's
-//! folder) → `auto_resume_remote_cwd` → `restore_remote_cwd`; `last_cwd` is never used there
-//! (it can be either side).
+//! folder) → the prompt's folder (absolute or `~/` only) → `auto_resume_remote_cwd` →
+//! `restore_remote_cwd`; `last_cwd` is never used there (it can be either side). An ssh tab's
+//! candidates are checked on the host by its Files helper (§15): the first that is a folder
+//! there wins, and its root is the repository top level the helper finds. When the host can't
+//! be asked in time, the first candidate other than the prompt's wins and is its own root.
 //!
 //! A saved folder that no longer exists comes back as `missing`, never as home: a tree that
 //! quietly showed `$HOME` would invite the human to work in the wrong place (docs/relocate.md
@@ -90,6 +93,29 @@ fn host_of_command(cmd: &str) -> Option<String> {
     (!h.is_empty()).then_some(h)
 }
 
+/// An ssh tab's candidate folders in order, deduplicated: the agent's, OSC 7 (unless it is
+/// the local shell's), the prompt's (absolute or `~/` only), then the saved ones.
+pub fn ssh_chain(i: &PlaceInputs, hints: &PlaceHints) -> Vec<(String, &'static str)> {
+    let osc = non_empty(&hints.osc_cwd).filter(|o| Some(*o) != i.live_cwd.as_deref() && is_remote_abs(o));
+    let prompt = non_empty(&hints.prompt_cwd).filter(|p| p.starts_with('/') || *p == "~" || p.starts_with("~/"));
+    let chain: [(Option<&str>, &'static str); 5] = [
+        (single_agent_cwd(i).filter(|c| is_remote_abs(c)), "agent"),
+        (osc, "osc7"),
+        (prompt, "prompt"),
+        (non_empty(&i.auto_resume_remote_cwd), "auto_resume"),
+        (non_empty(&i.restore_remote_cwd), "restore"),
+    ];
+    let mut out: Vec<(String, &'static str)> = Vec::new();
+    for (c, src) in chain {
+        if let Some(c) = c {
+            if !out.iter().any(|(o, _)| o == c) {
+                out.push((c.to_string(), src));
+            }
+        }
+    }
+    out
+}
+
 /// Decide. `exists` answers "is this a folder on this computer" (injected for tests).
 pub fn pick(i: &PlaceInputs, hints: &PlaceHints, local_host: &str, exists: &dyn Fn(&Path) -> bool) -> Result<Pick, String> {
     if i.is_service {
@@ -111,19 +137,12 @@ pub fn pick(i: &PlaceInputs, hints: &PlaceHints, local_host: &str, exists: &dyn 
                 (!h.is_empty()).then_some(h)
             }));
         let Some(host) = host else { return Err("This ssh tab's host is unknown".into()) };
-        let osc = non_empty(&hints.osc_cwd).filter(|o| Some(*o) != i.live_cwd.as_deref() && is_remote_abs(o));
-        // `prompt_cwd` needs an existence check on the host (a fish `~/D/I/m/x` abbreviation
-        // must be dropped), and that needs the remote helper (phase 6): not used until then.
-        let chain: [(Option<&str>, &'static str); 4] = [
-            (single_agent_cwd(i).filter(|c| is_remote_abs(c)), "agent"),
-            (osc, "osc7"),
-            (non_empty(&i.auto_resume_remote_cwd), "auto_resume"),
-            (non_empty(&i.restore_remote_cwd), "restore"),
-        ];
-        // A remote folder can't be checked from here: the first candidate wins.
-        return chain
-            .iter()
-            .find_map(|(c, src)| c.map(|c| Pick { cwd: c.to_string(), source: src, remote_host: Some(host.clone()), missing: false }))
+        // Unchecked, the first candidate wins; the prompt's folder never does, since only the
+        // host can tell a fish `~/D/I/m/x` abbreviation from a real path (`resolve` asks it).
+        return ssh_chain(i, hints)
+            .into_iter()
+            .find(|(_, src)| *src != "prompt")
+            .map(|(c, src)| Pick { cwd: c, source: src, remote_host: Some(host.clone()), missing: false })
             .ok_or_else(|| "No folder is known for this ssh tab yet".into());
     }
     let expand = |s: &str| crate::relocate::expand_home(s).to_string_lossy().into_owned();
@@ -162,10 +181,11 @@ pub fn is_shallow(root: &Path) -> bool {
     comps.len() == 3 && (comps[1] == "Volumes" || comps[1] == "mnt")
 }
 
-/// The same rule for a folder on an ssh host, where home isn't known here.
-fn is_shallow_remote(root: &str) -> bool {
+/// The same rule for a folder on an ssh host, whose home is known once its helper has said
+/// (`home`); before that, the usual homes.
+pub fn is_shallow_remote(root: &str, home: Option<&str>) -> bool {
     let r = root.trim_end_matches('/');
-    if r.is_empty() || r == "~" || r == "/root" {
+    if r.is_empty() || r == "~" || r == "/root" || home.is_some_and(|h| !h.is_empty() && h.trim_end_matches('/') == r) {
         return true;
     }
     let parts: Vec<&str> = r.split('/').collect();
@@ -232,9 +252,22 @@ fn remote_place(host: &str, root: &str, cwd: Option<&str>, source: &str) -> Tree
         cwd_rel: rel.map(String::from),
         source: source.into(),
         fs_class: super::fsclass::UNKNOWN.into(),
-        shallow: is_shallow_remote(root),
+        shallow: is_shallow_remote(root, None),
         missing: None,
     }
+}
+
+/// An ssh tab whose every candidate is missing on the host: shown as missing, never as home.
+fn missing_remote_place(host: &str, path: &str, source: &str) -> TreePlace {
+    TreePlace { missing: Some(path.to_string()), cwd_rel: None, shallow: false, ..remote_place(host, path, None, source) }
+}
+
+/// `user@host:/abs` (or `user@host:~/x`) as (host, root); None for anything else. The host is
+/// everything before the first `:` that starts a path, so connect args with options
+/// (`-p 2222 ews@nova`) stay whole.
+pub fn split_remote(place: &str) -> Option<(String, String)> {
+    let (host, root) = place.split_once(":/").map(|(h, r)| (h, format!("/{r}"))).or_else(|| place.split_once(":~").map(|(h, r)| (h, format!("~{r}"))))?;
+    (!host.trim().is_empty()).then(|| (host.to_string(), root))
 }
 
 fn local_place(root: &Path, cwd: Option<&Path>, source: &str) -> TreePlace {
@@ -280,15 +313,15 @@ pub fn place_for(pick: Option<&Pick>, pin: Option<&str>) -> Result<TreePlace, St
             return Ok(local_place(&root, cwd.as_deref(), "pin"));
         }
         // "user@host:/abs": the host is everything before the first ':' that precedes a path.
-        if let Some((host, root)) = pin.split_once(":/").map(|(h, r)| (h, format!("/{r}"))).or_else(|| pin.split_once(":~").map(|(h, r)| (h, format!("~{r}")))) {
-            let cwd = pick.filter(|p| p.remote_host.as_deref() == Some(host)).map(|p| p.cwd.as_str());
-            return Ok(remote_place(host, &root, cwd, "pin"));
+        if let Some((host, root)) = split_remote(pin) {
+            let cwd = pick.filter(|p| p.remote_host.as_deref() == Some(host.as_str())).map(|p| p.cwd.as_str());
+            return Ok(remote_place(&host, &root, cwd, "pin"));
         }
         return Err(format!("Unreadable Files pin: {pin}"));
     }
     let pick = pick.ok_or("No folder is known for this tab yet")?;
     if let Some(host) = &pick.remote_host {
-        // The top level of a remote folder needs the helper (phase 6): the folder is the root.
+        // Unchecked on the host (`resolve` couldn't ask it): the folder is its own root.
         return Ok(remote_place(host, &pick.cwd, Some(&pick.cwd), pick.source));
     }
     if pick.missing {
@@ -359,8 +392,22 @@ fn local_hostname() -> String {
     sysinfo::System::host_name().unwrap_or_default()
 }
 
-/// `ft_resolve_place`. Blocking: runs `git rev-parse` (cached) and reads the process table.
-pub fn resolve(state: &Arc<AppState>, tab_id: &str, hints: &PlaceHints) -> Result<TreePlace, String> {
+/// An ssh tab's place from its candidates as the host's helper found them (`probed`, in the
+/// same order): the first that is a folder there, rooted at its repository's top level. None
+/// of them there: the first is reported missing. None when the host couldn't be asked.
+pub fn remote_from_probe(host: &str, chain: &[(String, &'static str)], probed: &[super::remote::proto::Probed]) -> Option<TreePlace> {
+    for ((_, src), p) in chain.iter().zip(probed) {
+        if let Some(real) = &p.real {
+            let root = p.top.as_deref().unwrap_or(real);
+            return Some(remote_place(host, root, Some(real), src));
+        }
+    }
+    chain.first().map(|(c, src)| missing_remote_place(host, c, src))
+}
+
+/// `ft_resolve_place`. Blocking: runs `git rev-parse` (cached), reads the process table, and
+/// for an ssh tab asks the host (a few seconds at most).
+pub fn resolve(state: &Arc<AppState>, ft: &super::FileTreeState, tab_id: &str, hints: &PlaceHints) -> Result<TreePlace, String> {
     let inputs = gather(state, tab_id, hints.fresh)?;
     if inputs.is_service {
         return Err("A stack service tab is never the Files source".into());
@@ -368,7 +415,17 @@ pub fn resolve(state: &Arc<AppState>, tab_id: &str, hints: &PlaceHints) -> Resul
     let picked = pick(&inputs, hints, &local_hostname(), &|p: &Path| p.is_dir());
     match (&picked, inputs.pin.as_deref()) {
         (_, Some(pin)) => place_for(picked.as_ref().ok(), Some(pin)),
-        (Ok(p), None) => place_for(Some(p), None),
+        (Ok(p), None) => {
+            if let Some(host) = &p.remote_host {
+                let chain = ssh_chain(&inputs, hints);
+                let paths: Vec<String> = chain.iter().map(|(c, _)| c.clone()).collect();
+                let lookup = super::remote::tunnel_lookup(state);
+                if let Some(place) = ft.probe_remote(host, Some(lookup), &paths).and_then(|probed| remote_from_probe(host, &chain, &probed)) {
+                    return Ok(place);
+                }
+            }
+            place_for(Some(p), None)
+        }
         (Err(e), None) => Err(e.clone()),
     }
 }
@@ -504,8 +561,48 @@ mod tests {
         assert!(is_shallow(Path::new("/mnt/x")));
         assert!(!is_shallow(Path::new("/Volumes/Data/proj")));
         assert!(!is_shallow(&std::env::temp_dir().join("proj")));
-        assert!(is_shallow_remote("/home/ews"));
-        assert!(is_shallow_remote("~"));
-        assert!(!is_shallow_remote("/home/ews/app"));
+        assert!(is_shallow_remote("/home/ews", None));
+        assert!(is_shallow_remote("~", None));
+        assert!(!is_shallow_remote("/home/ews/app", None));
+        assert!(is_shallow_remote("/srv/users/ews", Some("/srv/users/ews/")), "the home the helper reported");
+    }
+
+    #[test]
+    fn an_ssh_tab_is_rooted_by_what_the_host_found() {
+        use crate::filetree::remote::proto::Probed;
+        let i = PlaceInputs {
+            ssh_foreground: Some("ssh ews@nova".into()),
+            live_cwd: Some("/Users/me".into()),
+            agent_cwds: vec!["/home/ews/gone".into()],
+            restore_remote_cwd: Some("/home/ews/app/src".into()),
+            ..Default::default()
+        };
+        // A fish abbreviation in the title looks like a path; only the host can say it isn't.
+        let hints = PlaceHints { prompt_cwd: Some("~/D/I/m/x".into()), ..Default::default() };
+        let chain = ssh_chain(&i, &hints);
+        assert_eq!(chain.iter().map(|(_, s)| *s).collect::<Vec<_>>(), vec!["agent", "prompt", "restore"]);
+        // Unchecked, the prompt's folder never wins.
+        assert_eq!(local(&i, &hints, &[]).unwrap().source, "agent");
+        let probed = vec![
+            Probed::default(),
+            Probed::default(),
+            Probed { real: Some("/home/ews/app/src".into()), top: Some("/home/ews/app".into()) },
+        ];
+        let place = remote_from_probe("ews@nova", &chain, &probed).unwrap();
+        assert_eq!(
+            (place.place.as_str(), place.root.as_str(), place.cwd_rel.as_deref(), place.source.as_str()),
+            ("ews@nova:/home/ews/app", "/home/ews/app", Some("src"), "restore")
+        );
+        // Nothing there: the first candidate is missing, never home.
+        let gone = remote_from_probe("ews@nova", &chain, &[Probed::default(), Probed::default(), Probed::default()]).unwrap();
+        assert_eq!((gone.missing.as_deref(), gone.kind.as_str()), (Some("/home/ews/gone"), "remote"));
+        // A prompt folder that is real on the host does win in its turn.
+        let hints = PlaceHints { prompt_cwd: Some("~/proj".into()), ..Default::default() };
+        let chain = ssh_chain(&i, &hints);
+        let probed = vec![Probed::default(), Probed { real: Some("/home/ews/proj".into()), top: None }, Probed::default()];
+        let place = remote_from_probe("ews@nova", &chain, &probed).unwrap();
+        assert_eq!((place.root.as_str(), place.source.as_str(), place.cwd_rel), ("/home/ews/proj", "prompt", None));
+        assert_eq!(split_remote("-p 2222 ews@nova:/srv/a b"), Some(("-p 2222 ews@nova".into(), "/srv/a b".into())));
+        assert_eq!(split_remote("/local/path"), None);
     }
 }

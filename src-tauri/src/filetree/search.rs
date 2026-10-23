@@ -15,6 +15,9 @@
 //! - **Stale queries stop early**: each carries a `seq`, the newest is kept in an atomic, and a
 //!   scan that sees a newer one gives up.
 //! - **Evicted** after 5 minutes with no query, by the thread that built it.
+//! - **A root on an ssh host** (§15) is listed by its helper there (`ls-files`, or its own
+//!   walk), and kept fresh by the helper's watch events; a status run's named files mark it
+//!   dirty rather than being looked up, since each lookup would be a round trip.
 
 use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;
@@ -31,6 +34,7 @@ use parking_lot::{Condvar, Mutex};
 
 use super::hub::RootHub;
 use super::paths::norm;
+use super::remote::RemoteRoot;
 use super::types::{SearchHit, SearchResult};
 use crate::util::proc;
 
@@ -239,6 +243,8 @@ pub struct SearchState {
     shallow: bool,
     /// The root's volume folds case (`relocate::case_insensitive`).
     fold: bool,
+    /// A root on an ssh host: its helper lists the paths.
+    remote: Option<Arc<RemoteRoot>>,
     /// The newest query each subscription asked; an older one of its own still scanning gives
     /// up. Per subscription because `seq` is: each window counts its own from zero, and two
     /// windows on one root share this hub, so one shared counter let the window that had
@@ -253,13 +259,19 @@ pub struct SearchState {
 }
 
 impl SearchState {
+    #[cfg(test)]
     pub fn new(hub: Weak<RootHub>, root: &Path, in_repo: bool, shallow: bool, fold: bool) -> Arc<SearchState> {
+        Self::new_with(hub, root, in_repo, shallow, fold, None)
+    }
+
+    pub fn new_with(hub: Weak<RootHub>, root: &Path, in_repo: bool, shallow: bool, fold: bool, remote: Option<Arc<RemoteRoot>>) -> Arc<SearchState> {
         Arc::new(SearchState {
             hub,
             root: root.to_path_buf(),
             in_repo,
             shallow,
             fold,
+            remote,
             latest: Mutex::new(HashMap::new()),
             inner: Mutex::new(Inner::default()),
             cv: Condvar::new(),
@@ -367,6 +379,12 @@ impl SearchState {
     }
 
     fn list_paths(&self) -> Vec<String> {
+        if let Some(r) = &self.remote {
+            return r.files().unwrap_or_else(|e| {
+                log::info!("filetree: indexing {} on {}: {e}", r.root, r.host);
+                Vec::new()
+            });
+        }
         if self.in_repo {
             if let Some(p) = git_ls_files(&self.root) {
                 return p;
@@ -399,8 +417,9 @@ impl SearchState {
         if inner.index.is_none() && !inner.building {
             return;
         }
-        if named.len() > MAX_RECONCILE {
-            // One `ls-files` costs less than this many lookups.
+        if named.len() > MAX_RECONCILE || self.remote.is_some() {
+            // One `ls-files` costs less than this many lookups (and on an ssh host, than one
+            // round trip of them).
             note_locked(&mut inner, vec![Change::Folder]);
             return;
         }

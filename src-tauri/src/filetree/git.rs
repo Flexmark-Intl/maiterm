@@ -22,7 +22,12 @@
 //! **Paths.** git reports paths relative to the repository's top level even with `-C root`;
 //! when the root is a folder inside a larger repo, the prefix is stripped and anything outside
 //! the root dropped (the `-- .` pathspec already keeps the run to the root's subtree).
+//!
+//! **Remote roots (§15).** The same commands run on the ssh host through its helper
+//! (`run`), which adds the same environment there. Keys are then left as git spells them: the
+//! host's volume is not macOS's, so there is no NFC to fold to.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -34,6 +39,7 @@ use parking_lot::{Condvar, Mutex};
 
 use super::hub::RootHub;
 use super::paths::{norm, split_rel};
+use super::remote::RemoteRoot;
 use super::types::{BranchInfo, GitUpdate};
 use super::Slots;
 use crate::util::proc::{self, RunError};
@@ -386,9 +392,18 @@ pub struct Published {
     pub named: Vec<String>,
 }
 
+/// What one git command answered.
+pub struct GitOut {
+    pub ok: bool,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
 pub struct GitCore {
     hub: Weak<RootHub>,
     program: OsString,
+    /// A root on an ssh host: every command runs there, through its helper.
+    remote: Option<Arc<RemoteRoot>>,
     pub timing: GitTiming,
     /// Every command runs here, `-C root`.
     root: PathBuf,
@@ -408,15 +423,20 @@ pub struct GitCore {
 }
 
 impl GitCore {
+    #[cfg(test)]
     pub fn new(hub: Weak<RootHub>, cfg: &GitConfig, root: &Path, top: &Path, network: bool, slots: Arc<Slots>) -> Arc<GitCore> {
+        Self::new_with(hub, cfg, root, top, network, slots, None)
+    }
+
+    /// `remote`: the root is on an ssh host, and `root`/`top` are its POSIX paths there.
+    pub fn new_with(hub: Weak<RootHub>, cfg: &GitConfig, root: &Path, top: &Path, network: bool, slots: Arc<Slots>, remote: Option<Arc<RemoteRoot>>) -> Arc<GitCore> {
         // In git's spelling (NFC on macOS): the root's own path may be stored NFD.
-        let prefix = root
-            .strip_prefix(top)
-            .map(|p| norm(&p.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")).into_owned())
-            .unwrap_or_default();
+        let joined = root.strip_prefix(top).map(|p| p.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")).unwrap_or_default();
+        let prefix = if remote.is_some() { joined } else { norm(&joined).into_owned() };
         Arc::new(GitCore {
             hub,
             program: cfg.program.clone(),
+            remote,
             timing: cfg.timing,
             root: root.to_path_buf(),
             prefix,
@@ -531,15 +551,33 @@ impl GitCore {
         c
     }
 
+    /// One git command in the root, here or on the ssh host, killed at `timeout`.
+    fn run(&self, args: &[String], timeout: Duration) -> Result<GitOut, RunError> {
+        if let Some(r) = &self.remote {
+            return r.git(args, timeout);
+        }
+        let mut c = self.cmd();
+        c.args(args);
+        proc::output_timeout(&mut c, timeout).map(|o| GitOut { ok: o.status.success(), stdout: o.stdout, stderr: o.stderr })
+    }
+
+    /// A path in git's spelling as this root keys it (see `new_with`).
+    fn norm<'a>(&self, s: &'a str) -> Cow<'a, str> {
+        if self.remote.is_some() {
+            Cow::Borrowed(s)
+        } else {
+            norm(s)
+        }
+    }
+
     /// One status run, blocking.
     pub fn run_status(&self) -> Result<Status, Failure> {
-        let mut c = self.cmd();
-        c.args(["status", "--porcelain=v2", "-z", "--branch", "--untracked-files=normal", "--", "."]);
-        match proc::output_timeout(&mut c, self.timing.timeout) {
+        let args = ["status", "--porcelain=v2", "-z", "--branch", "--untracked-files=normal", "--", "."].map(String::from);
+        match self.run(&args, self.timing.timeout) {
             Err(RunError::Spawn(e)) if e.kind() == std::io::ErrorKind::NotFound => Err(Failure::Missing),
             Err(RunError::TimedOut) => Err(Failure::TimedOut),
             Err(e) => Err(Failure::Other(e.to_string())),
-            Ok(o) if !o.status.success() => Err(failure_from_stderr(&o.stderr)),
+            Ok(o) if !o.ok => Err(failure_from_stderr(&o.stderr)),
             Ok(o) => {
                 let mut st = parse_porcelain_v2(&o.stdout);
                 self.expand_untracked_root(&mut st);
@@ -556,7 +594,7 @@ impl GitCore {
         if self.prefix.is_empty() {
             return;
         }
-        let covers_root = |e: &StatusEntry| e.dir && e.letter == "?" && super::paths::is_at_or_under(&self.prefix, &norm(&e.path));
+        let covers_root = |e: &StatusEntry| e.dir && e.letter == "?" && super::paths::is_at_or_under(&self.prefix, &self.norm(&e.path));
         let Some(i) = st.entries.iter().position(covers_root) else { return };
         let Some(children) = self.untracked_children() else { return };
         st.entries.remove(i);
@@ -581,14 +619,14 @@ impl GitCore {
     fn untracked_children(&self) -> Option<Vec<(String, bool)>> {
         let mut out = Vec::new();
         for (specs, directory) in UNTRACKED_RUNS {
-            let mut c = self.cmd();
-            c.args(["ls-files", "-o", "--exclude-standard", "-z"]);
+            let mut args: Vec<String> = ["ls-files", "-o", "--exclude-standard", "-z"].map(String::from).to_vec();
             if directory {
-                c.args(["--directory", "--no-empty-directory"]);
+                args.extend(["--directory", "--no-empty-directory"].map(String::from));
             }
-            c.arg("--").args(specs);
-            let o = match proc::output_timeout(&mut c, self.timing.timeout) {
-                Ok(o) if o.status.success() => o,
+            args.push("--".into());
+            args.extend(specs.iter().map(|s| s.to_string()));
+            let o = match self.run(&args, self.timing.timeout) {
+                Ok(o) if o.ok => o,
                 Ok(o) => {
                     log::debug!("filetree: listing the untracked root failed: {}", failure_from_stderr(&o.stderr).note());
                     return None;
@@ -655,12 +693,12 @@ impl GitCore {
         let mut renames = HashMap::new();
         for e in st.entries {
             // A rename's source counts even when only it is under the root (moved out).
-            if let Some(o) = e.orig.as_deref().and_then(|o| self.to_root_rel(&norm(o))) {
+            if let Some(o) = e.orig.as_deref().and_then(|o| self.to_root_rel(&self.norm(o))) {
                 named.push(o);
             }
             // Keys are NFC on macOS whatever `core.precomposeunicode` says, so the client can
             // look a row up by normalizing its on-disk name once (`OpenAck.nfc_names`).
-            let Some(rel) = self.to_root_rel(&norm(&e.path)) else { continue };
+            let Some(rel) = self.to_root_rel(&self.norm(&e.path)) else { continue };
             if !e.dir {
                 named.push(rel.clone());
             }
@@ -737,7 +775,7 @@ impl GitCore {
             return None;
         }
         // The row's rel is the on-disk spelling; the keys are git's (NFC on macOS).
-        let key = norm(rel);
+        let key = self.norm(rel);
         let (gen, source) = {
             let d = self.data.lock();
             let letter = d.files.get(key.as_ref())?;
@@ -755,14 +793,15 @@ impl GitCore {
         let target = if self.prefix.is_empty() { key.to_string() } else { format!("{}/{key}", self.prefix) };
         let got = {
             let _slot = self.slots.acquire();
-            let mut c = self.cmd();
             // `-M` whatever `diff.renames` says, and the source named too (from the top: it
             // may be outside the root), so a staged rename counts its edits, not its size.
-            c.args(["diff", "--numstat", "-z", "-M", "HEAD", "--"]).arg(format!(":(literal){rel}"));
+            let mut args: Vec<String> = ["diff", "--numstat", "-z", "-M", "HEAD", "--"].map(String::from).to_vec();
+            args.push(format!(":(literal){rel}"));
             if let Some(src) = &source {
-                c.arg(format!(":(top,literal){src}"));
+                args.push(format!(":(top,literal){src}"));
             }
-            proc::output_timeout(&mut c, Duration::from_secs(5)).ok().filter(|o| o.status.success()).and_then(|o| parse_numstat(&o.stdout, &target))
+            let nfc = self.remote.is_none();
+            self.run(&args, Duration::from_secs(5)).ok().filter(|o| o.ok).and_then(|o| parse_numstat(&o.stdout, &target, nfc))
         };
         let mut d = self.data.lock();
         if d.gen == gen {
@@ -789,11 +828,9 @@ impl GitCore {
         };
         let out = {
             let _slot = self.slots.acquire();
-            let mut c = self.cmd();
-            c.args(["cat-file", "blob"]).arg(spec);
-            proc::output_timeout(&mut c, Duration::from_secs(15)).map_err(|e| format!("git {e}"))?
+            self.run(&["cat-file".to_string(), "blob".to_string(), spec], Duration::from_secs(15)).map_err(|e| format!("git {e}"))?
         };
-        if !out.status.success() {
+        if !out.ok {
             let err = String::from_utf8_lossy(&out.stderr);
             let absent = ["does not exist", "exists on disk, but not in", "not in the index", "invalid object name", "Not a valid object name"];
             if absent.iter().any(|a| err.contains(a)) {
@@ -829,20 +866,17 @@ impl GitCore {
             return None;
         }
         let _slot = self.slots.acquire();
-        let mut anc = self.cmd();
-        anc.args(["merge-base", "--is-ancestor", old, new]);
-        let o = proc::output_timeout(&mut anc, Duration::from_secs(5)).ok()?;
-        if !o.status.success() {
+        let o = self.run(&["merge-base", "--is-ancestor", old, new].map(String::from), Duration::from_secs(5)).ok()?;
+        if !o.ok {
             return None;
         }
-        let mut c = self.cmd();
-        c.args(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", old, new]);
-        let o = proc::output_timeout(&mut c, Duration::from_secs(10)).ok().filter(|o| o.status.success())?;
+        let args = ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", old, new].map(String::from);
+        let o = self.run(&args, Duration::from_secs(10)).ok().filter(|o| o.ok)?;
         Some(
             o.stdout
                 .split(|b| *b == 0)
                 .filter(|f| !f.is_empty())
-                .filter_map(|f| self.to_root_rel(&norm(&String::from_utf8_lossy(f))))
+                .filter_map(|f| self.to_root_rel(&self.norm(&String::from_utf8_lossy(f))))
                 .take(MAX_COMMITTED)
                 .collect(),
         )
@@ -861,8 +895,9 @@ fn untranslated(c: &mut std::process::Command) {
 /// The counts for `target` (repository-relative) from `--numstat -z`: `added\tdeleted\tpath\0`,
 /// or `added\tdeleted\t\0source\0dest\0` for a rename. A binary file's `-\t-` counts nothing.
 /// When no record names the target (a spelling git and the disk disagree on), a lone record
-/// is still this file's: the pathspec named nothing else.
-fn parse_numstat(out: &[u8], target: &str) -> Option<(u32, u32)> {
+/// is still this file's: the pathspec named nothing else. `nfc`: compare in this platform's
+/// one spelling (a remote root's names are compared as git gives them).
+fn parse_numstat(out: &[u8], target: &str, nfc: bool) -> Option<(u32, u32)> {
     let mut fields = out.split(|b| *b == 0).filter(|f| !f.is_empty());
     let (mut records, mut lone) = (0, None);
     while let Some(rec) = fields.next() {
@@ -877,7 +912,7 @@ fn parse_numstat(out: &[u8], target: &str) -> Option<(u32, u32)> {
             }
         };
         let counts = a.parse().ok().zip(d.parse().ok());
-        if norm(&path) == target {
+        if (if nfc { norm(&path) } else { Cow::Borrowed(path.as_str()) }) == target {
             return counts;
         }
         records += 1;
@@ -1193,15 +1228,15 @@ mod tests {
 
     #[test]
     fn numstat_parses_counts_and_skips_binary() {
-        assert_eq!(parse_numstat(b"12\t3\tsrc/a.ts\0", "src/a.ts"), Some((12, 3)));
-        assert_eq!(parse_numstat(b"-\t-\timg.png\0", "img.png"), None);
-        assert_eq!(parse_numstat(b"", "a"), None);
+        assert_eq!(parse_numstat(b"12\t3\tsrc/a.ts\0", "src/a.ts", true), Some((12, 3)));
+        assert_eq!(parse_numstat(b"-\t-\timg.png\0", "img.png", true), None);
+        assert_eq!(parse_numstat(b"", "a", true), None);
         // A rename's record names the destination after the source.
-        assert_eq!(parse_numstat(b"1\t0\t\0a.txt\0b.txt\0", "b.txt"), Some((1, 0)));
+        assert_eq!(parse_numstat(b"1\t0\t\0a.txt\0b.txt\0", "b.txt", true), Some((1, 0)));
         // Several records: only the target's counts; a lone record is the file's whatever its spelling.
-        assert_eq!(parse_numstat(b"5\t5\tsrc.txt\0201\t0\tb.txt\0", "b.txt"), Some((201, 0)));
-        assert_eq!(parse_numstat(b"5\t5\tsrc.txt\0201\t0\tb.txt\0", "c.txt"), None);
-        assert_eq!(parse_numstat(b"7\t1\tcafe\xcc\x81.txt\0", "caf\u{e9}.txt"), Some((7, 1)));
+        assert_eq!(parse_numstat(b"5\t5\tsrc.txt\0201\t0\tb.txt\0", "b.txt", true), Some((201, 0)));
+        assert_eq!(parse_numstat(b"5\t5\tsrc.txt\0201\t0\tb.txt\0", "c.txt", true), None);
+        assert_eq!(parse_numstat(b"7\t1\tcafe\xcc\x81.txt\0", "caf\u{e9}.txt", true), Some((7, 1)));
     }
 
     #[test]

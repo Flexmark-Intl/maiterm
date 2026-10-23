@@ -189,6 +189,12 @@ fn live_cwd_refusal(dirs: &[PathBuf], fold: bool, holders: &dyn Fn() -> Vec<CwdH
             tabs.push((h.tab_id, h.tab_name));
         }
     }
+    live_cwd_needs(tabs)
+}
+
+/// The live-cwd refusal for these (tab id, tab name) pairs; None when there are none. Shared
+/// with a remote root's guard (`remote::run_op`), so the sentence is the same on every root.
+pub(super) fn live_cwd_needs(tabs: Vec<(String, String)>) -> Option<Needs> {
     if tabs.is_empty() {
         return None;
     }
@@ -739,7 +745,7 @@ impl Tickets {
         Tickets { ttl, map: Mutex::new(HashMap::new()) }
     }
 
-    fn mint(&self, place: &str, rels: &[String]) -> String {
+    pub(super) fn mint(&self, place: &str, rels: &[String]) -> String {
         let token = uuid::Uuid::new_v4().simple().to_string();
         let mut map = self.map.lock();
         let now = Instant::now();
@@ -750,7 +756,7 @@ impl Tickets {
 
     /// Whether `token` deletes exactly `rels` in `place`, without using it up: a delete that
     /// stops at a guard can come back with the same ticket after the human's second yes.
-    fn check(&self, token: Option<&str>, place: &str, rels: &[String]) -> Result<(), String> {
+    pub(super) fn check(&self, token: Option<&str>, place: &str, rels: &[String]) -> Result<(), String> {
         let token = token.ok_or("A permanent delete needs a ticket from ft_prepare_delete")?;
         let map = self.map.lock();
         let t = map.get(token).ok_or("This delete's ticket is used up or unknown: confirm it again")?;
@@ -763,7 +769,7 @@ impl Tickets {
         Ok(())
     }
 
-    fn take(&self, token: Option<&str>, place: &str, rels: &[String]) -> Result<(), String> {
+    pub(super) fn take(&self, token: Option<&str>, place: &str, rels: &[String]) -> Result<(), String> {
         self.check(token, place, rels)?;
         if let Some(t) = token {
             self.map.lock().remove(t);

@@ -14,6 +14,7 @@
 //! - `git.rs`: decorations from `git status`, scheduled per repository (phase 2).
 //! - `search.rs`: the find index, built on the first query (phase 2).
 //! - `ops.rs`: file operations, their guards, the trash thread and delete tickets (phase 3).
+//! - `remote/`: roots on an ssh host, served by one Python helper per host (phase 6).
 
 pub mod commands;
 mod coalesce;
@@ -25,6 +26,7 @@ pub mod list;
 pub mod ops;
 pub mod paths;
 pub mod place;
+pub mod remote;
 pub mod search;
 pub mod types;
 pub mod watch;
@@ -35,7 +37,7 @@ mod tests;
 mod git_tests;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -143,7 +145,16 @@ pub struct FileTreeState {
     tickets: ops::Tickets,
     /// What each agent tab is reading and changing (§9): fed by the hooks, routed to the hubs.
     pub agents: Arc<AgentFiles>,
+    /// One helper per ssh host, for remote roots (§15).
+    pub(crate) remotes: remote::Remotes,
 }
+
+/// Agent sessions working on one ssh host, for a remote root's live-cwd guard: (tab id, tab
+/// name, cwd there). Asked with the host's connect args.
+pub type RemoteHolders<'a> = &'a dyn Fn(&str) -> Vec<(String, String, String)>;
+
+/// How long the resolver waits on a host's helper before keeping its first candidate.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
 impl FileTreeState {
     pub fn new() -> Arc<Self> {
@@ -173,6 +184,7 @@ impl FileTreeState {
             trash: OnceLock::new(),
             tickets: ops::Tickets::default(),
             agents: AgentFiles::new(me.clone()),
+            remotes: remote::Remotes::default(),
         })
     }
 
@@ -186,6 +198,8 @@ impl FileTreeState {
     pub fn coverage_for(&self, path: &Path) -> Vec<(String, &'static str)> {
         self.live_hubs()
             .into_iter()
+            // A remote root's path is the host's, never this computer's.
+            .filter(|h| h.remote.is_none())
             .filter(|h| h.covers(path) || paths::strip_root(&h.root, path, h.fold).is_some())
             .map(|h| (h.place.clone(), h.coverage()))
             .collect()
@@ -206,20 +220,35 @@ impl FileTreeState {
     /// changed that are open, so the view doesn't wait on the watcher (a network mount has
     /// none). `holders` lists the tabs working in some folder, for the live-cwd guard; it is
     /// asked only when a folder is moved or removed.
+    #[cfg(test)]
     pub fn op(&self, sub_id: u64, op: &FileOp, holders: &dyn Fn() -> Vec<ops::CwdHolder>) -> Result<OpResult, String> {
+        self.op_with(sub_id, op, holders, &|_| Vec::new())
+    }
+
+    /// `op`, with the agent sessions on an ssh host for a remote root's live-cwd guard.
+    pub fn op_with(&self, sub_id: u64, op: &FileOp, holders: &dyn Fn() -> Vec<ops::CwdHolder>, remote_holders: RemoteHolders) -> Result<OpResult, String> {
         let hub = self.hub_of(sub_id)?;
-        let agents = |items: &[std::path::PathBuf]| self.agents.active_tabs(items, hub.fold);
-        let env = ops::Env {
-            place: &hub.place,
-            root: &hub.root,
-            fold: hub.fold,
-            trash: self.trash_worker(),
-            tickets: &self.tickets,
-            holders,
-            agents: &agents,
-            rename: ops::rename_noreplace,
+        let result = match &hub.remote {
+            Some(r) => {
+                let on_host = || remote_holders(&r.host);
+                let env = remote::RemoteEnv { place: &hub.place, remote: r, tickets: &self.tickets, holders: &on_host };
+                remote::run_op(&env, op)?
+            }
+            None => {
+                let agents = |items: &[std::path::PathBuf]| self.agents.active_tabs(items, hub.fold);
+                let env = ops::Env {
+                    place: &hub.place,
+                    root: &hub.root,
+                    fold: hub.fold,
+                    trash: self.trash_worker(),
+                    tickets: &self.tickets,
+                    holders,
+                    agents: &agents,
+                    rename: ops::rename_noreplace,
+                };
+                ops::run(&env, op)?
+            }
         };
-        let result = ops::run(&env, op)?;
         // An import's `from` is a native path elsewhere, not a rel of this root.
         let from_is_rel = op.kind != "import";
         let mut parents: Vec<String> = Vec::new();
@@ -248,6 +277,11 @@ impl FileTreeState {
     /// `ft_prepare_delete`: a ticket for permanently deleting exactly `rels`, with the counts.
     pub fn prepare_delete(&self, sub_id: u64, rels: &[String]) -> Result<DeleteTicket, String> {
         let hub = self.hub_of(sub_id)?;
+        if let Some(r) = &hub.remote {
+            let nobody = Vec::new;
+            let env = remote::RemoteEnv { place: &hub.place, remote: r, tickets: &self.tickets, holders: &nobody };
+            return remote::prepare_delete(&env, rels);
+        }
         let none = || Vec::new();
         let no_agents = |_: &[std::path::PathBuf]| Vec::new();
         let env = ops::Env {
@@ -287,17 +321,80 @@ impl FileTreeState {
     /// Subscribe a webview to a local root. `restore` re-requests the folders it had open, with
     /// the generations it holds, so a returning view costs one round trip. Events may reach the
     /// Channel before this returns.
-    pub fn open(&self, window: &str, place: &str, mut restore: Vec<DirReq>, sink: Arc<dyn Sink>, excludes: Vec<String>) -> Result<OpenAck, String> {
+    #[cfg(test)]
+    pub fn open(&self, window: &str, place: &str, restore: Vec<DirReq>, sink: Arc<dyn Sink>, excludes: Vec<String>) -> Result<OpenAck, String> {
+        self.open_with(window, place, restore, sink, excludes, None)
+    }
+
+    /// `open`, with how to find an ssh host's connection (the tab's bridge tunnel) for a remote
+    /// place, `user@host:/abs`. Blocking: the first remote root on a host starts its helper.
+    pub fn open_with(&self, window: &str, place: &str, restore: Vec<DirReq>, sink: Arc<dyn Sink>, excludes: Vec<String>, lookup: Option<remote::Lookup>) -> Result<OpenAck, String> {
         let given = Path::new(place.trim());
-        if !given.is_absolute() {
-            return Err(format!("Files can't open {place} here: folders on an ssh host aren't supported yet"));
+        if given.is_absolute() {
+            let root = crate::share::canon(given);
+            if !root.is_dir() {
+                return Err(format!("Folder missing: {place}"));
+            }
+            let key = root.to_string_lossy().into_owned();
+            let hub = self.hub_for(&key, &root, excludes);
+            return Ok(self.subscribe(hub, window, restore, sink));
         }
-        let root = crate::share::canon(given);
-        if !root.is_dir() {
-            return Err(format!("Folder missing: {place}"));
+        let Some((host, root)) = place::split_remote(place.trim()) else {
+            return Err(format!("Files can't open {place}: not a folder here or on an ssh host"));
+        };
+        let hub = self.remote_hub_for(place.trim(), &host, &root, excludes, lookup)?;
+        Ok(self.subscribe(hub, window, restore, sink))
+    }
+
+    /// The hub for a remote place, made (and its root opened on the host) if there is none.
+    fn remote_hub_for(&self, key: &str, host: &str, root: &str, excludes: Vec<String>, lookup: Option<remote::Lookup>) -> Result<Arc<RootHub>, String> {
+        let conn = self.remotes.conn(host, lookup);
+        if let Some(h) = self.hubs.lock().get(key) {
+            if !h.is_gone() {
+                return Ok(h.clone());
+            }
         }
-        let key = root.to_string_lossy().into_owned();
-        let hub = self.hub_for(&key, &root, excludes);
+        // Outside the map's lock: it waits on the host.
+        let r = remote::RemoteRoot::open(conn, root, excludes.clone())?;
+        let real = PathBuf::from(&r.root);
+        let init = HubInit {
+            place: key.to_string(),
+            shallow: place::is_shallow_remote(&r.root, r.conn.hello().map(|h| h.home).as_deref()),
+            root: real,
+            fs_class: fsclass::UNKNOWN,
+            user_excludes: excludes,
+            raw_capacity: self.raw_capacity,
+            git: self.git.lock().clone(),
+            git_slots: self.git_slots.clone(),
+            agents: self.agents.clone(),
+            remote: Some(r),
+        };
+        let fresh = RootHub::new(init, self.slots.clone(), self.focus.clone(), self.watch_ctx());
+        let mut hubs = self.hubs.lock();
+        Ok(match hubs.get(key) {
+            Some(h) if !h.is_gone() => h.clone(),
+            _ => {
+                hubs.insert(key.to_string(), fresh.clone());
+                fresh
+            }
+        })
+    }
+
+    /// The resolver's question for an ssh tab's candidate folders (§4.1): each one's real path
+    /// when it is a folder on the host, and its repository's top level. None when the host
+    /// can't be asked in time. Starts the host's helper if it isn't running (kept for the grace
+    /// period, so the tree that opens next finds it ready).
+    pub fn probe_remote(&self, host: &str, lookup: Option<remote::Lookup>, paths: &[String]) -> Option<Vec<remote::proto::Probed>> {
+        if paths.is_empty() {
+            return Some(Vec::new());
+        }
+        let conn = self.remotes.conn(host, lookup);
+        // Held for the probe; dropping it after starts the grace period.
+        let _lease = remote::Lease::hold(&conn);
+        conn.probe(paths, PROBE_TIMEOUT)
+    }
+
+    fn subscribe(&self, hub: Arc<RootHub>, window: &str, mut restore: Vec<DirReq>, sink: Arc<dyn Sink>) -> OpenAck {
         let sub_id = self.next_sub.fetch_add(1, Ordering::Relaxed);
         self.subs.lock().insert(sub_id, hub.clone());
         // A new subscriber cancels any pending reap.
@@ -307,7 +404,7 @@ impl FileTreeState {
             restore.insert(0, DirReq { rel: String::new(), known_gen: None });
         }
         hub.expand(sub_id, restore);
-        Ok(hub.open_ack(sub_id))
+        hub.open_ack(sub_id)
     }
 
     fn hub_for(&self, key: &str, root: &Path, excludes: Vec<String>) -> Arc<RootHub> {
@@ -327,6 +424,7 @@ impl FileTreeState {
             git: self.git.lock().clone(),
             git_slots: self.git_slots.clone(),
             agents: self.agents.clone(),
+            remote: None,
         };
         let fresh = RootHub::new(init, self.slots.clone(), self.focus.clone(), self.watch_ctx());
         let mut hubs = self.hubs.lock();
@@ -396,7 +494,10 @@ impl FileTreeState {
         let Some(away) = away else { return };
         let hubs: Vec<Arc<RootHub>> = self.hubs.lock().values().cloned().collect();
         for h in hubs {
-            if away >= FOCUS_REVALIDATE_AFTER || h.is_network() {
+            // A remote root whose helper can't watch everything open (polled folders, no
+            // python3) is looked at again on every return, like a network mount.
+            let unwatched = h.remote.as_ref().is_some_and(|r| r.health().0 != "live");
+            if away >= FOCUS_REVALIDATE_AFTER || h.is_network() || unwatched {
                 h.revalidate_window(label);
             }
             // Regaining focus is a git edge (§7.2): a commit made in another app shows.

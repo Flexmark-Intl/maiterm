@@ -19,11 +19,10 @@ pub struct PlaceHints {
     /// terminalsStore `osc.cwdHost`, the host OSC 7 named.
     #[serde(default)]
     pub osc_host: Option<String>,
-    /// terminalsStore `osc.promptCwd`, read off the OSC 0 title by frontend patterns.
-    /// Read only once remote folders can be checked for existence (phase 6): until then a fish
-    /// `~/D/I/m/x` abbreviation can't be told from a real path, so it is not used.
+    /// terminalsStore `osc.promptCwd`, read off the OSC 0 title by frontend patterns. Used for
+    /// an ssh tab only, and only when the host's helper finds it is a folder there: a fish
+    /// `~/D/I/m/x` abbreviation looks like a path and isn't one.
     #[serde(default)]
-    #[allow(dead_code)]
     pub prompt_cwd: Option<String>,
     /// Bypass the 800 ms process-table cache: set on ssh start/exit edges, where a stale
     /// answer is wrong for the whole session.
@@ -82,6 +81,10 @@ pub struct OpenAck {
     pub nfc_names: bool,
     pub repo: Option<RepoInfo>,
     pub caps: Caps,
+    /// A remote root: the host's own name as its helper reported it (`hello`), for the
+    /// wrong-host warning when the tab's OSC 7 names another machine (§15.3). None locally, and
+    /// until the helper has said.
+    pub remote_hostname: Option<String>,
 }
 
 /// The git repository the root is in, resolved once per hub.

@@ -147,6 +147,16 @@ pub fn sort_entries(entries: &mut Vec<Entry>) {
     sort_with_head(entries, &mut |_| {});
 }
 
+/// A listing read elsewhere (an ssh host's helper, §15), sorted and capped as a local one is,
+/// so a remote folder's rows come in the same order. `total` counts entries the reader
+/// stopped short of.
+pub fn finish(mut entries: Vec<Entry>, total: usize) -> Listing {
+    let total = total.max(entries.len());
+    sort_with_head(&mut entries, &mut |_| {});
+    entries.truncate(MAX_ENTRIES);
+    Listing { entries, total: total.min(u32::MAX as usize) as u32, truncated: total > MAX_ENTRIES }
+}
+
 /// Classify one entry. `dir_canon` is the canonical path of the folder being listed, computed
 /// on the first symlink that needs it.
 fn classify(path: &Path, ft: Option<FileType>, dir_abs: &Path, dir_canon: &mut Option<Option<PathBuf>>) -> (&'static str, u8) {

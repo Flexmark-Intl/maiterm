@@ -145,6 +145,12 @@ impl IgnoreStack {
         }
     }
 
+    /// A stack that reads nothing: a root on an ssh host, whose ignore rules the helper applies
+    /// there (§15.2). A local file at the same path as a remote one must never decide a flag.
+    pub fn inert(root: &Path) -> Self {
+        Self::with(root, None, None, &[])
+    }
+
     /// Test seam: a stack with an explicit global excludes file.
     #[cfg(test)]
     pub fn for_test(root: &Path, git_dir: Option<&Path>, global_file: Option<&Path>, user_excludes: &[String]) -> Self {

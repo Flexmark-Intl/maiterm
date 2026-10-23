@@ -19,11 +19,11 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Sen
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
 
-/// Which folder a tab's tree shows (§4.1).
+/// Which folder a tab's tree shows (§4.1). An ssh tab's candidates are checked on the host.
 #[tauri::command]
-pub async fn ft_resolve_place(state: State<'_, Arc<AppState>>, tab_id: String, hints: PlaceHints) -> Result<TreePlace, String> {
-    let st = state.inner().clone();
-    blocking(move || super::place::resolve(&st, &tab_id, &hints)).await
+pub async fn ft_resolve_place(state: State<'_, Arc<AppState>>, ft: State<'_, Arc<FileTreeState>>, tab_id: String, hints: PlaceHints) -> Result<TreePlace, String> {
+    let (st, ft) = (state.inner().clone(), ft.inner().clone());
+    blocking(move || super::place::resolve(&st, &ft, &tab_id, &hints)).await
 }
 
 /// Subscribe this webview to a root. `restore` re-opens the folders the view had, with the
@@ -43,10 +43,11 @@ pub async fn ft_open(
     };
     let ft = ft.inner().clone();
     let label = window.label().to_string();
+    let lookup = super::remote::tunnel_lookup(state.inner());
     blocking(move || {
         ft.set_git_enabled(git);
         ft.agents.set_routing(agents);
-        ft.open(&label, &place, restore, Arc::new(on_event), excludes)
+        ft.open_with(&label, &place, restore, Arc::new(on_event), excludes, Some(lookup))
     })
     .await
 }
@@ -200,12 +201,39 @@ fn live_cwd_holders(state: &AppState) -> Vec<CwdHolder> {
     out
 }
 
+/// Every agent session working on the ssh host `host` (a tunnel's connect args): (tab id, tab
+/// name, its cwd there), for a remote root's live-cwd guard. Only the agent's own folder is
+/// known for an ssh tab: the remote shell's cwd isn't readable from here.
+fn remote_cwd_holders(state: &AppState, host: &str) -> Vec<(String, String, String)> {
+    let tabs: HashSet<String> = state
+        .ssh_tunnels
+        .read()
+        .values()
+        .filter(|t| crate::watch::connect_args(&t.host_key) == host)
+        .flat_map(|t| t.tab_ids.iter().cloned())
+        .collect();
+    if tabs.is_empty() {
+        return Vec::new();
+    }
+    let names: HashMap<String, String> = {
+        let data = state.app_data.read();
+        data.windows.iter().flat_map(|w| w.workspaces.iter()).flat_map(|ws| ws.panes.iter()).flat_map(|p| p.tabs.iter()).map(|t| (t.id.clone(), t.name.clone())).collect()
+    };
+    state
+        .agent_sessions
+        .read()
+        .values()
+        .filter(|s| tabs.contains(&s.tab_id))
+        .filter_map(|s| s.cwd.clone().map(|c| (s.tab_id.clone(), names.get(&s.tab_id).cloned().unwrap_or_else(|| s.tab_id.clone()), c)))
+        .collect()
+}
+
 /// A file operation on the subscription's root (§10). Errors refuse the whole op before
 /// anything changed; a guard the human can answer comes back as `needs`.
 #[tauri::command]
 pub async fn ft_op(state: State<'_, Arc<AppState>>, ft: State<'_, Arc<FileTreeState>>, sub_id: u64, op: FileOp) -> Result<OpResult, String> {
     let (st, ft) = (state.inner().clone(), ft.inner().clone());
-    blocking(move || ft.op(sub_id, &op, &|| live_cwd_holders(&st))).await
+    blocking(move || ft.op_with(sub_id, &op, &|| live_cwd_holders(&st), &|host| remote_cwd_holders(&st, host))).await
 }
 
 /// A single-use ticket, good for 60 s, for permanently deleting exactly `rels`, with what that

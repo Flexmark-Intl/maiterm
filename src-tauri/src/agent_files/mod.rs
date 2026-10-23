@@ -873,9 +873,15 @@ impl AgentFiles {
     /// The marks that still stand for `tabs` (None: every tab): each local path's latest mark
     /// per tab and agent, this session. Reads and searches leave no lasting mark, so none.
     pub fn standing_marks(&self, tabs: Option<&HashSet<String>>) -> Vec<AgentMarkAbs> {
+        self.standing_marks_on(tabs, None)
+    }
+
+    /// `standing_marks` for the tabs on one ssh host (`host`, the tunnel's connect args, as a
+    /// remote tree's place names it), or the local tabs with None.
+    pub fn standing_marks_on(&self, tabs: Option<&HashSet<String>>, host: Option<&str>) -> Vec<AgentMarkAbs> {
         let inner = self.inner.lock();
         let mut latest: HashMap<(&str, &str, &str), AgentMarkAbs> = HashMap::new();
-        for (id, t) in inner.tabs.iter().filter(|(id, t)| t.host.is_none() && tabs.is_none_or(|s| s.contains(id.as_str()))) {
+        for (id, t) in inner.tabs.iter().filter(|(id, t)| t.host.as_deref() == host && tabs.is_none_or(|s| s.contains(id.as_str()))) {
             for e in t.entries.iter().filter(|e| !matches!(e.op.as_str(), "read" | "search")) {
                 latest.insert((id.as_str(), e.path.as_str(), e.agent.as_str()), AgentMarkAbs::from_entry(id, e));
             }
