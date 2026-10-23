@@ -112,8 +112,8 @@ On **Create**, maiTerm:
    folder, detached at its Base tip in the default mode, or on a new **integration branch**
    `hive/<slug>` in the approval mode. The coordinator reads code there, never in the human's
    checkouts.
-2. Creates the shared memory directory and seeds it with the goal (§9), and an empty gallery
-   (§10).
+2. Creates the shared memory directory, writes its `MEMORY.md` with the fences (§9) and seeds
+   it with the goal, and creates an empty gallery (§10).
 3. Sets up the Hive's stack (§6.8). Stacks are per workspace (`Workspace.stack`), so copying
    the repo's stack as is would start a second Postgres or dev server beside the human's. So:
    - **Infrastructure the human already runs** in another workspace is not copied. The Hive's
@@ -549,15 +549,21 @@ repos it needs rather than all of them, since each one is a worktree and a setup
                               provenance (§9); owned by Rust, on no agent's write allowlist
   coordinator/
     home/                     the coordinator's working directory (empty but for its own files)
-    <folder>/                 detached worktree per git folder
-  wt/<worker-slug>/
-    <folder>/                 the worker's worktree of each git folder it needs
-    scratch/                  the worker's own working space: renders, downloads, drafts
+  wt.noindex/
+    coordinator/<folder>/     the coordinator's detached read copy per git folder
+    <worker-slug>/
+      <folder>/               the worker's worktree of each git folder it needs
+      scratch/                the worker's own working space: renders, downloads, drafts
+      claude-tmp/             the worker's CLAUDE_CODE_TMPDIR (§6.7)
+    land/<id>/                temporary worktrees for land and post-land checks (§8.1, §8.6)
 ```
 
 It lives **outside every repo**, under `app_data_slug()` (never a hard-coded `com.aiterm.app`).
 Nested inside a repo, every watcher would scan it: Vite, tsc, cargo, eslint, the Files column,
-Claude's own Grep in the main checkout.
+Claude's own Grep in the main checkout. `coordinator` is a reserved worker slug.
+
+**Every worktree lives under `wt.noindex/`.** Spotlight skips a folder whose name ends in
+`.noindex`; without it, Spotlight indexed a fresh worktree at about 100% CPU (spike 4, §13.1).
 
 ### 6.3 What an agent's folders look like to it
 
@@ -565,20 +571,24 @@ Claude has one working directory plus `--add-dir` for the rest. So:
 
 - **The working directory** is the worktree of the task's first folder; for a task with no git
   folder, it's the worker's `scratch/`. The coordinator's is `coordinator/home/`, never the
-  Hive root: from the root, its Grep and Glob would walk every worker's `wt/`, every `scratch/`
+  Hive root: from the root, its Grep and Glob would walk every worker's worktree, every `scratch/`
   and the gallery. Its read copies and the plain folders are `--add-dir`.
 - **Everything else is `--add-dir`**: the worker's other worktrees, the plain folders, and
   `scratch/`. They're launched with `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`, because
   by default Claude doesn't load an added directory's `CLAUDE.md`, and each repo's rules
   have to reach the worker that edits it.
-- **The gallery is `--add-dir` on every launch** (`<hive>/gallery`), for every Hive agent. A path
-  outside the working directories makes the first Read prompt even in auto mode, and that prompt
-  offers "block reads… from now on" and "keep allowing", which write the user's settings. Writes
-  there are denied (the sandbox's `denyWrite` plus an Edit/Write deny rule, §6.7): the gallery is
-  Rust's, and assets enter it only through the gallery tools (§10.3). Spike 14 (§13) checks a
-  gallery and memory-dir read under a fresh account.
+- **The gallery is `--add-dir` on every launch** (`<hive>/gallery`), for every Hive agent. In
+  auto mode a read outside the working directories didn't prompt (spike 14, §13.1), but a worker
+  in manual or acceptEdits mode gets the outside-read prompt, which offers "block reads… from now
+  on" and "keep allowing", both of which write the user's settings. The `--add-dir` keeps that
+  prompt from ever appearing. Writes there are denied (the sandbox's `denyWrite` plus
+  `Write(//…)`/`Edit(//…)` deny rules, §6.7): the gallery is Rust's, and assets enter it only
+  through the gallery tools (§10.3).
 - The brief names every folder with its role: "web (git, your worktree, lands to main)",
   "brand (plain, read-only)", "scratch (yours: put renders here, then add them to the gallery)".
+  For a secondary repo it says to commit with `git -C <worktree> …`: `cd <worktree> && git …` is
+  refused by Claude's own check on changing directory before a version-control command (spike 6,
+  §13.1).
 
 ### 6.4 Worktrees
 
@@ -597,50 +607,73 @@ Claude has one working directory plus `--add-dir` for the rest. So:
 
 ### 6.5 Build caches are the hidden cost
 
-A fresh worktree has no `node_modules` and no `target/`. For a Rust repo like this one, each
-worker would rebuild from scratch for minutes. Sharing one `CARGO_TARGET_DIR` serializes every
-build on cargo's lock. The setup command is the place for this, plus two defaults the sheet
-offers when it detects them: a per-worker `CARGO_TARGET_DIR` seeded by copying the main
-checkout's `target/` with `cp -c` (APFS clone: instant, no space until written), and `npm ci`
-with the shared npm cache. This is the biggest practical risk to "spawn 6 workers" feeling fast.
-Measure it in spike 4 (§13).
+A fresh worktree has no `node_modules` and no `target/`. Sharing one `CARGO_TARGET_DIR`
+serializes every build on cargo's lock. The setup command is the place for this, plus two
+defaults the sheet offers when it detects them:
+
+- **Rust: a per-worker `CARGO_TARGET_DIR` with a slim seed.** maiTerm copies, with `cp -c` (an
+  APFS clone), only `target/debug/.fingerprint/`, `target/debug/build/` and
+  `target/debug/deps/*.{rmeta,rlib,dylib,d}`, ideally from a check-only target dir. Never a clone
+  of the whole `target/`: this repo's is 330 GB in about 790k files, and the clone (279 s) plus
+  its first check (101 s) is worse than a cold build (about 50 s and 250 CPU-seconds). The slim
+  seed copies in 40 s and its first check takes 24 s, with the CPU spent only on the crate
+  itself, which rebuilds because its fingerprint includes the worktree path (spike 4, §13.1).
+- **npm: `npm ci` with the shared npm cache.** About 2 s; its cost is negligible.
 
 The shared caches sit outside the worker's folders (`~/.cargo` registry and git dirs, the npm
-cache, sccache's dir), so the sandbox's write allowlist names them explicitly, together with the
-per-worker target dir and temp (§6.7). Without that, a sandboxed `npm ci` or `cargo build` fails
-on its first cache write.
+cache, sccache's dir), and a sandboxed write outside the working folder is refused by default
+(§6.7), so the sandbox's write allowlist names them explicitly, together with the per-worker
+target dir. Without that, a sandboxed `npm ci` or `cargo build` fails on its first cache write.
 
 ### 6.6 Trust
 
-A worktree is its own git root, and Claude's trust walk stops at the git root (the
-trust-dialog memory). **Every new worktree would raise "Do you trust this folder?"**, and so
-would the Hive's own folders under app data. Nothing automated may confirm that dialog
-(`trust_dialog_open`, root CLAUDE.md). The human already chose these folders by creating the
-Hive. So **maiTerm itself** (not an agent, which the permission classifier rightly refuses as
-"Security Weaken") writes `hasTrustDialogAccepted` for the folders it creates.
+Claude raises "Do you trust this folder?" for a folder it has no trust entry for, and nothing
+automated may confirm that dialog (`trust_dialog_open`, root CLAUDE.md). How Claude decides,
+as measured on 2.1.309 (spike 2, §13.1):
 
-- **Which folders.** The Hive's own folders under app data, the coordinator's read copies, and a
-  worker's own worktrees, written when they're created at the landing target's tip (the worker
-  can't later add hooks there: `.claude/settings*.json` and `.mcp.json` are on its `denyWrite`,
-  §6.7). **Never a worktree checked out at a commit that
-  isn't already on the landing target**, whoever it's for: trusting a folder lets its project
-  hooks, `.mcp.json` and settings run unseen, outside the Bash sandbox, and an unlanded branch is
-  worker-authored. A **reviewer's** worktree of an unlanded branch therefore gets no trust entry,
-  and the reviewer is launched with project settings off (`--setting-sources user`), so the
-  branch's `.claude/settings.json` hooks and `.mcp.json` never load (§7.7). A reviewer whose
-  launch would raise the trust dialog is a launch failure, never a dialog anything answers.
-- **Every account root, not one.** A respawn after an account switch, or a resume, can come up
-  under a different account than the one the folder was made under. So the entry is written to,
-  and removed from, the `.claude.json` of **every** root `Homes::real()` covers (`accounts/`,
-  per-account roots), through relocate's change-detecting `update_file`
-  (`relocate/agents.rs:118-147`) lifted into a shared helper. Live Claude sessions rewrite that
-  file from stale copies (`accounts/mod.rs:179-188`), so a naive read-modify-write would lose to
-  them.
+- **Trust is read only from the launching root's `.claude.json`**
+  (`$CLAUDE_CONFIG_DIR/.claude.json` under a managed account). An entry only in `~/.claude.json`
+  doesn't count for a managed account.
+- **Entries are keyed by realpath.** A key spelled through a symlink doesn't count, so maiTerm
+  canonicalizes a path before writing it.
+- **Trust on a main checkout covers all its linked worktrees.** Claude maps a worktree to its
+  main repo. The reverse doesn't hold, and a worktree session files its project data under the
+  main repo's key, creating that key itself (with trust false) if it's missing.
+
+So **a worktree of a repo the human already trusts needs no trust write at all**, and that is
+the usual case: the coordinator's read copies, every worker worktree and every temporary land
+worktree come up without the dialog. For a repo the human hasn't trusted, the entry that would
+count is the main repo's, which also trusts the human's own checkout; the Create sheet says the
+repo isn't trusted, and trusting it is the human's act, not maiTerm's (not measured beyond the
+mapping above; the conservative choice).
+
+**maiTerm writes trust only for Hive folders that aren't worktrees**: the coordinator's `home/`
+and a scratch-only worker's `scratch/`, which it creates itself. The human chose the Hive by
+creating it, so **maiTerm itself** (not an agent, which the permission classifier rightly refuses
+as "Security Weaken") writes `projects["<realpath>"].hasTrustDialogAccepted = true` for them.
+
+- **Trust doesn't keep a worker's branch out.** Since every worktree inherits its repo's trust,
+  an unlanded, worker-authored branch is trusted too, a reviewer's included. Trust lets a
+  folder's project hooks, `.mcp.json` and settings run unseen, outside the Bash sandbox, so the
+  safeguards are elsewhere: no worker can write `.claude/**` or `.mcp.json` (the mandatory
+  Write/Edit deny rules and `denyWrite` of §6.7), and **reviewers launch with
+  `--setting-sources user`**, so the reviewed branch's project hooks, settings and MCP servers
+  never load (§7.7). A reviewer whose launch would raise the trust dialog is a launch failure,
+  never a dialog anything answers.
+- **Every account root that needs one.** A respawn after an account switch, or a resume, can
+  come up under a different account than the one the folder was made under, and the seed-once
+  merge in `accounts/mod.rs` carries only `mcpServers`, never a later trust write. So an entry
+  maiTerm writes goes into the `.claude.json` of **every** root `Homes::real()` covers
+  (`accounts/`, per-account roots), through relocate's change-detecting `update_file`
+  (`relocate/agents.rs:118-147`) lifted into a shared helper. Claude 2.1.309 re-reads and merges
+  rather than writing back a stale copy (the entry survived a storm of six sessions); the helper
+  covers the small unlocked race that remains.
 - **Re-verified before every launch** in a Hive folder, under the account that launch will use.
   A missing entry is re-written before the agent starts, never discovered as a dialog on screen.
 
-Removal happens when the folder is removed. Spike 2 (§13) confirms the write suppresses the
-dialog under a managed account, survives concurrent writers, and holds across an account switch.
+**Removal** happens when the folder is removed, and deletes only the keys maiTerm wrote, never
+Claude's own entry for a repo (which a worktree session creates itself). A respawn after an
+account switch wasn't exercised in spike 2; the build step's acceptance test covers it.
 
 ### 6.7 Isolation: what the sandbox contains, and what it doesn't
 
@@ -664,23 +697,32 @@ resume and relaunch, §11.1):
 
 - `failIfUnavailable: true`: without it, a machine where the sandbox can't start runs every
   command **unsandboxed, silently**. With it, the worker fails to start and its card says why.
+  (Its failure path couldn't be forced on macOS, spike 10, §13.1.)
 - `allowUnsandboxedCommands: false`: by default a blocked command is retried with
   `dangerouslyDisableSandbox`, which turns every block into an escape.
-- `strictAllowlist: true`: otherwise, in auto mode, Claude names extra hosts per command for the
-  classifier, and the allowlist is advisory.
+- `strictAllowlist: true`: without it, auto mode widened `allowed_domains` per call and got
+  through (spike 10, §13.1). With it, a host off the list gets a 403 and a `<sandbox_violations>`
+  note, with no retry and no prompt.
 
 **What it contains: shell commands only** (Bash, PowerShell, Monitor). For those, writes are
-limited to `allowWrite` and network to `allowedDomains`.
+limited to the working folder plus `allowWrite`, minus `denyWrite`, and network to
+`allowedDomains`. A write outside the working folder is refused by default, `$HOME` included
+(spike 10 re-run, §13.1), so `allowWrite` names only what lies outside it and must be writable.
 
 **What it does not contain**, and what bounds each instead:
 
 | Outside the sandbox | Bounded by |
 |---|---|
-| **Write and Edit** tools | Permission rules: maiTerm adds `Edit`/`Write` deny rules for every path outside the worker's writable folders (its worktrees and `scratch/`, the same set as `allowWrite`) to the launch settings, and the worker's PreToolUse hook (§6.8) refuses a Write/Edit whose path resolves outside them. Both, since a deny rule is a glob and the hook reads the real path |
-| **WebFetch** | `allowedDomains` doesn't limit it. Permission rules: WebFetch is allowed only for the same host list |
-| **MCP servers** (generators, maiTerm's MCP proxy) | They run in maiTerm's or their own process. Bounded by the budget (§10.3) and by what the proxy serves. The proxy is **not** on the shell allowlist: an agent reaches it as an MCP server, never by `curl` |
-| **Hooks** (project and user) | Not sandboxed at all. That's why trust is never written for unlanded worktrees (§6.6), reviewers run with project settings off, and `.claude/settings*.json` and `.mcp.json` are on every worker's `denyWrite` |
+| **Write and Edit** tools | **The Write tool ignores the sandbox**: in auto mode it wrote `.claude/settings.json` and another repo's `.git/config` with no prompt (spike 10, §13.1). So `Write`/`Edit` deny rules in the launch settings are **mandatory**, for `.claude/**`, `.mcp.json` and every repo's `.git/{config,hooks/**,info/**}`, the gallery and the other `denyWrite` paths below. They must use the `//` form for an absolute path, `Write(//abs/**)`: `Edit(/abs/**)` matches nothing (spike 14). The worker's PreToolUse command hook (§6.8) also refuses a Write/Edit whose real path resolves outside its folders, since a deny rule is a glob and the hook reads the path |
+| **WebFetch** | **It escapes the allowlist**: in auto mode it fetched an unlisted host despite an allow rule naming one domain, and `deny: ["WebFetch(domain:*)"]` also cuts the sandbox's own network (spike 10). So WebFetch is **removed** from a worker whose role doesn't need it (`--disallowedTools`). One that needs it gets a PreToolUse command hook on WebFetch that refuses any host not on its `allowedDomains` |
+| **MCP servers** (generators, maiTerm's MCP proxy) | They run in maiTerm's or their own process. Bounded by the budget (§10.3), by what the proxy serves, and by `--strict-mcp-config` with only the servers the worker needs (§6.8). The proxy is **not** on the shell allowlist: an agent reaches it as an MCP server, never by `curl` |
+| **Hooks** (project and user) | Not sandboxed at all. Every worktree inherits its repo's trust (§6.6), so the bounds are that no worker can write `.claude/**` or `.mcp.json` (the deny rules above plus `denyWrite`) and reviewers run with `--setting-sources user`. maiTerm's own hooks rely on running outside the sandbox: they are `type:"command"` (§6.8, §11.1) |
 | **Commands maiTerm runs for a worker** (`hiveRun` jobs, setup, land checks, services on its branch) | These run in maiTerm's PTYs, not Claude's. maiTerm applies the **same sandbox profile** at spawn (§6.8), so nothing the worker can name runs with more than the worker has |
+
+**Edit deny rules alone don't hold a path.** With `Write`/`Edit` denied on a folder, Bash `cp`
+into it was refused but `python3 -c "open(…,'w')"` got through (spike 14, §13.1). So every path
+denied to Write/Edit is also on the sandbox's `denyWrite`, and the reverse: each layer covers
+the other's gap.
 
 Media CLIs (ffmpeg, ImageMagick, sox, Blender) stay sandboxed like any command: they run inside
 the worker's folders because `allowWrite` names them, not because they're exempt. `excludedCommands`
@@ -689,27 +731,62 @@ inside its folders".
 
 **The write allowlist** is derived per worker in Rust, never typed:
 
-- `allowWrite`: the worker's worktrees and `scratch/`; for each **secondary** repo (an `--add-dir`
-  worktree), that repo's `objects/`, `refs/`, `logs/`, `packed-refs` and `worktrees/<this
-  worktree>/` (Claude's own git-worktree exception covers only the working-directory repo, so
-  without these a second repo can't commit); the cargo registry and git dirs, the npm cache,
-  sccache's dir, the per-worker target dir, and temp (§6.5).
-- `denyWrite`, explicitly: every repo's `config`, `hooks/**` and `info/**`, other worktrees'
-  admin dirs, `.claude/settings*.json` and `.mcp.json` in every worktree, the gallery (§6.3), and
-  the human's checkouts.
+- `allowWrite`: the worker's worktrees other than its working folder, its `scratch/`; for each
+  worktree, the main repo's git entries below; the cargo registry and git dirs, the npm cache,
+  sccache's dir and the per-worker target dir (§6.5).
+- **A linked worktree's git entries.** A Hive worktree is a linked worktree of the human's repo,
+  whose `.git` isn't otherwise writable. For worker branch `B` in worktree `N`, a commit needs
+  exactly (spike 10 re-run, §13.1):
+  - `allowWrite`: `<main>/.git/worktrees/N`, `<main>/.git/objects`, `<main>/.git/refs/heads/B`,
+    `<main>/.git/refs/heads/B.lock` and `<main>/.git/logs/refs/heads/B`;
+  - `denyWrite`: `<main>/.git/{hooks,config,info}` and
+    `<main>/.git/worktrees/N/{commondir,gitdir,config.worktree}`.
+
+  The branch entries are **per file, never the `refs/heads` folder**, so a worker can't move
+  Base or another worker's branch. `packed-refs` is left out: the commit still succeeds, with a
+  harmless error. `objects/` has to be writable, so a worker writes into the shared main repo's
+  object store: a residual risk to that store, not a boundary. maiTerm
+  creates the branch before launch, since a slashed name needs its parent folder. The same set
+  is written for the primary worktree as for secondary ones: Claude protects the working-folder
+  repo's `.git/hooks` and `config` itself, but not an `--add-dir` repo's, where Bash wrote a hook
+  and the Write tool overwrote `.git/config` (spike 10).
+- `denyWrite`, explicitly, on top of those: every repo's `.git/{config,hooks,info}`, other
+  worktrees' admin dirs, `.claude/**` and `.mcp.json` in every worktree, the gallery (§6.3), the
+  hook scripts of §6.8 and any local-path git remote (§7.3). Each also has its
+  `Write(//…)`/`Edit(//…)` deny rule (above).
+- **The human's checkouts** get a `Write(//…)`/`Edit(//…)` deny rule on the whole checkout. In
+  the sandbox they are refused by default (outside every working folder) and aren't put on
+  `denyWrite` whole, since that would also cover the `.git` entries a worker's commit needs.
 - maiTerm's own git calls on worker content pass `-c core.fsmonitor=false -c
   core.hooksPath=/dev/null`, so a hook or fsmonitor a worker planted never runs as maiTerm.
 
-**Localhost** is closed by default. On macOS, reaching a local port needs `allowLocalBinding`,
-which opens **every** port, including maiTerm's 8765 and the MCP proxy. So a worker reaches local
-services through MCP or `hiveRun` jobs (§6.8), and `allowLocalBinding` is an explicit per-Hive
-widening in Hive settings, labelled as opening all local ports.
+**Temp is shared, and is not a boundary.** Sandboxed Bash always sees
+`TMPDIR=/tmp/claude-<uid>`, whatever maiTerm sets, and that folder is writable by **every**
+sandboxed session of the same user: every worker of every Hive and the human's own sessions. It
+can't be denied either: Claude writes its cwd file there, and denying it breaks every Bash call
+(spike 10 re-run, §13.1). So:
 
-**A block is a blocker, not a retry.** A PostToolUse detector on the worker's own hook recognises
-a sandbox refusal (a blocked host or path) and turns it into a worker blocker naming the host or
-path. It goes to the coordinator, which can't widen the sandbox and raises its own blocker to
-the human (§7.4); the fix is in Hive settings (§14.16). Spike 10 (§13) proves a blocked host
-ends as a blocker.
+- worktrees, `scratch/` and anything a result depends on **never live under it**;
+- maiTerm sets `CLAUDE_CODE_TMPDIR` per worker (`wt.noindex/<worker>/claude-tmp/`, §6.2), which
+  moves Claude's own state (tasks, sockets) out of the shared folder;
+- briefs say `mktemp -p "$TMPDIR"` (plain `mktemp` fails in the sandbox) and that anything in
+  temp is visible to, and changeable by, every other worker.
+
+**Localhost** is closed by default (measured, spike 10). Two settings open it, and both open
+**every** port, maiTerm's 8765 and the MCP proxy included: `allowLocalBinding: true`, and a bare
+`127.0.0.1` in `allowedDomains` (spike 9). So a worker reaches local services through MCP or
+`hiveRun` jobs (§6.8), and maiTerm's own hooks don't need localhost (they are command hooks,
+§6.8). If a Hive ever needs a local port, it's opened **by port only**, `127.0.0.1:<port>`, as an
+explicit per-Hive widening in Hive settings, never for maiTerm's MCP, proxy or maiLink port.
+Bash can reach that port through the sandbox's proxy, so the service there must not trust a
+local caller.
+
+**A block is a blocker, not a retry.** The detector is a **`PostToolUseFailure` command hook**
+on the worker: it parses the `<sandbox_violations>` note in the failed call's output and turns
+it into a worker blocker naming the host or path. PostToolUse doesn't fire for the failure, and
+http hooks don't arrive from a sandboxed tab (spike 10, §13.1). The blocker goes to the
+coordinator, which can't widen the sandbox and raises its own blocker to the human (§7.4); the
+fix is in Hive settings (§14.16).
 
 **Native Windows** has no Claude sandbox. With `failIfUnavailable`, a Hive worker can't start
 there; the Create sheet says so up front rather than offering an unsandboxed Hive (the
@@ -818,21 +895,44 @@ id, since a reload mints a new tab id.
   none waits forever on a result that will never come. Activity entries for those jobs are
   cleared.
 
-**It's enforced, not requested.** A worker's shell call that runs a queued command directly is
-**denied by its PreToolUse hook**, with the reason "run this through hiveRun". The deny must
-**fail closed**: maiTerm's global PreToolUse is a plain http hook (`lockfile.rs:540`), and a
-connection failure, a timeout (600 s by default) or a non-2xx lets the call through. So every
-Hive agent gets its **own** hook through the launch's `--settings` (on a worker it denies queued
-commands; on every Hive tab it carries §7.3's push refusal), leaving the global hook alone:
+**The deny is a speed bump and an audit log, not a guarantee.** A worker's shell call that runs
+a queued command directly is **denied by its PreToolUse hook**, with the reason "run this
+through hiveRun", and every refusal is written to the run log. Measured (spike 9, §13.1):
 
+- **A cooperative model stops**, and the hook catches the obvious wrappers: `sh -c`, `bash -lc`,
+  `env X=…`, aliases, full paths. Sonnet refused to route around it.
+- **It isn't a wall.** These ran past it: a split string (`c=car; ${c}go test`), `base64 -d | sh`,
+  a subcommand alias (`cargo t`), a script written with the Write tool and run as `./t.sh` (the
+  hook sees only that), and `git send-pack`. No pattern match on a command line closes that list.
+
+So nothing in the design relies on the deny. **What limits a worker that goes around it is the
+sandbox and the queue's resources**: a bypassed `cargo test` still runs only inside the worker's
+sandbox (§6.7: its folders, its network allowlist, no local ports), and the shared things the
+queue schedules (the dev server's ports and data folder, the GPU, a namespace's migrations) are
+maiTerm's services, which a worker can't bind, start or retarget except through the queue. A
+bypass costs the machine an unscheduled run, which the memory-pressure ceiling below still
+bounds, and it's on the record. Everything that isn't queued runs freely, inside the sandbox.
+
+**The hook is a `type:"command"` hook, and fails closed.** maiTerm's global PreToolUse is a plain
+http hook (`lockfile.rs:540`), and a connection failure, a timeout (600 s by default) or a non-2xx
+lets the call through. Worse, **the sandbox breaks localhost http hooks**: in a sandboxed tab
+every `type:"http"` hook to 127.0.0.1 fails, so with `onFailure:"block"` every Bash call is
+blocked, and PostToolUse and Stop never arrive (spike 9). Hooks themselves run outside the
+sandbox, so a command hook reaches maiTerm with no allowlist entry. So every Hive agent gets its
+**own** hook through the launch's `--settings` (on a worker it denies queued commands; on every
+Hive tab it carries §7.3's push refusal), leaving the global hook alone:
+
+- a **maiTerm-owned script**, at a path outside every agent's writable paths and on every
+  `denyWrite` (§6.7), that forwards the event to maiTerm and **exits 2 on any failure** (maiTerm
+  down, slow or answering non-2xx);
 - `onFailure: "block"`, a short timeout, matcher `Bash|PowerShell` (plus `Monitor` once proven);
   the same hook carries the Write/Edit path check (§6.7);
-- a URL that survives a maiTerm restart (a port walk must not strand it);
+- the script finds maiTerm's current port on every call, so a restart or a port walk can't
+  strand it;
 - workers are refused on a Claude older than 2.1.295, where `onFailure` doesn't exist.
 
-Spike 9 (§13) shows the deny holds with maiTerm down or slow, and that a worker doesn't route
-around it with `sh -c` or a script file. Everything that isn't queued runs freely, inside the
-sandbox.
+With `onFailure:"block"`, a closed port, a timeout and an HTTP 500 all blocked the call; without
+it, the call ran (spike 9). Every other hook a Hive tab needs is a command hook too (§11.1).
 
 **Land checks can be batched** (a merge queue, like GitHub's or bors). Land checks are the
 heaviest runs, and they're one at a time per repo. A batch is made only of workers **already
@@ -855,15 +955,24 @@ passed to `hiveLand`** (§8.1), never of workers that are merely Reported: revie
 When everything passes, N workers cost one suite instead of N. Batching comes after per-worker
 landing works (§16), not before it.
 
-**The machine sets the ceiling.** Rust reads CPU load and macOS memory pressure. Under
-pressure it lowers the heavy resources' capacity and the effective worker cap, starts nothing
-new, and the header says "Throttled · memory pressure". The agents themselves aren't free
-either. Each Claude session is its own process, which is why the worker cap exists at all.
-What one costs here is spike 8 (§13).
+**The machine sets the ceiling.** The agents themselves aren't free. A Claude session plus its
+MCP-server children (a median of seven) is a median 0.9 GB, p90 1.1 GB, and about 2 GB for a
+long session; idle, it uses about 0% CPU, so the cost is what it runs (spike 8, §13.1). So:
+
+- **The default worker cap is 4.** The sheet's ceiling scales at about **one worker per 16 GB
+  of RAM above a 32 GB reserve**, and never more than **ncpu/4**; a cap set above it says so.
+- **Workers launch with `--strict-mcp-config`** and only the MCP servers they need (maiTerm's,
+  and the generators the role uses), since the MCP children are half a session's memory.
+- **Pressure** is read from `kern.memorystatus_vm_pressure_level` and the free-memory
+  percentage: at level 2 or more, or under 25% free, Rust starts nothing new and lowers the
+  effective worker cap; at level 4, or under 10% free, the heavy resources drop to one each. The
+  header says "Throttled · memory pressure".
+- **CPU is read as idle %, never load average.** With 69 sessions running, load average was 80
+  while the CPU was 67% idle. `cargo`'s capacity of 2 stands.
 
 **Shared caches** cut the remaining cost: sccache across worktrees for Rust (each worktree's
-`target/` lock remains, but compiled crates are shared), the npm cache, and the APFS-clone
-seeding of §6.5.
+`target/` lock remains, but compiled crates are shared), the npm cache, and the slim APFS-clone
+seed of §6.5.
 
 **maiTerm as its own pilot repo** needs one change first: a `tauri:dev` instance must accept a
 data-folder and port override. Today two instances share `com.aiterm.dev` and ports, including
@@ -921,7 +1030,8 @@ A branch with no worktree yet gets one, never by switching the human's own check
 other agents are working in it:
 
 - An **existing checkout of that branch** (a Hive worker's worktree, say) is used as it is.
-- Otherwise maiTerm makes a **detached** worktree under the app's data folder, reused next time
+- Otherwise maiTerm makes a **detached** worktree under the app's data folder, in a `.noindex`
+  folder so Spotlight leaves it alone (§6.2), reused next time
   and removed when its branch is gone. Detached means it doesn't move when the branch does, so
   before each start maiTerm runs `git checkout --detach <branch>` there to bring it to the
   branch's tip, refuses (and says why) if that worktree has tracked changes, and the row shows
@@ -960,19 +1070,32 @@ after compaction through the SessionStart hook's additional context, as tab iden
 
 **What limits it is enforcement, not the brief.** The coordinator holds every key (spawn, land,
 answer a worker's prompt, deliver), and it reads worker text, which §7.4 names as a
-prompt-injection channel. So "it doesn't do the work itself" is also made true by its launch:
+prompt-injection channel. So "it doesn't do the work itself" is also made true by its launch.
+The settings below are the set that passed spike 13 (§13.1), plus the two additions that spike
+named. An earlier draft failed: `--tools` with a pattern in it silently dropped Bash, and
+`autoAllowBashIfSandboxed` (default true) ran any sandboxed Bash command regardless of the
+allow rules, while auto mode let Write go anywhere.
 
-- **Sandboxed** like a worker (§6.7), with its own profile: writes only to `coordinator/home/`
-  and the Hive's memory folder (§9); the repos and its read copies are read-only; no shell
-  network at all, since it reaches generators and maiTerm only as MCP servers.
-- **A restricted tool set**, by `--tools` / `--disallowedTools` (a removal, not an
-  `--allowedTools` pre-approval, which leaves the rest available): Read, Grep, Glob; Write and
-  Edit, with deny rules for every path outside its home and memory folder; maiTerm's hive,
-  gallery, task and notes tools; and `Bash(git diff:*)`, `Bash(git log:*)`, `Bash(git show:*)`
-  for review. No general Bash, no WebFetch.
-- The push deny rules and PreToolUse hook of §7.3 apply to it as to every Hive agent.
-
-Spike 13 (§13) checks that a coordinator launched this way can still plan, review and land.
+- **Tools, by name only:** `--tools "Read,Grep,Glob,Bash,Write,Edit"`. `--tools` takes tool names;
+  a pattern such as `Bash(git diff:*)` there silently drops the tool. Patterns belong in
+  permission rules.
+- **`--permission-mode dontAsk`.** It is what makes the allow list the whole list: a tool or
+  command not allowed is denied, never asked. AskUserQuestion is always denied under it, which
+  fits the coordinator asking only by blocker (§7.4).
+- **Sandbox** (§6.7), with its own profile: `autoAllowBashIfSandboxed: false`; `allowWrite` its
+  home (also passed as `--add-dir <home>`); `denyWrite` the repos and its read copies; network
+  `allowedDomains: []` with `strictAllowlist: true`, since it reaches generators and maiTerm only
+  as MCP servers. Its memory writes go through Claude's own exemption for `autoMemoryDirectory`
+  (§9; spike 1 saw it in every permission mode it tried, and step 3's acceptance test checks it
+  under dontAsk).
+- **`permissions.allow`:** `Bash(git diff *)`, `Bash(git log *)`, `Bash(git show *)`; Write and
+  Edit on its home (`//` form, §6.7); and the `mcp__maiterm__*` tools it uses (hive, gallery,
+  task, notes), which dontAsk would otherwise deny. Its cwd is `home/`, not a repo, so reviews
+  either run with a repo as cwd or need `git -C` rules (`Bash(git -C * diff *)` and the same for
+  `log` and `show`); the coordinator gets the `git -C` rules, since its home stays its cwd (§6.3).
+- **`permissions.deny`:** WebFetch and WebSearch, plus the push rules of §7.3.
+- The fail-closed command hook of §6.8 (carrying §7.3's push refusal) applies to it as to every
+  Hive agent.
 
 **Brief size.** Claude re-sends SessionStart context only up to 10,000 characters; above that it
 gets a file path and a 2,000-character preview, and a Hive's Instructions field alone can be
@@ -1045,17 +1168,29 @@ exists.
 | Undo a land | The coordinator in the default mode (`hiveUndoLand`); the human in the approval mode (§8.6) |
 
 **No Hive agent pushes.** Auto mode allows a push to any branch, the default branch included,
-with no prompt, so "Push after land = off" has to be enforced, not trusted:
+with no prompt, so "Push after land = off" has to be enforced, not trusted. **No deny rule
+reliably stops a push**: with `permissions.deny` on `git push`, `sh -c 'git push'`,
+`git -C . push` and `git -c x=y push` all reached a local bare remote, and `git send-pack`
+passes the hook too (spike 9, §13.1). What stops a push is that **no remote is reachable** from a
+Hive agent:
 
-- Every Hive agent's launch `--settings` carries `permissions.deny` for `Bash(git push:*)`,
-  `Bash(git remote:*)` and `Bash(gh pr merge:*)`.
-- The fail-closed PreToolUse hook (§6.8) is installed on **every** Hive tab, coordinator
-  included, and refuses `git push` and `git -C <path>` for a path outside the agent's folders,
-  however the command is spelled.
-- A repo's git remote is **not** on any worker's network allowlist (§14.16): a host allowlist
-  can't tell a fetch from a push. maiTerm does any fetch itself.
-- Spike 9 (§13) tries the bypasses: `sh -c "git push"`, a script file, an alias.
+- **Network remotes:** a repo's git remote host is **not** on any agent's network allowlist
+  (§14.16), and `strictAllowlist` holds it there (§6.7). A host allowlist can't tell a fetch from
+  a push anyway, so maiTerm does any fetch itself.
+- **Local-path remotes** (a bare repo on disk, `file://`): maiTerm reads each repo's remotes when
+  a folder is added, and every local-path remote goes on every agent's `denyWrite` (§6.7), with
+  its `Write(//…)`/`Edit(//…)` deny rules. It's outside the working folder, so a sandboxed write
+  there is refused by default as well.
 - `hiveLand`, `hiveUndoLand` and every other Hive tool refuse to push; only §8.5 does.
+
+Kept as speed bumps and an audit trail, not as the guarantee:
+
+- `permissions.deny` in every Hive agent's launch `--settings`, in the **space-wildcard form**:
+  `Bash(git * push*)`, `Bash(git push*)`, `Bash(git * send-pack*)`, `Bash(git remote*)` and
+  `Bash(gh pr merge*)`. A `:*` in mid-pattern matches nothing, and `Bash(git push:*)` and
+  `Bash(git -C * push:*)` both missed `git -C <wt> push` (spike 6, §13.1).
+- The fail-closed command hook (§6.8) on **every** Hive tab, coordinator included, refuses and
+  logs `git push`, `git send-pack` and `git -C <path>` for a path outside the agent's folders.
 
 **`galleryDeliver` limits** (Rust, before any byte is written; Export… is the human's for
 everything else):
@@ -1289,8 +1424,10 @@ without receipts is a report of hope.
 
 **Reviews.** For work where it matters (the role says so, or the Hive's instructions do), the
 coordinator spawns a **reviewer** with `reviews: <worker>`. It's a separate session with read
-access to the builder's worktree (a detached worktree of the builder's branch, with no trust
-entry and launched with project settings off, §6.6) and its assets.
+access to the builder's worktree (a detached worktree of the builder's branch) and its assets.
+That worktree inherits its repo's trust like every worktree (§6.6), so the dialog is no
+safeguard there: the reviewer launches with `--setting-sources user`, and the branch's project
+hooks, settings and MCP servers never load.
 It answers with `hiveVerdict`:
 
 - `pass`, or `fail` with issues, each one *expected / actual / evidence / fix / files*.
@@ -1497,7 +1634,7 @@ can touch anyone's uncommitted work (both behaviours checked in a scratch repo, 
 neither runs in the worker's live worktree:
 
 1. **Bring the reviewed commit up to date, in a temporary worktree.** maiTerm adds a detached
-   worktree at the pinned sha, seeded like a worker's (setup, cloned caches, §6.5), and runs
+   worktree at the pinned sha, seeded like a worker's (setup, the slim cache seed, §6.5), and runs
    `git merge <Base>` there. A conflict aborts, and `hiveLand` answers with the conflicting files.
    The coordinator tells the worker to resolve them in its own tree and report again, which means
    a new sha and a new review. The land check (if set) then runs on that merge, as a queued job
@@ -1680,18 +1817,28 @@ kind Claude honours, per the auto-memory memory). That gives, natively:
 Why redirect at all: Claude's default auto memory is keyed by git repository and **shared across
 all its worktrees**. Left alone, the Hive's workers would write into the human's everyday memory
 for that repo, which every other session there reads. With several folders there would also be
-several memories, not one. That's also why the redirect has to survive every relaunch: a
-resumed agent launched without it writes straight back into the human's per-repo memory, which
-is why every Hive relaunch goes through the launch builder (§11.1).
+several memories, not one. That's also why the settings are **re-passed on every launch**
+(§11.1). Resumed without them, an agent's recorded system prompt still names the Hive's folder,
+but the write exemption is gone (manual and acceptEdits deny the write; auto allows it), and
+after its **first compaction** the agent switches to the per-repo default and writes into the
+human's memory (spike 1, §13.1). The leak starts at that compaction, not at the resume, which
+makes it easy to miss; so every Hive relaunch goes through the launch builder.
 
 What maiTerm adds:
 
-- **Index rebuild.** Several agents editing one `MEMORY.md` at once lose updates. maiTerm
-  watches the directory and **regenerates its section of `MEMORY.md` from the files'
-  frontmatter** (name, description, a link). The brief tells agents to write files and leave the
-  index to maiTerm, but Claude's own auto memory writes a pointer line to `MEMORY.md` whenever it
-  saves a file, and no brief stops that. So the rebuild expects agent lines and absorbs them
-  rather than fighting them.
+- **`MEMORY.md` exists from the start.** maiTerm creates it, with its fences (below), when the
+  Hive is created (§3). Two sessions that both created it with Write lost one session's index
+  lines: a Write to a file that doesn't exist yet gets no "modified since read" check. Once the
+  file exists, Edit's stale-read check makes a second writer re-read, and nothing was lost
+  (spike 5, §13.1).
+- **Index rebuild.** Several agents editing one `MEMORY.md` at once can still lose updates.
+  maiTerm watches the directory and **regenerates its section of `MEMORY.md` from the files'
+  frontmatter**. It parses Claude's own formats: an index line is `- [Title](file.md) — hook`, and
+  a memory file carries frontmatter `name`, `description` and `metadata {node_type, type,
+  originSessionId, modified}`. The brief tells agents to write files and leave the index to
+  maiTerm, but Claude's own auto memory writes a pointer line in that format to `MEMORY.md`
+  whenever it saves a file, and no brief stops that. So the rebuild expects agent lines and
+  absorbs them rather than fighting them.
 - **The file has fenced sections.** Block HTML comments mark them:
 
   ```
@@ -1726,7 +1873,7 @@ What maiTerm adds:
   the original only if the file still has the content it read; if an agent wrote in between, it
   starts again from the new content. The Memory view's edits go through the same writer.
 - **Provenance comes from maiTerm, not from the file.** Frontmatter is agent-editable, so a
-  `writer:` field in it proves nothing. Rust keeps each file's provenance in its own record,
+  `writer:` field in it, or Claude's own `originSessionId`, proves nothing. Rust keeps each file's provenance in its own record,
   beside `memory/` and outside every agent's write scope: a change matched by path and time to a
   Write/Edit tool event (PostToolUse) from a Hive tab is that tab's (`coordinator` or the
   worker's title); an edit through the Memory view is `human`; anything else (a Bash write, a
@@ -1918,9 +2065,13 @@ while focus is inside `[data-gallery]`, never in an input, a textarea or a compo
 
 - Rust generates thumbnails and reads metadata when an asset is filed, off the main thread.
   - **macOS**: QuickLook (`qlmanage -t`, present on every Mac) gives thumbnails for images,
-    video, audio, PDF and Office files with no install.
+    video, PDF and Office files with no install, in 0.15–0.4 s each. For audio it gives only a
+    generic icon (spike 7, §13.1).
   - **ffmpeg/ffprobe**, when installed (they are here), add dimensions and duration, video hover
-    strips and audio waveforms.
+    strips and **audio waveforms** (`showwavespic`, about 0.1 s). A hover strip is made with
+    parallel seeks, one per frame, or `-skip_frame nokey` (keyframes only), **never a full
+    decode**: for ten frames of a long video, a full-decode `fps` filter took 3.6 s, parallel
+    seeks 1.4 s and keyframes 0.47 s. Without ffmpeg, an audio tile shows the kind icon.
   - **Windows/Linux**: ffmpeg plus the `image` crate.
   - With neither tool, a tile shows a kind icon and the title. Nothing is required.
 - **Serving.** Nothing serves local files to the webview today: the asset protocol isn't enabled
@@ -1959,17 +2110,20 @@ copied into a folder, with names given or derived from titles.
 ### 11.1 The Hive launch record, and one builder for every launch
 
 A Hive agent's first launch carries everything that makes it a Hive agent: `--add-dir` for each
-of its folders and the gallery (§6.3), `--settings` with the memory directory (§9), the sandbox
-(§6.7), the push denies (§7.3), its own fail-closed hook (§6.8) and the StopFailure hook (§7.8),
-its env, model and effort (§7.9), for the coordinator its restricted tool set (§7.1), and for a
-reviewer `--setting-sources user` (§6.6). Every **re**launch today uses the generic
+of its folders and the gallery (§6.3), with `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` so
+each added repo's `CLAUDE.md` loads (confirmed, spike 6, §13.1); `--settings` with the memory
+directory (§9), the sandbox and the Write/Edit deny rules (§6.7), the push denies (§7.3) and its
+hooks (below); `--strict-mcp-config` with only the MCP servers it needs (§6.8); its tool set
+(WebFetch removed where the role doesn't need it, §6.7; the coordinator's restricted set,
+§7.1); its env, including `CLAUDE_CODE_TMPDIR` (§6.7); `--model` and `--effort` (§7.9); and for
+a reviewer `--setting-sources user` (§6.6). Every **re**launch today uses the generic
 `claude --resume %claudeSessionId` (`agents/resume.ts:104`, `triggers/defaults.ts:5`): session
 restore (`+page.svelte:226-254`), tab and workspace resume (`workspaces.svelte.ts:369-374`),
 reload, a follow-up relaunch (`followUps.svelte.ts:534`), `recoverTab`. And agent init writes
 that generic command over the tab's auto-resume unless it's pinned
-(`agentState.svelte.ts:501-507`). After any restart, a worker would come back writing into the
-human's per-repo memory (the leak §9 exists to prevent), without its folders, and unsandboxed.
-So:
+(`agentState.svelte.ts:501-507`). After any restart, a worker would come back without its
+folders, unsandboxed, at medium effort, and, from its first compaction, writing into the
+human's per-repo memory (the leak §9 exists to prevent; spike 1, §13.1). So:
 
 - **Rust persists a launch record per task**, in `<app data>/hive/<id>/tasks/<task id>/`:
   runtime, model, effort, cwd, the current add-dirs, the env maiTerm sets, the setting sources,
@@ -1982,6 +2136,20 @@ So:
   `hiveRestartWorker` and waking a Done Hive (below). The folders and allowlist can change during
   a Hive's life (a folder added, the Tools row re-detected), and the builder reads the current
   record each time.
+- **Every relaunch re-passes everything**, the settings included, never only `--resume`. In
+  particular **`--effort` on every relaunch**: on resume Claude keeps the model but effort falls
+  back to medium (spike 11, §13.1). `--model` is passed too, so the record, not the resumed
+  session, decides it.
+- **Every hook in a Hive tab is `type:"command"`.** The sandbox breaks localhost http hooks
+  (spike 9, §13.1), so in a sandboxed tab maiTerm's global http hooks fail silently: no agent
+  state, no permission card, no Stop. The settings file therefore installs command-hook versions
+  of all of them: maiTerm's state, permission-ledger and PreModelSwitch hooks, the fail-closed
+  PreToolUse deny (§6.8), the WebFetch host check and the `PostToolUseFailure` block detector
+  (§6.7), and the StopFailure hook (§7.8). Each is the same maiTerm-owned script, outside every
+  writable path and on `denyWrite`, that forwards to maiTerm and exits 2 on failure; the deny
+  hook also sets `onFailure: "block"`. The global http hooks still load from user settings there
+  and fail without effect (none of them blocks on failure); localhost is opened by port only, if
+  ever (§6.7), never to make them work.
 - **`hive_role` tabs skip the generic paths**: `handleEnableAutoResume` and the auto-resume
   template migration never touch them, so nothing writes a generic resume command over a Hive
   tab.
@@ -1989,9 +2157,11 @@ So:
   the card goes to **Failed** ("launch record missing"). It never falls back to a generic launch,
   because the fallback is exactly the silent leak above.
 
-Steps 3 and 4 (§16) aren't done until every relaunch path goes through the builder, and spike 1
-(§13) checks it after a suspend and resume, a maiTerm restart and a reload: `/memory` shows the
-Hive's directory, the add-dirs are present and the sandbox is on.
+Spike 1 proved the mechanism (`--settings` carries `autoMemoryDirectory` with no prompt in
+every permission mode). Steps 3 and 4 (§16) aren't done until every relaunch path goes through
+the builder, checked after a suspend and resume, a maiTerm restart, a reload and a `/compact`:
+`/memory` shows the Hive's directory, the add-dirs are present, the sandbox is on, the effort
+is the record's, and maiTerm still receives the tab's hook events.
 
 ### 11.2 Events
 
@@ -2340,8 +2510,7 @@ interactive run through `expect`.
     a cwd in the repo or `Bash(git -C * diff *)`-style rules for reviews. AskUserQuestion is always
     denied in dontAsk, which fits the blocker-only rule.
 
-**What these spikes change in the spec**, listed here and still to be applied to the sections
-themselves:
+**What these spikes change in the spec** (now applied to the sections themselves):
 - **§6.8 "It's enforced":** the deny is a `type:"command"` hook, outside every writable path and
   on `denyWrite`, that exits 2 on failure. It's a speed bump plus an audit log, NOT a guarantee:
   drop "doesn't route around it". The real limits are the sandbox and the resources.
@@ -2419,8 +2588,31 @@ account, with `expect`, 68–69 live sessions.
   `accounts/mod.rs` carries only `mcpServers`, not a later trust write. A respawn after an account
   switch wasn't exercised.
 
-**Not yet run:** the spike 10 re-run outside `/tmp/claude-<uid>` (writes outside the working
-folder refused by default; whether a secondary repo's objects need `allowWrite`).
+**Spike 10 re-run**, with scratch outside `/tmp/claude-<uid>` (git 2.54.0, macOS Seatbelt):
+- **Writes outside the working folder are refused** by default in auto and default mode
+  (`Operation not permitted`), including to `$HOME`.
+- **An `--add-dir` repo of the worker's own is writable**, and commits there work with no
+  `allowWrite`. Its `.git/hooks`, `config` and `info` are writable too, so each one needs an
+  explicit `denyWrite`.
+- **A linked worktree whose main repo isn't otherwise writable** needs, for worker branch B and
+  worktree N:
+  - `allowWrite` `<main>/.git/worktrees/N`, `<main>/.git/objects`, `<main>/.git/refs/heads/B`,
+    `<main>/.git/refs/heads/B.lock` and `<main>/.git/logs/refs/heads/B`;
+  - `denyWrite` `<main>/.git/{hooks,config,info}` and `worktrees/N/{commondir,gitdir,config.worktree}`.
+
+  Use per-file branch entries, never the `refs/heads` folder, so a worker can't move main or
+  another worker's branch. Leave out `packed-refs`: the commit still succeeds, with a harmless
+  error. `objects/` has to be writable, so a worker writes objects into the shared main repo.
+  maiTerm creates the branch before launch, since slashed names need their parent folder.
+- **A worker can't get its own temp.** Sandboxed Bash always sees `TMPDIR=/tmp/claude-<uid>`,
+  whatever is set. Denying that folder breaks every Bash call, because Claude writes its cwd file
+  there. `CLAUDE_CODE_TMPDIR` moves only Claude's own state (tasks, sockets), which is still worth
+  setting per worker. Plain `mktemp` fails in the sandbox, so briefs say `mktemp -p "$TMPDIR"`.
+  **Temp is shared across workers and is not a boundary**, which §6.7 has to say plainly.
+
+**All 15 spikes are done.** The corrections above are folded into the sections they affect: §6.5,
+§6.6, §6.7, §6.8, §7.1, §7.3, §7.7, §9 and §11.1, and with them §3, §6.2, §6.3, §6.9, §10.5,
+§14.16 and §16.
 
 ## 14. Decisions
 
@@ -2468,31 +2660,39 @@ Decided 2026-10-23:
       `allowUnsandboxedCommands: false` a blocked command is retried outside it; without
       `strictAllowlist` auto mode adds hosts per command.
     - **What it covers: shell commands only** (Bash, PowerShell, Monitor). Write/Edit, WebFetch,
-      MCP servers and hooks run outside it and are bounded as §6.7's table says (Edit/Write deny
-      rules plus the fail-closed hook's path check; WebFetch limited by permission rules to the
-      same hosts; MCP by the budget and the proxy; hooks by never trusting unlanded worktrees).
-      Commands maiTerm runs for a worker (`hiveRun`, setup, land checks, services on its branch)
-      get the same profile at spawn (§6.8).
+      MCP servers and hooks run outside it and are bounded as §6.7's table says (mandatory
+      `Write(//…)`/`Edit(//…)` deny rules, mirrored on `denyWrite`, plus the command hook's path
+      check; WebFetch removed, or gated by a command hook on its host; MCP by the budget, the
+      proxy and `--strict-mcp-config`; hooks by no worker writing `.claude/**` or `.mcp.json` and
+      reviewers running with `--setting-sources user`). Every hook maiTerm installs is
+      `type:"command"`, since the sandbox breaks localhost http hooks (§11.1). Commands maiTerm
+      runs for a worker (`hiveRun`, setup, land checks, services on its branch) get the same
+      profile at spawn (§6.8).
     - **Network allowlist:** each detected generator's API host (Higgsfield, fal.ai, Kling,
       WaveSpeed, Kie.ai) and the package registries. **Not** maiTerm's MCP proxy (agents reach it
       as an MCP server, never by shell) and **not** any repo's git remote: a host allowlist can't
       tell a fetch from a push, so maiTerm does any fetch itself (§7.3). Every allowed host is
       also a residual exfiltration channel; the allowlist limits reach, it doesn't make content
       private.
-    - **Write allowlist and denylist** (§6.7): `allowWrite` is the worker's worktrees and
-      `scratch/`, each secondary repo's `objects/`, `refs/`, `logs/`, `packed-refs` and its own
-      `worktrees/<name>/`, the cargo registry and git dirs, the npm cache, sccache, the
-      per-worker target dir and temp. `denyWrite` is every repo's `config`, `hooks/**` and
-      `info/**`, other worktrees' admin dirs, `.claude/settings*.json` and `.mcp.json`, the
-      gallery and the human's checkouts.
-    - **Localhost** is closed by default: on macOS `allowLocalBinding` opens every local port,
-      maiTerm's 8765 and the proxy included. Local services (ComfyUI, a dev server) are reached
-      through MCP or `hiveRun`; `allowLocalBinding` is an explicit per-Hive widening, labelled
-      as opening all local ports.
+    - **Write allowlist and denylist** (§6.7): writes outside the working folder are refused by
+      default. `allowWrite` is the worker's other worktrees and `scratch/`; for each worktree,
+      the main repo's `.git/worktrees/<name>`, `.git/objects` and per-file entries for its own
+      branch (`refs/heads/B`, `refs/heads/B.lock`, `logs/refs/heads/B`), never `refs/heads` and
+      never `packed-refs`; the cargo registry and git dirs, the npm cache, sccache and the
+      per-worker target dir. `denyWrite` is every repo's `.git/{config,hooks,info}`, each
+      worktree's `commondir`, `gitdir` and `config.worktree`, other worktrees' admin dirs,
+      `.claude/**` and `.mcp.json`, the hook scripts, any local-path remote and the gallery; the
+      human's checkouts are refused by default and carry Write/Edit deny rules. Temp (`/tmp/claude-<uid>`) is shared by every sandboxed session and
+      can't be denied, so it is not a boundary and nothing a worker owns lives there.
+    - **Localhost** is closed by default: `allowLocalBinding` and a bare `127.0.0.1` in
+      `allowedDomains` each open every local port, maiTerm's 8765 and the proxy included. Local
+      services (ComfyUI, a dev server) are reached through MCP or `hiveRun`; a per-Hive widening,
+      if ever, opens one port (`127.0.0.1:<port>`), never maiTerm's own.
     - **Media CLIs** (ffmpeg, ImageMagick, sox, Blender) stay sandboxed and work because
       `allowWrite` names the worker's folders. `excludedCommands` is never used: an excluded
       command gets full disk and network.
-    - **A block is a blocker.** A PostToolUse detector turns a sandbox refusal into a blocker
+    - **A block is a blocker.** A `PostToolUseFailure` command hook parsing
+      `<sandbox_violations>` turns a sandbox refusal into a blocker
       naming the host or path, routed to the coordinator, which raises its own blocker to the
       human (§7.4); the fix is one click in Hive settings, not a worker working around it.
     - **Native Windows** has no Claude sandbox, so with `failIfUnavailable` a Hive can't run
@@ -2578,7 +2778,8 @@ several releases a day).
      `hive_role` tab going through it;
    - the coordinator's **sandbox profile and restricted tool set** (§7.1), the push denies and
      fail-closed hook (§7.3, §6.8);
-   - trust written to every account root (§6.6); `navigateToTab`/`openOnTab`, the Hive answers
+   - the command-type hooks (§11.1), and trust written where needed, to every account root
+     (§6.6); `navigateToTab`/`openOnTab`, the Hive answers
      of §5's call-site table (Loom, mesh, browser link, account-switch reload) and the lifecycle
      table (§11.2) for Hive tabs; the engine's `hive_role` skip in place of `overlord_exempt`
      (§7.3).
@@ -2589,8 +2790,8 @@ several releases a day).
    coordinator can't answer a prompt, so the gate returns false and every worker prompt reaches
    the human as today). This step owns:
    - the worker **sandbox settings** of §14.16 (allow/deny lists derived from folders and the
-     Tools row, localhost closed, `failIfUnavailable`), the Edit/Write deny rules and the
-     PostToolUse detector that turns a block into a blocker;
+     Tools row, localhost closed, `failIfUnavailable`), the mandatory Edit/Write deny rules and
+     the `PostToolUseFailure` command hook that turns a block into a blocker;
    - the **spawn reservation** (§7.8): cap, spawn counts and breaker taken under one Rust lock
      before any worktree exists, released on failure or timeout;
    - every worker launch and relaunch through the step 3 builder.
