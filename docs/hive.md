@@ -715,6 +715,89 @@ widens its own authority. Precedents are the human's own answers. Earned autonom
 changes a checkpoint only on the human's click. No precedent, memory or role can raise the cap,
 the budget, the fuses or a tool's reach.
 
+### 7.9 Model routing with Jev (Darryl's idea, 2026-10-23)
+
+Every worker is a full Claude session, and most of a Hive's cost is which model each one runs
+on. A rename across twenty files doesn't need the model a concurrency redesign needs. So before a
+worker launches, maiTerm decides its **tier** (model + effort). ruflo's router is a keyword table
+with a fixed 0.6 "confidence"; ours uses **Jev**, TypeSafe's System One model: a fast judgment
+model that returns typed answers with probabilities, not text. Designed from the live TypeSafe
+docs (intent routing, composite scoring, confidence).
+
+**Jev judges the task; code picks the model.** Asking Jev "which model?" would make it guess at
+model names, prices and capabilities, which change every few months and which it has no evidence
+for. Instead it answers narrow questions about the **task**, and a policy in code (weights and
+thresholds the human can see and change) turns those answers into a tier. This is TypeSafe's own
+guidance: keep policy in code, decompose broad judgments, keep the signals visible.
+
+**One request per spawn, all questions together** (they run in parallel; TypeSafe measured
+batching at about 12× cheaper and 10× faster than separate calls). The `state` is the worker's
+brief, role, acceptance criteria and folders, plus what's known about earlier attempts:
+
+| Question | Type | Levels (each a concrete situation, as the Score docs advise) |
+|---|---|---|
+| `reasoning_depth` | Score | mechanical edit or rename · routine change that follows an existing pattern · new logic in one area that needs several files understood · a design across subsystems, concurrency, or state that must not be lost · open-ended research or architecture with no pattern to follow |
+| `ambiguity` | Score | fully specified with checkable criteria · mostly specified, small gaps a reasonable reading fills · the goal is clear but the approach is open · only a goal: the worker decides what to build |
+| `blast_radius` | Score | docs, tests or scratch only · one module, trivially reverted · shared code with many callers · persisted state, auth, money, secrets or migrations |
+| `context_breadth` | Score | one file · one module · several subsystems · most of the codebase |
+| `needs_taste` | Noul | Does doing this well depend on aesthetic or editorial judgment (visual direction, copy, tone, a final pick among renders)? |
+
+**The policy (code, in Hive settings, defaults shown):**
+
+1. Normalise each Score to 0–1 and combine:
+   `difficulty = 0.35·reasoning_depth + 0.20·ambiguity + 0.25·blast_radius + 0.20·context_breadth`.
+2. Map to a tier:
+   - below 0.25 → **Light** (Haiku, low effort);
+   - below 0.50 → **Standard** (Sonnet, medium);
+   - below 0.75 → **Strong** (Sonnet, high);
+   - otherwise **Max** (Opus, high).
+
+   The tiers name model ids in settings, so a new model release is a settings change, not a code
+   change. The defaults are the current Haiku 5.5, Sonnet 5.5 and Opus 5.5.
+3. Hard rules, applied after the sum, because "any serious risk" is a condition, not a weight (the
+   docs' warning about compensating scores):
+   - `blast_radius` at its top level → at least **Strong**;
+   - `needs_taste` above 0.7 → at least **Strong**;
+   - a reviewer runs at least the tier of the worker it reviews.
+4. **Uncertainty rounds up.** Any Score with confidence below 0.5 moves the tier up one. Jev
+   telling us it can't tell is a reason to spend more, not to guess cheap.
+5. **The cascade.** A worker that fails review, or reports `blocked` because the task is beyond
+   it, comes back on its next attempt one tier up (the docs' cascade pattern). Three attempts
+   (§7.7) can therefore run Standard → Strong → Max.
+6. **Floors and ceilings** per Hive: "never below Sonnet", or "never Opus" when the budget is
+   tight.
+7. **The coordinator can override**, with `model` on `hiveSpawnWorker`. It must give a reason,
+   and the override is logged beside what the router would have picked.
+
+**It learns from outcomes, which is the real advantage over a keyword table.** Every spawn records
+the router's inputs and answers (each probability and confidence), the tier chosen, any override,
+and the outcome: first-attempt pass, attempts used, escalations, tokens and time, and whether the
+human stepped in.
+- **v1 shows it.** A routing report in the Hive's Memory view: "Light workers passed review first
+  time on 46 of 50 tasks with `reasoning_depth` below 1". The human tunes the weights and
+  thresholds from numbers.
+- **Later, it tunes itself.** The recorded probabilities are exactly the features TypeSafe suggests
+  for a small classical model trained on labelled outcomes. Its suggestions are proposals the human
+  applies (§7.8: learning never widens its own authority, and spending is authority).
+
+**Routing is an optimisation, never a dependency.** No TypeSafe key, the API unreachable, or an
+answer later than 3 s: the worker launches on the coordinator's choice, or the Hive's default
+tier, and the card says "routed by default". A spawn never waits on the router.
+
+**What leaves the machine.** The router sends each worker's brief (task text, file names, the
+role) to TypeSafe's API. That's a third party seeing the Hive's work, so routing is **off until
+the human turns it on**, with that sentence beside the switch. The API key lives in the OS
+keychain, never in preferences or `preference_meta`, never shown to an agent. It moves to the
+Secrets Vault when that's built.
+
+**Also later:**
+- The same shape can pick a **generator quality** for media: a draft-quality render for
+  exploration, the expensive model only for a final.
+- It could also decide whether a **question can be settled by a precedent** before it goes to the
+  coordinator.
+
+Both have to be measured before either is built.
+
 ## 8. Landing
 
 The local stand-in for Projects' pull requests. Both modes start the same way:
@@ -1103,6 +1186,12 @@ Each is an hour or less, and each can change the design:
 10. **The sandbox with media tools**: a sandboxed worker can reach a hosted generator's API,
     maiTerm's MCP proxy and localhost ComfyUI, and run ffmpeg on files in its own folders, with
     the allowlist built from the Tools row (§14.16).
+11. **Launching on a tier**: a hidden worker tab starts Claude on a chosen model and effort
+    (`--model`, and effort through `--settings` or the first `/effort`), and the transcript
+    confirms both (§7.9).
+12. **Router on real tasks**: run the five questions over ~30 finished tasks from this repo's own
+    task board, whose outcomes are known, and check that the tiers the policy picks look right
+    to the human before any Hive relies on them (§7.9).
 
 ## 14. Decisions
 
@@ -1148,6 +1237,10 @@ Decided 2026-10-23:
     run unrestricted inside the worker's own folders. A tool the sandbox blocks surfaces as a
     worker blocker naming the host or path, so the fix is one click in Hive settings, not a
     worker quietly working around it.
+17. **Model routing:** Jev judges each task on narrow dimensions; a visible policy in code picks
+    the tier; uncertainty and failures move up; outcomes are recorded so the weights can be tuned
+    from evidence. Off until the human turns it on, since briefs go to TypeSafe's API (§7.9).
+    Darryl's idea; the design follows the live TypeSafe docs.
 
 ## 15. Prior art: what Hive takes and what it leaves
 
