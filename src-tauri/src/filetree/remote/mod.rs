@@ -1070,6 +1070,11 @@ impl Remotes {
         Lease::new(c)
     }
 
+    /// A helper for `host` is running and answering now.
+    pub fn is_live(&self, host: &str) -> bool {
+        self.map.lock().get(host).is_some_and(|c| c.status() == Status::Live)
+    }
+
     /// The helper for `host`, made if there is none, held by nobody: it ends after the grace
     /// period like any other unless a root leases it.
     pub fn conn(&self, host: &str, lookup: Option<Lookup>) -> Arc<Conn> {

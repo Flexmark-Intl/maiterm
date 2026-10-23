@@ -445,7 +445,8 @@ pub fn resolve(state: &Arc<AppState>, ft: &super::FileTreeState, tab_id: &str, h
     match (&picked, inputs.pin.as_deref()) {
         (_, Some(pin)) => place_for(picked.as_ref().ok(), Some(pin)),
         (Ok(p), None) => {
-            if let Some(host) = &p.remote_host {
+            // Only looking: a host whose helper isn't up is not started (or waited on) for it.
+            if let Some(host) = p.remote_host.as_ref().filter(|h| !hints.passive || ft.remotes.is_live(h)) {
                 let chain = ssh_chain(&inputs, hints);
                 let paths: Vec<String> = chain.iter().map(|(c, _)| c.clone()).collect();
                 let lookup = super::remote::tunnel_lookup(state);

@@ -22,11 +22,13 @@
   let { anchor, onclose }: Props = $props();
 
   let el = $state<HTMLDivElement | null>(null);
-  let tabRoots = $state<{ place: TreePlace; tabs: { id: string; name: string }[] }[] | null>(null);
+  let tabRoots = $state<{ place: TreePlace; tabs: { id: string; name: string }[] }[]>([]);
+  /** Some tab hasn't answered yet: the list grows as they do. */
+  let looking = $state(true);
   const current = $derived(fileTreeStore.place?.place ?? null);
   const pinned = $derived(fileTreeStore.pinned);
   const recent = $derived(
-    fileTreeStore.recentPlaces.filter((p) => p !== current && p !== pinned && !tabRoots?.some((r) => r.place.place === p)),
+    fileTreeStore.recentPlaces.filter((p) => p !== current && p !== pinned && !tabRoots.some((r) => r.place.place === p)),
   );
 
   const pos = $derived.by(() => {
@@ -35,7 +37,8 @@
   });
 
   onMount(() => {
-    void fileTreeStore.tabRoots().then((r) => { tabRoots = r; });
+    let open = true;
+    void fileTreeStore.tabRoots((r) => { if (open) tabRoots = r; }).finally(() => { looking = false; });
     // Focus explicitly: Svelte's autofocus doesn't move focus off a keyboard-opened button.
     void tick().then(() => el?.querySelector<HTMLButtonElement>('button.item')?.focus({ preventScroll: true }));
     const onDown = (e: MouseEvent) => {
@@ -44,7 +47,10 @@
       onclose();
     };
     window.addEventListener('mousedown', onDown, true);
-    return () => window.removeEventListener('mousedown', onDown, true);
+    return () => {
+      open = false;
+      window.removeEventListener('mousedown', onDown, true);
+    };
   });
 
   function dotColor(tabId: string): 'accent' | 'green' | 'yellow' | null {
@@ -87,10 +93,8 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="switcher" role="menu" tabindex="-1" bind:this={el} style="left:{pos.left}px; top:{pos.top}px" onkeydown={onKeydown}>
   <div class="section">Tabs in this workspace</div>
-  {#if tabRoots === null}
-    <div class="empty">Looking…</div>
-  {:else if tabRoots.length === 0}
-    <div class="empty">No terminal tab has a folder yet.</div>
+  {#if tabRoots.length === 0}
+    <div class="empty">{looking ? 'Looking…' : 'No terminal tab has a folder yet.'}</div>
   {:else}
     {#each tabRoots as r (r.place.place)}
       <Tooltip text={fileTreeStore.displayRoot(r.place)} block>
@@ -105,6 +109,7 @@
         </button>
       </Tooltip>
     {/each}
+    {#if looking}<div class="empty">Looking…</div>{/if}
   {/if}
 
   {#if pinned}

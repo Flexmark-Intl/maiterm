@@ -28,6 +28,12 @@ pub struct PlaceHints {
     /// answer is wrong for the whole session.
     #[serde(default)]
     pub fresh: bool,
+    /// Only looking (the root switcher's list of every tab's folder): an ssh tab's host is
+    /// asked only when its helper is already up. Never starts a helper, never waits on a host
+    /// that is down; unasked, the first candidate is its own root, as when the host can't be
+    /// asked in time.
+    #[serde(default)]
+    pub passive: bool,
 }
 
 /// Where a tab's tree is rooted, and why.

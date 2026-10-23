@@ -978,6 +978,9 @@ export interface PlaceHints {
   prompt_cwd?: string | null;
   /** Bypass the 800 ms process-table cache: pass true on ssh start/exit edges. */
   fresh?: boolean;
+  /** Only looking (the root switcher): an ssh tab's host is asked only when its Files helper
+   *  is already up, so nothing starts a helper or waits on a host that is down. */
+  passive?: boolean;
 }
 
 /** Which folder a tab's tree shows (`ftResolvePlace`). */

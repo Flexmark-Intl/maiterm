@@ -2872,26 +2872,38 @@ function createFileTreeStore() {
     /** The followed agent can take these files in its composer (files on this computer). */
     get canAskAbout() { return !rootHost(); },
 
-    /** The roots of every terminal tab in the workspace, deduped, for the root switcher. */
-    async tabRoots(): Promise<{ place: TreePlace; tabs: { id: string; name: string }[] }[]> {
+    /** The roots of every terminal tab in the workspace, deduped, for the root switcher.
+     *  `onUpdate` gets the list so far, in tab order, as each tab answers: one slow host must
+     *  not hold back every other tab's folder. Resolved `passive`ly, so opening the switcher
+     *  never starts a helper on a host or waits on one that is down. */
+    async tabRoots(onUpdate: (roots: { place: TreePlace; tabs: { id: string; name: string }[] }[]) => void): Promise<void> {
       const ws = workspacesStore.activeWorkspace;
-      if (!ws) return [];
-      const out = new Map<string, { place: TreePlace; tabs: { id: string; name: string }[] }>();
+      if (!ws) return;
       const tabs = ws.panes.flatMap((p) => p.tabs).filter((t) => (t.tab_type ?? 'terminal') === 'terminal' && !t.service_id);
-      await Promise.all(tabs.map(async (t) => {
-        const osc = terminalsStore.getOsc(t.id);
-        try {
-          const p = await commands.ftResolvePlace(t.id, { osc_cwd: osc?.cwd ?? null, osc_host: osc?.cwdHost ?? null, prompt_cwd: osc?.promptCwd ?? null, fresh: false });
-          // A pinned workspace answers every tab with its pin, which says nothing new.
-          if (p.missing || p.source === 'pin') return;
+      const answers: (TreePlace | null)[] = tabs.map(() => null);
+      const publish = () => {
+        const out = new Map<string, { place: TreePlace; tabs: { id: string; name: string }[] }>();
+        tabs.forEach((t, i) => {
+          const p = answers[i];
+          if (!p) return;
           const hit = out.get(p.place) ?? { place: p, tabs: [] };
           hit.tabs.push({ id: t.id, name: t.name });
           out.set(p.place, hit);
+        });
+        onUpdate([...out.values()]);
+      };
+      await Promise.all(tabs.map(async (t, i) => {
+        const osc = terminalsStore.getOsc(t.id);
+        try {
+          const p = await commands.ftResolvePlace(t.id, { osc_cwd: osc?.cwd ?? null, osc_host: osc?.cwdHost ?? null, prompt_cwd: osc?.promptCwd ?? null, fresh: false, passive: true });
+          // A pinned workspace answers every tab with its pin, which says nothing new.
+          if (p.missing || p.source === 'pin') return;
+          answers[i] = p;
+          publish();
         } catch {
           /* a tab with no known folder isn't a root */
         }
       }));
-      return [...out.values()];
     },
 
     displayRoot(p: TreePlace | null): string {

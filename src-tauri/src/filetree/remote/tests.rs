@@ -409,6 +409,8 @@ fn a_remote_place_serves_the_same_tree_events() {
     let ack = ft.open_with("w", &place, vec![], rec.clone(), vec![], None).unwrap();
     assert!(ack.caps.remote && ack.caps.writable && ack.caps.git);
     assert_eq!((ack.root_native.as_str(), ack.sep.as_str(), ack.nfc_names), (t.to_str().unwrap(), "/", false));
+    // The root switcher's passive resolve asks only a host whose helper is up.
+    assert!(ft.remotes.is_live("me@here") && !ft.remotes.is_live("me@elsewhere"));
     // The ack names the host (the wrong-host guard is off for a subscription without it).
     let here = String::from_utf8(Command::new("hostname").output().unwrap().stdout).unwrap();
     assert_eq!(ack.remote_hostname.as_deref().map(shortname), Some(shortname(here.trim())));
