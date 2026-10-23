@@ -575,7 +575,7 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
 
     // Overlord standing instruction (docs/overlord.md §8): only when the feature is on AND
     // this tab's window actually has an Overlord workspace.
-    let (overlord_present, escalations_to_overlord) = {
+    let (overlord_present, escalations_to_overlord, is_overlord_agent) = {
         let app_data = state.app_data.read();
         let present = app_data.preferences.overlord_enabled
             && app_data.windows.iter().any(|w| {
@@ -593,7 +593,7 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
                 ws.overlord && ws.panes.iter().any(|p| p.tabs.iter().any(|t| t.id == tab_id))
             })
         });
-        (present, app_data.preferences.escalations_to_overlord() && !is_overlord_agent)
+        (present, app_data.preferences.escalations_to_overlord() && !is_overlord_agent, is_overlord_agent)
     };
     if overlord_present {
         out.push_str(
@@ -632,6 +632,18 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
              having seen your session: name things by what they are, never by a task id, and \
              say what any number or name from your own code or data refers to.",
         );
+        // One asker, one channel (2026-10-23): agents asked the same question as a blocker AND
+        // with AskUserQuestion, or a blocker AND a needs_human escalation, and the human was
+        // notified once per channel. Not for a tab told above to escalate to the Overlord
+        // instead, nor the Overlord agent, whose doctrine has it ask with AskUserQuestion.
+        if !(overlord_present && escalations_to_overlord) && !is_overlord_agent {
+            out.push_str(
+                " When you need your human to decide or do something, ask by blocking the task \
+                 with a `blocker`: that is the one way to ask. Do not also ask the same thing \
+                 with AskUserQuestion or in a replyToOverlord escalation, each of which notifies \
+                 your human again.",
+            );
+        }
     }
 
     // Workspace stack priming (docs/stack.md §6.2) — rendered from LIVE state, not static

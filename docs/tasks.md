@@ -332,6 +332,15 @@ TaskBlocker { kind, question, context?, options[{label, detail?, recommended?}],
 | `action` | only the human can do it: a sudo, a login, a payment | `command` |
 | `external` | waiting on something outside maiTerm: a review, CI, a person | the question says what |
 
+**A blocker is the one way an agent asks its human** (2026-10-23), while the task tools are on
+and the window's Overlord doesn't answer escalations (with it, a tab escalates and waits —
+docs/overlord.md §9.1.2). Agents asked the same question as a blocker AND with AskUserQuestion,
+or a blocker AND a `needs_human` escalation; each channel notified the human, so one question
+rang the phone twice, worded differently, and sat in the Decisions twice. The session priming
+(`session_priming_text`), the `blocker` field, `replyToOverlord` and the mesh opener all say it.
+The doorbell also drops a second push for the same tab within 30 s (docs/mailink-protocol.md
+§6), for agents that ask twice anyway.
+
 **Waiting on other tasks is not a kind.** It is derived from `blocked_by` as before, and
 `parseBlocker` refuses `dependency` with a pointer to `block_on`. Storing it would give one
 fact two sources, which would then disagree.

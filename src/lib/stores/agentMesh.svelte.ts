@@ -475,6 +475,12 @@ function createAgentMeshStore() {
     const spans = member.workspace
       ? ` This mesh spans several workspaces, so every agent is named "Workspace/Tab" (you are "${member.role}"). A bare tab name also works while no other workspace has a tab by that name.`
       : '';
+    // One channel per question. Agents put the same question to the human as a task blocker
+    // AND with AskUserQuestion, and the human was notified once per channel; with the task
+    // tools there, the blocker is the one (the session priming says the same, server.rs).
+    const reachHuman = preferencesStore.tasksEnabled
+      ? `when you need a decision, or are blocked on something only the human can resolve, put your task in Blocked with a \`blocker\` (updateTasks, or createTasks for a new one) — that is the ONE way to ask them: it reaches their board, the tab and their phone, and their answer is typed back to you. Do NOT also ask the same thing with AskUserQuestion, and do NOT just print the question to the terminal or write a "status" or "NEEDS DECISION" note — those are noise the human won't act on. If you have nothing the human must decide, stay silent.`
+      : `when you need a decision, or are blocked on something only the human can resolve, ASK with the AskUserQuestion tool — that is the ONE channel that reaches them (it also rings their phone via maiLink). Do NOT just print the question to the terminal, and do NOT write a "status" or "NEEDS DECISION" note — those are noise the human won't act on. If you have nothing the human must decide, stay silent.`;
     return (
       `⟦MESH⟧ You've joined a Mesh Workspace as "${member.role}"${where}. Every agent here is a peer AI agent (NOT your human operator); you can talk to any of them.${spans}\n\n` +
       `Your purpose: ${purpose || '(your human will tell you — ask if unclear)'}\n\n` +
@@ -484,7 +490,7 @@ function createAgentMeshStore() {
       `  - Reusing a thread keeps context together; near-duplicate labels are deduped automatically.\n` +
       `  - When a thread's work is done, its OWNER calls completeTopic(id) so peers stop replying. Don't reply just to acknowledge.\n` +
       `  - Tools: listBridgedPeers, listTopics, startTopic, completeTopic, sendToBridgedAgent (recipient = a peer's role or handle; topic = id or new label).\n\n` +
-      `Reaching your human: when you need a decision, or are blocked on something only the human can resolve, ASK with the AskUserQuestion tool — that is the ONE channel that reaches them (it also rings their phone via maiLink). Do NOT just print the question to the terminal, and do NOT write a "status" or "NEEDS DECISION" note — those are noise the human won't act on. If you have nothing the human must decide, stay silent.\n\n` +
+      `Reaching your human: ${reachHuman}\n\n` +
       `Don't message anyone yet. First check in with your human: confirm you've joined as "${member.role}", say what you'll own, and wait for direction.`
     );
   }
@@ -512,7 +518,8 @@ function createAgentMeshStore() {
   /** Prime a member on join: introduce it to the mesh once by injecting the opener. Idempotent
    *  within a session (`primed`) AND across restarts (persisted MESH_ONBOARDED_VAR) — a resumed
    *  agent already carries the opener in its transcript, so it's never re-introduced. No status
-   *  note is created; the human-facing channel is the agent's native AskUserQuestion (see opener). */
+   *  note is created; the human-facing channel is a task blocker, or AskUserQuestion with tasks off
+   *  (see opener). */
   async function tryPrime(tabId: string) {
     if (primed.has(tabId)) return;
     const ws = meshWorkspaceForTab(tabId);

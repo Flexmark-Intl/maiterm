@@ -704,7 +704,7 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
     // `blocker` (docs/tasks.md §3.1) is shared by createTasks and updateTasks.
     let blocker_schema = serde_json::json!({
         "type": "object",
-        "description": "Why this task is blocked when the reason is NOT another task: it puts the task in Blocked with your question on it, where the human sees it and answers it; the answer is typed back to you as a message starting \"[maiTerm] The human answered\", and the task moves back to Active. Use it whenever you stop on something only the human can settle — do not leave the question in your chat output, where it scrolls away. Waiting on other tasks is block_on, not this.",
+        "description": "Why this task is blocked when the reason is NOT another task: it puts the task in Blocked with your question on it, where the human sees it and answers it; the answer is typed back to you as a message starting \"[maiTerm] The human answered\", and the task moves back to Active. Use it whenever you stop on something only the human can settle — do not leave the question in your chat output, where it scrolls away. It is the one way to ask: do not also put the same question to the human with AskUserQuestion, which notifies them a second time for one question. Waiting on other tasks is block_on, not this.",
         "properties": {
             "kind": { "type": "string", "enum": ["decision", "action", "external"], "description": "'decision': the human has to choose (give options). 'action': only the human can do it — a sudo, a login, a payment (give the command if there is one). 'external': waiting on something outside maiTerm — a review, CI, another person." },
             "question": { "type": "string", "description": "One line the human can answer without scrolling back: 'Deploy the relay to production now?', not 'see above'. Write for someone who has not seen your session: the human never sees task ids, so name another task by its title, and say what any number or name from your own code or data is ('the \"remind after 3 days\" automation', not 'action 9')." },
@@ -944,7 +944,7 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
     tools.extend(serde_json::json!([
         {
             "name": "replyToOverlord",
-            "description": reply_to_overlord_description(escalations_to_overlord),
+            "description": reply_to_overlord_description(escalations_to_overlord, tasks_enabled),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1541,9 +1541,15 @@ fn browser_tools() -> Vec<Value> {
 /// decisions (docs/overlord.md §9.1.2). Exactly one asker per question: with the Overlord
 /// agent answering, the tab escalates and does NOT also ask its human; without, nobody answers
 /// an escalation, so the tab asks its human itself and `needs_human` is only a board note.
-fn reply_to_overlord_description(escalations_to_overlord: bool) -> &'static str {
+///
+/// Without the Overlord answering, the question goes on a task blocker when the task tools are
+/// there: an agent that also flagged it here with `needs_human`, or opened AskUserQuestion for
+/// it, rang the human's phone once per channel for one question.
+fn reply_to_overlord_description(escalations_to_overlord: bool, tasks_enabled: bool) -> &'static str {
     if escalations_to_overlord {
         "Report to this window's Overlord (the supervisor coordinating work across tabs). One shape, four uses: kind 'ready' when you come up, 'ack' when you finish something you were asked to do, 'status' for a state change worth recording (e.g. blocked), 'escalate' with needs_human when you need a decision before you can go on. The Overlord agent answers an escalation — typed into your tab as a normal message — and asks your human itself only when it must, so do NOT also ask your human the same question; wait for the answer. Keep summary under 280 chars."
+    } else if tasks_enabled {
+        "Report to this window's Overlord (the supervisor coordinating work across tabs). Three uses: kind 'ready' when you come up, 'ack' when you finish something you were asked to do, 'status' for a state change worth recording (e.g. blocked). Nobody here answers escalations: when you need your human to decide or do something, block your task with a `blocker` (updateTasks) — that is how they are asked. Do not also flag it here with needs_human, or ask it with AskUserQuestion: each one notifies them again for the same question. Keep summary under 280 chars."
     } else {
         "Report to this window's Overlord (the supervisor coordinating work across tabs). Three uses: kind 'ready' when you come up, 'ack' when you finish something you were asked to do, 'status' for a state change worth recording (e.g. blocked). Nobody here answers escalations: when you need a decision, ask your human directly, as you normally would. Keep summary under 280 chars."
     }
