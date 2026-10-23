@@ -31,7 +31,7 @@ fn rec(event: &serde_json::Value, tab: &str) -> HookRecord {
     let name = event["hook_event_name"].as_str().unwrap();
     let tool = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
     HookRecord {
-        phase: Phase::of(name).unwrap(),
+        phase: Phase::of(name, event).unwrap(),
         tab_id: tab.into(),
         session_id: event["session_id"].as_str().unwrap_or("s1").into(),
         runtime: "claude".into(),
@@ -63,9 +63,135 @@ fn stop(cwd: &str) -> serde_json::Value {
 
 #[test]
 fn the_raw_failure_event_is_kept_apart_from_success() {
-    assert_eq!(Phase::of("PostToolUseFailure"), Some(Phase::Post { failed: true }));
-    assert_eq!(Phase::of("PostToolUse"), Some(Phase::Post { failed: false }));
-    assert_eq!(Phase::of("Notification"), None);
+    let none = json!({});
+    assert_eq!(Phase::of("PostToolUseFailure", &none), Some(Phase::Post { failed: true }));
+    assert_eq!(Phase::of("PostToolUse", &none), Some(Phase::Post { failed: false }));
+    assert_eq!(Phase::of("Notification", &json!({ "notification_type": "permission_prompt" })), None);
+    assert_eq!(Phase::of("Notification", &json!({ "notification_type": "idle_prompt" })), Some(Phase::Idle));
+    assert_eq!(Phase::of("SubagentStop", &none), Some(Phase::SubagentStop));
+    assert_eq!(Phase::of("Interrupt", &none), Some(Phase::Interrupt));
+}
+
+fn idle(cwd: &str) -> serde_json::Value {
+    json!({ "hook_event_name": "Notification", "session_id": "s1", "cwd": cwd, "notification_type": "idle_prompt", "message": "Claude is waiting for your input" })
+}
+
+fn subagent_stop(agent: &str, cwd: &str) -> serde_json::Value {
+    json!({ "hook_event_name": "SubagentStop", "session_id": "s1", "cwd": cwd, "agent_id": agent, "agent_type": "general-purpose", "stop_hook_active": false })
+}
+
+/// A call as a subagent makes it: the parent's session, the subagent's `agent_id`.
+fn by_agent(mut event: serde_json::Value, agent: &str) -> serde_json::Value {
+    event["agent_id"] = json!(agent);
+    event
+}
+
+fn status_of(l: &AgentFiles, tab: &str, id: &str) -> String {
+    l.activity(tab, "session", true).unwrap().entries.into_iter().find(|e| e.tool_use_id.as_deref() == Some(id)).unwrap().status
+}
+
+fn running_shells(l: &AgentFiles) -> Vec<String> {
+    l.inner.lock().shells.iter().filter(|s| s.running()).map(|s| s.tool_use_id.clone()).collect()
+}
+
+#[test]
+fn a_denied_subagent_call_is_settled_when_the_subagent_stops() {
+    let l = ledger();
+    l.record(rec(&prompt("/repo"), "t1"));
+    l.record(rec(&by_agent(pre("Edit", json!({ "file_path": "/repo/a.ts" }), "e1", "/repo"), "a1"), "t1"));
+    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b1", "/repo"), "a2"), "t1"));
+    // Denied: no Post. The main agent's turn ending leaves a subagent's calls alone.
+    l.record(rec(&stop("/repo"), "t1"));
+    assert_eq!(status_of(&l, "t1", "e1"), "pending");
+    assert_eq!(running_shells(&l), vec!["b1".to_string()]);
+    l.record(rec(&subagent_stop("a1", "/repo"), "t1"));
+    assert_eq!(status_of(&l, "t1", "e1"), "failed");
+    assert!(l.active_tabs(&[PathBuf::from("/repo/a.ts")], false).is_empty(), "nothing in flight on it any more");
+    assert_eq!(running_shells(&l), vec!["b1".to_string()], "another subagent's shell call runs on");
+    l.record(rec(&subagent_stop("a2", "/repo"), "t1"));
+    assert!(running_shells(&l).is_empty());
+}
+
+#[test]
+fn an_agent_that_moves_on_has_left_its_denied_call_behind() {
+    let l = ledger();
+    l.record(rec(&prompt("/repo"), "t1"));
+    l.record(rec(&by_agent(pre("Edit", json!({ "file_path": "/repo/a.ts" }), "e1", "/repo"), "a1"), "t1"));
+    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b1", "/repo"), "a1"), "t1"));
+    assert_eq!(status_of(&l, "t1", "e1"), "failed", "Claude runs an edit on its own: a later call means it never ran");
+    // A read may run beside another call, so it is left alone; the Bash before it is over.
+    l.record(rec(&by_agent(pre("Read", json!({ "file_path": "/repo/b.ts" }), "r1", "/repo"), "a1"), "t1"));
+    l.record(rec(&by_agent(pre("Grep", json!({ "pattern": "x", "path": "/repo" }), "g1", "/repo"), "a1"), "t1"));
+    assert_eq!(status_of(&l, "t1", "r1"), "pending");
+    assert!(running_shells(&l).is_empty());
+    // Another agent's call is not this one's evidence.
+    l.record(rec(&pre("Edit", json!({ "file_path": "/repo/c.ts" }), "e2", "/repo"), "t1"));
+    l.record(rec(&by_agent(pre("Edit", json!({ "file_path": "/repo/d.ts" }), "e3", "/repo"), "a2"), "t1"));
+    assert_eq!(status_of(&l, "t1", "e2"), "pending");
+    // A Post that turns up after all still wins.
+    l.record(rec(&by_agent(post("Edit", json!({ "file_path": "/repo/a.ts" }), "e1", "/repo"), "a1"), "t1"));
+    assert_eq!(status_of(&l, "t1", "e1"), "ok");
+}
+
+#[test]
+fn codex_calls_may_overlap_so_a_new_one_settles_nothing() {
+    let l = ledger();
+    let mut r = rec(&pre("shell", json!({ "command": ["bash", "-lc", "make"] }), "c1", "/repo"), "t1");
+    r.runtime = "codex".into();
+    l.record(r);
+    let mut r = rec(&pre("shell", json!({ "command": ["bash", "-lc", "make test"] }), "c2", "/repo"), "t1");
+    r.runtime = "codex".into();
+    l.record(r);
+    assert_eq!(running_shells(&l), vec!["c1".to_string(), "c2".to_string()]);
+}
+
+#[test]
+fn an_esc_or_a_denial_ends_the_turn_at_idle_prompt() {
+    let l = ledger();
+    l.record(rec(&prompt("/repo"), "t1"));
+    l.record(rec(&pre("Edit", json!({ "file_path": "/repo/a.ts" }), "e1", "/repo"), "t1"));
+    l.record(rec(&by_agent(pre("Write", json!({ "file_path": "/repo/b.ts", "content": "x" }), "w1", "/repo"), "a1"), "t1"));
+    l.record(rec(&pre("Bash", json!({ "command": "git commit" }), "b1", "/repo"), "t1"));
+    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b2", "/repo"), "a2"), "t1"));
+    // Esc: no Post, no Stop. Claude's idle_prompt is the first word that the turn is over.
+    l.record(rec(&idle("/repo"), "t1"));
+    let a = l.activity("t1", "session", true).unwrap();
+    assert!(!a.turn_open);
+    assert!(a.entries.iter().all(|e| e.status == "failed"), "no dialog is open, so nothing is still waiting: {:?}", a.entries);
+    assert!(l.sole_open_turn(&|_| true).is_none(), "a later commit is not credited to it");
+    assert_eq!(running_shells(&l), vec!["b2".to_string()], "a background subagent's Bash may really still run");
+}
+
+#[test]
+fn a_codex_interrupt_ends_the_turn_and_every_call() {
+    let l = ledger();
+    l.record(rec(&prompt("/repo"), "t1"));
+    l.record(rec(&pre("Bash", json!({ "command": "make" }), "b1", "/repo"), "t1"));
+    l.record(rec(&json!({ "hook_event_name": "Interrupt", "session_id": "s1", "cwd": "/repo" }), "t1"));
+    assert!(!l.activity("t1", "turn", true).unwrap().turn_open);
+    assert!(running_shells(&l).is_empty());
+}
+
+#[test]
+fn a_new_session_ends_the_old_ones_shell_calls() {
+    let l = ledger();
+    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b1", "/repo"), "a1"), "t1"));
+    let mut fresh = prompt("/repo");
+    fresh["session_id"] = json!("s2");
+    l.record(rec(&fresh, "t1"));
+    assert!(running_shells(&l).is_empty());
+}
+
+#[test]
+fn a_shell_call_no_hook_ever_ends_stops_counting_after_ten_minutes() {
+    let l = ledger();
+    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b1", "/tmp"), "a1"), "t1"));
+    assert!(l.sole_shell_in(Path::new("/tmp"), false).is_some());
+    for s in l.inner.lock().shells.iter_mut() {
+        s.started -= SHELL_MAX;
+    }
+    assert!(l.sole_shell_in(Path::new("/tmp"), false).is_none());
+    assert!(l.inner.lock().shells.is_empty(), "and it is dropped, so the watcher pays nothing for it");
 }
 
 #[test]

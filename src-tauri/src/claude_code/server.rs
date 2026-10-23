@@ -4299,7 +4299,7 @@ async fn hooks_handler(
     // Files (docs/file-tree.md §9.1): what each agent reads and changes. Read off the RAW event
     // name, before the normalization below folds PostToolUseFailure into PostToolUse: the ledger
     // keeps a failed call visible.
-    if let Some(phase) = crate::agent_files::Phase::of(hook_event_name) {
+    if let Some(phase) = crate::agent_files::Phase::of(hook_event_name, &event) {
         record_agent_files(&srv, phase, &event, &session_id, runtime_key, tab_id_from_param.as_deref()).await;
     }
 

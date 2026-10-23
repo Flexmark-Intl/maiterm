@@ -52,6 +52,12 @@ const MISSING_GRACE: Duration = Duration::from_secs(60);
 /// A shell call that ended this recently still owns a change the watcher reports now: its
 /// batch closes up to 250 ms after the write (`coalesce::TOTAL`).
 const SHELL_TAIL: Duration = Duration::from_millis(300);
+/// A shell call with no end seen after this long is over as far as attribution goes: the last
+/// resort for one whose end no hook reports (a subagent cut short by Esc may send no
+/// SubagentStop). Claude's Bash times out at 10 minutes. A call that really runs longer, or sat
+/// longer behind its permission dialog, loses its label for the rest: no label beats crediting
+/// the human's saves to it.
+const SHELL_MAX: Duration = Duration::from_secs(600);
 
 /// One thing an agent did to one path (§9.1).
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -116,23 +122,42 @@ impl AgentMarkAbs {
 
 /// Which hook event a record comes from, read off the RAW `hook_event_name`: the shared
 /// normalization folds `PostToolUseFailure` into PostToolUse, and the ledger keeps failures.
+///
+/// A call that is denied, or cut short with Esc, gets no Post, and Claude sends no Stop for that
+/// turn either (claude_code/gate.rs: "A denied call fires no hook at all"). Without the last
+/// three phases such a call stayed `pending`, and its shell call running, until the next prompt,
+/// and a subagent's for good: the row pulsed, the rename guard asked, and every later change in
+/// the tree (the human's saves included) was credited to that Bash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     Pre,
     Post { failed: bool },
     Prompt,
     Stop,
+    /// Claude's `idle_prompt` Notification. It is never sent while any dialog is open (a
+    /// subagent's included) or while the main thread works, so the main agent's turn is over and
+    /// no call is waiting on a human: a pending call is either done or never ran.
+    Idle,
+    /// Codex's `Interrupt`: the human cancelled the turn (Esc). No turn completed, and Codex sends
+    /// nothing for a call it was asking about.
+    Interrupt,
+    /// One subagent finished: whatever of its calls never got a Post never will.
+    SubagentStop,
 }
 
 impl Phase {
-    /// The phase of a raw hook event name, or None for an event the ledger ignores.
-    pub fn of(hook_event_name: &str) -> Option<Phase> {
+    /// The phase of a raw hook event (its name, and for a Notification its type), or None for an
+    /// event the ledger ignores.
+    pub fn of(hook_event_name: &str, event: &serde_json::Value) -> Option<Phase> {
         match hook_event_name {
             "PreToolUse" => Some(Phase::Pre),
             "PostToolUse" => Some(Phase::Post { failed: false }),
             "PostToolUseFailure" => Some(Phase::Post { failed: true }),
             "UserPromptSubmit" => Some(Phase::Prompt),
             "Stop" => Some(Phase::Stop),
+            "Notification" if event.get("notification_type").and_then(|v| v.as_str()) == Some("idle_prompt") => Some(Phase::Idle),
+            "Interrupt" => Some(Phase::Interrupt),
+            "SubagentStop" => Some(Phase::SubagentStop),
             _ => None,
         }
     }
@@ -181,11 +206,20 @@ impl TabLedger {
         self.entries.push_back(e);
     }
 
-    /// The main agent's calls still pending when its turn ended (Esc, a crash) never get a
-    /// Post: they did not complete, so they stop pulsing as failed.
-    fn settle_unfinished(&mut self, tab_id: &str, now: i64, marks: &mut Vec<(AgentMarkAbs, bool)>) {
+    /// Calls still pending when their agent stopped (a denial, Esc, a crash) never get a Post:
+    /// they did not complete, so they stop pulsing as failed. `agent` None settles every agent's;
+    /// `keep` is the call that is starting now. A Post that does turn up later still wins: it
+    /// matches on `tool_use_id`, whatever the status.
+    fn settle_unfinished(&mut self, tab_id: &str, agent: Option<&str>, keep: Option<&str>, writes_only: bool, now: i64, marks: &mut Vec<(AgentMarkAbs, bool)>) {
         let local = self.host.is_none();
-        for e in self.entries.iter_mut().filter(|e| e.status == "pending" && e.agent.is_empty()) {
+        let settles = |e: &LedgerEntry| {
+            e.status == "pending"
+                && e.evidence == "tool"
+                && agent.is_none_or(|a| e.agent == a)
+                && (keep.is_none() || e.tool_use_id.as_deref() != keep)
+                && (!writes_only || !matches!(e.op.as_str(), "read" | "search"))
+        };
+        for e in self.entries.iter_mut().filter(|e| settles(e)) {
             e.status = "failed".into();
             e.t_post_ms = Some(now);
             if local {
@@ -203,8 +237,29 @@ struct ShellCall {
     agent: String,
     turn: u64,
     cwd: PathBuf,
-    /// When its Post arrived; None while it runs.
+    started: Instant,
+    /// When its Post (or other proof that it is over) arrived; None while it runs.
     ended: Option<Instant>,
+}
+
+impl ShellCall {
+    /// Still running as far as attribution goes: no end seen, and younger than `SHELL_MAX`.
+    fn running(&self) -> bool {
+        self.ended.is_none() && self.started.elapsed() < SHELL_MAX
+    }
+
+    /// Can still own a change the watcher reports now.
+    fn attributable(&self) -> bool {
+        self.running() || self.ended.is_some_and(|t| t.elapsed() < SHELL_TAIL)
+    }
+}
+
+/// End `tab_id`'s running shell calls: `agent` None for every agent's, `keep` the one starting.
+fn end_shells(shells: &mut [ShellCall], tab_id: &str, agent: Option<&str>, keep: Option<&str>) {
+    let now = Instant::now();
+    for s in shells.iter_mut().filter(|s| s.tab_id == tab_id && s.ended.is_none() && agent.is_none_or(|a| s.agent == a) && keep.is_none_or(|k| s.tool_use_id != k)) {
+        s.ended = Some(now);
+    }
 }
 
 /// The one shell call a tree's changes are attributed to.
@@ -354,6 +409,9 @@ impl AgentFiles {
                     tab.entries.clear();
                     tab.turn = 0;
                     tab.turn_open = false;
+                    // The old session's shell calls are over too: left running, they would keep
+                    // claiming the tree's changes for a session that is gone.
+                    end_shells(&mut inner.shells, &rec.tab_id, None, None);
                 }
                 tab.session_id = rec.session_id.clone();
             }
@@ -367,19 +425,48 @@ impl AgentFiles {
             let local = rec.host.is_none();
             match rec.phase {
                 Phase::Prompt | Phase::Stop => {
-                    tab.settle_unfinished(&rec.tab_id, now, &mut out);
+                    // The main agent's turn is over; a background subagent may still be working.
+                    tab.settle_unfinished(&rec.tab_id, Some(""), None, false, now, &mut out);
                     if rec.phase == Phase::Prompt {
                         tab.turn += 1;
                         tab.turn_open = true;
                     } else {
                         tab.turn_open = false;
                     }
-                    let instant = Instant::now();
-                    for s in inner.shells.iter_mut().filter(|s| s.tab_id == rec.tab_id && s.agent.is_empty() && s.ended.is_none()) {
-                        s.ended = Some(instant);
+                    end_shells(&mut inner.shells, &rec.tab_id, Some(""), None);
+                }
+                Phase::Idle => {
+                    // No dialog is open anywhere, so no call is waiting on a human, and an edit
+                    // or a read that was let through has long finished: every agent's pending
+                    // call is settled. A background subagent's Bash may really still run, so only
+                    // the main agent's shell calls end. The turn is over (an Esc sends no Stop).
+                    tab.settle_unfinished(&rec.tab_id, None, None, false, now, &mut out);
+                    tab.turn_open = false;
+                    end_shells(&mut inner.shells, &rec.tab_id, Some(""), None);
+                }
+                Phase::Interrupt => {
+                    tab.settle_unfinished(&rec.tab_id, None, None, false, now, &mut out);
+                    tab.turn_open = false;
+                    end_shells(&mut inner.shells, &rec.tab_id, None, None);
+                }
+                Phase::SubagentStop => {
+                    if !rec.agent.is_empty() {
+                        tab.settle_unfinished(&rec.tab_id, Some(&rec.agent), None, false, now, &mut out);
+                        end_shells(&mut inner.shells, &rec.tab_id, Some(&rec.agent), None);
                     }
                 }
                 Phase::Pre => {
+                    // Claude runs a write or a shell command only on its own: while one runs,
+                    // its agent starts nothing else. So this agent's earlier write or shell call
+                    // still open is one that never ran (denied with feedback, and the agent went
+                    // on), the same evidence claude_code/gate.rs uses. Reads may run side by side
+                    // and are left alone. Codex runs calls in parallel, so not there.
+                    if rec.runtime == "claude" {
+                        if let Some(id) = rec.tool_use_id.as_deref().filter(|s| !s.is_empty()) {
+                            tab.settle_unfinished(&rec.tab_id, Some(&rec.agent), Some(id), true, now, &mut out);
+                            end_shells(&mut inner.shells, &rec.tab_id, Some(&rec.agent), Some(id));
+                        }
+                    }
                     // A call proves a turn is running, whether or not its prompt was seen (maiTerm
                     // started mid-turn, or a background subagent outlived its parent's).
                     if !tab.turn_open {
@@ -418,6 +505,7 @@ impl AgentFiles {
                                     agent: rec.agent.clone(),
                                     turn: tab.turn,
                                     cwd: PathBuf::from(cwd),
+                                    started: Instant::now(),
                                     ended: None,
                                 });
                             }
@@ -471,7 +559,7 @@ impl AgentFiles {
                 }
             }
             // Ended shell calls are kept only as long as a late batch can still name them.
-            inner.shells.retain(|s| s.ended.is_none_or(|t| t.elapsed() < SHELL_TAIL * 4));
+            inner.shells.retain(|s| s.running() || s.ended.is_some_and(|t| t.elapsed() < SHELL_TAIL * 4));
         }
         self.route(out);
     }
@@ -514,11 +602,14 @@ impl AgentFiles {
     /// just ended) whose folder is in the tree, or that holds the tree. Two tabs: nobody's.
     pub fn sole_shell_in(&self, root: &Path, fold: bool) -> Option<ShellRef> {
         let calls: Vec<ShellCall> = {
-            let inner = self.inner.lock();
+            let mut inner = self.inner.lock();
+            // Dropped here too, not only on the next hook: an idle ledger then costs the
+            // watcher nothing again (§17).
+            inner.shells.retain(|s| s.running() || s.ended.is_some_and(|t| t.elapsed() < SHELL_TAIL * 4));
             if inner.shells.is_empty() {
                 return None;
             }
-            inner.shells.iter().filter(|s| s.ended.is_none_or(|t| t.elapsed() < SHELL_TAIL)).cloned().collect()
+            inner.shells.iter().filter(|s| s.attributable()).cloned().collect()
         };
         let mine: Vec<&ShellCall> = calls.iter().filter(|s| within(&s.cwd, root, fold) || within(root, &s.cwd, fold)).collect();
         let tabs: HashSet<&str> = mine.iter().map(|s| s.tab_id.as_str()).collect();
