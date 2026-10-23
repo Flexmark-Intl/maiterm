@@ -917,7 +917,7 @@ fn run_helper_harness(name: &str, script: &str) {
     let helper = dir.join("helper.py");
     std::fs::write(&helper, proto::HELPER).unwrap();
     let harness = dir.join("harness.py");
-    let prelude = "import errno, json, os, sys, time\nfrom concurrent.futures import ThreadPoolExecutor\nsrc = open(sys.argv[1]).read()\nh = {'__name__': 'helper'}\nexec(compile(src, sys.argv[1], 'exec'), h)\nanswers = []\nh['send'] = lambda header, payload=b'': answers.append(header)\nroot = sys.argv[2]\n";
+    let prelude = "import errno, json, os, sys, time\nfrom concurrent.futures import ThreadPoolExecutor\nsrc = open(sys.argv[1], encoding='utf-8').read()\nh = {'__name__': 'helper'}\nexec(compile(src, sys.argv[1], 'exec'), h)\nanswers = []\nh['send'] = lambda header, payload=b'': answers.append(header)\nroot = sys.argv[2]\n";
     std::fs::write(&harness, format!("{prelude}{script}")).unwrap();
     let root = dir.join("root");
     std::fs::create_dir_all(&root).unwrap();
