@@ -386,8 +386,24 @@ function createFileTreeStore() {
   /** The branch row's "N changed": the Changed lens on or off. */
   function toggleChanged() {
     const from = viewMode();
-    lens = lens === 'changed' ? 'all' : 'changed';
-    changeMode(from, viewMode());
+    const wasOn = lens === 'changed';
+    lens = wasOn ? 'all' : 'changed';
+    const to = viewMode();
+    if (from === 'find' && to === 'find') {
+      // The branch row stays clickable under find with a query, which stays in front: the
+      // lens changed the view BENEATH it, so what Escape puts back moves with it. Off: the
+      // tree's own view (held for the lens) is now the one under find. On: the tree's view
+      // is held for the lens, and find will close onto the lens, from its top.
+      if (wasOn) {
+        savedForFind = savedForChanged;
+        savedForChanged = null;
+      } else {
+        savedForChanged = savedForFind;
+        savedForFind = savedForFind ? { ...savedForFind, scrollTop: 0 } : null;
+      }
+    } else {
+      changeMode(from, to);
+    }
     rebuildLens();
   }
 
@@ -910,6 +926,19 @@ function createFileTreeStore() {
    *  when the human asked (`select`). */
   function revealRel(rel: string, select: boolean) {
     if (!model) return;
+    if (viewMode() !== 'tree') {
+      if (!select) {
+        // An automatic reveal (the active file, you-are-here) under find or the Changed lens:
+        // the view on screen is the lens's, and opening folders in the hidden real tree would
+        // move what Escape restores. Scroll to the row only if the lens shows it.
+        if (rows.some((x) => x.key === rel)) requestScroll(rel);
+        return;
+      }
+      // The human asked (Reveal in Files): the real tree comes back to show it, with the
+      // lens and find put away first so the restored view can't replace the selection.
+      if (find) closeFind();
+      if (lens === 'changed') toggleChanged();
+    }
     const r = model.reveal(rel);
     sendOpen(r.open);
     syncRows();
