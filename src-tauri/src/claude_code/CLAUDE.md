@@ -40,7 +40,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | getLatestSelection | Most recent selection in any tab |
 | openFile | Open file in editor tab (with optional line/text selection) |
 | openDiff | Show side-by-side diff for review (blocking) |
-| showDiff | Open read-only diff tab comparing file to a git ref (default HEAD) |
+| showDiff | Open read-only diff tab comparing file to a git ref (default HEAD). `ref` `"@turn"` / `"@session"` (exactly; `@~2` stays git) diffs against the caller's turn baseline (docs/file-tree.md §14): judged as own-tab-only (`is_baseline_diff` + `own_tab_refusal`) and handed the STATED caller as `__maitermCallerTab`, so another tab's baselines are never served |
 | closeAllDiffTabs | Close all pending diff tabs |
 | listWindows | List all maiTerm windows with IDs, labels, and workspace summaries |
 | listWorkspaces | List all workspaces with panes, tabs, archived tab count (IDs, display names, types, active state, notes, Claude state) |

@@ -553,6 +553,49 @@
 >   it: `revealed`, `not_found`, `hidden`, `noted` (with the chip), or `revealed` with a note
 >   that the folders are still listing. A `missing` reveal also closes the folders it opened that
 >   aren't on disk, so they aren't kept open and saved.
+>
+> **As built, phase 5: turn baselines (2026-10-23, `agent_files/baseline.rs`,
+> `filetree/baselines.ts`, `openBaselineDiff` in `utils/openGitDiff.ts`).** Where it differs from
+> the text below:
+> - **The baseline read is the hook's only wait.** It runs before the Pre is recorded, in the
+>   turn `AgentFiles::turn_for_pre` predicts (it mirrors `record`, and a test holds the two
+>   together), and its outcome also answers a Write's create-or-overwrite. The phase 4 stat runs
+>   only when nothing was read (baselines off, or the file already captured this turn), so the
+>   hook never waits 25 ms twice.
+> - **Deadline and discard:** the slots are reserved under the store's lock before the read (a
+>   second copy of the Pre, mod and settings hook, reads nothing), and a finished read fills its
+>   slot under that same lock only while the cancel flag is clear. The deadline sets the flag and
+>   marks what is left `timeout` under the lock, so a late result can never land. `read_capped`
+>   reads in 64 KB chunks and stops at the flag. A timed-out file is not read again that turn
+>   (that read could only see the agent's edit).
+> - **Refusals:** over 2 MB (also if it grows past that mid-read), a NUL in the first 8 KB, or
+>   not UTF-8, as `read_file` refuses. `unavailable` is `timeout` | `binary` | `too_large` |
+>   `unreadable` | `evicted` | `not_captured` | `pending`.
+> - **Eviction:** a closed turn is one older than the tab's newest captured turn (no ledger
+>   lookup under the store's lock). The session baseline is the same slot as its turn's, so
+>   evicting it says `evicted` for both rather than serving a later capture. A new session drops
+>   the tab's baselines (the new turns reuse the numbers), as does the ledger forgetting a closed
+>   tab; a reload's remap moves them. Turning `file_tree_turn_baselines` off drops everything.
+> - **Lookups use the ledger's turn and session** (`turn_and_session`), and match a path spelled
+>   another way (`/tmp` vs `/private/tmp`, a folder link, case on a folding volume) through
+>   `canon_existing`, off the hook.
+> - **Wire additions:** `Baseline.runtime` (for the diff tab's title) and a second command,
+>   `agent_files_baseline_stat` → `BaselineStat {added, removed, unavailable, turn}`: the
+>   tooltip's `+N −N` counted in Rust with `similar`, so a hover never ships 2 MB twice.
+> - **Menu:** "Compare with Turn Start" shows when the tab edited the file this turn, "Compare
+>   with Session Start" when it did this session, both only for marks with `evidence: "tool"`
+>   (a Bash change or a commit has no baseline). Two writers get a pair each, named. The title
+>   is `foo.ts (turn 14 · claude, tab 3)` or `foo.ts (session start · …)`, with the runtime left
+>   out when the tab's name already is it. The Turn lens tooltip adds "+12 −3 since turn 14
+>   began" per writer this turn (the chosen chip's only, when one is chosen).
+> - **`showDiff` `@turn` / `@session`** is matched exactly (`@`, `@~2` and `@{u}` are git's
+>   and stay git refs). Rust refuses a `tabId` that isn't the connection's stated tab
+>   (`own_tab_refusal`, the own-tab-only rule) and passes the stated tab as
+>   `__maitermCallerTab`; the frontend serves only that tab's baseline and refuses a null (an
+>   inferred identity). Preferences → Files has the Turn Baselines toggle.
+> - **Not checked in the running app** (no dev run in this step): the dev check (an agent edits a
+>   file twice in one turn, and the turn diff shows the pre-turn content) and the hook's time in
+>   a real session. A deleted file's diff relies on `read_file`'s "os error 2/3" wording.
 
 ## 1. Why
 
