@@ -128,6 +128,9 @@ async function connect(host) {
         c.status = 'connected';
         c.instance = r.instance;
         c.error = undefined;
+        // A maiTerm from before several tabs per agent (3.11.0) sends no `handles`: to it a link
+        // REPLACES the agent's tab, so nothing may join (a sign-in popup would take the human's).
+        c.several = 'handles' in r;
         // Links maiTerm didn't take back (their tab closed meanwhile) are gone; the rest carry
         // the handle maiTerm kept or gave them.
         const accepted = new Set(r.accepted ?? []);
@@ -366,6 +369,7 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener(async ({ sourceTabId,
   // Chrome may have woken this worker for the event itself, before its socket to maiTerm is open.
   await connect(opener.host).catch(() => {});
   for (let i = 0; i < 20 && conns.get(opener.host).status !== 'connected'; i++) await new Promise((r) => setTimeout(r, 100));
+  if (!conns.get(opener.host).several) return;
   await link(opener.host, { id: opener.maitermTabId, name: opener.maitermTabName }, tab, sourceTabId).catch(() => {});
 });
 

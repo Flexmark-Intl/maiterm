@@ -60,6 +60,9 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    even while the agent reads that page. maiTerm refuses an opener that isn't the same agent's link.
    An extension older than 0.2.0 (still running in a Chrome that hasn't reloaded it) keeps one tab
    per agent: maiTerm drops that agent's other links when it links one, as that extension does.
+   The other way round, a maiTerm from before several tabs (3.11.0, the store's extension can be
+   newer than the app) answers `hello` without `handles` and replaces an agent's tab on every
+   link, so the extension joins nothing to it: a sign-in popup would take the human's tab.
 8. **A linked tab is marked in Chrome's own tab strip** (`chrome-extension/marker.js`), because
    Chrome's debugging bar shows in every tab and says nothing about which one is linked: each
    agent's linked tabs share a tab group per window, "maiTerm · <agent tab>", in a colour fixed
