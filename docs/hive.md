@@ -2390,9 +2390,37 @@ running. Load average was 25–87, but CPU was 67% idle.
       heavy resources to one at level 4 or under 10% free;
     - **use CPU idle, not load average** (80 with 67% idle here). Cargo's capacity of 2 stands.
 
-**Not yet run:**
-- **2, the live trust write**, alone.
-- **The spike 10 re-run** outside `/tmp/claude-<uid>`.
+**Spike 2, the trust write: passes, with a correction.** Claude Code 2.1.309, under a managed
+account, with `expect`, 68–69 live sessions.
+- **The write works.** `projects["<realpath>"].hasTrustDialogAccepted = true` in the account's
+  `.claude.json` suppressed the dialog.
+- **Claude reads trust only from `$CLAUDE_CONFIG_DIR/.claude.json`.** An entry only in
+  `~/.claude.json` didn't count.
+- **Entries are keyed by realpath.** A symlink-path key didn't count, so maiTerm canonicalizes the
+  path before writing.
+- **The entry survived** 3 minutes, a session that loaded the config before the write and saved on
+  exit, and a storm of 6 sessions (8 rewrites in 30 s, 0 of 30 samples lost). Claude 2.1.309
+  re-reads and merges rather than writing back a stale copy. Keep the change-detecting
+  `update_file` helper for the small unlocked race.
+- **Correction: trust on a main checkout covers ALL its linked worktrees.** Claude maps a worktree
+  to its main repo, so a sibling worktree had no dialog with only the repo trusted. The reverse
+  isn't true. A worktree session also files its project data under the main repo's key, and
+  creates that key itself with trust false. What follows:
+  - For a repo the human already trusts (the usual case), **maiTerm needs no trust write for its
+    worktrees at all.** §6.6's writes matter only for Hive folders that aren't worktrees of a
+    trusted repo, such as the Hive's own folder and a scratch-only worker.
+  - **A reviewer's worktree of an unlanded branch is trusted too.** So §6.6's "no trust entry for a
+    reviewer's worktree" doesn't stop the dialog being skipped there. The safeguard is launching
+    reviewers with `--setting-sources user`, so that branch's project hooks, settings and MCP never
+    load, plus the mandatory Write/Edit deny on `.claude/**` and `.mcp.json` for every worker
+    (spike 10).
+  - Removal deletes only the keys maiTerm wrote, never Claude's own repo entry.
+- **Each account root needs its own entry where one is needed.** The seed-once merge in
+  `accounts/mod.rs` carries only `mcpServers`, not a later trust write. A respawn after an account
+  switch wasn't exercised.
+
+**Not yet run:** the spike 10 re-run outside `/tmp/claude-<uid>` (writes outside the working
+folder refused by default; whether a secondary repo's objects need `allowWrite`).
 
 ## 14. Decisions
 
