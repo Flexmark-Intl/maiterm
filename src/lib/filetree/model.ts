@@ -33,7 +33,7 @@ export interface Row {
   kind: RowKind;
   flags: number;
   /** Message rows only: what the row says, for styling. */
-  msg?: 'loading' | 'error' | 'truncated' | 'slow' | 'empty';
+  msg?: 'loading' | 'error' | 'truncated' | 'slow' | 'empty' | 'new';
 }
 
 /** One change to `rows`, already applied: `rows.splice(start, deleteCount, ...rows)`. */
@@ -786,6 +786,46 @@ export function typeAheadMatch(rows: Row[], from: number, prefix: string): numbe
     if (r.kind !== 'm' && r.name.toLowerCase().startsWith(p)) return i;
   }
   return -1;
+}
+
+/** The key of the inline New row (a message row: never focused, never selected). */
+export const NEW_ROW_KEY = '\u0000new';
+
+/**
+ * The rows with the inline New row placed at the top of `parent`'s children (§10.4): right
+ * after the parent's row, one level deeper, or first for the root. A parent with no row
+ * (filtered out, not listed yet) puts it first, so the input is never lost off screen.
+ * Returns `rows` itself when there is nothing to add, so identity holds.
+ */
+export function withNewRow(rows: Row[], parent: string | null): Row[] {
+  if (parent === null) return rows;
+  const i = parent === '' ? -1 : rows.findIndex((r) => r.key === parent && r.kind !== 'm');
+  const at = i + 1;
+  const depth = i >= 0 ? rows[i].depth + 1 : 0;
+  const out = rows.slice(0, at);
+  out.push({ key: NEW_ROW_KEY, depth, name: '', kind: 'm', flags: 0, msg: 'new' });
+  for (let j = at; j < rows.length; j++) out.push(rows[j]);
+  return out;
+}
+
+/** The folder a drop or a paste at `rows[i]` lands in: a folder row is itself, a file row
+ *  its folder, a message row the folder it belongs to; past the last row, the root. */
+export function dropFolderAt(rows: Row[], i: number): string {
+  const r = rows[i];
+  if (!r) return '';
+  if (r.kind === 'm') {
+    const nul = r.key.indexOf('\u0000');
+    return nul >= 0 ? r.key.slice(0, nul) : '';
+  }
+  return isExpandable(r) ? r.key : parentRel(r.key);
+}
+
+/** A move or copy of `srcs` into `dest` that would do something: never a folder into itself
+ *  (or below itself), and a move must take at least one item somewhere new. */
+export function dropAccepted(srcs: string[], dest: string, copy: boolean): boolean {
+  if (srcs.length === 0) return false;
+  if (srcs.some((s) => isWithin(dest, s))) return false;
+  return copy || srcs.some((s) => parentRel(s) !== dest);
 }
 
 /** The visible window of a fixed-height list: `[first, last)` with overscan. */

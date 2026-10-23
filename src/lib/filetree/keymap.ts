@@ -2,9 +2,7 @@
  * The tree's keys, as a pure function from a key event to an action (docs/file-tree.md §11.2).
  *
  * Kept out of the component so the map reads as one table and the platform split (macOS
- * Cmd vs Ctrl elsewhere, Alt-chords) is decided in one place. The read-only actions and find
- * (`/`, Cmd/Ctrl+F) are mapped; rename, trash, clipboard and undo arrive with file
- * operations, and until then their keys do nothing in the tree.
+ * Cmd vs Ctrl elsewhere, Alt-chords) is decided in one place.
  *
  * Two rules from the spec this enforces:
  * - Bare letters are never commands outside vim mode: an accidental `a` while typing a name
@@ -33,7 +31,16 @@ export type TreeAction =
   /** `/` or Cmd/Ctrl+F: the find bar (§8). */
   | { type: 'find' }
   /** Vim `g`, waiting for its second `g`. */
-  | { type: 'pendingG' };
+  | { type: 'pendingG' }
+  /** F2 on every platform (Enter opens, also on macOS). */
+  | { type: 'rename' }
+  /** Delete; macOS Cmd+Backspace. */
+  | { type: 'trash' }
+  /** Shift+Delete; macOS Cmd+Alt+Backspace. Always through the ConfirmStrip. */
+  | { type: 'deletePermanent' }
+  /** Cmd/Ctrl+C / X / V: the tree's own clipboard of files. */
+  | { type: 'clipboard'; op: 'copy' | 'cut' | 'paste' }
+  | { type: 'undo' };
 
 export interface KeyLike {
   key: string;
@@ -83,8 +90,19 @@ export function treeAction(e: KeyLike, o: KeymapOptions): TreeAction | null {
   // `/` opens find, except as a typed character once vim's `'` armed type-ahead.
   if (!mod && !e.altKey && k === '/' && !(o.vim && o.typeaheadArmed)) return { type: 'find' };
   if (mod && !e.altKey && k === 'Enter') return { type: 'openSide' };
+  if (mod && !e.altKey && !e.shiftKey) {
+    // `code` too: a non-Latin layout types another letter on these keys.
+    if (lower === 'c' || e.code === 'KeyC') return { type: 'clipboard', op: 'copy' };
+    if (lower === 'x' || e.code === 'KeyX') return { type: 'clipboard', op: 'cut' };
+    if (lower === 'v' || e.code === 'KeyV') return { type: 'clipboard', op: 'paste' };
+    if (lower === 'z' || e.code === 'KeyZ') return { type: 'undo' };
+  }
+  if (o.mac && mod && k === 'Backspace') return e.altKey ? { type: 'deletePermanent' } : { type: 'trash' };
 
   if (mod) return null; // every other chord is the app's or nobody's
+
+  if (k === 'F2' && !e.altKey && !e.shiftKey) return { type: 'rename' };
+  if (k === 'Delete' && !e.altKey) return e.shiftKey ? { type: 'deletePermanent' } : { type: 'trash' };
 
   switch (k) {
     case 'ArrowUp': return e.shiftKey ? { type: 'extend', to: 'up' } : { type: 'move', to: 'up' };

@@ -18,13 +18,56 @@
   import TreeBody from './TreeBody.svelte';
   import BranchRow from './BranchRow.svelte';
   import FindBar from './FindBar.svelte';
+  import ConfirmStrip from './ConfirmStrip.svelte';
+  import { getCurrentWebview } from '@tauri-apps/api/webview';
+  import { error as logError } from '@tauri-apps/plugin-log';
 
   const rowH = $derived(preferencesStore.fileTreeDensity === 'compact' ? 20 : preferencesStore.fileTreeDensity === 'comfortable' ? 24 : 22);
 
   onMount(() => {
     void fileTreeStore.attach();
   });
-  onDestroy(() => fileTreeStore.detach());
+  onDestroy(() => {
+    fileTreeStore.detach();
+    unlistenDrop?.();
+  });
+
+  // Files dropped from the OS onto the tree are copied in (§10.4). The event is the window's
+  // (every listener sees every drop), so the column hit-tests its own rect, and only while it
+  // is in the document and showing a tree; the row under the point is found arithmetically
+  // by the tree. The header is the root, like a drag inside the app.
+  let treeBody = $state<{ hitTree: (x: number, y: number) => { kind: string; rel?: string } | undefined } | null>(null);
+  let unlistenDrop: (() => void) | null = null;
+  let destroyed = false;
+  onDestroy(() => { destroyed = true; });
+
+  function osDropFolder(x: number, y: number): string | null {
+    if (!columnEl?.isConnected || status !== 'ready' || !fileTreeStore.writable) return null;
+    const r = columnEl.getBoundingClientRect();
+    if (x < r.left || x > r.right || y < r.top || y > r.bottom) return null;
+    const hit = treeBody?.hitTree(x, y);
+    if (hit?.kind === 'folder') return hit.rel ?? '';
+    // Over the column but not the rows (the header, the branch row, the footer): the root.
+    return '';
+  }
+
+  onMount(() => {
+    void getCurrentWebview().onDragDropEvent((event) => {
+      const p = event.payload;
+      if (p.type === 'over') {
+        fileTreeStore.setDropTarget(osDropFolder(p.position.x, p.position.y));
+      } else if (p.type === 'drop') {
+        const dest = osDropFolder(p.position.x, p.position.y);
+        fileTreeStore.setDropTarget(null);
+        if (dest !== null && p.paths.length) void fileTreeStore.importPaths(p.paths, dest);
+      } else {
+        fileTreeStore.setDropTarget(null);
+      }
+    }).then((u) => {
+      if (destroyed) u();
+      else unlistenDrop = u;
+    }).catch((e) => logError(`[files] drop listener: ${e}`));
+  });
 
   // Follow: the active tab (or workspace) changed. Debounced in the store; an editor tab
   // only reveals its file there, never re-roots.
@@ -119,7 +162,7 @@
 
   <div class="body" class:mono={preferencesStore.fileTreeIcons === 'mono'}>
     {#if status === 'ready' || status === 'opening'}
-      <TreeBody {rowH} />
+      <TreeBody {rowH} bind:this={treeBody} />
     {:else if status === 'missing'}
       <div class="state">
         <p>Folder missing: <span class="path">{fileTreeStore.statusText}</span></p>
@@ -154,10 +197,25 @@
     {/if}
   </div>
 
-  {#if footer.length > 0}
+  {#if footer.length > 0 || fileTreeStore.notice}
     <div class="footer">
       {#each footer as line (line)}<div class="footer-line">{line}</div>{/each}
+      {#if fileTreeStore.notice}
+        {@const n = fileTreeStore.notice}
+        <div class="footer-line notice">
+          <span>{n.text}</span>
+          {#if n.action}
+            <span class="sep">·</span>
+            <button class="link" onclick={() => { const run = n.action!.run; fileTreeStore.dismissNotice(); run(); }}>{n.action.label}</button>
+          {/if}
+        </div>
+      {/if}
     </div>
+  {/if}
+  {#if fileTreeStore.confirm}
+    {#key fileTreeStore.confirm}
+      <ConfirmStrip question={fileTreeStore.confirm} onrun={(a) => void fileTreeStore.confirmRun(a)} oncancel={() => fileTreeStore.cancelConfirm()} />
+    {/key}
   {/if}
 
   <div class="sr-only" aria-live="polite">{fileTreeStore.announcement}</div>
@@ -256,6 +314,14 @@
     font-size: 0.85em;
     color: var(--fg-dim);
     overflow-wrap: anywhere;
+  }
+
+  .notice {
+    color: var(--fg);
+  }
+
+  .notice .link {
+    font-size: inherit;
   }
 
   .sr-only {

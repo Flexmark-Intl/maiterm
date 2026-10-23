@@ -20,10 +20,14 @@
   import { getEditorByTabId, isEditorDirty } from '$lib/stores/editorRegistry.svelte';
   import * as commands from '$lib/tauri/commands';
   import { TREE_FLAG_IGNORED, TREE_FLAG_HIDDEN, TREE_FLAG_LOOP, TREE_FLAG_UNREADABLE } from '$lib/tauri/types';
-  import { highlightRuns, isExpandable, isFolderKind, parentRowIndex, stickyAncestors, typeAheadMatch, windowOf, type Row } from '$lib/filetree/model';
+  import { NEW_ROW_KEY, dropFolderAt, highlightRuns, isExpandable, isFolderKind, parentRowIndex, stickyAncestors, typeAheadMatch, windowOf, withNewRow, type Row } from '$lib/filetree/model';
   import type { GitLetter } from '$lib/tauri/types';
   import { iconFor } from '$lib/filetree/icons';
   import { treeAction, type TreeAction } from '$lib/filetree/keymap';
+  import { renameSelection } from '$lib/filetree/names';
+  import { trashLabel } from '$lib/filetree/undo';
+  import { beginPointerDrag, type DropTarget } from '$lib/filetree/dnd';
+  import InlineName from './InlineName.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import TooltipBubble from '$lib/components/TooltipBubble.svelte';
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
@@ -49,7 +53,9 @@
    *  whole column, which is what Cmd+Shift+B asks about. */
   let hasFocus = $state(false);
 
-  const rows = $derived(fileTreeStore.rows);
+  const edit = $derived(fileTreeStore.edit);
+  /** The store's rows, plus the inline New row at the top of its folder while one is open. */
+  const rows = $derived(withNewRow(fileTreeStore.rows, edit?.mode === 'create' ? edit.parent : null));
 
   // ── Focus index, cached: a focus move must not scan 100k rows every time ───────────────
   let idxHint = 0;
@@ -82,6 +88,12 @@
     for (let i = w.first; i < w.last; i++) out.push({ r: rows[i], i });
     const f = focusIdx;
     if (f >= 0 && (f < w.first || f >= w.last)) out.push({ r: rows[f], i: f });
+    // The inline New input stays mounted when scrolled away: unmounting it would drop the
+    // name being typed (and a rename's row is the focused one, kept above).
+    if (edit?.mode === 'create') {
+      const n = idxOf(NEW_ROW_KEY);
+      if (n >= 0 && (n < w.first || n >= w.last) && n !== f) out.push({ r: rows[n], i: n });
+    }
     return out;
   });
 
@@ -257,6 +269,15 @@
       case 'typeahead': typeahead(a.char); break;
       case 'find': fileTreeStore.openFind(); break;
       case 'pendingG': pendingGAt = e.timeStamp; break;
+      case 'rename': if (r && r.kind !== 'm' && fileTreeStore.selectedOrFocused().length <= 1) fileTreeStore.startRename(r.key); break;
+      case 'trash': void fileTreeStore.trash(fileTreeStore.selectedOrFocused()); break;
+      case 'deletePermanent': void fileTreeStore.deletePermanently(fileTreeStore.selectedOrFocused()); break;
+      case 'clipboard':
+        if (a.op === 'copy') fileTreeStore.copyFiles(fileTreeStore.selectedOrFocused());
+        else if (a.op === 'cut') fileTreeStore.cutFiles(fileTreeStore.selectedOrFocused());
+        else void fileTreeStore.paste();
+        break;
+      case 'undo': void fileTreeStore.undoLast(); break;
     }
   }
 
@@ -319,13 +340,52 @@
     fileTreeStore.setFocus(r.key, false);
   }
 
-  // ── Context menu (read-only, phase 1) ─────────────────────────────────────────────────
+  // ── Context menu (§10.4: platform-correct labels; multi-select hides single-item entries)
   let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
   const revealLabel = mac ? 'Reveal in Finder' : isWindows() ? 'Show in File Explorer' : 'Open Containing Folder';
   const copyPathKey = mac ? `⌥${modSymbol}C` : 'Shift+Alt+C';
   const copyRelKey = mac ? `⌥⇧${modSymbol}C` : 'Ctrl+Shift+Alt+C';
+  const trashKey = mac ? `${modSymbol}⌫` : 'Del';
+  const deleteKey = mac ? `⌥${modSymbol}⌫` : 'Shift+Del';
   const SEP: MenuItem = { label: '', separator: true, action: () => {} };
+
+  /** New File… / New Folder… / Paste, into `folder`. */
+  function createItems(folder: string): MenuItem[] {
+    const off = !fileTreeStore.writable;
+    return [
+      { label: 'New File…', disabled: off, action: () => fileTreeStore.startCreate('file', folder) },
+      { label: 'New Folder…', disabled: off, action: () => fileTreeStore.startCreate('dir', folder) },
+    ];
+  }
+
+  function writeItems(r: Row, rels: string[], single: boolean, folder: boolean): MenuItem[] {
+    const off = !fileTreeStore.writable;
+    const items: MenuItem[] = [];
+    if (single) items.push(...createItems(folder ? r.key : fileTreeStore.folderOf(r.key)));
+    items.push(
+      { label: 'Cut', shortcut: `${modSymbol}X`, disabled: off, action: () => fileTreeStore.cutFiles(rels) },
+      { label: 'Copy', shortcut: `${modSymbol}C`, action: () => fileTreeStore.copyFiles(rels) },
+    );
+    if (single) items.push({ label: 'Paste', shortcut: `${modSymbol}V`, disabled: off || !fileTreeStore.hasClip, action: () => void fileTreeStore.paste(fileTreeStore.folderOf(r.key)) });
+    items.push({ label: 'Duplicate', disabled: off, action: () => fileTreeStore.duplicate(rels) });
+    if (single) items.push({ label: 'Rename…', shortcut: 'F2', disabled: off, action: () => fileTreeStore.startRename(r.key) });
+    items.push(SEP);
+    if (fileTreeStore.canTrash) items.push({ label: trashLabel(fileTreeStore.platform), shortcut: trashKey, disabled: off, action: () => void fileTreeStore.trash(rels) });
+    items.push({ label: 'Delete Permanently…', shortcut: deleteKey, disabled: off, action: () => void fileTreeStore.deletePermanently(rels) });
+    return items;
+  }
+
+  /** Right-click below the rows: the root folder's own actions. */
+  function rootMenuItems(): MenuItem[] {
+    return [
+      ...createItems(''),
+      { label: 'Paste', shortcut: `${modSymbol}V`, disabled: !fileTreeStore.writable || !fileTreeStore.hasClip, action: () => void fileTreeStore.paste('') },
+      SEP,
+      { label: revealLabel, action: () => void fileTreeStore.revealInOs('') },
+      { label: 'Open Terminal Here', action: () => void fileTreeStore.openTerminalHere('') },
+    ];
+  }
 
   function menuItems(r: Row): MenuItem[] {
     const rels = fileTreeStore.selectedOrFocused(r.key);
@@ -348,6 +408,11 @@
       disabled: !target,
       action: () => void fileTreeStore.addToTab(rels),
     });
+    items.push({
+      label: 'Ask about this…',
+      disabled: !target,
+      action: () => fileTreeStore.askAbout(rels),
+    });
     if (single) items.push({ label: 'Open Terminal Here', action: () => void fileTreeStore.openTerminalHere(r.key) });
     items.push(SEP);
     if (single) items.push({ label: revealLabel, action: () => void fileTreeStore.revealInOs(r.key) });
@@ -355,6 +420,7 @@
       { label: rels.length > 1 ? 'Copy Paths' : 'Copy Path', shortcut: copyPathKey, action: () => void fileTreeStore.copyPaths(rels, false) },
       { label: rels.length > 1 ? 'Copy Relative Paths' : 'Copy Relative Path', shortcut: copyRelKey, action: () => void fileTreeStore.copyPaths(rels, true) },
     );
+    items.push(SEP, ...writeItems(r, rels, single, folder));
     if (single && !folder && fileTreeStore.gitOn) {
       items.push(SEP, { label: 'Compare with HEAD', action: () => void fileTreeStore.compareWithHead(r.key) });
     }
@@ -371,6 +437,45 @@
     if (!fileTreeStore.selection.has(r.key)) fileTreeStore.selectOnly(r.key);
     fileTreeStore.setFocus(r.key, false);
     menu = { x: e.clientX, y: e.clientY, items: menuItems(r) };
+  }
+
+  function onTreeContext(e: MouseEvent) {
+    if (e.defaultPrevented) return; // a row's own menu
+    e.preventDefault();
+    fileTreeStore.humanTouched();
+    menu = { x: e.clientX, y: e.clientY, items: rootMenuItems() };
+  }
+
+  // ── Drag and drop (§10.4, filetree/dnd.ts) ────────────────────────────────────────────
+
+  /** The drop target at a point over the tree, arithmetically (rows are a fixed height):
+   *  a folder row is itself, a file row its folder, below the rows the root. Undefined when
+   *  the point isn't over the tree. Also used for drops from the OS (FilesColumn). */
+  export function hitTree(x: number, y: number): DropTarget | undefined {
+    if (!el) return undefined;
+    const box = el.getBoundingClientRect();
+    if (x < box.left || x > box.right || y < box.top || y > box.bottom) return undefined;
+    const i = Math.floor((y - box.top + el.scrollTop) / rowH);
+    return { kind: 'folder', rel: dropFolderAt(rows, i) };
+  }
+
+  function onRowPointerDown(e: PointerEvent, r: Row) {
+    if (r.kind === 'm' || e.button !== 0 || edit) return;
+    // A press that becomes a drag carries the selection when it starts on a selected row,
+    // else just this row (the click that would have selected it never comes).
+    const srcs = fileTreeStore.selection.has(r.key) ? fileTreeStore.selectedOrFocused(r.key) : [r.key];
+    beginPointerDrag(e, {
+      label: srcs.length === 1 ? r.name : `${srcs.length} items`,
+      mac,
+      hitTree,
+      isTerminal: (id) => !!terminalsStore.get(id) && !workspacesStore._locateTab(id)?.tab.service_id,
+      accepts: (t, copy) => fileTreeStore.dropAccepts(srcs, t, copy),
+      scroller: () => el,
+      onHover: (t) => fileTreeStore.setDropTarget(t?.kind === 'folder' ? t.rel : null),
+      onLinger: (rel) => { if (!fileTreeStore.isExpanded(rel)) fileTreeStore.expand(rel); },
+      onDrop: (t, copy) => { fileTreeStore.humanTouched(); void fileTreeStore.dropItems(srcs, t, copy); },
+      onEnd: () => fileTreeStore.setDropTarget(null),
+    });
   }
 
   function openMenuAt(r: Row, i: number) {
@@ -473,7 +578,21 @@
 <TooltipBubble text={tip?.text ?? ''} anchor={tip?.el ?? null} />
 
 {#snippet rowView(r: Row, i: number)}
-  {#if r.kind === 'm'}
+  {#if r.msg === 'new' && edit?.mode === 'create'}
+    {@const ic = iconFor('', edit.kind === 'dir' ? 'd' : 'f', false)}
+    <div class="row editing" role="presentation" style="transform: translateY({i * rowH}px); padding-left: {PAD + r.depth * INDENT + 16}px">
+      <svg class="ic" style="color: var(--ft-ic-{ic.color})" width="16" height="16" aria-hidden="true"><use href="#{ic.id}" /></svg>
+      <InlineName
+        initial={edit.value}
+        placeholder={edit.kind === 'dir' ? 'Folder name' : 'File name (a/b/c.ts makes folders)'}
+        rules={fileTreeStore.editRules()}
+        error={edit.error}
+        pending={edit.pending}
+        oncommit={(v) => void fileTreeStore.commitEdit(v)}
+        oncancel={() => fileTreeStore.cancelEdit()}
+      />
+    </div>
+  {:else if r.kind === 'm'}
     <div class="row msg msg-{r.msg}" role="presentation" style="transform: translateY({i * rowH}px); padding-left: {PAD + r.depth * INDENT + 16}px">
       <span class="name">{r.name}</span>
     </div>
@@ -489,6 +608,7 @@
     {@const git = fileTreeStore.gitOf(r.key, folder)}
     {@const gcls = git ? gitClass(git.letter) : ''}
     {@const hl = typed ? undefined : fileTreeStore.highlightsFor(r.key)}
+    {@const renaming = edit?.mode === 'rename' && edit.rel === r.key ? edit : null}
     <!-- The container holds focus (aria-activedescendant); a row never does, so it has no
          tabindex: clicking it focuses the tree. -->
     <!-- svelte-ignore a11y_interactive_supports_focus -->
@@ -502,6 +622,9 @@
       class:ignored={r.flags & TREE_FLAG_IGNORED}
       class:hidden-file={r.flags & TREE_FLAG_HIDDEN}
       class:active-file={r.key === fileTreeStore.activeFile}
+      class:drop-target={folder && r.key === fileTreeStore.dropTarget}
+      class:cut={fileTreeStore.isCut(r.key)}
+      class:editing={!!renaming}
       role="treeitem"
       aria-level={r.depth + 1}
       aria-expanded={expandable ? expanded : undefined}
@@ -509,6 +632,7 @@
       aria-label={ariaLabel(r, expanded, dirty, git)}
       style="transform: translateY({i * rowH}px); padding-left: {PAD}px"
       onmousedown={(e) => { if (e.detail > 1) e.preventDefault(); }}
+      onpointerdown={(e) => onRowPointerDown(e, r)}
       onclick={(e) => onRowClick(e, r)}
       ondblclick={() => onRowDblClick(r)}
       oncontextmenu={(e) => openMenu(e, r)}
@@ -526,7 +650,19 @@
       </span>
       <svg class="ic" style="color: var(--ft-ic-{ic.color})" width="16" height="16" aria-hidden="true"><use href="#{ic.id}" /></svg>
       <!-- A folder's roll-up is a dot, not a colour: the name stays readable over a big tree. -->
+      {#if renaming}
+        <InlineName
+          initial={renaming.value}
+          select={renameSelection(renaming.value, folder)}
+          rules={fileTreeStore.editRules()}
+          error={renaming.error}
+          pending={renaming.pending}
+          oncommit={(v) => void fileTreeStore.commitEdit(v)}
+          oncancel={() => fileTreeStore.cancelEdit()}
+        />
+      {:else}
       <span class="name {git && !git.rollup ? gcls : ''}">{#if typed}<mark>{r.name.slice(0, typed)}</mark>{r.name.slice(typed)}{:else if hl}{#each highlightRuns(r.name, hl) as run, j (j)}{#if run.hit}<mark class="hit">{run.text}</mark>{:else}{run.text}{/if}{/each}{:else}{r.name}{/if}</span>
+      {/if}
       <span class="gutter">
         {#if r.key === fileTreeStore.youAreHere}<span class="here" aria-hidden="true"></span>{/if}
         {#if tabs}<span class="ed-dot" class:dirty aria-hidden="true"></span>{/if}
@@ -545,8 +681,10 @@
   aria-label="Files"
   aria-multiselectable="true"
   aria-activedescendant={focusIdx >= 0 ? `ftr-${focusIdx}` : undefined}
+  class:drop-root={fileTreeStore.dropTarget === ''}
   onscroll={onScroll}
   onkeydown={onKeydown}
+  oncontextmenu={onTreeContext}
   onfocus={() => { hasFocus = true; if (focusIdx < 0 && rows.length) { const i = focusable(Math.floor(scrollTop / rowH), 1); if (i >= 0) fileTreeStore.setFocus(rows[i].key, false); } }}
   onblur={() => { hasFocus = false; }}
   onmouseleave={hideTip}
@@ -624,6 +762,26 @@
 
   .row.ignored {
     opacity: 0.55;
+  }
+
+  /* Cut to the in-app clipboard: dimmed until pasted. */
+  .row.cut {
+    opacity: 0.45;
+  }
+
+  /* Where a drag would land: the folder row, or (below the rows, or on the header) the root. */
+  .row.drop-target {
+    background: color-mix(in srgb, var(--accent) 28%, transparent);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+
+  .tree.drop-root {
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent);
+  }
+
+  /* The input's error bubble hangs below the row: above its neighbours. */
+  .row.editing {
+    z-index: 3;
   }
 
   .row.msg {

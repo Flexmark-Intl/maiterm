@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TreeEntry, TreeEvent } from '$lib/tauri/types';
 import { TREE_FLAG_HIDDEN, TREE_FLAG_IGNORED, TREE_FLAG_LOOP } from '$lib/tauri/types';
-import { TreeModel, ancestorsOf, joinRel, parentRowIndex, stickyAncestors, typeAheadMatch, windowOf, type Row } from './model';
+import { NEW_ROW_KEY, TreeModel, ancestorsOf, dropAccepted, dropFolderAt, joinRel, parentRowIndex, withNewRow, stickyAncestors, typeAheadMatch, windowOf, type Row } from './model';
 
 // ── A fake disk that answers like the hub ──────────────────────────────────────────────────
 // Folders first, then by name: any fixed order will do, since the model must keep whatever
@@ -378,5 +378,43 @@ describe('virtual list helpers', () => {
   it('ancestorsOf lists the folders above a path', () => {
     expect(ancestorsOf('a/b/c.ts')).toEqual(['a', 'a/b']);
     expect(ancestorsOf('top')).toEqual([]);
+  });
+});
+
+describe('file operation helpers', () => {
+  const rows: Row[] = [
+    { key: 'src', depth: 0, name: 'src', kind: 'd', flags: 0 },
+    { key: 'src/a.ts', depth: 1, name: 'a.ts', kind: 'f', flags: 0 },
+    { key: 'src/lib\u0000loading', depth: 1, name: 'Loading…', kind: 'm', flags: 0, msg: 'loading' },
+    { key: 'loop', depth: 0, name: 'loop', kind: 'L', flags: TREE_FLAG_LOOP },
+    { key: 'README.md', depth: 0, name: 'README.md', kind: 'f', flags: 0 },
+  ];
+
+  it('withNewRow puts the input at the top of its folder, or first for the root', () => {
+    const inSrc = withNewRow(rows, 'src');
+    expect(inSrc[1]).toMatchObject({ key: NEW_ROW_KEY, depth: 1, kind: 'm', msg: 'new' });
+    expect(inSrc.length).toBe(rows.length + 1);
+    expect(withNewRow(rows, '')[0]).toMatchObject({ key: NEW_ROW_KEY, depth: 0 });
+    expect(withNewRow(rows, null)).toBe(rows);
+  });
+
+  it('dropFolderAt: a folder is itself, a file its folder, past the end the root', () => {
+    expect(dropFolderAt(rows, 0)).toBe('src');
+    expect(dropFolderAt(rows, 1)).toBe('src');
+    expect(dropFolderAt(rows, 2)).toBe('src/lib');
+    expect(dropFolderAt(rows, 3)).toBe(''); // a loop link isn't a folder to drop into
+    expect(dropFolderAt(rows, 4)).toBe('');
+    expect(dropFolderAt(rows, 99)).toBe('');
+  });
+
+  it('dropAccepted refuses a folder into itself and a move to where it already is', () => {
+    expect(dropAccepted(['src'], 'src/lib', false)).toBe(false);
+    expect(dropAccepted(['src'], 'src', true)).toBe(false);
+    expect(dropAccepted(['src/a.ts'], 'src', false)).toBe(false);
+    expect(dropAccepted(['src/a.ts'], 'src', true)).toBe(true);
+    expect(dropAccepted(['src/a.ts', 'README.md'], 'src', false)).toBe(true);
+    expect(dropAccepted(['src/a.ts'], '', false)).toBe(true);
+    expect(dropAccepted(['srcx/a'], 'src', false)).toBe(true);
+    expect(dropAccepted([], '', true)).toBe(false);
   });
 });

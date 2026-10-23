@@ -37,6 +37,25 @@ describe('treeAction', () => {
     expect(treeAction(k('a', { metaKey: true }), linux)).toBeNull();
   });
 
+  it('maps the file operations per platform', () => {
+    expect(treeAction(k('F2'), mac)).toEqual({ type: 'rename' });
+    expect(treeAction(k('F2'), linux)).toEqual({ type: 'rename' });
+    expect(treeAction(k('Enter'), mac)).toEqual({ type: 'open' });
+    expect(treeAction(k('Delete'), linux)).toEqual({ type: 'trash' });
+    expect(treeAction(k('Delete', { shiftKey: true }), linux)).toEqual({ type: 'deletePermanent' });
+    expect(treeAction(k('Backspace', { metaKey: true }), mac)).toEqual({ type: 'trash' });
+    expect(treeAction(k('Backspace', { metaKey: true, altKey: true }), mac)).toEqual({ type: 'deletePermanent' });
+    // Plain Backspace is nothing (it would be too easy to hit while typing ahead).
+    expect(treeAction(k('Backspace'), mac)).toBeNull();
+    expect(treeAction(k('Backspace', { ctrlKey: true }), linux)).toBeNull();
+    expect(treeAction(k('c', { metaKey: true }), mac)).toEqual({ type: 'clipboard', op: 'copy' });
+    expect(treeAction(k('x', { ctrlKey: true }), linux)).toEqual({ type: 'clipboard', op: 'cut' });
+    expect(treeAction(k('v', { ctrlKey: true }), linux)).toEqual({ type: 'clipboard', op: 'paste' });
+    expect(treeAction(k('z', { metaKey: true }), mac)).toEqual({ type: 'undo' });
+    // Shift+Cmd+Z is redo elsewhere: not ours (there is no redo).
+    expect(treeAction(k('z', { metaKey: true, shiftKey: true }), mac)).toBeNull();
+  });
+
   it('copy path chords differ per platform', () => {
     expect(treeAction(k('ç', { code: 'KeyC', metaKey: true, altKey: true }), mac)).toEqual({ type: 'copyPath', relative: false });
     expect(treeAction(k('Ç', { code: 'KeyC', metaKey: true, altKey: true, shiftKey: true }), mac)).toEqual({ type: 'copyPath', relative: true });

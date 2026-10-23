@@ -1,8 +1,9 @@
 <script lang="ts">
   /**
    * The Files header (docs/file-tree.md §3.2): the root's name (a click opens the root
-   * switcher), a host chip on a remote root, and Refresh / Collapse All / Pin / "⋯".
-   * Phase 1 is read-only, so New File and New Folder arrive with file operations.
+   * switcher), a host chip on a remote root, and New File / New Folder / Refresh / Collapse
+   * All / Pin / "⋯". The header is also a drop target for the root folder (`data-ft-root-drop`,
+   * filetree/dnd.ts), since a deep tree may have no empty space below its rows.
    */
   import { fileTreeStore } from '$lib/stores/fileTree.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
@@ -79,7 +80,7 @@
   }
 </script>
 
-<div class="header">
+<div class="header" data-ft-root-drop class:drop-root={fileTreeStore.dropTarget === ''}>
   <div class="root">
     <Tooltip text={rootTip} block>
       <button
@@ -97,6 +98,14 @@
     </Tooltip>
   </div>
   <div class="buttons">
+    <!-- Into the focused folder (or the focused file's), else the root. No Cmd+N: that
+         stays the app's new window (§11.1). -->
+    <IconButton tooltip="New File" size={22} onclick={() => fileTreeStore.startCreate('file')} disabled={!fileTreeStore.subscribed || !fileTreeStore.writable}>
+      <Icon name="new-file" size={13} />
+    </IconButton>
+    <IconButton tooltip="New Folder" size={22} onclick={() => fileTreeStore.startCreate('dir')} disabled={!fileTreeStore.subscribed || !fileTreeStore.writable}>
+      <Icon name="new-folder" size={13} />
+    </IconButton>
     <IconButton tooltip="Refresh" size={22} onclick={() => fileTreeStore.refresh()} disabled={!fileTreeStore.subscribed}>
       <Icon name="refresh" size={13} />
     </IconButton>
@@ -147,6 +156,10 @@
     gap: 4px;
     padding: 0 4px 0 6px;
     border-bottom: 1px solid var(--bg-light);
+  }
+
+  .header.drop-root {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
   }
 
   .root {

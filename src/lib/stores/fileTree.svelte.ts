@@ -30,9 +30,15 @@ import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import { writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import * as commands from '$lib/tauri/commands';
-import type { BranchInfo, DirReq, GitLetter, OpenAck, TreeEnvelope, TreePlace, TreeSearchHit } from '$lib/tauri/types';
+import type { BranchInfo, DirReq, FileOp, GitLetter, OpItem, OpResult, OpenAck, TreeEnvelope, TreePlace, TreeSearchHit } from '$lib/tauri/types';
 import { TREE_FLAG_IGNORED } from '$lib/tauri/types';
-import { TreeModel, ancestorsOf, isExpandable, isFolderKind, isWithin, joinRel, matchHighlights, parentRel, prunedRows, revealPlan, type RevealKind, type Row } from '$lib/filetree/model';
+import { TreeModel, ancestorsOf, baseName, dropAccepted, isExpandable, isFolderKind, isWithin, joinRel, matchHighlights, parentRel, prunedRows, revealPlan, type RevealKind, type Row } from '$lib/filetree/model';
+import { nameProblem, siblingLookup, type NameRules } from '$lib/filetree/names';
+import { UndoStacks, describeResult, trashLabel, trashPlace, undoLabel, type Lookup, type Platform, type UndoEntry } from '$lib/filetree/undo';
+import type { DropTarget } from '$lib/filetree/dnd';
+import { relocateStore } from '$lib/stores/relocate.svelte';
+import { attachToComposer } from '$lib/components/terminal/ComposerDock.svelte';
+import { isMac, isWindows } from '$lib/utils/platform';
 import { openGitDiff } from '$lib/utils/openGitDiff';
 import { relToAbs, lastSegment, tildePath } from '$lib/filetree/paths';
 import { settleActiveFile, type ActiveFileTarget } from '$lib/filetree/activeFile';
@@ -49,6 +55,35 @@ import { insertPathsIntoTab } from '$lib/utils/insertPaths';
 export type TreeStatus = 'none' | 'resolving' | 'opening' | 'ready' | 'missing' | 'remote' | 'gone' | 'error';
 
 export type OpenMode = 'preview' | 'pin' | 'side';
+
+/** The inline New or Rename input (§10.4). */
+export type EditState =
+  | { mode: 'create'; kind: 'file' | 'dir'; parent: string; error: string | null; pending: boolean; value: string }
+  | { mode: 'rename'; rel: string; error: string | null; pending: boolean; value: string };
+
+/** One button on the ConfirmStrip. */
+export interface ConfirmAction {
+  label: string;
+  tone?: 'danger' | 'primary';
+  run: () => void | Promise<unknown>;
+}
+
+/** The footer's question (§10.4): `confirm()` is dead in the webview. */
+export interface ConfirmState {
+  text: string;
+  actions: ConfirmAction[];
+}
+
+/** The footer's last op result, with Undo (or "Show in Trash" where there is no undo). */
+export interface OpNotice {
+  text: string;
+  action: { label: string; run: () => void } | null;
+}
+
+/** How long an op's result stays in the footer. */
+const NOTICE_MS = 10_000;
+
+const PLATFORM: Platform = isMac() ? 'mac' : isWindows() ? 'windows' : 'linux';
 
 interface ViewState {
   model: TreeModel;
@@ -217,6 +252,17 @@ function createFileTreeStore() {
   /** The view to put back when find (or the Changed lens) gives way. */
   let savedForFind: SavedView | null = null;
   let savedForChanged: SavedView | null = null;
+
+  // File operations (§10).
+  let edit = $state<EditState | null>(null);
+  let confirm = $state<ConfirmState | null>(null);
+  let notice = $state<OpNotice | null>(null);
+  let noticeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The tree's own clipboard of files (Cmd/Ctrl+C / X); never the OS clipboard. */
+  let clip = $state<{ place: string; rels: string[]; abs: string[]; cut: boolean } | null>(null);
+  /** The folder a drag (or an OS drop) would land in now: '' the root, null none. */
+  let dropTarget = $state<string | null>(null);
+  const undo = new UndoStacks();
 
   homeDir().then((h) => { home = h; }).catch(() => {});
 
@@ -649,6 +695,12 @@ function createFileTreeStore() {
     savedForFind = null;
     savedForChanged = null;
     lensRows = [];
+    // An edit, a question and a result all name rels of the root being left. An unfinished
+    // name is dropped, never committed (§10.4).
+    edit = null;
+    confirm = null;
+    dropTarget = null;
+    setNotice(null);
   }
 
   function newModel(p: TreePlace): TreeModel {
@@ -741,7 +793,10 @@ function createFileTreeStore() {
       case 'dir': {
         const r = m.applyDir(env);
         if (r === 'resync') commands.ftRefresh(sub, env.rel).catch(() => {});
-        else if (env.last) onListed(env.rel);
+        else if (env.last) {
+          onListed(env.rel);
+          noteDiskChange(env.rel, null);
+        }
         break;
       }
       case 'not_modified': {
@@ -752,7 +807,10 @@ function createFileTreeStore() {
       }
       case 'delta': {
         if (m.applyDelta(env) === 'resync') commands.ftRefresh(sub, env.rel).catch(() => {});
-        else if ((selection.size || focusKey) && viewMode() === 'tree') pruneSelection();
+        else {
+          if ((selection.size || focusKey) && viewMode() === 'tree') pruneSelection();
+          noteDiskChange(env.rel, [...env.add.map((e) => e.n), ...env.del, ...env.chg.map((e) => e.n)]);
+        }
         break;
       }
       case 'dir_error': {
@@ -1164,6 +1222,431 @@ function createFileTreeStore() {
     if (r.ok) announce(`Added ${items.length} path${items.length > 1 ? 's' : ''} to ${target.name}`);
   }
 
+  // ── File operations (§10) ─────────────────────────────────────────────────────────────
+  //
+  // Every write is one `ftOp`, checked in Rust (containment, never clobber, the guards). What
+  // lives here is the human's side: the inline name, the footer's questions, the undo stack,
+  // editor tabs following their file, and the in-app clipboard.
+
+  const writable = () => !!ack?.caps.writable && subId !== null;
+
+  /** Exists in the model, when the folder holding it is listed; undefined when nobody knows. */
+  const lookup: Lookup = (rel) => {
+    const d = model?.dirs.get(parentRel(rel));
+    if (!d || d.state !== 'ok') return undefined;
+    return d.entries.has(baseName(rel));
+  };
+
+  /** A folder changed on disk: undo entries it contradicts go stale (unless it was us). */
+  function noteDiskChange(dir: string, names: string[] | null) {
+    if (place && undo.size(place.place)) undo.noteChange(place.place, dir, names, lookup, Date.now());
+  }
+
+  function setNotice(n: OpNotice | null) {
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeTimer = null;
+    notice = n;
+    if (n) noticeTimer = setTimeout(() => { notice = null; noticeTimer = null; }, NOTICE_MS);
+  }
+
+  function ask(text: string, actions: ConfirmAction[]) {
+    confirm = { text, actions };
+  }
+
+  /** The folder an action without a folder of its own lands in: the focused folder, the
+   *  focused file's folder, else the root. */
+  function folderOf(rel: string | null | undefined): string {
+    if (rel == null || rel === '') return '';
+    const e = model?.entry(rel);
+    return e && isExpandable(e) ? rel : parentRel(rel);
+  }
+
+  function quotedNames(rels: string[]): string {
+    return rels.length === 1 ? `“${baseName(rels[0])}”` : `${rels.length} items`;
+  }
+
+  /** The editor tabs showing a file at or under any of `rels`: [rel, tabId]. */
+  function editorsWithin(rels: string[]): [string, string][] {
+    const out: [string, string][] = [];
+    for (const [rel, tabs] of editorRels) {
+      if (rels.some((r) => isWithin(rel, r))) for (const t of tabs) out.push([rel, t]);
+    }
+    return out;
+  }
+
+  /** Renamed or moved files keep their editor tabs: each tab is pointed at the new path and
+   *  its watcher re-armed there (§10.3). Unsaved edits stay in the buffer. */
+  async function retargetEditors(done: OpItem[]) {
+    const moves = done.filter((d): d is OpItem & { to: string } => !!d.to && d.from !== d.to);
+    if (!moves.length || !ack) return;
+    for (const [rel, tabs] of editorRels) {
+      const m = moves.find((d) => isWithin(rel, d.from));
+      if (!m) continue;
+      const abs = relToAbs(ack, m.to + rel.slice(m.from.length));
+      for (const tabId of tabs) {
+        const loc = workspacesStore._locateTab(tabId);
+        const f = loc?.tab.editor_file;
+        if (!loc || loc.tab.tab_type !== 'editor' || !f || f.is_remote) continue;
+        const info = { ...f, file_path: abs, language: editorFileInfo(abs).language ?? f.language };
+        const name = loc.tab.custom_name ? loc.tab.name : lastSegment(abs);
+        try {
+          await workspacesStore.updateEditorTabFile(tabId, name, info);
+          window.dispatchEvent(new CustomEvent('editor-retarget-file', { detail: { tabId } }));
+        } catch (e) {
+          logError(`[files] retarget editor ${tabId}: ${e}`);
+        }
+      }
+    }
+  }
+
+  /** Select what an op made or moved, revealing the first. */
+  function selectResult(rels: string[]) {
+    if (!rels.length) return;
+    revealRel(rels[0], 'asked');
+    if (rels.length > 1) {
+      for (const r of rels) selection.add(r);
+    }
+  }
+
+  interface RunOpts {
+    /** Undoing: the result is not pushed (there is no redo), and the footer says "Undid". */
+    undoing?: UndoEntry;
+    /** Select what the op made or moved (create, rename, move, copy, duplicate, import). */
+    select?: boolean;
+    /** Called with the result once handled. */
+    after?: (r: OpResult) => void;
+  }
+
+  /**
+   * Run one op and settle everything around it: the guards the human answers (on the
+   * ConfirmStrip), editor tabs following renamed files, the undo stack, the footer and the
+   * announcement. Resolves with the result, or null when it was refused or asks first.
+   */
+  async function runOp(op: FileOp, o: RunOpts = {}): Promise<OpResult | null> {
+    const sub = subId;
+    const p = place;
+    if (sub === null || !p) return null;
+    confirm = null;
+    let r: OpResult;
+    undo.beginOp();
+    try {
+      r = await commands.ftOp(sub, op);
+    } catch (e) {
+      // A refusal of the whole op: nothing changed.
+      const msg = e instanceof Error ? e.message : String(e);
+      setNotice({ text: msg, action: null });
+      announce(msg);
+      return null;
+    } finally {
+      undo.endOp(Date.now());
+    }
+    if (sub !== subId) return r;
+
+    if (r.needs) {
+      const n = r.needs;
+      if (n.code === 'agent_active') {
+        ask(`${n.detail} Do it anyway?`, [{ label: 'Do It Anyway', tone: 'danger', run: () => runOp({ ...op, ack_agents: true }, o) }]);
+      } else if (n.code === 'live_cwd') {
+        const folder = op.src?.length === 1 ? absOf(op.src[0]) : null;
+        const suggested = op.kind === 'rename' && op.src?.length === 1 && op.name && ack
+          ? relToAbs(ack, joinRel(parentRel(op.src[0]), op.name))
+          : op.kind === 'move' && op.src?.length === 1 && ack ? relToAbs(ack, joinRel(op.dest ?? '', baseName(op.src[0]))) : null;
+        ask(n.detail, folder
+          ? [{ label: 'Move Project…', tone: 'primary', run: () => relocateStore.open({ mode: 'move', old: folder, suggested }) }]
+          : []);
+      } else if (n.code === 'no_trash') {
+        const left = r.failed.filter((f) => f.code === 'no_trash').map((f) => f.rel);
+        if (left.length) void deletePermanently(left, n.detail);
+      }
+    }
+
+    void retargetEditors(op.kind === 'rename' || op.kind === 'move' ? r.done : []);
+
+    const text = describeResult(op, r, PLATFORM);
+    let action: OpNotice['action'] = null;
+    if (o.undoing) {
+      const words = `Undid the ${o.undoing.label}${op.kind === 'trash' && r.done.length ? ` (moved to ${trashPlace(PLATFORM)})` : ''}`;
+      const extra = r.failed.length ? ` · ${r.failed[0].msg}` : '';
+      if (r.done.length || r.failed.length) setNotice({ text: words + extra, action: null });
+      announce(words + extra);
+    } else {
+      if (r.undo && r.done.length) {
+        const entry = undo.push(p.place, r.undo, undoLabel(op, r));
+        action = { label: 'Undo', run: () => void undoLast(entry) };
+      } else if (op.kind === 'trash' && r.done.length && PLATFORM === 'mac') {
+        // NSFileManager can't put things back from here: say where they went instead.
+        action = { label: 'Show in Trash', run: () => void showTrash() };
+      }
+      if (text) {
+        setNotice({ text, action });
+        announce(text);
+      }
+    }
+
+    // Same-named items: offer to keep both rather than fail the drop quietly.
+    const clashes = r.failed.filter((f) => f.code === 'exists');
+    if (!r.needs && clashes.length && (op.kind === 'move' || op.kind === 'copy' || op.kind === 'import') && op.conflict !== 'keep_both' && !op.to?.length) {
+      const where = op.dest ? `“${baseName(op.dest)}”` : 'the root folder';
+      ask(`${quotedNames(clashes.map((c) => c.rel))} ${clashes.length === 1 ? 'is' : 'are'} already in ${where}.`, [
+        { label: 'Keep Both', tone: 'primary', run: () => runOp({ ...op, src: clashes.map((c) => c.rel), conflict: 'keep_both' }, o) },
+      ]);
+    }
+
+    // `to` is the new rel (an import's `from` is the native source); a create's is `from`.
+    if (o.select && sub === subId) selectResult(r.done.map((d) => d.to ?? d.from));
+    o.after?.(r);
+    return r;
+  }
+
+  async function showTrash() {
+    const h = home ?? (await homeDir().catch(() => null));
+    if (h) await commands.openWithDefaultApp(`${h.replace(/\/$/, '')}/.Trash`).catch((e) => toastStore.addToast('Couldn’t open the Trash', String(e), 'error'));
+  }
+
+  // The inline name (§10.4).
+
+  /** New File / New Folder: the folder opens and the input sits at the top of its children.
+   *  Find and the Changed lens are put away first: the new item belongs in the real tree. */
+  function startCreate(kind: 'file' | 'dir', parent?: string) {
+    if (!writable() || !model) return;
+    const dir = parent ?? folderOf(focusKey);
+    if (find) closeFind();
+    if (lens === 'changed') toggleChanged();
+    if (dir !== '') {
+      revealRel(dir, 'auto');
+      expand(dir);
+    }
+    confirm = null;
+    edit = { mode: 'create', kind, parent: dir, error: null, pending: false, value: '' };
+    if (dir) requestScroll(dir);
+    else scrollToTop();
+  }
+
+  function startRename(rel: string) {
+    if (!writable() || !rel) return;
+    confirm = null;
+    edit = { mode: 'rename', rel, error: null, pending: false, value: baseName(rel) };
+    // Focused, so the row stays rendered while scrolled away (TreeBody keeps the focused row).
+    focusKey = rel;
+    requestScroll(rel);
+  }
+
+  function cancelEdit() {
+    if (!edit) return;
+    edit = null;
+    focusPending = true;
+  }
+
+  /** The rules the input checks as the human types. */
+  function editRules(): NameRules | null {
+    const e = edit;
+    const a = ack;
+    if (!e || !a || !model) return null;
+    const dir = e.mode === 'create' ? e.parent : parentRel(e.rel);
+    const d = model.dirs.get(dir);
+    const own = e.mode === 'rename' ? baseName(e.rel) : undefined;
+    const names: [string, 'dir' | 'file'][] = d ? [...d.entries.values()].map((x) => [x.n, isFolderKind(x.k) ? 'dir' : 'file']) : [];
+    return {
+      mode: e.mode,
+      strictWindows: PLATFORM === 'windows' || a.case_insensitive,
+      caseInsensitive: a.case_insensitive,
+      nfc: a.nfc_names,
+      sibling: siblingLookup(names, a.case_insensitive, a.nfc_names, own),
+      current: own,
+    };
+  }
+
+  /** Enter (or a real blur) on the input. Nothing is sent for an invalid or unchanged name;
+   *  a failure keeps the input up with the reason under it. */
+  async function commitEdit(value: string) {
+    const e = edit;
+    const rules = editRules();
+    if (!e || e.pending || !rules) return;
+    const problem = nameProblem(value, rules);
+    if (problem) {
+      edit = { ...e, error: problem, value };
+      return;
+    }
+    if (e.mode === 'rename' && value === baseName(e.rel)) {
+      cancelEdit();
+      return;
+    }
+    edit = { ...e, pending: true, error: null, value };
+    const op: FileOp = e.mode === 'create'
+      ? { kind: e.kind === 'file' ? 'create_file' : 'create_dir', dest: e.parent, name: value }
+      : { kind: 'rename', src: [e.rel], name: value };
+    const r = await runOp(op, { select: true });
+    if (edit?.pending !== true) return; // cancelled or re-rooted meanwhile
+    if (r?.needs) {
+      // The footer asks now (agents at work, a tab's folder); its answer reruns the op.
+      edit = null;
+      return;
+    }
+    if (!r || !r.done.length) {
+      const why = r?.failed[0]?.msg ?? (r?.skipped.length ? 'Nothing to change' : notice?.text ?? 'That didn’t work');
+      edit = { ...e, pending: false, value, error: why };
+      return;
+    }
+    edit = null;
+    focusPending = true;
+    // A new file opens as a pinned editor tab (§10.4).
+    const made = r.done[r.done.length - 1]?.from;
+    if (e.mode === 'create' && e.kind === 'file' && made) void openFile(made, 'pin');
+  }
+
+  // Trash, delete, duplicate.
+
+  function dirtyNames(rels: string[]): string[] {
+    return [...new Set(editorsWithin(rels).filter(([, t]) => isEditorDirty(t)).map(([rel]) => baseName(rel)))];
+  }
+
+  function unsavedNote(names: string[]): string {
+    if (!names.length) return '';
+    return names.length === 1 ? `“${names[0]}” has unsaved changes. ` : `${names.length} open files have unsaved changes. `;
+  }
+
+  /** Delete / Cmd+Backspace: to the trash, asking first only over unsaved edits (§10.3). */
+  async function trash(rels: string[]) {
+    rels = rels.filter((r) => r !== '');
+    if (!rels.length || !writable()) return;
+    if (!ack?.caps.trash) return deletePermanently(rels);
+    const dirty = dirtyNames(rels);
+    const go = () => runOp({ kind: 'trash', src: rels });
+    if (dirty.length) ask(`${unsavedNote(dirty)}${trashLabel(PLATFORM)} anyway?`, [{ label: trashLabel(PLATFORM), tone: 'danger', run: go }]);
+    else await go();
+  }
+
+  /** Shift+Delete, or a trash that can't: always asked, with what it will remove, and run
+   *  with a single-use ticket bound to exactly these rels (§10.1). */
+  async function deletePermanently(rels: string[], why?: string) {
+    rels = rels.filter((r) => r !== '');
+    const sub = subId;
+    if (!rels.length || sub === null || !writable()) return;
+    let t;
+    try {
+      t = await commands.ftPrepareDelete(sub, rels);
+    } catch (e) {
+      toastStore.addToast('Couldn’t delete', String(e), 'error');
+      return;
+    }
+    if (sub !== subId) return;
+    const counts = [t.files && `${t.files} file${t.files === 1 ? '' : 's'}`, t.dirs && `${t.dirs} folder${t.dirs === 1 ? '' : 's'}`].filter(Boolean).join(' and ');
+    const lead = why ? `${why} ` : '';
+    ask(`${lead}${unsavedNote(dirtyNames(rels))}Delete ${quotedNames(rels)} permanently${counts ? ` (${counts})` : ''}? This can’t be undone.`, [
+      { label: 'Delete Permanently', tone: 'danger', run: () => runOp({ kind: 'delete', src: rels, token: t.token }) },
+    ]);
+  }
+
+  function duplicate(rels: string[]) {
+    rels = rels.filter((r) => r !== '');
+    if (rels.length && writable()) void runOp({ kind: 'duplicate', src: rels }, { select: true });
+  }
+
+  // The in-app clipboard.
+
+  function clipTo(rels: string[], cut: boolean) {
+    rels = rels.filter((r) => r !== '');
+    if (!rels.length || !place || !ack) return;
+    clip = { place: place.place, rels, abs: rels.map((r) => relToAbs(ack!, r)), cut };
+    announce(`${quotedNames(rels)} ${cut ? 'cut' : 'copied'}: paste into a folder`);
+  }
+
+  /** Paste into `dest` (or the focused folder). A cut moves within this root; anywhere else
+   *  (another root) it can only copy, and says so. A copy into the folder it came from gets
+   *  a fresh name, like Finder and Explorer. */
+  async function paste(dest?: string) {
+    const c = clip;
+    if (!c || !place || !writable()) return;
+    const to = dest ?? folderOf(focusKey);
+    if (c.place === place.place) {
+      if (!dropAccepted(c.rels, to, !c.cut)) {
+        announce(c.cut ? 'Already in that folder' : 'A folder can’t be copied into itself');
+        return;
+      }
+      if (c.cut) {
+        const r = await runOp({ kind: 'move', src: c.rels, dest: to }, { select: true });
+        if (r && !r.failed.length && !r.needs) clip = null;
+      } else {
+        const same = c.rels.every((s) => parentRel(s) === to);
+        await runOp({ kind: 'copy', src: c.rels, dest: to, conflict: same ? 'keep_both' : 'fail' }, { select: true });
+      }
+      return;
+    }
+    const r = await runOp({ kind: 'import', src: c.abs, dest: to }, { select: true });
+    if (r && c.cut) announce('Files from another root are copied, not moved');
+  }
+
+  // Undo (§10.4).
+
+  /** Cmd/Ctrl+Z: the newest op on this root, unless it changed on disk since. `expected`
+   *  (the footer's Undo) only acts while that entry is still the newest. */
+  async function undoLast(expected?: UndoEntry) {
+    if (!place || !writable()) return;
+    const top = undo.peek(place.place);
+    if (!top || (expected && top !== expected)) {
+      announce('Nothing to undo');
+      if (!top) setNotice({ text: 'Nothing to undo in this folder', action: null });
+      return;
+    }
+    undo.pop(place.place);
+    const stale = undo.check(top, lookup);
+    if (stale) {
+      const text = `Can’t undo the ${top.label}: ${stale}`;
+      setNotice({ text, action: null });
+      announce(text);
+      return;
+    }
+    const sel = top.op.kind === 'rename' || top.op.kind === 'move' || top.op.kind === 'restore';
+    await runOp(top.op, { undoing: top, select: sel });
+  }
+
+  // Drag and drop (§10.4).
+
+  /** Whether a drag of `srcs` would do anything at `t`. */
+  function dropAccepts(srcs: string[], t: DropTarget, copy: boolean): boolean {
+    if (t.kind !== 'folder') return true;
+    return writable() && dropAccepted(srcs, t.rel, copy);
+  }
+
+  async function dropItems(srcs: string[], t: DropTarget, copy: boolean) {
+    const abs = srcs.map((r) => absOf(r)).filter((a): a is string => !!a);
+    if (t.kind === 'terminal') {
+      const r = await insertPathsIntoTab(t.tabId, abs.map((a) => ({ abs: a })));
+      if (r.ok) announce(`Added ${quotedNames(srcs)} to the tab`);
+      return;
+    }
+    if (t.kind === 'composer') {
+      attachToComposer(t.tabId, abs);
+      announce(`Attached ${quotedNames(srcs)}`);
+      return;
+    }
+    if (!dropAccepts(srcs, t, copy)) return;
+    // Undoable beats confirmable: a move never asks (§10.4).
+    if (copy) {
+      const same = srcs.every((s) => parentRel(s) === t.rel);
+      await runOp({ kind: 'copy', src: srcs, dest: t.rel, conflict: same ? 'keep_both' : 'fail' }, { select: true });
+    } else {
+      await runOp({ kind: 'move', src: srcs, dest: t.rel }, { select: true });
+    }
+  }
+
+  /** Files dropped from the OS onto the tree: copied in (§10.4). */
+  async function importPaths(paths: string[], dest: string) {
+    if (!paths.length || !writable()) return;
+    await runOp({ kind: 'import', src: paths, dest }, { select: true });
+  }
+
+  /** "Ask about this…": the paths go into the followed tab's composer as attachments; the
+   *  human writes the prompt and sends it (§9.5). The tree never submits. */
+  function askAbout(rels: string[]) {
+    const target = addTarget;
+    if (!target || !rels.length) return;
+    const abs = rels.map((r) => absOf(r)).filter((a): a is string => !!a);
+    if (!workspacesStore.isComposerOpen(target.tabId)) workspacesStore.toggleComposer(target.tabId);
+    attachToComposer(target.tabId, abs);
+    announce(`Attached ${quotedNames(rels)} to ${target.name}’s composer`);
+  }
+
   // ── Selection and focus ───────────────────────────────────────────────────────────────
 
   function setFocus(key: string | null, scroll = true) {
@@ -1483,6 +1966,49 @@ function createFileTreeStore() {
     openWithDefaultApp,
     openTerminalHere,
     addToTab,
+
+    // File operations (§10)
+    get writable() { return !!ack?.caps.writable; },
+    get canTrash() { return !!ack?.caps.trash; },
+    get platform(): Platform { return PLATFORM; },
+    get edit() { return edit; },
+    get confirm() { return confirm; },
+    get notice() { return notice; },
+    get dropTarget() { return dropTarget; },
+    setDropTarget(rel: string | null) { dropTarget = rel; },
+    get hasClip() { return !!clip; },
+    /** A row cut to the in-app clipboard, drawn dimmed until pasted. */
+    isCut(key: string): boolean {
+      return !!clip?.cut && clip.place === place?.place && clip.rels.includes(key);
+    },
+    folderOf,
+    startCreate,
+    startRename,
+    cancelEdit,
+    commitEdit,
+    editRules,
+    /** The ConfirmStrip: run a button (the strip closes first), or put it away. */
+    async confirmRun(a: ConfirmAction) {
+      confirm = null;
+      focusPending = true;
+      await a.run();
+    },
+    cancelConfirm() {
+      confirm = null;
+      focusPending = true;
+    },
+    dismissNotice() { setNotice(null); },
+    trash,
+    deletePermanently,
+    duplicate,
+    copyFiles(rels: string[]) { clipTo(rels, false); },
+    cutFiles(rels: string[]) { clipTo(rels, true); },
+    paste,
+    undoLast() { return undoLast(); },
+    dropAccepts,
+    dropItems,
+    importPaths,
+    askAbout,
 
     pin,
     unpin,

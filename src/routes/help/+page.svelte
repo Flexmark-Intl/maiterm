@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { modLabel, altLabel, isMac } from '$lib/utils/platform';
+  import { modLabel, altLabel, isMac, isWindows } from '$lib/utils/platform';
   import { slide } from 'svelte/transition';
 
   import { onMount } from 'svelte';
@@ -150,6 +150,15 @@
             <div class="shortcut"><kbd>Shift</kbd> + <kbd>{altLabel}</kbd> + <kbd>C</kbd> <span>Copy path (+ <kbd>{modLabel}</kbd>: relative)</span></div>
           {/if}
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>Shift</kbd> + <kbd>.</kbd> <span>Show / hide hidden files</span></div>
+          <div class="shortcut"><kbd>F2</kbd> <span>Rename</span></div>
+          {#if isMac()}
+            <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>&#x232B;</kbd> <span>Move to Trash (+ <kbd>{altLabel}</kbd>: delete permanently, asked first)</span></div>
+          {:else}
+            <div class="shortcut"><kbd>Delete</kbd> <span>{isWindows() ? 'Delete to the Recycle Bin' : 'Move to Trash'} (+ <kbd>Shift</kbd>: delete permanently, asked first)</span></div>
+          {/if}
+          <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>C</kbd> / <kbd>X</kbd> / <kbd>V</kbd> <span>Copy / cut / paste files</span></div>
+          <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>Z</kbd> <span>Undo the last file operation in this folder</span></div>
+          <div class="shortcut"><span>Drag rows to move them ({isMac() ? altLabel : 'Ctrl'} copies), onto a terminal to insert their paths, onto the composer to attach</span></div>
           <div class="shortcut"><kbd>a</kbd>–<kbd>z</kbd> <span>Jump to the next name starting with what you type</span></div>
           <div class="shortcut"><kbd>/</kbd> · <kbd>{modLabel}</kbd> + <kbd>F</kbd> <span>Find a file: arrows move, Enter opens, Esc puts the tree back</span></div>
           <div class="shortcut"><kbd>Esc</kbd> <span>Close find, then clear the selection, then back to the terminal</span></div>
