@@ -773,8 +773,14 @@ impl RootHub {
         let mut got = HashSet::new();
         let mut subs = self.subs.lock();
         for s in subs.values_mut().filter(|s| s.interest.contains(rel)) {
+            let before = s.seq;
             s.deliver(TreeEvent::Dir { rel: rel.to_string(), gen, chunk: 0, last: false, total, truncated, entries: head.to_vec() });
-            got.insert(s.id);
+            // Only a sub chunk 0 actually reached continues from chunk 1. One that was paused or
+            // stalled only had the folder marked dirty: counting it would record a resume point
+            // past a chunk it never got, and every chunk after would be refused as out of order.
+            if s.seq > before {
+                got.insert(s.id);
+            }
         }
         Some((gen, got))
     }
@@ -1358,6 +1364,41 @@ mod stall_tests {
         }
         assert!(done, "{chunks} chunks: the big folder never finished");
         assert_eq!(next_chunk, Some(chunks as u32));
+    }
+
+    /// A big folder's early chunk 0 that met a paused sub was only marked dirty; the resume
+    /// must start the listing from chunk 0, not carry on from chunk 1.
+    #[test]
+    fn an_early_head_a_paused_sub_missed_is_resent_from_chunk_zero() {
+        const CHUNKS: usize = 3;
+        let root = std::env::temp_dir().join(format!("ft-early-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let ft = super::super::FileTreeState::with(Duration::from_secs(30), super::super::watch::RAW_CAPACITY, None);
+        let rec = Arc::new(Recorder::default());
+        let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+        let hub = ft.hub_of(ack.sub_id).unwrap();
+        // "big" is never on disk: the snapshot published below is all the hub knows of it.
+        hub.subs.lock().get_mut(&ack.sub_id).unwrap().interest.insert("big".to_string());
+        hub.pause(ack.sub_id, true);
+
+        let entries: Vec<Entry> = (0..CHUNKS * CHUNK).map(|i| Entry { n: format!("f{i:06}"), k: "f", f: 0 }).collect();
+        let early = hub.early_head("big", &entries[..CHUNK], entries.len() as u32, false);
+        assert!(early.as_ref().is_some_and(|(_, got)| got.is_empty()), "a paused sub got no chunk 0");
+        hub.publish("big", Ok(Listing { entries, total: (CHUNKS * CHUNK) as u32, truncated: false }), Vec::new(), early);
+        hub.pause(ack.sub_id, false);
+
+        let chunks: Vec<u32> = rec
+            .msgs
+            .lock()
+            .iter()
+            .filter_map(|m| match &m.ev {
+                TreeEvent::Dir { rel, chunk, .. } if rel == "big" => Some(*chunk),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chunks, (0..CHUNKS as u32).collect::<Vec<_>>());
+        ft.close(ack.sub_id);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
