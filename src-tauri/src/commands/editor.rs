@@ -1109,37 +1109,54 @@ pub async fn unwatch_remote_file(
 
 #[command]
 pub async fn git_show_file(file_path: String, git_ref: String) -> Result<String, String> {
-    let file_path = expand_tilde(&file_path);
-    let dir = Path::new(&file_path)
-        .parent()
-        .ok_or("Invalid file path")?;
+    // Two git processes on the command thread is the pinwheel this app has shipped before.
+    tauri::async_runtime::spawn_blocking(move || {
+        git_show_file_blocking(Path::new(&expand_tilde(&file_path)), &git_ref)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
-    // Get repo root
-    let root_output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(dir)
-        .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+/// The content of `file_path` at `git_ref`.
+fn git_show_file_blocking(file_path: &Path, git_ref: &str) -> Result<String, String> {
+    use crate::util::proc::{self, RunError};
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+    // A ref is a revision, never an option: `--output=…` would make `git show` write a file.
+    if git_ref.is_empty() || git_ref.starts_with('-') {
+        return Err(format!("Invalid git ref: {git_ref}"));
+    }
+    let name = file_path.file_name().ok_or("Invalid file path")?;
+    let dir = file_path.parent().ok_or("Invalid file path")?;
+    // Canonicalise the folder, not the file: a file deleted from the working tree still has a
+    // version at HEAD. git reports its toplevel with symlinks resolved, so the path has to be
+    // resolved the same way or /tmp/x never strips against /private/tmp/x.
+    let file = crate::share::canon(dir).join(name);
+
+    let run = |args: &[&std::ffi::OsStr]| {
+        proc::output_timeout(proc::git().args(args), TIMEOUT).map_err(|e| match e {
+            RunError::Spawn(e) => format!("Failed to run git: {e}"),
+            e => format!("git {e}"),
+        })
+    };
+
+    let root_output = run(&["-C".as_ref(), dir.as_os_str(), "rev-parse".as_ref(), "--show-toplevel".as_ref()])?;
     if !root_output.status.success() {
         return Err("Not a git repository".to_string());
     }
-    let repo_root = String::from_utf8_lossy(&root_output.stdout)
-        .trim()
-        .to_string();
+    let repo_root = crate::share::canon(Path::new(String::from_utf8_lossy(&root_output.stdout).trim()));
 
-    // Compute relative path
-    let rel_path = Path::new(&file_path)
+    // `ref:path` wants '/' separators on every OS; a Windows `src\x.ts` names nothing.
+    let rel_path = file
         .strip_prefix(&repo_root)
-        .map_err(|_| "File is outside the git repository".to_string())?;
+        .map_err(|_| "File is outside the git repository".to_string())?
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
 
-    // git show ref:path
-    let output = std::process::Command::new("git")
-        .arg("show")
-        .arg(format!("{}:{}", git_ref, rel_path.to_string_lossy()))
-        .current_dir(&repo_root)
-        .output()
-        .map_err(|e| format!("Failed to run git show: {}", e))?;
-
+    let spec = format!("{git_ref}:{rel_path}");
+    let output = run(&["-C".as_ref(), repo_root.as_os_str(), "show".as_ref(), spec.as_ref()])?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("git show failed: {}", stderr.trim()));
@@ -1485,4 +1502,53 @@ async fn poll_host_files(
         .collect();
 
     Ok(mtimes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A throwaway repo whose git never reads the developer's own config or hooks.
+    fn git_in(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    #[test]
+    fn git_show_file_reads_a_path_with_spaces_through_an_unresolved_temp_path() {
+        // On macOS temp_dir() is under /var, a symlink to /private/var, while git reports the
+        // resolved toplevel: the strip has to work across that.
+        let base = std::env::temp_dir().join(format!("git-show-{}", uuid::Uuid::new_v4()));
+        let sub = base.join("my dir");
+        std::fs::create_dir_all(&sub).unwrap();
+        git_in(&base, &["init", "-q"]);
+        let file = sub.join("a file.txt");
+        std::fs::write(&file, "committed\n").unwrap();
+        git_in(&base, &["add", "-A"]);
+        git_in(&base, &["commit", "-q", "--no-verify", "-m", "x"]);
+        std::fs::write(&file, "working\n").unwrap();
+
+        let got = tauri::async_runtime::block_on(git_show_file(
+            file.to_string_lossy().into_owned(),
+            "HEAD".to_string(),
+        ));
+        assert_eq!(got.unwrap(), "committed\n");
+
+        // Deleted from the working tree: HEAD still has it.
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(git_show_file_blocking(&file, "HEAD").unwrap(), "committed\n");
+
+        assert!(git_show_file_blocking(&file, "--output=/tmp/x").is_err(), "a ref is never an option");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
