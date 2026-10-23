@@ -14,6 +14,10 @@ describe('turn baselines in words', () => {
 
   it('says why there is no baseline', () => {
     expect(baselineUnavailableWords('too_large', 'turn')).toMatch(/2 MB/);
+    expect(baselineUnavailableWords('evicted', 'turn')).toMatch(/64 MB/);
+    // Dropped because other sessions ran, not memory: it must not blame memory.
+    expect(baselineUnavailableWords('too_many_sessions', 'session')).toMatch(/more agent sessions ran in this tab/);
+    expect(baselineUnavailableWords('too_many_sessions', 'turn')).not.toMatch(/memory/);
     expect(baselineUnavailableWords('not_captured', 'session')).toMatch(/this session began before maiTerm started/);
     expect(baselineUnavailableWords('something_new', 'turn')).toMatch(/kept no start/);
   });

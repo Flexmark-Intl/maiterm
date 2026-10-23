@@ -736,7 +736,7 @@ async fn headless_children_never_make_the_parents_edits_its_baseline() {
     assert_eq!(l.turn_and_session("t1"), Some((1, "s1".to_string())));
     for scope in ["turn", "session"] {
         let got = l.baselines.lookup("t1", "s1", &a, scope, 1);
-        assert_eq!((got.content, got.unavailable.as_deref()), (None, Some("evicted")), "{scope}");
+        assert_eq!((got.content, got.unavailable.as_deref()), (None, Some("too_many_sessions")), "{scope}");
     }
     // Its next turn opens with a prompt after it came back: a clean turn, read as usual.
     l.record(rec(&stop(&cwd), "t1"));
@@ -748,7 +748,7 @@ async fn headless_children_never_make_the_parents_edits_its_baseline() {
 
 /// A session the ledger forgot comes back with a prompt, reads for a turn or two, and only then
 /// edits: none of those turns began before it came back, so the edit's turn is read as usual and
-/// the read-only turns are "not captured", not evicted. Only the session's start stays gone.
+/// the read-only turns are "not captured", not lost. Only the session's start stays gone.
 #[tokio::test]
 async fn a_forgotten_session_back_with_a_prompt_starts_clean() {
     let d = std::env::temp_dir().join(format!("af-back-{}", uuid::Uuid::new_v4()));
@@ -775,6 +775,6 @@ async fn a_forgotten_session_back_with_a_prompt_starts_clean() {
     l.record(rec(&prompt(&cwd), "t1"));
     hook_pre(&l, &pre("Edit", json!({ "file_path": a, "old_string": "v", "new_string": "w" }), "e2", &cwd), &a).await;
     assert_eq!(l.baselines.lookup("t1", "s1", &a, "turn", 3).content.as_deref(), Some("v1\n"));
-    assert_eq!(l.baselines.lookup("t1", "s1", &a, "session", 3).unavailable.as_deref(), Some("evicted"));
+    assert_eq!(l.baselines.lookup("t1", "s1", &a, "session", 3).unavailable.as_deref(), Some("too_many_sessions"));
     let _ = std::fs::remove_dir_all(&d);
 }

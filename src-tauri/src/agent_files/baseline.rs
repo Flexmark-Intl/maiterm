@@ -11,7 +11,7 @@
 //!   the same turn would read the agent's own work. The first capture per (tab, session, path)
 //!   is also the session baseline. A tab keeps as many sessions' baselines as the ledger can
 //!   resume a turn for; a session whose baselines were dropped and that comes back says
-//!   `evicted` for what it lost instead of capturing again.
+//!   `too_many_sessions` for what it lost instead of capturing again.
 //! - The hook waits at most `DEADLINE` (25 ms). A read still running then is told to stop by a
 //!   cancellation flag, and whatever it finds is discarded: by then the tool may have run, and
 //!   post-edit bytes passed off as the turn's start would be a false claim. The slot records
@@ -132,7 +132,8 @@ pub struct Baseline {
     /// The file's text at the start; None with no `unavailable` is a new file.
     pub content: Option<String>,
     /// Why there is no content: "timeout" | "binary" | "too_large" | "unreadable" | "evicted"
-    /// | "not_captured" (no write-capable call of this tab touched the file in that turn or
+    /// (dropped for the memory budget) | "too_many_sessions" (dropped with its session's other
+    /// baselines, `SESSIONS_GONE`) | "not_captured" (no write-capable call of this tab touched the file in that turn or
     /// session, or it began before maiTerm started) | "pending" (being read right now).
     pub unavailable: Option<String>,
     /// The turn it was captured in.
@@ -181,7 +182,7 @@ struct SessionState {
     /// Set when this session's baselines were dropped and it came back, to the last turn that may
     /// have begun before it came back (`Dropped::fresh_after`). What it captured before is gone,
     /// so a capture in such a turn could read its own earlier edits: its session baselines are
-    /// `evicted` for good, and so are its turns up to this one. A later turn captures again, since
+    /// `too_many_sessions` for good, and so are its turns up to this one. A later turn captures again, since
     /// a turn starts from whatever the file holds at its first write.
     lost: Option<u64>,
 }
@@ -195,6 +196,10 @@ const SESSIONS: usize = super::LEFT_SESSIONS + 1;
 /// known to have lost them (`SessionState::lost`) rather than taken for a new session, which
 /// would recapture files after its own edits. Only sessions that captured land here.
 const DROPPED: usize = 256;
+/// Why a baseline is gone when its session's were dropped (more sessions than `SESSIONS`
+/// captured, or the ledger forgot the session's turn), not the memory budget's "evicted": the
+/// diff tab must not blame memory for what other sessions in the tab did.
+const SESSIONS_GONE: &str = "too_many_sessions";
 
 /// A session whose baselines were dropped.
 struct Dropped {
@@ -327,7 +332,7 @@ impl Baselines {
     /// Capture `paths` for `tab`'s turn `turn`, those not captured yet this turn. Waits at most
     /// the deadline. Returns, per path read now, whether the file existed (None: unknown, the
     /// read timed out or failed), so a Write's create-or-overwrite needs no second look. A path
-    /// recorded `evicted` without a read (a session that lost its baselines) is listed as unknown,
+    /// recorded `too_many_sessions` without a read (a session that lost its baselines) is listed as unknown,
     /// so the hook still moves it with `rekey`.
     pub async fn capture(self: &Arc<Self>, tab: &str, session: &str, runtime: &str, turn: u64, paths: Vec<String>) -> Vec<(String, Option<bool>)> {
         let (reserved, unread) = self.reserve(tab, session, runtime, turn, &paths);
@@ -366,7 +371,7 @@ impl Baselines {
 
     /// Claim the slots this call captures, under the lock, so a second copy of the same Pre
     /// (the mod's and the settings hook's) or a parallel call never reads the file again.
-    /// Answers the slots to read, and the paths recorded `evicted` with no read.
+    /// Answers the slots to read, and the paths recorded `too_many_sessions` with no read.
     fn reserve(&self, tab: &str, session: &str, runtime: &str, turn: u64, paths: &[String]) -> (Vec<(u64, String)>, Vec<String>) {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
@@ -409,7 +414,7 @@ impl Baselines {
             ss.by_turn.insert(key, seq);
             ss.by_session.entry(p.clone()).or_insert(seq);
             // Recorded, not read: a later call this turn must not read the file either.
-            let state = if blind { State::Done { content: None, unavailable: Some("evicted") } } else { State::Pending };
+            let state = if blind { State::Done { content: None, unavailable: Some(SESSIONS_GONE) } } else { State::Pending };
             inner.slots.insert(seq, Slot { tab: tab.to_string(), session: sid.clone(), turn, state, bytes: 0 });
             if blind {
                 unread.push(p.clone());
@@ -540,14 +545,14 @@ impl Baselines {
             let Some(tab) = inner.tabs.get(tab) else { return none("not_captured", String::new()) };
             let runtime = tab.runtime.clone();
             let Some(ss) = tab.session(session) else {
-                let why = if tab.dropped(session).is_some_and(|d| d.covers(scope, turn)) { "evicted" } else { "not_captured" };
+                let why = if tab.dropped(session).is_some_and(|d| d.covers(scope, turn)) { SESSIONS_GONE } else { "not_captured" };
                 return none(why, runtime);
             };
             // A session that lost its baselines can't say where it started, nor where a turn it
             // was already in started, for any file: an empty answer there would read as "never
             // touched".
             if ss.lost.is_some_and(|t| scope == "session" || turn <= t) {
-                return none("evicted", runtime);
+                return none(SESSIONS_GONE, runtime);
             }
             if scope == "session" {
                 (ss.by_session.get(&want).copied(), ss.by_session.iter().map(|(p, s)| (p.clone(), *s)).collect::<Vec<_>>(), runtime)
@@ -881,8 +886,8 @@ mod tests {
     }
 
     /// More sessions capture than a tab keeps, and the parent's baselines go. When it comes back
-    /// mid-turn, the file holds its own edits: that turn and its session start say `evicted`,
-    /// never the edited bytes. Its next turn captures again.
+    /// mid-turn, the file holds its own edits: that turn and its session start say so (as other
+    /// sessions, not memory), never the edited bytes. Its next turn captures again.
     #[tokio::test]
     async fn a_session_whose_baselines_were_dropped_never_recaptures_its_open_turn() {
         let d = dir("dropped");
@@ -896,20 +901,22 @@ mod tests {
         for child in 0..SESSIONS {
             b.capture("t1", &format!("c{child}"), "claude", 1, vec![x.clone()]).await;
         }
-        assert_eq!(b.lookup("t1", "s1", &a, "turn", 3).unavailable.as_deref(), Some("evicted"));
+        assert_eq!(b.lookup("t1", "s1", &a, "turn", 3).unavailable.as_deref(), Some(SESSIONS_GONE));
         // Back in turn 3: nothing is read, and a second edit doesn't read either.
         assert_eq!(b.capture("t1", "s1", "claude", 3, vec![a.clone()]).await, vec![(a.clone(), None)]);
         assert!(b.capture("t1", "s1", "claude", 3, vec![a.clone()]).await.is_empty());
         for scope in ["turn", "session"] {
             let got = b.lookup("t1", "s1", &a, scope, 3);
-            assert_eq!((got.content, got.unavailable.as_deref()), (None, Some("evicted")), "{scope}");
+            assert_eq!((got.content, got.unavailable.as_deref()), (None, Some(SESSIONS_GONE)), "{scope}");
         }
         // A file not touched since it came back may have been touched before.
-        assert_eq!(b.lookup("t1", "s1", &c, "turn", 3).unavailable.as_deref(), Some("evicted"));
+        assert_eq!(b.lookup("t1", "s1", &c, "turn", 3).unavailable.as_deref(), Some(SESSIONS_GONE));
         // Turn 4 starts from what turn 3 left; the session's start stays unknown.
         b.capture("t1", "s1", "claude", 4, vec![a.clone()]).await;
         assert_eq!(content(&b.lookup("t1", "s1", &a, "turn", 4)), Some("v1\n"));
-        assert_eq!(b.lookup("t1", "s1", &a, "session", 4).unavailable.as_deref(), Some("evicted"));
+        assert_eq!(b.lookup("t1", "s1", &a, "session", 4).unavailable.as_deref(), Some(SESSIONS_GONE));
+        // Nothing here came near the memory budget.
+        assert!(b.held_bytes() < 64);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -926,7 +933,7 @@ mod tests {
         b.lose_session("t1", "s1");
         assert_eq!(b.held_bytes(), 0);
         assert_eq!(b.capture("t1", "s1", "claude", 1, vec![a.clone()]).await, vec![(a.clone(), None)]);
-        assert_eq!(b.lookup("t1", "s1", &a, "turn", 1).unavailable.as_deref(), Some("evicted"));
+        assert_eq!(b.lookup("t1", "s1", &a, "turn", 1).unavailable.as_deref(), Some(SESSIONS_GONE));
         // A session that never captured has nothing to lose: it is new when it comes.
         b.lose_session("t1", "c1");
         b.capture("t1", "c1", "claude", 1, vec![a.clone()]).await;
@@ -949,20 +956,20 @@ mod tests {
         // Back mid-turn 1 (renumbered), then a prompt opens turn 2.
         b.came_back("t1", "s1", 1);
         let why = |scope: &str, turn: u64| b.lookup("t1", "s1", &a, scope, turn).unavailable;
-        assert_eq!(why("turn", 1).as_deref(), Some("evicted"));
+        assert_eq!(why("turn", 1).as_deref(), Some(SESSIONS_GONE));
         assert_eq!(why("turn", 2).as_deref(), Some("not_captured"));
-        assert_eq!(why("session", 2).as_deref(), Some("evicted"));
+        assert_eq!(why("session", 2).as_deref(), Some(SESSIONS_GONE));
         // A later return doesn't move it: turn 2 began after the first.
         b.came_back("t1", "s1", 5);
         assert_eq!(why("turn", 3).as_deref(), Some("not_captured"));
         assert_eq!(b.capture("t1", "s1", "claude", 3, vec![a.clone()]).await, vec![(a.clone(), Some(true))]);
         assert_eq!(content(&b.lookup("t1", "s1", &a, "turn", 3)), Some("v1\n"));
-        assert_eq!((why("turn", 1).as_deref(), why("session", 3).as_deref()), (Some("evicted"), Some("evicted")));
+        assert_eq!((why("turn", 1).as_deref(), why("session", 3).as_deref()), (Some(SESSIONS_GONE), Some(SESSIONS_GONE)));
         // Lost again before it captured: what it came back to is forgotten with it.
         b.lose_session("t1", "s1");
         b.came_back("t1", "s1", 1);
         b.lose_session("t1", "s1");
-        assert_eq!(why("turn", 2).as_deref(), Some("evicted"));
+        assert_eq!(why("turn", 2).as_deref(), Some(SESSIONS_GONE));
         assert_eq!(b.capture("t1", "s1", "claude", 2, vec![a.clone()]).await, vec![(a.clone(), None)]);
         let _ = std::fs::remove_dir_all(&d);
     }

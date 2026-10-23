@@ -1267,7 +1267,8 @@ export interface TabTurn {
  *  empty). */
 export interface Baseline {
   content: string | null;
-  /** 'timeout' | 'binary' | 'too_large' | 'unreadable' | 'evicted' | 'not_captured' | 'pending' */
+  /** 'timeout' | 'binary' | 'too_large' | 'unreadable' | 'evicted' (memory budget) |
+   *  'too_many_sessions' (dropped with its session's, other sessions ran) | 'not_captured' | 'pending' */
   unavailable: string | null;
   /** The turn it was captured in. */
   turn: number;

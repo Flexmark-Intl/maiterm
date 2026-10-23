@@ -29,6 +29,9 @@ export function baselineUnavailableWords(why: string, scope: BaselineScope): str
     case 'too_large': return 'It is over 2 MB, so its start wasn’t kept.';
     case 'unreadable': return 'It couldn’t be read before the agent’s first edit.';
     case 'evicted': return 'Its start was dropped to keep memory under 64 MB.';
+    // Not memory: more agent sessions ran in the tab (each headless `claude -p` the agent ran is
+    // one) than maiTerm keeps starts for, and this one's went.
+    case 'too_many_sessions': return `Its start was dropped: more agent sessions ran in this tab than maiTerm keeps starts for, so where ${start} began isn’t known.`;
     case 'pending': return 'Its start is still being read. Try again in a moment.';
     case 'current_unreadable': return 'The file on disk can’t be read as text now.';
     case 'not_captured':
