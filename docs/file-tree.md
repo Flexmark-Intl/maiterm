@@ -303,6 +303,36 @@
 >   Another window's tab on the same file sees the rename as its watcher does today.
 > - **Not checked in the running app** (no dev run in this step): the dev checks above, a drag
 >   onto a terminal and the composer, and an OS drop. `agent_active` never fires until phase 4.
+>
+> **As built, phase 3 review fixes (2026-10-23).** Where they changed the above:
+> - **A failed copy removes only what it made** (`copy_fresh`): a cross-volume move's
+>   fallback used to remove the target on any copy error, so an item another writer put there
+>   after the landing check (Linux answers `EXDEV` before it looks at the target) was deleted
+>   while the move reported `exists`.
+> - **Windows:** a rel with a component ending in a dot or a space is refused (Win32 trims it
+>   to another name: `foo.` is `foo`, `...` the root); the no-replace rename passes verbatim
+>   paths, so it works past 260 characters like every std call; an NTFS junction is copied as
+>   a junction (the `junction` crate), since recreating it as a symlink needs Developer Mode
+>   or admin. Compiled for `x86_64-pc-windows-msvc` in isolation (the app's C deps don't
+>   cross-build here); not run on Windows.
+> - **OS drop positions are CSS pixels everywhere** (`utils/dropPoint.ts`): Windows sends
+>   physical pixels; every drop listener (Files, terminal, composer, Focus) divides by
+>   `devicePixelRatio` there.
+> - **A drop on the sticky header lands in that ancestor** (`rowAtPoint`), and the header
+>   shows the drop target, rather than the row hidden underneath.
+> - **An inline edit ends quietly:** focus comes back to the tree only if it hasn't gone
+>   somewhere else (a click into a terminal is the human moving on), and an edit whose row an
+>   agent renamed or deleted away is dropped (it blocked every drag).
+> - **Undo runs one at a time**, and the model check before it is skipped while one of ours
+>   is settling (a quick second Cmd+Z saw its own first undo as a change on disk). **Undoing
+>   a create, copy or import asks over unsaved edits** like any trash, keeping the entry until
+>   the answer. A folder made by New Folder is still trashed with whatever was written into it
+>   since (recoverable from the Trash, not asked).
+> - **Retargeting uses the root the op ran in**, so a re-root during a slow move still moves
+>   the editor tabs. Another window's editor tab (and its dirty buffer in the trash question)
+>   remains out of reach, as above.
+> - **EditorPane's watcher** carries a start/stop generation: overlapping starts (mount,
+>   visibility, a retarget) no longer leak listener pairs.
 
 ## 1. Why
 
