@@ -16,6 +16,12 @@ export function registerEditor(tabId: string, view: EditorView, filePath: string
   registry.set(tabId, { view, filePath, isDirty: false });
 }
 
+/** The tab's file was renamed or moved under it (Files): same buffer, new path. */
+export function setEditorFilePath(tabId: string, filePath: string): void {
+  const entry = registry.get(tabId);
+  if (entry) entry.filePath = filePath;
+}
+
 export function unregisterEditor(tabId: string): void {
   registry.delete(tabId);
   if (dirtyTabs.has(tabId)) {

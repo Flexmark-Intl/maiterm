@@ -1,6 +1,19 @@
 <script module lang="ts">
   /** Per-tab attachment lists, surviving keyed remounts on tab switch. */
   const attachmentsByTab = new Map<string, { path: string; name: string; thumb?: string }[]>();
+
+  /**
+   * Attach files to a tab's composer from outside it (Files: a drag onto the dock, "Ask
+   * about this…"). The list is the module's, so a dock that isn't mounted yet shows them when
+   * it is; a mounted one is told to re-read it. Never sends: the human writes the prompt.
+   */
+  export function attachToComposer(tabId: string, paths: string[]): void {
+    const current = attachmentsByTab.get(tabId) ?? [];
+    const existing = new Set(current.map((a) => a.path));
+    const next = [...current, ...paths.filter((p) => !existing.has(p)).map((p) => ({ path: p, name: p.split(/[\\/]/).pop() || p }))];
+    if (next.length) attachmentsByTab.set(tabId, next);
+    window.dispatchEvent(new CustomEvent('composer-attachments-changed', { detail: { tabId } }));
+  }
 </script>
 
 <script lang="ts">
@@ -326,7 +339,12 @@
   // interception); bounds-checked against the shell so the terminal's own drop
   // zone above keeps its behavior.
   let unlistenDragDrop: UnlistenFn | undefined;
+  function onAttachedElsewhere(e: Event) {
+    if ((e as CustomEvent<{ tabId: string }>).detail?.tabId !== tabId) return;
+    attachments = attachmentsByTab.get(tabId) ?? [];
+  }
   onMount(() => {
+    window.addEventListener('composer-attachments-changed', onAttachedElsewhere);
     void (async () => {
       unlistenDragDrop = await getCurrentWebview().onDragDropEvent((event) => {
         const { type } = event.payload;
@@ -353,12 +371,14 @@
   onDestroy(() => {
     persistDraft();
     unlistenDragDrop?.();
+    window.removeEventListener('composer-attachments-changed', onAttachedElsewhere);
   });
 </script>
 
 <!-- Always mounted; see setShellHeight for why the open/close animation is
-     hand-rolled. inert blocks focus/input while collapsed. -->
-<div class="composer-shell" class:open inert={!open} bind:this={shellEl}>
+     hand-rolled. inert blocks focus/input while collapsed. `data-composer-tab` marks an open
+     dock as a drop target for a drag out of Files (filetree/dnd.ts). -->
+<div class="composer-shell" class:open inert={!open} bind:this={shellEl} data-composer-tab={open ? tabId : undefined}>
   <div class="composer-dock" class:drag-over={isDragOver}>
     <AttachmentChips {attachments} onremove={removeAttachment} />
     <div class="composer-row">

@@ -22,7 +22,7 @@
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { dispatch } from '$lib/stores/notificationDispatch';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
-  import { registerEditor, unregisterEditor, setEditorDirty } from '$lib/stores/editorRegistry.svelte';
+  import { registerEditor, unregisterEditor, setEditorDirty, setEditorFilePath } from '$lib/stores/editorRegistry.svelte';
   import { claudeCodeStore } from '$lib/stores/claudeCode.svelte';
   import { EditorSelection } from '@codemirror/state';
   import { countedListen as listen } from '$lib/utils/listenCounter';
@@ -552,6 +552,17 @@
     }
   }
 
+  /** Files renamed or moved this tab's file (the tab already names the new path): the buffer
+   *  and its unsaved edits stay, the watcher follows the file to where it is now. The old
+   *  path's watcher may have seen the rename as a deletion, which it wasn't. */
+  async function handleEditorRetargetFile(e: Event) {
+    if ((e as CustomEvent).detail?.tabId !== tabId || !isLocalFile) return;
+    await stopWatching();
+    fileDeleted = false;
+    if (editorView) setEditorFilePath(tabId, editorFile.file_path);
+    await startWatching();
+  }
+
   function handleEditorReplaceFile(e: Event) {
     const detail = (e as CustomEvent).detail;
     if (detail?.tabId === tabId) {
@@ -1056,6 +1067,7 @@
     window.addEventListener('editor-save', handleEditorSave);
     window.addEventListener('editor-reload', handleEditorReload);
     window.addEventListener('editor-replace-file', handleEditorReplaceFile);
+    window.addEventListener('editor-retarget-file', handleEditorRetargetFile);
 
     const filePath = editorFile.remote_path ?? editorFile.file_path;
     const isImage = isImageFile(filePath);
@@ -1375,6 +1387,7 @@
     window.removeEventListener('editor-save', handleEditorSave);
     window.removeEventListener('editor-reload', handleEditorReload);
     window.removeEventListener('editor-replace-file', handleEditorReplaceFile);
+    window.removeEventListener('editor-retarget-file', handleEditorRetargetFile);
     unregisterEditor(tabId);
     if (editorView) {
       editorView.destroy();
