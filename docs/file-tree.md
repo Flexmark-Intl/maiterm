@@ -865,6 +865,24 @@
 > - **Tests:** a 1 MB first frame through a 512 KB/s pipe against a 500 ms wait leaves nothing
 >   once discarded, and a refused first frame is not counted as made; the tunnel match with
 >   `ControlMaster` on either side. **Not checked on a real slow link or password-only host.**
+>
+> **As built, phase 6 third review fixes (2026-10-23).** Where they changed the above:
+> - **A refused put has made nothing.** `op_put` makes the file with `O_EXCL` and then writes it;
+>   a write that failed there (`ENOSPC`, `EDQUOT`) answered `io` with the file already made, and
+>   Rust reads any refused first frame as "not made" (on the normal path and after the second
+>   wait alike), so no discard followed and a truncated file stayed under the real name. The
+>   helper now unlinks a file whose write failed, so Rust's rule holds as written; only `exists`
+>   (another writer's file) leaves anything there, and that is not the import's.
+> - **The discard can no longer lose the race.** The helper's `main` hands requests to
+>   `dispatch`, which records every `put`/`append`/`mkdir`/`symlink` still running by
+>   (root, rel); a `discard` waits for each one read before it at or under its path. The case
+>   left above (both waits run out, the discard runs first in the pool and removes nothing, the
+>   put then makes the file) is closed: the discard always runs after the put it follows. No
+>   deadlock: the pool takes jobs in order, so anything a discard waits for is already running.
+> - **Tests:** the helper's own code under python3 with `send` captured: a put whose write fails
+>   with `ENOSPC` answers `io` and leaves no file; a put slowed by 0.4 s and a put inside a
+>   folder are both followed by discards that leave nothing. Both fail against the old helper.
+>   **Not checked on a real full disk.**
 
 ## 1. Why
 
