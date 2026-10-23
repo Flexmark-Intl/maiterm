@@ -62,6 +62,8 @@ pub struct ToolGates {
     pub escalations_to_overlord: bool,
     /// The browser tools (docs/browser-link.md §4).
     pub browser_link: bool,
+    /// The Files tools (docs/file-tree.md §9.6): `file_tree_enabled && file_tree_agent_tools`.
+    pub file_tree: bool,
 }
 
 impl ToolGates {
@@ -72,12 +74,19 @@ impl ToolGates {
             follow_ups_live: prefs.follow_ups_live(),
             escalations_to_overlord: prefs.escalations_to_overlord(),
             browser_link: prefs.browser_link_enabled,
+            file_tree: file_tree_tools_on(prefs),
         }
     }
 }
 
+/// The Files tools are offered (and answered) only while the human has both the tree and its
+/// agent tools on.
+pub fn file_tree_tools_on(prefs: &crate::state::workspace::Preferences) -> bool {
+    prefs.file_tree_enabled && prefs.file_tree_agent_tools
+}
+
 pub fn tool_list_response(gates: ToolGates) -> Value {
-    let ToolGates { tasks: tasks_enabled, stack: stack_enabled, follow_ups_live, escalations_to_overlord, browser_link } = gates;
+    let ToolGates { tasks: tasks_enabled, stack: stack_enabled, follow_ups_live, escalations_to_overlord, browser_link, file_tree } = gates;
     // Tools are built in batches to stay under the serde_json::json! macro recursion limit (128).
     // Each batch is a small Vec<Value> that gets extended into the final tools array.
 
@@ -1340,8 +1349,52 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
     if browser_link {
         tools.extend(browser_tools());
     }
+    if file_tree {
+        tools.extend(file_tree_tools());
+    }
 
     serde_json::json!({ "tools": tools })
+}
+
+/// The Files tools (docs/file-tree.md §9.6): paths only, never content. The descriptions carry
+/// the priming; there is no priming line.
+fn file_tree_tools() -> Vec<Value> {
+    let tab_id = serde_json::json!({ "type": "string", "description": "Your own tab (auto-injected)" });
+    serde_json::json!([
+        {
+            "name": "revealInTree",
+            "description": "Point your human at a file or folder in the Files column of your own maiTerm window: its folders are opened and it is scrolled into view (and selected, with select). It never opens a closed column and never takes the keyboard. Answers result: 'revealed'; 'noted' (your human used the tree in the last 3 seconds, so a chip naming the path appeared instead of moving their view); 'tree_closed' (the Files button gets a dot); or 'outside_root' (the tree shows another folder). Use it when you want your human to look at something, not to track your own edits: the tree already shows what you read and change.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": tab_id,
+                    "path": { "type": "string", "description": "Absolute path of the file or folder" },
+                    "select": { "type": "boolean", "description": "Also select it (default false: the selection is your human's)" }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "getTreeSelection",
+            "description": "What your human has selected in the Files column of your maiTerm window: absolute paths only (never contents), the root the tree shows, its host for an ssh folder, the focused row, and humanIdleMs (how long since they used the tree). Ask it when your human says \"these files\" or \"the selected folder\"; maiTerm never puts the selection into your prompt itself.",
+            "inputSchema": { "type": "object", "properties": { "tabId": tab_id } }
+        },
+        {
+            "name": "getAgentFileActivity",
+            "description": "The files an agent read and changed, as maiTerm recorded them from its tool calls: your own tab by default, or another tab in your mesh with tabId. Each entry has the path, what was done (read, search, edit, write, create, delete; changed = seen changing on disk while that tab's shell command ran, which a human's save at that moment would also be; commit = in a commit made during that turn), the tool, status (pending, ok, failed) and evidence (tool, fs_during_tool, commit). coverage says, per open Files tree, how much of a shell command's writes it could see: full, expanded_only, or none. Paths only, never contents.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "A tab in your mesh; omit for your own" },
+                    "scope": { "type": "string", "enum": ["turn", "session"], "description": "Default 'turn': the current (or last) turn" },
+                    "includeReads": { "type": "boolean", "description": "Include reads and searches (default false)" }
+                }
+            }
+        }
+    ])
+    .as_array()
+    .unwrap()
+    .clone()
 }
 
 /// The browser-link tools (docs/browser-link.md §4): diagnose and drive the ONE Chrome tab the
@@ -1569,4 +1622,36 @@ pub fn initialize_response(client_protocol_version: Option<&str>) -> Value {
             crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude)
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(gates: ToolGates) -> Vec<String> {
+        tool_list_response(gates)["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    const FILES: [&str; 3] = ["revealInTree", "getTreeSelection", "getAgentFileActivity"];
+
+    #[test]
+    fn the_files_tools_are_listed_only_while_the_tree_and_its_agent_tools_are_on() {
+        let mut prefs = crate::state::workspace::Preferences::default();
+        assert!(prefs.file_tree_enabled && prefs.file_tree_agent_tools, "both default on");
+        let on = names(ToolGates::from_prefs(&prefs));
+        assert!(FILES.iter().all(|f| on.iter().any(|n| n == f)));
+        for (tree, tools) in [(false, true), (true, false)] {
+            prefs.file_tree_enabled = tree;
+            prefs.file_tree_agent_tools = tools;
+            let off = names(ToolGates::from_prefs(&prefs));
+            assert!(FILES.iter().all(|f| !off.iter().any(|n| n == f)), "tree {tree}, tools {tools}");
+        }
+    }
+
+    #[test]
+    fn every_listed_tool_name_is_unique() {
+        let all = names(ToolGates { tasks: true, stack: true, follow_ups_live: true, escalations_to_overlord: true, browser_link: true, file_tree: true });
+        let set: std::collections::HashSet<&String> = all.iter().collect();
+        assert_eq!(set.len(), all.len());
+    }
 }

@@ -1007,6 +1007,94 @@ fn request_status(arguments: &Value) -> Value {
     }
 }
 
+/// The argument `process_message` puts the connection's own STATED tab in for
+/// `getAgentFileActivity` (null when it has none): an explicit `tabId` names the target only.
+const FILES_CALLER_ARG: &str = "__maitermCallerTab";
+
+const FILES_TOOLS_OFF: &str = "The Files tools are turned off in this maiTerm (Preferences → Files).";
+
+/// Whether tabs `a` and `b` can reach each other over a mesh: the same mesh workspace, or two
+/// mesh workspaces linked in one window (docs/mesh-workspace.md §17). The same rule the roster
+/// follows, so an agent reads only the activity of agents it could message.
+fn same_mesh(state: &AppState, a: &str, b: &str) -> bool {
+    let data = state.app_data.read();
+    for w in &data.windows {
+        let ws_of = |tab: &str| w.workspaces.iter().find(|ws| ws.panes.iter().any(|p| p.tabs.iter().any(|t| t.id == tab)));
+        let (Some(wa), Some(wb)) = (ws_of(a), ws_of(b)) else { continue };
+        if !(wa.bridge_all && wb.bridge_all) {
+            return false;
+        }
+        return wa.id == wb.id || (wa.mesh_group.is_some() && wa.mesh_group == wb.mesh_group);
+    }
+    false
+}
+
+/// `getAgentFileActivity` (docs/file-tree.md §9.6): a tab's ledger with how much of a shell
+/// command's writes each open tree could see.
+async fn agent_file_activity(arguments: &Value, state: &Arc<AppState>, app_handle: &AppHandle) -> Value {
+    if !super::protocol::file_tree_tools_on(&state.app_data.read().preferences) {
+        return serde_json::json!({ "error": FILES_TOOLS_OFF });
+    }
+    let target = arguments.get("tabId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if target.is_empty() {
+        return serde_json::json!({ "error": "No tab: run /maiterm init, then retry." });
+    }
+    let caller = arguments.get(FILES_CALLER_ARG).and_then(|v| v.as_str()).map(String::from);
+    if caller.as_deref() != Some(target.as_str()) {
+        match caller {
+            None => return serde_json::json!({ "error": "Reading another tab's activity needs to know which tab is yours: run /maiterm init, then retry." }),
+            Some(c) if !same_mesh(state, &c, &target) => {
+                return serde_json::json!({ "error": "Only your own tab's activity, or that of a tab in your mesh, can be read." })
+            }
+            Some(_) => {}
+        }
+    }
+    let scope = match arguments.get("scope").and_then(|v| v.as_str()) {
+        Some("session") => "session",
+        _ => "turn",
+    };
+    let include_reads = arguments.get("includeReads").and_then(|v| v.as_bool()).unwrap_or(false);
+    let Some(ft) = tauri::Manager::try_state::<Arc<crate::filetree::FileTreeState>>(app_handle) else {
+        return serde_json::json!({ "error": "Files isn't running" });
+    };
+    let ft = ft.inner().clone();
+    let tab = target.clone();
+    // Matching a folder to the open trees may touch the disk.
+    let answer = tokio::task::spawn_blocking(move || {
+        let Some(a) = ft.agents.activity(&tab, scope, include_reads) else {
+            return serde_json::json!({ "tabId": tab, "scope": scope, "entries": [], "coverage": [],
+                "note": "maiTerm has no record of an agent working in this tab since it started." });
+        };
+        let coverage: Vec<Value> = match (&a.host, &a.cwd) {
+            (Some(h), _) => vec![serde_json::json!({ "root": format!("{}:{}", crate::watch::host_label(h), a.cwd.as_deref().unwrap_or("")), "coverage": "none" })],
+            (None, Some(cwd)) => ft
+                .coverage_for(&crate::share::canon(std::path::Path::new(cwd)))
+                .into_iter()
+                .map(|(root, c)| serde_json::json!({ "root": root, "coverage": c }))
+                .collect(),
+            (None, None) => Vec::new(),
+        };
+        let note = if a.host.is_some() {
+            "An ssh tab: tool calls are recorded, but no tree watches the remote host, so its shell commands' writes are not."
+        } else if coverage.is_empty() {
+            "No Files tree is open on this tab's folder, so its shell commands' writes are not recorded; tool calls are."
+        } else {
+            "changed (fs_during_tool) is what changed on disk while this tab's shell command was the only one running there, which a human's save at that moment would also be."
+        };
+        serde_json::json!({
+            "tabId": tab,
+            "scope": scope,
+            "turn": a.turn,
+            "turnOpen": a.turn_open,
+            "entries": a.entries,
+            "coverage": coverage,
+            "note": note,
+        })
+    })
+    .await;
+    answer.unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }))
+}
+
 async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<AppState>, app_handle: &AppHandle) -> Option<Value> {
     match tool_name {
         "bindCommsThread" => Some(handle_bind_comms_thread(arguments, state, app_handle).await),
@@ -1015,6 +1103,11 @@ async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<App
         "sendFilesToPhone" => Some(handle_send_files_to_phone(arguments, state).await),
         "getMeshLayout" => Some(mesh_layout(state)),
         "getRequestStatus" => Some(request_status(arguments)),
+        "getAgentFileActivity" => Some(agent_file_activity(arguments, state, app_handle).await),
+        // Answered by the caller's window (claudeCode.svelte.ts) unless the human turned them off.
+        "revealInTree" | "getTreeSelection" if !super::protocol::file_tree_tools_on(&state.app_data.read().preferences) => {
+            Some(serde_json::json!({ "error": FILES_TOOLS_OFF }))
+        }
         t if crate::browser_link::is_browser_tool(t) => Some(crate::browser_link::handle_tool(t, arguments, state, app_handle).await),
         "postCommsReply" => Some(handle_post_comms_reply(arguments, state, app_handle).await),
         "startCommsThread" => Some(handle_start_comms_thread(arguments, state, app_handle).await),
@@ -2723,7 +2816,13 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 58] = [
+const PEER_ADDRESSING_TOOLS: [&str; 61] = [
+    // Files (docs/file-tree.md §9.6): reveal and selection act in the CALLER's window, and the
+    // activity read names "your own" tab, which a guessed identity can't vouch for. Another
+    // tab's activity is served only inside the caller's mesh.
+    "revealInTree",
+    "getTreeSelection",
+    "getAgentFileActivity",
     // A mute aimed at a guessed tab silences notifications the human wants (docs/mute.md).
     "setMuted",
     // Agent requests and the moves (agent_requests.rs, docs/agent-requests.md): a request is
@@ -2815,7 +2914,11 @@ const PEER_ADDRESSING_TOOLS: [&str; 58] = [
 /// The agent-request tools (agent_requests.rs) are here for the same reason from the other side:
 /// a request is shown to the human as "the agent in <tab> asks…", so the tab named must be the
 /// caller, and a request's status is only its own tab's to read.
-const OWN_TAB_ONLY_TOOLS: [&str; 26] = [
+const OWN_TAB_ONLY_TOOLS: [&str; 28] = [
+    // The Files column is the caller's window's (docs/file-tree.md §9.6): another tab's tree
+    // is not its to move or read.
+    "revealInTree",
+    "getTreeSelection",
     "createFollowUp",
     "listFollowUps",
     "cancelFollowUp",
@@ -3485,6 +3588,16 @@ async fn process_message(
                         }),
                     );
                     return Some(serde_json::to_string(&resp).unwrap());
+                }
+
+                // getAgentFileActivity may read another tab, but only one in the CALLER's mesh,
+                // and an explicit tabId says nothing about who the caller is: the handler is told
+                // the connection's own stated tab.
+                if tool_name == "getAgentFileActivity" {
+                    let caller = affinity.as_ref().filter(|a| a.stated).map(|a| Value::String(a.tab_id.clone())).unwrap_or(Value::Null);
+                    if let Some(obj) = arguments.as_object_mut() {
+                        obj.insert(FILES_CALLER_ARG.to_string(), caller);
+                    }
                 }
 
                 let affinity_tab: Option<String> = affinity.map(|a| a.tab_id);
