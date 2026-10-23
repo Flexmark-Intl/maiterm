@@ -297,11 +297,12 @@ function createFileTreeStore() {
     if (token !== resolveSeq) return;
     sourceTabId = tabId;
     placeWorkspaceId = ws.id;
-    await adoptPlace(p);
+    await adoptPlace(p, token);
     if (!followableTab()) void revealActiveEditor();
   }
 
-  async function adoptPlace(p: TreePlace) {
+  /** `token` is the resolve that found `p`: a newer resolve supersedes it across the await. */
+  async function adoptPlace(p: TreePlace, token: number) {
     if (p.missing) {
       saveView();
       closeSub();
@@ -327,7 +328,12 @@ function createFileTreeStore() {
     // always come back as their own place, so this is the follow case only.
     if (place && subId !== null && ack && p.source !== 'pin' && place.source !== 'pin') {
       const cwdAbs = relToAbs({ root_native: p.root, sep: ack.sep }, p.cwd_rel ?? '');
-      const located = await commands.ftLocate(subId, [cwdAbs]).catch(() => [null]);
+      const sub = subId;
+      const located = await commands.ftLocate(sub, [cwdAbs]).catch(() => [null]);
+      // A newer resolve (or a reroot under it) took over while this was asking: its rel was
+      // computed under the old root, and its failure may only mean the sub was closed, so
+      // neither may move the tick or re-root over the newer place.
+      if (token !== resolveSeq || sub !== subId) return;
       if (located[0] != null) {
         moveYouAreHere(located[0] || null);
         return;
@@ -417,9 +423,15 @@ function createFileTreeStore() {
       if (!ready) early.push(env);
       else handle(env);
     };
+    // The tree is on screen while ftOpen runs, and an expand or reveal in that window has
+    // no subscription to send to (`sendOpen` drops it). What was asked here is remembered,
+    // so whatever the model started following meanwhile is sent once the sub exists.
+    const m = model;
+    const restore = m.restoreReqs();
+    const asked = new Set(restore.map((r) => r.rel));
     let opened: OpenAck;
     try {
-      opened = await commands.ftOpen(p.place, model.restoreReqs(), channel);
+      opened = await commands.ftOpen(p.place, restore, channel);
     } catch (e) {
       if (token !== openSeq) return;
       status = 'error';
@@ -435,6 +447,8 @@ function createFileTreeStore() {
     acked = { count: 0, at: performance.now() };
     status = 'ready';
     ready = true;
+    sendOpen(m.restoreReqs().filter((r) => !asked.has(r.rel)));
+    sendClose([...asked].filter((r) => r !== '' && !m.interest.has(r)));
     for (const env of early) handle(env);
     if (typeof document !== 'undefined' && document.hidden) commands.ftPause(opened.sub_id, true).catch(() => {});
     if (youAreHere && !kept) revealRel(youAreHere, false);
