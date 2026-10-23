@@ -20,6 +20,7 @@
 import { Channel } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { homeDir } from '@tauri-apps/api/path';
+import { untrack } from 'svelte';
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import { writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
@@ -141,7 +142,12 @@ function createFileTreeStore() {
   let focusPending = $state(false);
   let lastHumanInputMs = 0;
 
-  let model: TreeModel | null = null;
+  /** Raw state: the tree reads it, and a reroot swaps it for another root's model while the
+   *  tree stays mounted, so a plain `let` would leave the tree drawing the old root. */
+  let model = $state.raw<TreeModel | null>(null);
+  /** Bumped whenever `model.expanded` changes. The set is plain (the model is pure), and an
+   *  empty folder opens or closes without changing `rows`, so the chevron needs this. */
+  let expandedVersion = $state(0);
   const roots = new Map<string, ViewState>();
   let scrollTop = 0;
   let openSeq = 0;
@@ -163,8 +169,13 @@ function createFileTreeStore() {
 
   // ── Small helpers ──────────────────────────────────────────────────────────────────────
 
+  /** Called after every change to the model (expand, collapse, reveal, a message). Bumping
+   *  `expandedVersion` each time re-reads only the visible rows' open state, which is cheap,
+   *  and no path that opens or closes a folder can forget to. */
   function syncRows() {
     if (model && rows !== model.rows) rows = model.rows;
+    // Untracked: `++` reads the counter, and a caller inside an effect must not subscribe.
+    untrack(() => { expandedVersion++; });
   }
 
   function announce(text: string) {
@@ -942,6 +953,11 @@ function createFileTreeStore() {
     get ack() { return ack; },
     get rows() { return rows; },
     get model() { return model; },
+    /** A folder is open, read reactively (the model's own set is not). */
+    isExpanded(key: string): boolean {
+      void expandedVersion;
+      return !!model?.expanded.has(key);
+    },
     get health() { return health; },
     get focused() { return focused; },
     set focused(v: boolean) { focused = v; },

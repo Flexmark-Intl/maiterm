@@ -49,6 +49,7 @@
   let hasFocus = $state(false);
 
   const rows = $derived(fileTreeStore.rows);
+  /** Live across a reroot: the store's model is raw state, swapped while this stays mounted. */
   const model = $derived(fileTreeStore.model);
 
   // ── Focus index, cached: a focus move must not scan 100k rows every time ───────────────
@@ -229,12 +230,12 @@
       case 'extend': step(a.to, true); break;
       case 'right':
         if (r && isExpandable(r)) {
-          if (!model?.expanded.has(r.key)) fileTreeStore.expand(r.key);
+          if (!fileTreeStore.isExpanded(r.key)) fileTreeStore.expand(r.key);
           else if (rows[focusIdx + 1]?.depth > r.depth) step('down');
         }
         break;
       case 'left':
-        if (r && isExpandable(r) && model?.expanded.has(r.key)) fileTreeStore.collapse(r.key);
+        if (r && isExpandable(r) && fileTreeStore.isExpanded(r.key)) fileTreeStore.collapse(r.key);
         else if (model && focusIdx >= 0) {
           const p = model.parentIndex(focusIdx);
           if (p >= 0) moveTo(p);
@@ -307,7 +308,7 @@
     e.stopPropagation();
     fileTreeStore.humanTouched();
     if (e.altKey) {
-      if (model?.expanded.has(r.key)) fileTreeStore.collapseRecursive(r.key);
+      if (fileTreeStore.isExpanded(r.key)) fileTreeStore.collapseRecursive(r.key);
       else fileTreeStore.expandRecursive(r.key);
     } else {
       fileTreeStore.toggle(r.key);
@@ -442,7 +443,7 @@
       <span class="name">{r.name}</span>
     </div>
   {:else}
-    {@const expanded = !!model?.expanded.has(r.key)}
+    {@const expanded = fileTreeStore.isExpanded(r.key)}
     {@const expandable = isExpandable(r)}
     {@const ic = iconFor(r.name, r.kind, expanded)}
     {@const tabs = fileTreeStore.editorRels.get(r.key)}
