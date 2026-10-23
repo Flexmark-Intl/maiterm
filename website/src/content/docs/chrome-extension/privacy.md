@@ -27,9 +27,11 @@ Only tabs you link yourself, and the tabs those pages open for the agent:
 
 An agent cannot link a tab or choose one, and reaches only the tabs linked to it.
 
-The extension uses Chrome's debugger (the DevTools Protocol) on a linked tab, and Chrome shows
-its "is debugging this browser" bar while it does. Cancelling that bar, closing the tab, clicking
-**Unlink**, or turning the feature off in maiTerm ends the link.
+The extension uses Chrome's debugger (the DevTools Protocol) on linked tabs only. While it does,
+Chrome shows its "started debugging this browser" bar, in every tab of every window: the bar is
+about the whole browser, and doesn't mean the extension can reach the other tabs. Cancelling that
+bar ends every link. Closing a tab, clicking **Unlink**, or turning the feature off in maiTerm
+ends that tab's link (or all of them, for the last).
 
 It does read the title and address of your open tabs, because it needs them to mark linked
 tabs and to tell maiTerm which page a link is on. Those never leave your computer except as

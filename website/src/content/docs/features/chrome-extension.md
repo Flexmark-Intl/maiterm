@@ -30,7 +30,7 @@ All of it in your real, signed-in session, and in the background: the tab doesn'
 
 - **Only you link a tab**, from the extension's icon in the browser. No agent can link one, pick one, or see your other tabs.
 - **Each tab has one agent.** An agent can use only the tabs linked to it, and a tab is linked to one agent at a time. The one tab you don't link by hand is one a linked page opens for its agent, such as a sign-in popup ([below](#several-tabs-and-popups)).
-- **Chrome shows that it's happening.** While an agent is working, Chrome shows its "is debugging this browser" bar. **Cancel** it, close the tab, click **Unlink**, or turn the feature off in maiTerm, and the link ends.
+- **Chrome shows that it's happening.** While a linked tab is in use, Chrome shows its "started debugging this browser" bar. Chrome shows it in **every** tab of every window, because it's about the whole browser, but only the tabs you linked are attached; the rest stay out of the agent's reach. **Cancel** on that bar ends every link at once. To end one, close the tab, click **Unlink**, or turn the feature off in maiTerm.
 - **Nothing leaves your computer through the extension.** It talks only to maiTerm on your own machine. What the agent reads from the tab goes to that agent, as everything else it reads does. See the [privacy policy](/chrome-extension/privacy/).
 
 ## Setting it up
@@ -99,6 +99,8 @@ Agents in an agent tab get these while the feature is on. Every one acts on the 
 Console and network records start when the agent first uses the tab, so for a bug that happens on load, the agent reloads the page first. The extension keeps the last 200 console messages and 300 requests per linked tab, in memory, and drops them when the link ends.
 
 ## Worth knowing
+
+- **The debugging bar stays while tabs are linked.** The extension stays attached so it records console errors and requests while you use the page yourself; that is what lets an agent read the errors from a bug you just reproduced. If the bar bothers you, Chrome hides it when started with `--silent-debugger-extension-api`, which hides it for every extension, so use it knowingly.
 
 - **It acts as you.** Clicking "Delete" in a linked tab deletes, in your account. Link a tab you're happy for the agent to work in, and say what it may and may not do.
 - **Agent tabs only.** The popup lists maiTerm tabs running an agent, not shells or stack services.
