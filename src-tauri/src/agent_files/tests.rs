@@ -641,3 +641,81 @@ async fn record_answers_the_turn_a_call_was_really_filed_in() {
     assert_eq!(l.record(rec(&call, "t1")), None);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The hook's own order for a Pre: predict the turn, capture, record, move the baseline.
+async fn hook_pre(l: &AgentFiles, event: &serde_json::Value, file: &str) {
+    let session = event["session_id"].as_str().unwrap();
+    let turn = l.turn_for_pre("t1", session);
+    let seen = l.baselines.capture("t1", session, "claude", turn, vec![file.to_string()]).await;
+    if let Some(filed) = l.record(rec(event, "t1")) {
+        let paths: Vec<String> = seen.into_iter().map(|(p, _)| p).collect();
+        l.baselines.rekey("t1", session, turn, filed, &paths);
+    }
+}
+
+/// A parent turn's Bash runs headless `claude -p` children, which inherit the tab's id. However
+/// many there are, and whether they write or only read, the parent's edits of a file it already
+/// changed this turn never become the turn's start: either the real start survives, or the
+/// lookup says it is gone.
+#[tokio::test]
+async fn headless_children_never_make_the_parents_edits_its_baseline() {
+    let d = std::env::temp_dir().join(format!("af-children-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&d).unwrap();
+    let cwd = d.to_string_lossy().into_owned();
+    let (a, x) = (d.join("a.ts").to_string_lossy().into_owned(), d.join("x.ts").to_string_lossy().into_owned());
+    std::fs::write(&x, "x\n").unwrap();
+    let edit = |file: &str, id: &str, session: &str| {
+        let mut e = pre("Edit", json!({ "file_path": file, "old_string": "v", "new_string": "w" }), id, &cwd);
+        e["session_id"] = json!(session);
+        e
+    };
+    let child_turn = |session: &str| {
+        let mut p = prompt(&cwd);
+        p["session_id"] = json!(session);
+        let mut s = stop(&cwd);
+        s["session_id"] = json!(session);
+        (p, s)
+    };
+    // Writers: `claude -p 'fix lint' && claude -p 'add tests'`.
+    let l = ledger();
+    std::fs::write(&a, "v0\n").unwrap();
+    l.record(rec(&prompt(&cwd), "t1"));
+    hook_pre(&l, &edit(&a, "p1", "s1"), &a).await;
+    std::fs::write(&a, "v1\n").unwrap();
+    for c in ["c1", "c2"] {
+        let (p, s) = child_turn(c);
+        l.record(rec(&p, "t1"));
+        hook_pre(&l, &edit(&x, &format!("{c}-e"), c), &x).await;
+        l.record(rec(&s, "t1"));
+    }
+    hook_pre(&l, &edit(&a, "p2", "s1"), &a).await;
+    assert_eq!(l.turn_and_session("t1"), Some((1, "s1".to_string())));
+    for scope in ["turn", "session"] {
+        assert_eq!(l.baselines.lookup("t1", "s1", &a, scope, 1).content.as_deref(), Some("v0\n"), "{scope}");
+    }
+    // Readers, more than the ledger keeps turns for: the parent comes back numbering from 1.
+    let l = ledger();
+    std::fs::write(&a, "v0\n").unwrap();
+    l.record(rec(&prompt(&cwd), "t1"));
+    hook_pre(&l, &edit(&a, "q1", "s1"), &a).await;
+    l.record(rec(&stop(&cwd), "t1"));
+    std::fs::write(&a, "v5\n").unwrap();
+    for i in 2..=7 {
+        l.record(rec(&prompt(&cwd), "t1"));
+        l.record(rec(&stop(&cwd), "t1"));
+        assert_eq!(l.turn_of("t1"), Some(i));
+    }
+    l.record(rec(&prompt(&cwd), "t1"));
+    for i in 0..=LEFT_SESSIONS {
+        let (p, s) = child_turn(&format!("r{i}"));
+        l.record(rec(&p, "t1"));
+        l.record(rec(&s, "t1"));
+    }
+    hook_pre(&l, &edit(&a, "q2", "s1"), &a).await;
+    assert_eq!(l.turn_and_session("t1"), Some((1, "s1".to_string())));
+    for scope in ["turn", "session"] {
+        let got = l.baselines.lookup("t1", "s1", &a, scope, 1);
+        assert_eq!((got.content, got.unavailable.as_deref()), (None, Some("evicted")), "{scope}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

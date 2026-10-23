@@ -9,7 +9,9 @@
 //! Rules:
 //! - Only the FIRST write-capable call per (tab, session, turn, path) captures; a later edit in
 //!   the same turn would read the agent's own work. The first capture per (tab, session, path)
-//!   is also the session baseline. A tab keeps its two most recent sessions' baselines.
+//!   is also the session baseline. A tab keeps as many sessions' baselines as the ledger can
+//!   resume a turn for; a session whose baselines were dropped and that comes back says
+//!   `evicted` for what it lost instead of capturing again.
 //! - The hook waits at most `DEADLINE` (25 ms). A read still running then is told to stop by a
 //!   cancellation flag, and whatever it finds is discarded: by then the tool may have run, and
 //!   post-edit bytes passed off as the turn's start would be a false claim. The slot records
@@ -21,7 +23,7 @@
 //!   persisted, never on any wire to the phone.
 //! - Local tabs only: a hook must never wait on ssh.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -176,19 +178,40 @@ struct SessionState {
     turn: u64,
     by_turn: HashMap<(u64, String), u64>,
     by_session: HashMap<String, u64>,
+    /// Set when this session's baselines were dropped and it came back, to the turn it came back
+    /// in. What it captured before is gone, so a capture now could read its own earlier edits:
+    /// its session baselines are `evicted` for good, and so are its turns up to this one. A later
+    /// turn captures again, since a turn starts from whatever the file holds at its first write.
+    lost: Option<u64>,
 }
 
-/// Sessions kept per tab. Two, not one: a headless `claude -p` the agent runs from its Bash
-/// inherits the tab's id and posts its own session's events, and the parent's work goes on
-/// around it. Dropping the parent's baselines when the child captured would have the parent's
-/// next call recapture its files after its own edits and serve those as the start.
-const SESSIONS: usize = 2;
+/// Sessions whose baselines a tab keeps: as many as the ledger can resume a turn for (the one
+/// it is in, and `LEFT_SESSIONS` it switched away from). A headless `claude -p` the agent runs
+/// from its Bash inherits the tab's id and posts its own session's events, and the parent's turn
+/// goes on around it, however many children it runs: its baselines must outlive them.
+const SESSIONS: usize = super::LEFT_SESSIONS + 1;
+/// Ids of sessions whose baselines were dropped, remembered per tab so one that comes back is
+/// known to have lost them (`SessionState::lost`) rather than taken for a new session, which
+/// would recapture files after its own edits. Only sessions that captured land here.
+const DROPPED: usize = 256;
 
 #[derive(Default)]
 struct TabState {
     runtime: String,
     /// Least recently captured first; the last is the session capturing now.
     sessions: Vec<SessionState>,
+    /// Sessions whose baselines were dropped, oldest first.
+    dropped: VecDeque<String>,
+}
+
+impl TabState {
+    fn tombstone(&mut self, session: String) {
+        self.dropped.retain(|s| *s != session);
+        self.dropped.push_back(session);
+        if self.dropped.len() > DROPPED {
+            self.dropped.pop_front();
+        }
+    }
 }
 
 impl TabState {
@@ -280,11 +303,14 @@ impl Baselines {
 
     /// Capture `paths` for `tab`'s turn `turn`, those not captured yet this turn. Waits at most
     /// the deadline. Returns, per path read now, whether the file existed (None: unknown, the
-    /// read timed out or failed), so a Write's create-or-overwrite needs no second look.
+    /// read timed out or failed), so a Write's create-or-overwrite needs no second look. A path
+    /// recorded `evicted` without a read (a session that lost its baselines) is listed as unknown,
+    /// so the hook still moves it with `rekey`.
     pub async fn capture(self: &Arc<Self>, tab: &str, session: &str, runtime: &str, turn: u64, paths: Vec<String>) -> Vec<(String, Option<bool>)> {
-        let reserved = self.reserve(tab, session, runtime, turn, &paths);
+        let (reserved, unread) = self.reserve(tab, session, runtime, turn, &paths);
+        let unread = unread.into_iter().map(|p| (p, None));
         if reserved.is_empty() {
-            return Vec::new();
+            return unread.collect();
         }
         let cancel = Arc::new(AtomicBool::new(false));
         let (me, flag, list) = (self.clone(), cancel.clone(), reserved.clone());
@@ -311,12 +337,14 @@ impl Baselines {
                 };
                 (path, existed)
             })
+            .chain(unread)
             .collect()
     }
 
     /// Claim the slots this call captures, under the lock, so a second copy of the same Pre
     /// (the mod's and the settings hook's) or a parallel call never reads the file again.
-    fn reserve(&self, tab: &str, session: &str, runtime: &str, turn: u64, paths: &[String]) -> Vec<(u64, String)> {
+    /// Answers the slots to read, and the paths recorded `evicted` with no read.
+    fn reserve(&self, tab: &str, session: &str, runtime: &str, turn: u64, paths: &[String]) -> (Vec<(u64, String)>, Vec<String>) {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
         let st = inner.tabs.entry(tab.to_string()).or_default();
@@ -328,17 +356,28 @@ impl Baselines {
         let at = if session.is_empty() && !st.sessions.is_empty() { Some(st.sessions.len() - 1) } else { st.sessions.iter().position(|s| s.session == session) };
         let ss = match at {
             Some(i) => st.sessions.remove(i),
-            None => SessionState { session: session.to_string(), ..Default::default() },
+            None => {
+                // One whose baselines were dropped is not new: its turn may already have edited
+                // these files, so what they hold now is not where the turn started.
+                let lost = st.dropped.iter().position(|s| s == session).map(|i| {
+                    st.dropped.remove(i);
+                    turn
+                });
+                SessionState { session: session.to_string(), lost, ..Default::default() }
+            }
         };
         st.sessions.push(ss);
         let mut gone: Vec<String> = Vec::new();
         while st.sessions.len() > SESSIONS {
-            gone.push(st.sessions.remove(0).session);
+            let s = st.sessions.remove(0).session;
+            st.tombstone(s.clone());
+            gone.push(s);
         }
-        let Some(ss) = st.sessions.last_mut() else { return Vec::new() };
+        let Some(ss) = st.sessions.last_mut() else { return (Vec::new(), Vec::new()) };
         let sid = ss.session.clone();
         ss.turn = ss.turn.max(turn);
-        let mut out = Vec::new();
+        let blind = ss.lost.is_some_and(|t| turn <= t);
+        let (mut out, mut unread) = (Vec::new(), Vec::new());
         for p in paths {
             let key = (turn, p.clone());
             if ss.by_turn.contains_key(&key) {
@@ -348,13 +387,35 @@ impl Baselines {
             inner.next += 1;
             ss.by_turn.insert(key, seq);
             ss.by_session.entry(p.clone()).or_insert(seq);
-            inner.slots.insert(seq, Slot { tab: tab.to_string(), session: sid.clone(), turn, state: State::Pending, bytes: 0 });
-            out.push((seq, p.clone()));
+            // Recorded, not read: a later call this turn must not read the file either.
+            let state = if blind { State::Done { content: None, unavailable: Some("evicted") } } else { State::Pending };
+            inner.slots.insert(seq, Slot { tab: tab.to_string(), session: sid.clone(), turn, state, bytes: 0 });
+            if blind {
+                unread.push(p.clone());
+            } else {
+                out.push((seq, p.clone()));
+            }
         }
         if !gone.is_empty() {
             inner.drop_slots(|s| s.tab == tab && gone.contains(&s.session));
         }
-        out
+        (out, unread)
+    }
+
+    /// The ledger forgot `session`'s turn (it fell out of `TabLedger.left`): if it comes back, the
+    /// ledger numbers its turns afresh, and the baselines filed under its old numbers would be
+    /// served for the new ones. They go, and the session is remembered as having lost them.
+    pub fn lose_session(&self, tab: &str, session: &str) {
+        if session.is_empty() {
+            return;
+        }
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        let Some(st) = inner.tabs.get_mut(tab) else { return };
+        let Some(i) = st.sessions.iter().position(|s| s.session == session) else { return };
+        st.sessions.remove(i);
+        st.tombstone(session.to_string());
+        inner.drop_slots(|s| s.tab == tab && s.session == session);
     }
 
     /// The ledger recorded the call in turn `to`, not the `from` its baselines were reserved
@@ -434,7 +495,16 @@ impl Baselines {
             let inner = self.inner.lock();
             let Some(tab) = inner.tabs.get(tab) else { return none("not_captured", String::new()) };
             let runtime = tab.runtime.clone();
-            let Some(ss) = tab.session(session) else { return none("not_captured", runtime) };
+            let Some(ss) = tab.session(session) else {
+                let why = if tab.dropped.iter().any(|s| s == session) { "evicted" } else { "not_captured" };
+                return none(why, runtime);
+            };
+            // A session that lost its baselines can't say where it started, nor where a turn it
+            // was already in started, for any file: an empty answer there would read as "never
+            // touched".
+            if ss.lost.is_some_and(|t| scope == "session" || turn <= t) {
+                return none("evicted", runtime);
+            }
             if scope == "session" {
                 (ss.by_session.get(&want).copied(), ss.by_session.iter().map(|(p, s)| (p.clone(), *s)).collect::<Vec<_>>(), runtime)
             } else {
@@ -733,10 +803,6 @@ mod tests {
         // in the tab doesn't make the parent's next edit recapture its file.
         assert_eq!(content(&b.lookup("t1", "s1", &f, "turn", 1)), Some("old\n"));
         assert!(b.capture("t1", "s1", "claude", 1, vec![f.clone()]).await.is_empty());
-        // A third session drops the least recent one (s2 captured last but one).
-        b.capture("t1", "s3", "claude", 1, vec![f.clone()]).await;
-        assert_eq!(b.lookup("t1", "s2", &f, "turn", 1).unavailable.as_deref(), Some("not_captured"));
-        assert_eq!(content(&b.lookup("t1", "s1", &f, "turn", 1)), Some("old\n"));
         assert_eq!(b.held_bytes(), "old\n".len() + "new\n".len());
         b.forget(&["t1".to_string()]);
         b.capture("t1", "s2", "claude", 1, vec![f.clone()]).await;
@@ -746,6 +812,81 @@ mod tests {
         b.forget(&["t9".to_string()]);
         assert_eq!(b.lookup("t9", "s2", &f, "turn", 1).unavailable.as_deref(), Some("not_captured"));
         assert_eq!(b.held_bytes(), 0);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A parent's turn runs `claude -p 'fix lint' && claude -p 'add tests'`: both children
+    /// capture, back to back, under the tab. The parent's next edit of a file it already changed
+    /// this turn must still find the turn's real start, not recapture its own edit.
+    #[tokio::test]
+    async fn children_capturing_in_a_parent_turn_keep_the_parents_baselines() {
+        let d = dir("children");
+        let (a, x) = (p(&d, "a.ts"), p(&d, "x.ts"));
+        std::fs::write(&a, "v0\n").unwrap();
+        std::fs::write(&x, "x\n").unwrap();
+        let b = Baselines::new();
+        b.capture("t1", "s1", "claude", 3, vec![a.clone()]).await;
+        std::fs::write(&a, "v1\n").unwrap();
+        for child in 0..SESSIONS - 1 {
+            b.capture("t1", &format!("c{child}"), "claude", 1, vec![x.clone()]).await;
+        }
+        assert!(b.capture("t1", "s1", "claude", 3, vec![a.clone()]).await.is_empty());
+        assert_eq!(content(&b.lookup("t1", "s1", &a, "turn", 3)), Some("v0\n"));
+        assert_eq!(content(&b.lookup("t1", "s1", &a, "session", 3)), Some("v0\n"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// More sessions capture than a tab keeps, and the parent's baselines go. When it comes back
+    /// mid-turn, the file holds its own edits: that turn and its session start say `evicted`,
+    /// never the edited bytes. Its next turn captures again.
+    #[tokio::test]
+    async fn a_session_whose_baselines_were_dropped_never_recaptures_its_open_turn() {
+        let d = dir("dropped");
+        let (a, c, x) = (p(&d, "a.ts"), p(&d, "c.ts"), p(&d, "x.ts"));
+        std::fs::write(&a, "v0\n").unwrap();
+        std::fs::write(&c, "c0\n").unwrap();
+        std::fs::write(&x, "x\n").unwrap();
+        let b = Baselines::new();
+        b.capture("t1", "s1", "claude", 3, vec![a.clone()]).await;
+        std::fs::write(&a, "v1\n").unwrap();
+        for child in 0..SESSIONS {
+            b.capture("t1", &format!("c{child}"), "claude", 1, vec![x.clone()]).await;
+        }
+        assert_eq!(b.lookup("t1", "s1", &a, "turn", 3).unavailable.as_deref(), Some("evicted"));
+        // Back in turn 3: nothing is read, and a second edit doesn't read either.
+        assert_eq!(b.capture("t1", "s1", "claude", 3, vec![a.clone()]).await, vec![(a.clone(), None)]);
+        assert!(b.capture("t1", "s1", "claude", 3, vec![a.clone()]).await.is_empty());
+        for scope in ["turn", "session"] {
+            let got = b.lookup("t1", "s1", &a, scope, 3);
+            assert_eq!((got.content, got.unavailable.as_deref()), (None, Some("evicted")), "{scope}");
+        }
+        // A file not touched since it came back may have been touched before.
+        assert_eq!(b.lookup("t1", "s1", &c, "turn", 3).unavailable.as_deref(), Some("evicted"));
+        // Turn 4 starts from what turn 3 left; the session's start stays unknown.
+        b.capture("t1", "s1", "claude", 4, vec![a.clone()]).await;
+        assert_eq!(content(&b.lookup("t1", "s1", &a, "turn", 4)), Some("v1\n"));
+        assert_eq!(b.lookup("t1", "s1", &a, "session", 4).unavailable.as_deref(), Some("evicted"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The ledger forgot the session's turn: its baselines go with it, and coming back as "turn 1"
+    /// it gets neither the old turn 1's bytes nor a fresh read of its own edits.
+    #[tokio::test]
+    async fn a_session_the_ledger_forgot_loses_its_baselines() {
+        let d = dir("forgot");
+        let a = p(&d, "a.ts");
+        std::fs::write(&a, "v0\n").unwrap();
+        let b = Baselines::new();
+        b.capture("t1", "s1", "claude", 1, vec![a.clone()]).await;
+        std::fs::write(&a, "v5\n").unwrap();
+        b.lose_session("t1", "s1");
+        assert_eq!(b.held_bytes(), 0);
+        assert_eq!(b.capture("t1", "s1", "claude", 1, vec![a.clone()]).await, vec![(a.clone(), None)]);
+        assert_eq!(b.lookup("t1", "s1", &a, "turn", 1).unavailable.as_deref(), Some("evicted"));
+        // A session that never captured has nothing to lose: it is new when it comes.
+        b.lose_session("t1", "c1");
+        b.capture("t1", "c1", "claude", 1, vec![a.clone()]).await;
+        assert_eq!(content(&b.lookup("t1", "c1", &a, "turn", 1)), Some("v5\n"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

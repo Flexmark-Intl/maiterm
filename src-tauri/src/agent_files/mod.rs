@@ -209,7 +209,8 @@ struct TabLedger {
     /// headless `claude -p` run from the agent's Bash inherits the tab's id and posts its own
     /// session's events, and the parent goes on in its turn around it: coming back, the parent's
     /// turn carries on under its own number instead of restarting at 1, where it would collide
-    /// with the turn baselines (baseline.rs) its earlier turns captured.
+    /// with the turn baselines (baseline.rs) its earlier turns captured. A session that falls off
+    /// the end loses its baselines with its turn number (`Baselines::lose_session`).
     left: VecDeque<(String, u64, (i64, Option<i64>))>,
 }
 
@@ -452,6 +453,7 @@ impl AgentFiles {
     pub fn record(&self, rec: HookRecord) -> Option<u64> {
         let now = now_ms();
         let mut out: Vec<(AgentMarkAbs, bool)> = Vec::new();
+        let mut forgot: Option<String> = None;
         let recorded = {
             let mut inner = self.inner.lock();
             let inner = &mut *inner;
@@ -478,7 +480,10 @@ impl AgentFiles {
                     tab.left.retain(|(s, ..)| *s != tab.session_id);
                     tab.left.push_back((tab.session_id.clone(), tab.turn, tab.turn_span));
                     if tab.left.len() > LEFT_SESSIONS {
-                        tab.left.pop_front();
+                        // Its turn number is gone: coming back, it starts again at turn 1, so
+                        // its baselines go too (below, outside this lock) rather than being
+                        // served for turns that only share their numbers.
+                        forgot = tab.left.pop_front().map(|(s, ..)| s);
                     }
                     tab.entries.clear();
                     tab.turn = 0;
@@ -656,6 +661,9 @@ impl AgentFiles {
             inner.shells.retain(|s| s.running() || s.ended.is_some_and(|t| t.elapsed() < SHELL_TAIL * 4));
             turn
         };
+        if let Some(s) = forgot {
+            self.baselines.lose_session(&rec.tab_id, &s);
+        }
         self.route(out);
         Some(recorded)
     }
