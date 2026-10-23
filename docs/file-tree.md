@@ -180,6 +180,31 @@
 >   it, and does not open folders in the hidden tree.
 > - **Compare with HEAD** diffs against an empty right side only when `ft_stat` says the file
 >   is gone; a file still on disk that `readFile` refuses (over 2 MB, not UTF-8) is an error.
+>
+> **As built, phase 2 second review fixes (2026-10-22).** Where they changed the above:
+> - **A status run reconciles Find by looking on disk**, not by git's letters: every file the
+>   run names (each changed file, and a rename's source) is checked with a stat under the lock
+>   the watcher's own changes take, and the index follows what is there. Letters alone kept
+>   dropping files still on disk after `git rm --cached -r dir` (git lists the folder as one
+>   `? dir/`), missed a staged rename's two sides (Linux's only signal for a collapsed
+>   folder), and re-inserted a file made and removed during the run. A run naming over 20k
+>   files marks the index dirty instead. `Published` carries one `named` list.
+> - **An untracked root's contents come from two git runs** with fixed globs (`:(glob)*` for
+>   top-level files; `:(glob)*/**` with `--directory --no-empty-directory` for top-level
+>   folders), each one pass over the folder. A pathspec per name was quadratic (seconds at
+>   20k entries, enough to trip slow mode) and could overrun Windows' command line. A failed
+>   run keeps git's own entry and logs.
+> - **Hover counts** are cached per (rel, git gen, the file's size and mtime): a file that
+>   stays `M` while it is edited bumps no gen. A staged rename is diffed with `-M` and its
+>   source named (`:(top,literal)`), so it counts its edits rather than its size; the record
+>   for the file is picked by path.
+> - **Find leaves out `S` (skip-worktree) entries**: outside a sparse checkout's cone, in the
+>   index, not on disk, and never reported deleted.
+> - **Builds carry a generation**: starting one wakes the previous build's thread, which exits,
+>   so only the newest stays to evict.
+> - **The focus shortcut keeps find and the lens** (`revealPlan`): Cmd/Ctrl+Shift+B with an
+>   editor in front selects the file's row if the pruned view shows it and otherwise only
+>   focuses. Only "Reveal in Files" puts the pruned view away.
 
 ## 1. Why
 
