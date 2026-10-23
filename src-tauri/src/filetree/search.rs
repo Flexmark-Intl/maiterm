@@ -30,6 +30,7 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 use parking_lot::{Condvar, Mutex};
 
 use super::hub::RootHub;
+use super::paths::norm;
 use super::types::{SearchHit, SearchResult};
 use crate::util::proc;
 
@@ -84,10 +85,15 @@ impl Index {
 
     #[cfg(test)]
     pub fn contains(&self, path: &str) -> bool {
-        self.map.get(&hash_of(path)).and_then(|s| self.get(*s)) == Some(path)
+        let path = norm(path);
+        self.map.get(&hash_of(&path)).and_then(|s| self.get(*s)) == Some(path.as_ref())
     }
 
+    /// Paths are kept in one spelling (NFC on macOS): `ls-files` gives git's NFC, a walk and
+    /// the watcher give names as stored, often NFD, and one file must not be listed twice.
     pub fn insert(&mut self, path: &str) {
+        let path = norm(path);
+        let path = path.as_ref();
         let h = hash_of(path);
         if let Some(&slot) = self.map.get(&h) {
             if self.get(slot) != Some(path) {
@@ -107,6 +113,8 @@ impl Index {
 
     /// True when the path was there.
     pub fn remove(&mut self, path: &str) -> bool {
+        let path = norm(path);
+        let path = path.as_ref();
         let h = hash_of(path);
         let Some(&slot) = self.map.get(&h) else { return false };
         if self.get(slot) != Some(path) {
@@ -148,7 +156,7 @@ impl Index {
             if n % CANCEL_EVERY == 0 && n > 0 && cancelled() {
                 return None;
             }
-            let Some(score) = pattern.score(Utf32Str::new(path, &mut buf), &mut matcher) else { continue };
+            let Some(score) = pattern.score(code_points(path, &mut buf), &mut matcher) else { continue };
             let key = (score, Reverse(path.len() as u32));
             if heap.len() == limit {
                 let Some(Reverse(worst)) = heap.peek() else { continue };
@@ -167,13 +175,28 @@ impl Index {
             best.into_iter()
                 .map(|(score, _, Reverse(rel), _)| {
                     idx.clear();
-                    pattern.indices(Utf32Str::new(&rel, &mut buf), &mut matcher, &mut idx);
+                    pattern.indices(code_points(&rel, &mut buf), &mut matcher, &mut idx);
                     idx.sort_unstable();
                     idx.dedup();
                     SearchHit { rel, score, idx: idx.clone() }
                 })
                 .collect(),
         )
+    }
+}
+
+/// `path` as nucleo matches it, one slot per code point, so the positions it returns are code
+/// points: what the frontend counts (`matchHighlights`). `Utf32Str::new` keeps one slot per
+/// grapheme instead, and falls back to the raw bytes when every grapheme starts with an ASCII
+/// character (an NFD `café`), so its positions drifted off the string at any combining mark or
+/// multi-code-point emoji.
+fn code_points<'a>(path: &'a str, buf: &'a mut Vec<char>) -> Utf32Str<'a> {
+    if path.is_ascii() {
+        Utf32Str::Ascii(path.as_bytes())
+    } else {
+        buf.clear();
+        buf.extend(path.chars());
+        Utf32Str::Unicode(buf)
     }
 }
 
@@ -184,6 +207,9 @@ pub enum Change {
     File(String),
     /// Nothing exists here now (a file, or a whole folder, went).
     Gone(String),
+    /// A file git reports deleted. Unlike `Gone` it can't be a folder, so one the index
+    /// doesn't hold was already removed (the watcher saw it first) and needs no rebuild.
+    FileGone(String),
     /// A folder appeared or changed shape: only a rebuild knows what's in it.
     Folder,
 }
@@ -205,8 +231,11 @@ pub struct SearchState {
     /// The root is inside a repository: list with git, not a walk.
     in_repo: bool,
     shallow: bool,
-    /// The newest query asked; an older one still scanning gives up.
-    latest: AtomicU64,
+    /// The newest query each subscription asked; an older one of its own still scanning gives
+    /// up. Per subscription because `seq` is: each window counts its own from zero, and two
+    /// windows on one root share this hub, so one shared counter let the window that had
+    /// searched more cancel every scan of the other.
+    latest: Mutex<HashMap<u64, Arc<AtomicU64>>>,
     inner: Mutex<Inner>,
     cv: Condvar,
     evict_after: Duration,
@@ -219,7 +248,7 @@ impl SearchState {
             root: root.to_path_buf(),
             in_repo,
             shallow,
-            latest: AtomicU64::new(0),
+            latest: Mutex::new(HashMap::new()),
             inner: Mutex::new(Inner::default()),
             cv: Condvar::new(),
             evict_after: EVICT_AFTER,
@@ -234,8 +263,9 @@ impl SearchState {
 
     /// `ft_search`. Answers from the index there is; starts a build when there is none or it
     /// is dirty, and says so (`indexing`), with `search_ready` sent when it is done.
-    pub fn query(self: &Arc<Self>, query: &str, limit: usize, seq: u64, index_shallow: bool) -> SearchResult {
-        self.latest.fetch_max(seq, Ordering::SeqCst);
+    pub fn query(self: &Arc<Self>, sub: u64, query: &str, limit: usize, seq: u64, index_shallow: bool) -> SearchResult {
+        let latest = self.latest.lock().entry(sub).or_default().clone();
+        latest.fetch_max(seq, Ordering::SeqCst);
         let limit = limit.clamp(1, MAX_HITS);
         let mut inner = self.inner.lock();
         inner.last_query = Some(Instant::now());
@@ -263,7 +293,6 @@ impl SearchState {
         let Some(ix) = inner.index.as_ref() else {
             return SearchResult { seq, indexing, items: Vec::new(), unavailable: None };
         };
-        let latest = &self.latest;
         let items = ix.search(query, limit, &|| latest.load(Ordering::SeqCst) != seq).unwrap_or_default();
         SearchResult { seq, indexing, items, unavailable: None }
     }
@@ -330,11 +359,18 @@ impl SearchState {
         }
     }
 
-    /// A status run's untracked files and deleted paths (the Linux reconciliation).
+    /// A status run's untracked files and deleted paths (the Linux reconciliation). Deletions
+    /// go first, so a path somehow in both lists ends up present: it was listed untracked,
+    /// so it is on disk.
     pub fn reconcile(&self, untracked: &[String], deleted: &[String]) {
-        let mut changes: Vec<Change> = untracked.iter().map(|p| Change::File(p.clone())).collect();
-        changes.extend(deleted.iter().map(|p| Change::Gone(p.clone())));
+        let mut changes: Vec<Change> = deleted.iter().map(|p| Change::FileGone(p.clone())).collect();
+        changes.extend(untracked.iter().map(|p| Change::File(p.clone())));
         self.note(changes);
+    }
+
+    /// A subscription closed: its query counter goes with it.
+    pub fn forget(&self, sub: u64) {
+        self.latest.lock().remove(&sub);
     }
 
     /// The hub is gone: let the eviction wait end now.
@@ -358,6 +394,9 @@ fn apply_change(ix: &mut Index, c: Change) {
                 ix.dirty = true;
             }
         }
+        Change::FileGone(p) => {
+            ix.remove(&p);
+        }
         Change::Folder => ix.dirty = true,
     }
 }
@@ -365,22 +404,41 @@ fn apply_change(ix: &mut Index, c: Change) {
 /// Tracked and untracked files, ignored ones left out, relative to the root.
 fn git_ls_files(root: &Path) -> Option<Vec<String>> {
     let mut c = proc::git();
-    c.arg("--no-optional-locks").arg("-C").arg(root).args(["ls-files", "-co", "--exclude-standard", "-z"]);
+    // `-c` lists the index, which still holds a file deleted from the worktree but not yet
+    // staged: every rebuild would bring an `rm`'d file (or a whole `rm -rf`'d folder) back
+    // as a hit that opens nothing. `-d -t` lists those again tagged `R`, to leave out.
+    c.arg("--no-optional-locks").arg("-C").arg(root).args(["ls-files", "-cdo", "-t", "--exclude-standard", "-z"]);
     let out = proc::output_timeout(&mut c, Duration::from_secs(30)).ok()?;
     if !out.status.success() {
         return None;
     }
+    Some(parse_ls_files_tagged(&out.stdout))
+}
+
+/// `ls-files -t -z` records: a one-letter tag, a space, the path. `R` (deleted from the
+/// worktree) removes a path the `H` record listed; every other tag lists one.
+fn parse_ls_files_tagged(out: &[u8]) -> Vec<String> {
+    let mut removed = std::collections::HashSet::new();
+    let mut listed = Vec::new();
+    for rec in out.split(|b| *b == 0) {
+        if rec.len() < 3 || rec[1] != b' ' {
+            continue;
+        }
+        let path = String::from_utf8_lossy(&rec[2..]).into_owned();
+        if rec[0] == b'R' {
+            removed.insert(path);
+        } else {
+            listed.push(path);
+        }
+    }
     let mut seen = std::collections::HashSet::new();
-    Some(
-        out.stdout
-            .split(|b| *b == 0)
-            .filter(|p| !p.is_empty())
-            .map(|p| String::from_utf8_lossy(p).into_owned())
-            // A path with a conflict is listed once per stage.
-            .filter(|p| seen.insert(hash_of(p)))
-            .take(MAX_PATHS)
-            .collect(),
-    )
+    listed
+        .into_iter()
+        .filter(|p| !removed.contains(p))
+        // A path with a conflict is listed once per stage.
+        .filter(|p| seen.insert(hash_of(p)))
+        .take(MAX_PATHS)
+        .collect()
 }
 
 /// Every file below `root` that git would not ignore, 20 levels deep, `.git` skipped.
@@ -464,6 +522,59 @@ mod tests {
         assert_eq!(h.idx.iter().map(|&i| chars[i as usize]).collect::<String>(), "x.ts");
     }
 
+    /// The frontend reads positions as code points. nucleo's own `Utf32Str::new` counts
+    /// graphemes (or bytes, when every grapheme starts with ASCII), which drifted at a
+    /// combining mark or a skin-toned emoji.
+    #[test]
+    fn indices_are_code_points_with_combining_marks_and_emoji() {
+        // q + combining dot (no precomposed form, so NFC keeps it two code points), and a
+        // thumbs-up with a skin tone (two code points, one grapheme).
+        for rel in ["q\u{307}/x.ts", "\u{1F44D}\u{1F3FD}/x.ts", "a\u{301}b\u{301}c/x.ts"] {
+            let i = ix(&[rel]);
+            let h = &i.search("x.ts", 10, &|| false).unwrap()[0];
+            let chars: Vec<char> = h.rel.chars().collect();
+            assert!(h.idx.iter().all(|&n| (n as usize) < chars.len()), "{rel}: {:?}", h.idx);
+            assert_eq!(h.idx.iter().map(|&n| chars[n as usize]).collect::<String>(), "x.ts", "{rel}");
+        }
+    }
+
+    #[test]
+    fn a_tracked_file_deleted_from_the_worktree_is_not_listed() {
+        // `-c` lists the index; the `R` records (deleted) take those paths back out.
+        let out = b"? new.ts\0H kept.ts\0H gone.ts\0H old/a.ts\0R gone.ts\0R old/a.ts\0H c.ts\0H c.ts\0";
+        assert_eq!(parse_ls_files_tagged(out), vec!["new.ts".to_string(), "kept.ts".to_string(), "c.ts".to_string()]);
+    }
+
+    #[test]
+    fn git_reporting_a_file_deleted_that_is_already_gone_costs_no_rebuild() {
+        let mut i = ix(&["a.ts", "b.ts"]);
+        // The watcher removed it first; the status run reports it deleted afterwards.
+        apply_change(&mut i, Change::Gone("a.ts".into()));
+        apply_change(&mut i, Change::FileGone("a.ts".into()));
+        assert!(!i.dirty && !i.contains("a.ts") && i.contains("b.ts"));
+    }
+
+    #[test]
+    fn a_file_both_untracked_and_deleted_stays_findable() {
+        // `git rm --cached top`: the index lost it, the disk didn't.
+        let state = SearchState::new(Weak::new(), Path::new("/nonexistent"), false, false);
+        state.inner.lock().index = Some(ix(&["top", "other"]));
+        state.reconcile(&["top".to_string()], &["top".to_string()]);
+        assert_eq!(state.inner.lock().index.as_ref().map(|i| i.contains("top")), Some(true));
+    }
+
+    /// One file is one path, however the source spelled it: `ls-files` gives git's NFC, the
+    /// watcher the name as stored (NFD on macOS).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn nfc_and_nfd_spellings_are_one_path_on_macos() {
+        let mut i = ix(&["caf\u{e9}/x.ts"]);
+        i.insert("cafe\u{301}/x.ts");
+        assert_eq!(i.len(), 1);
+        assert!(i.remove("cafe\u{301}/x.ts"));
+        assert_eq!(i.len(), 0);
+    }
+
     #[test]
     fn ties_go_to_the_shorter_path_and_the_limit_holds() {
         let i = ix(&["a/b/c/readme.md", "readme.md", "x/readme.md"]);
@@ -518,18 +629,29 @@ mod tests {
         let state = SearchState::new(Weak::new(), Path::new("/nonexistent"), false, false);
         state.inner.lock().index = Some(Index::from_paths((0..50_000).map(|n| format!("dir{}/file{n}.rs", n % 50))));
         // Seq 2 was asked before seq 1's scan began: seq 1 is stale from its first check.
-        state.latest.store(2, Ordering::SeqCst);
-        let stale = state.query("file", 500, 1, false);
+        state.latest.lock().entry(7).or_default().store(2, Ordering::SeqCst);
+        let stale = state.query(7, "file", 500, 1, false);
         assert_eq!(stale.seq, 1);
         assert!(stale.items.is_empty(), "a stale query returns nothing");
-        let fresh = state.query("file", 500, 2, false);
+        let fresh = state.query(7, "file", 500, 2, false);
         assert_eq!(fresh.items.len(), 500);
+    }
+
+    #[test]
+    fn another_window_on_the_same_root_never_cancels_a_query() {
+        let state = SearchState::new(Weak::new(), Path::new("/nonexistent"), false, false);
+        state.inner.lock().index = Some(Index::from_paths((0..50_000).map(|n| format!("dir{}/file{n}.rs", n % 50))));
+        // Window A has searched a hundred times; window B, counting from zero, is not stale.
+        assert_eq!(state.query(1, "file", 500, 100, false).items.len(), 500);
+        assert_eq!(state.query(2, "file", 500, 1, false).items.len(), 500);
+        state.forget(1);
+        assert!(!state.latest.lock().contains_key(&1), "a closed view's counter goes");
     }
 
     #[test]
     fn a_shallow_root_outside_a_repo_waits_for_the_human() {
         let state = SearchState::new(Weak::new(), Path::new("/"), false, true);
-        let r = state.query("x", 10, 1, false);
+        let r = state.query(1, "x", 10, 1, false);
         assert!(r.unavailable.is_some() && !r.indexing);
     }
 

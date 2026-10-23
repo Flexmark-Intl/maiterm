@@ -358,6 +358,27 @@ fn a_root_inside_a_wholly_untracked_folder_decorates_its_contents() {
     let _ = std::fs::remove_dir_all(&r);
 }
 
+/// The index is rebuilt from `ls-files`, whose `-c` still lists a file deleted from the
+/// worktree but not staged: every rebuild brought `rm`'d files (and an `rm -rf`'d folder's)
+/// back as hits that open nothing.
+#[test]
+fn find_never_lists_a_tracked_file_deleted_from_the_worktree() {
+    let r = repo("find-rm");
+    std::fs::write(r.join("kept.txt"), "k").unwrap();
+    std::fs::remove_file(r.join("README.md")).unwrap();
+    std::fs::remove_dir_all(r.join("src")).unwrap();
+    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let rec = Arc::new(Recorder::default());
+    let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    assert!(hub.search(ack.sub_id, "x", 10, 1, false).indexing);
+    wait_for("search_ready", Duration::from_secs(10), || rec.msgs.lock().iter().any(|m| m.ev == TreeEvent::SearchReady));
+    assert_eq!(hub.search.len(), Some(1), "only kept.txt is on disk");
+    assert_eq!(hub.search(ack.sub_id, "kept", 10, 2, false).items.first().map(|h| h.rel.as_str()), Some("kept.txt"));
+    ft.close(ack.sub_id);
+    let _ = std::fs::remove_dir_all(&r);
+}
+
 /// The reason for `--no-optional-locks`: an agent committing in the same repo must never meet
 /// our `index.lock`, however hard the tree refreshes.
 #[test]
@@ -404,13 +425,13 @@ fn find_builds_its_index_on_the_first_query_and_follows_the_disk() {
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
 
-    let first = hub.search("helper", 500, 1, false);
+    let first = hub.search(ack.sub_id, "helper", 500, 1, false);
     assert!(first.indexing, "the first query starts the build");
     wait_for("search_ready", Duration::from_secs(10), || rec.msgs.lock().iter().any(|m| m.ev == TreeEvent::SearchReady));
-    let hits = hub.search("helper", 500, 2, false);
+    let hits = hub.search(ack.sub_id, "helper", 500, 2, false);
     assert!(!hits.indexing);
     assert_eq!(hits.items.first().map(|h| h.rel.as_str()), Some("src/untracked_helper.ts"), "untracked files are indexed");
-    assert!(hub.search("bundle", 500, 3, false).items.is_empty(), "ignored files are not");
+    assert!(hub.search(ack.sub_id, "bundle", 500, 3, false).items.is_empty(), "ignored files are not");
     wait_for_watcher(&ft, ack.sub_id);
 
     // A new file is found once the watcher reports it; a deleted one disappears.
@@ -418,12 +439,12 @@ fn find_builds_its_index_on_the_first_query_and_follows_the_disk() {
     let mut seq = 10;
     wait_for("the new file in the index", Duration::from_secs(15), || {
         seq += 1;
-        hub.search("brand_new_widget", 500, seq, false).items.iter().any(|h| h.rel == "src/lib/brand_new_widget.ts")
+        hub.search(ack.sub_id, "brand_new_widget", 500, seq, false).items.iter().any(|h| h.rel == "src/lib/brand_new_widget.ts")
     });
     std::fs::remove_file(r.join("src/untracked_helper.ts")).unwrap();
     wait_for("the deleted file gone from the index", Duration::from_secs(15), || {
         seq += 1;
-        !hub.search("untracked_helper", 500, seq, false).items.iter().any(|h| h.rel == "src/untracked_helper.ts")
+        !hub.search(ack.sub_id, "untracked_helper", 500, seq, false).items.iter().any(|h| h.rel == "src/untracked_helper.ts")
     });
     assert!(hub.search.len().is_some());
     ft.close(ack.sub_id);

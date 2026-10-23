@@ -132,8 +132,8 @@ pub async fn ft_stat(ft: State<'_, Arc<FileTreeState>>, sub_id: u64, rel: String
     blocking(move || ft.hub_of(sub_id)?.stat(&rel)).await
 }
 
-/// Find (§8): the best `limit` (≤500) paths for `query`. `seq` orders queries: an older one
-/// still scanning stops when a newer arrives. `index_shallow`: the human asked to index a
+/// Find (§8): the best `limit` (≤500) paths for `query`. `seq` orders one subscription's
+/// queries: an older one still scanning stops when a newer one from the same view arrives. `index_shallow`: the human asked to index a
 /// home or volume root.
 #[tauri::command]
 pub async fn ft_search(
@@ -145,7 +145,7 @@ pub async fn ft_search(
     index_shallow: Option<bool>,
 ) -> Result<SearchResult, String> {
     let ft = ft.inner().clone();
-    blocking(move || Ok(ft.hub_of(sub_id)?.search(&query, limit as usize, seq, index_shallow.unwrap_or(false)))).await
+    blocking(move || Ok(ft.hub_of(sub_id)?.search(sub_id, &query, limit as usize, seq, index_shallow.unwrap_or(false)))).await
 }
 
 /// A file's content at "HEAD" or in the "index", for Compare with HEAD. None: the file is new

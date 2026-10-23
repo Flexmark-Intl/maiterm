@@ -642,6 +642,12 @@ impl GitCore {
             let key = if e.dir { format!("{rel}/") } else { rel };
             files.insert(key, e.letter.to_string());
         }
+        // An index-only deletion (`git rm --cached`) leaves the file on disk, listed again as
+        // untracked: it is not gone, and the search index must keep it.
+        if !deleted.is_empty() && !untracked.is_empty() {
+            let on_disk: std::collections::HashSet<&String> = untracked.iter().collect();
+            deleted.retain(|p| !on_disk.contains(p));
+        }
         let dirs = roll_up(&files);
         let truncated = files.len() > MAX_FILES;
         let old_wire = d.wire_files();
@@ -1009,6 +1015,15 @@ mod tests {
         assert_eq!(p.diff.del, vec!["a".to_string(), "a/x.ts".to_string()]);
         assert_eq!(p.untracked, vec!["b.ts".to_string()]);
         assert_eq!(p.diff.count, 1);
+    }
+
+    #[test]
+    fn an_index_only_deletion_is_not_gone_for_the_search_index() {
+        // `git rm --cached top` prints `1 D. … top` and `? top`; `rm gone` prints `1 .D … gone`.
+        let c = core(Path::new("/r"), Path::new("/r"));
+        let p = now(&c, st(&[("top", "D"), ("gone", "D"), ("top", "?")]), Duration::ZERO).unwrap();
+        assert_eq!(p.untracked, vec!["top".to_string()]);
+        assert_eq!(p.deleted, vec!["gone".to_string()]);
     }
 
     #[test]

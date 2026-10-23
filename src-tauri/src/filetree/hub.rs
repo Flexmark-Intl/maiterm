@@ -595,6 +595,7 @@ impl RootHub {
             let left: Vec<String> = if subs.is_empty() { Vec::new() } else { interest.into_iter().filter(|r| !subs.values().any(|s| s.interest.contains(r))).collect() };
             (left, subs.len())
         };
+        self.search.forget(id);
         for rel in interest {
             self.drop_dir(&rel);
         }
@@ -1409,8 +1410,8 @@ impl RootHub {
     // ── Search ───────────────────────────────────────────────────────────────────────────
 
     /// `ft_search`.
-    pub fn search(&self, query: &str, limit: usize, seq: u64, index_shallow: bool) -> SearchResult {
-        self.search.query(query, limit, seq, index_shallow)
+    pub fn search(&self, sub: u64, query: &str, limit: usize, seq: u64, index_shallow: bool) -> SearchResult {
+        self.search.query(sub, query, limit, seq, index_shallow)
     }
 
     /// The index finished building: every subscriber may re-ask a query answered `indexing`.
