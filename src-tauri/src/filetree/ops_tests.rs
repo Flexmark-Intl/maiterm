@@ -51,6 +51,10 @@ impl TrashBackend for FakeTrash {
     }
 }
 
+fn no_agents(_: &[PathBuf]) -> Vec<String> {
+    Vec::new()
+}
+
 struct Fx {
     tmp: PathBuf,
     root: PathBuf,
@@ -76,7 +80,7 @@ impl Fx {
     }
 
     fn env<'a>(&'a self, holders: &'a dyn Fn() -> Vec<CwdHolder>) -> Env<'a> {
-        Env { place: "test", root: &self.root, fold: self.fold, trash: &self.trash, tickets: &self.tickets, holders, rename: rename_noreplace }
+        Env { place: "test", root: &self.root, fold: self.fold, trash: &self.trash, tickets: &self.tickets, holders, agents: &no_agents, rename: rename_noreplace }
     }
 
     fn run(&self, op: FileOp) -> Result<OpResult, String> {

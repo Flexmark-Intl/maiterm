@@ -677,6 +677,11 @@ export interface Preferences {
   file_tree_exclude: string[];
   /** Git decorations, the branch row and the Changed lens (§7). Default true. */
   file_tree_git: boolean;
+  /** Agent activity in the tree (§9): marks reach the trees. Off, the ledger still records
+   *  (getAgentFileActivity, the agent-in-flight guard). Default true. */
+  file_tree_agent_activity: boolean;
+  /** The Files MCP tools, listed only while this and `file_tree_enabled` are on. Default true. */
+  file_tree_agent_tools: boolean;
   /** Sticky ancestor rows; 0 = off. Default 5. */
   file_tree_sticky_max: number;
   /** 'compact' | 'normal' | 'comfortable' (row height 20/22/24). Default 'normal'. */
@@ -1206,7 +1211,9 @@ export const TREE_FLAG_UNREADABLE = 8;
  *   to home by yourself.
  * - `git`: decorations (see `GitUpdate`). `health.git` is 'off' | 'live' | 'slow' | 'error'.
  * - `search_ready`: the find index finished building; re-ask a query answered `indexing`.
- * Agent (`agent`) events arrive in phase 4.
+ * - `agent`: agents touched rows (§9), at most one event per 100 ms; draw each row's latest
+ *   mark per tab and agent. Also sent on subscribe and on resume with the marks that still
+ *   stand under the root.
  */
 export type TreeEvent =
   | { t: 'dir'; rel: string; gen: number; chunk: number; last: boolean; total: number; truncated: boolean; entries: TreeEntry[] }
@@ -1216,7 +1223,47 @@ export type TreeEvent =
   | { t: 'health'; watch: string; git: string; note: string | null }
   | ({ t: 'git' } & GitUpdate)
   | { t: 'search_ready' }
+  | { t: 'agent'; marks: AgentMark[] }
   | { t: 'root_gone' };
+
+/** What an agent did to one row (docs/file-tree.md §9.1). Evidence is always named: say
+ *  "changed while claude's Bash ran" for `fs_during_tool`, never "claude edited". */
+export interface AgentMark {
+  rel: string;
+  /** 'read' | 'search' | 'edit' | 'write' | 'create' | 'delete' | 'changed' | 'commit' */
+  op: string;
+  /** 'pending' (the call is running: editing now) | 'ok' | 'failed' */
+  phase: string;
+  tab_id: string;
+  /** '' for the main agent, otherwise the subagent's id. */
+  agent: string;
+  turn: number;
+  /** 'tool' | 'fs_during_tool' | 'commit' */
+  evidence: string;
+  at_ms: number;
+}
+
+/** `AgentMark` with an absolute path, before a tree placed it (`agentFilesMarks`). */
+export interface AgentMarkAbs extends Omit<AgentMark, 'rel'> {
+  path: string;
+}
+
+/** One entry of a tab's agent ledger (`agentFilesActivity`). `path` is absolute, or
+ *  `user@host:/abs` for an ssh tab's. */
+export interface LedgerEntry {
+  path: string;
+  op: string;
+  tool: string;
+  tool_use_id: string | null;
+  agent: string;
+  /** 'pending' | 'ok' | 'failed' */
+  status: string;
+  /** 'tool' | 'fs_during_tool' | 'commit' */
+  evidence: string;
+  turn: number;
+  t_pre_ms: number;
+  t_post_ms: number | null;
+}
 
 /** Every Channel message: `seq` increases by one per message. Ack from inside `onmessage`:
  *  `ftAck(sub, seq)` on every 32nd message, or when ≥100 ms passed since the last ack (checked

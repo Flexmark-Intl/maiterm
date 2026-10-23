@@ -200,19 +200,14 @@ fn live_cwd_refusal(dirs: &[PathBuf], fold: bool, holders: &dyn Fn() -> Vec<CwdH
     Some(Needs { code: "live_cwd".into(), detail, tabs: tabs.into_iter().map(|(id, _)| id).collect() })
 }
 
-/// The tabs whose agent has a write in flight on any of `paths`, or wrote one this turn
-/// (§10.3). The ledger that knows this, `agent_files`, arrives in phase 4 (§9.1): until then no
-/// tab is ever named, so `needs: agent_active` is never answered and `ack_agents` is accepted
-/// but changes nothing.
-fn agent_active_tabs(_paths: &[PathBuf]) -> Vec<String> {
-    Vec::new()
-}
-
-fn agent_refusal(paths: &[PathBuf], ack: bool) -> Option<Needs> {
+/// The agent guard (§10.3): `active` names the tabs whose agent has a call in flight on any of
+/// `paths` (or inside one), or wrote one in its open turn (`AgentFiles::active_tabs`). The
+/// human confirms a second time (`ack_agents`) to go ahead.
+fn agent_refusal(paths: &[PathBuf], ack: bool, active: &dyn Fn(&[PathBuf]) -> Vec<String>) -> Option<Needs> {
     if ack {
         return None;
     }
-    let tabs = agent_active_tabs(paths);
+    let tabs = active(paths);
     (!tabs.is_empty()).then(|| Needs {
         code: "agent_active".into(),
         detail: "An agent is working on this right now. Go ahead anyway?".into(),
@@ -789,6 +784,8 @@ pub struct Env<'a> {
     pub tickets: &'a Tickets,
     /// Every tab working in some folder, gathered only when a folder is moved or removed.
     pub holders: &'a dyn Fn() -> Vec<CwdHolder>,
+    /// The tabs whose agent is working on any of these paths (`AgentFiles::active_tabs`).
+    pub agents: &'a dyn Fn(&[PathBuf]) -> Vec<String>,
     /// `rename_noreplace`; a test forces a cross-device answer through here.
     pub rename: fn(&Path, &Path) -> io::Result<()>,
 }
@@ -849,7 +846,7 @@ impl Env<'_> {
     /// The live-cwd and agent guards over the items about to be moved or removed.
     fn guards(&self, items: &[PathBuf], ack_agents: bool) -> Option<Needs> {
         let dirs: Vec<PathBuf> = items.iter().filter_map(|p| real_dir(p)).collect();
-        live_cwd_refusal(&dirs, self.fold, self.holders).or_else(|| agent_refusal(items, ack_agents))
+        live_cwd_refusal(&dirs, self.fold, self.holders).or_else(|| agent_refusal(items, ack_agents, self.agents))
     }
 }
 

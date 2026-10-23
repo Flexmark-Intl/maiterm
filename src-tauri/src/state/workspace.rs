@@ -1910,6 +1910,15 @@ pub struct Preferences {
     /// Git decorations (§7): the hub's git worker runs only while this is on.
     #[serde(default = "default_true")]
     pub file_tree_git: bool,
+    /// Agent activity in the tree (§9): the ledger's marks reach the open trees (rails, pulses,
+    /// badges). Off, the ledger still records, for `getAgentFileActivity` and the guard that
+    /// asks before moving a file an agent is writing.
+    #[serde(default = "default_true")]
+    pub file_tree_agent_activity: bool,
+    /// The Files MCP tools (revealInTree, getTreeSelection, getAgentFileActivity), listed only
+    /// while this and `file_tree_enabled` are on (§9.6).
+    #[serde(default = "default_true")]
+    pub file_tree_agent_tools: bool,
     /// Sticky ancestor rows at the top of the tree; 0 turns them off.
     #[serde(default = "default_file_tree_sticky_max")]
     pub file_tree_sticky_max: u32,
@@ -2264,6 +2273,8 @@ impl Default for Preferences {
             file_tree_show_ignored: true,
             file_tree_exclude: Vec::new(),
             file_tree_git: true,
+            file_tree_agent_activity: true,
+            file_tree_agent_tools: true,
             file_tree_sticky_max: default_file_tree_sticky_max(),
             file_tree_density: default_file_tree_density(),
             file_tree_icons: default_file_tree_icons(),

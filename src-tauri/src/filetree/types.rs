@@ -292,6 +292,26 @@ impl Entry {
     }
 }
 
+/// What an agent did to one row (§9.1), from `agent_files`. Evidence is always named: a mark
+/// is never read as "the human did it" when it is absent, nor as "the agent edited it" when the
+/// watcher only saw a change while its shell ran.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AgentMark {
+    pub rel: String,
+    /// "read" | "search" | "edit" | "write" | "create" | "delete" | "changed" | "commit".
+    pub op: String,
+    /// "pending" (the call is running: editing now) | "ok" | "failed".
+    pub phase: String,
+    pub tab_id: String,
+    /// "" for the main agent, otherwise the subagent's id.
+    pub agent: String,
+    pub turn: u64,
+    /// "tool" (the call named it) | "fs_during_tool" (changed on disk while the tab's one shell
+    /// call ran) | "commit" (in a commit made during the tab's turn).
+    pub evidence: String,
+    pub at_ms: i64,
+}
+
 /// Every message on a subscription's Channel carries a sequence number, which the client acks
 /// (§5.4).
 #[derive(Debug, Clone, Serialize)]
@@ -323,6 +343,10 @@ pub enum TreeEvent {
     Git(GitUpdate),
     /// The search index finished building: a query answered `indexing` should be asked again.
     SearchReady,
+    /// Agents touched rows (§9.1): at most one per 100 ms, each path's latest mark per tab and
+    /// agent. Also the standing marks under the root when a subscription starts or resumes
+    /// after missing some.
+    Agent { marks: Vec<AgentMark> },
     // No `Resync` (§5.3): when events were lost the hub re-lists every folder itself and sends
     // ordinary deltas, which costs the client no round trip.
     /// The root itself was deleted or renamed away. Never followed by a re-root to home.
@@ -354,6 +378,7 @@ impl TreeEvent {
                 let pairs = |v: &[(String, String)]| v.iter().map(|(k, _)| k.len() + 10).sum::<usize>();
                 160 + pairs(&g.files) + pairs(&g.dirs) + g.del.iter().map(|d| d.len() + 3).sum::<usize>()
             }
+            TreeEvent::Agent { marks } => 40 + marks.iter().map(|m| m.rel.len() + m.tab_id.len() + 110).sum::<usize>(),
             _ => 120,
         }
     }

@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex};
 
+use crate::agent_files::AgentFiles;
 use git::{GitConfig, Trigger};
 use hub::{HubInit, RootHub, Sink};
 use types::{DeleteTicket, DirReq, FileOp, OpResult, OpenAck};
@@ -140,6 +141,8 @@ pub struct FileTreeState {
     trash: OnceLock<ops::TrashWorker>,
     /// Permanent-delete tickets (`ft_prepare_delete`).
     tickets: ops::Tickets,
+    /// What each agent tab is reading and changing (§9): fed by the hooks, routed to the hubs.
+    pub agents: Arc<AgentFiles>,
 }
 
 impl FileTreeState {
@@ -169,7 +172,23 @@ impl FileTreeState {
             commands: OnceLock::new(),
             trash: OnceLock::new(),
             tickets: ops::Tickets::default(),
+            agents: AgentFiles::new(me.clone()),
         })
+    }
+
+    /// Every hub still serving its root, for the agent dispatcher to route marks to.
+    pub(crate) fn live_hubs(&self) -> Vec<Arc<RootHub>> {
+        self.hubs.lock().values().filter(|h| !h.is_gone()).cloned().collect()
+    }
+
+    /// The open hubs `path` (absolute, local) is under, with how much of a shell call's writes
+    /// each can see (`getAgentFileActivity`'s `coverage`).
+    pub fn coverage_for(&self, path: &Path) -> Vec<(String, &'static str)> {
+        self.live_hubs()
+            .into_iter()
+            .filter(|h| h.covers(path) || paths::strip_root(&h.root, path, h.fold).is_some())
+            .map(|h| (h.place.clone(), h.coverage()))
+            .collect()
     }
 
     /// Test seam: a stand-in trash, so tests never fill the real one. Only before the first
@@ -189,6 +208,7 @@ impl FileTreeState {
     /// asked only when a folder is moved or removed.
     pub fn op(&self, sub_id: u64, op: &FileOp, holders: &dyn Fn() -> Vec<ops::CwdHolder>) -> Result<OpResult, String> {
         let hub = self.hub_of(sub_id)?;
+        let agents = |items: &[std::path::PathBuf]| self.agents.active_tabs(items, hub.fold);
         let env = ops::Env {
             place: &hub.place,
             root: &hub.root,
@@ -196,6 +216,7 @@ impl FileTreeState {
             trash: self.trash_worker(),
             tickets: &self.tickets,
             holders,
+            agents: &agents,
             rename: ops::rename_noreplace,
         };
         let result = ops::run(&env, op)?;
@@ -228,6 +249,7 @@ impl FileTreeState {
     pub fn prepare_delete(&self, sub_id: u64, rels: &[String]) -> Result<DeleteTicket, String> {
         let hub = self.hub_of(sub_id)?;
         let none = || Vec::new();
+        let no_agents = |_: &[std::path::PathBuf]| Vec::new();
         let env = ops::Env {
             place: &hub.place,
             root: &hub.root,
@@ -235,6 +257,7 @@ impl FileTreeState {
             trash: self.trash_worker(),
             tickets: &self.tickets,
             holders: &none,
+            agents: &no_agents,
             rename: ops::rename_noreplace,
         };
         ops::prepare_delete(&env, rels)
@@ -303,6 +326,7 @@ impl FileTreeState {
             raw_capacity: self.raw_capacity,
             git: self.git.lock().clone(),
             git_slots: self.git_slots.clone(),
+            agents: self.agents.clone(),
         };
         let fresh = RootHub::new(init, self.slots.clone(), self.focus.clone(), self.watch_ctx());
         let mut hubs = self.hubs.lock();

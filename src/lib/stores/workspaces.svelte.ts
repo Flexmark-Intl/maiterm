@@ -2813,6 +2813,9 @@ function createWorkspacesStore() {
       // by the dedup, so the resumed session would mirror its whole list a second time
       // on the very next tick, and again on every subsequent reload.
       import('$lib/stores/tasks.svelte').then(m => m.tasksStore.remapTab(tabId, newTab.id)).catch(() => {});
+      // The Files agent ledger (docs/file-tree.md §9.1) is keyed by tab id too: the resumed
+      // session's turn and its marks carry on under the new one.
+      commands.agentFilesRemapTab(tabId, newTab.id).catch(() => {});
       // Mounts it without focusing it (+page.svelte `handleActivateTab`).
       if (wasLive) window.dispatchEvent(new CustomEvent('activate-tab', { detail: newTab.id }));
       return newTab.id;

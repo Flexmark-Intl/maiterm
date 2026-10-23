@@ -1,4 +1,5 @@
 mod accounts;
+mod agent_files;
 mod agent_requests;
 mod browser_link;
 mod claude_code;
@@ -799,6 +800,9 @@ pub fn run() {
             filetree::commands::ft_diff_base,
             filetree::commands::ft_op,
             filetree::commands::ft_prepare_delete,
+            agent_files::commands::agent_files_activity,
+            agent_files::commands::agent_files_marks,
+            agent_files::commands::agent_files_remap_tab,
             commands::workspace::set_split_ratio,
             commands::workspace::set_tab_scrollback,
             commands::workspace::set_tab_notes,

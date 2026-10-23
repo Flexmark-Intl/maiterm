@@ -103,6 +103,9 @@ pub enum Trigger {
     Worktree,
     /// A command finished (OSC 133 D) in a terminal whose folder is in this repo.
     Command,
+    /// An agent's write tool finished on a file under the root (§7.2): an edge, so it runs at
+    /// once rather than after the watcher's trailing delay.
+    Agent,
     /// The window regained focus.
     Focus,
     /// A view subscribed, or one that was paused came back.
@@ -466,7 +469,7 @@ impl GitCore {
             }
             // Slow repos, and network mounts (no watcher to trust), refresh on index changes,
             // focus, a new view and the human's refresh only.
-            if (d.slow || self.network) && matches!(t, Trigger::Worktree | Trigger::Command) {
+            if (d.slow || self.network) && matches!(t, Trigger::Worktree | Trigger::Command | Trigger::Agent) {
                 return;
             }
         }
@@ -805,6 +808,44 @@ impl GitCore {
             return Err("Binary file: nothing to compare as text".to_string());
         }
         Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+    }
+}
+
+/// A commit id as `# branch.oid` gives it: not "(initial)" before the first commit.
+pub fn is_oid(s: &str) -> bool {
+    s.len() >= 7 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Files a commit may name before the rest are left out: a commit made during a turn is a
+/// handful of files, and a merge pulling in a branch is not "what the agent committed".
+const MAX_COMMITTED: usize = 2000;
+
+impl GitCore {
+    /// The files changed from `old` to `new`, as rels of the root, when `new` descends from
+    /// `old` (commits were made: a checkout of another branch is no commit). None when it
+    /// doesn't, or git fails.
+    pub fn committed_between(&self, old: &str, new: &str) -> Option<Vec<String>> {
+        if !(is_oid(old) && is_oid(new)) {
+            return None;
+        }
+        let _slot = self.slots.acquire();
+        let mut anc = self.cmd();
+        anc.args(["merge-base", "--is-ancestor", old, new]);
+        let o = proc::output_timeout(&mut anc, Duration::from_secs(5)).ok()?;
+        if !o.status.success() {
+            return None;
+        }
+        let mut c = self.cmd();
+        c.args(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", old, new]);
+        let o = proc::output_timeout(&mut c, Duration::from_secs(10)).ok().filter(|o| o.status.success())?;
+        Some(
+            o.stdout
+                .split(|b| *b == 0)
+                .filter(|f| !f.is_empty())
+                .filter_map(|f| self.to_root_rel(&norm(&String::from_utf8_lossy(f))))
+                .take(MAX_COMMITTED)
+                .collect(),
+        )
     }
 }
 

@@ -37,14 +37,15 @@ pub async fn ft_open(
     restore: Vec<DirReq>,
     on_event: tauri::ipc::Channel<Envelope>,
 ) -> Result<OpenAck, String> {
-    let (excludes, git) = {
+    let (excludes, git, agents) = {
         let data = state.app_data.read();
-        (data.preferences.file_tree_exclude.clone(), data.preferences.file_tree_git)
+        (data.preferences.file_tree_exclude.clone(), data.preferences.file_tree_git, data.preferences.file_tree_agent_activity)
     };
     let ft = ft.inner().clone();
     let label = window.label().to_string();
     blocking(move || {
         ft.set_git_enabled(git);
+        ft.agents.set_routing(agents);
         ft.open(&label, &place, restore, Arc::new(on_event), excludes)
     })
     .await

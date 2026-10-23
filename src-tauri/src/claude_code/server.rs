@@ -3923,6 +3923,80 @@ async fn mod_inbox_handler(
     }
 }
 
+/// How long a hook waits to learn whether a Write's file exists yet (a Write that makes it is a
+/// "create"). A local stat takes microseconds; a hung network mount must not hold the tool.
+const WRITE_EXISTS_BUDGET: Duration = Duration::from_millis(25);
+
+/// Feed one tool, prompt or stop event to the Files agent ledger (`agent_files`). Only paths
+/// are taken from `tool_input`, in this path and with no IO, except one bounded stat for a
+/// Write. The ledger's own push never waits on routing.
+async fn record_agent_files(
+    srv: &ServerState,
+    phase: crate::agent_files::Phase,
+    event: &Value,
+    session_id: &str,
+    runtime_key: &str,
+    tab_from_param: Option<&str>,
+) {
+    use crate::agent_files::{extract, HookRecord, Phase};
+    let Some(ft) = tauri::Manager::try_state::<Arc<crate::filetree::FileTreeState>>(&srv.app_handle) else { return };
+    let ft = ft.inner().clone();
+    let (tab_id, session_cwd) = {
+        let sessions = srv.state.agent_sessions.read();
+        match sessions.get(session_id) {
+            Some(s) => (Some(s.tab_id.clone()), s.cwd.clone()),
+            None => (None, None),
+        }
+    };
+    let Some(tab_id) = tab_id.or_else(|| tab_from_param.map(String::from)).filter(|t| !t.is_empty()) else { return };
+    let cwd = event.get("cwd").and_then(|v| v.as_str()).map(String::from).or(session_cwd);
+    // An ssh tab's paths name the remote host: keyed by the tunnel's destination (never the
+    // full command line, which can carry maiTerm's own credentials).
+    let host = srv
+        .state
+        .ssh_tunnels
+        .read()
+        .values()
+        .find(|t| t.tab_ids.contains(&tab_id))
+        .map(|t| crate::watch::connect_args(&t.host_key));
+    let tool = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let extracted = match phase {
+        Phase::Pre | Phase::Post { .. } => event.get("tool_input").map(|i| extract::extract(&tool, i)).unwrap_or(extract::Extracted::Nothing),
+        _ => extract::Extracted::Nothing,
+    };
+    let existed = match (&phase, &extracted, host.is_none()) {
+        (Phase::Pre, extract::Extracted::Files(t), true) if tool == "Write" => match t.first().and_then(|t| crate::agent_files::entry_path(&t.path, cwd.as_deref(), None)) {
+            Some(p) => tokio::time::timeout(WRITE_EXISTS_BUDGET, tokio::task::spawn_blocking(move || std::fs::symlink_metadata(p).is_ok()))
+                .await
+                .ok()
+                .and_then(|r| r.ok()),
+            None => None,
+        },
+        _ => None,
+    };
+    if phase == Phase::Prompt {
+        // A tab closed a minute ago is forgotten; a reload's old id lives until its ledger moves.
+        let existing: std::collections::HashSet<String> = {
+            let data = srv.state.app_data.read();
+            data.windows.iter().flat_map(|w| w.workspaces.iter()).flat_map(|ws| ws.panes.iter()).flat_map(|p| p.tabs.iter()).map(|t| t.id.clone()).collect()
+        };
+        ft.agents.prune(&existing);
+    }
+    ft.agents.record(HookRecord {
+        phase,
+        tab_id,
+        session_id: session_id.to_string(),
+        runtime: runtime_key.to_string(),
+        cwd,
+        host,
+        tool,
+        tool_use_id: event.get("tool_use_id").and_then(|v| v.as_str()).map(String::from),
+        agent: crate::claude_code::gate::agent_key(event),
+        extracted,
+        existed,
+    });
+}
+
 /// Handle POST /hooks — receives agent hook events (Claude today; other runtimes
 /// post here with a ?runtime= tag). SessionStart registers a session→tab mapping;
 /// other events use it to route Tauri events to the correct frontend tab.
@@ -4108,6 +4182,13 @@ async fn hooks_handler(
     } else {
         None
     };
+
+    // Files (docs/file-tree.md §9.1): what each agent reads and changes. Read off the RAW event
+    // name, before the normalization below folds PostToolUseFailure into PostToolUse: the ledger
+    // keeps a failed call visible.
+    if let Some(phase) = crate::agent_files::Phase::of(hook_event_name) {
+        record_agent_files(&srv, phase, &event, &session_id, runtime_key, tab_id_from_param.as_deref()).await;
+    }
 
     match normalize_hook_event(runtime, hook_event_name, &event) {
         HookPhase::SessionStart => {

@@ -42,9 +42,10 @@ use super::ignore_cache::IgnoreStack;
 use super::list::{self, ListError, Listing, CHUNK};
 use super::paths::{self, join_rel, name_key, rel_to_native, split_rel};
 use super::search::SearchState;
-use super::types::{Caps, DirReq, Entry, Envelope, GitUpdate, OpenAck, RepoInfo, SearchResult, StatInfo, TreeEvent};
+use super::types::{AgentMark, Caps, DirReq, Entry, Envelope, GitUpdate, OpenAck, RepoInfo, SearchResult, StatInfo, TreeEvent};
 use super::watch::{self, HubWatch, RawSender, WatchContext, WatchError};
 use super::{fsclass, Focus, Slots};
+use crate::agent_files::AgentFiles;
 
 /// Where a subscription's events go. A Channel in the app; a recorder in tests.
 pub trait Sink: Send + Sync {
@@ -101,6 +102,8 @@ pub struct Sub {
     git_dirty: bool,
     /// A `search_ready` was held back: a query answered `indexing` is still waiting for it.
     search_ready: bool,
+    /// Agent marks were held back: the standing ones are sent on resume.
+    agent_missed: bool,
 }
 
 impl Sub {
@@ -124,6 +127,7 @@ impl Sub {
             git_gen: None,
             git_dirty: false,
             search_ready: false,
+            agent_missed: false,
         }
     }
 
@@ -149,6 +153,7 @@ impl Sub {
                 TreeEvent::Health { .. } => self.health_dirty = true,
                 TreeEvent::Git(_) => self.git_dirty = true,
                 TreeEvent::SearchReady => self.search_ready = true,
+                TreeEvent::Agent { .. } => self.agent_missed = true,
                 other => {
                     if let Some(rel) = other.rel() {
                         self.dirty.insert(rel.to_string());
@@ -340,6 +345,8 @@ pub struct HubInit {
     pub git: GitConfig,
     /// The app-wide limit on git processes (§7.2).
     pub git_slots: Arc<Slots>,
+    /// The agent ledger: shell writes are attributed to it and its marks primed from it (§9).
+    pub agents: Arc<AgentFiles>,
 }
 
 pub struct RootHub {
@@ -351,6 +358,7 @@ pub struct RootHub {
     pub fold: bool,
     pub fs_class: &'static str,
     pub repo: Option<RepoInfo>,
+    pub(super) agents: Arc<AgentFiles>,
     git_dir: Option<PathBuf>,
     /// The repository's git dir and (when different) common dir: events under them are git
     /// signals, wherever they are.
@@ -450,6 +458,7 @@ impl RootHub {
             search: SearchState::new(me.clone(), &init.root, repo.is_some(), shallow, fold),
             root: init.root,
             fs_class: init.fs_class,
+            agents: init.agents,
             repo: repo.map(|(r, _)| r),
             git_dir,
             git_dirs,
@@ -570,12 +579,17 @@ impl RootHub {
 
     pub fn add_sub(&self, id: u64, window: &str, sink: Arc<dyn Sink>) {
         let health = self.health_event();
+        // Read before taking subs: placing a mark may look at the disk.
+        let standing = self.standing_agent_marks();
         {
             let mut subs = self.subs.lock();
             let mut sub = Sub::new(id, window, sink);
             sub.deliver(health);
             if self.is_gone() {
                 sub.deliver(TreeEvent::RootGone);
+            }
+            if !standing.is_empty() {
+                sub.deliver(TreeEvent::Agent { marks: standing });
             }
             // What git already knows goes out at once; the run below brings it up to date.
             if let Some(full) = self.git_full() {
@@ -756,6 +770,8 @@ impl RootHub {
     /// paused or stalled, then whatever else it missed.
     fn flush(&self, sub: u64) {
         let health = self.health_event();
+        let missed = self.subs.lock().get(&sub).is_some_and(|s| s.agent_missed);
+        let standing = if missed { Some(self.standing_agent_marks()) } else { None };
         let relist = {
             let dirs = self.dirs.lock();
             let mut subs = self.subs.lock();
@@ -781,6 +797,10 @@ impl RootHub {
             }
             if std::mem::take(&mut s.search_ready) {
                 s.deliver(TreeEvent::SearchReady);
+            }
+            if let Some(marks) = standing {
+                s.agent_missed = false;
+                s.deliver(TreeEvent::Agent { marks });
             }
             s.flush_dirty(&dirs)
         };
@@ -1379,8 +1399,19 @@ impl RootHub {
     pub(super) fn git_finished(&self, epoch: u64, out: Result<Status, Failure>, took: Duration) {
         let Some(g) = &self.git else { return };
         let before = g.health();
+        // Where HEAD was, from a run already shown: the first run's HEAD is no move.
+        let old_head = {
+            let d = g.data.lock();
+            d.ran.then(|| d.branch.as_ref().map(|b| b.oid.clone())).flatten()
+        };
         let published = g.apply(epoch, out, took);
         if let Some(p) = published {
+            let new_head = p.diff.branch.as_ref().map(|b| b.oid.as_str());
+            if let (Some(old), Some(new)) = (old_head.as_deref(), new_head) {
+                if old != new && super::git::is_oid(old) && super::git::is_oid(new) {
+                    self.credit_commit(old, new);
+                }
+            }
             self.search.reconcile(&p.named);
             let mut subs = self.subs.lock();
             let mut full: Option<GitUpdate> = None;
@@ -1437,6 +1468,113 @@ impl RootHub {
         let mut subs = self.subs.lock();
         for s in subs.values_mut() {
             s.deliver(TreeEvent::SearchReady);
+        }
+    }
+
+    // ── Agents (§9) ──────────────────────────────────────────────────────────────────────
+
+    /// An agent's path (absolute) as a rel of this root; None outside it. An ssh tab's
+    /// `user@host:/abs` is never under a local root. Each name is spelled as the listing of an
+    /// open folder spells it (a hook path arrives NFC, the disk may hold NFD), and as given
+    /// below a folder nobody has open: marks arrive on every Read, and `ft_locate`'s look at
+    /// the disk for each name would cost a folder listing per mark there.
+    pub(crate) fn locate_agent_path(&self, abs: &str) -> Option<String> {
+        if !Path::new(abs).is_absolute() {
+            return None;
+        }
+        let comps = paths::locate_components(&self.root, self.fold, abs)?;
+        let dirs = self.dirs.lock();
+        let mut rel = String::new();
+        for c in comps {
+            let key = name_key(&c, self.fold);
+            let name = dirs.get(&rel).and_then(|snap| snap.entries.iter().find(|e| e.n == c || name_key(&e.n, self.fold) == key)).map(|e| e.n.clone()).unwrap_or(c);
+            rel = join_rel(&rel, &name);
+        }
+        Some(rel)
+    }
+
+    pub(crate) fn agents_routing(&self) -> bool {
+        self.agents.routing()
+    }
+
+    /// One coalesced batch of marks from the dispatcher, to every subscriber.
+    pub fn agent_marks(&self, marks: Vec<AgentMark>) {
+        if marks.is_empty() {
+            return;
+        }
+        let ev = TreeEvent::Agent { marks };
+        let mut subs = self.subs.lock();
+        for s in subs.values_mut() {
+            s.deliver(ev.clone());
+        }
+    }
+
+    /// The marks that still stand under this root, for a subscriber that is new or missed some.
+    fn standing_agent_marks(&self) -> Vec<AgentMark> {
+        if !self.agents.routing() {
+            return Vec::new();
+        }
+        self.agents.standing_marks(None).into_iter().filter_map(|m| self.locate_agent_path(&m.path).map(|rel| m.with_rel(rel))).collect()
+    }
+
+    /// How much of a shell call's writes this tree can see (§9.2): "full" with one recursive
+    /// watcher, "expanded_only" when only opened folders are watched (Linux, a home or volume
+    /// root), "none" with no watcher (a network mount).
+    pub fn coverage(&self) -> &'static str {
+        if self.is_network() {
+            return "none";
+        }
+        let ws = self.watch.lock();
+        match &ws.hw {
+            _ if ws.pending => "full",
+            HubWatch::Recursive(_) => "full",
+            HubWatch::PerDir(_) => "expanded_only",
+            HubWatch::None => "none",
+        }
+    }
+
+    /// Changes the coalescer saw while exactly one agent tab had a shell call running here
+    /// (§9.2): every path that isn't ignored, recorded as "changed while its shell ran". A
+    /// folder that was only modified (an entry came or went in it) has an event of its own for
+    /// that entry, so it is left out. Costs nothing while no shell call is running.
+    pub(super) fn attribute_to_shell(&self, worktree: &[String], reshaped: &HashSet<String>) {
+        if worktree.is_empty() {
+            return;
+        }
+        let Some(shell) = self.agents.sole_shell_in(&self.root, self.fold) else { return };
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for rel in worktree {
+            let Ok(abs) = rel_to_native(&self.root, rel) else { continue };
+            let is_dir = std::fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir());
+            if is_dir && !reshaped.contains(rel) {
+                continue;
+            }
+            let (parent, name) = paths::split_parent(rel);
+            {
+                let mut ig = self.ignore.lock();
+                if ig.dir_is_ignored(parent) || ig.is_ignored(parent, name, is_dir) {
+                    continue;
+                }
+            }
+            if !paths.contains(&abs) {
+                paths.push(abs);
+            }
+        }
+        if !paths.is_empty() {
+            self.agents.record_fs(&shell, &paths);
+        }
+    }
+
+    /// HEAD moved from `old` to `new` (both commits). If exactly one agent tab has a turn open
+    /// in this repository and the move went forward (commits made, not a checkout elsewhere),
+    /// the files those commits changed are credited to that turn (§9.2).
+    fn credit_commit(&self, old: &str, new: &str) {
+        let Some(g) = &self.git else { return };
+        let Some((tab, turn)) = self.agents.sole_open_turn(&|p| self.covers(p)) else { return };
+        let Some(rels) = g.committed_between(old, new) else { return };
+        let abs: Vec<PathBuf> = rels.iter().filter_map(|r| rel_to_native(&self.root, r).ok()).collect();
+        if !abs.is_empty() {
+            self.agents.record_commit(&tab, turn, &abs);
         }
     }
 

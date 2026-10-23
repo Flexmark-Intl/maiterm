@@ -117,7 +117,7 @@ impl Client {
                     }
                 }
             }
-            TreeEvent::Health { .. } | TreeEvent::RootGone | TreeEvent::Git(_) | TreeEvent::SearchReady => {}
+            TreeEvent::Health { .. } | TreeEvent::RootGone | TreeEvent::Git(_) | TreeEvent::SearchReady | TreeEvent::Agent { .. } => {}
         }
     }
 

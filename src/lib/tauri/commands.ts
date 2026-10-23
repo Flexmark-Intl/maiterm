@@ -1,6 +1,6 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
-import type { DeleteTicket, DirReq, FileOp, OpResult, OpenAck, PlaceHints, StatInfo, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
+import type { AgentMarkAbs, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
@@ -963,6 +963,23 @@ export async function ftOp(subId: number, op: FileOp): Promise<OpResult> {
  *  needs: single use, 60 s, exactly this set. */
 export async function ftPrepareDelete(subId: number, rels: string[]): Promise<DeleteTicket> {
   return invoke('ft_prepare_delete', { subId, rels });
+}
+
+/** A tab's agent ledger (§9.1): 'turn' (its current or last turn) or 'session'. Reads and
+ *  searches only with `includeReads`. Empty for a tab no agent has worked in. */
+export async function agentFilesActivity(tabId: string, scope: 'turn' | 'session', includeReads = false): Promise<LedgerEntry[]> {
+  return invoke('agent_files_activity', { tabId, scope, includeReads });
+}
+
+/** The agent marks still standing for this window's tabs, with absolute paths: what the
+ *  column draws on mount, before any `agent` event. */
+export async function agentFilesMarks(): Promise<AgentMarkAbs[]> {
+  return invoke('agent_files_marks');
+}
+
+/** A reload replaced `oldTabId` with `newTabId`: the agent ledger moves with it. */
+export async function agentFilesRemapTab(oldTabId: string, newTabId: string): Promise<void> {
+  return invoke('agent_files_remap_tab', { oldTabId, newTabId });
 }
 
 export async function setSplitRatio(workspaceId: string, splitId: string, ratio: number): Promise<void> {

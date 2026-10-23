@@ -1769,6 +1769,10 @@ pub fn set_preferences(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, m
         preferences.mailink_devices = app_data.preferences.mailink_devices.clone();
         let excludes_changed = app_data.preferences.file_tree_exclude != preferences.file_tree_exclude;
         let git_changed = app_data.preferences.file_tree_git != preferences.file_tree_git;
+        // Agent marks start or stop reaching the open trees at once.
+        if let Some(ft) = tauri::Manager::try_state::<Arc<crate::filetree::FileTreeState>>(&app) {
+            ft.agents.set_routing(preferences.file_tree_agent_activity);
+        }
         app_data.preferences = preferences.clone();
         if excludes_changed {
             // Every open tree re-lists under the new excludes, off this (main) thread.

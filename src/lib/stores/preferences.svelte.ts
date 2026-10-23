@@ -80,6 +80,8 @@ function createPreferencesStore() {
   let fileTreeShowIgnored = $state(true);
   let fileTreeExclude = $state<string[]>([]);
   let fileTreeGit = $state(true);
+  let fileTreeAgentActivity = $state(true);
+  let fileTreeAgentTools = $state(true);
   let fileTreeStickyMax = $state(5);
   let fileTreeDensity = $state('normal');
   let fileTreeIcons = $state('color');
@@ -213,6 +215,8 @@ function createPreferencesStore() {
     get fileTreeShowIgnored() { return fileTreeShowIgnored; },
     get fileTreeExclude() { return fileTreeExclude; },
     get fileTreeGit() { return fileTreeGit; },
+    get fileTreeAgentActivity() { return fileTreeAgentActivity; },
+    get fileTreeAgentTools() { return fileTreeAgentTools; },
     get fileTreeStickyMax() { return fileTreeStickyMax; },
     get fileTreeDensity() { return fileTreeDensity; },
     get fileTreeIcons() { return fileTreeIcons; },
@@ -337,6 +341,8 @@ function createPreferencesStore() {
       fileTreeShowIgnored = prefs.file_tree_show_ignored ?? true;
       fileTreeExclude = prefs.file_tree_exclude ?? [];
       fileTreeGit = prefs.file_tree_git ?? true;
+      fileTreeAgentActivity = prefs.file_tree_agent_activity ?? true;
+      fileTreeAgentTools = prefs.file_tree_agent_tools ?? true;
       fileTreeStickyMax = prefs.file_tree_sticky_max ?? 5;
       fileTreeDensity = prefs.file_tree_density || 'normal';
       fileTreeIcons = prefs.file_tree_icons || 'color';
@@ -715,6 +721,8 @@ function createPreferencesStore() {
     async setFileTreeShowIgnored(value: boolean) { fileTreeShowIgnored = value; await this.save(); },
     /** Git decorations; open trees start or stop them at once. */
     async setFileTreeGit(value: boolean) { fileTreeGit = value; await this.save(); },
+    async setFileTreeAgentActivity(value: boolean) { fileTreeAgentActivity = value; await this.save(); },
+    async setFileTreeAgentTools(value: boolean) { fileTreeAgentTools = value; await this.save(); },
     /** Gitignore lines Rust hides from every listing. Takes effect on the next open of a root. */
     async setFileTreeExclude(value: string[]) { fileTreeExclude = value; await this.save(); },
     async setFileTreeStickyMax(value: number) {
@@ -1023,6 +1031,8 @@ function createPreferencesStore() {
       fileTreeShowIgnored = prefs.file_tree_show_ignored ?? true;
       fileTreeExclude = prefs.file_tree_exclude ?? [];
       fileTreeGit = prefs.file_tree_git ?? true;
+      fileTreeAgentActivity = prefs.file_tree_agent_activity ?? true;
+      fileTreeAgentTools = prefs.file_tree_agent_tools ?? true;
       fileTreeStickyMax = prefs.file_tree_sticky_max ?? 5;
       fileTreeDensity = prefs.file_tree_density || 'normal';
       fileTreeIcons = prefs.file_tree_icons || 'color';
@@ -1139,6 +1149,8 @@ function createPreferencesStore() {
         file_tree_show_ignored: fileTreeShowIgnored,
         file_tree_exclude: fileTreeExclude,
         file_tree_git: fileTreeGit,
+        file_tree_agent_activity: fileTreeAgentActivity,
+        file_tree_agent_tools: fileTreeAgentTools,
         file_tree_sticky_max: fileTreeStickyMax,
         file_tree_density: fileTreeDensity,
         file_tree_icons: fileTreeIcons,

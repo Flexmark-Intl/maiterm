@@ -347,6 +347,8 @@ impl RootHub {
         if exclude_changed {
             worktree_git = true;
         }
+        // While one agent tab's shell call runs here, what changed is credited to it (§9.2).
+        self.attribute_to_shell(&worktree, &reshaped);
         self.note_for_git_and_search(git_signal, worktree_git, !rescan.is_empty(), worktree, &reshaped);
         {
             let dirs = self.dirs.lock();
