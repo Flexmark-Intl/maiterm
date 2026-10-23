@@ -142,6 +142,70 @@ pub fn create(root: &Path, shallow: bool, network: bool, sender: RawSender, ctx:
     }
 }
 
+/// Watches on a repository's own folders, for git decorations (§6, §7.2): each git dir
+/// NonRecursive (index, HEAD, packed-refs, MERGE_HEAD) plus its `refs/heads`. Used when the
+/// root's watcher doesn't already cover them. None when nothing could be watched: decorations
+/// then refresh on the other edges (a command finishing, focus, a manual refresh).
+pub fn create_git(git_dirs: &[PathBuf], sender: RawSender, ctx: &WatchContext) -> Option<Box<dyn Send>> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for g in git_dirs {
+        for d in [g.clone(), g.join("refs").join("heads")] {
+            if d.is_dir() && !dirs.contains(&d) {
+                dirs.push(d);
+            }
+        }
+    }
+    if dirs.is_empty() {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // The shared instance routes by path prefix, so each folder gets a route of its own:
+        // a git dir outside the root would otherwise be dropped as belonging to no hub.
+        let shared = ctx.inotify.as_ref()?;
+        let mut handles = Vec::new();
+        for d in &dirs {
+            let mut h = shared.handle(d, sender.clone());
+            match h.add(d) {
+                Ok(()) => handles.push(h),
+                Err(e) => log::debug!("filetree: no git watch on {}: {e:?}", d.display()),
+            }
+        }
+        return (!handles.is_empty()).then(|| Box::new(handles) as Box<dyn Send>);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = ctx;
+        return per_dir_git(&dirs, fsevents::per_dir(sender));
+    }
+    #[cfg(windows)]
+    {
+        let _ = ctx;
+        return per_dir_git(&dirs, windows::per_dir(sender));
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = (sender, ctx);
+        None
+    }
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn per_dir_git(dirs: &[PathBuf], made: notify::Result<Box<dyn DirWatch>>) -> Option<Box<dyn Send>> {
+    let mut w = match made {
+        Ok(w) => w,
+        Err(e) => {
+            log::debug!("filetree: no git watcher: {e}");
+            return None;
+        }
+    };
+    let mut any = false;
+    for d in dirs {
+        any |= w.add(d).is_ok();
+    }
+    any.then(|| Box::new(w) as Box<dyn Send>)
+}
+
 #[cfg(any(target_os = "macos", windows))]
 fn native(
     root: &Path,

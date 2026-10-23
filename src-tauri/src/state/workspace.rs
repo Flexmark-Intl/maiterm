@@ -1907,6 +1907,9 @@ pub struct Preferences {
     /// Rust's listing on top of the built-ins (.git, .DS_Store, Thumbs.db), which always apply.
     #[serde(default)]
     pub file_tree_exclude: Vec<String>,
+    /// Git decorations (§7): the hub's git worker runs only while this is on.
+    #[serde(default = "default_true")]
+    pub file_tree_git: bool,
     /// Sticky ancestor rows at the top of the tree; 0 turns them off.
     #[serde(default = "default_file_tree_sticky_max")]
     pub file_tree_sticky_max: u32,
@@ -2260,6 +2263,7 @@ impl Default for Preferences {
             file_tree_show_hidden: true,
             file_tree_show_ignored: true,
             file_tree_exclude: Vec::new(),
+            file_tree_git: true,
             file_tree_sticky_max: default_file_tree_sticky_max(),
             file_tree_density: default_file_tree_density(),
             file_tree_icons: default_file_tree_icons(),

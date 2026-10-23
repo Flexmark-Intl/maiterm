@@ -1768,6 +1768,7 @@ pub fn set_preferences(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, m
         // unrelated preference change. Preserve the stored value.
         preferences.mailink_devices = app_data.preferences.mailink_devices.clone();
         let excludes_changed = app_data.preferences.file_tree_exclude != preferences.file_tree_exclude;
+        let git_changed = app_data.preferences.file_tree_git != preferences.file_tree_git;
         app_data.preferences = preferences.clone();
         if excludes_changed {
             // Every open tree re-lists under the new excludes, off this (main) thread.
@@ -1775,6 +1776,14 @@ pub fn set_preferences(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, m
                 let ft = ft.inner().clone();
                 let excludes = preferences.file_tree_exclude.clone();
                 tauri::async_runtime::spawn_blocking(move || ft.set_excludes(&excludes));
+            }
+        }
+        if git_changed {
+            // Every open tree starts or stops its git decorations.
+            if let Some(ft) = tauri::Manager::try_state::<Arc<crate::filetree::FileTreeState>>(&app) {
+                let ft = ft.inner().clone();
+                let on = preferences.file_tree_git;
+                tauri::async_runtime::spawn_blocking(move || ft.set_git_enabled(on));
             }
         }
         app_data.clone()

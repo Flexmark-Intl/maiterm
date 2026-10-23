@@ -37,7 +37,12 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
 /// A prompt nobody can see is a hang, and everything that calls this runs where nobody can
 /// answer one.
 pub fn git() -> Command {
-    let mut cmd = command("git");
+    git_at("git")
+}
+
+/// `git()` with the program named: the Files git worker's tests run a stub in its place.
+pub fn git_at(program: impl AsRef<OsStr>) -> Command {
+    let mut cmd = command(program);
     cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=10");

@@ -98,7 +98,7 @@ pub struct Caps {
     /// "live" (a watcher covers what is shown), "partial" (some folders polled: watch limit),
     /// "poll" (no watcher: network mount), "none" (no watcher and no poll).
     pub watch: String,
-    /// Git decorations (phase 2): false for now.
+    /// Git decorations: the root is in a repository and `file_tree_git` is on.
     pub git: bool,
     /// Trash available (phase 3): false for now.
     pub trash: bool,
@@ -116,8 +116,63 @@ pub struct StatInfo {
     pub exec: bool,
     /// A symlink's target as written in the link.
     pub link_target: Option<String>,
-    /// `git diff --numstat HEAD` for this file only (phase 2): None until then.
+    /// `git diff --numstat HEAD` for this file only, cached per status run: (added, deleted)
+    /// lines. None for a clean, untracked or binary file, or outside a repository.
     pub numstat: Option<(u32, u32)>,
+}
+
+/// The branch row (§3.2), from the `# branch.*` headers of a status run.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+pub struct BranchInfo {
+    /// The branch name, or "(detached)".
+    pub head: String,
+    /// The commit, or "(initial)" before the first one.
+    pub oid: String,
+    pub upstream: Option<String>,
+    pub ahead: i32,
+    pub behind: i32,
+}
+
+/// Git decorations for one hub (§7.3). Paths are root-relative like everything else.
+/// `full`: replace everything held; otherwise drop `del` from both maps, then set `files` and
+/// `dirs` (a key can move from one map to the other: an untracked folder that gains a staged
+/// file becomes a folder with a roll-up).
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct GitUpdate {
+    pub gen: u64,
+    pub full: bool,
+    /// rel → "M" | "A" | "D" | "R" | "C" (conflict) | "?" (untracked; a folder when the whole
+    /// folder is untracked) | "T" (type change).
+    pub files: Vec<(String, String)>,
+    /// Folders' rolled-up severity, the same letters (never "R" or "T").
+    pub dirs: Vec<(String, String)>,
+    /// Keys that left the map they were in since the last update.
+    pub del: Vec<String>,
+    pub branch: Option<BranchInfo>,
+    /// Past 20k changed files only `dirs` and `count` are sent.
+    pub truncated: bool,
+    /// How many changed entries the status run found (the branch row's "7 changed").
+    pub count: u32,
+}
+
+/// `ft_search`'s answer (§8).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SearchResult {
+    /// The query this answers; an older one than the client's newest is dropped there.
+    pub seq: u64,
+    /// The index is being built (or rebuilt): `search_ready` follows on the Channel.
+    pub indexing: bool,
+    pub items: Vec<SearchHit>,
+    /// Why there is no index: a home or volume root is indexed only when the human asks.
+    pub unavailable: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SearchHit {
+    pub rel: String,
+    pub score: u32,
+    /// Matched character positions (chars, not bytes) in `rel`, ascending.
+    pub idx: Vec<u32>,
 }
 
 /// One row of a listing. The short keys matter: 50k entries are ~1.2 MB instead of ~3 MB.
@@ -168,7 +223,12 @@ pub enum TreeEvent {
     /// arrives when it does).
     DirError { rel: String, code: String, msg: String },
     /// The hub's health. The footer shows `note` when it is set; absent note = healthy.
+    /// `git`: "off" | "live" | "slow" | "error".
     Health { watch: String, git: String, note: Option<String> },
+    /// Git decorations changed (or, `full`, everything this subscription should hold).
+    Git(GitUpdate),
+    /// The search index finished building: a query answered `indexing` should be asked again.
+    SearchReady,
     // No `Resync` (§5.3): when events were lost the hub re-lists every folder itself and sends
     // ordinary deltas, which costs the client no round trip.
     /// The root itself was deleted or renamed away. Never followed by a re-root to home.
@@ -195,6 +255,10 @@ impl TreeEvent {
             TreeEvent::Dir { entries: e, rel, .. } => 80 + rel.len() + entries(e),
             TreeEvent::Delta { add, del, chg, rel, .. } => {
                 80 + rel.len() + entries(add) + entries(chg) + del.iter().map(|d| d.len() + 3).sum::<usize>()
+            }
+            TreeEvent::Git(g) => {
+                let pairs = |v: &[(String, String)]| v.iter().map(|(k, _)| k.len() + 10).sum::<usize>();
+                160 + pairs(&g.files) + pairs(&g.dirs) + g.del.iter().map(|d| d.len() + 3).sum::<usize>()
             }
             _ => 120,
         }

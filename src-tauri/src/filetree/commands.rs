@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use tauri::State;
 
-use super::types::{DirReq, Envelope, OpenAck, PlaceHints, StatInfo, TreePlace};
+use super::types::{DirReq, Envelope, OpenAck, PlaceHints, SearchResult, StatInfo, TreePlace};
 use super::FileTreeState;
 use crate::state::AppState;
 
@@ -35,10 +35,17 @@ pub async fn ft_open(
     restore: Vec<DirReq>,
     on_event: tauri::ipc::Channel<Envelope>,
 ) -> Result<OpenAck, String> {
-    let excludes = state.app_data.read().preferences.file_tree_exclude.clone();
+    let (excludes, git) = {
+        let data = state.app_data.read();
+        (data.preferences.file_tree_exclude.clone(), data.preferences.file_tree_git)
+    };
     let ft = ft.inner().clone();
     let label = window.label().to_string();
-    blocking(move || ft.open(&label, &place, restore, Arc::new(on_event), excludes)).await
+    blocking(move || {
+        ft.set_git_enabled(git);
+        ft.open(&label, &place, restore, Arc::new(on_event), excludes)
+    })
+    .await
 }
 
 /// End a subscription (closing the column, or switching roots).
@@ -117,9 +124,34 @@ pub async fn ft_locate(ft: State<'_, Arc<FileTreeState>>, sub_id: u64, abs_paths
     blocking(move || Ok(ft.hub_of(sub_id)?.locate(&abs_paths))).await
 }
 
-/// Size, mtime, exec bit and link target, for the hover tooltip only.
+/// Size, mtime, exec bit, link target and (for a changed file) its line counts against HEAD,
+/// for the hover tooltip only.
 #[tauri::command]
 pub async fn ft_stat(ft: State<'_, Arc<FileTreeState>>, sub_id: u64, rel: String) -> Result<StatInfo, String> {
     let ft = ft.inner().clone();
     blocking(move || ft.hub_of(sub_id)?.stat(&rel)).await
+}
+
+/// Find (§8): the best `limit` (≤500) paths for `query`. `seq` orders queries: an older one
+/// still scanning stops when a newer arrives. `index_shallow`: the human asked to index a
+/// home or volume root.
+#[tauri::command]
+pub async fn ft_search(
+    ft: State<'_, Arc<FileTreeState>>,
+    sub_id: u64,
+    query: String,
+    limit: u32,
+    seq: u64,
+    index_shallow: Option<bool>,
+) -> Result<SearchResult, String> {
+    let ft = ft.inner().clone();
+    blocking(move || Ok(ft.hub_of(sub_id)?.search(&query, limit as usize, seq, index_shallow.unwrap_or(false)))).await
+}
+
+/// A file's content at "HEAD" or in the "index", for Compare with HEAD. None: the file is new
+/// since that base.
+#[tauri::command]
+pub async fn ft_diff_base(ft: State<'_, Arc<FileTreeState>>, sub_id: u64, rel: String, base: String) -> Result<Option<String>, String> {
+    let ft = ft.inner().clone();
+    blocking(move || ft.hub_of(sub_id)?.diff_base(&rel, &base)).await
 }

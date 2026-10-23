@@ -665,6 +665,17 @@ pub fn spawn_pty(
                                     &format!("term-osc133-{}", pty_id_clone),
                                     serde_json::json!({ "cmd": cmd.to_string(), "exit_code": exit_code }),
                                 );
+                                // A command finished: the Files tree's git decorations for the
+                                // shell's folder are due (docs/file-tree.md §7.2). Raised here,
+                                // where the frontend's own 133 D comes from, so it costs no IPC
+                                // round trip; the tree's state only queues the pid.
+                                if cmd == 'D' {
+                                    if let Some(ft) = tauri::Manager::try_state::<Arc<crate::filetree::FileTreeState>>(&app_handle_clone) {
+                                        if let Some(pid) = pty_child_pid_of(&state_reader, &pty_id_clone) {
+                                            ft.command_done(pid);
+                                        }
+                                    }
+                                }
                             }
                             OscEvent::Notification { message } => {
                                 let _ = app_handle_clone.emit(
@@ -1382,6 +1393,12 @@ pub fn get_agent_liveness(state: &Arc<AppState>, pty_id: &str) -> Result<AgentLi
     let ssh_foreground = get_foreground_command(pid).is_some();
     let agent_running = agent_process_alive(pid, AGENT_PROCESS_NAMES);
     Ok(AgentLiveness { agent_running, ssh_foreground })
+}
+
+/// A process's working directory, for callers outside this module (the Files tree's
+/// "a command finished here" git signal).
+pub fn cwd_of_pid(pid: u32) -> Option<String> {
+    get_cwd_for_pid(pid)
 }
 
 /// Get the current working directory of a process via /proc (Linux)

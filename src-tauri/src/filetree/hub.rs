@@ -21,7 +21,13 @@
 //! read hung on a dead mount is never re-issued onto another thread. Each hub runs at most 4
 //! listings (2 on a network mount), inside a global limit of 32.
 //!
-//! Lock order, always: jobs → dirs → subs → watch. No lock is held across another hub's.
+//! **Git (§7).** A hub in a repository has a git worker (`git.rs`). Each subscription records
+//! the git generation it holds; a change is sent as only the keys that changed to a
+//! subscription holding the previous generation, and as everything (`full`) to any other — a
+//! new one, or one that was paused or stalled through a change.
+//!
+//! Lock order, always: jobs → dirs → subs → git data → watch. The git data lock is never held
+//! while taking subs. No lock is held across another hub's.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -31,10 +37,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 
+use super::git::{Failure, GitConfig, GitCore, Status, Trigger};
 use super::ignore_cache::IgnoreStack;
 use super::list::{self, ListError, Listing, CHUNK};
 use super::paths::{self, join_rel, name_key, rel_to_native, split_rel};
-use super::types::{Caps, DirReq, Entry, Envelope, OpenAck, RepoInfo, StatInfo, TreeEvent};
+use super::search::SearchState;
+use super::types::{Caps, DirReq, Entry, Envelope, GitUpdate, OpenAck, RepoInfo, SearchResult, StatInfo, TreeEvent};
 use super::watch::{self, HubWatch, RawSender, WatchContext, WatchError};
 use super::{fsclass, Focus, Slots};
 
@@ -87,6 +95,12 @@ pub struct Sub {
     /// The folders this subscriber has open.
     interest: HashSet<String>,
     dead: bool,
+    /// The git generation this subscriber holds; None before its first update.
+    git_gen: Option<u64>,
+    /// A git update was held back (paused or stalled): resend everything on resume.
+    git_dirty: bool,
+    /// A `search_ready` was held back: a query answered `indexing` is still waiting for it.
+    search_ready: bool,
 }
 
 impl Sub {
@@ -107,6 +121,21 @@ impl Sub {
             health_dirty: false,
             interest: HashSet::new(),
             dead: false,
+            git_gen: None,
+            git_dirty: false,
+            search_ready: false,
+        }
+    }
+
+    /// Send a git update that brings this subscriber to `gen`. Recorded only if it went out;
+    /// one met by a pause or stall marks the subscriber for a full resend instead.
+    fn send_git(&mut self, update: GitUpdate) {
+        let gen = update.gen;
+        let before = self.seq;
+        self.deliver(TreeEvent::Git(update));
+        if self.seq > before {
+            self.git_gen = Some(gen);
+            self.git_dirty = false;
         }
     }
 
@@ -118,6 +147,8 @@ impl Sub {
             match &ev {
                 TreeEvent::RootGone => self.root_gone = true,
                 TreeEvent::Health { .. } => self.health_dirty = true,
+                TreeEvent::Git(_) => self.git_dirty = true,
+                TreeEvent::SearchReady => self.search_ready = true,
                 other => {
                     if let Some(rel) = other.rel() {
                         self.dirty.insert(rel.to_string());
@@ -292,6 +323,11 @@ struct WatchState {
     poller_running: bool,
     /// Why there is no watcher, when there isn't.
     error: Option<String>,
+    /// Watches on the repository's own folders (index, HEAD, refs) when the root's watcher
+    /// doesn't cover them: a root inside a larger repo, a linked worktree, a per-folder
+    /// watcher (Linux, shallow roots). Held only so they stay alive.
+    #[allow(dead_code)]
+    git_watch: Option<Box<dyn Send>>,
 }
 
 pub struct HubInit {
@@ -301,6 +337,9 @@ pub struct HubInit {
     pub shallow: bool,
     pub user_excludes: Vec<String>,
     pub raw_capacity: usize,
+    pub git: GitConfig,
+    /// The app-wide limit on git processes (§7.2).
+    pub git_slots: Arc<Slots>,
 }
 
 pub struct RootHub {
@@ -313,6 +352,12 @@ pub struct RootHub {
     pub fs_class: &'static str,
     pub repo: Option<RepoInfo>,
     git_dir: Option<PathBuf>,
+    /// The repository's git dir and (when different) common dir: events under them are git
+    /// signals, wherever they are.
+    git_dirs: Vec<PathBuf>,
+    /// The git worker, when the root is in a repository.
+    pub(super) git: Option<Arc<GitCore>>,
+    pub(super) search: Arc<SearchState>,
     pub(super) dirs: Mutex<HashMap<String, DirSnap>>,
     subs: Mutex<HashMap<u64, Sub>>,
     pub(super) ignore: Mutex<IgnoreStack>,
@@ -377,14 +422,36 @@ impl RootHub {
         let ignore = IgnoreStack::new(&init.root, git_dir.as_deref(), &init.user_excludes);
         let (raw, rx, overflow) = watch::channel(init.raw_capacity);
         let (root, shallow) = (init.root.clone(), init.shallow);
-        let hub = Arc::new_cyclic(|me| RootHub {
+        // The top level, from the `..` steps: a root inside a larger repo strips its prefix
+        // from git's paths.
+        let top = repo.as_ref().and_then(|(r, _)| {
+            let up = if r.toplevel_rel.is_empty() { 0 } else { r.toplevel_rel.split('/').count() };
+            init.root.ancestors().nth(up).map(Path::to_path_buf)
+        });
+        let mut git_dirs: Vec<PathBuf> = Vec::new();
+        if let Some((r, g)) = &repo {
+            git_dirs.push(g.clone());
+            let common = PathBuf::from(&r.common_dir);
+            if common != *g {
+                git_dirs.push(common);
+            }
+        }
+        // A home or volume root decorates only when it is itself a repository (§6.5).
+        let git_on = repo.as_ref().is_some_and(|(r, _)| !shallow || r.toplevel_rel.is_empty());
+        let hub = Arc::new_cyclic(|me: &Weak<RootHub>| RootHub {
             me: me.clone(),
             place: init.place,
             fold: crate::relocate::case_insensitive(&init.root),
+            git: match (&top, git_on) {
+                (Some(top), true) => Some(GitCore::new(me.clone(), &init.git, &init.root, top, network, init.git_slots.clone())),
+                _ => None,
+            },
+            search: SearchState::new(me.clone(), &init.root, repo.is_some(), shallow),
             root: init.root,
             fs_class: init.fs_class,
             repo: repo.map(|(r, _)| r),
             git_dir,
+            git_dirs,
             dirs: Mutex::new(HashMap::new()),
             subs: Mutex::new(HashMap::new()),
             ignore: Mutex::new(ignore),
@@ -400,6 +467,7 @@ impl RootHub {
                 poll_mtimes: HashMap::new(),
                 poller_running: false,
                 error: None,
+                git_watch: None,
             }),
             raw,
             overflow,
@@ -419,7 +487,7 @@ impl RootHub {
             let spawned = std::thread::Builder::new().name("ft-watch-start".into()).spawn(move || {
                 let (hw, error) = watch::create(&root, shallow, false, raw, &ctx);
                 if let Some(h) = me.upgrade() {
-                    h.watcher_started(hw, error);
+                    h.watcher_started(hw, error, &ctx);
                 }
             });
             if let Err(e) = spawned {
@@ -432,12 +500,17 @@ impl RootHub {
         hub
     }
 
-    fn watcher_started(&self, hw: HubWatch, error: Option<String>) {
+    fn watcher_started(&self, hw: HubWatch, error: Option<String>, ctx: &WatchContext) {
+        // The root's own watcher sees the repository's index and refs only when it is
+        // recursive and the git dirs are inside the root.
+        let covered = matches!(hw, HubWatch::Recursive(_)) && self.git_dirs.iter().all(|g| g.starts_with(&self.root));
+        let git_watch = if self.git.is_some() && !covered { watch::create_git(&self.git_dirs, self.raw.clone(), ctx) } else { None };
         {
             let mut ws = self.watch.lock();
             ws.hw = hw;
             ws.error = error;
             ws.pending = false;
+            ws.git_watch = git_watch;
         }
         let mut open: BTreeSet<String> = self.dirs.lock().keys().cloned().collect();
         open.extend(self.subs.lock().values().flat_map(|s| s.interest.iter().cloned()));
@@ -446,6 +519,12 @@ impl RootHub {
         }
         for rel in &open {
             self.request(rel, None);
+        }
+        // Whatever changed before the watcher ran was never reported: git looks again, and an
+        // index built meanwhile is rebuilt on its next query.
+        self.git_signal(Trigger::Open);
+        if self.search.wanted() {
+            self.search.note(vec![super::search::Change::Folder]);
         }
         self.broadcast_health();
     }
@@ -462,6 +541,26 @@ impl RootHub {
         self.git_dir.as_deref()
     }
 
+    /// The repository's git dir and common dir.
+    pub(super) fn git_dirs(&self) -> &[PathBuf] {
+        &self.git_dirs
+    }
+
+    /// A subscription of this hub lives in window `label`.
+    pub fn has_window(&self, label: &str) -> bool {
+        self.subs.lock().values().any(|s| s.window == label)
+    }
+
+    /// `path` (absolute) is inside the repository this hub decorates, or inside its root.
+    pub fn covers(&self, path: &Path) -> bool {
+        if paths::strip_root(path, &self.root, self.fold).is_some() {
+            return true;
+        }
+        let Some(r) = &self.repo else { return false };
+        let up = if r.toplevel_rel.is_empty() { 0 } else { r.toplevel_rel.split('/').count() };
+        self.root.ancestors().nth(up).is_some_and(|top| paths::strip_root(path, top, self.fold).is_some())
+    }
+
     pub fn raw_sender(&self) -> RawSender {
         self.raw.clone()
     }
@@ -470,13 +569,20 @@ impl RootHub {
 
     pub fn add_sub(&self, id: u64, window: &str, sink: Arc<dyn Sink>) {
         let health = self.health_event();
-        let mut subs = self.subs.lock();
-        let mut sub = Sub::new(id, window, sink);
-        sub.deliver(health);
-        if self.is_gone() {
-            sub.deliver(TreeEvent::RootGone);
+        {
+            let mut subs = self.subs.lock();
+            let mut sub = Sub::new(id, window, sink);
+            sub.deliver(health);
+            if self.is_gone() {
+                sub.deliver(TreeEvent::RootGone);
+            }
+            // What git already knows goes out at once; the run below brings it up to date.
+            if let Some(full) = self.git_full() {
+                sub.send_git(full);
+            }
+            subs.insert(id, sub);
         }
-        subs.insert(id, sub);
+        self.git_signal(Trigger::Open);
     }
 
     /// Drop a subscription; returns how many remain. Its folders lose their snapshots and
@@ -510,7 +616,7 @@ impl RootHub {
             sep: std::path::MAIN_SEPARATOR.to_string(),
             case_insensitive: self.fold,
             repo: self.repo.clone(),
-            caps: Caps { watch: self.watch_kind(), git: false, trash: false, remote: false, writable: false },
+            caps: Caps { watch: self.watch_kind(), git: self.git.as_ref().is_some_and(|g| g.enabled()), trash: false, remote: false, writable: false },
         }
     }
 
@@ -601,7 +707,11 @@ impl RootHub {
                 }
                 vec![r]
             }
-            None => self.subs.lock().get(&sub).map(|s| s.interest.iter().cloned().collect()).unwrap_or_default(),
+            None => {
+                // Refresh everything: the decorations too.
+                self.git_signal(Trigger::Manual);
+                self.subs.lock().get(&sub).map(|s| s.interest.iter().cloned().collect()).unwrap_or_default()
+            }
         };
         for r in rels {
             self.request(&r, Some(Waiter::Refresh { sub }));
@@ -656,10 +766,27 @@ impl RootHub {
             if std::mem::take(&mut s.health_dirty) {
                 s.deliver(health);
             }
+            if s.git_dirty {
+                // Taken under subs: git data comes after subs in the lock order.
+                if let Some(full) = self.git_full() {
+                    if s.git_gen != Some(full.gen) {
+                        s.send_git(full);
+                    } else {
+                        s.git_dirty = false;
+                    }
+                }
+            }
+            if std::mem::take(&mut s.search_ready) {
+                s.deliver(TreeEvent::SearchReady);
+            }
             s.flush_dirty(&dirs)
         };
         for rel in relist {
             self.request(&rel, Some(Waiter::Refresh { sub }));
+        }
+        // A run deferred while nobody could see it happens now.
+        if let Some(g) = &self.git {
+            g.wake_if_deferred();
         }
     }
 
@@ -967,8 +1094,12 @@ impl RootHub {
                 ws.error.clone()
             }
         };
-        // Git decorations arrive in phase 2.
-        TreeEvent::Health { watch, git: "off".into(), note }
+        let (git, git_note) = self.git.as_ref().map(|g| g.health()).unwrap_or(("off", None));
+        let note = match (note, git_note) {
+            (Some(a), Some(b)) => Some(format!("{a} · {b}")),
+            (a, b) => a.or(b),
+        };
+        TreeEvent::Health { watch, git: git.into(), note }
     }
 
     fn broadcast_health(&self) {
@@ -1198,7 +1329,95 @@ impl RootHub {
         };
         #[cfg(not(unix))]
         let exec = false;
-        Ok(StatInfo { size: m.len(), mtime_ms, exec, link_target, numstat: None })
+        let numstat = if m.is_file() { self.git.as_ref().and_then(|g| g.numstat(rel)) } else { None };
+        Ok(StatInfo { size: m.len(), mtime_ms, exec, link_target, numstat })
+    }
+
+    // ── Git ──────────────────────────────────────────────────────────────────────────────
+
+    /// Ask for a status run (a no-op outside a repository or with decorations off).
+    pub fn git_signal(&self, t: Trigger) {
+        if let Some(g) = &self.git {
+            g.signal(t);
+        }
+    }
+
+    /// Everything a subscriber should hold, once git has run.
+    fn git_full(&self) -> Option<GitUpdate> {
+        let g = self.git.as_ref()?;
+        let d = g.data.lock();
+        d.ran.then(|| d.full_update())
+    }
+
+    /// Someone can see a status run's result: a subscription neither paused nor stalled.
+    pub(super) fn git_audience(&self) -> bool {
+        self.subs.lock().values().any(|s| !s.paused && !s.stalled && !s.dead)
+    }
+
+    /// A status run finished: fold it in, send what changed, feed the search index, and say
+    /// so in Health when the repo turned slow or failed (or recovered).
+    pub(super) fn git_finished(&self, out: Result<Status, Failure>, took: Duration) {
+        let Some(g) = &self.git else { return };
+        let before = g.health();
+        let published = g.apply(out, took);
+        if let Some(p) = published {
+            self.search.reconcile(&p.untracked, &p.deleted);
+            let mut subs = self.subs.lock();
+            let mut full: Option<GitUpdate> = None;
+            for s in subs.values_mut() {
+                if s.git_gen == Some(p.diff.gen) {
+                    continue;
+                }
+                if s.git_gen == Some(p.from) && !s.git_dirty {
+                    s.send_git(p.diff.clone());
+                } else {
+                    let f = full.get_or_insert_with(|| g.data.lock().full_update());
+                    s.send_git(f.clone());
+                }
+            }
+        }
+        if g.health() != before {
+            self.broadcast_health();
+        }
+    }
+
+    /// `file_tree_git` changed. Off: every subscriber drops its decorations.
+    pub fn set_git_enabled(&self, on: bool) {
+        let Some(g) = &self.git else { return };
+        if !g.set_enabled(on) {
+            return;
+        }
+        if !on {
+            let full = g.data.lock().full_update();
+            let mut subs = self.subs.lock();
+            for s in subs.values_mut() {
+                s.send_git(full.clone());
+            }
+        }
+        self.broadcast_health();
+    }
+
+    /// `ft_diff_base`: the file's content at HEAD or in the index.
+    pub fn diff_base(&self, rel: &str, base: &str) -> Result<Option<String>, String> {
+        match &self.git {
+            Some(g) => g.diff_base(rel, base),
+            None => Err("This folder isn't in a git repository".to_string()),
+        }
+    }
+
+    // ── Search ───────────────────────────────────────────────────────────────────────────
+
+    /// `ft_search`.
+    pub fn search(&self, query: &str, limit: usize, seq: u64, index_shallow: bool) -> SearchResult {
+        self.search.query(query, limit, seq, index_shallow)
+    }
+
+    /// The index finished building: every subscriber may re-ask a query answered `indexing`.
+    pub(super) fn search_ready(&self) {
+        let mut subs = self.subs.lock();
+        for s in subs.values_mut() {
+            s.deliver(TreeEvent::SearchReady);
+        }
     }
 
     #[cfg(all(test, target_os = "linux"))]
@@ -1217,6 +1436,17 @@ impl RootHub {
     #[cfg(test)]
     pub(crate) fn watch_pending(&self) -> bool {
         self.watch.lock().pending
+    }
+}
+
+impl Drop for RootHub {
+    /// The git worker and the index's eviction wait hold no strong reference to the hub, so
+    /// they are told to end here rather than finding out on their next wakeup.
+    fn drop(&mut self) {
+        if let Some(g) = &self.git {
+            g.stop();
+        }
+        self.search.stop();
     }
 }
 

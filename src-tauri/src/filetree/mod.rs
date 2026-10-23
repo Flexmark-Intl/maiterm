@@ -11,20 +11,26 @@
 //! - `coalesce.rs` + `watch/`: disk changes into deltas.
 //! - `paths.rs`: rel ↔ native, containment, NFC, case folding.
 //! - `fsclass.rs`: network mounts, which get no watcher.
+//! - `git.rs`: decorations from `git status`, scheduled per repository (phase 2).
+//! - `search.rs`: the find index, built on the first query (phase 2).
 
 pub mod commands;
 mod coalesce;
 pub mod fsclass;
+pub mod git;
 pub mod hub;
 mod ignore_cache;
 pub mod list;
 pub mod paths;
 pub mod place;
+pub mod search;
 pub mod types;
 pub mod watch;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod git_tests;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -34,6 +40,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex};
 
+use git::{GitConfig, Trigger};
 use hub::{HubInit, RootHub, Sink};
 use types::{DirReq, OpenAck};
 
@@ -45,6 +52,9 @@ pub const GLOBAL_IO_SLOTS: usize = 32;
 /// After this long unfocused, regaining focus revalidates the window's folders: FSEvents can
 /// coalesce changes away across a sleep.
 pub const FOCUS_REVALIDATE_AFTER: Duration = Duration::from_secs(60);
+/// git processes running at once across the app (§7.2): seventy tabs on ten repos can't pile
+/// up status runs.
+pub const GIT_SLOTS: usize = 2;
 
 /// A counting semaphore for blocking IO threads.
 pub struct Slots {
@@ -118,6 +128,12 @@ pub struct FileTreeState {
     watch_ctx: OnceLock<Arc<watch::WatchContext>>,
     grace: Duration,
     raw_capacity: usize,
+    /// How new hubs run git (`file_tree_git`, and the program: a stub in tests).
+    git: Mutex<GitConfig>,
+    git_slots: Arc<Slots>,
+    /// Shell pids whose command just finished (OSC 133 D), for the thread that turns each
+    /// into a git signal. Started on first use.
+    commands: OnceLock<std::sync::mpsc::Sender<u32>>,
 }
 
 impl FileTreeState {
@@ -142,7 +158,16 @@ impl FileTreeState {
             watch_ctx,
             grace,
             raw_capacity,
+            git: Mutex::new(GitConfig::default()),
+            git_slots: Arc::new(Slots::new(GIT_SLOTS)),
+            commands: OnceLock::new(),
         })
+    }
+
+    /// Test seam: how hubs opened from now on run git.
+    #[cfg(test)]
+    pub(crate) fn set_git_config(&self, cfg: GitConfig) {
+        *self.git.lock() = cfg;
     }
 
     /// Linux's one inotify instance is made on first use, not at launch.
@@ -200,6 +225,8 @@ impl FileTreeState {
             shallow: place::is_shallow(root),
             user_excludes: excludes,
             raw_capacity: self.raw_capacity,
+            git: self.git.lock().clone(),
+            git_slots: self.git_slots.clone(),
         };
         let fresh = RootHub::new(init, self.slots.clone(), self.focus.clone(), self.watch_ctx());
         let mut hubs = self.hubs.lock();
@@ -271,6 +298,64 @@ impl FileTreeState {
         for h in hubs {
             if away >= FOCUS_REVALIDATE_AFTER || h.is_network() {
                 h.revalidate_window(label);
+            }
+            // Regaining focus is a git edge (§7.2): a commit made in another app shows.
+            if h.has_window(label) {
+                h.git_signal(Trigger::Focus);
+            }
+        }
+    }
+
+    /// `file_tree_git` changed (or is read at `ft_open`): every hub follows.
+    pub fn set_git_enabled(&self, on: bool) {
+        {
+            let mut cfg = self.git.lock();
+            if cfg.enabled == on {
+                return;
+            }
+            cfg.enabled = on;
+        }
+        let hubs: Vec<Arc<RootHub>> = self.hubs.lock().values().cloned().collect();
+        for h in hubs {
+            h.set_git_enabled(on);
+        }
+    }
+
+    /// A command finished in a terminal (OSC 133 D), whose shell is `shell_pid`. Called on the
+    /// PTY reader's thread, so it only hands the pid on: a thread looks up the shell's folder
+    /// and signals the repository hubs it is in, so a `git commit` typed in a terminal
+    /// decorates without waiting for the watcher's trailing delay. Nothing at all happens
+    /// while no tree is open.
+    pub fn command_done(&self, shell_pid: u32) {
+        if self.hubs.lock().values().all(|h| h.git.is_none()) {
+            return;
+        }
+        let tx = self.commands.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<u32>();
+            let me = self.me.clone();
+            let spawned = std::thread::Builder::new().name("ft-commands".into()).spawn(move || {
+                // Blocks with no timeout: a terminal that runs nothing costs nothing.
+                while let Ok(pid) = rx.recv() {
+                    let Some(state) = me.upgrade() else { return };
+                    let Some(cwd) = crate::pty::manager::cwd_of_pid(pid) else { continue };
+                    state.note_command_in(Path::new(&cwd));
+                }
+            });
+            if let Err(e) = spawned {
+                log::warn!("filetree: couldn't start the command watcher: {e}");
+            }
+            tx
+        });
+        let _ = tx.send(shell_pid);
+    }
+
+    /// A command finished with its shell in `cwd`.
+    pub fn note_command_in(&self, cwd: &Path) {
+        let cwd = crate::share::canon(cwd);
+        let hubs: Vec<Arc<RootHub>> = self.hubs.lock().values().filter(|h| h.git.is_some()).cloned().collect();
+        for h in hubs {
+            if h.covers(&cwd) {
+                h.git_signal(Trigger::Command);
             }
         }
     }

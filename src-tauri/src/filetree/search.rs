@@ -1,0 +1,574 @@
+//! Find: a fuzzy path index per hub (docs/file-tree.md §8).
+//!
+//! - **Built lazily**, on the first query, in the background: inside a repository from
+//!   `git ls-files -co --exclude-standard -z` (tracked plus untracked, ignored left out, about
+//!   100 ms for 100k files); elsewhere from a gitignore-aware parallel walk, 20 levels deep,
+//!   `.git` skipped. A home or volume root is never walked unless the human asks (§6.5).
+//! - **Stored as one `String` arena plus spans**, about 6 MB per 100k paths. A removed path
+//!   leaves a dead span; the arena is compacted once a quarter of it is dead.
+//! - **Kept fresh** from the watcher's events (a file appearing or going), and from each git
+//!   status run's untracked and deleted files, which is what reconciles Linux, whose watcher
+//!   sees only open folders. A folder appearing or going marks the index dirty: the next query
+//!   rebuilds it in the background while the old one answers.
+//! - **Matched with nucleo** (`match_paths`, smart case, smart normalization); the top 500 come
+//!   back with their matched character positions.
+//! - **Stale queries stop early**: each carries a `seq`, the newest is kept in an atomic, and a
+//!   scan that sees a newer one gives up.
+//! - **Evicted** after 5 minutes with no query, by the thread that built it.
+
+use std::cmp::Reverse;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BinaryHeap, HashMap};
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
+
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
+use parking_lot::{Condvar, Mutex};
+
+use super::hub::RootHub;
+use super::types::{SearchHit, SearchResult};
+use crate::util::proc;
+
+/// Results returned at most.
+pub const MAX_HITS: usize = 500;
+/// An index nobody has queried for this long is dropped.
+pub const EVICT_AFTER: Duration = Duration::from_secs(300);
+/// Paths indexed at most: past this a walk stops (a pinned `/` would otherwise never end).
+const MAX_PATHS: usize = 1_000_000;
+const WALK_DEPTH: usize = 20;
+/// A scan checks for a newer query this often.
+const CANCEL_EVERY: usize = 2048;
+
+fn hash_of(s: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// Every indexed path, root-relative POSIX, in one arena.
+#[derive(Default)]
+pub struct Index {
+    arena: String,
+    /// (start, len) into `arena`; a removed path keeps its slot with `u32::MAX` as start.
+    spans: Vec<(u32, u32)>,
+    /// hash(path) → slot. A collision (two paths, one hash) marks the index for a rebuild
+    /// instead of risking the wrong slot.
+    map: HashMap<u64, u32>,
+    dead: usize,
+    dead_bytes: usize,
+    /// Something changed that a per-path update can't express (a folder came or went).
+    pub dirty: bool,
+}
+
+impl Index {
+    pub fn from_paths<I: IntoIterator<Item = String>>(paths: I) -> Index {
+        let mut ix = Index::default();
+        for p in paths {
+            ix.insert(&p);
+        }
+        ix
+    }
+
+    pub fn len(&self) -> usize {
+        self.spans.len() - self.dead
+    }
+
+    fn get(&self, slot: u32) -> Option<&str> {
+        let (s, l) = self.spans[slot as usize];
+        (s != u32::MAX).then(|| &self.arena[s as usize..(s + l) as usize])
+    }
+
+    #[cfg(test)]
+    pub fn contains(&self, path: &str) -> bool {
+        self.map.get(&hash_of(path)).and_then(|s| self.get(*s)) == Some(path)
+    }
+
+    pub fn insert(&mut self, path: &str) {
+        let h = hash_of(path);
+        if let Some(&slot) = self.map.get(&h) {
+            if self.get(slot) != Some(path) {
+                self.dirty = true;
+            }
+            return;
+        }
+        if self.arena.len() + path.len() > u32::MAX as usize {
+            self.dirty = true;
+            return;
+        }
+        let start = self.arena.len() as u32;
+        self.arena.push_str(path);
+        self.map.insert(h, self.spans.len() as u32);
+        self.spans.push((start, path.len() as u32));
+    }
+
+    /// True when the path was there.
+    pub fn remove(&mut self, path: &str) -> bool {
+        let h = hash_of(path);
+        let Some(&slot) = self.map.get(&h) else { return false };
+        if self.get(slot) != Some(path) {
+            return false;
+        }
+        self.map.remove(&h);
+        self.dead_bytes += self.spans[slot as usize].1 as usize;
+        self.spans[slot as usize] = (u32::MAX, 0);
+        self.dead += 1;
+        if self.dead * 4 > self.spans.len().max(64) || self.dead_bytes * 4 > self.arena.len().max(4096) {
+            self.compact();
+        }
+        true
+    }
+
+    fn compact(&mut self) {
+        let live: Vec<String> = self.iter().map(|(_, p)| p.to_string()).collect();
+        let dirty = self.dirty;
+        *self = Index::from_paths(live);
+        self.dirty |= dirty;
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (u32, &str)> {
+        self.spans.iter().enumerate().filter(|(_, (s, _))| *s != u32::MAX).map(|(i, (s, l))| (i as u32, &self.arena[*s as usize..(*s + *l) as usize]))
+    }
+
+    /// The best `limit` matches for `query`, or None when `cancelled` said stop.
+    pub fn search(&self, query: &str, limit: usize, cancelled: &dyn Fn() -> bool) -> Option<Vec<SearchHit>> {
+        let query = query.trim();
+        if query.is_empty() || limit == 0 {
+            return Some(Vec::new());
+        }
+        let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+        let mut buf = Vec::new();
+        // A min-heap of the best so far: (score, shorter path first, then earlier path).
+        let mut heap: BinaryHeap<Reverse<(u32, Reverse<u32>, Reverse<String>, u32)>> = BinaryHeap::with_capacity(limit + 1);
+        for (n, (slot, path)) in self.iter().enumerate() {
+            if n % CANCEL_EVERY == 0 && n > 0 && cancelled() {
+                return None;
+            }
+            let Some(score) = pattern.score(Utf32Str::new(path, &mut buf), &mut matcher) else { continue };
+            let key = (score, Reverse(path.len() as u32));
+            if heap.len() == limit {
+                let Some(Reverse(worst)) = heap.peek() else { continue };
+                // Only a strictly better hit displaces the worst; equal ones keep the earlier.
+                if (key.0, key.1) <= (worst.0, worst.1) {
+                    continue;
+                }
+                heap.pop();
+            }
+            heap.push(Reverse((score, key.1, Reverse(path.to_string()), slot)));
+        }
+        let mut best: Vec<(u32, Reverse<u32>, Reverse<String>, u32)> = heap.into_iter().map(|Reverse(x)| x).collect();
+        best.sort_by(|a, b| b.cmp(a));
+        let mut idx = Vec::new();
+        Some(
+            best.into_iter()
+                .map(|(score, _, Reverse(rel), _)| {
+                    idx.clear();
+                    pattern.indices(Utf32Str::new(&rel, &mut buf), &mut matcher, &mut idx);
+                    idx.sort_unstable();
+                    idx.dedup();
+                    SearchHit { rel, score, idx: idx.clone() }
+                })
+                .collect(),
+        )
+    }
+}
+
+/// One change the watcher saw, already classified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    /// A file exists here now.
+    File(String),
+    /// Nothing exists here now (a file, or a whole folder, went).
+    Gone(String),
+    /// A folder appeared or changed shape: only a rebuild knows what's in it.
+    Folder,
+}
+
+#[derive(Default)]
+struct Inner {
+    index: Option<Index>,
+    building: bool,
+    /// Changes that arrived while a build ran: replayed onto the new index.
+    pending: Vec<Change>,
+    /// The human asked to index a home or volume root.
+    shallow_ok: bool,
+    last_query: Option<Instant>,
+}
+
+pub struct SearchState {
+    hub: Weak<RootHub>,
+    root: PathBuf,
+    /// The root is inside a repository: list with git, not a walk.
+    in_repo: bool,
+    shallow: bool,
+    /// The newest query asked; an older one still scanning gives up.
+    latest: AtomicU64,
+    inner: Mutex<Inner>,
+    cv: Condvar,
+    evict_after: Duration,
+}
+
+impl SearchState {
+    pub fn new(hub: Weak<RootHub>, root: &Path, in_repo: bool, shallow: bool) -> Arc<SearchState> {
+        Arc::new(SearchState {
+            hub,
+            root: root.to_path_buf(),
+            in_repo,
+            shallow,
+            latest: AtomicU64::new(0),
+            inner: Mutex::new(Inner::default()),
+            cv: Condvar::new(),
+            evict_after: EVICT_AFTER,
+        })
+    }
+
+    /// An index exists (or is being built): only then are watcher events worth classifying.
+    pub fn wanted(&self) -> bool {
+        let inner = self.inner.lock();
+        inner.index.is_some() || inner.building
+    }
+
+    /// `ft_search`. Answers from the index there is; starts a build when there is none or it
+    /// is dirty, and says so (`indexing`), with `search_ready` sent when it is done.
+    pub fn query(self: &Arc<Self>, query: &str, limit: usize, seq: u64, index_shallow: bool) -> SearchResult {
+        self.latest.fetch_max(seq, Ordering::SeqCst);
+        let limit = limit.clamp(1, MAX_HITS);
+        let mut inner = self.inner.lock();
+        inner.last_query = Some(Instant::now());
+        if index_shallow {
+            inner.shallow_ok = true;
+        }
+        if self.shallow && !self.in_repo && !inner.shallow_ok && inner.index.is_none() {
+            return SearchResult {
+                seq,
+                indexing: false,
+                items: Vec::new(),
+                unavailable: Some("A home or volume folder isn't indexed by itself.".to_string()),
+            };
+        }
+        let need_build = inner.index.as_ref().is_none_or(|ix| ix.dirty);
+        if need_build && !inner.building {
+            inner.building = true;
+            let me = self.clone();
+            if let Err(e) = std::thread::Builder::new().name("ft-index".into()).spawn(move || me.build_and_keep()) {
+                inner.building = false;
+                log::warn!("filetree: couldn't start the index thread: {e}");
+            }
+        }
+        let indexing = inner.building;
+        let Some(ix) = inner.index.as_ref() else {
+            return SearchResult { seq, indexing, items: Vec::new(), unavailable: None };
+        };
+        let latest = &self.latest;
+        let items = ix.search(query, limit, &|| latest.load(Ordering::SeqCst) != seq).unwrap_or_default();
+        SearchResult { seq, indexing, items, unavailable: None }
+    }
+
+    /// The index thread: build, publish, then stay to evict it once queries stop.
+    fn build_and_keep(self: Arc<Self>) {
+        let started = Instant::now();
+        let paths = self.list_paths();
+        let mut ix = Index::from_paths(paths);
+        log::debug!("filetree: indexed {} paths under {} in {:?}", ix.len(), self.root.display(), started.elapsed());
+        {
+            let mut inner = self.inner.lock();
+            for c in std::mem::take(&mut inner.pending) {
+                apply_change(&mut ix, c);
+            }
+            inner.index = Some(ix);
+            inner.building = false;
+        }
+        if let Some(h) = self.hub.upgrade() {
+            h.search_ready();
+        }
+        // Eviction: wake once per idle period; a query since the last look keeps the index.
+        let mut inner = self.inner.lock();
+        loop {
+            let since = inner.last_query.map(|t| t.elapsed()).unwrap_or(self.evict_after);
+            if since >= self.evict_after {
+                inner.index = None;
+                inner.pending.clear();
+                return;
+            }
+            if inner.building || self.hub.strong_count() == 0 {
+                // A rebuild started: its thread takes over the eviction. A dead hub: done.
+                if self.hub.strong_count() == 0 {
+                    inner.index = None;
+                }
+                return;
+            }
+            self.cv.wait_for(&mut inner, self.evict_after - since);
+        }
+    }
+
+    fn list_paths(&self) -> Vec<String> {
+        if self.in_repo {
+            if let Some(p) = git_ls_files(&self.root) {
+                return p;
+            }
+        }
+        walk(&self.root)
+    }
+
+    /// Watcher changes, already classified. Cheap when there is no index.
+    pub fn note(&self, changes: Vec<Change>) {
+        if changes.is_empty() {
+            return;
+        }
+        let mut inner = self.inner.lock();
+        if inner.building {
+            inner.pending.extend(changes.iter().cloned());
+        }
+        if let Some(ix) = inner.index.as_mut() {
+            for c in changes {
+                apply_change(ix, c);
+            }
+        }
+    }
+
+    /// A status run's untracked files and deleted paths (the Linux reconciliation).
+    pub fn reconcile(&self, untracked: &[String], deleted: &[String]) {
+        let mut changes: Vec<Change> = untracked.iter().map(|p| Change::File(p.clone())).collect();
+        changes.extend(deleted.iter().map(|p| Change::Gone(p.clone())));
+        self.note(changes);
+    }
+
+    /// The hub is gone: let the eviction wait end now.
+    pub fn stop(&self) {
+        self.inner.lock().last_query = None;
+        self.cv.notify_all();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> Option<usize> {
+        self.inner.lock().index.as_ref().map(Index::len)
+    }
+}
+
+fn apply_change(ix: &mut Index, c: Change) {
+    match c {
+        Change::File(p) => ix.insert(&p),
+        Change::Gone(p) => {
+            // Not an indexed file: it may have been a folder, whose files only a rebuild drops.
+            if !ix.remove(&p) {
+                ix.dirty = true;
+            }
+        }
+        Change::Folder => ix.dirty = true,
+    }
+}
+
+/// Tracked and untracked files, ignored ones left out, relative to the root.
+fn git_ls_files(root: &Path) -> Option<Vec<String>> {
+    let mut c = proc::git();
+    c.arg("--no-optional-locks").arg("-C").arg(root).args(["ls-files", "-co", "--exclude-standard", "-z"]);
+    let out = proc::output_timeout(&mut c, Duration::from_secs(30)).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut seen = std::collections::HashSet::new();
+    Some(
+        out.stdout
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            // A path with a conflict is listed once per stage.
+            .filter(|p| seen.insert(hash_of(p)))
+            .take(MAX_PATHS)
+            .collect(),
+    )
+}
+
+/// Every file below `root` that git would not ignore, 20 levels deep, `.git` skipped.
+fn walk(root: &Path) -> Vec<String> {
+    let out = Arc::new(Mutex::new(Vec::new()));
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .parents(true)
+        .follow_links(false)
+        .max_depth(Some(WALK_DEPTH))
+        .filter_entry(|e| e.file_name() != ".git")
+        .build_parallel();
+    walker.run(|| {
+        let out = out.clone();
+        let root = root.to_path_buf();
+        Box::new(move |res| {
+            let Ok(entry) = res else { return ignore::WalkState::Continue };
+            if !entry.file_type().is_some_and(|t| t.is_file() || t.is_symlink()) {
+                return ignore::WalkState::Continue;
+            }
+            let Ok(rel) = entry.path().strip_prefix(&root) else { return ignore::WalkState::Continue };
+            let rel = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+            let mut v = out.lock();
+            if v.len() >= MAX_PATHS {
+                return ignore::WalkState::Quit;
+            }
+            v.push(rel);
+            ignore::WalkState::Continue
+        })
+    });
+    let mut v = std::mem::take(&mut *out.lock());
+    v.sort();
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ix(paths: &[&str]) -> Index {
+        Index::from_paths(paths.iter().map(|s| s.to_string()))
+    }
+
+    fn rels(hits: &[SearchHit]) -> Vec<&str> {
+        hits.iter().map(|h| h.rel.as_str()).collect()
+    }
+
+    #[test]
+    fn a_hit_in_the_file_name_beats_one_spread_over_folders() {
+        let i = ix(&["src/lib/filetree/model.ts", "src/models/index.ts", "mod/el/x.ts", "docs/model-notes.md", "src/lib/stores/fileTree.svelte.ts"]);
+        let hits = i.search("model", 10, &|| false).unwrap();
+        let r = rels(&hits);
+        assert!(r.iter().position(|p| *p == "src/lib/filetree/model.ts").unwrap() < r.iter().position(|p| *p == "mod/el/x.ts").unwrap());
+        assert!(!r.contains(&"src/lib/stores/fileTree.svelte.ts"));
+        // Scores never increase down the list.
+        assert!(hits.windows(2).all(|w| w[0].score >= w[1].score));
+    }
+
+    #[test]
+    fn smart_case_and_indices_point_at_matched_characters() {
+        let i = ix(&["src/FileTree.ts", "src/filetree.ts"]);
+        // An upper-case letter makes the query case-sensitive.
+        assert_eq!(rels(&i.search("FT", 10, &|| false).unwrap()), vec!["src/FileTree.ts"]);
+        let hits = i.search("ftree", 10, &|| false).unwrap();
+        assert_eq!(hits.len(), 2);
+        for h in &hits {
+            let chars: Vec<char> = h.rel.chars().collect();
+            let picked: String = h.idx.iter().map(|&i| chars[i as usize].to_ascii_lowercase()).collect();
+            assert_eq!(picked, "ftree", "{}", h.rel);
+        }
+    }
+
+    #[test]
+    fn indices_are_characters_not_bytes() {
+        let i = ix(&["caf\u{e9}/\u{1F600}/x.ts"]);
+        let h = &i.search("x.ts", 10, &|| false).unwrap()[0];
+        let chars: Vec<char> = h.rel.chars().collect();
+        assert_eq!(h.idx.iter().map(|&i| chars[i as usize]).collect::<String>(), "x.ts");
+    }
+
+    #[test]
+    fn ties_go_to_the_shorter_path_and_the_limit_holds() {
+        let i = ix(&["a/b/c/readme.md", "readme.md", "x/readme.md"]);
+        let hits = i.search("readme.md", 2, &|| false).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].rel, "readme.md");
+    }
+
+    #[test]
+    fn an_empty_query_finds_nothing() {
+        assert!(ix(&["a"]).search("  ", 10, &|| false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_scan_gives_up() {
+        let i = Index::from_paths((0..10_000).map(|n| format!("d/f{n}.ts")));
+        assert!(i.search("f", 10, &|| true).is_none());
+    }
+
+    #[test]
+    fn insert_remove_and_compaction_keep_the_index_exact() {
+        let mut i = ix(&["a.ts", "b.ts"]);
+        i.insert("a.ts");
+        assert_eq!(i.len(), 2);
+        assert!(i.remove("a.ts"));
+        assert!(!i.remove("a.ts"));
+        assert!(!i.contains("a.ts") && i.contains("b.ts"));
+        for n in 0..500 {
+            i.insert(&format!("x/{n}"));
+        }
+        for n in 0..400 {
+            assert!(i.remove(&format!("x/{n}")));
+        }
+        assert_eq!(i.len(), 101);
+        assert!(i.dead * 4 <= i.spans.len().max(64), "compacted");
+        assert!(i.contains("x/450") && i.contains("b.ts"));
+        assert!(!i.dirty);
+    }
+
+    #[test]
+    fn a_vanished_folder_marks_the_index_dirty() {
+        let mut i = ix(&["src/a.ts"]);
+        apply_change(&mut i, Change::Gone("src".into()));
+        assert!(i.dirty);
+        let mut i = ix(&["src/a.ts"]);
+        apply_change(&mut i, Change::Gone("src/a.ts".into()));
+        assert!(!i.dirty && i.len() == 0);
+    }
+
+    #[test]
+    fn a_stale_query_stops_and_the_newest_answers() {
+        let state = SearchState::new(Weak::new(), Path::new("/nonexistent"), false, false);
+        state.inner.lock().index = Some(Index::from_paths((0..50_000).map(|n| format!("dir{}/file{n}.rs", n % 50))));
+        // Seq 2 was asked before seq 1's scan began: seq 1 is stale from its first check.
+        state.latest.store(2, Ordering::SeqCst);
+        let stale = state.query("file", 500, 1, false);
+        assert_eq!(stale.seq, 1);
+        assert!(stale.items.is_empty(), "a stale query returns nothing");
+        let fresh = state.query("file", 500, 2, false);
+        assert_eq!(fresh.items.len(), 500);
+    }
+
+    #[test]
+    fn a_shallow_root_outside_a_repo_waits_for_the_human() {
+        let state = SearchState::new(Weak::new(), Path::new("/"), false, true);
+        let r = state.query("x", 10, 1, false);
+        assert!(r.unavailable.is_some() && !r.indexing);
+    }
+
+    /// The keystroke budget: 100k paths answer in ≤30 ms (release; a debug build only checks
+    /// it finishes). `cargo test --release --lib filetree::search -- --ignored`.
+    #[test]
+    #[ignore]
+    fn a_keystroke_over_100k_paths_is_within_budget() {
+        let words = ["src", "lib", "components", "filetree", "stores", "utils", "tests", "docs", "assets", "server"];
+        let paths: Vec<String> = (0..100_000)
+            .map(|n| format!("{}/{}/{}/file_{n}.{}", words[n % 10], words[(n / 10) % 10], words[(n / 100) % 10], ["ts", "rs", "svelte", "md"][n % 4]))
+            .collect();
+        let i = Index::from_paths(paths);
+        let _ = i.search("warm", 500, &|| false);
+        let mut worst = Duration::ZERO;
+        for q in ["fts", "comp/file_99", "stores svelte", "x"] {
+            let t = Instant::now();
+            let hits = i.search(q, 500, &|| false).unwrap();
+            worst = worst.max(t.elapsed());
+            assert!(hits.len() <= 500);
+        }
+        eprintln!("worst keystroke over 100k paths: {worst:?}");
+        if !cfg!(debug_assertions) {
+            assert!(worst <= Duration::from_millis(30), "{worst:?}");
+        }
+    }
+
+    #[test]
+    fn walk_skips_dot_git_and_ignored_files() {
+        let root = std::env::temp_dir().join(format!("ft-walk-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/x")).unwrap();
+        std::fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: x\n").unwrap();
+        std::fs::write(root.join("src/deep/a.ts"), "").unwrap();
+        std::fs::write(root.join("node_modules/x/i.js"), "").unwrap();
+        let got = walk(&crate::share::canon(&root));
+        assert_eq!(got, vec![".gitignore".to_string(), "src/deep/a.ts".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
