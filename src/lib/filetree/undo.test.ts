@@ -96,11 +96,11 @@ describe('UndoStacks', () => {
     const u = new UndoStacks();
     const e = u.push(P, { kind: 'move', src: ['deep/x'], to: ['src/x'] }, 'move');
     // `deep` isn't listed: nothing known, so it may run (Rust refuses a clobber anyway).
-    expect(u.check(e, disk([]))).toBeNull();
+    expect(u.check(e, disk([]), 0)).toBeNull();
     const f = u.push(P, { kind: 'trash', src: ['src/gone.ts'] }, 'create');
-    expect(u.check(f, disk([]))).toBe(STALE_CHANGED);
+    expect(u.check(f, disk([]), 0)).toBe(STALE_CHANGED);
     // Once stale, stays stale.
-    expect(u.check(f, disk(['src/gone.ts']))).toBe(STALE_CHANGED);
+    expect(u.check(f, disk(['src/gone.ts']), 0)).toBe(STALE_CHANGED);
   });
 
   it('the rename then create sequence undoes in order', () => {
@@ -108,10 +108,26 @@ describe('UndoStacks', () => {
     u.push(P, { kind: 'trash', src: ['a.ts'] }, 'create');
     u.push(P, { kind: 'rename', src: ['b.ts'], name: 'a.ts' }, 'rename');
     const top = u.pop(P)!;
-    expect(u.check(top, disk(['b.ts']))).toBeNull();
+    expect(u.check(top, disk(['b.ts']), 0)).toBeNull();
     // After the rename back, a.ts is there again for the create's undo.
     const next = u.pop(P)!;
-    expect(u.check(next, disk(['a.ts']))).toBeNull();
+    expect(u.check(next, disk(['a.ts']), 0)).toBeNull();
+  });
+
+  it('a quick second undo isn’t judged by a model the first hasn’t reached yet', () => {
+    const u = new UndoStacks();
+    // a.ts → b.ts → c.ts; undoing both renames.
+    u.push(P, { kind: 'rename', src: ['b.ts'], name: 'a.ts' }, 'rename of a');
+    u.push(P, { kind: 'rename', src: ['c.ts'], name: 'b.ts' }, 'rename of b');
+    const first = u.pop(P)!;
+    expect(u.check(first, disk(['c.ts']), 10_000)).toBeNull();
+    u.beginOp();
+    u.endOp(10_050);
+    // The first undo answered, but its re-list hasn't arrived: the model still has c.ts.
+    const second = u.pop(P)!;
+    expect(u.check(second, disk(['c.ts']), 10_060)).toBeNull();
+    // Once settled, the model is the word again.
+    expect(u.check(second, disk(['c.ts']), 10_050 + OWN_SETTLE_MS + 1)).toBe(STALE_CHANGED);
   });
 });
 

@@ -13,7 +13,8 @@
  * flight and the listings that arrive within `OWN_SETTLE_MS` of one settling (the hub re-lists
  * what an op touched, and the watcher's echo can follow it). The expectations are checked
  * against the model once more right before an undo runs, which catches a change made while
- * one of ours was settling. Rust refuses to clobber whatever this misses.
+ * one of ours was settling; an undo pressed inside that window skips it, since the model may
+ * not show our own last op yet. Rust refuses to clobber whatever this misses.
  *
  * A stale entry stays on the stack until Cmd+Z reaches it, so the human is told it can't be
  * undone instead of the press silently undoing something older.
@@ -155,9 +156,15 @@ export class UndoStacks {
     return marked;
   }
 
-  /** Right before running: anything the model now contradicts makes it stale. */
-  check(entry: UndoEntry, lookup: Lookup): string | null {
-    if (!entry.stale && brokenExpectation(entry.expect, lookup)) entry.stale = STALE_CHANGED;
+  /**
+   * Right before running: anything the model now contradicts makes it stale. Not while one of
+   * ours is in flight or settling: the model may still show the folder before it (the hub's
+   * re-list arrives after the op answers), so a quick second Cmd+Z would read the first
+   * undo's own result as a change on disk. Then only what `noteChange` already marked counts,
+   * and Rust refuses whatever would clobber or is gone.
+   */
+  check(entry: UndoEntry, lookup: Lookup, now: number): string | null {
+    if (!entry.stale && !this.isOwn(now) && brokenExpectation(entry.expect, lookup)) entry.stale = STALE_CHANGED;
     return entry.stale;
   }
 }

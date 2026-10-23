@@ -1612,26 +1612,53 @@ function createFileTreeStore() {
 
   // Undo (§10.4).
 
+  /** Undos run one at a time: a held or double Cmd+Z must not send the second undo before the
+   *  first has landed (it would find its file not there yet). */
+  let undoQueue: Promise<void> = Promise.resolve();
+
   /** Cmd/Ctrl+Z: the newest op on this root, unless it changed on disk since. `expected`
    *  (the footer's Undo) only acts while that entry is still the newest. */
-  async function undoLast(expected?: UndoEntry) {
+  function undoLast(expected?: UndoEntry): Promise<void> {
+    const next = undoQueue.then(() => undoOne(expected));
+    undoQueue = next.catch((e) => logError(`[files] undo: ${e}`));
+    return next;
+  }
+
+  async function undoOne(expected?: UndoEntry) {
     if (!place || !writable()) return;
-    const top = undo.peek(place.place);
+    const where = place.place;
+    const top = undo.peek(where);
     if (!top || (expected && top !== expected)) {
       announce('Nothing to undo');
       if (!top) setNotice({ text: 'Nothing to undo in this folder', action: null });
       return;
     }
-    undo.pop(place.place);
-    const stale = undo.check(top, lookup);
+    const stale = undo.check(top, lookup, Date.now());
     if (stale) {
+      undo.pop(where);
       const text = `Can’t undo the ${top.label}: ${stale}`;
       setNotice({ text, action: null });
       announce(text);
       return;
     }
-    const sel = top.op.kind === 'rename' || top.op.kind === 'move' || top.op.kind === 'restore';
-    await runOp(top.op, { undoing: top, select: sel });
+    const go = async () => {
+      // Asked first, and the answer came later: only while it is still this root's newest.
+      if (place?.place !== where || undo.peek(where) !== top) return;
+      undo.pop(where);
+      const sel = top.op.kind === 'rename' || top.op.kind === 'move' || top.op.kind === 'restore';
+      await runOp(top.op, { undoing: top, select: sel });
+    };
+    // Undoing a create, copy, duplicate or import trashes what it made, whatever was typed
+    // into it since: the same question over unsaved edits as any trash (§10.3). Left on the
+    // stack until the answer, so Cancel loses nothing.
+    const dirty = top.op.kind === 'trash' ? dirtyNames(top.op.src ?? []) : [];
+    if (dirty.length) {
+      ask(`${unsavedNote(dirty)}Undoing the ${top.label} moves it to ${trashPlace(PLATFORM)}.`, [
+        { label: 'Undo Anyway', tone: 'danger', run: go },
+      ]);
+      return;
+    }
+    await go();
   }
 
   // Drag and drop (§10.4).
