@@ -30,6 +30,7 @@
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import { isModKey, isWindows, modSymbol } from '$lib/utils/platform';
   import { shellQuote, localShellKind } from '$lib/utils/shellQuote';
+  import { insertPathsIntoTab } from '$lib/utils/insertPaths';
   import { buildShellIntegrationSnippet, buildInstallSnippet } from '$lib/utils/shellIntegration';
   import ResizableTextarea from '$lib/components/ResizableTextarea.svelte';
   import { processOutput, cleanupTab, loadTabVariables, interpolateVariables, getVariables, clearTabVariables, suppressTab, unsuppressTab, replayAutoResume } from '$lib/stores/triggers.svelte';
@@ -1343,67 +1344,11 @@
             } catch { /* getPtyInfo failure already logged; treat as local */ }
             const sshCommand = dragSshCommand;
             dragSshCommand = null;
-            if (sshCommand) {
-              // SSH session — resolve remote CWD fresh at drop time
-              const isClaudeSession = !!claudeStateStore.getState(tabId);
-              let remoteCwd = '~';
-              if (!isClaudeSession) {
-                const oscState = terminalsStore.getOsc(tabId);
-                const osc7Cwd = oscState?.cwd ?? null;
-                const promptCwd = oscState?.promptCwd ?? null;
-                remoteCwd = (osc7Cwd ?? promptCwd ?? '~').trim();
-                logInfo(`drag-drop: remoteCwd=${remoteCwd} (osc7=${osc7Cwd}, prompt=${promptCwd})`);
-              }
-              const remoteDir = isClaudeSession ? AGENT_UPLOAD_DIR : remoteCwd;
-              const count = paths.length;
-              logInfo(`drag-drop SSH: uploading ${count} file(s) to ${remoteDir} via ${sshCommand} (claude=${isClaudeSession})`);
-              logInfo(`drag-drop SSH: paths=${JSON.stringify(paths)}`);
-              const outcome = await uploadWithProgress(sshCommand, paths, remoteDir);
-              if (outcome.status === 'done') {
-                const basenames = paths.map(p => p.split('/').pop() ?? p);
-                if (isClaudeSession) {
-                  // Write each path separately so Claude Code detects each as a file reference
-                  for (let i = 0; i < basenames.length; i++) {
-                    const path = `${AGENT_UPLOAD_DIR}/${basenames[i]}`;
-                    const bytes = Array.from(new TextEncoder().encode(path + ' '));
-                    if (i > 0) await new Promise(r => setTimeout(r, 200));
-                    await writeTerminal(ptyId, bytes, true);
-                  }
-                  toastStore.addToast('SCP Upload', `${count} file${count > 1 ? 's' : ''} uploaded`, 'success');
-                } else {
-                  // Non-Claude: clickable toast to list uploaded files (no echo to prompt)
-                  const lCmd = `l ${basenames.map(b => shellQuote(b, 'posix')).join(' ')}\n`;
-                  toastStore.addToast(
-                    'SCP Upload',
-                    `${count} file${count > 1 ? 's' : ''} uploaded — click to list`,
-                    'success',
-                    undefined,
-                    undefined,
-                    () => {
-                      const bytes = Array.from(new TextEncoder().encode(lCmd));
-                      writeTerminal(ptyId, bytes).catch(e => logError(String(e)));
-                    },
-                  );
-                }
-              } else if (outcome.status === 'error') {
-                logError(`drag-drop SCP upload failed: ${outcome.error}`);
-                toastStore.addToast('SCP Upload Failed', outcome.error ?? 'Upload failed', 'error');
-              }
-            } else if (claudeStateStore.getState(tabId)) {
-              // Local Claude session — write absolute paths so Claude can reference files
-              const count = paths.length;
-              logInfo(`drag-drop local Claude: sending ${count} file path(s)`);
-              for (let i = 0; i < paths.length; i++) {
-                const bytes = Array.from(new TextEncoder().encode(paths[i] + ' '));
-                if (i > 0) await new Promise(r => setTimeout(r, 200));
-                await writeTerminal(ptyId, bytes, true);
-              }
-            } else {
-              // Local session — paste escaped file paths
-              const escaped = paths.map(quoteLocalPath).join(' ');
-              const bytes = Array.from(new TextEncoder().encode(escaped));
-              await writeTerminal(ptyId, bytes, true);
-            }
+            logInfo(`drag-drop: ${paths.length} file(s), ssh=${sshCommand ?? 'none'}, paths=${JSON.stringify(paths)}`);
+            // One path for every "put these files on the tab's line": it refuses while the
+            // agent shows a dialog (a typed key would answer it), uploads for ssh, quotes for
+            // the shell, and never submits.
+            await insertPathsIntoTab(tabId, paths.map(abs => ({ abs })), { sshCommand });
           })().catch(e => logError(`drag-drop failed: ${e}`));
         } else {
           dragSshCommand = null;
