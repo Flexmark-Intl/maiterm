@@ -184,6 +184,9 @@ export const REMOTE_CLAUDE_MOD_ENV = 'CLAUDE_CODE_PLUGIN_DIRS=$HOME/.maiterm/cla
  * escaped, and it contains no apostrophe so the single quotes below still close where they look
  * like they do.
  */
+/** A remote folder no shell treats specially, which `buildSshCommand` can quote once. */
+const SAFE_REMOTE_PATH = /^[A-Za-z0-9_@%+=:,./~-]+$/;
+
 export function buildSshCommand(
   sshCmd: string | null,
   remoteCwd: string | null,
@@ -215,7 +218,11 @@ export function buildSshCommand(
     }
     return `${program} -t -o ControlMaster=no ${rest} '${prelude}exec $SHELL -l'`;
   }
-  const cdPath = shellEscapePath(remoteCwd);
+  // `shellEscapePath` quotes for the REMOTE shell, but the line is typed into the local one,
+  // inside its own single quotes. A plain path passes through both unharmed; one with a space,
+  // a quote or a `$` must be escaped again for the local shell, or it splits there (and the
+  // remote `cd` fails, ending the session) or expands on this computer.
+  const cdPath = SAFE_REMOTE_PATH.test(remoteCwd) ? shellEscapePath(remoteCwd) : shellEscapePath(remoteCwd).replace(/'/g, "'\\''");
   return `${program} -t -o ControlMaster=no ${rest} '${prelude}cd ${cdPath} && exec $SHELL -l'`;
 }
 

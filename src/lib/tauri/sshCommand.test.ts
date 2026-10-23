@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { buildSshCommand, cleanSshCommand, normalizeSshInput, sshArgsOf, sshCommandLine } from './commands';
 
 const TAB = 'a1b2c3d4-5e6f-7788-99aa-bbccddeeff00';
@@ -26,6 +27,24 @@ describe('buildSshCommand', () => {
     expect(buildSshCommand('ews@nova', '/srv/app')).toBe(
       "ssh -t -o ControlMaster=no ews@nova 'cd '/srv/app' && exec $SHELL -l'",
     );
+  });
+
+  // The line is typed into a local shell, which hands ssh its words; ssh joins them with
+  // spaces into the command the remote shell parses. A folder with a space used to split in
+  // the local shell and reach the host as `cd /srv/my app`, which fails and ends the session.
+  it('quotes a folder for both shells it passes through', () => {
+    const remoteCommand = (line: string) => {
+      const prefix = 'ssh -t -o ControlMaster=no ews@nova ';
+      expect(line.startsWith(prefix)).toBe(true);
+      const words = execFileSync('/bin/sh', ['-c', `printf '%s\\0' ${line.slice(prefix.length)}`], { encoding: 'utf8' });
+      return words.split('\0').filter(Boolean).join(' ');
+    };
+    expect(remoteCommand(buildSshCommand('ews@nova', '/srv/my app'))).toBe("cd '/srv/my app' && exec $SHELL -l");
+    expect(remoteCommand(buildSshCommand('ews@nova', "/srv/it's $HOME"))).toBe("cd '/srv/it'\\''s $HOME' && exec $SHELL -l");
+    expect(remoteCommand(buildSshCommand('ews@nova', '~/my app'))).toBe("cd ~/'my app' && exec $SHELL -l");
+    // A plain folder keeps the form every stored command already has.
+    expect(remoteCommand(buildSshCommand('ews@nova', '/srv/app'))).toBe('cd /srv/app && exec $SHELL -l');
+    expect(cleanSshCommand(buildSshCommand('-x ews@nova', '/srv/my app', TAB))).toBe('-x ews@nova');
   });
 
   it('refuses to interpolate anything that is not a plain id', () => {
