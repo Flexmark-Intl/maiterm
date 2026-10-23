@@ -123,6 +123,7 @@
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd> <span>Toggle composer dock</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>Shift</kbd> + <kbd>J</kbd> <span>Workstream Loom</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>B</kbd> <span>Toggle sidebar</span></div>
+          <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>Shift</kbd> + <kbd>B</kbd> <span>Files: open and focus, focus, or close</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>F</kbd> <span>Find in terminal</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>K</kbd> <span>Clear terminal + scrollback</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>+</kbd> <span>Zoom in</span></div>
@@ -131,6 +132,26 @@
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>,</kbd> <span>Preferences</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>/</kbd> <span>Show this help</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>Q</kbd> <span>Quit</span></div>
+        </div>
+
+        <h3 class="section-heading">Files (while the tree has focus)</h3>
+        <div class="shortcut-group">
+          <div class="shortcut"><kbd>&#x2191;</kbd> <kbd>&#x2193;</kbd> <kbd>PgUp</kbd> <kbd>PgDn</kbd> <kbd>Home</kbd> <kbd>End</kbd> <span>Move</span></div>
+          <div class="shortcut"><kbd>&#x2192;</kbd> / <kbd>&#x2190;</kbd> <span>Open folder or step in / close folder or go to parent</span></div>
+          <div class="shortcut"><kbd>{altLabel}</kbd> + <kbd>&#x2192;</kbd> / <kbd>&#x2190;</kbd> <span>Open / close every folder below</span></div>
+          <div class="shortcut"><kbd>Space</kbd> <span>Preview, keeping focus in the tree</span></div>
+          <div class="shortcut"><kbd>Enter</kbd> <span>Open file / toggle folder</span></div>
+          <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>Enter</kbd> <span>Open to the side</span></div>
+          <div class="shortcut"><kbd>{altLabel}</kbd> + <kbd>Enter</kbd> <span>Add path(s) to the followed tab (never sent)</span></div>
+          <div class="shortcut"><kbd>Shift</kbd> + <kbd>&#x2191;</kbd><kbd>&#x2193;</kbd> · <kbd>{modLabel}</kbd> + <kbd>A</kbd> <span>Extend selection / select all</span></div>
+          {#if isMac()}
+            <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>{altLabel}</kbd> + <kbd>C</kbd> <span>Copy path (+ <kbd>Shift</kbd>: relative)</span></div>
+          {:else}
+            <div class="shortcut"><kbd>Shift</kbd> + <kbd>{altLabel}</kbd> + <kbd>C</kbd> <span>Copy path (+ <kbd>{modLabel}</kbd>: relative)</span></div>
+          {/if}
+          <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>Shift</kbd> + <kbd>.</kbd> <span>Show / hide hidden files</span></div>
+          <div class="shortcut"><kbd>a</kbd>–<kbd>z</kbd> <span>Jump to the next name starting with what you type</span></div>
+          <div class="shortcut"><kbd>Esc</kbd> <span>Clear the selection, then back to the terminal</span></div>
         </div>
 
       {:else if activeSection === 'editor'}

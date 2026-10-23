@@ -84,7 +84,7 @@
     if (result) preferencesStore.setTriggers(result);
   }
 
-  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'notifications', 'triggers', 'overlord', 'claude_code', 'mailink', 'accounts', 'mcp', 'browser', 'deshittify', 'integrations', 'backup', 'updates', 'permissions'] as const;
+  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'files', 'notifications', 'triggers', 'overlord', 'claude_code', 'mailink', 'accounts', 'mcp', 'browser', 'deshittify', 'integrations', 'backup', 'updates', 'permissions'] as const;
   type SectionId = typeof sectionIds[number];
   const saved = localStorage.getItem('prefs-section');
   let activeSection = $state<SectionId>(
@@ -419,6 +419,7 @@
     { id: 'tabs' as const, label: 'Tabs' },
     { id: 'workspace' as const, label: 'Workspace' },
     { id: 'notes' as const, label: 'Notes' },
+    { id: 'files' as const, label: 'Files' },
     { id: 'notifications' as const, label: 'Notifications' },
     { id: 'triggers' as const, label: 'Triggers' },
     { id: 'overlord' as const, label: 'Overlord' },
@@ -1360,6 +1361,84 @@
             <span class="toggle-knob"></span>
           </button>
         </div>
+
+      {:else if activeSection === 'files'}
+        <!-- Files (docs/file-tree.md §16): the human's view settings. None is in
+             preference_meta: agents get purpose-built tools instead. -->
+        {#snippet ftToggle(id: string, label: string, hint: string, value: boolean, set: (v: boolean) => unknown)}
+          <div class="setting" style="align-items: flex-start;">
+            <div>
+              <label for={id}>{label}</label>
+              {#if hint}<p class="setting-hint">{hint}</p>{/if}
+            </div>
+            <button id={id} class="toggle" class:active={value} onclick={() => set(!value)} aria-pressed={value} aria-label={`Toggle ${label.toLowerCase()}`}>
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+        {/snippet}
+
+        <h3 class="section-heading">Files</h3>
+        <p class="section-desc">A project tree beside the terminals, following the active tab’s folder. Toggle it with {modLabel}+Shift+B or the folder button in the titlebar.</p>
+        {@render ftToggle('ft-enabled', 'Enable Files', 'The column, its shortcut and its titlebar button.', preferencesStore.fileTreeEnabled, (v) => preferencesStore.setFileTreeEnabled(v))}
+        {@render ftToggle('ft-follow', 'Follow the Active Tab', 'Show the folder of the terminal tab in front. Off: the folder stays until you pick another.', preferencesStore.fileTreeFollow, (v) => preferencesStore.setFileTreeFollow(v))}
+        {@render ftToggle('ft-reveal', 'Reveal the Active File', 'When an editor tab is in front, open the folders down to its file.', preferencesStore.fileTreeAutoReveal, (v) => preferencesStore.setFileTreeAutoReveal(v))}
+        {@render ftToggle('ft-preview', 'Preview Tabs', 'A single click opens a file in an italic preview tab that the next click reuses. Edit it or double-click to keep it.', preferencesStore.fileTreePreviewTabs, (v) => preferencesStore.setFileTreePreviewTabs(v))}
+
+        <h3 class="section-heading" style="margin-top: 20px;">What’s Shown</h3>
+        {@render ftToggle('ft-hidden', 'Show Hidden Files', 'Dotfiles and files the system marks hidden.', preferencesStore.fileTreeShowHidden, (v) => preferencesStore.setFileTreeShowHidden(v))}
+        {@render ftToggle('ft-ignored', 'Show Ignored Files', 'Files your .gitignore excludes, dimmed.', preferencesStore.fileTreeShowIgnored, (v) => preferencesStore.setFileTreeShowIgnored(v))}
+        <div class="setting" style="align-items: flex-start;">
+          <div>
+            <label for="ft-exclude">Always Hide</label>
+            <p class="setting-hint">One gitignore pattern per line (for example <code>*.log</code> or <code>build/</code>). .git, .DS_Store and Thumbs.db are always hidden. Applies the next time a folder is opened.</p>
+          </div>
+        </div>
+        <textarea
+          id="ft-exclude"
+          class="pattern-input"
+          rows="4"
+          placeholder={'*.log\nbuild/'}
+          spellcheck="false"
+          value={preferencesStore.fileTreeExclude.join('\n')}
+          onchange={(e) => preferencesStore.setFileTreeExclude(e.currentTarget.value.split('\n').map((l) => l.trim()).filter(Boolean))}
+        ></textarea>
+
+        <h3 class="section-heading" style="margin-top: 20px;">Look and Keys</h3>
+        <div class="setting">
+          <label for="ft-density">Row Density</label>
+          <select id="ft-density" value={preferencesStore.fileTreeDensity} onchange={(e) => preferencesStore.setFileTreeDensity(e.currentTarget.value)}>
+            <option value="compact">Compact</option>
+            <option value="normal">Normal</option>
+            <option value="comfortable">Comfortable</option>
+          </select>
+        </div>
+        <div class="setting">
+          <label for="ft-icons">Icons</label>
+          <select id="ft-icons" value={preferencesStore.fileTreeIcons} onchange={(e) => preferencesStore.setFileTreeIcons(e.currentTarget.value)}>
+            <option value="color">Colour</option>
+            <option value="mono">Monochrome</option>
+          </select>
+        </div>
+        <div class="setting" style="align-items: flex-start;">
+          <div>
+            <label for="ft-sticky">Sticky Folders</label>
+            <p class="setting-hint">How many parent folders stay pinned at the top while you scroll. 0 turns it off.</p>
+          </div>
+          <div class="number-input-wrapper">
+            <button class="number-btn" onclick={() => preferencesStore.setFileTreeStickyMax(preferencesStore.fileTreeStickyMax - 1)}>−</button>
+            <input
+              type="number"
+              id="ft-sticky"
+              class="number-input"
+              min="0"
+              max="10"
+              value={preferencesStore.fileTreeStickyMax}
+              onchange={(e) => preferencesStore.setFileTreeStickyMax(parseInt(e.currentTarget.value) || 0)}
+            />
+            <button class="number-btn" onclick={() => preferencesStore.setFileTreeStickyMax(preferencesStore.fileTreeStickyMax + 1)}>+</button>
+          </div>
+        </div>
+        {@render ftToggle('ft-vim', 'Vim Keys', 'j k h l, gg G, o, y/Y to copy paths, a to add to the followed tab. Type-ahead then needs a leading \'.', preferencesStore.fileTreeVimKeys, (v) => preferencesStore.setFileTreeVimKeys(v))}
 
       {:else if activeSection === 'notifications'}
         <div class="setting" style="align-items: flex-start;">

@@ -31,6 +31,7 @@
   import * as commands from '$lib/tauri/commands';
   import { stageRemoteFileTemp } from '$lib/tauri/commands';
   import { error as logError } from '@tauri-apps/plugin-log';
+  import { fileTreeStore } from '$lib/stores/fileTree.svelte';
 
   interface Props {
     workspaceId: string;
@@ -1132,6 +1133,17 @@
         });
       }
     }
+    // Files (docs/file-tree.md §3.1): reveals, and opens the column only because the human
+    // clicked. A local editor file is selected in the tree; a terminal tab is brought to the
+    // front so the tree follows it, and its folder is selected. Not for a stack service.
+    if (preferencesStore.fileTreeEnabled) {
+      if (editorFile && !editorFile.is_remote) {
+        const path = editorFile.file_path;
+        editorPathItems.push({ label: 'Reveal in Files', action: () => { void fileTreeStore.revealPath(path); } });
+      } else if (isTerminalTab && !tabObj?.service_id) {
+        editorPathItems.push({ label: 'Reveal in Files', action: () => { void fileTreeStore.revealTabFolder(workspaceId, pane.id, tabId); } });
+      }
+    }
     const items: Array<MenuItem> = [
       ...editorPathItems,
       ...(editorPathItems.length > 0 ? [{ label: '', separator: true, action: () => {} }] : []),
@@ -1255,7 +1267,11 @@
       class:drop-after={dropTargetIndex === index && dropSide === 'after' && dragTabId !== tab.id}
       data-tab-id={tab.id}
       onclick={() => { if (!dragTabId && !justDragged) handleTabClick(tab.id); }}
-      ondblclick={(e) => startEditing(tab, e)}
+      ondblclick={(e) => {
+        // A double-click on a Files preview tab keeps it (§10.5) instead of renaming it.
+        if (fileTreeStore.isPreviewTab(tab.id)) { e.preventDefault(); fileTreeStore.pinPreview(tab.id); return; }
+        startEditing(tab, e);
+      }}
       oncontextmenu={(e) => {
         if (editingId === tab.id) return; // native menu for the rename input
         e.preventDefault();
@@ -1401,7 +1417,7 @@
             <span class="muted-indicator"><Icon name="bell-off" size={11} /></span>
           </Tooltip>
         {/if}
-        <span class="tab-name">{displayName(tab)}</span>
+        <span class="tab-name" class:preview={fileTreeStore.isPreviewTab(tab.id)}>{displayName(tab)}</span>
         {@const hasRunningPty = !isEditor && !isDiff && !!terminalsStore.get(tab.id)}
         <div class="tab-actions" class:always-visible={preferencesStore.tabButtonStyle === 'always'} class:modifier-only={preferencesStore.tabButtonStyle === 'modifier'} class:modifier-active={preferencesStore.tabButtonStyle === 'modifier' && modHeld} class:never-visible={preferencesStore.tabButtonStyle === 'never'} class:triple-action={isEditor || isDiff} class:quadruple-action={!isEditor && !isDiff && !hasRunningPty} class:quintuple-action={hasRunningPty}>
           <IconButton
@@ -1951,6 +1967,11 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 0.923rem;
+  }
+
+  /* A Files preview tab: the next preview replaces it until it's kept (docs/file-tree.md §10.5). */
+  .tab-name.preview {
+    font-style: italic;
   }
 
   .tab-actions {
