@@ -65,7 +65,7 @@ async function render() {
         link.handle
           ? el('span', { class: 'meta' }, [`The agent knows this tab as ${link.handle}`, link.openedBy ? `opened by ${link.openedBy}` : null].filter(Boolean).join(' · '))
           : null,
-        el('span', { class: 'hint' }, 'That agent can diagnose this tab (console, network) and drive it (read, click, type). Chrome shows a debugging bar while it works; cancelling the bar also unlinks.'),
+        el('span', { class: 'hint' }, 'That agent can diagnose this tab (console, network) and drive it (read, click, type), and no other tab. While it does, Chrome shows its “debugging this browser” bar in every tab: that bar is Chrome’s and covers the whole browser. Cancelling it unlinks every linked tab.'),
         el('button', { class: 'primary', onclick: unlink }, 'Unlink'),
       ),
     );

@@ -101,8 +101,10 @@
     Link a tab in your own Chrome (or Brave, Edge, Arc) to one of your agent tabs, and that agent
     can diagnose it (console errors, network requests and their responses) and drive it (read the
     page, click, type, navigate), signed in as you, even while you look at another tab. Only you can
-    link a tab, from the extension’s icon in the browser, and an agent can use only the tab linked
-    to it. Chrome shows a debugging bar while one works; cancelling that bar unlinks the tab.
+    link a tab, from the extension’s icon in the browser, and an agent can use only the tabs linked
+    to it. While a linked tab is in use, Chrome shows its “debugging this browser” bar in every
+    tab of every window: it is Chrome’s, browser-wide, and doesn’t mean the other tabs are linked.
+    Cancelling it unlinks every linked tab.
   </p>
 
   <div class="row">

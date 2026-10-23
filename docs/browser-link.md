@@ -35,9 +35,15 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    (`handleFloors`, sent on `hello`), since a maiTerm restart empties the counter.
    What changed that the agent didn't do (a tab joined, closed, moved, was unlinked) is held and
    handed over as `linked_tabs_changed` on its next browser tool call.
-4. **The human can always see and stop it.** Chrome's own "is debugging this browser" bar shows
-   while a linked tab is attached. Cancelling that bar UNLINKS the tab (it is the human saying
-   stop — re-attaching silently would overrule them). Closing the Chrome tab unlinks it.
+4. **The human can always see and stop it.** Chrome's own "started debugging this browser" bar
+   shows while a linked tab is attached — in EVERY tab of every window (Chrome's choice: it is
+   browser-wide, no extension can scope or hide it; only Chrome's `--silent-debugger-extension-api`
+   flag does). So every surface that mentions it says it is browser-wide and that only linked
+   tabs are attached, or a human reads it as "it took all my tabs". Cancelling that bar detaches
+   every session and so UNLINKS every linked tab (the human saying stop — re-attaching silently
+   would overrule them). Closing a Chrome tab unlinks it. The extension stays attached for the
+   life of a link, by decision (2026-10-22): idle-detach would hide the bar but lose the console
+   and network record of a bug the human reproduces themselves.
 5. **Links are in memory.** Chrome tab ids do not survive a browser restart, so nothing is
    persisted on a `Tab`. The extension keeps its links in `chrome.storage.session` (lives as long
    as the browser) and re-announces them on every (re)connect; maiTerm accepts a re-announced

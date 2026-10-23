@@ -51,7 +51,7 @@ Typical uses: an agent fixing a bug reproduces it in your real, signed-in app an
 YOU STAY IN CONTROL
 - Only you link a tab, from this extension's icon. An agent cannot pick or reach any other tab.
 - Each agent can use only the tabs linked to it. A popup a linked page opens for it, such as a sign-in window, joins it too.
-- Chrome shows its "is debugging this browser" bar while a tab is in use. Cancel it, close the tab, click Unlink, or turn the feature off in maiTerm, and the link ends.
+- Chrome shows its "started debugging this browser" bar while a linked tab is in use. Chrome shows it in every tab, but only the tabs you linked are attached. Cancel it to end every link, or close a tab or click Unlink to end that one.
 - It works in the background: you can keep using other tabs while an agent works in its own.
 
 REQUIRES maiTerm
