@@ -54,9 +54,11 @@ agent in the Hive reads and writes one **shared memory**.
    set, the coordinator can spawn workers without a card each. It can't exceed the cap, it
    can't create Hives, and workers can't spawn workers. Rust enforces all of this by tab
    identity (§7).
-6. **Workers never land their own work.** A worker reports. The coordinator asks to land. The
-   human approves the merge (§8), the same rule Anthropic's auto mode enforces ("merging a pull
-   request no human has approved").
+6. **Workers never land their own work; the coordinator does, through maiTerm.** A worker
+   reports. The coordinator reviews it and lands it: by default straight into the Hive's base
+   branch (main), with no card (§8). maiTerm carries out the merge, never the agent's own git,
+   so it can refuse a merge that would touch anyone's uncommitted work. A Hive setting switches
+   to an integration branch where the human approves each land.
 7. **Reuse before invent.** The cards are maiTerm Tasks. Prompts go through `PromptCard`, blockers
    through `BlockerCard`, delivery through `deliver_to_agent`, and memory is Claude's own auto
    memory pointed at a shared directory.
@@ -75,13 +77,16 @@ replaces):
 | Goal | One line. Shown on the board header, and sent to the coordinator first |
 | Instructions | Standing rules, the brief every agent in the Hive starts from (Projects' 16k-char instructions) |
 | Workers at once | **Hard cap**, enforced in Rust (default 4) |
+| Landing | **Land to Base** (default: the coordinator merges each finished worker into Base) or **Integration branch, I approve each land** (§8) |
+| Land check | Optional command that must pass in the worker's worktree before a land (e.g. `npm run check`) |
 | Setup command | Run in every new worktree before its agent starts (e.g. `npm ci`) |
 | Models | Coordinator and worker runtime/model/effort (default: Claude, coordinator lower effort, as Projects does) |
 
 On **Create**, maiTerm:
 
-1. Makes the **integration branch** `hive/<slug>` off Base, and its worktree (§6). The coordinator
-   lives there.
+1. Makes the coordinator's worktree (§6): detached at Base's tip in the default mode, or on a
+   new **integration branch** `hive/<slug>` off Base in the approval mode. The coordinator works
+   there, so it reads the code without ever being in the human's checkout.
 2. Creates the shared memory directory and seeds `MEMORY.md` with the goal (§9).
 3. Creates the coordinator tab hidden, launched in the integration worktree with the Hive's
    settings, and sends it the Hive brief: role, goal, instructions, tools, rules.
@@ -244,9 +249,9 @@ empty (the serde-enum-downgrade memory, and `docs/loom.md` "Blocked with no reas
   `app_data_slug()`, never a hard-coded `com.aiterm.app`. Nested inside the repo, every watcher
   would scan it: Vite, tsc, cargo, eslint, the Files column, Claude's own Grep in the main
   checkout.
-- **Branches**: integration `hive/<hive-slug>`; workers `hive/<hive-slug>/<worker-slug>`, branched
-  off the integration branch's current tip. A wave-2 worker therefore starts with wave 1's
-  landed work.
+- **Branches**: workers `hive/<hive-slug>/<worker-slug>`, branched off the **landing target's
+  current tip** (Base by default, `hive/<hive-slug>` in the approval mode). A wave-2 worker
+  therefore starts with wave 1's landed work.
 - **Setup**: the Hive's setup command runs in the new worktree, in the worker's own tab before
   its agent starts, so its output is in the raw terminal if it fails. Gitignored files the work
   needs (`.env`) are copied in from a `.worktreeinclude`-style list in the Hive settings, with
@@ -304,7 +309,7 @@ from the stated tab identity, like `own_tab_only_refusal`.
 | `hiveSpawnWorker {title, brief, depends_on?, model?, effort?}` | coordinator | Creates the task, worktree, branch and hidden tab, runs setup, launches the agent with the Hive preamble + brief. Refused above the cap. A worker with unmet `depends_on` is created in **Starting · waits on …** and launched when they land |
 | `hiveListWorkers` | coordinator | Cards as data: state, task, branch, diff stat, last report |
 | `hiveMessageWorker {worker, text}` | coordinator | Through `deliver_to_agent`: the draft, dialog and typing guards; a busy agent is no reason to hold |
-| `hiveRequestLand {worker, summary}` | coordinator | Files a land request (§8) |
+| `hiveLand {worker, summary}` | coordinator | Lands the worker (§8): maiTerm merges it into Base, or files a land request in the approval mode. Answers with what happened, or why it refused |
 | `hiveStopWorker {worker, reason}` | coordinator | Stops the agent; keeps worktree and branch |
 | `hiveReport {status: done\|blocked\|failed, summary, notes?}` | worker | Records the report on the task (status + note), and delivers it to the coordinator as a framed `⟦HIVE REPORT⟧` message |
 
@@ -321,8 +326,9 @@ exists.
 | Create a Hive | The human, by the sheet. No tool can |
 | Spawn a worker within the cap | None; the Hive is the envelope (decision §13.1) |
 | Raise the cap | The human, in Hive settings |
-| Land a worker's branch | The human, on a land card (decision §13.2) |
-| Merge the Hive into Base | The human, outside the Hive (a normal merge or MR) |
+| Land a worker into Base (default mode) | None: the coordinator calls `hiveLand`, and maiTerm merges behind its guards (§8) |
+| Land a worker (approval mode) | The human, on a land card; merging the integration branch into Base is the human's, outside the Hive |
+| Push | Never automatic in v1; landing is local (§8.4) |
 | A worker's permission prompt | The human, in the worker's column, or the phone |
 
 The window's Overlord engine leaves Hive tabs alone. A Hive workspace is `overlord_exempt` by
@@ -331,26 +337,56 @@ agent is the double-drive problem `docs/overlord.md` §9.1.2 solved for escalati
 
 ## 8. Landing
 
-The local stand-in for Projects' pull requests:
+The local stand-in for Projects' pull requests. Both modes start the same way:
 
 1. A worker reports `done`. Its card goes to **Reported**.
 2. The coordinator reviews: it reads the report, can read the worker's diff
-   (`git diff hive/<hive>...hive/<hive>/<worker>`), and can send the worker back with
+   (`git diff <target>...hive/<hive>/<worker>`), and can send the worker back with
    `hiveMessageWorker`.
-3. When satisfied, the coordinator calls `hiveRequestLand`. The card goes to **Landing**, and an
-   **Agent request** card ("Land *Session store* into *hive/auth*?", with the diff stat and the
-   coordinator's summary quoted as its reason) appears in the Loom's Decisions, in the worker's
-   column, and on the phone. It's the existing agent-requests machinery (`docs/agent-requests.md`):
-   only a human click or a paired phone approves.
-4. On approval, maiTerm merges `--no-ff` **in the integration worktree**, which is the
-   coordinator's own folder, so the human's main checkout is never touched. A conflict aborts the
-   merge, and the card says so. The coordinator then tells the worker to rebase onto the
-   integration branch and report again.
-5. After landing, the worker is retired: the agent exits, and the worktree is removed **only if
-   it's clean**. The branch is kept.
+3. When satisfied, the coordinator calls `hiveLand`. The card goes to **Landing**.
 
-At the end, the integration branch `hive/<slug>` holds the whole result. The human merges it into
-Base or opens an MR from it, outside the Hive.
+### 8.1 Default: land to Base (decided 2026-10-23)
+
+maiTerm lands the worker into Base (main) with no card, in two git steps. Neither one can
+touch anyone's uncommitted work:
+
+1. **Bring the worker up to date, in the worker's own worktree:** `git merge <Base>`. A conflict
+   aborts, and `hiveLand` answers with the conflicting files. The coordinator tells the worker to
+   resolve them in its own tree and report again. The land check (if set) then runs there, and a
+   failure refuses the land with its output.
+2. **Advance Base by fast-forward only.** Since the worker now contains Base, Base moves to the
+   worker's tip with no new merge:
+   - if Base is checked out somewhere (usually the human's main checkout, where other agents may
+     be working), `git -C <that checkout> merge --ff-only <worker tip>`. Git refuses if that would
+     overwrite an uncommitted change there. **The land then waits**: the card reads "Landing ·
+     held: main checkout has uncommitted changes to `src/x.ts`", and the coordinator is told,
+     rather than anything being stashed or overwritten;
+   - if Base isn't checked out anywhere, `git update-ref refs/heads/<Base> <tip> <old tip>`,
+     a compare-and-swap that refuses if Base moved meanwhile.
+
+Lands are serialized per repository (one lock), so two coordinators or two workers can't race.
+After a land, maiTerm moves the coordinator's detached worktree to the new Base tip, and any new
+worker branches from it. Files in the main checkout change under agents working there, the same
+as when any one of them commits.
+
+### 8.2 Setting: integration branch, I approve each land
+
+`hiveLand` files an **Agent request** card ("Land *Session store* into *hive/auth*?", with the
+diff stat and the coordinator's summary quoted as its reason) in the Loom's Decisions, in the
+worker's column and on the phone. It's the existing agent-requests machinery
+(`docs/agent-requests.md`): only a human click or a paired phone approves. On approval, maiTerm
+merges `--no-ff` in the integration worktree (the coordinator's own folder). At the end,
+`hive/<slug>` holds the whole result, and the human merges it into Base or opens an MR from it,
+outside the Hive.
+
+### 8.3 After landing
+
+The worker is retired: the agent exits, and its worktree is removed **only if clean**. The branch
+is kept.
+
+### 8.4 Pushing
+
+Landing is local. Whether a land to Base also pushes is an open question (§13).
 
 ## 9. Shared memory
 
@@ -419,14 +455,17 @@ Each is an hour or less, and each can change the design:
 
 ## 13. Decisions for the human
 
-1. **Spawn approval.** Recommended: spawns within the cap need no card (principle 5).
-   Alternative: a card per worker, or a "propose first" mode where the coordinator's suggestions
-   are cards with Start.
-2. **Landing.** Recommended: an integration branch, with each land approved by the human on a
-   card (§8). Alternative: workers' branches are left for the human to merge by hand, with no
-   integration branch.
-3. **Runtime scope.** Recommended: Claude only in v1 (§11).
-4. **The window Overlord** leaves Hive tabs alone. Recommended: yes (§7.3).
+Decided 2026-10-23:
+
+1. **Spawn approval:** spawns within the cap need no card (principle 5).
+2. **Landing:** by default the coordinator lands each worker straight into Base (§8.1). The
+   integration branch with human-approved lands is a setting (§8.2).
+3. **Runtime scope:** Claude only in v1 (§11).
+4. **The window Overlord** leaves Hive tabs alone (§7.3).
+
+Open:
+
+5. Does a land to Base also push Base to its upstream?
 
 ## 14. Build order
 
@@ -437,6 +476,6 @@ Each is an hour or less, and each can change the design:
 4. Workers: worktrees, setup, trust write, `hiveSpawnWorker`/`hiveListWorkers`/`hiveReport`,
    static cards.
 5. The activity feed, diff stat, worker columns, raw terminal, keyboard.
-6. Landing through agent requests; retire; delete flow.
+6. Landing: land to Base (default), the approval-mode setting through agent requests; retire; delete flow.
 7. Shared memory: `autoMemoryDirectory`, index rebuild, Memory tab, Library.
 8. Suspend/resume/restart, phone polish (Hive tabs already appear as chats).
