@@ -21,6 +21,16 @@ describe('treeAction', () => {
     expect(treeAction(k('j'), { ...vim, typeaheadArmed: true })).toEqual({ type: 'typeahead', char: 'j' });
   });
 
+  it('AltGr characters are type-ahead off macOS, though Chromium reports Ctrl+Alt', () => {
+    const altGr = (key: string) => k(key, { ctrlKey: true, altKey: true, getModifierState: (m) => m === 'AltGraph' });
+    expect(treeAction(altGr('@'), linux)).toEqual({ type: 'typeahead', char: '@' });
+    expect(treeAction(altGr('ł'), linux)).toEqual({ type: 'typeahead', char: 'ł' });
+    // A real Ctrl+Alt chord (no AltGraph) is still nobody's.
+    expect(treeAction(k('q', { ctrlKey: true, altKey: true, getModifierState: () => false }), linux)).toBeNull();
+    // Vim mode keeps letters as commands; an AltGr character is not one.
+    expect(treeAction(altGr('@'), { ...linux, vim: true })).toBeNull();
+  });
+
   it('leaves app chords alone (Cmd+N, Cmd+D) and the other platform modifier', () => {
     expect(treeAction(k('n', { metaKey: true }), mac)).toBeNull();
     expect(treeAction(k('d', { metaKey: true }), mac)).toBeNull();

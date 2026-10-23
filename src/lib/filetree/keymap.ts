@@ -40,6 +40,8 @@ export interface KeyLike {
   ctrlKey: boolean;
   altKey: boolean;
   shiftKey: boolean;
+  /** A KeyboardEvent's, for AltGr. */
+  getModifierState?(key: string): boolean;
 }
 
 export interface KeymapOptions {
@@ -52,6 +54,11 @@ export interface KeymapOptions {
 }
 
 export function treeAction(e: KeyLike, o: KeymapOptions): TreeAction | null {
+  // AltGr (Windows and Linux layouts) types a character: `@` on German, `ł` on Polish.
+  // Chromium reports it as Ctrl+Alt, which would read as a chord below, so it is text.
+  if (!o.mac && e.key.length === 1 && e.getModifierState?.('AltGraph')) {
+    return o.vim && !o.typeaheadArmed ? null : { type: 'typeahead', char: e.key };
+  }
   const mod = o.mac ? e.metaKey : e.ctrlKey;
   // The other platform's modifier is never ours (Ctrl+letter on macOS is emacs motion in
   // inputs; Meta elsewhere is the OS's).
