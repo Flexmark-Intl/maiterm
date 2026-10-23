@@ -517,6 +517,17 @@
 >   (which only ever raises a turn) stayed ahead of it for good. The next subscription's primed
 >   marks rebuild it; until a mark of the current turn arrives, the newest turn with marks reads
 >   as this turn.
+>
+> **As built, phase 4 second review fixes (2026-10-23).** Where they changed the above:
+> - **A reopened column starts each tab's turn from the ledger's count**, not from the primed
+>   marks alone. Those carry writes only, so a turn that had only read (or not yet called a tool)
+>   was lost and the previous turn's writes read as this turn's (Turn lens, badges, tooltips,
+>   the two-writer span). The ledger now keeps when its current turn began (the prompt, or the
+>   first call when the prompt wasn't seen) and ended (the first of Stop, `idle_prompt` or an
+>   interrupt), and `agent_files_turns` serves them for the window's tabs. `attach()` asks for
+>   them as the hook listeners go up (`seedTurns` → `TurnTracker.seed`); a turn heard since the
+>   read is never lowered by it, and a Stop heard since keeps its end. Residual: a prompt that
+>   lands between the read and its arrival (milliseconds) is counted only from the next mark.
 
 ## 1. Why
 
