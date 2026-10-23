@@ -1474,9 +1474,9 @@ impl RemoteRoot {
         }
     }
 
-    /// Every file Find should know.
+    /// Every file Find should know. Carried through a restart of the helper, like a listing.
     pub fn files(&self) -> Result<Vec<String>, String> {
-        let f = self.conn.call("files", json!({ "root": self.root }), &[], Duration::from_secs(60)).map_err(|e| e.to_string())?;
+        let f = self.conn.call_through("files", json!({ "root": self.root }), &[], Duration::from_secs(60)).map_err(|e| e.to_string())?;
         Ok(f.payload.split(|b| *b == 0).filter(|p| !p.is_empty()).map(|p| String::from_utf8_lossy(p).into_owned()).collect())
     }
 

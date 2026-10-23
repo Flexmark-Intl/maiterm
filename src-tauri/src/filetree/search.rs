@@ -42,6 +42,9 @@ use crate::util::proc;
 pub const MAX_HITS: usize = 500;
 /// An index nobody has queried for this long is dropped.
 pub const EVICT_AFTER: Duration = Duration::from_secs(300);
+/// A build that couldn't list the root (a remote host that dropped, or timed out) is tried
+/// again on the first query this long after it: sooner, `search_ready`'s re-query would loop.
+pub const RETRY_FAILED_AFTER: Duration = Duration::from_secs(5);
 /// Paths indexed at most: past this a walk stops (a pinned `/` would otherwise never end).
 const MAX_PATHS: usize = 1_000_000;
 const WALK_DEPTH: usize = 20;
@@ -233,6 +236,10 @@ struct Inner {
     /// The human asked to index a home or volume root.
     shallow_ok: bool,
     last_query: Option<Instant>,
+    /// The last build couldn't list the root: why, and when. No index is published for it
+    /// (an empty one would answer "no matches" as if the root were empty, until something
+    /// dirtied it).
+    failed: Option<(String, Instant)>,
 }
 
 pub struct SearchState {
@@ -253,6 +260,8 @@ pub struct SearchState {
     inner: Mutex<Inner>,
     cv: Condvar,
     evict_after: Duration,
+    /// `RETRY_FAILED_AFTER` in ms (a test shortens it).
+    pub(crate) retry_failed_ms: AtomicU64,
     /// Index threads alive, for the test that a rebuild leaves none behind.
     #[cfg(test)]
     pub(crate) threads: std::sync::atomic::AtomicUsize,
@@ -276,6 +285,7 @@ impl SearchState {
             inner: Mutex::new(Inner::default()),
             cv: Condvar::new(),
             evict_after: EVICT_AFTER,
+            retry_failed_ms: AtomicU64::new(RETRY_FAILED_AFTER.as_millis() as u64),
             #[cfg(test)]
             threads: std::sync::atomic::AtomicUsize::new(0),
         })
@@ -307,7 +317,9 @@ impl SearchState {
             };
         }
         let need_build = inner.index.as_ref().is_none_or(|ix| ix.dirty);
-        if need_build && !inner.building {
+        let retry_after = Duration::from_millis(self.retry_failed_ms.load(Ordering::SeqCst));
+        let failed_lately = inner.failed.as_ref().is_some_and(|(_, at)| at.elapsed() < retry_after);
+        if need_build && !inner.building && !failed_lately {
             inner.building = true;
             inner.build_gen += 1;
             let (me, gen) = (self.clone(), inner.build_gen);
@@ -326,7 +338,9 @@ impl SearchState {
         }
         let indexing = inner.building;
         let Some(ix) = inner.index.as_ref() else {
-            return SearchResult { seq, indexing, items: Vec::new(), unavailable: None };
+            // Said, not answered as "no matches": the index couldn't be built.
+            let unavailable = if indexing { None } else { inner.failed.as_ref().map(|(why, _)| why.clone()) };
+            return SearchResult { seq, indexing, items: Vec::new(), unavailable };
         };
         let items = ix.search(query, limit, &|| latest.load(Ordering::SeqCst) != seq).unwrap_or_default();
         SearchResult { seq, indexing, items, unavailable: None }
@@ -347,16 +361,28 @@ impl SearchState {
             Alive(self.clone())
         };
         let started = Instant::now();
-        let paths = self.list_paths();
-        let mut ix = Index::from_paths(paths);
-        log::debug!("filetree: indexed {} paths under {} in {:?}", ix.len(), self.root.display(), started.elapsed());
-        {
-            let mut inner = self.inner.lock();
-            for c in std::mem::take(&mut inner.pending) {
-                apply_change(&mut ix, c);
+        match self.list_paths() {
+            Ok(paths) => {
+                let mut ix = Index::from_paths(paths);
+                log::debug!("filetree: indexed {} paths under {} in {:?}", ix.len(), self.root.display(), started.elapsed());
+                let mut inner = self.inner.lock();
+                for c in std::mem::take(&mut inner.pending) {
+                    apply_change(&mut ix, c);
+                }
+                inner.index = Some(ix);
+                inner.building = false;
+                inner.failed = None;
             }
-            inner.index = Some(ix);
-            inner.building = false;
+            Err(why) => {
+                // Nothing published: a (dirty) index from before stays, still due a rebuild,
+                // and with none the next query says why. The changes noted for this build
+                // are covered by the next one's fresh listing.
+                log::info!("filetree: indexing {}: {why}", self.root.display());
+                let mut inner = self.inner.lock();
+                inner.pending.clear();
+                inner.building = false;
+                inner.failed = Some((why, Instant::now()));
+            }
         }
         if let Some(h) = self.hub.upgrade() {
             h.search_ready();
@@ -378,19 +404,17 @@ impl SearchState {
         }
     }
 
-    fn list_paths(&self) -> Vec<String> {
+    /// Every path to index. Only a remote root can fail: a local one falls back to a walk.
+    fn list_paths(&self) -> Result<Vec<String>, String> {
         if let Some(r) = &self.remote {
-            return r.files().unwrap_or_else(|e| {
-                log::info!("filetree: indexing {} on {}: {e}", r.root, r.host);
-                Vec::new()
-            });
+            return r.files().map_err(|e| format!("Find couldn't list the files on {}: {e}", r.conn.label()));
         }
         if self.in_repo {
             if let Some(p) = git_ls_files(&self.root) {
-                return p;
+                return Ok(p);
             }
         }
-        walk(&self.root)
+        Ok(walk(&self.root))
     }
 
     /// Watcher changes, already classified. Cheap when there is no index.

@@ -500,6 +500,52 @@ fn a_remote_place_serves_the_same_tree_events() {
     }
 }
 
+/// Find on a remote root whose file list couldn't be had: it says why rather than answering "no
+/// matches" from an empty index taken as valid, and the next query after a while tries again.
+#[test]
+fn a_find_index_that_could_not_be_listed_says_so_and_is_tried_again() {
+    if !python3() {
+        return;
+    }
+    let home = scratch("findfail");
+    let t = scratch("findfail-root");
+    std::fs::write(t.join("alpha.txt"), "").unwrap();
+    let ft = FileTreeState::with(Duration::from_millis(200), crate::filetree::watch::RAW_CAPACITY, None);
+    ft.remotes.set_transport(Arc::new(Local { home: home.clone(), python: "python3" }), fast());
+    let rec = Arc::new(Recorder::default());
+    let ack = ft.open_with("w", &format!("me@here:{}", t.display()), vec![], rec.clone(), vec![], None).unwrap();
+    rec.wait("the root", |e| matches!(e, TreeEvent::Dir { .. }));
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    let mut seq = 0;
+    let mut settled = |want: &dyn Fn(&crate::filetree::types::SearchResult) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            seq += 1;
+            let r = hub.search(ack.sub_id, "alpha", 10, seq, false);
+            if !r.indexing && want(&r) {
+                return r;
+            }
+            assert!(Instant::now() < deadline, "never settled: {r:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    // The root goes away on the host: its `files` fails.
+    let away = t.with_extension("away");
+    std::fs::rename(&t, &away).unwrap();
+    let r = settled(&|r| r.unavailable.is_some());
+    assert!(r.items.is_empty());
+    assert!(r.unavailable.as_deref().is_some_and(|u| u.contains("Find couldn't list the files on")), "{r:?}");
+    // Back in place: tried again once the wait is over, and found.
+    std::fs::rename(&away, &t).unwrap();
+    hub.search.retry_failed_ms.store(0, Ordering::SeqCst);
+    let r = settled(&|r| !r.items.is_empty());
+    assert_eq!(r.items[0].rel, "alpha.txt");
+    assert_eq!(r.unavailable, None);
+    ft.close(ack.sub_id);
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&t);
+}
+
 #[test]
 fn a_dead_helper_comes_back_and_its_roots_reattach() {
     if !python3() {
