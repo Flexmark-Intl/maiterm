@@ -1331,7 +1331,7 @@ impl RootHub {
         };
         #[cfg(not(unix))]
         let exec = false;
-        let numstat = if m.is_file() { self.git.as_ref().and_then(|g| g.numstat(rel)) } else { None };
+        let numstat = if m.is_file() { self.git.as_ref().and_then(|g| g.numstat(rel, (m.len(), m.modified().ok()))) } else { None };
         Ok(StatInfo { size: m.len(), mtime_ms, exec, link_target, numstat })
     }
 

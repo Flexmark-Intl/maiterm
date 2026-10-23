@@ -366,6 +366,44 @@ fn a_root_inside_a_wholly_untracked_folder_decorates_its_contents() {
     let _ = std::fs::remove_dir_all(&r);
 }
 
+/// The hover's line counts: a file that stays `M` while it is edited changes no letter, so a
+/// cache kept only per git gen showed its first counts forever; and a staged rename named
+/// alone counted as wholly added.
+#[test]
+fn hover_counts_follow_edits_and_pair_a_rename_with_its_source() {
+    let r = repo("git-numstat");
+    let body: String = (0..200).map(|n| format!("line {n}\n")).collect();
+    std::fs::write(r.join("src/lib/big.txt"), &body).unwrap();
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "--no-verify", "-m", "big"]);
+    let stamp = |rel: &str| {
+        let m = std::fs::metadata(r.join(rel)).unwrap();
+        (m.len(), m.modified().ok())
+    };
+    for (root, rel) in [(r.clone(), "README.md"), (r.join("src"), "lib/a.ts")] {
+        let core = GitCore::new(std::sync::Weak::new(), &GitConfig::default(), &root, &r, false, Arc::new(Slots::new(2)));
+        let abs = root.join(rel);
+        let orig = std::fs::read_to_string(&abs).unwrap();
+        std::fs::write(&abs, format!("{orig}1\n2\n")).unwrap();
+        core.apply(core.epoch(), core.run_status(), Duration::ZERO).expect("the edit publishes");
+        let rel_from_top = abs.strip_prefix(&r).unwrap().to_string_lossy().replace('\\', "/");
+        assert_eq!(core.numstat(rel, stamp(&rel_from_top)), Some((2, 0)));
+        // More edits, same letter: no status run changes anything, the counts still move.
+        std::fs::write(&abs, format!("{orig}1\n2\n3\n4\n5\n")).unwrap();
+        assert!(core.apply(core.epoch(), core.run_status(), Duration::ZERO).is_none(), "still just M");
+        assert_eq!(core.numstat(rel, stamp(&rel_from_top)), Some((5, 0)), "root {}", root.display());
+    }
+    // `git mv` plus one line: +1, not +201.
+    git(&r, &["mv", "src/lib/big.txt", "src/lib/moved.txt"]);
+    std::fs::write(r.join("src/lib/moved.txt"), format!("{body}one more\n")).unwrap();
+    for (root, rel) in [(r.clone(), "src/lib/moved.txt"), (r.join("src/lib"), "moved.txt")] {
+        let core = GitCore::new(std::sync::Weak::new(), &GitConfig::default(), &root, &r, false, Arc::new(Slots::new(2)));
+        core.apply(core.epoch(), core.run_status(), Duration::ZERO).expect("the rename publishes");
+        assert_eq!(core.numstat(rel, stamp("src/lib/moved.txt")), Some((1, 0)), "root {}", root.display());
+    }
+    let _ = std::fs::remove_dir_all(&r);
+}
+
 /// The index is rebuilt from `ls-files`, whose `-c` still lists a file deleted from the
 /// worktree but not staged: every rebuild brought `rm`'d files (and an `rm -rf`'d folder's)
 /// back as hits that open nothing.

@@ -332,8 +332,16 @@ pub struct GitData {
     pub slow: bool,
     slow_streak: u32,
     pub error: Option<Failure>,
-    numstat: HashMap<String, (u64, Option<(u32, u32)>)>,
+    /// A staged rename's source (repository-relative) by its key: numstat names both sides so
+    /// git can pair them, or the new name counts as wholly added.
+    renames: HashMap<String, String>,
+    /// key → (gen, the file's stamp, counts). The stamp, because a file that stays `M` while
+    /// it keeps being edited changes no letter and bumps no gen.
+    numstat: HashMap<String, (u64, FileStamp, Option<(u32, u32)>)>,
 }
+
+/// A worktree file's size and modification time: when either moved, its counts did too.
+pub type FileStamp = (u64, Option<std::time::SystemTime>);
 
 impl GitData {
     /// The files map as the wire carries it: empty past the cap.
@@ -634,6 +642,7 @@ impl GitCore {
         d.error = None;
         let mut files: HashMap<String, String> = HashMap::with_capacity(st.entries.len());
         let mut named = Vec::new();
+        let mut renames = HashMap::new();
         for e in st.entries {
             // A rename's source counts even when only it is under the root (moved out).
             if let Some(o) = e.orig.as_deref().and_then(|o| self.to_root_rel(&norm(o))) {
@@ -644,6 +653,9 @@ impl GitCore {
             let Some(rel) = self.to_root_rel(&norm(&e.path)) else { continue };
             if !e.dir {
                 named.push(rel.clone());
+            }
+            if let (Some(o), "R") = (&e.orig, e.letter) {
+                renames.insert(rel.clone(), o.clone());
             }
             // A wholly untracked folder keeps git's trailing slash: the client can't tell a
             // folder from a file by name, and needs to, to mark everything inside it.
@@ -670,6 +682,7 @@ impl GitCore {
         d.files = files;
         d.dirs = dirs;
         d.truncated = truncated;
+        d.renames = renames;
         if unchanged {
             return None;
         }
@@ -706,39 +719,47 @@ impl GitCore {
         ("live", None)
     }
 
-    /// `git diff --numstat HEAD` for one changed file, cached until the next status run
-    /// changes anything. Clean and untracked files cost nothing: there is no diff to count.
-    pub fn numstat(&self, rel: &str) -> Option<(u32, u32)> {
+    /// `git diff --numstat HEAD` for one changed file, cached until a status run changes
+    /// anything or the file itself changes (`stamp`, from the hover's own stat). Clean and
+    /// untracked files cost nothing: there is no diff to count.
+    pub fn numstat(&self, rel: &str, stamp: FileStamp) -> Option<(u32, u32)> {
         if !self.enabled() || split_rel(rel).is_err() || rel.is_empty() {
             return None;
         }
         // The row's rel is the on-disk spelling; the keys are git's (NFC on macOS).
         let key = norm(rel);
-        let gen = {
+        let (gen, source) = {
             let d = self.data.lock();
             let letter = d.files.get(key.as_ref())?;
             if letter == "?" {
                 return None;
             }
-            if let Some((g, v)) = d.numstat.get(key.as_ref()) {
-                if *g == d.gen {
+            if let Some((g, s, v)) = d.numstat.get(key.as_ref()) {
+                if *g == d.gen && *s == stamp {
                     return *v;
                 }
             }
-            d.gen
+            (d.gen, d.renames.get(key.as_ref()).cloned())
         };
+        // git prints repository-relative paths: the record for this file is found by that.
+        let target = if self.prefix.is_empty() { key.to_string() } else { format!("{}/{key}", self.prefix) };
         let got = {
             let _slot = self.slots.acquire();
             let mut c = self.cmd();
-            c.args(["diff", "--numstat", "-z", "HEAD", "--"]).arg(format!(":(literal){rel}"));
-            proc::output_timeout(&mut c, Duration::from_secs(5)).ok().filter(|o| o.status.success()).and_then(|o| parse_numstat(&o.stdout))
+            // `-M` whatever `diff.renames` says, and the source named too (from the top: it
+            // may be outside the root), so a staged rename counts its edits, not its size.
+            c.args(["diff", "--numstat", "-z", "-M", "HEAD", "--"]).arg(format!(":(literal){rel}"));
+            if let Some(src) = &source {
+                c.arg(format!(":(top,literal){src}"));
+            }
+            proc::output_timeout(&mut c, Duration::from_secs(5)).ok().filter(|o| o.status.success()).and_then(|o| parse_numstat(&o.stdout, &target))
         };
         let mut d = self.data.lock();
         if d.gen == gen {
             if d.numstat.len() >= NUMSTAT_CACHE {
                 d.numstat.clear();
             }
-            d.numstat.insert(key.into_owned(), (gen, got));
+            d.numstat.insert(key.into_owned(), (gen, stamp, got));
         }
         got
     }
@@ -789,14 +810,36 @@ fn untranslated(c: &mut std::process::Command) {
     c.env("LC_ALL", "C");
 }
 
-/// `added\tdeleted\tpath\0` for one file; a binary file's `-\t-` counts nothing.
-fn parse_numstat(out: &[u8]) -> Option<(u32, u32)> {
-    let rec = out.split(|b| *b == 0).next()?;
-    let text = std::str::from_utf8(rec).ok()?;
-    let mut it = text.splitn(3, '\t');
-    let a = it.next()?.parse().ok()?;
-    let d = it.next()?.parse().ok()?;
-    Some((a, d))
+/// The counts for `target` (repository-relative) from `--numstat -z`: `added\tdeleted\tpath\0`,
+/// or `added\tdeleted\t\0source\0dest\0` for a rename. A binary file's `-\t-` counts nothing.
+/// When no record names the target (a spelling git and the disk disagree on), a lone record
+/// is still this file's: the pathspec named nothing else.
+fn parse_numstat(out: &[u8], target: &str) -> Option<(u32, u32)> {
+    let mut fields = out.split(|b| *b == 0).filter(|f| !f.is_empty());
+    let (mut records, mut lone) = (0, None);
+    while let Some(rec) = fields.next() {
+        let text = String::from_utf8_lossy(rec);
+        let mut it = text.splitn(3, '\t');
+        let (Some(a), Some(d)) = (it.next(), it.next()) else { continue };
+        let path = match it.next() {
+            Some(p) if !p.is_empty() => p.to_string(),
+            _ => {
+                let _source = fields.next();
+                fields.next().map(|p| String::from_utf8_lossy(p).into_owned()).unwrap_or_default()
+            }
+        };
+        let counts = a.parse().ok().zip(d.parse().ok());
+        if norm(&path) == target {
+            return counts;
+        }
+        records += 1;
+        lone = counts;
+    }
+    if records == 1 {
+        lone
+    } else {
+        None
+    }
 }
 
 /// The hub's git thread: waits until a run is due, runs it inside the global slots, hands the
@@ -1102,9 +1145,15 @@ mod tests {
 
     #[test]
     fn numstat_parses_counts_and_skips_binary() {
-        assert_eq!(parse_numstat(b"12\t3\tsrc/a.ts\0"), Some((12, 3)));
-        assert_eq!(parse_numstat(b"-\t-\timg.png\0"), None);
-        assert_eq!(parse_numstat(b""), None);
+        assert_eq!(parse_numstat(b"12\t3\tsrc/a.ts\0", "src/a.ts"), Some((12, 3)));
+        assert_eq!(parse_numstat(b"-\t-\timg.png\0", "img.png"), None);
+        assert_eq!(parse_numstat(b"", "a"), None);
+        // A rename's record names the destination after the source.
+        assert_eq!(parse_numstat(b"1\t0\t\0a.txt\0b.txt\0", "b.txt"), Some((1, 0)));
+        // Several records: only the target's counts; a lone record is the file's whatever its spelling.
+        assert_eq!(parse_numstat(b"5\t5\tsrc.txt\0201\t0\tb.txt\0", "b.txt"), Some((201, 0)));
+        assert_eq!(parse_numstat(b"5\t5\tsrc.txt\0201\t0\tb.txt\0", "c.txt"), None);
+        assert_eq!(parse_numstat(b"7\t1\tcafe\xcc\x81.txt\0", "caf\u{e9}.txt"), Some((7, 1)));
     }
 
     #[test]
