@@ -1,6 +1,6 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
-import type { DirReq, OpenAck, PlaceHints, StatInfo, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
+import type { DeleteTicket, DirReq, FileOp, OpResult, OpenAck, PlaceHints, StatInfo, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
@@ -950,6 +950,19 @@ export async function ftSearch(subId: number, query: string, limit: number, seq:
 /** A file's content at 'HEAD' or in the 'index' (Compare with HEAD); null = new since then. */
 export async function ftDiffBase(subId: number, rel: string, base: 'HEAD' | 'index'): Promise<string | null> {
   return invoke('ft_diff_base', { subId, rel, base });
+}
+
+/** A file operation on the subscription's root (§10). Rejects, with nothing changed, for a path
+ *  outside the root, the root itself or a bad delete ticket; a decision for the human comes
+ *  back as `needs`. The view updates through the Channel as usual. */
+export async function ftOp(subId: number, op: FileOp): Promise<OpResult> {
+  return invoke('ft_op', { subId, op });
+}
+
+/** Count what deleting `rels` permanently removes and get the ticket `ftOp({kind: 'delete'})`
+ *  needs: single use, 60 s, exactly this set. */
+export async function ftPrepareDelete(subId: number, rels: string[]): Promise<DeleteTicket> {
+  return invoke('ft_prepare_delete', { subId, rels });
 }
 
 export async function setSplitRatio(workspaceId: string, splitId: string, ratio: number): Promise<void> {

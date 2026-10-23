@@ -13,6 +13,7 @@
 //! - `fsclass.rs`: network mounts, which get no watcher.
 //! - `git.rs`: decorations from `git status`, scheduled per repository (phase 2).
 //! - `search.rs`: the find index, built on the first query (phase 2).
+//! - `ops.rs`: file operations, their guards, the trash thread and delete tickets (phase 3).
 
 pub mod commands;
 mod coalesce;
@@ -21,6 +22,7 @@ pub mod git;
 pub mod hub;
 mod ignore_cache;
 pub mod list;
+pub mod ops;
 pub mod paths;
 pub mod place;
 pub mod search;
@@ -42,7 +44,7 @@ use parking_lot::{Condvar, Mutex};
 
 use git::{GitConfig, Trigger};
 use hub::{HubInit, RootHub, Sink};
-use types::{DirReq, OpenAck};
+use types::{DeleteTicket, DirReq, FileOp, OpResult, OpenAck};
 
 /// How long a hub outlives its last subscriber: switching back to a root within this is free.
 pub const HUB_GRACE: Duration = Duration::from_secs(30);
@@ -134,6 +136,10 @@ pub struct FileTreeState {
     /// Shell pids whose command just finished (OSC 133 D), for the thread that turns each
     /// into a git signal. Started on first use.
     commands: OnceLock<std::sync::mpsc::Sender<u32>>,
+    /// The one thread every trash call runs on, started by the first trash.
+    trash: OnceLock<ops::TrashWorker>,
+    /// Permanent-delete tickets (`ft_prepare_delete`).
+    tickets: ops::Tickets,
 }
 
 impl FileTreeState {
@@ -161,7 +167,77 @@ impl FileTreeState {
             git: Mutex::new(GitConfig::default()),
             git_slots: Arc::new(Slots::new(GIT_SLOTS)),
             commands: OnceLock::new(),
+            trash: OnceLock::new(),
+            tickets: ops::Tickets::default(),
         })
+    }
+
+    /// Test seam: a stand-in trash, so tests never fill the real one. Only before the first
+    /// trash.
+    #[cfg(test)]
+    pub(crate) fn set_trash_backend(&self, backend: Box<dyn ops::TrashBackend>) {
+        let _ = self.trash.set(ops::TrashWorker::start(backend));
+    }
+
+    fn trash_worker(&self) -> &ops::TrashWorker {
+        self.trash.get_or_init(|| ops::TrashWorker::start(Box::new(ops::SystemTrash::new())))
+    }
+
+    /// `ft_op`: run a file operation on the subscription's root, then re-list the folders it
+    /// changed that are open, so the view doesn't wait on the watcher (a network mount has
+    /// none). `holders` lists the tabs working in some folder, for the live-cwd guard; it is
+    /// asked only when a folder is moved or removed.
+    pub fn op(&self, sub_id: u64, op: &FileOp, holders: &dyn Fn() -> Vec<ops::CwdHolder>) -> Result<OpResult, String> {
+        let hub = self.hub_of(sub_id)?;
+        let env = ops::Env {
+            place: &hub.place,
+            root: &hub.root,
+            fold: hub.fold,
+            trash: self.trash_worker(),
+            tickets: &self.tickets,
+            holders,
+            rename: ops::rename_noreplace,
+        };
+        let result = ops::run(&env, op)?;
+        // An import's `from` is a native path elsewhere, not a rel of this root.
+        let from_is_rel = op.kind != "import";
+        let mut parents: Vec<String> = Vec::new();
+        let mut gone: Vec<String> = Vec::new();
+        for item in &result.done {
+            if from_is_rel {
+                parents.push(paths::split_parent(&item.from).0.to_string());
+                if matches!(op.kind.as_str(), "rename" | "move" | "trash" | "delete") {
+                    gone.push(item.from.clone());
+                }
+            }
+            if let Some(to) = &item.to {
+                parents.push(paths::split_parent(to).0.to_string());
+            }
+        }
+        // A create's folders on the way: the first one made is in its parent's listing.
+        if let Some(first) = result.undo.as_ref().filter(|_| op.kind.starts_with("create_")).and_then(|u| u.src.first()) {
+            parents.push(paths::split_parent(first).0.to_string());
+        }
+        parents.sort();
+        parents.dedup();
+        hub.touched(&parents, &gone);
+        Ok(result)
+    }
+
+    /// `ft_prepare_delete`: a ticket for permanently deleting exactly `rels`, with the counts.
+    pub fn prepare_delete(&self, sub_id: u64, rels: &[String]) -> Result<DeleteTicket, String> {
+        let hub = self.hub_of(sub_id)?;
+        let none = || Vec::new();
+        let env = ops::Env {
+            place: &hub.place,
+            root: &hub.root,
+            fold: hub.fold,
+            trash: self.trash_worker(),
+            tickets: &self.tickets,
+            holders: &none,
+            rename: ops::rename_noreplace,
+        };
+        ops::prepare_delete(&env, rels)
     }
 
     /// Test seam: how hubs opened from now on run git.

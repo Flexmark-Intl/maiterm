@@ -797,6 +797,8 @@ pub fn run() {
             filetree::commands::ft_stat,
             filetree::commands::ft_search,
             filetree::commands::ft_diff_base,
+            filetree::commands::ft_op,
+            filetree::commands::ft_prepare_delete,
             commands::workspace::set_split_ratio,
             commands::workspace::set_tab_scrollback,
             commands::workspace::set_tab_notes,

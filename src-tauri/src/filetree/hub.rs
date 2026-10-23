@@ -619,7 +619,7 @@ impl RootHub {
             case_insensitive: self.fold,
             nfc_names: super::paths::NORMALIZATION_INSENSITIVE,
             repo: self.repo.clone(),
-            caps: Caps { watch: self.watch_kind(), git: self.git.as_ref().is_some_and(|g| g.enabled()), trash: false, remote: false, writable: false },
+            caps: Caps { watch: self.watch_kind(), git: self.git.as_ref().is_some_and(|g| g.enabled()), trash: true, remote: false, writable: true },
         }
     }
 
@@ -807,6 +807,23 @@ impl RootHub {
         let rels: Vec<String> = self.dirs.lock().keys().filter(|r| paths::is_at_or_under(r, base)).cloned().collect();
         for rel in rels {
             self.request(&rel, None);
+        }
+    }
+
+    /// A file operation of ours changed `parents`: re-list the open ones now, so the result
+    /// shows with the op's answer instead of after the watcher's window (and at all on a
+    /// network mount, which has no watcher). Open folders at or under a path that moved away
+    /// are re-listed too, which reports them gone. A no-op where the listing hasn't changed.
+    pub fn touched(&self, parents: &[String], gone: &[String]) {
+        let open: Vec<String> = {
+            let dirs = self.dirs.lock();
+            parents.iter().filter(|p| dirs.contains_key(p.as_str())).cloned().collect()
+        };
+        for rel in open {
+            self.request(&rel, None);
+        }
+        for g in gone.iter().filter(|g| !g.is_empty()) {
+            self.revalidate_under(g);
         }
     }
 

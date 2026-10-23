@@ -103,11 +103,102 @@ pub struct Caps {
     pub watch: String,
     /// Git decorations: the root is in a repository and `file_tree_git` is on.
     pub git: bool,
-    /// Trash available (phase 3): false for now.
+    /// Move to Trash is offered. A trash that fails anyway (a network volume, no XDG trash)
+    /// answers `needs: no_trash` per op.
     pub trash: bool,
     pub remote: bool,
-    /// File operations allowed (phase 3): false for now — the tree is read-only.
+    /// File operations (`ft_op`) are allowed.
     pub writable: bool,
+}
+
+/// One file operation (§10.2). Every path is a rel, checked against the root in Rust, except
+/// an `import`'s sources (native absolute paths from an OS drop).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct FileOp {
+    /// "create_file" | "create_dir" | "rename" | "move" | "copy" | "duplicate" | "trash" |
+    /// "delete" | "import" | "restore".
+    pub kind: String,
+    #[serde(default)]
+    pub src: Vec<String>,
+    /// The destination folder (create, move, copy, import); "" or None = the root.
+    #[serde(default)]
+    pub dest: Option<String>,
+    /// create: the new name, where "a/b/c.ts" makes the folders on the way; rename: the new
+    /// name, one component.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Exact destination rels, one per `src`, for a move (undo moves each item back to where
+    /// it came from, under the name it had: a multi-select spans folders, and keep-both may
+    /// have renamed it). When set, `dest` is ignored.
+    #[serde(default)]
+    pub to: Vec<String>,
+    /// "fail" (default) | "keep_both" (pick a fresh name) | "skip".
+    #[serde(default)]
+    pub conflict: String,
+    /// "delete": the ticket from `ft_prepare_delete`.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// The human confirmed a second time over an agent's in-flight work (§10.3).
+    #[serde(default)]
+    pub ack_agents: bool,
+    /// "restore": when the items went to the trash (unix seconds), to tell them from older
+    /// trashed items with the same path.
+    #[serde(default)]
+    pub trashed_at: Option<i64>,
+}
+
+/// What `ft_op` did. Refusals of the whole op (a path outside the root, a bad ticket) are the
+/// command's error instead; a guard the human can act on comes back as `needs`, with nothing
+/// done.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct OpResult {
+    pub done: Vec<OpItem>,
+    pub failed: Vec<OpFail>,
+    /// Sources left alone by `conflict: "skip"`, or already where they were asked to go.
+    pub skipped: Vec<String>,
+    /// The op that reverses this one, for the tree's undo stack. None when nothing can (a
+    /// permanent delete; a trash on macOS, whose trash can't be restored from).
+    pub undo: Option<FileOp>,
+    pub needs: Option<Needs>,
+}
+
+/// One item done. create: `from` is the new rel, `to` None. move/rename/copy/duplicate/import:
+/// `from` the source (native for import), `to` the new rel. trash/delete/restore: `from` the
+/// rel, `to` None.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct OpItem {
+    pub from: String,
+    pub to: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct OpFail {
+    pub rel: String,
+    /// "exists" | "gone" | "inside_itself" | "no_trash" | "not_in_trash" | "unsupported" |
+    /// "io".
+    pub code: String,
+    pub msg: String,
+}
+
+/// Something the human must decide before the op can run.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Needs {
+    /// "no_trash" (offer permanent delete) | "agent_active" (confirm again, `ack_agents`) |
+    /// "live_cwd" (refused: Use Move project…).
+    pub code: String,
+    /// The sentence to show.
+    pub detail: String,
+    /// The tabs concerned (agent_active, live_cwd).
+    pub tabs: Vec<String>,
+}
+
+/// `ft_prepare_delete`'s answer: a single-use ticket for exactly these rels, good for 60 s,
+/// and what deleting them would remove (the ConfirmStrip shows the counts).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DeleteTicket {
+    pub token: String,
+    pub files: u64,
+    pub dirs: u64,
 }
 
 /// One file's details, fetched only on hover.

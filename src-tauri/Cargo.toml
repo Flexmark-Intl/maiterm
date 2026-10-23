@@ -63,6 +63,9 @@ unicode-normalization = "0.1"
 # Files find (docs/file-tree.md §8): fuzzy path matching with match indices, the matcher Helix
 # uses. Path-aware scoring (`match_paths`) ranks a hit in the file name over one in a folder.
 nucleo-matcher = "0.3"
+# Files' Move to Trash (docs/file-tree.md §10.1): Finder/NSFileManager, freedesktop, Recycle Bin.
+# Every call runs on one thread: the crate warns of UB from concurrent mount queries on Linux.
+trash = "5"
 sysinfo = "0.33"
 alacritty_terminal = "0.25"
 rusqlite = { version = "0.31", features = ["bundled"] }

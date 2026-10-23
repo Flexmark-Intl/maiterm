@@ -5,11 +5,13 @@
 //! the main thread (`list_files` and `git_show_file` are the counter-examples). Every path in
 //! and out is root-relative POSIX, keyed by the subscription.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tauri::State;
 
-use super::types::{DirReq, Envelope, OpenAck, PlaceHints, SearchResult, StatInfo, TreePlace};
+use super::ops::{CwdHolder, CwdOf};
+use super::types::{DeleteTicket, DirReq, Envelope, FileOp, OpResult, OpenAck, PlaceHints, SearchResult, StatInfo, TreePlace};
 use super::FileTreeState;
 use crate::state::AppState;
 
@@ -146,6 +148,71 @@ pub async fn ft_search(
 ) -> Result<SearchResult, String> {
     let ft = ft.inner().clone();
     blocking(move || Ok(ft.hub_of(sub_id)?.search(sub_id, &query, limit as usize, seq, index_shallow.unwrap_or(false)))).await
+}
+
+/// Every tab working in some folder on this computer, for the live-cwd guard (§10.3): each
+/// live terminal's shell (its cwd read at the moment of the op), each agent session in a live
+/// local tab, and each running stack service's folder. An agent in an ssh tab works on the
+/// remote host: its cwd names a folder there, not here.
+fn live_cwd_holders(state: &AppState) -> Vec<CwdHolder> {
+    let (names, services): (HashMap<String, String>, HashMap<String, (String, String)>) = {
+        let data = state.app_data.read();
+        let mut names = HashMap::new();
+        let mut services = HashMap::new();
+        for ws in data.windows.iter().flat_map(|w| w.workspaces.iter()) {
+            for t in ws.panes.iter().flat_map(|p| p.tabs.iter()) {
+                names.insert(t.id.clone(), t.name.clone());
+                if let Some(sid) = &t.service_id {
+                    if let Some(svc) = ws.stack.iter().find(|s| &s.id == sid) {
+                        services.insert(sid.clone(), (t.id.clone(), svc.cwd.clone()));
+                    }
+                }
+            }
+        }
+        (names, services)
+    };
+    let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_string());
+    let mut out = Vec::new();
+    let live: Vec<(String, u32)> = {
+        let tabs = state.tab_pty_map.read();
+        let ptys = state.pty_registry.read();
+        tabs.iter().filter_map(|(tab, pty)| ptys.get(pty).and_then(|h| h.child_pid).map(|pid| (tab.clone(), pid))).collect()
+    };
+    for (tab, pid) in &live {
+        out.push(CwdHolder { tab_id: tab.clone(), tab_name: name(tab), cwd: CwdOf::Pid(*pid) });
+    }
+    let ssh_tabs: HashSet<String> = state.ssh_tunnels.read().values().flat_map(|t| t.tab_ids.iter().cloned()).collect();
+    for s in state.agent_sessions.read().values() {
+        let live_local = live.iter().any(|(t, _)| *t == s.tab_id) && !ssh_tabs.contains(&s.tab_id);
+        if let (true, Some(cwd)) = (live_local, &s.cwd) {
+            out.push(CwdHolder { tab_id: s.tab_id.clone(), tab_name: name(&s.tab_id), cwd: CwdOf::Path(cwd.into()) });
+        }
+    }
+    for row in state.stack_runtime.read().values() {
+        if !matches!(row.status.as_str(), "starting" | "running" | "ready") {
+            continue;
+        }
+        if let Some((tab, cwd)) = services.get(&row.service_id) {
+            out.push(CwdHolder { tab_id: tab.clone(), tab_name: name(tab), cwd: CwdOf::Path(cwd.into()) });
+        }
+    }
+    out
+}
+
+/// A file operation on the subscription's root (§10). Errors refuse the whole op before
+/// anything changed; a guard the human can answer comes back as `needs`.
+#[tauri::command]
+pub async fn ft_op(state: State<'_, Arc<AppState>>, ft: State<'_, Arc<FileTreeState>>, sub_id: u64, op: FileOp) -> Result<OpResult, String> {
+    let (st, ft) = (state.inner().clone(), ft.inner().clone());
+    blocking(move || ft.op(sub_id, &op, &|| live_cwd_holders(&st))).await
+}
+
+/// A single-use ticket, good for 60 s, for permanently deleting exactly `rels`, with what that
+/// removes. `ft_op { kind: "delete" }` refuses anything without one.
+#[tauri::command]
+pub async fn ft_prepare_delete(ft: State<'_, Arc<FileTreeState>>, sub_id: u64, rels: Vec<String>) -> Result<DeleteTicket, String> {
+    let ft = ft.inner().clone();
+    blocking(move || ft.prepare_delete(sub_id, &rels)).await
 }
 
 /// A file's content at "HEAD" or in the "index", for Compare with HEAD. None: the file is new

@@ -1019,11 +1019,78 @@ export interface Caps {
   watch: string;
   /** Git decorations: the root is in a repository and `file_tree_git` is on. */
   git: boolean;
-  /** Trash: false until phase 3. */
+  /** Move to Trash is offered. A trash that fails anyway answers `needs.code === 'no_trash'`. */
   trash: boolean;
   remote: boolean;
-  /** File operations: false until phase 3 (the tree is read-only). */
+  /** File operations (`ftOp`) are allowed. */
   writable: boolean;
+}
+
+/** One file operation (`ftOp`, docs/file-tree.md §10.2). Every path is a rel checked in Rust,
+ *  except an `import`'s sources: native absolute paths from an OS drop. */
+export interface FileOp {
+  kind: 'create_file' | 'create_dir' | 'rename' | 'move' | 'copy' | 'duplicate' | 'trash' | 'delete' | 'import' | 'restore';
+  src?: string[];
+  /** The destination folder (create, move, copy, import); '' or null = the root. */
+  dest?: string | null;
+  /** create: the new name ('a/b/c.ts' makes the folders on the way); rename: one component. */
+  name?: string | null;
+  /** move: an exact destination rel per `src` (what `OpResult.undo` uses to put each item back
+   *  under the name it had). When set, `dest` is ignored. */
+  to?: string[];
+  /** 'fail' (default) | 'keep_both' (a platform-style "a copy.ts") | 'skip'. */
+  conflict?: 'fail' | 'keep_both' | 'skip';
+  /** delete: the ticket from `ftPrepareDelete`. */
+  token?: string | null;
+  /** The human confirmed a second time over an agent's in-flight work. */
+  ack_agents?: boolean;
+  /** restore: when the items were trashed (unix seconds); `undo` fills it in. */
+  trashed_at?: number | null;
+}
+
+/** One item done. create: `from` = the new rel, `to` null. move/rename/copy/duplicate/import:
+ *  `from` = the source (native for import), `to` = the new rel. trash/delete/restore: `from`
+ *  = the rel, `to` null. */
+export interface OpItem {
+  from: string;
+  to: string | null;
+}
+
+export interface OpFail {
+  rel: string;
+  code: 'exists' | 'gone' | 'inside_itself' | 'no_trash' | 'not_in_trash' | 'unsupported' | 'io';
+  msg: string;
+}
+
+/** Something the human decides before the op can run (the ConfirmStrip). */
+export interface OpNeeds {
+  /** 'no_trash': offer Delete Permanently (`ftPrepareDelete`, then `delete`). 'agent_active':
+   *  ask again, then resend with `ack_agents: true` (never answered until phase 4's ledger).
+   *  'live_cwd': refused; show `detail` with a Move project… action. */
+  code: 'no_trash' | 'agent_active' | 'live_cwd';
+  detail: string;
+  /** The tabs concerned. */
+  tabs: string[];
+}
+
+/** `ftOp`'s answer. A rejected promise means nothing changed (a path outside the root, the
+ *  root itself, a bad ticket). */
+export interface OpResult {
+  done: OpItem[];
+  failed: OpFail[];
+  /** Left alone by `conflict: 'skip'`, or already where asked. */
+  skipped: string[];
+  /** The op that reverses this one, for the undo stack; null when nothing can (a permanent
+   *  delete, a trash on macOS: "Show in Trash" instead). */
+  undo: FileOp | null;
+  needs: OpNeeds | null;
+}
+
+/** `ftPrepareDelete`'s answer: a single-use ticket for exactly those rels, good for 60 s. */
+export interface DeleteTicket {
+  token: string;
+  files: number;
+  dirs: number;
 }
 
 /** `ftOpen`'s answer. Events may reach the Channel BEFORE this resolves: queue them. */
