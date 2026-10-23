@@ -59,6 +59,10 @@ pub struct TreePlace {
     pub fs_class: String,
     /// A home, filesystem or volume root: watched per opened folder only (§6.5).
     pub shallow: bool,
+    /// The root is the top level of the repository the tab's folder is in, not just that
+    /// folder: following re-roots to it even from a root that contains it, such as home
+    /// (§4.2). False for a pin, a missing folder and an ssh folder the host didn't check.
+    pub project: bool,
     /// A saved folder that no longer exists. The tree shows it as missing; it is NEVER
     /// replaced by home (docs/relocate.md §4).
     pub missing: Option<String>,

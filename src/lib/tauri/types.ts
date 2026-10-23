@@ -1005,6 +1005,10 @@ export interface TreePlace {
   fs_class: string;
   /** Home, '/', a drive or volume root: only opened folders are watched (§6.5). */
   shallow: boolean;
+  /** The root is the top level of the repository the tab's folder is in, not just that
+   *  folder: following re-roots to it even from a root containing it, such as home (§4.2).
+   *  False for a pin, a missing folder and an ssh folder the host didn't check. */
+  project: boolean;
   /** A saved folder that no longer exists. Show "Folder missing: …" with a Move project link;
    *  never fall back to home. `ftOpen` on it fails. */
   missing: string | null;

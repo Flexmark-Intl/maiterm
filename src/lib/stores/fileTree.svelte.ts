@@ -11,7 +11,8 @@
  *   tab never selects anything: the you-are-here folder is revealed, not selected.
  * - Idle is free: the root is re-resolved only on edges (tab activation, a prompt, a cwd or
  *   title change, the tab's agent starting), debounced 150 ms, never on a timer.
- * - Inside the root, reveal; outside, re-root. `cd src/lib` never reloads anything.
+ * - Re-root when the tab's ROOT changes (another repository, even one inside a home root);
+ *   a plain folder inside the root only moves the tick. `cd src/lib` never reloads anything.
  * - Editor and diff tabs never re-root; their file is revealed if it is under the root.
  * - Switching roots is instant: the last 8 roots keep their model (with its generations),
  *   so coming back costs one `ftOpen` whose folders answer `not_modified`.
@@ -43,6 +44,7 @@ import { openGitDiff } from '$lib/utils/openGitDiff';
 import { relToAbs, lastSegment, tildePath } from '$lib/filetree/paths';
 import { activeFileOf, lookupIn, settleActiveFile, type ActiveFileTarget } from '$lib/filetree/activeFile';
 import { ledgerPathIs, onAnotherHost, remoteWithin, sameSshHost } from '$lib/filetree/remote';
+import { followStep } from '$lib/filetree/follow';
 import { getBridgeInfo } from '$lib/stores/sshMcpBridge.svelte';
 import { AgentMarks, TurnTracker, agentLensItems, assignColours, changedThisTurn, cwdInRoot, folderBadges, isLasting, markWords, overlappingWriters, rowView, type RowAgentView } from '$lib/filetree/agents';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
@@ -758,16 +760,15 @@ function createFileTreeStore() {
       statusText = p.missing;
       return;
     }
-    if (place && place.place === p.place && subId !== null) {
+    const step = followStep(place, p);
+    if (step === 'same' && subId !== null) {
       place = p;
       moveYouAreHere(p.cwd_rel);
       return;
     }
-    // Inside the current root: only the tick moves (`cd src/lib` reloads nothing). Pins
-    // always come back as their own place, so this is the follow case only. Only on the same
-    // machine: a remote root keys the host's paths, which a local `/tmp/x` can spell too.
-    const sameMachine = !!place && place.kind === p.kind && (p.kind !== 'remote' || sameSshHost(place.host_key, p.host_key));
-    if (place && sameMachine && subId !== null && ack && p.source !== 'pin' && place.source !== 'pin') {
+    // A plain folder inside the current root: only the tick moves. Another project's root
+    // re-roots even when it lies inside this one (a home root), see `followStep`.
+    if (step === 'locate' && place && subId !== null && ack) {
       const cwdAbs = relToAbs({ root_native: p.root, sep: ack.sep }, p.cwd_rel ?? '');
       const sub = subId;
       const located = await commands.ftLocate(sub, [cwdAbs]).catch(() => [null]);

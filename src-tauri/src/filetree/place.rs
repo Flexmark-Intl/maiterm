@@ -264,6 +264,7 @@ fn remote_place(host: &str, root: &str, cwd: Option<&str>, source: &str) -> Tree
         source: source.into(),
         fs_class: super::fsclass::UNKNOWN.into(),
         shallow: is_shallow_remote(root, None),
+        project: false,
         missing: None,
     }
 }
@@ -292,6 +293,7 @@ fn local_place(root: &Path, cwd: Option<&Path>, source: &str) -> TreePlace {
         source: source.into(),
         fs_class: super::fsclass::classify(root).into(),
         shallow: is_shallow(root),
+        project: false,
         missing: None,
     }
 }
@@ -307,6 +309,7 @@ fn missing_place(path: &str, source: &str) -> TreePlace {
         source: source.into(),
         fs_class: super::fsclass::UNKNOWN.into(),
         shallow: false,
+        project: false,
         missing: Some(path.to_string()),
     }
 }
@@ -347,8 +350,9 @@ pub fn place_for(pick: Option<&Pick>, pin: Option<&str>) -> Result<TreePlace, St
         return Ok(missing_place(&pick.cwd, pick.source));
     }
     let cwd = crate::share::canon(Path::new(&pick.cwd));
-    let root = toplevel_cached(&cwd).unwrap_or_else(|| cwd.clone());
-    Ok(local_place(&root, Some(&cwd), pick.source))
+    let top = toplevel_cached(&cwd);
+    let root = top.clone().unwrap_or_else(|| cwd.clone());
+    Ok(TreePlace { project: top.is_some(), ..local_place(&root, Some(&cwd), pick.source) })
 }
 
 /// Gather a tab's inputs from app state.
@@ -420,7 +424,7 @@ pub fn remote_from_probe(host: &str, chain: &[(String, &'static str)], probed: &
     for ((_, src), p) in chain.iter().zip(probed) {
         if let Some(real) = &p.real {
             let root = p.top.as_deref().unwrap_or(real);
-            return Some(remote_place(host, root, Some(real), src));
+            return Some(TreePlace { project: p.top.is_some(), ..remote_place(host, root, Some(real), src) });
         }
     }
     chain.iter().find(|(_, src)| *src != "prompt").map(|(c, src)| missing_remote_place(host, c, src))
@@ -584,6 +588,26 @@ mod tests {
     }
 
     #[test]
+    fn a_place_says_whether_its_root_is_a_repository_top_level() {
+        // What lets following leave a home root for a project inside it (§4.2): the project's
+        // root differs from home although the tab's folder is inside home.
+        let tmp = std::env::temp_dir().join(format!("ft-project-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(tmp.join("proj").join("src")).unwrap();
+        std::fs::create_dir_all(tmp.join("plain").join("sub")).unwrap();
+        let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(tmp.join("proj")).status().is_ok_and(|s| s.success());
+        assert!(ok, "git init");
+        let at = |rel: &str| Pick { cwd: tmp.join(rel).to_string_lossy().into(), source: "pty", remote_host: None, missing: false };
+        let p = place_for(Some(&at("proj/src")), None).unwrap();
+        assert!(p.project);
+        assert_eq!((p.root, p.cwd_rel.as_deref()), (crate::share::canon(&tmp.join("proj")).to_string_lossy().into_owned(), Some("src")));
+        let plain = place_for(Some(&at("plain/sub")), None).unwrap();
+        assert!(!plain.project, "a folder in no repository roots at itself");
+        let pinned = place_for(Some(&at("proj/src")), Some(&tmp.join("proj").to_string_lossy())).unwrap();
+        assert!(!pinned.project, "a pin never re-roots by this rule");
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
     fn shallow_roots() {
         assert!(is_shallow(Path::new("/")));
         assert!(is_shallow(&dirs::home_dir().unwrap()));
@@ -623,6 +647,7 @@ mod tests {
             (place.place.as_str(), place.root.as_str(), place.cwd_rel.as_deref(), place.source.as_str()),
             ("ews@nova:/home/ews/app", "/home/ews/app", Some("src"), "restore")
         );
+        assert!(place.project, "rooted at the repository the host found");
         // Nothing there: the first candidate is missing, never home.
         let gone = remote_from_probe("ews@nova", &chain, &[Probed::default(), Probed::default(), Probed::default()]).unwrap();
         assert_eq!((gone.missing.as_deref(), gone.kind.as_str()), (Some("/home/ews/gone"), "remote"));
@@ -632,6 +657,7 @@ mod tests {
         let probed = vec![Probed::default(), Probed { real: Some("/home/ews/proj".into()), top: None }, Probed::default()];
         let place = remote_from_probe("ews@nova", &chain, &probed).unwrap();
         assert_eq!((place.root.as_str(), place.source.as_str(), place.cwd_rel), ("/home/ews/proj", "prompt", None));
+        assert!(!place.project, "a folder in no repository is only itself");
         assert_eq!(split_remote("-p 2222 ews@nova:/srv/a b"), Some(("-p 2222 ews@nova".into(), "/srv/a b".into())));
         assert_eq!(split_remote("/local/path"), None);
     }
