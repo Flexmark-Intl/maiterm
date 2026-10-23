@@ -160,6 +160,14 @@ const RECURSIVE_ROW_BUDGET = 2000;
 const REFOCUS_REVALIDATE_MS = 60_000;
 /** The human touched the tree this recently: agents' reveals wait (§9.3). */
 export const HUMAN_QUIET_MS = 3000;
+/** `revealInTree` waits this long for the folders above its path to list before answering. */
+const REVEAL_ANSWER_MS = 2000;
+
+/** How a reveal that waited on listings ended: it got its row; the listings show it isn't on
+ *  disk, or that the filters hide it (or a folder above it), or that its folder lists more
+ *  entries than the tree shows and it is one left out; or something else took over (another
+ *  reveal, the human closing a folder above it, a new root). */
+type RevealOutcome = 'shown' | 'missing' | 'hidden' | 'unlisted' | 'dropped';
 /** Expanded sets kept in localStorage: places × paths (§12.4). */
 const EXP_PLACES = 64;
 const EXP_PATHS = 512;
@@ -258,8 +266,9 @@ function createFileTreeStore() {
   let blurredAt: number | null = null;
   let acked = { count: 0, at: 0 };
   let saveExpTimer: ReturnType<typeof setTimeout> | null = null;
-  /** A row to scroll to (and optionally select) once its listing arrives. */
-  let pendingReveal: { rel: string; select: boolean } | null = null;
+  /** A row to scroll to (and optionally select) once its listing arrives. `done` hears how it
+   *  ended (`revealInTree` answers from it). */
+  let pendingReveal: { rel: string; select: boolean; done?: (o: RevealOutcome) => void } | null = null;
   /** An Alt+→ in progress: the folder it started from and the row count it stops at. */
   let recursive: { root: string; budget: number } | null = null;
 
@@ -750,7 +759,7 @@ function createFileTreeStore() {
     subId = null;
     ack = null;
     health = null;
-    pendingReveal = null;
+    settleReveal('dropped');
     recursive = null;
     gitState = 'off';
     branch = null;
@@ -942,19 +951,37 @@ function createFileTreeStore() {
     if (recursive && model && isWithin(rel, recursive.root) && model.expanded.has(rel)) expandChildren(rel);
   }
 
+  /** The pending reveal is over, one way or another: tell whoever waits on it. */
+  function settleReveal(o: RevealOutcome) {
+    const p = pendingReveal;
+    pendingReveal = null;
+    p?.done?.(o);
+  }
+
   function checkPendingReveal() {
     if (!pendingReveal || !model) return;
     const { rel, select } = pendingReveal;
-    if (model.indexOf(rel) < 0) {
-      // Its folder has listed and it isn't there (deleted, or filtered out): stop waiting,
-      // so later messages don't each scan the rows for it.
-      const parent = model.dirs.get(parentRel(rel));
-      const e = model.entry(rel);
-      const m = model;
-      if ((parent?.state === 'ok' && (!e || !m.visible(e))) || !ancestorsOf(rel).every((a) => m.expanded.has(a))) pendingReveal = null;
+    const m = model;
+    if (m.indexOf(rel) < 0) {
+      // The listings show it can never get a row (not on disk, or it or a folder above it is
+      // filtered out, or left out of a truncated listing): stop waiting, so later messages
+      // don't each scan the rows for it. Nor does a folder the human closed meanwhile.
+      if (m.knownGone(rel)) {
+        // The reveal opened folders that aren't there: they don't stay open (and saved) for
+        // nothing. The shallowest one closes everything it opened below it.
+        const gone = ancestorsOf(rel).find((a) => m.expanded.has(a) && m.knownGone(a));
+        if (gone !== undefined) {
+          sendClose(m.collapse(gone).close);
+          syncRows();
+          scheduleSaveExpanded();
+        }
+        settleReveal('missing');
+      } else if ([...ancestorsOf(rel), rel].some((a) => { const e = m.entry(a); return !!e && !m.visible(e); })) settleReveal('hidden');
+      else if (m.rowGone(rel)) settleReveal('unlisted');
+      else if (!ancestorsOf(rel).every((a) => m.expanded.has(a))) settleReveal('dropped');
       return;
     }
-    pendingReveal = null;
+    settleReveal('shown');
     if (select) {
       selection.clear();
       selection.add(rel);
@@ -1058,8 +1085,9 @@ function createFileTreeStore() {
   // ── Revealing ─────────────────────────────────────────────────────────────────────────
 
   /** Open the folders above `rel` and scroll it into view when it has a row; select it
-   *  unless the reveal is automatic. Under find or the Changed lens, see `revealPlan`. */
-  function revealRel(rel: string, kind: RevealKind): ReturnType<typeof revealPlan> {
+   *  unless the reveal is automatic. Under find or the Changed lens, see `revealPlan`. `done`
+   *  hears whether it got a row (not called for 'none'). */
+  function revealRel(rel: string, kind: RevealKind, done?: (o: RevealOutcome) => void): ReturnType<typeof revealPlan> {
     if (!model) return 'none';
     const select = kind !== 'auto';
     const plan = revealPlan(kind, viewMode() !== 'tree', rows.some((x) => x.key === rel));
@@ -1072,6 +1100,7 @@ function createFileTreeStore() {
         anchorKey = rel;
       }
       requestScroll(rel);
+      done?.('shown');
       return plan;
     }
     if (plan === 'put-away') {
@@ -1084,7 +1113,8 @@ function createFileTreeStore() {
     sendOpen(r.open);
     syncRows();
     if (r.open.length) scheduleSaveExpanded();
-    pendingReveal = { rel, select };
+    settleReveal('dropped');
+    pendingReveal = { rel, select, done };
     checkPendingReveal();
     return plan;
   }
@@ -2084,12 +2114,34 @@ function createFileTreeStore() {
       scrollToTop();
       return { result: 'revealed' };
     }
-    const plan = revealRel(rel, select ? 'focus' : 'auto');
+    // Answered from what the tree did, not from having asked: a path that isn't on disk, or
+    // that the filters hide, opens folders but never gets a row, and "revealed" would send the
+    // human looking for something the tree isn't showing.
+    let settle!: (o: RevealOutcome) => void;
+    const outcome = new Promise<RevealOutcome>((r) => { settle = r; });
+    const plan = revealRel(rel, select ? 'focus' : 'auto', (o) => settle(o));
     if (plan === 'none') {
       point();
       return { result: 'noted', note: 'Your human has the tree on a filtered view (find or a lens) that leaves this path out: a chip offers it instead.' };
     }
-    return { result: 'revealed' };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const o = await Promise.race([outcome, new Promise<'slow'>((r) => { timer = setTimeout(() => r('slow'), REVEAL_ANSWER_MS); })]);
+    clearTimeout(timer);
+    switch (o) {
+      case 'shown':
+        return { result: 'revealed' };
+      case 'slow':
+        return { result: 'revealed', note: 'The folders above it are still listing: it is scrolled into view when they arrive.' };
+      case 'missing':
+        return { result: 'not_found', note: 'Nothing by that name is on disk in the folder Files shows.' };
+      case 'hidden':
+        return { result: 'hidden', note: 'It is on disk, but the tree hides it, or a folder above it: your human has hidden or ignored files turned off.' };
+      case 'unlisted':
+        return { result: 'hidden', note: 'Its folder holds more entries than the tree lists, and it is one of those left out.' };
+      case 'dropped':
+        point();
+        return { result: 'noted', note: 'The tree moved on before it was shown (another reveal, your human closed a folder above it, or a new root): a chip offers it instead.' };
+    }
   }
 
   /** `getTreeSelection` (§9.6): the human's selection, as absolute paths, in this window. */

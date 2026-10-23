@@ -1363,7 +1363,7 @@ fn file_tree_tools() -> Vec<Value> {
     serde_json::json!([
         {
             "name": "revealInTree",
-            "description": "Point your human at a file or folder in the Files column of your own maiTerm window: its folders are opened and it is scrolled into view (and selected, with select). It never opens a closed column and never takes the keyboard. Answers result: 'revealed'; 'noted' (your human used the tree in the last 3 seconds, so a chip naming the path appeared instead of moving their view); 'tree_closed' (the Files button gets a dot); or 'outside_root' (the tree shows another folder). Use it when you want your human to look at something, not to track your own edits: the tree already shows what you read and change.",
+            "description": "Point your human at a file or folder in the Files column of your own maiTerm window: its folders are opened and it is scrolled into view (and selected, with select). It never opens a closed column and never takes the keyboard. Answers result: 'revealed'; 'noted' (your human used the tree in the last 3 seconds, so a chip naming the path appeared instead of moving their view); 'tree_closed' (the Files button gets a dot); 'outside_root' (the tree shows another folder); 'not_found' (no such file or folder on disk); or 'hidden' (it exists, but the tree hides it, e.g. hidden files are turned off). A note may explain more. Use it when you want your human to look at something, not to track your own edits: the tree already shows what you read and change.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -528,6 +528,31 @@
 >   them as the hook listeners go up (`seedTurns` → `TurnTracker.seed`); a turn heard since the
 >   read is never lowered by it, and a Stop heard since keeps its end. Residual: a prompt that
 >   lands between the read and its arrival (milliseconds) is counted only from the next mark.
+>
+> **As built, phase 4 third review fixes (2026-10-23).** Where they changed the above:
+> - **Turns are the ledger's numbers end to end.** The residual above was worse than stated: a
+>   prompt racing the read left the tracker one turn behind (an unseeded tab counted 0 + 1, then
+>   the seed overwrote it with the read's older turn) or one ahead (the seed already had the new
+>   turn, then the prompt counted one more), and nothing corrected either until a write.
+>   `agent-hook-user-prompt` now carries `turn`, the ledger's number for the turn it began
+>   (`AgentFiles::turn_of`, read after the record), and `TurnTracker.turnStarted` takes it as is
+>   (never lower than what it has; the old count only when the ledger had no tab). `seed` takes
+>   the tracker's `edgeMark()` from when the read was sent and skips a tab with a prompt or new
+>   session heard since, and everything after a `clear()`; `attach()` sends the read only once
+>   its hook listeners are up, so an edge is either in the read or heard.
+> - **The ledger renumbers at SessionStart**, not at the new session's first prompt or call:
+>   `Phase::SessionStart` records nothing but the session id, so the session-change reset runs
+>   when the session starts (a compaction keeps the id and changes nothing). Before, a column
+>   opened after `/clear` and before the next prompt seeded the old session's turn N, and the
+>   new session's marks (1, 2, …) never counted as this turn's.
+> - **`revealInTree` answers from what the tree did.** A path not on disk, or one the filters
+>   hide (itself or a folder above it — that one used to wait forever), opened folders and got
+>   no row, yet answered `revealed`. The pending reveal now settles with an outcome (`shown`,
+>   `missing` via `knownGone`, `hidden`, `unlisted` for a truncated listing, `dropped` when
+>   another reveal, a closed ancestor or a new root takes over), and the tool waits up to 2 s for
+>   it: `revealed`, `not_found`, `hidden`, `noted` (with the chip), or `revealed` with a note
+>   that the folders are still listing. A `missing` reveal also closes the folders it opened that
+>   aren't on disk, so they aren't kept open and saved.
 
 ## 1. Why
 
@@ -1304,7 +1329,7 @@ Gating:
 
 | Tool | Args | Behaviour |
 |---|---|---|
-| `revealInTree` | `{path, select?: bool=false}` | Acts in the **caller's tab's window** only. Never opens a closed column (that would change width) and never takes focus. Returns `{result}`, one of: `revealed`; `noted` (the human used the tree in the last 3 s, so a chip "claude points at `src/x.ts`" appears instead of moving); `tree_closed` (the toggle button gets a dot badge); `outside_root`. On `OWN_TAB_ONLY_TOOLS`. |
+| `revealInTree` | `{path, select?: bool=false}` | Acts in the **caller's tab's window** only. Never opens a closed column (that would change width) and never takes focus. Returns `{result}`, one of: `revealed`; `noted` (the human used the tree in the last 3 s, so a chip "claude points at `src/x.ts`" appears instead of moving); `tree_closed` (the toggle button gets a dot badge); `outside_root`; `not_found` (not on disk); `hidden` (on disk, but the filters hide it or a folder above it, or a truncated listing leaves it out). Answered from what the tree did, waiting up to 2 s for listings (as built, phase 4 third review fixes). On `OWN_TAB_ONLY_TOOLS`. |
 | `getTreeSelection` | `{}` | The human's selection in the caller's window: `{host: null \| "user@host", root, focused, selected: [abs paths], humanIdleMs}`. Paths only, never content. Handled like `getCurrentSelection`, in the caller's webview. On `OWN_TAB_ONLY_TOOLS`. This is the pull answer to the mod's prompt injection: maiTerm does **not** inject the selection into prompts. |
 | `getAgentFileActivity` | `{tabId?, scope?: "turn"\|"session"="turn", includeReads?: false}` | Ledger entries with `status`, `evidence` and per-hub `coverage`. Defaults to the caller's own tab. An explicit `tabId` follows `PEER_ADDRESSING_TOOLS` (same mesh). Paths only. |
 | `showDiff` (extended, phase 5) | `ref` accepts `"@turn"` / `"@session"` | A read-only diff against the **caller's own** baseline. A baseline from another tab is never served. |
