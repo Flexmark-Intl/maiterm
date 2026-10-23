@@ -1073,6 +1073,9 @@ copied into a folder, with names given or derived from titles.
   `autoMemoryDirectory` and folders on `--add-dir`. Codex workers need their own paths for both.
 - **Scheduled work in a Hive** (Projects' scheduled tasks). Follow-ups cover one-offs already.
 - **Hive templates** (save a Hive's settings to start the next one).
+- **Spreading load across accounts.** v1 spawns every agent the way a new tab would (§14.15).
+  Sharing a Hive's load across several logins or keys is a later idea, which has to respect each
+  plan's terms.
 - **A gallery across all Hives.** Each Hive's gallery stands alone in v1; one window-wide view
   over all of them (Higgsfield's single library) is a later read over the same stores.
 
@@ -1097,6 +1100,9 @@ Each is an hour or less, and each can change the design:
    default worker cap and the pressure thresholds come from numbers, not guesses (§6.8).
 9. **The PreToolUse deny** stops a worker's direct `cargo test`, and the worker then uses
    `hiveRun` rather than finding a workaround (`sh -c`, a script file) (§6.8).
+10. **The sandbox with media tools**: a sandboxed worker can reach a hosted generator's API,
+    maiTerm's MCP proxy and localhost ComfyUI, and run ffmpeg on files in its own folders, with
+    the allowlist built from the Tools row (§14.16).
 
 ## 14. Decisions
 
@@ -1127,9 +1133,21 @@ Decided 2026-10-23:
 13. **Several Hives:** spawn fuses and the quota breaker count across all Hives; budgets stay
     per Hive (§7.8).
 14. **Running things:** one shared stack and a run queue, not an environment per worker.
-    Infrastructure is shared with a namespace per worker; code-bearing services are slots taken
-    in turns; maiTerm schedules, the coordinator sets priority (§6.8). Darryl's direction.
-    Containers are a later per-Hive option, built together with SSH Hives.
+    Infrastructure is shared with a namespace per worker; code-bearing services relaunch on the
+    branch they're needed for (§6.9); maiTerm schedules, the coordinator sets priority (§6.8).
+    Darryl's direction. Containers are a later per-Hive option, built together with SSH Hives.
+15. **Accounts:** every Hive agent spawns exactly as a new agent tab does today, under the
+    account a new tab would get, the same as the Overlord (`docs/login.md` §5). No per-Hive
+    account picker in v1. Spreading a Hive's load across several accounts is a later idea (§12).
+16. **Sandbox:** Hive workers run in Claude's sandbox by default (writes limited to their own
+    folders, network to an allowlist), widened per Hive. Darryl's caveat: **don't kneecap the
+    workers that need tools.** So the allowlist is built from the Hive's Tools row (§10.3), not
+    typed by hand. Every detected generator's API host (Higgsfield, fal.ai, Kling, WaveSpeed,
+    Kie.ai), maiTerm's MCP proxy, local ComfyUI on localhost, the package registries and each
+    repo's git remote are allowed automatically. Local CLIs (ffmpeg, ImageMagick, sox, Blender)
+    run unrestricted inside the worker's own folders. A tool the sandbox blocks surfaces as a
+    worker blocker naming the host or path, so the fix is one click in Hive settings, not a
+    worker quietly working around it.
 
 ## 15. Prior art: what Hive takes and what it leaves
 
