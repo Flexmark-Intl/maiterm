@@ -143,6 +143,13 @@ pub enum Phase {
     Interrupt,
     /// One subagent finished: whatever of its calls never got a Post never will.
     SubagentStop,
+    /// A session started (startup, resume, /clear, compaction). It records nothing of its own:
+    /// it carries the session id, so a new session starts its own history and numbering here,
+    /// when the window hears of it, rather than at its first prompt or tool call. Until then the
+    /// ledger went on reporting the old session's turn, and a Files column opened in that gap
+    /// started its tracker there (file-tree.md §9.4). A compaction keeps the id and so changes
+    /// nothing.
+    SessionStart,
 }
 
 impl Phase {
@@ -158,6 +165,7 @@ impl Phase {
             "Notification" if event.get("notification_type").and_then(|v| v.as_str()) == Some("idle_prompt") => Some(Phase::Idle),
             "Interrupt" => Some(Phase::Interrupt),
             "SubagentStop" => Some(Phase::SubagentStop),
+            "SessionStart" => Some(Phase::SessionStart),
             _ => None,
         }
     }
@@ -472,6 +480,8 @@ impl AgentFiles {
                     tab.end_turn(now);
                     end_shells(&mut inner.shells, &rec.tab_id, None, None);
                 }
+                // The session change above is all it does.
+                Phase::SessionStart => {}
                 Phase::SubagentStop => {
                     if !rec.agent.is_empty() {
                         tab.settle_unfinished(&rec.tab_id, Some(&rec.agent), None, false, now, &mut out);
@@ -808,6 +818,14 @@ impl AgentFiles {
             .filter(|(id, t)| t.turn > 0 && tabs.is_none_or(|s| s.contains(id.as_str())))
             .map(|(id, t)| TabTurn { tab_id: id.clone(), turn: t.turn, open: t.turn_open, start_ms: t.turn_span.0, end_ms: t.turn_span.1 })
             .collect()
+    }
+
+    /// The tab's current turn in the ledger's own numbering (None: no turn yet). Sent with the
+    /// prompt hook's event, so a window sets its tracker to the ledger's number instead of
+    /// counting one on from what it has seen: a count can't be squared with a `turns()` read
+    /// that raced the same prompt.
+    pub fn turn_of(&self, tab_id: &str) -> Option<u64> {
+        self.inner.lock().tabs.get(tab_id).map(|t| t.turn).filter(|&t| t > 0)
     }
 
     /// A reload replaced `old` with `new`: the same agent session goes on under the new id.

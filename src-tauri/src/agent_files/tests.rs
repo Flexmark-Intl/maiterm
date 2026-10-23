@@ -183,6 +183,29 @@ fn a_new_session_ends_the_old_ones_shell_calls() {
 }
 
 #[test]
+fn a_new_session_numbers_its_turns_afresh_from_its_session_start() {
+    let l = ledger();
+    for _ in 0..3 {
+        l.record(rec(&prompt("/repo"), "t1"));
+        l.record(rec(&stop("/repo"), "t1"));
+    }
+    assert_eq!(l.turn_of("t1"), Some(3));
+    // A compaction keeps the session id: the count goes on.
+    l.record(rec(&json!({ "hook_event_name": "SessionStart", "session_id": "s1", "cwd": "/repo", "source": "compact" }), "t1"));
+    assert_eq!(l.turn_of("t1"), Some(3));
+    // A /clear mints a new id: before its first prompt, nothing of the old session's count is
+    // left for a window opening its Files column to start from.
+    l.record(rec(&json!({ "hook_event_name": "SessionStart", "session_id": "s2", "cwd": "/repo", "source": "clear" }), "t1"));
+    assert_eq!(l.turn_of("t1"), None);
+    assert!(l.turns(None).is_empty());
+    let mut p = prompt("/repo");
+    p["session_id"] = json!("s2");
+    l.record(rec(&p, "t1"));
+    assert_eq!(l.turn_of("t1"), Some(1));
+    assert_eq!(l.turns(None)[0].turn, 1);
+}
+
+#[test]
 fn a_shell_call_no_hook_ever_ends_stops_counting_after_ten_minutes() {
     let l = ledger();
     l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b1", "/tmp"), "a1"), "t1"));

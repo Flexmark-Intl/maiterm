@@ -143,6 +143,51 @@ describe('turns', () => {
     expect(turns.span('A', T0, true)).toEqual({ start: T0 + 8, end: T0 + 20 });
   });
 
+  it('a prompt that races the ledger read lands on the ledger\'s number, in either order', () => {
+    const t4 = mark({ rel: 'a.ts', turn: 4, at_ms: T0 });
+    // Behind: the read saw turn 4; the prompt for turn 5 is heard before the reply.
+    const behind = new TurnTracker();
+    behind.noteMark(t4);
+    const readAt = behind.edgeMark();
+    behind.turnStarted('A', T0 + 100, 5);
+    behind.seed('A', 4, T0, T0 + 50, readAt);
+    expect(behind.current('A')).toBe(5);
+    expect(behind.isThisTurn(t4)).toBe(false);
+    expect(behind.span('A', T0, true)).toEqual({ start: T0 + 100, end: Infinity });
+    // Ahead: the read already saw turn 5 recorded; the prompt's own event comes after.
+    const ahead = new TurnTracker();
+    ahead.noteMark(t4);
+    ahead.seed('A', 5, T0 + 100, null, ahead.edgeMark());
+    ahead.turnStarted('A', T0 + 101, 5);
+    expect(ahead.current('A')).toBe(5);
+    expect(ahead.isThisTurn(mark({ rel: 'b.ts', turn: 5, at_ms: T0 + 200 }))).toBe(true);
+    // An unseeded tab takes the number, not 0 + 1.
+    const fresh = new TurnTracker();
+    fresh.turnStarted('A', T0, 7);
+    expect(fresh.current('A')).toBe(7);
+    // A late prompt event never steps back.
+    fresh.turnStarted('A', T0 + 1, 6);
+    expect(fresh.current('A')).toBe(7);
+  });
+
+  it('a read sent before a new session, or before the column closed, seeds nothing', () => {
+    const turns = new TurnTracker();
+    const readAt = turns.edgeMark();
+    turns.forget('A'); // /clear heard while the read was in flight
+    turns.seed('A', 9, T0, T0 + 5, readAt);
+    expect(turns.current('A')).toBe(0);
+    turns.turnStarted('A', T0 + 10, 1);
+    expect(turns.isThisTurn(mark({ rel: 'a.ts', turn: 1 }))).toBe(true);
+    // Another tab in the same read is seeded as usual.
+    turns.seed('B', 3, T0, null, readAt);
+    expect(turns.current('B')).toBe(3);
+    // A clear (the column closed and opened again) outdates every read sent before it.
+    const stale = turns.edgeMark();
+    turns.clear();
+    turns.seed('B', 3, T0, null, stale);
+    expect(turns.current('B')).toBe(0);
+  });
+
   it('a running write pulses; a failed one is outlined; a delete is struck', () => {
     const { am, turns } = setup([
       mark({ rel: 'p.ts', phase: 'pending', op: 'write' }),

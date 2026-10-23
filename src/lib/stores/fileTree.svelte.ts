@@ -2028,9 +2028,9 @@ function createFileTreeStore() {
 
   /** The hook edges that move turns: a prompt starts one, Stop ends it, a new session (not a
    *  compaction) starts the ledger's numbering again. Hook events reach every window. */
-  function onTurnEdge(kind: 'prompt' | 'stop' | 'session', tabId: string) {
+  function onTurnEdge(kind: 'prompt' | 'stop' | 'session', tabId: string, turn?: number | null) {
     const now = Date.now();
-    if (kind === 'prompt') turns.turnStarted(tabId, now);
+    if (kind === 'prompt') turns.turnStarted(tabId, now, turn);
     else if (kind === 'stop') turns.turnEnded(tabId, now);
     else {
       turns.forget(tabId);
@@ -2044,13 +2044,16 @@ function createFileTreeStore() {
 
   /** The column opens: start each tab's turn from the ledger's count. The primed marks alone
    *  would leave a turn that has only read (or not yet called a tool) unknown, and the
-   *  previous turn's writes would count as this one's. Asked as the hook listeners go up and
-   *  before the subscription is opened, so it normally lands before the primed marks; `seed`
-   *  never lowers a turn heard since, whichever comes first. */
+   *  previous turn's writes would count as this one's. Asked once the hook listeners are up
+   *  (an edge before then is in the read; one after it is heard), before the subscription
+   *  has primed its marks; `seed` never lowers a turn heard since, and skips a tab with a
+   *  prompt or a new session heard after the read was sent, whose event the read can't be
+   *  ordered against. */
   async function seedTurns() {
+    const readAt = turns.edgeMark();
     const list = await commands.agentFilesTurns().catch(() => []);
     if (!attached || list.length === 0) return;
-    for (const t of list) turns.seed(t.tab_id, t.turn, t.start_ms, t.end_ms);
+    for (const t of list) turns.seed(t.tab_id, t.turn, t.start_ms, t.end_ms, readAt);
     bumpAgents();
     const mode = viewMode();
     if (mode === 'turn' || mode === 'session') rebuildLens();
@@ -2269,11 +2272,12 @@ function createFileTreeStore() {
       if (tabId === sourceTabId) scheduleResolve(false);
     });
     const hookOffs: UnlistenFn[] = [];
+    const hooksUp: Promise<void>[] = [];
     const onHook = <T>(event: string, fn: (p: T) => void) => {
-      listen<T>(event, (e) => { if (e.payload) fn(e.payload); }).then((u) => {
+      hooksUp.push(listen<T>(event, (e) => { if (e.payload) fn(e.payload); }).then((u) => {
         if (attached) hookOffs.push(u);
         else u();
-      }).catch(() => {});
+      }).catch(() => {}));
     };
     onHook<{ tab_id?: string; source?: string }>('agent-hook-session-start', (p) => {
       if (!p.tab_id) return;
@@ -2282,9 +2286,11 @@ function createFileTreeStore() {
       // the turn on, and initSession's re-emit (no source) is the same session named late.
       if (p.source && p.source !== 'compact') onTurnEdge('session', p.tab_id);
     });
-    onHook<{ tab_id?: string | null }>('agent-hook-user-prompt', (p) => { if (p.tab_id) onTurnEdge('prompt', p.tab_id); });
+    // `turn`: the ledger's number for the turn the prompt began (absent when the ledger had no
+    // tab for it), so the tracker can't drift from the seed below.
+    onHook<{ tab_id?: string | null; turn?: number | null }>('agent-hook-user-prompt', (p) => { if (p.tab_id) onTurnEdge('prompt', p.tab_id, p.turn); });
     onHook<{ tab_id?: string | null }>('agent-hook-stop', (p) => { if (p.tab_id) onTurnEdge('stop', p.tab_id); });
-    void seedTurns();
+    void Promise.all(hooksUp).then(() => { if (attached) void seedTurns(); });
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('blur', onWindowBlur);
     window.addEventListener('focus', onWindowFocus);

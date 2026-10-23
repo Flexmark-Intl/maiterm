@@ -4790,10 +4790,16 @@ async fn hooks_handler(
             }
 
             log::debug!("Claude hook: UserPromptSubmit session={} (tab {:?})", &session_id[..session_id.len().min(8)], tab_id);
+            // The Files ledger's number for the turn this prompt began (recorded above, before
+            // this arm): a window's turn tracker takes it as is (file-tree.md §9.4).
+            let turn = tab_id.as_deref().and_then(|t| {
+                tauri::Manager::try_state::<Arc<crate::filetree::FileTreeState>>(&srv.app_handle).and_then(|ft| ft.agents.turn_of(t))
+            });
             emit_dual(&srv.app_handle, "agent-hook-user-prompt", "claude-hook-user-prompt", serde_json::json!({
                 "runtime": runtime_key,
                 "session_id": session_id,
                 "tab_id": tab_id,
+                "turn": turn,
             }));
         }
 

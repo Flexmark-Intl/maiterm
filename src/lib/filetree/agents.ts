@@ -59,6 +59,12 @@ export class TurnTracker {
   private turn = new Map<string, number>();
   /** tab → when its newest turn began and ended (null: still open), ms epoch. */
   private spans = new Map<string, { start: number; end: number | null }>();
+  /** A counter of the edges heard (prompts, new sessions) and `clear()`s, never reset, and
+   *  where each tab's newest edge and the last clear fell on it: what `seed` checks a read
+   *  against. */
+  private edgeSeq = 0;
+  private lastEdge = new Map<string, number>();
+  private clearedAt = 0;
 
   current(tabId: string): number {
     return this.turn.get(tabId) ?? 0;
@@ -81,9 +87,22 @@ export class TurnTracker {
     }
   }
 
-  /** The tab's prompt hook: a new turn starts now, so nothing seen so far is this turn's. */
-  turnStarted(tabId: string, at: number): void {
-    this.turn.set(tabId, this.current(tabId) + 1);
+  /** The tab's prompt hook: a new turn starts now, so nothing seen so far is this turn's.
+   *  `turn` is the ledger's number for it, sent with the hook: taken as is, it can't drift
+   *  from a `seed` that raced the prompt, whichever lands first. A count of one on from what
+   *  this window has seen could (an unseeded tab counts from 0). Without it, the count. */
+  turnStarted(tabId: string, at: number, turn?: number | null): void {
+    this.lastEdge.set(tabId, ++this.edgeSeq);
+    const cur = this.turn.get(tabId);
+    if (turn == null) {
+      this.turn.set(tabId, (cur ?? 0) + 1);
+      this.spans.set(tabId, { start: at, end: null });
+      return;
+    }
+    // Already there: a seed read after the ledger recorded this prompt, or a mark of the turn
+    // that beat its prompt's event. Older: a late event, never a step back.
+    if (cur !== undefined && cur >= turn) return;
+    this.turn.set(tabId, turn);
     this.spans.set(tabId, { start: at, end: null });
   }
 
@@ -103,14 +122,26 @@ export class TurnTracker {
 
   /** A new session on the tab (not a compaction): the ledger starts its numbering again. */
   forget(tabId: string): void {
+    this.lastEdge.set(tabId, ++this.edgeSeq);
     this.turn.delete(tabId);
     this.spans.delete(tabId);
   }
 
+  /** Where the edges stand, taken as a `agentFilesTurns` read is sent and handed to `seed`. */
+  edgeMark(): number {
+    return this.edgeSeq;
+  }
+
   /** The ledger's own count for the tab, read when the column opens (`agentFilesTurns`): the
    *  marks carry only turns something was written in, so a turn that has only read is known
-   *  from here alone. A newer turn seen since the read (a mark, a prompt hook) wins. */
-  seed(tabId: string, turn: number, start: number, end: number | null): void {
+   *  from here alone. A newer turn seen since the read (a mark, a prompt hook) wins.
+   *
+   *  `readAt` is `edgeMark()` from when the read was sent. A tab with a prompt or a new session
+   *  heard since then is not seeded at all: the read can't be ordered against the hook's event
+   *  (they travel apart), and after a new session its higher number is the stale one, which
+   *  the comparison below would keep for good. Nor is anything after a `clear()`. */
+  seed(tabId: string, turn: number, start: number, end: number | null, readAt?: number): void {
+    if (readAt !== undefined && (this.clearedAt > readAt || (this.lastEdge.get(tabId) ?? 0) > readAt)) return;
     const cur = this.turn.get(tabId);
     if (cur !== undefined && cur > turn) return;
     const s = cur === turn ? this.spans.get(tabId) : undefined;
@@ -123,6 +154,9 @@ export class TurnTracker {
   clear(): void {
     this.turn.clear();
     this.spans.clear();
+    this.lastEdge.clear();
+    // A read sent before this lands on a tracker it no longer describes: it seeds nothing.
+    this.clearedAt = ++this.edgeSeq;
   }
 
   remap(oldId: string, newId: string): void {
@@ -135,6 +169,11 @@ export class TurnTracker {
     if (s) {
       this.spans.delete(oldId);
       this.spans.set(newId, s);
+    }
+    const e = this.lastEdge.get(oldId);
+    if (e !== undefined) {
+      this.lastEdge.delete(oldId);
+      this.lastEdge.set(newId, e);
     }
   }
 }
