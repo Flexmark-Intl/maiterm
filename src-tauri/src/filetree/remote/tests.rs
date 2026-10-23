@@ -4,11 +4,11 @@
 //! pipes. Each test has a scratch HOME (the remote trash, git's global config), never the real
 //! one. `on_a_real_host` runs the same against an ssh host when asked.
 //!
-//! A test that starts the helper this way is `#[cfg(unix)]`: it makes THIS computer stand in
-//! for the ssh host, and a host is always a POSIX one (`/bin/sh`, select on pipes, unix
-//! symlinks). Windows only ever runs the Rust side against a host elsewhere; what of that
-//! needs no host (the registry, exit classification, the 3.6 gate, the helper harness) runs
-//! everywhere.
+//! A test that runs the helper's code here (started as above, or loaded by the harness) is
+//! `#[cfg(unix)]`: it makes THIS computer stand in for the ssh host, and a host is always a
+//! POSIX one (`/bin/sh`, select on pipes, unix symlinks, roots that are `/`-absolute paths).
+//! Windows only ever runs the Rust side against a host elsewhere; what of that needs no host
+//! (the registry, exit classification, the 3.6 gate) runs everywhere.
 #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use std::io::{BufReader, Write};
@@ -932,6 +932,7 @@ fn run_helper_harness(name: &str, script: &str) {
 /// A first frame whose write fails after it made the file (a full disk, a quota) takes the
 /// file back out: Rust reads any refused put as "not made" and sends no discard after it.
 #[test]
+#[cfg(unix)]
 fn a_put_whose_write_fails_leaves_nothing_behind() {
     if !python3() {
         return;
@@ -954,6 +955,7 @@ assert not os.path.lexists(os.path.join(root, 'big.bin')), 'a failed put left it
 /// run jobs in any order, so a discard that ran first removed nothing and the put then made the
 /// half-written file it was sent to take away; the put is slowed here so it always would.
 #[test]
+#[cfg(unix)]
 fn a_discard_waits_for_the_put_it_follows() {
     if !python3() {
         return;
