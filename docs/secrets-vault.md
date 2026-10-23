@@ -213,10 +213,20 @@ So:
 
 - **Two data keys.** 256 random bits each, under service `{app_data_slug()}.secrets`:
   - `vault-dek` seals dev- and staging-tier values. It is the keychain item alone.
-  - `vault-dek-prod` seals prod-tier values, and **is itself wrapped**: a passphrase
-    (Argon2id) in v1, an OS user-presence check later (§16). It is unwrapped for a session and
-    held in memory. This is what makes §1's promise true for prod on Linux and Windows, where any
-    same-user process can read the keychain item without a prompt.
+  - `vault-dek-prod` seals prod-tier values, and **the OS guards it**, not just a dialog (§16
+    decision 2):
+    - **macOS**: a keychain item with a user-presence access control, so the keychain itself
+      refuses to release it without Touch ID or the login password, whoever asks. `keyring`
+      can't set an access control, so this one item uses the Security framework directly.
+    - **Windows**: unwrapped by a Windows Hello-protected key (`KeyCredentialManager`). Not
+      `UserConsentVerifier`, which only shows a prompt and protects nothing.
+    - **Linux, and the fallback anywhere**: a passphrase (Argon2id).
+
+    Once unlocked it is held in memory until 15 minutes idle. This is what makes §1's promise
+    true for prod on Linux and Windows, where any same-user process can read a plain keychain
+    item without a prompt. A project can opt dev and staging into the same guard.
+- **Storage sits behind a `ValueStore` interface** (read, write, list versions) from the first
+  commit, so 1Password can be a second backend without a rewrite (§16 decision 3).
 - **Dev and prod builds get separate entries**, the same split as `accounts/vault.rs` rule 3.
 - **Windows: entries are created with local persistence.** keyring's Windows store defaults to
   `CRED_PERSIST_ENTERPRISE`, which **roams** with a roaming domain profile. A data key must
@@ -238,7 +248,7 @@ So:
 
 **Backups.** A backup of `secrets.vault` alone is useless elsewhere. A backup that also carries
 the keychain (a full macOS backup includes `login.keychain-db`) is protected only by the login
-password for dev and staging values, and by the prod passphrase for prod ones. Moving the vault
+password for dev and staging values. Prod values also need the prod unlock. Moving the vault
 on purpose is an explicit **Export vault** with a passphrase, in age's format so the file opens
 with the `age` CLI too. **Import vault** is the fifth way a value enters (§1).
 
@@ -420,7 +430,8 @@ the value on stdin). So every adapter:
 | Kubernetes | `kubectl create secret … --dry-run=client -o yaml \| kubectl apply --server-side -f -`. A client-side `apply` keeps a **second copy** of the data in the `last-applied-configuration` annotation | `--context`, `--namespace` |
 | `env_file`, `ssh_env` | local, see §7.4, §7.5 | — |
 
-Each row must be checked against the real CLI or API before its adapter ships.
+Each row must be checked against the real CLI or API before its adapter ships. **Order** (§16
+decision 4): GitHub Actions, Cloudflare, Railway; then Vercel and Fly; AWS and Kubernetes later.
 
 **Adapter errors are fixed sentences.** An adapter reports "GitHub refused the push: not
 authorized for maisoft/api", never raw stderr. Provider errors can echo their input, and
@@ -490,7 +501,7 @@ panel. **No MCP tool can change policy**, and policy is not in `preference_meta`
 | `writeEnvFile` to an approved file | at once | a card each write | **off**. Enabled per target with a card, then a card each write |
 | `generateSecret` (missing value) | at once | at once | a card |
 | `captureSecret` | a card the first time per command + place + `extract` | same | a card each time |
-| reveal / copy in the panel | yes | yes | after the prod unlock (§5), and a user-presence check later (§16) |
+| reveal / copy in the panel | yes | yes | after the prod unlock (§5: Touch ID / Windows Hello / passphrase) |
 | leak found | reported to the human | reported, rotation proposed | reported, **rotation proposed as a Decision** |
 
 A prod card can be approved on the phone (§12): it names what moves and where, never a value.
@@ -595,8 +606,9 @@ as far as we know, so its keys are human-minted, §9.5.)
 
 A small built-in table per provider: format prefixes (test vs live), the console URL for
 issuing and revoking keys, whether two keys can be live at once, typical expiry, and which
-adapter or recipe mints and revokes, or "human". Initial candidates: Stripe (human-minted),
-GitHub, AWS, Anthropic, OpenAI, Slack, SendGrid, Resend, Cloudflare, Supabase. **Every entry
+adapter or recipe mints and revokes, or "human". First: Stripe (human-minted), GitHub,
+Anthropic, OpenAI, Cloudflare, AWS (§16 decision 4). Later candidates: Slack, SendGrid, Resend,
+Supabase. **Every entry
 must be checked against the provider's current docs when it is written**, not from memory.
 
 ## 10. Keeping secrets out of sessions
@@ -652,8 +664,13 @@ under 12 characters are skipped, since they would match by accident. The panel n
   open (when maiTerm is down or the tunnel is dead, the call goes ahead), and string matching is
   easy to dodge (`cat .e""nv`). To verify: that a deciding `PreToolUse` works on every runtime
   we support (Codex hook parity is listed in docs/codex-integration-review.md).
+- **No `Read(.env)` rules are written into Claude's settings** (§16 decision 6). Such a rule
+  covers only the Read tool, so `cat .env` in Bash walks past it, and it costs a write to user
+  config.
 - **For prod, the boundary that holds** is the agent's own sandbox or a separate OS user (§1).
-  The panel says so where prod is turned on.
+  Turning prod on offers "Run this project's agents sandboxed" as one click, **only once a
+  spike has proven** that Claude Code's sandbox blocks the keychain, other processes'
+  environments and the vault file (§16 decision 7). Until then the panel only says so.
 - The priming line (`initSession`) tells agents the vault exists and which tools to use, so
   "paste your API key here" is not the agent's first idea.
 
@@ -661,8 +678,10 @@ under 12 characters are skipped, since they would match by accident. The panel n
 
 ### 11.1 The Secrets panel
 
-A window-level view per project (opened from the workspace's context menu and a sidebar row;
-the shortcut is an open question):
+A full-window view per project, like Preferences, opened from the workspace's context menu, a
+sidebar row and every secrets card. **No shortcut in v1, and not a new `tab_type`** (that would
+add a value an older build can't load; §16 decision 8). It needs the width, so it is not a side
+dock:
 - **a matrix of keys × environments**, each cell showing set (with age), missing (red when
   required), pending (a rotation in progress), overdue, or expiring;
 - expanding a key shows its description (quoted as the agent's), provider, template, targets,
@@ -713,9 +732,13 @@ filtered in the panel and exported.
   - the request carries a wire flag (`desktopOnly: true`) so the phone draws "Enter these on
     the desktop" instead of buttons. **That field is a protocol bump.**
 
-  Pasting from a phone password manager would be handy, and it needs its own transport review
-  (§16). The "never go to desktop" rule (memory) is broken here on purpose, and the card says
-  why.
+  The "never go to desktop" rule (memory) is broken here on purpose, and the card says why.
+- **Values on the phone later, end-to-end encrypted** (§16 decision 1), after the targets phase.
+  The real use is rotation: you create the new key in a provider's mobile dashboard or your
+  phone's password manager and paste it. The desktop card carries a one-time X25519 public
+  key; the phone seals the value to it, and only Rust can open it. The LAN link and the relay
+  then carry only ciphertext, so the design does not depend on what they can see. The request
+  keeps `desktopOnly` until then.
 - Leak reports and rotation proposals ring the doorbell, gated by mute (docs/mute.md) like any
   other notice.
 
@@ -744,9 +767,9 @@ filtered in the panel and exported.
 |---|---|---|
 | **A prompt-injected agent** ("send the key to evil.com") | No tool takes a value or a free URL; targets need a card and an agent's config and PATH can't redirect them (§7.3); templates can't cross an allowlist (§4.4); prod deploys need a card each time | An agent that writes code which leaks the key at runtime and gets it deployed. Code review and CI catch that, not the vault |
 | **A careless agent** (prints env, commits `.env`) | No values in tool results; masking and scrubbing; gitignore check; leak scan; pre-commit hook | A value it already read through its own tools |
-| **A determined agent running as the same OS user** | Prod values sealed under a passphrase-unwrapped key (§5); the `PreToolUse` speed bump (§10.3); no oracles (§1 rule 4) | Dev and staging values: the keychain item, process environments and `.env` files are readable to it. **The real boundary is a sandbox or a separate OS user** |
+| **A determined agent running as the same OS user** | Prod values sealed under an OS-guarded key (§5); the `PreToolUse` speed bump (§10.3); no oracles (§1 rule 4) | Dev and staging values: the keychain item, process environments and `.env` files are readable to it. **The real boundary is a sandbox or a separate OS user** |
 | **Another local process as the same user** | As above | As above, the same reach docs/login.md §9.2 accepts |
-| **A stolen backup or synced data dir** | The vault file alone is useless; Windows entries don't roam (§5); prod needs the passphrase | A backup that also carries the macOS login keychain opens dev and staging values to whoever has the login password |
+| **A stolen backup or synced data dir** | The vault file alone is useless; Windows entries don't roam (§5); prod needs the prod unlock | A backup that also carries the macOS login keychain opens dev and staging values to whoever has the login password |
 | **A lost or compromised phone** | Values never reach the phone; approvals need a paired device token (docs/agent-requests.md §2) | A paired phone can approve a prod deploy, so unpairing is the response |
 | **A shared screen / shoulder** | Masked by default; reveal times out; copy stays out of clipboard history | — |
 | **maiTerm's own logs and errors** | `Secret` has no `Display`/`Serialize`; errors name the operation and key, never the value (the `accounts/vault.rs` rule 1); adapter errors are fixed sentences (§7.3) | — |
@@ -778,49 +801,74 @@ user.** Every card on a `run` or prod path says so in one line.
 - **Fully automatic rotation, including revoke**: revoking is the one step that can't be
   undone, so it stays with the human unless they tick otherwise on that run's card.
 
-## 16. Open questions
+## 16. Decisions (Darryl, 2026-10-23)
 
-1. **Phone value entry**: worth a transport review for v1, or later?
-2. **Prod unlock**: a passphrase in v1 (§5). Later, an OS user-presence check (Touch ID through
-   LocalAuthentication, Windows Hello through `UserConsentVerifier`, polkit on Linux): three
-   implementations. Should dev and staging also be wrappable, for people who want it?
-3. **Bring your own backend**: let maiTerm keep the manifest, targets, ledger and rotation
-   runs while the values live in 1Password / Doppler / Infisical (resolved through their CLIs
-   at delivery, written back on rotation). That is the path to teams sharing secrets, which v1
-   doesn't do. How soon?
-4. **Which targets and providers first?** The tables in §7.3 and §9.5 are candidates.
-5. **Default prod `run` policy**: off (as above), or a card per run?
-6. **The `PreToolUse` deny (§10.3)**: is it enough, or should maiTerm also write `Read(.env)`
-   deny rules into the project's Claude settings? That writes user config, so reviewers need a
-   scratch HOME (memory "Reviewers must isolate HOME").
-7. **Recommending a sandbox**: should turning on prod keys offer to set up Claude Code's sandbox
-   for the project's tabs, or only say so?
-8. **Panel placement and shortcut.**
-9. **Dynamic secrets**: mint short-lived credentials per `run` where the provider supports it
-   (AWS STS, database IAM auth). A real step past rotation. Which phase?
+The first draft's open questions, each with the answer agreed and the reason it was chosen.
+
+1. **Phone value entry: not in v1; later, end-to-end encrypted** (§12). The need is real only
+   once rotation exists (pasting a newly minted key from a mobile dashboard or a password
+   manager). Sealing the value to a one-time key on the desktop card means the LAN link and the
+   relay never need a review of what they can see.
+2. **Prod unlock: OS-enforced, not a dialog** (§5). macOS: a keychain access control requiring
+   user presence. Windows: a Hello-protected key. Linux and the fallback: a passphrase. Unlocked
+   for 15 minutes idle. Dev and staging can opt in per project, not by default. A passphrase on
+   every prod action gets turned off within a week, and only the OS-enforced form also stops a
+   same-user agent on macOS.
+3. **1Password: designed for from phase 1, built right after targets.** Storage sits behind a
+   `ValueStore` interface from the start (§5); the 1Password backend resolves with `op read` and
+   writes back on rotation, while manifest, targets, ledger and runs stay in maiTerm. Doppler and
+   Infisical wait for someone to ask. 1Password is what most developers already have and is
+   teams' sharing for free; retrofitting a second backend later is a rewrite.
+4. **Targets: GitHub Actions, Cloudflare, Railway; then Vercel, Fly; AWS and Kubernetes
+   later** (§7.3). **Provider packs: Stripe, GitHub, Anthropic, OpenAI, Cloudflare, AWS** (§9.5).
+   GitHub is near-universal, maiTerm itself deploys to Cloudflare, Railway is in use here, and
+   AWS/Kubernetes are the hardest adapters and most likely to have their own secrets manager.
+5. **Prod `run`: off by default; enabled per project, then a card per run** (§8). Prod
+   credentials on a laptop are the anti-pattern this ends; prod migrations belong in the deploy
+   pipeline; the rare one-off ops job fits a card per run.
+6. **No `Read(.env)` rules in Claude's settings** (§10.3). They cover only the Read tool, so Bash
+   walks past them, and they cost a user-config write. The hook stays as a speed bump; the
+   sandbox is the real answer.
+7. **The sandbox is offered as one click, after a spike proves it** (§10.3). The spike checks that
+   Claude Code's sandbox blocks the keychain, other processes' environments and the vault file.
+   If it doesn't, the button would promise protection it doesn't give, so it ships only if the
+   spike passes.
+8. **The panel is a full-window view like Preferences, with no shortcut and no new `tab_type`**
+   (§11.1). The keys × environments grid needs width, it is an occasional screen mostly reached
+   from a card, and a new `tab_type` value is the older-build-loads-empty risk for no gain.
+9. **Dynamic secrets: advice, not a feature.** When a long-lived `AKIA…` key is stored, the panel
+   suggests AWS SSO (`aws sso login` already yields short-lived credentials) or OIDC for CI, as
+   the OIDC advisor does (§7.3). The providers that support short-lived credentials ship the
+   tooling; maiTerm's job is to stop the long-lived key being stored, not to reimplement STS.
 
 ## 17. Build order
 
-1. **Vault core.** `src-tauri/src/secrets/`: the envelope store across platforms with the two
-   data keys and local-only Windows persistence (§5), passphrase unlock, the data model, the
-   Secrets panel with human entry, environments, the audit log. `accounts/vault.rs`'s `Secret`
+1. **Vault core.** `src-tauri/src/secrets/`: the envelope store behind the `ValueStore`
+   interface, with the two data keys and local-only Windows persistence (§5), the passphrase
+   unlock (the Linux path and the fallback everywhere), the data model, the Secrets panel as a
+   full-window view with human entry, environments, the audit log. `accounts/vault.rs`'s `Secret`
    grows `zeroize` and moves to a shared module.
 2. **The agent manifest.** `listSecrets`, `declareSecrets` with its locked fields,
    `requestSecretValues`, the entry sheet, the combined store-approve-settle Done, per-kind
    request TTLs and the reload remap (§6.1), the phone refusal and `desktopOnly` (§12), the
    ⟦SECRETS⟧ notice, `generateSecret`. **This is the first phase an agent can use, and it proves
    Darryl's flow end to end.**
-3. **Local delivery.** The scrubber at every MCP and persistence boundary (§10.1) **first**,
+3. **Prod guards, before anything can deliver a prod value.** The OS-enforced prod unlock: the
+   macOS keychain access control and the Windows Hello-protected key (§5). The sandbox spike
+   (§10.3), and the one-click offer only if it passes.
+4. **Local delivery.** The scrubber at every MCP and persistence boundary (§10.1) **first**,
    then `runWithSecrets` with masking, the `maiterm-run` shim with peer-verified tickets for
    stack services (§7.1, §7.2), `writeEnvFile`, `adoptSecrets`.
-4. **Targets.** `declareTargets`, `deploySecrets`, the ledger, adapters with pinned addresses and
-   binaries (§7.3) for GitHub Actions and one host (Railway or Cloudflare) first.
-5. **Rotation.** Runs with human mint and revoke, `requestRotation`, the run view, age and
-   expiry proposals, provider packs.
-6. **Leak detection.** The dedicated transcript scanner, scrollback and pre-commit scans,
-   leak-triggered rotation, the `PreToolUse` deny.
-7. **Automation and reach.** Capture recipes with their oracle guards, adapter mint/revoke, ssh
-   delivery, bring-your-own backend, OS user-presence for prod.
+5. **Targets.** `declareTargets`, `deploySecrets`, the ledger, adapters with pinned addresses and
+   binaries (§7.3): GitHub Actions, Cloudflare, Railway.
+6. **1Password backend** on the `ValueStore` interface (§16 decision 3).
+7. **Rotation.** Runs with human mint and revoke, `requestRotation`, the run view, age and
+   expiry proposals, the first provider packs (§9.5), end-to-end encrypted value entry on the
+   phone (§12).
+8. **Leak detection.** The dedicated transcript scanner, scrollback and pre-commit scans,
+   leak-triggered rotation, the `PreToolUse` deny, the OIDC / AWS SSO advice.
+9. **Automation and reach.** Capture recipes with their oracle guards, adapter mint/revoke, ssh
+   delivery, Vercel and Fly, then AWS and Kubernetes.
 
 Each phase is reviewed before the next. The shim and the adapters must be reviewed with a
 scratch HOME. **Two tests must exist before the first adapter ships**: no value in argv, and no
