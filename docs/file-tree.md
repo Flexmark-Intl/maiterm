@@ -941,6 +941,22 @@
 >   (by poll here) and a removal in the grace. The FSEvents-heavy suite still times out a
 >   watcher start now and then on a loaded machine (seen at the base too); it passes with
 >   `--test-threads=4`. **Not checked in the running app or on nova** (no dev run in this step).
+>
+> **As built, final dev-check review fixes (2026-10-23).** Where they changed the above:
+> - **A kept remote hub is handed back at once; its repository is checked after.** The `root`
+>   call before reuse waited out its 5 s timeout while the helper was down or reconnecting, so a
+>   switch back to a remote root in its grace sat in "opening" with no subscription (and added
+>   an ssh round trip even with the host up). Now the hub is subscribed first and
+>   `recheck_remote_repo` asks the host on its own thread; another repository retires the hub
+>   and the new subscriber gets the Reopen. `add_sub` delivers Reopen to a subscriber that lands
+>   on a hub already retired, and `repo_moved` flips `retired` under the subscription lock, so
+>   each subscriber hears it exactly once. The local grace check (a few stats) stays inline.
+> - **A Reopen keeps the you-are-here tick.** The client re-opened with `place` as first opened,
+>   whose `cwd_rel` a 'locate' step never updates, so the tick jumped back (often to the root);
+>   it now re-opens with the current tick.
+> - **Tests:** `a_kept_remote_hub_comes_back_at_once_while_its_host_is_down` (5.0 s before the
+>   fix), and the remote `git init` test now follows the Reopen after a removal in the grace.
+>   The tick fix has no store test (the store has no harness); not checked in the running app.
 
 ## 1. Why
 
