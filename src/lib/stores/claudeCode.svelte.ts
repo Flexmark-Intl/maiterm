@@ -109,9 +109,11 @@ function createClaudeCodeStore() {
           } else if (tool === 'getTreeSelection') {
             result = fileTreeStore.selectionForAgent();
           } else {
-            result = typeof a.path === 'string' && a.path
+            // A relative path can't be placed: answering outside_root for it would tell the
+            // agent its file isn't in the tree when it only spelled the path wrong.
+            result = typeof a.path === 'string' && /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(a.path)
               ? await fileTreeStore.agentReveal(a.tabId, a.path, a.select === true)
-              : { error: 'path is required: the absolute path of a file or folder.' };
+              : { error: 'path must be the absolute path of a file or folder.' };
           }
           break;
         }
