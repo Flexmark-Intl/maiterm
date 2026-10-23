@@ -595,11 +595,14 @@ impl RootHub {
     /// every subscriber is asked to open the place again, which makes a new hub. Its view is
     /// kept on the client and its folders answer from generations, so this costs a round trip.
     pub(super) fn repo_moved(&self) {
+        // Flipped under the subscription lock, which `add_sub` reads it under: a subscriber
+        // arriving at the same moment is told exactly once, by one side or the other.
+        let mut subs = self.subs.lock();
         if self.retired.swap(true, Ordering::SeqCst) {
             return;
         }
         log::info!("filetree: the repository of {} changed; its views reopen", self.root.display());
-        for s in self.subs.lock().values_mut() {
+        for s in subs.values_mut() {
             s.deliver(TreeEvent::Reopen);
         }
     }
@@ -652,6 +655,10 @@ impl RootHub {
             sub.deliver(health);
             if self.is_gone() {
                 sub.deliver(TreeEvent::RootGone);
+            } else if self.retired.load(Ordering::SeqCst) {
+                // Retired between being handed out and this subscription (a repository
+                // re-check, or the watcher): this subscriber missed the Reopen the others got.
+                sub.deliver(TreeEvent::Reopen);
             }
             if !standing.is_empty() {
                 sub.deliver(TreeEvent::Agent { marks: standing });

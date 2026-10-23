@@ -342,21 +342,42 @@ impl FileTreeState {
         let Some((host, root)) = place::split_remote(place.trim()) else {
             return Err(format!("Files can't open {place}: not a folder here or on an ssh host"));
         };
-        let hub = self.remote_hub_for(place.trim(), &host, &root, excludes, lookup)?;
-        Ok(self.subscribe(hub, window, restore, sink))
+        let (hub, idle) = self.remote_hub_for(place.trim(), &host, &root, excludes, lookup)?;
+        let ack = self.subscribe(hub.clone(), window, restore, sink);
+        if idle {
+            Self::recheck_remote_repo(hub);
+        }
+        Ok(ack)
     }
 
-    /// The hub for a remote place, made (and its root opened on the host) if there is none.
-    fn remote_hub_for(&self, key: &str, host: &str, root: &str, excludes: Vec<String>, lookup: Option<remote::Lookup>) -> Result<Arc<RootHub>, String> {
+    /// A remote hub handed back from its grace period had nobody watching for a `.git` there
+    /// that a poll would have caught (no inotify), so the host is asked once. In the background,
+    /// after the subscription: the ask is an ssh round trip, and up to its whole timeout while
+    /// the helper is reconnecting, and switching back to a root must not wait on it. A
+    /// different repository retires the hub, and the Reopen reaches the new subscriber.
+    fn recheck_remote_repo(hub: Arc<RootHub>) {
+        let spawned = std::thread::Builder::new().name("ft-repo-check".into()).spawn(move || {
+            let Some(r) = hub.remote.as_ref() else { return };
+            if let Some(now) = r.repo_now() {
+                if now != hub.repo {
+                    hub.repo_moved();
+                }
+            }
+        });
+        if let Err(e) = spawned {
+            log::warn!("filetree: couldn't re-check a remote root's repository: {e}");
+        }
+    }
+
+    /// The hub for a remote place, made (and its root opened on the host) if there is none; and
+    /// whether it is a kept one coming back from its grace period, whose repository may have
+    /// changed unwatched (`recheck_remote_repo`).
+    fn remote_hub_for(&self, key: &str, host: &str, root: &str, excludes: Vec<String>, lookup: Option<remote::Lookup>) -> Result<(Arc<RootHub>, bool), String> {
         let lease = self.remotes.lease(host, lookup);
         let kept = self.hubs.lock().get(key).filter(|h| h.reusable()).cloned();
         if let Some(h) = kept {
-            // A hub in its grace period had nobody watching for a `.git` there that a poll
-            // would have caught (no inotify), so the host is asked once before it is handed out.
-            match h.remote.as_ref().filter(|_| h.sub_count() == 0).map(|r| r.repo_now()) {
-                Some(Some(now)) if now != h.repo => h.repo_moved(),
-                _ => return Ok(h),
-            }
+            let idle = h.sub_count() == 0;
+            return Ok((h, idle));
         }
         // Outside the map's lock: it waits on the host.
         let r = remote::RemoteRoot::open(lease, root, excludes.clone())?;
@@ -376,10 +397,10 @@ impl FileTreeState {
         let fresh = RootHub::new(init, self.slots.clone(), self.focus.clone(), self.watch_ctx());
         let mut hubs = self.hubs.lock();
         Ok(match hubs.get(key) {
-            Some(h) if h.reusable() => h.clone(),
+            Some(h) if h.reusable() => (h.clone(), false),
             _ => {
                 hubs.insert(key.to_string(), fresh.clone());
-                fresh
+                (fresh, false)
             }
         })
     }

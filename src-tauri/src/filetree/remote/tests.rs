@@ -541,12 +541,81 @@ fn git_init_on_the_host_reopens_the_root_with_its_repository() {
     let again = ft.open_with("w", &place, vec![], rec2.clone(), vec![], None).unwrap();
     ft.close(ack.sub_id);
     assert!(again.repo.is_some() && again.caps.git, "the new hub decorates: {:?}", again.repo);
-    // Unseen (nobody subscribed, the hub in its grace): the reopen asks the host.
+    // Unseen (nobody subscribed, the hub in its grace): the host is asked after the kept hub is
+    // handed back, and a different answer reopens it. (A poll that caught it first already
+    // retired the hub, and the open makes a new one.)
     ft.close(again.sub_id);
     std::fs::remove_dir_all(t.join(".git")).unwrap();
-    let plain = ft.open_with("w", &place, vec![], rec2, vec![], None).unwrap();
+    let rec3 = Arc::new(Recorder::default());
+    let mut plain = ft.open_with("w", &place, vec![], rec3.clone(), vec![], None).unwrap();
+    if plain.repo.is_some() {
+        rec3.wait("a reopen of the kept hub", |e| matches!(e, TreeEvent::Reopen));
+        let next = ft.open_with("w", &place, vec![], Arc::new(Recorder::default()), vec![], None).unwrap();
+        ft.close(plain.sub_id);
+        plain = next;
+    }
     assert!(plain.repo.is_none(), "the removed repository is gone from the new hub");
     ft.close(plain.sub_id);
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&t);
+}
+
+/// `Local`, with a switch that makes every new connection fail the way ssh to a dropped host
+/// does.
+struct Droppable {
+    local: Local,
+    down: std::sync::atomic::AtomicBool,
+}
+
+impl Transport for Droppable {
+    fn helper(&self, t: &Target) -> Command {
+        if !self.down.load(std::sync::atomic::Ordering::SeqCst) {
+            return self.local.helper(t);
+        }
+        let mut c = Command::new("/bin/sh");
+        c.arg("-c").arg("echo 'ssh: connect to host here port 22: Connection refused' >&2; exit 255");
+        env(&mut c, &self.local.home);
+        c
+    }
+
+    fn shell(&self, t: &Target) -> Command {
+        self.local.shell(t)
+    }
+}
+
+/// Switching back to a remote root within its grace period is instant even while its host is
+/// down: the repository re-check of a kept hub waited out its whole 5 s timeout first, so the
+/// column sat in "opening" with no subscription.
+#[test]
+#[cfg(unix)]
+fn a_kept_remote_hub_comes_back_at_once_while_its_host_is_down() {
+    if !python3() {
+        return;
+    }
+    let home = scratch("keptdown");
+    let t = scratch("keptdown-root");
+    let ft = FileTreeState::with(Duration::from_secs(30), crate::filetree::watch::RAW_CAPACITY, None);
+    let transport = Arc::new(Droppable { local: Local { home: home.clone(), python: "python3" }, down: Default::default() });
+    ft.remotes.set_transport(transport.clone(), fast());
+    let place = format!("me@here:{}", t.display());
+    let rec = Arc::new(Recorder::default());
+    let ack = ft.open_with("w", &place, vec![], rec.clone(), vec![], None).unwrap();
+    rec.wait("the root", |e| matches!(e, TreeEvent::Dir { rel, .. } if rel.is_empty()));
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    let conn = hub.remote.as_ref().unwrap().conn.clone();
+    ft.close(ack.sub_id);
+    transport.down.store(true, std::sync::atomic::Ordering::SeqCst);
+    conn.kill_current();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !matches!(conn.status(), Status::Down(_)) {
+        assert!(Instant::now() < deadline, "never went down ({:?})", conn.status());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let started = Instant::now();
+    let again = ft.open_with("w", &place, vec![], Arc::new(Recorder::default()), vec![], None).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2), "the kept hub took {:?}", started.elapsed());
+    assert!(Arc::ptr_eq(&hub, &ft.hub_of(again.sub_id).unwrap()), "the kept hub was handed back");
+    ft.close(again.sub_id);
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&t);
 }
