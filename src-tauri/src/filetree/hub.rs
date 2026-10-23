@@ -191,7 +191,15 @@ impl Sub {
                 // `seq` moved only if this chunk actually went out (the one that filled the
                 // window did; one met by an existing stall was only marked dirty).
                 let next = if self.seq > before { i + 1 } else { i };
-                if next > 0 && next < n {
+                // The chunk that filled the window was the last: the client has the whole
+                // listing, so there is nothing to resume. Marking it dirty would resend it all
+                // from chunk 0, and when the chunk count lines up with the ack cadence, the
+                // resend ends on the last chunk again, forever. A real change made during the
+                // stall still marks it dirty, through `deliver`.
+                if next == n {
+                    return;
+                }
+                if next > 0 {
                     self.partial.insert(rel.to_string(), (snap.gen, next));
                 }
                 self.dirty.insert(rel.to_string());
@@ -1300,14 +1308,21 @@ mod stall_tests {
     /// every ack forever.
     #[test]
     fn a_big_folder_dirtied_in_a_stall_finishes_under_partial_acks() {
+        // 32 and 64 chunks line the folder's last chunk up with the window filling, which once
+        // resent the whole finished folder on every ack.
+        for chunks in [2, 31, 32, 33, 40, 64, 96] {
+            big_folder_finishes_under_partial_acks(chunks);
+        }
+    }
+
+    fn big_folder_finishes_under_partial_acks(chunks: usize) {
         const ACK_EVERY: u64 = 32;
-        const CHUNKS: usize = 40;
         let rec = Arc::new(Recorder::default());
         let mut s = Sub::new(1, "w", rec.clone());
         s.interest.insert("big".to_string());
-        let entries: Vec<Entry> = (0..CHUNKS * CHUNK).map(|i| Entry { n: format!("f{i:06}"), k: "f", f: 0 }).collect();
+        let entries: Vec<Entry> = (0..chunks * CHUNK).map(|i| Entry { n: format!("f{i:06}"), k: "f", f: 0 }).collect();
         let mut dirs = HashMap::new();
-        dirs.insert("big".to_string(), DirSnap { gen: 7, entries, total: (CHUNKS * CHUNK) as u32, truncated: false });
+        dirs.insert("big".to_string(), DirSnap { gen: 7, entries, total: (chunks * CHUNK) as u32, truncated: false });
 
         // Fill the window until it stalls, then the folder changes.
         while !s.stalled {
@@ -1319,16 +1334,16 @@ mod stall_tests {
         // The client: applies in order, acks every 32nd message; each resume flushes.
         let (mut read, mut since_ack, mut next_chunk, mut done) = (0usize, 0u64, None::<u32>, false);
         while read < rec.msgs.lock().len() {
-            assert!(read < 2_000, "the folder was resent over and over");
+            assert!(read < 2_000 + chunks, "{chunks} chunks: the folder was resent over and over");
             let env = rec.msgs.lock()[read].clone();
             read += 1;
             if let TreeEvent::Dir { rel, chunk, last, gen, .. } = &env.ev {
                 assert_eq!((rel.as_str(), *gen), ("big", 7));
-                assert!(!done, "a finished folder was sent again");
+                assert!(!done, "{chunks} chunks: a finished folder was sent again");
                 next_chunk = match (chunk, next_chunk) {
                     (0, _) => Some(1),
                     (c, Some(n)) if *c == n => Some(n + 1),
-                    (c, n) => panic!("chunk {c} out of order (expected {n:?})"),
+                    (c, n) => panic!("{chunks} chunks: chunk {c} out of order (expected {n:?})"),
                 };
                 done = *last;
             }
@@ -1341,8 +1356,8 @@ mod stall_tests {
                 }
             }
         }
-        assert!(done, "the big folder never finished");
-        assert_eq!(next_chunk, Some(CHUNKS as u32));
+        assert!(done, "{chunks} chunks: the big folder never finished");
+        assert_eq!(next_chunk, Some(chunks as u32));
     }
 
     #[test]
