@@ -27,10 +27,21 @@ pub fn nfc(s: &str) -> Cow<'_, str> {
 /// as two different files, so folding there would match a path to a file it doesn't name.
 pub const NORMALIZATION_INSENSITIVE: bool = cfg!(target_os = "macos");
 
+/// `s` in the one spelling a name has here: NFC where the platform's volumes ignore
+/// normalization, untouched elsewhere. Also how macOS git spells paths
+/// (`core.precomposeunicode`), while a listing gives the name as stored, often NFD.
+pub fn norm(s: &str) -> Cow<'_, str> {
+    if NORMALIZATION_INSENSITIVE {
+        nfc(s)
+    } else {
+        Cow::Borrowed(s)
+    }
+}
+
 /// The form two names are compared in: NFC where the platform's volumes ignore normalization,
 /// and lowercased where the volume folds case.
 pub fn name_key(s: &str, fold: bool) -> String {
-    let n = if NORMALIZATION_INSENSITIVE { nfc(s) } else { Cow::Borrowed(s) };
+    let n = norm(s);
     if fold {
         n.to_lowercase()
     } else {

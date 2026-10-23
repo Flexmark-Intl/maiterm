@@ -132,6 +132,8 @@ export class TreeModel {
   gitDirs = new Map<string, GitLetter>();
   /** Past 20k changed files Rust sends folders only. */
   gitTruncated = false;
+  /** Git keys are NFC while rows carry the on-disk name (`OpenAck.nfc_names`, macOS). */
+  nfcNames = false;
   showHidden: boolean;
   showIgnored: boolean;
 
@@ -564,6 +566,9 @@ export class TreeModel {
   /** What a row shows for git: its own letter, a folder's roll-up (a dot), or untracked
    *  because a folder above it is wholly untracked. Null when clean. */
   gitOf(rel: string, folder: boolean): { letter: GitLetter; rollup: boolean } | null {
+    // An accented name stored NFD (as Finder and Cocoa write it) is keyed NFC by git. Only
+    // non-ASCII names can differ, so the common row skips the normalize.
+    if (this.nfcNames && /[^\x00-\x7f]/.test(rel)) rel = rel.normalize('NFC');
     const own = this.gitFiles.get(rel) ?? (folder ? this.gitFiles.get(rel + '/') : undefined);
     if (own) return { letter: own, rollup: false };
     if (folder) {

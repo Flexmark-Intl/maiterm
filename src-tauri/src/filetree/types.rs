@@ -77,6 +77,9 @@ pub struct OpenAck {
     pub sep: String,
     /// The volume folds case: names compare case-insensitively (validation, dedupe).
     pub case_insensitive: bool,
+    /// Names are one name in NFC and NFD here (macOS), and git keys come in NFC while a row's
+    /// name is as stored (often NFD): look a row up in the git map by its NFC spelling.
+    pub nfc_names: bool,
     pub repo: Option<RepoInfo>,
     pub caps: Caps,
 }

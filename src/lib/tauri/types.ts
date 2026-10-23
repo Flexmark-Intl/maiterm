@@ -1035,6 +1035,9 @@ export interface OpenAck {
   sep: string;
   /** The volume folds case: compare names case-insensitively (validation, dedupe). */
   case_insensitive: boolean;
+  /** NFC and NFD spell one name here (macOS): git keys are NFC, a row's name is as stored,
+   *  so a row is looked up in the git map by its NFC spelling. */
+  nfc_names: boolean;
   repo: RepoInfo | null;
   caps: Caps;
 }

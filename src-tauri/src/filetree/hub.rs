@@ -615,6 +615,7 @@ impl RootHub {
             root_native: self.root.to_string_lossy().into_owned(),
             sep: std::path::MAIN_SEPARATOR.to_string(),
             case_insensitive: self.fold,
+            nfc_names: super::paths::NORMALIZATION_INSENSITIVE,
             repo: self.repo.clone(),
             caps: Caps { watch: self.watch_kind(), git: self.git.as_ref().is_some_and(|g| g.enabled()), trash: false, remote: false, writable: false },
         }

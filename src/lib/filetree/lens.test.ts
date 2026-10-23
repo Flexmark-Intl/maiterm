@@ -42,6 +42,22 @@ describe('git decorations on the model', () => {
       { rel: 'src/a.ts', kind: 'f' },
     ]);
   });
+
+  it("a row named in NFD finds git's NFC key where names compare in NFC (macOS)", () => {
+    // Built from code points, so no editor's normalization can blur which spelling is which.
+    const nfdCafe = 'cafe' + String.fromCodePoint(0x301);
+    const nfcCafe = nfdCafe.normalize('NFC');
+    const nfdNaive = 'nai' + String.fromCodePoint(0x308) + 've';
+    expect(nfdCafe).not.toBe(nfcCafe);
+    const m = new TreeModel();
+    m.applyGit(update({ full: true, files: [[`${nfcCafe}/x.txt`, 'M'], [`${nfdNaive.normalize('NFC')}/`, '?']], dirs: [[nfcCafe, 'M']] }));
+    // Elsewhere NFC and NFD are two names: no folding.
+    expect(m.gitOf(`${nfdCafe}/x.txt`, false)).toBeNull();
+    m.nfcNames = true;
+    expect(m.gitOf(`${nfdCafe}/x.txt`, false)).toEqual({ letter: 'M', rollup: false });
+    expect(m.gitOf(nfdCafe, true)).toEqual({ letter: 'M', rollup: true });
+    expect(m.gitOf(`${nfdNaive}/inner.ts`, false)).toEqual({ letter: '?', rollup: false });
+  });
 });
 
 describe('prunedRows', () => {

@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use parking_lot::{Condvar, Mutex};
 
 use super::hub::RootHub;
-use super::paths::split_rel;
+use super::paths::{norm, split_rel};
 use super::types::{BranchInfo, GitUpdate};
 use super::Slots;
 use crate::util::proc::{self, RunError};
@@ -395,9 +395,10 @@ pub struct GitCore {
 
 impl GitCore {
     pub fn new(hub: Weak<RootHub>, cfg: &GitConfig, root: &Path, top: &Path, network: bool, slots: Arc<Slots>) -> Arc<GitCore> {
+        // In git's spelling (NFC on macOS): the root's own path may be stored NFD.
         let prefix = root
             .strip_prefix(top)
-            .map(|p| p.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"))
+            .map(|p| norm(&p.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")).into_owned())
             .unwrap_or_default();
         Arc::new(GitCore {
             hub,
@@ -540,7 +541,7 @@ impl GitCore {
         if self.prefix.is_empty() {
             return;
         }
-        let covers_root = |e: &StatusEntry| e.dir && e.letter == "?" && super::paths::is_at_or_under(&self.prefix, &e.path);
+        let covers_root = |e: &StatusEntry| e.dir && e.letter == "?" && super::paths::is_at_or_under(&self.prefix, &norm(&e.path));
         let Some(i) = st.entries.iter().position(covers_root) else { return };
         st.entries.remove(i);
         for (name, dir) in self.untracked_children() {
@@ -626,7 +627,9 @@ impl GitCore {
         let mut untracked = Vec::new();
         let mut deleted = Vec::new();
         for e in st.entries {
-            let Some(rel) = self.to_root_rel(&e.path) else { continue };
+            // Keys are NFC on macOS whatever `core.precomposeunicode` says, so the client can
+            // look a row up by normalizing its on-disk name once (`OpenAck.nfc_names`).
+            let Some(rel) = self.to_root_rel(&norm(&e.path)) else { continue };
             if e.letter == "?" && !e.dir {
                 untracked.push(rel.clone());
             }
@@ -700,13 +703,15 @@ impl GitCore {
         if !self.enabled() || split_rel(rel).is_err() || rel.is_empty() {
             return None;
         }
+        // The row's rel is the on-disk spelling; the keys are git's (NFC on macOS).
+        let key = norm(rel);
         let gen = {
             let d = self.data.lock();
-            let letter = d.files.get(rel)?;
+            let letter = d.files.get(key.as_ref())?;
             if letter == "?" {
                 return None;
             }
-            if let Some((g, v)) = d.numstat.get(rel) {
+            if let Some((g, v)) = d.numstat.get(key.as_ref()) {
                 if *g == d.gen {
                     return *v;
                 }
@@ -724,7 +729,7 @@ impl GitCore {
             if d.numstat.len() >= NUMSTAT_CACHE {
                 d.numstat.clear();
             }
-            d.numstat.insert(rel.to_string(), (gen, got));
+            d.numstat.insert(key.into_owned(), (gen, got));
         }
         got
     }
@@ -1001,6 +1006,18 @@ mod tests {
         let c = core(Path::new("/r/a/b"), Path::new("/r"));
         let p = now(&c,st(&[("a/b/x.ts", "M"), ("a/bb/y.ts", "M"), ("a/b", "?"), ("top.ts", "A")]), Duration::ZERO).unwrap();
         assert_eq!(p.diff.files, vec![("x.ts".to_string(), "M".to_string())]);
+    }
+
+    /// macOS git spells paths NFC (`core.precomposeunicode`) while the root's own path may be
+    /// stored NFD: the prefix must still strip, and keys come out NFC either way.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keys_are_nfc_and_an_nfd_root_still_strips() {
+        let nfd_root = format!("/r/Re\u{301}sume\u{301}");
+        let c = core(Path::new(&nfd_root), Path::new("/r"));
+        let nfd_file = "R\u{e9}sum\u{e9}/cafe\u{301}.txt".to_string(); // precompose turned off
+        let p = now(&c, st(&[("R\u{e9}sum\u{e9}/caf\u{e9}.txt", "M"), (&nfd_file, "?")]), Duration::ZERO).expect("the root's paths publish");
+        assert_eq!(p.diff.files, vec![("caf\u{e9}.txt".to_string(), "?".to_string())], "one NFC key for one name");
     }
 
     #[test]

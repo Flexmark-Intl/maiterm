@@ -705,6 +705,7 @@ function createFileTreeStore() {
     }
     subId = opened.sub_id;
     ack = opened;
+    m.nfcNames = opened.nfc_names;
     acked = { count: 0, at: performance.now() };
     status = 'ready';
     ready = true;
