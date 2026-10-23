@@ -2215,9 +2215,56 @@ Found beyond Hive:
 
 **Spike 12:** see item 12 above and §7.9.
 
-**Not yet run:** 1, 5, 6, 11 and 14 (launch facts) and 9, 10 and 13 (enforcement) were running when
-this was written. 4, 7 and 8 (measurements) and 2 (the live trust write) run after them, each
-alone.
+**Spikes 1, 5, 6, 11 and 14** were run on Claude Code 2.1.309 with `claude -p`, plus one
+interactive run through `expect`.
+- **1, the memory folder: passes.**
+  - `--settings '{"autoMemoryDirectory":…}'` puts memory there with no prompt in every
+    permission mode. Claude exempts that folder natively.
+  - Resumed WITHOUT the settings, the recorded system prompt still names the Hive's folder. The
+    write exemption is gone, though: manual and acceptEdits deny the write, and auto allows it.
+  - After the first `/compact`, the agent switches to the per-repo default.
+
+  So §9's leak starts at the first compaction, not at resume, and the launch builder re-passing
+  the settings (§11.1) is still required.
+- **5, two writers at once: partial.**
+  - Two sessions both creating `MEMORY.md` with Write lost one session's index lines. A Write
+    to a file that doesn't exist yet gets no "modified since read" check.
+  - Once the file exists, Edit's stale-read check made the second writer re-read, and nothing
+    was lost.
+
+  So **maiTerm creates `MEMORY.md` (with its fences) when the Hive is created**, and the index
+  rebuild stays. Claude's own formats: index lines are `- [Title](file.md) — hook`; files carry
+  frontmatter `name`, `description`, `metadata {node_type, type, originSessionId, modified}`.
+  `originSessionId` is agent-editable, so §9's Rust-owned provenance stands.
+- **6, `--add-dir`: passes.**
+  - The added worktree's `CLAUDE.md` loads only with `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`.
+  - Write and Edit there work under acceptEdits.
+  - A commit in the secondary repo needs `git -C <wt> …`. `cd <wt> && git …` is refused by
+    Claude's own "changes directory before a version-control command" check.
+  - **Push denies:** `Bash(git push:*)` and `Bash(git -C * push:*)` did NOT stop
+    `git -C <wt> push`. `Bash(git * push*)` does. §7.3's deny rules use the space-wildcard form,
+    because a `:*` mid-pattern matches nothing.
+- **11, model and effort: passes.**
+  - `--effort low|medium|high|xhigh|max`, or the setting `effortLevel`.
+  - The transcript records `.message.model`, `"effort"` and `perTurnEffort`.
+  - On resume the model is kept but **effort falls back to medium**, so the launch builder passes
+    `--effort` on every relaunch.
+- **14, reads and gallery denies:**
+  - Reads from the gallery `--add-dir` work.
+  - In auto mode an outside read did NOT prompt, in `-p` or interactively, on this account and
+    under `/private/tmp`. So the claim that the first outside read prompts even in auto mode
+    didn't reproduce. The gallery `--add-dir` still matters for manual and acceptEdits workers.
+  - **A deny rule needs the `//` form for an absolute path.** `Edit(/abs/**)` did nothing;
+    `Edit(//abs/**)` blocked Write and Edit and still allowed Read.
+  - Bash `cp` into the denied folder was also refused, but a `python3 -c "open(…,'w')"` got
+    through. So the sandbox's `denyWrite` is required, not optional.
+- **A side effect to know about:** these `-p` runs loaded the user's settings hooks, so the
+  installed maiTerm received hook events, including permission requests, from about 35 scratch
+  sessions. Later spikes run with `disableAllHooks` unless hooks are what they test.
+
+**Not yet run:**
+- 9, 10 and 13 (enforcement) were still running when this was written.
+- 4, 7 and 8 (measurements), then 2 (the live trust write), run after them, each alone.
 
 ## 14. Decisions
 
