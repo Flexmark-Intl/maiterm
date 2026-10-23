@@ -5,22 +5,17 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// A git invocation that can never stop to ask a question. A prompt nobody can see is a
-/// hang, and everything here runs where nobody can answer one.
-fn git() -> Command {
-    let mut cmd = Command::new("git");
-    cmd.env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=10")
-        .stdin(Stdio::null());
-    cmd
-}
+use crate::util::proc::{self, git, RunError};
+
+/// A local query (rev-parse, remote -v) answers in milliseconds. One that doesn't is a hung
+/// filesystem or a wedged hook, and must not hold the import open.
+const LOCAL_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// stdout of a local git command in `dir`, trimmed; None on any failure.
 fn run_in(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = git().arg("-C").arg(dir).args(args).output().ok()?;
+    let out = proc::output_timeout(git().arg("-C").arg(dir).args(args), LOCAL_TIMEOUT).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -200,32 +195,13 @@ pub enum Probe {
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub fn probe(url: &str, branch: Option<&str>) -> Probe {
-    let child = git()
-        // `--`: the URL comes from someone else's file, and one starting `--upload-pack=` is
-        // an option that runs a command — before the human has clicked anything (§4.2).
-        .args(["ls-remote", "--heads", "--", url])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match child {
-        Ok(c) => c,
-        Err(e) => return Probe::Unverified { message: format!("couldn't run git: {e}") },
-    };
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if start.elapsed() > PROBE_TIMEOUT => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Probe::Unverified { message: "timed out".to_string() };
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(e) => return Probe::Unverified { message: e.to_string() },
-        }
-    }
-    let out = match child.wait_with_output() {
+    let mut cmd = git();
+    // `--`: the URL comes from someone else's file, and one starting `--upload-pack=` is
+    // an option that runs a command — before the human has clicked anything (§4.2).
+    cmd.args(["ls-remote", "--heads", "--", url]);
+    let out = match proc::output_timeout(&mut cmd, PROBE_TIMEOUT) {
         Ok(o) => o,
+        Err(RunError::Spawn(e)) => return Probe::Unverified { message: format!("couldn't run git: {e}") },
         Err(e) => return Probe::Unverified { message: e.to_string() },
     };
     if out.status.success() {

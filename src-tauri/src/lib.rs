@@ -10,6 +10,7 @@ mod pty;
 mod state;
 mod share;
 mod terminal;
+mod util;
 mod watch;
 mod relocate;
 mod windows_setup;
