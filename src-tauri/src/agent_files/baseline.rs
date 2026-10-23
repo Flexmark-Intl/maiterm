@@ -427,10 +427,20 @@ impl Baselines {
     }
 }
 
-/// (added, removed) lines from `old` to `new`.
+/// How long the Turn lens's `+N −N` may spend diffing. Myers is quadratic when most lines
+/// changed: a rewritten 2 MB file took ~10 s, on every hover, with nothing to cancel it.
+const COUNT_DEADLINE: Duration = Duration::from_millis(200);
+
+/// (added, removed) lines from `old` to `new`. Past `COUNT_DEADLINE` the diff stops looking for
+/// the shortest edit and counts what is left as replaced, so a heavy rewrite may count a few
+/// unchanged lines too; for a file where nearly every line changed that is what happened anyway.
 pub fn line_counts(old: &str, new: &str) -> (u32, u32) {
+    line_counts_within(old, new, COUNT_DEADLINE)
+}
+
+fn line_counts_within(old: &str, new: &str, limit: Duration) -> (u32, u32) {
     use similar::{ChangeTag, TextDiff};
-    let diff = TextDiff::from_lines(old, new);
+    let diff = TextDiff::configure().timeout(limit).diff_lines(old, new);
     let (mut added, mut removed) = (0u32, 0u32);
     for c in diff.iter_all_changes() {
         match c.tag() {
@@ -629,5 +639,18 @@ mod tests {
     fn line_counts_count_lines() {
         assert_eq!(line_counts("a\nb\nc\n", "a\nB\nc\nd\n"), (2, 1));
         assert_eq!(line_counts("", ""), (0, 0));
+    }
+
+    /// A rewrite of every line of a big file is quadratic for Myers; the count gives up looking
+    /// for the shortest edit at its deadline instead of spinning for seconds per hover.
+    #[test]
+    fn line_counts_of_a_full_rewrite_stop_at_the_deadline() {
+        let old: String = (0..40_000).map(|i| format!("old line {i}\n")).collect();
+        let new: String = (0..40_000).map(|i| format!("new line {i}\n")).collect();
+        let started = Instant::now();
+        let (added, removed) = line_counts_within(&old, &new, Duration::from_millis(50));
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(2), "counting took {took:?}");
+        assert_eq!((added, removed), (40_000, 40_000));
     }
 }
