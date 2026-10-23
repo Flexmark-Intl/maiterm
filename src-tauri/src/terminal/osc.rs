@@ -198,30 +198,64 @@ impl OscInterceptor {
     }
 }
 
-/// Simple percent-decoding for file:// URLs
+/// Percent-decoding for file:// URLs.
+///
+/// Decodes into BYTES and only then reads them as UTF-8: a folder named `café` arrives as
+/// `caf%C3%A9`, and pushing each decoded byte as its own `char` turned it into `cafÃ©`.
+/// Malformed escapes (`%`, `%4`, `%zz`) pass through as written.
 fn percent_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.bytes();
-    while let Some(b) = chars.next() {
-        if b == b'%' {
-            let hi = chars.next();
-            let lo = chars.next();
-            if let (Some(h), Some(l)) = (hi, lo) {
-                let hex = [h, l];
-                if let Ok(s) = std::str::from_utf8(&hex) {
-                    if let Ok(val) = u8::from_str_radix(s, 16) {
-                        result.push(val as char);
-                        continue;
-                    }
-                }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = |b: u8| (b as char).to_digit(16);
+            if let (Some(h), Some(l)) = (
+                bytes.get(i + 1).copied().and_then(hex),
+                bytes.get(i + 2).copied().and_then(hex),
+            ) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
             }
-            // Malformed percent encoding — pass through
-            result.push('%');
-        } else {
-            result.push(b as char);
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod osc7_tests {
+    use super::*;
+
+    fn cwd_of(seq: &[u8]) -> Option<(String, Option<String>)> {
+        match OscInterceptor::new().process(seq).into_iter().next()? {
+            OscEvent::Cwd { cwd, host } => Some((cwd, host)),
+            _ => None,
         }
     }
-    result
+
+    #[test]
+    fn a_percent_encoded_utf8_folder_decodes_as_utf8() {
+        let (cwd, host) = cwd_of(b"\x1b]7;file://mac.local/Users/d/caf%C3%A9/%E6%97%A5%E6%9C%AC%20x\x07").unwrap();
+        assert_eq!(cwd, "/Users/d/café/日本 x");
+        assert_eq!(host.as_deref(), Some("mac.local"));
+    }
+
+    #[test]
+    fn unencoded_utf8_in_the_url_is_kept() {
+        let (cwd, _) = cwd_of("\x1b]7;file:///tmp/café\x07".as_bytes()).unwrap();
+        assert_eq!(cwd, "/tmp/café");
+    }
+
+    #[test]
+    fn malformed_escapes_pass_through_whole() {
+        assert_eq!(percent_decode("/a%zzb"), "/a%zzb");
+        assert_eq!(percent_decode("/100%"), "/100%");
+        assert_eq!(percent_decode("/a%4"), "/a%4");
+        assert_eq!(percent_decode("/a%2fb"), "/a/b");
+    }
 }
 
 #[cfg(test)]
