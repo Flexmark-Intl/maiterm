@@ -992,12 +992,17 @@ mod tests {
     fn write_paths_are_the_write_capable_ones() {
         use super::super::extract::extract;
         use serde_json::json;
-        let edit = extract("Edit", &json!({ "file_path": "/r/a.ts", "old_string": "a", "new_string": "b" }));
-        assert_eq!(write_paths(&edit, None), vec!["/r/a.ts".to_string()]);
-        assert!(write_paths(&extract("Read", &json!({ "file_path": "/r/a.ts" })), None).is_empty());
+        // The root is built from the temp dir: "/r" is not absolute on Windows, so a local
+        // path under it would be refused there rather than resolved.
+        let r = std::env::temp_dir().join("r");
+        let a = p(&r, "a.ts");
+        let edit = extract("Edit", &json!({ "file_path": a, "old_string": "a", "new_string": "b" }));
+        assert_eq!(write_paths(&edit, None), vec![a.clone()]);
+        assert!(write_paths(&extract("Read", &json!({ "file_path": a })), None).is_empty());
         assert!(write_paths(&extract("Bash", &json!({ "command": "touch x" })), None).is_empty());
         let patch = "*** Begin Patch\n*** Update File: src/x.ts\n*** Add File: src/y.ts\n+y\n*** End Patch";
-        assert_eq!(write_paths(&extract("apply_patch", &json!(patch)), Some("/r")), vec!["/r/src/x.ts".to_string(), "/r/src/y.ts".to_string()]);
+        let src = r.join("src");
+        assert_eq!(write_paths(&extract("apply_patch", &json!(patch)), r.to_str()), vec![p(&src, "x.ts"), p(&src, "y.ts")]);
     }
 
     #[test]
