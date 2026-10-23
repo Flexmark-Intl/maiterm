@@ -431,6 +431,62 @@
 >   others (about 2 s apiece on a busy machine), and the suite's other watcher tests wait 30 s.
 >   Not checked in the running app: the dev check (pulse within 150 ms, badges, edge chips) needs
 >   the UI half.
+>
+> **As built, phase 4 frontend (2026-10-23, `filetree/agents.ts`, `AgentStrip.svelte`,
+> `LensBar.svelte`, `EdgeChips.svelte`).** Where it differs from the text below:
+> - **Marks live on the store, not on `TreeModel`**: one `AgentMarks` for the current root,
+>   cleared on a re-root (the new subscription is primed with the marks still standing), and one
+>   `TurnTracker` per window. A row keeps one slot per tab, (sub)agent and read-or-not, so a
+>   read after an edit lights the row without wiping its "written this turn" dot.
+> - **"This turn" is the newest turn the window has seen for that tab**: the highest `turn` on
+>   its marks, moved on by its `UserPromptSubmit` hook (so a prompt with no file activity still
+>   ends the old turn's dots). A startup, resume or `/clear` SessionStart forgets the tab (the
+>   ledger renumbers); a compaction and initSession's re-emit (no `source`) don't. A tab whose
+>   prompt the window missed keeps its old dots until its next mark.
+> - **The rail is drawn only while it has something to say**: pending (pulse), the 1.2 s sweep
+>   after an ok write (and a commit, in green), a read's 2.7 s light, a failed call (outline), a
+>   delete (red, name struck), or two writers this turn (split into their colours). Otherwise
+>   the persistent mark is the agent-coloured dot, one per writer, two at most. Animations take
+>   `animation-delay: -age`, so a row scrolled back into view carries on. Reduced motion holds a
+>   static tint for the same time (`steps(1)`) and stops the pulse.
+> - **One timer, only while something is lit**: the next read light or sweep to end. Edge chips
+>   and rows re-read on it; a running call needs none (its Post is an event). Idle sets nothing.
+> - **Edge chips count a lit path inside a collapsed folder as that folder's row**, since folders
+>   never open by themselves. The label splits `N editing · M active`.
+> - **Agent strip membership**: a registered agent session whose SessionStart `cwd` is inside the
+>   root (component-wise string test on the canonical and resolved roots, no IPC), or any tab
+>   with marks in this root. Colours are assigned over the window's agent tabs in window order
+>   (`assignColours`: keep, else lowest free, else least used), so a tab keeps its colour
+>   whichever root is showing.
+> - **The two-writer conflict needs tool evidence from both tabs** (a change seen while a shell
+>   ran is not a second writer) and turn spans that overlap: a prompt hook starts a span and
+>   Stop ends it; a turn whose Stop was never seen ends at its last mark unless agentState says
+>   the tab is working. The buffer conflict is a dirty editor tab on a file written this turn;
+>   the ⚠ (and the context menu's "Compare Buffer ↔ Disk") opens a read-only diff, disk left,
+>   buffer right.
+> - **Tooltip words carry the tool** by reading the tab's ledger (`agentFilesActivity`) on hover
+>   only, matched on path, op and evidence; without a match the op's own word stands.
+> - **Lenses** are `Lens = 'all' | 'changed' | 'turn' | 'session'` with one held view
+>   (`savedForLens`) for whichever lens is on; switching lens to lens keeps the tree's view held.
+>   A failed call is left out of Turn/Session; one still running is in. The bar shows when git
+>   is on, an agent chip exists, or the session has marks.
+> - **Follow agent** is a ⋯ menu item enabled once a chip is chosen (choosing another chip stops
+>   it); it reveals the followed tab's newest write of this turn (never a delete), not during
+>   find or an inline edit, and only 3 s after the last key, click, wheel or drop in the tree.
+> - **`revealInTree`** with `select` uses the focus shortcut's plan (selects, never takes the
+>   keyboard). Besides "the human used the tree in the last 3 s", `noted` also answers when find
+>   or a lens leaves the path out; the chip ("‹tab› points at x · Show") sits under the strip,
+>   and with the column closed the titlebar's Files button gets a dot until it opens.
+>   **`getTreeSelection`** adds `open`; a closed column has no subscription, so it reports no
+>   selection rather than paths it can't spell.
+> - **The agent_active question is the frontend's** ("“claude · tab 3” is working on “a.ts”
+>   right now, or changed it this turn. Rename it anyway?"): the backend's `detail` already ends
+>   in a question, and appending "Do it anyway?" asked twice. "Add to ‹tab›" and Alt+Enter go to
+>   the followed agent when it is live, else the followed tab. A reload remaps the window's
+>   per-tab state (marks, turn, colour, chosen chip, follow) next to `agent_files_remap_tab`.
+> - Not built: vim's `1`–`4` lens keys and `t`/`s` (vim mode has no lens actions yet). **Not
+>   checked in the running app** (no dev run in this step): the pulse budget, badges, edge chips,
+>   and both tools end to end.
 
 ## 1. Why
 
