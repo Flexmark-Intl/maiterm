@@ -60,6 +60,33 @@
 >   a bare `read_dir` of the same folder of 22–77 ms in the same runs, so the disk floor alone can
 >   exceed the budget here. The ignored budget test asserts 30 ms or ≤8 ms above that floor.
 >   Idle: zero coalescer wakeups over 10 s.
+>
+> **As built, phase 1 frontend (2026-10-22).** Where it differs from the text below:
+> - **`Delta` carries `at`**: the position of each `add` then `chg` entry in the folder after
+>   the delta. The add list alone doesn't say where a new name goes, and the client must not
+>   sort (§12.1). The convergence test's client keeps wire order and applies `at`.
+> - **The model returns `Splice[] | 'resync'`** for listings and deltas as specified, but
+>   expand/collapse return what Rust must follow or drop (`open: DirReq[]` / `close`), and a
+>   delta that deletes an open folder queues it on `pendingClose`. Collapsing a folder drops it
+>   and its open children from Rust's interest but keeps them open in the view, so reopening
+>   the parent restores them, asked with their generations.
+> - **Column width and open** live on `workspacesStore` (read with the window before the first
+>   render, so terminals spawn at their final width), not on the tree store.
+> - **Preview tabs** go through `openInEditor({…, replaceTabId})`; EditorPane no longer takes
+>   focus while focus is in `[data-filetree]`, and a real open hands focus to the editor.
+> - **"Open With Default App"** needed a new command, `open_with_default_app`.
+> - **Alt+→ skips ignored folders** (node_modules, target): opening them is never the point of
+>   a recursive expand, and they would spend the 2,000-row budget.
+> - **"Outside root · Show"** pins the editor file's folder (there is no resolve-by-path
+>   command); **"Reveal in Files" on a terminal tab** brings that tab to the front so the tree
+>   follows it, then selects its folder.
+> - **Help** is the help window (`routes/help`), not a `HelpModal.svelte`; the shortcut row and
+>   a "Files" key section are there.
+> - **The titlebar button** sits at the titlebar's right end: the left holds the macOS traffic
+>   lights (overlay title bar).
+> - Not in phase 1 by design: the find/filter bar (phase 2; Cmd+F and `/` do nothing in the
+>   tree yet), New File/Folder buttons and every write (phase 3), the agent strip, lenses,
+>   edge chips and follow-agent (phase 4).
 
 ## 1. Why
 
