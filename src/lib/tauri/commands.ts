@@ -1430,6 +1430,11 @@ export async function createEditorTab(workspaceId: string, paneId: string, name:
   return invoke('create_editor_tab', { workspaceId, paneId, name, fileInfo, afterTabId: afterTabId ?? null });
 }
 
+/** The one spelling an editor tab keeps for a local file: folder canonicalized, name kept. */
+export async function canonicalEditorPath(path: string): Promise<string> {
+  return invoke('canonical_editor_path', { path });
+}
+
 export async function watchFile(tabId: string, path: string): Promise<void> {
   return invoke('watch_file', { tabId, path });
 }

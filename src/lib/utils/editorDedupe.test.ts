@@ -60,3 +60,17 @@ describe('revealsWorkspace', () => {
     expect(revealsWorkspace(inW2, 'w3', 'w1')).toBe(false);
   });
 });
+
+describe('sameEditorFile path forms', () => {
+  it('matches a click joined onto a cwd with ./ or .. to the plain path', () => {
+    expect(sameEditorFile(local('/Users/d/repo/./src/a.ts'), local('/Users/d/repo/src/a.ts'))).toBe(true);
+    expect(sameEditorFile(local('/Users/d/repo/lib/../src/a.ts'), local('/Users/d/repo/src/a.ts'))).toBe(true);
+  });
+
+  it('ignores separators and case for a local Windows file only', () => {
+    expect(sameEditorFile(local('C:\\repo/src/a.ts'), local('c:\\Repo\\src\\a.ts'), true)).toBe(true);
+    expect(sameEditorFile(local('/A/b.ts'), local('/a/b.ts'))).toBe(false);
+    // A remote path is POSIX whatever this machine runs.
+    expect(sameEditorFile(remote('/A/b.ts', 'h'), remote('/a/b.ts', 'h'), true)).toBe(false);
+  });
+});

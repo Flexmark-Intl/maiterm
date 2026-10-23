@@ -8,9 +8,11 @@
 import type { EditorFileInfo } from '$lib/tauri/types';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
-import { getPtyInfo, sshArgsOf } from '$lib/tauri/commands';
+import { canonicalEditorPath, getPtyInfo, sshArgsOf } from '$lib/tauri/commands';
 import { detectLanguageFromPath } from './languageDetect';
 import { findOpenEditor, revealsWorkspace } from './editorDedupe';
+import { basenameOf } from './pathForm';
+import { isWindows } from './platform';
 
 export interface OpenInEditorArgs {
   /** The file: a local absolute path, or the path on the ssh host when `remote` is set. */
@@ -61,11 +63,17 @@ export function editorFileInfo(abs: string, remote?: { sshCommand: string } | nu
 }
 
 export async function openInEditor(args: OpenInEditorArgs): Promise<OpenInEditorResult> {
-  const fileInfo = editorFileInfo(args.abs, args.remote);
-  const hit = findOpenEditor(workspacesStore.workspaces, fileInfo, {
-    workspaceId: args.workspaceId,
-    paneId: args.paneId,
-  });
+  // A local file is opened under one spelling (folder symlinks and `~` resolved in Rust), so a
+  // click on `./src/a.ts` from a /private/tmp cwd finds the tab the agent opened as /tmp/…/a.ts.
+  // A failed lookup opens the path as given; the comparison below still folds `.`/`..`.
+  const abs = args.remote ? args.abs : await canonicalEditorPath(args.abs).catch(() => args.abs);
+  const fileInfo = editorFileInfo(abs, args.remote);
+  const hit = findOpenEditor(
+    workspacesStore.workspaces,
+    fileInfo,
+    { workspaceId: args.workspaceId, paneId: args.paneId },
+    isWindows(),
+  );
   if (hit) {
     if (revealsWorkspace(hit, args.workspaceId, workspacesStore.activeWorkspaceId)) {
       await navigateToTab(hit.tabId);
@@ -74,7 +82,7 @@ export async function openInEditor(args: OpenInEditorArgs): Promise<OpenInEditor
     }
     return { tabId: hit.tabId, existing: true };
   }
-  const name = args.abs.split('/').pop() || args.abs;
+  const name = args.remote ? abs.split('/').pop() || abs : basenameOf(abs, isWindows());
   // EditorPane shows its own loading state and errors, so the tab is created at once.
   const tab = await workspacesStore.createEditorTab(args.workspaceId, args.paneId, name, fileInfo, args.afterTabId);
   return { tabId: tab.id, existing: false };

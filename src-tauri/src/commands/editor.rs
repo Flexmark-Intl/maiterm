@@ -20,6 +20,32 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
+/// The one spelling an editor tab keeps for a local file, so a second request for the same file
+/// finds the tab already showing it (docs/file-tree.md §10.5). A terminal click arrives as
+/// `cwd + "/" + typed` (`./src/a.ts`, `../x`, `~/notes.md`, and on macOS a cwd that is already
+/// `/private/tmp` while an agent says `/tmp`); the agent's openFile arrives however it chose.
+///
+/// The FOLDER is canonicalized (symlinks, `.`/`..`, Windows' separators) and the file name kept
+/// as given: resolving the file itself would rename a tab opened on a symlink (`~/.zshrc`) after
+/// its target. A folder that doesn't exist leaves the path as typed, tilde expanded.
+fn canonical_editor_path_blocking(path: &str) -> String {
+    let expanded = expand_tilde(path);
+    let p = Path::new(&expanded);
+    match (p.parent(), p.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() && parent.exists() => {
+            crate::share::canon(parent).join(name).to_string_lossy().into_owned()
+        }
+        _ => expanded,
+    }
+}
+
+#[command]
+pub async fn canonical_editor_path(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || canonical_editor_path_blocking(&path))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[derive(serde::Serialize)]
 pub struct ReadFileResult {
     pub content: String,
@@ -1550,6 +1576,38 @@ mod tests {
         assert_eq!(git_show_file_blocking(&file, "HEAD").unwrap(), "committed\n");
 
         assert!(git_show_file_blocking(&file, "--output=/tmp/x").is_err(), "a ref is never an option");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn canonical_editor_path_gives_every_spelling_of_one_file_the_same_path() {
+        // temp_dir() on macOS is under /var -> /private/var: the symlinked spelling a terminal
+        // cwd from proc_pidinfo never uses.
+        let base = std::env::temp_dir().join(format!("canon-editor-{}", uuid::Uuid::new_v4()));
+        let src = base.join("repo").join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(base.join("repo").join("lib")).unwrap();
+        let real = crate::share::canon(&src).join("a.ts").to_string_lossy().into_owned();
+
+        let spellings = [
+            src.join("a.ts"),
+            base.join("repo").join(".").join("src").join("a.ts"),
+            base.join("repo").join("lib").join("..").join("src").join("a.ts"),
+        ];
+        for s in spellings {
+            assert_eq!(canonical_editor_path_blocking(&s.to_string_lossy()), real, "{s:?}");
+        }
+
+        // The file itself is never resolved: a tab on a symlink keeps the symlink's name.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(src.join("a.ts"), src.join("link.ts")).unwrap();
+            let got = canonical_editor_path_blocking(&src.join("link.ts").to_string_lossy());
+            assert!(got.ends_with("link.ts"), "{got}");
+        }
+
+        // A folder that isn't there leaves the path alone.
+        assert_eq!(canonical_editor_path_blocking("/no/such/dir/x.ts"), "/no/such/dir/x.ts");
         let _ = std::fs::remove_dir_all(&base);
     }
 }
