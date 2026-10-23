@@ -1356,10 +1356,10 @@ impl RootHub {
 
     /// A status run finished: fold it in, send what changed, feed the search index, and say
     /// so in Health when the repo turned slow or failed (or recovered).
-    pub(super) fn git_finished(&self, out: Result<Status, Failure>, took: Duration) {
+    pub(super) fn git_finished(&self, epoch: u64, out: Result<Status, Failure>, took: Duration) {
         let Some(g) = &self.git else { return };
         let before = g.health();
-        let published = g.apply(out, took);
+        let published = g.apply(epoch, out, took);
         if let Some(p) = published {
             self.search.reconcile(&p.untracked, &p.deleted);
             let mut subs = self.subs.lock();

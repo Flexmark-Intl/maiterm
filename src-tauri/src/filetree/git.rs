@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -383,6 +383,10 @@ pub struct GitCore {
     /// A network mount has no watcher: git refreshes on edges only.
     network: bool,
     enabled: AtomicBool,
+    /// Bumped by every `file_tree_git` change. A run carries the epoch it started in, and a
+    /// result from an earlier one is dropped: a run still going when decorations were turned
+    /// off would otherwise publish onto the cleared data and colour the rows again.
+    epoch: AtomicU64,
     sched: Mutex<Sched>,
     cv: Condvar,
     pub data: Mutex<GitData>,
@@ -403,6 +407,7 @@ impl GitCore {
             prefix,
             network,
             enabled: AtomicBool::new(cfg.enabled),
+            epoch: AtomicU64::new(0),
             sched: Mutex::new(Sched::default()),
             cv: Condvar::new(),
             data: Mutex::new(GitData::default()),
@@ -414,6 +419,11 @@ impl GitCore {
         self.enabled.load(Ordering::SeqCst)
     }
 
+    /// Which `file_tree_git` setting a run starts under (see `epoch`).
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
     /// `file_tree_git` changed. Turning it off forgets everything (the hub then tells its
     /// subscribers to drop their decorations); turning it on runs at once.
     pub fn set_enabled(self: &Arc<Self>, on: bool) -> bool {
@@ -421,6 +431,7 @@ impl GitCore {
         if was == on {
             return false;
         }
+        self.epoch.fetch_add(1, Ordering::SeqCst);
         if on {
             self.signal(Trigger::Manual);
         } else {
@@ -527,8 +538,13 @@ impl GitCore {
     }
 
     /// Fold a run's outcome into the data. Some when something the wire carries changed.
-    pub fn apply(&self, out: Result<Status, Failure>, took: Duration) -> Option<Published> {
+    /// `epoch` is the one the run started in: a run that outlived a `file_tree_git` change
+    /// is dropped whole (checked under the data lock, which `set_enabled` resets under).
+    pub fn apply(&self, epoch: u64, out: Result<Status, Failure>, took: Duration) -> Option<Published> {
         let mut d = self.data.lock();
+        if epoch != self.epoch() || !self.enabled() {
+            return None;
+        }
         let slow_run = took >= self.timing.slow_run || matches!(out, Err(Failure::TimedOut));
         if slow_run {
             d.slow_streak += 1;
@@ -736,6 +752,7 @@ fn worker(core: Arc<GitCore>) {
             core.sched.lock().thread = false;
             return;
         };
+        let epoch = core.epoch();
         if !core.enabled() {
             continue;
         }
@@ -743,12 +760,14 @@ fn worker(core: Arc<GitCore>) {
             core.sched.lock().deferred = true;
             continue;
         }
-        let started = Instant::now();
-        let out = {
+        // Timed from the slot, not from before waiting for it: a fast repo queued behind two
+        // slow ones (or a numstat, or a Compare with HEAD) is not a slow repo.
+        let (out, took) = {
             let _slot = core.slots.acquire();
-            core.run_status()
+            let started = Instant::now();
+            (core.run_status(), started.elapsed())
         };
-        hub.git_finished(out, started.elapsed());
+        hub.git_finished(epoch, out, took);
     }
 }
 
@@ -886,15 +905,37 @@ mod tests {
         Ok(Status { branch: None, entries: entries.iter().map(|(p, l)| StatusEntry { path: p.to_string(), letter: l, orig: None, dir: false }).collect() })
     }
 
+    /// A run that started under the current setting.
+    fn now(c: &Arc<GitCore>, out: Result<Status, Failure>, took: Duration) -> Option<Published> {
+        c.apply(c.epoch(), out, took)
+    }
+
+    #[test]
+    fn a_run_that_outlived_turning_decorations_off_is_dropped() {
+        let c = core(Path::new("/r"), Path::new("/r"));
+        now(&c, st(&[("a.ts", "M")]), Duration::ZERO).unwrap();
+        // The run starts, then the human turns decorations off (and maybe on again) before
+        // it finishes: neither may publish what it found onto the cleared data.
+        let started = c.epoch();
+        assert!(c.set_enabled(false));
+        assert!(c.apply(started, st(&[("a.ts", "M")]), Duration::ZERO).is_none());
+        assert!(c.data.lock().files.is_empty(), "the cleared data stays cleared");
+        let off = c.epoch();
+        c.epoch.fetch_add(1, Ordering::SeqCst); // what set_enabled(true) does, without spawning a run
+        c.enabled.store(true, Ordering::SeqCst);
+        assert!(c.apply(off, st(&[("a.ts", "M")]), Duration::ZERO).is_none(), "nor after turning them back on");
+        assert!(now(&c, st(&[("a.ts", "M")]), Duration::ZERO).is_some(), "a run started after the change publishes");
+    }
+
     #[test]
     fn apply_sends_a_change_only_when_something_changed() {
         let c = core(Path::new("/r"), Path::new("/r"));
-        let p = c.apply(st(&[("a/x.ts", "M")]), Duration::ZERO).expect("first run publishes");
+        let p = now(&c,st(&[("a/x.ts", "M")]), Duration::ZERO).expect("first run publishes");
         assert_eq!(p.from, 0);
         assert_eq!(p.diff.files, vec![("a/x.ts".to_string(), "M".to_string())]);
         assert_eq!(p.diff.dirs, vec![("a".to_string(), "M".to_string())]);
-        assert!(c.apply(st(&[("a/x.ts", "M")]), Duration::ZERO).is_none(), "an unchanged run sends nothing");
-        let p = c.apply(st(&[("b.ts", "?")]), Duration::ZERO).unwrap();
+        assert!(now(&c,st(&[("a/x.ts", "M")]), Duration::ZERO).is_none(), "an unchanged run sends nothing");
+        let p = now(&c,st(&[("b.ts", "?")]), Duration::ZERO).unwrap();
         assert_eq!(p.diff.files, vec![("b.ts".to_string(), "?".to_string())]);
         assert_eq!(p.diff.del, vec!["a".to_string(), "a/x.ts".to_string()]);
         assert_eq!(p.untracked, vec!["b.ts".to_string()]);
@@ -904,7 +945,7 @@ mod tests {
     #[test]
     fn a_root_inside_a_larger_repo_keeps_only_its_own_paths() {
         let c = core(Path::new("/r/a/b"), Path::new("/r"));
-        let p = c.apply(st(&[("a/b/x.ts", "M"), ("a/bb/y.ts", "M"), ("a/b", "?"), ("top.ts", "A")]), Duration::ZERO).unwrap();
+        let p = now(&c,st(&[("a/b/x.ts", "M"), ("a/bb/y.ts", "M"), ("a/b", "?"), ("top.ts", "A")]), Duration::ZERO).unwrap();
         assert_eq!(p.diff.files, vec![("x.ts".to_string(), "M".to_string())]);
     }
 
@@ -912,7 +953,7 @@ mod tests {
     fn an_untracked_folder_keeps_its_slash() {
         let c = core(Path::new("/r"), Path::new("/r"));
         let out = Ok(Status { branch: None, entries: vec![StatusEntry { path: "build".into(), letter: "?", orig: None, dir: true }] });
-        let p = c.apply(out, Duration::ZERO).unwrap();
+        let p = now(&c,out, Duration::ZERO).unwrap();
         assert_eq!(p.diff.files, vec![("build/".to_string(), "?".to_string())]);
         assert!(p.diff.dirs.is_empty());
         assert!(p.untracked.is_empty(), "a folder is not a file for the search index");
@@ -923,7 +964,7 @@ mod tests {
         let c = core(Path::new("/r"), Path::new("/r"));
         let many: Vec<(String, &'static str)> = (0..MAX_FILES + 5).map(|i| (format!("d{}/f{i}", i % 3), "M")).collect();
         let entries: Vec<(&str, &'static str)> = many.iter().map(|(p, l)| (p.as_str(), *l)).collect();
-        let p = c.apply(st(&entries), Duration::ZERO).unwrap();
+        let p = now(&c,st(&entries), Duration::ZERO).unwrap();
         assert!(p.diff.truncated);
         assert!(p.diff.files.is_empty());
         assert_eq!(p.diff.dirs.len(), 3);
@@ -936,19 +977,19 @@ mod tests {
     fn slow_mode_trips_after_two_slow_runs_and_ends_on_a_fast_one() {
         let c = core(Path::new("/r"), Path::new("/r"));
         let slow = c.timing.slow_run + Duration::from_millis(1);
-        c.apply(st(&[]), slow);
+        now(&c,st(&[]), slow);
         assert!(!c.data.lock().slow, "one slow run is not a slow repo");
-        c.apply(st(&[]), slow);
+        now(&c,st(&[]), slow);
         assert!(c.data.lock().slow);
         assert_eq!(c.health().0, "slow");
         // Between 1 s and 2 s: neither slow nor fast, the mode stays.
-        c.apply(st(&[]), c.timing.fast_run + Duration::from_millis(1));
+        now(&c,st(&[]), c.timing.fast_run + Duration::from_millis(1));
         assert!(c.data.lock().slow);
-        c.apply(st(&[]), Duration::from_millis(5));
+        now(&c,st(&[]), Duration::from_millis(5));
         assert!(!c.data.lock().slow);
         // A timeout counts as slow.
-        c.apply(Err(Failure::TimedOut), Duration::ZERO);
-        c.apply(Err(Failure::TimedOut), Duration::ZERO);
+        now(&c,Err(Failure::TimedOut), Duration::ZERO);
+        now(&c,Err(Failure::TimedOut), Duration::ZERO);
         assert!(c.data.lock().slow);
     }
 
