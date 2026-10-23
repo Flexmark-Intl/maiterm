@@ -475,8 +475,11 @@ enough. Three layers:
      which behaves exactly like paused.
 3. **Paused or stalled mode.**
    - The hub stops sending and only adds folders to a per-sub dirty set, at O(folders) memory.
-   - On resume (`ft_pause(false)`, or the first ack after a stall) it sends one collapsed
-     `Dir`/`Delta` per dirty folder and one `Git { full: true }`.
+   - On resume (`ft_pause(false)`, or the first ack after a stall that brings the window back
+     under both limits) it sends one collapsed `Dir`/`Delta` per dirty folder and one
+     `Git { full: true }`. A `Dir` a stall cut short carries on from its next chunk while the
+     snapshot's generation is unchanged: restarting at chunk 0 never finished a folder of more
+     than ~32 chunks, because the client acks every 32 messages.
 
 ### 5.5 Listing (`filetree/list.rs`)
 
