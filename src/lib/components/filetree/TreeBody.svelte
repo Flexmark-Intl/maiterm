@@ -20,7 +20,7 @@
   import { getEditorByTabId, isEditorDirty } from '$lib/stores/editorRegistry.svelte';
   import * as commands from '$lib/tauri/commands';
   import { TREE_FLAG_IGNORED, TREE_FLAG_HIDDEN, TREE_FLAG_LOOP, TREE_FLAG_UNREADABLE } from '$lib/tauri/types';
-  import { NEW_ROW_KEY, dropFolderAt, highlightRuns, isExpandable, isFolderKind, parentRowIndex, stickyAncestors, typeAheadMatch, windowOf, withNewRow, type Row } from '$lib/filetree/model';
+  import { NEW_ROW_KEY, dropFolderAt, highlightRuns, isExpandable, isFolderKind, parentRowIndex, rowAtPoint, stickyAncestors, typeAheadMatch, windowOf, withNewRow, type Row } from '$lib/filetree/model';
   import type { GitLetter } from '$lib/tauri/types';
   import { iconFor } from '$lib/filetree/icons';
   import { treeAction, type TreeAction } from '$lib/filetree/keymap';
@@ -449,14 +449,14 @@
   // ── Drag and drop (§10.4, filetree/dnd.ts) ────────────────────────────────────────────
 
   /** The drop target at a point over the tree, arithmetically (rows are a fixed height):
-   *  a folder row is itself, a file row its folder, below the rows the root. Undefined when
+   *  a folder row is itself, a file row its folder, a sticky ancestor that folder, below the
+   *  rows the root. Undefined when
    *  the point isn't over the tree. Also used for drops from the OS (FilesColumn). */
   export function hitTree(x: number, y: number): DropTarget | undefined {
     if (!el) return undefined;
     const box = el.getBoundingClientRect();
     if (x < box.left || x > box.right || y < box.top || y > box.bottom) return undefined;
-    const i = Math.floor((y - box.top + el.scrollTop) / rowH);
-    return { kind: 'folder', rel: dropFolderAt(rows, i) };
+    return { kind: 'folder', rel: dropFolderAt(rows, rowAtPoint(y - box.top, el.scrollTop, rowH, sticky)) };
   }
 
   function onRowPointerDown(e: PointerEvent, r: Row) {
@@ -690,7 +690,7 @@
   onmouseleave={hideTip}
 >
   <div class="sticky-wrap">
-    <StickyAncestors {rows} indices={sticky} {rowH} onpick={(key) => { fileTreeStore.selectOnly(key); scrollIntoView(idxOf(key)); }} />
+    <StickyAncestors {rows} indices={sticky} {rowH} dropTarget={fileTreeStore.dropTarget} onpick={(key) => { fileTreeStore.selectOnly(key); scrollIntoView(idxOf(key)); }} />
   </div>
   <div class="spacer" style="height: {rows.length * rowH}px">
     {#each visible as v (v.r.key)}

@@ -12,10 +12,12 @@
     rows: Row[];
     indices: number[];
     rowH: number;
+    /** Where a drag would land: shown here too, since the folder's own row is under us. */
+    dropTarget?: string | null;
     onpick: (key: string) => void;
   }
 
-  let { rows, indices, rowH, onpick }: Props = $props();
+  let { rows, indices, rowH, dropTarget = null, onpick }: Props = $props();
 
   // A clipped name gets its full path in a bubble (the nowrap-needs-a-tooltip rule).
   let tip = $state<{ el: Element; text: string } | null>(null);
@@ -34,6 +36,7 @@
       {@const ic = iconFor(r.name, r.kind, true)}
       <button
         class="sticky-row"
+        class:drop-target={r.key === dropTarget}
         style="top:{n * rowH}px; height:{rowH}px; padding-left:{8 + r.depth * 12}px"
         tabindex="-1"
         onmousedown={(e) => e.preventDefault()}
@@ -75,6 +78,12 @@
 
   .sticky-row:hover {
     background: var(--bg-light);
+  }
+
+  /* The tree's own drop-target look, over the opaque header background. */
+  .sticky-row.drop-target {
+    background: color-mix(in srgb, var(--accent) 28%, var(--bg-medium));
+    box-shadow: inset 0 0 0 1px var(--accent);
   }
 
   .chev {

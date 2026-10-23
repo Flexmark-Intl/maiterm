@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TreeEntry, TreeEvent } from '$lib/tauri/types';
 import { TREE_FLAG_HIDDEN, TREE_FLAG_IGNORED, TREE_FLAG_LOOP } from '$lib/tauri/types';
-import { NEW_ROW_KEY, TreeModel, ancestorsOf, dropAccepted, dropFolderAt, joinRel, parentRowIndex, withNewRow, stickyAncestors, typeAheadMatch, windowOf, type Row } from './model';
+import { NEW_ROW_KEY, TreeModel, ancestorsOf, dropAccepted, dropFolderAt, joinRel, parentRowIndex, rowAtPoint, withNewRow, stickyAncestors, typeAheadMatch, windowOf, type Row } from './model';
 
 // ── A fake disk that answers like the hub ──────────────────────────────────────────────────
 // Folders first, then by name: any fixed order will do, since the model must keep whatever
@@ -405,6 +405,16 @@ describe('file operation helpers', () => {
     expect(dropFolderAt(rows, 3)).toBe(''); // a loop link isn't a folder to drop into
     expect(dropFolderAt(rows, 4)).toBe('');
     expect(dropFolderAt(rows, 99)).toBe('');
+  });
+
+  it('rowAtPoint: a point on the sticky header is that ancestor, not the row under it', () => {
+    // Scrolled 10 rows down (22 px rows) with two sticky ancestors, rows 0 and 4.
+    expect(rowAtPoint(5, 220, 22, [0, 4])).toBe(0);
+    expect(rowAtPoint(30, 220, 22, [0, 4])).toBe(4);
+    // Below the header: the row under the point.
+    expect(rowAtPoint(50, 220, 22, [0, 4])).toBe(12);
+    // No header.
+    expect(rowAtPoint(30, 220, 22, [])).toBe(11);
   });
 
   it('dropAccepted refuses a folder into itself and a move to where it already is', () => {

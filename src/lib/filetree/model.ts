@@ -808,6 +808,15 @@ export function withNewRow(rows: Row[], parent: string | null): Row[] {
   return out;
 }
 
+/** The row under a point `y` px below the tree's top edge. The sticky header (`sticky`, row
+ *  indices, one `rowH` each from the top) is drawn over the rows it covers, so a point on it
+ *  means that ancestor folder, never the row hidden underneath. */
+export function rowAtPoint(y: number, scrollTop: number, rowH: number, sticky: number[]): number {
+  const s = Math.floor(y / rowH);
+  if (s >= 0 && s < sticky.length) return sticky[s];
+  return Math.floor((y + scrollTop) / rowH);
+}
+
 /** The folder a drop or a paste at `rows[i]` lands in: a folder row is itself, a file row
  *  its folder, a message row the folder it belongs to; past the last row, the root. */
 export function dropFolderAt(rows: Row[], i: number): string {
