@@ -118,7 +118,7 @@
           {#if fileTreeStore.pinned}
             <button class="link" onclick={() => fileTreeStore.unpin()}>Follow the tab</button>
           {:else}
-            <button class="link" onclick={() => fileTreeStore.scheduleResolve(true)}>Follow the tab</button>
+            <button class="link" onclick={() => void fileTreeStore.followTabNow()}>Follow the tab</button>
           {/if}
           <span class="sep">·</span>
           <span class="hint">or pick another from the folder name above</span>

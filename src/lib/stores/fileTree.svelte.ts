@@ -472,9 +472,19 @@ function createFileTreeStore() {
         health = env.note ? { watch: env.watch, git: env.git, note: env.note } : null;
         break;
       case 'root_gone':
+        // The hub is dead for good (Rust never revives a gone root), so drop the
+        // subscription and the model with it. The next resolve of this same place then
+        // finds no live subscription and re-roots onto a fresh hub, so a folder deleted and
+        // re-created (a rename away and back, `rm -rf && git clone`) comes back. The old
+        // model's generations belong to the dead hub and must not be offered to a new one;
+        // the open folders survive through localStorage.
         status = 'gone';
         statusText = place ? tildePath(place.root, home) : null;
-        break;
+        if (place) roots.delete(place.place);
+        closeSub();
+        model = null;
+        rows = [];
+        return;
     }
     if (m.pendingClose.length) sendClose(m.pendingClose.splice(0));
     syncRows();
@@ -991,6 +1001,9 @@ function createFileTreeStore() {
     attach,
     detach,
     scheduleResolve,
+    /** The human asked the tree to follow the tab now (the gone banner's button): forced,
+     *  so it acts even with following turned off. */
+    followTabNow() { return resolveNow(true, true); },
     humanTouched() { lastHumanInputMs = Date.now(); },
     noteScroll(top: number) { scrollTop = top; },
 
