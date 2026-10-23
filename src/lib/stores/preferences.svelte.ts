@@ -81,6 +81,7 @@ function createPreferencesStore() {
   let fileTreeExclude = $state<string[]>([]);
   let fileTreeGit = $state(true);
   let fileTreeAgentActivity = $state(true);
+  let fileTreeTurnBaselines = $state(true);
   let fileTreeAgentTools = $state(true);
   let fileTreeStickyMax = $state(5);
   let fileTreeDensity = $state('normal');
@@ -216,6 +217,7 @@ function createPreferencesStore() {
     get fileTreeExclude() { return fileTreeExclude; },
     get fileTreeGit() { return fileTreeGit; },
     get fileTreeAgentActivity() { return fileTreeAgentActivity; },
+    get fileTreeTurnBaselines() { return fileTreeTurnBaselines; },
     get fileTreeAgentTools() { return fileTreeAgentTools; },
     get fileTreeStickyMax() { return fileTreeStickyMax; },
     get fileTreeDensity() { return fileTreeDensity; },
@@ -342,6 +344,7 @@ function createPreferencesStore() {
       fileTreeExclude = prefs.file_tree_exclude ?? [];
       fileTreeGit = prefs.file_tree_git ?? true;
       fileTreeAgentActivity = prefs.file_tree_agent_activity ?? true;
+      fileTreeTurnBaselines = prefs.file_tree_turn_baselines ?? true;
       fileTreeAgentTools = prefs.file_tree_agent_tools ?? true;
       fileTreeStickyMax = prefs.file_tree_sticky_max ?? 5;
       fileTreeDensity = prefs.file_tree_density || 'normal';
@@ -722,6 +725,7 @@ function createPreferencesStore() {
     /** Git decorations; open trees start or stop them at once. */
     async setFileTreeGit(value: boolean) { fileTreeGit = value; await this.save(); },
     async setFileTreeAgentActivity(value: boolean) { fileTreeAgentActivity = value; await this.save(); },
+    async setFileTreeTurnBaselines(value: boolean) { fileTreeTurnBaselines = value; await this.save(); },
     async setFileTreeAgentTools(value: boolean) { fileTreeAgentTools = value; await this.save(); },
     /** Gitignore lines Rust hides from every listing. Takes effect on the next open of a root. */
     async setFileTreeExclude(value: string[]) { fileTreeExclude = value; await this.save(); },
@@ -1032,6 +1036,7 @@ function createPreferencesStore() {
       fileTreeExclude = prefs.file_tree_exclude ?? [];
       fileTreeGit = prefs.file_tree_git ?? true;
       fileTreeAgentActivity = prefs.file_tree_agent_activity ?? true;
+      fileTreeTurnBaselines = prefs.file_tree_turn_baselines ?? true;
       fileTreeAgentTools = prefs.file_tree_agent_tools ?? true;
       fileTreeStickyMax = prefs.file_tree_sticky_max ?? 5;
       fileTreeDensity = prefs.file_tree_density || 'normal';
@@ -1150,6 +1155,7 @@ function createPreferencesStore() {
         file_tree_exclude: fileTreeExclude,
         file_tree_git: fileTreeGit,
         file_tree_agent_activity: fileTreeAgentActivity,
+        file_tree_turn_baselines: fileTreeTurnBaselines,
         file_tree_agent_tools: fileTreeAgentTools,
         file_tree_sticky_max: fileTreeStickyMax,
         file_tree_density: fileTreeDensity,

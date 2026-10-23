@@ -680,6 +680,9 @@ export interface Preferences {
   /** Agent activity in the tree (§9): marks reach the trees. Off, the ledger still records
    *  (getAgentFileActivity, the agent-in-flight guard). Default true. */
   file_tree_agent_activity: boolean;
+  /** Turn baselines (§14): an agent's first edit of a file in a turn reads it first, for
+   *  Compare with Turn/Session Start and showDiff '@turn'. Default true. */
+  file_tree_turn_baselines: boolean;
   /** The Files MCP tools, listed only while this and `file_tree_enabled` are on. Default true. */
   file_tree_agent_tools: boolean;
   /** Sticky ancestor rows; 0 = off. Default 5. */
@@ -1257,6 +1260,30 @@ export interface TabTurn {
   start_ms: number;
   /** When it ended; null while open, or when its end was never seen. */
   end_ms: number | null;
+}
+
+/** What a file held before a tab's agent first edited it this turn or session (§14,
+ *  `agentFilesBaseline`). `content` null with no `unavailable` is a new file (diff against
+ *  empty). */
+export interface Baseline {
+  content: string | null;
+  /** 'timeout' | 'binary' | 'too_large' | 'unreadable' | 'evicted' | 'not_captured' | 'pending' */
+  unavailable: string | null;
+  /** The turn it was captured in. */
+  turn: number;
+  /** 'maiterm' */
+  source: string;
+  /** The tab's agent runtime ('claude', 'codex', …); '' when unknown. */
+  runtime: string;
+}
+
+/** Lines added and removed since a baseline (`agentFilesBaselineStat`). */
+export interface BaselineStat {
+  added: number;
+  removed: number;
+  /** As `Baseline.unavailable`, or 'current_unreadable' (the file on disk isn't text now). */
+  unavailable: string | null;
+  turn: number;
 }
 
 /** One entry of a tab's agent ledger (`agentFilesActivity`). `path` is absolute, or

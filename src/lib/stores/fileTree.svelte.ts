@@ -44,7 +44,8 @@ import { relToAbs, lastSegment, tildePath } from '$lib/filetree/paths';
 import { settleActiveFile, type ActiveFileTarget } from '$lib/filetree/activeFile';
 import { AgentMarks, TurnTracker, agentLensItems, assignColours, changedThisTurn, cwdInRoot, folderBadges, isLasting, markWords, overlappingWriters, rowView, type RowAgentView } from '$lib/filetree/agents';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
-import { openReadOnlyDiff } from '$lib/utils/openGitDiff';
+import { openBaselineDiff, openReadOnlyDiff } from '$lib/utils/openGitDiff';
+import { baselineStatWords, type BaselineScope } from '$lib/filetree/baselines';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
@@ -2200,6 +2201,53 @@ function createFileTreeStore() {
     }).catch((e) => toastStore.addToast('Couldn’t compare', String(e), 'error'));
   }
 
+  // ── Turn baselines (§14) ──────────────────────────────────────────────────────────────
+
+  /** The agent tabs that edited `rel` through a tool (Edit, Write, a patch: the calls that
+   *  capture a baseline), newest first, and whether that was this turn. A change seen while a
+   *  shell ran, or a commit, has no baseline (Compare with HEAD covers those). */
+  function baselineWriters(rel: string): { tabId: string; name: string; thisTurn: boolean }[] {
+    if (!preferencesStore.fileTreeTurnBaselines || !preferencesStore.fileTreeAgentActivity || !absOf(rel)) return [];
+    const byTab = new Map<string, { at: number; thisTurn: boolean }>();
+    for (const m of agentMarks.marksOf(rel)) {
+      if (m.evidence !== 'tool' || !isLasting(m.op)) continue;
+      const cur = byTab.get(m.tab_id) ?? { at: 0, thisTurn: false };
+      byTab.set(m.tab_id, { at: Math.max(cur.at, m.at_ms), thisTurn: cur.thisTurn || turns.isThisTurn(m) });
+    }
+    return [...byTab.entries()].sort((a, b) => b[1].at - a[1].at).map(([tabId, v]) => ({ tabId, name: tabName(tabId), thisTurn: v.thisTurn }));
+  }
+
+  /** "Compare with Turn Start" / "Session Start": the file before `tabId`'s agent first
+   *  edited it, against the disk now. */
+  async function compareWithBaseline(rel: string, tabId: string, scope: BaselineScope) {
+    const abs = absOf(rel);
+    const ws = workspacesStore.activeWorkspace;
+    const pane = workspacesStore.activePane;
+    if (!abs || !ws || !pane) return;
+    try {
+      await openBaselineDiff({ tabId, agentTabName: tabName(tabId), abs, scope, workspaceId: ws.id, paneId: pane.id, afterTabId: pane.active_tab_id });
+    } catch (e) {
+      toastStore.addToast(scope === 'turn' ? 'Couldn’t compare with the turn’s start' : 'Couldn’t compare with the session’s start', e instanceof Error ? e.message : String(e), 'error');
+    }
+  }
+
+  /** The Turn lens tooltip's line counts (§14): for each tab that edited the file this turn
+   *  (the chosen chip's only, when one is chosen), "+N −N since turn 14 began", with the tab
+   *  named when there are two. Hover only: each is one read of the file. */
+  async function turnDeltaWords(rel: string): Promise<string[]> {
+    if (lens !== 'turn') return [];
+    const abs = absOf(rel);
+    if (!abs) return [];
+    const writers = baselineWriters(rel).filter((w) => w.thisTurn && (!agentFilter || w.tabId === agentFilter));
+    const out: string[] = [];
+    for (const w of writers) {
+      const st = await commands.agentFilesBaselineStat(w.tabId, abs, 'turn').catch(() => null);
+      const words = st ? baselineStatWords(st) : null;
+      if (words) out.push(writers.length > 1 ? `${words} (“${w.name}”)` : words);
+    }
+    return out;
+  }
+
   /** A reload gave an agent tab a new id: what this window keeps by tab follows it. */
   function remapAgentTab(oldId: string, newId: string) {
     agentMarks.remapTab(oldId, newId);
@@ -2464,6 +2512,9 @@ function createFileTreeStore() {
     compareBufferWithDisk,
     remapAgentTab,
     compareWithHead,
+    baselineWriters,
+    compareWithBaseline,
+    turnDeltaWords,
     // Find
     get find() { return find; },
     get findFocusSeq() { return findFocusSeq; },

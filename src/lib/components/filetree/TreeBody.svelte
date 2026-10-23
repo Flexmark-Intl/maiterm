@@ -424,6 +424,16 @@
     items.push(SEP, ...writeItems(r, rels, single, folder));
     const compare: MenuItem[] = [];
     if (single && !folder && fileTreeStore.gitOn) compare.push({ label: 'Compare with HEAD', action: () => void fileTreeStore.compareWithHead(r.key) });
+    // Against what the file held before an agent's first edit (§14). With two agents, one
+    // pair per agent, named.
+    if (single && !folder) {
+      const writers = fileTreeStore.baselineWriters(r.key);
+      for (const w of writers) {
+        const of = writers.length > 1 ? ` (${w.name})` : '';
+        if (w.thisTurn) compare.push({ label: `Compare with Turn Start${of}`, action: () => void fileTreeStore.compareWithBaseline(r.key, w.tabId, 'turn') });
+        compare.push({ label: `Compare with Session Start${of}`, action: () => void fileTreeStore.compareWithBaseline(r.key, w.tabId, 'session') });
+      }
+    }
     // An agent wrote a file that has unsaved edits here (§9.3's conflict badge).
     if (single && !folder && fileTreeStore.rowAgent(r.key, false, false)?.conflict?.buffer) {
       compare.push({ label: 'Compare Buffer ↔ Disk', action: () => void fileTreeStore.compareBufferWithDisk(r.key) });
@@ -548,6 +558,12 @@
         const words = await fileTreeStore.agentWords(r.key);
         if (seq !== tipSeq) return;
         if (words.length) text += `\n${words.join('\n')}`;
+        // In the Turn lens, how much this turn changed the file: against its turn baseline.
+        if (!isFolderKind(r.kind)) {
+          const delta = await fileTreeStore.turnDeltaWords(r.key);
+          if (seq !== tipSeq) return;
+          if (delta.length) text += `\n${delta.join('\n')}`;
+        }
       }
       if (ag?.conflict) text += `\n⚠ ${ag.conflict.text}${ag.conflict.buffer ? ' · click ⚠ to compare buffer ↔ disk' : ''}`;
       if (seq === tipSeq) tip = { el: nameEl, text };

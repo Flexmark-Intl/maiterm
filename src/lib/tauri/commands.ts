@@ -1,6 +1,6 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
-import type { AgentMarkAbs, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
+import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
@@ -981,6 +981,17 @@ export async function agentFilesMarks(): Promise<AgentMarkAbs[]> {
  *  Files column that was closed starts its turn tracking from. */
 export async function agentFilesTurns(): Promise<TabTurn[]> {
   return invoke('agent_files_turns');
+}
+
+/** What `pathAbs` held before `tabId`'s agent first edited it, this 'turn' (its current or
+ *  last) or this 'session' (§14). Serve an agent only its OWN tab's. */
+export async function agentFilesBaseline(tabId: string, pathAbs: string, scope: 'turn' | 'session'): Promise<Baseline> {
+  return invoke('agent_files_baseline', { tabId, pathAbs, scope });
+}
+
+/** Lines added and removed in `pathAbs` since that baseline (the Turn lens tooltip). */
+export async function agentFilesBaselineStat(tabId: string, pathAbs: string, scope: 'turn' | 'session'): Promise<BaselineStat> {
+  return invoke('agent_files_baseline_stat', { tabId, pathAbs, scope });
 }
 
 /** A reload replaced `oldTabId` with `newTabId`: the agent ledger moves with it. */

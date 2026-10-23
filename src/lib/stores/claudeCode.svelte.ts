@@ -26,7 +26,7 @@ import { getListenerStats } from '$lib/utils/listenCounter';
 import { editorFileInfo, localFileIdentities, openInEditor, sshCommandOfTab } from '$lib/utils/openInEditor';
 import { editorTitleAfter } from '$lib/utils/editorTitle';
 import { isWindows } from '$lib/utils/platform';
-import { openReadOnlyDiff } from '$lib/utils/openGitDiff';
+import { openBaselineDiff, openReadOnlyDiff } from '$lib/utils/openGitDiff';
 import { fileTreeStore } from '$lib/stores/fileTree.svelte';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
@@ -741,9 +741,10 @@ function createClaudeCodeStore() {
     await workspacesStore.createDiffTab(ws.id, pane.id, tabName, diffContext, afterTabId);
   }
 
-  async function handleShowDiff(args: { filePath: string; ref?: string; tabId?: string }) {
+  async function handleShowDiff(args: { filePath: string; ref?: string; tabId?: string; __maitermCallerTab?: string | null }) {
     const filePath = args.filePath;
     const gitRef = args.ref ?? 'HEAD';
+    if (gitRef === '@turn' || gitRef === '@session') return showBaselineDiff(args, gitRef === '@turn' ? 'turn' : 'session');
     const fileName = filePath.split('/').pop() ?? filePath;
     const tabName = `Diff: ${fileName} (${gitRef})`;
 
@@ -770,6 +771,30 @@ function createClaudeCodeStore() {
     await openReadOnlyDiff({ filePath, oldContent, newContent, tabName, workspaceId: ws.id, paneId: pane.id, afterTabId });
 
     return { success: true, filePath, ref: gitRef };
+  }
+
+  /** showDiff against the caller's turn baseline (docs/file-tree.md §14). Served from the
+   *  caller's OWN baselines only: Rust passes the connection's stated tab as
+   *  `__maitermCallerTab` (null when it was only inferred), and refuses a tabId naming another. */
+  async function showBaselineDiff(args: { filePath: string; __maitermCallerTab?: string | null }, scope: 'turn' | 'session') {
+    const caller = args.__maitermCallerTab;
+    if (!caller) {
+      return { success: false, error: 'showDiff with @turn/@session needs to know which tab is yours: run /maiterm init, then call it again without a tabId.' };
+    }
+    if (!preferencesStore.fileTreeTurnBaselines) {
+      return { success: false, error: 'Turn baselines are turned off in this maiTerm (Preferences → Files → Turn Baselines).' };
+    }
+    const target = resolvePane(caller);
+    if (!target) return { success: false, error: 'No active pane' };
+    const { ws, pane } = target;
+    const afterTabId = pane.tabs.some(t => t.id === caller) ? caller : pane.active_tab_id;
+    const agentTabName = findTabLocation(caller)?.tab.name ?? 'this tab';
+    try {
+      const { turn } = await openBaselineDiff({ tabId: caller, agentTabName, abs: args.filePath, scope, workspaceId: ws.id, paneId: pane.id, afterTabId });
+      return { success: true, filePath: args.filePath, ref: scope === 'turn' ? '@turn' : '@session', baselineTurn: turn };
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) };
+    }
   }
 
   async function handleCloseAllDiffTabs(requestId: string) {

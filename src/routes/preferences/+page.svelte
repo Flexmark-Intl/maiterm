@@ -1388,6 +1388,7 @@
         {@render ftToggle('ft-hidden', 'Show Hidden Files', 'Dotfiles and files the system marks hidden.', preferencesStore.fileTreeShowHidden, (v) => preferencesStore.setFileTreeShowHidden(v))}
         {@render ftToggle('ft-ignored', 'Show Ignored Files', 'Files your .gitignore excludes, dimmed.', preferencesStore.fileTreeShowIgnored, (v) => preferencesStore.setFileTreeShowIgnored(v))}
         {@render ftToggle('ft-git', 'Git Status', 'Colour changed files and their folders, show the branch row and the Changed view. Runs git status when files change.', preferencesStore.fileTreeGit, (v) => preferencesStore.setFileTreeGit(v))}
+        {@render ftToggle('ft-baselines', 'Turn Baselines', 'Before an agent first edits a file in a turn, keep what the file held, for Compare with Turn Start or Session Start. Local files only, up to 2 MB each, kept in memory.', preferencesStore.fileTreeTurnBaselines, (v) => preferencesStore.setFileTreeTurnBaselines(v))}
         <div class="setting" style="align-items: flex-start;">
           <div>
             <label for="ft-exclude">Always Hide</label>
