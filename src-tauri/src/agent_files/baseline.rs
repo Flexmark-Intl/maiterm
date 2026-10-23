@@ -178,10 +178,11 @@ struct SessionState {
     turn: u64,
     by_turn: HashMap<(u64, String), u64>,
     by_session: HashMap<String, u64>,
-    /// Set when this session's baselines were dropped and it came back, to the turn it came back
-    /// in. What it captured before is gone, so a capture now could read its own earlier edits:
-    /// its session baselines are `evicted` for good, and so are its turns up to this one. A later
-    /// turn captures again, since a turn starts from whatever the file holds at its first write.
+    /// Set when this session's baselines were dropped and it came back, to the last turn that may
+    /// have begun before it came back (`Dropped::fresh_after`). What it captured before is gone,
+    /// so a capture in such a turn could read its own earlier edits: its session baselines are
+    /// `evicted` for good, and so are its turns up to this one. A later turn captures again, since
+    /// a turn starts from whatever the file holds at its first write.
     lost: Option<u64>,
 }
 
@@ -195,22 +196,44 @@ const SESSIONS: usize = super::LEFT_SESSIONS + 1;
 /// would recapture files after its own edits. Only sessions that captured land here.
 const DROPPED: usize = 256;
 
+/// A session whose baselines were dropped.
+struct Dropped {
+    session: String,
+    /// Turns after this one began after the session came back (the ledger saw a prompt open
+    /// the next): they start clean. None until that prompt, when any turn may be one it was
+    /// already in.
+    fresh_after: Option<u64>,
+}
+
+impl Dropped {
+    /// Whether turn `turn` (any turn, for the session's start) may have begun before the
+    /// session lost its baselines.
+    fn covers(&self, scope: &str, turn: u64) -> bool {
+        scope == "session" || self.fresh_after.is_none_or(|t| turn <= t)
+    }
+}
+
 #[derive(Default)]
 struct TabState {
     runtime: String,
     /// Least recently captured first; the last is the session capturing now.
     sessions: Vec<SessionState>,
     /// Sessions whose baselines were dropped, oldest first.
-    dropped: VecDeque<String>,
+    dropped: VecDeque<Dropped>,
 }
 
 impl TabState {
+    /// `session` lost its baselines (again, maybe: whatever it had come back to is lost too).
     fn tombstone(&mut self, session: String) {
-        self.dropped.retain(|s| *s != session);
-        self.dropped.push_back(session);
+        self.dropped.retain(|d| d.session != session);
+        self.dropped.push_back(Dropped { session, fresh_after: None });
         if self.dropped.len() > DROPPED {
             self.dropped.pop_front();
         }
+    }
+
+    fn dropped(&self, session: &str) -> Option<&Dropped> {
+        self.dropped.iter().find(|d| d.session == session)
     }
 }
 
@@ -357,12 +380,10 @@ impl Baselines {
         let ss = match at {
             Some(i) => st.sessions.remove(i),
             None => {
-                // One whose baselines were dropped is not new: its turn may already have edited
-                // these files, so what they hold now is not where the turn started.
-                let lost = st.dropped.iter().position(|s| s == session).map(|i| {
-                    st.dropped.remove(i);
-                    turn
-                });
+                // One whose baselines were dropped is not new: a turn it was already in may have
+                // edited these files, so what they hold now is not where that turn started. With
+                // no prompt seen since it came back, this turn may be one of those.
+                let lost = st.dropped.iter().position(|d| d.session == session).and_then(|i| st.dropped.remove(i)).map(|d| d.fresh_after.unwrap_or(turn));
                 SessionState { session: session.to_string(), lost, ..Default::default() }
             }
         };
@@ -412,10 +433,33 @@ impl Baselines {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
         let Some(st) = inner.tabs.get_mut(tab) else { return };
-        let Some(i) = st.sessions.iter().position(|s| s.session == session) else { return };
-        st.sessions.remove(i);
+        match st.sessions.iter().position(|s| s.session == session) {
+            Some(i) => {
+                st.sessions.remove(i);
+            }
+            // Lost before and not back to capturing since: the turns it came back to are
+            // renumbered too, so what `came_back` said of them no longer holds.
+            None if st.dropped(session).is_some() => {}
+            // Never captured: it has nothing to lose, and is new when it comes.
+            None => return,
+        }
         st.tombstone(session.to_string());
         inner.drop_slots(|s| s.tab == tab && s.session == session);
+    }
+
+    /// The ledger saw `session`'s first prompt since the tab switched back to it, opening turn
+    /// `after + 1`: turns after `after` began after it came back, so if it lost its baselines
+    /// they start clean (a capture reads the file as the turn found it). Only the first return
+    /// counts until it is lost again; a session that hasn't lost anything is left alone.
+    pub fn came_back(&self, tab: &str, session: &str, after: u64) {
+        let mut inner = self.inner.lock();
+        let Some(st) = inner.tabs.get_mut(tab) else { return };
+        if st.session(session).is_some() {
+            return;
+        }
+        if let Some(d) = st.dropped.iter_mut().find(|d| d.session == session) {
+            d.fresh_after.get_or_insert(after);
+        }
     }
 
     /// The ledger recorded the call in turn `to`, not the `from` its baselines were reserved
@@ -496,7 +540,7 @@ impl Baselines {
             let Some(tab) = inner.tabs.get(tab) else { return none("not_captured", String::new()) };
             let runtime = tab.runtime.clone();
             let Some(ss) = tab.session(session) else {
-                let why = if tab.dropped.iter().any(|s| s == session) { "evicted" } else { "not_captured" };
+                let why = if tab.dropped(session).is_some_and(|d| d.covers(scope, turn)) { "evicted" } else { "not_captured" };
                 return none(why, runtime);
             };
             // A session that lost its baselines can't say where it started, nor where a turn it
@@ -887,6 +931,39 @@ mod tests {
         b.lose_session("t1", "c1");
         b.capture("t1", "c1", "claude", 1, vec![a.clone()]).await;
         assert_eq!(content(&b.lookup("t1", "c1", &a, "turn", 1)), Some("v5\n"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A session that lost its baselines and came back: only the turns that may have begun before
+    /// it came back are blind. One it opened with a prompt after is read as usual, however many
+    /// clean turns went before its first edit, and those turns never touched the file.
+    #[tokio::test]
+    async fn only_turns_begun_before_a_session_came_back_are_blind() {
+        let d = dir("back");
+        let a = p(&d, "a.ts");
+        std::fs::write(&a, "v0\n").unwrap();
+        let b = Baselines::new();
+        b.capture("t1", "s1", "claude", 3, vec![a.clone()]).await;
+        std::fs::write(&a, "v1\n").unwrap();
+        b.lose_session("t1", "s1");
+        // Back mid-turn 1 (renumbered), then a prompt opens turn 2.
+        b.came_back("t1", "s1", 1);
+        let why = |scope: &str, turn: u64| b.lookup("t1", "s1", &a, scope, turn).unavailable;
+        assert_eq!(why("turn", 1).as_deref(), Some("evicted"));
+        assert_eq!(why("turn", 2).as_deref(), Some("not_captured"));
+        assert_eq!(why("session", 2).as_deref(), Some("evicted"));
+        // A later return doesn't move it: turn 2 began after the first.
+        b.came_back("t1", "s1", 5);
+        assert_eq!(why("turn", 3).as_deref(), Some("not_captured"));
+        assert_eq!(b.capture("t1", "s1", "claude", 3, vec![a.clone()]).await, vec![(a.clone(), Some(true))]);
+        assert_eq!(content(&b.lookup("t1", "s1", &a, "turn", 3)), Some("v1\n"));
+        assert_eq!((why("turn", 1).as_deref(), why("session", 3).as_deref()), (Some("evicted"), Some("evicted")));
+        // Lost again before it captured: what it came back to is forgotten with it.
+        b.lose_session("t1", "s1");
+        b.came_back("t1", "s1", 1);
+        b.lose_session("t1", "s1");
+        assert_eq!(why("turn", 2).as_deref(), Some("evicted"));
+        assert_eq!(b.capture("t1", "s1", "claude", 2, vec![a.clone()]).await, vec![(a.clone(), None)]);
         let _ = std::fs::remove_dir_all(&d);
     }
 

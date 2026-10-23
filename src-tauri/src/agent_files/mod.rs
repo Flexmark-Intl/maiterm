@@ -212,6 +212,9 @@ struct TabLedger {
     /// with the turn baselines (baseline.rs) its earlier turns captured. A session that falls off
     /// the end loses its baselines with its turn number (`Baselines::lose_session`).
     left: VecDeque<(String, u64, (i64, Option<i64>))>,
+    /// A prompt was seen since the tab last switched to its current session: the turns from that
+    /// prompt on began after it came back (`Baselines::came_back`).
+    prompted: bool,
 }
 
 impl TabLedger {
@@ -227,6 +230,7 @@ impl TabLedger {
             entries: VecDeque::new(),
             missing_since: None,
             left: VecDeque::new(),
+            prompted: false,
         }
     }
 
@@ -454,6 +458,7 @@ impl AgentFiles {
         let now = now_ms();
         let mut out: Vec<(AgentMarkAbs, bool)> = Vec::new();
         let mut forgot: Option<String> = None;
+        let mut fresh_from: Option<(String, u64)> = None;
         let recorded = {
             let mut inner = self.inner.lock();
             let inner = &mut *inner;
@@ -502,6 +507,7 @@ impl AgentFiles {
                     tab.turn_span = span;
                 }
                 tab.session_id = rec.session_id.clone();
+                tab.prompted = false;
             }
             if !rec.runtime.is_empty() {
                 tab.runtime = rec.runtime.clone();
@@ -519,6 +525,12 @@ impl AgentFiles {
                         tab.turn += 1;
                         tab.turn_open = true;
                         tab.turn_span = (now, None);
+                        // The first prompt since the session (re)became current: every turn
+                        // before this one may have begun before it came back.
+                        if !tab.prompted {
+                            tab.prompted = true;
+                            fresh_from = Some((tab.session_id.clone(), tab.turn));
+                        }
                     } else {
                         tab.end_turn(now);
                     }
@@ -663,6 +675,9 @@ impl AgentFiles {
         };
         if let Some(s) = forgot {
             self.baselines.lose_session(&rec.tab_id, &s);
+        }
+        if let Some((s, turn)) = fresh_from {
+            self.baselines.came_back(&rec.tab_id, &s, turn - 1);
         }
         self.route(out);
         Some(recorded)

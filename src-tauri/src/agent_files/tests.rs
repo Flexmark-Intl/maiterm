@@ -738,5 +738,43 @@ async fn headless_children_never_make_the_parents_edits_its_baseline() {
         let got = l.baselines.lookup("t1", "s1", &a, scope, 1);
         assert_eq!((got.content, got.unavailable.as_deref()), (None, Some("evicted")), "{scope}");
     }
+    // Its next turn opens with a prompt after it came back: a clean turn, read as usual.
+    l.record(rec(&stop(&cwd), "t1"));
+    l.record(rec(&prompt(&cwd), "t1"));
+    hook_pre(&l, &edit(&a, "q3", "s1"), &a).await;
+    assert_eq!(l.baselines.lookup("t1", "s1", &a, "turn", 2).content.as_deref(), Some("v5\n"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A session the ledger forgot comes back with a prompt, reads for a turn or two, and only then
+/// edits: none of those turns began before it came back, so the edit's turn is read as usual and
+/// the read-only turns are "not captured", not evicted. Only the session's start stays gone.
+#[tokio::test]
+async fn a_forgotten_session_back_with_a_prompt_starts_clean() {
+    let d = std::env::temp_dir().join(format!("af-back-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&d).unwrap();
+    let cwd = d.to_string_lossy().into_owned();
+    let a = d.join("a.ts").to_string_lossy().into_owned();
+    std::fs::write(&a, "v0\n").unwrap();
+    let l = ledger();
+    l.record(rec(&prompt(&cwd), "t1"));
+    hook_pre(&l, &pre("Edit", json!({ "file_path": a, "old_string": "v", "new_string": "w" }), "e1", &cwd), &a).await;
+    l.record(rec(&stop(&cwd), "t1"));
+    std::fs::write(&a, "v1\n").unwrap();
+    for i in 0..=LEFT_SESSIONS {
+        let mut p = prompt(&cwd);
+        p["session_id"] = json!(format!("r{i}"));
+        l.record(rec(&p, "t1"));
+    }
+    for turn in 1..=2 {
+        l.record(rec(&prompt(&cwd), "t1"));
+        assert_eq!(l.turn_and_session("t1"), Some((turn, "s1".to_string())));
+        assert_eq!(l.baselines.lookup("t1", "s1", &a, "turn", turn).unavailable.as_deref(), Some("not_captured"));
+        l.record(rec(&stop(&cwd), "t1"));
+    }
+    l.record(rec(&prompt(&cwd), "t1"));
+    hook_pre(&l, &pre("Edit", json!({ "file_path": a, "old_string": "v", "new_string": "w" }), "e2", &cwd), &a).await;
+    assert_eq!(l.baselines.lookup("t1", "s1", &a, "turn", 3).content.as_deref(), Some("v1\n"));
+    assert_eq!(l.baselines.lookup("t1", "s1", &a, "session", 3).unavailable.as_deref(), Some("evicted"));
     let _ = std::fs::remove_dir_all(&d);
 }
