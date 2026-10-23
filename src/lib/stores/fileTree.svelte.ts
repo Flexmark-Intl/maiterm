@@ -1034,8 +1034,11 @@ function createFileTreeStore() {
         focusPending = true;
       } else {
         await workspacesStore.setFileTreeOpen(false);
+        // The column unmounts with the keyboard inside it: hand it to what's in front, as
+        // the tree's own Escape does, or it falls to <body> and typing goes nowhere.
         const t = workspacesStore.activeTab;
         if (t?.tab_type === 'terminal') terminalsStore.focusTerminal(t.id);
+        else if (t?.tab_type === 'editor') getEditorByTabId(t.id)?.view.focus();
         return;
       }
       const t = workspacesStore.activeTab;
