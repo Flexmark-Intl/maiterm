@@ -13,6 +13,7 @@
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { decisionsQueue, summarize } from '$lib/loom/model';
+  import { overlordStore } from '$lib/stores/overlord.svelte';
   import { followUpsStore } from '$lib/stores/followUps.svelte';
   import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
   import { workspaceIsLive } from '$lib/workspace/liveness';
@@ -58,8 +59,11 @@
     followUpsStore.pendingApprovals.filter((a) => !loomStore.workspaceFilter || a.workspaceId === loomStore.workspaceFilter),
   );
   const scripts = $derived(approvals.length);
-  // Agent requests are app-wide (a restart, a mesh change), so no filter hides them.
-  const decisions = $derived(decisionsQueue(tasks).length + scripts + agentRequestsStore.pending.length);
+  // Agent requests and Overlord rule changes are app-wide (a restart, a mesh change, a
+  // supervision rule), so no filter hides them.
+  const decisions = $derived(
+    decisionsQueue(tasks).length + scripts + agentRequestsStore.pending.length + (overlordStore.pendingRuleChanges ? 1 : 0),
+  );
   /** Agents stopped at a permission prompt, in scope. */
   const permissions = $derived(
     scoped.reduce(

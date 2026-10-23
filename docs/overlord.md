@@ -7,7 +7,7 @@
 >
 > Implementation map: engine `src/lib/stores/overlord.svelte.ts`; defaults
 > `src/lib/overlord/defaults.ts`; UI `src/lib/components/overlord/` (board, rules
-> section, rule-change modal); Rust facts/commands `src-tauri/src/commands/overlord.rs`
+> section, rule-change card); Rust facts/commands `src-tauri/src/commands/overlord.rs`
 > + `mailink/transcript.rs` (tail facts); schema `src-tauri/src/state/workspace.rs`;
 > MCP tools `src-tauri/src/claude_code/protocol.rs` + `server.rs`. Off by default —
 > Preferences → Overlord → Enable (propose-mode starts on).
@@ -1076,7 +1076,7 @@ with `needs_human` — the agent filing an `agent_report` about someone else's t
 **The playbook** (`Preferences.overlord_playbook: Vec<String>`, window-wide) is the human's
 standing answers. Training is by proposal: when the agent had to ask, it proposes the answer
 as an entry through `proposeRuleChanges` (ops `playbook_add` / `playbook_remove`, `text`),
-approved per change in the same modal as rules — no new prompt surface. It reaches the agent
+approved per change on the same card as rules — no new prompt surface. It reaches the agent
 on the `listEscalations` reply, not in the doctrine, so it is current at the moment of
 deciding and editing it never re-pastes the doctrine. Neither preference is in
 `preference_meta`: an agent that could set them could grant itself the job, or its own
@@ -1287,9 +1287,14 @@ proposeRuleChanges({
 → { approved: string[], rejected: string[] }
 ```
 
-- Approval goes through **native AskUserQuestion**, per-change `multiSelect`
-  rather than all-or-nothing — otherwise one bad change in a batch of five makes
-  the human reject four good ones.
+- Approval is **per change**, never all-or-nothing — otherwise one bad change in a
+  batch of five makes the human reject four good ones. It is a card
+  (`components/overlord/RuleChangeCard.svelte`, 2026-10-23) waiting on the human like
+  any other: on the Overlord tab's corner, in the Loom's Decisions and on the phone,
+  with a notice that stays until the batch is decided and opens the card. It replaced a
+  window-wide modal that opened by itself and rejected the whole batch on any Escape —
+  pressed, often as not, to interrupt an agent in the terminal. Only a click on Apply or
+  Reject all decides; no key does.
 - The prompt must render a **verbatim diff** of the directive text, not
   Overlord's description of it. The text is the entire payload; "tightened the
   compaction wording" is not something anyone can approve blind.

@@ -20,6 +20,7 @@ import { claudeStateStore, resumeCommandFor } from '$lib/stores/agentState.svelt
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { bracketedPasteSubmit, deliverPrompt } from '$lib/utils/agentPrompt';
 import { dispatch } from '$lib/stores/notificationDispatch';
+import { toastStore } from '$lib/stores/toasts.svelte';
 import { pruneHiddenDefaultOverlordRules, seedDefaultOverlordRules } from '$lib/overlord/defaults';
 import { DEFAULT_AGENT_STATES, guardsForCondition } from '$lib/overlord/format';
 import { getVariables, interpolateVariables, setVariable } from '$lib/stores/triggers.svelte';
@@ -229,6 +230,9 @@ export const PLAYBOOK_ENTRY_MAX = 400;
 export function isPlaybookChange(c: OverlordRuleChange): boolean {
   return c.op === 'playbook_add' || c.op === 'playbook_remove';
 }
+
+/** The one notice for the pending rule-change batch (there is at most one batch). */
+const RULE_CHANGES_KEY = 'overlord-rule-changes';
 
 export interface PendingRuleChangeBatch {
   id: string;
@@ -451,7 +455,7 @@ const DEDUPED_ESCALATIONS = new Set<OverlordEscalation['kind']>(['blocked']);
 const RECOVERED_STATES = new Set(['working', 'done', 'idle']);
 
 /** Guards an agent-created rule gets, whatever it asked for — the field-tier rule (§10):
- *  guards are human-only, unreachable from the MCP surface. Exported so the approval modal
+ *  guards are human-only, unreachable from the MCP surface. Exported so the approval card
  *  can warn about the rule the human would ACTUALLY get, not the one the agent asked for. */
 export const AGENT_RULE_GUARDS = {
   agent_state: ['idle', 'active'] as ('idle' | 'active' | 'permission')[],
@@ -548,7 +552,7 @@ function applyRuleChange(rules: OverlordRule[], c: OverlordRuleChange): Overlord
         // default set contradicts three conditions outright, so the coupled guard is
         // repaired the same way the human editor repairs it. This handled `agent_unready`
         // alone, which meant an agent-proposed `permission_pending` or `directive_unacked`
-        // rule arrived permanently unfireable and the approval modal asked the human to
+        // rule arrived permanently unfireable and the approval card asked the human to
         // approve it anyway.
         guards: guardsForCondition(AGENT_RULE_GUARDS, c.rule.when.event),
         sequence: c.rule.sequence,
@@ -608,9 +612,12 @@ function createOverlordStore() {
   let lastScan = $state<ScanSummary | null>(null);
   let scanning = $state(false);
   let pendingRuleChanges = $state<PendingRuleChangeBatch | null>(null);
+  /** When the pending batch was proposed (ms): its place among what waits on the human, and
+   *  the card's click guard. Kept off the batch, which the phone is sent as it is. */
+  let pendingRuleChangesAt = $state(0);
   let triageRun = $state<TriageRunProgress | null>(null);
   let triageCancelled = false;
-  // Resolver for the MCP proposeRuleChanges round trip (the modal answers it).
+  // Resolver for the MCP proposeRuleChanges round trip (RuleChangeCard answers it).
   let ruleChangeResolver:
     | ((res: { approved: string[]; rejected: string[]; failed?: string[]; pending?: boolean }) => void)
     | null = null;
@@ -4507,6 +4514,7 @@ function createOverlordStore() {
     },
 
     get pendingRuleChanges() { return pendingRuleChanges; },
+    get pendingRuleChangesAt() { return pendingRuleChangesAt; },
 
     isOverlordAgentTab,
 
@@ -4593,10 +4601,10 @@ function createOverlordStore() {
       };
     },
 
-    /** proposeRuleChanges (§10): queue the batch for explicit human approval (a modal
-     *  with per-change selection). Resolves when the human decides, or returns
-     *  pending:true if they haven't within the MCP window — the modal stays up and the
-     *  decision applies asynchronously. */
+    /** proposeRuleChanges (§10): queue the batch for explicit human approval (a card with
+     *  per-change selection, on the Overlord tab's corner and in the Loom's Decisions).
+     *  Resolves when the human decides, or returns pending:true if they haven't within the
+     *  MCP window — the card stays and the decision applies asynchronously. */
     async proposeRuleChanges(
       callerTabId: string,
       rationale: string,
@@ -4643,7 +4651,14 @@ function createOverlordStore() {
         changes,
       };
       pendingRuleChanges = batch;
-      dispatch('Overlord', 'Overlord proposes rule changes — review in the approval prompt.', 'info');
+      pendingRuleChangesAt = Date.now();
+      // Stays until the batch is decided (`resolveRuleChanges` removes it); a click opens the
+      // card on the Overlord tab. Dynamic: waiting.svelte imports this store.
+      const n = changes.length;
+      void dispatch('Overlord', `Proposes ${n} rule change${n === 1 ? '' : 's'} for you to allow.`, 'info', { tabId: callerTabId }, {
+        key: RULE_CHANGES_KEY,
+        action: () => void import('$lib/stores/waiting.svelte').then(({ waitingStore }) => waitingStore.openOnTab(batch.tabId, batch.id)),
+      });
       const decision = await new Promise<{
         approved: string[];
         rejected: string[];
@@ -4651,7 +4666,7 @@ function createOverlordStore() {
         pending?: boolean;
       }>((resolve) => {
         ruleChangeResolver = resolve;
-        // Answer inside the MCP response window; the modal stays up past this.
+        // Answer inside the MCP response window; the card stays past this.
         setTimeout(() => {
           if (ruleChangeResolver === resolve) {
             ruleChangeResolver = null;
@@ -4662,7 +4677,7 @@ function createOverlordStore() {
       if (decision.pending) {
         return {
           pending: true,
-          note: 'The human has not decided yet. The approval prompt stays open; check the ruleset later. Do not re-propose.',
+          note: 'The human has not decided yet. The batch waits for them; check the ruleset later. Do not re-propose.',
         };
       }
       return {
@@ -4674,11 +4689,13 @@ function createOverlordStore() {
       };
     },
 
-    /** The approval modal's answer: apply the selected change indexes, reject the rest. */
+    /** The human's answer (RuleChangeCard, or the phone): apply the selected change indexes,
+     *  reject the rest. */
     resolveRuleChanges(batchId: string, approvedIdx: number[]) {
       const batch = pendingRuleChanges;
       if (!batch || batch.id !== batchId) return;
       pendingRuleChanges = null;
+      toastStore.removeByKey(RULE_CHANGES_KEY);
       const approved: string[] = [];
       const rejected: string[] = [];
       const failed: string[] = [];
@@ -4716,8 +4733,8 @@ function createOverlordStore() {
           // The human said yes to something that cannot be built. Saying "approved" here is
           // how "SSH tabs must report explicitly" came to be ledgered as approved, reported
           // approved to the agent, and never exist. Propose-time validation should stop this
-          // reaching the modal at all; this is the backstop for a ruleset that moved in
-          // between (the target rule deleted while the prompt was open).
+          // reaching the card at all; this is the backstop for a ruleset that moved in
+          // between (the target rule deleted while the card was up).
           const why = changeProblem(change, rules, playbook) ?? 'it no longer applies to the current ruleset';
           failed.push(`${label} — ${why}`);
           ledger(batch.tabId, null, 'overlord_judgment', 0,

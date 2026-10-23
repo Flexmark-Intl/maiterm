@@ -214,11 +214,16 @@ tab whose agent asked.
 
 - **`waitingStore`** (`stores/waiting.svelte.ts`) indexes everything waiting on the human
   by its asking tab: decision/action blockers (`decisionsQueue`), watch scripts to allow
-  (not on archived tabs), and agent requests. Tasks with no tab stay Loom-only.
+  (not on archived tabs), agent requests, and the Overlord agent's proposed rule changes
+  (on the Overlord tab that proposed them). Tasks with no tab stay Loom-only.
+- **A notice opens the card, not the Loom** (`waitingStore.openOnTab`): an agent request, a
+  watch script or a rule-change batch goes to its tab and opens the corner card on it. Only
+  where no corner can show it (a tab archived, in a suspended workspace or a mesh shown as a
+  stage; scripts waiting in several tabs) does the notice open the Decisions instead.
 - **`WaitingCorner`** (`components/tasks/WaitingCorner.svelte`) sits in each pane's terminal
   area for the active tab. It is a pill in the lower right (orange; red when something is an
   `action`), and a click opens a card stack. The cards are the same `BlockerCard`,
-  `ScriptApprovalCard` and `AgentRequestCard`, with all their guards.
+  `ScriptApprovalCard`, `AgentRequestCard` and `RuleChangeCard`, with all their guards.
   - It sits under the service console drawer (z 40), so an open drawer covers it.
 - **The tab strip** badges a tab that isn't showing (`.waiting-badge`, a count). A click
   switches to the tab first, then opens the card.

@@ -45,7 +45,6 @@
   import FollowUpsModal from '$lib/components/followUps/FollowUpsModal.svelte';
   import MeshCockpit from '$lib/components/MeshCockpit.svelte';
   import MeshSetupModal from '$lib/components/MeshSetupModal.svelte';
-  import OverlordRuleChangeModal from '$lib/components/overlord/OverlordRuleChangeModal.svelte';
   import { detectLanguageFromPath, isImageFile, isPdfFile } from '$lib/utils/languageDetect';
   import { readFile } from '$lib/tauri/commands';
   import type { EditorFileInfo } from '$lib/tauri/types';
@@ -1545,7 +1544,6 @@
   onclose={() => { meshSetupWorkspaceId = null; }}
   onEnabled={() => { showMeshCockpit = true; }}
 />
-<OverlordRuleChangeModal />
 {#if claudeSetupStore.open}
   <ClaudeSetupModal />
 {/if}

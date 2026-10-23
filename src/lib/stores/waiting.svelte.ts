@@ -1,17 +1,20 @@
 /**
  * What is waiting on the human, by the tab whose agent asked: a task's question (a `decision`
  * or `action` blocker, docs/tasks.md §3.1), a watch script to allow (docs/follow-ups.md §5.1),
- * and an agent request (docs/agent-requests.md). The Loom's Decisions view lists them all; this
+ * an agent request (docs/agent-requests.md), and the Overlord agent's proposed rule changes
+ * (docs/overlord.md §10). The Loom's Decisions view lists them all; this
  * index puts each one on its own terminal, as a corner card (`WaitingCorner.svelte`) and a tab
  * strip badge, so a question is seen where the human already is (docs/loom.md, "On the
  * terminal").
  *
  * The cards are the same components every surface uses (BlockerCard, ScriptApprovalCard,
- * AgentRequestCard), so answering here goes through the same guards and the same verbs.
+ * AgentRequestCard, RuleChangeCard), so answering here goes through the same guards and the
+ * same verbs.
  */
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { followUpsStore, type PendingApproval } from '$lib/stores/followUps.svelte';
 import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
+import { overlordStore, type PendingRuleChangeBatch } from '$lib/stores/overlord.svelte';
 import { decisionsQueue } from '$lib/loom/model';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { SvelteMap } from 'svelte/reactivity';
@@ -20,10 +23,11 @@ import type { AgentRequest, Task } from '$lib/tauri/types';
 export type WaitingItem =
   | { kind: 'task'; key: string; at: number; task: Task }
   | { kind: 'script'; key: string; at: number; approval: PendingApproval }
-  | { kind: 'request'; key: string; at: number; request: AgentRequest };
+  | { kind: 'request'; key: string; at: number; request: AgentRequest }
+  | { kind: 'rules'; key: string; at: number; batch: PendingRuleChangeBatch };
 
 /** How urgent a tab's corner reads, most urgent first: something only the human can do, then a
- *  choice. Scripts and requests are choices. */
+ *  choice. Scripts, requests and rule changes are choices. */
 export type WaitingTone = 'action' | 'decision';
 
 export function waitingTone(items: WaitingItem[]): WaitingTone {
@@ -53,6 +57,9 @@ function byTab(): Map<string, WaitingItem[]> {
   for (const request of agentRequestsStore.pending) {
     add(request.tab_id, { kind: 'request', key: request.id, at: request.requested_at, request });
   }
+  // The Overlord agent's proposed rule changes, on the Overlord tab that proposed them.
+  const batch = overlordStore.pendingRuleChanges;
+  if (batch) add(batch.tabId, { kind: 'rules', key: batch.id, at: overlordStore.pendingRuleChangesAt, batch });
   for (const list of out.values()) list.sort((a, b) => a.at - b.at);
   return out;
 }

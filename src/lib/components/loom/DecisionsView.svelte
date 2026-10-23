@@ -1,15 +1,17 @@
 <!--
   Every question waiting on the human, oldest first: decisions to make and things only the
-  human can do. Two kinds, in one queue: a task's blocker, answered through BlockerCard, which
-  types the answer back into the agent's tab; and a watch script waiting to be allowed
-  (docs/follow-ups.md §5.1), answered through ScriptApprovalCard, which maiTerm acts on itself.
+  human can do, in one queue: a task's blocker, answered through BlockerCard, which types the
+  answer back into the agent's tab; a watch script waiting to be allowed (docs/follow-ups.md
+  §5.1, ScriptApprovalCard); an agent request (docs/agent-requests.md, AgentRequestCard); and the
+  Overlord agent's proposed rule changes (docs/overlord.md §10, RuleChangeCard).
 -->
 <script lang="ts">
   import { loomStore } from '$lib/stores/loom.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { workspacesStore, tabDisplayName, navigateToTab } from '$lib/stores/workspaces.svelte';
   import { decisionsQueue, unexplainedBlocked } from '$lib/loom/model';
-  import { overlordStore } from '$lib/stores/overlord.svelte';
+  import { overlordStore, type PendingRuleChangeBatch } from '$lib/stores/overlord.svelte';
+  import RuleChangeCard from '$lib/components/overlord/RuleChangeCard.svelte';
   import { fmtAge } from '$lib/overlord/format';
   import BlockerCard from '$lib/components/tasks/BlockerCard.svelte';
   import ScriptApprovalCard from '$lib/components/followUps/ScriptApprovalCard.svelte';
@@ -30,18 +32,23 @@
   type Item =
     | { kind: 'task'; at: number; task: Task }
     | { kind: 'script'; at: number; approval: PendingApproval }
-    | { kind: 'request'; at: number; request: AgentRequest };
-  const itemKey = (i: Item) => (i.kind === 'task' ? i.task.id : i.kind === 'script' ? i.approval.followUp.id : i.request.id);
-  /** Blockers, scripts and agent requests, oldest first: the order they should be answered in.
-   *  Requests are not scoped by the workspace filter: a restart or a mesh change is app-wide,
-   *  and a filter must never hide something only the human can approve. */
-  const queue = $derived.by((): Item[] =>
-    [
+    | { kind: 'request'; at: number; request: AgentRequest }
+    | { kind: 'rules'; at: number; batch: PendingRuleChangeBatch };
+  const itemKey = (i: Item) =>
+    i.kind === 'task' ? i.task.id : i.kind === 'script' ? i.approval.followUp.id : i.kind === 'rules' ? i.batch.id : i.request.id;
+  /** Blockers, scripts, agent requests and Overlord rule changes, oldest first: the order they
+   *  should be answered in. Requests and rule changes are not scoped by the workspace filter: a
+   *  restart, a mesh change or a supervision rule is app-wide, and a filter must never hide
+   *  something only the human can approve. */
+  const queue = $derived.by((): Item[] => {
+    const batch = overlordStore.pendingRuleChanges;
+    return [
       ...decisionsQueue(tasks).map((task): Item => ({ kind: 'task', at: Date.parse(task.blocker!.asked_at), task })),
       ...approvals.map((approval): Item => ({ kind: 'script', at: Date.parse(approval.followUp.created_at), approval })),
       ...agentRequestsStore.pending.map((request): Item => ({ kind: 'request', at: request.requested_at, request })),
-    ].sort((a, b) => a.at - b.at),
-  );
+      ...(batch ? [{ kind: 'rules', at: overlordStore.pendingRuleChangesAt, batch } as Item] : []),
+    ].sort((a, b) => a.at - b.at);
+  });
   /** When the queue last changed — an item in, out or reordered — for the script cards' click
    *  guard: any change can move a card under the pointer. Written, never read, here. */
   let listChangedAt = $state(0);
@@ -119,6 +126,19 @@
             <button onclick={() => void navigateToTab(t.tab_id!)}>Open the tab</button>
           {/if}
         </div>
+      </article>
+    {:else if item.kind === 'rules'}
+      {@const b = item.batch}
+      <article class="card">
+        <div class="who">
+          <span>Overlord rule changes</span>
+          <span>waiting {fmtAge(new Date(item.at).toISOString())}</span>
+        </div>
+        <RuleChangeCard
+          batch={b}
+          {listChangedAt}
+          onnote={(text) => (answered = [{ id: b.id, title: 'Overlord rule changes', text }, ...answered.filter((x) => x.id !== b.id)].slice(0, 5))}
+        />
       </article>
     {:else if item.kind === 'request'}
       {@const r = item.request}

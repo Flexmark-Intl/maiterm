@@ -18,6 +18,7 @@
   import BlockerCard from './BlockerCard.svelte';
   import ScriptApprovalCard from '$lib/components/followUps/ScriptApprovalCard.svelte';
   import AgentRequestCard from '$lib/components/agentRequests/AgentRequestCard.svelte';
+  import RuleChangeCard from '$lib/components/overlord/RuleChangeCard.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
 
   interface Props {
@@ -42,7 +43,7 @@
 
   function label(i: WaitingItem): string {
     if (i.kind === 'task') return BLOCKER_LABEL[i.task.blocker!.kind];
-    return i.kind === 'script' ? 'A watch script to allow' : 'An agent request';
+    return i.kind === 'script' ? 'A watch script to allow' : i.kind === 'rules' ? 'Rule changes to allow' : 'An agent request';
   }
 
   /** When the list last changed: anything above a card moving can put it under the pointer
@@ -144,6 +145,8 @@
                 <BlockerCard task={item.task} variant="card" onnote={showNote} />
               {:else if item.kind === 'script'}
                 <ScriptApprovalCard tabId={item.approval.tabId} followUp={item.approval.followUp} {listChangedAt} onnote={showNote} />
+              {:else if item.kind === 'rules'}
+                <RuleChangeCard batch={item.batch} {listChangedAt} onnote={showNote} />
               {:else}
                 <AgentRequestCard request={item.request} {listChangedAt} onnote={showNote} />
               {/if}
