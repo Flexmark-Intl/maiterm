@@ -362,6 +362,78 @@ checks (those apply to `--worktree`/`EnterWorktree` sessions). Nothing stops a w
 coordinator's tools only ever name the worktrees. A later option is a PreToolUse guard keyed
 on the tab's folders, since maiTerm already receives every PreToolUse. It's not v1.
 
+### 6.8 Running things: one shared stack and a run queue (Darryl's direction, 2026-10-23)
+
+One machine can't run a dev server, a database and a full test suite per worker. Isolating
+each worker (its own ports, its own container) multiplies exactly that load. So a Hive
+**shares what can be shared and schedules what can't**. maiTerm runs the schedule; the
+coordinator only sets priorities.
+
+**What decides it: does the thing run the worker's code?**
+
+| Kind | Examples | How a Hive runs it |
+|---|---|---|
+| **Infrastructure**: doesn't run any branch's code | Postgres, Redis, MinIO, an emulator, ComfyUI, a local model | **One instance** in the Hive's stack (`docs/stack.md`), used by every worker. Each worker gets its **own namespace** inside it: database `app_<worker>`, a key prefix, a bucket prefix, through env vars maiTerm sets from a template (`DATABASE_URL=…/app_{worker}`) |
+| **Code-bearing**: runs one branch's code | A dev server, an API built from source, `tauri:dev`, an e2e suite, a full `cargo test` | **Taken in turns.** A dev server serves one checkout at a time, so it can't be shared across branches at once. It's a *slot* the queue binds to one worker's worktree per job |
+| **Cheap and local** | Typechecking a file, one module's unit tests, lint | **Runs freely** in the worker's own tab, no queue |
+
+**The run queue (Rust).** A worker runs anything heavy through `hiveRun {command, folder, needs,
+timeout?}`:
+
+- **Resources.** Hive settings declare, per repo, what jobs need: `cargo` (CPU-heavy, 2 at a
+  time), `tauri-dev` (one at a time: its ports and data folder), `e2e` (one: a browser and a
+  port), `gpu` (one: ComfyUI), `migrate:<db>` (exclusive per namespace). A job starts when
+  everything it needs has room. Jobs that don't compete run in parallel; jobs that do, wait.
+- **The job runs in a maiTerm-owned hidden tab** in the worker's worktree (a slot), so its
+  output is visible in the worker's column and its exit code is maiTerm's own record (OSC 133).
+  That's what makes it a receipt (§7.7).
+- **The worker isn't held hostage.** `hiveRun` answers at once with the job's place in the
+  queue. The result arrives as a framed `⟦HIVE RUN⟧` message between turns: the follow-ups
+  delivery path (`docs/follow-ups.md`), take-before-type, held only for a dialog or a draft. A
+  short job that finishes within a few seconds answers in the tool result directly.
+- **The coordinator sets priority, not timing.** `hiveRunPriority` moves a job forward (the
+  run blocking a land, say). Deciding when each test runs turn by turn would be slow and wrong
+  for an LLM, and it's easy for a queue. That's principle 8 again.
+- **Slots stay warm.** A slot keeps its last worktree's server running. If the next job is for
+  the same worker, it reuses it. Otherwise it restarts in the new worktree. Separately, one
+  **integration instance** of the dev server can stay up on Base (the coordinator's read copy),
+  so the human always has main to look at.
+
+**It's enforced, not requested.** Per repo, the Hive lists which commands are *queued*
+(`cargo test`, `npm run tauri:dev`, `playwright test`…). maiTerm already receives every
+`PreToolUse`. A worker's Bash call that runs a queued command directly is **denied by the
+hook**, with the reason "run this through hiveRun", and Claude honours a PreToolUse deny.
+Everything else runs freely.
+
+**Land checks are batched** (a merge queue, like GitHub's or bors). Land checks are the
+heaviest runs, and they're already one at a time per repo. When several workers are Reported
+together, maiTerm merges them all onto Base in a temporary worktree and runs the land check
+once.
+- Pass: they land in order.
+- Fail: the batch is split in half and each half tried again, until the culprit is found.
+
+When everything passes, which is the usual case, N workers cost one suite instead of N.
+
+**The machine sets the ceiling.** Rust reads CPU load and macOS memory pressure. Under
+pressure it lowers the heavy resources' capacity and the effective worker cap, starts nothing
+new, and the header says "Throttled · memory pressure". The agents themselves aren't free
+either. Each Claude session is its own process, which is why the worker cap exists at all.
+What one costs here is a spike (§13).
+
+**Shared caches** cut the remaining cost: sccache across worktrees for Rust (each worktree's
+`target/` lock remains, but compiled crates are shared), the npm cache, and the APFS-clone
+seeding of §6.5.
+
+**maiTerm as its own pilot repo** needs one change first: a `tauri:dev` instance must accept a
+data-folder and port override. Today two instances share `com.aiterm.dev` and ports, including
+8765, where the installed maiTerm listens. With the override, `tauri-dev` is still a one-at-a-time
+resource, since even one extra maiTerm is heavy.
+
+**Containers stay a later, per-Hive option.** Apple's `container` (1.0, June 2026) gives each
+container its own IP on macOS 26, so ports can't collide. It suits Linux-shaped stacks where
+isolation is worth the memory. It can't run Mac apps or reach the Apple GPU, and an agent inside
+one is a remote agent. So it arrives with SSH Hives, as one piece of work (§12).
+
 ## 7. Agents, tools and authority
 
 ### 7.1 The coordinator
@@ -948,8 +1020,10 @@ copied into a folder, with names given or derived from titles.
 
 ## 12. Not in v1
 
-- **SSH Hives** (workers on a remote host). The pieces exist (bridge, remote watch scripts),
-  but local first.
+- **SSH Hives and container workers** (workers on a remote host, or each in its own Apple
+  `container` VM). One piece of work: maiTerm treats a container as a local remote host,
+  reached by `container exec` instead of `ssh`, over the remote-agent path that already exists
+  (the bridge, the §6 login handoff, the transcript mirror). Local and shared first (§6.8).
 - **Mixed runtimes.** v1 is Claude only, because shared memory rides on Claude's
   `autoMemoryDirectory` and folders on `--add-dir`. Codex workers need their own paths for both.
 - **Scheduled work in a Hive** (Projects' scheduled tasks). Follow-ups cover one-offs already.
@@ -974,6 +1048,10 @@ Each is an hour or less, and each can change the design:
    worktree's `CLAUDE.md` loads, and auto mode writes there without prompting.
 7. **Thumbnail cost**: `qlmanage -t` and an ffmpeg frame strip on a 4K, 2-minute video; both must
    stay well under the time an agent takes to make the next asset.
+8. **The machine budget**: memory and CPU of one idle and one busy Claude session, so the
+   default worker cap and the pressure thresholds come from numbers, not guesses (§6.8).
+9. **The PreToolUse deny** stops a worker's direct `cargo test`, and the worker then uses
+   `hiveRun` rather than finding a workaround (`sh -c`, a script file) (§6.8).
 
 ## 14. Decisions
 
@@ -1003,6 +1081,10 @@ Decided 2026-10-23:
 12. **Retired workers:** their chats stay readable from their cards (§8.4).
 13. **Several Hives:** spawn fuses and the quota breaker count across all Hives; budgets stay
     per Hive (§7.8).
+14. **Running things:** one shared stack and a run queue, not an environment per worker.
+    Infrastructure is shared with a namespace per worker; code-bearing services are slots taken
+    in turns; maiTerm schedules, the coordinator sets priority (§6.8). Darryl's direction.
+    Containers are a later per-Hive option, built together with SSH Hives.
 
 ## 15. Prior art: what Hive takes and what it leaves
 
@@ -1054,6 +1136,9 @@ several releases a day).
 4. Workers: worktrees per folder, `--add-dir`, setup, trust write, the role catalogue, receipts, fuses,
    `hiveSpawnWorker`/`hiveListWorkers`/`hiveReport`, static cards.
 5. The activity feed, diff stat, worker columns, raw terminal, keyboard.
+5b. The shared Hive stack and the run queue: namespaces, slots, `hiveRun`, the PreToolUse deny,
+   pressure-aware capacity, batched land checks. For maiTerm as the pilot repo, the `tauri:dev`
+   data-folder and port override comes first.
 6. Reviewers (`hiveVerdict`, three attempts, escalation). Landing: land to Base (default) including several repos, the approval-mode setting through
    agent requests; retire; delete flow.
 7. Shared memory: `autoMemoryDirectory`, index rebuild, Memory view; checkpoints, `hiveAnswerWorker`, precedents, the decision log and earned autonomy.
