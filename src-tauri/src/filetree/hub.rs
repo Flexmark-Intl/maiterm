@@ -1627,6 +1627,17 @@ mod stall_tests {
         let rec = Arc::new(Recorder::default());
         let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
         let hub = ft.hub_of(ack.sub_id).unwrap();
+        // The watcher first: once it runs it re-lists every folder a sub is interested in,
+        // and "big", not on disk, would come back gone and drop the snapshot below. Windows
+        // starts it fast enough to land inside this test. Its start ends with a Health
+        // broadcast, the second this sub gets (the first came with the subscribe), and that is
+        // after it read the interest set, which `watch_pending` turning false is not.
+        let healths = || rec.msgs.lock().iter().filter(|m| matches!(m.ev, TreeEvent::Health { .. })).count();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while hub.watch_pending() || healths() < 2 {
+            assert!(std::time::Instant::now() < deadline, "the watcher never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         // "big" is never on disk: the snapshot published below is all the hub knows of it.
         hub.subs.lock().get_mut(&ack.sub_id).unwrap().interest.insert("big".to_string());
         hub.pause(ack.sub_id, true);
