@@ -39,6 +39,20 @@ describe('nameProblem', () => {
     expect(nameProblem('trail.', rules())).toBeNull();
   });
 
+  it('words the Windows rules for where it runs', () => {
+    // On a Mac's case-folding disk the name works here: the message says what it would break.
+    const mac = rules({ strictWindows: true, windows: false });
+    expect(nameProblem('a:b', mac)).toBe('“:” isn’t allowed: the name would break on Windows');
+    expect(nameProblem('trail.', mac)).toBe('A name ending with a dot or a space would break on Windows');
+    expect(nameProblem('aux.ts', mac)).toBe('“AUX” is reserved on Windows, so the name would break there');
+    // On Windows the disk refuses it outright, so "on Windows" adds nothing.
+    const win = rules({ strictWindows: true, windows: true });
+    expect(nameProblem('a:b', win)).toBe('“:” isn’t allowed in a name');
+    expect(nameProblem('trail ', win)).toBe('A name can’t end with a dot or a space');
+    expect(nameProblem('aux.ts', win)).toBe('“AUX” is a reserved name');
+    for (const r of [mac, win, rules()]) expect(nameProblem('a\u0007b', r)).toMatch(/Control characters/);
+  });
+
   it('refuses Windows reserved names, with or without an extension, in any case', () => {
     for (const n of ['CON', 'prn', 'Aux', 'nul.txt', 'COM1', 'com9.log', 'LPT3', 'lpt1.c']) {
       expect(nameProblem(n, rules({ strictWindows: true }))).toMatch(/reserved/);

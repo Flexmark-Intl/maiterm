@@ -1505,6 +1505,7 @@ function createFileTreeStore() {
     return {
       mode: e.mode,
       strictWindows: PLATFORM === 'windows' || a.case_insensitive,
+      windows: PLATFORM === 'windows',
       caseInsensitive: a.case_insensitive,
       nfc: a.nfc_names,
       sibling: siblingLookup(names, a.case_insensitive, a.nfc_names, own),

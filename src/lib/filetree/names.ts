@@ -24,6 +24,10 @@ export interface NameRules {
   mode: 'create' | 'rename';
   /** Apply the Windows rules: on Windows, or on a disk that folds case. */
   strictWindows: boolean;
+  /** This computer is Windows. Only the wording depends on it: there the rules are the disk's
+   *  own, elsewhere (a Mac's APFS) the name works here and would break on a Windows checkout,
+   *  and the message has to say so rather than claim this is Windows. */
+  windows?: boolean;
   /** The disk folds case: `Foo` and `foo` are one name. */
   caseInsensitive: boolean;
   /** NFC and NFD spell one name (macOS). */
@@ -43,15 +47,23 @@ export function foldName(name: string, caseInsensitive: boolean, nfc = false): s
 }
 
 /** One component's problem, or null. */
-function componentProblem(part: string, strictWindows: boolean): string | null {
+function componentProblem(part: string, r: NameRules): string | null {
   if (part === '') return 'A name can’t be empty between slashes';
   if (part === '.' || part === '..') return `“${part}” isn’t a name`;
-  if (CONTROL.test(part)) return 'A name can’t contain control characters';
-  if (strictWindows) {
+  // Legal on Linux, but nothing a person means to type, and no tool shows it.
+  if (CONTROL.test(part)) return 'Control characters aren’t allowed in a name';
+  if (r.strictWindows) {
     const bad = part.match(WINDOWS_ILLEGAL);
-    if (bad) return `“${bad[0]}” isn’t allowed in a name on Windows`;
-    if (/[. ]$/.test(part)) return 'A name can’t end with a dot or a space on Windows';
-    if (RESERVED.test(part)) return `“${part.split('.')[0].toUpperCase()}” is a reserved name on Windows`;
+    const reserved = RESERVED.test(part) ? part.split('.')[0].toUpperCase() : null;
+    if (r.windows) {
+      if (bad) return `“${bad[0]}” isn’t allowed in a name`;
+      if (/[. ]$/.test(part)) return 'A name can’t end with a dot or a space';
+      if (reserved) return `“${reserved}” is a reserved name`;
+    } else {
+      if (bad) return `“${bad[0]}” isn’t allowed: the name would break on Windows`;
+      if (/[. ]$/.test(part)) return 'A name ending with a dot or a space would break on Windows';
+      if (reserved) return `“${reserved}” is reserved on Windows, so the name would break there`;
+    }
   }
   return null;
 }
@@ -65,7 +77,7 @@ export function nameProblem(raw: string, r: NameRules): string | null {
   if (name.trim() === '') return 'A name is needed';
   if (r.mode === 'rename') {
     if (name.includes('/')) return 'A name can’t contain “/”';
-    const p = componentProblem(name, r.strictWindows);
+    const p = componentProblem(name, r);
     if (p) return p;
     if (r.current !== undefined) {
       if (name === r.current) return null;
@@ -78,7 +90,7 @@ export function nameProblem(raw: string, r: NameRules): string | null {
   if (name.endsWith('/')) return 'A name can’t end with “/”';
   const parts = name.split('/');
   for (const part of parts) {
-    const p = componentProblem(part, r.strictWindows);
+    const p = componentProblem(part, r);
     if (p) return p;
   }
   // Only the first component is in this folder; deeper ones are checked by Rust, which uses
