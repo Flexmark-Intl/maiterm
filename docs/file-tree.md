@@ -205,6 +205,25 @@
 > - **The focus shortcut keeps find and the lens** (`revealPlan`): Cmd/Ctrl+Shift+B with an
 >   editor in front selects the file's row if the pruned view shows it and otherwise only
 >   focuses. Only "Reveal in Files" puts the pruned view away.
+>
+> **As built, phase 2 third review fixes (2026-10-23).** Where they changed the above:
+> - **The untracked root's file run stops at its top level.** `:(glob)*` alone still walks
+>   into every folder (git matches the folder's name and descends), so it visited every file
+>   under the root on every status run: an unignored `node_modules` meant slow mode or a
+>   timeout. It now also passes the exclude pathspec `:(exclude,glob)*/**`, which git prunes
+>   on, and a test reads git's trace2 counters to hold that. (This code landed inside
+>   2e811a04, another session's commit that swept up the staged change.)
+> - **Find keeps an `S` entry that is on disk.** `git update-index --skip-worktree` (hiding
+>   local edits to `.env` and the like) sets the same bit as a sparse cone's exclusion, and
+>   status never names such a file, so dropping every `S` lost it for good. An `S` path is
+>   listed when a lookup finds it; folder answers are memoized, so a cone's missing folders
+>   cost one lookup each.
+> - **A case-only rename leaves one name.** On a volume that folds case (APFS, NTFS) a stat
+>   of `Foo.ts` finds `foo.ts`, so reconcile and the watcher re-indexed the old name.
+>   `paths::spelled_on_disk` compares the stored spelling (canonicalizing answers it per
+>   component; a symlink's own name comes from its folder's listing). The watcher asks for
+>   every file it finds on such a volume; reconcile asks only for names that collide once
+>   case is folded, which is exactly a rename's two sides, so ordinary runs cost nothing extra.
 
 ## 1. Why
 
