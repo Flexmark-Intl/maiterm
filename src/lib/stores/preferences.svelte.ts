@@ -79,6 +79,7 @@ function createPreferencesStore() {
   let fileTreeShowHidden = $state(true);
   let fileTreeShowIgnored = $state(true);
   let fileTreeExclude = $state<string[]>([]);
+  let fileTreeGit = $state(true);
   let fileTreeStickyMax = $state(5);
   let fileTreeDensity = $state('normal');
   let fileTreeIcons = $state('color');
@@ -211,6 +212,7 @@ function createPreferencesStore() {
     get fileTreeShowHidden() { return fileTreeShowHidden; },
     get fileTreeShowIgnored() { return fileTreeShowIgnored; },
     get fileTreeExclude() { return fileTreeExclude; },
+    get fileTreeGit() { return fileTreeGit; },
     get fileTreeStickyMax() { return fileTreeStickyMax; },
     get fileTreeDensity() { return fileTreeDensity; },
     get fileTreeIcons() { return fileTreeIcons; },
@@ -334,6 +336,7 @@ function createPreferencesStore() {
       fileTreeShowHidden = prefs.file_tree_show_hidden ?? true;
       fileTreeShowIgnored = prefs.file_tree_show_ignored ?? true;
       fileTreeExclude = prefs.file_tree_exclude ?? [];
+      fileTreeGit = prefs.file_tree_git ?? true;
       fileTreeStickyMax = prefs.file_tree_sticky_max ?? 5;
       fileTreeDensity = prefs.file_tree_density || 'normal';
       fileTreeIcons = prefs.file_tree_icons || 'color';
@@ -710,6 +713,8 @@ function createPreferencesStore() {
     async setFileTreePreviewTabs(value: boolean) { fileTreePreviewTabs = value; await this.save(); },
     async setFileTreeShowHidden(value: boolean) { fileTreeShowHidden = value; await this.save(); },
     async setFileTreeShowIgnored(value: boolean) { fileTreeShowIgnored = value; await this.save(); },
+    /** Git decorations; open trees start or stop them at once. */
+    async setFileTreeGit(value: boolean) { fileTreeGit = value; await this.save(); },
     /** Gitignore lines Rust hides from every listing. Takes effect on the next open of a root. */
     async setFileTreeExclude(value: string[]) { fileTreeExclude = value; await this.save(); },
     async setFileTreeStickyMax(value: number) {
@@ -1017,6 +1022,7 @@ function createPreferencesStore() {
       fileTreeShowHidden = prefs.file_tree_show_hidden ?? true;
       fileTreeShowIgnored = prefs.file_tree_show_ignored ?? true;
       fileTreeExclude = prefs.file_tree_exclude ?? [];
+      fileTreeGit = prefs.file_tree_git ?? true;
       fileTreeStickyMax = prefs.file_tree_sticky_max ?? 5;
       fileTreeDensity = prefs.file_tree_density || 'normal';
       fileTreeIcons = prefs.file_tree_icons || 'color';
@@ -1132,6 +1138,7 @@ function createPreferencesStore() {
         file_tree_show_hidden: fileTreeShowHidden,
         file_tree_show_ignored: fileTreeShowIgnored,
         file_tree_exclude: fileTreeExclude,
+        file_tree_git: fileTreeGit,
         file_tree_sticky_max: fileTreeStickyMax,
         file_tree_density: fileTreeDensity,
         file_tree_icons: fileTreeIcons,

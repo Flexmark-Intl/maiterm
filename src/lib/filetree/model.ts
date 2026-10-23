@@ -18,7 +18,7 @@
  *   'resync' and the store asks for the whole folder again, so a missed message heals
  *   instead of drifting.
  */
-import type { DirReq, TreeEntry, TreeEvent } from '$lib/tauri/types';
+import type { DirReq, GitLetter, GitUpdate, TreeEntry, TreeEvent } from '$lib/tauri/types';
 import { TREE_FLAG_HIDDEN, TREE_FLAG_IGNORED, TREE_FLAG_LOOP } from '$lib/tauri/types';
 
 /** 'm' is a message row: "Loading…", an error, "50,000 of N shown". Never focusable. */
@@ -33,7 +33,7 @@ export interface Row {
   kind: RowKind;
   flags: number;
   /** Message rows only: what the row says, for styling. */
-  msg?: 'loading' | 'error' | 'truncated' | 'slow';
+  msg?: 'loading' | 'error' | 'truncated' | 'slow' | 'empty';
 }
 
 /** One change to `rows`, already applied: `rows.splice(start, deleteCount, ...rows)`. */
@@ -125,6 +125,13 @@ export class TreeModel {
   /** Folders a delta deleted while Rust was following them: the store drains this into
    *  `ftCollapse` so the hub stops tracking a path that no longer exists. */
   pendingClose: string[] = [];
+  /** Git decorations as Rust sent them (§7.3): changed files (a wholly untracked folder's key
+   *  ends in '/') and folders' rolled-up severity. A git update never touches `rows`: only
+   *  the mounted rows read these, through the store's `gitVersion`. */
+  gitFiles = new Map<string, GitLetter>();
+  gitDirs = new Map<string, GitLetter>();
+  /** Past 20k changed files Rust sends folders only. */
+  gitTruncated = false;
   showHidden: boolean;
   showIgnored: boolean;
 
@@ -530,6 +537,56 @@ export class TreeModel {
     return { gen: 0, names: [], entries: new Map(), state: 'loading', truncated: false, total: 0, building: null };
   }
 
+  // ── Git ───────────────────────────────────────────────────────────────────────────────
+
+  /** A `git` event: replace everything (`full`), or drop `del` and set the rest. Keys can
+   *  move between the maps, so `del` clears both before anything is set. */
+  applyGit(u: GitUpdate): void {
+    if (u.full) {
+      this.gitFiles.clear();
+      this.gitDirs.clear();
+    }
+    for (const k of u.del) {
+      this.gitFiles.delete(k);
+      this.gitDirs.delete(k);
+    }
+    for (const [k, v] of u.files) this.gitFiles.set(k, v);
+    for (const [k, v] of u.dirs) this.gitDirs.set(k, v);
+    this.gitTruncated = u.truncated;
+  }
+
+  clearGit(): void {
+    this.gitFiles.clear();
+    this.gitDirs.clear();
+    this.gitTruncated = false;
+  }
+
+  /** What a row shows for git: its own letter, a folder's roll-up (a dot), or untracked
+   *  because a folder above it is wholly untracked. Null when clean. */
+  gitOf(rel: string, folder: boolean): { letter: GitLetter; rollup: boolean } | null {
+    const own = this.gitFiles.get(rel) ?? (folder ? this.gitFiles.get(rel + '/') : undefined);
+    if (own) return { letter: own, rollup: false };
+    if (folder) {
+      const d = this.gitDirs.get(rel);
+      if (d) return { letter: d, rollup: true };
+    }
+    if (this.gitFiles.size) {
+      for (const a of ancestorsOf(rel)) if (this.gitFiles.get(a + '/') === '?') return { letter: '?', rollup: false };
+    }
+    return null;
+  }
+
+  /** The Changed lens's paths: every changed file, and each wholly untracked folder as one
+   *  folder leaf. */
+  changedItems(): LensItem[] {
+    const out: LensItem[] = [];
+    for (const k of this.gitFiles.keys()) {
+      if (k.endsWith('/')) out.push({ rel: k.slice(0, -1), kind: 'd' });
+      else out.push({ rel: k, kind: this.entry(k)?.k ?? 'f' });
+    }
+    return out;
+  }
+
   // ── Queries ───────────────────────────────────────────────────────────────────────────
 
   entry(rel: string): TreeEntry | undefined {
@@ -548,6 +605,128 @@ export class TreeModel {
     for (let j = i - 1; j >= 0; j--) if (this.rows[j].depth < d) return j;
     return -1;
   }
+}
+
+// ── Pruned trees: find results and the Changed lens (§8, §9.4) ─────────────────────────────
+
+/** One path a pruned tree must show; its folders come with it. */
+export interface LensItem {
+  rel: string;
+  kind: RowKind;
+}
+
+interface LensNode {
+  kind: RowKind;
+  children: Map<string, LensNode>;
+}
+
+function lensCmp(a: [string, LensNode], b: [string, LensNode]): number {
+  const fa = isFolderKind(a[1].kind) ? 0 : 1;
+  const fb = isFolderKind(b[1].kind) ? 0 : 1;
+  if (fa !== fb) return fa - fb;
+  const la = a[0].toLowerCase();
+  const lb = b[0].toLowerCase();
+  if (la !== lb) return la < lb ? -1 : 1;
+  return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+}
+
+/**
+ * The rows of a pruned tree: every item plus the folders above it, folders first, each open
+ * unless it is in `collapsed`. The listing order is Rust's and these paths aren't all listed,
+ * so siblings sort here (folders first, then case-insensitive); this never touches the real
+ * tree's rows. `entryOf` supplies kinds and flags for paths the model has listed; with hidden
+ * files off, a path with a dot segment is left out. An empty result is one 'empty' message
+ * row saying `emptyText`.
+ */
+export function prunedRows(
+  items: LensItem[],
+  collapsed: Set<string>,
+  entryOf: (rel: string) => TreeEntry | undefined,
+  opts: { showHidden: boolean; emptyText: string },
+): Row[] {
+  const root: LensNode = { kind: 'd', children: new Map() };
+  for (const it of items) {
+    if (!it.rel) continue;
+    const parts = it.rel.split('/');
+    if (!opts.showHidden && parts.some((p) => p.startsWith('.'))) continue;
+    let node = root;
+    let rel = '';
+    for (let i = 0; i < parts.length; i++) {
+      rel = joinRel(rel, parts[i]);
+      const last = i === parts.length - 1;
+      let next = node.children.get(parts[i]);
+      if (!next) {
+        const known = entryOf(rel)?.k;
+        next = { kind: last ? it.kind : known && isFolderKind(known) ? known : 'd', children: new Map() };
+        node.children.set(parts[i], next);
+      } else if (!last && !isFolderKind(next.kind)) {
+        next.kind = 'd';
+      }
+      node = next;
+    }
+  }
+  const out: Row[] = [];
+  const walk = (node: LensNode, rel: string, depth: number) => {
+    for (const [name, child] of [...node.children].sort(lensCmp)) {
+      const key = joinRel(rel, name);
+      out.push({ key, depth, name, kind: child.kind, flags: entryOf(key)?.f ?? 0 });
+      if (child.children.size && !collapsed.has(key)) walk(child, key, depth + 1);
+    }
+  };
+  walk(root, '', 0);
+  if (out.length === 0) out.push({ key: '\u0000empty', depth: 0, name: opts.emptyText, kind: 'm', flags: 0, msg: 'empty' });
+  return out;
+}
+
+/**
+ * Find's highlights per row: for each hit, its matched character positions (code points, as
+ * Rust counts them) mapped onto the name of each row on its path, so a folder lights the
+ * letters of the query that fell in its name. Positions are within the row's name, in code
+ * points.
+ */
+export function matchHighlights(hits: { rel: string; idx: number[] }[]): Map<string, number[]> {
+  const out = new Map<string, Set<number>>();
+  for (const h of hits) {
+    if (!h.idx.length) continue;
+    const chars = Array.from(h.rel);
+    // Each segment's start (in code points) and the row key it ends at.
+    const segs: { start: number; key: string }[] = [];
+    let start = 0;
+    for (let i = 0; i <= chars.length; i++) {
+      if (i === chars.length || chars[i] === '/') {
+        segs.push({ start, key: chars.slice(0, i).join('') });
+        start = i + 1;
+      }
+    }
+    let s = 0;
+    for (const i of h.idx) {
+      while (s + 1 < segs.length && segs[s + 1].start <= i) s++;
+      if (chars[i] === '/') continue;
+      const seg = segs[s];
+      let set = out.get(seg.key);
+      if (!set) out.set(seg.key, (set = new Set()));
+      set.add(i - seg.start);
+    }
+  }
+  const res = new Map<string, number[]>();
+  for (const [k, v] of out) res.set(k, [...v].sort((a, b) => a - b));
+  return res;
+}
+
+/** A name split into runs for drawing, `true` runs highlighted. `marks` are code-point
+ *  positions in `name`. */
+export function highlightRuns(name: string, marks: number[] | undefined): { text: string; hit: boolean }[] {
+  if (!marks?.length) return [{ text: name, hit: false }];
+  const set = new Set(marks);
+  const runs: { text: string; hit: boolean }[] = [];
+  let i = 0;
+  for (const ch of name) {
+    const hit = set.has(i++);
+    const last = runs[runs.length - 1];
+    if (last && last.hit === hit) last.text += ch;
+    else runs.push({ text: ch, hit });
+  }
+  return runs;
 }
 
 /** The ancestors of the row at the top of the viewport whose own rows have scrolled away,

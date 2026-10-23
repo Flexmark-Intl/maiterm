@@ -1,6 +1,6 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
-import type { DirReq, OpenAck, PlaceHints, StatInfo, TreeEnvelope, TreePlace } from './types';
+import type { DirReq, OpenAck, PlaceHints, StatInfo, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
@@ -935,9 +935,21 @@ export async function ftLocate(subId: number, absPaths: string[]): Promise<(stri
   return invoke('ft_locate', { subId, absPaths });
 }
 
-/** Size, mtime, exec bit, link target for the hover tooltip. */
+/** Size, mtime, exec bit, link target and (a changed file's) line counts for the hover tooltip. */
 export async function ftStat(subId: number, rel: string): Promise<StatInfo> {
   return invoke('ft_stat', { subId, rel });
+}
+
+/** Find (§8): the best `limit` (≤500) paths for `query`, with matched character positions.
+ *  `seq` must increase per query: an older answer arriving late is the caller's to drop.
+ *  `indexShallow`: the human asked to index a home or volume folder. */
+export async function ftSearch(subId: number, query: string, limit: number, seq: number, indexShallow = false): Promise<TreeSearchResult> {
+  return invoke('ft_search', { subId, query, limit, seq, indexShallow });
+}
+
+/** A file's content at 'HEAD' or in the 'index' (Compare with HEAD); null = new since then. */
+export async function ftDiffBase(subId: number, rel: string, base: 'HEAD' | 'index'): Promise<string | null> {
+  return invoke('ft_diff_base', { subId, rel, base });
 }
 
 export async function setSplitRatio(workspaceId: string, splitId: string, ratio: number): Promise<void> {

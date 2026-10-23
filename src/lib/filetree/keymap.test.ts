@@ -52,6 +52,16 @@ describe('treeAction', () => {
     expect(treeAction(k(' '), mac)).toEqual({ type: 'preview' });
   });
 
+  it('slash and Mod+F open find; a slash typed after vim arms type-ahead is text', () => {
+    expect(treeAction(k('/'), mac)).toEqual({ type: 'find' });
+    expect(treeAction(k('f', { metaKey: true }), mac)).toEqual({ type: 'find' });
+    expect(treeAction(k('f', { ctrlKey: true }), linux)).toEqual({ type: 'find' });
+    expect(treeAction(k('f', { ctrlKey: true }), mac)).toBeNull();
+    expect(treeAction(k('F', { metaKey: true, shiftKey: true }), mac)).toBeNull();
+    expect(treeAction(k('/'), { mac: true, vim: true })).toEqual({ type: 'find' });
+    expect(treeAction(k('/'), { mac: true, vim: true, typeaheadArmed: true })).toEqual({ type: 'typeahead', char: '/' });
+  });
+
   it('arrows move, shift extends, alt recurses', () => {
     expect(treeAction(k('ArrowDown', { shiftKey: true }), mac)).toEqual({ type: 'extend', to: 'down' });
     expect(treeAction(k('ArrowRight', { altKey: true }), mac)).toEqual({ type: 'expandRecursive' });

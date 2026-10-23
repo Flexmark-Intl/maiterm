@@ -675,6 +675,8 @@ export interface Preferences {
   file_tree_show_ignored: boolean;
   /** Extra names hidden by Rust's listing, as gitignore lines. Default []. */
   file_tree_exclude: string[];
+  /** Git decorations, the branch row and the Changed lens (§7). Default true. */
+  file_tree_git: boolean;
   /** Sticky ancestor rows; 0 = off. Default 5. */
   file_tree_sticky_max: number;
   /** 'compact' | 'normal' | 'comfortable' (row height 20/22/24). Default 'normal'. */
@@ -1015,7 +1017,7 @@ export interface RepoInfo {
 export interface Caps {
   /** 'live' | 'partial' (some folders polled: watch limit) | 'poll' (network mount) | 'none'. */
   watch: string;
-  /** Git decorations: false until phase 2. */
+  /** Git decorations: the root is in a repository and `file_tree_git` is on. */
   git: boolean;
   /** Trash: false until phase 3. */
   trash: boolean;
@@ -1044,8 +1046,57 @@ export interface StatInfo {
   exec: boolean;
   /** A symlink's target as written in the link. */
   link_target: string | null;
-  /** `git diff --numstat HEAD` for this file: always null until phase 2. */
+  /** `git diff --numstat HEAD` for a changed file: [added, deleted] lines. Null for a clean,
+   *  untracked or binary file, or outside a repository. */
   numstat: [number, number] | null;
+}
+
+/** The branch row, from the `# branch.*` headers of a status run. */
+export interface BranchInfo {
+  /** The branch name, or '(detached)'. */
+  head: string;
+  /** The commit, or '(initial)' before the first one. */
+  oid: string;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+}
+
+/** A git letter: M modified, A added, D deleted, R renamed, C conflict, ? untracked, T type
+ *  change. Folders carry rolled-up severity (C > D > M > A > ?). */
+export type GitLetter = 'M' | 'A' | 'D' | 'R' | 'C' | '?' | 'T';
+
+/** `git` on the Channel (§7.3). `full`: replace everything held. Otherwise drop `del` from both
+ *  maps, then set `files` and `dirs`. An untracked folder is in `files` with '?' (everything in
+ *  it is untracked too). `truncated`: past 20k changed files only `dirs` and `count` arrive. */
+export interface GitUpdate {
+  gen: number;
+  full: boolean;
+  files: [string, GitLetter][];
+  dirs: [string, GitLetter][];
+  del: string[];
+  branch: BranchInfo | null;
+  truncated: boolean;
+  /** Changed entries in all (the branch row's "7 changed"). */
+  count: number;
+}
+
+/** `ftSearch`'s answer (Rust's `filetree::types::SearchResult`; named apart from the terminal
+ *  search's). Drop it when `seq` is older than the newest query sent. */
+export interface TreeSearchResult {
+  seq: number;
+  /** The index is being built: `search_ready` arrives on the Channel when it is done. */
+  indexing: boolean;
+  items: TreeSearchHit[];
+  /** No index: a home or volume folder, indexed only when the human asks (`indexShallow`). */
+  unavailable: string | null;
+}
+
+export interface TreeSearchHit {
+  rel: string;
+  score: number;
+  /** Matched CHARACTER positions in `rel` (not UTF-16 units), ascending. */
+  idx: number[];
 }
 
 /** One row of a listing. Sorted by Rust (folders first, natural, case-insensitive): never
@@ -1083,7 +1134,9 @@ export const TREE_FLAG_UNREADABLE = 8;
  * - `health`: show `note` in the footer when set; absent note = healthy, no footer.
  * - `root_gone`: "This folder no longer exists · Follow the tab / pick another". Never re-root
  *   to home by yourself.
- * Git (`git`) and agent (`agent`) events arrive in phases 2 and 4.
+ * - `git`: decorations (see `GitUpdate`). `health.git` is 'off' | 'live' | 'slow' | 'error'.
+ * - `search_ready`: the find index finished building; re-ask a query answered `indexing`.
+ * Agent (`agent`) events arrive in phase 4.
  */
 export type TreeEvent =
   | { t: 'dir'; rel: string; gen: number; chunk: number; last: boolean; total: number; truncated: boolean; entries: TreeEntry[] }
@@ -1091,6 +1144,8 @@ export type TreeEvent =
   | { t: 'delta'; rel: string; from: number; gen: number; add: TreeEntry[]; del: string[]; chg: TreeEntry[]; at: number[] }
   | { t: 'dir_error'; rel: string; code: 'denied' | 'gone' | 'timeout'; msg: string }
   | { t: 'health'; watch: string; git: string; note: string | null }
+  | ({ t: 'git' } & GitUpdate)
+  | { t: 'search_ready' }
   | { t: 'root_gone' };
 
 /** Every Channel message: `seq` increases by one per message. Ack from inside `onmessage`:

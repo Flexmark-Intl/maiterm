@@ -151,7 +151,8 @@
           {/if}
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>Shift</kbd> + <kbd>.</kbd> <span>Show / hide hidden files</span></div>
           <div class="shortcut"><kbd>a</kbd>–<kbd>z</kbd> <span>Jump to the next name starting with what you type</span></div>
-          <div class="shortcut"><kbd>Esc</kbd> <span>Clear the selection, then back to the terminal</span></div>
+          <div class="shortcut"><kbd>/</kbd> · <kbd>{modLabel}</kbd> + <kbd>F</kbd> <span>Find a file: arrows move, Enter opens, Esc puts the tree back</span></div>
+          <div class="shortcut"><kbd>Esc</kbd> <span>Close find, then clear the selection, then back to the terminal</span></div>
         </div>
 
       {:else if activeSection === 'editor'}

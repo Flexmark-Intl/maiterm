@@ -2,9 +2,9 @@
  * The tree's keys, as a pure function from a key event to an action (docs/file-tree.md §11.2).
  *
  * Kept out of the component so the map reads as one table and the platform split (macOS
- * Cmd vs Ctrl elsewhere, Alt-chords) is decided in one place. Only phase 1's read-only
- * actions are mapped; rename, trash, clipboard, undo and the filter arrive with their
- * phases, and until then their keys do nothing in the tree.
+ * Cmd vs Ctrl elsewhere, Alt-chords) is decided in one place. The read-only actions and find
+ * (`/`, Cmd/Ctrl+F) are mapped; rename, trash, clipboard and undo arrive with file
+ * operations, and until then their keys do nothing in the tree.
  *
  * Two rules from the spec this enforces:
  * - Bare letters are never commands outside vim mode: an accidental `a` while typing a name
@@ -30,6 +30,8 @@ export type TreeAction =
   | { type: 'escape' }
   | { type: 'contextMenu' }
   | { type: 'typeahead'; char: string }
+  /** `/` or Cmd/Ctrl+F: the find bar (§8). */
+  | { type: 'find' }
   /** Vim `g`, waiting for its second `g`. */
   | { type: 'pendingG' };
 
@@ -77,6 +79,9 @@ export function treeAction(e: KeyLike, o: KeymapOptions): TreeAction | null {
   // Toggle hidden files: Cmd/Ctrl+Shift+.
   if (mod && e.shiftKey && (e.code === 'Period' || k === '>' || k === '.')) return { type: 'toggleHidden' };
   if (mod && !e.shiftKey && !e.altKey && lower === 'a') return { type: 'selectAll' };
+  if (mod && !e.shiftKey && !e.altKey && (lower === 'f' || e.code === 'KeyF')) return { type: 'find' };
+  // `/` opens find, except as a typed character once vim's `'` armed type-ahead.
+  if (!mod && !e.altKey && k === '/' && !(o.vim && o.typeaheadArmed)) return { type: 'find' };
   if (mod && !e.altKey && k === 'Enter') return { type: 'openSide' };
 
   if (mod) return null; // every other chord is the app's or nobody's

@@ -20,7 +20,8 @@
   import { getEditorByTabId, isEditorDirty } from '$lib/stores/editorRegistry.svelte';
   import * as commands from '$lib/tauri/commands';
   import { TREE_FLAG_IGNORED, TREE_FLAG_HIDDEN, TREE_FLAG_LOOP, TREE_FLAG_UNREADABLE } from '$lib/tauri/types';
-  import { isExpandable, isFolderKind, stickyAncestors, typeAheadMatch, windowOf, type Row } from '$lib/filetree/model';
+  import { highlightRuns, isExpandable, isFolderKind, stickyAncestors, typeAheadMatch, windowOf, type Row } from '$lib/filetree/model';
+  import type { GitLetter } from '$lib/tauri/types';
   import { iconFor } from '$lib/filetree/icons';
   import { treeAction, type TreeAction } from '$lib/filetree/keymap';
   import Icon from '$lib/components/Icon.svelte';
@@ -212,6 +213,11 @@
   }
 
   function escape() {
+    // Staged (§11.2): the find first, then a multi-selection, then the keyboard goes back.
+    if (fileTreeStore.find) {
+      fileTreeStore.closeFind();
+      return;
+    }
     if (fileTreeStore.selection.size > 1) {
       fileTreeStore.clearSelectionToFocus();
       return;
@@ -253,6 +259,7 @@
       case 'escape': escape(); break;
       case 'contextMenu': if (r) openMenuAt(r, focusIdx); break;
       case 'typeahead': typeahead(a.char); break;
+      case 'find': fileTreeStore.openFind(); break;
       case 'pendingG': pendingGAt = e.timeStamp; break;
     }
   }
@@ -352,6 +359,9 @@
       { label: rels.length > 1 ? 'Copy Paths' : 'Copy Path', shortcut: copyPathKey, action: () => void fileTreeStore.copyPaths(rels, false) },
       { label: rels.length > 1 ? 'Copy Relative Paths' : 'Copy Relative Path', shortcut: copyRelKey, action: () => void fileTreeStore.copyPaths(rels, true) },
     );
+    if (single && !folder && fileTreeStore.gitOn) {
+      items.push(SEP, { label: 'Compare with HEAD', action: () => void fileTreeStore.compareWithHead(r.key) });
+    }
     if (single && folder && !(r.flags & TREE_FLAG_LOOP)) {
       items.push(SEP, { label: 'Set as Root (pins)', action: () => void fileTreeStore.pinRel(r.key) });
     }
@@ -403,6 +413,8 @@
       if (!nameEl || !rowEl.isConnected) return;
       const clipped = nameEl.scrollWidth > nameEl.clientWidth;
       const notes: string[] = [];
+      const g = fileTreeStore.gitOf(r.key, isFolderKind(r.kind));
+      if (g) notes.push(g.rollup ? `changes inside: ${gitWord(g.letter)}` : gitWord(g.letter));
       if (r.flags & TREE_FLAG_IGNORED) notes.push('ignored by git');
       if (r.flags & TREE_FLAG_LOOP) notes.push('link back to a folder above it: not opened');
       if (r.flags & TREE_FLAG_UNREADABLE) notes.push('can’t be read');
@@ -417,6 +429,8 @@
           const when = st.mtime_ms ? new Date(st.mtime_ms).toLocaleString() : '';
           text += `\n${fmtSize(st.size)}${when ? ` · ${when}` : ''}${st.exec ? ' · executable' : ''}`;
           if (st.link_target) text += `\n→ ${st.link_target}`;
+          // The line counts belong with the git word they qualify: "modified · +12 −3".
+          if (st.numstat && g && !g.rollup) notes[0] = `${notes[0]} · +${st.numstat[0]} −${st.numstat[1]}`;
         }
       }
       if (notes.length) text += `\n${notes.join(' · ')}`;
@@ -425,9 +439,34 @@
   }
 
   // ── Rendering helpers ─────────────────────────────────────────────────────────────────
-  function ariaLabel(r: Row, expanded: boolean, dirty: boolean): string {
+  function gitWord(letter: GitLetter): string {
+    switch (letter) {
+      case 'M': return 'modified';
+      case 'A': return 'added';
+      case 'D': return 'deleted';
+      case 'R': return 'renamed';
+      case 'C': return 'conflict';
+      case '?': return 'untracked';
+      case 'T': return 'type changed';
+    }
+  }
+
+  /** The colour class (§7.3): M/T yellow, A/? green, D red struck through, R cyan, conflict
+   *  magenta. */
+  function gitClass(letter: GitLetter): string {
+    switch (letter) {
+      case 'M': case 'T': return 'g-mod';
+      case 'A': case '?': return 'g-add';
+      case 'D': return 'g-del';
+      case 'R': return 'g-ren';
+      case 'C': return 'g-conf';
+    }
+  }
+
+  function ariaLabel(r: Row, expanded: boolean, dirty: boolean, git: { letter: GitLetter; rollup: boolean } | null): string {
     const parts = [r.name];
     if (isExpandable(r)) parts.push(expanded ? 'expanded' : 'collapsed');
+    if (git) parts.push(git.rollup ? `contains ${gitWord(git.letter)} files` : gitWord(git.letter));
     if (r.flags & TREE_FLAG_IGNORED) parts.push('ignored');
     if (dirty) parts.push('unsaved changes');
     if (r.key === fileTreeStore.youAreHere) parts.push('this tab’s folder');
@@ -450,6 +489,10 @@
     {@const dirty = !!tabs?.some((t) => isEditorDirty(t))}
     {@const focused = i === focusIdx}
     {@const typed = focused && prefix && r.name.toLowerCase().startsWith(prefix.toLowerCase()) ? prefix.length : 0}
+    {@const folder = isFolderKind(r.kind)}
+    {@const git = fileTreeStore.gitOf(r.key, folder)}
+    {@const gcls = git ? gitClass(git.letter) : ''}
+    {@const hl = typed ? undefined : fileTreeStore.highlightsFor(r.key)}
     <!-- The container holds focus (aria-activedescendant); a row never does, so it has no
          tabindex: clicking it focuses the tree. -->
     <!-- svelte-ignore a11y_interactive_supports_focus -->
@@ -458,7 +501,7 @@
       id="ftr-{i}"
       class="row"
       class:focused
-      class:tree-focused={focused && hasFocus}
+      class:tree-focused={focused && (hasFocus || !!fileTreeStore.find)}
       class:selected={fileTreeStore.selection.has(r.key)}
       class:ignored={r.flags & TREE_FLAG_IGNORED}
       class:hidden-file={r.flags & TREE_FLAG_HIDDEN}
@@ -467,7 +510,7 @@
       aria-level={r.depth + 1}
       aria-expanded={expandable ? expanded : undefined}
       aria-selected={fileTreeStore.selection.has(r.key)}
-      aria-label={ariaLabel(r, expanded, dirty)}
+      aria-label={ariaLabel(r, expanded, dirty, git)}
       style="transform: translateY({i * rowH}px); padding-left: {PAD}px"
       onmousedown={(e) => { if (e.detail > 1) e.preventDefault(); }}
       onclick={(e) => onRowClick(e, r)}
@@ -486,10 +529,13 @@
         {#if expandable}<Icon name="chevron" size={11} />{/if}
       </span>
       <svg class="ic" style="color: var(--ft-ic-{ic.color})" width="16" height="16" aria-hidden="true"><use href="#{ic.id}" /></svg>
-      <span class="name">{#if typed}<mark>{r.name.slice(0, typed)}</mark>{r.name.slice(typed)}{:else}{r.name}{/if}</span>
+      <!-- A folder's roll-up is a dot, not a colour: the name stays readable over a big tree. -->
+      <span class="name {git && !git.rollup ? gcls : ''}">{#if typed}<mark>{r.name.slice(0, typed)}</mark>{r.name.slice(typed)}{:else if hl}{#each highlightRuns(r.name, hl) as run, j (j)}{#if run.hit}<mark class="hit">{run.text}</mark>{:else}{run.text}{/if}{/each}{:else}{r.name}{/if}</span>
       <span class="gutter">
         {#if r.key === fileTreeStore.youAreHere}<span class="here" aria-hidden="true"></span>{/if}
         {#if tabs}<span class="ed-dot" class:dirty aria-hidden="true"></span>{/if}
+        {#if git && folder}<span class="git-dot {gcls}" aria-hidden="true"></span>
+        {:else if git}<span class="git-letter {gcls}" aria-hidden="true">{git.letter === 'C' ? '!' : git.letter}</span>{/if}
       </span>
     </div>
   {/if}
@@ -668,5 +714,55 @@
   .ed-dot.dirty {
     background: var(--fg);
     border-color: var(--fg);
+  }
+
+  /* Find's matched letters: the same mark as type-ahead, a little stronger. */
+  .name mark.hit {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+    font-weight: 600;
+  }
+
+  /* Git (§7.3): the name's colour and a trailing letter; a folder's roll-up is a dot. */
+  .g-mod { --git-c: var(--yellow); }
+  .g-add { --git-c: var(--green); }
+  .g-del { --git-c: var(--red); }
+  .g-ren { --git-c: var(--cyan); }
+  .g-conf { --git-c: var(--magenta); }
+
+  .name.g-mod,
+  .name.g-add,
+  .name.g-del,
+  .name.g-ren,
+  .name.g-conf {
+    color: color-mix(in srgb, var(--git-c) 85%, var(--fg));
+  }
+
+  .name.g-del {
+    text-decoration: line-through;
+  }
+
+  .name.g-conf {
+    font-weight: 600;
+  }
+
+  .git-letter {
+    min-width: 10px;
+    text-align: center;
+    font-size: 0.85em;
+    font-weight: 600;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    color: var(--git-c);
+  }
+
+  .git-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--git-c);
+    margin: 0 2px;
+  }
+
+  .row.msg-empty {
+    font-style: normal;
   }
 </style>

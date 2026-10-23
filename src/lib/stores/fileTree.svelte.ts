@@ -16,6 +16,11 @@
  * - Switching roots is instant: the last 8 roots keep their model (with its generations),
  *   so coming back costs one `ftOpen` whose folders answer `not_modified`.
  * - Preview tabs live here in memory only, never on a Tab (§10.5).
+ * - Git decorations live on the model and never touch `rows` (§12.2): only the mounted rows
+ *   read them, through `gitVersion`.
+ * - Find and the Changed lens draw a PRUNED tree (`prunedRows`) in place of the model's rows,
+ *   with an open/closed state of their own: the real tree's expansion is never touched, so
+ *   leaving restores it, its scroll and its selection exactly (§8).
  */
 import { Channel } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -25,9 +30,10 @@ import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import { writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import * as commands from '$lib/tauri/commands';
-import type { DirReq, OpenAck, TreeEnvelope, TreePlace } from '$lib/tauri/types';
+import type { BranchInfo, DirReq, GitLetter, OpenAck, TreeEnvelope, TreePlace, TreeSearchHit } from '$lib/tauri/types';
 import { TREE_FLAG_IGNORED } from '$lib/tauri/types';
-import { TreeModel, ancestorsOf, isExpandable, isWithin, joinRel, parentRel, type Row } from '$lib/filetree/model';
+import { TreeModel, ancestorsOf, isExpandable, isFolderKind, isWithin, joinRel, matchHighlights, parentRel, prunedRows, type Row } from '$lib/filetree/model';
+import { openGitDiff } from '$lib/utils/openGitDiff';
 import { relToAbs, lastSegment, tildePath } from '$lib/filetree/paths';
 import { settleActiveFile, type ActiveFileTarget } from '$lib/filetree/activeFile';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
@@ -51,6 +57,31 @@ interface ViewState {
   focus: string | null;
   anchor: string | null;
 }
+
+/** What the tree body draws: the real tree, find's results, or the changed files. */
+export type ViewMode = 'tree' | 'find' | 'changed';
+
+/** Where the view was before a lens or find replaced it: put back exactly on leaving. */
+interface SavedView {
+  scrollTop: number;
+  selection: string[];
+  focus: string | null;
+  anchor: string | null;
+}
+
+interface FindState {
+  query: string;
+  hits: TreeSearchHit[];
+  /** rel → matched code-point positions in that row's name. */
+  highlights: Map<string, number[]>;
+  indexing: boolean;
+  unavailable: string | null;
+  /** A query is out and nothing has come back for it yet. */
+  pending: boolean;
+}
+
+/** Results asked of Rust per query (§8). */
+const FIND_LIMIT = 500;
 
 /** How long a re-resolve waits for the edges to settle (§4.2). */
 const RESOLVE_DEBOUNCE_MS = 150;
@@ -168,6 +199,25 @@ function createFileTreeStore() {
   /** An Alt+→ in progress: the folder it started from and the row count it stops at. */
   let recursive: { root: string; budget: number } | null = null;
 
+  // Git (§7): the decorations live on the model; these are what the branch row reads.
+  let gitVersion = $state(0);
+  let gitState = $state('off');
+  let branch = $state<BranchInfo | null>(null);
+  let gitCount = $state(0);
+
+  // Find and the Changed lens (§8, §9.4).
+  let lens = $state<'all' | 'changed'>('all');
+  let find = $state.raw<FindState | null>(null);
+  /** The find bar's input should take the keyboard (`/`, Cmd+F with the bar already open). */
+  let findFocusSeq = $state(0);
+  let searchSeq = 0;
+  /** The pruned tree's rows, and the folders closed in it (open by default). */
+  let lensRows: Row[] = [];
+  const lensCollapsed = new Set<string>();
+  /** The view to put back when find (or the Changed lens) gives way. */
+  let savedForFind: SavedView | null = null;
+  let savedForChanged: SavedView | null = null;
+
   homeDir().then((h) => { home = h; }).catch(() => {});
 
   // ── Small helpers ──────────────────────────────────────────────────────────────────────
@@ -176,9 +226,192 @@ function createFileTreeStore() {
    *  `expandedVersion` each time re-reads only the visible rows' open state, which is cheap,
    *  and no path that opens or closes a folder can forget to. */
   function syncRows() {
-    if (model && rows !== model.rows) rows = model.rows;
+    if (viewMode() === 'tree') {
+      if (model && rows !== model.rows) rows = model.rows;
+    } else if (rows !== lensRows) {
+      rows = lensRows;
+    }
     // Untracked: `++` reads the counter, and a caller inside an effect must not subscribe.
     untrack(() => { expandedVersion++; });
+  }
+
+  // ── Find and the Changed lens ─────────────────────────────────────────────────────────
+
+  /** Find with a query wins; then the Changed lens; else the real tree. Read untracked by
+   *  callers inside effects. */
+  function viewMode(): ViewMode {
+    if (find && find.query.trim()) return 'find';
+    if (lens === 'changed') return 'changed';
+    return 'tree';
+  }
+
+  function snapshotView(): SavedView {
+    return { scrollTop, selection: [...selection], focus: focusKey, anchor: anchorKey };
+  }
+
+  function restoreView(s: SavedView | null) {
+    if (!s) return;
+    selection.clear();
+    for (const k of s.selection) selection.add(k);
+    focusKey = s.focus;
+    anchorKey = s.anchor;
+    scrollTop = s.scrollTop;
+    scrollRequest = { key: null, top: s.scrollTop, seq: scrollRequest.seq + 1 };
+  }
+
+  function scrollToTop() {
+    scrollTop = 0;
+    scrollRequest = { key: null, top: 0, seq: scrollRequest.seq + 1 };
+  }
+
+  /** Re-derive the pruned tree for the current mode and show it. */
+  function rebuildLens() {
+    const m = model;
+    const mode = viewMode();
+    if (!m || mode === 'tree') {
+      lensRows = [];
+      syncRows();
+      return;
+    }
+    const entryOf = (rel: string) => m.entry(rel);
+    const showHidden = preferencesStore.fileTreeShowHidden;
+    if (mode === 'find' && find) {
+      const items = find.hits.map((h) => ({ rel: h.rel, kind: m.entry(h.rel)?.k ?? ('f' as const) }));
+      const emptyText = find.unavailable ?? (find.indexing || find.pending ? 'Indexing…' : 'No matches');
+      lensRows = prunedRows(items, lensCollapsed, entryOf, { showHidden, emptyText });
+    } else {
+      const emptyText = m.gitTruncated ? 'Too many changes to list here: changed folders are marked in the tree' : 'No changes';
+      lensRows = prunedRows(m.changedItems(), lensCollapsed, entryOf, { showHidden, emptyText });
+    }
+    syncRows();
+  }
+
+  /** Moving between modes: save the view being left, put back the one returned to. */
+  function changeMode(from: ViewMode, to: ViewMode) {
+    if (from === to) return;
+    if (to === 'find') savedForFind = snapshotView();
+    else if (from === 'find') {
+      restoreView(savedForFind);
+      savedForFind = null;
+    }
+    if (to === 'changed' && from === 'tree') savedForChanged = snapshotView();
+    else if (to === 'tree' && from === 'changed') {
+      restoreView(savedForChanged);
+      savedForChanged = null;
+    }
+    if (to !== 'tree') {
+      lensCollapsed.clear();
+      if (from === 'tree' || to === 'find') scrollToTop();
+    }
+  }
+
+  function openFind() {
+    if (!model) return;
+    if (!find) find = { query: '', hits: [], highlights: new Map(), indexing: false, unavailable: null, pending: false };
+    findFocusSeq++;
+  }
+
+  /** Escape (or the bar's close button): the view goes back exactly as it was. */
+  function closeFind() {
+    if (!find) return;
+    const from = viewMode();
+    find = null;
+    searchSeq++;
+    changeMode(from, viewMode());
+    rebuildLens();
+    focusPending = true;
+  }
+
+  function setFindQuery(q: string) {
+    if (!find) return;
+    const from = viewMode();
+    find = { ...find, query: q, pending: !!q.trim(), ...(q.trim() ? {} : { hits: [], highlights: new Map(), unavailable: null }) };
+    changeMode(from, viewMode());
+    rebuildLens();
+    if (q.trim()) void runSearch();
+    else searchSeq++;
+  }
+
+  async function runSearch(indexShallow = false) {
+    const sub = subId;
+    const f = find;
+    if (!f || sub === null || !f.query.trim()) return;
+    const q = f.query;
+    const seq = ++searchSeq;
+    let r;
+    try {
+      r = await commands.ftSearch(sub, q, FIND_LIMIT, seq, indexShallow);
+    } catch (e) {
+      logError(`[files] search: ${e}`);
+      return;
+    }
+    if (seq !== searchSeq || sub !== subId || !find || find.query !== q || r.seq !== seq) return;
+    find = { ...find, hits: r.items, highlights: matchHighlights(r.items), indexing: r.indexing, unavailable: r.unavailable, pending: false };
+    lensCollapsed.clear();
+    rebuildLens();
+    // The best hit takes focus (not selection), so Enter opens it and the arrows start there.
+    const best = r.items[0]?.rel ?? null;
+    if (best && !rows.some((x) => x.key === focusKey && x.kind !== 'm')) {
+      focusKey = best;
+      requestScroll(best);
+    }
+  }
+
+  /** Find's ↑/↓ from the input: the focus moves over the results, the input keeps the keys. */
+  function findMove(delta: 1 | -1) {
+    const rs = rows;
+    let i = focusKey ? rs.findIndex((r) => r.key === focusKey) : -1;
+    for (let n = 0; n < rs.length; n++) {
+      i = i < 0 ? (delta > 0 ? 0 : rs.length - 1) : i + delta;
+      if (i < 0 || i >= rs.length) return;
+      if (rs[i].kind !== 'm') break;
+    }
+    const r = rs[i];
+    if (!r || r.kind === 'm') return;
+    selectOnly(r.key);
+    requestScroll(r.key);
+  }
+
+  /** Find's Enter: a file opens (and keeps its tab), a folder opens or closes in the results. */
+  function findActivate() {
+    const r = rows.find((x) => x.key === focusKey);
+    if (!r || r.kind === 'm') return;
+    if (isFolderKind(r.kind)) {
+      toggle(r.key);
+      return;
+    }
+    void openFile(r.key, 'pin');
+  }
+
+  /** The branch row's "N changed": the Changed lens on or off. */
+  function toggleChanged() {
+    const from = viewMode();
+    lens = lens === 'changed' ? 'all' : 'changed';
+    changeMode(from, viewMode());
+    rebuildLens();
+  }
+
+  function toggle(rel: string) {
+    if (!model) return;
+    if (viewMode() !== 'tree') {
+      if (lensCollapsed.has(rel)) lensCollapsed.delete(rel);
+      else lensCollapsed.add(rel);
+      rebuildLens();
+      return;
+    }
+    if (model.expanded.has(rel)) collapse(rel);
+    else expand(rel);
+  }
+
+  async function compareWithHead(rel: string) {
+    const abs = absOf(rel);
+    const sub = subId;
+    if (!abs || sub === null) return;
+    try {
+      await openGitDiff({ subId: sub, abs }, rel, 'HEAD');
+    } catch (e) {
+      toastStore.addToast('Couldn’t compare with HEAD', String(e), 'error');
+    }
   }
 
   function announce(text: string) {
@@ -389,6 +622,17 @@ function createFileTreeStore() {
     health = null;
     pendingReveal = null;
     recursive = null;
+    gitState = 'off';
+    branch = null;
+    gitCount = 0;
+    gitVersion++;
+    // A query and a lens belong to the root they were made in.
+    searchSeq++;
+    find = null;
+    lens = 'all';
+    savedForFind = null;
+    savedForChanged = null;
+    lensRows = [];
   }
 
   function newModel(p: TreePlace): TreeModel {
@@ -412,6 +656,9 @@ function createFileTreeStore() {
     roots.delete(p.place);
     model = kept?.model ?? newModel(p);
     model.setFilters(preferencesStore.fileTreeShowHidden, preferencesStore.fileTreeShowIgnored);
+    // A kept model's decorations came from the old subscription; the new one starts with a
+    // full update of its own (or none, with decorations off).
+    model.clearGit();
     selection.clear();
     for (const k of kept?.selection ?? []) selection.add(k);
     focusKey = kept?.focus ?? null;
@@ -488,7 +735,7 @@ function createFileTreeStore() {
       }
       case 'delta': {
         if (m.applyDelta(env) === 'resync') commands.ftRefresh(sub, env.rel).catch(() => {});
-        else if (selection.size || focusKey) pruneSelection();
+        else if ((selection.size || focusKey) && viewMode() === 'tree') pruneSelection();
         break;
       }
       case 'dir_error': {
@@ -498,6 +745,18 @@ function createFileTreeStore() {
       }
       case 'health':
         health = env.note ? { watch: env.watch, git: env.git, note: env.note } : null;
+        gitState = env.git;
+        if (env.git === 'off' && lens === 'changed') toggleChanged();
+        break;
+      case 'git':
+        m.applyGit(env);
+        branch = env.branch;
+        gitCount = env.count;
+        gitVersion++;
+        if (viewMode() === 'changed') rebuildLens();
+        break;
+      case 'search_ready':
+        if (find?.query.trim()) void runSearch();
         break;
       case 'root_gone':
         // The hub is dead for good (Rust never revives a gone root), so drop the
@@ -571,6 +830,10 @@ function createFileTreeStore() {
 
   function expand(rel: string) {
     if (!model) return;
+    if (viewMode() !== 'tree') {
+      if (lensCollapsed.delete(rel)) rebuildLens();
+      return;
+    }
     const r = model.expand(rel);
     sendOpen(r.open);
     syncRows();
@@ -579,6 +842,13 @@ function createFileTreeStore() {
 
   function collapse(rel: string) {
     if (!model) return;
+    if (viewMode() !== 'tree') {
+      if (!lensCollapsed.has(rel)) {
+        lensCollapsed.add(rel);
+        rebuildLens();
+      }
+      return;
+    }
     const r = model.collapse(rel);
     sendClose(r.close);
     syncRows();
@@ -590,6 +860,12 @@ function createFileTreeStore() {
    *  recursive expand is for, and it would spend the budget on them. */
   function expandRecursive(rel: string) {
     if (!model) return;
+    if (viewMode() !== 'tree') {
+      // A pruned tree is small: everything under the folder opens.
+      for (const k of [...lensCollapsed]) if (isWithin(k, rel)) lensCollapsed.delete(k);
+      rebuildLens();
+      return;
+    }
     recursive = { root: rel, budget: model.rows.length + RECURSIVE_ROW_BUDGET };
     if (rel !== '' && !model.expanded.has(rel)) expand(rel);
     if (model.dirs.get(rel)?.state === 'ok') expandChildren(rel);
@@ -618,6 +894,10 @@ function createFileTreeStore() {
   /** Alt+←: close the folder and forget every open folder below it. */
   function collapseRecursive(rel: string) {
     if (!model) return;
+    if (viewMode() !== 'tree') {
+      collapse(rel);
+      return;
+    }
     collapse(rel);
     for (const r of [...model.expanded]) if (r !== '' && r !== rel && isWithin(r, rel)) model.expanded.delete(r);
     scheduleSaveExpanded();
@@ -870,24 +1150,24 @@ function createFileTreeStore() {
   }
 
   /** Shift-extend from the anchor to `key`, over the visible rows. */
+  /** Over the rows on screen: the real tree's, or a pruned tree's. */
   function extendTo(key: string) {
-    if (!model) return;
-    const from = anchorKey ? model.indexOf(anchorKey) : -1;
-    const to = model.indexOf(key);
+    const rs = rows;
+    const from = anchorKey ? rs.findIndex((r) => r.key === anchorKey) : -1;
+    const to = rs.findIndex((r) => r.key === key);
     if (to < 0) return;
     const [a, b] = from < 0 ? [to, to] : from < to ? [from, to] : [to, from];
     selection.clear();
     for (let i = a; i <= b; i++) {
-      const r = model.rows[i];
+      const r = rs[i];
       if (r.kind !== 'm') selection.add(r.key);
     }
     focusKey = key;
   }
 
   function selectAll() {
-    if (!model) return;
     selection.clear();
-    for (const r of model.rows) if (r.kind !== 'm') selection.add(r.key);
+    for (const r of rows) if (r.kind !== 'm') selection.add(r.key);
   }
 
   // ── Pinning (§4.2) ────────────────────────────────────────────────────────────────────
@@ -993,11 +1273,43 @@ function createFileTreeStore() {
     get ack() { return ack; },
     get rows() { return rows; },
     get model() { return model; },
-    /** A folder is open, read reactively (the model's own set is not). */
+    /** A folder is open, read reactively (the model's own set is not). In a pruned tree,
+     *  open unless closed there. */
     isExpanded(key: string): boolean {
       void expandedVersion;
+      if (viewMode() !== 'tree') return !lensCollapsed.has(key);
       return !!model?.expanded.has(key);
     },
+    get viewMode(): ViewMode { return viewMode(); },
+    /** A row's git state, read reactively through `gitVersion`. */
+    gitOf(key: string, folder: boolean): { letter: GitLetter; rollup: boolean } | null {
+      void gitVersion;
+      return model?.gitOf(key, folder) ?? null;
+    },
+    /** Health's word, not `caps.git`: Health follows `file_tree_git` turned on or off while
+     *  the tree is open, the caps only say how it was at open. */
+    get gitOn() { return gitState !== 'off'; },
+    get gitState() { return gitState; },
+    get branch() { return branch; },
+    get gitCount() { return gitCount; },
+    get gitTruncated() { void gitVersion; return !!model?.gitTruncated; },
+    get lens() { return lens; },
+    toggleChanged,
+    compareWithHead,
+    // Find
+    get find() { return find; },
+    get findFocusSeq() { return findFocusSeq; },
+    /** Find's matched letters in a row's name, while results are showing. */
+    highlightsFor(key: string): number[] | undefined {
+      return find && find.query.trim() ? find.highlights.get(key) : undefined;
+    },
+    openFind,
+    closeFind,
+    setFindQuery,
+    findMove,
+    findActivate,
+    /** "Index this folder": the human asked to index a home or volume root. */
+    indexShallow() { void runSearch(true); },
     get health() { return health; },
     get focused() { return focused; },
     set focused(v: boolean) { focused = v; },
@@ -1073,15 +1385,17 @@ function createFileTreeStore() {
 
     expand,
     collapse,
-    toggle(rel: string) {
-      if (!model) return;
-      if (model.expanded.has(rel)) collapse(rel);
-      else expand(rel);
-    },
+    toggle,
     expandRecursive,
     collapseRecursive,
     collapseAll() {
       if (!model) return;
+      if (viewMode() !== 'tree') {
+        for (const r of lensRows) if (isFolderKind(r.kind) && r.depth === 0) lensCollapsed.add(r.key);
+        rebuildLens();
+        scrollToTop();
+        return;
+      }
       sendClose(model.collapseAll().close);
       syncRows();
       scheduleSaveExpanded();
@@ -1093,8 +1407,12 @@ function createFileTreeStore() {
     },
     setFilters(showHidden: boolean, showIgnored: boolean) {
       if (model?.setFilters(showHidden, showIgnored)) {
-        syncRows();
-        pruneSelection();
+        if (viewMode() === 'tree') {
+          syncRows();
+          pruneSelection();
+        } else {
+          rebuildLens();
+        }
       }
     },
 

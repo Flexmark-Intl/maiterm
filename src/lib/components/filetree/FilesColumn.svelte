@@ -16,6 +16,8 @@
   import { activeFileOf } from '$lib/filetree/activeFile';
   import FilesHeader from './FilesHeader.svelte';
   import TreeBody from './TreeBody.svelte';
+  import BranchRow from './BranchRow.svelte';
+  import FindBar from './FindBar.svelte';
 
   const rowH = $derived(preferencesStore.fileTreeDensity === 'compact' ? 20 : preferencesStore.fileTreeDensity === 'comfortable' ? 24 : 22);
 
@@ -108,6 +110,12 @@
   <!-- eslint-disable-next-line svelte/no-at-html-tags -->
   {@html ICON_SPRITE}
   <FilesHeader />
+  {#if (status === 'ready' || status === 'opening') && fileTreeStore.gitOn}
+    <BranchRow />
+  {/if}
+  {#if (status === 'ready' || status === 'opening') && fileTreeStore.find}
+    <FindBar />
+  {/if}
 
   <div class="body" class:mono={preferencesStore.fileTreeIcons === 'mono'}>
     {#if status === 'ready' || status === 'opening'}

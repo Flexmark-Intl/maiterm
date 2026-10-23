@@ -24,6 +24,7 @@ import { navHistoryStore } from '$lib/stores/navHistory.svelte';
 import { getEditorRegistrySizes } from '$lib/stores/editorRegistry.svelte';
 import { getListenerStats } from '$lib/utils/listenCounter';
 import { editorFileInfo, localFileIdentities, openInEditor, sshCommandOfTab } from '$lib/utils/openInEditor';
+import { openReadOnlyDiff } from '$lib/utils/openGitDiff';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 export interface PendingSelection {
@@ -743,16 +744,8 @@ function createClaudeCodeStore() {
     if (!target) return { success: false, error: 'No active pane' };
     const { ws, pane } = target;
 
-    const diffContext: DiffContext = {
-      request_id: '', // Empty = read-only, non-blocking
-      file_path: filePath,
-      old_content: oldContent,
-      new_content: newContent,
-      tab_name: tabName,
-    };
-
     const afterTabId = args.tabId && pane.tabs.some(t => t.id === args.tabId) ? args.tabId : pane.active_tab_id;
-    await workspacesStore.createDiffTab(ws.id, pane.id, tabName, diffContext, afterTabId);
+    await openReadOnlyDiff({ filePath, oldContent, newContent, tabName, workspaceId: ws.id, paneId: pane.id, afterTabId });
 
     return { success: true, filePath, ref: gitRef };
   }
