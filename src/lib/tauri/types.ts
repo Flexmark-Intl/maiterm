@@ -953,3 +953,148 @@ export interface RelocateOutcome {
   agents: { done: string[]; warnings: string[] };
   unconfirmed_windows: string[];
 }
+
+// ── Files (docs/file-tree.md §4–§5) ────────────────────────────────────────────────────────
+// Every path between Rust and the tree is ROOT-RELATIVE POSIX (`src/lib/x.ts`, '' for the
+// root), keyed by the subscription. Native paths appear only in `TreePlace.root`,
+// `OpenAck.root_native` and the absolute paths handed to `ftLocate`.
+
+/** What terminalsStore knows about a tab that Rust doesn't keep. */
+export interface PlaceHints {
+  /** terminalsStore `osc.cwd` (OSC 7). */
+  osc_cwd?: string | null;
+  /** terminalsStore `osc.cwdHost`. */
+  osc_host?: string | null;
+  /** terminalsStore `osc.promptCwd`. Accepted, but only used once remote roots exist (phase 6). */
+  prompt_cwd?: string | null;
+  /** Bypass the 800 ms process-table cache: pass true on ssh start/exit edges. */
+  fresh?: boolean;
+}
+
+/** Which folder a tab's tree shows (`ftResolvePlace`). */
+export interface TreePlace {
+  /** The hub key in `watch::place` form: canonical "/abs" locally, "user@host:/abs" remote.
+   *  Pass it to `ftOpen` and use it as the view-state LRU key. */
+  place: string;
+  /** 'local' | 'remote'. Phase 1 opens local places only: `ftOpen` refuses a remote one. */
+  kind: string;
+  /** Remote: the ssh destination (connect args only, never a full command line). */
+  host_key: string | null;
+  /** Remote: the host for a human, for the header chip (`ews@nova`). */
+  host_label: string | null;
+  /** Native absolute path locally; POSIX absolute (or `~/…`) remotely. */
+  root: string;
+  /** The tab's folder relative to the root: the you-are-here tick. Null when it IS the root,
+   *  or isn't under it (a pinned root elsewhere). Reveal it; never select it. */
+  cwd_rel: string | null;
+  /** 'pty' | 'osc7' | 'agent' | 'last_cwd' | 'auto_resume' | 'restore' | 'prompt' | 'pin'. */
+  source: string;
+  /** 'local' | 'network' | 'unknown'. */
+  fs_class: string;
+  /** Home, '/', a drive or volume root: only opened folders are watched (§6.5). */
+  shallow: boolean;
+  /** A saved folder that no longer exists. Show "Folder missing: …" with a Move project link;
+   *  never fall back to home. `ftOpen` on it fails. */
+  missing: string | null;
+}
+
+/** A folder to open, with the generation the client already holds (null = none). */
+export interface DirReq {
+  rel: string;
+  known_gen?: number | null;
+}
+
+export interface RepoInfo {
+  /** The repo's top level relative to the root: '' when the root is the top level, '..' steps
+   *  when the root is a folder inside a larger repo. */
+  toplevel_rel: string;
+  /** Absolute native paths. */
+  git_dir: string;
+  common_dir: string;
+}
+
+export interface Caps {
+  /** 'live' | 'partial' (some folders polled: watch limit) | 'poll' (network mount) | 'none'. */
+  watch: string;
+  /** Git decorations: false until phase 2. */
+  git: boolean;
+  /** Trash: false until phase 3. */
+  trash: boolean;
+  remote: boolean;
+  /** File operations: false until phase 3 (the tree is read-only). */
+  writable: boolean;
+}
+
+/** `ftOpen`'s answer. Events may reach the Channel BEFORE this resolves: queue them. */
+export interface OpenAck {
+  sub_id: number;
+  /** The canonical root on this computer: `relToAbs(ack, rel)` joins onto this with `sep`. */
+  root_native: string;
+  /** '/' or '\\'. */
+  sep: string;
+  /** The volume folds case: compare names case-insensitively (validation, dedupe). */
+  case_insensitive: boolean;
+  repo: RepoInfo | null;
+  caps: Caps;
+}
+
+/** Hover-only details (`ftStat`). */
+export interface StatInfo {
+  size: number;
+  mtime_ms: number;
+  exec: boolean;
+  /** A symlink's target as written in the link. */
+  link_target: string | null;
+  /** `git diff --numstat HEAD` for this file: always null until phase 2. */
+  numstat: [number, number] | null;
+}
+
+/** One row of a listing. Sorted by Rust (folders first, natural, case-insensitive): never
+ *  re-sort in JS. */
+export interface TreeEntry {
+  /** The name as the disk spells it: the row key is `parentRel + '/' + n`. */
+  n: string;
+  /** 'f' file | 'd' folder | 'l' link to a file (or broken) | 'L' link to a folder | 'o' other. */
+  k: 'f' | 'd' | 'l' | 'L' | 'o';
+  /** Bit flags: TREE_FLAG_*. */
+  f: number;
+}
+
+/** Gitignored: hidden unless `file_tree_show_ignored`, dimmed when shown. */
+export const TREE_FLAG_IGNORED = 1;
+/** Dotfile (or Windows hidden attribute): hidden unless `file_tree_show_hidden`. */
+export const TREE_FLAG_HIDDEN = 2;
+/** A link back to itself or an ancestor: show it, never expand it. */
+export const TREE_FLAG_LOOP = 4;
+/** Couldn't be read. */
+export const TREE_FLAG_UNREADABLE = 8;
+
+/**
+ * Events on a subscription's Channel, in order, generation-checked (§5.3):
+ * - `dir` arrives in 512-entry chunks; chunk 0 REPLACES whatever is held for `rel`; apply the
+ *   folder when `last` arrives. A chunk > 0 whose `gen` doesn't match the one being built, or
+ *   that arrives without chunk 0: drop it and `ftRefresh(rel)`. `truncated`: show
+ *   "50,000 of {total} shown · search to find more".
+ * - `not_modified`: the `known_gen` sent is current. If you don't hold that gen, `ftRefresh`.
+ * - `delta`: apply only when holding `gen == from` (then hold `gen`); otherwise `ftRefresh(rel)`.
+ *   Entries in `add`/`chg` go in sorted position (`chg` may change an entry's kind or flags).
+ * - `dir_error`: 'denied' | 'gone' (drop the folder and `ftCollapse` it) | 'timeout' (a network
+ *   folder not answering: show "not responding…"; its listing still arrives when it does).
+ * - `health`: show `note` in the footer when set; absent note = healthy, no footer.
+ * - `root_gone`: "This folder no longer exists · Follow the tab / pick another". Never re-root
+ *   to home by yourself.
+ * Git (`git`) and agent (`agent`) events arrive in phases 2 and 4.
+ */
+export type TreeEvent =
+  | { t: 'dir'; rel: string; gen: number; chunk: number; last: boolean; total: number; truncated: boolean; entries: TreeEntry[] }
+  | { t: 'not_modified'; rel: string; gen: number }
+  | { t: 'delta'; rel: string; from: number; gen: number; add: TreeEntry[]; del: string[]; chg: TreeEntry[] }
+  | { t: 'dir_error'; rel: string; code: 'denied' | 'gone' | 'timeout'; msg: string }
+  | { t: 'health'; watch: string; git: string; note: string | null }
+  | { t: 'root_gone' };
+
+/** Every Channel message: `seq` increases by one per message. Ack from inside `onmessage`:
+ *  `ftAck(sub, seq)` on every 32nd message, or when ≥100 ms passed since the last ack (checked
+ *  on arrival, never on a timer). Past 256 unacked messages or 8 MB Rust stops sending until
+ *  the next ack, then resends each folder that changed meanwhile as a whole `dir`. */
+export type TreeEnvelope = { seq: number } & TreeEvent;

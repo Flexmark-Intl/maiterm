@@ -57,6 +57,9 @@ libc = "0.2"
 # FSEvents is path-based and costs ~1 fd per watch regardless of directory size.
 notify = { version = "7", default-features = false, features = ["macos_fsevent"] }
 notify-debouncer-mini = "0.5"
+# Files (docs/file-tree.md §5.1): APFS keeps a name in the form it was typed (often NFD), while
+# a hook or a typed path arrives NFC. Paths are compared NFC, or one file reads as two.
+unicode-normalization = "0.1"
 sysinfo = "0.33"
 alacritty_terminal = "0.25"
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -83,7 +86,9 @@ tauri-plugin-single-instance = "2"
 # already in the tree through tauri.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+# Win32_Storage_FileSystem: GetDriveTypeW, so Files can tell a network drive and skip watching
+# it (docs/file-tree.md §6.4).
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem"] }
 
 # Window/webview base colour (commands::window::set_window_background). Same versions
 # wry already pulls in; default features off so only the two bindings we call land.

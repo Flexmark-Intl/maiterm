@@ -4,6 +4,7 @@ mod browser_link;
 mod claude_code;
 mod commands;
 mod comms;
+mod filetree;
 mod mailink;
 mod mcp_proxy;
 mod pty;
@@ -268,7 +269,31 @@ pub fn run() {
 
     builder
         .manage(app_state.clone())
+        // Files (docs/file-tree.md §13): root hubs and their webview subscriptions.
+        .manage(filetree::FileTreeState::new())
+        // A Channel to a page that reloaded still "sends" without an error, so a reload is the
+        // only signal that the window's Files subscriptions are gone.
+        .on_page_load(|webview, payload| {
+            if let tauri::webview::PageLoadEvent::Started = payload.event() {
+                if let Some(ft) = webview.try_state::<Arc<filetree::FileTreeState>>() {
+                    ft.window_gone(webview.label());
+                }
+            }
+        })
         .on_window_event(|window, event| {
+            match event {
+                tauri::WindowEvent::Focused(focused) => {
+                    if let Some(ft) = window.try_state::<Arc<filetree::FileTreeState>>() {
+                        ft.window_focus(window.label(), *focused);
+                    }
+                }
+                tauri::WindowEvent::Destroyed => {
+                    if let Some(ft) = window.try_state::<Arc<filetree::FileTreeState>>() {
+                        ft.window_destroyed(window.label());
+                    }
+                }
+                _ => {}
+            }
             // Remember which terminal window was last key, so a menu click made
             // while Preferences is focused (or while everything is minimized)
             // still has a window to act on.
@@ -760,6 +785,16 @@ pub fn run() {
             commands::workspace::set_file_tree_open,
             commands::workspace::set_file_tree_width,
             commands::workspace::set_workspace_file_tree_pin,
+            filetree::commands::ft_resolve_place,
+            filetree::commands::ft_open,
+            filetree::commands::ft_close,
+            filetree::commands::ft_pause,
+            filetree::commands::ft_ack,
+            filetree::commands::ft_expand,
+            filetree::commands::ft_collapse,
+            filetree::commands::ft_refresh,
+            filetree::commands::ft_locate,
+            filetree::commands::ft_stat,
             commands::workspace::set_split_ratio,
             commands::workspace::set_tab_scrollback,
             commands::workspace::set_tab_notes,

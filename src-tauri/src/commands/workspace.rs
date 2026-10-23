@@ -1767,7 +1767,16 @@ pub fn set_preferences(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, m
         // list, so a wholesale replace here would wipe every paired phone on any
         // unrelated preference change. Preserve the stored value.
         preferences.mailink_devices = app_data.preferences.mailink_devices.clone();
+        let excludes_changed = app_data.preferences.file_tree_exclude != preferences.file_tree_exclude;
         app_data.preferences = preferences.clone();
+        if excludes_changed {
+            // Every open tree re-lists under the new excludes, off this (main) thread.
+            if let Some(ft) = tauri::Manager::try_state::<Arc<crate::filetree::FileTreeState>>(&app) {
+                let ft = ft.inner().clone();
+                let excludes = preferences.file_tree_exclude.clone();
+                tauri::async_runtime::spawn_blocking(move || ft.set_excludes(&excludes));
+            }
+        }
         app_data.clone()
     };
     save_state(&data_clone)?;

@@ -1,5 +1,6 @@
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
+import type { DirReq, OpenAck, PlaceHints, StatInfo, TreeEnvelope, TreePlace } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
@@ -874,6 +875,69 @@ export async function setFileTreeWidth(width: number): Promise<void> {
 /** Pin the Files root for a workspace (a `watch::place`), or unpin with null (§4.2). */
 export async function setWorkspaceFileTreePin(workspaceId: string, place: string | null): Promise<void> {
   return invoke('set_workspace_file_tree_pin', { workspaceId, place });
+}
+
+// ── Files tree (docs/file-tree.md §5.2) ──────────────────────────────────────────────────
+// Paths in and out are root-relative POSIX ('' = the root). A subscription is one webview's
+// Channel; a page reload drops this window's subscriptions in Rust, so a reloaded page just
+// opens again.
+
+/** Which folder a tab's tree shows. Call on tab activation, OSC 133 A, OSC 7/title change and
+ *  the tab's agent SessionStart, debounced 150 ms; never on a timer. Rejects for a stack
+ *  service tab, a tab with no known folder, and an ssh tab whose host is unknown. A pinned
+ *  workspace answers with its pin (`source: 'pin'`). */
+export async function ftResolvePlace(tabId: string, hints: PlaceHints): Promise<TreePlace> {
+  return invoke('ft_resolve_place', { tabId, hints });
+}
+
+/** Subscribe to a local root. `restore` re-opens folders with the generations held (the root is
+ *  always included). Set `channel.onmessage` BEFORE calling: events can arrive before the
+ *  promise resolves. Rejects for a remote or missing place. */
+export async function ftOpen(place: string, restore: DirReq[], channel: Channel<TreeEnvelope>): Promise<OpenAck> {
+  return invoke('ft_open', { place, restore, onEvent: channel });
+}
+
+/** End a subscription: closing the column or switching roots (not pause). The hub stays warm
+ *  for 30 s, so coming back is cheap. */
+export async function ftClose(subId: number): Promise<void> {
+  return invoke('ft_close', { subId });
+}
+
+/** `document.visibilitychange`: true while hidden. Changed folders arrive whole on resume. */
+export async function ftPause(subId: number, paused: boolean): Promise<void> {
+  return invoke('ft_pause', { subId, paused });
+}
+
+/** Everything up to `seq` is applied. Called from inside `onmessage` (see `TreeEnvelope`). */
+export async function ftAck(subId: number, seq: number): Promise<void> {
+  return invoke('ft_ack', { subId, seq });
+}
+
+/** Open folders: answers arrive as `dir` (chunked) or `not_modified`. */
+export async function ftExpand(subId: number, dirs: DirReq[]): Promise<void> {
+  return invoke('ft_expand', { subId, dirs });
+}
+
+/** Close folders, so Rust stops tracking them. */
+export async function ftCollapse(subId: number, dirs: string[]): Promise<void> {
+  return invoke('ft_collapse', { subId, dirs });
+}
+
+/** A whole `dir` for `rel` (null = every open folder): after a `delta` whose `from` isn't held,
+ *  a broken chunk sequence, or the human's Refresh. */
+export async function ftRefresh(subId: number, rel: string | null): Promise<void> {
+  return invoke('ft_refresh', { subId, rel });
+}
+
+/** Absolute paths (an editor's file, a hook path) to rels spelled as the tree keys them; null =
+ *  outside the root. The only abs → rel conversion: never strip prefixes in JS. */
+export async function ftLocate(subId: number, absPaths: string[]): Promise<(string | null)[]> {
+  return invoke('ft_locate', { subId, absPaths });
+}
+
+/** Size, mtime, exec bit, link target for the hover tooltip. */
+export async function ftStat(subId: number, rel: string): Promise<StatInfo> {
+  return invoke('ft_stat', { subId, rel });
 }
 
 export async function setSplitRatio(workspaceId: string, splitId: string, ratio: number): Promise<void> {
