@@ -37,18 +37,26 @@ All of it in your real, signed-in session, and in the background: the tab doesn'
 
 The extension needs the maiTerm app; on its own it does nothing.
 
-:::note
-The Chrome extension needs maiTerm 3.11.0 or later. Its Chrome Web Store listing isn't live yet, so for now you load it from maiTerm as below.
-:::
+Install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/maiterm/mdaccealpnngffgibmnijfgakddfgjpa). It needs maiTerm 3.11.0 or later.
 
 1. In maiTerm, open **Preferences → Chrome extension** and turn on **Let agents diagnose and drive linked browser tabs**. This gives agents the browser tools and lets the extension find maiTerm.
-2. Install the extension, once per browser. The same section walks you through it, because Chrome only lets you add an extension that isn't from its store by hand:
-   1. Click **Open in Chrome** to open Chrome's extensions page (`chrome://extensions`).
-   2. Turn on **Developer mode**, the switch at the top right.
-   3. Click **Load unpacked** and choose the folder maiTerm shows. **Copy path** and **Show in Finder** are beside it. The folder is inside your hidden Library: in Chrome's file picker, press ⌘⇧G, paste the path and press Return.
-   4. Click the puzzle-piece icon in Chrome's toolbar and pin **maiTerm**. That icon is where you link a tab.
+2. Add the extension, once per browser: **Add from the Chrome Web Store** in that section opens its store page, where you click **Add to Chrome**.
+3. Click the puzzle-piece icon in Chrome's toolbar and pin **maiTerm**. That icon is where you link a tab.
 
-   maiTerm keeps that folder up to date, so the extension updates with maiTerm.
+The store updates the extension on its own. If you loaded it unpacked before it was in the store, remove that copy on `chrome://extensions` first: they share an id, and Chrome keeps only one.
+
+<details>
+<summary>Loading it unpacked instead</summary>
+
+maiTerm also keeps a copy of the extension on disk that matches the app exactly, which can be newer than the store's while a store review is pending. Under **Preferences → Chrome extension → Load it unpacked instead**:
+
+1. Click **Open in Chrome** to open Chrome's extensions page (`chrome://extensions`).
+2. Turn on **Developer mode**, the switch at the top right.
+3. Click **Load unpacked** and choose the folder maiTerm shows. **Copy path** and **Show in Finder** are beside it. The folder is inside your hidden Library: in Chrome's file picker, press ⌘⇧G, paste the path and press Return.
+
+That copy updates with maiTerm, not the store.
+
+</details>
 
 It works in Chrome and other Chromium browsers: Brave, Edge, Vivaldi, and Arc on macOS. Within 30 seconds the browser appears under **Connected browsers**.
 
