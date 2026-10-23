@@ -290,7 +290,11 @@ fn window_patches(data: &crate::state::workspace::AppData, report: &relocate::St
     for w in &data.windows {
         let mut tabs = vec![];
         let mut stacks = vec![];
+        let mut pins = vec![];
         for ws in &w.workspaces {
+            if report.pins.iter().any(|(l, id)| *l == w.label && *id == ws.id) {
+                pins.push(json!({ "workspace_id": ws.id, "file_tree_pin": ws.file_tree_pin }));
+            }
             for t in ws.panes.iter().flat_map(|p| p.tabs.iter()).chain(ws.archived_tabs.iter()) {
                 if report.tabs.iter().any(|(l, id)| *l == w.label && *id == t.id) {
                     tabs.push(json!({ "workspace_id": ws.id, "tab": t }));
@@ -300,7 +304,7 @@ fn window_patches(data: &crate::state::workspace::AppData, report: &relocate::St
                 stacks.push(json!({ "workspace_id": ws.id, "stack": ws.stack }));
             }
         }
-        out.push((w.label.clone(), json!({ "tabs": tabs, "stacks": stacks, "wake": [] })));
+        out.push((w.label.clone(), json!({ "tabs": tabs, "stacks": stacks, "pins": pins, "wake": [] })));
     }
     out
 }

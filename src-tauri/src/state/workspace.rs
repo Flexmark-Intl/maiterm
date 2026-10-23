@@ -893,6 +893,12 @@ pub struct Workspace {
     /// Mute every tab in this workspace (docs/mute.md). See `Tab::muted`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub muted: bool,
+    /// The Files root frozen for this workspace (docs/file-tree.md §4.2), in `watch::place`
+    /// form: "/abs" locally, "user@host:/abs" on an ssh host. None = the tree follows the
+    /// active tab. A String, never an enum, so an older build reading it can't lose state.
+    /// Copied with a duplicated workspace, rebased by Move project, never in a share file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_tree_pin: Option<String>,
     #[serde(default)]
     pub archived_tabs: Vec<Tab>,
     /// Transient flag set after merge import — cleared on workspace activation.
@@ -932,6 +938,13 @@ pub struct WindowData {
     pub sidebar_width: u32,
     #[serde(default)]
     pub sidebar_collapsed: bool,
+    /// The Files column (docs/file-tree.md §3.1). Only the human's toggle changes it: a width
+    /// change at a streaming agent duplicates its scrollback, so nothing opens it on its own.
+    #[serde(default)]
+    pub file_tree_open: bool,
+    /// Its width in px, clamped to 200–560 by the setter, committed once per resize gesture.
+    #[serde(default = "default_file_tree_width")]
+    pub file_tree_width: u32,
     /// Window geometry per monitor count (e.g. "1" for single monitor, "2" for dual).
     /// When monitors change, the window repositions to the saved geometry for that count.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -972,6 +985,8 @@ impl WindowData {
             active_workspace_id: None,
             sidebar_width: default_sidebar_width(),
             sidebar_collapsed: false,
+            file_tree_open: false,
+            file_tree_width: default_file_tree_width(),
             window_geometry: std::collections::HashMap::new(),
             last_geometry_monitors: None,
             overlord_ledger: Vec::new(),
@@ -1221,6 +1236,25 @@ fn tab_position(window: &str, workspace: &str, container: &str, tab: &str) -> Ta
 fn default_sidebar_width() -> u32 {
     // Keep in sync with SIDEBAR_DEFAULT_WIDTH in workspaces.svelte.ts.
     215
+}
+
+pub const FILE_TREE_MIN_WIDTH: u32 = 200;
+pub const FILE_TREE_MAX_WIDTH: u32 = 560;
+
+fn default_file_tree_width() -> u32 {
+    280
+}
+
+fn default_file_tree_sticky_max() -> u32 {
+    5
+}
+
+fn default_file_tree_density() -> String {
+    "normal".to_string()
+}
+
+fn default_file_tree_icons() -> String {
+    "color".to_string()
 }
 
 fn default_font_size() -> u32 {
@@ -1848,6 +1882,43 @@ pub struct Preferences {
     /// lists the browser tools to agents. Not in `preference_meta` — the human turns it on.
     #[serde(default)]
     pub browser_link_enabled: bool,
+    /// Files (docs/file-tree.md §16): the human's view settings for the project tree. None of
+    /// them is in `preference_meta` — agents get purpose-built tools instead. Values are bools,
+    /// numbers and Strings, never enums, so an older build reading them loses nothing.
+    /// Master switch: the column, its shortcut and (later) its MCP tools.
+    #[serde(default = "default_true")]
+    pub file_tree_enabled: bool,
+    /// Follow the active tab's folder (§4.2); off = stay where the human put it.
+    #[serde(default = "default_true")]
+    pub file_tree_follow: bool,
+    /// Reveal the active editor tab's file when it is under the root.
+    #[serde(default = "default_true")]
+    pub file_tree_auto_reveal: bool,
+    /// A single click opens a preview tab that the next click replaces (§10.5).
+    #[serde(default = "default_true")]
+    pub file_tree_preview_tabs: bool,
+    /// Show dotfiles. A client-side filter: Rust always lists them, flagged.
+    #[serde(default = "default_true")]
+    pub file_tree_show_hidden: bool,
+    /// Show gitignored entries (dimmed). Also client-side: Rust flags, never drops.
+    #[serde(default = "default_true")]
+    pub file_tree_show_ignored: bool,
+    /// Extra names hidden from the tree, as gitignore lines (`node_modules`, `*.log`). Applied in
+    /// Rust's listing on top of the built-ins (.git, .DS_Store, Thumbs.db), which always apply.
+    #[serde(default)]
+    pub file_tree_exclude: Vec<String>,
+    /// Sticky ancestor rows at the top of the tree; 0 turns them off.
+    #[serde(default = "default_file_tree_sticky_max")]
+    pub file_tree_sticky_max: u32,
+    /// Row height: "compact" (20 px), "normal" (22), "comfortable" (24).
+    #[serde(default = "default_file_tree_density")]
+    pub file_tree_density: String,
+    /// "color" or "mono" file icons.
+    #[serde(default = "default_file_tree_icons")]
+    pub file_tree_icons: String,
+    /// Vim keys in the tree (§11.2). Off: bare letters are never commands.
+    #[serde(default)]
+    pub file_tree_vim_keys: bool,
     /// Overlord ruleset. Global across windows; workspace-scoped rules bind via rule.workspaces.
     #[serde(default)]
     pub overlord_rules: Vec<OverlordRule>,
@@ -2182,6 +2253,17 @@ impl Default for Preferences {
             follow_ups_resume_agent: true,
             follow_ups_scripts_unattended: false,
             browser_link_enabled: false,
+            file_tree_enabled: true,
+            file_tree_follow: true,
+            file_tree_auto_reveal: true,
+            file_tree_preview_tabs: true,
+            file_tree_show_hidden: true,
+            file_tree_show_ignored: true,
+            file_tree_exclude: Vec::new(),
+            file_tree_sticky_max: default_file_tree_sticky_max(),
+            file_tree_density: default_file_tree_density(),
+            file_tree_icons: default_file_tree_icons(),
+            file_tree_vim_keys: false,
             overlord_rules: Vec::new(),
             hidden_default_overlord_rules: Vec::new(),
             claude_ide: true,
@@ -2431,6 +2513,7 @@ impl Workspace {
             overlord: false,
             overlord_exempt: false,
             muted: false,
+            file_tree_pin: None,
             archived_tabs: Vec::new(),
             import_highlight: false,
             suspended: false,

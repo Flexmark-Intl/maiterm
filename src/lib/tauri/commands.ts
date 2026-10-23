@@ -860,6 +860,22 @@ export async function setSidebarCollapsed(collapsed: boolean): Promise<void> {
   return invoke('set_sidebar_collapsed', { collapsed });
 }
 
+/** Open/close this window's Files column (docs/file-tree.md §3.1). Only from the human's toggle:
+ *  a width change at a streaming agent duplicates its scrollback. */
+export async function setFileTreeOpen(open: boolean): Promise<void> {
+  return invoke('set_file_tree_open', { open });
+}
+
+/** Commit the Files column width once, on pointerup of the ghost resize. Clamped 200–560 in Rust. */
+export async function setFileTreeWidth(width: number): Promise<void> {
+  return invoke('set_file_tree_width', { width });
+}
+
+/** Pin the Files root for a workspace (a `watch::place`), or unpin with null (§4.2). */
+export async function setWorkspaceFileTreePin(workspaceId: string, place: string | null): Promise<void> {
+  return invoke('set_workspace_file_tree_pin', { workspaceId, place });
+}
+
 export async function setSplitRatio(workspaceId: string, splitId: string, ratio: number): Promise<void> {
   return invoke('set_split_ratio', { workspaceId, splitId, ratio });
 }

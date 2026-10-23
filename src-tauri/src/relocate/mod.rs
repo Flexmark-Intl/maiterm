@@ -212,6 +212,12 @@ fn rebase_text(text: &str, old: &Path, new: &Path) -> Option<String> {
     changed.then_some(out)
 }
 
+/// A `watch::place` that is a folder on this computer: it reads as an absolute path once `~` is
+/// expanded. A remote place starts with its host (`ews@nova:/srv`), which never does.
+fn is_local_place(place: &str) -> bool {
+    expand_home(place.trim()).is_absolute()
+}
+
 fn is_ssh_tab(t: &Tab) -> bool {
     t.auto_resume_ssh_command.as_deref().is_some_and(|s| !s.trim().is_empty())
         || t.restore_ssh_command.as_deref().is_some_and(|s| !s.trim().is_empty())
@@ -271,6 +277,8 @@ pub struct StateReport {
     /// (window label, tab id) of every tab whose saved paths moved, archived tabs included.
     pub tabs: Vec<(String, String)>,
     pub services: usize,
+    /// (window label, workspace id) of every workspace whose Files pin moved.
+    pub pins: Vec<(String, String)>,
     pub approvals_carried: usize,
     pub backup_directory: bool,
 }
@@ -298,6 +306,11 @@ pub fn relocate_state(data: &mut AppData, old: &Path, new: &Path) -> StateReport
                         report.services += 1;
                     }
                 }
+            }
+            // A Files pin in `watch::place` form: only a local one ("/abs", "~/…") is this
+            // folder. "user@host:/abs" is a folder on that host, whatever its name.
+            if ws.file_tree_pin.as_deref().is_some_and(is_local_place) && rebase_field(&mut ws.file_tree_pin, old, new) {
+                report.pins.push((w.label.clone(), ws.id.clone()));
             }
         }
     }
@@ -494,5 +507,21 @@ mod tests {
         assert_eq!(r.approvals_carried, 1);
         assert!(crate::watch::is_approved(&d, "/u/maiterm", "test -f done"));
         assert_eq!(d.windows[0].workspaces[0].panes[0].tabs[0].follow_ups[0].due.cwd.as_deref(), Some("/u/maiterm"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebases_a_local_files_pin_and_never_a_remote_one() {
+        let (o, n) = (p("/u/aiTerm"), p("/u/maiterm"));
+        let mut d = data_with(vec![tab("t")], vec![]);
+        let mut remote = crate::state::workspace::Workspace::new("remote".into());
+        remote.file_tree_pin = Some("ews@nova:/u/aiTerm".into());
+        d.windows[0].workspaces.push(remote);
+        d.windows[0].workspaces[0].file_tree_pin = Some("/u/aiTerm/src".into());
+        let r = relocate_state(&mut d, &o, &n);
+        let ws = &d.windows[0].workspaces;
+        assert_eq!(ws[0].file_tree_pin.as_deref(), Some("/u/maiterm/src"));
+        assert_eq!(ws[1].file_tree_pin.as_deref(), Some("ews@nova:/u/aiTerm"), "a folder on nova is not this one");
+        assert_eq!(r.pins, vec![("main".to_string(), ws[0].id.clone())]);
     }
 }

@@ -62,6 +62,7 @@ an existing ancestor) — a `cd`-typed `$PWD` keeps its typed case, but on a cas
 | `Tab.diff_context.file_path` | |
 | `FollowUp.due.cwd` | watch scripts |
 | `Service.cwd` | |
+| `Workspace.file_tree_pin` | the Files root pin (docs/file-tree.md §4.2), local pins only — a `user@host:/abs` pin is a folder on that host; carried to each window's mirror as `pins` |
 | `Preferences.backup_directory` | |
 | `AppData.approved_watch_scripts` | digests of folder + script, one-way: an approval held by a follow-up that moved is re-recorded under the new folder. A moved folder is the same folder; the "same script elsewhere is another approval" rule (docs/follow-ups.md §5.1) is about a DIFFERENT folder |
 

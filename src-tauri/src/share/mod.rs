@@ -1449,6 +1449,18 @@ mod tests {
         assert_eq!(remote.auto_resume.as_ref().unwrap().command.as_deref(), Some("claude --resume %claudeSessionId"));
     }
 
+    /// A Files pin is the sender's own folder (docs/file-tree.md §4.2): the allowlist must keep
+    /// it out, so a receiver never opens a tree on a path from someone else's disk.
+    #[test]
+    fn a_files_pin_never_travels() {
+        let mut ws = sample_ws();
+        ws.file_tree_pin = Some("/Users/sender/pinned-root-xyz".to_string());
+        let opts = ExportOptions { include_notes: true, include_tasks: true, ..Default::default() };
+        let json = serde_json::to_string(&export_file(&ws, &[], &opts)).unwrap();
+        assert!(!json.contains("pinned-root-xyz"));
+        assert!(!json.contains("file_tree_pin"));
+    }
+
     #[test]
     fn agent_commands_are_recognised_through_their_wrappers() {
         for (cmd, want) in [

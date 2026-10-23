@@ -156,6 +156,8 @@ interface Patch {
   session?: string;
   tabs?: { workspace_id: string; tab: Tab }[];
   stacks?: { workspace_id: string; stack: Service[] }[];
+  /** Files pins that moved with the folder (docs/file-tree.md §4.2). */
+  pins?: { workspace_id: string; file_tree_pin: string | null }[];
   wake?: string[];
 }
 
@@ -181,6 +183,10 @@ export function applyPatch(patch: Patch): { applied: number; woken: number } {
   for (const { workspace_id, stack } of patch.stacks ?? []) {
     const ws = workspacesStore.workspaces.find((w) => w.id === workspace_id);
     if (ws) ws.stack = stack;
+  }
+  for (const { workspace_id, file_tree_pin } of patch.pins ?? []) {
+    const ws = workspacesStore.workspaces.find((w) => w.id === workspace_id);
+    if (ws) ws.file_tree_pin = file_tree_pin;
   }
   // Wake what this window suspended for the move — its own record, not only the ids Rust
   // echoes back, so a tab suspended after its answer was cut off still comes back.

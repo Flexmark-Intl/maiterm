@@ -948,6 +948,8 @@ pub(crate) fn clone_workspace_with_id_mapping(
         // An exemption is a property of the work, not the window: it travels.
         overlord_exempt: ws.overlord_exempt,
         muted: ws.muted,
+        // A pin names a folder, not a tab: the copy is the same project and keeps its root.
+        file_tree_pin: ws.file_tree_pin.clone(),
         archived_tabs: Vec::new(),
         import_highlight: false,
         suspended: false,

@@ -998,6 +998,63 @@ pub fn set_sidebar_width(window: tauri::Window, state: State<'_, Arc<AppState>>,
     Ok(())
 }
 
+/// Save `data` off the command thread: these setters are async so a slow disk never stalls the
+/// window, and the write itself is the only blocking part.
+async fn save_detached(data: crate::state::AppData) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || save_state(&data))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Open or close this window's Files column (docs/file-tree.md §3.1). Called only from the
+/// human's toggle: nothing else may change the column, because a width change at a streaming
+/// agent makes it duplicate its scrollback.
+#[tauri::command]
+pub async fn set_file_tree_open(window: tauri::Window, state: State<'_, Arc<AppState>>, open: bool) -> Result<(), String> {
+    let data = {
+        let mut app_data = state.app_data.write();
+        let win = app_data.window_mut(window.label()).ok_or("Window not found")?;
+        win.file_tree_open = open;
+        app_data.clone()
+    };
+    save_detached(data).await
+}
+
+/// The Files column's width, committed once when a resize gesture ends. Clamped here too, so a
+/// bad value from anywhere can't make the column unusable on the next launch.
+#[tauri::command]
+pub async fn set_file_tree_width(window: tauri::Window, state: State<'_, Arc<AppState>>, width: u32) -> Result<(), String> {
+    use crate::state::workspace::{FILE_TREE_MAX_WIDTH, FILE_TREE_MIN_WIDTH};
+    let data = {
+        let mut app_data = state.app_data.write();
+        let win = app_data.window_mut(window.label()).ok_or("Window not found")?;
+        win.file_tree_width = width.clamp(FILE_TREE_MIN_WIDTH, FILE_TREE_MAX_WIDTH);
+        app_data.clone()
+    };
+    save_detached(data).await
+}
+
+/// Pin (or, with None, unpin) the Files root for one workspace (docs/file-tree.md §4.2). The
+/// value is a `watch::place` string — "/abs" or "user@host:/abs" — and is stored as given: the
+/// frontend got it from `ft_resolve_place` or the folder picker, which already canonicalized it.
+#[tauri::command]
+pub async fn set_workspace_file_tree_pin(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    place: Option<String>,
+) -> Result<(), String> {
+    let place = place.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+    let data = {
+        let mut app_data = state.app_data.write();
+        let win = app_data.window_mut(window.label()).ok_or("Window not found")?;
+        let ws = win.workspaces.iter_mut().find(|w| w.id == workspace_id).ok_or("Workspace not found")?;
+        ws.file_tree_pin = place;
+        app_data.clone()
+    };
+    save_detached(data).await
+}
+
 #[tauri::command]
 pub fn set_sidebar_collapsed(window: tauri::Window, state: State<'_, Arc<AppState>>, collapsed: bool) -> Result<(), String> {
     let label = window.label().to_string();
