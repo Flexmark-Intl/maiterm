@@ -446,7 +446,9 @@ fn git_ls_files(root: &Path) -> Option<Vec<String>> {
 }
 
 /// `ls-files -t -z` records: a one-letter tag, a space, the path. `R` (deleted from the
-/// worktree) removes a path the `H` record listed; every other tag lists one.
+/// worktree) removes a path the `H` record listed. `S` (skip-worktree: outside a sparse
+/// checkout's cone) is in the index but not on disk, and git never reports it deleted, so it
+/// is left out on its own. Every other tag lists one.
 fn parse_ls_files_tagged(out: &[u8]) -> Vec<String> {
     let mut removed = std::collections::HashSet::new();
     let mut listed = Vec::new();
@@ -455,10 +457,12 @@ fn parse_ls_files_tagged(out: &[u8]) -> Vec<String> {
             continue;
         }
         let path = String::from_utf8_lossy(&rec[2..]).into_owned();
-        if rec[0] == b'R' {
-            removed.insert(path);
-        } else {
-            listed.push(path);
+        match rec[0] {
+            b'R' => {
+                removed.insert(path);
+            }
+            b'S' => {}
+            _ => listed.push(path),
         }
     }
     let mut seen = std::collections::HashSet::new();
@@ -573,6 +577,12 @@ mod tests {
         // `-c` lists the index; the `R` records (deleted) take those paths back out.
         let out = b"? new.ts\0H kept.ts\0H gone.ts\0H old/a.ts\0R gone.ts\0R old/a.ts\0H c.ts\0H c.ts\0";
         assert_eq!(parse_ls_files_tagged(out), vec!["new.ts".to_string(), "kept.ts".to_string(), "c.ts".to_string()]);
+    }
+
+    #[test]
+    fn a_file_outside_a_sparse_checkout_is_not_listed() {
+        // `git sparse-checkout set in`: out/b is in the index, tagged `S`, and not on disk.
+        assert_eq!(parse_ls_files_tagged(b"H in/a\0S out/b\0H top\0"), vec!["in/a".to_string(), "top".to_string()]);
     }
 
     #[test]
