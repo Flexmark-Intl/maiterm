@@ -41,11 +41,18 @@ export function gitDiffTabName(rel: string, ref: 'HEAD' | 'index'): string {
   return `Diff: ${basenameOf(rel, false)} (${ref})`;
 }
 
+/** readFile's refusal in words: its too-large error is a code the editor spells out too. */
+function readFailure(raw: string): string {
+  const big = /FILE_TOO_LARGE:([\d.]+)/.exec(raw);
+  return big ? `The file is too large to compare (${big[1]} MB)` : raw.replace(/^Error:\s*/, '');
+}
+
 /**
  * "Compare with HEAD" (or the index) for a file in the Files tree: `subId` is the tree's
  * subscription, `abs` the file's native path (for reading the working copy and naming the
  * tab), `rel` its root-relative path. A file new since `ref` diffs against empty; a deleted
- * one against empty on the right. Throws with git's reason (binary, too large, no repo).
+ * one against empty on the right. Throws with git's reason (binary, too large, no repo), or
+ * with the reason a file still on disk couldn't be read.
  */
 export async function openGitDiff(target: { subId: number; abs: string }, rel: string, ref: 'HEAD' | 'index' = 'HEAD'): Promise<void> {
   const ws = workspacesStore.activeWorkspace;
@@ -55,8 +62,12 @@ export async function openGitDiff(target: { subId: number; abs: string }, rel: s
   let current = '';
   try {
     current = (await commands.readFile(target.abs)).content;
-  } catch {
-    // Deleted from the working tree: the right side is empty.
+  } catch (e) {
+    // Only a file that is gone diffs against empty. readFile refuses more than the base side
+    // does (over 2 MB, or not UTF-8), and showing such a file as wholly deleted would be a
+    // deletion that never happened.
+    const exists = await commands.ftStat(target.subId, rel).then(() => true, () => false);
+    if (exists) throw new Error(readFailure(String(e)));
   }
   await openReadOnlyDiff({
     filePath: target.abs,

@@ -426,7 +426,7 @@ function createFileTreeStore() {
     try {
       await openGitDiff({ subId: sub, abs }, rel, 'HEAD');
     } catch (e) {
-      toastStore.addToast('Couldn’t compare with HEAD', String(e), 'error');
+      toastStore.addToast('Couldn’t compare with HEAD', e instanceof Error ? e.message : String(e), 'error');
     }
   }
 
