@@ -104,8 +104,9 @@ socket, so the port and a secret reach it through Chrome **native messaging**:
 - Manifests are (re)written at launch and when the human turns the feature on, so a moved app
   heals itself. Turning it off removes them.
 
-Extension ids: `mdaccealpnngffgibmnijfgakddfgjpa` (unpacked — fixed by the public `key` in the
-manifest). The Chrome Web Store id is added to `ALLOWED_EXTENSION_IDS` when the listing exists.
+Extension id: `mdaccealpnngffgibmnijfgakddfgjpa`, for the unpacked copy (fixed by the public `key`
+in the manifest) and the Chrome Web Store item alike (its first upload carried the key; live since
+2026-10-22).
 
 ## 3. Wire protocol (extension ↔ maiTerm), `protocol: 1`
 
@@ -199,13 +200,13 @@ The tools are listed only while `Preferences.browser_link_enabled` is on (not in
 
 ## 5. Installing
 
-Preferences → Chrome extension: the toggle writes the host manifests. Chrome lets no app install an
-unpacked extension, so the install card IS the four manual steps (open `chrome://extensions`,
-Developer mode, Load unpacked + the folder, pin the icon), with buttons for the parts maiTerm can do;
-each refreshes the copy in the app data dir (`chrome-extension/`) first. Once connected the steps
-fold away under "Install it in another browser". (Planned, not built: once the store listing is
-live, the card links to it.) The pane shows each connected browser
-and every live link.
+Preferences → Chrome extension: the toggle writes the host manifests. The install card leads with
+the Chrome Web Store (open the listing, Add to Chrome, pin the icon). "Load it unpacked instead"
+folds the manual steps (open `chrome://extensions`, Developer mode, Load unpacked + the folder),
+for a copy that matches this maiTerm exactly and can be ahead of the store's while a review is
+pending; its buttons refresh the copy in the app data dir (`chrome-extension/`) first. The two share
+an id, so Chrome holds one or the other. Once connected the card folds away under "Install it in
+another browser". The pane shows each connected browser and every live link.
 
 **maiTerm shows a link where it lands**, since it is made in Chrome: a tab holding linked Chrome
 tabs carries a browser mark in the tab strip (a count when several; the tooltip lists them by

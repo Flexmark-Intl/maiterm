@@ -2,7 +2,8 @@
   /** Preferences → Chrome extension (docs/browser-link.md §5).
    *
    *  The toggle writes the native-messaging host manifests (and lists the browser tools to
-   *  agents); the extension is loaded unpacked until it has a store listing. Links are made only
+   *  agents); the extension comes from the Chrome Web Store, or unpacked from a folder maiTerm
+   *  keeps current (it can be ahead of the store's while a review is pending). Links are made only
    *  in the extension's popup — this pane shows them and can break them. Everything it draws is
    *  Rust-owned, redrawn on `browser-link-changed`. */
   import { onMount } from 'svelte';
@@ -14,6 +15,9 @@
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
   import { isMac } from '$lib/utils/platform';
+  import { open as shellOpen } from '@tauri-apps/plugin-shell';
+
+  const STORE_URL = 'https://chromewebstore.google.com/detail/maiterm/mdaccealpnngffgibmnijfgakddfgjpa';
 
   let status = $state<BrowserLinkStatus | null>(null);
   let feedback = $state<{ text: string; error: boolean } | null>(null);
@@ -133,10 +137,38 @@
         </p>
       {:else}
         {#snippet steps(s: BrowserLinkStatus)}
+          <p class="hint">Once per browser ({s.installed_in.join(', ')}).</p>
+          <ol class="steps">
+            <li>
+              Open its store page and click <strong>Add to Chrome</strong>.
+              <div class="actions">
+                <Button onclick={() => void shellOpen(STORE_URL)}>Add from the Chrome Web Store</Button>
+              </div>
+              <p class="hint">
+                It opens in your default browser. If that isn't the one to install it in, open this
+                there: <code class="path">{STORE_URL}</code>
+              </p>
+            </li>
+            <li>
+              Pin it: click the puzzle-piece icon in Chrome's toolbar and pin <strong>maiTerm</strong>.
+              That icon is where you link a tab.
+            </li>
+          </ol>
           <p class="hint">
-            It isn't in the Chrome Web Store yet, and Chrome lets no app install an extension for
-            you, so you add it by hand from a folder maiTerm keeps up to date. Once per browser
-            ({s.installed_in.join(', ')}); updates arrive with maiTerm.
+            Chrome then shows under Connected browsers within 30 seconds. If it doesn't, quit and
+            reopen Chrome. If you loaded it unpacked before, remove that copy on
+            <code>chrome://extensions</code> first: it has the same id.
+          </p>
+          <details>
+            <summary class="hint">Load it unpacked instead</summary>
+            {@render unpacked(s)}
+          </details>
+        {/snippet}
+        {#snippet unpacked(s: BrowserLinkStatus)}
+          <p class="hint">
+            A copy that matches this maiTerm exactly, which can be newer than the store's while a
+            store review is pending. It updates with maiTerm, not the store, and Chrome lets no app
+            add it for you, so it takes these steps.
           </p>
           <ol class="steps">
             <li>
@@ -165,15 +197,8 @@
                 </p>
               {/if}
             </li>
-            <li>
-              Pin it: click the puzzle-piece icon in Chrome's toolbar and pin <strong>maiTerm</strong>.
-              That icon is where you link a tab.
-            </li>
+            <li>Pin it from the puzzle-piece icon, as above.</li>
           </ol>
-          <p class="hint">
-            Chrome then shows under Connected browsers within 30 seconds. If it doesn't, quit and
-            reopen Chrome.
-          </p>
         {/snippet}
         {#if status.connections.length}
           <p class="hint">Installed and connected.</p>
