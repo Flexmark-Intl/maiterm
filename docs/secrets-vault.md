@@ -8,23 +8,47 @@ needs and the **platforms** it may deploy to, pushes up a UI where the human typ
 and is told when the human clicks Done. An agent can also ask to rotate keys: "The agent has
 requested to rotate these keys: a, b, c. Do you want to continue?"
 
+**Reviewed the same day** (a review of d2a441c8). It found eight ways an agent could still
+reach a value through the first draft, and they are fixed below. The most important result is
+§1's second paragraph: what the vault can promise against an agent running as the same OS
+user.
+
 ## 1. The rule
 
 > **An agent handles a secret's name, never its value. Rust looks up the value at the moment
 > it is used, and sends it to a place the human approved.**
 
-Everything else follows from this:
+**What this protects against, and what it doesn't.** An agent's Bash tool is a process
+running as the human's own OS user. Such a process can read:
+- the keychain item (Linux Secret Service and Windows Credential Manager have no per-app ACL,
+  so any process can read an unlocked item without a prompt);
+- another process's environment (`ps eww`, `/proc/<pid>/environ`);
+- any file the human can read.
 
-1. **No MCP tool returns a value, and no tool accepts one.** Values reach the vault in four
-   ways only: the human types them into maiTerm's own entry sheet, Rust generates them, Rust
-   captures them from an approved command's output, or Rust reads them out of a file (§6).
-2. **A value never passes through a PTY, argv, a log line, `aiterm-state.json`, the phone, or
-   a share file.** The remote setup-token already works this way (docs/login.md §9,
-   `accounts/vault.rs`). This feature makes that pattern general.
+So the vault stops **accidental and naive exposure** (an agent printing env, pasting a key
+into chat, committing `.env`). It also stops **a prompt-injected agent sending a value
+somewhere directly**. It does **not** stop a same-user agent that is set on getting a value
+and knows where to look. For prod keys, the real boundary is running agents sandboxed (Claude
+Code's sandbox) or as a different OS user, and §5 seals prod values under a key that the
+keychain item alone does not open. Every card on a prod path says this in one line.
+
+Everything else follows from the rule:
+
+1. **No MCP tool returns a value, and no tool accepts one.** Values reach the vault in five ways
+   only: the human types them into maiTerm's own entry sheet, Rust generates them, Rust
+   captures them from an approved command's output, Rust reads them out of a file (§6), or the
+   human imports a vault export (§5).
+2. **A value never passes through a PTY, argv, a log line, `aiterm-state.json` or the scrollback
+   database, the phone, a share file, or a tool result.** The remote setup-token kept itself out
+   of argv, the terminal and state the same way (docs/login.md §9). The analogy stops there: that
+   token lives in the remote shell's environment, which this design avoids where it can (§7.5).
 3. **Secrets are tied to destinations.** Each key and environment lists where it may go. A
    prompt-injected agent's natural move is "send STRIPE_KEY to this URL". The defense is that
-   no tool takes an arbitrary URL. Masking output is a backstop, not the protection.
-4. **maiTerm knows every place it put a value.** Each delivery is recorded in a ledger (§4.5).
+   no tool takes an arbitrary URL, and that **an agent's files and PATH cannot change where an
+   approved delivery goes** (§7.3). Masking output is a backstop, not the protection.
+4. **Nothing an agent controls can answer questions about a value.** A length, a "matches",
+   or a leak hit on text the agent wrote are each one bit of the value per call (§9.4, §10.2).
+5. **maiTerm knows every place it put a value.** Each delivery is recorded in a ledger (§4.5).
    That ledger is what makes rotation tractable: today the slow part of rotating a key is
    finding everywhere it lives.
 
@@ -48,17 +72,23 @@ own state.
 ## 3. Shape
 
 ```
-Secret project  (bound to a repo root, docs/workspace-share.md's identity: remote URL + subpath)
+Secret project  (bound to local folders the human approved; the repo's remote URL only matches shares)
 ├── environments   development · staging · production · custom (each has a TIER: dev | staging | prod)
 ├── keys           the names the code needs (declared by agents or the human)
 │   └── per environment: versions labelled current / pending / previous
-├── targets        approved destinations: GitHub Actions, Railway, Cloudflare, a .env file, a stack service…
+├── targets        approved destinations: GitHub Actions, Railway, Cloudflare, a .env file…
 ├── policy         per tier: what may happen without a card (§8)
 └── ledger         every delivery: key, environment, version, destination, when, by which tab
 ```
 
-A tab resolves to a project through its folder, the same way Files and Tasks find theirs. An
-agent sees only the project its tab is in. Using another project's keys needs a card.
+**A project is bound to canonical local paths the human approved**, not to a remote URL.
+Anyone can `git init` a folder and add another project's remote. The remote URL (with the
+subpath, docs/workspace-share.md's identity) is used only to match a project on share import.
+
+A tab resolves to a project from **its shell's real working directory, read by Rust** (as
+Files does), never from the OSC 7 cwd: any process in the tab can write an OSC 7 to the
+terminal. An agent sees only the project its tab is in. Using another project's keys needs a
+card.
 
 ## 4. Data model
 
@@ -72,7 +102,8 @@ wipe").
 ```rust
 SecretProject {
     id, name,
-    root: RepoRoot,                 // remote URL + subpath; a local-only folder uses its path
+    paths: Vec<String>,             // canonical local roots the human approved (§3)
+    remote: Option<RepoRoot>,       // remote URL + subpath: share-import matching only
     environments: Vec<SecretEnv>,
     keys: Vec<KeyDef>,
     targets: Vec<SecretTarget>,
@@ -81,12 +112,16 @@ SecretProject {
 SecretEnv {
     id, name,                       // "development", "staging", "production", "preview-alice"
     tier: String,                   // "dev" | "staging" | "prod": policy follows the tier, never the name
-    inherits_from: Option<String>,  // a preview env falls back to staging for keys it doesn't set
+    inherits_from: Option<String>,  // SAME TIER ONLY: a preview env falls back to development
 }
 ```
 
 Three environments are created by default. **Tier, not name, decides policy**, so a custom
 "prod-eu" environment is prod-tier and gets prod's guards.
+
+**Inheritance never crosses a tier.** Otherwise a prod-tier environment inheriting from
+staging would ship staging values to production, and a dev environment inheriting from prod
+would hand prod values to dev policy (`.env` writes and local runs at once).
 
 ### 4.2 Key definitions
 
@@ -104,28 +139,37 @@ KeyDef {
 }
 ```
 
+**Two fields are locked once the key matters**, or they become a way around the rest:
+- `format` is fixed once any value exists. An agent able to change it and re-validate would
+  have an oracle on the value (§1 rule 4).
+- `template`: any change on a key that has a value or a target binding needs a card, and the
+  card shows the template text. Otherwise an agent turns a key it declared into
+  `{{STRIPE_SECRET_KEY}}`, and the next at-once deploy sends Stripe's value to a target that
+  was approved for something else (§4.4).
+
 ### 4.3 Value metadata
 
 ```rust
 ValueMeta {                         // plaintext metadata; the value itself is in the vault file
     key, env, version: u32,
     label: String,                  // "current" | "pending" | "previous"
-    created_at, source: String,     // "human" | "generated" | "captured" | "adopted"
+    created_at, source: String,     // "human" | "generated" | "captured" | "adopted" | "imported"
     expires_at: Option<i64>,        // when the provider says it dies (a GitHub PAT, say)
 }
 ```
 
-**Metadata holds no hash or fingerprint of a value.** A hash of a low-entropy secret (a
-database password) can be brute-forced, and nothing in the design needs one outside Rust's
-memory (§10.2).
+**Metadata holds no hash, fingerprint or length of a value.** A hash of a low-entropy secret (a
+database password) can be brute-forced, and a length is a fingerprint (the `Secret` `Debug`
+comment in `accounts/vault.rs` says the same).
 
 ### 4.4 Targets
 
 ```rust
 SecretTarget {
     id, kind: String,               // "github_actions" | "railway" | "cloudflare_worker" | "vercel"
-                                    // | "fly" | "env_file" | "stack_service" | "ssh_env" | …
+                                    // | "fly" | "aws_secrets" | "kubernetes" | "env_file" | "ssh_env"
     address: Map<String, String>,   // { repo: "maisoft/maiterm", environment: "production" }
+    binary: Option<String>,         // the CLI's ABSOLUTE path, resolved when the target was approved (§7.3)
     env: String,                    // which vault environment feeds it, exactly one
     keys: Vec<String>,              // which keys may go there; "*" is not allowed for prod tier
     approved: Approval,             // card id, by "desktop" | "phone", when
@@ -134,7 +178,13 @@ SecretTarget {
 
 **A target takes exactly one environment.** That is the structural guard against the classic
 mistake, a dev key in prod or a prod key on a laptop: there is no call that sends a staging
-value to a target bound to production.
+value to a target bound to production. (Inheritance stays inside a tier, §4.1, so it can't
+undo this.)
+
+**`keys` is checked against the resolved set**: a templated key counts as every key its
+template uses, so a template can't carry a value past the allowlist.
+
+Stack services are **not** a target kind: a service's binding is on the service (§7.2).
 
 ### 4.5 The ledger
 
@@ -145,7 +195,7 @@ by hand is invisible to it, which is why rotation also searches for consumers (�
 
 ## 5. Storage, across macOS, Windows and Linux
 
-> **Envelope encryption: ONE data key in the OS keychain, every value in one encrypted file.**
+> **Envelope encryption: data keys in the OS keychain, every value in one encrypted file.**
 
 `keyring` v4 (already a dependency) covers all three platforms: the Apple Keychain, Windows
 Credential Manager and Secret Service over zbus. Putting each secret in its own keychain item
@@ -154,31 +204,43 @@ looks simpler and is worse on every platform:
 - **Windows caps a credential blob at 2,560 bytes** (`CRED_MAX_CREDENTIAL_BLOB_SIZE`). A PEM
   key or a GCP service-account JSON does not fit.
 - **macOS asks for keychain access per item.** A dev build's ad-hoc signature changes on every
-  rebuild and invalidates each item's ACL (see `map_err` in `accounts/vault.rs`), so fifty secrets
-  would mean fifty prompts after a rebuild.
+  rebuild and invalidates each item's ACL (see `map_err` in `accounts/vault.rs`), so fifty
+  secrets would mean fifty prompts after a rebuild.
 - **Secret Service** collections lock independently, and enumerating them is slow and differs
   by provider (GNOME Keyring, KWallet, KeePassXC).
 
 So:
 
-- **The data key**: 256 random bits under service `{app_data_slug()}.secrets`, user `vault-dek`.
-  Dev and prod get separate entries, the same split as `accounts/vault.rs` rule 3.
+- **Two data keys.** 256 random bits each, under service `{app_data_slug()}.secrets`:
+  - `vault-dek` seals dev- and staging-tier values. It is the keychain item alone.
+  - `vault-dek-prod` seals prod-tier values, and **is itself wrapped**: a passphrase
+    (Argon2id) in v1, an OS user-presence check later (§16). It is unwrapped for a session and
+    held in memory. This is what makes §1's promise true for prod on Linux and Windows, where any
+    same-user process can read the keychain item without a prompt.
+- **Dev and prod builds get separate entries**, the same split as `accounts/vault.rs` rule 3.
+- **Windows: entries are created with local persistence.** keyring's Windows store defaults to
+  `CRED_PERSIST_ENTERPRISE`, which **roams** with a roaming domain profile. A data key must
+  not leave the machine.
 - **The vault file**: `secrets.vault` in the data dir. A versioned header, then one record per
   value, sealed with **XChaCha20-Poly1305**. Each record's associated data is
   `project|env|key|version`, so a record can't be cut out and moved under another name. The
   file is written atomically (temp file, then rename) and is mode 0600 on Unix.
 - **Headless Linux, WSL, a box with no Secret Service**: the same rule as `accounts/vault.rs`,
-  **no plaintext fallback**. The human can choose a passphrase unlock instead: an
-  Argon2id-derived key-encryption key, held in memory for the session, never written. Without
-  one the vault is unavailable and says so.
-- **In memory**: values are decrypted only for a delivery and held in a `Secret` type with a
-  hand-written redacted `Debug`, `zeroize`d on drop. The existing `Secret` grows into this.
+  **no plaintext fallback**. Both data keys can be passphrase-unlocked for the session instead.
+  Without that the vault is unavailable and says so.
+- **In memory**: delivery paths decrypt a value only for that delivery and hold it in a
+  `Secret` type with a hand-written redacted `Debug`, `zeroize`d on drop. The existing `Secret`
+  grows into this. **The leak scanner is the exception** (§10.2): it keeps the values it looks
+  for in its own tables for as long as the vault is unlocked, and that memory is **not**
+  zeroized. Locking the vault drops it.
 - **Crates**: `chacha20poly1305`, `argon2`, `zeroize` (RustCrypto, pure Rust, all three
   platforms). No OpenSSL.
 
-**Backups.** A backup that includes `secrets.vault` is useless on another machine, because the
-data key stays in this machine's keychain. That is intended. Moving the vault is an explicit
-**Export vault** with a passphrase, in age's format so the file opens with the `age` CLI too.
+**Backups.** A backup of `secrets.vault` alone is useless elsewhere. A backup that also carries
+the keychain (a full macOS backup includes `login.keychain-db`) is protected only by the login
+password for dev and staging values, and by the prod passphrase for prod ones. Moving the vault
+on purpose is an explicit **Export vault** with a passphrase, in age's format so the file opens
+with the `age` CLI too. **Import vault** is the fifth way a value enters (§1).
 
 ## 6. The agent's side: MCP tools
 
@@ -190,15 +252,15 @@ browser-link tools.
 | Tool | Acts at once? | What it does |
 |---|---|---|
 | `listSecrets` | yes: read-only | The project's keys × environments: set / missing / pending / expiring / overdue, age, provider, targets, the latest delivery per target. **Never a value, a length, or a fingerprint.** |
-| `declareSecrets` | yes | Adds key definitions (§4.2): names, descriptions, format, `required_in`, `generate`. Names are harmless, and nothing is sent anywhere. Changing a definition the human set needs a card. |
+| `declareSecrets` | yes, for new keys | Adds key definitions (§4.2): names, descriptions, format, `required_in`, `generate`. Names are harmless, and nothing is sent anywhere. Changing a definition the human set, a locked `format`, or a `template` on a key in use needs a card (§4.2). |
 | `declareTargets` | **never: a request** | Proposes destinations (§4.4). Widens where values may go, so the human approves. maiTerm checks each address with its adapter before the card is filed (the repo exists, the Railway service exists). |
 | `requestSecretValues` | **never: a request** | Opens the entry sheet (§6.1) for named keys × environments. Settles when the human clicks Done. |
-| `generateSecret` | dev tier: yes, if the value is missing. Otherwise a request | Rust mints a value from the key's `GenerateSpec`. Replacing an existing value is a rotation (§9), never a generate. |
+| `generateSecret` | dev and staging: yes, if the value is missing. Prod: a request | Rust mints a value from the key's `GenerateSpec`. Replacing an existing value is a rotation (§9), never a generate. |
 | `deploySecrets` | per tier policy (§8) | Pushes keys from one environment to one approved target. The reply lists which keys and versions went. |
-| `runWithSecrets` | per tier policy (§8) | Runs a command with keys in its environment (§7.1). |
-| `writeEnvFile` | dev tier, an approved `env_file` target: yes | Renders a `.env` from the vault (§7.4). |
+| `runWithSecrets` | per tier policy (§8) | **maiTerm** runs a command with keys in its environment and returns the masked output (§7.1). There is no mode that hands the agent a ticket. |
+| `writeEnvFile` | per tier policy (§8) | Renders a `.env` from the vault to an approved `env_file` target (§7.4). |
 | `adoptSecrets` | **never: a request** | Rust reads an existing `.env` (or a JSON/YAML file plus key paths), stores the values, and on approval rewrites the file's lines as references. The agent organizes the cleanup and never reads a value. |
-| `captureSecret` | **never: a request** | Runs a mint command (`stripe keys create …`, `openssl rand -hex 32`) and stores its output (or a JSON path into it) as a pending value, without returning it to the agent (§9.4). |
+| `captureSecret` | **a request the first time**; a saved recipe reruns inside an approved rotation run | Runs a mint command and stores its output as a pending value, without returning it to the agent. The reply is only "captured" or "failed" (§9.4). |
 | `requestRotation` | **never: a request** | "The agent has requested to rotate these keys…" (§9.3). |
 | `getRotation` / `reportRotationStep` | yes | Reads a rotation run, or records the agent's result for one of its steps (§9.1). |
 
@@ -220,81 +282,115 @@ This is the flow Darryl described:
      provider issues keys;
    - a masked input (`autocomplete="off"`, `spellcheck="false"`, `autocapitalize="off"`, and no
      smart-quote substitution: memory "Smart quotes fix");
-   - **checks as the human types**, all in Rust: the format matches; **a test-mode key in a
-     prod-tier environment, or a live key in dev, is flagged** (`sk_test_` in production); the
-     same value in two tiers is flagged; leading and trailing whitespace is trimmed (the
-     `Secret::new` lesson);
+   - **checks as the human types, run in the webview** from rules Rust sends with the sheet
+     (none of them secret): the format matches; **a test-mode key in a prod-tier environment,
+     or a live key in dev, is flagged** (`sk_test_` in production); leading and trailing
+     whitespace is trimmed (the `Secret::new` lesson);
    - **Generate** when the key has a `GenerateSpec`, and **Skip**.
-4. **Done** sends each value to Rust once (one `invoke` per value, never kept in a store, the
-   field cleared) and settles the request with a per-key outcome. **Cancel** denies it.
+4. **Done** calls one Rust command with the sheet's values. That command **stores them, then
+   approves the request, then settles it**, in that order, before returning. Rust then runs the
+   checks that need other values (**the same value in two tiers**) and can return warnings the
+   human confirms or fixes. The values are never kept in a Svelte store, and the inputs are
+   cleared on submit and on unmount. **Cancel** denies the request.
 5. The agent is told through the existing settle path (`agent-request-settled` →
    `overlordStore.tellTab`, which never types over a draft), framed as
    `⟦SECRETS⟧ Values set: STRIPE_SECRET_KEY (development, production). Skipped:
    RESEND_API_KEY (development).` From there it carries on: `deploySecrets`, `runWithSecrets`.
 
-**Request lifetime.** Agent requests expire after 30 minutes. Typing values can take longer
-(finding the right dashboard, waiting on a colleague), so `secret_values` gets 24 hours.
-Requests are in memory: after a restart the agent's `getRequestStatus` says it is gone, and
-the agent asks again.
+**"Enter values" is not `decide`.** In `agent_requests.rs`, approving a request starts a 5-minute
+clock (`APPROVED_TTL_MS`) for the window to report back. A human who spends longer typing
+would see the request fail. That is why approve and settle happen together, at Done.
+
+**Request lifetime: what has to change in `agent_requests.rs`.** A `secret_values` request should
+wait 24 hours, since finding the right dashboard or waiting on a colleague takes time. Today:
+- `sweep` expires every request at `requested_at + PENDING_TTL_MS` and ignores `expires_at`;
+- the agent's notice hard-codes "lapsed after 30 minutes" (`agentRequests.svelte.ts`);
+- docs/mailink-protocol.md §4.4 promises phones 30 minutes.
+
+All three move to a per-kind TTL read from `expires_at`. Because a request that lives a day will
+meet a reload (a human's Cmd+Shift+R mints a new tab id), `reloadTab` must **remap the request's
+tab id**, like its other `remapTab` calls. A request held for a day must not block the agent's
+own reload for a day either. Requests stay in memory: after a restart the agent's
+`getRequestStatus` says the request is gone, and the agent asks again.
 
 **The webview holds a value for an instant.** It is the human's own machine, and the
 alternative, a native dialog per platform, costs three implementations. The rules: never in a
-Svelte store, never logged (dev builds attach the console), never in an error message, and
-the input element is cleared on submit and on unmount.
+Svelte store, never logged (dev builds attach the console), never in an error message.
+**Dev builds load `tauri-plugin-mcp-bridge`**, whose `webview_execute_js` and IPC-capture tools
+let an agent read the sheet's inputs and payloads. So the sheet **refuses prod-tier values in a
+build with the bridge**, and warns for dev and staging ones.
 
 ## 7. Delivery: getting a value where it needs to be
 
-Every delivery path follows the same three rules:
+Every delivery path follows the same four rules:
 - **stdin or an API, never argv.** A test runs every adapter against a fake binary and fails if
   any value shows up in argv.
 - **Never typed into a PTY.**
+- **Nothing that returns to an agent is unscrubbed**: output, errors and settle outcomes all go
+  through the value scrubber (§10.1).
 - **Recorded in the ledger.**
 
-### 7.1 `maiterm run`: a process with secrets in its environment
+### 7.1 Running a process with secrets
 
-The equivalent of `doppler run`. The maiTerm binary already takes a different path on certain
-argv (`run_browser_link_host_if_requested` in `main.rs`), and it gets one more:
+The equivalent of `doppler run`. Two forms:
+
+**Agent runs (`runWithSecrets`).** maiTerm runs the command itself, in its own process group as
+watch scripts are (`watch.rs`), with the values in the child's environment, and returns the
+**masked** output as the tool result. Masking (1Password's idea) replaces any value the run
+holds, plus its base64 (all three alignments), URL-encoded, hex and JSON-escaped forms, with
+`«STRIPE_SECRET_KEY»`. **This is the only form an MCP tool offers.** No tool hands an agent a
+ticket or anything else it could redeem for values: the first draft's ticket mode would have
+let an agent speak the shim's protocol itself and skip the masking.
+
+**Service runs (the `maiterm-run` shim).** A stack service with secrets (§7.2) is started by a
+small shim that maiTerm types into the service's shell:
 
 ```
-maiterm run --ticket <t> -- npm run dev
+'/Applications/maiTerm.app/Contents/MacOS/maiterm-run' --ticket <t> -- sh -c '<service command>'
 ```
 
-- **The ticket** comes from `runWithSecrets` (or a stack service start, §7.2). It is single-use,
-  valid for 60 seconds, and bound to the command line, the folder and the key set the human
-  approved. The shim gives the ticket to maiTerm along with its own argv and cwd. maiTerm
-  checks they match, then returns the values over the local connection, never through a file.
-  A ticket in scrollback is spent the moment it is redeemed.
-- **On Unix** the shim `exec`s the command, so the process tree is exactly what it would be
-  without it. **On Windows** there is no `exec`: the shim spawns the child, forwards
+- **A separate small console-subsystem executable**, shipped beside maiTerm and typed by
+  **absolute path**. It is not the main binary: in release builds `main.rs` sets
+  `windows_subsystem = "windows"`, and a GUI-subsystem exe started from cmd or PowerShell has no
+  console, so the shell neither waits for it nor passes Ctrl-C. The argv-dispatch precedent
+  (`run_browser_link_host_if_requested`) works only because Chrome supplies pipes.
+- **The ticket** is single-use, valid for 60 seconds, and bound to the exact command string, the
+  folder and the key set. maiTerm types it, so it sits briefly in the service's scrollback and in
+  `getServiceOutput`.
+- **A ticket is worth nothing to anyone but the shim.** On redemption maiTerm identifies the
+  peer **from the OS, not from the message**: `LOCAL_PEERPID` (macOS), `SO_PEERCRED` (Linux),
+  `GetNamedPipeClientProcessId` (Windows). The peer's executable must be maiTerm's own
+  `maiterm-run`, and its argv and cwd are read from the OS. The values are released only to that
+  pid.
+- **On Unix** the shim `exec`s `sh -c`, so the process tree is exactly what it would be without
+  it. **On Windows** there is no `exec`: the shim spawns the child (through `cmd /c`), forwards
   Ctrl-C/Ctrl-Break and returns the child's exit code.
-- **Output masking** (1Password's idea). When stdout/stderr is not a TTY, the shim stays as
-  the parent, pipes the output and replaces any value it holds, plus its base64, URL-encoded
-  and hex forms, with `«STRIPE_SECRET_KEY»`. An agent running a command reads the output, so
-  this matters. On a TTY (an interactive dev server) piping would break the terminal, so
-  masking is off and the card says so.
-- **Agent mode** (`runWithSecrets({command, keys, env, wait: true})`): maiTerm runs the command
-  itself, in its own process group as watch scripts are (`watch.rs`), and returns the masked
-  output as the tool result. That is the right default for one-shot jobs such as migrations or
-  seed scripts.
+- **On a TTY** (an interactive dev server) the shim can't mask without breaking the terminal,
+  so masking is off there. That output still reaches agents only through the scrubbed MCP
+  boundary (§10.1).
 
-**What a `run` approval does NOT cover, said plainly on the card:** the approval binds the
-command line, not the code it runs. An agent that can edit `scripts/seed.js` can make the
-approved `node scripts/seed.js` print `process.env`. Local execution with a secret means
-trusting the code with it, which is why prod-tier keys don't run locally by default (§8).
+**What an approval does NOT cover, said plainly on the card:** it binds the command line, not
+the code it runs. An agent that can edit `scripts/seed.js` can make the approved
+`node scripts/seed.js` print `process.env`, or write it to a file. Also, a running process's
+environment can be read by the same OS user (`ps eww`, `/proc/<pid>/environ`). Local execution
+with a secret means trusting the code with it, which is why prod-tier keys don't run locally
+by default (§8).
 
 ### 7.2 Stack services
 
 Today a service starts by typing `cd`, `export`s and the command into its shell
 (docs/stack.md §4). **A secret cannot be delivered that way**: it would land in the
-scrollback, the shell history and the serialized scrollback in `aiterm-state.json`. So:
+scrollback, the shell history and the scrollback database. So:
 
 - `Service` gains `secrets: Vec<{env_var, key}>` and `secret_env: Option<String>` (which vault
-  environment).
-- When a service has secrets, its start types `maiterm run --ticket <t> -- <command>`, with a
-  fresh ticket each start and restart. The plain `env` exports stay as they are for
-  non-secret values.
-- `restartService` after a `deploySecrets` to a `stack_service` target is how an agent picks up
-  a new value. A rotation does this for every service in its ledger (§9.2).
+  environment). This is the service's only binding: there is no `stack_service` target, and
+  nothing to `deploySecrets` to. Delivering a new value means restarting the service.
+- When a service has secrets, its start types the shim line of §7.1, with a fresh ticket each
+  start and restart. **The command goes in as `sh -c '<command>'`**, quoted, because
+  `Service.command` is typed verbatim: `npm run build && npm start`, a pipe or a `cd x;` would
+  otherwise be split by the shell, and everything after the first `&&` would run without
+  secrets. The plain `env` exports stay as they are for non-secret values.
+- A rotation restarts every service in its ledger (§9.2).
 - The shell underneath never holds the values. Only the service process does, so a Ctrl-C in
   the console leaves nothing behind.
 
@@ -302,19 +398,34 @@ scrollback, the shell history and the serialized scrollback in `aiterm-state.jso
 
 Each `kind` is an adapter in `src-tauri/src/secrets/targets/` with five operations: `check`
 (the address exists and maiTerm can reach it), `push`, `list` (which names are there and when
-they changed; providers never return values), `remove`, and `verify`. Initial set, each to be
-checked against the real CLI or API before it ships:
+they changed; providers never return values), `remove`, and `verify`.
 
-| Target | How the value travels |
-|---|---|
-| GitHub Actions (repo, environment, org) | `gh secret set NAME [--env E]` reading **stdin** |
-| Cloudflare Workers | `wrangler secret put NAME` reading **stdin** |
-| Vercel | `vercel env add NAME <environment>` reading **stdin** |
-| Fly.io | `fly secrets import` reading `NAME=value` lines on **stdin** |
-| Railway | the GraphQL API (`variableUpsert`). The CLI's `--set K=V` puts the value in **argv**, so it is not used |
-| AWS Secrets Manager / SSM | the API over the SDK. The CLI's `--secret-string` is argv |
-| Kubernetes | a Secret manifest on **stdin** to `kubectl apply -f -` |
-| `env_file`, `stack_service`, `ssh_env` | local, see §7.2, §7.4, §7.5 |
+**An agent must not be able to change where an approved push goes.** Each of these CLIs picks
+its target from files and PATH an agent can edit: `gh` from the cwd's git remote, `wrangler`
+from `wrangler.toml`, `vercel` from `.vercel/project.json`, `fly` from `fly.toml`, `kubectl` from
+the current context, and the binary itself from PATH (a fake `gh` in `~/.local/bin` would get
+the value on stdin). So every adapter:
+- passes **every address field as an explicit flag** from the approved `SecretTarget.address`;
+- runs in an **empty temporary directory** with a **minimal environment**;
+- runs the CLI by the **absolute path resolved when the target was approved**, shown on the card.
+
+| Target | How the value travels | Address pinned by |
+|---|---|---|
+| GitHub Actions (repo, environment, org) | `gh secret set NAME` reading **stdin** | `-R owner/repo`, `--env`, `--org` |
+| Cloudflare Workers | `wrangler secret put NAME` reading **stdin** | `--name`, `CLOUDFLARE_ACCOUNT_ID` |
+| Vercel | `vercel env add NAME <environment>` reading **stdin** | `--scope`, project id |
+| Fly.io | `fly secrets import` reading `NAME=value` lines on **stdin**, with `--stage` (otherwise it redeploys at once, which a rotation plans separately) | `-a app` |
+| Railway | the GraphQL API (`variableUpsert`). The CLI's `--set K=V` puts the value in **argv**, so it is not used | project, environment, service ids |
+| AWS Secrets Manager / SSM | the API, or the CLI with `--secret-string file:///dev/stdin` (Unix) | ARN, region, profile |
+| Kubernetes | `kubectl create secret … --dry-run=client -o yaml \| kubectl apply --server-side -f -`. A client-side `apply` keeps a **second copy** of the data in the `last-applied-configuration` annotation | `--context`, `--namespace` |
+| `env_file`, `ssh_env` | local, see §7.4, §7.5 | — |
+
+Each row must be checked against the real CLI or API before its adapter ships.
+
+**Adapter errors are fixed sentences.** An adapter reports "GitHub refused the push: not
+authorized for maisoft/api", never raw stderr. Provider errors can echo their input, and
+outcome text travels a long way: `carryOut` puts the error message into the request's outcome,
+which `onSettled` types into the agent's tab, shows in a toast and sends to the phone.
 
 **A platform's own credential (a Railway token, a Cloudflare API token) is itself a vault key**,
 marked `deployer`. Deployer keys are never delivered anywhere except to their own adapter.
@@ -328,32 +439,44 @@ suggestion, nothing is changed.
 ### 7.4 `.env` files
 
 The weakest destination, and the one every framework reads. Rules:
-- dev tier only, unless the human enables it per target with a card that says "a production
-  value will be on disk in plain text";
-- the path must be inside the project and **ignored by git** (`git check-ignore`), checked
-  every write;
+- policy by tier (§8). A prod-tier file needs the human to enable it per target, with a card
+  that says "a production value will be on disk in plain text";
+- the path is **pinned when the target is approved**, after canonicalizing its parent directory,
+  so a symlinked parent can't move the write outside the project;
+- the file must be **ignored by git** (`git check-ignore`), checked every write. An agent can edit
+  `.gitignore`, so this guards against accidents, not against the agent;
 - mode 0600, written atomically;
 - the file gets a header naming maiTerm as the writer, and the ledger knows the file, so a
   rotation rewrites it.
 
-The panel nudges toward `maiterm run`, which leaves nothing on disk.
+The panel nudges toward `runWithSecrets` and service secrets, which leave nothing on disk.
 
 ### 7.5 SSH hosts
 
 For an ssh tab, the place is `user@host:folder`, the same identity watch scripts use
 (`watch::place`). Values go **over the stdin of maiTerm's own ssh connection**, through the
-tunnel's ControlMaster socket, as `watch/remote.rs` does and as the setup-token handoff does
-(docs/login.md §6). `runWithSecrets` on an ssh tab runs a stdin-fed wrapper on the host that
-reads the environment, `exec`s the command, and is killed as a group afterwards. Nothing is
-written to the remote disk unless the target is an `env_file` there. The card says **which
-host**.
+tunnel's ControlMaster socket. `runWithSecrets` on an ssh tab feeds `sh -s` on the host a
+script that holds the values **in shell variables only**, exports them to the command and
+returns its output over the same stream.
+
+**This is stricter than the patterns it borrows from**, which both write to the remote disk:
+- `watch/remote.rs` writes the script and its `.out`/`.err` files under
+  `~/.maiterm/watch-scripts`;
+- the setup-token handoff writes a file under `~/.maiterm/tokens` that is sourced, then removed
+  (`accounts/remote.rs`).
+
+Here nothing is written to the remote disk (no heredoc'd file, no temp output) unless the target
+is an `env_file` there. The card says **which host**, and that root and the same user on that
+host can read the process's environment.
 
 ### 7.6 Templates and references
 
 A key may be a template over other keys (`DATABASE_URL =
-postgres://{{DB_USER}}:{{DB_PASS}}@db:5432/app`). The agent writes the template, which holds
-no secrets, and Rust fills it in at delivery. Rotating `DB_PASS` re-renders `DATABASE_URL`
-everywhere it went. The same syntax works in any file a target renders.
+postgres://{{DB_USER}}:{{DB_PASS}}@db:5432/app`). The agent may write the template on a new key,
+since it holds no secrets, and Rust fills it in at delivery. Once the key has a value or a
+target, a template change needs a card (§4.2), and a target's allowlist is checked against
+every key a template uses (§4.4). Rotating `DB_PASS` re-renders `DATABASE_URL` everywhere it
+went.
 
 ## 8. Environments and policy
 
@@ -364,10 +487,11 @@ panel. **No MCP tool can change policy**, and policy is not in `preference_meta`
 |---|---|---|---|
 | `deploySecrets` to an approved target | at once | at once | **a card each time**, listing keys and version changes (`STRIPE_SECRET_KEY v3 → v4`) |
 | `runWithSecrets` | a card once per command + place, then at once | same as dev | **off**. The human can turn it on, then it is a card per run |
-| `writeEnvFile` | at once to an approved file | a card | off |
+| `writeEnvFile` to an approved file | at once | a card each write | **off**. Enabled per target with a card, then a card each write |
 | `generateSecret` (missing value) | at once | at once | a card |
-| reveal / copy in the panel | yes | yes | after an OS user-presence check (§16, a later phase) |
-| leak found | reported | reported, rotation proposed | reported, **rotation proposed as a Decision** |
+| `captureSecret` | a card the first time per command + place + `extract` | same | a card each time |
+| reveal / copy in the panel | yes | yes | after the prod unlock (§5), and a user-presence check later (§16) |
+| leak found | reported to the human | reported, rotation proposed | reported, **rotation proposed as a Decision** |
 
 A prod card can be approved on the phone (§12): it names what moves and where, never a value.
 
@@ -397,8 +521,9 @@ planned → minting → staged (pending) → distributing → verifying → prom
 6. **Overlap.** The old key stays live for a window (default 24 h, or until the human says
    so), so caches, workers and a colleague's laptop can catch up.
 7. **Revoke** the old key: an adapter call, or a card for the human ("I've revoked it in the
-   Stripe dashboard"). Previous values are purged after the retention period (default 7
-   days).
+   Stripe dashboard"). The previous value is purged **7 days after the revoke** (counted from
+   the revoke, not the promote: a long overlap would otherwise purge a value a revoke recipe
+   still needs).
 
 Before revoking, **rollback is cheap**: move the labels back and redeploy previous to every
 consumer that already switched. After revoking it is impossible, which is why revoking is
@@ -418,8 +543,9 @@ phone show each step, and the agent works through it with the ordinary task tool
 - **The ledger**: everywhere maiTerm delivered.
 - **Discovery.** The agent searches the repo and its CI config for the key's *name*
   (`STRIPE_SECRET_KEY` in a workflow file, `process.env.X`). Rust scans for the *value* in
-  files under the project root and in the human's other known projects, and reports "found in
-  ~/old-project/.env" without showing what it found.
+  files under the project's paths and the human's other projects, and reports to the **human**
+  "found in ~/old-project/.env" without showing what it found. The agent sees only that a
+  consumer was added to the plan.
 - **Unknown consumers** (a teammate's laptop, a manual dashboard entry) can't be found. The
   card lists what *is* known and says "and anywhere you copied it by hand". The overlap
   window exists for exactly that.
@@ -449,59 +575,85 @@ when it is answered, just as with `requestSecretValues`.
 
 ### 9.4 Capture recipes: rotation without an adapter for every provider
 
-Most providers have a CLI or API that mints keys, and the value comes back on stdout. That is
+Many providers have a CLI or API that mints keys, and the value comes back on stdout. That is
 exactly where an agent must not see it. `captureSecret({key, env, command, extract})` runs the
-command through the same runner as §7.1 and **stores** the output instead of returning it:
-- `extract` is a JSON path or a regex;
-- the agent gets back "captured, 51 characters, matches the Stripe format".
+command through the agent-run path of §7.1 and **stores** the output instead of returning it.
 
-Approval is keyed by command + place, like a watch script. A revoke command works the same
-way, with the old value going *in* through stdin or a template. Recipes that work can be saved
-on the key's `RotationPolicy`, so the next rotation of that key needs only the start card.
+What keeps it from being an oracle (§1 rule 4):
+- **`extract` (a JSON path or regex) is part of what is approved**, with the command and the
+  place. Otherwise an agent reruns an approved capture with `^sk_live_a`, `^sk_live_b`… and
+  reads the output one bit per call.
+- **The reply is "captured" or "failed"**, with no length and no "matches the format".
+- **Captures are rate-limited** per key.
+
+A revoke command works the same way, with the old value going *in* through stdin or a template.
+Recipes that work can be saved on the key's `RotationPolicy`, so the next rotation of that key
+needs only the start card. (Stripe, for one, has no public API that mints or rolls a secret key
+as far as we know, so its keys are human-minted, §9.5.)
 
 ### 9.5 Provider packs
 
 A small built-in table per provider: format prefixes (test vs live), the console URL for
 issuing and revoking keys, whether two keys can be live at once, typical expiry, and which
-adapter or recipe mints and revokes. Initial candidates: Stripe, GitHub, AWS, Anthropic,
-OpenAI, Slack, SendGrid, Resend, Cloudflare, Supabase. **Every entry must be checked against
-the provider's current docs when it is written**, not from memory.
+adapter or recipe mints and revokes, or "human". Initial candidates: Stripe (human-minted),
+GitHub, AWS, Anthropic, OpenAI, Slack, SendGrid, Resend, Cloudflare, Supabase. **Every entry
+must be checked against the provider's current docs when it is written**, not from memory.
 
 ## 10. Keeping secrets out of sessions
 
 ### 10.1 What maiTerm can and can't stop
 
-- **Where maiTerm owns the store, it scrubs**: serialized scrollback, its logs, toasts, the
-  phone mirror and share files are checked for live values and redacted before they are
-  written.
+- **Every boundary maiTerm owns is scrubbed** for live values (all the forms in §7.1):
+  - **what it returns**: `getTabContext`, `getServiceOutput`, the Overlord's tab reads,
+    maiLink's `recent_text()` fallback, tool results, and request outcomes;
+  - **what it persists**: the scrollback database write, its logs, toasts, the phone mirror and
+    share files.
+
+  A TTY service with masking off commonly prints its config (a `DATABASE_URL` at boot), and that
+  reaches agents through exactly these tools.
 - **Where someone else owns the store, maiTerm reports.** Claude Code's transcript is Claude
   Code's file, and **anything in it has already been sent to the model provider**. Editing the
   file does not undo that. So a value found there is treated as leaked, and the response is
   rotation, not cleanup.
-- **It can't stop an agent's own tools from reading a file.** If `.env` holds a value, the
-  agent's Bash can `cat` it. The mitigations below make that rare. They don't make it
-  impossible.
+- **A same-user agent's own tools are not stopped** (§1): `cat .env`, the keychain CLIs and
+  `ps eww` all work for it. §10.3 makes them rare and visible. It doesn't make them impossible.
 
 ### 10.2 Leak detection
 
-Rust holds the current, pending and previous values in memory while the vault is unlocked and
-runs one Aho-Corasick pass (raw, base64, URL-encoded, hex) over:
-- Claude JSONL and Codex rollouts as maiLink already tails them (`mailink/transcript.rs`);
-- the terminal grid at scrollback-serialize time;
+**A dedicated scanner**, not maiLink's tail: `mailink/transcript.rs` skips tool outputs (exactly
+where `cat .env` or `ps eww` output appears), reads only a tail, and runs only when maiLink asks.
+While the vault is unlocked, the scanner holds the values in memory (not zeroized, §5) and runs
+one Aho-Corasick pass, in raw, JSON-escaped, URL-encoded, hex and three-alignment base64 forms,
+over:
+- Claude JSONL and Codex rollouts, read **whole and incrementally, `tool_result` included**,
+  whether or not maiLink is on. Gemini has no transcript source yet;
+- the terminal grid at the scrollback-database write;
 - the git diff of a commit, if the human enables the optional pre-commit hook;
-- files under project roots, when asked during discovery (§9.2).
+- files under project paths, when asked during discovery (§9.2).
 
-A hit reports **which key, which environment, where and when**, never the surrounding text,
-and per §8 raises a rotation proposal. Short values (under 12 characters) are skipped, since
-they would match by accident. The panel notes this.
+A hit reports **which key, which environment, where and when, to the human**, never the
+surrounding text. Per §8 it raises a rotation proposal. **The agent is not told about hits on
+text it produced**: otherwise an agent could print guesses and use the scanner (or the masking)
+to confirm them, which matters most for the low-entropy passwords §4.3 worries about. Values
+under 12 characters are skipped, since they would match by accident. The panel notes this.
 
 ### 10.3 Making the wrong thing hard
 
 - `adoptSecrets` turns an existing `.env` into references, so there is less on disk to read.
-- The hook maiTerm already receives (`PreToolUse`, `claude_code/gate.rs`) can deny a Bash or
-  Read call that targets a file the ledger says holds values, with a reason pointing the agent
-  at `runWithSecrets`. **To verify:** that a deciding `PreToolUse` from maiTerm's hook works
-  on every runtime we support (Codex hook parity is listed in docs/codex-integration-review.md).
+- **A `PreToolUse` deny.** maiTerm already receives `PreToolUse` as an http hook (`hooks_handler`
+  in `claude_code/server.rs`). It has **never decided anything** with it (it answers an empty
+  200: `claude_code/lockfile.rs`). This would be its first deny. The deny list:
+  - Bash or Read on a file the ledger says holds values;
+  - the keychain CLIs (`security find-generic-password`, `secret-tool`, PowerShell credential
+    modules / `CredRead`);
+  - process environment reads (`ps e…`, `/proc/*/environ`).
+
+  The reason it gives points the agent at `runWithSecrets`. This is a **speed bump**: it fails
+  open (when maiTerm is down or the tunnel is dead, the call goes ahead), and string matching is
+  easy to dodge (`cat .e""nv`). To verify: that a deciding `PreToolUse` works on every runtime
+  we support (Codex hook parity is listed in docs/codex-integration-review.md).
+- **For prod, the boundary that holds** is the agent's own sandbox or a separate OS user (§1).
+  The panel says so where prod is turned on.
 - The priming line (`initSession`) tells agents the vault exists and which tools to use, so
   "paste your API key here" is not the agent's first idea.
 
@@ -517,18 +669,21 @@ the shortcut is an open question):
   version history (no values), consumers from the ledger, and its audit rows;
 - actions: Set, Generate, Rotate, Remove from target, Reveal, Copy.
 
-**Reveal** shows the value for 10 seconds. **Copy** clears the clipboard after 30 seconds if
-it still holds that value. Both are written to the audit log. Values are masked by default,
-because screens get shared.
+**Reveal** shows the value for 10 seconds. **Copy** clears the clipboard after 30 seconds if it
+still holds that value, and keeps the value out of clipboard history:
+`CanIncludeInClipboardHistory=0` and `CanUploadToCloudClipboard=0` on Windows,
+`org.nspasteboard.ConcealedType` on macOS. Both are written to the audit log. Values are masked
+by default, because screens get shared.
 
 ### 11.2 Cards
 
 New agent-request kinds, each rendered by `AgentRequestCard` with the existing guards (no
 decision in a card's first 1.5 s, the second click of a double-click ignored):
-`secret_values`, `secret_targets`, `secret_deploy` (prod), `secret_run`, `secret_adopt`,
-`secret_capture`, `secret_rotation`, plus the rotation steps that need the human. As with
-every card: **the words are maiTerm's, the agent's only as a quoted `reason`; they must be
-true about what runs and where; and they never carry a value**, since cards reach the phone.
+`secret_values`, `secret_targets`, `secret_deploy` (prod), `secret_run`, `secret_env_file`,
+`secret_adopt`, `secret_capture`, `secret_definition` (a locked field or template change, §4.2),
+`secret_rotation`, plus the rotation steps that need the human. As with every card: **the words
+are maiTerm's, the agent's only as a quoted `reason`; they must be true about what runs and
+where; and they never carry a value**, since cards reach the phone.
 
 ### 11.3 Rotation progress
 
@@ -545,55 +700,73 @@ filtered in the panel and exported.
 
 ## 12. The phone
 
-- **Approvals: yes.** `secret_targets`, `secret_deploy`, `secret_run`, `secret_rotation` and
-  revoke confirmations are agent requests, so they appear in maiLink §4.4's `/requests` like
-  any other kind. Each new kind is a protocol bump (docs/mailink-protocol.md §13.5).
+- **Approvals: yes.** `secret_targets`, `secret_deploy`, `secret_run`, `secret_env_file`,
+  `secret_adopt`, `secret_capture`, `secret_definition`, `secret_rotation` and revoke
+  confirmations are agent requests, so they appear in maiLink §4.4's `/requests` like any other
+  kind. A new kind alone is **not** a protocol bump: the phone draws any kind from its text
+  fields (docs/mailink-protocol.md §4.4, `agent_requests.rs`).
 - **Values: no, in v1.** Entering a value on the phone would carry it over the maiLink LAN API
-  and through the phone app. The sheet's card on the phone says "enter these on the desktop".
-  This is an open question (§16): pasting from a phone password manager is handy, and it
-  needs its own transport review. The "never go to desktop" rule (memory) is broken here on
-  purpose, and the card says why.
+  and through the phone app. But the phone shows Approve/Deny on every pending request, and a
+  phone Approve on `secret_values` would `decide` with no values entered. So:
+  - `decide(by: "phone")` **refuses** `secret_values` and any human rotation step that needs a
+    value pasted;
+  - the request carries a wire flag (`desktopOnly: true`) so the phone draws "Enter these on
+    the desktop" instead of buttons. **That field is a protocol bump.**
+
+  Pasting from a phone password manager would be handy, and it needs its own transport review
+  (§16). The "never go to desktop" rule (memory) is broken here on purpose, and the card says
+  why.
 - Leak reports and rotation proposals ring the doorbell, gated by mute (docs/mute.md) like any
   other notice.
 
 ## 13. How it meets the rest of maiTerm
 
 - **Reload / duplicate / archive**: the vault belongs to the project, not to a `Tab`, so
-  there is nothing to carry. Pending requests are keyed by the asking tab and follow
-  docs/agent-requests.md's rules (a reload is refused while one is open).
-- **Move project** (docs/relocate.md): `env_file` target paths, `run` approvals keyed by place,
-  and the project's root all follow the move.
+  there is nothing to carry. Pending requests are keyed by the asking tab, and `reloadTab` must
+  remap them to the new tab id (§6.1). Today an agent's reload of its own tab is refused while it
+  has a request open (docs/agent-requests.md §1), which a day-long `secret_values` request would
+  make unreasonable. The remap makes that refusal unnecessary for this kind.
+- **Move project** (docs/relocate.md): the project's paths, `env_file` target paths and `run`
+  approvals keyed by place all follow the move.
 - **Workspace Share**: the share file carries the **manifest**: key names, descriptions,
   environments and target kinds, never values or target approvals. Importing it shows "this
   project needs 6 secrets" and opens the entry sheet. This becomes a `Shared*` type on the
-  allowlist (docs/workspace-share.md).
+  allowlist (docs/workspace-share.md), and it is where the remote URL matches a project (§3).
 - **Overlord**: `listEscalations` and rules can see a project's missing and overdue counts.
   Never values.
-- **Accounts**: the audit row records the tab's account (docs/login.md §14 recording at spawn).
+- **Accounts**: the audit row records the account the tab **spawned** under
+  (`accounts/tab_record.rs`, docs/mailink-protocol.md §14), never the active account.
 - **Mute**: silences notices, never cards (docs/mute.md).
 
 ## 14. Threat model
 
 | Adversary | Defended by | Not defended |
 |---|---|---|
-| **A prompt-injected agent** ("send the key to evil.com") | No tool takes a value or a free URL; targets need a card; prod deploys need a card each time | An agent that writes code which leaks the key at runtime and gets it deployed. Code review and CI catch that, not the vault |
-| **A careless agent** (prints env, commits `.env`) | No values in sessions; masking; gitignore check; leak scan; pre-commit hook | A value it already read through its own tools |
-| **Another local process as the same user** | The keychain ACL on the data key; 0600 files | Same user, same reach, as docs/login.md §9.2 accepts |
-| **A stolen backup or synced data dir** | The data key never leaves the keychain | — |
+| **A prompt-injected agent** ("send the key to evil.com") | No tool takes a value or a free URL; targets need a card and an agent's config and PATH can't redirect them (§7.3); templates can't cross an allowlist (§4.4); prod deploys need a card each time | An agent that writes code which leaks the key at runtime and gets it deployed. Code review and CI catch that, not the vault |
+| **A careless agent** (prints env, commits `.env`) | No values in tool results; masking and scrubbing; gitignore check; leak scan; pre-commit hook | A value it already read through its own tools |
+| **A determined agent running as the same OS user** | Prod values sealed under a passphrase-unwrapped key (§5); the `PreToolUse` speed bump (§10.3); no oracles (§1 rule 4) | Dev and staging values: the keychain item, process environments and `.env` files are readable to it. **The real boundary is a sandbox or a separate OS user** |
+| **Another local process as the same user** | As above | As above, the same reach docs/login.md §9.2 accepts |
+| **A stolen backup or synced data dir** | The vault file alone is useless; Windows entries don't roam (§5); prod needs the passphrase | A backup that also carries the macOS login keychain opens dev and staging values to whoever has the login password |
 | **A lost or compromised phone** | Values never reach the phone; approvals need a paired device token (docs/agent-requests.md §2) | A paired phone can approve a prod deploy, so unpairing is the response |
-| **A shared screen / shoulder** | Masked by default; reveal times out | — |
-| **maiTerm's own logs and errors** | `Secret` has no `Display`/`Serialize`; errors name the operation and key, never the value (the `accounts/vault.rs` rule 1) | — |
+| **A shared screen / shoulder** | Masked by default; reveal times out; copy stays out of clipboard history | — |
+| **maiTerm's own logs and errors** | `Secret` has no `Display`/`Serialize`; errors name the operation and key, never the value (the `accounts/vault.rs` rule 1); adapter errors are fixed sentences (§7.3) | — |
+| **An agent in a dev build** | Prod value entry refused while the MCP bridge is loaded (§6.1) | Dev and staging entry can be watched through the bridge's webview tools |
 | **A malicious dependency in the app being run** | — | It gets whatever the process gets. That is true of every secrets manager |
 
 **The vault keeps secrets out of sessions and decides where they go. It does not make the code
-that uses them trustworthy.** Every card on a `run` or prod path says so in one line.
+that uses them trustworthy, and it does not contain an agent that shares the human's OS
+user.** Every card on a `run` or prod path says so in one line.
 
 ## 15. Rejected
 
 - **One keychain item per secret**: §5.
 - **Giving the agent the value and asking it not to print it**: it ends up in the transcript,
   so with the model provider, the moment the agent reads it.
-- **Typing `export`s into a PTY**: scrollback, history and serialized state (§7.2).
+- **Typing `export`s into a PTY**: scrollback, history and the scrollback database (§7.2).
+- **Handing agents a run ticket** (the first draft's `maiterm run --ticket` for agents): a ticket
+  is redeemable by whoever holds it, the binding was self-reported, and the agent could skip the
+  masking (§7.1).
+- **Trusting a CLI's own config for the destination**: the agent can edit it (§7.3).
 - **A `curl`-style "call this URL with the key" tool**: every exfiltration needs exactly that.
   A later "signed request" tool would be acceptable only with a per-key host allowlist, set by
   a card.
@@ -608,9 +781,9 @@ that uses them trustworthy.** Every card on a `run` or prod path says so in one 
 ## 16. Open questions
 
 1. **Phone value entry**: worth a transport review for v1, or later?
-2. **Prod reveal/copy**: an OS user-presence check (Touch ID through LocalAuthentication,
-   Windows Hello through `UserConsentVerifier`, polkit on Linux) is three implementations. Is
-   it v1, or does prod simply have no reveal until it exists?
+2. **Prod unlock**: a passphrase in v1 (§5). Later, an OS user-presence check (Touch ID through
+   LocalAuthentication, Windows Hello through `UserConsentVerifier`, polkit on Linux): three
+   implementations. Should dev and staging also be wrappable, for people who want it?
 3. **Bring your own backend**: let maiTerm keep the manifest, targets, ledger and rotation
    runs while the values live in 1Password / Doppler / Infisical (resolved through their CLIs
    at delivery, written back on rotation). That is the path to teams sharing secrets, which v1
@@ -620,27 +793,35 @@ that uses them trustworthy.** Every card on a `run` or prod path says so in one 
 6. **The `PreToolUse` deny (§10.3)**: is it enough, or should maiTerm also write `Read(.env)`
    deny rules into the project's Claude settings? That writes user config, so reviewers need a
    scratch HOME (memory "Reviewers must isolate HOME").
-7. **Panel placement and shortcut.**
-8. **Dynamic secrets**: mint short-lived credentials per `run` where the provider supports it
+7. **Recommending a sandbox**: should turning on prod keys offer to set up Claude Code's sandbox
+   for the project's tabs, or only say so?
+8. **Panel placement and shortcut.**
+9. **Dynamic secrets**: mint short-lived credentials per `run` where the provider supports it
    (AWS STS, database IAM auth). A real step past rotation. Which phase?
 
 ## 17. Build order
 
-1. **Vault core.** `src-tauri/src/secrets/`: the envelope store across platforms (§5),
-   passphrase unlock, the data model, the Secrets panel with human entry, environments, the
-   audit log. `accounts/vault.rs`'s `Secret` grows `zeroize` and moves to a shared module.
-2. **The agent manifest.** `listSecrets`, `declareSecrets`, `requestSecretValues`, the entry
-   sheet, the ⟦SECRETS⟧ notice, `generateSecret`. **This is the first phase an agent can use,
-   and it proves Darryl's flow end to end.**
-3. **Local delivery.** The `maiterm run` shim with tickets and masking, `runWithSecrets`, stack
-   service secrets (§7.2), `writeEnvFile`, `adoptSecrets`, scrollback redaction.
-4. **Targets.** `declareTargets`, `deploySecrets`, the ledger, adapters for GitHub Actions and
-   one host (Railway or Cloudflare) first.
+1. **Vault core.** `src-tauri/src/secrets/`: the envelope store across platforms with the two
+   data keys and local-only Windows persistence (§5), passphrase unlock, the data model, the
+   Secrets panel with human entry, environments, the audit log. `accounts/vault.rs`'s `Secret`
+   grows `zeroize` and moves to a shared module.
+2. **The agent manifest.** `listSecrets`, `declareSecrets` with its locked fields,
+   `requestSecretValues`, the entry sheet, the combined store-approve-settle Done, per-kind
+   request TTLs and the reload remap (§6.1), the phone refusal and `desktopOnly` (§12), the
+   ⟦SECRETS⟧ notice, `generateSecret`. **This is the first phase an agent can use, and it proves
+   Darryl's flow end to end.**
+3. **Local delivery.** The scrubber at every MCP and persistence boundary (§10.1) **first**,
+   then `runWithSecrets` with masking, the `maiterm-run` shim with peer-verified tickets for
+   stack services (§7.1, §7.2), `writeEnvFile`, `adoptSecrets`.
+4. **Targets.** `declareTargets`, `deploySecrets`, the ledger, adapters with pinned addresses and
+   binaries (§7.3) for GitHub Actions and one host (Railway or Cloudflare) first.
 5. **Rotation.** Runs with human mint and revoke, `requestRotation`, the run view, age and
    expiry proposals, provider packs.
-6. **Leak detection.** Transcript, scrollback and pre-commit scans, leak-triggered rotation.
-7. **Automation and reach.** Capture recipes, adapter mint/revoke, ssh delivery, bring-your-own
-   backend, OS user-presence for prod.
+6. **Leak detection.** The dedicated transcript scanner, scrollback and pre-commit scans,
+   leak-triggered rotation, the `PreToolUse` deny.
+7. **Automation and reach.** Capture recipes with their oracle guards, adapter mint/revoke, ssh
+   delivery, bring-your-own backend, OS user-presence for prod.
 
 Each phase is reviewed before the next. The shim and the adapters must be reviewed with a
-scratch HOME, and **the "no value in argv" test must exist before the first adapter ships.**
+scratch HOME. **Two tests must exist before the first adapter ships**: no value in argv, and no
+change to an agent-writable file or PATH entry moves where a push goes.
