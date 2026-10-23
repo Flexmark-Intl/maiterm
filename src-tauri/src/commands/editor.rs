@@ -916,9 +916,10 @@ pub async fn watch_file(
 
     // Canonicalize so our stored path matches what `notify` reports for directory
     // events — this resolves symlinks (e.g. macOS /tmp -> /private/tmp) so the
-    // path-equality filter below holds.
-    let file_path = std::fs::canonicalize(&file_path)
-        .map_err(|e| format!("Cannot resolve file path: {}", e))?;
+    // path-equality filter below holds. `share::canon` rather than a raw
+    // `canonicalize`: on Windows that returns a `\\?\` verbatim path, and the one
+    // canonical form the rest of the app compares paths in strips it (keeping UNC).
+    let file_path = crate::share::canon(&file_path);
     let parent = file_path
         .parent()
         .ok_or("Cannot determine parent directory")?
