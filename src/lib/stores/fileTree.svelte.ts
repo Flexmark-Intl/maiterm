@@ -248,7 +248,11 @@ function createFileTreeStore() {
     if (!attached || !preferencesStore.fileTreeEnabled) return;
     // Every outcome that acts takes a token, so an older resolve still in flight yields to
     // it. The follow-off no-op does not: it would supersede a forced resolve (Reveal in
-    // Files) and then do nothing, leaving the tree on the previous tab's folder.
+    // Files) and then do nothing, leaving the tree on the previous tab's folder. Because
+    // that no-op cancels nothing, a resolve also checks after its await that its workspace
+    // is still the one in front: leave a workspace and come back while its resolve is in
+    // flight, and the no-op on return would otherwise let it re-root the tree onto the
+    // workspace just left.
     const ws = workspacesStore.activeWorkspace;
     if (!ws) {
       ++resolveSeq;
@@ -279,6 +283,8 @@ function createFileTreeStore() {
     // yet or the workspace changed (a pin is per workspace).
     if (!force && !preferencesStore.fileTreeFollow && place && sameWorkspace) return;
     const token = ++resolveSeq;
+    const superseded = () =>
+      token !== resolveSeq || workspacesStore.activeWorkspace?.id !== ws.id;
 
     const osc = terminalsStore.getOsc(tabId);
     if (!place) status = 'resolving';
@@ -291,7 +297,7 @@ function createFileTreeStore() {
         fresh,
       });
     } catch (e) {
-      if (token !== resolveSeq) return;
+      if (superseded()) return;
       if (!place || !sameWorkspace) {
         closeSub();
         place = null;
@@ -300,7 +306,7 @@ function createFileTreeStore() {
       }
       return;
     }
-    if (token !== resolveSeq) return;
+    if (superseded()) return;
     sourceTabId = tabId;
     placeWorkspaceId = ws.id;
     await adoptPlace(p, token);
