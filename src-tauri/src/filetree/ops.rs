@@ -456,16 +456,42 @@ fn is_junction(p: &Path) -> bool {
 /// `target` re-pointed into the copy when it lies inside the tree being copied (`src_root`
 /// itself included), else None. Windows compares the way its filesystems do: drive letters
 /// and names without case, and `\\?\C:\` the same as `C:\`.
+///
+/// The target is text written by whoever made the junction, in whatever spelling their cwd
+/// had: a `subst` drive, a path through another junction, an 8.3 short name. The Files root
+/// is canonical, so when the text doesn't start with it literally, each leading part of the
+/// target that exists is resolved and compared with the resolved root. Only the prefix is
+/// resolved, never the whole target: the rest may run through a link inside the tree, and
+/// following that could carry it out of the tree and miss the copy.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn rebased_target(target: &Path, src_root: &Path, dst_root: &Path) -> Option<PathBuf> {
-    let mut t = target.components();
-    for r in src_root.components() {
+    let onto = |rest: &Path| if rest.as_os_str().is_empty() { dst_root.to_path_buf() } else { dst_root.join(rest) };
+    if let Some(rest) = rest_under(target, src_root) {
+        return Some(onto(rest));
+    }
+    let root = std::fs::canonicalize(src_root).ok()?;
+    // Shortest first, so the part that names the root is found before anything inside it.
+    let prefixes: Vec<&Path> = target.ancestors().collect();
+    for a in prefixes.into_iter().rev() {
+        let Ok(c) = std::fs::canonicalize(a) else { continue };
+        if rest_under(&c, &root).is_some_and(|r| r.as_os_str().is_empty()) {
+            return Some(onto(target.strip_prefix(a).ok()?));
+        }
+    }
+    None
+}
+
+/// What follows `root` in `p`, compared component by component, or None when `p` isn't
+/// `root` or under it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn rest_under<'a>(p: &'a Path, root: &Path) -> Option<&'a Path> {
+    let mut t = p.components();
+    for r in root.components() {
         if !same_component(t.next()?, r) {
             return None;
         }
     }
-    let rest = t.as_path();
-    Some(if rest.as_os_str().is_empty() { dst_root.to_path_buf() } else { dst_root.join(rest) })
+    Some(t.as_path())
 }
 
 fn same_component(a: std::path::Component, b: std::path::Component) -> bool {

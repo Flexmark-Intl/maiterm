@@ -249,6 +249,32 @@ fn a_target_inside_the_copied_tree_is_rebased_into_the_copy() {
     assert_eq!(rebased_target(Path::new("/w"), src, dst), None);
 }
 
+/// A target written through another spelling of the root (a subst drive or parent junction on
+/// Windows; a symlinked parent stands in here) still lands in the copy, and only the part
+/// naming the root is resolved: a link inside the tree is left in the rest as written.
+#[cfg(unix)]
+#[test]
+fn a_target_spelled_through_an_alias_of_the_root_is_rebased() {
+    let base = temp("alias");
+    let real = base.join("real");
+    let app = real.join("app");
+    std::fs::create_dir_all(app.join("node_modules/.pnpm/react")).unwrap();
+    std::fs::create_dir_all(real.join("other")).unwrap();
+    std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+    std::os::unix::fs::symlink(base.join("elsewhere"), app.join("out")).unwrap();
+    let alias = base.join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let dst = base.join("copy");
+    let rb = |t: PathBuf| rebased_target(&t, &app, &dst);
+    assert_eq!(rb(alias.join("app/node_modules/.pnpm/react")), Some(dst.join("node_modules/.pnpm/react")));
+    assert_eq!(rb(alias.join("app")), Some(dst.clone()));
+    assert_eq!(rb(alias.join("app/node_modules/gone")), Some(dst.join("node_modules/gone")));
+    assert_eq!(rb(alias.join("app/out/x")), Some(dst.join("out/x")));
+    assert_eq!(rb(alias.join("other/x")), None);
+    assert_eq!(rb(alias.clone()), None);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[cfg(windows)]
 #[test]
 fn rebasing_ignores_case_and_the_verbatim_prefix_on_windows() {
