@@ -69,6 +69,11 @@ export interface AgentTabSession {
    *  keystrokes that relaunched an agent by hand counted as a draft, and its follow-ups waited
    *  for a turn nobody was going to start. */
   idleSince?: number;
+  /** The folder the session started in, from its SessionStart hook. On an ssh tab it is a
+   *  path ON THAT HOST. Kept so Files can tell which agent tabs work inside a root without an
+   *  IPC call per tab (docs/file-tree.md §4.3). Absent when the start event carried none (the
+   *  initSession re-emit) and no earlier start of the same session did. */
+  cwd?: string;
 }
 
 /** Validate a hook payload's runtime field, defaulting to Claude. */
@@ -164,8 +169,10 @@ function createAgentStateStore() {
     // A new session (start, /clear) is a fresh stretch of idle even when the old one was idle.
     const sameIdleStretch = !freshStart && state === 'idle' && current?.state === 'idle' && current.sessionId === sessionId;
     const idleSince = state !== 'idle' ? undefined : sameIdleStretch ? current?.idleSince : Date.now();
+    // Only SessionStart reports the folder; every later state change of the same session keeps it.
+    const cwd = current?.sessionId === sessionId ? current.cwd : undefined;
     sessions = new Map(sessions);
-    sessions.set(tabId, { runtime, sessionId, state, toolName, toolDetail, read, updatedAt, idleSince });
+    sessions.set(tabId, { runtime, sessionId, state, toolName, toolDetail, read, updatedAt, idleSince, cwd });
 
     // Propagate permission state to activityStore tab state so workspace sidebar shows alert.
     // Clear alert when leaving permission state (but only if we set it).
@@ -362,8 +369,8 @@ function createAgentStateStore() {
     },
 
     async init() {
-      const u1 = await listen<{ session_id: string; tab_id: string; source?: string; runtime?: string }>('agent-hook-session-start', (e) => {
-        const { session_id, tab_id, source } = e.payload;
+      const u1 = await listen<{ session_id: string; tab_id: string; source?: string; runtime?: string; cwd?: unknown }>('agent-hook-session-start', (e) => {
+        const { session_id, tab_id, source, cwd } = e.payload;
         if (!tab_id) return;
         const runtime = runtimeOf(e.payload);
         // A session that has just STARTED is up and waiting for input — idle, not active.
@@ -385,6 +392,14 @@ function createAgentStateStore() {
         }
         // Only a compaction is activity; a start or resume is not (see `updatedAt`).
         setState(tab_id, session_id, started, undefined, undefined, runtime, source === 'compact', started === 'idle');
+        // Keep the folder the hook reported (the field is the runtime's, so check its type).
+        if (typeof cwd === 'string' && cwd) {
+          const s = sessions.get(tab_id);
+          if (s && s.cwd !== cwd) {
+            sessions = new Map(sessions);
+            sessions.set(tab_id, { ...s, cwd });
+          }
+        }
         // ...and mark that idle READ: "idle + unread" is the finished-something-you-have-not-
         // seen signal that fills the tab dot and drives the workspace all-done indicator.
         // Coming up at startup is not a result the human missed.
