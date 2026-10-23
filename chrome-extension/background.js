@@ -363,6 +363,9 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener(async ({ sourceTabId,
   if (!tab) return;
   const win = await chrome.windows.get(tab.windowId).catch(() => null);
   if (!recent && win?.type !== 'popup') return; // the human's own; the group guard below releases it
+  // Chrome may have woken this worker for the event itself, before its socket to maiTerm is open.
+  await connect(opener.host).catch(() => {});
+  for (let i = 0; i < 20 && conns.get(opener.host).status !== 'connected'; i++) await new Promise((r) => setTimeout(r, 100));
   await link(opener.host, { id: opener.maitermTabId, name: opener.maitermTabName }, tab, sourceTabId).catch(() => {});
 });
 
@@ -370,10 +373,13 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener(async ({ sourceTabId,
 // from a grouped tab with it; "New tab to the right" too) would read as the agent's: take it out.
 // After a moment, so a tab about to join its opener's agent isn't released first.
 function guardGroup(tabId) {
-  setTimeout(async () => {
-    const links = await getLinks();
-    if (links.some((l) => l.chromeTabId === tabId)) return;
-    await releaseIfOurs({ id: tabId }, links);
+  // In the queue: a join stores its link only when `link()` finishes, and a check outside it could
+  // read the list just before that and release a tab that is joining.
+  setTimeout(() => {
+    mutateLinks(async (links) => {
+      if (!links.some((l) => l.chromeTabId === tabId)) await releaseIfOurs({ id: tabId }, links);
+      return null;
+    }).catch(() => {});
   }, 600);
 }
 chrome.tabs.onUpdated.addListener((tabId, change) => {

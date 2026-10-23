@@ -60,17 +60,22 @@ export async function mark(link, links, carried) {
     if (win.type !== 'normal') return undefined;
     const agentGroup = await agentGroupIn(link, links, tab.windowId);
 
+    const here = async () => {
+      const before = tab.index > 0 ? (await chrome.tabs.query({ windowId: tab.windowId, index: tab.index - 1 }))[0] : undefined;
+      return { windowId: tab.windowId, index: tab.index, afterTabId: before?.id ?? null };
+    };
     let placement;
     if (carried && tab.groupId === carried.groupId) {
-      placement = carried;
+      // A joined tab was born in its opener's group and never had another place; moving it to
+      // another agent's group moves it, so where it is now becomes the place to put it back.
+      placement = carried.joined && carried.groupId !== agentGroup ? await here() : carried;
     } else if (tab.groupId !== NONE && tab.groupId === agentGroup) {
       // Chrome put it there itself (opened from one of the agent's tabs): it was never anywhere else.
       return { windowId: tab.windowId, groupId: agentGroup, joined: true };
     } else if (tab.groupId !== NONE) {
       return undefined; // the human's own group
     } else {
-      const before = tab.index > 0 ? (await chrome.tabs.query({ windowId: tab.windowId, index: tab.index - 1 }))[0] : undefined;
-      placement = { windowId: tab.windowId, index: tab.index, afterTabId: before?.id ?? null };
+      placement = await here();
     }
 
     let groupId = agentGroup;
@@ -87,11 +92,24 @@ export async function mark(link, links, carried) {
   }
 }
 
+/** Chrome refuses tab edits while the human is dragging a tab ("Tabs cannot be edited right
+ *  now"): wait and try again, or a link ending mid-drag would leave its tab in the group. */
+async function retry(fn) {
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (i >= 10 || !/cannot be edited/i.test(String(e?.message ?? e))) throw e;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+}
+
 /** Out of its group; Chrome pulls a tab moved between two members of a group back into it. */
 async function ungroupFully(tabId) {
-  await chrome.tabs.ungroup(tabId);
+  await retry(() => chrome.tabs.ungroup(tabId));
   const t = await chrome.tabs.get(tabId);
-  if (t.groupId !== NONE) await chrome.tabs.ungroup(tabId);
+  if (t.groupId !== NONE) await retry(() => chrome.tabs.ungroup(tabId));
 }
 
 /** The link ended: out of the group, and back after the tab it followed (else its old index). */
@@ -101,7 +119,7 @@ export async function unmark(link) {
   try {
     const tab = await chrome.tabs.get(link.chromeTabId);
     if (tab.groupId !== p.groupId) return; // the human moved it; leave it where they put it
-    await chrome.tabs.ungroup(tab.id);
+    await retry(() => chrome.tabs.ungroup(tab.id));
     if (p.joined || tab.windowId !== p.windowId) return;
     const after = p.afterTabId != null ? await chrome.tabs.get(p.afterTabId).catch(() => null) : null;
     let index;
@@ -110,7 +128,7 @@ export async function unmark(link) {
       const now = await chrome.tabs.get(tab.id);
       index = after.index < now.index ? after.index + 1 : after.index;
     } else index = p.index;
-    await chrome.tabs.move(tab.id, { index });
+    await retry(() => chrome.tabs.move(tab.id, { index }));
     // Landed between two of the agent's remaining tabs: Chrome regroups it, so take it out again.
     const moved = await chrome.tabs.get(tab.id);
     if (moved.groupId !== NONE) await ungroupFully(tab.id);
