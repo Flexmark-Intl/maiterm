@@ -92,7 +92,9 @@ replaces):
 | Land check | Optional command per repo that must pass in the worker's worktree before a land (e.g. `npm run check`) |
 | Setup command | Per repo, run in every new worktree before its agent starts (e.g. `npm ci`) |
 | Models | Coordinator and worker runtime/model/effort (default: Claude, coordinator lower effort, as Projects does) |
-| Tools | What the Hive can make things with: detected CLIs (ffmpeg, ImageMagick, sox, Blender…) and the MCP servers the agents have (§10.3). Read-only; it tells the coordinator what is really available |
+| Tools | What the Hive can make things with: generation MCP servers, skills, local CLIs, ComfyUI (§10.3). Detected; it tells the coordinator what is really available, and offers the `/generate` skill as an optional install |
+| Budget | Dollars the Hive may spend on paid generation (default $10). A rule agents follow and a total the human watches (§10.3) |
+| Push after land | Off by default. On: each land to Base also pushes that repo's Base (§8.5) |
 
 On **Create**, maiTerm:
 
@@ -402,7 +404,8 @@ exists.
 | Land a worker into Base (default mode) | None: the coordinator calls `hiveLand`, and maiTerm merges behind its guards (§8) |
 | Land a worker (approval mode) | The human, on a land card; merging the integration branch into Base is the human's, outside the Hive |
 | Deliver assets into a folder | None for new files; overwriting anything is the human's (§10.6) |
-| Push | Never automatic in v1; landing is local (§8.5) |
+| Push | Only if the Hive's Push after land setting is on (default off), never forced (§8.5) |
+| Spend past the budget | The human, on a blocker the agent raises first (§10.3) |
 | A worker's permission prompt | The human, in the worker's column, or the phone |
 
 The window's Overlord engine leaves Hive tabs alone. A Hive workspace is `overlord_exempt` by
@@ -479,7 +482,11 @@ branches are kept.
 
 ### 8.5 Pushing
 
-Landing is local. Whether a land to Base also pushes is an open question (§14).
+Landing is local unless the Hive's **Push after land** setting is on (decided 2026-10-23: a
+setting, default off). When it's on, a land to Base pushes that repo's Base to its upstream right
+after the fast-forward. A push that's refused (the remote moved, auth) doesn't undo the land.
+The card shows "Landed · push held: <reason>", the coordinator is told, and the next land pushes
+both. It never force-pushes.
 
 ## 9. Shared memory
 
@@ -539,7 +546,7 @@ Asset {
   title, caption?,
   made_by: { tab_id, role, worker_title } | "human",
   task_id?, created_at,
-  recipe?: { tool, model?, prompt?, negative?, seed?, params?: json, source_url? },
+  recipe?: { tool, model?, prompt?, negative?, seed?, params?: json, source_url?, cost_usd? },
   parents: [asset id],          // what it was derived from: a variant, an edit, an upscale, a cut
   status: "" | "picked" | "final" | "rejected",
   starred, tags: [string], collections: [collection id],
@@ -558,12 +565,36 @@ Collection { id, name, asset_ids (ordered), cover? }
 
 ### 10.3 How agents make and file assets
 
-**Making** is whatever the Hive's agents can really run: MCP servers for image, video and audio
-generation (including any the human has connected through maiTerm's MCP proxy,
-`docs/mcp-proxy.md`), and local tools (ffmpeg, ImageMagick, sox, Blender, ComfyUI's API…). The
-sheet's **Tools** row (§3) lists what was detected, and the brief carries the same list, so the
-coordinator plans with real tools. An agent renders into its `scratch/` (a generator that answers
-with a URL is downloaded there first), then files the result.
+**Making** is whatever the Hive's agents can really run. The sheet's **Tools** row (§3) detects
+these, in this order (decided 2026-10-23), and the brief carries the same list, so the
+coordinator plans with real tools:
+
+| Kind | Detected how | Examples |
+|---|---|---|
+| Hosted generation APIs as MCP servers | The agents' MCP config, including entries served by maiTerm's MCP proxy (`docs/mcp-proxy.md`) | Higgsfield (one MCP, 30+ image and video models), fal.ai, Kling, WaveSpeed AI, Kie.ai |
+| Skills | `SKILL.md` folders the agents load (user and project scope) | The `/generate` skill (Sabrina Ramonov's, built on a RoboNuggets guide: picks the cheapest capable model on Kie.ai, quotes the cost, keeps a cost ledger), RoboNuggets' `higgsfield-skill` and `seedance-skill`. The sheet offers `/generate` as an optional install to boost what a Hive can make |
+| Local CLIs | On `PATH` | ffmpeg, ImageMagick, sox, Blender |
+| Local ComfyUI | Its API answering on its configured port | Workflows run through the HTTP API |
+
+An agent renders into its `scratch/`. A generator that answers with a URL is downloaded there
+first, and a skill that writes to a folder of its own is pointed at `scratch/` where it allows it.
+The agent then files the result.
+
+**Paid generation spends real money**, and a Hive can run many workers at once. So a Hive has a
+**budget** (sheet and settings, in dollars; default $10):
+
+- An asset's recipe carries its **cost** where the generator reports one. The `/generate` skill
+  and most hosted APIs quote before running. The Hive header shows the running total against
+  the budget.
+- The brief carries the budget and the rule: **before a spend that would cross it, stop and ask
+  the human** with a task blocker (a Needs-you card), never decide alone.
+- A skill's own "approve this cost?" question, asked inside a hidden worker, arrives as a
+  Needs-you card like any other question. The Hive's instructions can pre-approve spends under a
+  per-item amount so workers don't stall on every 3-cent frame.
+- This accounting is **self-reported**. maiTerm can't see inside an API call an agent makes
+  directly, so the budget is a rule agents follow plus a total the human watches, not a wall.
+  The only hard limit is the provider account's own credit, which is why the sheet says so next
+  to the field.
 
 **Filing**, all Hive agents:
 
@@ -577,8 +608,9 @@ with a URL is downloaded there first), then files the result.
 | `galleryDeliver {assets \| collection, folder, names?}` | Coordinator: §10.6 |
 
 **`galleryAdd` takes a path only from the caller's own folders**: its `scratch/`, its worktrees,
-or the system temp directory, matched whole against the canonical path, with symlinks resolved
-first (the path-authorization memory: never a prefix test). The gallery is reachable from the
+the system temp directory, or an **output folder the human listed** in Hive settings for a tool
+that writes only to its own place. It's matched whole against the canonical path, with symlinks
+resolved first (the path-authorization memory: never a prefix test). The gallery is reachable from the
 phone later, so it mustn't become a way to lift any file on the machine into view.
 
 Every agent's brief says: anything you produce that a person would look at goes in the gallery,
@@ -737,10 +769,10 @@ Decided 2026-10-23:
 6. **Gallery:** per Hive, immutable assets with recipes and lineage, filed by tool, owned by
    Rust (§10). Self-answered likewise.
 
-Open:
-
-7. Does a land to Base also push Base to its upstream?
-8. Which generators should the brief and the Tools row know about first (§10.3)?
+7. **Push:** a Hive setting, default off (§8.5).
+8. **Generators:** hosted APIs as MCP servers, skills, local CLIs and local ComfyUI, with Kling,
+   fal.ai, WaveSpeed AI, Kie.ai and Higgsfield named, and the `/generate` skill offered as an
+   optional install (§10.3). Paid generation brings a per-Hive budget, self-answered.
 
 ## 15. Build order
 
