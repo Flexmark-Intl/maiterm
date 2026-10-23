@@ -50,6 +50,7 @@ description: Complete list of maiTerm keyboard shortcuts.
 | `Cmd+Shift+E` | Toggle task panel ([Tasks](/features/tasks/)) |
 | `Cmd+Shift+J` | Open the [Workstream Loom](/features/loom/); press again to go back |
 | `Cmd+B` | Toggle sidebar |
+| `Cmd+Shift+B` | [Files](/features/files/): open and focus, focus, or close |
 | `Cmd+F` | Find in terminal |
 | `Cmd+K` | Clear terminal + scrollback |
 | `Cmd+` `+` | Zoom in |
@@ -58,6 +59,32 @@ description: Complete list of maiTerm keyboard shortcuts.
 | `Cmd+,` | Preferences |
 | `Cmd+/` | Help |
 | `Cmd+Q` | Quit |
+
+## Files
+
+While the [Files](/features/files/) tree has focus.
+
+| Shortcut | Action |
+|----------|--------|
+| `↑` `↓` `PgUp` `PgDn` `Home` `End` | Move |
+| `→` / `←` | Open a folder or step in / close it or go to its parent |
+| `Opt+→` / `Opt+←` | Open / close every folder below |
+| `Space` | Preview, keeping focus in the tree |
+| `Enter` | Open file / toggle folder |
+| `Cmd+Enter` | Open to the side |
+| `Opt+Enter` | Add path(s) to the followed tab (never sent) |
+| `Shift+Up` / `Shift+Down` · `Cmd+A` | Extend selection / select all |
+| `Cmd+Opt+C` | Copy path (`Cmd+Opt+Shift+C`: relative) |
+| `Cmd+Shift+.` | Show / hide hidden files |
+| `F2` | Rename |
+| `Cmd+Backspace` | Move to Trash (`Cmd+Opt+Backspace`: delete permanently, asked first) |
+| `Cmd+C` / `Cmd+X` / `Cmd+V` | Copy / cut / paste files |
+| `Cmd+Z` | Undo the last file operation in this folder |
+| `a`–`z` | Jump to the next name starting with what you type |
+| `/` or `Cmd+F` | Find a file: arrows move, Enter opens, Esc puts the tree back |
+| `Esc` | Close find, then clear the selection, then back to the terminal |
+
+On Windows and Linux, copy path is `Shift+Alt+C` (`Ctrl+Shift+Alt+C` for relative), and `Delete` moves to the trash (Recycle Bin on Windows), with `Shift+Delete` to delete permanently.
 
 ## Editor
 

@@ -9,7 +9,8 @@ maiTerm includes a full-featured code editor built on CodeMirror 6, living along
 
 ## Features
 
-- **Click to open** — click any file path in terminal output to open it in an editor tab
+- **Click to open** — click any file path in terminal output to open it in an editor tab. A file that's already open is brought forward instead of opened twice, however the path is spelled (`./src/a.ts`, `../x`, `~/notes`); the same path on an SSH host and on this computer are different files
+- **Files** — browse the project in the [Files](/features/files/) column; a single click opens a file in an italic preview tab that the next click reuses, and **Reveal in Files** on a tab's menu shows its file in the tree
 - **Cmd+O** — file dialog that defaults to the active terminal's CWD
 - **Local + remote files** — remote files read/written via SCP, transparent to the user
 - **50+ languages** — syntax highlighting via CodeMirror 6 first-class packages and legacy StreamLanguage modes
@@ -53,7 +54,7 @@ Image files (PNG, JPG, GIF, WebP, SVG, AVIF, BMP, ICO) open in a preview tab wit
 
 ## Remote Files
 
-Files on remote servers are accessed transparently via SCP. The SSH command is extracted from the active terminal's foreground process. Files over 2MB or binary files are rejected with a user-friendly error.
+Files on remote servers are accessed transparently via SCP. The SSH command is extracted from the active terminal's foreground process, keeping the options that reach the host (a port, key file, jump host or `-o` option), and when maiTerm's bridge tunnel to that host is up, the transfers go through it — so a host you reach with a password works too. Files over 2MB or binary files are rejected with a user-friendly error.
 
 Opening a remote file reads its bytes straight into the editor and deletes the transfer temp right away, so there's normally no local file for tooling to point at. The tab's right-click menu closes that gap:
 

@@ -21,7 +21,7 @@ maiTerm's terminal does its heavy lifting in Rust: alacritty_terminal handles VT
 - **Multi-window** — open additional windows, duplicate windows with full tab context
 - **Default shell on Windows** — **Preferences → Default Shell** picks the shell for new tabs. **Automatic** uses Git Bash when Git for Windows is installed, started as a login shell, and PowerShell when it isn't; see [Claude Code on Windows](/guides/getting-started/#claude-code-on-windows)
 - **Per-tab command history** — each tab maintains its own shell history, cloned tabs inherit it
-- **File drop** — drag files onto a terminal to paste paths; over SSH, files are SCP'd to the remote CWD automatically, with live upload progress you can cancel
+- **File drop** — drag files onto a terminal to paste paths, quoted the way the shell needs (PowerShell and cmd included) and never sent; over SSH, files are SCP'd to the remote CWD automatically, with live upload progress you can cancel
 - **Image paste** — paste clipboard images (Cmd+V) into agent sessions (Claude Code, Codex) as temp file paths
 
 ## Composer Dock

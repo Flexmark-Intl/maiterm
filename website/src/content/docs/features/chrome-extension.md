@@ -86,7 +86,7 @@ A tab a linked page opens joins that page's agent by itself, so a flow like "Sig
 Linking a tab that's already linked to another agent moves it to the one you choose.
 
 :::note
-Several tabs per agent and popups joining need a maiTerm release after 3.11.0. In 3.11.0 an agent has one tab, and linking another replaces it.
+Several tabs per agent and popups joining need maiTerm 3.12.0 or later. In 3.11.0 an agent has one tab, and linking another replaces it.
 :::
 
 ## The tools

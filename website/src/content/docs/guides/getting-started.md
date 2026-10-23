@@ -46,6 +46,7 @@ If you want to build maiTerm from source, you'll need:
 - **Cmd+D** — split pane (duplicates current tab with full context)
 - **Cmd+Opt+N** — new workspace
 - **Cmd+E** — notes panel · **Cmd+Shift+E** — [task panel](/features/tasks/)
+- **Cmd+Shift+B** — [Files](/features/files/), the project tree that shows what your agents read and change
 - **Cmd+,** — open preferences
 - **Cmd+/** — help and keyboard shortcuts
 

@@ -56,7 +56,11 @@ It can also click, type, press keys and navigate in that tab, in your logged-in 
 
 In `chrome.storage.session`, which Chrome clears when the browser closes:
 
-- your links: the Chrome tab's id, title and address, and the maiTerm tab's id and name.
+- your links: the Chrome tab's id, title and address, the maiTerm tab's id and name, the short
+  handle the agent knows the tab by (`b1`, `b2`…), which linked tab opened it, and where the tab
+  sat before it joined the agent's tab group, so it can go back there;
+- the highest handle each maiTerm tab has used, so a closed tab's handle is never given to a new
+  page.
 
 Console and network logs are kept in memory only while a tab is linked (the last 200 console
 messages and 300 requests), and are discarded when the link ends.

@@ -221,9 +221,19 @@ An agent can reload its own tab straight away — it's the one interrupted — b
 
 A bridge follows the [Agent Bridge picker](/features/agent-bridge/#bridging-two-agents)'s rules: an agent already bridged with a third is neither connected to nor forked, and only Claude Code and Codex can be forked. If the asking agent is bridged with someone else, the card says that bridge closes. A fork's card says where the copy will run: on this machine, or — when the agent being forked is over SSH — on that host, showing the ssh command it will run through. If that has changed by the time you approve, nothing is done. A bridge to a tab that has since closed carries nothing, so `disconnectBridge` closes that one at once.
 
+### Files
+
+| Tool | Description |
+|------|-------------|
+| `revealInTree` | Point you at a file or folder in the [Files](/features/files/) column of the agent's own window. Never opens a closed column or takes the keyboard |
+| `getTreeSelection` | What you've selected in the Files tree: paths only, never contents |
+| `getAgentFileActivity` | The files an agent read and changed this turn or session, as maiTerm recorded them from its tool calls — its own tab's, or another agent tab's in its mesh |
+
+Listed while **Preferences → Files → Enable Files** is on. See [Files](/features/files/#agents-can-use-it-too).
+
 ### Browser
 
-With **Preferences → Chrome extension** on, an agent gets ten `browser…` tools for the one Chrome tab you linked to it: read its console errors and failing requests (with their responses), read the page, click, type, navigate and take screenshots, signed in as you. Only you link a tab. See [Chrome Extension](/features/chrome-extension/#the-tools).
+With **Preferences → Chrome extension** on, an agent gets ten `browser…` tools for the Chrome tabs you linked to it: read their console errors and failing requests (with their responses), read the page, click, type, navigate and take screenshots, signed in as you. Only you link a tab. See [Chrome Extension](/features/chrome-extension/#the-tools).
 
 ### Supervision
 
@@ -302,7 +312,7 @@ The same hooks that drive the state indicators can ring your phone. [maiLink](/f
 
 ## File Drop & Image Paste
 
-Drag files onto a terminal running an agent over SSH — maiTerm SCP uploads them to a temp directory on the remote and pastes the paths so the agent can read them as file references. On local terminals, file paths are pasted directly.
+Drag files onto a terminal running an agent over SSH — maiTerm SCP uploads them to a temp directory on the remote and pastes the paths so the agent can read them as file references. On local terminals, file paths are pasted directly. Either way the paths are only typed onto the line, never sent, and nothing is typed while the agent is showing a permission or trust dialog. The same goes for files dragged in from the [Files](/features/files/) tree.
 
 You can also paste images from your clipboard (Cmd+V) into an agent session. maiTerm saves the image to a temp file and pastes the path, so the agent can view it directly — useful for sharing screenshots, diagrams, or error messages without leaving the terminal.
 
