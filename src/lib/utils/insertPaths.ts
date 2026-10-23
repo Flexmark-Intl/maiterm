@@ -29,6 +29,7 @@ import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
 import { shellQuote, localShellKind } from '$lib/utils/shellQuote';
 import { isWindows } from '$lib/utils/platform';
 import { basenameOf } from '$lib/utils/pathForm';
+import { sameSshHost } from '$lib/filetree/remote';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 export interface InsertItem {
@@ -104,10 +105,12 @@ export async function insertPathsIntoTab(
   const remoteItems = items.filter((i) => i.remote);
   const localPaths = items.filter((i) => !i.remote).map((i) => i.abs);
 
-  // 5a. Paths already on a host go only to a tab on that same host.
+  // 5a. Paths already on a host go only to a tab on that same host. Compared by where each
+  //     connects (`sameSshHost`): Files names the host by its connect args and the bridge by
+  //     the stored command, and a tab with the bridge off has only its live ssh command.
   if (remoteItems.length > 0) {
-    const tabHost = sshCommand ? getBridgeInfo(tabId)?.hostKey ?? null : null;
-    if (!tabHost || remoteItems.some((i) => i.remote!.hostKey !== tabHost)) {
+    const tabHost = sshCommand ? getBridgeInfo(tabId)?.hostKey ?? sshCommand : null;
+    if (!tabHost || remoteItems.some((i) => !sameSshHost(i.remote!.hostKey, tabHost))) {
       return refuse('Those files are on another machine than this tab.');
     }
     if (localPaths.length > 0) return refuse('Local and remote files can’t be added together.');
