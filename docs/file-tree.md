@@ -479,7 +479,9 @@ enough. Three layers:
      under both limits) it sends one collapsed `Dir`/`Delta` per dirty folder and one
      `Git { full: true }`. A `Dir` a stall cut short carries on from its next chunk while the
      snapshot's generation is unchanged: restarting at chunk 0 never finished a folder of more
-     than ~32 chunks, because the client acks every 32 messages.
+     than ~32 chunks, because the client acks every 32 messages. A `Dir` whose last chunk is the
+     one that filled the window went out whole and is not resent. A cold-open chunk 0 sent before the sort that
+     met a paused or stalled sub was never sent, so that sub gets the whole listing from chunk 0.
 
 ### 5.5 Listing (`filetree/list.rs`)
 
