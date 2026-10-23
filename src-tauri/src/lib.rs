@@ -797,6 +797,7 @@ pub fn run() {
             filetree::commands::ft_retry_host,
             filetree::commands::ft_local_hostname,
             filetree::commands::ft_locate,
+            filetree::commands::ft_exists,
             filetree::commands::ft_stat,
             filetree::commands::ft_search,
             filetree::commands::ft_diff_base,

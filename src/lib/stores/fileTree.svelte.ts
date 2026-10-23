@@ -45,6 +45,7 @@ import { relToAbs, lastSegment, tildePath } from '$lib/filetree/paths';
 import { activeFileOf, lookupIn, settleActiveFile, type ActiveFileTarget } from '$lib/filetree/activeFile';
 import { ledgerPathIs, onAnotherHost, remoteWithin, sameSshHost } from '$lib/filetree/remote';
 import { followStep } from '$lib/filetree/follow';
+import { revealEarly, type RevealEarly } from '$lib/filetree/reveal';
 import { getBridgeInfo } from '$lib/stores/sshMcpBridge.svelte';
 import { AgentMarks, TurnTracker, agentLensItems, assignColours, changedThisTurn, cwdInRoot, folderBadges, isLasting, markWords, overlappingWriters, rowView, type RowAgentView } from '$lib/filetree/agents';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
@@ -2218,9 +2219,17 @@ function createFileTreeStore() {
   async function agentReveal(callerTab: string | undefined, path: string, select: boolean): Promise<{ result: string; note?: string }> {
     const name = callerTab ? tabName(callerTab) : 'an agent';
     const point = () => { pointer = { abs: path, tabId: callerTab ?? '', name }; };
+    // Every answer goes through `revealEarly`, which asks whether the path is there before
+    // anything raises a chip for it.
+    const answer = (e: RevealEarly) => {
+      if (e.chip) point();
+      return e.note ? { result: e.result, note: e.note } : { result: e.result };
+    };
     if (!workspacesStore.fileTreeOpen) {
-      point();
-      return { result: 'tree_closed' };
+      // No subscription: only a caller on this computer can be checked (here).
+      const local = (callerTab ? await liveTabHost(callerTab) : null) === null;
+      const [onDisk] = local ? await commands.ftExists(null, [path]).catch(() => [null]) : [null];
+      return answer(revealEarly({ open: false, onDisk, inRoot: null, humanBusy: false })!);
     }
     for (let i = 0; i < 40 && subId === null && (status === 'resolving' || status === 'opening'); i++) await new Promise((r) => setTimeout(r, 50));
     const sub = subId;
@@ -2234,12 +2243,10 @@ function createFileTreeStore() {
       return { result: 'outside_root', note: host ? `Files is showing a folder on ${place?.host_label ?? host}, another machine than yours.` : 'Files is showing a folder on your human’s computer, not on your host.' };
     }
     const [rel] = await commands.ftLocate(sub, [path]).catch(() => [null]);
+    const [onDisk] = rel == null ? [null] : await commands.ftExists(sub, [path]).catch(() => [null]);
     if (sub !== subId) return { result: 'outside_root', note: 'Files moved to another folder meanwhile.' };
-    if (rel == null) return { result: 'outside_root' };
-    if (edit || Date.now() - lastHumanInputMs < HUMAN_QUIET_MS) {
-      point();
-      return { result: 'noted' };
-    }
+    const early = revealEarly({ open: true, onDisk, inRoot: rel != null, humanBusy: !!edit || Date.now() - lastHumanInputMs < HUMAN_QUIET_MS });
+    if (early || rel == null) return answer(early ?? { result: 'outside_root', chip: false });
     if (rel === '') {
       scrollToTop();
       return { result: 'revealed' };

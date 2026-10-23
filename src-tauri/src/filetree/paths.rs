@@ -235,9 +235,37 @@ pub fn spelled_on_disk(root: &Path, rel: &str, fold: bool) -> bool {
     }
 }
 
+/// Is anything at this absolute path on this computer (a dangling link counts)? None when the
+/// disk can't say: a folder on the way refused us, or the path isn't absolute.
+pub fn on_disk(p: &Path) -> Option<bool> {
+    if !p.is_absolute() {
+        return None;
+    }
+    match std::fs::symlink_metadata(p) {
+        Ok(_) => Some(true),
+        // A file where the path needs a folder (`a.ts/x`) is as absent as no file at all.
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => Some(false),
+        Err(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn on_disk_tells_absent_from_unknown() {
+        let tmp = std::env::temp_dir().join(format!("ft-ondisk-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("a.ts"), "x").unwrap();
+        assert_eq!(on_disk(&tmp.join("a.ts")), Some(true));
+        assert_eq!(on_disk(&tmp), Some(true));
+        assert_eq!(on_disk(&tmp.join("nope.ts")), Some(false));
+        assert_eq!(on_disk(&tmp.join("no").join("such")), Some(false));
+        assert_eq!(on_disk(&tmp.join("a.ts").join("x")), Some(false), "a file on the way");
+        assert_eq!(on_disk(Path::new("relative/a.ts")), None);
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
 
     /// The source of a case-only rename still resolves where the volume folds case; only the
     /// stored spelling tells the two names apart. A volume that keeps case answers yes without

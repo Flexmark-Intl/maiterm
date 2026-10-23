@@ -952,6 +952,13 @@ export async function ftLocate(subId: number, absPaths: string[]): Promise<(stri
   return invoke('ft_locate', { subId, absPaths });
 }
 
+/** Whether each absolute path is on disk: on the subscription's root's machine (an ssh host
+ *  is asked, for a path under the root), or on this computer with `subId` null. Null = can't
+ *  tell (refused, a host not answering, outside a remote root). */
+export async function ftExists(subId: number | null, absPaths: string[]): Promise<(boolean | null)[]> {
+  return invoke('ft_exists', { subId, absPaths });
+}
+
 /** Size, mtime, exec bit, link target and (a changed file's) line counts for the hover tooltip. */
 export async function ftStat(subId: number, rel: string): Promise<StatInfo> {
   return invoke('ft_stat', { subId, rel });

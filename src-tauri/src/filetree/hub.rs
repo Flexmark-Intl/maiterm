@@ -1394,6 +1394,18 @@ impl RootHub {
         abs_paths.iter().map(|a| self.locate_one(a)).collect()
     }
 
+    /// Whether each absolute path is on disk on this root's machine. On a host only a path
+    /// under the root can be asked (one stat each); None where nothing could say.
+    pub fn exists(&self, abs_paths: &[String]) -> Vec<Option<bool>> {
+        abs_paths
+            .iter()
+            .map(|a| match &self.remote {
+                Some(r) => self.locate_one(a).and_then(|rel| r.exists(&rel)),
+                None => paths::on_disk(Path::new(a)),
+            })
+            .collect()
+    }
+
     fn locate_one(&self, abs: &str) -> Option<String> {
         if let Some(r) = &self.remote {
             // A remote editor's path is the host's own; names are as the host spells them.

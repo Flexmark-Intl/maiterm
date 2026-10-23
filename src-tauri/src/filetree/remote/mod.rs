@@ -1485,6 +1485,15 @@ impl RemoteRoot {
         ))
     }
 
+    /// Is `rel` on disk there? None when the host couldn't say (not answering, no python3).
+    pub fn exists(&self, rel: &str) -> Option<bool> {
+        match self.conn.call_through("stat", json!({ "root": self.root, "rel": rel }), &[], Duration::from_secs(10)) {
+            Ok(_) => Some(true),
+            Err(CallError::Op { code, .. }) if code == "gone" => Some(false),
+            Err(_) => None,
+        }
+    }
+
     /// One git command in the root, there (a fixed set of read-only subcommands).
     pub fn git(&self, args: &[String], timeout: Duration) -> Result<GitOut, RunError> {
         let req = json!({ "root": self.root, "args": args, "timeout": timeout.as_secs_f64() });

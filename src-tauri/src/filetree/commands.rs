@@ -150,6 +150,20 @@ pub async fn ft_locate(ft: State<'_, Arc<FileTreeState>>, sub_id: u64, abs_paths
     blocking(move || Ok(ft.hub_of(sub_id)?.locate(&abs_paths))).await
 }
 
+/// Whether each absolute path is on disk: with a subscription, on its root's machine (an ssh
+/// host is asked, for a path under the root); without one, on this computer. None where it
+/// can't be told. `revealInTree` asks this first, so a path that isn't there is answered as
+/// such and never raises a chip (§9.6).
+#[tauri::command]
+pub async fn ft_exists(ft: State<'_, Arc<FileTreeState>>, sub_id: Option<u64>, abs_paths: Vec<String>) -> Result<Vec<Option<bool>>, String> {
+    let ft = ft.inner().clone();
+    blocking(move || match sub_id {
+        Some(id) => Ok(ft.hub_of(id)?.exists(&abs_paths)),
+        None => Ok(abs_paths.iter().map(|p| super::paths::on_disk(std::path::Path::new(p))).collect()),
+    })
+    .await
+}
+
 /// Size, mtime, exec bit, link target and (for a changed file) its line counts against HEAD,
 /// for the hover tooltip only.
 #[tauri::command]
