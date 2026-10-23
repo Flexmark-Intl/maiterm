@@ -603,13 +603,17 @@ export class TreeModel {
   restoreReqs(): DirReq[] {
     return [...this.interest].map((r) => this.reqFor(r));
   }
+}
 
-  /** Index of the parent row of `rows[i]` (-1 for a root child). */
-  parentIndex(i: number): number {
-    const d = this.rows[i]?.depth ?? 0;
-    for (let j = i - 1; j >= 0; j--) if (this.rows[j].depth < d) return j;
-    return -1;
-  }
+/** Index of the parent row of `rows[i]` in the rows on screen (-1 for a root child or an
+ *  index outside them). Taken over the rows the index came from: find and the Changed lens
+ *  show a pruned list, and a lens index read against the real tree's rows named another row
+ *  (or ran off the end). */
+export function parentRowIndex(rows: Row[], i: number): number {
+  if (i < 0 || i >= rows.length) return -1;
+  const d = rows[i].depth;
+  for (let j = i - 1; j >= 0; j--) if (rows[j].depth < d) return j;
+  return -1;
 }
 
 // ── Pruned trees: find results and the Changed lens (§8, §9.4) ─────────────────────────────

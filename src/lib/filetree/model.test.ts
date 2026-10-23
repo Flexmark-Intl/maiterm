@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TreeEntry, TreeEvent } from '$lib/tauri/types';
 import { TREE_FLAG_HIDDEN, TREE_FLAG_IGNORED, TREE_FLAG_LOOP } from '$lib/tauri/types';
-import { TreeModel, ancestorsOf, joinRel, stickyAncestors, typeAheadMatch, windowOf, type Row } from './model';
+import { TreeModel, ancestorsOf, joinRel, parentRowIndex, stickyAncestors, typeAheadMatch, windowOf, type Row } from './model';
 
 // ── A fake disk that answers like the hub ──────────────────────────────────────────────────
 // Folders first, then by name: any fixed order will do, since the model must keep whatever
@@ -316,6 +316,17 @@ describe('TreeModel convergence protocol', () => {
 });
 
 describe('virtual list helpers', () => {
+  it('a parent is found in the rows the index belongs to, never past them', () => {
+    const r = (key: string, depth: number): Row => ({ key, depth, name: key, kind: 'f', flags: 0 });
+    // A pruned list (find, the Changed lens) longer than the real tree's rows.
+    const rows = [r('a', 0), r('a/b', 1), r('a/b/c.ts', 2), r('a/d.ts', 1), r('e.ts', 0)];
+    expect(parentRowIndex(rows, 2)).toBe(1);
+    expect(parentRowIndex(rows, 3)).toBe(0);
+    expect(parentRowIndex(rows, 4)).toBe(-1);
+    expect(parentRowIndex(rows, 12)).toBe(-1);
+    expect(parentRowIndex(rows, -1)).toBe(-1);
+  });
+
   it('a 100k-row tree renders a window of ~60 rows and splices a 5k subtree fast', () => {
     const root = Array.from({ length: 100_000 }, (_, i) => (i === 50 ? d('big') : f(`r${String(i).padStart(6, '0')}`)));
     const disk: Disk = new Map([['', root], ['big', Array.from({ length: 5000 }, (_, i) => f(`b${i}`))]]);

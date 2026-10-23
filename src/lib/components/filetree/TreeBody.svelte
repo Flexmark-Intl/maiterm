@@ -20,7 +20,7 @@
   import { getEditorByTabId, isEditorDirty } from '$lib/stores/editorRegistry.svelte';
   import * as commands from '$lib/tauri/commands';
   import { TREE_FLAG_IGNORED, TREE_FLAG_HIDDEN, TREE_FLAG_LOOP, TREE_FLAG_UNREADABLE } from '$lib/tauri/types';
-  import { highlightRuns, isExpandable, isFolderKind, stickyAncestors, typeAheadMatch, windowOf, type Row } from '$lib/filetree/model';
+  import { highlightRuns, isExpandable, isFolderKind, parentRowIndex, stickyAncestors, typeAheadMatch, windowOf, type Row } from '$lib/filetree/model';
   import type { GitLetter } from '$lib/tauri/types';
   import { iconFor } from '$lib/filetree/icons';
   import { treeAction, type TreeAction } from '$lib/filetree/keymap';
@@ -50,8 +50,6 @@
   let hasFocus = $state(false);
 
   const rows = $derived(fileTreeStore.rows);
-  /** Live across a reroot: the store's model is raw state, swapped while this stays mounted. */
-  const model = $derived(fileTreeStore.model);
 
   // ── Focus index, cached: a focus move must not scan 100k rows every time ───────────────
   let idxHint = 0;
@@ -89,9 +87,7 @@
 
   /** The focused row's parent guide, highlighted (§3.2). */
   const guide = $derived.by(() => {
-    const f = focusIdx;
-    if (f < 0 || !model) return null;
-    const p = model.parentIndex(f);
+    const p = parentRowIndex(rows, focusIdx);
     if (p < 0) return null;
     const d = rows[p].depth;
     let end = p + 1;
@@ -242,8 +238,8 @@
         break;
       case 'left':
         if (r && isExpandable(r) && fileTreeStore.isExpanded(r.key)) fileTreeStore.collapse(r.key);
-        else if (model && focusIdx >= 0) {
-          const p = model.parentIndex(focusIdx);
+        else {
+          const p = parentRowIndex(rows, focusIdx);
           if (p >= 0) moveTo(p);
         }
         break;
