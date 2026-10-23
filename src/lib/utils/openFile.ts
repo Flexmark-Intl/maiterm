@@ -1,32 +1,12 @@
-import type { EditorFileInfo } from '$lib/tauri/types';
-import { detectLanguageFromPath } from './languageDetect';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
-import { workspacesStore } from '$lib/stores/workspaces.svelte';
-import { getPtyInfo, sshArgsOf } from '$lib/tauri/commands';
+import { getPtyInfo } from '$lib/tauri/commands';
 import { error as logError } from '@tauri-apps/plugin-log';
-
-/**
- * Detect SSH command for a terminal tab.
- * Primary: process tree via getPtyInfo (detects live SSH sessions).
- * Fallback: tab's persisted restore_ssh_command (covers cases where
- * process tree walk fails, e.g. background jobs confuse child ordering).
- */
-function detectSshCommand(ptyInfo: { foreground_command: string | null }, tabId: string): string | null {
-  if (ptyInfo.foreground_command) return ptyInfo.foreground_command;
-
-  // Fallback: check persisted SSH command on the tab
-  for (const ws of workspacesStore.workspaces) {
-    for (const pane of ws.panes) {
-      const tab = pane.tabs.find(t => t.id === tabId);
-      if (tab) return tab.restore_ssh_command ?? tab.auto_resume_ssh_command ?? null;
-    }
-  }
-  return null;
-}
+import { openInEditor, sshCommandOfTab } from './openInEditor';
 
 /**
  * Open a file from a terminal context.
- * Creates the editor tab immediately — EditorPane handles loading and errors.
+ * Reuses an editor tab already showing the file; otherwise creates one at once —
+ * EditorPane handles loading and errors.
  */
 export async function openFileFromTerminal(
   workspaceId: string,
@@ -40,7 +20,7 @@ export async function openFileFromTerminal(
 
     // Get PTY info for SSH detection and local cwd
     const ptyInfo = await getPtyInfo(instance.ptyId);
-    const sshCommand = detectSshCommand(ptyInfo, tabId);
+    const sshCommand = await sshCommandOfTab(tabId, ptyInfo.foreground_command ?? null);
     const isRemote = !!sshCommand;
 
     // Resolve relative paths
@@ -59,19 +39,12 @@ export async function openFileFromTerminal(
       }
     }
 
-    const language = detectLanguageFromPath(resolvedPath);
-    const fileName = resolvedPath.split('/').pop() ?? resolvedPath;
-
-    const fileInfo: EditorFileInfo = {
-      file_path: resolvedPath,
-      is_remote: isRemote,
-      remote_ssh_command: isRemote ? sshArgsOf(sshCommand!) : null,
-      remote_path: isRemote ? resolvedPath : null,
-      language,
-    };
-
-    // Create tab immediately — EditorPane shows loading state and handles errors
-    await workspacesStore.createEditorTab(workspaceId, paneId, fileName, fileInfo);
+    await openInEditor({
+      abs: resolvedPath,
+      remote: sshCommand ? { sshCommand } : null,
+      workspaceId,
+      paneId,
+    });
   } catch (e) {
     logError(`Failed to open file: ${e}`);
   }

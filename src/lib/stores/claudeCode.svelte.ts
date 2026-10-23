@@ -23,6 +23,7 @@ import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
 import { getEditorRegistrySizes } from '$lib/stores/editorRegistry.svelte';
 import { getListenerStats } from '$lib/utils/listenCounter';
+import { editorFileInfo, openInEditor, sshCommandOfTab } from '$lib/utils/openInEditor';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 export interface PendingSelection {
@@ -610,42 +611,11 @@ function createClaudeCodeStore() {
   }) {
     const { filePath, tabId, targetTabId, startLine, endLine, startText, endText } = args;
     const fileName = filePath.split('/').pop() ?? filePath;
-    const { detectLanguageFromPath } = await import('$lib/utils/languageDetect');
-    const language = detectLanguageFromPath(filePath);
 
-    // Detect SSH context from the session's terminal tab
-    let sshCommand: string | null = null;
-    if (tabId) {
-      const instance = terminalsStore.get(tabId);
-      if (instance) {
-        try {
-          const ptyInfo = await commands.getPtyInfo(instance.ptyId);
-          sshCommand = ptyInfo.foreground_command;
-        } catch { /* ignore */ }
-      }
-      // Fallback: persisted SSH command on the tab
-      if (!sshCommand) {
-        for (const ws of workspacesStore.workspaces) {
-          for (const pane of ws.panes) {
-            const tab = pane.tabs.find(t => t.id === tabId);
-            if (tab) {
-              sshCommand = tab.restore_ssh_command ?? tab.auto_resume_ssh_command ?? null;
-              break;
-            }
-          }
-          if (sshCommand) break;
-        }
-      }
-    }
-    const isRemote = !!sshCommand;
-
-    const fileInfo = {
-      file_path: filePath,
-      is_remote: isRemote,
-      remote_ssh_command: isRemote ? commands.sshArgsOf(sshCommand!) : null,
-      remote_path: isRemote ? filePath : null,
-      language,
-    };
+    // The session's terminal tab says which machine the path is on.
+    const sshCommand = tabId ? await sshCommandOfTab(tabId) : null;
+    const remote = sshCommand ? { sshCommand } : null;
+    const fileInfo = editorFileInfo(filePath, remote);
 
     // Replace file in an existing tab if targetTabId is provided
     if (targetTabId) {
@@ -669,33 +639,8 @@ function createClaudeCodeStore() {
       return { success: true, filePath, tabId: targetTabId };
     }
 
-    // Check if file is already open
-    let existingTabId: string | null = null;
-    let existingWorkspaceId: string | null = null;
-    let existingPaneId: string | null = null;
-
-    outer: for (const ws of workspacesStore.workspaces) {
-      for (const pane of ws.panes) {
-        for (const tab of pane.tabs) {
-          if (tab.tab_type === 'editor' && tab.editor_file?.file_path === filePath) {
-            existingTabId = tab.id;
-            existingWorkspaceId = ws.id;
-            existingPaneId = pane.id;
-            break outer;
-          }
-        }
-      }
-    }
-
-    if (existingTabId && existingWorkspaceId && existingPaneId) {
-      await workspacesStore.setActiveTab(existingWorkspaceId, existingPaneId, existingTabId);
-      if (startLine !== undefined || startText) {
-        pendingSelections.set(existingTabId, { startLine, endLine, startText, endText });
-      }
-      return { success: true, filePath, tabId: existingTabId };
-    }
-
-    // Open in the session tab's pane, falling back to active workspace
+    // A new tab opens in the session tab's pane, falling back to the active workspace; a tab
+    // already showing the file is brought forward instead.
     const target = resolvePane(tabId);
     if (!target) {
       return { success: false, message: 'No active pane' };
@@ -705,13 +650,13 @@ function createClaudeCodeStore() {
     // Insert after the session tab (tabId) if it's in this pane
     const afterTabId = tabId && pane.tabs.some(t => t.id === tabId) ? tabId : pane.active_tab_id ?? undefined;
 
-    const tab = await workspacesStore.createEditorTab(ws.id, pane.id, fileName, fileInfo, afterTabId);
+    const opened = await openInEditor({ abs: filePath, remote, workspaceId: ws.id, paneId: pane.id, afterTabId });
 
     if (startLine !== undefined || startText) {
-      pendingSelections.set(tab.id, { startLine, endLine, startText, endText });
+      pendingSelections.set(opened.tabId, { startLine, endLine, startText, endText });
     }
 
-    return { success: true, filePath, tabId: tab.id };
+    return { success: true, filePath, tabId: opened.tabId };
   }
 
   async function handleOpenDiff(requestId: string, args: {
