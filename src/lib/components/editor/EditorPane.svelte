@@ -558,9 +558,11 @@
 
   /** Files renamed or moved this tab's file (the tab already names the new path): the buffer
    *  and its unsaved edits stay, the watcher follows the file to where it is now. The old
-   *  path's watcher may have seen the rename as a deletion, which it wasn't. */
+   *  path's watcher may have seen the rename as a deletion, which it wasn't. A remote file
+   *  (renamed in a root on its host) too: its poller would otherwise go on stat-ing the old
+   *  path, report the file deleted, and never see the new one change. */
   async function handleEditorRetargetFile(e: Event) {
-    if ((e as CustomEvent).detail?.tabId !== tabId || !isLocalFile) return;
+    if ((e as CustomEvent).detail?.tabId !== tabId) return;
     await stopWatching();
     fileDeleted = false;
     if (editorView) setEditorFilePath(tabId, editorFile.file_path);
