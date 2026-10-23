@@ -2153,6 +2153,72 @@ Each is an hour or less, and each can change the design:
     `startService`, `restartService {on}`, setup, a land check, a follow-up or watch script); each
     is refused or runs under the worker's sandbox profile (§6.8, §7.2).
 
+### 13.1 Results so far (2026-10-23)
+
+**Spike 3, by reading the code. The hidden size is set by four things:**
+- the mount fit (`TerminalPane.svelte:579-597`) runs even when the tab isn't visible;
+- a tab with no slot spawns at xterm's 80×24, or at its last saved size;
+- an approved `createTab` becomes the pane's ACTIVE tab (`commands/workspace.rs:360`), so in the
+  active workspace it isn't hidden at all;
+- `resize_terminal` (`commands/terminal.rs:242`) is the only caller of `resize_pty`, and it's
+  reached only from `TerminalPane`.
+
+The paths that call it:
+
+| Path | Lines in `TerminalPane.svelte` | Gate |
+|---|---|---|
+| `attachToSlot` | 480-491 | `visible` |
+| Reattach refit after a window reload | 956-966 | **none** |
+| ResizeObserver | 1188-1197 | `visible` |
+| Visibility effect | 1462-1472 | `visible` |
+| Font, cursor or theme change | 1537-1559 | `visible` |
+
+So `fixedSize` must:
+- skip `fitWithPadding` and all five `resizeTerminal` calls (one guard, ideally one `fitAndSync`);
+- not create the ResizeObserver;
+- spawn at the launch record's size;
+- on reattach, adopt the grid's size without resizing.
+
+SplitPane's `visibleTabs` (`SplitPane.svelte:51`) must leave out `hive_role` tabs, or its slot wins
+the portal. As a backstop, Rust locks the size of a Hive PTY and `resize_pty` refuses it with a
+warning. The build step's acceptance test:
+1. log every `resize_pty`;
+2. spawn at 120×40 and stream;
+3. open, hide and drag Show terminal; switch workspace; toggle Files and the sidebar; change font
+   and theme; reload the window and the tab; suspend and resume; restart maiTerm;
+4. expect zero `resize_pty` lines for that PTY and no duplicated blocks, with an ordinary tab as the
+   control.
+
+**Spike 15, by reading the code:** every path an agent tab can use to make something run, and the
+acceptance test for steps 4 and 5b. Each row is called from a worker tab, both as itself and with
+a foreign `tabId`, and must be refused or seen running under the sandbox profile.
+
+| Path | Today | A Hive worker |
+|---|---|---|
+| `createService` | no approval; `auto_start` defaults to true, so it runs on the next activation | refused |
+| `updateService` | can rewrite a human-defined service's command, env or cwd | refused; "human-defined" also needs a never-agent-edited flag |
+| `startService` / `restartService` | types the start line into an unsandboxed shell | only human-defined services on its own branch, through the queue, in a sandboxed service PTY |
+| `startStack` / `stopStack` | | refused |
+| Watch scripts | run as maiTerm, unsandboxed, after human approval | refused in v1, or sandboxed with approval still required and the unattended waiver ignored |
+| `createTab`, `restoreArchivedTab`, `switchTab` onto an unactivated tab | each replays a stored auto-resume | refused |
+| `setPreference` (e.g. `windows_shell`), `addMcpServer`, mesh sends | | refused |
+| Overlord tools | `driveTab`, `answerTabPrompt` and `recoverTab` can still TARGET a Hive tab | refuse a Hive target, or route it through the launch builder and `hiveAnswerWorker` |
+| maiTerm's own git on worker content | | passes `-c core.fsmonitor=false -c core.hooksPath=/dev/null` |
+
+Found beyond Hive:
+- **Fixed in `fb9f1c2f`:** `setAutoResume` and `setTriggerVariable` accepted any `tabId`, so any
+  agent could plant the command another tab replays.
+- **Still open, on the task board:**
+  - `updateService` can rewrite a human service;
+  - the stack verbs accept a foreign `tabId`;
+  - trigger variables are interpolated into commands unescaped.
+
+**Spike 12:** see item 12 above and §7.9.
+
+**Not yet run:** 1, 5, 6, 11 and 14 (launch facts) and 9, 10 and 13 (enforcement) were running when
+this was written. 4, 7 and 8 (measurements) and 2 (the live trust write) run after them, each
+alone.
+
 ## 14. Decisions
 
 Decided 2026-10-23:
