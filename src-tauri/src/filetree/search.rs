@@ -221,6 +221,9 @@ pub enum Change {
 struct Inner {
     index: Option<Index>,
     building: bool,
+    /// Bumped by every build: only the newest build's thread stays to evict, so a rebuild
+    /// can't leave the previous thread parked beside it.
+    build_gen: u64,
     /// Changes that arrived while a build ran: replayed onto the new index.
     pending: Vec<Change>,
     /// The human asked to index a home or volume root.
@@ -242,6 +245,9 @@ pub struct SearchState {
     inner: Mutex<Inner>,
     cv: Condvar,
     evict_after: Duration,
+    /// Index threads alive, for the test that a rebuild leaves none behind.
+    #[cfg(test)]
+    pub(crate) threads: std::sync::atomic::AtomicUsize,
 }
 
 impl SearchState {
@@ -255,6 +261,8 @@ impl SearchState {
             inner: Mutex::new(Inner::default()),
             cv: Condvar::new(),
             evict_after: EVICT_AFTER,
+            #[cfg(test)]
+            threads: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -286,10 +294,19 @@ impl SearchState {
         let need_build = inner.index.as_ref().is_none_or(|ix| ix.dirty);
         if need_build && !inner.building {
             inner.building = true;
-            let me = self.clone();
-            if let Err(e) = std::thread::Builder::new().name("ft-index".into()).spawn(move || me.build_and_keep()) {
-                inner.building = false;
-                log::warn!("filetree: couldn't start the index thread: {e}");
+            inner.build_gen += 1;
+            let (me, gen) = (self.clone(), inner.build_gen);
+            match std::thread::Builder::new().name("ft-index".into()).spawn(move || me.build_and_keep(gen)) {
+                // The previous build's thread, parked for eviction, wakes to see it is not
+                // the newest and exits.
+                Ok(_) => {
+                    self.cv.notify_all();
+                }
+                Err(e) => {
+                    inner.building = false;
+                    inner.build_gen -= 1;
+                    log::warn!("filetree: couldn't start the index thread: {e}");
+                }
             }
         }
         let indexing = inner.building;
@@ -300,8 +317,20 @@ impl SearchState {
         SearchResult { seq, indexing, items, unavailable: None }
     }
 
-    /// The index thread: build, publish, then stay to evict it once queries stop.
-    fn build_and_keep(self: Arc<Self>) {
+    /// The index thread: build, publish, then stay to evict it once queries stop, unless a
+    /// newer build (`gen`) has taken that over.
+    fn build_and_keep(self: Arc<Self>, gen: u64) {
+        #[cfg(test)]
+        let _alive = {
+            struct Alive(Arc<SearchState>);
+            impl Drop for Alive {
+                fn drop(&mut self) {
+                    self.0.threads.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            self.threads.fetch_add(1, Ordering::SeqCst);
+            Alive(self.clone())
+        };
         let started = Instant::now();
         let paths = self.list_paths();
         let mut ix = Index::from_paths(paths);
@@ -320,17 +349,14 @@ impl SearchState {
         // Eviction: wake once per idle period; a query since the last look keeps the index.
         let mut inner = self.inner.lock();
         loop {
-            let since = inner.last_query.map(|t| t.elapsed()).unwrap_or(self.evict_after);
-            if since >= self.evict_after {
-                inner.index = None;
-                inner.pending.clear();
+            if inner.build_gen != gen {
+                // A rebuild started: its thread takes over the eviction.
                 return;
             }
-            if inner.building || self.hub.strong_count() == 0 {
-                // A rebuild started: its thread takes over the eviction. A dead hub: done.
-                if self.hub.strong_count() == 0 {
-                    inner.index = None;
-                }
+            let since = inner.last_query.map(|t| t.elapsed()).unwrap_or(self.evict_after);
+            if since >= self.evict_after || self.hub.strong_count() == 0 {
+                inner.index = None;
+                inner.pending.clear();
                 return;
             }
             self.cv.wait_for(&mut inner, self.evict_after - since);

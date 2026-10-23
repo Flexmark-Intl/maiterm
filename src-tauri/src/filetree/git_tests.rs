@@ -496,3 +496,24 @@ fn find_builds_its_index_on_the_first_query_and_follows_the_disk() {
     ft.close(ack.sub_id);
     let _ = std::fs::remove_dir_all(&r);
 }
+
+/// Each rebuild's thread stays to evict the index; the one before it must leave rather than
+/// stay parked until five idle minutes, one more thread per rebuild in an active session.
+#[test]
+fn a_rebuild_leaves_one_index_thread_not_one_per_build() {
+    let r = repo("find-rebuild");
+    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let rec = Arc::new(Recorder::default());
+    let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    let ready = || rec.msgs.lock().iter().filter(|m| m.ev == TreeEvent::SearchReady).count();
+    for n in 1..=3u64 {
+        // A folder came or went: the next query rebuilds.
+        hub.search.note(vec![super::search::Change::Folder]);
+        assert!(hub.search(ack.sub_id, "a", 10, n, false).indexing);
+        wait_for("search_ready", Duration::from_secs(10), || ready() >= n as usize);
+    }
+    wait_for("one index thread", Duration::from_secs(5), || hub.search.threads.load(std::sync::atomic::Ordering::SeqCst) == 1);
+    ft.close(ack.sub_id);
+    let _ = std::fs::remove_dir_all(&r);
+}
