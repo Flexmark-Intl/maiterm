@@ -237,6 +237,8 @@ pub struct SearchState {
     /// The root is inside a repository: list with git, not a walk.
     in_repo: bool,
     shallow: bool,
+    /// The root's volume folds case (`relocate::case_insensitive`).
+    fold: bool,
     /// The newest query each subscription asked; an older one of its own still scanning gives
     /// up. Per subscription because `seq` is: each window counts its own from zero, and two
     /// windows on one root share this hub, so one shared counter let the window that had
@@ -251,12 +253,13 @@ pub struct SearchState {
 }
 
 impl SearchState {
-    pub fn new(hub: Weak<RootHub>, root: &Path, in_repo: bool, shallow: bool) -> Arc<SearchState> {
+    pub fn new(hub: Weak<RootHub>, root: &Path, in_repo: bool, shallow: bool, fold: bool) -> Arc<SearchState> {
         Arc::new(SearchState {
             hub,
             root: root.to_path_buf(),
             in_repo,
             shallow,
+            fold,
             latest: Mutex::new(HashMap::new()),
             inner: Mutex::new(Inner::default()),
             cv: Condvar::new(),
@@ -401,11 +404,21 @@ impl SearchState {
             note_locked(&mut inner, vec![Change::Folder]);
             return;
         }
+        // A volume that folds case finds both sides of a case-only rename (`git mv Foo.ts
+        // foo.ts` names both), so those, and only those, are asked how they are spelled on
+        // disk: asking for every name would cost a canonicalization each, on every run.
+        let mut folded: HashMap<String, usize> = HashMap::new();
+        if self.fold {
+            for p in named {
+                *folded.entry(super::paths::name_key(p, true)).or_default() += 1;
+            }
+        }
         let changes = named
             .iter()
             .filter_map(|p| {
                 let abs = super::paths::rel_to_native(&self.root, p).ok()?;
-                let file = std::fs::symlink_metadata(&abs).is_ok_and(|m| !m.is_dir());
+                let file = std::fs::symlink_metadata(&abs).is_ok_and(|m| !m.is_dir())
+                    && (!self.fold || folded.get(&super::paths::name_key(p, true)).is_none_or(|n| *n < 2) || super::paths::spelled_on_disk(&self.root, p, true));
                 Some(if file { Change::File(p.clone()) } else { Change::FileGone(p.clone()) })
             })
             .collect();
@@ -723,7 +736,7 @@ mod tests {
         for f in ["top", "cfg/a", "cfg/b", "src/deep/b.ts"] {
             std::fs::write(root.join(f), "").unwrap();
         }
-        let state = SearchState::new(Weak::new(), &root, true, false);
+        let state = SearchState::new(Weak::new(), &root, true, false, false);
         state.inner.lock().index = Some(ix(&["top", "cfg/a", "cfg/b", "gone", "src/deep/a.ts", "other"]));
         // `git rm --cached top` and `git rm --cached -r cfg` (reported `D` plus `? cfg/`): still
         // on disk. `gone` really is. `git mv src/deep/a.ts src/deep/b.ts`: the source went,
@@ -745,6 +758,30 @@ mod tests {
         let many: Vec<String> = (0..=MAX_RECONCILE).map(|n| format!("f{n}")).collect();
         state.reconcile(&many);
         assert!(state.inner.lock().index.as_ref().unwrap().dirty);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `git mv Foo.ts foo.ts` names both sides, and where the volume folds case a lookup of
+    /// `Foo.ts` still finds the file: only its stored spelling says the old name is gone.
+    /// (On a volume that keeps case the old name simply isn't there; the test asks the same.)
+    #[test]
+    fn a_case_only_rename_leaves_one_name_in_the_index() {
+        let tmp = std::env::temp_dir().join(format!("ft-case-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+        let root = crate::share::canon(&tmp);
+        std::fs::write(root.join("src/foo.ts"), "").unwrap();
+        std::fs::write(root.join("Other.ts"), "").unwrap();
+        let fold = crate::relocate::case_insensitive(&root);
+        let state = SearchState::new(Weak::new(), &root, true, false, fold);
+        // Built before the rename; `Other.ts` is a file a run names alone, in its own case.
+        state.inner.lock().index = Some(ix(&["src/Foo.ts", "Other.ts"]));
+        state.reconcile(&["src/foo.ts", "src/Foo.ts", "Other.ts"].map(String::from));
+        let inner = state.inner.lock();
+        let i = inner.index.as_ref().unwrap();
+        assert!(i.contains("src/foo.ts") && i.contains("Other.ts"));
+        assert!(!i.contains("src/Foo.ts"), "the rename's source is gone, however the volume looks it up");
+        assert_eq!(i.len(), 2);
+        drop(inner);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -811,7 +848,7 @@ mod tests {
 
     #[test]
     fn a_stale_query_stops_and_the_newest_answers() {
-        let state = SearchState::new(Weak::new(), Path::new("/nonexistent"), false, false);
+        let state = SearchState::new(Weak::new(), Path::new("/nonexistent"), false, false, false);
         state.inner.lock().index = Some(Index::from_paths((0..50_000).map(|n| format!("dir{}/file{n}.rs", n % 50))));
         // Seq 2 was asked before seq 1's scan began: seq 1 is stale from its first check.
         state.latest.lock().entry(7).or_default().store(2, Ordering::SeqCst);
@@ -824,7 +861,7 @@ mod tests {
 
     #[test]
     fn another_window_on_the_same_root_never_cancels_a_query() {
-        let state = SearchState::new(Weak::new(), Path::new("/nonexistent"), false, false);
+        let state = SearchState::new(Weak::new(), Path::new("/nonexistent"), false, false, false);
         state.inner.lock().index = Some(Index::from_paths((0..50_000).map(|n| format!("dir{}/file{n}.rs", n % 50))));
         // Window A has searched a hundred times; window B, counting from zero, is not stale.
         assert_eq!(state.query(1, "file", 500, 100, false).items.len(), 500);
@@ -835,7 +872,7 @@ mod tests {
 
     #[test]
     fn a_shallow_root_outside_a_repo_waits_for_the_human() {
-        let state = SearchState::new(Weak::new(), Path::new("/"), false, true);
+        let state = SearchState::new(Weak::new(), Path::new("/"), false, true, false);
         let r = state.query(1, "x", 10, 1, false);
         assert!(r.unavailable.is_some() && !r.indexing);
     }

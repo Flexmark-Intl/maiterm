@@ -217,6 +217,9 @@ impl RootHub {
                 let abs = paths::rel_to_native(&self.root, &rel).ok()?;
                 Some(match std::fs::symlink_metadata(&abs) {
                     Ok(m) if m.is_dir() => Change::Folder,
+                    // `mv Foo.ts foo.ts` reports both names, and where the volume folds case
+                    // both look up: the old one is gone if the disk spells it otherwise.
+                    Ok(_) if !paths::spelled_on_disk(&self.root, &rel, self.fold) => Change::FileGone(rel),
                     Ok(_) => Change::File(rel),
                     Err(_) => Change::Gone(rel),
                 })

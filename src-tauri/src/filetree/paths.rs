@@ -196,9 +196,74 @@ pub fn locate_components(root: &Path, fold: bool, abs: &str) -> Option<Vec<Strin
     strip_root(&canon_existing(p), root, fold)
 }
 
+/// Whether `rel`, which a lookup below `root` (canonical) just found, is stored spelled the
+/// way `rel` spells it. On a volume that folds case (`fold`) a lookup of `Foo.ts` finds
+/// `foo.ts`, so after a case-only rename the old name still looks present, and anything
+/// indexed by name (Find) would list the file twice. The stored spelling comes from
+/// canonicalizing, which on macOS and Windows answers each component as stored; a symlink is
+/// canonicalized only up to its folder (resolving it would leave its own name behind) and its
+/// name read from the folder's listing. Only a definite mismatch says no: a symlinked folder
+/// on the way, or a lookup that fails, keeps the answer the first lookup gave.
+pub fn spelled_on_disk(root: &Path, rel: &str, fold: bool) -> bool {
+    if !fold {
+        return true;
+    }
+    let Ok(parts) = split_rel(rel) else { return true };
+    let Some((leaf, dirs)) = parts.split_last() else { return true };
+    let Ok(abs) = rel_to_native(root, rel) else { return true };
+    let link = std::fs::symlink_metadata(&abs).is_ok_and(|m| m.file_type().is_symlink());
+    let (target, want) = match (link, abs.parent()) {
+        (true, Some(parent)) => (parent.to_path_buf(), dirs),
+        _ => (abs.clone(), &parts[..]),
+    };
+    let canon = crate::share::canon(&target);
+    let Ok(tail) = canon.strip_prefix(root) else { return true };
+    let got: Vec<String> = tail.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    if got.len() != want.len() {
+        return true;
+    }
+    if got.iter().zip(want).any(|(g, w)| norm(g) != norm(w)) {
+        return false;
+    }
+    if !link {
+        return true;
+    }
+    let Some(parent) = abs.parent() else { return true };
+    match std::fs::read_dir(parent) {
+        Ok(rd) => rd.flatten().any(|e| norm(&e.file_name().to_string_lossy()) == norm(leaf)),
+        Err(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The source of a case-only rename still resolves where the volume folds case; only the
+    /// stored spelling tells the two names apart. A volume that keeps case answers yes without
+    /// asking (both names really are there, or the first lookup failed).
+    #[test]
+    fn a_case_only_renames_source_is_not_spelled_on_disk() {
+        let tmp = std::env::temp_dir().join(format!("ft-spell-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(tmp.join("Dir")).unwrap();
+        let root = crate::share::canon(&tmp);
+        std::fs::write(root.join("Dir/foo.ts"), "").unwrap();
+        let fold = crate::relocate::case_insensitive(&root);
+        assert!(spelled_on_disk(&root, "Dir/foo.ts", fold));
+        assert!(spelled_on_disk(&root, "Dir/Foo.ts", false), "unfolded: nothing to ask");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("foo.ts", root.join("Dir/link.ts")).unwrap();
+            assert!(spelled_on_disk(&root, "Dir/link.ts", fold), "a symlink keeps its own name");
+        }
+        if fold {
+            assert!(!spelled_on_disk(&root, "Dir/Foo.ts", fold), "the leaf's case differs");
+            assert!(!spelled_on_disk(&root, "dir/foo.ts", fold), "a folder's case differs");
+            #[cfg(unix)]
+            assert!(!spelled_on_disk(&root, "Dir/LINK.ts", fold), "a symlink's case differs");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_rel_can_never_step_outside() {

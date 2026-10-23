@@ -438,15 +438,16 @@ impl RootHub {
         }
         // A home or volume root decorates only when it is itself a repository (§6.5).
         let git_on = repo.as_ref().is_some_and(|(r, _)| !shallow || r.toplevel_rel.is_empty());
+        let fold = crate::relocate::case_insensitive(&init.root);
         let hub = Arc::new_cyclic(|me: &Weak<RootHub>| RootHub {
             me: me.clone(),
             place: init.place,
-            fold: crate::relocate::case_insensitive(&init.root),
+            fold,
             git: match (&top, git_on) {
                 (Some(top), true) => Some(GitCore::new(me.clone(), &init.git, &init.root, top, network, init.git_slots.clone())),
                 _ => None,
             },
-            search: SearchState::new(me.clone(), &init.root, repo.is_some(), shallow),
+            search: SearchState::new(me.clone(), &init.root, repo.is_some(), shallow, fold),
             root: init.root,
             fs_class: init.fs_class,
             repo: repo.map(|(r, _)| r),
