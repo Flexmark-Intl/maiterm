@@ -150,6 +150,36 @@
 > - **Budgets measured** (release, this machine): a keystroke over 100k generated paths, worst of
 >   four queries, 17.6 ms (budget 30). Not yet checked in the running app: the dev check (a
 >   commit typed in a terminal decorates in about 150 ms).
+>
+> **As built, phase 2 review fixes (2026-10-22).** Where they changed the above:
+> - **A status run carries the `file_tree_git` epoch it started in**, and `apply` drops a run
+>   that outlived a change (checked under the data lock): a run still going when decorations
+>   were turned off used to publish onto the cleared data. The slow-repo clock starts once a
+>   git slot is held, so waiting behind other repos' runs never trips slow mode.
+> - **A root inside a wholly untracked folder** (git reports only `? new/sub/` or `? new/`)
+>   lists its own untracked top level with `ls-files -o --directory --no-empty-directory`,
+>   so it decorates like any other root.
+> - **NFC on macOS.** Git keys and the root's prefix are NFC whatever
+>   `core.precomposeunicode` says, numstat looks the row up the same way, and
+>   `OpenAck.nfc_names` tells the model to look a non-ASCII row (an on-disk NFD name) up by
+>   its NFC spelling. The find index keeps every path NFC there too, so the watcher's NFD name
+>   and `ls-files`' NFC one are one entry, and hits come back NFC (they open fine on APFS).
+> - **git runs with `LC_ALL=C`** in the tree: `diff_base` and the `safe.directory` check read
+>   stderr.
+> - **The index lists only what is on disk**: `ls-files -cdo -t` drops the `R` (deleted from
+>   the worktree) paths `-c` still lists. Git's deletions reconcile as files, so one the
+>   watcher already removed costs no rebuild, and an index-only deletion (`git rm --cached`,
+>   also listed untracked) is not reconciled as gone.
+> - **Stale queries are per subscription** (`ft_search`'s `seq` counts per window), so two
+>   windows on one root never cancel each other's scans. **Match positions are code points**:
+>   nucleo is fed one slot per code point, not its grapheme (or byte) `Utf32Str::new`.
+> - **Pruned views:** the parent guide and ArrowLeft work on the rows on screen
+>   (`parentRowIndex`). Toggling the Changed lens while find has a query moves the saved
+>   views with it, so Escape restores the right one. "Reveal in Files" under find or the lens
+>   puts both away first; an automatic reveal there only scrolls to the row if the lens shows
+>   it, and does not open folders in the hidden tree.
+> - **Compare with HEAD** diffs against an empty right side only when `ft_stat` says the file
+>   is gone; a file still on disk that `readFile` refuses (over 2 MB, not UTF-8) is an error.
 
 ## 1. Why
 
