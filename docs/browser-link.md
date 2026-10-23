@@ -183,7 +183,12 @@ appears ("Detached while handling command"). In practice it is a password manage
 So the driver retries the attach for 4 s (the popup usually closes on blur), then tells the agent
 in plain words to ask its human to dismiss it (a reload needs the debugger too); a read that was
 detached mid-command is repeated once, an action is reported as "may or may not have happened";
-and a detach that isn't the human's Cancel keeps the console and network record. Turning off the
+and a detach that isn't the human's Cancel keeps the console and network record. Keeping it has
+two consequences, both handled in driver.js: re-enabling Runtime/Log makes Chrome REPLAY the page's
+stored console messages, so messages at or before the newest one recorded (or the agent's last
+`clear`) are skipped (`consoleFloor`); and requests in flight across the gap never report their
+end, so they are marked `failed: unknown…`. Both "Detached while handling command" and "Debugger is
+not attached" (a detach between two commands) count as the same thing. Turning off the
 password manager's in-page autofill menu stops it at the source.
 
 Refs are `e<backendDOMNodeId>`: stable for a node's life and needing no per-snapshot table, so a

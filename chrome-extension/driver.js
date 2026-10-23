@@ -12,6 +12,11 @@ const attached = new Set();
 const consoleBuf = new Map();
 /** tabId → requestId → request, in arrival order (a Map keeps insertion order). */
 const netLog = new Map();
+/** tabId → the newest console message time recorded (ms), or when the agent cleared the buffer. */
+const consoleLast = new Map();
+/** tabId → console messages at or before this time are not recorded again. Set on a re-attach
+ *  that kept the buffer: enabling Runtime and Log makes Chrome replay the page's stored messages. */
+const consoleFloor = new Map();
 
 const send = (tabId, method, params = {}) => chrome.debugger.sendCommand({ tabId }, method, params);
 
@@ -42,7 +47,18 @@ export async function ensureAttached(tabId) {
     }
   }
   attached.add(tabId);
-  if (!consoleBuf.has(tabId)) consoleBuf.set(tabId, []);
+  if (consoleBuf.has(tabId)) {
+    // Re-attached with the record kept (§4): skip the replay, and mark requests that were in
+    // flight while detached, whose ends this session will never report.
+    consoleFloor.set(tabId, consoleLast.get(tabId) ?? 0);
+    for (const r of netLog.get(tabId)?.values() ?? []) {
+      if (r.status == null && r.failed == null && r.ms == null) r.failed = 'unknown: maiTerm was detached from the tab while this was in flight';
+    }
+  } else {
+    consoleBuf.set(tabId, []);
+    consoleFloor.delete(tabId);
+    consoleLast.delete(tabId);
+  }
   if (!netLog.has(tabId)) netLog.set(tabId, new Map());
   await send(tabId, 'Runtime.enable');
   await send(tabId, 'Page.enable');
@@ -74,11 +90,15 @@ export function forget(tabId, { keepLogs = false } = {}) {
   if (keepLogs) return;
   consoleBuf.delete(tabId);
   netLog.delete(tabId);
+  consoleLast.delete(tabId);
+  consoleFloor.delete(tabId);
 }
 
-function pushConsole(tabId, line) {
+function pushConsole(tabId, line, ts) {
   const buf = consoleBuf.get(tabId);
   if (!buf) return;
+  if (ts <= (consoleFloor.get(tabId) ?? -Infinity)) return; // replayed on re-attach, or cleared
+  if (ts > (consoleLast.get(tabId) ?? -Infinity)) consoleLast.set(tabId, ts);
   buf.push(line);
   if (buf.length > CONSOLE_KEEP) buf.splice(0, buf.length - CONSOLE_KEEP);
 }
@@ -137,15 +157,15 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     onNetwork(tabId, method, params);
   } else if (method === 'Runtime.consoleAPICalled') {
     const text = (params.args ?? []).map(remoteObjectText).join(' ');
-    pushConsole(tabId, { level: params.type, text, source: where(params.stackTrace), at: new Date(params.timestamp).toISOString() });
+    pushConsole(tabId, { level: params.type, text, source: where(params.stackTrace), at: new Date(params.timestamp).toISOString() }, params.timestamp);
   } else if (method === 'Runtime.exceptionThrown') {
     const d = params.exceptionDetails ?? {};
     const text = d.exception?.description ?? d.text ?? 'Uncaught exception';
-    pushConsole(tabId, { level: 'exception', text, source: where(d.stackTrace, d.url, d.lineNumber, d.columnNumber), at: new Date(params.timestamp).toISOString() });
+    pushConsole(tabId, { level: 'exception', text, source: where(d.stackTrace, d.url, d.lineNumber, d.columnNumber), at: new Date(params.timestamp).toISOString() }, params.timestamp);
   } else if (method === 'Log.entryAdded') {
     // Browser-side messages: CSP violations, failed resource loads, deprecations.
     const e = params.entry;
-    pushConsole(tabId, { level: e.level, text: e.text, source: e.url, origin: e.source, at: new Date(e.timestamp).toISOString() });
+    pushConsole(tabId, { level: e.level, text: e.text, source: e.url, origin: e.source, at: new Date(e.timestamp).toISOString() }, e.timestamp);
   }
 });
 
@@ -406,7 +426,11 @@ function consoleRead(tabId, args) {
   const buf = consoleBuf.get(tabId) ?? [];
   let messages = buf.slice();
   if (args.errors_only) messages = messages.filter((m) => ERROR_LEVELS.has(m.level));
-  if (args.clear) buf.length = 0;
+  if (args.clear) {
+    buf.length = 0;
+    // A later re-attach replays the page's messages; the cleared ones must stay cleared.
+    consoleLast.set(tabId, Date.now());
+  }
   return { messages, note: messages.length ? undefined : 'Nothing logged since maiTerm attached. Reload the page (browserNavigate "reload") to capture what it logs while loading.' };
 }
 
@@ -451,7 +475,9 @@ export async function runAction(tabId, action, args = {}) {
   try {
     return await perform(tabId, action, args);
   } catch (e) {
-    if (!/detached while handling command/i.test(String(e?.message ?? e))) throw e;
+    // Mid-command ("Detached while handling command") or between two commands ("Debugger is not
+    // attached to the tab"): the same thing to the agent.
+    if (!/detached while handling command|debugger is not attached/i.test(String(e?.message ?? e))) throw e;
     // Pushed out mid-command (another extension's frame appeared). A read is safe to repeat; an
     // action may or may not have happened, so the agent is told to look before repeating it.
     attached.delete(tabId);
