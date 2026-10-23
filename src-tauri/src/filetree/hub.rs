@@ -635,8 +635,7 @@ impl RootHub {
     /// paused or stalled, then whatever else it missed.
     fn flush(&self, sub: u64) {
         let health = self.health_event();
-        let mut relist = Vec::new();
-        {
+        let relist = {
             let dirs = self.dirs.lock();
             let mut subs = self.subs.lock();
             let Some(s) = subs.get_mut(&sub) else { return };
@@ -649,8 +648,8 @@ impl RootHub {
             if std::mem::take(&mut s.health_dirty) {
                 s.deliver(health);
             }
-            relist = s.flush_dirty(&dirs);
-        }
+            s.flush_dirty(&dirs)
+        };
         for rel in relist {
             self.request(&rel, Some(Waiter::Refresh { sub }));
         }
