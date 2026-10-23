@@ -8,9 +8,9 @@
 import type { EditorFileInfo } from '$lib/tauri/types';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
-import { canonicalEditorPath, getPtyInfo, sshArgsOf } from '$lib/tauri/commands';
+import { editorFileIdentities, getPtyInfo, sshArgsOf } from '$lib/tauri/commands';
 import { detectLanguageFromPath } from './languageDetect';
-import { findOpenEditor, revealsWorkspace } from './editorDedupe';
+import { findOpenEditor, localEditorPaths, revealsWorkspace } from './editorDedupe';
 import { basenameOf } from './pathForm';
 import { isWindows } from './platform';
 
@@ -62,17 +62,35 @@ export function editorFileInfo(abs: string, remote?: { sshCommand: string } | nu
   };
 }
 
+/**
+ * What each local path is on disk, keyed by the path, for `sameEditorFile`. Undefined when Rust
+ * can't say, which leaves the comparison to its lexical fallback.
+ */
+export async function localFileIdentities(paths: string[]): Promise<Map<string, string> | undefined> {
+  const unique = [...new Set(paths)];
+  if (unique.length === 0) return new Map();
+  const ids = await editorFileIdentities(unique).catch(() => null);
+  if (!ids || ids.length !== unique.length) return undefined;
+  return new Map(unique.map((p, i) => [p, ids[i]]));
+}
+
 export async function openInEditor(args: OpenInEditorArgs): Promise<OpenInEditorResult> {
-  // A local file is opened under one spelling (folder symlinks and `~` resolved in Rust), so a
-  // click on `./src/a.ts` from a /private/tmp cwd finds the tab the agent opened as /tmp/…/a.ts.
-  // A failed lookup opens the path as given; the comparison below still folds `.`/`..`.
-  const abs = args.remote ? args.abs : await canonicalEditorPath(args.abs).catch(() => args.abs);
+  // The tab keeps the caller's spelling: the agent's later saveDocument/checkDocumentDirty and
+  // getOpenEditors speak in it. Whether an open tab already shows the file is decided by what
+  // the file IS on disk (Rust), not by spelling, because open tabs carry whatever spelling they
+  // were opened with — the agent's /tmp/…, a Cmd+O pick, one saved by an older build — and a
+  // click's /private/tmp/… or wrong-case name is the same file.
+  const abs = args.abs;
   const fileInfo = editorFileInfo(abs, args.remote);
+  const identities = args.remote
+    ? undefined
+    : await localFileIdentities([abs, ...localEditorPaths(workspacesStore.workspaces)]);
   const hit = findOpenEditor(
     workspacesStore.workspaces,
     fileInfo,
     { workspaceId: args.workspaceId, paneId: args.paneId },
     isWindows(),
+    identities,
   );
   if (hit) {
     if (revealsWorkspace(hit, args.workspaceId, workspacesStore.activeWorkspaceId)) {

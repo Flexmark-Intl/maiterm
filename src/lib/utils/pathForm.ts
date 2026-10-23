@@ -14,15 +14,23 @@ export function basenameOf(path: string, windows: boolean): string {
 /**
  * The form two spellings of one path compare equal in, without touching the disk: `.` and
  * empty segments dropped, `..` folded into its parent. On Windows separators become `/` and
- * case is ignored, because the file system ignores it. Symlinks are not resolved here — the
- * opener canonicalizes local paths through Rust before they reach a tab (`canonicalEditorPath`).
+ * case is ignored, because the file system ignores it. Symlinks are not resolved here: a local
+ * file's identity comes from Rust (`editorFileIdentities`), and this is only its fallback.
+ *
+ * Folding `..` lexically is wrong under a symlinked folder (`/home/me/proj/../x` is
+ * `/data/x` when proj links to /data/proj), so pass `foldParent = false` for a path nothing can
+ * check against its disk — a file on an ssh host. Dropping `.` and empty segments is always safe.
  */
-export function pathKey(path: string, windows: boolean): string {
+export function pathKey(path: string, windows: boolean, foldParent = true): string {
   let p = windows ? path.replace(/\\/g, '/') : path;
   const absolute = p.startsWith('/');
   const out: string[] = [];
   for (const seg of p.split('/')) {
     if (seg === '' || seg === '.') continue;
+    if (!foldParent && seg === '..') {
+      out.push(seg);
+      continue;
+    }
     if (seg === '..' && out.length > 0 && out[out.length - 1] !== '..') {
       out.pop();
       continue;

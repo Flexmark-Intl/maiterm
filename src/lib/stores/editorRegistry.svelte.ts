@@ -49,6 +49,11 @@ export function getEditorByFilePath(filePath: string): { tabId: string; entry: E
   return undefined;
 }
 
+/** Every registered editor, for lookups that can't match on the stored path alone. */
+export function listEditors(): { tabId: string; entry: EditorRegistryEntry }[] {
+  return [...registry].map(([tabId, entry]) => ({ tabId, entry }));
+}
+
 /** Diagnostic snapshot for getDiagnostics. */
 export function getEditorRegistrySizes() {
   return {

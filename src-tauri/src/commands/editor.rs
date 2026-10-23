@@ -46,6 +46,45 @@ pub async fn canonical_editor_path(path: String) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// What a local file IS, for deciding whether two editor tabs would edit one file. Two spellings
+/// of one file get the same identity whatever the tab stored: a symlinked folder (`/tmp` vs
+/// `/private/tmp`), a symlink to the file, a mapped drive vs its UNC path, or a name typed in
+/// the wrong case on a case-insensitive disk. Comparing stored spellings can't do that, because
+/// a tab keeps the spelling it was opened with (the agent's own, a Cmd+O pick, one saved by an
+/// older build) and only the new request could ever be canonicalized.
+///
+/// An existing file is its device + inode on Unix, its fully canonicalized path on Windows (the
+/// file system ignores case there, so it is folded). A file that isn't there yet falls back to
+/// the canonical-folder spelling.
+fn editor_file_identity_blocking(path: &str) -> String {
+    let expanded = expand_tilde(path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(m) = std::fs::metadata(&expanded) {
+            return format!("inode:{}:{}", m.dev(), m.ino());
+        }
+    }
+    #[cfg(windows)]
+    {
+        let p = Path::new(&expanded);
+        if p.exists() {
+            return format!("path:{}", crate::share::canon(p).to_string_lossy().to_lowercase());
+        }
+    }
+    format!("path:{}", canonical_editor_path_blocking(path))
+}
+
+/// `editor_file_identity_blocking` for several local paths in one round trip, in order.
+#[command]
+pub async fn editor_file_identities(paths: Vec<String>) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        paths.iter().map(|p| editor_file_identity_blocking(p)).collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 #[derive(serde::Serialize)]
 pub struct ReadFileResult {
     pub content: String,
@@ -1608,6 +1647,45 @@ mod tests {
 
         // A folder that isn't there leaves the path alone.
         assert_eq!(canonical_editor_path_blocking("/no/such/dir/x.ts"), "/no/such/dir/x.ts");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn editor_file_identity_matches_every_spelling_of_one_file_and_only_that_file() {
+        let base = std::env::temp_dir().join(format!("ident-editor-{}", uuid::Uuid::new_v4()));
+        let src = base.join("repo").join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.ts"), "a").unwrap();
+        std::fs::write(src.join("b.ts"), "b").unwrap();
+        let id = |p: &Path| editor_file_identity_blocking(&p.to_string_lossy());
+        let a = id(&src.join("a.ts"));
+
+        // temp_dir() on macOS is the /var spelling of /private/var: a tab stored with either
+        // spelling (an older build, Cmd+O, the agent's own path) is the same file.
+        let canonical = crate::share::canon(&src).join("a.ts");
+        assert_eq!(id(&canonical), a);
+        assert_eq!(id(&base.join("repo").join(".").join("src").join("a.ts")), a);
+        assert_ne!(id(&src.join("b.ts")), a);
+
+        #[cfg(unix)]
+        {
+            // A symlinked folder and a symlink to the file both edit the same bytes.
+            std::os::unix::fs::symlink(&src, base.join("linked")).unwrap();
+            assert_eq!(id(&base.join("linked").join("a.ts")), a);
+            std::os::unix::fs::symlink(src.join("a.ts"), src.join("link.ts")).unwrap();
+            assert_eq!(id(&src.join("link.ts")), a);
+        }
+
+        // On a case-insensitive disk a wrong-case name opens the same file.
+        if src.join("A.TS").exists() {
+            assert_eq!(id(&src.join("A.TS")), a);
+        }
+
+        // A file not there yet is its canonical-folder spelling.
+        assert_eq!(
+            id(&src.join("new.ts")),
+            format!("path:{}", canonical.with_file_name("new.ts").to_string_lossy())
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

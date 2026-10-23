@@ -1,5 +1,5 @@
 import { terminalsStore } from '$lib/stores/terminals.svelte';
-import { getPtyInfo } from '$lib/tauri/commands';
+import { canonicalEditorPath, getPtyInfo } from '$lib/tauri/commands';
 import { error as logError } from '@tauri-apps/plugin-log';
 import { openInEditor, sshCommandOfTab } from './openInEditor';
 
@@ -37,6 +37,12 @@ export async function openFileFromTerminal(
           resolvedPath = ptyInfo.cwd.endsWith('/') ? ptyInfo.cwd + filePath : ptyInfo.cwd + '/' + filePath;
         }
       }
+    }
+    // A click has no spelling worth keeping (`cwd/./src/a.ts`, `cwd/../x`, `~/notes`), so a new
+    // tab gets the canonical one: folder resolved in Rust, file name as typed. A remote path
+    // can't be resolved from here and stays as joined.
+    if (!isRemote) {
+      resolvedPath = await canonicalEditorPath(resolvedPath).catch(() => resolvedPath);
     }
 
     await openInEditor({

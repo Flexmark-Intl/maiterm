@@ -74,3 +74,26 @@ describe('sameEditorFile path forms', () => {
     expect(sameEditorFile(remote('/A/b.ts', 'h'), remote('/a/b.ts', 'h'), true)).toBe(false);
   });
 });
+
+describe('sameEditorFile identities', () => {
+  it('matches two spellings Rust says are one file, whatever each tab stored', () => {
+    // A tab stored /tmp/x/a.ts (the agent's spelling, Cmd+O, an older build); the request is
+    // the canonical /private/tmp/x/a.ts. Lexically different, one file on disk.
+    const ids = new Map([['/tmp/x/a.ts', 'inode:1:2'], ['/private/tmp/x/a.ts', 'inode:1:2'], ['/repo/README.md', 'inode:1:3'], ['/repo/Readme.md', 'inode:1:3']]);
+    expect(sameEditorFile(local('/tmp/x/a.ts'), local('/private/tmp/x/a.ts'), false, ids)).toBe(true);
+    expect(sameEditorFile(local('/repo/README.md'), local('/repo/Readme.md'), false, ids)).toBe(true);
+    const workspaces = [ws('w1', [{ id: 'p1', tabs: [editor('e1', local('/tmp/x/a.ts'))] }])];
+    expect(findOpenEditor(workspaces, local('/private/tmp/x/a.ts'), {}, false, ids)?.tabId).toBe('e1');
+  });
+
+  it('trusts different identities over a lexical match', () => {
+    // /home/me/proj links elsewhere: proj/../shared is not /home/me/shared.
+    const ids = new Map([['/home/me/proj/../shared/x.ts', 'inode:1:4'], ['/home/me/shared/x.ts', 'inode:1:5']]);
+    expect(sameEditorFile(local('/home/me/proj/../shared/x.ts'), local('/home/me/shared/x.ts'), false, ids)).toBe(false);
+  });
+
+  it('never folds .. in a remote path, which nothing here can resolve', () => {
+    expect(sameEditorFile(remote('/home/me/proj/../shared/x.ts', 'h'), remote('/home/me/shared/x.ts', 'h'))).toBe(false);
+    expect(sameEditorFile(remote('/home/me/./shared//x.ts', 'h'), remote('/home/me/shared/x.ts', 'h'))).toBe(true);
+  });
+});

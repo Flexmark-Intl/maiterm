@@ -20,6 +20,10 @@ describe('pathKey', () => {
     expect(pathKey('/../a', false)).toBe('/a');
   });
 
+  it('keeps .. when asked not to fold it, still dropping . and empty segments', () => {
+    expect(pathKey('/home/me/proj/../shared//./x.ts', false, false)).toBe('/home/me/proj/../shared/x.ts');
+  });
+
   it('keeps case and backslashes on macOS/Linux', () => {
     expect(pathKey('/A/b\\c', false)).toBe('/A/b\\c');
   });

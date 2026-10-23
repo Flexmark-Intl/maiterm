@@ -5,7 +5,7 @@ import { hostLabel, isScriptKind, needsApproval, triggerText, type CreateArgs } 
 import * as commands from '$lib/tauri/commands';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
-import { getEditorByFilePath, getEditorByTabId } from '$lib/stores/editorRegistry.svelte';
+import { getEditorByFilePath, getEditorByTabId, listEditors } from '$lib/stores/editorRegistry.svelte';
 import { interpolateVariables, getVariables, setVariable, handleEnableAutoResume, getTriggerStats } from '$lib/stores/triggers.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { dispatch as dispatchNotification } from '$lib/stores/notificationDispatch';
@@ -23,7 +23,7 @@ import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
 import { getEditorRegistrySizes } from '$lib/stores/editorRegistry.svelte';
 import { getListenerStats } from '$lib/utils/listenCounter';
-import { editorFileInfo, openInEditor, sshCommandOfTab } from '$lib/utils/openInEditor';
+import { editorFileInfo, localFileIdentities, openInEditor, sshCommandOfTab } from '$lib/utils/openInEditor';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 export interface PendingSelection {
@@ -84,7 +84,7 @@ function createClaudeCodeStore() {
           result = await commands.readAppLogs(args as { lines?: number; level?: string; search?: string });
           break;
         case 'checkDocumentDirty':
-          result = handleCheckDocumentDirty(args as { filePath: string });
+          result = await handleCheckDocumentDirty(args as { filePath: string });
           break;
         case 'saveDocument':
           result = await handleSaveDocument(args as { filePath: string });
@@ -528,13 +528,13 @@ function createClaudeCodeStore() {
       for (const pane of ws.panes) {
         for (const tab of pane.tabs) {
           if (tab.tab_type === 'editor' && tab.editor_file) {
-            const registryEntry = getEditorByFilePath(tab.editor_file.file_path);
+            const registryEntry = getEditorByTabId(tab.id);
             tabs.push({
               uri: `file://${tab.editor_file.file_path}`,
               isActive: tab.id === pane.active_tab_id && ws.id === workspacesStore.activeWorkspaceId,
               label: tab.name,
               languageId: tab.editor_file.language ?? 'plaintext',
-              isDirty: registryEntry?.entry.isDirty ?? false,
+              isDirty: registryEntry?.isDirty ?? false,
             });
           }
         }
@@ -570,8 +570,27 @@ function createClaudeCodeStore() {
     return { folders, rootPath };
   }
 
-  function handleCheckDocumentDirty(args: { filePath: string }) {
-    const found = getEditorByFilePath(args.filePath);
+  /**
+   * The editor showing the file an agent names. Its spelling first; failing that, a local editor
+   * whose file is the same one on disk — a tab a terminal click opened as /private/tmp/… when the
+   * agent says /tmp/…, or one opened through a symlinked folder or a wrong-case name.
+   */
+  async function findEditorForAgentPath(filePath: string) {
+    const exact = getEditorByFilePath(filePath);
+    if (exact) return exact;
+    const locals = listEditors().filter(({ tabId }) => {
+      const tab = workspacesStore._locateTab(tabId)?.tab;
+      return !!tab?.editor_file && !tab.editor_file.is_remote;
+    });
+    if (locals.length === 0) return undefined;
+    const ids = await localFileIdentities([filePath, ...locals.map((e) => e.entry.filePath)]);
+    const want = ids?.get(filePath);
+    if (want === undefined) return undefined;
+    return locals.find((e) => ids?.get(e.entry.filePath) === want);
+  }
+
+  async function handleCheckDocumentDirty(args: { filePath: string }) {
+    const found = await findEditorForAgentPath(args.filePath);
     if (!found) {
       return { success: false, filePath: args.filePath, message: 'Document not open' };
     }
@@ -579,7 +598,7 @@ function createClaudeCodeStore() {
   }
 
   async function handleSaveDocument(args: { filePath: string }) {
-    const found = getEditorByFilePath(args.filePath);
+    const found = await findEditorForAgentPath(args.filePath);
     if (!found) {
       return { success: false, filePath: args.filePath, message: 'Document not open' };
     }
