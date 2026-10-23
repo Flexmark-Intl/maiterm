@@ -4,7 +4,7 @@
 // can hold several, each under a handle (b1, b2…) maiTerm gives it.
 
 import { runAction, detach, forget } from './driver.js';
-import { mark, unmark, retitle } from './marker.js';
+import { mark, unmark, retitle, releaseIfOurs, sweepOrphans } from './marker.js';
 
 const PROTOCOL = 1;
 const VERSION = chrome.runtime.getManifest().version;
@@ -271,6 +271,12 @@ chrome.alarms.onAlarm.addListener((a) => {
 chrome.runtime.onStartup.addListener(ensureConnected);
 chrome.runtime.onInstalled.addListener(ensureConnected);
 ensureConnected();
+// Groups our links no longer own: storage was cleared under them (§1.8). In the queue, so a link
+// being made right now isn't swept before its placement is stored.
+mutateLinks(async (links) => {
+  await sweepOrphans(links);
+  return null;
+});
 
 // ── linking (only from the popup: the human's click) ────────────────────────
 
@@ -315,11 +321,11 @@ async function link(host, maitermTab, chromeTab, openerChromeTabId) {
       title: chromeTab.title ?? '',
       url: chromeTab.url ?? '',
     };
-    // Into its agent's tab group. Moving between agents carries where the human had it, so the
-    // final unlink still puts it back there; relinking to the same agent keeps its group as is.
+    // Into its agent's tab group. A relink or a move between agents carries where the human had
+    // it, as long as the tab is still where we put it (`mark` checks), so the final unlink puts it
+    // back there.
     const carried = previous.find((l) => l.placement)?.placement;
-    const sameAgent = previous.find((l) => l.host === host && l.maitermTabId === maitermTab.id);
-    entry.placement = sameAgent?.placement ?? (await mark(entry, rest, carried));
+    entry.placement = await mark(entry, rest, carried);
     return [...rest, entry];
   });
 }
@@ -344,16 +350,38 @@ const ACTING_MAX_MS = 30000;
 const agentActed = new Map();
 const AGENT_OPENED_MS = 2000;
 
-chrome.tabs.onCreated.addListener(async (tab) => {
-  if (tab.openerTabId == null) return;
-  const opener = (await getLinks()).find((l) => l.chromeTabId === tab.openerTabId);
+// The tab that really opened it. `tabs.onCreated`'s openerTabId can't be used: when a BACKGROUND
+// tab opens one (the usual case, an agent working in a tab the human isn't looking at), Chrome
+// reports the tab in FRONT as the opener. webNavigation names the source page itself.
+chrome.webNavigation.onCreatedNavigationTarget.addListener(async ({ sourceTabId, tabId }) => {
+  const opener = (await getLinks()).find((l) => l.chromeTabId === sourceTabId);
   if (!opener) return;
   const now = Date.now();
-  const acting = (agentActing.get(tab.openerTabId) ?? []).some((a) => now - a.at < ACTING_MAX_MS);
-  const recent = acting || now - (agentActed.get(tab.openerTabId) ?? 0) < AGENT_OPENED_MS;
+  const acting = (agentActing.get(sourceTabId) ?? []).some((a) => now - a.at < ACTING_MAX_MS);
+  const recent = acting || now - (agentActed.get(sourceTabId) ?? 0) < AGENT_OPENED_MS;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab) return;
   const win = await chrome.windows.get(tab.windowId).catch(() => null);
-  if (!recent && win?.type !== 'popup') return;
-  await link(opener.host, { id: opener.maitermTabId, name: opener.maitermTabName }, tab, opener.chromeTabId).catch(() => {});
+  if (!recent && win?.type !== 'popup') return; // the human's own; the group guard below releases it
+  await link(opener.host, { id: opener.maitermTabId, name: opener.maitermTabName }, tab, sourceTabId).catch(() => {});
+});
+
+// A tab that ends up in one of our groups without being linked to it (Chrome groups a tab opened
+// from a grouped tab with it; "New tab to the right" too) would read as the agent's: take it out.
+// After a moment, so a tab about to join its opener's agent isn't released first.
+function guardGroup(tabId) {
+  setTimeout(async () => {
+    const links = await getLinks();
+    if (links.some((l) => l.chromeTabId === tabId)) return;
+    await releaseIfOurs({ id: tabId }, links);
+  }, 600);
+}
+chrome.tabs.onUpdated.addListener((tabId, change) => {
+  if (change.groupId != null && change.groupId >= 0) guardGroup(tabId);
+});
+// A tab Chrome CREATES inside a group never reports a change to it.
+chrome.tabs.onCreated.addListener((tab) => {
+  if (tab.groupId >= 0) guardGroup(tab.id);
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {

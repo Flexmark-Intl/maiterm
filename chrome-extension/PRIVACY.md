@@ -30,8 +30,9 @@ about the whole browser, and doesn't mean the extension can reach the other tabs
 bar ends every link. Closing a tab, clicking **Unlink**, or turning the feature off in maiTerm
 ends that tab's link (or all of them, for the last).
 
-It does read the title and address of your open tabs, because it needs them to mark linked
-tabs and to tell maiTerm which page a link is on. Those never leave your computer except as
+It does read the title and address of your open tabs, and which tab opened which, because it
+needs them to mark linked tabs, to tell maiTerm which page a link is on, and to know when a linked
+page opened a new tab. Those never leave your computer except as
 part of a linked tab's information sent to your local maiTerm.
 
 ## What it reads from a linked tab

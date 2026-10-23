@@ -51,8 +51,10 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    id (`browser_link::remap_tab`, called from `reloadTab`'s remaps). Every reload's old→new id is remembered (`Registry.renamed`), and both a re-announced
    link and the 5 s prune follow that chain, so a link that missed the remap (the extension was
    disconnected, or its `hello` was in flight) still reaches the reloaded tab.
-6. **A tab a linked page opens joins that page's agent** (the extension, `tabs.onCreated` with an
-   `openerTabId` it holds): when it is a popup window (a sign-in window), or an action that can
+6. **A tab a linked page opens joins that page's agent** (the extension,
+   `webNavigation.onCreatedNavigationTarget`'s `sourceTabId` — NOT `tabs.onCreated`'s
+   `openerTabId`, which names the tab in FRONT when a background tab opens one, i.e. exactly when
+   an agent works in a tab the human isn't looking at): when it is a popup window (a sign-in window), or an action that can
    open a tab (click, type, press, navigate, eval — never a read) is running on the opener or
    finished under 2 s ago (a running one counts for at most 30 s: an eval may never settle). A tab the HUMAN opens from a linked page (a middle-click) stays theirs,
    even while the agent reads that page. maiTerm refuses an opener that isn't the same agent's link.
@@ -67,7 +69,15 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    Moving a link between agents carries the original placement. Never touched: a tab already in
    the human's own group (not grouped), pinned or popup-window tabs (not grouped), and a tab the
    human has since dragged out of our group or to another window (ungrouped only, left where
-   they put it). maiTerm's tab-strip mark and the popup's "Linked tabs" list bring a linked tab
+   they put it). Chrome groups on its own as well (a tab opened from a grouped tab joins that
+   group), so: a joined tab already in the agent's group is recorded as `joined` (ungrouped in
+   place at the end, never moved); any tab in one of our groups that isn't linked is taken out
+   after 600 ms (checked on `onCreated` too — a tab created inside a group reports no change);
+   and at worker start a "maiTerm · " group no link owns is ungrouped, because
+   `chrome.storage.session` (the links and their placements) is cleared by an extension reload or
+   update and a browser restart while Chrome keeps the groups. Putting a tab back between two
+   tabs still in the group would make Chrome regroup it, so it is then taken out to the group's
+   edge. maiTerm's tab-strip mark and the popup's "Linked tabs" list bring a linked tab
    to the front (`reveal`, a command the extension runs without the debugger; no agent tool).
 7. **The popup lists agent tabs most recently used first**, each window's front tab (active
    workspace → active pane → active tab) above all. Recency is in memory (`browser_link::touch_tab`,

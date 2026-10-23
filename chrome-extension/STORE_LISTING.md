@@ -105,6 +105,12 @@ The popup needs the current tab's id, title and address to link it, and the exte
 Puts the tabs the user linked to an agent into a tab group named after that agent, so the user can see in their tab strip which tabs are linked (Chrome's debugging bar shows in every tab and can't say which). When the link ends, the tab is taken out of the group and put back where it was. Only linked tabs are grouped; tabs already in one of the user's own groups are left alone.
 ```
 
+`webNavigation`
+
+```
+Tells the extension which tab opened a new tab or popup, so a sign-in popup opened by a linked page can join the same agent, and a tab the user opens themselves from a linked page is kept out of that agent's tab group. Chrome's tab opener information names the wrong tab when a background tab opens one; navigation events name the right one. Nothing from these events leaves the user's computer.
+```
+
 `storage`
 
 ```
