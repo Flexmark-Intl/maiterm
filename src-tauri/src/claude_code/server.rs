@@ -814,6 +814,11 @@ fn claim_pending_index(
 fn target_owner_window(state: &Arc<AppState>, tool_name: &str, arguments: &Value) -> Option<String> {
     match tool_name {
         "moveTab" | "reloadTab" => find_window_for_tab(state, arguments.get("tab_id")?.as_str()?),
+        // Files act in the CALLER's window (docs/file-tree.md §9.6). By here `tabId` is the
+        // caller's own (`own_tab_only_refusal`); a `windowId` must not pick another window, or
+        // an agent could read the human's selection there or move that tree.
+        // `process_message` also strips `windowId` from them, so the fallback can't either.
+        "revealInTree" | "getTreeSelection" => find_window_for_tab(state, arguments.get("tabId")?.as_str()?),
         "moveWorkspace" | "setMesh" | "linkMeshes" | "unlinkMesh" | "createTab" => {
             let ws = arguments.get("workspace_id")?.as_str()?;
             let app_data = state.app_data.read();
@@ -3599,6 +3604,14 @@ async fn process_message(
                         obj.insert(FILES_CALLER_ARG.to_string(), caller);
                     }
                 }
+                // revealInTree and getTreeSelection act in the caller's own window, which its
+                // tab decides (`target_owner_window`). A `windowId` (listWindows hands them out)
+                // would otherwise outrank the tab in `resolve_target_window`.
+                if matches!(tool_name.as_str(), "revealInTree" | "getTreeSelection") {
+                    if let Some(obj) = arguments.as_object_mut() {
+                        obj.remove("windowId");
+                    }
+                }
 
                 let affinity_tab: Option<String> = affinity.map(|a| a.tab_id);
                 if let Some(ref tab) = affinity_tab {
@@ -5232,6 +5245,33 @@ mod tests {
 
     fn norm(name: &str, ev: serde_json::Value) -> HookPhase {
         normalize_hook_event(AgentRuntime::Claude, name, &ev)
+    }
+
+    /// Files' window tools go to the caller's tab's window, whatever `windowId` they name:
+    /// listWindows hands every window's id to any agent.
+    #[test]
+    fn tree_tools_go_to_the_callers_window_not_a_named_one() {
+        use std::sync::Arc;
+        let state = Arc::new(crate::state::AppState::new());
+        let (own_tab, other_window) = {
+            let mut data = state.app_data.write();
+            let mut a = crate::state::WindowData::new("win-a".into());
+            let ws = crate::state::Workspace::new("A".into());
+            let own_tab = ws.panes[0].tabs[0].id.clone();
+            a.workspaces.push(ws);
+            let mut b = crate::state::WindowData::new("win-b".into());
+            b.workspaces.push(crate::state::Workspace::new("B".into()));
+            let other_window = b.id.clone();
+            data.windows.push(a);
+            data.windows.push(b);
+            (own_tab, other_window)
+        };
+        let args = serde_json::json!({ "tabId": own_tab, "windowId": other_window, "path": "/x" });
+        for tool in ["revealInTree", "getTreeSelection"] {
+            assert_eq!(super::target_owner_window(&state, tool, &args).as_deref(), Some("win-a"), "{tool}");
+        }
+        // What the guard is for: elsewhere a windowId outranks the tab.
+        assert_eq!(super::resolve_target_window(&state, &args).as_deref(), Some("win-b"));
     }
 
     fn norm_codex(name: &str, ev: serde_json::Value) -> HookPhase {

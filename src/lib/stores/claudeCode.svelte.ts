@@ -98,15 +98,21 @@ function createClaudeCodeStore() {
           result = handleGetSelection();
           break;
         // Files (docs/file-tree.md §9.6). Rust routed the call to the caller's own window and
-        // refused it when the human turned the tools off; both act on THIS window's column.
+        // refused it when the human turned the tools off; both act on THIS window's column, so
+        // they answer only a caller whose tab is in this window (Rust's fallback when it can't
+        // place the tab is the first window, which may be another).
         case 'getTreeSelection':
-          result = fileTreeStore.selectionForAgent();
-          break;
         case 'revealInTree': {
           const a = args as { tabId?: string; path?: unknown; select?: unknown };
-          result = typeof a.path === 'string' && a.path
-            ? await fileTreeStore.agentReveal(a.tabId, a.path, a.select === true)
-            : { error: 'path is required: the absolute path of a file or folder.' };
+          if (!a.tabId || !findTabLocation(a.tabId)) {
+            result = { error: `${tool} works only in your own tab's window, and your tab isn't open in this one.` };
+          } else if (tool === 'getTreeSelection') {
+            result = fileTreeStore.selectionForAgent();
+          } else {
+            result = typeof a.path === 'string' && a.path
+              ? await fileTreeStore.agentReveal(a.tabId, a.path, a.select === true)
+              : { error: 'path is required: the absolute path of a file or folder.' };
+          }
           break;
         }
         case 'openFile':
