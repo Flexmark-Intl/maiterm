@@ -505,6 +505,10 @@ fn find_builds_its_index_on_the_first_query_and_follows_the_disk() {
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
+    // The watcher first. One that starts after a build began marks that build stale (what
+    // changed before it ran was never reported), so the query after `search_ready` would be
+    // a rebuild: on Windows the watcher is up within the first build, elsewhere after it.
+    wait_for_watcher(&ft, ack.sub_id);
 
     let first = hub.search(ack.sub_id, "helper", 500, 1, false);
     assert!(first.indexing, "the first query starts the build");
@@ -513,7 +517,6 @@ fn find_builds_its_index_on_the_first_query_and_follows_the_disk() {
     assert!(!hits.indexing);
     assert_eq!(hits.items.first().map(|h| h.rel.as_str()), Some("src/untracked_helper.ts"), "untracked files are indexed");
     assert!(hub.search(ack.sub_id, "bundle", 500, 3, false).items.is_empty(), "ignored files are not");
-    wait_for_watcher(&ft, ack.sub_id);
 
     // A new file is found once the watcher reports it; a deleted one disappears.
     std::fs::write(r.join("src/lib/brand_new_widget.ts"), "").unwrap();
