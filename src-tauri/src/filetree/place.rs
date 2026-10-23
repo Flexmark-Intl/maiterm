@@ -87,10 +87,39 @@ fn osc_is_local(host: Option<&str>, local_host: &str) -> bool {
 }
 
 /// The ssh destination of a foreground command line (`ssh -p 2222 ews@nova` → `-p 2222 ews@nova`).
+///
+/// The process table shows the raw argv, so an ssh maiTerm started itself (a clone, a split, a
+/// restore, Open Terminal Here) still carries the `-o ControlMaster=no` `buildSshCommand`
+/// injects. That says how the session was started, not where it goes: kept, it made the
+/// place's host a spelling no stored command has (the frontend compares the cleaned one), and
+/// a second helper for the same host as a hand-typed `ssh ews@nova` tab.
 fn host_of_command(cmd: &str) -> Option<String> {
     let rest = cmd.trim().split_once(char::is_whitespace).map(|(_, r)| r).unwrap_or("");
-    let h = crate::watch::connect_args(rest);
+    let h = crate::watch::connect_args(&without_control_master(rest));
     (!h.is_empty()).then_some(h)
+}
+
+/// ssh args without any `ControlMaster` option (`-o ControlMaster=x` or `-oControlMaster=x`,
+/// any case), as the frontend's `cleanSshCommand` stores them.
+fn without_control_master(args: &str) -> String {
+    let is_cm = |o: &str| o.to_ascii_lowercase().starts_with("controlmaster=");
+    let words: Vec<&str> = args.split_whitespace().collect();
+    let mut out: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i];
+        if w == "-o" && words.get(i + 1).is_some_and(|o| is_cm(o)) {
+            i += 2;
+            continue;
+        }
+        if w.strip_prefix("-o").is_some_and(is_cm) {
+            i += 1;
+            continue;
+        }
+        out.push(w);
+        i += 1;
+    }
+    out.join(" ")
 }
 
 /// An ssh tab's candidate folders in order, deduplicated: the agent's, OSC 7 (unless it is
@@ -524,6 +553,13 @@ mod tests {
         assert_eq!(local(&i, &fresh, &[]).unwrap().source, "osc7");
         i.agent_cwds = vec!["/home/ews/agent".into()];
         assert_eq!(local(&i, &fresh, &[]).unwrap().source, "agent");
+        // An ssh maiTerm started (a split, a restore) is the same host as a hand-typed one:
+        // the `-o ControlMaster=no` it injects is not part of where it goes.
+        let mut split = i.clone();
+        split.ssh_foreground = Some("ssh -t -o ControlMaster=no -p 2222 ews@nova export MAITERM_TAB_ID=x; cd /srv/app && exec $SHELL -l".into());
+        assert_eq!(local(&split, &fresh, &[]).unwrap().remote_host.as_deref(), Some("-p 2222 ews@nova"));
+        split.ssh_foreground = Some("ssh -oControlMaster=NO -x ews@nova".into());
+        assert_eq!(local(&split, &fresh, &[]).unwrap().remote_host.as_deref(), Some("-x ews@nova"));
         // The tunnel's host wins over parsing the command line.
         i.tunnel_host = Some("ews@nova".into());
         assert_eq!(local(&i, &fresh, &[]).unwrap().remote_host.as_deref(), Some("ews@nova"));

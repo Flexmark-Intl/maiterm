@@ -36,6 +36,13 @@ export function connectArgs(cmd: string | null | undefined): string {
     const flags = w.slice(1);
     // A terminal is never part of where: `-t` / `-tt` come and go with how a tab was started.
     if (/^t+$/.test(flags)) continue;
+    // Nor is ControlMaster: `buildSshCommand` injects `-o ControlMaster=no` into every ssh it
+    // starts, and `cleanSshCommand` drops it from what is stored.
+    if (/^ocontrolmaster=/i.test(flags)) continue;
+    if (flags === 'o' && /^controlmaster=/i.test(words[i + 1] ?? '')) {
+      i++;
+      continue;
+    }
     out.push(w);
     // A cluster (`-xCp2222`): its argument is the rest of the word, or else the next word.
     for (let j = 0; j < flags.length; j++) {

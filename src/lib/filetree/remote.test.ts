@@ -6,7 +6,9 @@ describe('connectArgs', () => {
     expect(connectArgs('ews@nova')).toBe('ews@nova');
     expect(connectArgs('-p 2222 ews@nova')).toBe('-p 2222 ews@nova');
     expect(connectArgs('-xCp2222 ews@nova')).toBe('-xCp2222 ews@nova');
-    expect(connectArgs('-t -o ControlMaster=no ews@nova')).toBe('-o ControlMaster=no ews@nova');
+    // ControlMaster is how maiTerm started the session, not where it goes.
+    expect(connectArgs('-t -o ControlMaster=no ews@nova')).toBe('ews@nova');
+    expect(connectArgs('-oControlMaster=no -x ews@nova')).toBe('-x ews@nova');
   });
 
   it('reads a live foreground command, remote command and all, without its secrets', () => {
@@ -26,6 +28,8 @@ describe('sameSshHost', () => {
   it('matches the place, a stored command and a live one for one host', () => {
     expect(sameSshHost('ews@nova', 'ssh -t ews@nova')).toBe(true);
     expect(sameSshHost('-p 2222 ews@nova', 'ssh -t -p 2222 ews@nova')).toBe(true);
+    // A split or restore of an ssh tab, as the process table shows it.
+    expect(sameSshHost('ews@nova', "ssh -t -o ControlMaster=no ews@nova 'cd /srv/app && exec $SHELL -l'")).toBe(true);
   });
 
   it('tells hosts, ports and users apart', () => {
