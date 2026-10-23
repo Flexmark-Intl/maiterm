@@ -182,13 +182,48 @@ impl SshTarget {
 /// The ControlMaster socket of a bridge tunnel to the host `ssh_command` reaches (compared by
 /// connect args, as the transcript mirror and Files find it), if that socket exists.
 fn tunnel_socket(ssh_command: &str, state: &crate::state::AppState) -> Option<String> {
-    let want = crate::watch::connect_args(&without_program(ssh_command));
+    let tunnels: Vec<String> = state.ssh_tunnels.read().values().map(|t| t.host_key.clone()).collect();
+    let key = matching_tunnel(ssh_command, &tunnels)?;
+    let sock = crate::commands::ssh_tunnel::cm_socket_path(key)?;
+    (cfg!(unix) && sock.exists()).then(|| sock.to_string_lossy().into_owned())
+}
+
+/// The tunnel key among `keys` that reaches the same host as `ssh_command`.
+///
+/// Both sides are compared without `ControlMaster`: an ssh maiTerm started itself (a split, a
+/// clone, a restore, Open Terminal Here) shows `-o ControlMaster=no` in the process table the
+/// editor's command is read from, while its tunnel was keyed by the stored, cleaned command.
+/// The option says how that session was started, not where it goes.
+fn matching_tunnel<'a>(ssh_command: &str, keys: &'a [String]) -> Option<&'a String> {
+    let connect = |c: &str| crate::watch::connect_args(&without_control_master(&without_program(c)));
+    let want = connect(ssh_command);
     if want.is_empty() {
         return None;
     }
-    let key = state.ssh_tunnels.read().values().find(|t| crate::watch::connect_args(&t.host_key) == want).map(|t| t.host_key.clone())?;
-    let sock = crate::commands::ssh_tunnel::cm_socket_path(&key)?;
-    (cfg!(unix) && sock.exists()).then(|| sock.to_string_lossy().into_owned())
+    keys.iter().find(|k| connect(k) == want)
+}
+
+/// ssh args without any `ControlMaster` option (`-o ControlMaster=x` or `-oControlMaster=x`,
+/// any case), as the frontend's `cleanSshCommand` stores them.
+pub fn without_control_master(args: &str) -> String {
+    let is_cm = |o: &str| o.to_ascii_lowercase().starts_with("controlmaster=");
+    let words: Vec<&str> = args.split_whitespace().collect();
+    let mut out: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i];
+        if w == "-o" && words.get(i + 1).is_some_and(|o| is_cm(o)) {
+            i += 2;
+            continue;
+        }
+        if w.strip_prefix("-o").is_some_and(is_cm) {
+            i += 1;
+            continue;
+        }
+        out.push(w);
+        i += 1;
+    }
+    out.join(" ")
 }
 
 /// The args of an ssh command, without a leading ssh program (and autossh's own options).
@@ -256,5 +291,21 @@ mod tests {
         assert!(scp.windows(2).any(|w| w == ["-o", "ControlMaster=no"]));
         assert!(scp.windows(2).any(|w| w == ["-o", "ControlPath=/tmp/cm/ews@nova.sock"]));
         assert_eq!(without_program("autossh -M 0 -x ews@nova"), "-x ews@nova");
+    }
+
+    #[test]
+    fn a_session_maiterm_started_finds_its_hosts_tunnel() {
+        // The editor's command is the ps line of a split/restored tab (program dropped by
+        // `sshArgsOf`); the tunnel was keyed by the stored, cleaned command.
+        let keys = vec!["other@host".to_string(), "ews@nova".to_string()];
+        let ps = "-t -o ControlMaster=no ews@nova export MAITERM_TAB_ID=x; cd /a && exec $SHELL -l";
+        assert_eq!(matching_tunnel(ps, &keys).map(String::as_str), Some("ews@nova"));
+        assert_eq!(matching_tunnel("ssh -oControlMaster=no ews@nova", &keys).map(String::as_str), Some("ews@nova"));
+        // And the other way round: a tunnel started from a raw ps line, a hand-typed command.
+        let raw = vec!["-t -o ControlMaster=no -p 2222 ews@nova".to_string()];
+        assert_eq!(matching_tunnel("ssh -p 2222 ews@nova", &raw), Some(&raw[0]));
+        // Still a different host when anything that says where differs.
+        assert_eq!(matching_tunnel("-o ControlMaster=no -p 2222 ews@nova", &keys), None);
+        assert_eq!(without_control_master("-o ControlMaster=no -oControlMaster=auto -t ews@nova"), "-t ews@nova");
     }
 }

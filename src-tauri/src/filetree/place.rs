@@ -95,31 +95,8 @@ fn osc_is_local(host: Option<&str>, local_host: &str) -> bool {
 /// a second helper for the same host as a hand-typed `ssh ews@nova` tab.
 fn host_of_command(cmd: &str) -> Option<String> {
     let rest = cmd.trim().split_once(char::is_whitespace).map(|(_, r)| r).unwrap_or("");
-    let h = crate::watch::connect_args(&without_control_master(rest));
+    let h = crate::watch::connect_args(&crate::util::ssh_target::without_control_master(rest));
     (!h.is_empty()).then_some(h)
-}
-
-/// ssh args without any `ControlMaster` option (`-o ControlMaster=x` or `-oControlMaster=x`,
-/// any case), as the frontend's `cleanSshCommand` stores them.
-fn without_control_master(args: &str) -> String {
-    let is_cm = |o: &str| o.to_ascii_lowercase().starts_with("controlmaster=");
-    let words: Vec<&str> = args.split_whitespace().collect();
-    let mut out: Vec<&str> = Vec::new();
-    let mut i = 0;
-    while i < words.len() {
-        let w = words[i];
-        if w == "-o" && words.get(i + 1).is_some_and(|o| is_cm(o)) {
-            i += 2;
-            continue;
-        }
-        if w.strip_prefix("-o").is_some_and(is_cm) {
-            i += 1;
-            continue;
-        }
-        out.push(w);
-        i += 1;
-    }
-    out.join(" ")
 }
 
 /// An ssh tab's candidate folders in order, deduplicated: the agent's, OSC 7 (unless it is
