@@ -292,9 +292,10 @@ So:
 the keychain (a full macOS backup includes `login.keychain-db`) is protected only by the login
 password for dev and staging values.
 
-**Prod values never travel with a backup, by design**: the macOS item is ThisDeviceOnly, and
-the Windows Hello key is held in the TPM. A new Mac, a reinstalled Windows, or a Hello or PIN
-reset loses every prod value **unless an Export vault was made**, and Export needs the prod
+**The prod key itself never travels with a backup**: the macOS item is ThisDeviceOnly, and the
+Windows Hello key is held in the TPM. A backup carries prod values only **behind the recovery
+key** (below). A new Mac, a reinstalled Windows, or a Hello or PIN reset loses every prod value
+**unless an Export vault was made or the recovery key was kept**. Export needs the prod
 unlock. The panel says this when prod is turned on and offers the export then.
 
 **Recovery** (§16 decision 10). At setup, and when prod is first turned on, maiTerm offers a
@@ -302,10 +303,17 @@ unlock. The panel says this when prod is turned on and offers the export then.
 the machine. It wraps a copy of each data key, `vault-dek-prod` included, and the wrapped copies
 sit beside the vault file. Because the key is random rather than chosen, the wrapped copies can't be
 attacked offline the way the phase 1 passphrase wrap can, so keeping them on disk opens no new
-attack. Anyone who
-*finds* it, an agent included, can open the whole vault, and the screen that shows it says
-so. **It is not offered for values held in 1Password** (decision 3): their recovery belongs
-to 1Password. A project whose values are all there needs none. Moving the vault
+attack. What it does do, stated where it is made and in §14:
+- **It bypasses** the OS-enforced unlock, the idle lock and the audit log. Anyone who *finds*
+  it, an agent included, can open the whole vault, prod values too.
+- So the screen says **write it on paper**. A saved PDF or a photo in the camera roll is a
+  file an agent can read.
+- **It is never shown in a build with the MCP bridge**, whose webview tools could read it off
+  the screen (the same rule as prod entry, §6.1).
+
+**It covers only the values maiTerm stores itself** (decision 3): values held in 1Password are
+recovered through 1Password. The data keys are vault-wide, so the key is offered once the local
+store holds any values. If every value lives in 1Password, none is needed. Moving the vault
 on purpose is an explicit **Export vault** with a passphrase, in age's format so the file opens
 with the `age` CLI too. **Import vault** is the fifth way a value enters (§1).
 
@@ -390,8 +398,15 @@ build with the bridge**, and warns for dev and staging ones.
 ### 6.2 First run: bringing existing secrets in
 
 The vault is worth something on day one only if existing secrets can come in. When the vault is
-first turned on, maiTerm offers a scan of the folders its tabs and workspaces already use for
-`.env`-style files (`.env`, `.env.*`, `*.env`, skipping `.env.example`). It shows **"Found 14
+first turned on, maiTerm offers a scan of the **local** folders its tabs and workspaces already
+use (an ssh tab's folder is on another machine, so it is skipped) for `.env`-style files
+(`.env`, `.env.*`, `*.env`). The scan:
+- skips templates: `.example`, `.sample`, `.template`, `.dist`;
+- follows no symlinks, skips `node_modules`, `.git` and `vendor`, and stops four levels below
+  each folder.
+
+Adopting from a folder **binds that folder to a project explicitly**, on the human's tick (§3:
+projects are bound to approved paths). It shows **"Found 14
 keys in 6 projects"**, with names, files and a guessed tier (`.env.production` → prod, a
 `sk_test_` value → dev), and **no values**. Adopting is `adoptSecrets` in bulk:
 - one sheet;
@@ -443,12 +458,27 @@ small shim that maiTerm types into the service's shell:
   peer **from the OS, not from the message**: `LOCAL_PEERPID` (macOS), `SO_PEERCRED` (Linux),
   `GetNamedPipeClientProcessId` (Windows). The peer's argv and cwd are read from the OS, and the
   values are released only to that pid.
-- **"maiTerm's own `maiterm-run`" is checked by code signature, not by path.** On many Macs the
-  app bundle is writable by the same user, so an agent could replace the file at that path. So
-  maiTerm checks the peer process's signature: `SecCodeCheckValidity` against maiTerm's
-  designated requirement on macOS, and `WinVerifyTrust` plus a match on maiTerm's own signer on
-  Windows. Linux has no platform signature, so the check is the binary's hash against the one
-  maiTerm shipped. Dev builds are ad-hoc signed and fall back to that hash too.
+- **The redeemer must be running in that service's terminal.** The genuine shim can be run by
+  anyone, and the ticket sits in the service's scrollback and `getServiceOutput`. So an agent
+  could type `cd <folder> && <shim> --ticket <t> -- sh -c '<cmd>'` in its own tab within 60
+  seconds and pass a signature, argv and cwd check. So the peer's **controlling terminal must
+  be the service's PTY**, which maiTerm owns: `proc_pidinfo` `e_tdev` on macOS, `tty_nr` in
+  `/proc/<pid>/stat` on Linux. On Windows, ConPTY gives no such field, so the check walks the
+  peer's parent chain to the service shell's pid; that one is weaker, and the doc says so.
+  Agents run in their own tabs, not in service consoles, so this check is the one that blocks
+  them.
+- **And it must be maiTerm's genuine shim, checked so it can't be raced:**
+  - macOS: identify the peer by **audit token** (`LOCAL_PEERTOKEN` plus
+    `kSecGuestAttributeAudit`), not by pid, which can be reused. The shim is built with the
+    **hardened runtime and library validation**, so `DYLD_INSERT_LIBRARIES` can't put an
+    agent's code inside a validly signed process.
+  - Windows: verify the image of the **running process** through its handle, not the file at
+    its path (a running exe can be renamed and another file swapped in).
+  - Linux, which has no platform signature: hash `/proc/<pid>/exe`, not the path on disk.
+  - Dev builds are ad-hoc signed and use the hash check.
+- **What is still open, stated:** a process that connects, forks a child holding a copy of the
+  socket and then execs the genuine shim passes every check, and the child reads the values. On
+  Linux, ptrace depends on `ptrace_scope`. Both are §1's same-user limit.
 - **On Unix** the shim `exec`s `sh -c`, so the process tree is exactly what it would be without
   it. **On Windows** there is no `exec`: the shim spawns the child (through `cmd /c`), forwards
   Ctrl-C/Ctrl-Break and returns the child's exit code.
@@ -457,18 +487,35 @@ small shim that maiTerm types into the service's shell:
   boundary (§10.1).
 
 **Secrets that are files** (`kind: "file"`, §4.2). A service-account JSON, an Apple `.p8` or
-`.p12`, a TLS or SSH key: most of these are read from a path, not from a variable. For a file
-key, the runner (agent runs and the shim alike):
-- writes the value into a fresh per-run directory, mode 0700/0600. That is
-  `$XDG_RUNTIME_DIR` (memory-backed) on Linux, and the per-user temp directory on macOS and
-  Windows;
-- sets `path_var` to the file's path;
-- deletes the directory when the process exits.
+`.p12`, a TLS or SSH key: most of these are read from a path, not from a variable.
 
-A crash can leave a directory behind, so maiTerm sweeps its runtime directories at startup.
-The ledger records the run, not a lasting file. Rotation needs nothing extra, since each run
-gets the current version. Targets take file keys as their contents (a GitHub secret holding
-the JSON).
+- **Entry and encoding.** A file key is entered on the sheet by choosing the file, which Rust
+  reads, not by pasting: a `.p12` is binary. It is stored as bytes. A target that takes text (a
+  GitHub secret) gets base64, and the card says so.
+- **Where it lands.** A fresh per-run directory under one runtime root:
+  - Linux: `$XDG_RUNTIME_DIR` (memory-backed), falling back to a 0700 directory under maiTerm's
+    data dir when it is unset (ssh, WSL, headless);
+  - macOS: the per-user temp directory, which **is on disk**, and the doc says so;
+  - Windows: a directory with an explicit DACL for the user only, since mode bits mean nothing
+    there.
+
+  Mode 0700/0600 on Unix. `path_var` is set to the file's path.
+- **Cleanup is maiTerm's, not the runner's.** On Unix the shim `exec`s, so nothing of it is left
+  to clean up. maiTerm watches the run (kqueue `NOTE_EXIT` on macOS, a pidfd on Linux, a process
+  handle on Windows), and deletes the directory once the **whole process group** has exited.
+  Services fork children that may read the path later. A crash can leave a directory behind, so
+  maiTerm sweeps the runtime root at startup and every hour.
+- **The runtime root is denied like the vault file**: in the `PreToolUse` deny (§10.3), the
+  user-scope read-deny rules (§10.4) and the sandbox config. The ledger records the run, not a
+  lasting file, so a per-file entry would always be late.
+- **Masking knows structure.** A whole-value match misses a JSON key printed in part or
+  re-serialized, or a PEM printed line by line. So for a file key the masker also matches each
+  string field of a JSON value of 16 characters or more (`private_key`, `client_secret`), and
+  each line of a PEM body.
+- **A one-shot reader can take a pipe** (`/dev/fd/N`) instead of a file, which leaves nothing on
+  disk. It is offered where the consumer accepts one.
+
+Rotation needs nothing extra, since each run gets the current version.
 
 **What an approval does NOT cover, said plainly on the card:** it binds the command line, not
 the code it runs. An agent that can edit `scripts/seed.js` can make the approved
@@ -492,6 +539,11 @@ scrollback, the shell history and the scrollback database. So:
   otherwise be split by the shell, and everything after the first `&&` would run without
   secrets. The plain `env` exports stay as they are for non-secret values.
 - A rotation restarts every service in its ledger (§9.2).
+- **A service bound to a prod-tier environment is off by default**, like a prod `run` (§8): the
+  human turns it on per service, with a card. Once on, starting and restarting it are at once.
+- **An agent's `startService` / `restartService` never raises an unlock prompt.** A prompt the
+  human didn't cause trains them to approve prompts. The service waits instead (below), and the
+  human unlocks from the panel or the notice.
 - **A service that needs prod values waits for the unlock.** After a relaunch, `was_running`
   services start on their own (docs/stack.md §5), and an overnight restart or a deploy with the
   screens off can't do Touch ID. Such a service shows **waiting for unlock** rather than
@@ -596,6 +648,7 @@ panel. **No MCP tool can change policy**, and policy is not in `preference_meta`
 | `deploySecrets` to an approved target | at once | at once | **a card each time**, listing keys and version changes (`STRIPE_SECRET_KEY v3 → v4`) |
 | `runWithSecrets` | a card once per command + place, then at once | same as dev | **off**. The human can turn it on, then it is a card per run |
 | `writeEnvFile` to an approved file | at once | a card each write | **off**. Enabled per target with a card, then a card each write |
+| a stack service bound to the environment (§7.2) | at once | at once | **off**. Enabled per service with a card, then starts at once (waiting for the unlock if locked) |
 | `generateSecret` (missing value) | at once | at once | a card |
 | `captureSecret` | a card the first time per command + place + `extract` | same | a card each time |
 | reveal / copy in the panel | yes | yes | after the prod unlock (§5: Touch ID / Windows Hello / passphrase) |
@@ -789,51 +842,97 @@ under 12 characters are skipped, since they would match by accident. The panel n
 ### 10.4 Read-deny rules in every runtime, written with precision
 
 Darryl (2026-10-23): yes, "so long as it's done with precision so maiTerm doesn't have any
-chance of corrupting settings", and not only for Claude. maiTerm supports four runtimes
-(`accounts/mod.rs`: Claude, Codex, Gemini, Grok), and each needs its own mechanism. What
-each offers, read from its docs on 2026-10-23. **Every row must be verified against the
-installed version before its writer ships.**
+chance of corrupting settings", and not only for Claude. Agent tabs run Claude, Codex, Gemini
+and Grok. maiTerm's own integration is deepest for Claude: `accounts/mod.rs` says "Claude is
+the only runtime implemented", and Grok is a placeholder there. So each runtime below gets its
+writer only once its row is verified. The rows were read from each runtime's docs and source on
+2026-10-23 and corrected by a review the same day.
+
+**Two scopes.** The vault file and the file-key runtime directory (§7.1) are global, so their
+rules go at **user scope**. A ledger file (a `.env` maiTerm wrote) is in one project, so its
+rule goes at **project scope**.
 
 | Runtime | Mechanism | What maiTerm writes | Strength |
 |---|---|---|---|
-| **Claude Code** | `permissions.deny` `Read(<path>)` rules. These cover the built-in file tools, the file commands Claude recognizes in Bash (`cat`, `head`, `tail`, `sed`, `tee`) and redirection targets. They miss reads that don't name the file (`grep -r`, a script) | Rules in the project's **`.claude/settings.local.json`** (local and uncommitted, never the shared `.claude/settings.json`) | Good. Enforced by Claude, not by maiTerm |
-| **Grok Build** | Its own allow/ask/deny rules, and it **also reads Claude's settings files**, translating `permissions.deny` into native rules. Its `Read` deny rules also cover file paths that shell commands touch | Nothing extra: the Claude file covers it, **once a test proves Grok picks up those rules**. Otherwise a rule in the project's `.grok/config.toml` | Good, if the translation holds |
-| **Gemini CLI** | No deny setting. `.geminiignore` is filtering, not a boundary: a file named directly still loads. The **policy engine** takes TOML rules (`toolName = "read_file"`, `argsPattern`, `decision = "deny"`) from files in `~/.gemini/policies/` | **A file maiTerm owns outright**: `~/.gemini/policies/maiterm-vault[-dev].toml`, one `read_file` rule per path. Plus `run_shell_command` rules for the common readers | Medium: a user-tier rule is reported to be overridden in YOLO mode, and shell coverage is only by command prefix |
-| **Codex CLI** | Filesystem permission profiles (`[permissions.<name>.filesystem]`, `deny`), which are **beta**. The active profile is chosen by `default_permissions`, which is the human's own choice. Project `.codex/config.toml` loads only for trusted projects | **Nothing until a test settles it.** maiTerm must not change which profile a human runs under. The candidate is a project-level profile layered on the human's, offered on a card that names the change | Unknown |
+| **Claude Code** | `permissions.deny` `Read(<path>)`. Covers the built-in file tools, the file commands Claude recognizes in Bash (`cat`, `head`, `tail`, `sed`, `tee`) and redirection targets; misses reads that don't name the file (`grep -r`, a script). **Path syntax:** a single leading `/` anchors at the settings file's source, not the filesystem root, so **absolute paths must be written `//Users/…`** (Windows: `//c/…`). Settings are **strict JSON**: a comment is a settings error, and Claude can drop the whole file | Project: rules in `.claude/settings.local.json` **at the location Claude itself uses**: the git repository root even when started in a subdirectory, the **main checkout's** root in a worktree, the cwd's `.claude/` outside git, when the repo root is `$HOME`, on Windows, or when ownership doesn't match (versions before 2.1.211 differ). User scope: `~/.claude/settings.json` | Good. Enforced by Claude, not by maiTerm |
+| **Grok Build** | Native allow/ask/deny rules, in which **a single `/` is absolute** (its docs: `Read(/Users/you/private/**)`). It also reads Claude's settings files and translates their `permissions.deny`, so one string could mean two things | **Native rules** in `.grok/config.toml` (project) and `~/.grok/config.toml` (user), rather than relying on the translation. The behavioural check below also confirms that the `//` rules in the Claude file don't misfire under Grok | Good, once verified |
+| **Gemini CLI** | The **policy engine**: TOML rules (`toolName`, `argsPattern`, `decision = "deny"`) in `~/.gemini/policies/`. A parse error is **isolated per file**, so a broken maiTerm file can't disable the human's other policies. A user-tier deny beats YOLO, whose allow-all sits in the default tier (`policies/yolo.toml`). But "Always allow" answers are saved to `~/.gemini/policies/auto-saved.toml` at priority 950, inside the same user tier. `argsPattern` is a regex over the raw arguments, with no path normalization: `..`, a relative path or a symlink can get past it. `.geminiignore` is filtering, not a boundary | **A file maiTerm owns outright**: `~/.gemini/policies/maiterm-vault[-dev].toml`, every rule at **priority 999** (the maximum) so a saved "Always allow" can't outrank it. Rules for `read_file`, `read_many_files` and the grep and glob tools, each with absolute and `~` forms, plus `run_shell_command` prefix rules for the common readers | Low to medium: pattern-based and bypassable |
+| **Codex CLI** | Filesystem permission profiles (`[permissions.<name>.filesystem]`, `deny`), **beta**, which **apply only to sandboxed tool calls**: under `danger-full-access` or YOLO a deny does nothing. The active profile is the human's choice (`default_permissions`). Project `.codex/config.toml` loads only for trusted projects | **Nothing until a test settles it.** maiTerm must not change which profile a human runs under. The candidate is a project-level profile layered on the human's, offered on a card that names the change | Unknown |
+
+**Gemini CLI's own future.** It stopped serving Google AI Pro, Ultra and free users on
+2026-06-18, and those users were moved to the closed-source **Antigravity CLI** (`agy`). It
+remains available with paid Gemini API keys and enterprise licences. Antigravity's mechanism is
+unknown, so it gets nothing until it is looked at.
+
+**A behavioural check, per runtime version.** Re-reading the file proves only that the bytes are
+right, not that the runtime reads the rule as meant: a rule anchored wrong parses perfectly and
+protects nothing. So for each runtime version maiTerm sees, a check starts the runtime
+non-interactively in a scratch HOME against a scratch file under the rule, and confirms the read
+is refused. A runtime whose check fails or can't run gets no rules, and the panel says so. That
+check is also Grok's "test proves it" step.
 
 **What "precision" means here.** These rules come from the existing writers (the MCP entries in
 `mcp_proxy/entries.rs`), tightened where those fall short:
 
 1. **Own a file outright wherever the runtime allows it** (Gemini's policies directory). A file
    only maiTerm writes can't corrupt anyone else's settings.
-2. **When the file is shared, edit only what maiTerm added.** JSON arrays can't carry a marker,
-   so maiTerm keeps a record of each exact rule it added, per file. It removes only those rules,
-   and **never adopts or removes a rule that was already there**, even an identical one.
-3. **Keep the rest of the file exactly as it was.** Use `toml_edit` for TOML. For JSON, keep key
-   order: today's writer re-sorts keys, because `serde_json` is built without `preserve_order`,
-   so it needs that feature or a surgical edit. A re-read must parse to the original plus
-   maiTerm's change, and nothing else.
-4. **An unparseable file is left alone**, and the panel shows why (as `entries.rs` already
-   does). maiTerm never "repairs" a file.
-5. **Back up before the first write** to each file, beside it as `<name>.maiterm-backup`, once.
-6. **Write atomically under maiTerm's own temp name**, holding one writer lock (as
-   `write_toml` does), and **through symlinks**: managed account roots symlink these files
-   (docs/login.md §5.4), and renaming over a symlink would replace the link with a file and
-   detach that account. maiTerm resolves the link and writes the target.
-7. **Compare before writing**: if the file's hash changed between maiTerm's read and its write
-   (the runtime or the human saved it in between), re-read and redo the edit.
-8. **Verify after writing**: re-read and parse. If the result isn't exactly what was intended,
-   restore the backup and report it.
-9. **Keep the rules out of git.** If `.claude/settings.local.json` isn't already ignored, add it
-   to **`.git/info/exclude`** (local) rather than to `.gitignore`, which is shared.
+2. **Keep two sets: the rules that are wanted, and the rules maiTerm added.** JSON arrays can't
+   carry a marker, so both sets are kept per file, in maiTerm's data dir.
+   - A wanted rule already present, written by the human, counts as satisfied but is never
+     treated as maiTerm's.
+   - If a wanted rule goes missing (including the human's own copy), maiTerm adds its own,
+     records it as added, and the panel shows **"re-added"**.
+   - A human who wants a project's rules gone uses the panel's **"Stop protecting this project"**
+     switch, so a deliberate removal sticks instead of being re-added forever.
+   - maiTerm removes only rules in its added set, one entry for each one it added, never a rule
+     it didn't write.
+3. **Change only the bytes that must change.** TOML through `toml_edit`. JSON by a **surgical
+   splice of the `permissions.deny` array's text**, not a parse and re-serialize: today's writer
+   (`edit_json` in `mcp_proxy/entries.rs`) re-sorts keys, because `serde_json` is built without
+   `preserve_order`. Turning that feature on is crate-wide and would change every map in the
+   app. Re-serializing also changes indentation, CRLF, the trailing newline and number spelling
+   (`1e3` becomes `1000.0`). The check is **byte equality outside the splice**.
+4. **A file that doesn't parse is left alone**, and the panel says why. Claude settings are
+   strict JSON, so a file with a comment is in this case: maiTerm never "repairs" a file.
+5. **No backup in the project.** A backup beside the file would match no ignore rule, get
+   committed by a `git add -A`, and carry the human's local settings (an `env` block can hold
+   tokens). Rollback (rule 8) uses the exact bytes maiTerm read in rule 7. A copy for the human,
+   if kept at all, goes in maiTerm's data dir, mode 0600, and the newest one only.
+6. **Write atomically, under a lock that spans processes, and follow symlinks only to expected
+   places.**
+   - The temp file goes in the resolved target's directory, so the rename can't cross a
+     filesystem.
+   - The lock is an advisory file lock (`flock` / `LockFileEx`): the dev and installed builds
+     write the same files, and the `WRITE` mutex in `entries.rs` is process-local.
+   - Account roots symlink the **user-level** `~/.claude/settings*.json` (docs/login.md §5.4), so
+     those links are followed to their known targets.
+   - **In a project, a symlinked `.claude` or settings file is refused**: the project is
+     agent-writable, and following an agent's symlink would let it aim maiTerm's write at any
+     JSON file. (Claude itself treats a symlinked `.claude` as repository-supplied.)
+   - `entries.rs` renames over symlinks today (`std::fs::rename(&tmp, path)`), which would break a
+     dotfiles-symlinked `~/.claude.json` or `~/.codex/config.toml`. That is fixed in the same work.
+7. **Compare before writing**: if the file's hash changed between maiTerm's read and its write,
+   re-read and redo the edit. A small window between the compare and the rename remains, and the
+   doc says so: a concurrent save in that window is caught by rule 8.
+8. **Verify after writing**: the bytes outside the splice are identical, it parses, and the rule
+   is there. On a mismatch, restore the bytes read in rule 7, **only if the file still holds
+   exactly what maiTerm wrote**; otherwise leave it and report it. Then the behavioural check
+   above, once per runtime version.
+9. **Keep the rules out of git, or don't write them.**
+   - If `.claude/settings.local.json` is **tracked**, refuse, and the panel says why: an exclude
+     does nothing for a tracked file, and maiTerm's absolute paths would be committed.
+   - Otherwise, if `git check-ignore` says it isn't ignored (Claude adds a global exclude only
+     when *Claude* creates the file), add it to the path `git rev-parse --git-path info/exclude`
+     gives. That is local, and works in worktrees, where `.git` is a file. Never edit `.gitignore`.
 10. **Dev and prod flavours don't touch each other's rules.** Gemini's file name and the rule
-    record carry `app_data_slug()`.
-11. **Remove the rules when they stop being true**: when a ledger file is deleted, when the vault
-    is turned off, and at uninstall. A drift check reasserts them like the MCP entries' 30-second
-    loop, but only rules maiTerm still has on record.
+    records carry `app_data_slug()`.
+11. **Remove the rules when they stop being true**: when a ledger file is deleted and when the
+    vault is turned off. macOS has no uninstall hook, so the panel has **"Remove maiTerm's rules
+    everywhere"**, and turning the vault off offers it. A drift check reasserts the wanted set
+    like the MCP entries' 30-second loop.
 12. **Test with a scratch HOME**, against real files from each runtime (memory: "Reviewers must
-    isolate HOME"). Those include JSON with comments, CRLF line endings and symlinked account
-    roots.
+    isolate HOME"). Cases: strict-JSON errors (left alone), CRLF, worktrees, a symlinked
+    `.claude` (refused), a tracked local file (refused), dotfile-symlinked user files.
 
 ## 11. UI
 
@@ -848,10 +947,13 @@ dock:
 - expanding a key shows its description (quoted as the agent's), provider, template, targets,
   version history (no values), consumers from the ledger, and its audit rows;
 - actions: Set, Generate, Rotate, Remove from target, Reveal, Copy;
-- **unused keys**: each key shows when it was **last delivered** (from the ledger). A key with
-  no delivery for 90 days is flagged "unused?", and the panel suggests removing it from its
-  targets and the vault. Unused keys are the ones nobody remembers to rotate. This is only a
-  suggestion: the ledger can't see a key the human copied somewhere by hand.
+- **unused keys**: each key shows when it was **last delivered** (from the ledger). Delivery is
+  not use: a key pushed once to GitHub Actions may be used by CI every day. So only a key with
+  **no live target binding** and no delivery for 90 days is flagged "unused?". Such a key is
+  held only for local runs, services and `.env` files, none of which touched it. The panel
+  suggests removing it from the vault, never from a target. Unused keys are the ones nobody
+  remembers to rotate. The ledger can't see a key the human copied somewhere by hand, so this is
+  only ever a suggestion.
 
 **Reveal** shows the value for 10 seconds. **Copy** clears the clipboard after 30 seconds if it
 still holds that value, and keeps the value out of clipboard history:
@@ -871,16 +973,21 @@ where; and they never carry a value**, since cards reach the phone.
 
 **No agent approves a secrets card, the Overlord included.** Only `decide`, reached by the
 human's click or a paired phone, moves a request out of pending (docs/agent-requests.md §2).
-This holds today. It gets a test anyway, so a later change can't loosen it: with
-`overlord_answers_escalations` on, the Overlord agent answers escalations, and a secrets card
-must never be one of them.
+With `overlord_answers_escalations` on, the Overlord agent answers escalations, and a secrets
+card must never be one of them. **One exception exists today: a dev build.** There
+`decide_agent_request` is a Tauri command, and `tauri-plugin-mcp-bridge` lets an agent call the
+webview, so an agent could approve its own card. So, as with prod entry (§6.1), **a build with
+the bridge refuses desktop approval of prod-tier secrets cards** (the phone can still approve
+them). Tests cover both rules, so a later change can't loosen them.
 
-**A card says when the ask came after a mesh message.** An agent can be asked by a peer to
-deploy prod, and the card then names the agent that filed it, which is true but hides who
-started it. maiTerm delivers mesh and bridge messages itself, so it knows the last one this tab
-received. A secrets card filed within 10 minutes of one says **"after a message from
-'<peer name>' (2 min ago)"**. Those are maiTerm's words, built from its own record, never
-from the message text.
+**A card lists what reached the agent since the human last typed in its tab.** An agent can be
+steered by a peer, or by other input maiTerm delivers, into asking to deploy prod. The card then
+names the agent that filed it, which is true but hides who started it. maiTerm records every
+input it types into a tab: mesh and bridge messages, comms pickups, board notices, follow-ups,
+`driveTab` directives. It also knows when the human last typed there (`Turn.typedBy`). A secrets
+card lists **every maiTerm-delivered input since the human last typed in this tab**, by source:
+"after a message from 'Release', a follow-up and a board notice". There is no time window to wait
+out. Those are maiTerm's words, built from its own record, never from the message text.
 
 ### 11.3 Rotation progress
 
@@ -958,9 +1065,9 @@ filtered in the panel and exported.
 |---|---|---|
 | **A prompt-injected agent** ("send the key to evil.com") | No tool takes a value or a free URL; targets need a card and an agent's config and PATH can't redirect them (§7.3); templates can't cross an allowlist (§4.4); prod deploys need a card each time | An agent that writes code which leaks the key at runtime and gets it deployed. Code review and CI catch that, not the vault |
 | **A careless agent** (prints env, commits `.env`) | No values in tool results; masking and scrubbing; gitignore check; leak scan; pre-commit hook | A value it already read through its own tools |
-| **A determined agent running as the same OS user** | Prod values behind an OS-enforced unlock (§5): on macOS release builds the keychain itself refuses it; the `PreToolUse` speed bump (§10.3); no oracles (§1 rule 4) | Dev and staging values, unless the project opted them into the prod guard: the keychain item, process environments and `.env` files are readable to it. **On Windows** it can raise a Hello prompt for the same credential, and read the unlocked key from maiTerm's memory. **On Linux and in dev builds** the passphrase is all there is. **The real boundary is a configured sandbox (§10.3) or a separate OS user** |
+| **A determined agent running as the same OS user** | Prod values behind an OS-enforced unlock (§5): on macOS release builds the keychain itself refuses it; the `PreToolUse` speed bump (§10.3); no oracles (§1 rule 4) | Dev and staging values, unless the project opted them into the prod guard: the keychain item, process environments and `.env` files are readable to it. **On Windows** it can raise a Hello prompt for the same credential, and read the unlocked key from maiTerm's memory. **On Linux and in dev builds** the passphrase is all there is. **A recovery key it finds** (a saved PDF, a photo) opens everything, past every unlock (§5). **The real boundary is a configured sandbox (§10.3) or a separate OS user** |
 | **Another local process as the same user** | As above | As above, the same reach docs/login.md §9.2 accepts |
-| **A stolen backup or synced data dir** | The vault file alone is useless; Windows entries don't roam (§5); prod needs the prod unlock | A backup that also carries the macOS login keychain opens dev and staging values to whoever has the login password |
+| **A stolen backup or synced data dir** | The vault file alone is useless; Windows entries don't roam (§5); the prod key doesn't travel, and the recovery-wrapped copies need the offline recovery key | A backup that also carries the macOS login keychain opens dev and staging values to whoever has the login password |
 | **A lost or compromised phone** | Values never reach the phone; approvals need a paired device token (docs/agent-requests.md §2) | A paired phone can approve a prod deploy, so unpairing is the response |
 | **A shared screen / shoulder** | Masked by default; reveal times out; copy stays out of clipboard history | — |
 | **maiTerm's own logs and errors** | `Secret` has no `Display`/`Serialize`; errors name the operation and key, never the value (the `accounts/vault.rs` rule 1); adapter errors are fixed sentences (§7.3) | — |
@@ -1090,8 +1197,11 @@ Free or paid is Darryl's product call and doesn't change the design.
    then `runWithSecrets` with masking and file keys, the `maiterm-run` shim with peer-verified,
    **signature-checked** tickets for stack services, and "waiting for unlock" (§7.1, §7.2),
    `writeEnvFile`, `adoptSecrets` with the first-run scan (§6.2), and with them **the
-   ledger-file `PreToolUse` deny and the read-deny writers** (§10.3, §10.4): Claude and
-   Gemini first, Grok once its translation is proven, Codex once its test settles the approach.
+   ledger-file `PreToolUse` deny and the read-deny writers** (§10.3, §10.4), each runtime only
+   after its behavioural check passes: Claude first, then Grok's native rules; Gemini CLI
+   (paid-API and enterprise users only since 2026-06-18) after those; Codex once its test settles
+   the approach. Antigravity CLI waits to be looked at. The `entries.rs` symlink fix goes in
+   with them.
 5. **Targets.** `declareTargets`, `deploySecrets`, the ledger, adapters with pinned addresses and
    binaries (§7.3): GitHub Actions, Cloudflare, Railway. The OIDC / AWS SSO advice, which is
    about targets. "Last delivered" and the unused-key flag (§11.1). **The end of v1**, followed
@@ -1116,8 +1226,12 @@ Shipping a secrets manager raises the bar for the whole product. Before the vaul
 advertised on maiterm.dev:
 - **An outside security review of phases 1–5** (v1), with the threat model (§14) as its brief.
 - **A `SECURITY.md`** with a way to report vulnerabilities privately, and a stated response time.
-- **Nothing about the vault leaves the machine.** No key name, project name, count or event
-  reaches the updater's usage count (memory: "Usage stats / MAU") or any other service.
+- **Nothing identifying about the vault leaves the machine.** No key name, project name, count
+  or event reaches the updater's usage count (memory: "Usage stats / MAU"). The one deliberate
+  exception is the phone doorbell (§12): a push travels through the relay and APNs carrying a
+  kind and a title (docs/mailink-protocol.md §6). So secrets pushes carry only a **generic
+  title** ("A secret needs your attention"), never a key, project or provider name. The phone
+  fetches the details over maiLink's pinned LAN connection.
 - **The website copy stays true** (website/CLAUDE.md): it says what §1 and §14 say, including
   that the vault does not contain an agent running as the same OS user, and that prod protection
   differs by platform. It makes no "military-grade"-style claims.
