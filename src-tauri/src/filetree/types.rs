@@ -141,8 +141,8 @@ pub struct BranchInfo {
 pub struct GitUpdate {
     pub gen: u64,
     pub full: bool,
-    /// rel → "M" | "A" | "D" | "R" | "C" (conflict) | "?" (untracked; a folder when the whole
-    /// folder is untracked) | "T" (type change).
+    /// rel → "M" | "A" | "D" | "R" | "C" (conflict) | "?" (untracked) | "T" (type change). A
+    /// wholly untracked folder's key ends in "/" (`build/`): everything inside it is untracked.
     pub files: Vec<(String, String)>,
     /// Folders' rolled-up severity, the same letters (never "R" or "T").
     pub dirs: Vec<(String, String)>,

@@ -245,7 +245,8 @@ pub fn roll_up(files: &HashMap<String, String>) -> HashMap<String, String> {
     let mut sev: HashMap<String, u8> = HashMap::new();
     for (rel, letter) in files {
         let s = severity(letter);
-        let mut cur = rel.as_str();
+        // An untracked folder's key ends in '/': its roll-up starts at its parent.
+        let mut cur = rel.trim_end_matches('/');
         while let Some(i) = cur.rfind('/') {
             cur = &cur[..i];
             match sev.get_mut(cur) {
@@ -562,7 +563,10 @@ impl GitCore {
             if e.letter == "D" {
                 deleted.push(rel.clone());
             }
-            files.insert(rel, e.letter.to_string());
+            // A wholly untracked folder keeps git's trailing slash: the client can't tell a
+            // folder from a file by name, and needs to, to mark everything inside it.
+            let key = if e.dir { format!("{rel}/") } else { rel };
+            files.insert(key, e.letter.to_string());
         }
         let dirs = roll_up(&files);
         let truncated = files.len() > MAX_FILES;
@@ -845,6 +849,7 @@ mod tests {
         let files = m(&[
             ("a/b/c.ts", "?"),
             ("a/b/d.ts", "A"),
+            ("u/new/", "?"),
             ("a/e.ts", "M"),
             ("a/x/r.ts", "R"),
             ("z/gone.ts", "D"),
@@ -853,7 +858,8 @@ mod tests {
             ("top.txt", "M"),
         ]);
         let dirs = roll_up(&files);
-        assert_eq!(dirs, m(&[("a", "M"), ("a/b", "A"), ("a/x", "M"), ("z", "C"), ("z/y", "C"), ("w", "M")]));
+        // An untracked folder ("u/new/") rolls up into its parent, not into itself.
+        assert_eq!(dirs, m(&[("a", "M"), ("a/b", "A"), ("a/x", "M"), ("z", "C"), ("z/y", "C"), ("w", "M"), ("u", "?")]));
         assert!(!dirs.contains_key(""), "the root has no row and gets no roll-up");
         // Order independence: the early stop must not hide a more severe state.
         let mut sorted: Vec<_> = files.into_iter().collect();
@@ -900,6 +906,16 @@ mod tests {
         let c = core(Path::new("/r/a/b"), Path::new("/r"));
         let p = c.apply(st(&[("a/b/x.ts", "M"), ("a/bb/y.ts", "M"), ("a/b", "?"), ("top.ts", "A")]), Duration::ZERO).unwrap();
         assert_eq!(p.diff.files, vec![("x.ts".to_string(), "M".to_string())]);
+    }
+
+    #[test]
+    fn an_untracked_folder_keeps_its_slash() {
+        let c = core(Path::new("/r"), Path::new("/r"));
+        let out = Ok(Status { branch: None, entries: vec![StatusEntry { path: "build".into(), letter: "?", orig: None, dir: true }] });
+        let p = c.apply(out, Duration::ZERO).unwrap();
+        assert_eq!(p.diff.files, vec![("build/".to_string(), "?".to_string())]);
+        assert!(p.diff.dirs.is_empty());
+        assert!(p.untracked.is_empty(), "a folder is not a file for the search index");
     }
 
     #[test]
