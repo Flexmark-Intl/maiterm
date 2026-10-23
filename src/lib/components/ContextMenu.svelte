@@ -9,6 +9,34 @@
      *  shows the item disabled. */
     submenu?: MenuItem[];
   }
+
+  /** How long the rest of a double-click is waited for after an item acts. */
+  const GESTURE_TAIL_MS = 600;
+
+  /**
+   * An item acts on `click` and the menu is gone at once, so the second press of a
+   * double-click on it lands on whatever the menu covered: a Files row is then selected,
+   * opened and handed the keyboard, a terminal takes focus. Those presses carry
+   * `detail > 1` (the same multi-click gesture), so they are swallowed at the window before
+   * anything sees them; the first press of a new gesture (`detail` 1) ends the watch.
+   */
+  function swallowRestOfGesture() {
+    const types = ['mousedown', 'mouseup', 'click', 'dblclick'] as const;
+    const onEvent = (e: MouseEvent) => {
+      if (e.type === 'dblclick' || e.detail > 1) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
+      off();
+    };
+    const timer = setTimeout(() => off(), GESTURE_TAIL_MS);
+    function off() {
+      clearTimeout(timer);
+      for (const t of types) window.removeEventListener(t, onEvent, true);
+    }
+    for (const t of types) window.addEventListener(t, onEvent, true);
+  }
 </script>
 
 <script lang="ts">
@@ -92,6 +120,7 @@
       showSub(item, index, el);
       return;
     }
+    swallowRestOfGesture();
     item.action();
     onclose();
   }
