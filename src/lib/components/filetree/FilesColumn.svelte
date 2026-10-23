@@ -7,7 +7,7 @@
    * Its width is the parent's business (+page.svelte, ghost resize): nothing in here may
    * change it, because a width change at a streaming agent duplicates its scrollback.
    */
-  import { onDestroy, onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { fileTreeStore } from '$lib/stores/fileTree.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
@@ -54,6 +54,19 @@
   const place = $derived(fileTreeStore.place);
   const status = $derived(fileTreeStore.status);
 
+  // Asked for focus (Cmd+Shift+B) and there is no tree to take it — a missing folder, an ssh
+  // tab, an error: the column takes it, so the shortcut's next press closes it as promised.
+  // Still resolving: wait, the tree will.
+  let columnEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    if (!fileTreeStore.focusPending || !columnEl) return;
+    const settled = status === 'missing' || status === 'remote' || status === 'gone' || status === 'error'
+      || (status === 'none' && !!fileTreeStore.statusText);
+    if (!settled) return;
+    untrack(() => fileTreeStore.takeFocus());
+    void tick().then(() => columnEl?.focus({ preventScroll: true }));
+  });
+
   /** The footer speaks only when there is something to say (§3.2): no permanent "all good". */
   const footer = $derived.by(() => {
     const parts: string[] = [];
@@ -69,7 +82,16 @@
 
 <!-- data-filetree scopes the app's keyboard (+layout isAppShortcut): while focus is anywhere
      in the column only app shortcuts reach the app, so Cmd+D can't split a pane from here. -->
-<aside class="files-column" data-filetree aria-label="Files" style="--ft-row-h: {rowH}px">
+<aside
+  class="files-column"
+  data-filetree
+  aria-label="Files"
+  tabindex="-1"
+  bind:this={columnEl}
+  onfocusin={() => { fileTreeStore.focused = true; }}
+  onfocusout={(e) => { if (!columnEl?.contains(e.relatedTarget as Node | null)) fileTreeStore.focused = false; }}
+  style="--ft-row-h: {rowH}px"
+>
   <!-- eslint-disable-next-line svelte/no-at-html-tags -->
   {@html ICON_SPRITE}
   <FilesHeader />

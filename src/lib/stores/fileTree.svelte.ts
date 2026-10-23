@@ -135,7 +135,10 @@ function createFileTreeStore() {
   let home: string | null = null;
   /** Bumped to ask TreeBody to scroll a row into view / restore a scroll offset / focus. */
   let scrollRequest = $state<{ key: string | null; top?: number; seq: number }>({ key: null, seq: 0 });
-  let focusRequest = $state(0);
+  /** The tree should take the keyboard as soon as it can. A flag the tree consumes, not a
+   *  counter: a counter left over from an earlier request would pull focus into the tree
+   *  every time it remounts (the column reopened from the titlebar, say). */
+  let focusPending = $state(false);
   let lastHumanInputMs = 0;
 
   let model: TreeModel | null = null;
@@ -621,7 +624,7 @@ function createFileTreeStore() {
       return;
     }
     if (rel) revealRel(rel, true);
-    focusRequest++;
+    focusPending = true;
   }
 
   /** "Reveal in Files" on a terminal tab: that tab comes to the front (so the tree follows
@@ -632,7 +635,7 @@ function createFileTreeStore() {
     for (let i = 0; i < 40 && !attached; i++) await new Promise((r) => setTimeout(r, 50));
     await resolveNow(false);
     if (youAreHere) revealRel(youAreHere, true);
-    focusRequest++;
+    focusPending = true;
   }
 
   // ── Opening ───────────────────────────────────────────────────────────────────────────
@@ -681,7 +684,7 @@ function createFileTreeStore() {
       logError(`[files] open ${rel}: ${e}`);
       toastStore.addToast('Couldn’t open file', String(e), 'error');
     }
-    if (keepFocus) focusRequest++;
+    if (keepFocus) focusPending = true;
   }
 
   /** A preview becomes a normal tab (Enter, a double-click, its first edit). */
@@ -951,7 +954,13 @@ function createFileTreeStore() {
     get outsideFile() { return outsideFile; },
     get announcement() { return announcement; },
     get scrollRequest() { return scrollRequest; },
-    get focusRequest() { return focusRequest; },
+    get focusPending() { return focusPending; },
+    /** Taken by whoever focuses (the tree, or the column when there is no tree to focus). */
+    takeFocus(): boolean {
+      const was = focusPending;
+      focusPending = false;
+      return was;
+    },
     get sourceTabId() { return sourceTabId; },
     get addTarget() { return addTarget; },
     get editorRels() { return editorRels; },
@@ -968,7 +977,6 @@ function createFileTreeStore() {
     scheduleResolve,
     humanTouched() { lastHumanInputMs = Date.now(); },
     noteScroll(top: number) { scrollTop = top; },
-    requestFocus() { focusRequest++; },
 
     /** Cmd/Ctrl+Shift+B (§11.2): closed → open and focus; open, unfocused → focus;
      *  focused → close. With an editor tab in front, its file is revealed too. */
@@ -976,9 +984,9 @@ function createFileTreeStore() {
       if (!preferencesStore.fileTreeEnabled) return;
       if (!workspacesStore.fileTreeOpen) {
         await workspacesStore.setFileTreeOpen(true);
-        focusRequest++;
+        focusPending = true;
       } else if (!focused) {
-        focusRequest++;
+        focusPending = true;
       } else {
         await workspacesStore.setFileTreeOpen(false);
         const t = workspacesStore.activeTab;
@@ -991,7 +999,7 @@ function createFileTreeStore() {
         const [rel] = subId !== null ? await commands.ftLocate(subId, [t.editor_file.file_path]).catch(() => [null]) : [null];
         if (rel) {
           revealRel(rel, true);
-          focusRequest++;
+          focusPending = true;
         }
       }
     },

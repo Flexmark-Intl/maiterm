@@ -44,6 +44,9 @@
   let el = $state<HTMLDivElement | null>(null);
   let scrollTop = $state(0);
   let viewportH = $state(400);
+  /** The list itself holds the keyboard (draws the focus ring); the store's `focused` is the
+   *  whole column, which is what Cmd+Shift+B asks about. */
+  let hasFocus = $state(false);
 
   const rows = $derived(fileTreeStore.rows);
   const model = $derived(fileTreeStore.model);
@@ -118,8 +121,8 @@
   });
 
   $effect(() => {
-    const n = fileTreeStore.focusRequest;
-    if (n === 0) return;
+    if (!fileTreeStore.focusPending || !el) return;
+    untrack(() => fileTreeStore.takeFocus());
     // tick, not rAF (stalls in an occluded webview) and never `autofocus` (CLAUDE.md).
     void tick().then(() => el?.focus({ preventScroll: true }));
   });
@@ -454,7 +457,7 @@
       id="ftr-{i}"
       class="row"
       class:focused
-      class:tree-focused={focused && fileTreeStore.focused}
+      class:tree-focused={focused && hasFocus}
       class:selected={fileTreeStore.selection.has(r.key)}
       class:ignored={r.flags & TREE_FLAG_IGNORED}
       class:hidden-file={r.flags & TREE_FLAG_HIDDEN}
@@ -501,8 +504,8 @@
   aria-activedescendant={focusIdx >= 0 ? `ftr-${focusIdx}` : undefined}
   onscroll={onScroll}
   onkeydown={onKeydown}
-  onfocus={() => { fileTreeStore.focused = true; if (focusIdx < 0 && rows.length) { const i = focusable(Math.floor(scrollTop / rowH), 1); if (i >= 0) fileTreeStore.setFocus(rows[i].key, false); } }}
-  onblur={() => { fileTreeStore.focused = false; }}
+  onfocus={() => { hasFocus = true; if (focusIdx < 0 && rows.length) { const i = focusable(Math.floor(scrollTop / rowH), 1); if (i >= 0) fileTreeStore.setFocus(rows[i].key, false); } }}
+  onblur={() => { hasFocus = false; }}
   onmouseleave={hideTip}
 >
   <div class="sticky-wrap">
