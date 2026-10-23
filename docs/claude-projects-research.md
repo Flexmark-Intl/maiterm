@@ -1,6 +1,6 @@
 # Claude Code Projects (beta): research notes
 
-Research for the Overlord Hive feature, 2026-10-23. This describes Anthropic's product as it
+Research for the Hive feature, 2026-10-23. This describes Anthropic's product as it
 ships, not anything maiTerm does yet. The design for our local version comes later and lives
 elsewhere.
 
