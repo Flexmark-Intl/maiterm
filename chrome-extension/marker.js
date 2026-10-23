@@ -80,9 +80,9 @@ export async function mark(link, links, carried) {
 
     let groupId = agentGroup;
     if (groupId != null) {
-      if (tab.groupId !== groupId) await chrome.tabs.group({ groupId, tabIds: [tab.id] });
+      if (tab.groupId !== groupId) await retry(() => chrome.tabs.group({ groupId, tabIds: [tab.id] }));
     } else {
-      groupId = await chrome.tabs.group({ tabIds: [tab.id], createProperties: { windowId: tab.windowId } });
+      groupId = await retry(() => chrome.tabs.group({ tabIds: [tab.id], createProperties: { windowId: tab.windowId } }));
       await chrome.tabGroups.update(groupId, { title: titleFor(link), color: colorFor(link.maitermTabId) });
     }
     return { ...placement, groupId };
