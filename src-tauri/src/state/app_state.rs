@@ -60,7 +60,9 @@ pub struct MemorySample {
 
 /// Remote file watch entry for SSH-based polling.
 pub struct RemoteFileWatch {
-    pub user_host: String,
+    /// Where the file is: its host with the options that reach it (port, identity, jump, the
+    /// bridge tunnel's socket), not just `user@host`.
+    pub target: crate::util::ssh_target::SshTarget,
     pub remote_path: String,
     pub last_mtime: Option<u64>,
 }

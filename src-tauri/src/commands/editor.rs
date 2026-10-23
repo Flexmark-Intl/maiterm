@@ -1,5 +1,6 @@
 use crate::state::persistence::save_state;
 use crate::state::{AppState, EditorFileInfo, FileWatcherHandle, RemoteFileWatch, Tab};
+use crate::util::ssh_target::SshTarget;
 use base64::Engine;
 use std::io::Read;
 use std::path::Path;
@@ -202,13 +203,10 @@ fn join_resolved_folder(printed: &str, name: &str) -> Option<String> {
     Some(if folder == "/" { format!("/{name}") } else { format!("{folder}/{name}") })
 }
 
-fn resolve_remote_editor_path_blocking(ssh_command: &str, path: &str) -> Result<String, String> {
+fn resolve_remote_editor_path_blocking(target: &SshTarget, path: &str) -> Result<String, String> {
     let (cmd, name) = remote_resolve_folder_command(path).ok_or("Not a file path")?;
-    let user_host = extract_user_host(ssh_command)?;
-    let mut child = std::process::Command::new("ssh")
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("ConnectTimeout=5")
-        .arg(&user_host)
+    let mut child = target
+        .ssh(5)
         .arg(&cmd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -247,8 +245,9 @@ fn resolve_remote_editor_path_blocking(ssh_command: &str, path: &str) -> Result<
 /// from `git status` in a subfolder), which must find the editor tab the agent opened as
 /// `/home/me/proj/foo.ts`; only the host can say what `..` means under a symlinked folder.
 #[command]
-pub async fn resolve_remote_editor_path(ssh_command: String, path: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || resolve_remote_editor_path_blocking(&ssh_command, &path))
+pub async fn resolve_remote_editor_path(state: State<'_, Arc<AppState>>, ssh_command: String, path: String) -> Result<String, String> {
+    let target = SshTarget::for_command(&ssh_command, &state)?;
+    tauri::async_runtime::spawn_blocking(move || resolve_remote_editor_path_blocking(&target, &path))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -340,21 +339,21 @@ pub async fn read_file_base64(path: String) -> Result<ReadFileBase64Result, Stri
 
 #[command]
 pub async fn scp_read_file_base64(
+    state: State<'_, Arc<AppState>>,
     ssh_command: String,
     remote_path: String,
 ) -> Result<ReadFileBase64Result, String> {
-    let user_host = extract_user_host(&ssh_command)?;
-    let remote_path = expand_remote_tilde(&user_host, &remote_path);
+    let target = SshTarget::for_command(&ssh_command, &state)?;
+    let remote_path = expand_remote_tilde(&target, &remote_path);
 
     // Download via SCP
     let temp_dir = std::env::temp_dir();
     let temp_name = format!("aiterm-scp-{}", uuid::Uuid::new_v4());
     let local_path = temp_dir.join(&temp_name);
 
-    let output = std::process::Command::new("scp")
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("ConnectTimeout=10")
-        .arg(format!("{}:{}", user_host, remote_path))
+    let output = target
+        .scp(10)
+        .arg(target.remote(&remote_path))
         .arg(local_path.to_str().unwrap())
         .output()
         .map_err(|e| format!("Failed to run scp: {}", e))?;
@@ -383,11 +382,12 @@ pub async fn scp_read_file_base64(
 
 #[command]
 pub async fn scp_read_file(
+    state: State<'_, Arc<AppState>>,
     ssh_command: String,
     remote_path: String,
 ) -> Result<ReadFileResult, String> {
-    let user_host = extract_user_host(&ssh_command)?;
-    let remote_path = expand_remote_tilde(&user_host, &remote_path);
+    let target = SshTarget::for_command(&ssh_command, &state)?;
+    let remote_path = expand_remote_tilde(&target, &remote_path);
 
     // Pre-check via SSH: file type, size, and binary detection in one command
     // stat -c on Linux, stat -f on macOS — use a portable approach
@@ -396,10 +396,8 @@ pub async fn scp_read_file(
         shell_quote(&remote_path)
     );
 
-    let check_output = std::process::Command::new("ssh")
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("ConnectTimeout=10")
-        .arg(&user_host)
+    let check_output = target
+        .ssh(10)
         .arg(&check_cmd)
         .output()
         .map_err(|e| format!("Failed to run ssh: {}", e))?;
@@ -437,10 +435,9 @@ pub async fn scp_read_file(
     let temp_name = format!("aiterm-scp-{}", uuid::Uuid::new_v4());
     let local_path = temp_dir.join(&temp_name);
 
-    let output = std::process::Command::new("scp")
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("ConnectTimeout=10")
-        .arg(format!("{}:{}", user_host, remote_path))
+    let output = target
+        .scp(10)
+        .arg(target.remote(&remote_path))
         .arg(local_path.to_str().unwrap())
         .output()
         .map_err(|e| format!("Failed to run scp: {}", e))?;
@@ -461,12 +458,13 @@ pub async fn scp_read_file(
 
 #[command]
 pub async fn scp_write_file(
+    state: State<'_, Arc<AppState>>,
     ssh_command: String,
     remote_path: String,
     content: String,
 ) -> Result<(), String> {
-    let user_host = extract_user_host(&ssh_command)?;
-    let remote_path = expand_remote_tilde(&user_host, &remote_path);
+    let target = SshTarget::for_command(&ssh_command, &state)?;
+    let remote_path = expand_remote_tilde(&target, &remote_path);
 
     // Write content to temp file
     let temp_dir = std::env::temp_dir();
@@ -476,13 +474,10 @@ pub async fn scp_write_file(
     std::fs::write(&local_path, &content).map_err(|e| format!("Cannot write temp file: {}", e))?;
 
     // Run scp to upload
-    let output = std::process::Command::new("scp")
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=10")
+    let output = target
+        .scp(10)
         .arg(local_path.to_str().unwrap())
-        .arg(format!("{}:{}", user_host, remote_path))
+        .arg(target.remote(&remote_path))
         .output()
         .map_err(|e| format!("Failed to run scp: {}", e))?;
 
@@ -661,16 +656,17 @@ fn shell_execute_open(path: &str) -> Result<(), String> {
 /// same path.
 #[command]
 pub async fn stage_remote_file_temp(
+    state: State<'_, Arc<AppState>>,
     ssh_command: String,
     remote_path: String,
 ) -> Result<String, String> {
     use std::hash::{Hash, Hasher};
 
-    let user_host = extract_user_host(&ssh_command)?;
-    let remote_path = expand_remote_tilde(&user_host, &remote_path);
+    let target = SshTarget::for_command(&ssh_command, &state)?;
+    let remote_path = expand_remote_tilde(&target, &remote_path);
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    user_host.hash(&mut hasher);
+    target.key().hash(&mut hasher);
     remote_path.hash(&mut hasher);
     let key = format!("{:016x}", hasher.finish());
 
@@ -685,10 +681,9 @@ pub async fn stage_remote_file_temp(
         .unwrap_or_else(|| "file".to_string());
     let dest = dir.join(&basename);
 
-    let output = std::process::Command::new("scp")
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("ConnectTimeout=10")
-        .arg(format!("{}:{}", user_host, remote_path))
+    let output = target
+        .scp(10)
+        .arg(target.remote(&remote_path))
         .arg(dest.to_str().ok_or("Invalid destination path")?)
         .output()
         .map_err(|e| format!("Failed to run scp: {}", e))?;
@@ -705,11 +700,12 @@ pub async fn stage_remote_file_temp(
 /// Returns the absolute local path of the saved copy.
 #[command]
 pub async fn download_remote_file(
+    state: State<'_, Arc<AppState>>,
     ssh_command: String,
     remote_path: String,
 ) -> Result<String, String> {
-    let user_host = extract_user_host(&ssh_command)?;
-    let remote_path = expand_remote_tilde(&user_host, &remote_path);
+    let target = SshTarget::for_command(&ssh_command, &state)?;
+    let remote_path = expand_remote_tilde(&target, &remote_path);
 
     let downloads = dirs::download_dir()
         .ok_or_else(|| "Could not locate the Downloads directory".to_string())?;
@@ -723,10 +719,9 @@ pub async fn download_remote_file(
         .unwrap_or_else(|| "download".to_string());
     let dest = crate::util::naming::unique_path(&downloads, &basename, crate::util::naming::CopyNames::Numbered);
 
-    let output = std::process::Command::new("scp")
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("ConnectTimeout=10")
-        .arg(format!("{}:{}", user_host, remote_path))
+    let output = target
+        .scp(10)
+        .arg(target.remote(&remote_path))
         .arg(dest.to_str().ok_or("Invalid destination path")?)
         .output()
         .map_err(|e| format!("Failed to run scp: {}", e))?;
@@ -887,8 +882,11 @@ fn run_scp_upload(
     let _registry_guard = RegistryGuard { state: app_state, id: upload_id };
 
     let remote_dir = remote_dir.trim().to_string();
-    let user_host = extract_user_host(ssh_command)?;
-    let remote_dir = expand_remote_tilde(&user_host, &remote_dir);
+    // This upload opens its own ControlMaster to the destination (below); only the tilde is
+    // expanded with the tab's full connect options.
+    let target = SshTarget::parse(ssh_command)?;
+    let user_host = target.dest.clone();
+    let remote_dir = expand_remote_tilde(&target, &remote_dir);
     log::info!(
         "scp_upload_files[{}]: user_host={:?}, remote_dir={:?}, paths={:?}",
         upload_id, user_host, remote_dir, local_paths
@@ -1150,7 +1148,7 @@ fn shell_quote(s: &str) -> String {
 
 /// Expand `~` and `~username` prefixes on a remote host via SSH.
 /// SCP in SFTP mode doesn't support `~user` paths, so we resolve them first.
-fn expand_remote_tilde(user_host: &str, path: &str) -> String {
+fn expand_remote_tilde(target: &SshTarget, path: &str) -> String {
     if !path.starts_with('~') {
         return path.to_string();
     }
@@ -1161,12 +1159,7 @@ fn expand_remote_tilde(user_host: &str, path: &str) -> String {
         None => (path, ""),
     };
     let cmd = format!("echo {}", tilde_prefix);
-    if let Ok(output) = std::process::Command::new("ssh")
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("ConnectTimeout=10")
-        .arg(user_host)
-        .arg(&cmd)
-        .output()
+    if let Ok(output) = target.ssh(10).arg(&cmd).output()
     {
         if output.status.success() {
             let expanded = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1269,57 +1262,19 @@ pub async fn get_file_mtime(path: String) -> Result<u64, String> {
     Ok(epoch.as_millis() as u64)
 }
 
-/// Extract user@host from an SSH command string.
-/// Handles formats like "ssh user@host", "ssh -o Foo=bar user@host", etc.
-fn extract_user_host(ssh_command: &str) -> Result<String, String> {
-    let parts: Vec<&str> = ssh_command.split_whitespace().collect();
-
-    // Find the user@host part (first argument that contains @ and isn't a flag value)
-    let mut skip_next = false;
-    for part in &parts {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if *part == "ssh" {
-            continue;
-        }
-        // Flags that take a value
-        if [
-            "-o", "-i", "-p", "-l", "-F", "-J", "-L", "-R", "-D", "-W", "-S", "-b", "-c", "-E",
-            "-m", "-O", "-Q", "-w", "-B", "-e",
-        ]
-        .contains(part)
-        {
-            skip_next = true;
-            continue;
-        }
-        // Single-letter flags (no value)
-        if part.starts_with('-') && !part.contains('=') {
-            continue;
-        }
-        // This should be user@host or just host
-        return Ok(part.to_string());
-    }
-
-    Err("Cannot extract host from SSH command".to_string())
-}
-
 // ── Remote file watching (SSH stat polling) ──────────────────────────
 
 /// Get modification time of a remote file via SSH stat.
 /// Returns epoch seconds (not ms) since that's what `stat` gives us.
-fn ssh_stat_mtime(user_host: &str, remote_path: &str) -> Result<u64, String> {
+fn ssh_stat_mtime(target: &SshTarget, remote_path: &str) -> Result<u64, String> {
     let quoted = shell_quote(remote_path);
     // stat -c %Y = Linux (GNU coreutils), stat -f %m = macOS/BSD
     let cmd = format!(
         "stat -c %Y {} 2>/dev/null || stat -f %m {} 2>/dev/null",
         quoted, quoted
     );
-    let output = std::process::Command::new("ssh")
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("ConnectTimeout=5")
-        .arg(user_host)
+    let output = target
+        .ssh(5)
         .arg(&cmd)
         .output()
         .map_err(|e| format!("Failed to run ssh: {}", e))?;
@@ -1337,10 +1292,10 @@ fn ssh_stat_mtime(user_host: &str, remote_path: &str) -> Result<u64, String> {
 
 /// One-shot remote file mtime check (used by frontend before/after saves).
 #[command]
-pub async fn get_remote_file_mtime(ssh_command: String, remote_path: String) -> Result<u64, String> {
-    let user_host = extract_user_host(&ssh_command)?;
-    let remote_path = expand_remote_tilde(&user_host, &remote_path);
-    let mtime = ssh_stat_mtime(&user_host, &remote_path)?;
+pub async fn get_remote_file_mtime(state: State<'_, Arc<AppState>>, ssh_command: String, remote_path: String) -> Result<u64, String> {
+    let target = SshTarget::for_command(&ssh_command, &state)?;
+    let remote_path = expand_remote_tilde(&target, &remote_path);
+    let mtime = ssh_stat_mtime(&target, &remote_path)?;
     // Return as seconds (frontend handles comparison consistently)
     Ok(mtime)
 }
@@ -1354,13 +1309,13 @@ pub async fn watch_remote_file(
     ssh_command: String,
     remote_path: String,
 ) -> Result<(), String> {
-    let user_host = extract_user_host(&ssh_command)?;
-    let remote_path = expand_remote_tilde(&user_host, &remote_path);
+    let target = SshTarget::for_command(&ssh_command, &state)?;
+    let remote_path = expand_remote_tilde(&target, &remote_path);
 
     {
         let mut watchers = state.remote_file_watchers.write();
         watchers.insert(tab_id, RemoteFileWatch {
-            user_host,
+            target,
             remote_path,
             last_mtime: None,
         });
@@ -1452,17 +1407,15 @@ pub async fn is_directory(path: String) -> Result<bool, String> {
 }
 
 #[command]
-pub async fn ssh_is_directory(ssh_command: String, remote_path: String) -> Result<bool, String> {
-    let user_host = extract_user_host(&ssh_command)?;
-    let remote_path = expand_remote_tilde(&user_host, &remote_path);
+pub async fn ssh_is_directory(state: State<'_, Arc<AppState>>, ssh_command: String, remote_path: String) -> Result<bool, String> {
+    let target = SshTarget::for_command(&ssh_command, &state)?;
+    let remote_path = expand_remote_tilde(&target, &remote_path);
     let quoted = shell_quote(&remote_path);
 
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        tokio::process::Command::new("ssh")
-            .arg("-o").arg("BatchMode=yes")
-            .arg("-o").arg("ConnectTimeout=5")
-            .arg(&user_host)
+        target
+            .ssh_async(5)
             .arg(format!("test -d {}", quoted))
             .output()
     )
@@ -1572,14 +1525,15 @@ pub async fn list_files(
 
 #[command]
 pub async fn ssh_list_files(
+    state: State<'_, Arc<AppState>>,
     ssh_command: String,
     remote_path: String,
     max_files: Option<u32>,
     show_hidden: Option<bool>,
     show_ignored: Option<bool>,
 ) -> Result<Vec<String>, String> {
-    let user_host = extract_user_host(&ssh_command)?;
-    let remote_path = expand_remote_tilde(&user_host, &remote_path);
+    let target = SshTarget::for_command(&ssh_command, &state)?;
+    let remote_path = expand_remote_tilde(&target, &remote_path);
     let max = max_files.unwrap_or(5000);
     let hidden = show_hidden.unwrap_or(false);
     let no_ignore = show_ignored.unwrap_or(false);
@@ -1628,10 +1582,8 @@ pub async fn ssh_list_files(
 
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        tokio::process::Command::new("ssh")
-            .arg("-o").arg("BatchMode=yes")
-            .arg("-o").arg("ConnectTimeout=10")
-            .arg(&user_host)
+        target
+            .ssh_async(10)
             .arg(&cmd)
             .output()
     )
@@ -1669,7 +1621,7 @@ async fn remote_file_poll_loop(state: Arc<AppState>, app: tauri::AppHandle) {
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
         // Take a snapshot of current watchers
-        let snapshot: Vec<(String, String, String, Option<u64>)> = {
+        let snapshot: Vec<(String, SshTarget, String, Option<u64>)> = {
             let watchers = state.remote_file_watchers.read();
             if watchers.is_empty() {
                 // No watchers — stop the polling task
@@ -1678,24 +1630,25 @@ async fn remote_file_poll_loop(state: Arc<AppState>, app: tauri::AppHandle) {
                 return;
             }
             watchers.iter().map(|(tab_id, w)| {
-                (tab_id.clone(), w.user_host.clone(), w.remote_path.clone(), w.last_mtime)
+                (tab_id.clone(), w.target.clone(), w.remote_path.clone(), w.last_mtime)
             }).collect()
         };
 
-        // Group by user_host
-        let mut by_host: HashMap<String, Vec<(String, String, Option<u64>)>> = HashMap::new();
-        for (tab_id, user_host, remote_path, last_mtime) in snapshot {
-            by_host.entry(user_host).or_default().push((tab_id, remote_path, last_mtime));
+        // Group by connection (host and the options that reach it)
+        type Files = Vec<(String, String, Option<u64>)>;
+        let mut by_host: HashMap<String, (SshTarget, Files)> = HashMap::new();
+        for (tab_id, target, remote_path, last_mtime) in snapshot {
+            by_host.entry(target.key()).or_insert_with(|| (target, Vec::new())).1.push((tab_id, remote_path, last_mtime));
         }
 
         // Poll each host
-        for (user_host, files) in &by_host {
+        for (user_host, (target, files)) in &by_host {
             // Skip hosts that have failed too many times
             if host_failures.get(user_host).copied().unwrap_or(0) >= MAX_FAILURES {
                 continue;
             }
 
-            let result = poll_host_files(user_host, files).await;
+            let result = poll_host_files(target, files).await;
 
             match result {
                 Ok(mtimes) => {
@@ -1743,7 +1696,7 @@ async fn remote_file_poll_loop(state: Arc<AppState>, app: tauri::AppHandle) {
 /// Poll mtime for multiple files on a single host in one SSH call.
 /// Returns a vec of mtime values (one per file, 0 if stat failed for that file).
 async fn poll_host_files(
-    user_host: &str,
+    target: &SshTarget,
     files: &[(String, String, Option<u64>)],
 ) -> Result<Vec<u64>, String> {
     // Build a script that stats each file and prints one mtime per line
@@ -1760,10 +1713,8 @@ async fn poll_host_files(
         file_list
     );
 
-    let output = tokio::process::Command::new("ssh")
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("ConnectTimeout=5")
-        .arg(user_host)
+    let output = target
+        .ssh_async(5)
         .arg(&script)
         .output()
         .await

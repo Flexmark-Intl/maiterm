@@ -15,7 +15,7 @@ Editor tabs (`tab_type === 'editor'`) render `EditorPane.svelte` instead of `Ter
 
 **Image preview**: `isImageFile()` checks extension; if true, loads via `read_file_base64` / `scp_read_file_base64` and renders with `<img src="data:...">`. Zoom controls: fit-to-window (default), preset steps (10%–500%), +/- buttons.
 
-**Remote files**: SCP commands extracted from the SSH foreground command. Files >2MB or binary (null bytes in first 8KB) are rejected with a user-friendly error toast.
+**Remote files**: SCP commands extracted from the SSH foreground command. Every remote command goes through `util::ssh_target::SshTarget`, which keeps the connect options (`-p`, `-i`, `-J`, `-o`, written as `-o Key=v` so scp reads them too) and muxes over the tab's bridge tunnel socket when there is one — never reduce a command to `user@host` again: a port-only or password-only (bridge-only) host then lists in Files and fails every open. Files >2MB or binary (null bytes in first 8KB) are rejected with a user-friendly error toast.
 
 **Search panel**: Uses `search({ top: true })` — positioned at top of editor. Styled via `:global(.cm-panel.cm-search)` CSS in EditorPane.
 
