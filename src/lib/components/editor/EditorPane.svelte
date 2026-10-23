@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine } from '@codemirror/view';
   import { EditorState, Compartment, Transaction } from '@codemirror/state';
   import { MergeView } from '@codemirror/merge';
@@ -97,6 +97,10 @@
   let fileDeleted = $state(false);
   let unlistenFileChanged: UnlistenFn | null = null;
   let unlistenFileDeleted: UnlistenFn | null = null;
+  /** Bumped by every start and stop of the watcher. Starts overlap (the mount, the visibility
+   *  effect, a Files rename's retarget), and each awaits several times: only the newest may
+   *  keep its listeners, or the others' pairs are never removed. */
+  let watchGen = 0;
   const isLocalFile = !editorFile.is_remote;
 
   // PDF viewer state
@@ -560,7 +564,8 @@
     await stopWatching();
     fileDeleted = false;
     if (editorView) setEditorFilePath(tabId, editorFile.file_path);
-    await startWatching();
+    // A hidden tab starts watching when it is shown, like any other.
+    if (visible) await startWatching();
   }
 
   function handleEditorReplaceFile(e: Event) {
@@ -714,6 +719,9 @@
           registerEditor(tabId, editorView, editorFile.file_path);
         }
         loading = false;
+        // The new file's watcher, from its own mtime (the old file's means nothing here).
+        lastKnownMtime = 0;
+        if (visible) void startWatching();
       }
     } catch (e) {
       errorMsg = String(e);
@@ -794,11 +802,29 @@
     }
   }
 
+  /** Keep a listener only while this start is still the newest; a superseded one drops it. */
+  function keepIfCurrent(gen: number, un: UnlistenFn): UnlistenFn | null {
+    if (gen === watchGen) return un;
+    un();
+    return null;
+  }
+
+  function dropListeners() {
+    unlistenFileChanged?.();
+    unlistenFileChanged = null;
+    unlistenFileDeleted?.();
+    unlistenFileDeleted = null;
+  }
+
   async function startWatching() {
+    const gen = ++watchGen;
+    // A start never stacks on another's listeners.
+    dropListeners();
     if (isLocalFile) {
       try {
         // Check mtime first — file may have changed while tab was hidden
         const currentMtime = await getFileMtime(editorFile.file_path);
+        if (gen !== watchGen) return;
         if (lastKnownMtime > 0 && currentMtime > lastKnownMtime) {
           await handleExternalChange();
         }
@@ -806,7 +832,8 @@
 
         // Start fs watcher
         await watchFile(tabId, editorFile.file_path);
-        unlistenFileChanged = await listen(`file-changed-${tabId}`, async () => {
+        if (gen !== watchGen) return;
+        unlistenFileChanged = keepIfCurrent(gen, await listen(`file-changed-${tabId}`, async () => {
           try {
             const newMtime = await getFileMtime(editorFile.file_path);
             if (newMtime <= lastKnownMtime) return;
@@ -816,7 +843,7 @@
           } catch {
             // File may have been deleted — ignore
           }
-        });
+        }));
       } catch (e) {
         logError(`Failed to start file watcher: ${e}`);
       }
@@ -824,6 +851,7 @@
       try {
         // Check mtime via SSH — file may have changed while tab was hidden
         const currentMtime = await getRemoteFileMtime(editorFile.remote_ssh_command, editorFile.remote_path);
+        if (gen !== watchGen) return;
         if (lastKnownMtime > 0 && currentMtime > lastKnownMtime) {
           await handleExternalChange();
         }
@@ -831,7 +859,8 @@
 
         // Register with backend polling task
         await watchRemoteFile(tabId, editorFile.remote_ssh_command, editorFile.remote_path);
-        unlistenFileChanged = await listen(`file-changed-${tabId}`, async () => {
+        if (gen !== watchGen) return;
+        unlistenFileChanged = keepIfCurrent(gen, await listen(`file-changed-${tabId}`, async () => {
           try {
             const newMtime = await getRemoteFileMtime(editorFile.remote_ssh_command!, editorFile.remote_path!);
             if (newMtime <= lastKnownMtime) return;
@@ -841,28 +870,23 @@
           } catch {
             // SSH may have disconnected — ignore
           }
-        });
+        }));
       } catch (e) {
         logError(`Failed to start remote file watcher: ${e}`);
       }
     }
+    if (gen !== watchGen) return;
 
     // Listen for file deletion (both local and remote)
-    unlistenFileDeleted = await listen(`file-deleted-${tabId}`, () => {
+    unlistenFileDeleted = keepIfCurrent(gen, await listen(`file-deleted-${tabId}`, () => {
       fileDeleted = true;
       logInfo(`File deleted: ${editorFile.remote_path ?? editorFile.file_path}`);
-    });
+    }));
   }
 
   async function stopWatching() {
-    if (unlistenFileChanged) {
-      unlistenFileChanged();
-      unlistenFileChanged = null;
-    }
-    if (unlistenFileDeleted) {
-      unlistenFileDeleted();
-      unlistenFileDeleted = null;
-    }
+    watchGen++;
+    dropListeners();
     if (isLocalFile) {
       try { await unwatchFile(tabId); } catch { /* ignore */ }
     } else {
@@ -1430,13 +1454,15 @@
     }
   });
 
-  // Start/stop file watching based on visibility
+  // Start/stop file watching based on visibility. Untracked: startWatching reads the file's
+  // path before its first await, which would re-run this on a rename too, beside the retarget
+  // handler's own restart.
   $effect(() => {
     if (!editorView) return;
     if (visible) {
-      startWatching();
+      untrack(() => void startWatching());
     } else {
-      stopWatching();
+      untrack(() => void stopWatching());
     }
   });
 </script>
