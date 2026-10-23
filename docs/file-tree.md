@@ -381,6 +381,56 @@
 >   name would break on Windows", and likewise for a trailing dot or space and reserved names.
 > - **`IconButton` takes its tooltip as its `aria-label`** unless the caller passes one (or an
 >   `aria-labelledby`), so the Files header buttons and every other icon button have a name.
+>
+> **As built, phase 4 backend (2026-10-23, `src-tauri/src/agent_files/{mod,extract,commands}.rs`).**
+> The UI half (AgentStrip, LensBar, EdgeChips, rails, follow-agent, the conflict badge, and the
+> `revealInTree` / `getTreeSelection` handlers in `claudeCode.svelte.ts`) is not in it: until those
+> land, the two frontend tools answer "Unknown tool". Where it differs from the text below:
+> - **`AgentFileLedger` is `AgentFiles`, owned by `FileTreeState`** (`ft.agents`) and handed to every
+>   hub; `hooks_handler` feeds it through `record_agent_files`, before `normalize_hook_event`.
+> - **Paths are not canonicalized in the hook.** An entry's path is absolute, lexically normalized
+>   and NFC on macOS; the dispatcher and the guard canonicalize only on a mismatch (`/tmp` vs
+>   `/private/tmp`), off the hook's path. A relative Codex patch path resolves against the session
+>   cwd. An ssh tab's key is `connect_args(host_key):/abs`.
+> - **Marks are placed without listing the disk**: a name takes the spelling of an open folder's
+>   listing (NFC/NFD, case) and stays as given below a folder nobody has open. `ft_locate`'s
+>   per-name look at the disk would cost a folder listing per Read.
+> - **A Write is a `create` when its file was absent at Pre**, checked with one stat under a 25 ms
+>   budget (unknown on timeout: `write`). The only IO in the hook's path.
+> - **Ops added:** `commit` (with `evidence: "commit"`), next to `changed`/`fs_during_tool`. A call
+>   still `pending` when its turn ends (Esc, no Post) is settled `failed`, so it stops pulsing. A
+>   new session id on a tab starts its history afresh. A tab gone from every window is forgotten
+>   after 60 s, not at once: a reload deletes the old tab before `agent_files_remap_tab` moves it.
+> - **Shell attribution** takes the coalescer's non-ignored worktree paths (a folder only
+>   "modified" is left out, its entry has an event of its own) while exactly one TAB has a shell
+>   call running (or ended within 300 ms: a batch closes up to 250 ms after the write) whose cwd
+>   is in the root or holds it. Parallel calls of one tab credit the latest. Shell tools: `Bash`,
+>   `PowerShell`, and Codex's `shell` / `local_shell` / `exec_command` (a `shell` call whose
+>   command is `apply_patch` is read as the patch).
+> - **The commit credit** runs `git merge-base --is-ancestor old new` first, so a checkout of
+>   another branch is no commit, then `diff-tree` (capped at 2,000 files), both in the git slots.
+> - **Delivery:** the first mark after a quiet spell goes at once, later ones wait for the hub's
+>   100 ms window; within a batch only a path's latest mark per tab and agent. A paused or stalled
+>   subscriber is sent the marks still standing when it resumes, and a new one when it subscribes
+>   (no reads: they leave no lasting mark). `file_tree_agent_activity` off stops routing and
+>   priming; the ledger still records (the guard and `getAgentFileActivity` read it). A completed
+>   write signals git with `Trigger::Agent` (an edge, skipped in slow and network mode like
+>   `Command`).
+> - **`agent_active`** names a tab with a non-read call `pending` on the item (or inside it), or an
+>   `ok` write in its open turn. Local tabs only.
+> - **`getAgentFileActivity`** answers `{tabId, scope, turn, turnOpen, entries, coverage, note}`;
+>   `coverage` lists each open hub holding the tab's cwd (or held by it) as `full`,
+>   `expanded_only` (per-folder watching: Linux, shallow roots) or `none` (network), and an ssh
+>   tab's as `none`. A `tabId` other than the caller's is served only in the caller's mesh (same
+>   mesh workspace, or linked ones in one window), judged against the connection's STATED tab.
+> - **Payload shapes tested:** Read/Edit/Write/Grep/Glob `tool_input`s and a Codex `apply_patch`
+>   envelope copied from real transcripts and rollouts on this machine; MultiEdit, NotebookEdit and
+>   `PostToolUseFailure` (none in the corpus) use Claude Code's documented shapes, and the tests say
+>   so. Whether Codex's hooks fire for apply_patch at all is still unverified.
+> - **Tests** share one FSEvents tree end to end: each stream start in a process queues behind the
+>   others (about 2 s apiece on a busy machine), and the suite's other watcher tests wait 30 s.
+>   Not checked in the running app: the dev check (pulse within 150 ms, badges, edge chips) needs
+>   the UI half.
 
 ## 1. Why
 
