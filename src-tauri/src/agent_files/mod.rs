@@ -476,6 +476,10 @@ impl AgentFiles {
             tab.missing_since = None;
             // A new session (a resume mints one, so does /clear) starts its own history.
             if !rec.session_id.is_empty() && tab.session_id != rec.session_id {
+                // A session the tab comes back to carries on where it was (its turn left open
+                // or not, the next event says). Taken out before the outgoing session is filed:
+                // with `left` full, filing first would push out the very session coming back.
+                let back = tab.left.iter().position(|(s, ..)| *s == rec.session_id).and_then(|i| tab.left.remove(i));
                 if !tab.session_id.is_empty() {
                     tab.left.retain(|(s, ..)| *s != tab.session_id);
                     tab.left.push_back((tab.session_id.clone(), tab.turn, tab.turn_span));
@@ -493,13 +497,9 @@ impl AgentFiles {
                     // claiming the tree's changes for a session that is gone.
                     end_shells(&mut inner.shells, &rec.tab_id, None, None);
                 }
-                // A session the tab comes back to carries on where it was (its turn left open
-                // or not, the next event says).
-                if let Some(i) = tab.left.iter().position(|(s, ..)| *s == rec.session_id) {
-                    if let Some((_, turn, span)) = tab.left.remove(i) {
-                        tab.turn = turn;
-                        tab.turn_span = span;
-                    }
+                if let Some((_, turn, span)) = back {
+                    tab.turn = turn;
+                    tab.turn_span = span;
                 }
                 tab.session_id = rec.session_id.clone();
             }

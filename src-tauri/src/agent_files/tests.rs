@@ -693,6 +693,27 @@ async fn headless_children_never_make_the_parents_edits_its_baseline() {
     for scope in ["turn", "session"] {
         assert_eq!(l.baselines.lookup("t1", "s1", &a, scope, 1).content.as_deref(), Some("v0\n"), "{scope}");
     }
+    // As many writers as the ledger remembers sessions for: with `left` full, the parent coming
+    // back must not be the one pushed out to make room for the child it leaves.
+    let l = ledger();
+    std::fs::write(&a, "v0\n").unwrap();
+    for _ in 0..3 {
+        l.record(rec(&prompt(&cwd), "t1"));
+    }
+    hook_pre(&l, &edit(&a, "w1", "s1"), &a).await;
+    std::fs::write(&a, "v1\n").unwrap();
+    for i in 0..LEFT_SESSIONS {
+        let c = format!("w{i}");
+        let (p, s) = child_turn(&c);
+        l.record(rec(&p, "t1"));
+        hook_pre(&l, &edit(&x, &format!("{c}-e"), &c), &x).await;
+        l.record(rec(&s, "t1"));
+    }
+    hook_pre(&l, &edit(&a, "w2", "s1"), &a).await;
+    assert_eq!(l.turn_and_session("t1"), Some((3, "s1".to_string())));
+    for scope in ["turn", "session"] {
+        assert_eq!(l.baselines.lookup("t1", "s1", &a, scope, 3).content.as_deref(), Some("v0\n"), "{scope}");
+    }
     // Readers, more than the ledger keeps turns for: the parent comes back numbering from 1.
     let l = ledger();
     std::fs::write(&a, "v0\n").unwrap();
