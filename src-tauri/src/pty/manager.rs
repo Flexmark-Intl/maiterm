@@ -1051,10 +1051,10 @@ fn note_live_ssh(state: &AppState, pty_id: &str, foreground: &Option<String>) {
     }
 }
 
-/// Foreground command only — skips the `lsof` cwd lookup that `get_pty_info`
-/// also does. Used on the SSH-bridge env-injection hot path, where the export
-/// races the user's first keystrokes: the cwd is irrelevant there, so paying for
-/// lsof would only widen that race.
+/// Foreground command only — skips the cwd lookup that `get_pty_info` also does.
+/// Used on the SSH-bridge env-injection hot path, where the export races the
+/// user's first keystrokes: the cwd is irrelevant there, so any extra work would
+/// only widen that race.
 ///
 /// `fresh` bypasses the `PROC_SNAPSHOT_TTL` cache. Pass it for any EDGE-triggered
 /// ssh transition ("did an interactive ssh just come up / just exit in this tab?").
@@ -1392,23 +1392,51 @@ fn get_cwd_for_pid(pid: u32) -> Option<String> {
         .and_then(|p| p.into_os_string().into_string().ok())
 }
 
-/// Get the current working directory of a process via lsof (macOS)
+/// Get the current working directory of a process via `proc_pidinfo` (macOS).
+///
+/// This used to spawn `lsof` per call, which costs tens of milliseconds and a process.
+/// The Files tree re-resolves a tab's folder on every prompt across every tab in a
+/// window (docs/file-tree.md §4.3), so the lookup has to be a syscall: microseconds,
+/// nothing spawned.
 #[cfg(target_os = "macos")]
 fn get_cwd_for_pid(pid: u32) -> Option<String> {
-    let output = std::process::Command::new("lsof")
-        .args(["-a", "-d", "cwd", "-p", &pid.to_string(), "-Fn"])
-        .output()
-        .ok()?;
+    use std::os::unix::ffi::OsStrExt;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if let Some(path) = line.strip_prefix('n') {
-            if path.starts_with('/') {
-                return Some(path.to_string());
-            }
-        }
+    let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    // SAFETY: the buffer is a zeroed proc_vnodepathinfo of exactly `size` bytes, which is
+    // what PROC_PIDVNODEPATHINFO writes into; the kernel never writes past `size`.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    // A short write means the call failed (no such pid, or not ours to inspect).
+    if written != size {
+        return None;
     }
-    None
+    // SAFETY: the kernel filled the whole struct, and it was zeroed before that anyway.
+    let info = unsafe { info.assume_init() };
+    // libc spells `vip_path` as [[c_char; 32]; 32] for old-rustc reasons; it is one
+    // contiguous MAXPATHLEN buffer holding a NUL-terminated path.
+    let raw = &info.pvi_cdir.vip_path;
+    // SAFETY: a [[c_char; 32]; 32] is 1024 contiguous bytes, valid for the borrow.
+    let bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(raw.as_ptr().cast::<u8>(), std::mem::size_of_val(raw))
+    };
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    if len == 0 {
+        return None;
+    }
+    std::ffi::OsStr::from_bytes(&bytes[..len])
+        .to_os_string()
+        .into_string()
+        .ok()
+        .filter(|p| p.starts_with('/'))
 }
 
 #[cfg(windows)]
@@ -2083,6 +2111,22 @@ mod tests {
         // Login shells show a leading dash in ps.
         assert_eq!(exe_basename("-zsh").as_deref(), Some("zsh"));
         assert_eq!(exe_basename("   "), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cwd_for_pid_reads_this_process() {
+        let got = get_cwd_for_pid(std::process::id()).expect("own cwd");
+        // The kernel reports the resolved path; compare against the resolved current dir so
+        // a symlinked checkout (or /tmp → /private/tmp) doesn't fail the test.
+        let want = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(std::path::PathBuf::from(got), want);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cwd_for_pid_of_no_process_is_none() {
+        assert_eq!(get_cwd_for_pid(u32::MAX >> 1), None);
     }
 
     #[test]
