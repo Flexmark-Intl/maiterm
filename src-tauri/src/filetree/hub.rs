@@ -1363,7 +1363,7 @@ impl RootHub {
         let before = g.health();
         let published = g.apply(epoch, out, took);
         if let Some(p) = published {
-            self.search.reconcile(&p.untracked, &p.deleted);
+            self.search.reconcile(&p.named);
             let mut subs = self.subs.lock();
             let mut full: Option<GitUpdate> = None;
             for s in subs.values_mut() {

@@ -6,9 +6,9 @@
 //!   `.git` skipped. A home or volume root is never walked unless the human asks (§6.5).
 //! - **Stored as one `String` arena plus spans**, about 6 MB per 100k paths. A removed path
 //!   leaves a dead span; the arena is compacted once a quarter of it is dead.
-//! - **Kept fresh** from the watcher's events (a file appearing or going), and from each git
-//!   status run's untracked and deleted files, which is what reconciles Linux, whose watcher
-//!   sees only open folders. A folder appearing or going marks the index dirty: the next query
+//! - **Kept fresh** from the watcher's events (a file appearing or going), and from the files
+//!   each git status run names, looked up on disk, which is what reconciles Linux, whose
+//!   watcher sees only open folders. A folder appearing or going marks the index dirty: the next query
 //!   rebuilds it in the background while the old one answers.
 //! - **Matched with nucleo** (`match_paths`, smart case, smart normalization); the top 500 come
 //!   back with their matched character positions.
@@ -43,6 +43,9 @@ const MAX_PATHS: usize = 1_000_000;
 const WALK_DEPTH: usize = 20;
 /// A scan checks for a newer query this often.
 const CANCEL_EVERY: usize = 2048;
+/// Past this many files named by one status run, the index is rebuilt instead of each being
+/// looked up on disk.
+const MAX_RECONCILE: usize = 20_000;
 
 fn hash_of(s: &str) -> u64 {
     let mut h = DefaultHasher::new();
@@ -348,24 +351,39 @@ impl SearchState {
         if changes.is_empty() {
             return;
         }
-        let mut inner = self.inner.lock();
-        if inner.building {
-            inner.pending.extend(changes.iter().cloned());
-        }
-        if let Some(ix) = inner.index.as_mut() {
-            for c in changes {
-                apply_change(ix, c);
-            }
-        }
+        note_locked(&mut self.inner.lock(), changes);
     }
 
-    /// A status run's untracked files and deleted paths (the Linux reconciliation). Deletions
-    /// go first, so a path somehow in both lists ends up present: it was listed untracked,
-    /// so it is on disk.
-    pub fn reconcile(&self, untracked: &[String], deleted: &[String]) {
-        let mut changes: Vec<Change> = deleted.iter().map(|p| Change::FileGone(p.clone())).collect();
-        changes.extend(untracked.iter().map(|p| Change::File(p.clone())));
-        self.note(changes);
+    /// The files a status run named (each changed file, and a rename's source): the Linux
+    /// reconciliation, whose watcher sees only open folders. Each is looked up on disk rather
+    /// than taken from git's letter, because git's view is as old as its scan and its letters
+    /// don't say what is on disk: a file made and removed during the run is gone, an
+    /// index-only deletion (`git rm --cached`, of one file or of a folder git then lists as
+    /// `? dir/`) is still there, and a staged rename's two sides are neither untracked nor
+    /// deleted. The lookup happens under the lock the watcher's own changes take, so a change
+    /// it reports meanwhile lands after this and is never undone by it.
+    pub fn reconcile(&self, named: &[String]) {
+        if named.is_empty() {
+            return;
+        }
+        let mut inner = self.inner.lock();
+        if inner.index.is_none() && !inner.building {
+            return;
+        }
+        if named.len() > MAX_RECONCILE {
+            // One `ls-files` costs less than this many lookups.
+            note_locked(&mut inner, vec![Change::Folder]);
+            return;
+        }
+        let changes = named
+            .iter()
+            .filter_map(|p| {
+                let abs = super::paths::rel_to_native(&self.root, p).ok()?;
+                let file = std::fs::symlink_metadata(&abs).is_ok_and(|m| !m.is_dir());
+                Some(if file { Change::File(p.clone()) } else { Change::FileGone(p.clone()) })
+            })
+            .collect();
+        note_locked(&mut inner, changes);
     }
 
     /// A subscription closed: its query counter goes with it.
@@ -382,6 +400,18 @@ impl SearchState {
     #[cfg(test)]
     pub(crate) fn len(&self) -> Option<usize> {
         self.inner.lock().index.as_ref().map(Index::len)
+    }
+}
+
+/// Changes into the index there is, and into the queue a running build replays.
+fn note_locked(inner: &mut Inner, changes: Vec<Change>) {
+    if inner.building {
+        inner.pending.extend(changes.iter().cloned());
+    }
+    if let Some(ix) = inner.index.as_mut() {
+        for c in changes {
+            apply_change(ix, c);
+        }
     }
 }
 
@@ -554,13 +584,39 @@ mod tests {
         assert!(!i.dirty && !i.contains("a.ts") && i.contains("b.ts"));
     }
 
+    /// Git's letters say nothing reliable about the disk: what a status run names is checked
+    /// there before the index follows it.
     #[test]
-    fn a_file_both_untracked_and_deleted_stays_findable() {
-        // `git rm --cached top`: the index lost it, the disk didn't.
-        let state = SearchState::new(Weak::new(), Path::new("/nonexistent"), false, false);
-        state.inner.lock().index = Some(ix(&["top", "other"]));
-        state.reconcile(&["top".to_string()], &["top".to_string()]);
-        assert_eq!(state.inner.lock().index.as_ref().map(|i| i.contains("top")), Some(true));
+    fn a_status_run_reconciles_the_files_it_names_against_the_disk() {
+        let root = std::env::temp_dir().join(format!("ft-reconcile-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("cfg")).unwrap();
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        for f in ["top", "cfg/a", "cfg/b", "src/deep/b.ts"] {
+            std::fs::write(root.join(f), "").unwrap();
+        }
+        let state = SearchState::new(Weak::new(), &root, true, false);
+        state.inner.lock().index = Some(ix(&["top", "cfg/a", "cfg/b", "gone", "src/deep/a.ts", "other"]));
+        // `git rm --cached top` and `git rm --cached -r cfg` (reported `D` plus `? cfg/`): still
+        // on disk. `gone` really is. `git mv src/deep/a.ts src/deep/b.ts`: the source went,
+        // the new name came. `ghost` was untracked when git scanned and removed before now.
+        let named: Vec<String> = ["top", "cfg/a", "cfg/b", "gone", "src/deep/b.ts", "src/deep/a.ts", "ghost"].iter().map(|s| s.to_string()).collect();
+        state.reconcile(&named);
+        {
+            let inner = state.inner.lock();
+            let i = inner.index.as_ref().unwrap();
+            for p in ["top", "cfg/a", "cfg/b", "src/deep/b.ts", "other"] {
+                assert!(i.contains(p), "{p} is on disk and stays findable");
+            }
+            for p in ["gone", "src/deep/a.ts", "ghost"] {
+                assert!(!i.contains(p), "{p} is not on disk");
+            }
+            assert!(!i.dirty, "per-file changes cost no rebuild");
+        }
+        // A run naming more than lookups are worth rebuilds instead.
+        let many: Vec<String> = (0..=MAX_RECONCILE).map(|n| format!("f{n}")).collect();
+        state.reconcile(&many);
+        assert!(state.inner.lock().index.as_ref().unwrap().dirty);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// One file is one path, however the source spelled it: `ls-files` gives git's NFC, the

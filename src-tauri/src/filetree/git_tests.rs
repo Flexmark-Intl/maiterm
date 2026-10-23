@@ -348,12 +348,12 @@ fn a_root_inside_a_wholly_untracked_folder_decorates_its_contents() {
     std::fs::write(r.join("new/sub/only_ignored/a.log"), "l").unwrap();
     let pairs = |v: &[(&str, &str)]| v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>();
     let cases = [(r.join("new/sub"), pairs(&[("f.txt", "?"), ("x/", "?")]), vec!["f.txt".to_string()]), (r.join("new"), pairs(&[("sub/", "?")]), vec![])];
-    for (root, want, untracked) in cases {
+    for (root, want, named) in cases {
         let core = GitCore::new(std::sync::Weak::new(), &GitConfig::default(), &root, &r, false, Arc::new(Slots::new(2)));
         let p = core.apply(core.epoch(), core.run_status(), Duration::ZERO).expect("the root's contents publish");
         assert_eq!(p.diff.files, want, "root {}", root.display());
         assert_eq!(p.diff.count as usize, want.len());
-        assert_eq!(p.untracked, untracked);
+        assert_eq!(p.named, named);
     }
     let _ = std::fs::remove_dir_all(&r);
 }

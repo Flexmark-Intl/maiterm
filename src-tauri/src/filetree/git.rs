@@ -324,7 +324,7 @@ pub struct GitData {
     pub gen: u64,
     pub ran: bool,
     /// Every changed path, root-relative (kept whole even when the wire is truncated: hover
-    /// numstats and the index reconciliation read it).
+    /// numstats read it).
     pub files: HashMap<String, String>,
     pub dirs: HashMap<String, String>,
     pub truncated: bool,
@@ -367,9 +367,9 @@ impl GitData {
 pub struct Published {
     pub from: u64,
     pub diff: GitUpdate,
-    /// Untracked files and deleted paths, for the search index.
-    pub untracked: Vec<String>,
-    pub deleted: Vec<String>,
+    /// Every file the run named, a rename's source included, for the search index to look up
+    /// on disk (`SearchState::reconcile`). Untracked folders aren't files and aren't named.
+    pub named: Vec<String>,
 }
 
 pub struct GitCore {
@@ -625,28 +625,22 @@ impl GitCore {
         };
         d.error = None;
         let mut files: HashMap<String, String> = HashMap::with_capacity(st.entries.len());
-        let mut untracked = Vec::new();
-        let mut deleted = Vec::new();
+        let mut named = Vec::new();
         for e in st.entries {
+            // A rename's source counts even when only it is under the root (moved out).
+            if let Some(o) = e.orig.as_deref().and_then(|o| self.to_root_rel(&norm(o))) {
+                named.push(o);
+            }
             // Keys are NFC on macOS whatever `core.precomposeunicode` says, so the client can
             // look a row up by normalizing its on-disk name once (`OpenAck.nfc_names`).
             let Some(rel) = self.to_root_rel(&norm(&e.path)) else { continue };
-            if e.letter == "?" && !e.dir {
-                untracked.push(rel.clone());
-            }
-            if e.letter == "D" {
-                deleted.push(rel.clone());
+            if !e.dir {
+                named.push(rel.clone());
             }
             // A wholly untracked folder keeps git's trailing slash: the client can't tell a
             // folder from a file by name, and needs to, to mark everything inside it.
             let key = if e.dir { format!("{rel}/") } else { rel };
             files.insert(key, e.letter.to_string());
-        }
-        // An index-only deletion (`git rm --cached`) leaves the file on disk, listed again as
-        // untracked: it is not gone, and the search index must keep it.
-        if !deleted.is_empty() && !untracked.is_empty() {
-            let on_disk: std::collections::HashSet<&String> = untracked.iter().collect();
-            deleted.retain(|p| !on_disk.contains(p));
         }
         let dirs = roll_up(&files);
         let truncated = files.len() > MAX_FILES;
@@ -686,7 +680,7 @@ impl GitCore {
             truncated,
             count: d.files.len() as u32,
         };
-        Some(Published { from, diff, untracked, deleted })
+        Some(Published { from, diff, named })
     }
 
     /// (state, note) for Health: "off" | "live" | "slow" | "error".
@@ -1013,17 +1007,26 @@ mod tests {
         let p = now(&c,st(&[("b.ts", "?")]), Duration::ZERO).unwrap();
         assert_eq!(p.diff.files, vec![("b.ts".to_string(), "?".to_string())]);
         assert_eq!(p.diff.del, vec!["a".to_string(), "a/x.ts".to_string()]);
-        assert_eq!(p.untracked, vec!["b.ts".to_string()]);
+        assert_eq!(p.named, vec!["b.ts".to_string()]);
         assert_eq!(p.diff.count, 1);
     }
 
     #[test]
-    fn an_index_only_deletion_is_not_gone_for_the_search_index() {
-        // `git rm --cached top` prints `1 D. … top` and `? top`; `rm gone` prints `1 .D … gone`.
+    fn the_search_index_hears_every_file_a_run_names_and_no_folder() {
+        // `git rm --cached -r cfg` (`1 D. cfg/a` plus `? cfg/`) and `git mv lib/a.ts lib/b.ts`
+        // (`2 R. … lib/b.ts`, source `lib/a.ts`): which are on disk is the index's lookup.
         let c = core(Path::new("/r"), Path::new("/r"));
-        let p = now(&c, st(&[("top", "D"), ("gone", "D"), ("top", "?")]), Duration::ZERO).unwrap();
-        assert_eq!(p.untracked, vec!["top".to_string()]);
-        assert_eq!(p.deleted, vec!["gone".to_string()]);
+        let entries = vec![
+            StatusEntry { path: "cfg/a".into(), letter: "D", orig: None, dir: false },
+            StatusEntry { path: "cfg".into(), letter: "?", orig: None, dir: true },
+            StatusEntry { path: "lib/b.ts".into(), letter: "R", orig: Some("lib/a.ts".into()), dir: false },
+        ];
+        let p = now(&c, Ok(Status { branch: None, entries }), Duration::ZERO).unwrap();
+        assert_eq!(p.named, vec!["cfg/a".to_string(), "lib/a.ts".to_string(), "lib/b.ts".to_string()]);
+        // A root inside the repo: a source outside it is not the root's to name.
+        let c = core(Path::new("/r/lib"), Path::new("/r"));
+        let entries = vec![StatusEntry { path: "lib/b.ts".into(), letter: "R", orig: Some("elsewhere/a.ts".into()), dir: false }];
+        assert_eq!(now(&c, Ok(Status { branch: None, entries }), Duration::ZERO).unwrap().named, vec!["b.ts".to_string()]);
     }
 
     #[test]
@@ -1052,7 +1055,7 @@ mod tests {
         let p = now(&c,out, Duration::ZERO).unwrap();
         assert_eq!(p.diff.files, vec![("build/".to_string(), "?".to_string())]);
         assert!(p.diff.dirs.is_empty());
-        assert!(p.untracked.is_empty(), "a folder is not a file for the search index");
+        assert!(p.named.is_empty(), "a folder is not a file for the search index");
     }
 
     #[test]
