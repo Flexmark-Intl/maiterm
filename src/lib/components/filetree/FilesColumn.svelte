@@ -246,6 +246,11 @@
     {:else}
       <div class="state">
         <p class="hint">{fileTreeStore.statusText ?? 'Open a terminal tab, or pick a folder from the name above.'}</p>
+        {#if status === 'error'}
+          <!-- The tab's folder couldn't be placed (an ssh host not answering in time, say).
+               Its next prompt asks again by itself; this asks now. -->
+          <button class="link" onclick={() => void fileTreeStore.followTabNow()}>Try again</button>
+        {/if}
       </div>
     {/if}
   </div>

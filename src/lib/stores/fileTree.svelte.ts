@@ -728,12 +728,17 @@ function createFileTreeStore() {
       });
     } catch (e) {
       if (superseded()) return;
-      if (!place || !sameWorkspace) {
-        closeSub();
-        place = null;
-        status = 'error';
-        statusText = String(e);
-      }
+      // The failure is this tab's to show. Keeping the root on screen made it read as this
+      // tab's folder: another tab's, or this one's from before it ssh'd somewhere Files
+      // couldn't place (§4.1). The view is kept, so coming back costs nothing.
+      saveView();
+      closeSub();
+      place = null;
+      status = 'error';
+      statusText = String(e);
+      sourceTabId = tabId;
+      sourceOscHost = null;
+      placeWorkspaceId = ws.id;
       return;
     }
     if (superseded()) return;

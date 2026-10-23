@@ -10,7 +10,9 @@
 //! `restore_remote_cwd`; `last_cwd` is never used there (it can be either side). An ssh tab's
 //! candidates are checked on the host by its Files helper (§15): the first that is a folder
 //! there wins, and its root is the repository top level the helper finds. When the host can't
-//! be asked in time, the first candidate other than the prompt's wins and is its own root.
+//! be asked in time, the first candidate other than the prompt's wins and is its own root; a
+//! tab whose only candidate is the prompt's folder (a remote shell that sends no OSC 7) then
+//! has no folder yet, and says so.
 //!
 //! A saved folder that no longer exists comes back as `missing`, never as home: a tree that
 //! quietly showed `$HOME` would invite the human to work in the wrong place (docs/relocate.md
@@ -143,11 +145,14 @@ pub fn pick(i: &PlaceInputs, hints: &PlaceHints, local_host: &str, exists: &dyn 
                 (!h.is_empty()).then_some(h)
             }));
         let Some(host) = host else { return Err("This ssh tab's host is unknown".into()) };
-        // Unchecked, the first candidate wins; the prompt's folder never does, since only the
-        // host can tell a fish `~/D/I/m/x` abbreviation from a real path (`resolve` asks it).
-        return ssh_chain(i, hints)
-            .into_iter()
-            .find(|(_, src)| *src != "prompt")
+        // Unchecked, the first candidate other than the prompt's wins, since only the host can
+        // tell a fish `~/D/I/m/x` abbreviation from a real path. When the prompt's folder is all
+        // there is (a remote shell that sends no OSC 7, no agent yet), it is still the pick: it
+        // must reach `resolve`, which asks the host, rather than end the chain here. Unasked, a
+        // `prompt` pick is never rooted (`place_for`).
+        let chain = ssh_chain(i, hints);
+        let first = chain.iter().find(|(_, src)| *src != "prompt").or_else(|| chain.first()).cloned();
+        return first
             .map(|(c, src)| Pick { cwd: c, source: src, remote_host: Some(host.clone()), missing: false })
             .ok_or_else(|| "No folder is known for this ssh tab yet".into());
     }
@@ -327,6 +332,14 @@ pub fn place_for(pick: Option<&Pick>, pin: Option<&str>) -> Result<TreePlace, St
     }
     let pick = pick.ok_or("No folder is known for this tab yet")?;
     if let Some(host) = &pick.remote_host {
+        // The prompt's folder counts only once the host has said it is a folder there.
+        if pick.source == "prompt" {
+            return Err(format!(
+                "Files couldn't check this tab's folder ({}) on {} yet",
+                pick.cwd,
+                crate::watch::host_label(host)
+            ));
+        }
         // Unchecked on the host (`resolve` couldn't ask it): the folder is its own root.
         return Ok(remote_place(host, &pick.cwd, Some(&pick.cwd), pick.source));
     }
@@ -400,7 +413,9 @@ fn local_hostname() -> String {
 
 /// An ssh tab's place from its candidates as the host's helper found them (`probed`, in the
 /// same order): the first that is a folder there, rooted at its repository's top level. None
-/// of them there: the first is reported missing. None when the host couldn't be asked.
+/// of them there: the first saved or reported folder is missing. None when the prompt's folder
+/// was the only candidate and isn't one: that is a title that only looked like a path (§4.1
+/// drops it), not a folder that went away.
 pub fn remote_from_probe(host: &str, chain: &[(String, &'static str)], probed: &[super::remote::proto::Probed]) -> Option<TreePlace> {
     for ((_, src), p) in chain.iter().zip(probed) {
         if let Some(real) = &p.real {
@@ -408,7 +423,7 @@ pub fn remote_from_probe(host: &str, chain: &[(String, &'static str)], probed: &
             return Some(remote_place(host, root, Some(real), src));
         }
     }
-    chain.first().map(|(c, src)| missing_remote_place(host, c, src))
+    chain.iter().find(|(_, src)| *src != "prompt").map(|(c, src)| missing_remote_place(host, c, src))
 }
 
 /// `ft_resolve_place`. Blocking: runs `git rev-parse` (cached), reads the process table, and
@@ -427,8 +442,9 @@ pub fn resolve(state: &Arc<AppState>, ft: &super::FileTreeState, tab_id: &str, h
                 let chain = ssh_chain(&inputs, hints);
                 let paths: Vec<String> = chain.iter().map(|(c, _)| c.clone()).collect();
                 let lookup = super::remote::tunnel_lookup(state);
-                if let Some(place) = ft.probe_remote(host, Some(lookup), &paths).and_then(|probed| remote_from_probe(host, &chain, &probed)) {
-                    return Ok(place);
+                if let Some(probed) = ft.probe_remote(host, Some(lookup), &paths) {
+                    return remote_from_probe(host, &chain, &probed)
+                        .ok_or_else(|| format!("No folder is known for this ssh tab yet: {} isn't a folder on {}", p.cwd, crate::watch::host_label(host)));
                 }
             }
             place_for(Some(p), None)
@@ -618,5 +634,30 @@ mod tests {
         assert_eq!((place.root.as_str(), place.source.as_str(), place.cwd_rel), ("/home/ews/proj", "prompt", None));
         assert_eq!(split_remote("-p 2222 ews@nova:/srv/a b"), Some(("-p 2222 ews@nova".into(), "/srv/a b".into())));
         assert_eq!(split_remote("/local/path"), None);
+    }
+
+    #[test]
+    fn an_ssh_tab_known_only_by_its_prompt_is_asked_of_the_host() {
+        use crate::filetree::remote::proto::Probed;
+        // `ssh ews@nova`, `cd /tmp/zz-ft-x`: nova sends no OSC 7 and no agent runs, so the
+        // title's folder is the only candidate. It used to end the chain before the host was
+        // asked, and the column kept the previous root.
+        let i = PlaceInputs { ssh_foreground: Some("ssh ews@nova".into()), live_cwd: Some("/Users/me".into()), ..Default::default() };
+        let hints = PlaceHints { prompt_cwd: Some("/tmp/zz-ft-x".into()), ..Default::default() };
+        let p = local(&i, &hints, &[]).expect("the prompt's folder reaches the probe");
+        assert_eq!((p.cwd.as_str(), p.source, p.remote_host.as_deref()), ("/tmp/zz-ft-x", "prompt", Some("ews@nova")));
+        let chain = ssh_chain(&i, &hints);
+        let place = remote_from_probe("ews@nova", &chain, &[Probed { real: Some("/tmp/zz-ft-x".into()), top: None }]).unwrap();
+        assert_eq!((place.place.as_str(), place.source.as_str(), place.missing.as_deref()), ("ews@nova:/tmp/zz-ft-x", "prompt", None));
+        // Not a folder there (a fish abbreviation): no folder, never a "missing" one.
+        assert!(remote_from_probe("ews@nova", &chain, &[Probed::default()]).is_none());
+        // Unasked (no helper in time, or only looking): never rooted at an unchecked title.
+        let err = place_for(Some(&p), None).unwrap_err();
+        assert!(err.contains("/tmp/zz-ft-x") && err.contains("nova"), "{err}");
+        // A pin still wins, and the unchecked prompt only places the tick if it matches.
+        let pinned = place_for(Some(&p), Some("ews@nova:/tmp")).unwrap();
+        assert_eq!((pinned.source.as_str(), pinned.cwd_rel.as_deref()), ("pin", Some("zz-ft-x")));
+        // Nothing at all known is still an error.
+        assert!(local(&i, &PlaceHints::default(), &[]).is_err());
     }
 }
