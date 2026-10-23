@@ -1,0 +1,668 @@
+<script lang="ts">
+  /**
+   * The virtual ARIA tree (docs/file-tree.md §12.3).
+   *
+   * - Fixed row height; rows sit in a spacer of `rows.length × h`, placed with translateY.
+   *   Only the visible window (± 10 rows) is in the DOM, about 60 nodes for any tree size,
+   *   plus the focused row, which is always rendered so `aria-activedescendant` points at
+   *   something real.
+   * - The container holds focus (`tabindex=0`, `aria-activedescendant`), never a row: a
+   *   focused row can be recycled out of the DOM by scrolling.
+   * - Each row is a snippet, not a component.
+   * - Keys come from `filetree/keymap.ts`. A key the tree handles is stopped here; the app's
+   *   capture handler has already passed only its own shortcuts through (+layout).
+   */
+  import { tick, untrack } from 'svelte';
+  import { fileTreeStore } from '$lib/stores/fileTree.svelte';
+  import { preferencesStore } from '$lib/stores/preferences.svelte';
+  import { workspacesStore } from '$lib/stores/workspaces.svelte';
+  import { terminalsStore } from '$lib/stores/terminals.svelte';
+  import { getEditorByTabId, isEditorDirty } from '$lib/stores/editorRegistry.svelte';
+  import * as commands from '$lib/tauri/commands';
+  import { TREE_FLAG_IGNORED, TREE_FLAG_HIDDEN, TREE_FLAG_LOOP, TREE_FLAG_UNREADABLE } from '$lib/tauri/types';
+  import { isExpandable, isFolderKind, stickyAncestors, typeAheadMatch, windowOf, type Row } from '$lib/filetree/model';
+  import { iconFor } from '$lib/filetree/icons';
+  import { treeAction, type TreeAction } from '$lib/filetree/keymap';
+  import Icon from '$lib/components/Icon.svelte';
+  import TooltipBubble from '$lib/components/TooltipBubble.svelte';
+  import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
+  import StickyAncestors from './StickyAncestors.svelte';
+  import { isMac, isWindows, modSymbol } from '$lib/utils/platform';
+
+  interface Props {
+    rowH: number;
+  }
+
+  let { rowH }: Props = $props();
+
+  const INDENT = 12;
+  const PAD = 8;
+  const TYPEAHEAD_RESET_MS = 1000;
+  const TOOLTIP_DELAY_MS = 400;
+  const mac = isMac();
+
+  let el = $state<HTMLDivElement | null>(null);
+  let scrollTop = $state(0);
+  let viewportH = $state(400);
+
+  const rows = $derived(fileTreeStore.rows);
+  const model = $derived(fileTreeStore.model);
+
+  // ── Focus index, cached: a focus move must not scan 100k rows every time ───────────────
+  let idxHint = 0;
+  function idxOf(key: string | null): number {
+    if (!key) return -1;
+    const rs = rows;
+    if (rs[idxHint]?.key === key) return idxHint;
+    for (let d = 1; d < 4; d++) {
+      if (rs[idxHint + d]?.key === key) return (idxHint += d);
+      if (rs[idxHint - d]?.key === key) return (idxHint -= d);
+    }
+    for (let i = 0; i < rs.length; i++) if (rs[i].key === key) return (idxHint = i);
+    return -1;
+  }
+  const focusIdx = $derived(idxOf(fileTreeStore.focusKey));
+
+  // ── Window and sticky header ──────────────────────────────────────────────────────────
+  const stickyMax = $derived(preferencesStore.fileTreeStickyMax);
+  const sticky = $derived.by(() => {
+    if (stickyMax <= 0 || rows.length === 0) return [] as number[];
+    const top = Math.floor(scrollTop / rowH);
+    const first = stickyAncestors(rows, top, stickyMax);
+    // The header covers rows itself: what matters is the row just under it.
+    return stickyAncestors(rows, top + first.length, stickyMax);
+  });
+
+  const visible = $derived.by(() => {
+    const w = windowOf(scrollTop, viewportH, rowH, rows.length);
+    const out: { r: Row; i: number }[] = [];
+    for (let i = w.first; i < w.last; i++) out.push({ r: rows[i], i });
+    const f = focusIdx;
+    if (f >= 0 && (f < w.first || f >= w.last)) out.push({ r: rows[f], i: f });
+    return out;
+  });
+
+  /** The focused row's parent guide, highlighted (§3.2). */
+  const guide = $derived.by(() => {
+    const f = focusIdx;
+    if (f < 0 || !model) return null;
+    const p = model.parentIndex(f);
+    if (p < 0) return null;
+    const d = rows[p].depth;
+    let end = p + 1;
+    while (end < rows.length && rows[end].depth > d) end++;
+    return { depth: d, start: p + 1, end };
+  });
+
+  // ── Effects: viewport size, scroll and focus requests ─────────────────────────────────
+  $effect(() => {
+    if (!el) return;
+    const node = el;
+    const ro = new ResizeObserver(() => { viewportH = node.clientHeight; });
+    ro.observe(node);
+    viewportH = node.clientHeight;
+    return () => ro.disconnect();
+  });
+
+  $effect(() => {
+    const req = fileTreeStore.scrollRequest;
+    if (!el || req.seq === 0) return;
+    untrack(() => {
+      if (req.top !== undefined && req.key === null) {
+        el!.scrollTop = req.top;
+        scrollTop = el!.scrollTop;
+        return;
+      }
+      if (req.key) scrollIntoView(idxOf(req.key));
+    });
+  });
+
+  $effect(() => {
+    const n = fileTreeStore.focusRequest;
+    if (n === 0) return;
+    // tick, not rAF (stalls in an occluded webview) and never `autofocus` (CLAUDE.md).
+    void tick().then(() => el?.focus({ preventScroll: true }));
+  });
+
+  function scrollIntoView(i: number) {
+    if (!el || i < 0) return;
+    const top = i * rowH;
+    const header = sticky.length * rowH;
+    if (top < el.scrollTop + header) el.scrollTop = Math.max(0, top - header);
+    else if (top + rowH > el.scrollTop + el.clientHeight) el.scrollTop = top + rowH - el.clientHeight;
+    scrollTop = el.scrollTop;
+  }
+
+  function onScroll() {
+    if (!el) return;
+    scrollTop = el.scrollTop;
+    fileTreeStore.noteScroll(scrollTop);
+    hideTip();
+  }
+
+  // ── Movement ──────────────────────────────────────────────────────────────────────────
+  function focusable(i: number, dir: 1 | -1): number {
+    for (let j = i; j >= 0 && j < rows.length; j += dir) if (rows[j].kind !== 'm') return j;
+    return -1;
+  }
+
+  function moveTo(i: number, extend = false) {
+    if (i < 0 || i >= rows.length) return;
+    const key = rows[i].key;
+    if (extend) fileTreeStore.extendTo(key);
+    else fileTreeStore.selectOnly(key);
+    fileTreeStore.setFocus(key, false);
+    scrollIntoView(i);
+  }
+
+  function step(to: 'up' | 'down' | 'pageUp' | 'pageDown' | 'home' | 'end', extend = false) {
+    const cur = focusIdx;
+    const page = Math.max(1, Math.floor(viewportH / rowH) - 1);
+    let target: number;
+    switch (to) {
+      case 'up': target = cur < 0 ? focusable(0, 1) : focusable(cur - 1, -1); break;
+      case 'down': target = cur < 0 ? focusable(0, 1) : focusable(cur + 1, 1); break;
+      case 'pageUp': target = focusable(Math.max(0, cur - page), 1); break;
+      case 'pageDown': target = focusable(Math.min(rows.length - 1, Math.max(0, cur) + page), -1); break;
+      case 'home': target = focusable(0, 1); break;
+      case 'end': target = focusable(rows.length - 1, -1); break;
+    }
+    if (target >= 0) moveTo(target, extend);
+  }
+
+  // ── Type-ahead (§8) ───────────────────────────────────────────────────────────────────
+  let prefix = $state('');
+  let prefixTimer: ReturnType<typeof setTimeout> | null = null;
+  let armed = false; // vim: a leading ' arms type-ahead
+  let pendingGAt = 0;
+
+  function typeahead(char: string) {
+    if (char === '') {
+      armed = true;
+      return;
+    }
+    prefix += char;
+    if (prefixTimer) clearTimeout(prefixTimer);
+    prefixTimer = setTimeout(() => {
+      prefix = '';
+      armed = false;
+      prefixTimer = null;
+    }, TYPEAHEAD_RESET_MS);
+    const i = typeAheadMatch(rows, focusIdx, prefix);
+    if (i >= 0) moveTo(i);
+  }
+
+  // ── Actions ───────────────────────────────────────────────────────────────────────────
+  function focusedRow(): Row | null {
+    const i = focusIdx;
+    return i >= 0 ? rows[i] : null;
+  }
+
+  function activate(r: Row, mode: 'preview' | 'pin' | 'side') {
+    if (r.kind === 'm') return;
+    if (isFolderKind(r.kind)) {
+      if (mode !== 'side' && isExpandable(r)) fileTreeStore.toggle(r.key);
+      return;
+    }
+    void fileTreeStore.openFile(r.key, mode, mode === 'preview');
+  }
+
+  function escape() {
+    if (fileTreeStore.selection.size > 1) {
+      fileTreeStore.clearSelectionToFocus();
+      return;
+    }
+    // Hand the keyboard back to what's in front.
+    const t = workspacesStore.activeTab;
+    if (t?.tab_type === 'terminal') terminalsStore.focusTerminal(t.id);
+    else if (t?.tab_type === 'editor') getEditorByTabId(t.id)?.view.focus();
+    else el?.blur();
+  }
+
+  function run(a: TreeAction, e: KeyboardEvent) {
+    const r = focusedRow();
+    switch (a.type) {
+      case 'move': step(a.to); break;
+      case 'extend': step(a.to, true); break;
+      case 'right':
+        if (r && isExpandable(r)) {
+          if (!model?.expanded.has(r.key)) fileTreeStore.expand(r.key);
+          else if (rows[focusIdx + 1]?.depth > r.depth) step('down');
+        }
+        break;
+      case 'left':
+        if (r && isExpandable(r) && model?.expanded.has(r.key)) fileTreeStore.collapse(r.key);
+        else if (model && focusIdx >= 0) {
+          const p = model.parentIndex(focusIdx);
+          if (p >= 0) moveTo(p);
+        }
+        break;
+      case 'expandRecursive': if (r && isExpandable(r)) fileTreeStore.expandRecursive(r.key); break;
+      case 'collapseRecursive': if (r && isExpandable(r)) fileTreeStore.collapseRecursive(r.key); break;
+      case 'selectAll': fileTreeStore.selectAll(); break;
+      case 'preview': if (r) activate(r, 'preview'); break;
+      case 'open': if (r) activate(r, 'pin'); break;
+      case 'openSide': if (r) activate(r, 'side'); break;
+      case 'addToTab': void fileTreeStore.addToTab(fileTreeStore.selectedOrFocused()); break;
+      case 'copyPath': void fileTreeStore.copyPaths(fileTreeStore.selectedOrFocused(), a.relative); break;
+      case 'toggleHidden': void preferencesStore.setFileTreeShowHidden(!preferencesStore.fileTreeShowHidden); break;
+      case 'escape': escape(); break;
+      case 'contextMenu': if (r) openMenuAt(r, focusIdx); break;
+      case 'typeahead': typeahead(a.char); break;
+      case 'pendingG': pendingGAt = e.timeStamp; break;
+    }
+  }
+
+  function onKeydown(e: KeyboardEvent) {
+    if (e.isComposing) return;
+    fileTreeStore.humanTouched();
+    const a = treeAction(e, {
+      mac,
+      vim: preferencesStore.fileTreeVimKeys,
+      pendingG: e.timeStamp - pendingGAt < TYPEAHEAD_RESET_MS,
+      typeaheadArmed: armed || prefix.length > 0,
+    });
+    if (!a) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (a.type !== 'pendingG') pendingGAt = 0;
+    run(a, e);
+  }
+
+  // ── Mouse ─────────────────────────────────────────────────────────────────────────────
+  function onRowClick(e: MouseEvent, r: Row) {
+    if (r.kind === 'm') return;
+    fileTreeStore.humanTouched();
+    const mod = mac ? e.metaKey : e.ctrlKey;
+    if (mod) {
+      fileTreeStore.toggleSelect(r.key);
+      return;
+    }
+    if (e.shiftKey) {
+      fileTreeStore.extendTo(r.key);
+      return;
+    }
+    fileTreeStore.selectOnly(r.key);
+    // A click selects a folder (the chevron or Enter opens it); a file opens as a preview
+    // when previews are on, keeping the keyboard here (§10.5).
+    if (!isFolderKind(r.kind)) {
+      const preview = preferencesStore.fileTreePreviewTabs;
+      void fileTreeStore.openFile(r.key, preview ? 'preview' : 'pin', preview);
+    }
+  }
+
+  function onRowDblClick(r: Row) {
+    if (r.kind === 'm') return;
+    if (isFolderKind(r.kind)) {
+      if (isExpandable(r)) fileTreeStore.toggle(r.key);
+    } else {
+      void fileTreeStore.openFile(r.key, 'pin');
+    }
+  }
+
+  function onChevron(e: MouseEvent, r: Row) {
+    e.stopPropagation();
+    fileTreeStore.humanTouched();
+    if (e.altKey) {
+      if (model?.expanded.has(r.key)) fileTreeStore.collapseRecursive(r.key);
+      else fileTreeStore.expandRecursive(r.key);
+    } else {
+      fileTreeStore.toggle(r.key);
+    }
+    fileTreeStore.setFocus(r.key, false);
+  }
+
+  // ── Context menu (read-only, phase 1) ─────────────────────────────────────────────────
+  let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+
+  const revealLabel = mac ? 'Reveal in Finder' : isWindows() ? 'Show in File Explorer' : 'Open Containing Folder';
+  const copyPathKey = mac ? `⌥${modSymbol}C` : 'Shift+Alt+C';
+  const copyRelKey = mac ? `⌥⇧${modSymbol}C` : 'Ctrl+Shift+Alt+C';
+  const SEP: MenuItem = { label: '', separator: true, action: () => {} };
+
+  function menuItems(r: Row): MenuItem[] {
+    const rels = fileTreeStore.selectedOrFocused(r.key);
+    const single = rels.length === 1;
+    const folder = isFolderKind(r.kind);
+    const target = fileTreeStore.addTarget;
+    const items: MenuItem[] = [];
+    if (single && !folder) {
+      items.push(
+        { label: 'Open', shortcut: '↩', action: () => void fileTreeStore.openFile(r.key, 'pin') },
+        { label: 'Open to the Side', shortcut: `${modSymbol}↩`, action: () => void fileTreeStore.openFile(r.key, 'side') },
+        { label: 'Open Preview', shortcut: 'Space', action: () => void fileTreeStore.openFile(r.key, 'preview', true) },
+        { label: 'Open With Default App', action: () => void fileTreeStore.openWithDefaultApp(r.key) },
+        SEP,
+      );
+    }
+    items.push({
+      label: target ? `Add to ‹${target.name}›` : 'Add to tab (no live tab followed)',
+      shortcut: mac ? '⌥↩' : 'Alt+Enter',
+      disabled: !target,
+      action: () => void fileTreeStore.addToTab(rels),
+    });
+    if (single) items.push({ label: 'Open Terminal Here', action: () => void fileTreeStore.openTerminalHere(r.key) });
+    items.push(SEP);
+    if (single) items.push({ label: revealLabel, action: () => void fileTreeStore.revealInOs(r.key) });
+    items.push(
+      { label: rels.length > 1 ? 'Copy Paths' : 'Copy Path', shortcut: copyPathKey, action: () => void fileTreeStore.copyPaths(rels, false) },
+      { label: rels.length > 1 ? 'Copy Relative Paths' : 'Copy Relative Path', shortcut: copyRelKey, action: () => void fileTreeStore.copyPaths(rels, true) },
+    );
+    if (single && folder && !(r.flags & TREE_FLAG_LOOP)) {
+      items.push(SEP, { label: 'Set as Root (pins)', action: () => void fileTreeStore.pinRel(r.key) });
+    }
+    return items;
+  }
+
+  function openMenu(e: MouseEvent, r: Row) {
+    e.preventDefault();
+    if (r.kind === 'm') return;
+    fileTreeStore.humanTouched();
+    if (!fileTreeStore.selection.has(r.key)) fileTreeStore.selectOnly(r.key);
+    fileTreeStore.setFocus(r.key, false);
+    menu = { x: e.clientX, y: e.clientY, items: menuItems(r) };
+  }
+
+  function openMenuAt(r: Row, i: number) {
+    const box = el?.getBoundingClientRect();
+    if (!box) return;
+    menu = { x: box.left + PAD + (r.depth + 2) * INDENT, y: box.top + i * rowH - scrollTop + rowH, items: menuItems(r) };
+  }
+
+  // ── Tooltip: one delegated bubble, only when it has something to add (§3.2) ───────────
+  let tip = $state<{ el: Element; text: string } | null>(null);
+  let tipTimer: ReturnType<typeof setTimeout> | null = null;
+  let tipSeq = 0;
+
+  function hideTip() {
+    if (tipTimer) clearTimeout(tipTimer);
+    tipTimer = null;
+    tipSeq++;
+    tip = null;
+  }
+
+  function fmtSize(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 ** 3) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+    return `${(n / 1024 ** 3).toFixed(1)} GB`;
+  }
+
+  function onRowEnter(e: MouseEvent, r: Row) {
+    hideTip();
+    if (r.kind === 'm') return;
+    const rowEl = e.currentTarget as HTMLElement;
+    const alt = e.altKey;
+    const seq = tipSeq;
+    tipTimer = setTimeout(async () => {
+      const nameEl = rowEl.querySelector('.name');
+      if (!nameEl || !rowEl.isConnected) return;
+      const clipped = nameEl.scrollWidth > nameEl.clientWidth;
+      const notes: string[] = [];
+      if (r.flags & TREE_FLAG_IGNORED) notes.push('ignored by git');
+      if (r.flags & TREE_FLAG_LOOP) notes.push('link back to a folder above it: not opened');
+      if (r.flags & TREE_FLAG_UNREADABLE) notes.push('can’t be read');
+      const tabs = fileTreeStore.editorRels.get(r.key);
+      if (tabs?.some((t) => isEditorDirty(t))) notes.push('unsaved changes in an editor tab');
+      if (!clipped && !alt && notes.length === 0) return;
+      let text = r.key;
+      if (!isFolderKind(r.kind) && fileTreeStore.ack) {
+        const st = await commands.ftStat(fileTreeStore.ack.sub_id, r.key).catch(() => null);
+        if (seq !== tipSeq) return;
+        if (st) {
+          const when = st.mtime_ms ? new Date(st.mtime_ms).toLocaleString() : '';
+          text += `\n${fmtSize(st.size)}${when ? ` · ${when}` : ''}${st.exec ? ' · executable' : ''}`;
+          if (st.link_target) text += `\n→ ${st.link_target}`;
+        }
+      }
+      if (notes.length) text += `\n${notes.join(' · ')}`;
+      if (seq === tipSeq) tip = { el: nameEl, text };
+    }, TOOLTIP_DELAY_MS);
+  }
+
+  // ── Rendering helpers ─────────────────────────────────────────────────────────────────
+  function ariaLabel(r: Row, expanded: boolean, dirty: boolean): string {
+    const parts = [r.name];
+    if (isExpandable(r)) parts.push(expanded ? 'expanded' : 'collapsed');
+    if (r.flags & TREE_FLAG_IGNORED) parts.push('ignored');
+    if (dirty) parts.push('unsaved changes');
+    if (r.key === fileTreeStore.youAreHere) parts.push('this tab’s folder');
+    return parts.join(', ');
+  }
+</script>
+
+<TooltipBubble text={tip?.text ?? ''} anchor={tip?.el ?? null} />
+
+{#snippet rowView(r: Row, i: number)}
+  {#if r.kind === 'm'}
+    <div class="row msg msg-{r.msg}" role="presentation" style="transform: translateY({i * rowH}px); padding-left: {PAD + r.depth * INDENT + 16}px">
+      <span class="name">{r.name}</span>
+    </div>
+  {:else}
+    {@const expanded = !!model?.expanded.has(r.key)}
+    {@const expandable = isExpandable(r)}
+    {@const ic = iconFor(r.name, r.kind, expanded)}
+    {@const tabs = fileTreeStore.editorRels.get(r.key)}
+    {@const dirty = !!tabs?.some((t) => isEditorDirty(t))}
+    {@const focused = i === focusIdx}
+    {@const typed = focused && prefix && r.name.toLowerCase().startsWith(prefix.toLowerCase()) ? prefix.length : 0}
+    <!-- The container holds focus (aria-activedescendant); a row never does, so it has no
+         tabindex: clicking it focuses the tree. -->
+    <!-- svelte-ignore a11y_interactive_supports_focus -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div
+      id="ftr-{i}"
+      class="row"
+      class:focused
+      class:tree-focused={focused && fileTreeStore.focused}
+      class:selected={fileTreeStore.selection.has(r.key)}
+      class:ignored={r.flags & TREE_FLAG_IGNORED}
+      class:hidden-file={r.flags & TREE_FLAG_HIDDEN}
+      class:active-file={r.key === fileTreeStore.activeFile}
+      role="treeitem"
+      aria-level={r.depth + 1}
+      aria-expanded={expandable ? expanded : undefined}
+      aria-selected={fileTreeStore.selection.has(r.key)}
+      aria-label={ariaLabel(r, expanded, dirty)}
+      style="transform: translateY({i * rowH}px); padding-left: {PAD}px"
+      onmousedown={(e) => { if (e.detail > 1) e.preventDefault(); }}
+      onclick={(e) => onRowClick(e, r)}
+      ondblclick={() => onRowDblClick(r)}
+      oncontextmenu={(e) => openMenu(e, r)}
+      onmouseenter={(e) => onRowEnter(e, r)}
+      onmouseleave={hideTip}
+    >
+      {#if r.depth > 0}<span class="indent" style="width: {r.depth * INDENT}px"></span>{/if}
+      {#if guide && i >= guide.start && i < guide.end}
+        <span class="guide-hl" style="left: {PAD + guide.depth * INDENT + 6}px"></span>
+      {/if}
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <span class="chev" class:open={expanded} onclick={(e) => { if (expandable) onChevron(e, r); }}>
+        {#if expandable}<Icon name="chevron" size={11} />{/if}
+      </span>
+      <svg class="ic" style="color: var(--ft-ic-{ic.color})" width="16" height="16" aria-hidden="true"><use href="#{ic.id}" /></svg>
+      <span class="name">{#if typed}<mark>{r.name.slice(0, typed)}</mark>{r.name.slice(typed)}{:else}{r.name}{/if}</span>
+      <span class="gutter">
+        {#if r.key === fileTreeStore.youAreHere}<span class="here" aria-hidden="true"></span>{/if}
+        {#if tabs}<span class="ed-dot" class:dirty aria-hidden="true"></span>{/if}
+      </span>
+    </div>
+  {/if}
+{/snippet}
+
+<div
+  class="tree"
+  bind:this={el}
+  role="tree"
+  tabindex="0"
+  aria-label="Files"
+  aria-multiselectable="true"
+  aria-activedescendant={focusIdx >= 0 ? `ftr-${focusIdx}` : undefined}
+  onscroll={onScroll}
+  onkeydown={onKeydown}
+  onfocus={() => { fileTreeStore.focused = true; if (focusIdx < 0 && rows.length) { const i = focusable(Math.floor(scrollTop / rowH), 1); if (i >= 0) fileTreeStore.setFocus(rows[i].key, false); } }}
+  onblur={() => { fileTreeStore.focused = false; }}
+  onmouseleave={hideTip}
+>
+  <div class="sticky-wrap">
+    <StickyAncestors {rows} indices={sticky} {rowH} onpick={(key) => { fileTreeStore.selectOnly(key); scrollIntoView(idxOf(key)); }} />
+  </div>
+  <div class="spacer" style="height: {rows.length * rowH}px">
+    {#each visible as v (v.r.key)}
+      {@render rowView(v.r, v.i)}
+    {/each}
+  </div>
+</div>
+
+{#if menu}
+  <ContextMenu items={menu.items} x={menu.x} y={menu.y} onclose={() => { menu = null; void tick().then(() => el?.focus({ preventScroll: true })); }} />
+{/if}
+
+<style>
+  .tree {
+    --ft-guide: color-mix(in srgb, var(--fg-dim) 35%, transparent);
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    position: relative;
+    outline: none;
+  }
+
+  /* Sticks to the top without taking room in the flow. */
+  .sticky-wrap {
+    position: sticky;
+    top: 0;
+    height: 0;
+    z-index: 2;
+  }
+
+  .spacer {
+    position: relative;
+    width: 100%;
+  }
+
+  .row {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--ft-row-h, 22px);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding-right: 6px;
+    box-sizing: border-box;
+    cursor: default;
+    user-select: none;
+    color: var(--fg);
+    outline: none;
+  }
+
+  .row:hover {
+    background: color-mix(in srgb, var(--bg-light) 45%, transparent);
+  }
+
+  .row.selected {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+
+  .row.focused.tree-focused {
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent);
+  }
+
+  .row.active-file:not(.selected) {
+    background: color-mix(in srgb, var(--bg-light) 30%, transparent);
+  }
+
+  .row.ignored {
+    opacity: 0.55;
+  }
+
+  .row.msg {
+    color: var(--fg-dim);
+    font-style: italic;
+  }
+
+  .row.msg-error {
+    color: var(--red);
+  }
+
+  .indent {
+    flex-shrink: 0;
+    align-self: stretch;
+    margin-right: -4px;
+    background-image: repeating-linear-gradient(to right, transparent 0 6px, var(--ft-guide) 6px 7px, transparent 7px 12px);
+  }
+
+  .guide-hl {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: color-mix(in srgb, var(--accent) 50%, transparent);
+  }
+
+  .chev {
+    width: 12px;
+    height: 100%;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--fg-dim);
+  }
+
+  .chev.open :global(svg) {
+    transform: rotate(90deg);
+  }
+
+  .ic {
+    flex-shrink: 0;
+  }
+
+  /* One line, ellipsized: a clipped name gets the hover bubble with the full path. */
+  .name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .name mark {
+    background: color-mix(in srgb, var(--yellow) 35%, transparent);
+    color: inherit;
+    border-radius: 2px;
+  }
+
+  .gutter {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  /* You-are-here: the followed tab's folder (§3.2). Revealed, never selected. */
+  .here {
+    width: 3px;
+    height: 12px;
+    border-radius: 2px;
+    background: var(--accent);
+  }
+
+  /* Open in an editor tab: hollow; unsaved: filled. */
+  .ed-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    border: 1.5px solid var(--fg-dim);
+    box-sizing: border-box;
+  }
+
+  .ed-dot.dirty {
+    background: var(--fg);
+    border-color: var(--fg);
+  }
+</style>

@@ -54,6 +54,7 @@
   import { updaterStore } from '$lib/stores/updater.svelte';
   import { claudeSetupStore } from '$lib/stores/claudeSetup.svelte';
   import ClaudeSetupModal from '$lib/components/ClaudeSetupModal.svelte';
+  import { fileTreeStore } from '$lib/stores/fileTree.svelte';
 
   interface Props {
     children: import('svelte').Snippet;
@@ -902,52 +903,75 @@
       }
     }
 
+    /**
+     * The app-level shortcuts that apply wherever focus is: in an editor (where every other
+     * Cmd key belongs to CodeMirror) and in the Files tree (where every other key belongs to
+     * the tree). Tab management (Cmd+T/W/1-9/Shift+[/]), window and workspace management
+     * (Cmd+N/Shift+N — these must never stop opening a window), zoom, preferences, open
+     * file, the sidebar, notes, tasks, the Loom, the mesh cockpit and Files.
+     */
+    function isAppShortcut(e: KeyboardEvent): boolean {
+      if (!isModKey(e)) return false;
+      const key = e.key.toLowerCase();
+      return (
+        // Tab management
+        (!e.shiftKey && !e.altKey && key === 't') ||             // Cmd+T new tab
+        (e.shiftKey && key === 't') ||                           // Cmd+Shift+T duplicate tab
+        (e.shiftKey && key === 'r') ||                           // Cmd+Shift+R reload tab
+        (e.shiftKey && key === 'e') ||                           // Cmd+Shift+E tasks panel
+        (e.shiftKey && key === 'j') ||                           // Cmd+Shift+J Workstream Loom
+        (key === 'w') ||                                         // Cmd+W close tab
+        (!e.shiftKey && e.key >= '1' && e.key <= '9') ||         // Cmd+1-9 switch tab
+        (e.shiftKey && (e.key === '[' || e.code === 'BracketLeft')) ||  // Cmd+Shift+[ prev tab
+        (e.shiftKey && (e.key === ']' || e.code === 'BracketRight')) || // Cmd+Shift+] next tab
+        (!e.shiftKey && (e.key === '[' || e.code === 'BracketLeft')) ||  // Cmd+[ nav back
+        (!e.shiftKey && (e.key === ']' || e.code === 'BracketRight')) || // Cmd+] nav forward
+        // Window/workspace management
+        (!e.shiftKey && !e.altKey && key === 'n') ||             // Cmd+N new window
+        (e.shiftKey && !e.altKey && key === 'n') ||              // Cmd+Shift+N duplicate window
+        (e.altKey && e.code === 'KeyN') ||                       // Cmd+Opt+N new workspace
+        // Zoom
+        (e.key === '=' || e.key === '+') ||                      // Cmd+= zoom in
+        (e.key === '-') ||                                       // Cmd+- zoom out
+        (e.key === '0') ||                                       // Cmd+0 reset zoom
+        // Other app-level
+        (e.key === ',') ||                                       // Cmd+, preferences
+        (!e.shiftKey && key === 'o') ||                          // Cmd+O open file
+        (!e.shiftKey && key === 'b') ||                          // Cmd+B toggle sidebar
+        (e.shiftKey && key === 'b') ||                           // Cmd+Shift+B Files
+        (!e.shiftKey && key === 'e') ||                          // Cmd+E toggle notes
+        (e.shiftKey && key === 'm')                              // Cmd+Shift+M mesh cockpit
+      );
+    }
+
     function handleKeydown(e: KeyboardEvent) {
       const isMeta = isModKey(e);
       const activeTabIsEditor = workspacesStore.activeTab?.tab_type === 'editor';
       const activeTabIsDiff = workspacesStore.activeTab?.tab_type === 'diff';
 
-      // When the active tab is an editor or diff tab, let CodeMirror handle all
-      // keyboard shortcuts EXCEPT app-level ones that don't conflict with editing.
-      // App-level shortcuts that always apply: tab management (Cmd+T/W/1-9/Shift+[/]),
-      // workspace/window management (Cmd+N/Shift+N), zoom (Cmd+=/-/0), preferences (Cmd+,),
-      // open file (Cmd+O), sidebar (Cmd+B), notes (Cmd+E).
-      // Everything else passes through to the editor.
+      // Focus in the Files column: only app shortcuts are the app's. Everything else goes on
+      // to the tree's own keydown (which stops what it handles) — without this, Cmd+D in the
+      // tree would split the pane (docs/file-tree.md §11.1).
+      const treeFocused = !!(document.activeElement as Element | null)?.closest('[data-filetree]');
+      if (treeFocused && !isAppShortcut(e)) return;
+
+      // When the active tab is an editor or diff tab, let CodeMirror handle all keyboard
+      // shortcuts EXCEPT the app-level ones above. Everything else passes through to it.
       if (activeTabIsEditor || activeTabIsDiff) {
         if (isMeta) {
-          const key = e.key.toLowerCase();
-          const isAppShortcut =
-            // Tab management
-            (!e.shiftKey && !e.altKey && key === 't') ||             // Cmd+T new tab
-            (e.shiftKey && key === 't') ||                           // Cmd+Shift+T duplicate tab
-            (e.shiftKey && key === 'r') ||                           // Cmd+Shift+R reload tab
-            (e.shiftKey && key === 'e') ||                           // Cmd+Shift+E tasks panel
-            (e.shiftKey && key === 'j') ||                           // Cmd+Shift+J Workstream Loom
-            (key === 'w') ||                                         // Cmd+W close tab
-            (!e.shiftKey && e.key >= '1' && e.key <= '9') ||         // Cmd+1-9 switch tab
-            (e.shiftKey && (e.key === '[' || e.code === 'BracketLeft')) ||  // Cmd+Shift+[ prev tab
-            (e.shiftKey && (e.key === ']' || e.code === 'BracketRight')) || // Cmd+Shift+] next tab
-            (!e.shiftKey && (e.key === '[' || e.code === 'BracketLeft')) ||  // Cmd+[ nav back
-            (!e.shiftKey && (e.key === ']' || e.code === 'BracketRight')) || // Cmd+] nav forward
-            // Window/workspace management
-            (!e.shiftKey && !e.altKey && key === 'n') ||             // Cmd+N new window
-            (e.shiftKey && !e.altKey && key === 'n') ||              // Cmd+Shift+N duplicate window
-            (e.altKey && e.code === 'KeyN') ||                       // Cmd+Opt+N new workspace
-            // Zoom
-            (e.key === '=' || e.key === '+') ||                      // Cmd+= zoom in
-            (e.key === '-') ||                                       // Cmd+- zoom out
-            (e.key === '0') ||                                       // Cmd+0 reset zoom
-            // Other app-level
-            (e.key === ',') ||                                       // Cmd+, preferences
-            (!e.shiftKey && key === 'o') ||                          // Cmd+O open file
-            (!e.shiftKey && key === 'b') ||                          // Cmd+B toggle sidebar
-            (!e.shiftKey && key === 'e') ||                          // Cmd+E toggle notes
-            (e.shiftKey && key === 'm');                             // Cmd+Shift+M mesh cockpit
-          if (!isAppShortcut) return; // Let CodeMirror handle it
+          if (!isAppShortcut(e)) return; // Let CodeMirror handle it
         } else if (e.altKey) {
           // Alt+Arrow keys etc — let editor handle
           return;
         }
+      }
+
+      // Cmd/Ctrl+Shift+B - Files column: open and focus, focus, or close (§11.2)
+      if (isMeta && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        e.stopPropagation();
+        void fileTreeStore.toggleFromShortcut();
+        return;
       }
 
       // Cmd+Shift+R - Reload tab

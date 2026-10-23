@@ -29,6 +29,10 @@ import { disableBridge } from '$lib/stores/sshMcpBridge.svelte';
 const SIDEBAR_MIN_WIDTH = 215;
 const SIDEBAR_MAX_WIDTH = 400;
 const SIDEBAR_DEFAULT_WIDTH = 215;
+// The Files column (docs/file-tree.md §3.1). Rust clamps the same range on save.
+export const FILE_TREE_MIN_WIDTH = 200;
+export const FILE_TREE_MAX_WIDTH = 560;
+const FILE_TREE_DEFAULT_WIDTH = 280;
 
 /**
  * Extract the remote cwd from the terminal prompt using user-configured patterns.
@@ -156,6 +160,11 @@ function createWorkspacesStore() {
   let activeWorkspaceId = $state<string | null>(null);
   let sidebarWidth = $state(SIDEBAR_DEFAULT_WIDTH);
   let sidebarCollapsed = $state(false);
+  // Read with the rest of the window at load, before the first render, so the terminals
+  // spawn at their final width: a column that appeared a frame later would resize every
+  // terminal at once, and a width change at a streaming agent duplicates its scrollback.
+  let fileTreeOpen = $state(false);
+  let fileTreeWidth = $state(FILE_TREE_DEFAULT_WIDTH);
   let lastSwitchedAt = $state<Map<string, number>>(new Map());
   // Frontend-only: set of tab IDs with notes panel visible
   let notesVisible = $state<Set<string>>(new Set());
@@ -254,6 +263,8 @@ function createWorkspacesStore() {
     get activeTab() { return activeTab; },
     get sidebarWidth() { return sidebarWidth; },
     get sidebarCollapsed() { return sidebarCollapsed; },
+    get fileTreeOpen() { return fileTreeOpen; },
+    get fileTreeWidth() { return fileTreeWidth; },
     get recentWorkspaces() { return recentWorkspaces; },
     get pendingWakeTabIds() { return pendingWakeTabIds; },
     get lastSwitchedAt() { return lastSwitchedAt; },
@@ -302,6 +313,8 @@ function createWorkspacesStore() {
       activeWorkspaceId = data.active_workspace_id;
       sidebarWidth = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, data.sidebar_width || SIDEBAR_DEFAULT_WIDTH));
       sidebarCollapsed = data.sidebar_collapsed ?? false;
+      fileTreeOpen = data.file_tree_open ?? false;
+      fileTreeWidth = Math.min(FILE_TREE_MAX_WIDTH, Math.max(FILE_TREE_MIN_WIDTH, data.file_tree_width || FILE_TREE_DEFAULT_WIDTH));
 
       // Seed notesVisible / tasksVisible from the persisted per-tab open flags
       const seeded = new Set<string>();
@@ -497,6 +510,29 @@ function createWorkspacesStore() {
     async toggleSidebar() {
       sidebarCollapsed = !sidebarCollapsed;
       await commands.setSidebarCollapsed(sidebarCollapsed);
+    },
+
+    /** Open or close this window's Files column. Only ever from the human's own action
+     *  (docs/file-tree.md §3.1): nothing opens it on their behalf. */
+    async setFileTreeOpen(open: boolean) {
+      if (fileTreeOpen === open) return;
+      fileTreeOpen = open;
+      await commands.setFileTreeOpen(open);
+    },
+
+    /** Commit a new column width: once per resize gesture, on pointerup. */
+    async setFileTreeWidth(width: number) {
+      const w = Math.round(Math.min(FILE_TREE_MAX_WIDTH, Math.max(FILE_TREE_MIN_WIDTH, width)));
+      if (w === fileTreeWidth) return;
+      fileTreeWidth = w;
+      await commands.setFileTreeWidth(w);
+    },
+
+    /** Pin (a `watch::place`) or unpin (null) the workspace's Files root (§4.2). */
+    async setWorkspaceFileTreePin(workspaceId: string, place: string | null) {
+      await commands.setWorkspaceFileTreePin(workspaceId, place);
+      const ws = workspaces.find(w => w.id === workspaceId);
+      if (ws) ws.file_tree_pin = place;
     },
 
     /** Name this window, or clear the name with `null`/blank so the titlebar goes back to
@@ -890,6 +926,19 @@ function createWorkspacesStore() {
         if (idx >= 0) workspaces[idx] = freshWs;
       }
       return { newPaneId: newPane.id, newTabId };
+    },
+
+    /** Split a pane and open a file in the new one (Files "Open to the Side" when the
+     *  workspace has a single pane). Returns the new editor tab's id. */
+    async openEditorInNewSplit(workspaceId: string, sourcePaneId: string, fileInfo: EditorFileInfo, direction: SplitDirection = 'horizontal') {
+      const newPane = await commands.splitPane(workspaceId, sourcePaneId, direction, null, fileInfo);
+      const data = await commands.getWindowData();
+      const freshWs = data.workspaces.find(w => w.id === workspaceId);
+      if (freshWs) {
+        const idx = workspaces.findIndex(w => w.id === workspaceId);
+        if (idx >= 0) workspaces[idx] = freshWs;
+      }
+      return newPane.tabs[0]?.id ?? null;
     },
 
     async splitPaneWithContext(workspaceId: string, sourcePaneId: string, sourceTabId: string, direction: SplitDirection) {

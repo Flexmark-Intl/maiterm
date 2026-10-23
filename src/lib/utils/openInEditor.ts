@@ -24,12 +24,19 @@ export interface OpenInEditorArgs {
   paneId: string;
   /** Insert a new tab after this one (default: after the pane's active tab). */
   afterTabId?: string;
+  /** Files' preview tab (docs/file-tree.md §10.5): when no tab shows the file yet, swap the
+   *  file inside this editor tab instead of opening a new one. The caller decides it may be
+   *  replaced (a preview with no unsaved edits); a tab that is gone or not an editor is
+   *  ignored and a new tab opens. */
+  replaceTabId?: string | null;
 }
 
 export interface OpenInEditorResult {
   tabId: string;
   /** True when an editor tab already showed the file and was brought forward. */
   existing: boolean;
+  /** True when the file went into `replaceTabId`. */
+  replaced?: boolean;
 }
 
 /**
@@ -108,6 +115,13 @@ export async function openInEditor(args: OpenInEditorArgs): Promise<OpenInEditor
     return { tabId: hit.tabId, existing: true };
   }
   const name = args.remote ? abs.split('/').pop() || abs : basenameOf(abs, isWindows());
+  const replace = args.replaceTabId ? workspacesStore._locateTab(args.replaceTabId) : null;
+  if (replace && replace.tab.tab_type === 'editor') {
+    await workspacesStore.updateEditorTabFile(replace.tab.id, name, fileInfo);
+    window.dispatchEvent(new CustomEvent('editor-replace-file', { detail: { tabId: replace.tab.id } }));
+    await workspacesStore.setActiveTab(replace.workspaceId, replace.paneId, replace.tab.id);
+    return { tabId: replace.tab.id, existing: false, replaced: true };
+  }
   // EditorPane shows its own loading state and errors, so the tab is created at once.
   const tab = await workspacesStore.createEditorTab(args.workspaceId, args.paneId, name, fileInfo, args.afterTabId);
   return { tabId: tab.id, existing: false };

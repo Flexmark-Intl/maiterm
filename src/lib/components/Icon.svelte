@@ -1,5 +1,5 @@
 <script lang="ts">
-  type IconName = 'trash' | 'notes' | 'eye' | 'eye-off' | 'pencil' | 'list' | 'lanes' | 'archive' | 'word-wrap' | 'settings' | 'help' | 'bug' | 'lightbulb' | 'pause' | 'bolt' | 'resume' | 'pdf' | 'image' | 'file' | 'diff' | 'restore' | 'close' | 'duplicate' | 'check' | 'cross' | 'warning' | 'circle' | 'circle-outline' | 'plus' | 'arrow-right' | 'search' | 'pin' | 'clock' | 'bell-off' | 'browser';
+  type IconName = 'trash' | 'notes' | 'eye' | 'eye-off' | 'pencil' | 'list' | 'lanes' | 'archive' | 'word-wrap' | 'settings' | 'help' | 'bug' | 'lightbulb' | 'pause' | 'bolt' | 'resume' | 'pdf' | 'image' | 'file' | 'diff' | 'restore' | 'close' | 'duplicate' | 'check' | 'cross' | 'warning' | 'circle' | 'circle-outline' | 'plus' | 'arrow-right' | 'search' | 'pin' | 'clock' | 'bell-off' | 'browser' | 'folder' | 'folder-open' | 'chevron' | 'new-file' | 'new-folder' | 'collapse-all' | 'refresh' | 'more';
 
   interface Props {
     name: IconName;
@@ -86,6 +86,24 @@
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h10"/><path d="M8 4l4 4-4 4"/></svg>
 {:else if name === 'clock'}
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.25"/><path d="M8 4.5V8l2.25 1.5"/></svg>
+{:else if name === 'folder'}
+  <!-- Files (docs/file-tree.md §3.2): the titlebar toggle and the column's own chrome. -->
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M1.75 3.25h4.5l1.5 1.5h6.5v8h-12.5z"/></svg>
+{:else if name === 'folder-open'}
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M1.75 12.75v-9.5h4.5l1.5 1.5h5.5v2"/><path d="M1.75 12.75l2-5.5h11l-2 5.5z"/></svg>
+{:else if name === 'chevron'}
+  <!-- Points right; rotate 90° for an open folder. -->
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5l4.5 4.5L6 12.5"/></svg>
+{:else if name === 'new-file'}
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 1.75H3.75v12.5h5"/><path d="M9 1.75l3.25 3.25v3"/><path d="M12 10.5v4M10 12.5h4"/></svg>
+{:else if name === 'new-folder'}
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 12.75H1.75v-9.5h4.5l1.5 1.5h6.5v3"/><path d="M12 9.5v4.5M9.75 11.75h4.5"/></svg>
+{:else if name === 'collapse-all'}
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M5 8h6"/></svg>
+{:else if name === 'refresh'}
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.25 8a5.25 5.25 0 1 1-1.54-3.71"/><path d="M13.5 2v3h-3"/></svg>
+{:else if name === 'more'}
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg>
 {:else if name === 'pin'}
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
 {/if}

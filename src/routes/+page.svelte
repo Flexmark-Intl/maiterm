@@ -21,6 +21,11 @@
   import { pendingResumePanes, resumePane } from '$lib/stores/resumeGate.svelte';
   import Resizer from '$lib/components/Resizer.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
+  import IconButton from '$lib/components/ui/IconButton.svelte';
+  import Icon from '$lib/components/Icon.svelte';
+  import FilesColumn from '$lib/components/filetree/FilesColumn.svelte';
+  import { fileTreeStore } from '$lib/stores/fileTree.svelte';
+  import { FILE_TREE_MAX_WIDTH, FILE_TREE_MIN_WIDTH } from '$lib/stores/workspaces.svelte';
   import { getVersion } from '@tauri-apps/api/app';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { modLabel, modSymbol, altLabel } from '$lib/utils/platform';
@@ -432,6 +437,55 @@
     workspacesStore.saveSidebarWidth();
   }
 
+  // ── Files column (docs/file-tree.md §3.1) ───────────────────────────────────────────────
+  const filesOpen = $derived(preferencesStore.fileTreeEnabled && workspacesStore.fileTreeOpen);
+
+  // A preview tab that gets edited, or closed, stops being a preview (§10.5). Here rather
+  // than in the column so it holds while the column is closed.
+  $effect(() => {
+    void workspacesStore.workspaces;
+    fileTreeStore.settlePreviews();
+  });
+
+  // Ghost resize: while dragging only a 2 px guide moves; the column and every terminal stay
+  // put, and the width is committed (and saved) once, on pointerup. A width change at a
+  // streaming agent duplicates its scrollback, so one gesture must be one resize, not sixty.
+  let filesColEl = $state<HTMLDivElement | null>(null);
+  let ghostX = $state<number | null>(null);
+
+  function startFilesResize(e: PointerEvent) {
+    if (e.button !== 0 || !filesColEl) return;
+    e.preventDefault();
+    const handle = e.currentTarget as HTMLElement;
+    const left = filesColEl.getBoundingClientRect().left;
+    const clampX = (x: number) => Math.min(left + FILE_TREE_MAX_WIDTH, Math.max(left + FILE_TREE_MIN_WIDTH, x));
+    handle.setPointerCapture(e.pointerId);
+    ghostX = clampX(e.clientX);
+    const move = (m: PointerEvent) => { ghostX = clampX(m.clientX); };
+    const end = (commit: boolean) => {
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+      handle.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', esc, true);
+      if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+      const x = ghostX;
+      ghostX = null;
+      if (commit && x !== null) void workspacesStore.setFileTreeWidth(x - left);
+    };
+    const up = () => end(true);
+    const cancel = () => end(false);
+    const esc = (k: KeyboardEvent) => {
+      if (k.key !== 'Escape') return;
+      k.preventDefault();
+      k.stopPropagation();
+      end(false);
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', esc, true);
+  }
+
   function handleTitlebarMouseDown(e: MouseEvent) {
     if (e.button === 0) getCurrentWindow().startDragging();
   }
@@ -536,6 +590,20 @@
         >{titlebarText}</span>
       </Tooltip>
     {/if}
+    {#if !loading && preferencesStore.fileTreeEnabled}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="titlebar-actions" onmousedown={(e) => e.stopPropagation()}>
+        <IconButton
+          tooltip={`${workspacesStore.fileTreeOpen ? 'Hide' : 'Show'} Files (${modSymbol}⇧B)`}
+          size={24}
+          active={workspacesStore.fileTreeOpen}
+          aria-pressed={workspacesStore.fileTreeOpen}
+          onclick={() => fileTreeStore.toggleColumn()}
+        >
+          <Icon name="folder" size={14} />
+        </IconButton>
+      </div>
+    {/if}
   </div>
   <div class="app-body">
     {#if loading}
@@ -555,6 +623,18 @@
         <button class="sidebar-expand" onclick={() => workspacesStore.toggleSidebar()} title="Expand sidebar ({modSymbol}B)">
           <span class="expand-icon">&#x203A;</span>
         </button>
+      {/if}
+
+      {#if filesOpen}
+        <!-- No width transition, and opening/closing is instant (§3.1). -->
+        <div class="files-wrapper" bind:this={filesColEl} style="width: {workspacesStore.fileTreeWidth}px">
+          <FilesColumn />
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="files-resizer" class:dragging={ghostX !== null} onpointerdown={startFilesResize}></div>
+        </div>
+        {#if ghostX !== null}
+          <div class="files-ghost" style="left: {ghostX - 1}px"></div>
+        {/if}
       {/if}
 
       <main class="main-content">
@@ -762,6 +842,48 @@
 
   .sidebar-wrapper.collapsed {
     width: 0 !important;
+  }
+
+  .titlebar-actions {
+    position: absolute;
+    right: 8px;
+    top: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+  }
+
+  .files-wrapper {
+    flex-shrink: 0;
+    display: flex;
+    position: relative;
+    border-right: 1px solid var(--bg-light);
+    overflow: hidden;
+  }
+
+  .files-resizer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 5px;
+    cursor: col-resize;
+    z-index: 3;
+  }
+
+  .files-resizer:hover,
+  .files-resizer.dragging {
+    background: color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+
+  .files-ghost {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--accent);
+    pointer-events: none;
+    z-index: 9000;
   }
 
   .main-content {

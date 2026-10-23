@@ -1305,7 +1305,7 @@
         }
         if (visible) {
           (async () => { await startWatching(); })();
-          requestAnimationFrame(() => { editorView?.focus(); });
+          requestAnimationFrame(() => { if (!filesTreeHasFocus()) editorView?.focus(); });
         }
 
         // Apply pending selection from Claude Code openFile
@@ -1392,11 +1392,18 @@
     };
   });
 
+  /** The Files tree holds the keyboard: a preview opened from it (Space, a click) keeps it
+   *  there (docs/file-tree.md §10.5), so an editor appearing must not take it. Opening a
+   *  file for real hands focus over explicitly. */
+  function filesTreeHasFocus(): boolean {
+    return !!document.activeElement?.closest('[data-filetree]');
+  }
+
   // Focus editor when becoming visible
   $effect(() => {
     if (visible && editorView) {
       requestAnimationFrame(() => {
-        editorView?.focus();
+        if (!filesTreeHasFocus()) editorView?.focus();
       });
     }
   });
