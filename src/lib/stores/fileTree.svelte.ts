@@ -1005,7 +1005,9 @@ function createFileTreeStore() {
         // The root's repository changed (`git init` in it): its hub decorates by the old one.
         // Opening the same place again makes a new hub; the view is kept (`reroot` saves it),
         // and its folders are listed again (a new hub's generations never match old ones).
-        if (place) void reroot(place);
+        // The tick stays where it is: a 'locate' step moved it without touching `place`, whose
+        // `cwd_rel` is still where the tab was when the root was opened.
+        if (place) void reroot({ ...place, cwd_rel: youAreHere });
         return;
     }
     if (m.pendingClose.length) sendClose(m.pendingClose.splice(0));
