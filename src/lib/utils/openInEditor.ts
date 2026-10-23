@@ -6,11 +6,11 @@
  * on a path in the terminal). Both go through here now; Files will too.
  */
 import type { EditorFileInfo } from '$lib/tauri/types';
-import { workspacesStore } from '$lib/stores/workspaces.svelte';
+import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { getPtyInfo, sshArgsOf } from '$lib/tauri/commands';
 import { detectLanguageFromPath } from './languageDetect';
-import { findOpenEditor } from './editorDedupe';
+import { findOpenEditor, revealsWorkspace } from './editorDedupe';
 
 export interface OpenInEditorArgs {
   /** The file: a local absolute path, or the path on the ssh host when `remote` is set. */
@@ -67,7 +67,11 @@ export async function openInEditor(args: OpenInEditorArgs): Promise<OpenInEditor
     paneId: args.paneId,
   });
   if (hit) {
-    await workspacesStore.setActiveTab(hit.workspaceId, hit.paneId, hit.tabId);
+    if (revealsWorkspace(hit, args.workspaceId, workspacesStore.activeWorkspaceId)) {
+      await navigateToTab(hit.tabId);
+    } else {
+      await workspacesStore.setActiveTab(hit.workspaceId, hit.paneId, hit.tabId);
+    }
     return { tabId: hit.tabId, existing: true };
   }
   const name = args.abs.split('/').pop() || args.abs;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { EditorFileInfo, Workspace } from '$lib/tauri/types';
-import { findOpenEditor, sameEditorFile } from './editorDedupe';
+import { findOpenEditor, revealsWorkspace, sameEditorFile } from './editorDedupe';
 
 const local = (path: string): EditorFileInfo => ({
   file_path: path, is_remote: false, remote_ssh_command: null, remote_path: null, language: null,
@@ -40,5 +40,23 @@ describe('findOpenEditor', () => {
     expect(findOpenEditor(workspaces, remote('/src/a.ts', 'ews@nova'))?.tabId).toBe('e3');
     expect(findOpenEditor(workspaces, remote('/src/a.ts', 'me@other'))).toBeNull();
     expect(sameEditorFile(local('/x'), remote('/x', 'ews@nova'))).toBe(false);
+  });
+});
+
+describe('revealsWorkspace', () => {
+  const inW2 = { workspaceId: 'w2', paneId: 'p2', tabId: 'e2' };
+
+  it('switches workspace when the on-screen workspace asked for a file open in another', () => {
+    // A Cmd+click in w1 on a file w2 already shows: making it active inside hidden w2 is a dead click.
+    expect(revealsWorkspace(inW2, 'w1', 'w1')).toBe(true);
+  });
+
+  it('stays put when the hit is already on screen', () => {
+    expect(revealsWorkspace(inW2, 'w2', 'w2')).toBe(false);
+    expect(revealsWorkspace(inW2, 'w1', 'w2')).toBe(false);
+  });
+
+  it('never pulls the window away for a request from a background workspace', () => {
+    expect(revealsWorkspace(inW2, 'w3', 'w1')).toBe(false);
   });
 });

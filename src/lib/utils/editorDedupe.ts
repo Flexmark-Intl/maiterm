@@ -47,3 +47,16 @@ export function findOpenEditor(
   }
   return inWorkspace ?? anywhere;
 }
+
+/**
+ * Whether bringing `hit` forward must switch the window to its workspace.
+ *
+ * Only when the request came from the workspace on screen and the hit is in another one: the
+ * human clicked a path (or asked Quick Open) where they are looking, and a new tab would have
+ * appeared there, so the existing tab has to be SHOWN — making it active in a hidden pane does
+ * nothing visible. A request from a workspace that isn't on screen (an agent working in the
+ * background) never pulls the window away from what the human is looking at.
+ */
+export function revealsWorkspace(hit: EditorHit, callerWorkspaceId: string, activeWorkspaceId: string | null): boolean {
+  return hit.workspaceId !== activeWorkspaceId && callerWorkspaceId === activeWorkspaceId;
+}
