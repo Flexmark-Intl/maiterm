@@ -618,6 +618,28 @@
 > - **The Turn lens's `+N −N` diff has a 200 ms deadline** (`similar`'s `timeout`). Myers is
 >   quadratic when most lines change (a rewritten 2 MB file took ~10 s per hover); past the
 >   deadline the rest counts as replaced.
+>
+> **As built, phase 5 second review fixes (2026-10-23).** Where they changed the above:
+> - **The baseline store and the ledger now forget a session together.** The store kept two
+>   sessions per tab, but the ledger resumes a turn for nine (the current one and
+>   `LEFT_SESSIONS` = 8). So two writing `claude -p` children in one parent turn dropped the
+>   parent's baselines, and its next edit recaptured its own work as the turn and session start.
+>   Nine read-only children were also a problem: the ledger forgot the parent's turn and
+>   restarted it at 1, while the store still held the real turn 1's bytes and served them. Now:
+>   - The store keeps `LEFT_SESSIONS + 1` sessions. Their content is still bounded by the 64 MB
+>     budget, and a session that isn't capturing counts as closed, so its content is evicted first.
+>   - When the ledger forgets a session's turn, it drops that session's baselines
+>     (`Baselines::lose_session`).
+> - **A session whose baselines were dropped is remembered** (`TabState.dropped`, the last 256
+>   per tab; only sessions that captured land there). If one comes back, nothing is read for the
+>   turn it comes back in, because the file may already hold that turn's edits. Each path it
+>   writes is recorded `evicted`, so a later call doesn't read either. That turn, every earlier
+>   one and its session start all look up as `evicted`, never as `not_captured` and never as
+>   bytes. Its next turn captures normally. The hook still moves those records with `rekey`
+>   (`capture` lists them as existence unknown, so such a Write's create-or-overwrite is unknown).
+> - **Residual:** past 256 later dropped writer sessions on one tab, a returning session is taken
+>   for a new one again. Also unchanged: turning `file_tree_turn_baselines` on mid-turn captures
+>   the first edit after the toggle, which may follow earlier edits in the same turn.
 
 ## 1. Why
 
