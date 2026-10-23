@@ -28,6 +28,7 @@ import { toastStore } from '$lib/stores/toasts.svelte';
 import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
 import { shellQuote, localShellKind } from '$lib/utils/shellQuote';
 import { isWindows } from '$lib/utils/platform';
+import { basenameOf } from '$lib/utils/pathForm';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 export interface InsertItem {
@@ -137,7 +138,8 @@ export async function insertPathsIntoTab(
     }
     if (outcome.status === 'cancelled') return { ok: false, reason: 'upload cancelled' };
 
-    const basenames = localPaths.map((p) => p.split(/[\\/]/).pop() ?? p);
+    // Named as scp names the uploaded file: a backslash is part of a macOS/Linux file name.
+    const basenames = localPaths.map((p) => basenameOf(p, isWindows()));
     if (isAgent) {
       const r = await typeIntoAgent(tabId, ptyId, basenames.map((b) => `${AGENT_UPLOAD_DIR}/${b}`));
       if (r.ok) toastStore.addToast('SCP Upload', `${plural(count)} uploaded`, 'success');
