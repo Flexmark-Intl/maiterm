@@ -61,7 +61,9 @@ It works in Chrome and other Chromium browsers: Brave, Edge, Vivaldi, and Arc on
 
 1. Open the page in your browser.
 2. Click the maiTerm icon in the toolbar. The popup lists your agent tabs in maiTerm, the one in front in each maiTerm window first (marked **in front**), then the rest by when you last used them, with a filter.
-3. Choose one. The page is now that agent's to use, and the extension's icon shows on the tab the name the agent knows it by: **b1**, **b2** and so on. In maiTerm, a notification says so, and the agent's tab shows a browser icon (with a count when it holds several); hover it to see which pages.
+3. Choose one. The page is now that agent's to use. Chrome's tab strip shows it: the tab moves into a coloured tab group named after the agent, **maiTerm · nova-agent** say, and the extension's icon shows on the tab the name the agent knows it by: **b1**, **b2** and so on. In maiTerm, a notification says so, and the agent's tab shows a browser icon (with a count when it holds several); hover it to see which pages, or click it to bring the page to the front in Chrome.
+
+When a link ends, however it ends, the tab leaves the group and goes back where it was. A tab already in a tab group of your own stays in your group, and one you've dragged somewhere else since stays where you put it. The extension's menu lists every linked tab, from whatever page you open it on, with a click to go to each.
 
 Tell the agent what to look at: "the orders page won't load, find out why" is enough for it to read the failing request and its response. To end it, click the icon again and **Unlink**, or click **Unlink** beside it in **Preferences → Chrome extension → Linked tabs**, which lists every link.
 
