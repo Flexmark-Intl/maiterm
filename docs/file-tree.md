@@ -640,6 +640,30 @@
 > - **Residual:** past 256 later dropped writer sessions on one tab, a returning session is taken
 >   for a new one again. Also unchanged: turning `file_tree_turn_baselines` on mid-turn captures
 >   the first edit after the toggle, which may follow earlier edits in the same turn.
+>
+> **As built, phase 5 third review fixes (2026-10-23).** Where they changed the above:
+> - **The ledger looks up a returning session before it files the one it leaves.** `record` used
+>   to push the outgoing session onto `left` and trim to `LEFT_SESSIONS` first, so a parent coming
+>   back after exactly 8 headless children was itself trimmed: its turn restarted at 1 and its
+>   baselines were dropped. The real capacity was 7. It is now 8, matching the store's
+>   `SESSIONS = LEFT_SESSIONS + 1` (covered through the ledger, not just the store).
+> - **Only turns that may have begun before a session came back are blind.** `lost` used to be the
+>   turn of the session's first capture after its return, so any number of clean turns later the
+>   first edit's turn was still recorded unread, and turns it only read in looked up as lost. The
+>   ledger now tracks whether a prompt was seen since it switched to the current session
+>   (`TabLedger.prompted`). At the first one it calls `Baselines::came_back(turn − 1)`, which
+>   stores the bound on the session's `Dropped` record (`fresh_after`, first return only). Turns
+>   after it capture normally and, before any capture, look up as `not_captured`. A turn no prompt
+>   was seen to open (a mid-turn return, or a return whose first event isn't a prompt) is still
+>   blind, so it never shows false bytes. A session lost again resets the bound: `lose_session`
+>   now also re-tombstones a dropped session that hasn't captured since, because the ledger has
+>   renumbered it again.
+> - **A session's lost baselines say `too_many_sessions`, not `evicted`.** Both the store's session
+>   cap and the ledger forgetting a session answered `evicted`, which the diff tab explains as "to
+>   keep memory under 64 MB". That was false when a few bytes were pushed out by `claude -p`
+>   children. Every tombstone path (blind records, a dropped session's lookup, `lost`) now answers
+>   `too_many_sessions` (`SESSIONS_GONE`), with its own sentence. `evicted` now means only the
+>   memory budget (a slot gone from a session that still exists).
 
 ## 1. Why
 
