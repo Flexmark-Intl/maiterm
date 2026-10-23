@@ -70,7 +70,12 @@ each was made, in the spirit of Higgsfield's library.
 7. **Code lands in git; everything else lands in the gallery.** A file a person would look at
    is an asset, kept immutable, with who made it, for which task, and how. Rust owns the gallery
    store; agents add to it through a tool, never by writing into it (§10).
-8. **Reuse before invent.** The cards are maiTerm Tasks. Prompts go through `PromptCard`,
+8. **maiTerm owns the facts; agents read them.** Whether a worker exists, runs, waits, or has
+   landed comes from tabs, PTYs, hooks and git, never from a ledger agents are asked to keep
+   in step with reality. The coordinator's tools read state; none of them declare it. A worker's
+   "done" counts only with receipts (§7.7). ruflo is the cautionary example (§15): its swarm is
+   JSON records the model keeps in sync, and most of its bugs are those records drifting.
+9. **Reuse before invent.** The cards are maiTerm Tasks. Prompts go through `PromptCard`,
    blockers through `BlockerCard`, delivery through `deliver_to_agent`, memory is Claude's own
    auto memory pointed at a shared directory, and "send this asset to an agent" is the
    composer's existing attachments.
@@ -380,14 +385,15 @@ from the stated tab identity, like `own_tab_only_refusal`.
 
 | Tool | Who | Does |
 |---|---|---|
-| `hiveSpawnWorker {title, brief, folders?, depends_on?, inputs?, model?, effort?}` | coordinator | Creates the task, worktrees, branches and hidden tab, runs setup, launches the agent with the Hive preamble + brief. `inputs` names gallery assets the worker starts from (their paths go in its brief). Refused above the cap. A worker with unmet `depends_on` is created in **Starting · waits on …** and launched when they land |
+| `hiveSpawnWorker {title, role, brief, folders?, depends_on?, inputs?, reviews?, model?, effort?}` | coordinator | Creates the task, worktrees, branches and hidden tab, runs setup, and launches the agent with the Hive preamble, its role (§7.7) and the brief. `inputs` names gallery assets the worker starts from (their paths go in its brief). `reviews` makes it the reviewer of another worker's result (§7.7). Refused above the cap or by a fuse (§7.8). A worker with unmet `depends_on` is created in **Starting · waits on …** and launched when they land |
 | `hiveListWorkers` | coordinator | Cards as data: state, task, folders, branches, diff stat, assets, last report |
 | `hiveMessageWorker {worker, text, assets?}` | coordinator | Through `deliver_to_agent`: the draft, dialog and typing guards; a busy agent is no reason to hold. `assets` attach gallery files as paths |
 | `hiveLand {worker, summary}` | coordinator | Lands the worker (§8). Answers with what happened in each repo, or why it refused |
 | `hiveStopWorker {worker, reason}` | coordinator | Stops the agent; keeps worktrees and branches |
 | `hiveAnswerWorker {worker, prompt_id, answer}` | coordinator | Answers a worker's on-screen question or permission prompt, within the limits of §7.4. Refused while that checkpoint is Ask me |
 | `hivePrecedents {category?, query?}` / `hiveRecordPrecedent {...}` | coordinator | Reads the precedents that bear on a decision; records one when the human answers (§7.5) |
-| `hiveReport {status: done\|blocked\|failed, summary, notes?, assets?}` | worker | Records the report on the task (status + note), and delivers it to the coordinator as a framed `⟦HIVE REPORT⟧` message, with the assets it's reporting |
+| `hiveReport {status: done\|blocked\|failed, summary, receipts?, notes?}` | worker | Records the report on the task (status + note), and delivers it to the coordinator as a framed `⟦HIVE REPORT⟧` message. `done` is refused without receipts (§7.7) |
+| `hiveVerdict {worker, verdict: pass\|fail, issues?}` | reviewer worker | A review's result in the fail-report shape (§7.7), delivered to the coordinator and recorded on the reviewed task |
 | Gallery tools | all Hive agents | §10.3 |
 
 Workers keep every ordinary maiTerm tool (tasks, notes, follow-ups) and their runtime's own
@@ -507,6 +513,88 @@ Confidence is counted, not felt:
   it (coordinator, by precedent, or the human), the precedent cited, and the outcome. A daily
   digest in the coordinator's chat summarises what it decided alone. It's a setting, on by default.
 
+### 7.7 Roles, briefs, receipts and reviews
+
+What the coordinator spawns is shaped by a protocol taken from agency-agents (§15): typed
+handoffs, a reviewer separate from the implementer, a retry cap, and escalation options. It's
+expressed as fields maiTerm checks, not Markdown it hopes for.
+
+**Roles.** A role is a short definition the coordinator picks for each worker: *mission*,
+*rules*, *deliverable*, *done means*, and the tools it needs. A few dozen lines, with no
+persona text. maiTerm ships a **curated catalogue** condensed from agency-agents' divisions
+(engineering, testing, design, marketing, game development…), each with its MIT notice and the
+upstream commit it came from. The Hive's media roles (image, video, audio, edit) are written
+by us, because agency-agents' are advisory: none of them calls a generator or defines what a
+finished asset must carry. The catalogue is data. The coordinator's brief lists role names and
+one-line descriptions, and the chosen role's body goes into the worker's brief only. It is
+**never** installed as Claude subagents: 282 descriptions in every worker's context, each
+inheriting every tool, is exactly the bloat to avoid. A Hive's instructions can add roles of
+its own.
+
+**Pairings.** Each kind of task has a builder role and a checker role (agency-agents' pairing
+table, adapted): backend API → backend engineer + API tester; UI → frontend engineer + UI
+reviewer; a hero image → image maker + art director. The coordinator uses the pairing unless it
+has a reason not to, and says the reason.
+
+**The brief** is typed: goal, context (files, assets, precedents that apply), acceptance
+criteria (each one checkable), the evidence wanted, what to do when something is missing (stop
+and report, never substitute), and attempt *n* of *max*.
+
+**Receipts.** `hiveReport` with `done` is refused unless it carries evidence maiTerm can check:
+
+| Receipt | Checked by maiTerm |
+|---|---|
+| `commits: [sha]` | Each exists on the worker's branch |
+| `checks: [{command, exit, summary}]` | Run in the worker's tab; the exit code is read from maiTerm's own record of that command (OSC 133), not the agent's word, when it ran in the tab |
+| `assets: [id]` | Each is in the gallery, made by this worker |
+| `files: [path]` | Each exists in the worker's folders |
+
+ruflo's rule, adopted: *registered ≠ reachable ≠ healthy ≠ done*. A report that says "done"
+without receipts is a report of hope.
+
+**Reviews.** For work where it matters (the role says so, or the Hive's instructions do), the
+coordinator spawns a **reviewer** with `reviews: <worker>`. It's a separate session with read
+access to the builder's worktree (a detached worktree of the builder's branch) and its assets.
+It answers with `hiveVerdict`:
+
+- `pass`, or `fail` with issues, each one *expected / actual / evidence / fix / files*.
+- The builder gets the issues and the rule "fix only these; add nothing".
+- **Inconclusive is a fail.** A reviewer that couldn't check something says so, and that's a
+  fail with the gap as the issue.
+- **Three attempts**, then escalation with one of five resolutions: reassign, decompose, revise
+  the brief, accept as is, or defer. The coordinator picks one under the checkpoints, and a
+  precedent can settle it.
+- Gates are **things a command can check** (tests pass, the file exists, the screenshot was
+  taken, the render is 1080p and 30 s long). They're never a score an agent asserts ("95% on
+  brand"), which agency-agents' gates invite and which only produces made-up numbers.
+
+**Shared files have one owner.** Lockfiles, manifests and other files every task touches
+(`package-lock.json`, `Cargo.lock`, a routes table) are each owned by one worker at a time, as
+the coordinator assigns. The brief says: if you need a change in a file you don't own, report
+it. This is ruflo's governance rule, and it's what keeps parallel landings from colliding on the
+same three files.
+
+### 7.8 Fuses
+
+A Hive runs agents unattended, and agents spend the human's Claude plan as well as money. ruflo
+learned this the hard way: workers in many worktrees silently drained users' quota. maiTerm
+checks these in Rust **before** a worker starts:
+
+- the worker cap (§3);
+- **spawns per hour and per day** for the Hive (defaults 20 and 100; Projects enforces 200
+  threads a day);
+- **a quota breaker.** When any Hive agent hits a usage limit or rate limit (the API error in
+  its transcript or Stop hook), the Hive stops starting workers for 60 minutes, tells the
+  coordinator, and shows "Paused · usage limit" in the header. Running workers carry on, since
+  Claude itself waits and resumes them when the limit resets.
+
+The coordinator is told its remaining headroom with every `hiveListWorkers`.
+
+**What learning may not do** (ruflo's rule, and the window playbook's): nothing the Hive learns
+widens its own authority. Precedents are the human's own answers. Earned autonomy (§7.6)
+changes a checkpoint only on the human's click. No precedent, memory or role can raise the cap,
+the budget, the fuses or a tool's reach.
+
 ## 8. Landing
 
 The local stand-in for Projects' pull requests. Both modes start the same way:
@@ -608,6 +696,16 @@ What maiTerm adds:
   maiTerm. That's the same shape as this user's memory index, kept consistent by construction.
   Claude loads only the first 200 lines or 25 KB of `MEMORY.md`, so the rebuilt index is one
   line per file, and over the limit the oldest are folded into a dated archive entry.
+- **The rebuild never loses a line it didn't write.** ruflo's index curation once replaced a
+  hand-kept 75-line `MEMORY.md` with a 6-line stub. Its fix, adopted: a rebuild may add and
+  reorder its own lines. Any line maiTerm didn't generate (a human's edit, a pinned note) is kept
+  verbatim, at the top. If a rebuild would drop a line for any reason, it writes
+  `MEMORY.generated.md` beside the file instead, and the Memory view says why.
+- **Provenance.** Each index line, and each file's frontmatter, carries who wrote it: `human`,
+  `coordinator`, a worker's title, or `tool`. maiTerm knows the writer from the PostToolUse hook
+  of the Write/Edit that touched the file. Agents weigh "the human said" above "a worker
+  concluded", and precedents are `human` by definition. ruflo's provenance column is the model
+  for this.
 - **Mid-task visibility is by message.** Agents read memory at start. A decision that running
   workers need right away goes from the coordinator to them with `hiveMessageWorker`. The brief
   says so, and nothing pretends running agents see memory live.
@@ -872,16 +970,57 @@ Decided 2026-10-23:
    them next time, and earn it whole categories (§7.4–7.6). Darryl's direction; the mechanics are
    self-answered.
 
-## 15. Build order
+## 15. Prior art: what Hive takes and what it leaves
+
+Studied 2026-10-23. The claims below were read from the repos; the main numbers and the
+skip-permissions default were checked by hand.
+
+**agency-agents** (github.com/msitarzewski/agency-agents; MIT; ~163k stars; very active). A
+library of 282 persona-style agent prompts in 18 divisions, plus playbooks.
+- **Takes:** the protocol layer (the brief, pass, fail and escalation templates, as typed
+  fields); a reviewer separate from the builder; three attempts then escalate; "inconclusive is
+  a fail"; the task-type → builder + checker pairing table; a condensed role catalogue (§7.7).
+- **Leaves:** persona text (identity, "vibe", fictional "memories"); installing the files as
+  Claude subagents; its 7-phase "agency" pipeline built on 12–24-week phases; numeric quality
+  gates an agent can't measure; its orchestrator's hard-coded roster.
+
+**ruflo** (github.com/ruvnet/ruflo, the renamed claude-flow; MIT; ~79k stars; one main author;
+several releases a day).
+- **What it actually is:** a coordination ledger (JSON and SQLite) around Claude Code's own
+  subagents. Its "agents" are records rather than processes, its consensus is a vote tally in a
+  file, and its own 2026-05-29 audit found faked benchmarks, an inert "LoRA" and a reward sign
+  bug.
+- **Takes:**
+  - the never-shrink rule for a curated `MEMORY.md`, and provenance on memory (§9);
+  - receipts, and "registered ≠ reachable ≠ healthy ≠ done" (§7.7);
+  - a launch fuse checked before spawning, with a quota breaker (§7.8);
+  - one owner for shared manifests and lockfiles (§7.7);
+  - "learning may propose, never widen its own authority" (§7.8);
+  - for worktrees, a namespaced branch per worker and detached worktrees for read-only agents
+    (reviewers).
+- **Leaves:**
+  - agents as ledger rows: maiTerm owns process truth (principle 8);
+  - LLM "consensus" and Byzantine voting;
+  - one SQLite vector store shared across processes;
+  - workers as subagents inside the coordinator's own process, which loses isolation,
+    per-worker accounts, cost attribution and visibility;
+  - keyword "routing" with fixed confidence numbers;
+  - its 108 persona agents.
+- **Red flag:** its `hive-mind spawn` declares `dangerously-skip-permissions` with
+  `default: true` (`v3/@claude-flow/cli/src/commands/hive-mind.ts:604`), so its Queen runs with
+  every permission prompt skipped unless the user opts out. **Hive never launches an agent with
+  skipped permissions.** Its agents run in auto mode, under the limits of §7.4.
+
+## 16. Build order
 
 1. Extract `ChatColumn` from `FocusView`; Loom unchanged. Ship alone.
 2. The `isHiddenTab` predicate replaces the service-only checks (Rust + TS); no behaviour change.
 3. Hive workspace: sheet (folders), the Hive folder on disk, coordinator read copies, hidden
    coordinator tab, `HiveView` with the coordinator column only.
-4. Workers: worktrees per folder, `--add-dir`, setup, trust write,
+4. Workers: worktrees per folder, `--add-dir`, setup, trust write, the role catalogue, receipts, fuses,
    `hiveSpawnWorker`/`hiveListWorkers`/`hiveReport`, static cards.
 5. The activity feed, diff stat, worker columns, raw terminal, keyboard.
-6. Landing: land to Base (default) including several repos, the approval-mode setting through
+6. Reviewers (`hiveVerdict`, three attempts, escalation). Landing: land to Base (default) including several repos, the approval-mode setting through
    agent requests; retire; delete flow.
 7. Shared memory: `autoMemoryDirectory`, index rebuild, Memory view; checkpoints, `hiveAnswerWorker`, precedents, the decision log and earned autonomy.
 8. Gallery: store and index, `galleryAdd`/`List`/`Get`/`Tag`/`Collect`, thumbnails, the grid
