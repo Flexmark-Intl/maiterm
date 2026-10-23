@@ -61,6 +61,20 @@ fn stop(cwd: &str) -> serde_json::Value {
     json!({ "hook_event_name": "Stop", "session_id": "s1", "cwd": cwd })
 }
 
+/// The folder the ledger-only tests place their calls in. Built from the temp dir because a
+/// POSIX literal like `/repo` is relative on Windows, where the ledger rightly can't place it.
+/// Nothing is created there: these tests never touch the disk.
+fn repo() -> String {
+    std::env::temp_dir().join("af-repo").to_string_lossy().into_owned()
+}
+
+/// `rel` (slash-separated) under `repo()`, spelled the native way the ledger stores it.
+fn at(rel: &str) -> String {
+    let mut p = PathBuf::from(repo());
+    p.extend(rel.split('/'));
+    p.to_string_lossy().into_owned()
+}
+
 #[test]
 fn the_raw_failure_event_is_kept_apart_from_success() {
     let none = json!({});
@@ -97,49 +111,49 @@ fn running_shells(l: &AgentFiles) -> Vec<String> {
 #[test]
 fn a_denied_subagent_call_is_settled_when_the_subagent_stops() {
     let l = ledger();
-    l.record(rec(&prompt("/repo"), "t1"));
-    l.record(rec(&by_agent(pre("Edit", json!({ "file_path": "/repo/a.ts" }), "e1", "/repo"), "a1"), "t1"));
-    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b1", "/repo"), "a2"), "t1"));
+    l.record(rec(&prompt(&repo()), "t1"));
+    l.record(rec(&by_agent(pre("Edit", json!({ "file_path": at("a.ts") }), "e1", &repo()), "a1"), "t1"));
+    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b1", &repo()), "a2"), "t1"));
     // Denied: no Post. The main agent's turn ending leaves a subagent's calls alone.
-    l.record(rec(&stop("/repo"), "t1"));
+    l.record(rec(&stop(&repo()), "t1"));
     assert_eq!(status_of(&l, "t1", "e1"), "pending");
     assert_eq!(running_shells(&l), vec!["b1".to_string()]);
-    l.record(rec(&subagent_stop("a1", "/repo"), "t1"));
+    l.record(rec(&subagent_stop("a1", &repo()), "t1"));
     assert_eq!(status_of(&l, "t1", "e1"), "failed");
-    assert!(l.active_tabs(&[PathBuf::from("/repo/a.ts")], false).is_empty(), "nothing in flight on it any more");
+    assert!(l.active_tabs(&[PathBuf::from(at("a.ts"))], false).is_empty(), "nothing in flight on it any more");
     assert_eq!(running_shells(&l), vec!["b1".to_string()], "another subagent's shell call runs on");
-    l.record(rec(&subagent_stop("a2", "/repo"), "t1"));
+    l.record(rec(&subagent_stop("a2", &repo()), "t1"));
     assert!(running_shells(&l).is_empty());
 }
 
 #[test]
 fn an_agent_that_moves_on_has_left_its_denied_call_behind() {
     let l = ledger();
-    l.record(rec(&prompt("/repo"), "t1"));
-    l.record(rec(&by_agent(pre("Edit", json!({ "file_path": "/repo/a.ts" }), "e1", "/repo"), "a1"), "t1"));
-    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b1", "/repo"), "a1"), "t1"));
+    l.record(rec(&prompt(&repo()), "t1"));
+    l.record(rec(&by_agent(pre("Edit", json!({ "file_path": at("a.ts") }), "e1", &repo()), "a1"), "t1"));
+    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b1", &repo()), "a1"), "t1"));
     assert_eq!(status_of(&l, "t1", "e1"), "failed", "Claude runs an edit on its own: a later call means it never ran");
     // A read may run beside another call, so it is left alone; the Bash before it is over.
-    l.record(rec(&by_agent(pre("Read", json!({ "file_path": "/repo/b.ts" }), "r1", "/repo"), "a1"), "t1"));
-    l.record(rec(&by_agent(pre("Grep", json!({ "pattern": "x", "path": "/repo" }), "g1", "/repo"), "a1"), "t1"));
+    l.record(rec(&by_agent(pre("Read", json!({ "file_path": at("b.ts") }), "r1", &repo()), "a1"), "t1"));
+    l.record(rec(&by_agent(pre("Grep", json!({ "pattern": "x", "path": repo() }), "g1", &repo()), "a1"), "t1"));
     assert_eq!(status_of(&l, "t1", "r1"), "pending");
     assert!(running_shells(&l).is_empty());
     // Another agent's call is not this one's evidence.
-    l.record(rec(&pre("Edit", json!({ "file_path": "/repo/c.ts" }), "e2", "/repo"), "t1"));
-    l.record(rec(&by_agent(pre("Edit", json!({ "file_path": "/repo/d.ts" }), "e3", "/repo"), "a2"), "t1"));
+    l.record(rec(&pre("Edit", json!({ "file_path": at("c.ts") }), "e2", &repo()), "t1"));
+    l.record(rec(&by_agent(pre("Edit", json!({ "file_path": at("d.ts") }), "e3", &repo()), "a2"), "t1"));
     assert_eq!(status_of(&l, "t1", "e2"), "pending");
     // A Post that turns up after all still wins.
-    l.record(rec(&by_agent(post("Edit", json!({ "file_path": "/repo/a.ts" }), "e1", "/repo"), "a1"), "t1"));
+    l.record(rec(&by_agent(post("Edit", json!({ "file_path": at("a.ts") }), "e1", &repo()), "a1"), "t1"));
     assert_eq!(status_of(&l, "t1", "e1"), "ok");
 }
 
 #[test]
 fn codex_calls_may_overlap_so_a_new_one_settles_nothing() {
     let l = ledger();
-    let mut r = rec(&pre("shell", json!({ "command": ["bash", "-lc", "make"] }), "c1", "/repo"), "t1");
+    let mut r = rec(&pre("shell", json!({ "command": ["bash", "-lc", "make"] }), "c1", &repo()), "t1");
     r.runtime = "codex".into();
     l.record(r);
-    let mut r = rec(&pre("shell", json!({ "command": ["bash", "-lc", "make test"] }), "c2", "/repo"), "t1");
+    let mut r = rec(&pre("shell", json!({ "command": ["bash", "-lc", "make test"] }), "c2", &repo()), "t1");
     r.runtime = "codex".into();
     l.record(r);
     assert_eq!(running_shells(&l), vec!["c1".to_string(), "c2".to_string()]);
@@ -148,13 +162,13 @@ fn codex_calls_may_overlap_so_a_new_one_settles_nothing() {
 #[test]
 fn an_esc_or_a_denial_ends_the_turn_at_idle_prompt() {
     let l = ledger();
-    l.record(rec(&prompt("/repo"), "t1"));
-    l.record(rec(&pre("Edit", json!({ "file_path": "/repo/a.ts" }), "e1", "/repo"), "t1"));
-    l.record(rec(&by_agent(pre("Write", json!({ "file_path": "/repo/b.ts", "content": "x" }), "w1", "/repo"), "a1"), "t1"));
-    l.record(rec(&pre("Bash", json!({ "command": "git commit" }), "b1", "/repo"), "t1"));
-    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b2", "/repo"), "a2"), "t1"));
+    l.record(rec(&prompt(&repo()), "t1"));
+    l.record(rec(&pre("Edit", json!({ "file_path": at("a.ts") }), "e1", &repo()), "t1"));
+    l.record(rec(&by_agent(pre("Write", json!({ "file_path": at("b.ts"), "content": "x" }), "w1", &repo()), "a1"), "t1"));
+    l.record(rec(&pre("Bash", json!({ "command": "git commit" }), "b1", &repo()), "t1"));
+    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b2", &repo()), "a2"), "t1"));
     // Esc: no Post, no Stop. Claude's idle_prompt is the first word that the turn is over.
-    l.record(rec(&idle("/repo"), "t1"));
+    l.record(rec(&idle(&repo()), "t1"));
     let a = l.activity("t1", "session", true).unwrap();
     assert!(!a.turn_open);
     assert!(a.entries.iter().all(|e| e.status == "failed"), "no dialog is open, so nothing is still waiting: {:?}", a.entries);
@@ -165,9 +179,9 @@ fn an_esc_or_a_denial_ends_the_turn_at_idle_prompt() {
 #[test]
 fn a_codex_interrupt_ends_the_turn_and_every_call() {
     let l = ledger();
-    l.record(rec(&prompt("/repo"), "t1"));
-    l.record(rec(&pre("Bash", json!({ "command": "make" }), "b1", "/repo"), "t1"));
-    l.record(rec(&json!({ "hook_event_name": "Interrupt", "session_id": "s1", "cwd": "/repo" }), "t1"));
+    l.record(rec(&prompt(&repo()), "t1"));
+    l.record(rec(&pre("Bash", json!({ "command": "make" }), "b1", &repo()), "t1"));
+    l.record(rec(&json!({ "hook_event_name": "Interrupt", "session_id": "s1", "cwd": repo() }), "t1"));
     assert!(!l.activity("t1", "turn", true).unwrap().turn_open);
     assert!(running_shells(&l).is_empty());
 }
@@ -175,8 +189,8 @@ fn a_codex_interrupt_ends_the_turn_and_every_call() {
 #[test]
 fn a_new_session_ends_the_old_ones_shell_calls() {
     let l = ledger();
-    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b1", "/repo"), "a1"), "t1"));
-    let mut fresh = prompt("/repo");
+    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b1", &repo()), "a1"), "t1"));
+    let mut fresh = prompt(&repo());
     fresh["session_id"] = json!("s2");
     l.record(rec(&fresh, "t1"));
     assert!(running_shells(&l).is_empty());
@@ -186,19 +200,19 @@ fn a_new_session_ends_the_old_ones_shell_calls() {
 fn a_new_session_numbers_its_turns_afresh_from_its_session_start() {
     let l = ledger();
     for _ in 0..3 {
-        l.record(rec(&prompt("/repo"), "t1"));
-        l.record(rec(&stop("/repo"), "t1"));
+        l.record(rec(&prompt(&repo()), "t1"));
+        l.record(rec(&stop(&repo()), "t1"));
     }
     assert_eq!(l.turn_of("t1"), Some(3));
     // A compaction keeps the session id: the count goes on.
-    l.record(rec(&json!({ "hook_event_name": "SessionStart", "session_id": "s1", "cwd": "/repo", "source": "compact" }), "t1"));
+    l.record(rec(&json!({ "hook_event_name": "SessionStart", "session_id": "s1", "cwd": repo(), "source": "compact" }), "t1"));
     assert_eq!(l.turn_of("t1"), Some(3));
     // A /clear mints a new id: before its first prompt, nothing of the old session's count is
     // left for a window opening its Files column to start from.
-    l.record(rec(&json!({ "hook_event_name": "SessionStart", "session_id": "s2", "cwd": "/repo", "source": "clear" }), "t1"));
+    l.record(rec(&json!({ "hook_event_name": "SessionStart", "session_id": "s2", "cwd": repo(), "source": "clear" }), "t1"));
     assert_eq!(l.turn_of("t1"), None);
     assert!(l.turns(None).is_empty());
-    let mut p = prompt("/repo");
+    let mut p = prompt(&repo());
     p["session_id"] = json!("s2");
     l.record(rec(&p, "t1"));
     assert_eq!(l.turn_of("t1"), Some(1));
@@ -208,27 +222,27 @@ fn a_new_session_numbers_its_turns_afresh_from_its_session_start() {
 #[test]
 fn a_shell_call_no_hook_ever_ends_stops_counting_after_ten_minutes() {
     let l = ledger();
-    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b1", "/tmp"), "a1"), "t1"));
-    assert!(l.sole_shell_in(Path::new("/tmp"), false).is_some());
+    l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b1", &repo()), "a1"), "t1"));
+    assert!(l.sole_shell_in(Path::new(&repo()), false).is_some());
     for s in l.inner.lock().shells.iter_mut() {
         s.started -= SHELL_MAX;
     }
-    assert!(l.sole_shell_in(Path::new("/tmp"), false).is_none());
+    assert!(l.sole_shell_in(Path::new(&repo()), false).is_none());
     assert!(l.inner.lock().shells.is_empty(), "and it is dropped, so the watcher pays nothing for it");
 }
 
 #[test]
 fn pre_is_recorded_once_whichever_copy_arrives_first() {
     let l = ledger();
-    let edit = json!({ "replace_all": false, "file_path": "/repo/src/a.ts", "old_string": "a", "new_string": "b" });
-    l.record(rec(&prompt("/repo"), "t1"));
+    let edit = json!({ "replace_all": false, "file_path": at("src/a.ts"), "old_string": "a", "new_string": "b" });
+    l.record(rec(&prompt(&repo()), "t1"));
     // The mod's relay, then the settings hook's copy of the same call.
-    l.record(rec(&pre("Edit", edit.clone(), "toolu_01P7vmSN1gCE2Kts811bbr1t", "/repo"), "t1"));
-    l.record(rec(&pre("Edit", edit.clone(), "toolu_01P7vmSN1gCE2Kts811bbr1t", "/repo"), "t1"));
+    l.record(rec(&pre("Edit", edit.clone(), "toolu_01P7vmSN1gCE2Kts811bbr1t", &repo()), "t1"));
+    l.record(rec(&pre("Edit", edit.clone(), "toolu_01P7vmSN1gCE2Kts811bbr1t", &repo()), "t1"));
     let a = l.activity("t1", "turn", false).unwrap();
     assert_eq!(a.entries.len(), 1);
     assert_eq!((a.entries[0].op.as_str(), a.entries[0].status.as_str(), a.entries[0].evidence.as_str()), ("edit", "pending", "tool"));
-    l.record(rec(&post("Edit", edit, "toolu_01P7vmSN1gCE2Kts811bbr1t", "/repo"), "t1"));
+    l.record(rec(&post("Edit", edit, "toolu_01P7vmSN1gCE2Kts811bbr1t", &repo()), "t1"));
     let a = l.activity("t1", "turn", false).unwrap();
     assert_eq!((a.entries.len(), a.entries[0].status.as_str()), (1, "ok"));
     assert!(a.entries[0].t_post_ms.is_some());
@@ -237,12 +251,12 @@ fn pre_is_recorded_once_whichever_copy_arrives_first() {
 #[test]
 fn a_failed_call_stays_visible_as_failed() {
     let l = ledger();
-    let write = json!({ "file_path": "/repo/out.txt", "content": "x" });
-    l.record(rec(&prompt("/repo"), "t1"));
-    let mut p = rec(&pre("Write", write.clone(), "toolu_w", "/repo"), "t1");
+    let write = json!({ "file_path": at("out.txt"), "content": "x" });
+    l.record(rec(&prompt(&repo()), "t1"));
+    let mut p = rec(&pre("Write", write.clone(), "toolu_w", &repo()), "t1");
     p.existed = Some(false);
     l.record(p);
-    let failure = json!({ "hook_event_name": "PostToolUseFailure", "session_id": "s1", "cwd": "/repo", "tool_name": "Write",
+    let failure = json!({ "hook_event_name": "PostToolUseFailure", "session_id": "s1", "cwd": repo(), "tool_name": "Write",
         "tool_input": write, "tool_use_id": "toolu_w", "error": "EACCES: permission denied" });
     l.record(rec(&failure, "t1"));
     let a = l.activity("t1", "turn", false).unwrap();
@@ -252,12 +266,12 @@ fn a_failed_call_stays_visible_as_failed() {
 #[test]
 fn reads_are_left_out_unless_asked_and_turns_scope_the_list() {
     let l = ledger();
-    l.record(rec(&prompt("/repo"), "t1"));
-    l.record(rec(&pre("Read", json!({ "file_path": "/repo/a.ts", "limit": 22 }), "r1", "/repo"), "t1"));
-    l.record(rec(&pre("Edit", json!({ "file_path": "/repo/b.ts", "old_string": "a", "new_string": "b" }), "e1", "/repo"), "t1"));
-    l.record(rec(&stop("/repo"), "t1"));
-    l.record(rec(&prompt("/repo"), "t1"));
-    l.record(rec(&pre("Grep", json!({ "pattern": "x", "path": "/repo/src" }), "g1", "/repo"), "t1"));
+    l.record(rec(&prompt(&repo()), "t1"));
+    l.record(rec(&pre("Read", json!({ "file_path": at("a.ts"), "limit": 22 }), "r1", &repo()), "t1"));
+    l.record(rec(&pre("Edit", json!({ "file_path": at("b.ts"), "old_string": "a", "new_string": "b" }), "e1", &repo()), "t1"));
+    l.record(rec(&stop(&repo()), "t1"));
+    l.record(rec(&prompt(&repo()), "t1"));
+    l.record(rec(&pre("Grep", json!({ "pattern": "x", "path": at("src") }), "g1", &repo()), "t1"));
     assert_eq!(l.activity("t1", "turn", false).unwrap().entries.len(), 0);
     assert_eq!(l.activity("t1", "turn", true).unwrap().entries.len(), 1);
     assert_eq!(l.activity("t1", "session", false).unwrap().entries.len(), 1);
@@ -270,9 +284,9 @@ fn reads_are_left_out_unless_asked_and_turns_scope_the_list() {
 fn a_codex_patch_resolves_against_the_session_folder() {
     let l = ledger();
     let patch = "*** Begin Patch\n*** Update File: src/routes/+layout.ts\n@@\n-a\n+b\n*** End Patch";
-    l.record(rec(&pre("shell", json!({ "command": ["apply_patch", patch] }), "call_IXwH9ULaOHVmXcQU8KIk9thN", "/proj"), "t1"));
+    l.record(rec(&pre("shell", json!({ "command": ["apply_patch", patch] }), "call_IXwH9ULaOHVmXcQU8KIk9thN", &repo()), "t1"));
     let a = l.activity("t1", "turn", false).unwrap();
-    assert_eq!(a.entries[0].path, "/proj/src/routes/+layout.ts");
+    assert_eq!(a.entries[0].path, at("src/routes/+layout.ts"));
 }
 
 #[test]
@@ -285,20 +299,20 @@ fn an_ssh_tabs_paths_carry_its_host() {
 #[test]
 fn the_ring_keeps_the_newest_two_thousand() {
     let l = ledger();
-    l.record(rec(&prompt("/repo"), "t1"));
+    l.record(rec(&prompt(&repo()), "t1"));
     for i in 0..(RING + 150) {
-        l.record(rec(&pre("Edit", json!({ "file_path": format!("/repo/f{i}.ts"), "old_string": "a", "new_string": "b" }), &format!("id{i}"), "/repo"), "t1"));
+        l.record(rec(&pre("Edit", json!({ "file_path": at(&format!("f{i}.ts")), "old_string": "a", "new_string": "b" }), &format!("id{i}"), &repo()), "t1"));
     }
     let a = l.activity("t1", "session", true).unwrap();
     assert_eq!(a.entries.len(), RING);
-    assert_eq!(a.entries[0].path, "/repo/f150.ts");
+    assert_eq!(a.entries[0].path, at("f150.ts"));
 }
 
 #[test]
 fn a_reload_moves_the_ledger_and_a_closed_tab_is_forgotten_after_a_minute() {
     let l = ledger();
-    l.record(rec(&prompt("/repo"), "old"));
-    l.record(rec(&pre("Edit", json!({ "file_path": "/repo/a.ts" }), "e1", "/repo"), "old"));
+    l.record(rec(&prompt(&repo()), "old"));
+    l.record(rec(&pre("Edit", json!({ "file_path": at("a.ts") }), "e1", &repo()), "old"));
     // The reload deletes the old tab first: a prune now must not lose it.
     l.prune(&HashSet::new());
     l.remap_tab("old", "new");
@@ -314,11 +328,11 @@ fn a_reload_moves_the_ledger_and_a_closed_tab_is_forgotten_after_a_minute() {
 #[test]
 fn a_turn_that_only_read_is_still_the_tabs_current_one() {
     let l = ledger();
-    l.record(rec(&prompt("/repo"), "t1"));
-    l.record(rec(&pre("Edit", json!({ "file_path": "/repo/a.ts", "old_string": "a", "new_string": "b" }), "e1", "/repo"), "t1"));
-    l.record(rec(&stop("/repo"), "t1"));
-    l.record(rec(&prompt("/repo"), "t1"));
-    l.record(rec(&pre("Read", json!({ "file_path": "/repo/b.ts" }), "r1", "/repo"), "t1"));
+    l.record(rec(&prompt(&repo()), "t1"));
+    l.record(rec(&pre("Edit", json!({ "file_path": at("a.ts"), "old_string": "a", "new_string": "b" }), "e1", &repo()), "t1"));
+    l.record(rec(&stop(&repo()), "t1"));
+    l.record(rec(&prompt(&repo()), "t1"));
+    l.record(rec(&pre("Read", json!({ "file_path": at("b.ts") }), "r1", &repo()), "t1"));
     // The standing marks know only turn 1 (the edit); the window must hear turn 2 from here.
     assert!(l.standing_marks(None).iter().all(|m| m.turn == 1));
     let t = l.turns(None);
@@ -326,14 +340,14 @@ fn a_turn_that_only_read_is_still_the_tabs_current_one() {
     assert_eq!((t[0].turn, t[0].open, t[0].end_ms), (2, true, None));
     assert!(t[0].start_ms > 0);
     // Stop ends it, and a later idle notification does not move the end.
-    l.record(rec(&stop("/repo"), "t1"));
+    l.record(rec(&stop(&repo()), "t1"));
     let ended = l.turns(None)[0].end_ms.expect("ended at the Stop");
     std::thread::sleep(Duration::from_millis(5));
-    l.record(rec(&idle("/repo"), "t1"));
+    l.record(rec(&idle(&repo()), "t1"));
     assert_eq!(l.turns(None)[0].end_ms, Some(ended));
     // Only the asked tabs; a new session starts at no turn and is left out until it has one.
     assert!(l.turns(Some(&HashSet::from(["t2".to_string()]))).is_empty());
-    let mut fresh = prompt("/repo");
+    let mut fresh = prompt(&repo());
     fresh["session_id"] = json!("s2");
     l.record(rec(&fresh, "t1"));
     assert_eq!(l.turns(None)[0].turn, 1);
@@ -342,8 +356,8 @@ fn a_turn_that_only_read_is_still_the_tabs_current_one() {
 #[test]
 fn a_new_session_starts_its_own_history() {
     let l = ledger();
-    l.record(rec(&pre("Edit", json!({ "file_path": "/repo/a.ts" }), "e1", "/repo"), "t1"));
-    let mut fresh = prompt("/repo");
+    l.record(rec(&pre("Edit", json!({ "file_path": at("a.ts") }), "e1", &repo()), "t1"));
+    let mut fresh = prompt(&repo());
     fresh["session_id"] = json!("s2");
     l.record(rec(&fresh, "t1"));
     assert!(l.activity("t1", "session", true).unwrap().entries.is_empty());
@@ -476,7 +490,7 @@ fn a_tool_call_lights_its_row(ft: &Arc<FileTreeState>, rec: &Recorder, root: &Pa
     assert_eq!((m.tab_id.as_str(), m.evidence.as_str(), m.op.as_str()), ("t1", "tool", "edit"));
     // A path outside the root reaches nobody.
     let before = rec.marks().len();
-    ft.agents.record(rec_for(&pre("Read", json!({ "file_path": "/elsewhere/x.ts" }), "r1", &cwd), "t1"));
+    ft.agents.record(rec_for(&pre("Read", json!({ "file_path": std::env::temp_dir().join("af-elsewhere").join("x.ts") }), "r1", &cwd), "t1"));
     std::thread::sleep(Duration::from_millis(250));
     assert_eq!(rec.marks().len(), before);
     // A subscriber that arrives later is primed with what still stands.
