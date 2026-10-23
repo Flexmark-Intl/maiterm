@@ -107,6 +107,12 @@ export class TurnTracker {
     this.spans.delete(tabId);
   }
 
+  /** Forget every tab: what was learned can no longer be kept in step with the ledger. */
+  clear(): void {
+    this.turn.clear();
+    this.spans.clear();
+  }
+
   remap(oldId: string, newId: string): void {
     const t = this.turn.get(oldId);
     if (t !== undefined) {

@@ -97,6 +97,20 @@ describe('turns', () => {
     expect(turns.isThisTurn(late)).toBe(false);
   });
 
+  it('a tracker cleared while the column was closed follows the ledger\'s renumbering', () => {
+    const turns = new TurnTracker();
+    turns.noteMark(mark({ rel: 'a', turn: 9 }));
+    // Closed: a /clear went by unseen and the ledger counts from 1 again. Reopened, the
+    // tracker is rebuilt from the primed marks.
+    turns.clear();
+    const primed = mark({ rel: 'b', turn: 3, at_ms: T0 + 5 });
+    turns.noteMark(primed);
+    expect(turns.current('A')).toBe(3);
+    expect(turns.isThisTurn(primed)).toBe(true);
+    turns.turnStarted('A', T0 + 10);
+    expect(turns.current('A')).toBe(4);
+  });
+
   it('a running write pulses; a failed one is outlined; a delete is struck', () => {
     const { am, turns } = setup([
       mark({ rel: 'p.ts', phase: 'pending', op: 'write' }),

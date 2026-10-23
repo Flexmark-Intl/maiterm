@@ -2294,6 +2294,12 @@ function createFileTreeStore() {
     resolveTimer = null;
     for (const u of unlisteners) u();
     unlisteners = [];
+    // With the hook listeners gone, a prompt or a new session (the ledger renumbers from 1)
+    // would pass unseen, and noteMark only ever raises a turn: kept, the tracker could stay
+    // ahead of the ledger for good and no mark would count as this turn's. The next
+    // subscription's primed marks rebuild it.
+    turns.clear();
+    tabLastAt.clear();
     saveView();
     closeSub();
     focused = false;
