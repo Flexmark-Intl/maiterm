@@ -4131,11 +4131,13 @@ async fn record_agent_files(
     // before the tool runs, at most 25 ms. The read also says whether a Write's file existed, so
     // the hook never waits twice.
     let mut seen: Vec<(String, Option<bool>)> = Vec::new();
+    let mut captured_in: Option<u64> = None;
     if phase == Phase::Pre && host.is_none() && srv.state.app_data.read().preferences.file_tree_turn_baselines {
         let paths = crate::agent_files::baseline::write_paths(&extracted, cwd.as_deref());
         if !paths.is_empty() {
             let turn = ft.agents.turn_for_pre(&tab_id, session_id);
             seen = ft.agents.baselines.capture(&tab_id, session_id, runtime_key, turn, paths).await;
+            captured_in = Some(turn);
         }
     }
     let existed = match (&phase, &extracted, host.is_none()) {
@@ -4159,7 +4161,8 @@ async fn record_agent_files(
         };
         ft.agents.prune(&existing);
     }
-    ft.agents.record(HookRecord {
+    let tab_for_rekey = captured_in.map(|_| tab_id.clone());
+    let recorded = ft.agents.record(HookRecord {
         phase,
         tab_id,
         session_id: session_id.to_string(),
@@ -4172,6 +4175,12 @@ async fn record_agent_files(
         extracted,
         existed,
     });
+    // A prompt can land while the baseline is read, and the ledger then files the call in the
+    // next turn: the baseline follows it there, or Compare with Turn Start would find nothing.
+    if let (Some(from), Some(to), Some(tab)) = (captured_in, recorded, tab_for_rekey) {
+        let paths: Vec<String> = seen.into_iter().map(|(p, _)| p).collect();
+        ft.agents.baselines.rekey(&tab, session_id, from, to, &paths);
+    }
 }
 
 /// Handle POST /hooks — receives agent hook events (Claude today; other runtimes

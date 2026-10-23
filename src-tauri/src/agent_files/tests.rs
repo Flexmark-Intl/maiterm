@@ -609,4 +609,35 @@ fn turn_for_pre_predicts_the_turn_record_files_the_call_in() {
     fresh["session_id"] = json!("s2");
     check(&l, fresh, "e4");
     assert_eq!(l.turn_and_session("t1"), Some((1, "s2".to_string())));
+    // That was a headless `claude -p` the agent ran (it inherits the tab's id). The parent's next
+    // call carries its own turn on rather than starting a turn 1 its baselines already have.
+    check(&l, edit("e5"), "e5");
+    assert_eq!(l.turn_and_session("t1"), Some((2, "s1".to_string())));
+    l.record(rec(&prompt(&cwd), "t1"));
+    assert_eq!(l.turn_of("t1"), Some(3));
+}
+
+/// A prompt landing between `turn_for_pre` and `record` (a background subagent's call racing the
+/// human's next prompt) moves the call to the next turn; `record` says so, and the hook moves the
+/// baseline it read to match.
+#[tokio::test]
+async fn record_answers_the_turn_a_call_was_really_filed_in() {
+    let l = ledger();
+    let d = std::env::temp_dir().join(format!("af-race-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&d).unwrap();
+    let cwd = d.to_string_lossy().into_owned();
+    let file = d.join("a.ts").to_string_lossy().into_owned();
+    std::fs::write(&file, "before\n").unwrap();
+    l.record(rec(&prompt(&cwd), "t1"));
+    let call = pre("Edit", json!({ "file_path": file, "old_string": "b", "new_string": "c" }), "e1", &cwd);
+    let predicted = l.turn_for_pre("t1", "s1");
+    l.baselines.capture("t1", "s1", "claude", predicted, vec![file.clone()]).await;
+    l.record(rec(&prompt(&cwd), "t1"));
+    let filed = l.record(rec(&call, "t1")).unwrap();
+    assert_eq!((predicted, filed), (1, 2));
+    l.baselines.rekey("t1", "s1", predicted, filed, std::slice::from_ref(&file));
+    assert_eq!(l.baselines.lookup("t1", "s1", &file, "turn", 2).content.as_deref(), Some("before\n"));
+    // The second copy of the same Pre is dropped and says so.
+    assert_eq!(l.record(rec(&call, "t1")), None);
+    let _ = std::fs::remove_dir_all(&d);
 }

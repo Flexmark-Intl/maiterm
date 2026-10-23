@@ -59,6 +59,8 @@ const SHELL_TAIL: Duration = Duration::from_millis(300);
 /// longer behind its permission dialog, loses its label for the rest: no label beats crediting
 /// the human's saves to it.
 const SHELL_MAX: Duration = Duration::from_secs(600);
+/// Sessions a tab switched away from whose turn numbers are remembered (`TabLedger::left`).
+const LEFT_SESSIONS: usize = 8;
 
 /// One thing an agent did to one path (§9.1).
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -203,6 +205,12 @@ struct TabLedger {
     host: Option<String>,
     entries: VecDeque<LedgerEntry>,
     missing_since: Option<Instant>,
+    /// Sessions the tab switched away from, with the turn and span each was at, newest last. A
+    /// headless `claude -p` run from the agent's Bash inherits the tab's id and posts its own
+    /// session's events, and the parent goes on in its turn around it: coming back, the parent's
+    /// turn carries on under its own number instead of restarting at 1, where it would collide
+    /// with the turn baselines (baseline.rs) its earlier turns captured.
+    left: VecDeque<(String, u64, (i64, Option<i64>))>,
 }
 
 impl TabLedger {
@@ -217,7 +225,13 @@ impl TabLedger {
             host: None,
             entries: VecDeque::new(),
             missing_since: None,
+            left: VecDeque::new(),
         }
+    }
+
+    /// The turn `session` was at when the tab last switched away from it (0: never seen).
+    fn left_turn(&self, session: &str) -> u64 {
+        self.left.iter().rev().find(|(s, ..)| s == session).map(|(_, t, _)| *t).unwrap_or(0)
     }
 
     /// Stop, idle or an interrupt: the turn is over. Only the first of them is its end; an idle
@@ -405,13 +419,16 @@ impl AgentFiles {
 
     /// The turn a PreToolUse of `session` in `tab` will be recorded in, asked before it is
     /// recorded (the baseline is read first, so a Write's create-or-overwrite comes from that
-    /// same read). Mirrors `record`: a new session starts at turn 1, and a call opens turn 1
-    /// when no turn was seen yet; otherwise it is the current turn.
+    /// same read). Mirrors `record`: a new session starts at turn 1, a session the tab comes back
+    /// to carries on at its own turn, and a call opens turn 1 when no turn was seen yet;
+    /// otherwise it is the current turn. A prompt can still land between this and `record`,
+    /// which is why `record` answers the turn it really used.
     pub fn turn_for_pre(&self, tab_id: &str, session_id: &str) -> u64 {
         let inner = self.inner.lock();
         match inner.tabs.get(tab_id) {
             Some(t) if session_id.is_empty() || t.session_id.is_empty() || t.session_id == session_id => t.turn.max(1),
-            _ => 1,
+            Some(t) => t.left_turn(session_id).max(1),
+            None => 1,
         }
     }
 
@@ -430,11 +447,12 @@ impl AgentFiles {
         self.routing.store(on, Ordering::SeqCst);
     }
 
-    /// Record one hook event. Never waits on anything but the ledger's own short lock.
-    pub fn record(&self, rec: HookRecord) {
+    /// Record one hook event. Never waits on anything but the ledger's own short lock. Answers
+    /// the tab's turn as recorded (None: a second copy of a Pre, dropped).
+    pub fn record(&self, rec: HookRecord) -> Option<u64> {
         let now = now_ms();
         let mut out: Vec<(AgentMarkAbs, bool)> = Vec::new();
-        {
+        let recorded = {
             let mut inner = self.inner.lock();
             let inner = &mut *inner;
             // The maiterm-tab mod and the settings hook both deliver PreToolUse; whichever
@@ -442,7 +460,7 @@ impl AgentFiles {
             if rec.phase == Phase::Pre {
                 if let Some(id) = rec.tool_use_id.as_deref().filter(|s| !s.is_empty()) {
                     if !inner.seen.insert(id.to_string()) {
-                        return;
+                        return None;
                     }
                     inner.seen_order.push_back(id.to_string());
                     if inner.seen_order.len() > SEEN_IDS {
@@ -457,6 +475,11 @@ impl AgentFiles {
             // A new session (a resume mints one, so does /clear) starts its own history.
             if !rec.session_id.is_empty() && tab.session_id != rec.session_id {
                 if !tab.session_id.is_empty() {
+                    tab.left.retain(|(s, ..)| *s != tab.session_id);
+                    tab.left.push_back((tab.session_id.clone(), tab.turn, tab.turn_span));
+                    if tab.left.len() > LEFT_SESSIONS {
+                        tab.left.pop_front();
+                    }
                     tab.entries.clear();
                     tab.turn = 0;
                     tab.turn_open = false;
@@ -464,6 +487,14 @@ impl AgentFiles {
                     // The old session's shell calls are over too: left running, they would keep
                     // claiming the tree's changes for a session that is gone.
                     end_shells(&mut inner.shells, &rec.tab_id, None, None);
+                }
+                // A session the tab comes back to carries on where it was (its turn left open
+                // or not, the next event says).
+                if let Some(i) = tab.left.iter().position(|(s, ..)| *s == rec.session_id) {
+                    if let Some((_, turn, span)) = tab.left.remove(i) {
+                        tab.turn = turn;
+                        tab.turn_span = span;
+                    }
                 }
                 tab.session_id = rec.session_id.clone();
             }
@@ -620,10 +651,13 @@ impl AgentFiles {
                     }
                 }
             }
+            let turn = tab.turn;
             // Ended shell calls are kept only as long as a late batch can still name them.
             inner.shells.retain(|s| s.running() || s.ended.is_some_and(|t| t.elapsed() < SHELL_TAIL * 4));
-        }
+            turn
+        };
         self.route(out);
+        Some(recorded)
     }
 
     /// Hand marks to the dispatcher. Nothing is routed while `file_tree_agent_activity` is off,
