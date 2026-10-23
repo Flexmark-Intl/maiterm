@@ -920,6 +920,7 @@ pub fn run() {
             commands::editor::unwatch_file,
             commands::editor::canonical_editor_path,
             commands::editor::editor_file_identities,
+            commands::editor::resolve_remote_editor_path,
             commands::editor::get_file_mtime,
             commands::editor::watch_remote_file,
             commands::editor::unwatch_remote_file,

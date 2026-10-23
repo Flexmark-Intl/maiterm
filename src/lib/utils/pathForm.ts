@@ -21,6 +21,11 @@ export function basenameOf(path: string, windows: boolean): string {
  * `/data/x` when proj links to /data/proj), so pass `foldParent = false` for a path nothing can
  * check against its disk — a file on an ssh host. Dropping `.` and empty segments is always safe.
  */
+/** Whether a POSIX path has a `.` or `..` segment: what a click joined onto a cwd may carry. */
+export function hasDotSegment(path: string): boolean {
+  return path.split('/').some((seg) => seg === '.' || seg === '..');
+}
+
 export function pathKey(path: string, windows: boolean, foldParent = true): string {
   let p = windows ? path.replace(/\\/g, '/') : path;
   const absolute = p.startsWith('/');

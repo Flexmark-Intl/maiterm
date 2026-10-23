@@ -1,7 +1,8 @@
 import { terminalsStore } from '$lib/stores/terminals.svelte';
-import { canonicalEditorPath, getPtyInfo } from '$lib/tauri/commands';
+import { canonicalEditorPath, getPtyInfo, resolveRemoteEditorPath } from '$lib/tauri/commands';
 import { error as logError } from '@tauri-apps/plugin-log';
 import { openInEditor, sshCommandOfTab } from './openInEditor';
+import { hasDotSegment } from './pathForm';
 
 /**
  * Open a file from a terminal context.
@@ -39,10 +40,14 @@ export async function openFileFromTerminal(
       }
     }
     // A click has no spelling worth keeping (`cwd/./src/a.ts`, `cwd/../x`, `~/notes`), so a new
-    // tab gets the canonical one: folder resolved in Rust, file name as typed. A remote path
-    // can't be resolved from here and stays as joined.
+    // tab gets the canonical one: folder resolved in Rust, file name as typed. On an ssh host
+    // only the host knows what `..` means under a symlinked folder, so a path with `.`/`..` in
+    // it is resolved there (one ssh round trip, only for those); if the host can't answer it
+    // stays as joined, which at worst opens a second tab rather than the wrong file's.
     if (!isRemote) {
       resolvedPath = await canonicalEditorPath(resolvedPath).catch(() => resolvedPath);
+    } else if (sshCommand && resolvedPath.startsWith('/') && hasDotSegment(resolvedPath)) {
+      resolvedPath = await resolveRemoteEditorPath(sshCommand, resolvedPath).catch(() => resolvedPath);
     }
 
     await openInEditor({

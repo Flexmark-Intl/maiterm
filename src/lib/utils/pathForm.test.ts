@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { basenameOf, pathKey } from './pathForm';
+import { basenameOf, hasDotSegment, pathKey } from './pathForm';
+
+describe('hasDotSegment', () => {
+  it('sees . and .. segments, not dots inside names', () => {
+    expect(hasDotSegment('/home/me/proj/sub/../foo.ts')).toBe(true);
+    expect(hasDotSegment('/home/me/proj/./foo.ts')).toBe(true);
+    expect(hasDotSegment('/home/me/.config/..rc/foo.ts')).toBe(false);
+    expect(hasDotSegment('/home/me/proj/foo.ts')).toBe(false);
+  });
+});
 
 describe('basenameOf', () => {
   it('keeps a backslash in a macOS/Linux file name', () => {

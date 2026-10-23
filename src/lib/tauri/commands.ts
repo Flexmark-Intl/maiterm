@@ -1444,6 +1444,11 @@ export async function editorFileIdentities(paths: string[]): Promise<(string | n
   return invoke('editor_file_identities', { paths });
 }
 
+/** A path clicked in an ssh tab with its folder resolved on the host (symlinks, `.`, `..`). */
+export async function resolveRemoteEditorPath(sshCommand: string, path: string): Promise<string> {
+  return invoke('resolve_remote_editor_path', { sshCommand, path });
+}
+
 export async function watchFile(tabId: string, path: string): Promise<void> {
   return invoke('watch_file', { tabId, path });
 }

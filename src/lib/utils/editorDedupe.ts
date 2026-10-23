@@ -28,7 +28,9 @@ export type FileIdentities = ReadonlyMap<string, string>;
  *
  * A remote path is always read as POSIX (`windows` describes this machine, not the ssh host), and
  * its `..` is never folded: nothing here can see the host's symlinks, and a lexical fold there
- * could take a different file for the one clicked.
+ * could take a different file for the one clicked. A click's `..` is resolved on the host before
+ * it gets here (`resolveRemoteEditorPath`, openFile.ts), so `sub/../foo.ts` still finds the tab
+ * on `foo.ts`.
  */
 export function sameEditorFile(a: FileKey, b: FileKey, windows = false, identities?: FileIdentities): boolean {
   if (!!a.is_remote !== !!b.is_remote) return false;

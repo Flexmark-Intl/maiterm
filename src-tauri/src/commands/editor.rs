@@ -177,6 +177,82 @@ pub async fn editor_file_identities(paths: Vec<String>) -> Result<Vec<Option<Str
     .map_err(|e| e.to_string())
 }
 
+/// How long a click in an ssh tab waits for the host to resolve its path.
+const REMOTE_RESOLVE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The remote command that prints a path's folder with its symlinks and `.`/`..` resolved BY THE
+/// HOST. The folder is the path up to its last `/`, taken as written: folding `..` here, before
+/// the host has followed the symlinks, is exactly the mistake this exists to avoid.
+fn remote_resolve_folder_command(path: &str) -> Option<(String, String)> {
+    let i = path.rfind('/')?;
+    let folder = if i == 0 { "/" } else { &path[..i] };
+    let name = &path[i + 1..];
+    if name.is_empty() || name == "." || name == ".." {
+        return None;
+    }
+    Some((format!("cd -P -- {} && pwd -P", shell_quote(folder)), name.to_string()))
+}
+
+/// The folder the host printed, joined to the file name as clicked.
+fn join_resolved_folder(printed: &str, name: &str) -> Option<String> {
+    let folder = printed.trim();
+    if !folder.starts_with('/') || folder.contains('\n') {
+        return None;
+    }
+    Some(if folder == "/" { format!("/{name}") } else { format!("{folder}/{name}") })
+}
+
+fn resolve_remote_editor_path_blocking(ssh_command: &str, path: &str) -> Result<String, String> {
+    let (cmd, name) = remote_resolve_folder_command(path).ok_or("Not a file path")?;
+    let user_host = extract_user_host(ssh_command)?;
+    let mut child = std::process::Command::new("ssh")
+        .arg("-o").arg("BatchMode=yes")
+        .arg("-o").arg("ConnectTimeout=5")
+        .arg(&user_host)
+        .arg(&cmd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to run ssh: {e}"))?;
+    let until = std::time::Instant::now() + REMOTE_RESOLVE_DEADLINE;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(25))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("The host did not answer in time".into());
+            }
+        }
+    };
+    if !status.success() {
+        return Err("The folder does not exist on the host".into());
+    }
+    let mut out = String::new();
+    child
+        .stdout
+        .take()
+        .ok_or("No output")?
+        .read_to_string(&mut out)
+        .map_err(|e| e.to_string())?;
+    join_resolved_folder(&out, &name).ok_or_else(|| "Unexpected answer from the host".into())
+}
+
+/// A path clicked in an ssh tab, with its folder resolved on the host — the remote counterpart of
+/// `canonical_editor_path`. A click arrives as the shell's cwd + what was printed (`../foo.ts`
+/// from `git status` in a subfolder), which must find the editor tab the agent opened as
+/// `/home/me/proj/foo.ts`; only the host can say what `..` means under a symlinked folder.
+#[command]
+pub async fn resolve_remote_editor_path(ssh_command: String, path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || resolve_remote_editor_path_blocking(&ssh_command, &path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[derive(serde::Serialize)]
 pub struct ReadFileResult {
     pub content: String,
@@ -1826,5 +1902,27 @@ mod tests {
         }
         let after = identities_within(&[stuck.clone()], std::time::Duration::from_secs(2), identify);
         assert_eq!(after, vec![Some(format!("id:{stuck}"))]);
+    }
+
+    #[test]
+    fn a_remote_click_resolves_its_folder_as_written_and_keeps_the_file_name() {
+        // `..` reaches the host unfolded: under a symlinked folder only the host knows where it goes.
+        assert_eq!(
+            remote_resolve_folder_command("/home/me/proj/sub/../foo.ts"),
+            Some(("cd -P -- '/home/me/proj/sub/..' && pwd -P".to_string(), "foo.ts".to_string()))
+        );
+        assert_eq!(
+            remote_resolve_folder_command("/it's/x"),
+            Some(("cd -P -- '/it'\\''s' && pwd -P".to_string(), "x".to_string()))
+        );
+        assert_eq!(remote_resolve_folder_command("/x.ts").map(|c| c.0), Some("cd -P -- '/' && pwd -P".to_string()));
+        assert_eq!(remote_resolve_folder_command("/home/me/.."), None);
+        assert_eq!(remote_resolve_folder_command("relative.ts"), None);
+
+        assert_eq!(join_resolved_folder("/home/me/proj\n", "foo.ts").as_deref(), Some("/home/me/proj/foo.ts"));
+        assert_eq!(join_resolved_folder("/\n", "x").as_deref(), Some("/x"));
+        // A login banner or anything else that isn't one absolute path is not an answer.
+        assert_eq!(join_resolved_folder("Welcome\n/home/me", "x"), None);
+        assert_eq!(join_resolved_folder("", "x"), None);
     }
 }
