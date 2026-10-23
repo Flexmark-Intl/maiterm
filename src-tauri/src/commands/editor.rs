@@ -543,6 +543,17 @@ fn unique_path(dir: &Path, name: &str) -> std::path::PathBuf {
     first
 }
 
+/// Spawn a launcher that hands off and exits (`open`, `xdg-open`, `explorer`) and reap it on
+/// a detached thread. Dropping the `Child` reaps nothing, and nothing else in maiTerm waits on
+/// stray children, so each use would leave a zombie until the app quits.
+fn spawn_and_reap(cmd: &mut std::process::Command) -> std::io::Result<()> {
+    let mut child = cmd.spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 /// Reveal a local file in the OS file manager (Finder / Explorer / file
 /// browser), selecting the file itself where the platform supports it.
 #[command]
@@ -555,10 +566,7 @@ pub async fn reveal_in_file_manager(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg("-R")
-            .arg(&path)
-            .spawn()
+        spawn_and_reap(std::process::Command::new("open").arg("-R").arg(&path))
             .map_err(|e| format!("Failed to reveal in Finder: {}", e))?;
     }
 
@@ -566,9 +574,7 @@ pub async fn reveal_in_file_manager(path: String) -> Result<(), String> {
     {
         // `explorer /select,<path>` selects the file. Explorer returns a
         // non-zero exit code even on success, so we spawn and don't check status.
-        std::process::Command::new("explorer")
-            .arg(format!("/select,{}", path))
-            .spawn()
+        spawn_and_reap(std::process::Command::new("explorer").arg(format!("/select,{}", path)))
             .map_err(|e| format!("Failed to reveal in Explorer: {}", e))?;
     }
 
@@ -595,9 +601,7 @@ pub async fn reveal_in_file_manager(path: String) -> Result<(), String> {
                 .parent()
                 .map(|x| x.to_path_buf())
                 .unwrap_or_else(|| p.to_path_buf());
-            std::process::Command::new("xdg-open")
-                .arg(parent)
-                .spawn()
+            spawn_and_reap(std::process::Command::new("xdg-open").arg(parent))
                 .map_err(|e| format!("Failed to open file manager: {}", e))?;
         }
     }
@@ -606,8 +610,13 @@ pub async fn reveal_in_file_manager(path: String) -> Result<(), String> {
 }
 
 /// Open a local file with the app the OS associates with it (Files "Open With Default App",
-/// docs/file-tree.md §10.4). The launcher is spawned and not waited on: the opened app's
-/// lifetime is not ours. On a blocking thread anyway, since a stat on a dead mount can hang.
+/// docs/file-tree.md §10.4). The launcher hands off and exits (it is reaped, never waited on:
+/// the opened app's lifetime is not ours). On a blocking thread, since a stat on a dead mount
+/// can hang.
+///
+/// The filename comes from a folder the human may have cloned from anyone, so it never passes
+/// through a shell: on Windows `cmd /C start` would parse `&`, `|`, `^` and `%VAR%` in it
+/// (`x&calc` runs calc), so the file goes straight to ShellExecuteW instead.
 #[command]
 pub async fn open_with_default_app(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -615,36 +624,55 @@ pub async fn open_with_default_app(path: String) -> Result<(), String> {
         if !p.exists() {
             return Err(format!("File does not exist: {}", path));
         }
-        #[cfg(target_os = "macos")]
-        let mut cmd = {
-            let mut c = std::process::Command::new("open");
-            c.arg(&path);
-            c
-        };
         #[cfg(target_os = "windows")]
-        let mut cmd = {
-            use std::os::windows::process::CommandExt;
-            // `start` is a cmd builtin; the empty "" is its window title, so a path with
-            // spaces is not taken for one. No console window flashes up.
-            let mut c = std::process::Command::new("cmd");
-            c.args(["/C", "start", ""]).arg(&path).creation_flags(0x0800_0000);
-            c
-        };
-        #[cfg(all(unix, not(target_os = "macos")))]
-        let mut cmd = {
-            let mut c = std::process::Command::new("xdg-open");
-            c.arg(&path);
-            c
-        };
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("Failed to open {}: {}", path, e))
+        {
+            shell_execute_open(&path).map_err(|e| format!("Failed to open {}: {}", path, e))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            #[cfg(target_os = "macos")]
+            let mut cmd = std::process::Command::new("open");
+            #[cfg(not(target_os = "macos"))]
+            let mut cmd = std::process::Command::new("xdg-open");
+            cmd.arg(&path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            spawn_and_reap(&mut cmd).map_err(|e| format!("Failed to open {}: {}", path, e))
+        }
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Open `path` with its default verb through the shell API: the path is one wide string, no
+/// command line is built, so nothing in a filename is interpreted.
+#[cfg(target_os = "windows")]
+fn shell_execute_open(path: &str) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let file: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
+    // SAFETY: `file` is NUL-terminated and outlives the call; every other pointer is null,
+    // which ShellExecuteW documents as "no window / default verb / no parameters / no dir".
+    // COM is initialized as Microsoft asks (a handler may be a COM shell extension), and
+    // uninitialized only when this call initialized it.
+    let result = unsafe {
+        let hr = CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32);
+        let r = ShellExecuteW(std::ptr::null_mut(), std::ptr::null(), file.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
+        if hr >= 0 {
+            CoUninitialize();
+        }
+        r as isize
+    };
+    // Documented: a value above 32 is success; anything else is an error code.
+    if result > 32 {
+        Ok(())
+    } else {
+        Err(format!("the shell could not open it (code {})", result))
+    }
 }
 
 /// Stage a remote file to a stable local temp path and return that path.

@@ -87,8 +87,9 @@ tauri-plugin-single-instance = "2"
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
 # Win32_Storage_FileSystem: GetDriveTypeW, so Files can tell a network drive and skip watching
-# it (docs/file-tree.md §6.4).
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem"] }
+# it (docs/file-tree.md §6.4). Win32_UI_Shell + Win32_System_Com: ShellExecuteW, so "Open With
+# Default App" hands a filename to the shell without cmd.exe parsing it.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_System_Com"] }
 
 # Window/webview base colour (commands::window::set_window_background). Same versions
 # wry already pulls in; default features off so only the two bindings we call land.
