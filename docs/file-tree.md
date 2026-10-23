@@ -224,6 +224,47 @@
 >   component; a symlink's own name comes from its folder's listing). The watcher asks for
 >   every file it finds on such a volume; reconcile asks only for names that collide once
 >   case is folded, which is exactly a rename's two sides, so ordinary runs cost nothing extra.
+>
+> **As built, phase 3 backend (2026-10-23, `filetree/ops.rs`, `util/naming.rs`).** The UI half
+> (InlineName, ConfirmStrip, dnd, the undo stack, editor retargeting) is not in it. Where it
+> differs from the text below:
+> - **Wire additions:** `FileOp.to` (exact destination rels, one per `src`, for a move: a
+>   move's undo puts each item back where it was under the name it had, since a multi-select
+>   spans folders and keep-both renames), `FileOp.trashed_at` (unix seconds, for restore's
+>   match by time), `OpResult.skipped` (`conflict: "skip"`, or already in place), and
+>   `OpFail.code` `inside_itself`. The TS type for `Needs` is `OpNeeds`.
+> - **Whole-op refusals are the command's error**, before anything changes: a rel that could
+>   step out, the root as an item, a link on the way that resolves outside (a dangling one
+>   too), a bad ticket, an import source that isn't absolute. Per-item outcomes are
+>   `failed`; a guard the human answers is `needs` with nothing done.
+> - **Never clobber is the OS's refusal**, not a check before the rename: `renamex_np`
+>   `RENAME_EXCL` (macOS), raw `renameat2` `RENAME_NOREPLACE` (Linux), `MoveFileExW` without
+>   `REPLACE_EXISTING` (Windows); only a volume that can't falls back to check-then-rename.
+>   A rename that names the same file on this volume (case or, on macOS, NFC/NFD only) hops
+>   through a temporary name. Cross-volume moves verify file and byte counts.
+> - **Undo of a create, copy, duplicate, import or restore is a `trash`** of what it made (a
+>   create's outermost new folder). Trash's undo is `restore` on Linux/Windows, none on macOS.
+> - **macOS trashes through NSFileManager**, not the crate's default Finder script: no
+>   automation prompt or sound, and Finder needn't answer. Put Back is lost on some systems
+>   either way. Tests drive a stand-in `TrashBackend`, so they never fill the real Trash.
+> - **The delete ticket is checked before the guards and used up after them**, so a resend
+>   with `ack_agents` after the second confirmation still holds a valid ticket.
+> - **The live-cwd guard covers permanent delete too**, and reads holders only when a real
+>   folder (not a link to one) is moved, renamed, trashed or deleted: each live terminal's
+>   shell cwd (`cwd_of_pid` at that moment, not `get_pty_info`, which also sweeps the process
+>   table for the foreground command), each agent session's cwd in a live tab that rides no
+>   ssh tunnel (an ssh agent's cwd names a remote folder), and each service the stack mirror
+>   reports starting/running/ready, by its `Service.cwd`.
+> - **`agent_active` is a stub** that names no tab until phase 4's ledger exists, so
+>   `ack_agents` is accepted and changes nothing yet.
+> - **Windows-illegal names are refused in Rust on Windows** (a reserved name would open the
+>   device); the frontend's wider check on case-folding disks stays a frontend rule.
+> - **`ft_op` re-lists the open folders an op touched** (`RootHub::touched`), so the result
+>   arrives with the answer rather than after the watcher's window, and at all on a network
+>   mount. `Caps.trash` and `Caps.writable` are now true on every local root.
+> - **Not tested here:** Windows (the verbatim/UNC and reserved-name tests are `cfg(windows)`),
+>   and Linux's real tmpfs move runs only where `/dev/shm` is another volume; elsewhere the
+>   cross-device fallback is tested through an injected rename that answers `EXDEV`.
 
 ## 1. Why
 
