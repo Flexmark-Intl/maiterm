@@ -1482,10 +1482,13 @@ function createFileTreeStore() {
       edit = null;
       return;
     }
-    // In the real tree a row the filters now hide (it became ignored) unmounts its input just
-    // the same. Find and the Changed lens list such rows anyway, so there it stays.
-    const x = viewMode() === 'tree' ? m.entry(rel) : undefined;
-    if (x && !m.visible(x)) edit = null;
+    // In the real tree the input lives on its row, so it goes when the row does: the filters
+    // now hide it (it became ignored), or its folder's listing dropped it (a truncated folder
+    // re-listed after a delete, which knownGone rightly can't call proof). Find and the
+    // Changed lens draw their rows from elsewhere, so there it stays.
+    if (viewMode() !== 'tree') return;
+    const x = m.entry(rel);
+    if (x ? !m.visible(x) : m.rowGone(rel)) edit = null;
   }
 
   /** The rules the input checks as the human types. */

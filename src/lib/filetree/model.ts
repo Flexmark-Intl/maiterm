@@ -616,6 +616,16 @@ export class TreeModel {
     return this.knownGone(p);
   }
 
+  /** True when the real tree can no longer draw `rel`'s row: its folder's listing is in hand
+   *  and lacks the name. Weaker than `knownGone` on purpose: a truncated listing that drops a
+   *  name it used to show proves nothing about the disk, but the row (and an input on it) has
+   *  still left the screen. */
+  rowGone(rel: string): boolean {
+    if (rel === '') return false;
+    const d = this.dirs.get(parentRel(rel));
+    return !!d && d.state === 'ok' && !d.entries.has(baseName(rel));
+  }
+
   /** The folders to ask again with their held generations: a returning view (§4.2). */
   restoreReqs(): DirReq[] {
     return [...this.interest].map((r) => this.reqFor(r));

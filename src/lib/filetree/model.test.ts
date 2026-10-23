@@ -158,6 +158,24 @@ describe('TreeModel listing and expansion', () => {
     expect(m.knownGone('src/new.ts')).toBe(true);
   });
 
+  it('rowGone sees a shown row leave a truncated listing that knownGone cannot call proof', () => {
+    const disk = smallDisk();
+    const m = opened(disk);
+    expandAndList(m, disk, 'src');
+    const truncate = (evs: TreeEvent[]) => evs.map((ev) => (ev.t === 'dir' ? { ...ev, truncated: true, total: 60_000 } : ev));
+    apply(m, truncate(dirEvents(disk, 'src')));
+    expect(m.rowGone('src/app.ts')).toBe(false);
+    // Rust re-lists a truncated folder in full after a delete; the name is simply absent.
+    disk.set('src', disk.get('src')!.filter((e) => e.n !== 'app.ts'));
+    apply(m, truncate(dirEvents(disk, 'src')));
+    expect(m.knownGone('src/app.ts')).toBe(false);
+    expect(m.rowGone('src/app.ts')).toBe(true);
+    // A row still listed, the root, and a folder not yet listed are not gone.
+    expect(m.rowGone('src/main.ts')).toBe(false);
+    expect(m.rowGone('')).toBe(false);
+    expect(m.rowGone('docs/a.md')).toBe(false);
+  });
+
   it('never opens a link loop', () => {
     const disk: Disk = new Map([['', [{ n: 'self', k: 'L', f: TREE_FLAG_LOOP }]]]);
     const m = opened(disk);
