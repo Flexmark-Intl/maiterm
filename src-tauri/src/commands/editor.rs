@@ -605,6 +605,48 @@ pub async fn reveal_in_file_manager(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Open a local file with the app the OS associates with it (Files "Open With Default App",
+/// docs/file-tree.md §10.4). The launcher is spawned and not waited on: the opened app's
+/// lifetime is not ours. On a blocking thread anyway, since a stat on a dead mount can hang.
+#[command]
+pub async fn open_with_default_app(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = Path::new(&path);
+        if !p.exists() {
+            return Err(format!("File does not exist: {}", path));
+        }
+        #[cfg(target_os = "macos")]
+        let mut cmd = {
+            let mut c = std::process::Command::new("open");
+            c.arg(&path);
+            c
+        };
+        #[cfg(target_os = "windows")]
+        let mut cmd = {
+            use std::os::windows::process::CommandExt;
+            // `start` is a cmd builtin; the empty "" is its window title, so a path with
+            // spaces is not taken for one. No console window flashes up.
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", "start", ""]).arg(&path).creation_flags(0x0800_0000);
+            c
+        };
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let mut cmd = {
+            let mut c = std::process::Command::new("xdg-open");
+            c.arg(&path);
+            c
+        };
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to open {}: {}", path, e))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Stage a remote file to a stable local temp path and return that path.
 ///
 /// Backs the "Copy Local Copy Path" tab action: opening an SSH file reads its

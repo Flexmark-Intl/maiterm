@@ -1472,6 +1472,11 @@ export async function revealInFileManager(path: string): Promise<void> {
   return invoke('reveal_in_file_manager', { path });
 }
 
+/** Open a local file with the OS's default app for it (Files "Open With Default App"). */
+export async function openWithDefaultApp(path: string): Promise<void> {
+  return invoke('open_with_default_app', { path });
+}
+
 /** SCP a remote file into the local Downloads directory; returns the saved path. */
 export async function downloadRemoteFile(sshCommand: string, remotePath: string): Promise<string> {
   return invoke('download_remote_file', { sshCommand, remotePath });

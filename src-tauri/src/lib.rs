@@ -950,6 +950,7 @@ pub fn run() {
             commands::editor::scp_write_file,
             commands::editor::save_clipboard_image,
             commands::editor::reveal_in_file_manager,
+            commands::editor::open_with_default_app,
             commands::editor::download_remote_file,
             commands::editor::stage_remote_file_temp,
             commands::editor::scp_upload_files,
