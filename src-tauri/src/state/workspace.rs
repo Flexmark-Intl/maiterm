@@ -1915,6 +1915,11 @@ pub struct Preferences {
     /// asks before moving a file an agent is writing.
     #[serde(default = "default_true")]
     pub file_tree_agent_activity: bool,
+    /// Turn baselines (§14): an agent's first edit of a file in a turn reads the file first, in
+    /// the PreToolUse hook (25 ms at most), for "Compare with Turn Start" and `showDiff` `@turn`.
+    /// Off, nothing is read and what was kept is dropped.
+    #[serde(default = "default_true")]
+    pub file_tree_turn_baselines: bool,
     /// The Files MCP tools (revealInTree, getTreeSelection, getAgentFileActivity), listed only
     /// while this and `file_tree_enabled` are on (§9.6).
     #[serde(default = "default_true")]
@@ -2274,6 +2279,7 @@ impl Default for Preferences {
             file_tree_exclude: Vec::new(),
             file_tree_git: true,
             file_tree_agent_activity: true,
+            file_tree_turn_baselines: true,
             file_tree_agent_tools: true,
             file_tree_sticky_max: default_file_tree_sticky_max(),
             file_tree_density: default_file_tree_density(),

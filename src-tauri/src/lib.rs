@@ -804,6 +804,8 @@ pub fn run() {
             agent_files::commands::agent_files_marks,
             agent_files::commands::agent_files_turns,
             agent_files::commands::agent_files_remap_tab,
+            agent_files::commands::agent_files_baseline,
+            agent_files::commands::agent_files_baseline_stat,
             commands::workspace::set_split_ratio,
             commands::workspace::set_tab_scrollback,
             commands::workspace::set_tab_notes,

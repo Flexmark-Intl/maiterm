@@ -66,6 +66,9 @@ nucleo-matcher = "0.3"
 # Files' Move to Trash (docs/file-tree.md §10.1): Finder/NSFileManager, freedesktop, Recycle Bin.
 # Every call runs on one thread: the crate warns of UB from concurrent mount queries on Linux.
 trash = "5"
+# Files' turn baselines (docs/file-tree.md §14): the Turn lens tooltip's "+N −N since the turn
+# began" is a line diff of the file against what it held before the agent's first edit.
+similar = "2"
 sysinfo = "0.33"
 alacritty_terminal = "0.25"
 rusqlite = { version = "0.31", features = ["bundled"] }

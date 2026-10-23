@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use tauri::State;
 
+use super::baseline::{Baseline, BaselineStat};
 use super::{AgentMarkAbs, LedgerEntry, TabTurn};
 use crate::filetree::FileTreeState;
 use crate::state::AppState;
@@ -50,6 +51,45 @@ fn window_tabs(st: &AppState, label: &str) -> HashSet<String> {
         .flat_map(|p| p.tabs.iter())
         .map(|t| t.id.clone())
         .collect()
+}
+
+/// What `path_abs` held before `tab_id`'s agent first edited it: `scope` "turn" (its current or
+/// last turn) or "session" (§14). Only the tab's own baselines exist here, so a caller acting for
+/// an agent must already have checked the agent IS that tab (`showDiff` `@turn` does, in
+/// claude_code/server.rs).
+#[tauri::command]
+pub async fn agent_files_baseline(ft: State<'_, Arc<FileTreeState>>, tab_id: String, path_abs: String, scope: String) -> Result<Baseline, String> {
+    let ft = ft.inner().clone();
+    blocking(move || Ok(baseline_of(&ft, &tab_id, &path_abs, &scope))).await
+}
+
+/// Lines added and removed in `path_abs` since that baseline: the Turn lens tooltip's `+N −N`.
+#[tauri::command]
+pub async fn agent_files_baseline_stat(ft: State<'_, Arc<FileTreeState>>, tab_id: String, path_abs: String, scope: String) -> Result<BaselineStat, String> {
+    let ft = ft.inner().clone();
+    blocking(move || {
+        let (turn, session) = ft.agents.turn_and_session(&tab_id).unwrap_or((0, String::new()));
+        Ok(ft.agents.baselines.stat(&tab_id, &session, &path_abs, scope_of(&scope), turn))
+    })
+    .await
+}
+
+fn scope_of(scope: &str) -> &'static str {
+    if scope == "session" {
+        "session"
+    } else {
+        "turn"
+    }
+}
+
+/// A tab's baseline as the ledger's current turn and session name it. A tab the ledger has no
+/// turn for has none.
+pub fn baseline_of(ft: &FileTreeState, tab_id: &str, path_abs: &str, scope: &str) -> Baseline {
+    let (turn, session) = ft.agents.turn_and_session(tab_id).unwrap_or((0, String::new()));
+    if turn == 0 {
+        return Baseline { content: None, unavailable: Some("not_captured".into()), turn: 0, source: "maiterm".into(), runtime: String::new() };
+    }
+    ft.agents.baselines.lookup(tab_id, &session, path_abs, scope_of(scope), turn)
 }
 
 /// A reload replaced tab `old_tab_id` with `new_tab_id` (a new id for the same agent session):

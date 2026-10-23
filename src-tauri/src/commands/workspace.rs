@@ -1772,6 +1772,10 @@ pub fn set_preferences(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, m
         // Agent marks start or stop reaching the open trees at once.
         if let Some(ft) = tauri::Manager::try_state::<Arc<crate::filetree::FileTreeState>>(&app) {
             ft.agents.set_routing(preferences.file_tree_agent_activity);
+            // Turned off: what files held at their turn's start is not kept either.
+            if !preferences.file_tree_turn_baselines {
+                ft.agents.baselines.clear();
+            }
         }
         app_data.preferences = preferences.clone();
         if excludes_changed {

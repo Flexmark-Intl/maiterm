@@ -2997,6 +2997,12 @@ fn own_tab_only_refusal(tool_name: &str, explicit_tab: Option<&str>, affinity: O
     if !OWN_TAB_ONLY_TOOLS.contains(&tool_name) {
         return None;
     }
+    own_tab_refusal(tool_name, explicit_tab, affinity)
+}
+
+/// `own_tab_only_refusal`'s rule for a call that is own-tab-only by its arguments rather than
+/// its name (`is_baseline_diff`).
+fn own_tab_refusal(tool_name: &str, explicit_tab: Option<&str>, affinity: Option<(&str, bool)>) -> Option<String> {
     match (explicit_tab, affinity) {
         (Some(given), Some((own, true))) if given == own => None,
         (Some(given), Some((own, true))) if given != own => Some(format!(
@@ -3011,6 +3017,13 @@ fn own_tab_only_refusal(tool_name: &str, explicit_tab: Option<&str>, affinity: O
         // `refuse_on_inferred_identity`, since these are all on PEER_ADDRESSING_TOOLS.
         (None, _) => None,
     }
+}
+
+/// A `showDiff` against a turn baseline (`ref` "@turn" / "@session", docs/file-tree.md §14)
+/// rather than a git ref. Those are served from the caller's own baselines only. Matched
+/// exactly: `@`, `@~2` and `@{u}` are git's own spellings and stay git refs.
+fn is_baseline_diff(tool_name: &str, arguments: &Value) -> bool {
+    tool_name == "showDiff" && matches!(arguments.get("ref").and_then(|v| v.as_str()), Some("@turn" | "@session"))
 }
 
 /// Make an Overlord-gated call act as the connection's own tab, whatever `tabId` it passed.
@@ -3595,6 +3608,29 @@ async fn process_message(
                     return Some(serde_json::to_string(&resp).unwrap());
                 }
 
+                // showDiff against a turn baseline serves the caller's OWN baselines only
+                // (docs/file-tree.md §9.6): another tab's is its human's view of that agent's
+                // work. Judged like an own-tab-only tool, and the handler is told the
+                // connection's stated tab (null on an inferred one, which it refuses).
+                if is_baseline_diff(&tool_name, &arguments) {
+                    if let Some(msg) = own_tab_refusal(
+                        "showDiff with @turn/@session",
+                        arguments.get("tabId").and_then(|v| v.as_str()).filter(|s| !s.is_empty()),
+                        affinity.as_ref().map(|a| (a.tab_id.as_str(), a.stated)),
+                    ) {
+                        log::warn!("Refusing a baseline showDiff for {}: it named a tab that isn't the caller's",
+                            &connection_id[..connection_id.len().min(11)]);
+                        let resp = JsonRpcResponse::success(
+                            id,
+                            serde_json::json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
+                        );
+                        return Some(serde_json::to_string(&resp).unwrap());
+                    }
+                    let caller = affinity.as_ref().filter(|a| a.stated).map(|a| Value::String(a.tab_id.clone())).unwrap_or(Value::Null);
+                    if let Some(obj) = arguments.as_object_mut() {
+                        obj.insert(FILES_CALLER_ARG.to_string(), caller);
+                    }
+                }
                 // getAgentFileActivity may read another tab, but only one in the CALLER's mesh,
                 // and an explicit tabId says nothing about who the caller is: the handler is told
                 // the connection's own stated tab.
@@ -4054,8 +4090,9 @@ async fn mod_inbox_handler(
 const WRITE_EXISTS_BUDGET: Duration = Duration::from_millis(25);
 
 /// Feed one tool, prompt or stop event to the Files agent ledger (`agent_files`). Only paths
-/// are taken from `tool_input`, in this path and with no IO, except one bounded stat for a
-/// Write. The ledger's own push never waits on routing.
+/// are taken from `tool_input`, in this path and with no IO, except one bounded read: the turn
+/// baseline of a write-capable call's files, or (baselines off, or already captured this turn)
+/// one stat for a Write. The ledger's own push never waits on routing.
 async fn record_agent_files(
     srv: &ServerState,
     phase: crate::agent_files::Phase,
@@ -4090,12 +4127,26 @@ async fn record_agent_files(
         Phase::Pre | Phase::Post { .. } => event.get("tool_input").map(|i| extract::extract(&tool, i)).unwrap_or(extract::Extracted::Nothing),
         _ => extract::Extracted::Nothing,
     };
+    // Turn baselines (docs/file-tree.md §14): a local write-capable call's files are read here,
+    // before the tool runs, at most 25 ms. The read also says whether a Write's file existed, so
+    // the hook never waits twice.
+    let mut seen: Vec<(String, Option<bool>)> = Vec::new();
+    if phase == Phase::Pre && host.is_none() && srv.state.app_data.read().preferences.file_tree_turn_baselines {
+        let paths = crate::agent_files::baseline::write_paths(&extracted, cwd.as_deref());
+        if !paths.is_empty() {
+            let turn = ft.agents.turn_for_pre(&tab_id, session_id);
+            seen = ft.agents.baselines.capture(&tab_id, session_id, runtime_key, turn, paths).await;
+        }
+    }
     let existed = match (&phase, &extracted, host.is_none()) {
         (Phase::Pre, extract::Extracted::Files(t), true) if tool == "Write" => match t.first().and_then(|t| crate::agent_files::entry_path(&t.path, cwd.as_deref(), None)) {
-            Some(p) => tokio::time::timeout(WRITE_EXISTS_BUDGET, tokio::task::spawn_blocking(move || std::fs::symlink_metadata(p).is_ok()))
-                .await
-                .ok()
-                .and_then(|r| r.ok()),
+            Some(p) => match seen.iter().find(|(s, _)| *s == p) {
+                Some((_, known)) => *known,
+                None => tokio::time::timeout(WRITE_EXISTS_BUDGET, tokio::task::spawn_blocking(move || std::fs::symlink_metadata(p).is_ok()))
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok()),
+            },
             None => None,
         },
         _ => None,
@@ -5777,6 +5828,24 @@ mod tests {
         }
         // Every other tool keeps its ordinary tabId behaviour.
         assert!(own_tab_only_refusal("setTabNotes", Some("other"), Some(("mine", true))).is_none());
+    }
+
+    #[test]
+    fn a_turn_baseline_diff_is_served_only_as_the_callers_own_tab() {
+        use super::{is_baseline_diff, own_tab_refusal};
+        let turn = serde_json::json!({ "filePath": "/r/a.ts", "ref": "@turn", "tabId": "other" });
+        assert!(is_baseline_diff("showDiff", &turn));
+        assert!(is_baseline_diff("showDiff", &serde_json::json!({ "filePath": "/r/a.ts", "ref": "@session" })));
+        // Another tab's baseline is refused, named outright or matched only by a guess.
+        assert!(own_tab_refusal("showDiff", Some("other"), Some(("mine", true))).is_some());
+        assert!(own_tab_refusal("showDiff", Some("other"), Some(("other", false))).is_some());
+        assert!(own_tab_refusal("showDiff", Some("mine"), Some(("mine", true))).is_none());
+        assert!(own_tab_refusal("showDiff", None, Some(("mine", true))).is_none());
+        // git's own `@` spellings stay git refs, with showDiff's ordinary tabId behaviour.
+        for r in ["@", "@~2", "@{u}", "HEAD"] {
+            assert!(!is_baseline_diff("showDiff", &serde_json::json!({ "filePath": "/r/a.ts", "ref": r })), "{r}");
+        }
+        assert!(!is_baseline_diff("openDiff", &turn));
     }
 
     #[test]

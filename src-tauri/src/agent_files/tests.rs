@@ -581,3 +581,32 @@ fn a_commit_during_the_sole_open_turn_is_credited_to_it(ft: &Arc<FileTreeState>,
     let c = paths::norm(&root.join("c.txt").to_string_lossy()).into_owned();
     assert!(!commits().contains(&c));
 }
+
+/// The hook reads a baseline BEFORE it records the Pre, in the turn `turn_for_pre` predicts;
+/// that has to be the turn `record` then files the call under, or the baseline would sit in a
+/// turn no lookup asks for.
+#[test]
+fn turn_for_pre_predicts_the_turn_record_files_the_call_in() {
+    let l = ledger();
+    let cwd = repo();
+    let edit = |id: &str| pre("Edit", json!({ "file_path": at("a.ts"), "old_string": "a", "new_string": "b" }), id, &cwd);
+    let check = |l: &AgentFiles, event: serde_json::Value, id: &str| {
+        let predicted = l.turn_for_pre("t1", event["session_id"].as_str().unwrap());
+        l.record(rec(&event, "t1"));
+        let filed = l.activity("t1", "session", true).unwrap().entries.into_iter().find(|e| e.tool_use_id.as_deref() == Some(id)).unwrap().turn;
+        assert_eq!(predicted, filed, "{id}");
+    };
+    // No prompt seen: the call opens turn 1.
+    check(&l, edit("e1"), "e1");
+    l.record(rec(&stop(&cwd), "t1"));
+    l.record(rec(&prompt(&cwd), "t1"));
+    check(&l, edit("e2"), "e2");
+    // After the turn's Stop, a background call carries the same turn on.
+    l.record(rec(&stop(&cwd), "t1"));
+    check(&l, edit("e3"), "e3");
+    // A new session numbers afresh.
+    let mut fresh = edit("e4");
+    fresh["session_id"] = json!("s2");
+    check(&l, fresh, "e4");
+    assert_eq!(l.turn_and_session("t1"), Some((1, "s2".to_string())));
+}

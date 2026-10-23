@@ -20,6 +20,7 @@
 //! against a tree, off the hook's path. An ssh tab's entry is `user@host:/abs` (the tunnel's
 //! connect args, then the remote path), and no tree shows those until remote roots arrive.
 
+pub mod baseline;
 pub mod commands;
 pub mod extract;
 
@@ -323,6 +324,9 @@ pub struct AgentFiles {
     /// `file_tree_agent_activity`: marks reach the trees. The ledger itself always records,
     /// since `getAgentFileActivity` and the agent-in-flight guard (§10.3) read it.
     routing: AtomicBool,
+    /// What each file held before a tab's first edit of it this turn and this session (§14).
+    /// Keyed by the same tab ids, so it follows the ledger's remaps and forgets with it.
+    pub baselines: Arc<baseline::Baselines>,
 }
 
 pub fn now_ms() -> i64 {
@@ -396,7 +400,25 @@ fn within(inner: &Path, outer: &Path, fold: bool) -> bool {
 
 impl AgentFiles {
     pub fn new(tree: Weak<FileTreeState>) -> Arc<Self> {
-        Arc::new(AgentFiles { inner: Mutex::new(Inner::default()), tree, tx: Mutex::new(None), routing: AtomicBool::new(true) })
+        Arc::new(AgentFiles { inner: Mutex::new(Inner::default()), tree, tx: Mutex::new(None), routing: AtomicBool::new(true), baselines: baseline::Baselines::new() })
+    }
+
+    /// The turn a PreToolUse of `session` in `tab` will be recorded in, asked before it is
+    /// recorded (the baseline is read first, so a Write's create-or-overwrite comes from that
+    /// same read). Mirrors `record`: a new session starts at turn 1, and a call opens turn 1
+    /// when no turn was seen yet; otherwise it is the current turn.
+    pub fn turn_for_pre(&self, tab_id: &str, session_id: &str) -> u64 {
+        let inner = self.inner.lock();
+        match inner.tabs.get(tab_id) {
+            Some(t) if session_id.is_empty() || t.session_id.is_empty() || t.session_id == session_id => t.turn.max(1),
+            _ => 1,
+        }
+    }
+
+    /// The tab's current (turn, session) in the ledger, for a baseline lookup. None for a tab
+    /// with no turn yet.
+    pub fn turn_and_session(&self, tab_id: &str) -> Option<(u64, String)> {
+        self.inner.lock().tabs.get(tab_id).filter(|t| t.turn > 0).map(|t| (t.turn, t.session_id.clone()))
     }
 
     pub fn routing(&self) -> bool {
@@ -838,6 +860,8 @@ impl AgentFiles {
         for s in inner.shells.iter_mut().filter(|s| s.tab_id == old) {
             s.tab_id = new.to_string();
         }
+        drop(inner);
+        self.baselines.remap_tab(old, new);
     }
 
     /// Forget tabs that have been gone from every window for a minute (closed). Not at once:
@@ -860,6 +884,10 @@ impl AgentFiles {
             inner.tabs.remove(id);
         }
         inner.shells.retain(|s| !dead.contains(&s.tab_id));
+        drop(inner);
+        if !dead.is_empty() {
+            self.baselines.forget(&dead);
+        }
     }
 
     #[cfg(test)]

@@ -222,7 +222,7 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
                 "type": "object",
                 "properties": {
                     "filePath": { "type": "string", "description": "Absolute path to the file to diff" },
-                    "ref": { "type": "string", "description": "Git ref to compare against (default: HEAD). Can be a commit SHA, branch, tag, HEAD~N, etc." }
+                    "ref": { "type": "string", "description": "Git ref to compare against (default: HEAD). Can be a commit SHA, branch, tag, HEAD~N, etc. Or \"@turn\" / \"@session\": what the file held before YOUR first edit of it this turn / this session (maiTerm reads it just before your Edit, Write or patch runs; local files only, not a shell command's writes). Only your own tab's are served: leave tabId out." }
                 },
                 "required": ["filePath"]
             }
