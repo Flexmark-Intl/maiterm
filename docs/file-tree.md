@@ -265,6 +265,44 @@
 > - **Not tested here:** Windows (the verbatim/UNC and reserved-name tests are `cfg(windows)`),
 >   and Linux's real tmpfs move runs only where `/dev/shm` is another volume; elsewhere the
 >   cross-device fallback is tested through an injected rename that answers `EXDEV`.
+>
+> **As built, phase 3 frontend (2026-10-23, `InlineName.svelte`, `ConfirmStrip.svelte`,
+> `filetree/{names,undo,dnd}.ts`).** Where it differs from the text below:
+> - **Undo staleness is checked by name, not by folder gen.** Each undo op says what must still
+>   hold (`undoExpectations`: what it acts on is there, where it puts things back is free). A
+>   listing or delta from the watcher that contradicts one marks the entry stale; a folder gen
+>   alone would have dropped every entry in a folder on any unrelated change, including the
+>   tree's own next op. Our own ops are not "since": anything arriving while one is in flight or
+>   within 1 s of it settling is its echo (the next op of ours is undone first, LIFO). The model
+>   is checked again just before an undo runs. A stale entry stays on the stack until Cmd+Z
+>   reaches it and says "Can't undo the rename of “a.ts”: it changed on disk since", rather than
+>   the press silently undoing something older.
+> - **The footer's result line** ("Moved 4 items · Undo", macOS trash "· Show in Trash", which
+>   opens `~/.Trash`) stays 10 s. An undo says "Undid the …", and undoing a create on macOS says
+>   it went to the Trash. There is no redo.
+> - **Name clashes ask instead of failing quietly.** A move, copy, paste or OS import runs with
+>   `conflict: "fail"`; items that answer `exists` get a "Keep Both" question on the ConfirmStrip.
+>   A copy into the folder it came from goes straight to `keep_both` (Finder's and Explorer's
+>   "copy" names). A cut pasted into another root can only be an `import` (a copy), and says so.
+> - **The ConfirmStrip focuses Cancel when the first action is destructive**, so a stray Enter
+>   never deletes; `no_trash` goes straight to the permanent-delete question with the ticket's
+>   counts (one question, not two). `live_cwd` offers "Move Project…" for a single folder, with
+>   the rename's or move's new path suggested.
+> - **Blur commits only a valid name**; an invalid or empty one cancels. A window switch is not a
+>   blur (the edit waits), and teardown never commits. A rename edits in place under find or the
+>   Changed lens; New puts both away first, since the new item belongs in the real tree. The New
+>   row (`withNewRow`) and a renamed row stay rendered while scrolled away.
+> - **Drops:** a file row means its folder, the space below the rows and the header are the root,
+>   a loop link is never a target. An OS drop anywhere on the column outside the rows lands in the
+>   root. Moving a folder into itself, or items onto the folder they are in, is no target at all.
+> - **Labels:** Windows' trash entry reads "Delete" (Explorer's word; the Recycle Bin is in the
+>   result line), next to "Delete Permanently…". Plain Backspace does nothing: too easy to hit
+>   while typing ahead. "Ask about this…" (§9.5) is in the menu, attaching to the followed tab's
+>   composer through `attachToComposer`.
+> - **Editor retargeting covers this window's editor tabs** (the ones the editor dots know).
+>   Another window's tab on the same file sees the rename as its watcher does today.
+> - **Not checked in the running app** (no dev run in this step): the dev checks above, a drag
+>   onto a terminal and the composer, and an OS drop. `agent_active` never fires until phase 4.
 
 ## 1. Why
 
