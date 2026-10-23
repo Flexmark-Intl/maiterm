@@ -398,7 +398,8 @@
 > - **A Write is a `create` when its file was absent at Pre**, checked with one stat under a 25 ms
 >   budget (unknown on timeout: `write`). The only IO in the hook's path.
 > - **Ops added:** `commit` (with `evidence: "commit"`), next to `changed`/`fs_during_tool`. A call
->   still `pending` when its turn ends (Esc, no Post) is settled `failed`, so it stops pulsing. A
+>   still `pending` when its turn ends (Esc, no Post) is settled `failed`, so it stops pulsing (see
+>   the review fixes below for the events that settle it). A
 >   new session id on a tab starts its history afresh. A tab gone from every window is forgotten
 >   after 60 s, not at once: a reload deletes the old tab before `agent_files_remap_tab` moves it.
 > - **Shell attribution** takes the coalescer's non-ignored worktree paths (a folder only
@@ -487,6 +488,35 @@
 > - Not built: vim's `1`–`4` lens keys and `t`/`s` (vim mode has no lens actions yet). **Not
 >   checked in the running app** (no dev run in this step): the pulse budget, badges, edge chips,
 >   and both tools end to end.
+>
+> **As built, phase 4 review fixes (2026-10-23).** Where they changed the above:
+> - **A call that gets no Post is settled by the evidence that it is over**, not only by the main
+>   agent's next prompt or Stop. A denied call fires no hook and an Esc sends no Stop, so a denied
+>   Edit pulsed and tripped the rename guard until the next prompt (a subagent's for good), and a
+>   denied Bash claimed every later change in its tree, the human's saves included. The ledger now
+>   also reads: `SubagentStop` (that agent's pending calls and shell calls); Claude's
+>   `idle_prompt` (never sent while any dialog is open or the main thread works: every agent's
+>   pending call, the main agent's shell calls, and the turn closes); Codex's `Interrupt` (all
+>   of the tab's calls, and the turn); a new session (the old one's shell calls); and, for Claude
+>   only, an agent starting another call (a write or a shell call never runs beside another, so
+>   that agent's earlier pending write and running shell call never ran; reads are left alone,
+>   and Codex runs calls in parallel). A Post that arrives after all still wins.
+> - **A shell call no hook ever ends stops counting after 10 minutes** (Claude's Bash ceiling),
+>   and is dropped, so the watcher pays nothing for it. A call that really runs longer, or sat
+>   longer behind its dialog, loses its label from then on.
+> - **Residual:** after an Esc at the desktop, Claude's `idle_prompt` comes about 60 s later, so
+>   for that minute the turn reads open (a commit could still be credited to it). A deny through
+>   the maiterm-tab mod reports `idle_prompt` at once. Not verified live: whether Claude sends
+>   `SubagentStop` for a subagent cut short by Esc (the 10-minute bound covers its shell call;
+>   its pending edits settle at `idle_prompt`).
+> - **`revealInTree` / `getTreeSelection` route by the caller's tab** (`target_owner_window`), and
+>   their `windowId` is stripped: it outranked the tab, and `listWindows` hands out every
+>   window's id. The frontend also refuses a caller whose tab isn't in its window.
+> - **The window's `TurnTracker` is cleared when the column closes.** Its hook listeners go with
+>   the column, so a `/clear` or restart in between renumbered the ledger unseen, and the tracker
+>   (which only ever raises a turn) stayed ahead of it for good. The next subscription's primed
+>   marks rebuild it; until a mark of the current turn arrives, the newest turn with marks reads
+>   as this turn.
 
 ## 1. Why
 
