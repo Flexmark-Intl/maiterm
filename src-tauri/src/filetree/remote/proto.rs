@@ -73,12 +73,18 @@ pub fn clean_connect_args(ssh_args: &str) -> Vec<String> {
     out
 }
 
-/// `ssh <mux args> -o ClearAllForwardings=yes <connect args> <remote command>`: muxed over the
-/// tunnel's ControlMaster when there is one, else one direct BatchMode connection.
+/// `ssh <mux args> -o ClearAllForwardings=yes -o RemoteCommand=none <connect args> <remote
+/// command>`: muxed over the tunnel's ControlMaster when there is one, else one direct
+/// BatchMode connection. A `RemoteCommand` in the user's ssh_config (`tmux new -A`, a common
+/// setup) makes ssh refuse any command of ours before it connects ("Cannot execute
+/// command-line and remote command", exit 255), which reads as a dropped connection and was
+/// retried forever; a command-line option wins over the config.
 pub fn ssh_args(tunnel_key: &str, ssh_args: &str, remote: &str) -> Vec<String> {
     let mut args = crate::commands::ssh_tunnel::mux_client_args(tunnel_key);
     args.push("-o".into());
     args.push("ClearAllForwardings=yes".into());
+    args.push("-o".into());
+    args.push("RemoteCommand=none".into());
     args.extend(clean_connect_args(ssh_args));
     args.push(remote.to_string());
     args
@@ -385,7 +391,36 @@ mod tests {
         // Never one of the orphan sweep's tunnels (`-R` plus our ControlPath).
         assert!(!argv.contains(" -R "));
         assert!(argv.contains("ClearAllForwardings=yes"));
+        // A RemoteCommand in ssh_config would otherwise refuse ours before connecting.
+        assert!(argv.contains("-o RemoteCommand=none"));
         assert!(argv.ends_with(&format!("ews@nova {}", remote_command())));
+    }
+
+    /// The real ssh, against a config that sets `RemoteCommand`: without our override it
+    /// refuses before connecting. The host can't resolve, so nothing leaves this computer.
+    #[test]
+    fn a_remote_command_in_ssh_config_does_not_refuse_the_helper() {
+        let Ok(probe) = std::process::Command::new("ssh").arg("-V").output() else { return };
+        if !probe.status.success() && probe.stderr.is_empty() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ft-sshcfg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config");
+        std::fs::write(&cfg, "Host *\n  RemoteCommand tmux new -A -s main\n").unwrap();
+        let connect = format!("-F {} nohost.invalid", cfg.display());
+        let run = |args: Vec<String>| {
+            let out = std::process::Command::new("ssh").args(args).stdin(std::process::Stdio::null()).output().unwrap();
+            String::from_utf8_lossy(&out.stderr).to_lowercase()
+        };
+        let ours = run(ssh_args("nohost.invalid", &connect, "true"));
+        // Without the override this OpenSSH (7.6 or later) says exactly that and exits 255.
+        let plain = run(vec!["-F".into(), cfg.display().to_string(), "-o".into(), "BatchMode=yes".into(), "nohost.invalid".into(), "true".into()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!ours.contains("cannot execute command-line and remote command"), "{ours}");
+        if plain.contains("cannot execute command-line and remote command") {
+            assert!(ours.contains("nohost.invalid"), "ours got as far as connecting: {ours}");
+        }
     }
 
     #[test]
