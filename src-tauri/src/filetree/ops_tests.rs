@@ -181,6 +181,50 @@ fn verbatim_and_unc_prefixes_never_parse_as_rels() {
     for name in ["CON", "nul.txt", "a.", "a ", "a?b", "COM1"] {
         assert!(fx.run(FileOp { kind: "create_file".into(), name: Some(name.into()), ..Default::default() }).is_err(), "{name:?}");
     }
+    // Win32 would trim these to another name: `...` to the root itself, `foo.` to `foo`.
+    fx.write("foo", "sibling");
+    for bad in ["...", "foo.", "foo ", "foo./x"] {
+        assert!(fx.run(op("trash", &[bad])).is_err(), "trash {bad:?}");
+        let none = || Vec::new();
+        assert!(prepare_delete(&fx.env(&none), &[bad.to_string()]).is_err(), "delete {bad:?}");
+    }
+    assert_eq!(fx.read("foo"), "sibling");
+}
+
+/// A raw Win32 rename needs verbatim paths to reach past 260 characters.
+#[test]
+fn raw_win32_paths_are_made_verbatim() {
+    assert_eq!(verbatim(r"C:\proj\a.ts"), r"\\?\C:\proj\a.ts");
+    assert_eq!(verbatim("C:/proj/a.ts"), r"\\?\C:\proj\a.ts");
+    assert_eq!(verbatim(r"\\server\share\a.ts"), r"\\?\UNC\server\share\a.ts");
+    assert_eq!(verbatim(r"\\?\C:\proj"), r"\\?\C:\proj");
+    assert_eq!(verbatim(r"\\.\pipe\x"), r"\\.\pipe\x");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_rename_past_the_old_path_limit_works() {
+    let fx = Fx::new("long");
+    let deep = (0..30).map(|i| format!("folder{i:02}")).collect::<Vec<_>>().join("/");
+    fx.write(&format!("{deep}/a.ts"), "a");
+    assert!(fx.root.join(&deep).join("a.ts").as_os_str().len() > 260);
+    let r = fx.run(FileOp { kind: "rename".into(), src: vec![format!("{deep}/a.ts")], name: Some("b.ts".into()), ..Default::default() }).unwrap();
+    assert_eq!(r.done.len(), 1, "{r:?}");
+    assert_eq!(fx.read(&format!("{deep}/b.ts")), "a");
+}
+
+/// A junction copies as a junction: making a symlink would need Developer Mode or admin.
+#[cfg(windows)]
+#[test]
+fn a_junction_is_copied_as_a_junction() {
+    let fx = Fx::new("junction");
+    fx.write("pkg/target/index.js", "x");
+    junction::create(fx.root.join("pkg/target"), fx.root.join("pkg/link")).unwrap();
+    let r = fx.run(op("duplicate", &["pkg"])).unwrap();
+    assert_eq!(r.done.len(), 1, "{r:?}");
+    let copy = fx.root.join(r.done[0].to.as_deref().unwrap()).join("link");
+    assert!(junction::exists(&copy).unwrap());
+    assert_eq!(crate::share::canon(&junction::get_target(&copy).unwrap()), crate::share::canon(&fx.root.join("pkg/target")));
 }
 
 #[test]

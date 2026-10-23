@@ -57,6 +57,14 @@ pub fn contained(root: &Path, fold: bool, rel: &str, usage: Use) -> Result<PathB
     if parts.is_empty() && usage == Use::Item {
         return Err("Files won't act on the root folder itself".into());
     }
+    // Win32 drops a name's trailing dots and spaces before it reaches the disk, so `foo.` would
+    // act on its sibling `foo` and `...` on the folder it is in (the root, at the top). Such a
+    // name (made from WSL, say) is refused rather than reached by a path that means another.
+    if cfg!(windows) {
+        if let Some(part) = parts.iter().find(|p| win32_trims(p)) {
+            return Err(format!("“{part}”: Files can't act on a name ending in a dot or a space on Windows"));
+        }
+    }
     let mut p = root.to_path_buf();
     for (i, part) in parts.iter().enumerate() {
         p.push(part);
@@ -81,12 +89,17 @@ pub fn contained(root: &Path, fold: bool, rel: &str, usage: Use) -> Result<PathB
     Ok(p)
 }
 
+/// A name Win32 path handling would change: a trailing dot or space is dropped from it.
+fn win32_trims(part: &str) -> bool {
+    part.ends_with('.') || part.ends_with(' ')
+}
+
 /// One component of a new name, refused where the platform can't hold it. Separators, `.`,
 /// `..` and NUL are already refused by `split_rel`. On Windows a reserved device name would
 /// open the device rather than make a file, and a trailing dot or space is silently dropped.
 fn check_part(part: &str) -> Result<(), String> {
     if cfg!(windows) {
-        if part.ends_with('.') || part.ends_with(' ') {
+        if win32_trims(part) {
             return Err(format!("“{part}”: a name can't end with a dot or a space on Windows"));
         }
         if part.chars().any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || (c as u32) < 32) {
@@ -247,9 +260,10 @@ pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
-        let wide = |p: &Path| p.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<u16>>();
-        let (f, t) = (wide(from), wide(to));
+        // Verbatim paths: the root is kept without `\\?\` (share::canon strips it) and the app
+        // isn't long-path aware, so a plain path of 260 characters or more would fail here
+        // while every std::fs call on it (std adds the prefix itself) works.
+        let (f, t) = (verbatim_wide(from), verbatim_wide(to));
         // No MOVEFILE_REPLACE_EXISTING: an existing target is refused. No COPY_ALLOWED either:
         // another volume answers ERROR_NOT_SAME_DEVICE, and the caller copies and verifies.
         // SAFETY: two NUL-terminated UTF-16 paths that live across the call.
@@ -264,6 +278,34 @@ pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, "the destination exists"));
         }
         std::fs::rename(from, to)
+    }
+}
+
+/// `p` as a NUL-terminated verbatim path for a raw Win32 call: `C:\x` → `\\?\C:\x`,
+/// `\\server\share\x` → `\\?\UNC\server\share\x`, an already verbatim or device path as it
+/// is. Verbatim paths take `\` only, so `/` is turned into one first (it can't be in a name).
+/// Every path here is a canonical root plus checked components, never `.` or `..`.
+#[cfg(any(windows, test))]
+fn verbatim(p: &str) -> String {
+    let p = p.replace('/', "\\");
+    if p.starts_with(r"\\?\") || p.starts_with(r"\\.\") {
+        p
+    } else if let Some(unc) = p.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{unc}")
+    } else if p.as_bytes().get(1) == Some(&b':') && p.as_bytes().get(2) == Some(&b'\\') {
+        format!(r"\\?\{p}")
+    } else {
+        p
+    }
+}
+
+#[cfg(windows)]
+fn verbatim_wide(p: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    // A path that isn't valid Unicode keeps its exact UTF-16; it only misses the prefix.
+    match p.to_str() {
+        Some(s) => std::ffi::OsStr::new(&verbatim(s)).encode_wide().chain(Some(0)).collect(),
+        None => p.as_os_str().encode_wide().chain(Some(0)).collect(),
     }
 }
 
@@ -345,6 +387,24 @@ fn copy_tree(from: &Path, to: &Path, made: &mut bool) -> io::Result<()> {
 }
 
 fn copy_link(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        // std counts an NTFS junction as a directory symlink, but making a symlink needs
+        // Developer Mode or admin while a junction needs neither, and pnpm's node_modules are
+        // full of them: a junction is recreated as a junction, pointing where it pointed.
+        if junction::exists(from).unwrap_or(false) {
+            let made = junction::create(junction::get_target(from)?, to);
+            if let Err(e) = &made {
+                // The crate makes the folder first and then turns it into the junction; one
+                // left plain and empty is this call's own. AlreadyExists is the folder's own
+                // create, which made nothing.
+                if e.kind() != io::ErrorKind::AlreadyExists {
+                    let _ = std::fs::remove_dir(to);
+                }
+            }
+            return made;
+        }
+    }
     let target = std::fs::read_link(from)?;
     #[cfg(unix)]
     {
