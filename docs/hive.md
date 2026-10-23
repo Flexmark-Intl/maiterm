@@ -374,7 +374,7 @@ coordinator only sets priorities.
 | Kind | Examples | How a Hive runs it |
 |---|---|---|
 | **Infrastructure**: doesn't run any branch's code | Postgres, Redis, MinIO, an emulator, ComfyUI, a local model | **One instance** in the Hive's stack (`docs/stack.md`), used by every worker. Each worker gets its **own namespace** inside it: database `app_<worker>`, a key prefix, a bucket prefix, through env vars maiTerm sets from a template (`DATABASE_URL=…/app_{worker}`) |
-| **Code-bearing**: runs one branch's code | A dev server, an API built from source, `tauri:dev`, an e2e suite, a full `cargo test` | **Taken in turns.** A dev server serves one checkout at a time, so it can't be shared across branches at once. It's a *slot* the queue binds to one worker's worktree per job |
+| **Code-bearing**: runs one branch's code | A dev server, an API built from source, `tauri:dev`, an e2e suite, a full `cargo test` | **The same stack service, relaunched on the branch it's needed for** (§6.9). One that can take a port runs several copies at once, one per branch; one that can't is taken in turns |
 | **Cheap and local** | Typechecking a file, one module's unit tests, lint | **Runs freely** in the worker's own tab, no queue |
 
 **The run queue (Rust).** A worker runs anything heavy through `hiveRun {command, folder, needs,
@@ -384,9 +384,10 @@ timeout?}`:
   time), `tauri-dev` (one at a time: its ports and data folder), `e2e` (one: a browser and a
   port), `gpu` (one: ComfyUI), `migrate:<db>` (exclusive per namespace). A job starts when
   everything it needs has room. Jobs that don't compete run in parallel; jobs that do, wait.
-- **The job runs in a maiTerm-owned hidden tab** in the worker's worktree (a slot), so its
-  output is visible in the worker's column and its exit code is maiTerm's own record (OSC 133).
-  That's what makes it a receipt (§7.7).
+- **A job is a stack service run on the worker's branch** (§6.9): a test suite is a service
+  whose command exits, an e2e run is one that needs the dev server on the same branch first.
+  Its output is visible in the worker's column, and its exit code is maiTerm's own record
+  (OSC 133). That's what makes it a receipt (§7.7).
 - **The worker isn't held hostage.** `hiveRun` answers at once with the job's place in the
   queue. The result arrives as a framed `⟦HIVE RUN⟧` message between turns: the follow-ups
   delivery path (`docs/follow-ups.md`), take-before-type, held only for a dialog or a draft. A
@@ -394,10 +395,9 @@ timeout?}`:
 - **The coordinator sets priority, not timing.** `hiveRunPriority` moves a job forward (the
   run blocking a land, say). Deciding when each test runs turn by turn would be slow and wrong
   for an LLM, and it's easy for a queue. That's principle 8 again.
-- **Slots stay warm.** A slot keeps its last worktree's server running. If the next job is for
-  the same worker, it reuses it. Otherwise it restarts in the new worktree. Separately, one
-  **integration instance** of the dev server can stay up on Base (the coordinator's read copy),
-  so the human always has main to look at.
+- **Services stay warm.** A service left running on a branch is reused when the next job wants
+  that branch, and relaunched otherwise. Separately, one copy of the dev server can stay up on
+  **main** (the coordinator's read copy), so the human always has main to look at.
 
 **It's enforced, not requested.** Per repo, the Hive lists which commands are *queued*
 (`cargo test`, `npm run tauri:dev`, `playwright test`…). maiTerm already receives every
@@ -433,6 +433,51 @@ resource, since even one extra maiTerm is heavy.
 container its own IP on macOS 26, so ports can't collide. It suits Linux-shaped stacks where
 isolation is worth the memory. It can't run Mac apps or reach the Apple GPU, and an agent inside
 one is a remote agent. So it arrives with SSH Hives, as one piece of work (§12).
+
+### 6.9 Any service, on any branch (a stack feature, 2026-10-23)
+
+Darryl's ask: relaunching a service on another branch should be simple. It is, because the stack
+already types `cd <cwd> && <command>` on every start (`startLine`, `src/lib/stack/model.ts`). Running a
+service on a branch is that same line with the folder moved onto the branch's worktree, then a
+restart. **This is built into the stack itself, not into Hive**, so every workspace gets it and a
+Hive simply uses it.
+
+**What a service gains:**
+
+- **`target`**: which checkout it runs. Empty means its own folder, as today. Otherwise it names a
+  worktree: a Hive worker's, or one maiTerm made for a branch. It's persisted, as intent, like
+  `was_running`, so a relaunch comes back on the same branch.
+- **The folder follows the branch.** The service's `cwd` is taken relative to its repo's top level
+  and re-rooted in the target worktree: `~/code/app/web` on main becomes
+  `<worktree>/web` on `session-store`. The mapping is computed in Rust (paths are Rust's,
+  `docs/file-tree.md`), never by string-prefixing in JS.
+- **Placeholders** in the command and env, filled in per target: `{port}` (a free port maiTerm
+  picks), `{branch}`, `{worker}`, `{checkout}`. `DATABASE_URL=postgres://localhost/app_{worker}` is
+  how one shared database gives each branch its own namespace (§6.8).
+
+**One verb, three ways to reach it:**
+
+- **The human:** the service's menu in the sidebar gets **Run on ▸** main, each open worktree, and
+  "Other branch…". The row then reads `web · on session-store :5174`.
+- **Any agent:** `restartService {name, on: "main" | "<branch>" | "<worker>"}`, beside the
+  existing `startService`/`restartService`/`waitForService`.
+- **The Hive's run queue,** which is just a caller of the same verb.
+
+A branch with no worktree yet gets one: a **detached** worktree under the app's data folder,
+reused next time and removed when its branch is gone. The human's own checkout never switches
+branches, because other agents are working in it.
+
+**Several branches at once, or in turns:**
+
+- A service whose command or env uses `{port}` can run as **several copies**, one per branch, each
+  in its own hidden service tab (`web@main :5173`, `web@session-store :5174`), up to a
+  per-service limit and the machine's headroom (§6.8).
+- A service that hard-codes its port (or a data folder) runs **one copy at a time**. Retargeting it
+  stops the copy that's up and starts it on the new branch, which takes seconds for most dev
+  servers, since the worktree's dependencies are already installed.
+
+That's the whole mechanism Hive needs: the run queue decides **when** and **on which branch**,
+and the stack does the rest. When this is built, its details move into `docs/stack.md`.
 
 ## 7. Agents, tools and authority
 
@@ -1136,7 +1181,7 @@ several releases a day).
 4. Workers: worktrees per folder, `--add-dir`, setup, trust write, the role catalogue, receipts, fuses,
    `hiveSpawnWorker`/`hiveListWorkers`/`hiveReport`, static cards.
 5. The activity feed, diff stat, worker columns, raw terminal, keyboard.
-5b. The shared Hive stack and the run queue: namespaces, slots, `hiveRun`, the PreToolUse deny,
+5b. The stack feature first: any service on any branch (§6.9: `target`, re-rooted cwd, placeholders, Run on ▸, copies per branch). Then the Hive run queue: namespaces, `hiveRun`, the PreToolUse deny,
    pressure-aware capacity, batched land checks. For maiTerm as the pilot repo, the `tauri:dev`
    data-folder and port override comes first.
 6. Reviewers (`hiveVerdict`, three attempts, escalation). Landing: land to Base (default) including several repos, the approval-mode setting through
