@@ -56,8 +56,6 @@ use crate::util::proc::RunError;
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 /// Files bigger than this are not sent by an import.
 const MAX_IMPORT_FILE: u64 = 256 << 20;
-/// One frame of an import (`PUT_CHUNK`, 1 MB) has this long: about 17 KB/s at the least.
-const PUT_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The helper's clock. Fields so tests needn't wait out real intervals.
 #[derive(Debug, Clone, Copy)]
@@ -75,6 +73,8 @@ pub struct Timing {
     pub poll_every: Duration,
     /// A host without python3: every open folder is listed again this often, while visible.
     pub limited_poll_every: Duration,
+    /// One frame of an import (`PUT_CHUNK`, 1 MB) has this long: about 17 KB/s at the least.
+    pub put_chunk: Duration,
 }
 
 impl Default for Timing {
@@ -88,6 +88,7 @@ impl Default for Timing {
             grace: Duration::from_secs(300),
             poll_every: Duration::from_secs(2),
             limited_poll_every: Duration::from_secs(5),
+            put_chunk: Duration::from_secs(60),
         }
     }
 }
@@ -189,6 +190,12 @@ impl std::fmt::Display for CallError {
 }
 
 type Reply = Result<proto::Frame, CallError>;
+
+/// An answer a call stopped waiting for after its frame was sent (`Conn::call_owing`).
+struct Owed {
+    id: u64,
+    rx: mpsc::Receiver<Reply>,
+}
 
 enum Waiter {
     Sync(mpsc::Sender<Reply>),
@@ -813,19 +820,33 @@ impl Conn {
 
     /// One request and its answer, blocking up to `timeout` in all.
     pub fn call(&self, op: &str, args: Value, payload: &[u8], timeout: Duration) -> Reply {
+        self.call_owing(op, args, payload, timeout).unwrap_or_else(|owed| self.settle(owed, Duration::ZERO))
+    }
+
+    /// `call`, telling apart a timeout after the frame went out (`Err(Owed)`): the helper has
+    /// it, or soon will, and acts on it whether or not anyone still waits. A frame that never
+    /// left (no live helper, another frame still writing) is an ordinary `Timeout`.
+    fn call_owing(&self, op: &str, args: Value, payload: &[u8], timeout: Duration) -> Result<Reply, Owed> {
         let deadline = Instant::now() + timeout;
         let (tx, rx) = mpsc::channel();
         let id = match self.send(op, args, payload, Waiter::Sync(tx), deadline, Some(deadline)) {
             Ok(id) => id,
-            Err((e, _)) => return Err(e),
+            Err((e, _)) => return Ok(Err(e)),
         };
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(r) => r,
-            Err(_) => {
-                self.pending.lock().remove(&id);
-                Err(CallError::Timeout)
-            }
+            Ok(r) => Ok(r),
+            Err(_) => Err(Owed { id, rx }),
         }
+    }
+
+    /// Wait up to `timeout` more for an owed answer, then forget it.
+    fn settle(&self, owed: Owed, timeout: Duration) -> Reply {
+        if let Ok(r) = owed.rx.recv_timeout(timeout) {
+            return r;
+        }
+        self.pending.lock().remove(&owed.id);
+        // It may have come in between.
+        owed.rx.try_recv().unwrap_or(Err(CallError::Timeout))
     }
 
     /// `call`, carried through a restart of the helper: a request the dying helper never
@@ -1761,7 +1782,26 @@ fn upload(r: &RemoteRoot, local: &Path, rel: &str, made: &mut bool) -> Result<()
             } else {
                 ("append", json!({ "root": r.root, "rel": rel, "mode": mode, "at": at, "more": more }))
             };
-            r.conn.call(op, req, &buf[..n], PUT_CHUNK_TIMEOUT).map_err(remote_err)?;
+            let wait = r.conn.timing.put_chunk;
+            let reply = match r.conn.call_owing(op, req, &buf[..n], wait) {
+                Ok(reply) => reply,
+                // Sent, but not answered in time (a slow link spends the wait writing the frame
+                // itself). The helper still acts on it: a first frame then makes the file
+                // holding only its first piece, at 0600, which nothing would ever finish. So the
+                // answer is waited out once more to learn whether this import made the file
+                // (`exists`: another writer did, and keeps it) and `import` discards it after,
+                // never racing ahead of the put through the helper's workers. A late `append`
+                // can't make anything, so the file it followed is discarded at once.
+                Err(owed) => {
+                    if at > 0 {
+                        let _ = r.conn.settle(owed, Duration::ZERO);
+                    } else if !matches!(r.conn.settle(owed, wait), Err(CallError::Op { .. })) {
+                        *made = true;
+                    }
+                    return Err(remote_err(CallError::Timeout));
+                }
+            };
+            reply.map_err(remote_err)?;
             *made = true;
             at += n as u64;
             if !more {

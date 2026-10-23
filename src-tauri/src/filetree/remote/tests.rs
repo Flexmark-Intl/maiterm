@@ -72,6 +72,7 @@ fn fast() -> Timing {
         grace: Duration::from_millis(500),
         poll_every: Duration::from_millis(150),
         limited_poll_every: Duration::from_millis(200),
+        put_chunk: Duration::from_secs(60),
     }
 }
 
@@ -847,6 +848,43 @@ fn a_slow_upload_is_not_taken_for_a_dead_helper() {
     let r = root.root.clone();
     assert_eq!(code(root.conn.call("append", json!({ "root": r, "rel": "big.bin", "at": 5, "more": false }), b"x", T)), "changed");
     assert_eq!(code(root.conn.call("append", json!({ "root": r, "rel": "nothing.bin", "at": 0 }), b"x", T)), "gone");
+    drop(root);
+    for d in [&home, &t, &src] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// A first frame that outlasts its wait while being written still reaches the helper, which
+/// makes the file from it. The upload must count that file as made, so the import's discard
+/// removes it, rather than leave the first megabyte under the real name at 0600.
+#[test]
+fn a_first_frame_that_times_out_is_discarded_not_left_half_made() {
+    if !python3() {
+        return;
+    }
+    let home = scratch("late");
+    let t = scratch("late-root");
+    let src = scratch("late-src");
+    let rs = Remotes::default();
+    // 1 MB at 512 KB/s is ~2 s to carry, against half a second for the frame's answer.
+    let timing = Timing { put_chunk: Duration::from_millis(500), ..fast() };
+    rs.set_transport(Arc::new(Throttled { home: home.clone(), rate: 512 << 10, deadline: "30" }), timing);
+    let root = RemoteRoot::open(rs.lease("me@here", None), &t.to_string_lossy(), Vec::new()).unwrap();
+    let file = src.join("big.bin");
+    std::fs::write(&file, vec![7u8; 1_310_720]).unwrap();
+    let mut made = false;
+    assert!(upload(&root, &file, "big.bin", &mut made).is_err(), "the first frame's answer can't come in time");
+    assert!(made, "the helper made the file from a frame that went out");
+    ok(root.conn.call("discard", json!({ "root": root.root, "rel": "big.bin" }), &[], T));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!t.join("big.bin").exists(), "a timed-out first frame left a file behind");
+    // An answer that is already refused (another writer's file) is not this import's to discard.
+    std::fs::write(t.join("theirs.bin"), b"keep").unwrap();
+    let mut made = false;
+    let small = src.join("small.bin");
+    std::fs::write(&small, b"x").unwrap();
+    assert_eq!(upload(&root, &small, "theirs.bin", &mut made).unwrap_err().0, "exists");
+    assert!(!made);
     drop(root);
     for d in [&home, &t, &src] {
         let _ = std::fs::remove_dir_all(d);
