@@ -20,6 +20,7 @@
   import FindBar from './FindBar.svelte';
   import ConfirmStrip from './ConfirmStrip.svelte';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
+  import { dropPointToCss } from '$lib/utils/dropPoint';
   import { error as logError } from '@tauri-apps/plugin-log';
 
   const rowH = $derived(preferencesStore.fileTreeDensity === 'compact' ? 20 : preferencesStore.fileTreeDensity === 'comfortable' ? 24 : 22);
@@ -55,9 +56,11 @@
     void getCurrentWebview().onDragDropEvent((event) => {
       const p = event.payload;
       if (p.type === 'over') {
-        fileTreeStore.setDropTarget(osDropFolder(p.position.x, p.position.y));
+        const at = dropPointToCss(p.position);
+        fileTreeStore.setDropTarget(osDropFolder(at.x, at.y));
       } else if (p.type === 'drop') {
-        const dest = osDropFolder(p.position.x, p.position.y);
+        const at = dropPointToCss(p.position);
+        const dest = osDropFolder(at.x, at.y);
         fileTreeStore.setDropTarget(null);
         if (dest !== null && p.paths.length) void fileTreeStore.importPaths(p.paths, dest);
       } else {

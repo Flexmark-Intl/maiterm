@@ -19,6 +19,7 @@
 <script lang="ts">
   import { tick, onMount, onDestroy } from 'svelte';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
+  import { dropPointToCss } from '$lib/utils/dropPoint';
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -350,7 +351,7 @@
         const { type } = event.payload;
         if (!open || !shellEl?.isConnected) { isDragOver = false; return; }
         if (type === 'over') {
-          const { position } = event.payload;
+          const position = dropPointToCss(event.payload.position);
           const rect = shellEl.getBoundingClientRect();
           isDragOver = position.x >= rect.left && position.x <= rect.right &&
                        position.y >= rect.top && position.y <= rect.bottom;

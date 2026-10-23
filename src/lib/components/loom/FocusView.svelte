@@ -35,6 +35,7 @@
   import { fromPaths, mergeAttachments, pasteCarriesFiles, readPaste, type ComposerAttachment } from '$lib/composer/attachments';
   import { isModKey } from '$lib/utils/platform';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
+  import { dropPointToCss } from '$lib/utils/dropPoint';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import type { Task, Workspace } from '$lib/tauri/types';
 
@@ -427,7 +428,8 @@
     let gone = false;
     void getCurrentWebview().onDragDropEvent((ev) => {
       const p = ev.payload;
-      const inside = (pos: { x: number; y: number }) => {
+      const inside = (raw: { x: number; y: number }) => {
+        const pos = dropPointToCss(raw);
         const r = dockEl?.getBoundingClientRect();
         return !!r && pos.x >= r.left && pos.x <= r.right && pos.y >= r.top && pos.y <= r.bottom;
       };

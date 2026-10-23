@@ -4,6 +4,7 @@
   import { afterLayout, nextLayout } from '$lib/utils/layout';
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
+  import { dropPointToCss } from '$lib/utils/dropPoint';
   import { Terminal } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
   import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -1304,7 +1305,7 @@
 
       if (type === 'over') {
         if (!visible || !containerRef?.isConnected) { isDragOver = false; return; }
-        const { position } = event.payload;
+        const position = dropPointToCss(event.payload.position);
         const rect = containerRef.getBoundingClientRect();
         const over = (
           position.x >= rect.left && position.x <= rect.right &&
@@ -1324,7 +1325,8 @@
         isDragOver = false;
         dragInfoPromise = null;
         if (!visible || !containerRef?.isConnected) { dragSshCommand = null; return; }
-        const { paths, position } = event.payload;
+        const { paths } = event.payload;
+        const position = dropPointToCss(event.payload.position);
         const rect = containerRef.getBoundingClientRect();
         if (
           position.x >= rect.left && position.x <= rect.right &&
