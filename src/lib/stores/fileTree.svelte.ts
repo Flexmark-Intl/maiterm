@@ -1446,10 +1446,27 @@ function createFileTreeStore() {
 
   /** An inline edit ended: the keyboard comes back to the tree unless it has gone somewhere
    *  else. A blur onto a terminal or an editor is the human moving on, and pulling focus back
-   *  would send their next keys (Enter, Delete) to the tree. */
+   *  would send their next keys (Enter, Delete) to the tree.
+   *
+   *  Body is ambiguous. The input's blur handler decides in a microtask, and on a click
+   *  that microtask runs between the blur and the focus of whatever was clicked, so focus
+   *  reads as body on its way to a terminal or an editor. Body is judged again once the
+   *  click's task is over, where it can only mean focus really went nowhere. */
   function refocusAfterEdit() {
-    const a = typeof document === 'undefined' ? null : document.activeElement;
-    if (!a || a === document.body || a.closest('[data-filetree]')) focusPending = true;
+    if (typeof document === 'undefined') return;
+    const intoTree = (a: Element | null) => !!a && a !== document.body && !!a.closest('[data-filetree]');
+    const a = document.activeElement;
+    if (intoTree(a)) {
+      focusPending = true;
+      return;
+    }
+    if (a && a !== document.body) return;
+    setTimeout(() => {
+      // A new inline edit owns the keyboard by now; taking it for the tree would blur it.
+      if (edit) return;
+      const now = document.activeElement;
+      if (!now || now === document.body || intoTree(now)) focusPending = true;
+    }, 0);
   }
 
   /** The row being renamed, or the folder a New input sits in, went away on disk (an agent
