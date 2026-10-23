@@ -249,7 +249,9 @@ pub struct Conn {
     hello: Mutex<Option<Hello>>,
 }
 
-/// A root's hold on its host's helper: the last one going starts the grace period.
+/// A root's hold on its host's helper: the last one going starts the grace period. Taken from
+/// `Remotes::lease`, under the registry's lock, which the grace period's end also takes: a
+/// helper handed out can't be closed before its lease counts.
 pub struct Lease(Arc<Conn>);
 
 impl Lease {
@@ -259,9 +261,8 @@ impl Lease {
         Lease(c)
     }
 
-    /// A hold for the length of one exchange (the resolver's probe).
-    pub fn hold(c: &Arc<Conn>) -> Lease {
-        Lease::new(c.clone())
+    pub fn conn(&self) -> &Arc<Conn> {
+        &self.0
     }
 }
 
@@ -786,13 +787,19 @@ impl Conn {
         let spawned = std::thread::Builder::new().name("ft-ssh-grace".into()).spawn(move || {
             std::thread::sleep(grace);
             let Some(c) = weak.upgrade() else { return };
-            if c.grace_token.load(Ordering::SeqCst) != token || c.leases.load(Ordering::SeqCst) > 0 {
-                return;
-            }
-            if let Some(reg) = c.registry.upgrade() {
-                let mut map = reg.lock();
-                if map.get(&c.host).is_some_and(|x| Arc::ptr_eq(x, &c)) {
-                    map.remove(&c.host);
+            // Decided under the registry's lock, where `Remotes::lease` hands this helper out
+            // and counts the lease: checked before it, a root opening at this moment got the
+            // helper and then had it closed under it, for good (a closed helper never restarts).
+            let reg = c.registry.upgrade();
+            {
+                let mut map = reg.as_ref().map(|r| r.lock());
+                if c.grace_token.load(Ordering::SeqCst) != token || c.leases.load(Ordering::SeqCst) > 0 {
+                    return;
+                }
+                if let Some(map) = map.as_mut() {
+                    if map.get(&c.host).is_some_and(|x| Arc::ptr_eq(x, &c)) {
+                        map.remove(&c.host);
+                    }
                 }
             }
             c.close();
@@ -935,22 +942,28 @@ impl Remotes {
         *self.timing.lock() = timing;
     }
 
-    /// The helper for `host`, made if there is none. A helper nobody leases (made for a
-    /// resolver's probe) ends after the grace period like any other.
-    pub fn conn(&self, host: &str, lookup: Option<Lookup>) -> Arc<Conn> {
+    /// A hold on the helper for `host`, made if there is none. The lease is counted before the
+    /// registry's lock is let go, so the grace period of the helper's last root can't close it
+    /// between here and the caller's first call.
+    pub fn lease(&self, host: &str, lookup: Option<Lookup>) -> Lease {
         let mut map = self.map.lock();
         if let Some(c) = map.get(host) {
             if c.status() != Status::Closed {
                 if let Some(l) = lookup {
                     *c.lookup.lock() = l;
                 }
-                return c.clone();
+                return Lease::new(c.clone());
             }
         }
         let c = Conn::new(host, self.transport.lock().clone(), lookup.unwrap_or_else(direct_lookup), Arc::downgrade(&self.map), *self.timing.lock());
         map.insert(host.to_string(), c.clone());
-        drop(Lease::new(c.clone()));
-        c
+        Lease::new(c)
+    }
+
+    /// The helper for `host`, made if there is none, held by nobody: it ends after the grace
+    /// period like any other unless a root leases it.
+    pub fn conn(&self, host: &str, lookup: Option<Lookup>) -> Arc<Conn> {
+        self.lease(host, lookup).conn().clone()
     }
 
     #[cfg(test)]
@@ -995,12 +1008,12 @@ fn strings(v: Option<&Value>) -> Vec<String> {
 }
 
 impl RemoteRoot {
-    /// Open `root` (POSIX, maybe `~`-based) on `conn`'s host: its real path and repository.
-    /// Blocking: the first open of a host starts its helper.
-    pub fn open(conn: Arc<Conn>, root: &str, excludes: Vec<String>) -> Result<Arc<RemoteRoot>, String> {
-        // Held before the first call: a grace period ending while the helper starts must not
-        // close it under this root.
-        let lease = Lease::new(conn.clone());
+    /// Open `root` (POSIX, maybe `~`-based) on the leased helper's host: its real path and
+    /// repository. Blocking: the first open of a host starts its helper. The lease
+    /// (`Remotes::lease`) was taken before the first call: a grace period ending while the
+    /// helper starts must not close it under this root.
+    pub fn open(lease: Lease, root: &str, excludes: Vec<String>) -> Result<Arc<RemoteRoot>, String> {
+        let conn = lease.conn().clone();
         let (real, repo) = match conn.call("root", json!({ "root": root, "excludes": excludes }), &[], CALL_TIMEOUT) {
             Ok(f) => (f.str("real").unwrap_or(root).to_string(), f.header.get("repo").and_then(parse_repo)),
             Err(CallError::Limited) => {

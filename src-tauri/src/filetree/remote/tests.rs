@@ -319,9 +319,7 @@ fn git_runs_on_the_host_with_the_same_parser() {
     std::fs::write(t.join("src/a.ts"), "one\ntwo\n").unwrap();
     std::fs::write(t.join("new.txt"), "").unwrap();
     let rs = remotes(&home, "python3");
-    let conn = rs.conn("me@here", None);
-    let _lease = Lease::new(conn.clone());
-    let root = RemoteRoot::open(conn.clone(), &t.to_string_lossy(), Vec::new()).unwrap();
+    let root = RemoteRoot::open(rs.lease("me@here", None), &t.to_string_lossy(), Vec::new()).unwrap();
     assert_eq!(root.repo.as_ref().map(|r| r.toplevel_rel.as_str()), Some(""));
     let core = crate::filetree::git::GitCore::new_with(
         std::sync::Weak::new(),
@@ -342,7 +340,7 @@ fn git_runs_on_the_host_with_the_same_parser() {
     assert_eq!(core.numstat("src/a.ts", (8, None)), Some((1, 0)));
     assert_eq!(core.diff_base("src/a.ts", "HEAD").unwrap().as_deref(), Some("one\n"));
     // Only read-only subcommands run there.
-    assert!(matches!(conn.call("git", json!({ "root": root.root, "args": ["commit", "-m", "x"] }), &[], T), Err(CallError::Op { ref code, .. }) if code == "denied"));
+    assert!(matches!(root.conn.call("git", json!({ "root": root.root, "args": ["commit", "-m", "x"] }), &[], T), Err(CallError::Op { ref code, .. }) if code == "denied"));
     // Find's list comes from ls-files there.
     let mut files = root.files().unwrap();
     files.sort();
@@ -698,6 +696,27 @@ sys.exit(1 if bad else 0)
         assert!(report.contains(why), "the gate missed {why}:\n{report}");
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A root opening just as the last one's grace period ends: `Remotes::lease` counts its lease
+/// under the registry's lock, and the grace period decides under the same lock, so the helper
+/// handed out is never closed under it. The test holds that lock across the grace period's end
+/// and leases there, as `lease` does.
+#[test]
+fn a_helper_leased_as_its_grace_ends_is_not_closed() {
+    let home = scratch("grace");
+    let rs = remotes(&home, "python3");
+    let c = rs.conn("me@here", None);
+    let map = rs.map.lock();
+    std::thread::sleep(fast().grace + Duration::from_millis(300));
+    let lease = Lease::new(map.get("me@here").unwrap().clone());
+    drop(map);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_ne!(c.status(), Status::Closed, "closed under a root that had just leased it");
+    assert_eq!(rs.count(), 1);
+    assert!(Arc::ptr_eq(lease.conn(), &rs.conn("me@here", None)));
+    drop(lease);
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]

@@ -348,14 +348,14 @@ impl FileTreeState {
 
     /// The hub for a remote place, made (and its root opened on the host) if there is none.
     fn remote_hub_for(&self, key: &str, host: &str, root: &str, excludes: Vec<String>, lookup: Option<remote::Lookup>) -> Result<Arc<RootHub>, String> {
-        let conn = self.remotes.conn(host, lookup);
+        let lease = self.remotes.lease(host, lookup);
         if let Some(h) = self.hubs.lock().get(key) {
             if !h.is_gone() {
                 return Ok(h.clone());
             }
         }
         // Outside the map's lock: it waits on the host.
-        let r = remote::RemoteRoot::open(conn, root, excludes.clone())?;
+        let r = remote::RemoteRoot::open(lease, root, excludes.clone())?;
         let real = PathBuf::from(&r.root);
         let init = HubInit {
             place: key.to_string(),
@@ -388,10 +388,9 @@ impl FileTreeState {
         if paths.is_empty() {
             return Some(Vec::new());
         }
-        let conn = self.remotes.conn(host, lookup);
         // Held for the probe; dropping it after starts the grace period.
-        let _lease = remote::Lease::hold(&conn);
-        conn.probe(paths, PROBE_TIMEOUT)
+        let lease = self.remotes.lease(host, lookup);
+        lease.conn().probe(paths, PROBE_TIMEOUT)
     }
 
     fn subscribe(&self, hub: Arc<RootHub>, window: &str, mut restore: Vec<DirReq>, sink: Arc<dyn Sink>) -> OpenAck {
