@@ -664,6 +664,80 @@
 >   children. Every tombstone path (blind records, a dropped session's lookup, `lost`) now answers
 >   `too_many_sessions` (`SESSIONS_GONE`), with its own sentence. `evicted` now means only the
 >   memory budget (a slot gone from a session that still exists).
+>
+> **As built, phase 6 backend: remote roots (2026-10-23, `filetree/remote/{mod,proto}.rs`,
+> `helper.py`).** The UI half (host chip, wrong-host warning, stale-while-revalidate) is not in
+> it. This supersedes phase 1's "remote places resolve but don't open". Where it differs from
+> the text below:
+> - **One helper per host** (`Conn`), leased by each remote root (`RemoteRoot`, held by its hub)
+>   and kept 5 min after the last lease; the resolver's probe holds a lease for its call too.
+>   argv is `ssh <mux_client_args(tunnel key)> -o ClearAllForwardings=yes <connect args> exec
+>   python3 -u -c '<LOADER>'`; `-L/-R/-D/-W/-N/-f/-M/-n/-t/-T` are dropped from the tab's args
+>   (a forward would be asked of the tunnel's master, and `-R` is what the orphan sweep matches).
+>   The tunnel is found as the mirror and watch scripts find it; without one the connect args
+>   are the host, and ssh connects itself once (nova: ready and `hello` in 1.35 s).
+> - **Ops are coarser than §15.2's list.** `fileop` runs a whole `FileOp` on the host the way
+>   `ops.rs` does (same result shape and undo), the ticket and live-cwd guard checked in Rust
+>   first; `tally` serves `ft_prepare_delete`. An import (an OS drop) is walked here and sent as
+>   primitives (`land`, `mkdir`, `put`, `symlink`, and `discard` of only what it made), files up
+>   to 256 MB each. `probe` answers the resolver (real path, is-a-folder, top level) and `root`
+>   opens a root (real path, repository, the user's excludes); the repository is found by
+>   walking up for `.git` as `repo_info` does, no git process. `read` and `write` exist but
+>   nothing calls them: the editor's remote I/O stays on `scp_*` (§19).
+> - **git** is one op running a fixed set of read-only subcommands (`status`, `ls-files`,
+>   `diff`, `cat-file`, `merge-base`, `diff-tree`, `rev-parse`) with §7.1's environment there;
+>   `GitCore` runs every command through `run`, local or remote, so decorations, hover numstat,
+>   Compare with HEAD and the commit credit's git all work. Remote keys are as git spells them
+>   (no NFC folding: the host isn't macOS), and `OpenAck.nfc_names` is false there.
+> - **Watching.** Each root's watches carry a tag; an `fs` event (150 ms coalesced) names the
+>   open folders to list again, the changed non-ignored paths (Find's changes) and whether git's
+>   index or the worktree moved. A `.gitignore` or `info/exclude` change re-lists the open
+>   folders it reaches. Over budget (or with no inotify) the NEW folder is polled; local Linux's
+>   evict-the-oldest is not ported. Polling is asked by Rust (`poll`, every 2 s) only while a
+>   subscription can see it. Snapshots are never served without a listing: each expand is one
+>   round trip, answered `NotModified` when unchanged. Listings are sorted and capped in Rust
+>   (`list::finish`), so remote rows come in the local order.
+> - **Liveness.** The helper exits on stdin EOF, when its parent pid changes (a subreaper adopting
+>   it counts) and after 60 s without a ping. A listing or stat that meets a dying helper is
+>   carried to the restarted one within its deadline (`call_through`) rather than failing, and a
+>   re-attach lists every folder a view has open (a failed listing had dropped its snapshot, so
+>   "re-list what has snapshots" missed exactly that folder; the reconnect test caught it).
+>   Needs-key and no-python3 wait for the human's Refresh (`ft_refresh(None)` retries).
+> - **No python3** (exit 127, csh's "Command not found", or a python too old to parse the
+>   helper): listings by `sh -s` with each entry typed by `test`, NUL-terminated, framed by a
+>   random marker; no ignore flags, no git, no Find, read-only (`caps.writable`/`trash` false);
+>   every open folder re-listed every 5 s while visible. The probe works there too.
+> - **The resolver** asks the host for an ssh tab's candidates (agent, OSC 7, the prompt's folder
+>   when absolute or `~/`, saved ones), 4 s at most: the first folder there wins, rooted at its
+>   top level; none there is a `missing` remote place, never home. Unanswered, the first
+>   non-prompt candidate is its own root, as before. `is_shallow_remote` uses the helper's home.
+> - **Remote trash** is `~/.maiterm/trash/<ms>-<pid>-<n>/` with an `items.json` (original path as
+>   hex bytes, time); `restore` takes the newest match at or after `trashed_at`. A folder on
+>   another filesystem than home answers `no_trash` (offer permanent delete) rather than copying
+>   it across. Entries older than 30 days are swept at the next trash.
+> - **Guards:** the live-cwd guard on a host uses the agent sessions of tabs riding a tunnel to
+>   it (a remote shell's cwd can't be read from here); `agent_active` stays local-only. Agent
+>   marks reach a remote tree by its `host:` prefix (`locate_agent_path`), primed with
+>   `standing_marks_on(host)`; shell attribution and the commit credit stay local (no local
+>   watcher, and `covers` is false for a remote root).
+> - **Wire addition:** `OpenAck.remote_hostname` (the helper's `hello.hostname`, for the
+>   wrong-host warning). Remote `caps`: `remote: true`, watch `live`/`partial`/`poll`/`none`.
+>   Health notes: "ssh: connecting to …", "ssh: reconnecting to … (why)", "ssh: needs key-based
+>   ssh to …", "ssh: limited (no python3 on …), read-only", "watch: polling N folders (inotify
+>   limit on …)".
+> - **Tests:** the helper under the local python3 through `sh -c` with the real remote command
+>   (frames with every byte value, 24 calls in flight, list/stat/read/write/put, the ignore
+>   fixtures of `ignore_cache.rs`, containment escapes, every op kind with undo and the trash,
+>   git status/numstat/diff_base/ls-files on a temp repo); a remote hub end to end (listing,
+>   deltas by polling, git, Find, ops, ticket, live-cwd, import, reaping); the sh fallback;
+>   three helper kills and a change made while it was down; the loader under sh, bash, zsh,
+>   dash, ksh, csh and tcsh; the AST gate (and the gate's own check on a file that breaks it).
+>   `on_a_real_host` (ignored; `MAITERM_FT_TEST_HOST`) ran on nova (Python 3.8, real inotify,
+>   a forced budget of 2 via `MAITERM_FT_WATCH_BUDGET`, scratch HOME under /tmp): root painted
+>   159 ms after open, three expands in 82 ms, `partial` reported, trash/restore, and neither
+>   the helper nor its folder left after close. **Not run:** Python 3.6 itself (the AST gate
+>   stands in), fish (not installed here), a Windows client, a muxed start over a live tunnel's
+>   ControlMaster, and the dev check in the running app.
 
 ## 1. Why
 
