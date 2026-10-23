@@ -51,6 +51,11 @@ Reuse the Google Cloud project and OAuth client from safe-auto-refresh if you st
    verification). Otherwise **External**, and afterwards Audience → **Publish app** ("In
    production"): in "Testing", refresh tokens expire after 7 days and the pipeline breaks with
    `invalid_grant` a week later. Data Access needs no scopes; the script asks for its one.
+   **Publish app** stays greyed out until Branding has a home page, a privacy policy link and
+   their domain under Authorized domains (`https://maiterm.dev/`,
+   `https://maiterm.dev/chrome-extension/privacy/`, `maiterm.dev`). A personal Gmail account
+   gets no Internal option, so this is the path there; it is what maiTerm's own client uses
+   (project `maiterm`).
 3. Clients → Create client → **Desktop app** (a Web client refuses the localhost redirect). Copy
    its client id and secret.
 4. Mint the token with the account that owns the item:
@@ -58,6 +63,10 @@ Reuse the Google Cloud project and OAuth client from safe-auto-refresh if you st
 ```bash
 CWS_CLIENT_ID=... CWS_CLIENT_SECRET=... node chrome-extension/scripts/get-refresh-token.mjs
 ```
+
+   An External app nobody verified shows "Google hasn't verified this app": **Advanced** →
+   **Go to maiTerm publisher (unsafe)** → allow. Verification isn't needed for the one account
+   that publishes, and the token doesn't expire once the app is In production.
 
 ### 3. Verify, then store the secrets
 
