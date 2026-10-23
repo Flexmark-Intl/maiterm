@@ -13,6 +13,7 @@
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { relocateStore } from '$lib/stores/relocate.svelte';
   import { ICON_SPRITE } from '$lib/filetree/icons';
+  import { activeFileOf } from '$lib/filetree/activeFile';
   import FilesHeader from './FilesHeader.svelte';
   import TreeBody from './TreeBody.svelte';
 
@@ -29,6 +30,18 @@
     void workspacesStore.activeWorkspaceId;
     void workspacesStore.activeTab?.id;
     untrack(() => fileTreeStore.scheduleResolve(false));
+  });
+
+  // The active file highlight follows the tab in front's FILE, not just its id: a preview
+  // tab swaps its file under the same id, and a terminal tab in front has none (which
+  // clears it). Re-placed on every new subscription (`ack`), since rels are per root. Keyed
+  // on the path so a tab update that leaves the file alone doesn't re-reveal it.
+  const activeTarget = $derived(activeFileOf(workspacesStore.activeTab));
+  const activeKey = $derived(activeTarget ? `${activeTarget.offerShow ? 'e' : 'd'}:${activeTarget.path}` : '');
+  $effect(() => {
+    void activeKey;
+    void fileTreeStore.ack;
+    untrack(() => void fileTreeStore.syncActiveFile(activeTarget));
   });
 
   $effect(() => {

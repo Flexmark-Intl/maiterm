@@ -56,7 +56,7 @@
     {
       label: 'Reveal Active File',
       disabled: !fileTreeStore.activeFile,
-      action: () => { void fileTreeStore.revealActiveEditor(true); },
+      action: () => fileTreeStore.revealActiveFile(),
     },
     {
       label: 'Reveal This Tab’s Folder',

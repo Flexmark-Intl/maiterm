@@ -29,6 +29,7 @@ import type { DirReq, OpenAck, TreeEnvelope, TreePlace } from '$lib/tauri/types'
 import { TREE_FLAG_IGNORED } from '$lib/tauri/types';
 import { TreeModel, ancestorsOf, isExpandable, isWithin, joinRel, parentRel, type Row } from '$lib/filetree/model';
 import { relToAbs, lastSegment, tildePath } from '$lib/filetree/paths';
+import { settleActiveFile, type ActiveFileTarget } from '$lib/filetree/activeFile';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
@@ -141,6 +142,8 @@ function createFileTreeStore() {
    *  every time it remounts (the column reopened from the titlebar, say). */
   let focusPending = $state(false);
   let lastHumanInputMs = 0;
+  /** Bumped per active-file lookup: only the newest may set the highlight. */
+  let activeSeq = 0;
 
   /** Raw state: the tree reads it, and a reroot swaps it for another root's model while the
    *  tree stays mounted, so a plain `let` would leave the tree drawing the old root. */
@@ -263,10 +266,10 @@ function createFileTreeStore() {
     const sameWorkspace = placeWorkspaceId === ws.id;
     let tabId = followableTab();
     if (!tabId) {
-      // An editor, diff or board tab: reveal its file, never re-root (§4.2).
+      // An editor, diff or board tab never re-roots (§4.2); its file is highlighted by
+      // `syncActiveFile`, which follows the tab rather than these resolves.
       if (place && sameWorkspace && !force) {
         ++resolveSeq;
-        void revealActiveEditor();
         return;
       }
       tabId = fallbackTab();
@@ -310,7 +313,6 @@ function createFileTreeStore() {
     sourceTabId = tabId;
     placeWorkspaceId = ws.id;
     await adoptPlace(p, token);
-    if (!followableTab()) void revealActiveEditor();
   }
 
   /** `token` is the resolve that found `p`: a newer resolve supersedes it across the await. */
@@ -464,7 +466,7 @@ function createFileTreeStore() {
     for (const env of early) handle(env);
     if (typeof document !== 'undefined' && document.hidden) commands.ftPause(opened.sub_id, true).catch(() => {});
     if (youAreHere && !kept) revealRel(youAreHere, false);
-    void revealActiveEditor();
+    // The active file is placed by FilesColumn's effect, which re-runs on the new `ack`.
   }
 
   function handle(env: TreeEnvelope) {
@@ -635,27 +637,27 @@ function createFileTreeStore() {
     checkPendingReveal();
   }
 
-  /** The active editor's file: highlighted and revealed when it is under the root (with
-   *  auto-reveal on), named in the header when it isn't. Never focused, never selected. */
-  async function revealActiveEditor(force = false) {
-    const t = workspacesStore.activeTab;
-    const f = t?.tab_type === 'editor' ? t.editor_file : null;
-    if (!f || f.is_remote || subId === null) {
+  /** The active tab's file: highlighted and revealed when it is under the root (with
+   *  auto-reveal on), named in the header when it isn't. Never focused, never selected.
+   *
+   *  Driven by FilesColumn's effect on the active tab's FILE (its type and path) and the
+   *  subscription, not by root resolves: a preview tab swapping its file keeps its tab id,
+   *  and a terminal tab coming to the front re-resolves nothing when its folder is under the
+   *  root, so a highlight kept up by resolves went stale in both cases. No target clears at
+   *  once; a lookup still in flight for an earlier target is dropped by `activeSeq`. */
+  async function syncActiveFile(target: ActiveFileTarget | null) {
+    const my = ++activeSeq;
+    const sub = subId;
+    if (!target || sub === null) {
       activeFile = null;
       outsideFile = null;
       return;
     }
-    const sub = subId;
-    const [rel] = await commands.ftLocate(sub, [f.file_path]).catch(() => [null]);
-    if (sub !== subId) return;
-    if (rel == null) {
-      activeFile = null;
-      outsideFile = f.file_path;
-      return;
-    }
-    outsideFile = null;
-    activeFile = rel;
-    if ((force || preferencesStore.fileTreeAutoReveal) && rel) revealRel(rel, false);
+    const s = await settleActiveFile(target, async (abs) => (await commands.ftLocate(sub, [abs]))[0] ?? null);
+    if (my !== activeSeq || sub !== subId) return;
+    activeFile = s.active;
+    outsideFile = s.outside;
+    if (preferencesStore.fileTreeAutoReveal && s.active) revealRel(s.active, false);
   }
 
   /** "Reveal in Files" from a tab menu: the human asked, so the column opens (if it was
@@ -1116,7 +1118,9 @@ function createFileTreeStore() {
     },
     revealPath,
     revealTabFolder,
-    revealActiveEditor,
+    syncActiveFile,
+    /** "Reveal Active File" (⋯ menu): the human asked, so it reveals with auto-reveal off. */
+    revealActiveFile() { if (activeFile) revealRel(activeFile, false); },
     revealYouAreHere() { if (youAreHere) revealRel(youAreHere, false); },
     absOf,
     copyPaths,
