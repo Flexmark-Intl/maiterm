@@ -11,6 +11,12 @@ pub fn browser_link_status(state: State<'_, Arc<AppState>>, app: AppHandle) -> S
     browser_link::status(&state, &app)
 }
 
+/// The live links alone, for the tab strip (no manifest scan, unlike `browser_link_status`).
+#[tauri::command]
+pub fn browser_link_links(state: State<'_, Arc<AppState>>, app: AppHandle) -> Vec<browser_link::LinkView> {
+    browser_link::links(&state, &app)
+}
+
 /// Bring the host manifests in line with the (already saved) preference: written when on,
 /// removed when off. The pane calls this after saving the toggle.
 #[tauri::command]

@@ -630,6 +630,14 @@ fn tab_name(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
         .map(|t| t.name.clone())
 }
 
+/// Every live link with its maiTerm tab's name: what the tab strip's browser indicator draws. The
+/// cheap half of `status` (no manifest scan), read on every `browser-link-changed`.
+pub fn links(state: &Arc<AppState>, app: &AppHandle) -> Vec<LinkView> {
+    prune(state, app);
+    let links = REG.lock().links.clone();
+    links.into_iter().map(|l| LinkView { tab_name: tab_name(state, &l.maiterm_tab_id), link: l }).collect()
+}
+
 pub fn status(state: &Arc<AppState>, app: &AppHandle) -> StatusView {
     prune(state, app);
     let enabled = state.app_data.read().preferences.browser_link_enabled;

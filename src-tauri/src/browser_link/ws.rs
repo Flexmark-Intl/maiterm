@@ -7,7 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
 use super::{
@@ -249,6 +249,12 @@ fn handle(v: &Value, conn_id: &str, browser: &str, version: &str, state: &Arc<Ap
                             None => format!("Your human linked a Chrome tab to you: {}.", stored.describe()),
                         };
                         tell(&stored.maiterm_tab_id, msg);
+                        // The human linked it in Chrome; maiTerm says so where they'll see it (a
+                        // notification from the window holding that tab). Not for a tab that
+                        // joined: a sign-in flow would ring once per popup.
+                        if stored.opened_by.is_none() {
+                            let _ = app.emit("browser-link-linked", &stored);
+                        }
                         emit_changed(app);
                         Ok(serde_json::json!({ "ok": true, "handle": stored.handle }))
                     }

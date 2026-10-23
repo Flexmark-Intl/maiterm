@@ -163,3 +163,11 @@ each refreshes the copy in the app data dir (`chrome-extension/`) first. Once co
 fold away under "Install it in another browser". (Planned, not built: once the store listing is
 live, the card links to it.) The pane shows each connected browser
 and every live link.
+
+**maiTerm shows a link where it lands**, since it is made in Chrome: a tab holding linked Chrome
+tabs carries a browser mark in the tab strip (a count when several; the tooltip lists them by
+handle), from `browserLinkStore`, which mirrors `browser_link_links` on every
+`browser-link-changed`. A link the HUMAN makes (`link` with no opener) also emits
+`browser-link-linked`, and the window holding that tab dispatches a notification ("Linked to
+Chrome", deep-linked, so mute applies). A joined popup or a re-announce doesn't: a sign-in flow
+or a reconnect would ring for nothing.

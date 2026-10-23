@@ -13,6 +13,7 @@
   import { getBridgeStatus } from '$lib/stores/sshMcpBridge.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
+  import { browserLinkStore } from '$lib/stores/browserLink.svelte';
   import { sshDisconnectStore } from '$lib/stores/sshDisconnect.svelte';
   import { isImageFile, isPdfFile } from '$lib/utils/languageDetect';
   import Icon from '$lib/components/Icon.svelte';
@@ -1345,6 +1346,16 @@
           <Tooltip text={`Chat monitoring ${tab.comms_monitor.channels.length} channel${tab.comms_monitor.channels.length === 1 ? '' : 's'} — @bot summons land here. Right-click → Chat monitoring… to change.`}><span class="comms-indicator comms-monitoring">@</span></Tooltip>
         {/if}
         {#if !isEditor}
+          {@const chromeLinks = browserLinkStore.linksFor(tab.id)}
+          {#if chromeLinks.length > 0}
+            <!-- Linked Chrome tabs (docs/browser-link.md): the link is made in Chrome, so this is
+                 where maiTerm shows it. -->
+            <Tooltip text={`Linked to Chrome — this agent can use ${chromeLinks.map((l) => `${l.handle}: ${l.title || l.url}`).join('; ')}. Unlink from the extension's icon in Chrome, or Preferences → Chrome extension.`}>
+              <span class="browser-link-indicator"><Icon name="browser" size={12} />{#if chromeLinks.length > 1}<span class="browser-link-count">{chromeLinks.length}</span>{/if}</span>
+            </Tooltip>
+          {/if}
+        {/if}
+        {#if !isEditor}
           {@const fu = badgeSummary(tab.follow_ups ?? [], followUpNow, preferencesStore.followUpsLive, preferencesStore.followUpsScriptsUnattended)}
           {#if fu}
             <Tooltip text={fu.tooltip}>
@@ -1721,6 +1732,22 @@
   }
 
   /* Monitoring-but-idle: listening for summons, no thread bound yet. */
+  .browser-link-indicator {
+    align-items: center;
+    /* Accent: an outside tool attached to this agent, beside the green chat and amber bridge. */
+    color: var(--accent);
+    display: flex;
+    flex-shrink: 0;
+    gap: 1px;
+    line-height: 1;
+    margin-right: 3px;
+  }
+
+  .browser-link-count {
+    font-size: 0.7rem;
+    font-weight: 700;
+  }
+
   .comms-indicator.comms-monitoring {
     color: var(--fg-dim);
   }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  type IconName = 'trash' | 'notes' | 'eye' | 'eye-off' | 'pencil' | 'list' | 'lanes' | 'archive' | 'word-wrap' | 'settings' | 'help' | 'bug' | 'lightbulb' | 'pause' | 'bolt' | 'resume' | 'pdf' | 'image' | 'file' | 'diff' | 'restore' | 'close' | 'duplicate' | 'check' | 'cross' | 'warning' | 'circle' | 'circle-outline' | 'plus' | 'arrow-right' | 'search' | 'pin' | 'clock' | 'bell-off';
+  type IconName = 'trash' | 'notes' | 'eye' | 'eye-off' | 'pencil' | 'list' | 'lanes' | 'archive' | 'word-wrap' | 'settings' | 'help' | 'bug' | 'lightbulb' | 'pause' | 'bolt' | 'resume' | 'pdf' | 'image' | 'file' | 'diff' | 'restore' | 'close' | 'duplicate' | 'check' | 'cross' | 'warning' | 'circle' | 'circle-outline' | 'plus' | 'arrow-right' | 'search' | 'pin' | 'clock' | 'bell-off' | 'browser';
 
   interface Props {
     name: IconName;
@@ -21,6 +21,9 @@
 {:else if name === 'bell-off'}
   <!-- A bell, struck through like eye-off: muted (docs/mute.md). -->
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11.5V7a4 4 0 0 1 8 0v4.5l1.5 1.5h-11L4 11.5Z"/><path d="M6.5 14.5a1.5 1.5 0 0 0 3 0"/><line x1="2" y1="14" x2="14" y2="2"/></svg>
+{:else if name === 'browser'}
+  <!-- A browser window: title bar and a page. The tab-strip mark for linked Chrome tabs. -->
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><line x1="1.5" y1="6" x2="14.5" y2="6"/><circle cx="3.75" cy="4.25" r="0.4" fill="currentColor"/><circle cx="5.5" cy="4.25" r="0.4" fill="currentColor"/></svg>
 {:else if name === 'pencil'}
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2 2L5 13l-3 1 1-3L12 2Z"/></svg>
 {:else if name === 'list'}

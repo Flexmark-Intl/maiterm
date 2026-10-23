@@ -2503,6 +2503,11 @@ export interface BrowserLinkStatus {
   extension_id: string;
 }
 
+/** The live links alone (the tab strip's browser indicator); no manifest scan. */
+export async function browserLinkLinks(): Promise<BrowserLinkView[]> {
+  return invoke('browser_link_links');
+}
+
 export async function browserLinkStatus(): Promise<BrowserLinkStatus> {
   return invoke('browser_link_status');
 }

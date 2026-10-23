@@ -28,6 +28,7 @@
   import { stackStore } from '$lib/stores/stack.svelte';
   import { followUpsStore } from '$lib/stores/followUps.svelte';
   import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
+  import { browserLinkStore } from '$lib/stores/browserLink.svelte';
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
   import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
   import { agentDelivery } from '$lib/stores/agentDeliveryLive';
@@ -764,6 +765,9 @@
     agentBridgeStore.init();
     // Mesh Workspace (N:M agent bridging — docs/mesh-workspace.md)
     agentMeshStore.init();
+    // Browser link (docs/browser-link.md): which tabs hold linked Chrome tabs, and a notice when
+    // the human links one.
+    browserLinkStore.init();
     // Agent requests the human approves (docs/agent-requests.md): the waiting list, and this
     // window's share of carrying out approved ones and telling the agent.
     void agentRequestsStore.init();
