@@ -352,6 +352,21 @@
 >   `.pnpm`) is pointed at the same place in the copy, compared without case and with
 >   `\\?\C:\` equal to `C:\`; one pointing elsewhere keeps its target. Symlinks are still
 >   copied verbatim, like `cp -R`. Again compiled for Windows in isolation, not run there.
+>
+> **As built, phase 3 third review fixes (2026-10-23).** Where they changed the above:
+> - **In the real tree an edit also goes with its row** (`TreeModel.rowGone`): a folder whose
+>   listing is in hand and lacks the name no longer draws the row, so the input has unmounted
+>   even when `knownGone` can't call it proof. That is a truncated folder (over 50,000 entries)
+>   re-listed after an agent deleted the shown item being renamed; the edit used to stay set
+>   with nothing able to cancel it, and every drag was refused. Find and the Changed lens
+>   still keep their edits on `knownGone` alone.
+> - **A junction target spelled another way still lands in the copy.** The target is the
+>   maker's text (a `subst` drive, a path through a parent junction, an 8.3 short name) while
+>   the Files root is canonical. When the text doesn't start with the root literally, each
+>   leading part of it that exists is canonicalized, shortest first, and compared with the
+>   canonical root; only that prefix is resolved, so a link further in can't carry the target
+>   out of the tree. Tested on Unix with a symlinked parent standing in for the alias; not run
+>   on Windows.
 
 ## 1. Why
 
