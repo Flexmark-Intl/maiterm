@@ -385,6 +385,8 @@ from the stated tab identity, like `own_tab_only_refusal`.
 | `hiveMessageWorker {worker, text, assets?}` | coordinator | Through `deliver_to_agent`: the draft, dialog and typing guards; a busy agent is no reason to hold. `assets` attach gallery files as paths |
 | `hiveLand {worker, summary}` | coordinator | Lands the worker (§8). Answers with what happened in each repo, or why it refused |
 | `hiveStopWorker {worker, reason}` | coordinator | Stops the agent; keeps worktrees and branches |
+| `hiveAnswerWorker {worker, prompt_id, answer}` | coordinator | Answers a worker's on-screen question or permission prompt, within the limits of §7.4. Refused while that checkpoint is Ask me |
+| `hivePrecedents {category?, query?}` / `hiveRecordPrecedent {...}` | coordinator | Reads the precedents that bear on a decision; records one when the human answers (§7.5) |
 | `hiveReport {status: done\|blocked\|failed, summary, notes?, assets?}` | worker | Records the report on the task (status + note), and delivers it to the coordinator as a framed `⟦HIVE REPORT⟧` message, with the assets it's reporting |
 | Gallery tools | all Hive agents | §10.3 |
 
@@ -406,11 +408,104 @@ exists.
 | Deliver assets into a folder | None for new files; overwriting anything is the human's (§10.6) |
 | Push | Only if the Hive's Push after land setting is on (default off), never forced (§8.5) |
 | Spend past the budget | The human, on a blocker the agent raises first (§10.3) |
-| A worker's permission prompt | The human, in the worker's column, or the phone |
+| A worker's question or permission prompt | The coordinator by default; a checkpoint can send it to the human (§7.4) |
 
 The window's Overlord engine leaves Hive tabs alone. A Hive workspace is `overlord_exempt` by
 default, because the coordinator already supervises its workers, and two supervisors driving one
 agent is the double-drive problem `docs/overlord.md` §9.1.2 solved for escalations.
+
+### 7.4 Autonomy: the coordinator decides (decided 2026-10-23)
+
+The default is that **the coordinator makes every decision it can**, and the human is asked only
+where a checkpoint says so. The checkpoints are Hive settings, and each one is set to
+*Coordinator* or *Ask me*:
+
+| Checkpoint | Default | Notes |
+|---|---|---|
+| Plan: which workers, how many, in what order | Coordinator | "Show me the plan first" is the Ask-me setting |
+| Workers' questions | Coordinator | One asker per question (`docs/overlord.md` §9.1.2): a worker asks the coordinator, never the human |
+| Workers' permission prompts | Coordinator | See the limits below |
+| Landing | Coordinator | The approval mode (§8.3) is this checkpoint set to Ask me |
+| Picking finals in the gallery | Coordinator | Creative Hives often set this to Ask me |
+| Spending past the budget | **Ask me** | Money; the one default that starts at the human (§10.3) |
+| Pushing | Coordinator, when Push after land is on | |
+| Adding a dependency, changing a public interface | Coordinator | Listed so a Hive can tighten them |
+
+What never moves to the coordinator, whatever the settings: creating a Hive, raising the cap
+or the budget, Claude's workspace-trust dialog, an "always allow" or "don't ask again" option
+on a permission prompt (the coordinator answers only *this once*), and overwriting anything
+outside the Hive's own folders. These are Rust refusals by tab identity, not words in a brief.
+
+**Workers ask the coordinator.** A worker's brief says its human is the coordinator: questions
+go up with `hiveReport {status: "blocked", ...}`, and the answer comes back by
+`hiveMessageWorker`. A worker that uses AskUserQuestion anyway, or stops at a permission
+prompt, is answered by the coordinator through the existing prompt responder, with the
+same `prompt_id` stale guard, the 1.5 s guard and the screen read that `answerTabPrompt` uses.
+That's new authority for an agent, and it's honest to say what it costs. A permission dialog
+appears when auto mode judged an action worth asking about, and a coordinator persuaded by a
+worker's transcript (a prompt injection carried in from a web page, say) could approve it. The
+limits above keep the worst outcomes out of reach, every answer is logged (§7.6), and setting
+the checkpoint to Ask me puts the human back in front of every prompt.
+
+**The coordinator never blocks the Hive on the human.** An AskUserQuestion in the coordinator's
+own tab would stop its whole turn, and with it every worker waiting for a decision. So the
+coordinator asks with a **task blocker** (`docs/tasks.md` §3.1: a `decision` with options and
+the one it recommends) and keeps coordinating everything else. The question reaches the human in
+the coordinator's column, the Loom's Decisions and the phone. The answer comes back typed as
+"[maiTerm] The human answered", which is already how blockers work.
+
+### 7.5 Learning from the human's decisions
+
+Every decision that reaches the human is a lesson, and the Hive keeps it as a **precedent**:
+
+```
+precedent: {
+  id, asked_at, answered_at,
+  category,                  // the checkpoint it fell under, or a free label ("visual style")
+  question, context, options, recommended,
+  answer, reason?,           // the human's answer, and their words if they gave any
+  rule,                      // one line the coordinator distils: "When X, choose Y, because Z"
+  scope: "hive" | "global",
+  cited: n, overridden: n,
+}
+```
+
+- **Recording needs no approval**, unlike the window playbook's proposals. The precedent is the
+  human's own answer, written down. The coordinator distils the `rule` line the moment the answer
+  arrives. It's stored in the Hive's memory folder under `precedents/`, and the human can read,
+  edit or delete each one in the Memory view.
+- **Before asking, the coordinator checks the precedents.** The brief says: if one settles the
+  question, decide, and **cite it** in the chat ("Chose the darker grade, per your precedent of
+  Oct 23: 'moody over bright for this brand'"). Citing is what makes autonomy auditable: the
+  human sees the decision and the reason in one line, and can say no.
+- **A correction is a precedent too.** When the human overrides a decision, maiTerm counts it
+  against the precedent that was cited, and the new answer replaces it. A rule that's overridden
+  twice is retired, not tweaked.
+- **Precedents reach the coordinator when it decides, not as a growing brief.** The memory index
+  lists categories with counts. `hivePrecedents {category?, query?}` returns the relevant ones.
+  That's the window playbook's design (handed over on `listEscalations`, never pasted into the
+  doctrine), applied per Hive.
+- **Global precedents** carry a person's taste across Hives: commit conventions, a visual style,
+  how much testing is enough. The coordinator proposes `global` when a rule doesn't name this
+  Hive's subject matter, and the human sees the scope on the precedent and can change it. They
+  live in `<app data>/hive/precedents/`, and every Hive's coordinator can query them.
+
+### 7.6 Earning more autonomy
+
+Confidence is counted, not felt:
+
+- For each checkpoint set to Ask me, maiTerm counts the human's recent answers in that category
+  and how often the coordinator's **recommended** option was the one chosen.
+- When the coordinator's recommendation has been taken **5 times in a row** in one category, and
+  no precedent there was overridden in that run, the coordinator offers, once, in its chat and as
+  a one-click card: "You've agreed with my last 5 calls on *landing*. Shall I handle landing
+  from now on?" Yes flips that checkpoint to Coordinator. No resets the count, and the offer
+  isn't repeated until another 5.
+- It works the other way too. Two overrides of the coordinator's own decisions in one category
+  within a day prompt it to offer handing that category back to the human.
+- **The decision log** (Hive header → Memory → Decisions) lists every decision with who made
+  it (coordinator, by precedent, or the human), the precedent cited, and the outcome. A daily
+  digest in the coordinator's chat summarises what it decided alone. It's a setting, on by default.
 
 ## 8. Landing
 
@@ -768,11 +863,14 @@ Decided 2026-10-23:
    inputs (§6.1). Self-answered, per the brief to decide as a pro would.
 6. **Gallery:** per Hive, immutable assets with recipes and lineage, filed by tool, owned by
    Rust (§10). Self-answered likewise.
-
 7. **Push:** a Hive setting, default off (§8.5).
 8. **Generators:** hosted APIs as MCP servers, skills, local CLIs and local ComfyUI, with Kling,
    fal.ai, WaveSpeed AI, Kie.ai and Higgsfield named, and the `/generate` skill offered as an
    optional install (§10.3). Paid generation brings a per-Hive budget, self-answered.
+9. **Autonomy:** the coordinator decides as much as possible; human checkpoints are Hive
+   settings; decisions that reach the human become precedents that let the coordinator decide
+   them next time, and earn it whole categories (§7.4–7.6). Darryl's direction; the mechanics are
+   self-answered.
 
 ## 15. Build order
 
@@ -785,7 +883,7 @@ Decided 2026-10-23:
 5. The activity feed, diff stat, worker columns, raw terminal, keyboard.
 6. Landing: land to Base (default) including several repos, the approval-mode setting through
    agent requests; retire; delete flow.
-7. Shared memory: `autoMemoryDirectory`, index rebuild, Memory view.
+7. Shared memory: `autoMemoryDirectory`, index rebuild, Memory view; checkpoints, `hiveAnswerWorker`, precedents, the decision log and earned autonomy.
 8. Gallery: store and index, `galleryAdd`/`List`/`Get`/`Tag`/`Collect`, thumbnails, the grid
    and detail view; then compare, Iterate/attach, collections, deliver.
 9. Suspend/resume/restart, phone polish (Hive tabs already appear as chats; the gallery feed
