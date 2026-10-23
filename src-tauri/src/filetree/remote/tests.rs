@@ -891,6 +891,77 @@ fn a_first_frame_that_times_out_is_discarded_not_left_half_made() {
     }
 }
 
+/// The helper's own code, loaded under python3 with `send` captured and one op swapped for a
+/// version that misbehaves on cue: the cases below can't be made to happen on cue end to end.
+fn run_helper_harness(name: &str, script: &str) {
+    let dir = scratch(name);
+    let helper = dir.join("helper.py");
+    std::fs::write(&helper, proto::HELPER).unwrap();
+    let harness = dir.join("harness.py");
+    let prelude = "import errno, json, os, sys, time\nfrom concurrent.futures import ThreadPoolExecutor\nsrc = open(sys.argv[1]).read()\nh = {'__name__': 'helper'}\nexec(compile(src, sys.argv[1], 'exec'), h)\nanswers = []\nh['send'] = lambda header, payload=b'': answers.append(header)\nroot = sys.argv[2]\n";
+    std::fs::write(&harness, format!("{prelude}{script}")).unwrap();
+    let root = dir.join("root");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut c = Command::new("python3");
+    c.arg("-I").arg(&harness).arg(&helper).arg(&root);
+    env(&mut c, &dir);
+    let out = c.output().unwrap();
+    assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A first frame whose write fails after it made the file (a full disk, a quota) takes the
+/// file back out: Rust reads any refused put as "not made" and sends no discard after it.
+#[test]
+fn a_put_whose_write_fails_leaves_nothing_behind() {
+    if !python3() {
+        return;
+    }
+    run_helper_harness(
+        "put-fails",
+        r#"
+def full_disk(fd, payload):
+    os.write(fd, payload[:3])
+    raise OSError(errno.ENOSPC, "No space left on device")
+h['write_all'] = full_disk
+h['handle']({'id': 1, 'op': 'put', 'root': root, 'rel': 'big.bin', 'more': True}, b'x' * 10)
+assert answers == [{'id': 1, 'ok': False, 'code': 'io', 'msg': answers[0]['msg']}], answers
+assert not os.path.lexists(os.path.join(root, 'big.bin')), 'a failed put left its file'
+"#,
+    );
+}
+
+/// A discard sent while the put it follows is still running waits for it. The helper's workers
+/// run jobs in any order, so a discard that ran first removed nothing and the put then made the
+/// half-written file it was sent to take away; the put is slowed here so it always would.
+#[test]
+fn a_discard_waits_for_the_put_it_follows() {
+    if !python3() {
+        return;
+    }
+    run_helper_harness(
+        "discard-order",
+        r#"
+real_put = h['PAYLOAD_OPS']['put']
+def slow_put(req, payload):
+    time.sleep(0.4)
+    return real_put(req, payload)
+h['PAYLOAD_OPS']['put'] = slow_put
+os.mkdir(os.path.join(root, 'dir'))
+pool = ThreadPoolExecutor(max_workers=6)
+h['dispatch'](pool, {'id': 1, 'op': 'put', 'root': root, 'rel': 'big.bin', 'more': True}, b'x' * 10)
+h['dispatch'](pool, {'id': 2, 'op': 'put', 'root': root, 'rel': 'dir/inner.bin', 'more': True}, b'x' * 10)
+h['dispatch'](pool, {'id': 3, 'op': 'discard', 'root': root, 'rel': 'big.bin'}, b'')
+h['dispatch'](pool, {'id': 4, 'op': 'discard', 'root': root, 'rel': 'dir'}, b'')
+pool.shutdown(wait=True)
+assert all(a['ok'] for a in answers), answers
+assert not os.path.lexists(os.path.join(root, 'big.bin')), 'the discard ran before the put'
+assert not os.path.lexists(os.path.join(root, 'dir')), 'a folder discard ran before a put inside it'
+assert h['MAKING'] == {}, h['MAKING']
+"#,
+    );
+}
+
 #[test]
 fn the_helper_ends_with_its_input() {
     if !python3() {

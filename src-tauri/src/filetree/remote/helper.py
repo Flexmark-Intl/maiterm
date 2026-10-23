@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
 
 PROTOCOL = 1
 MAX_HEADER = 1 << 20
@@ -1412,17 +1413,29 @@ def write_all(fd, payload):
 
 def op_put(req, payload):
     """A new file, never replacing anything. `more`: the rest follows in `append` frames,
-    so the file is made writable by its owner until the last one sets `mode`."""
+    so the file is made writable by its owner until the last one sets `mode`.
+
+    A put that fails has made nothing: maiTerm reads any refusal as "not made" (only `exists`
+    means another writer has the name) and so never discards after one."""
     root = get_root(req["root"])
     p = contained(root.real, req["rel"], True)
     mode = int(req.get("mode", 0o644)) & 0o7777
     try:
         fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if req.get("more") else mode)
+    except OSError as e:
+        raise os_fail(e, req["rel"])
+    try:
         try:
             write_all(fd, payload)
         finally:
             os.close(fd)
     except OSError as e:
+        # O_EXCL made the name this put's own, so a write that fails after it (a full disk, a
+        # quota) takes the half-written file back out rather than leave it under the real name.
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
         raise os_fail(e, req["rel"])
     return {}, b""
 
@@ -1906,6 +1919,50 @@ def liveness():
             die()
 
 
+# Requests that make something an import may discard, still running, by (root, rel).
+MAKING_OPS = ("put", "append", "mkdir", "symlink")
+MAKING = {}
+MAKING_LOCK = threading.Lock()
+
+
+def under_rel(rel, top):
+    return rel == top or (top != "" and rel.startswith(top + "/"))
+
+
+def dispatch(pool, req, payload):
+    """Hand a request to the workers, which run in any order. A `discard` waits for every
+    request read before it that is still making something at or under its path: maiTerm sends
+    one after a put whose answer it stopped waiting for, and run first it would remove nothing
+    and let the put then make the half-written file it was sent to take away."""
+    op = req.get("op")
+    root, rel = req.get("root"), str(req.get("rel") or "")
+    if op == "discard":
+        with MAKING_LOCK:
+            before = [f for (r, k), fs in MAKING.items() if r == root and under_rel(k, rel) for f in fs]
+
+        def after():
+            futures_wait(before)
+            handle(req, payload)
+
+        pool.submit(after)
+        return
+    fut = pool.submit(handle, req, payload)
+    if op in MAKING_OPS:
+        key = (root, rel)
+        with MAKING_LOCK:
+            MAKING.setdefault(key, set()).add(fut)
+
+        def done(f):
+            with MAKING_LOCK:
+                fs = MAKING.get(key)
+                if fs is not None:
+                    fs.discard(f)
+                    if not fs:
+                        del MAKING[key]
+
+        fut.add_done_callback(done)
+
+
 def main():
     t = threading.Thread(target=liveness, name="liveness")
     t.daemon = True
@@ -1923,7 +1980,7 @@ def main():
         if req.get("op") == "ping":
             send({"id": req.get("id"), "ok": True})
             continue
-        pool.submit(handle, req, payload)
+        dispatch(pool, req, payload)
 
 
 if __name__ == "__main__":

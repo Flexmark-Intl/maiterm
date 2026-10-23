@@ -1788,10 +1788,12 @@ fn upload(r: &RemoteRoot, local: &Path, rel: &str, made: &mut bool) -> Result<()
                 // Sent, but not answered in time (a slow link spends the wait writing the frame
                 // itself). The helper still acts on it: a first frame then makes the file
                 // holding only its first piece, at 0600, which nothing would ever finish. So the
-                // answer is waited out once more to learn whether this import made the file
-                // (`exists`: another writer did, and keeps it) and `import` discards it after,
-                // never racing ahead of the put through the helper's workers. A late `append`
-                // can't make anything, so the file it followed is discarded at once.
+                // answer is waited out once more to learn whether this import made the file, and
+                // `import` discards it after. A refused put has made nothing (`op_put` takes
+                // back a file whose write failed, so only `exists`, another writer's file, is
+                // left there), and a put still unanswered is counted as made: the helper runs
+                // that discard only after the put it follows. A late `append` can't make
+                // anything, so the file it followed is discarded at once.
                 Err(owed) => {
                     if at > 0 {
                         let _ = r.conn.settle(owed, Duration::ZERO);
