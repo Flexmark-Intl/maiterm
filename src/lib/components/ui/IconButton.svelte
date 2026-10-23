@@ -11,7 +11,12 @@
     children: Snippet;
   }
 
-  let { tooltip, size, active = false, danger = false, children, style, class: extraClass, ...rest }: Props = $props();
+  let { tooltip, size, active = false, danger = false, children, style, class: extraClass, 'aria-label': ariaLabel, ...rest }: Props = $props();
+
+  // The button shows only an icon, and Tooltip's text is a separate element nothing points at,
+  // so the tooltip doubles as the accessible name unless the caller gave one of its own.
+  // Never a native `title`: that would put a second tooltip over Tooltip's.
+  const label = $derived(ariaLabel ?? (rest['aria-labelledby'] ? undefined : tooltip || undefined));
 
   const mergedStyle = $derived(
     [size ? `--icon-btn-size:${size}px` : '', style ?? ''].filter(Boolean).join(';') || undefined
@@ -24,6 +29,7 @@
     class:active
     class:danger
     style={mergedStyle}
+    aria-label={label}
     {...rest}
   >
     {@render children()}
