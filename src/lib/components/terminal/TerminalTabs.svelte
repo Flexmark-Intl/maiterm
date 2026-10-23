@@ -32,6 +32,7 @@
   import { stageRemoteFileTemp } from '$lib/tauri/commands';
   import { error as logError } from '@tauri-apps/plugin-log';
   import { fileTreeStore } from '$lib/stores/fileTree.svelte';
+  import { observeResizeNextFrame } from '$lib/utils/frameResize';
 
   interface Props {
     workspaceId: string;
@@ -616,12 +617,14 @@
     prevActiveTabId = activeId ?? null;
   });
 
-  // Keep overflow state fresh when the bar resizes (window/sidebar/notes changes).
+  // Keep overflow state fresh when the bar resizes (window/sidebar/notes/Files changes). On
+  // the next frame, not in the observer's callback: the hidden-tab count is drawn in the
+  // button beside the bar, so a new count resizes the bar it was measured from, and doing that
+  // inside the observation loop logged "ResizeObserver loop completed with undelivered
+  // notifications" each time the Files column opened or closed over overflowing tabs.
   $effect(() => {
     if (!tabsBarEl) return;
-    const ro = new ResizeObserver(() => computeOverflow());
-    ro.observe(tabsBarEl);
-    return () => ro.disconnect();
+    return observeResizeNextFrame(tabsBarEl, computeOverflow);
   });
 
   // Recompute overflow whenever the tab set, grouping, or active tab changes.
