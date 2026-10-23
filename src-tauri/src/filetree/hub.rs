@@ -13,7 +13,9 @@
 //!
 //! **Backpressure (§5.4).** A subscription that is paused (`ft_pause`) or stalled (more than
 //! 256 messages or 8 MB unacked: an occluded webview stops acking on its own) is sent nothing;
-//! the folders that changed meanwhile are remembered by name, and resent whole on resume.
+//! the folders that changed meanwhile are remembered by name, and resent whole on resume (a
+//! listing the stall cut short carries on from its next chunk while its snapshot is unchanged).
+//! Only an ack that makes room in the window ends a stall.
 //!
 //! **Listing jobs.** One listing per folder at a time: a second request joins the first, so a
 //! read hung on a dead mount is never re-issued onto another thread. Each hub runs at most 4
@@ -75,6 +77,11 @@ pub struct Sub {
     unacked_bytes: usize,
     /// Folders that changed while nothing could be sent.
     dirty: BTreeSet<String>,
+    /// A listing a stall cut short: its generation and the first chunk not sent. A resume
+    /// carries on from there while the snapshot is unchanged. Restarting from chunk 0 instead
+    /// never finished a folder bigger than one ack's worth of window (the client acks every
+    /// 32 messages), and resent it forever.
+    partial: HashMap<String, (u64, usize)>,
     root_gone: bool,
     health_dirty: bool,
     /// The folders this subscriber has open.
@@ -95,6 +102,7 @@ impl Sub {
             unacked: VecDeque::new(),
             unacked_bytes: 0,
             dirty: BTreeSet::new(),
+            partial: HashMap::new(),
             root_gone: false,
             health_dirty: false,
             interest: HashSet::new(),
@@ -144,8 +152,13 @@ impl Sub {
             self.unacked.pop_front();
             self.unacked_bytes -= b;
         }
-        let resumed = self.stalled;
-        self.stalled = false;
+        // Only an ack that made room ends a stall: a repeated one would resume into a full
+        // window just to stall again on the first message.
+        let room = self.seq - self.acked <= STALL_MESSAGES && self.unacked_bytes <= STALL_BYTES;
+        let resumed = self.stalled && room;
+        if room {
+            self.stalled = false;
+        }
         resumed
     }
 
@@ -156,8 +169,14 @@ impl Sub {
     /// The chunks of a listing from `first` on (chunk 0 may have gone out early).
     fn send_dir_from(&mut self, rel: &str, snap: &DirSnap, first: usize) {
         let n = snap.entries.len().div_ceil(CHUNK).max(1);
+        // A send that can go out supersedes any cut-short one; one that can't (still stalled)
+        // leaves it, so a re-send of the same snapshot still resumes where the cut was.
+        if !(self.paused || self.stalled || self.dead) {
+            self.partial.remove(rel);
+        }
         for i in first..n {
             let chunk = if snap.entries.is_empty() { Vec::new() } else { snap.entries[i * CHUNK..((i + 1) * CHUNK).min(snap.entries.len())].to_vec() };
+            let before = self.seq;
             self.deliver(TreeEvent::Dir {
                 rel: rel.to_string(),
                 gen: snap.gen,
@@ -169,10 +188,37 @@ impl Sub {
             });
             if self.paused || self.stalled || self.dead {
                 // The rest would only be marked dirty one chunk at a time; the folder is.
+                // `seq` moved only if this chunk actually went out (the one that filled the
+                // window did; one met by an existing stall was only marked dirty).
+                let next = if self.seq > before { i + 1 } else { i };
+                if next > 0 && next < n {
+                    self.partial.insert(rel.to_string(), (snap.gen, next));
+                }
                 self.dirty.insert(rel.to_string());
                 return;
             }
         }
+    }
+
+    /// After a resume: one listing per folder that changed meanwhile, continuing one a stall
+    /// cut short when its snapshot is the one already partly sent. Returns the folders with
+    /// no snapshot, which must be listed again.
+    fn flush_dirty(&mut self, dirs: &HashMap<String, DirSnap>) -> Vec<String> {
+        let mut relist = Vec::new();
+        let rels: Vec<String> = std::mem::take(&mut self.dirty).into_iter().filter(|r| self.interest.contains(r)).collect();
+        for rel in rels {
+            match dirs.get(&rel) {
+                Some(snap) => {
+                    let from = match self.partial.get(&rel) {
+                        Some(&(gen, next)) if gen == snap.gen => next,
+                        _ => 0,
+                    };
+                    self.send_dir_from(&rel, snap, from);
+                }
+                None => relist.push(rel),
+            }
+        }
+        relist
     }
 }
 
@@ -519,6 +565,7 @@ impl RootHub {
                 let mut subs = self.subs.lock();
                 if let Some(s) = subs.get_mut(&sub) {
                     s.interest.remove(&rel);
+                    s.partial.remove(&rel);
                 }
                 !subs.values().any(|s| s.interest.contains(&rel))
             };
@@ -602,13 +649,7 @@ impl RootHub {
             if std::mem::take(&mut s.health_dirty) {
                 s.deliver(health);
             }
-            let rels: Vec<String> = std::mem::take(&mut s.dirty).into_iter().filter(|r| s.interest.contains(r)).collect();
-            for rel in rels {
-                match dirs.get(&rel) {
-                    Some(snap) => s.send_dir(&rel, snap),
-                    None => relist.push(rel),
-                }
-            }
+            relist = s.flush_dirty(&dirs);
         }
         for rel in relist {
             self.request(&rel, Some(Waiter::Refresh { sub }));
@@ -1236,5 +1277,85 @@ fn worker(me: Weak<RootHub>) {
             })
         };
         hub.complete(&rel, result, early);
+    }
+}
+
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Recorder {
+        msgs: Mutex<Vec<Envelope>>,
+    }
+
+    impl Sink for Recorder {
+        fn send(&self, env: Envelope) -> bool {
+            self.msgs.lock().push(env);
+            true
+        }
+    }
+
+    /// A folder bigger than one ack's worth of window, dirtied during a stall, must finish
+    /// with the frontend's ack policy (every 32 messages), not be resent from chunk 0 on
+    /// every ack forever.
+    #[test]
+    fn a_big_folder_dirtied_in_a_stall_finishes_under_partial_acks() {
+        const ACK_EVERY: u64 = 32;
+        const CHUNKS: usize = 40;
+        let rec = Arc::new(Recorder::default());
+        let mut s = Sub::new(1, "w", rec.clone());
+        s.interest.insert("big".to_string());
+        let entries: Vec<Entry> = (0..CHUNKS * CHUNK).map(|i| Entry { n: format!("f{i:06}"), k: "f", f: 0 }).collect();
+        let mut dirs = HashMap::new();
+        dirs.insert("big".to_string(), DirSnap { gen: 7, entries, total: (CHUNKS * CHUNK) as u32, truncated: false });
+
+        // Fill the window until it stalls, then the folder changes.
+        while !s.stalled {
+            s.deliver(TreeEvent::NotModified { rel: "other".into(), gen: 1 });
+        }
+        s.deliver(TreeEvent::NotModified { rel: "big".into(), gen: 7 });
+        assert!(s.dirty.contains("big"));
+
+        // The client: applies in order, acks every 32nd message; each resume flushes.
+        let (mut read, mut since_ack, mut next_chunk, mut done) = (0usize, 0u64, None::<u32>, false);
+        while read < rec.msgs.lock().len() {
+            assert!(read < 2_000, "the folder was resent over and over");
+            let env = rec.msgs.lock()[read].clone();
+            read += 1;
+            if let TreeEvent::Dir { rel, chunk, last, gen, .. } = &env.ev {
+                assert_eq!((rel.as_str(), *gen), ("big", 7));
+                assert!(!done, "a finished folder was sent again");
+                next_chunk = match (chunk, next_chunk) {
+                    (0, _) => Some(1),
+                    (c, Some(n)) if *c == n => Some(n + 1),
+                    (c, n) => panic!("chunk {c} out of order (expected {n:?})"),
+                };
+                done = *last;
+            }
+            since_ack += 1;
+            if since_ack >= ACK_EVERY {
+                since_ack = 0;
+                if s.ack(env.seq) {
+                    let relist = s.flush_dirty(&dirs);
+                    assert!(relist.is_empty());
+                }
+            }
+        }
+        assert!(done, "the big folder never finished");
+        assert_eq!(next_chunk, Some(CHUNKS as u32));
+    }
+
+    #[test]
+    fn an_ack_that_makes_no_room_does_not_end_a_stall() {
+        let rec = Arc::new(Recorder::default());
+        let mut s = Sub::new(1, "w", rec.clone());
+        while !s.stalled {
+            s.deliver(TreeEvent::NotModified { rel: "x".into(), gen: 1 });
+        }
+        assert!(!s.ack(0));
+        assert!(s.stalled);
+        assert!(s.ack(1));
+        assert!(!s.stalled);
     }
 }
