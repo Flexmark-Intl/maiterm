@@ -333,6 +333,25 @@
 >   remains out of reach, as above.
 > - **EditorPane's watcher** carries a start/stop generation: overlapping starts (mount,
 >   visibility, a retarget) no longer leak listener pairs.
+>
+> **As built, phase 3 second review fixes (2026-10-23).** Where they changed the above:
+> - **"Focus went nowhere" is judged after the click.** InlineName decides a blur in a
+>   microtask, which on a click runs before the clicked element is focused, so a cancelled,
+>   unchanged or invalid name read `activeElement` as body and took the keyboard back from the
+>   terminal or editor just clicked. Body now gets a second look in a `setTimeout(0)` (skipped
+>   if a new inline edit began); a commit that awaited its op was never affected.
+> - **An edit is dropped only on proof the item is gone** (`TreeModel.knownGone`): a folder
+>   Rust still follows (in `interest`, listed, not truncated) is listed without it, or that
+>   holds above it. A collapsed folder's kept listing proves nothing, and a filtered entry
+>   (ignored, hidden) is still on disk: Find and the Changed lens list both, and a rename
+>   started there used to vanish on any delta. The real tree still drops an edit whose row the
+>   filters now hide, since that row's input unmounted.
+> - **Junctions, Windows:** read off the directory entry (`FindFirstFileW`'s reparse tag), so
+>   a dangling one is still copied as a junction rather than failing as a symlink without
+>   Developer Mode. A junction whose target lies inside the copied tree (pnpm's into its own
+>   `.pnpm`) is pointed at the same place in the copy, compared without case and with
+>   `\\?\C:\` equal to `C:\`; one pointing elsewhere keeps its target. Symlinks are still
+>   copied verbatim, like `cp -R`. Again compiled for Windows in isolation, not run there.
 
 ## 1. Why
 
