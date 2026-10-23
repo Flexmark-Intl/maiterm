@@ -87,6 +87,22 @@
 > - Not in phase 1 by design: the find/filter bar (phase 2; Cmd+F and `/` do nothing in the
 >   tree yet), New File/Folder buttons and every write (phase 3), the agent strip, lenses,
 >   edge chips and follow-agent (phase 4).
+>
+> **As built, phase 1 fix: the active-file highlight (2026-10-22).** The dev check found the
+> `active-file` row (and the ⋯ menu's "Reveal Active File") going stale:
+> - **The highlight follows the active tab's FILE, not root resolves.** It was refreshed only by
+>   resolves keyed on the tab id, so a preview swapping its file (same id) kept the old row lit,
+>   and a terminal tab in front never cleared it. Now `filetree/activeFile.ts` derives the target
+>   from the tab's type and path and `FilesColumn` re-places it on every change of that path or
+>   of the subscription (`syncActiveFile`); no target clears at once, and a lookup for an earlier
+>   target is dropped. Resolves no longer touch it.
+> - **Diff tabs highlight their file too**, but never offer "Outside root · Show": a diff's path
+>   may be an ssh agent's file, whose folder doesn't exist here.
+> - **A double-click on a menu item no longer falls through.** The ⋯ menu is not inside the tree
+>   (no event propagates to a row), but an item acts on `click` and the menu unmounts, so a
+>   double-click's second press hit the row underneath: selected, opened, focused.
+>   `ContextMenu` now swallows presses with `detail > 1` for 600 ms after an item acts, for
+>   every menu in the app.
 
 ## 1. Why
 
