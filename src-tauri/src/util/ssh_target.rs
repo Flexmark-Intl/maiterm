@@ -184,8 +184,18 @@ impl SshTarget {
 fn tunnel_socket(ssh_command: &str, state: &crate::state::AppState) -> Option<String> {
     let tunnels: Vec<String> = state.ssh_tunnels.read().values().map(|t| t.host_key.clone()).collect();
     let key = matching_tunnel(ssh_command, &tunnels)?;
-    let sock = crate::commands::ssh_tunnel::cm_socket_path(key)?;
-    (cfg!(unix) && sock.exists()).then(|| sock.to_string_lossy().into_owned())
+    // Tunnels are ControlMasters only where ssh has unix sockets: on Windows there is no
+    // socket to ride, and the caller connects on its own.
+    #[cfg(unix)]
+    {
+        let sock = crate::commands::ssh_tunnel::cm_socket_path(key)?;
+        sock.exists().then(|| sock.to_string_lossy().into_owned())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = key;
+        None
+    }
 }
 
 /// The tunnel key among `keys` that reaches the same host as `ssh_command`.

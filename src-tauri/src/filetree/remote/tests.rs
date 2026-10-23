@@ -3,6 +3,13 @@
 //! (`exec python3 -u -c '<LOADER>'`), so the loader, the bootstrap and every frame cross real
 //! pipes. Each test has a scratch HOME (the remote trash, git's global config), never the real
 //! one. `on_a_real_host` runs the same against an ssh host when asked.
+//!
+//! A test that starts the helper this way is `#[cfg(unix)]`: it makes THIS computer stand in
+//! for the ssh host, and a host is always a POSIX one (`/bin/sh`, select on pipes, unix
+//! symlinks). Windows only ever runs the Rust side against a host elsewhere; what of that
+//! needs no host (the registry, exit classification, the 3.6 gate, the helper harness) runs
+//! everywhere.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -112,6 +119,7 @@ fn shortname(h: &str) -> String {
 }
 
 #[test]
+#[cfg(unix)]
 fn frames_carry_raw_bytes_both_ways() {
     if !python3() {
         return;
@@ -162,6 +170,7 @@ fn frames_carry_raw_bytes_both_ways() {
 }
 
 #[test]
+#[cfg(unix)]
 fn listings_flag_ignored_and_hidden_entries_like_the_local_stack() {
     if !python3() {
         return;
@@ -221,6 +230,7 @@ fn listings_flag_ignored_and_hidden_entries_like_the_local_stack() {
 }
 
 #[test]
+#[cfg(unix)]
 fn every_rel_is_contained_like_ops_rs() {
     if !python3() {
         return;
@@ -258,6 +268,7 @@ fn every_rel_is_contained_like_ops_rs() {
 }
 
 #[test]
+#[cfg(unix)]
 fn file_ops_answer_like_ops_rs_and_undo_through_the_remote_trash() {
     if !python3() {
         return;
@@ -310,6 +321,7 @@ fn file_ops_answer_like_ops_rs_and_undo_through_the_remote_trash() {
 }
 
 #[test]
+#[cfg(unix)]
 fn git_runs_on_the_host_with_the_same_parser() {
     if !python3() {
         return;
@@ -387,6 +399,7 @@ fn dir_names(ev: &TreeEvent) -> Vec<String> {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_remote_place_serves_the_same_tree_events() {
     if !python3() {
         return;
@@ -506,6 +519,7 @@ fn a_remote_place_serves_the_same_tree_events() {
 /// Find on a remote root whose file list couldn't be had: it says why rather than answering "no
 /// matches" from an empty index taken as valid, and the next query after a while tries again.
 #[test]
+#[cfg(unix)]
 fn a_find_index_that_could_not_be_listed_says_so_and_is_tried_again() {
     if !python3() {
         return;
@@ -550,6 +564,7 @@ fn a_find_index_that_could_not_be_listed_says_so_and_is_tried_again() {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_dead_helper_comes_back_and_its_roots_reattach() {
     if !python3() {
         return;
@@ -587,6 +602,7 @@ fn a_dead_helper_comes_back_and_its_roots_reattach() {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_host_without_python3_is_listed_read_only_by_sh() {
     let home = scratch("nopy");
     let t = scratch("nopy-root");
@@ -628,6 +644,7 @@ fn startup_failures_are_told_apart() {
 /// What `ssh host '<remote command>'` does: the login shell runs the command line. Each shell
 /// installed here must hand the loader to python3 intact and start the helper.
 #[test]
+#[cfg(unix)]
 fn the_loader_starts_the_helper_under_every_login_shell() {
     if !python3() {
         return;
@@ -811,6 +828,7 @@ impl Transport for Throttled {
 /// to hold stdin until it was written, so the ping behind it timed out and Rust killed the
 /// helper, and the helper itself, reading no ping until the payload was in, gave up too.
 #[test]
+#[cfg(unix)]
 fn a_slow_upload_is_not_taken_for_a_dead_helper() {
     if !python3() {
         return;
@@ -858,6 +876,7 @@ fn a_slow_upload_is_not_taken_for_a_dead_helper() {
 /// makes the file from it. The upload must count that file as made, so the import's discard
 /// removes it, rather than leave the first megabyte under the real name at 0600.
 #[test]
+#[cfg(unix)]
 fn a_first_frame_that_times_out_is_discarded_not_left_half_made() {
     if !python3() {
         return;
@@ -963,6 +982,7 @@ assert h['MAKING'] == {}, h['MAKING']
 }
 
 #[test]
+#[cfg(unix)]
 fn the_helper_ends_with_its_input() {
     if !python3() {
         return;
