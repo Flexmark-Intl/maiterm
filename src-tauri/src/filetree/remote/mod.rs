@@ -469,6 +469,32 @@ impl Conn {
         self.hello.lock().clone()
     }
 
+    fn keep_hello(&self, f: &proto::Frame) -> Hello {
+        let h = &f.header;
+        let hello = Hello {
+            hostname: h.get("hostname").and_then(Value::as_str).unwrap_or("").to_string(),
+            home: h.get("home").and_then(Value::as_str).unwrap_or("").to_string(),
+            inotify: h.get("inotify").and_then(|i| i.get("available")).and_then(Value::as_bool).unwrap_or(false),
+        };
+        *self.hello.lock() = Some(hello.clone());
+        hello
+    }
+
+    /// `hello`, asked now if the one sent when the helper came up hasn't answered. A root
+    /// opened by the call that started the helper usually beat it (the helper runs requests
+    /// side by side, and `root` is quicker than `hello`'s `git --version`), and what it read
+    /// then it kept: the wrong-host guard off for that subscription's life, inotify taken for
+    /// absent, a host's home not known to be shallow. None on a host without python3.
+    pub fn hello_now(&self, timeout: Duration) -> Option<Hello> {
+        if let Some(h) = self.hello() {
+            return Some(h);
+        }
+        match self.call("hello", json!({}), &[], timeout) {
+            Ok(f) => Some(self.keep_hello(&f)),
+            Err(_) => None,
+        }
+    }
+
     /// The host for a person (`ews@nova`).
     pub fn label(&self) -> String {
         crate::watch::host_label(&self.host)
@@ -580,16 +606,12 @@ impl Conn {
             }
             again
         };
-        // What the host is, for Health and the wrong-host guard.
+        // What the host is, for Health and the wrong-host guard. Not waited for here: a root
+        // being opened asks for it itself (`hello_now`) when this hasn't landed yet.
         let weak = self.me.clone();
         let _ = self.call_async("hello", json!({}), &[], move |r| {
             let (Some(c), Ok(f)) = (weak.upgrade(), r) else { return };
-            let h = &f.header;
-            *c.hello.lock() = Some(Hello {
-                hostname: h.get("hostname").and_then(Value::as_str).unwrap_or("").to_string(),
-                home: h.get("home").and_then(Value::as_str).unwrap_or("").to_string(),
-                inotify: h.get("inotify").and_then(|i| i.get("available")).and_then(Value::as_bool).unwrap_or(false),
-            });
+            c.keep_hello(&f);
         });
         if reattach {
             // Every root asks for its folders and watches again: what changed while the helper
@@ -1114,6 +1136,8 @@ impl RemoteRoot {
             Err(CallError::Op { code, .. }) if code == "gone" => return Err(format!("Folder missing on {}: {root}", conn.label())),
             Err(e) => return Err(e.to_string()),
         };
+        // Read below and by the hub's ack, its shallow check and Health: known before either.
+        let hello = if conn.status() == Status::Limited { None } else { conn.hello_now(Duration::from_secs(10)) };
         let tag = NEXT_TAG.fetch_add(1, Ordering::SeqCst);
         let r = Arc::new_cyclic(|me| RemoteRoot {
             me: me.clone(),
@@ -1127,7 +1151,7 @@ impl RemoteRoot {
             excludes: Mutex::new(excludes),
             watched: Mutex::new(BTreeSet::new()),
             polled: Mutex::new(BTreeSet::new()),
-            inotify: AtomicBool::new(conn.hello().is_some_and(|h| h.inotify)),
+            inotify: AtomicBool::new(hello.is_some_and(|h| h.inotify)),
             poller: AtomicBool::new(false),
         });
         conn.roots.lock().insert(tag, Arc::downgrade(&r));

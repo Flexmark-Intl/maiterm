@@ -106,6 +106,10 @@ fn git(dir: &Path, home: &Path, args: &[&str]) {
 
 const T: Duration = Duration::from_secs(20);
 
+fn shortname(h: &str) -> String {
+    h.split('.').next().unwrap_or(h).to_ascii_lowercase()
+}
+
 #[test]
 fn frames_carry_raw_bytes_both_ways() {
     if !python3() {
@@ -405,6 +409,17 @@ fn a_remote_place_serves_the_same_tree_events() {
     let ack = ft.open_with("w", &place, vec![], rec.clone(), vec![], None).unwrap();
     assert!(ack.caps.remote && ack.caps.writable && ack.caps.git);
     assert_eq!((ack.root_native.as_str(), ack.sep.as_str(), ack.nfc_names), (t.to_str().unwrap(), "/", false));
+    // The ack names the host (the wrong-host guard is off for a subscription without it).
+    let here = String::from_utf8(Command::new("hostname").output().unwrap().stdout).unwrap();
+    assert_eq!(ack.remote_hostname.as_deref().map(shortname), Some(shortname(here.trim())));
+    // Also when the `hello` sent as the helper came up hasn't answered yet, as happens when the
+    // open that started it gets its `root` back first: the open asks for it.
+    let conn = ft.hub_of(ack.sub_id).unwrap().remote.as_ref().unwrap().conn.clone();
+    *conn.hello.lock() = None;
+    let second = RemoteRoot::open(ft.remotes.lease("me@here", None), &t.join("src").to_string_lossy(), Vec::new()).unwrap();
+    assert!(second.conn.hello().is_some_and(|h| shortname(&h.hostname) == shortname(here.trim())));
+    assert!(second.inotify.load(Ordering::SeqCst) == conn.hello().unwrap().inotify);
+    drop(second);
     let root = rec.wait("the root's listing", |e| matches!(e, TreeEvent::Dir { rel, last: true, .. } if rel.is_empty()));
     assert_eq!(dir_names(&root), vec!["src", ".gitignore", "a.txt", "x.log"], "sorted here, folders first");
     if let TreeEvent::Dir { entries, .. } = &root {
