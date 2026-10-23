@@ -121,9 +121,10 @@ fn prune_snapshots(prefix: &str) {
 /// `exe` from KERN_PROCARGS2, which is the path as passed to execve — `cargo run`
 /// gives `target/debug/aiterm`, while current_exe() is always absolute, so comparing
 /// whole paths finds no peer in the two configurations that actually share a data
-/// dir: two `tauri:dev` sessions, and a second bundle copy (LaunchServices refuses to
-/// start a second instance of the *same* bundle, so a real duplicate is always a
-/// different path). A name match can only over-report, which costs a spurious abort;
+/// dir: two `tauri:dev` sessions, and a second bundle copy. (LaunchServices keeps one
+/// instance of a bundle only for launches made through it; exec'ing the binary directly
+/// starts another. The startup lock, instance_lock.rs, now refuses both before they get
+/// here; this guard is the backstop.) A name match can only over-report, which costs a spurious abort;
 /// a path match under-reports, which costs the user's state.
 fn another_instance_running() -> bool {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};

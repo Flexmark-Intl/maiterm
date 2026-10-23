@@ -22,8 +22,8 @@ pub fn is_share_path(p: &std::path::Path) -> bool {
 }
 
 /// Share files named on a command line. `cwd` resolves relative ones: a forwarded argv
-/// comes from the second process, whose working directory is not ours.
-#[cfg_attr(target_os = "macos", allow(dead_code))] // macOS delivers files as RunEvent::Opened
+/// comes from the second process, whose working directory is not ours. Also asked on every
+/// platform at launch, before the single-instance lock, to tell a file-open from a relaunch.
 pub fn paths_from_args(args: &[String], cwd: Option<&std::path::Path>) -> Vec<PathBuf> {
     args.iter()
         .skip(1)

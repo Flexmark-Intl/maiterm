@@ -6,6 +6,7 @@ mod claude_code;
 mod commands;
 mod comms;
 mod filetree;
+mod instance_lock;
 mod mailink;
 mod mcp_proxy;
 mod pty;
@@ -170,8 +171,60 @@ pub fn run_browser_link_host_if_requested() -> bool {
     true
 }
 
+/// Why this launch couldn't take the single-instance lock, for setup() to log.
+static UNGUARDED_LAUNCH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The one expansion of `generate_context!`: it embeds the whole frontend, so a second call
+/// site would ship it twice.
+fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
+/// Another maiTerm holds this data dir: leave without touching anything.
+///
+/// Windows/Linux hand a double-clicked share file to the running instance by launching a
+/// second process with the path in argv. That handoff is the single-instance plugin's, so a
+/// launch carrying one builds a bare app with that plugin alone: it forwards argv and exits
+/// during plugin init. If the holder vanished in between, setup() exits instead, before any
+/// window or state exists.
+fn second_instance_exit(opens_files: bool) {
+    use std::io::Write;
+    // Not `eprintln!`: a relaunched child can outlive the stderr it inherited, and eprintln
+    // panics on a closed pipe. Logging isn't up, and the log file is the other instance's.
+    let _ = writeln!(
+        std::io::stderr(),
+        "maiTerm is already running for this data directory ({}); not starting a second instance.",
+        instance_lock::lock_path().map(|p| p.display().to_string()).unwrap_or_default()
+    );
+    #[cfg(all(not(target_os = "macos"), not(debug_assertions)))]
+    if opens_files {
+        let _ = tauri::Builder::default()
+            .plugin(tauri_plugin_single_instance::init(|_, _, _| {}))
+            .setup(|_| std::process::exit(0))
+            .run(app_context());
+    }
+    let _ = opens_files;
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // One instance per data dir, before ANYTHING reads or writes it (instance_lock.rs).
+    // Bound for the whole of run(); the app's own exit releases it with the process.
+    let argv: Vec<String> = std::env::args().collect();
+    let opens_files = !share::open::paths_from_args(&argv, None).is_empty();
+    let _instance = match instance_lock::acquire(instance_lock::launch_wait(opens_files)) {
+        instance_lock::Outcome::Held(lock) => Some(lock),
+        instance_lock::Outcome::Unguarded(why) => {
+            // Logging isn't up yet; noted in setup() below.
+            UNGUARDED_LAUNCH.get_or_init(|| why);
+            None
+        }
+        instance_lock::Outcome::Taken => {
+            second_instance_exit(opens_files);
+            return;
+        }
+    };
+
     // Arm crash marker BEFORE any other init. arm_running_marker() captures
     // whether a marker file from the previous run still exists (= unclean
     // exit) and then re-writes it for this run. The captured PreviousRunInfo
@@ -234,10 +287,11 @@ pub fn run() {
 
     // Windows/Linux open a file by launching a SECOND process with the path in argv; this
     // hands that argv to the running maiTerm and exits the newcomer (docs/workspace-share.md
-    // §7), which also keeps two processes off one state file. Registered first, as the plugin
-    // requires. Release only: dev and prod share the bundle identifier, so in dev it would
-    // forward to — and quit in favour of — an installed maiTerm. macOS needs none of it:
-    // LaunchServices already keeps one instance and delivers files as `RunEvent::Opened`.
+    // §7). Registered first, as the plugin requires. Release only: dev and prod share the
+    // bundle identifier, so in dev it would forward to — and quit in favour of — an installed
+    // maiTerm. macOS delivers files as `RunEvent::Opened` instead. Keeping two processes off
+    // one data dir is NOT this plugin's job any more: it runs too late for that, and not on
+    // macOS. The lock at the top of run() is (instance_lock.rs).
     #[cfg(all(not(target_os = "macos"), not(debug_assertions)))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
         share::open::second_launch(app, share::open::paths_from_args(&argv, Some(std::path::Path::new(&cwd))));
@@ -320,6 +374,10 @@ pub fn run() {
             // tauri-plugin-log is active by now — surface the warning that
             // arm_running_marker() captured before the logger was ready.
             log_previous_run_status();
+
+            if let Some(why) = UNGUARDED_LAUNCH.get() {
+                log::warn!("Single-instance lock unavailable, running unguarded: {why}");
+            }
 
             match fd_limit_raise {
                 Some((old, new)) => log::info!("Raised RLIMIT_NOFILE soft limit {} -> {}", old, new),
@@ -1033,7 +1091,7 @@ pub fn run() {
             #[cfg(debug_assertions)]
             share::open::share_debug_open,
         ])
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             // Native quit paths — Dock → Quit, `osascript … to quit`, logout/
