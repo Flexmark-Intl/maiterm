@@ -103,6 +103,53 @@
 >   double-click's second press hit the row underneath: selected, opened, focused.
 >   `ContextMenu` now swallows presses with `detail > 1` for 600 ms after an item acts, for
 >   every menu in the app.
+>
+> **As built, phase 2: git and find (2026-10-22, `filetree/{git,search}.rs`, `FindBar.svelte`,
+> `BranchRow.svelte`).** Where it differs from the text below:
+> - **OSC 133 D is raised in Rust**, in the PTY reader where `term-osc133-<pty>` comes from, not
+>   sent back by the frontend: no IPC round trip, and Rust has the shell's live cwd
+>   (`proc_pidinfo`). `FileTreeState::command_done(pid)` only queues the pid (nothing at all
+>   while no repository hub exists); one thread resolves the cwd and signals every hub whose
+>   root, or whose repository's top level, contains it. The ToolPost trigger waits for phase 4.
+> - **Git signals need watches the root's watcher may not have.** The repository's git dir,
+>   common dir and `refs/heads` get NonRecursive watches of their own unless the root's watcher
+>   is recursive and they are inside the root (a root inside a larger repo, a linked worktree,
+>   Linux, shallow roots). Lock files are noise: git renames `index.lock` onto `index`.
+> - **Scheduling details:** a trailing delay never pushes a run more than 1 s past the first
+>   signal (a build writing without pause still decorates); run starts are 300 ms apart; a run
+>   nobody can see (every subscription paused or stalled) is deferred to the next resume; the
+>   watcher starting runs git once (changes made before it ran were never reported). Network
+>   mounts refresh on edges only, like slow repos. git missing or `safe.directory` refusing the
+>   repo stops automatic runs until Refresh, with the reason in Health.
+> - **A status run that changes nothing sends nothing** (not one empty message). A shallow
+>   root decorates only when it is itself a repository's top level.
+> - **Wire additions:** `GitUpdate.count` (the branch row's "N changed", also past the 20k cap);
+>   a wholly untracked folder's key keeps git's trailing slash (`build/`) so the client can mark
+>   what is inside it; `TreeEvent::SearchReady` (an index finished building: re-ask a query
+>   answered `indexing`); `SearchResult.unavailable` plus an `index_shallow` argument on
+>   `ft_search` for "Index this folder" on a home or volume root; `Health.git` is `off` | `live`
+>   | `slow` | `error`, its note joined to the watch note. The TS types are `GitUpdate`,
+>   `TreeSearchResult`, `TreeSearchHit` (a terminal-search `SearchResult` already existed).
+> - **The index** is rebuilt in the background, the old one still answering, when a folder
+>   appears or goes, two paths share a hash, or a batch changes more than 4,096 paths; its
+>   eviction is the building thread's timed wait (one wakeup per 5 min while an index exists).
+>   A walk stops at 1M paths. `ls-files -co` lists a conflicted path once per stage: deduped.
+> - **Hover numstat** runs only for a file with a letter other than `?` (a clean file spawns
+>   nothing), inside the same two git slots, cached until a status run changes anything.
+> - **Pruned trees** (find results, the Changed lens) sort siblings in JS, folders first then
+>   case-insensitive: these paths are not all listed, so there is no Rust order to keep. They
+>   have their own open/closed set, which is why Escape restores the real tree exactly. With
+>   hidden files off, a path with a dot segment is left out of them. The best hit takes focus
+>   (not selection); Enter opens it pinned.
+> - **The Changed lens** is toggled from the branch row only: the Lens bar arrives with the agent
+>   lenses (phase 4). `openGitDiff({subId, abs}, rel, ref)` takes the subscription rather than a
+>   place, and `ref` may be `'index'`; `openReadOnlyDiff` is the read-only flow it shares with
+>   the agent's `showDiff`.
+> - **`file_tree_git`** (§16, default on) is a Preferences toggle and applies to open trees at
+>   once: off clears every view's decorations.
+> - **Budgets measured** (release, this machine): a keystroke over 100k generated paths, worst of
+>   four queries, 17.6 ms (budget 30). Not yet checked in the running app: the dev check (a
+>   commit typed in a terminal decorates in about 150 ms).
 
 ## 1. Why
 
