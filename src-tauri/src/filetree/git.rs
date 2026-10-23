@@ -524,8 +524,62 @@ impl GitCore {
             Err(RunError::TimedOut) => Err(Failure::TimedOut),
             Err(e) => Err(Failure::Other(e.to_string())),
             Ok(o) if !o.status.success() => Err(failure_from_stderr(&o.stderr)),
-            Ok(o) => Ok(parse_porcelain_v2(&o.stdout)),
+            Ok(o) => {
+                let mut st = parse_porcelain_v2(&o.stdout);
+                self.expand_untracked_root(&mut st);
+                Ok(st)
+            }
         }
+    }
+
+    /// A root inside a wholly untracked folder: git collapses the folder, so the only entry is
+    /// the root itself (`? new/sub/`) or a folder above it (`? new/` for the root `new`), and
+    /// neither names anything below the root. Swap it for the root's own untracked contents,
+    /// collapsed the same way, so they decorate and the Changed lens lists them.
+    fn expand_untracked_root(&self, st: &mut Status) {
+        if self.prefix.is_empty() {
+            return;
+        }
+        let covers_root = |e: &StatusEntry| e.dir && e.letter == "?" && super::paths::is_at_or_under(&self.prefix, &e.path);
+        let Some(i) = st.entries.iter().position(covers_root) else { return };
+        st.entries.remove(i);
+        for (name, dir) in self.untracked_children() {
+            st.entries.push(StatusEntry { path: format!("{}/{name}", self.prefix), letter: "?", orig: None, dir });
+        }
+    }
+
+    /// The root's top-level entries git counts as untracked, as `-unormal` would report them
+    /// from the repository's top: a folder holding only ignored files (or nothing) is left
+    /// out, which is what `--no-empty-directory` asks for. Names go as literal pathspecs, in
+    /// batches so a crowded folder can't overrun a command line.
+    fn untracked_children(&self) -> Vec<(String, bool)> {
+        let names: Vec<OsString> = match std::fs::read_dir(&self.root) {
+            Ok(rd) => rd.flatten().map(|e| e.file_name()).filter(|n| n != ".git").collect(),
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for batch in names.chunks(256) {
+            let mut c = self.cmd();
+            c.args(["ls-files", "-o", "--exclude-standard", "--directory", "--no-empty-directory", "-z", "--"]);
+            for n in batch {
+                let mut spec = OsString::from(":(literal)");
+                spec.push(n);
+                c.arg(spec);
+            }
+            let Ok(o) = proc::output_timeout(&mut c, self.timing.timeout) else { continue };
+            if !o.status.success() {
+                continue;
+            }
+            for raw in o.stdout.split(|b| *b == 0).filter(|f| !f.is_empty()) {
+                let p = String::from_utf8_lossy(raw);
+                let dir = p.ends_with('/');
+                let name = p.trim_end_matches('/');
+                if !name.is_empty() {
+                    out.push((name.to_string(), dir));
+                }
+            }
+        }
+        out
     }
 
     /// A repository path as a root-relative one; None when it is outside the root (or is it).
