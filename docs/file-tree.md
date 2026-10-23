@@ -796,6 +796,54 @@
 >   **Not checked in the running app** (no dev run in this step): the whole dev check on nova,
 >   including the dimmed repaint, Retry after a refused login, the wrong-host warning after an
 >   onward ssh, a drag onto a tab on the host, and Open Terminal Here.
+>
+> **As built, phase 6 review fixes (2026-10-23).** Where they changed the above:
+> - **A host's spelling leaves out `ControlMaster`.** With the bridge off the resolver reads a
+>   tab's host off the raw `ps` line, which for every ssh maiTerm starts (split, clone, restore,
+>   Open Terminal Here) keeps the injected `-o ControlMaster=no`. `place::host_of_command` and
+>   the frontend's `connectArgs` now drop any ControlMaster option, as `cleanSshCommand` does, so
+>   such a tab is the same host (one place key, one helper) as a hand-typed `ssh ews@nova`.
+> - **Big imports over slow links.** An import sends a file in 1 MB frames (`put` creates it,
+>   refusing to replace; `append` continues only a regular file exactly `at` bytes long; the last
+>   frame sets the mode). Frames are written in 64 KB slices. The helper counts any bytes from
+>   maiTerm as hearing from it (`LAST_HEARD`, read per piece of a payload), and Rust kills a
+>   helper over a missed ping only when nothing moved on its pipes since the ping was asked
+>   (`Activity`: reads, and a big frame's later slices). A sync call waits for the stdin lock
+>   only until its own deadline. One frame per file used to have the pinger, and the helper
+>   itself, take a working upload for a dead helper.
+> - **Leases are taken under the registry's lock** (`Remotes::lease`, which `RemoteRoot::open`
+>   now takes), and the grace period decides under the same lock: a root opening as the last
+>   one's 5 minutes ran out could get a helper that was then closed for good.
+> - **`hello` before the ack.** `RemoteRoot::open` asks for `hello` when the one sent as the
+>   helper came up hasn't landed (`Conn::hello_now`): the open that starts a helper usually got
+>   its `root` back first, so `OpenAck.remote_hostname` was null and the wrong-host warning off
+>   for that subscription, notably a workspace pinned to a remote folder at launch.
+> - **Find says when it couldn't list a host's files** (`SearchResult.unavailable`) instead of
+>   publishing an empty index as valid; the next query 5 s or more later builds again, and
+>   `files` rides a helper restart as a listing does.
+> - **The root switcher** resolves with `PlaceHints.passive` (an ssh tab's host is probed only
+>   when its helper is already live; otherwise the unchecked first candidate, as on a probe
+>   timeout) and lists each tab's root as it answers, in tab order: opening it no longer starts
+>   helpers or waits up to 4 s on a down host before showing any tab.
+> - **`-o RemoteCommand=none`** on the helper's and the fallback shell's ssh: a `RemoteCommand` in
+>   ssh_config refused our command before connecting, read as a drop and retried forever.
+>   (Needs OpenSSH 7.6 or later on this computer.)
+> - **A remote editor follows a rename**: `EditorPane`'s retarget handler now re-arms a remote
+>   tab's poller at the new path (it used to keep stat-ing the old one and report it deleted).
+> - **The editor's remote I/O keeps the connect options** (`util/ssh_target.rs`): `-p`/`-i`/`-J`/
+>   `-o` as `-o Key=v` for ssh and scp alike, muxed over the bridge tunnel's socket to the same
+>   host when it exists. It used to reduce every command to `user@host`, so a root reached by
+>   port or only through the bridge listed and then failed every open. `run_scp_upload` still
+>   opens its own master to the bare destination (unchanged).
+> - **A tab that left ssh** stops counting as on its host: the periodic restore snapshot now
+>   updates the mirror's `restore_ssh_command` (`workspacesStore.noteRestoreSsh`), and
+>   `revealInTree` reads the caller tab's live foreground.
+> - **Tests:** a throttled pipe (512 KB/s) carrying a 1.25 MB import against a 300 ms ping wait
+>   and a 1 s helper deadline (`MAITERM_FT_PING_DEADLINE`), which fails with either half of the
+>   fix removed; the grace lock held across the grace's end; a root's `hello` asked when absent;
+>   Find with its root gone and back; ssh with a `RemoteCommand` config; `SshTarget` spellings.
+>   **Not checked in the running app or on nova**: a real slow-link import, the bridge-socket
+>   editor open on a password-only host, and the switcher with a down host.
 
 ## 1. Why
 
