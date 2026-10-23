@@ -25,7 +25,8 @@ pub fn spawn(hub: Weak<RootHub>, interval: Duration) {
         // None: nothing to poll any more, and the hub has recorded that this thread is gone.
         let Some(changed) = h.poll_tick() else { return };
         if !changed.is_empty() {
-            h.raw_sender().push(RawEvent { paths: changed, rescan: false });
+            // A folder whose mtime moved: polling sees no entry's own event, so it is a shape change.
+            h.raw_sender().push(RawEvent { paths: changed, rescan: false, content_only: false });
         }
     });
     if let Err(e) = spawned {

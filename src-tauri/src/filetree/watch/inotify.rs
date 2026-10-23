@@ -82,22 +82,22 @@ impl SharedInotify {
             let w = INotifyWatcher::new(
                 move |res: notify::Result<notify::Event>| {
                     let routes = routes.lock();
-                    let (paths, rescan) = match res {
+                    let (paths, rescan, content_only) = match res {
                         Ok(ev) => {
                             let rescan = ev.need_rescan();
-                            (ev.paths, rescan)
+                            (ev.paths, rescan, super::content_only(&ev.kind))
                         }
-                        Err(e) => (e.paths, true),
+                        Err(e) => (e.paths, true, false),
                     };
                     for r in routes.iter() {
                         if paths.is_empty() {
                             // Lost events with no path (IN_Q_OVERFLOW): every hub rescans.
-                            r.sender.push(RawEvent { paths: vec![], rescan: true });
+                            r.sender.push(RawEvent { paths: vec![], rescan: true, content_only: false });
                             continue;
                         }
                         let mine: Vec<PathBuf> = paths.iter().filter(|p| p.starts_with(&r.root)).cloned().collect();
                         if !mine.is_empty() {
-                            r.sender.push(RawEvent { paths: mine, rescan });
+                            r.sender.push(RawEvent { paths: mine, rescan, content_only });
                         }
                     }
                 },

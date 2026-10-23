@@ -38,6 +38,19 @@ pub const RAW_CAPACITY: usize = 65_536;
 pub struct RawEvent {
     pub paths: Vec<PathBuf>,
     pub rescan: bool,
+    /// The backend said only that these paths' content or metadata changed: nothing appeared,
+    /// went or was renamed. On a folder that is routine, not a change of shape: Windows
+    /// reports a folder MODIFIED whenever an entry in it is added, removed or renamed (its
+    /// last-write time moves, reported apart from the entry's own event, and as late as the
+    /// cache flushes it), and FSEvents reports a folder's inode metadata the same way.
+    pub content_only: bool,
+}
+
+/// `kind` says only that content or metadata changed (see `RawEvent::content_only`). `Any`
+/// and every create, remove and rename are not: they may be a folder's shape changing.
+pub fn content_only(kind: &notify::EventKind) -> bool {
+    use notify::event::ModifyKind;
+    matches!(kind, notify::EventKind::Modify(ModifyKind::Any | ModifyKind::Data(_) | ModifyKind::Metadata(_)))
 }
 
 /// The sending half every backend holds.
@@ -62,12 +75,12 @@ impl RawSender {
             Ok(ev) => {
                 let rescan = ev.need_rescan();
                 if !ev.paths.is_empty() || rescan {
-                    self.push(RawEvent { paths: ev.paths, rescan });
+                    self.push(RawEvent { content_only: content_only(&ev.kind), paths: ev.paths, rescan });
                 }
             }
             Err(e) => {
                 log::debug!("filetree: watcher error, rescanning: {e}");
-                self.push(RawEvent { paths: e.paths, rescan: true });
+                self.push(RawEvent { paths: e.paths, rescan: true, content_only: false });
             }
         }
     }
@@ -232,7 +245,7 @@ mod tests {
     fn a_full_channel_raises_overflow_instead_of_blocking() {
         let (tx, rx, overflow) = channel(2);
         for _ in 0..5 {
-            tx.push(RawEvent { paths: vec![PathBuf::from("/x")], rescan: false });
+            tx.push(RawEvent { paths: vec![PathBuf::from("/x")], ..Default::default() });
         }
         assert!(overflow.load(Ordering::SeqCst));
         assert_eq!(rx.try_iter().count(), 2);

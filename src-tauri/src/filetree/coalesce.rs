@@ -164,7 +164,7 @@ impl RootHub {
     /// the ignore rules first (an ignored folder's verdict is cached, so a burst under
     /// node_modules costs a lookup per event and runs no git). Events were lost (`lost`):
     /// git runs and the index is rebuilt on its next query.
-    fn note_for_git_and_search(&self, git_signal: bool, mut worktree_git: bool, lost: bool, worktree: Vec<String>) {
+    fn note_for_git_and_search(&self, git_signal: bool, mut worktree_git: bool, lost: bool, worktree: Vec<String>, reshaped: &HashSet<String>) {
         if git_signal {
             self.git_signal(Trigger::Index);
         }
@@ -216,6 +216,10 @@ impl RootHub {
             .filter_map(|rel| {
                 let abs = paths::rel_to_native(&self.root, &rel).ok()?;
                 Some(match std::fs::symlink_metadata(&abs) {
+                    // A folder only "modified" gained or lost an entry, and that entry has an
+                    // event of its own; rebuilding for it would rebuild on every new file on
+                    // Windows. A folder that appeared or moved in: only a rebuild knows its files.
+                    Ok(m) if m.is_dir() && !reshaped.contains(&rel) => return None,
                     Ok(m) if m.is_dir() => Change::Folder,
                     // `mv Foo.ts foo.ts` reports both names, and where the volume folds case
                     // both look up: the old one is gone if the disk spells it otherwise.
@@ -247,6 +251,8 @@ impl RootHub {
         let mut git_signal = false;
         let mut worktree_git = false;
         let mut worktree: Vec<String> = Vec::new();
+        // Worktree paths some event said appeared, went or moved (not only "modified").
+        let mut reshaped: HashSet<String> = HashSet::new();
         if self.overflow.swap(false, Ordering::SeqCst) {
             log::debug!("filetree: event overflow under {}, re-listing", self.root.display());
             rescan.push(String::new());
@@ -305,6 +311,9 @@ impl RootHub {
                     }
                     Class::Worktree => {
                         if !rel.is_empty() {
+                            if !ev.content_only {
+                                reshaped.insert(rel.clone());
+                            }
                             worktree.push(rel.clone());
                         }
                     }
@@ -338,7 +347,7 @@ impl RootHub {
         if exclude_changed {
             worktree_git = true;
         }
-        self.note_for_git_and_search(git_signal, worktree_git, !rescan.is_empty(), worktree);
+        self.note_for_git_and_search(git_signal, worktree_git, !rescan.is_empty(), worktree, &reshaped);
         {
             let dirs = self.dirs.lock();
             for base in &rescan {
