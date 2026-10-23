@@ -518,31 +518,6 @@ pub async fn save_clipboard_image(
     Ok(path.to_string_lossy().to_string())
 }
 
-/// Return a non-colliding path inside `dir` for `name`, appending " (1)", " (2)", …
-/// before the extension if a file of that name already exists.
-fn unique_path(dir: &Path, name: &str) -> std::path::PathBuf {
-    let first = dir.join(name);
-    if !first.exists() {
-        return first;
-    }
-    let p = Path::new(name);
-    let stem = p
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| name.to_string());
-    let ext = p
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
-    for i in 1..1000 {
-        let candidate = dir.join(format!("{} ({}){}", stem, i, ext));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    first
-}
-
 /// Spawn a launcher that hands off and exits (`open`, `xdg-open`, `explorer`) and reap it on
 /// a detached thread. Dropping the `Child` reaps nothing, and nothing else in maiTerm waits on
 /// stray children, so each use would leave a zombie until the app quits.
@@ -746,7 +721,7 @@ pub async fn download_remote_file(
         .map(|n| n.to_string_lossy().to_string())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "download".to_string());
-    let dest = unique_path(&downloads, &basename);
+    let dest = crate::util::naming::unique_path(&downloads, &basename, crate::util::naming::CopyNames::Numbered);
 
     let output = std::process::Command::new("scp")
         .arg("-o").arg("BatchMode=yes")
