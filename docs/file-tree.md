@@ -738,6 +738,64 @@
 >   the helper nor its folder left after close. **Not run:** Python 3.6 itself (the AST gate
 >   stands in), fish (not installed here), a Windows client, a muxed start over a live tunnel's
 >   ControlMaster, and the dev check in the running app.
+>
+> **As built, phase 6 frontend: remote roots (2026-10-23, `filetree/remote.ts`, the remote
+> branches of `fileTree.svelte.ts`, `FilesColumn`, `FilesHeader`).** Where it differs from the
+> text below:
+> - **A remote place opens like a local one**: the `remote` status is gone, `saveView` and
+>   `attach` keep remote views, and "inside the current root" (`ftLocate` for the tick) runs only
+>   between roots on the same machine, since a remote root keys the host's paths and a local
+>   `/tmp/x` spells one too. The same rule (`activeFile.lookupIn`) keeps the active-file
+>   highlight, Reveal in Files, the focus shortcut and editor dots to files on the root's machine;
+>   a remote editor tab now names its host (`ActiveFileTarget.host`), so its file lights in a root
+>   on that host, and a rename there retargets it.
+> - **Hosts are compared by where they connect** (`connectArgs`, a port of `watch::parse_ssh`):
+>   the place's `host_key`, a tab's stored command and a live `ps` line differ in spelling.
+>   `insertPathsIntoTab`'s same-host check uses it too, and falls back to the live ssh command
+>   when the tab has no bridge (it refused every remote path before). A tab's host, read
+>   synchronously for drag targets and the agent strip, is its bridge's, else its saved
+>   `restore_ssh_command`.
+> - **Stale-while-revalidate** dims the body only when the kept model had the root listed, until
+>   the root's `dir` (last chunk), `not_modified` or `dir_error` arrives; also while Health says
+>   the helper is down or can't log in. The footer says "Showing what ‹host› last listed, until
+>   it answers" meanwhile.
+> - **Health states:** the backend's notes are shown as they are; a refused login adds how to fix
+>   it (a key, or the tab's MCP bridge, whose connection Files shares), no python3 adds what is
+>   missing, and all three (and a reconnect) offer Retry (`ft_refresh`). An open that failed has
+>   no subscription to refresh, so a new command, `ft_retry_host(place)`, retries the host's
+>   helper before the root is opened again. Missing on the host has its own words and no Move
+>   project (that relocates local folders).
+> - **Wrong-host warning:** OSC 7's host against `OpenAck.remote_hostname`, by short name. A
+>   report naming this computer is the local shell's from before ssh, not a third machine, so a
+>   second command, `ft_local_hostname`, names it. The agent-cwd half of §15.3 is the resolver's
+>   `missing` remote place, not a warning.
+> - **Verbs:** files open through `openInEditor({remote: {sshCommand: host_key}})`; Compare with
+>   HEAD and Compare Buffer ↔ Disk read the working copy with `scpReadFile` (`openGitDiff` takes
+>   a `read`). Open Terminal Here creates a tab with the split context `{sshCommand: host_key,
+>   remoteCwd}`, so it starts through `buildSshCommand` like a cloned ssh tab (tab identity,
+>   bridge, account) rather than a command of its own. **`buildSshCommand` quoted the folder for
+>   the remote shell only**: a folder with a space split in the local shell and the remote `cd`
+>   ended the session. Such a folder is now escaped again for the local layer (POSIX local
+>   shells; a plain path keeps the old form).
+> - **Trash words** are `Platform` `remote`: "the host's trash (~/.maiterm/trash)", and Undo is
+>   offered on every client (its `restore` runs on the host); Show in Trash stays local macOS
+>   only. Name rules on a remote root are the host's (no Windows rules from a Windows client).
+> - **Left out on a remote root:** Reveal in Finder/Explorer, Open With Default App, Ask about
+>   this… and composer drops (attachments are local files), turn baselines (read off this
+>   computer's disk), and paste of a cut/copy taken on a host into another root (an import reads
+>   its sources here; local → host imports work). A drag onto a terminal is a target only for a
+>   tab on the root's host. `revealInTree` answers `outside_root` when the caller's tab is on
+>   another machine than the root; `getTreeSelection` serves a remote root's selection with its
+>   `host`.
+> - **Agent marks** need nothing new on the wire (Rust routes `host:/abs` to the root); the strip
+>   counts a remote agent whose tab reaches the root's host and whose cwd is under the root, and
+>   tooltips match ledger paths by host and path (`ledgerPathIs`).
+> - **Tests:** `remote.test.ts` (connect args, same host, wrong host, ledger paths, containment),
+>   `activeFile.test.ts` (`lookupIn`, remote editors), `undo.test.ts` (remote words), and
+>   `sshCommand.test.ts` runs the built line through `/bin/sh` to check what the host receives.
+>   **Not checked in the running app** (no dev run in this step): the whole dev check on nova,
+>   including the dimmed repaint, Retry after a refused login, the wrong-host warning after an
+>   onward ssh, a drag onto a tab on the host, and Open Terminal Here.
 
 ## 1. Why
 
