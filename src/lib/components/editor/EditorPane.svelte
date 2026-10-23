@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, dropCursor, rectangularSelection, crosshairCursor, highlightActiveLine } from '@codemirror/view';
-  import { EditorState, Compartment } from '@codemirror/state';
+  import { EditorState, Compartment, Transaction } from '@codemirror/state';
   import { MergeView } from '@codemirror/merge';
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { foldGutter, indentOnInput, bracketMatching, foldKeymap, foldAll, unfoldAll } from '@codemirror/language';
@@ -86,6 +86,10 @@
   }
   let wordWrap = $state(false);
   const wrapCompartment = new Compartment();
+  /** Holds `history()` so a file swapped into this editor (a preview tab reused, Claude's
+   *  openFile) starts with an empty undo stack: one Cmd+Z too many must never bring the
+   *  previous file's text back under the new file's path, where Cmd+S would save it. */
+  const historyCompartment = new Compartment();
 
   // File watching state
   let lastKnownMtime = 0;
@@ -630,9 +634,14 @@
         if (editorView) {
           // Reuse existing editor — just replace content
           originalContent = content;
+          // The swap itself is not undoable, and the old file's history goes with it:
+          // removing `history()` drops its state, putting it back starts an empty one.
           editorView.dispatch({
             changes: { from: 0, to: editorView.state.doc.length, insert: content },
+            annotations: Transaction.addToHistory.of(false),
+            effects: historyCompartment.reconfigure([]),
           });
+          editorView.dispatch({ effects: historyCompartment.reconfigure(history()) });
           dirty = false;
           setEditorDirty(tabId, false);
           registerEditor(tabId, editorView, editorFile.file_path);
@@ -646,7 +655,7 @@
             lineNumbers(),
             highlightActiveLineGutter(),
             highlightSpecialChars(),
-            history(),
+            historyCompartment.of(history()),
             foldGutter(),
             dropCursor(),
             EditorState.allowMultipleSelections.of(true),
@@ -1117,7 +1126,7 @@
           lineNumbers(),
           highlightActiveLineGutter(),
           highlightSpecialChars(),
-          history(),
+          historyCompartment.of(history()),
           foldGutter(),
           dropCursor(),
           EditorState.allowMultipleSelections.of(true),
