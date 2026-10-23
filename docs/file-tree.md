@@ -367,6 +367,20 @@
 >   canonical root; only that prefix is resolved, so a link further in can't carry the target
 >   out of the tree. Tested on Unix with a symlinked parent standing in for the alias; not run
 >   on Windows.
+>
+> **As built, phase 2/3 dev-check fixes (2026-10-23).** Where they changed the above:
+> - **A renamed or moved file retitles its editor tab** unless the human named the tab
+>   (`utils/editorTitle.ts`). `custom_name` can't say which: `Tab::new_editor` sets it on every
+>   editor tab, as do the load migration and a human rename. The title itself can: a title that
+>   is still the old file's name follows the file, any other stays. The same rule covers a
+>   preview swap and the agent's `openFile` with `targetTabId` (which overwrote a human's
+>   title, and on Windows titled the tab with the whole path). Move project never changes a
+>   file's name, only its folders, so its tabs' titles are already right.
+> - **The Windows name rules are worded for where they run** (`NameRules.windows`): on Windows
+>   "“:” isn’t allowed in a name"; on a case-folding disk elsewhere "“:” isn’t allowed: the
+>   name would break on Windows", and likewise for a trailing dot or space and reserved names.
+> - **`IconButton` takes its tooltip as its `aria-label`** unless the caller passes one (or an
+>   `aria-labelledby`), so the Files header buttons and every other icon button have a name.
 
 ## 1. Why
 
