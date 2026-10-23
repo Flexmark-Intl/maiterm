@@ -346,7 +346,7 @@ fn hop_rename(from: &Path, to: &Path, rename: fn(&Path, &Path) -> io::Result<()>
 /// item belongs to someone else, so it is left exactly as it is.
 fn copy_fresh(from: &Path, to: &Path) -> io::Result<()> {
     let mut made = false;
-    let r = copy_tree(from, to, &mut made);
+    let r = copy_tree(from, to, (from, to), &mut made);
     if r.is_err() && made {
         let _ = remove_any(to);
     }
@@ -356,12 +356,13 @@ fn copy_fresh(from: &Path, to: &Path) -> io::Result<()> {
 /// Copy `from` to `to`, which must not exist. A symlink is recreated as a link, never
 /// followed; a folder is walked with `symlink_metadata`, so a link inside it is copied as a
 /// link too. Files are created with `create_new`. `made` turns true once `to` itself exists
-/// because this call created it.
-fn copy_tree(from: &Path, to: &Path, made: &mut bool) -> io::Result<()> {
+/// because this call created it. `roots` is the (source, copy) pair of the whole copy, for
+/// a junction that points inside it.
+fn copy_tree(from: &Path, to: &Path, roots: (&Path, &Path), made: &mut bool) -> io::Result<()> {
     let m = std::fs::symlink_metadata(from)?;
     let ft = m.file_type();
     if ft.is_symlink() {
-        copy_link(from, to)?;
+        copy_link(from, to, roots)?;
         *made = true;
         Ok(())
     } else if ft.is_dir() {
@@ -369,7 +370,7 @@ fn copy_tree(from: &Path, to: &Path, made: &mut bool) -> io::Result<()> {
         *made = true;
         for e in std::fs::read_dir(from)? {
             let e = e?;
-            copy_tree(&e.path(), &to.join(e.file_name()), &mut false)?;
+            copy_tree(&e.path(), &to.join(e.file_name()), roots, &mut false)?;
         }
         // Last, so a read-only folder still takes its contents.
         let _ = std::fs::set_permissions(to, m.permissions());
@@ -386,14 +387,21 @@ fn copy_tree(from: &Path, to: &Path, made: &mut bool) -> io::Result<()> {
     }
 }
 
-fn copy_link(from: &Path, to: &Path) -> io::Result<()> {
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn copy_link(from: &Path, to: &Path, roots: (&Path, &Path)) -> io::Result<()> {
     #[cfg(windows)]
     {
         // std counts an NTFS junction as a directory symlink, but making a symlink needs
         // Developer Mode or admin while a junction needs neither, and pnpm's node_modules are
-        // full of them: a junction is recreated as a junction, pointing where it pointed.
-        if junction::exists(from).unwrap_or(false) {
-            let made = junction::create(junction::get_target(from)?, to);
+        // full of them: a junction is recreated as a junction. Its target is always absolute,
+        // so one pointing inside the tree being copied (pnpm's into its own .pnpm folder) is
+        // pointed at the same place in the copy; left alone, the copy would lean on the
+        // original and dangle once that is moved or deleted. A dangling junction is still a
+        // junction: `junction::exists` follows the link and would call it a symlink.
+        if is_junction(from) {
+            let target = std::fs::read_link(from)?;
+            let target = rebased_target(&target, roots.0, roots.1).unwrap_or(target);
+            let made = junction::create(target, to);
             if let Err(e) = &made {
                 // The crate makes the folder first and then turns it into the junction; one
                 // left plain and empty is this call's own. AlreadyExists is the folder's own
@@ -405,6 +413,8 @@ fn copy_link(from: &Path, to: &Path) -> io::Result<()> {
             return made;
         }
     }
+    // A symlink is copied verbatim, the way `cp -R` does: one can be relative (pnpm's are on
+    // Unix), so an absolute one pointing elsewhere was written that way on purpose.
     let target = std::fs::read_link(from)?;
     #[cfg(unix)]
     {
@@ -418,6 +428,65 @@ fn copy_link(from: &Path, to: &Path) -> io::Result<()> {
         } else {
             std::os::windows::fs::symlink_file(target, to)
         }
+    }
+}
+
+/// An NTFS junction, read off its directory entry without following it, so a junction whose
+/// target is gone still answers true.
+#[cfg(windows)]
+fn is_junction(p: &Path) -> bool {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{FindClose, FindFirstFileW, FILE_ATTRIBUTE_REPARSE_POINT, WIN32_FIND_DATAW};
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+    let w = verbatim_wide(p);
+    // SAFETY: a NUL-terminated UTF-16 path and a zeroed out-struct, both alive across the
+    // call; the handle is closed before returning.
+    unsafe {
+        let mut fd: WIN32_FIND_DATAW = std::mem::zeroed();
+        let h = FindFirstFileW(w.as_ptr(), &mut fd);
+        if h == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        FindClose(h);
+        // The reparse tag is in dwReserved0 when the entry is a reparse point.
+        fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && fd.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT
+    }
+}
+
+/// `target` re-pointed into the copy when it lies inside the tree being copied (`src_root`
+/// itself included), else None. Windows compares the way its filesystems do: drive letters
+/// and names without case, and `\\?\C:\` the same as `C:\`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn rebased_target(target: &Path, src_root: &Path, dst_root: &Path) -> Option<PathBuf> {
+    let mut t = target.components();
+    for r in src_root.components() {
+        if !same_component(t.next()?, r) {
+            return None;
+        }
+    }
+    let rest = t.as_path();
+    Some(if rest.as_os_str().is_empty() { dst_root.to_path_buf() } else { dst_root.join(rest) })
+}
+
+fn same_component(a: std::path::Component, b: std::path::Component) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let disk = |c: &Component| match c {
+            Component::Prefix(p) => match p.kind() {
+                Prefix::Disk(d) | Prefix::VerbatimDisk(d) => Some(d.to_ascii_uppercase()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let (Some(x), Some(y)) = (disk(&a), disk(&b)) {
+            return x == y;
+        }
+        a.as_os_str().to_string_lossy().to_lowercase() == b.as_os_str().to_string_lossy().to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
     }
 }
 

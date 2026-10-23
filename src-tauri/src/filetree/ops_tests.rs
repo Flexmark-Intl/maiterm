@@ -213,18 +213,48 @@ fn a_rename_past_the_old_path_limit_works() {
     assert_eq!(fx.read(&format!("{deep}/b.ts")), "a");
 }
 
-/// A junction copies as a junction: making a symlink would need Developer Mode or admin.
+/// A junction copies as a junction: making a symlink would need Developer Mode or admin. One
+/// pointing inside the copied folder (pnpm's node_modules into its own .pnpm) points into the
+/// copy; one pointing outside keeps its target; one whose target is gone still copies.
 #[cfg(windows)]
 #[test]
 fn a_junction_is_copied_as_a_junction() {
     let fx = Fx::new("junction");
     fx.write("pkg/target/index.js", "x");
+    fx.write("shared/lib.js", "y");
+    fx.write("pkg/gone/a.js", "z");
     junction::create(fx.root.join("pkg/target"), fx.root.join("pkg/link")).unwrap();
+    junction::create(fx.root.join("shared"), fx.root.join("pkg/outside")).unwrap();
+    junction::create(fx.root.join("pkg/gone"), fx.root.join("pkg/dangling")).unwrap();
+    std::fs::remove_dir_all(fx.root.join("pkg/gone")).unwrap();
     let r = fx.run(op("duplicate", &["pkg"])).unwrap();
     assert_eq!(r.done.len(), 1, "{r:?}");
-    let copy = fx.root.join(r.done[0].to.as_deref().unwrap()).join("link");
-    assert!(junction::exists(&copy).unwrap());
-    assert_eq!(crate::share::canon(&junction::get_target(&copy).unwrap()), crate::share::canon(&fx.root.join("pkg/target")));
+    let dup = fx.root.join(r.done[0].to.as_deref().unwrap());
+    let target = |p: &Path| crate::share::canon(&std::fs::read_link(p).unwrap());
+    assert!(junction::exists(dup.join("link")).unwrap());
+    assert_eq!(target(&dup.join("link")), crate::share::canon(&dup.join("target")));
+    assert_eq!(target(&dup.join("outside")), crate::share::canon(&fx.root.join("shared")));
+    assert!(is_junction(&dup.join("dangling")));
+    assert_eq!(target(&dup.join("dangling")), crate::share::canon(&dup.join("gone")));
+}
+
+/// A junction's absolute target is pointed into the copy only when it lies inside the source.
+#[test]
+fn a_target_inside_the_copied_tree_is_rebased_into_the_copy() {
+    let (src, dst) = (Path::new("/w/app"), Path::new("/w/app copy"));
+    assert_eq!(rebased_target(Path::new("/w/app/node_modules/.pnpm/react"), src, dst), Some(PathBuf::from("/w/app copy/node_modules/.pnpm/react")));
+    assert_eq!(rebased_target(Path::new("/w/app"), src, dst), Some(PathBuf::from("/w/app copy")));
+    assert_eq!(rebased_target(Path::new("/w/application/x"), src, dst), None);
+    assert_eq!(rebased_target(Path::new("/w/other"), src, dst), None);
+    assert_eq!(rebased_target(Path::new("/w"), src, dst), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn rebasing_ignores_case_and_the_verbatim_prefix_on_windows() {
+    let (src, dst) = (Path::new(r"C:\Proj\App"), Path::new(r"D:\Copy"));
+    assert_eq!(rebased_target(Path::new(r"\\?\c:\proj\app\node_modules\x"), src, dst), Some(PathBuf::from(r"D:\Copy\node_modules\x")));
+    assert_eq!(rebased_target(Path::new(r"C:\Proj\Apps\x"), src, dst), None);
 }
 
 #[test]
