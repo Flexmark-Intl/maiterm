@@ -298,25 +298,43 @@ fn hop_rename(from: &Path, to: &Path, rename: fn(&Path, &Path) -> io::Result<()>
     Ok(())
 }
 
+/// Copy `from` to `to`, which must not exist, and on failure remove only what this copy made.
+/// The caller checked `to` was free, but something can land there before the copy's first
+/// create (another tab's agent, a build); that create then answers `AlreadyExists` and the
+/// item belongs to someone else, so it is left exactly as it is.
+fn copy_fresh(from: &Path, to: &Path) -> io::Result<()> {
+    let mut made = false;
+    let r = copy_tree(from, to, &mut made);
+    if r.is_err() && made {
+        let _ = remove_any(to);
+    }
+    r
+}
+
 /// Copy `from` to `to`, which must not exist. A symlink is recreated as a link, never
 /// followed; a folder is walked with `symlink_metadata`, so a link inside it is copied as a
-/// link too. Files are created with `create_new`.
-pub fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+/// link too. Files are created with `create_new`. `made` turns true once `to` itself exists
+/// because this call created it.
+fn copy_tree(from: &Path, to: &Path, made: &mut bool) -> io::Result<()> {
     let m = std::fs::symlink_metadata(from)?;
     let ft = m.file_type();
     if ft.is_symlink() {
-        copy_link(from, to)
+        copy_link(from, to)?;
+        *made = true;
+        Ok(())
     } else if ft.is_dir() {
         std::fs::create_dir(to)?;
+        *made = true;
         for e in std::fs::read_dir(from)? {
             let e = e?;
-            copy_tree(&e.path(), &to.join(e.file_name()))?;
+            copy_tree(&e.path(), &to.join(e.file_name()), &mut false)?;
         }
         // Last, so a read-only folder still takes its contents.
         let _ = std::fs::set_permissions(to, m.permissions());
         Ok(())
     } else if ft.is_file() {
         let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(to)?;
+        *made = true;
         io::copy(&mut std::fs::File::open(from)?, &mut out)?;
         drop(out);
         let _ = std::fs::set_permissions(to, m.permissions());
@@ -375,12 +393,10 @@ fn tally(p: &Path) -> io::Result<(u64, u64, u64)> {
 }
 
 /// A move across volumes: copy, check the copy holds as many files and bytes as the source,
-/// and only then remove the source. A failed or short copy is removed and the source kept.
+/// and only then remove the source. A failed or short copy is removed and the source kept;
+/// something that took the name before the copy began is someone else's and stays.
 fn move_across(from: &Path, to: &Path) -> io::Result<()> {
-    if let Err(e) = copy_tree(from, to) {
-        let _ = remove_any(to);
-        return Err(e);
-    }
+    copy_fresh(from, to)?;
     let (a, b) = (tally(from)?, tally(to)?);
     if a.0 != b.0 || a.2 != b.2 {
         let _ = remove_any(to);
@@ -922,15 +938,9 @@ fn copy_one(env: &Env, label: &str, from: &Path, dest_rel: &str, dest: &Path, co
         Err(_) => return fail(label, "exists", format!("“{name}” is already there")),
     };
     let to = dest.join(&target);
-    match copy_tree(from, &to) {
+    match copy_fresh(from, &to) {
         Ok(()) => Step::Done(OpItem { from: label.to_string(), to: Some(join_rel(dest_rel, &target)) }),
-        Err(e) => {
-            // Only ever what this copy made: the target didn't exist before.
-            if e.kind() != io::ErrorKind::AlreadyExists {
-                let _ = remove_any(&to);
-            }
-            fail(label, if e.kind() == io::ErrorKind::AlreadyExists { "exists" } else { "io" }, e.to_string())
-        }
+        Err(e) => fail(label, if e.kind() == io::ErrorKind::AlreadyExists { "exists" } else { "io" }, e.to_string()),
     }
 }
 

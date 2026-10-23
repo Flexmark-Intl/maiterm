@@ -317,6 +317,30 @@ fn a_cross_device_move_copies_verifies_then_removes() {
     assert!(std::fs::symlink_metadata(fx.root.join("dest/src/link")).unwrap().file_type().is_symlink());
 }
 
+/// Another writer takes the name between the landing check and the copy (Linux answers EXDEV
+/// before it looks at the target): its item is someone else's, so the move refuses and the
+/// cleanup leaves it alone.
+fn exdev_after_someone_writes(_: &Path, to: &Path) -> io::Result<()> {
+    std::fs::create_dir(to)?;
+    std::fs::write(to.join("agent-work.txt"), "theirs")?;
+    exdev(to, to)
+}
+
+#[test]
+fn a_cross_device_move_never_removes_what_appeared_at_the_target() {
+    let fx = Fx::new("exdev-race");
+    fx.write("src/a.txt", "alpha");
+    std::fs::create_dir_all(fx.root.join("dest")).unwrap();
+    let none = || Vec::new();
+    let mut env = fx.env(&none);
+    env.rename = exdev_after_someone_writes;
+    let r = run(&env, &FileOp { kind: "move".into(), src: vec!["src".into()], dest: Some("dest".into()), ..Default::default() }).unwrap();
+    assert!(r.done.is_empty(), "{r:?}");
+    assert_eq!(r.failed[0].code, "exists");
+    assert_eq!(fx.read("dest/src/agent-work.txt"), "theirs");
+    assert_eq!(fx.read("src/a.txt"), "alpha", "the source stays");
+}
+
 /// The real thing on Linux CI: /dev/shm is tmpfs, the temp folder usually isn't.
 #[cfg(target_os = "linux")]
 #[test]
