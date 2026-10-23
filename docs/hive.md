@@ -2359,8 +2359,39 @@ themselves:
 - **§7.1:** the coordinator's launch settings are the working set above. Note that `--tools`
   doesn't take patterns.
 
+**Spikes 4, 7 and 8** were measured on an M1 Ultra with 128 GiB and 20 CPUs, with 69 Claude sessions
+running. Load average was 25–87, but CPU was 67% idle.
+- **4, build caches:**
+  - `npm ci` on the shared cache takes about 2 s, and `npm run check` 9.5 s.
+  - `cargo check` takes about 50 s cold (about 250 CPU-seconds, 1.3–2.4 GB).
+  - **Cloning the whole `target/` is worse than cold.** The main target is **330 GB and about 790k
+    files**. `cp -c` took 279 s, and the first check on the clone took 101 s.
+  - **A slim seed wins.** `cp -c` of only `debug/.fingerprint`, `debug/build` and
+    `deps/*.{rmeta,rlib,dylib,d}` takes 40 s, then 23.7 s to the first check. Only the crate
+    itself rebuilds, because its fingerprint includes the worktree path.
+  - **§6.5 uses the slim seed**, ideally from a check-only target dir.
+  - **Hive worktrees go under a `.noindex` folder**, because Spotlight indexed the new tree at
+    about 100% CPU.
+- **7, thumbnails:**
+  - `qlmanage -t` takes 0.15–0.4 s per asset, but gives audio only a generic icon. Waveforms come
+    from ffmpeg `showwavespic` (0.12 s).
+  - A 10-frame hover strip takes 3.6 s with a full-decode `fps` filter, 1.4 s with ten parallel
+    seeks, and 0.47 s with `-skip_frame nokey`.
+  - §10.5 uses seeks or keyframes, never a full decode. Thumbnail cost isn't a concern.
+- **8, the machine budget:**
+  - A Claude process is about 400 MB, but each session also runs a median of 7 MCP-server children
+    (about 480 MB). Session plus children: median 0.9 GB, p90 1.1 GB, long sessions about 2 GB.
+  - Idle sessions use about 0% CPU. The cost is what they run.
+  - So, in §6.8:
+    - the default worker cap is 4 (at most 6 on this Mac), scaling at about one worker per 16 GB
+      above a 32 GB reserve and no more than ncpu/4;
+    - workers launch with `--strict-mcp-config` and only the MCP servers they need;
+    - start nothing new at `kern.memorystatus_vm_pressure_level` ≥ 2 or under 25% free, and drop
+      heavy resources to one at level 4 or under 10% free;
+    - **use CPU idle, not load average** (80 with 67% idle here). Cargo's capacity of 2 stands.
+
 **Not yet run:**
-- **4, 7 and 8 (measurements)**, then **2 (the live trust write)**, each alone.
+- **2, the live trust write**, alone.
 - **The spike 10 re-run** outside `/tmp/claude-<uid>`.
 
 ## 14. Decisions
