@@ -844,6 +844,27 @@
 >   Find with its root gone and back; ssh with a `RemoteCommand` config; `SshTarget` spellings.
 >   **Not checked in the running app or on nova**: a real slow-link import, the bridge-socket
 >   editor open on a password-only host, and the switcher with a down host.
+>
+> **As built, phase 6 second review fixes (2026-10-23).** Where they changed the above:
+> - **A first import frame that times out is discarded.** The frame's wait (`Timing.put_chunk`,
+>   60 s) also covers writing it, so on a slow link the answer can be late although the helper
+>   got the whole frame and made the file from it: the first 1 MB at 0600, which no `append`
+>   would finish. `Conn::call_owing` now tells a timeout after the frame went out (`Owed`) from
+>   one that sent nothing. For a first frame the upload waits once more as long for the answer
+>   (`Conn::settle`): made, it counts as made and `import` discards it, after the put and so never
+>   racing ahead of it through the helper's workers; refused (`exists`), it is another writer's
+>   and stays. A late `append` makes nothing, so the file it followed is discarded at once. If
+>   the second wait also runs out, the file still counts as made and the discard is sent; it can
+>   then still lose that race in the helper's pool, the one case left.
+> - **The editor finds the bridge tunnel from a tab maiTerm started.** `ssh_target::tunnel_socket`
+>   compared the editor's command (the `ps` line, carrying `-o ControlMaster=no` for a split,
+>   clone, restore or Open Terminal Here) with the tunnel's cleaned key, so it never matched:
+>   every open, save and mtime poll made its own BatchMode connection and, on a password-only
+>   host, failed. Both sides are now compared without ControlMaster
+>   (`ssh_target::without_control_master`, moved there from `place.rs`, which uses it too).
+> - **Tests:** a 1 MB first frame through a 512 KB/s pipe against a 500 ms wait leaves nothing
+>   once discarded, and a refused first frame is not counted as made; the tunnel match with
+>   `ControlMaster` on either side. **Not checked on a real slow link or password-only host.**
 
 ## 1. Why
 
