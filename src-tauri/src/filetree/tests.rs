@@ -117,7 +117,7 @@ impl Client {
                     }
                 }
             }
-            TreeEvent::Health { .. } | TreeEvent::RootGone | TreeEvent::Git(_) | TreeEvent::SearchReady | TreeEvent::Agent { .. } => {}
+            TreeEvent::Health { .. } | TreeEvent::RootGone | TreeEvent::Reopen | TreeEvent::Git(_) | TreeEvent::SearchReady | TreeEvent::Agent { .. } => {}
         }
     }
 
@@ -452,6 +452,47 @@ fn a_deleted_root_says_root_gone() {
     assert!(wait_for(&rec, Duration::from_secs(5), |e| matches!(e, TreeEvent::Dir { .. })).is_some());
     std::fs::remove_dir_all(&root).unwrap();
     assert!(wait_for(&rec, Duration::from_secs(10), |e| matches!(e, TreeEvent::RootGone)).is_some());
+}
+
+fn git_init(dir: &std::path::Path) {
+    let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(dir).status().is_ok_and(|s| s.success());
+    assert!(ok, "git init");
+}
+
+#[test]
+fn git_init_in_an_open_root_reopens_it_with_its_repository() {
+    // A hub reads its repository once; `git init` in a plain root used to leave it without
+    // decorations for good, and a reopen within the grace period got the same hub back.
+    let root = temp_root("gitinit");
+    std::fs::write(root.join("a.ts"), "x").unwrap();
+    let ft = FileTreeState::with(Duration::from_millis(300), super::watch::RAW_CAPACITY, None);
+    let rec = Arc::new(Recorder::default());
+    let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+    assert!(ack.repo.is_none());
+    let old = ft.hub_of(ack.sub_id).unwrap();
+    wait_watching(&old);
+    git_init(&root);
+    assert!(wait_for(&rec, Duration::from_secs(10), |e| matches!(e, TreeEvent::Reopen)).is_some(), "the view is told to reopen");
+    // What the client does: close, open the same place again.
+    let rec2 = Arc::new(Recorder::default());
+    let again = ft.open("w", &root.to_string_lossy(), vec![], rec2, vec![]).unwrap();
+    ft.close(ack.sub_id);
+    assert!(again.repo.is_some(), "the new hub decorates by the new repository");
+    let new = ft.hub_of(again.sub_id).unwrap();
+    assert!(!Arc::ptr_eq(&old, &new));
+    drop((old, new));
+    // The old hub's reap (its last subscriber just left) must not take its successor.
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(ft.hub_of(again.sub_id).is_ok());
+    assert_eq!(ft.hub_count(), 1);
+    // In its grace period, with nobody to tell: the repository removed is caught when the
+    // place is opened again (the reopen reads the disk; the watcher may not have run).
+    ft.close(again.sub_id);
+    std::fs::remove_dir_all(root.join(".git")).unwrap();
+    let plain = ft.open("w", &root.to_string_lossy(), vec![], Arc::new(Recorder::default()), vec![]).unwrap();
+    assert!(plain.repo.is_none(), "a hub in its grace is not reused for another repository");
+    ft.close(plain.sub_id);
+    std::fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]

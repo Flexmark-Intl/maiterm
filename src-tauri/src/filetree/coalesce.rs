@@ -344,6 +344,13 @@ impl RootHub {
         if repo_changed {
             super::place::invalidate_toplevel_under(&self.root);
         }
+        // The root's own repository appeared or went (a `.git` here; for a root with none, also
+        // anything under a new `.git`, which FSEvents may report instead of the folder): the
+        // hub was built for the old one, and nothing short of a new hub decorates by the new.
+        if (repo_changed || (git_signal && self.repo.is_none())) && !self.repo_current() {
+            self.repo_moved();
+            return;
+        }
         if exclude_changed {
             worktree_git = true;
         }

@@ -1238,7 +1238,10 @@ export type TreeEvent =
   | ({ t: 'git' } & GitUpdate)
   | { t: 'search_ready' }
   | { t: 'agent'; marks: AgentMark[] }
-  | { t: 'root_gone' };
+  | { t: 'root_gone' }
+  /** The root's repository changed (`git init` there, its `.git` removed): open the same
+   *  place again, keeping the view. The hub was built for the old repository. */
+  | { t: 'reopen' };
 
 /** What an agent did to one row (docs/file-tree.md §9.1). Evidence is always named: say
  *  "changed while claude's Bash ran" for `fs_during_tool`, never "claude edited". */

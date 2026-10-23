@@ -502,16 +502,29 @@ ROOTS = {}
 ROOTS_LOCK = threading.Lock()
 
 
-def get_root(name, excludes=None):
+def get_root(name, excludes=None, recheck=False):
+    """The root's record, kept for the helper's life. `recheck` (an open) reads its repository
+    again: a `git init` since the record was made would otherwise never decorate."""
     real = os.path.realpath(expand(name))
     if not os.path.isdir(real):
         raise Fail("gone", "This folder no longer exists")
     with ROOTS_LOCK:
         r = ROOTS.get(real)
-        if r is None or (excludes is not None and excludes != r.excludes):
+        if r is None or (excludes is not None and excludes != r.excludes) or (recheck and repo_info(real) != r.repo):
             r = Root(real, excludes if excludes is not None else (r.excludes if r else []))
             ROOTS[real] = r
         return r
+
+
+def refresh_repo(real):
+    """The repository `real` is in now. A record made with another one is replaced, so later
+    listings use the new repository's ignore rules."""
+    now = repo_info(real)
+    with ROOTS_LOCK:
+        r = ROOTS.get(real)
+        if r is not None and now != r.repo:
+            ROOTS[real] = Root(real, r.excludes)
+    return now
 
 
 # -- Listing and stat ----------------------------------------------------------------------
@@ -628,7 +641,7 @@ def op_probe(req):
 def op_root(req):
     """Open (or re-open after a reconnect) a root: its real path and repository, and the
     user's excludes for its listings."""
-    root = get_root(req["root"], list(req.get("excludes", [])))
+    root = get_root(req["root"], list(req.get("excludes", [])), recheck=True)
     return {"real": S(root.real), "repo": root.repo}, b""
 
 
@@ -1665,7 +1678,7 @@ class Watcher(object):
             self.first = time.monotonic()
         p = self.pending.get(tag)
         if p is None:
-            p = {"dirs": set(), "paths": {}, "many": False, "index": False, "worktree": False, "ignore": set()}
+            p = {"dirs": set(), "paths": {}, "many": False, "index": False, "worktree": False, "ignore": set(), "repo": False}
             self.pending[tag] = p
         return p
 
@@ -1709,6 +1722,14 @@ class Watcher(object):
                         p["dirs"].add(rel)
                     if name == b".gitignore":
                         p["ignore"].add(rel)
+                    if name == b".git" and mask & SHAPE:
+                        # The root's own `.git` came or went: its repository may have changed.
+                        # Below the root, a folder became (or stopped being) a nested
+                        # repository, which bounds the ignore rules above it.
+                        if rel == "":
+                            p["repo"] = True
+                        else:
+                            p["ignore"].add(rel)
                     child = join_rel(rel, sname)
                     if len(p["paths"]) < MAX_EVENT_PATHS:
                         p["paths"][child] = bool(mask & IN_ISDIR)
@@ -1723,6 +1744,9 @@ class Watcher(object):
             tags = dict(self.tags)
         for tag, p in pending.items():
             real = tags.get(tag)
+            # The repository the root is in now, sent with the batch: maiTerm compares it with
+            # the one its hub was built for and, if they differ, opens the root again.
+            repo_now = refresh_repo(real) if p["repo"] and real is not None else None
             root = ROOTS.get(real) if real is not None else None
             dirs = set(p["dirs"])
             if root is not None and p["ignore"]:
@@ -1754,8 +1778,12 @@ class Watcher(object):
                         except OSError:
                             k = "x"
                         paths.append([rel, k])
-            send({"ev": "fs", "tag": tag, "dirs": sorted(dirs), "paths": paths, "many": p["many"], "index": p["index"],
-                  "worktree": worktree or p["many"]})
+            ev = {"ev": "fs", "tag": tag, "dirs": sorted(dirs), "paths": paths, "many": p["many"], "index": p["index"],
+                  "worktree": worktree or p["many"]}
+            if p["repo"]:
+                ev["repo"] = True
+                ev["repo_now"] = repo_now
+            send(ev)
 
 
 WATCHER = []
@@ -1809,7 +1837,16 @@ def op_poll(req):
     rels = req.get("rels")
     if rels is None:
         rels = w.polled_rels(tag)
-    return {"changed": w.poll(tag, rels)}, b""
+    changed = w.poll(tag, rels)
+    out = {"changed": changed}
+    # The root's own folder changed: a `.git` may have come or gone there (what inotify's
+    # `repo` flag says on a watched root).
+    with w.lock:
+        real = w.tags.get(tag)
+    if "" in changed and real is not None:
+        out["repo"] = True
+        out["repo_now"] = refresh_repo(real)
+    return out, b""
 
 
 # -- Hello and the loop -------------------------------------------------------------------

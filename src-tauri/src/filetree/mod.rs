@@ -349,9 +349,13 @@ impl FileTreeState {
     /// The hub for a remote place, made (and its root opened on the host) if there is none.
     fn remote_hub_for(&self, key: &str, host: &str, root: &str, excludes: Vec<String>, lookup: Option<remote::Lookup>) -> Result<Arc<RootHub>, String> {
         let lease = self.remotes.lease(host, lookup);
-        if let Some(h) = self.hubs.lock().get(key) {
-            if !h.is_gone() {
-                return Ok(h.clone());
+        let kept = self.hubs.lock().get(key).filter(|h| h.reusable()).cloned();
+        if let Some(h) = kept {
+            // A hub in its grace period had nobody watching for a `.git` there that a poll
+            // would have caught (no inotify), so the host is asked once before it is handed out.
+            match h.remote.as_ref().filter(|_| h.sub_count() == 0).map(|r| r.repo_now()) {
+                Some(Some(now)) if now != h.repo => h.repo_moved(),
+                _ => return Ok(h),
             }
         }
         // Outside the map's lock: it waits on the host.
@@ -372,7 +376,7 @@ impl FileTreeState {
         let fresh = RootHub::new(init, self.slots.clone(), self.focus.clone(), self.watch_ctx());
         let mut hubs = self.hubs.lock();
         Ok(match hubs.get(key) {
-            Some(h) if !h.is_gone() => h.clone(),
+            Some(h) if h.reusable() => h.clone(),
             _ => {
                 hubs.insert(key.to_string(), fresh.clone());
                 fresh
@@ -407,10 +411,14 @@ impl FileTreeState {
     }
 
     fn hub_for(&self, key: &str, root: &Path, excludes: Vec<String>) -> Arc<RootHub> {
-        if let Some(h) = self.hubs.lock().get(key) {
-            if !h.is_gone() {
-                return h.clone();
+        let kept = self.hubs.lock().get(key).filter(|h| h.reusable()).cloned();
+        if let Some(h) = kept {
+            // Re-read off the disk (a few stats): a `git init` while the hub sat in its grace
+            // period, or on a mount nothing watches, was never seen.
+            if h.repo_current() {
+                return h;
             }
+            h.repo_moved();
         }
         // Built outside the map's lock: it runs `git rev-parse` and starts a watcher.
         let init = HubInit {
@@ -428,7 +436,7 @@ impl FileTreeState {
         let fresh = RootHub::new(init, self.slots.clone(), self.focus.clone(), self.watch_ctx());
         let mut hubs = self.hubs.lock();
         match hubs.get(key) {
-            Some(h) if !h.is_gone() => h.clone(),
+            Some(h) if h.reusable() => h.clone(),
             _ => {
                 hubs.insert(key.to_string(), fresh.clone());
                 fresh
@@ -453,13 +461,16 @@ impl FileTreeState {
         let me = self.me.clone();
         let grace = self.grace;
         let key = hub.place.clone();
+        // A retired hub's key may hold its successor by then, whose token can be any number:
+        // only this hub is reaped.
+        let which = Arc::downgrade(&hub);
         drop(hub);
         let spawned = std::thread::Builder::new().name("ft-grace".into()).spawn(move || {
             std::thread::sleep(grace);
             let Some(state) = me.upgrade() else { return };
             let mut hubs = state.hubs.lock();
             if let Some(h) = hubs.get(&key) {
-                if h.grace_token.load(Ordering::SeqCst) == token && h.sub_count() == 0 {
+                if std::ptr::eq(Arc::as_ptr(h), which.as_ptr()) &&h.grace_token.load(Ordering::SeqCst) == token && h.sub_count() == 0 {
                     hubs.remove(&key);
                 }
             }

@@ -97,7 +97,8 @@ pub struct OpenAck {
     pub remote_hostname: Option<String>,
 }
 
-/// The git repository the root is in, resolved once per hub.
+/// The git repository the root is in, resolved once per hub (a change retires the hub:
+/// `TreeEvent::Reopen`).
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RepoInfo {
     /// The repo's top level relative to the root: "" when the root IS the top level, `..` steps
@@ -364,6 +365,10 @@ pub enum TreeEvent {
     // ordinary deltas, which costs the client no round trip.
     /// The root itself was deleted or renamed away. Never followed by a re-root to home.
     RootGone,
+    /// The repository the root is in changed (`git init` there, its `.git` removed): this hub
+    /// was made for the old one and decorates by it, so the client opens the same place again
+    /// (a new hub, its view kept) rather than go on without git or with a dead one.
+    Reopen,
 }
 
 impl TreeEvent {

@@ -98,6 +98,8 @@ pub struct Sub {
     /// 32 messages), and resent it forever.
     partial: HashMap<String, (u64, usize)>,
     root_gone: bool,
+    /// A `Reopen` was held back.
+    reopen: bool,
     health_dirty: bool,
     /// The folders this subscriber has open.
     interest: HashSet<String>,
@@ -127,6 +129,7 @@ impl Sub {
             dirty: BTreeSet::new(),
             partial: HashMap::new(),
             root_gone: false,
+            reopen: false,
             health_dirty: false,
             interest: HashSet::new(),
             dead: false,
@@ -156,6 +159,7 @@ impl Sub {
         if self.paused || self.stalled {
             match &ev {
                 TreeEvent::RootGone => self.root_gone = true,
+                TreeEvent::Reopen => self.reopen = true,
                 TreeEvent::Health { .. } => self.health_dirty = true,
                 TreeEvent::Git(_) => self.git_dirty = true,
                 TreeEvent::SearchReady => self.search_ready = true,
@@ -387,6 +391,9 @@ pub struct RootHub {
     raw: RawSender,
     pub(super) overflow: Arc<std::sync::atomic::AtomicBool>,
     gone: AtomicBool,
+    /// The root's repository changed since this hub was made (`repo_moved`): no new
+    /// subscriber is given it, and its own were told to reopen.
+    retired: AtomicBool,
     /// Coalescer batches processed: the idle test's measure.
     pub wakeups: Arc<AtomicU64>,
     /// Bumped by every subscribe and every reap scheduled; a reap only happens if unchanged.
@@ -503,6 +510,7 @@ impl RootHub {
             raw,
             overflow,
             gone: AtomicBool::new(false),
+            retired: AtomicBool::new(false),
             wakeups: Arc::new(AtomicU64::new(0)),
             grace_token: AtomicU64::new(0),
         });
@@ -568,6 +576,32 @@ impl RootHub {
 
     pub fn is_gone(&self) -> bool {
         self.gone.load(Ordering::SeqCst)
+    }
+
+    /// The hub may be given to a new subscriber: its root is there, and it was made for the
+    /// repository the root is in now.
+    pub fn reusable(&self) -> bool {
+        !self.is_gone() && !self.retired.load(Ordering::SeqCst)
+    }
+
+    /// The repository this hub decorates by (git worker, git watches, ignore rules, Find's
+    /// source) was read when it was made. Locally, that is the one the disk shows now.
+    pub fn repo_current(&self) -> bool {
+        self.remote.is_some() || repo_info(&self.root).map(|(r, _)| r) == self.repo
+    }
+
+    /// The root's repository appeared, went or moved (`git init` in a plain folder, `rm -rf
+    /// .git`): everything git-related here was built for the old one, so the hub retires and
+    /// every subscriber is asked to open the place again, which makes a new hub. Its view is
+    /// kept on the client and its folders answer from generations, so this costs a round trip.
+    pub(super) fn repo_moved(&self) {
+        if self.retired.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        log::info!("filetree: the repository of {} changed; its views reopen", self.root.display());
+        for s in self.subs.lock().values_mut() {
+            s.deliver(TreeEvent::Reopen);
+        }
     }
 
     pub fn is_network(&self) -> bool {
@@ -830,6 +864,9 @@ impl RootHub {
             }
             if std::mem::take(&mut s.root_gone) {
                 s.deliver(TreeEvent::RootGone);
+            }
+            if std::mem::take(&mut s.reopen) {
+                s.deliver(TreeEvent::Reopen);
             }
             if std::mem::take(&mut s.health_dirty) {
                 s.deliver(health);

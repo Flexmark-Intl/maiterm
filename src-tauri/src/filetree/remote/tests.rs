@@ -516,6 +516,41 @@ fn a_remote_place_serves_the_same_tree_events() {
     }
 }
 
+/// The helper kept each root's repository for its whole life, so `git init` in an open remote
+/// root never decorated, not even after reopening it once the hub's grace was over.
+#[test]
+#[cfg(unix)]
+fn git_init_on_the_host_reopens_the_root_with_its_repository() {
+    if !python3() {
+        return;
+    }
+    let home = scratch("gitinit");
+    let t = scratch("gitinit-root");
+    std::fs::write(t.join("a.txt"), "a\n").unwrap();
+    let ft = FileTreeState::with(Duration::from_secs(30), crate::filetree::watch::RAW_CAPACITY, None);
+    ft.remotes.set_transport(Arc::new(Local { home: home.clone(), python: "python3" }), fast());
+    let place = format!("me@here:{}", t.display());
+    let rec = Arc::new(Recorder::default());
+    let ack = ft.open_with("w", &place, vec![], rec.clone(), vec![], None).unwrap();
+    assert!(ack.repo.is_none() && !ack.caps.git);
+    rec.wait("the root", |e| matches!(e, TreeEvent::Dir { rel, .. } if rel.is_empty()));
+    // Seen live: inotify's `.git` in the root on Linux, the root's poll elsewhere.
+    git(&t, &home, &["init", "-q"]);
+    rec.wait("a reopen", |e| matches!(e, TreeEvent::Reopen));
+    let rec2 = Arc::new(Recorder::default());
+    let again = ft.open_with("w", &place, vec![], rec2.clone(), vec![], None).unwrap();
+    ft.close(ack.sub_id);
+    assert!(again.repo.is_some() && again.caps.git, "the new hub decorates: {:?}", again.repo);
+    // Unseen (nobody subscribed, the hub in its grace): the reopen asks the host.
+    ft.close(again.sub_id);
+    std::fs::remove_dir_all(t.join(".git")).unwrap();
+    let plain = ft.open_with("w", &place, vec![], rec2, vec![], None).unwrap();
+    assert!(plain.repo.is_none(), "the removed repository is gone from the new hub");
+    ft.close(plain.sub_id);
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&t);
+}
+
 /// Find on a remote root whose file list couldn't be had: it says why rather than answering "no
 /// matches" from an empty index taken as valid, and the next query after a while tries again.
 #[test]

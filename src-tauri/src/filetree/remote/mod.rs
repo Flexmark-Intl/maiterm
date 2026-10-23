@@ -1304,6 +1304,10 @@ impl RemoteRoot {
                 Status::Live => {
                     let rels: Vec<String> = me.polled.lock().iter().cloned().collect();
                     if let Ok(f) = me.conn.call("poll", json!({ "tag": me.tag, "rels": rels }), &[], Duration::from_secs(10)) {
+                        if me.repo_moved_in(&f) {
+                            hub.repo_moved();
+                            continue;
+                        }
                         hub.remote_changed(&strings(f.header.get("changed")));
                     }
                 }
@@ -1320,8 +1324,17 @@ impl RemoteRoot {
     /// listed again, and git looks again.
     fn reattach(&self) {
         let excludes = self.excludes.lock().clone();
-        if let Err(e) = self.conn.call("root", json!({ "root": self.root, "excludes": excludes }), &[], CALL_TIMEOUT) {
-            log::info!("filetree: re-opening {} on {}: {e}", self.root, self.conn.label());
+        match self.conn.call("root", json!({ "root": self.root, "excludes": excludes }), &[], CALL_TIMEOUT) {
+            Ok(f) => {
+                // A `git init` (or a removed `.git`) while the helper was gone went unwatched.
+                if f.header.get("repo").and_then(parse_repo) != self.repo {
+                    if let Some(h) = self.hub() {
+                        h.repo_moved();
+                        return;
+                    }
+                }
+            }
+            Err(e) => log::info!("filetree: re-opening {} on {}: {e}", self.root, self.conn.label()),
         }
         self.polled.lock().clear();
         let rels: Vec<String> = self.watched.lock().iter().cloned().collect();
@@ -1351,6 +1364,12 @@ impl RemoteRoot {
     fn fs_event(&self, f: &proto::Frame) {
         let Some(hub) = self.hub() else { return };
         let flag = |k: &str| f.header.get(k).and_then(Value::as_bool).unwrap_or(false);
+        // The helper saw the root's `.git` appear or go and found another repository (or
+        // none): this hub decorates by the old one, so its views open the place again.
+        if self.repo_moved_in(f) {
+            hub.repo_moved();
+            return;
+        }
         if flag("many") {
             // Events were lost (the queue overflowed, or too many to name): look again.
             hub.revalidate_under("");
@@ -1425,6 +1444,22 @@ impl RemoteRoot {
             "expanded_only"
         } else {
             "none"
+        }
+    }
+
+    /// An `fs` event or a poll answer that looked at the root's repository (`repo`) found
+    /// another one than this root was opened with (`repo_now`, null for none).
+    fn repo_moved_in(&self, f: &proto::Frame) -> bool {
+        f.header.get("repo").and_then(Value::as_bool).unwrap_or(false) && f.header.get("repo_now").and_then(parse_repo) != self.repo
+    }
+
+    /// The repository the root is in now, as the helper reads it off the host's disk; None when
+    /// the host couldn't be asked (the caller keeps what it has).
+    pub fn repo_now(&self) -> Option<Option<RepoInfo>> {
+        let excludes = self.excludes.lock().clone();
+        match self.conn.call("root", json!({ "root": self.root, "excludes": excludes }), &[], Duration::from_secs(5)) {
+            Ok(f) => Some(f.header.get("repo").and_then(parse_repo)),
+            Err(_) => None,
         }
     }
 
