@@ -23,7 +23,8 @@
     if (!place) return 'Choose a folder';
     const where = fileTreeStore.displayRoot(place);
     const why = place.source === 'pin' ? 'pinned for this workspace' : 'following the active tab';
-    return `${where}\n${why} · click to switch`;
+    const host = place.kind === 'remote' ? `\non the ssh host ${place.host_label ?? place.host_key}` : '';
+    return `${where}${host}\n${why} · click to switch`;
   });
 
   let switcherOpen = $state(false);
@@ -139,6 +140,16 @@
   </div>
 </div>
 
+{#if fileTreeStore.wrongHost}
+  {@const w = fileTreeStore.wrongHost}
+  <!-- The tab's shell went on from the host to another machine (§15.3): the tree still shows
+       the first hop, which is where Files' connection goes. -->
+  <div class="wrong-host" role="status">
+    <span class="warn-mark">⚠</span>
+    <span>Showing {w.showing} · this shell is on another machine{w.shell ? ` (${w.shell})` : ''}</span>
+  </div>
+{/if}
+
 {#if fileTreeStore.outsideFile}
   <div class="outside">
     <span class="muted">Outside root</span>
@@ -245,6 +256,22 @@
     padding: 2px 10px;
     font-size: 0.85em;
     border-bottom: 1px solid var(--bg-light);
+  }
+
+  .wrong-host {
+    flex-shrink: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    padding: 3px 10px;
+    font-size: 0.85em;
+    border-bottom: 1px solid var(--bg-light);
+    background: color-mix(in srgb, var(--yellow) 12%, transparent);
+    overflow-wrap: anywhere;
+  }
+
+  .warn-mark {
+    color: var(--yellow);
   }
 
   .muted,

@@ -136,6 +136,8 @@ describe('words', () => {
     const op: FileOp = { kind: 'trash', src: ['src/a.ts'] };
     expect(describeResult(op, res([{ from: 'src/a.ts', to: null }]), 'mac')).toBe('Moved “a.ts” to the Trash');
     expect(describeResult(op, res([{ from: 'src/a.ts', to: null }]), 'windows')).toBe('Moved “a.ts” to the Recycle Bin');
+    // A root on an ssh host trashes into maiTerm's own folder there, whatever this computer is.
+    expect(describeResult(op, res([{ from: 'src/a.ts', to: null }]), 'remote')).toBe('Moved “a.ts” to the host’s trash (~/.maiterm/trash)');
     const mv: FileOp = { kind: 'move', src: ['a', 'b'], dest: 'src' };
     expect(describeResult(mv, res([{ from: 'a', to: 'src/a' }, { from: 'b', to: 'src/b' }]), 'linux')).toBe('Moved 2 items');
     expect(describeResult({ kind: 'rename', src: ['a'], name: 'b' }, res([{ from: 'x/a', to: 'x/b' }]), 'linux')).toBe('Renamed “a” to “b”');

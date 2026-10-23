@@ -171,10 +171,14 @@ export class UndoStacks {
 
 // ── Words ───────────────────────────────────────────────────────────────────────────────────
 
-export type Platform = 'mac' | 'windows' | 'linux';
+/** Whose words an op's result is told in: this computer's file manager's, or `remote` for a
+ *  root on an ssh host, whose trash is maiTerm's own folder there (`~/.maiterm/trash`, §15.2)
+ *  whatever this computer is, and which Undo puts back on every client OS. */
+export type Platform = 'mac' | 'windows' | 'linux' | 'remote';
 
 /** Where trashed things go, in the platform's own word. */
 export function trashPlace(p: Platform): string {
+  if (p === 'remote') return 'the host’s trash (~/.maiterm/trash)';
   return p === 'windows' ? 'the Recycle Bin' : 'the Trash';
 }
 

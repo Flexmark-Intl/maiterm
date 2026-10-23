@@ -383,7 +383,8 @@
       ...createItems(''),
       { label: 'Paste', shortcut: `${modSymbol}V`, disabled: !fileTreeStore.writable || !fileTreeStore.hasClip, action: () => void fileTreeStore.paste('') },
       SEP,
-      { label: revealLabel, action: () => void fileTreeStore.revealInOs('') },
+      // The file manager is this computer's: a folder on an ssh host has nothing to reveal here.
+      ...(fileTreeStore.remote ? [] : [{ label: revealLabel, action: () => void fileTreeStore.revealInOs('') }]),
       { label: 'Open Terminal Here', action: () => void fileTreeStore.openTerminalHere('') },
     ];
   }
@@ -393,15 +394,18 @@
     const single = rels.length === 1;
     const folder = isFolderKind(r.kind);
     const target = fileTreeStore.addTarget;
+    // A root on an ssh host: this computer's file manager and apps can't reach its files, and
+    // the composer attaches files from here; the rest works there as here.
+    const remote = fileTreeStore.remote;
     const items: MenuItem[] = [];
     if (single && !folder) {
       items.push(
         { label: 'Open', shortcut: '↩', action: () => void fileTreeStore.openFile(r.key, 'pin') },
         { label: 'Open to the Side', shortcut: `${modSymbol}↩`, action: () => void fileTreeStore.openFile(r.key, 'side') },
         { label: 'Open Preview', shortcut: 'Space', action: () => void fileTreeStore.openFile(r.key, 'preview', true) },
-        { label: 'Open With Default App', action: () => void fileTreeStore.openWithDefaultApp(r.key) },
-        SEP,
       );
+      if (!remote) items.push({ label: 'Open With Default App', action: () => void fileTreeStore.openWithDefaultApp(r.key) });
+      items.push(SEP);
     }
     items.push({
       label: target ? `Add to ‹${target.name}›` : 'Add to tab (no live tab followed)',
@@ -409,14 +413,16 @@
       disabled: !target,
       action: () => void fileTreeStore.addToTab(rels),
     });
-    items.push({
-      label: 'Ask about this…',
-      disabled: !target,
-      action: () => fileTreeStore.askAbout(rels),
-    });
+    if (fileTreeStore.canAskAbout) {
+      items.push({
+        label: 'Ask about this…',
+        disabled: !target,
+        action: () => fileTreeStore.askAbout(rels),
+      });
+    }
     if (single) items.push({ label: 'Open Terminal Here', action: () => void fileTreeStore.openTerminalHere(r.key) });
     items.push(SEP);
-    if (single) items.push({ label: revealLabel, action: () => void fileTreeStore.revealInOs(r.key) });
+    if (single && !remote) items.push({ label: revealLabel, action: () => void fileTreeStore.revealInOs(r.key) });
     items.push(
       { label: rels.length > 1 ? 'Copy Paths' : 'Copy Path', shortcut: copyPathKey, action: () => void fileTreeStore.copyPaths(rels, false) },
       { label: rels.length > 1 ? 'Copy Relative Paths' : 'Copy Relative Path', shortcut: copyRelKey, action: () => void fileTreeStore.copyPaths(rels, true) },

@@ -16,21 +16,40 @@ export interface ActiveFileTarget {
    *  local editor's file earns it: a diff tab's path may be an ssh agent's file, whose
    *  folder doesn't exist here. */
   offerShow: boolean;
+  /** The machine the path is on: null this computer, else the ssh command that reaches it (a
+   *  remote editor's). Undefined when nobody knows (a diff tab's path), which is looked up in
+   *  whatever root is showing. A path is only ever looked up in a root on its own machine
+   *  (`lookupIn`): a remote root keys rows by the host's paths, which a local `/tmp/x` can
+   *  spell too. */
+  host?: string | null;
 }
 
-/** What the tree should highlight for this tab: a local editor's file, a diff tab's file,
- *  or nothing (terminal, board, a remote editor). */
+/** What the tree should highlight for this tab: an editor's file (local, or on an ssh host),
+ *  a diff tab's file, or nothing (terminal, board). */
 export function activeFileOf(tab: Pick<Tab, 'tab_type' | 'editor_file' | 'diff_context'> | null | undefined): ActiveFileTarget | null {
   if (!tab) return null;
   if (tab.tab_type === 'editor') {
     const f = tab.editor_file;
-    return f && !f.is_remote && f.file_path ? { path: f.file_path, offerShow: true } : null;
+    if (f?.is_remote) {
+      const p = f.remote_path ?? f.file_path;
+      return p && f.remote_ssh_command ? { path: p, offerShow: false, host: f.remote_ssh_command } : null;
+    }
+    return f && f.file_path ? { path: f.file_path, offerShow: true, host: null } : null;
   }
   if (tab.tab_type === 'diff') {
     const p = tab.diff_context?.file_path;
     return p ? { path: p, offerShow: false } : null;
   }
   return null;
+}
+
+/** Whether a target may be looked up in a root on `rootHost` (null: this computer), given
+ *  `sameHost` for two ssh spellings. A local editor's file next to a remote root is neither
+ *  highlighted nor offered there, but still offered "Show" (its folder is pinned locally). */
+export function lookupIn(target: ActiveFileTarget, rootHost: string | null, sameHost: (a: string, b: string) => boolean): boolean {
+  if (target.host === undefined) return true;
+  if (target.host === null || rootHost === null) return target.host === rootHost;
+  return sameHost(target.host, rootHost);
 }
 
 export interface ActiveFileState {

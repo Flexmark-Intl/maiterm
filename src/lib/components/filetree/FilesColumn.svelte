@@ -87,7 +87,7 @@
   // clears it). Re-placed on every new subscription (`ack`), since rels are per root. Keyed
   // on the path so a tab update that leaves the file alone doesn't re-reveal it.
   const activeTarget = $derived(activeFileOf(workspacesStore.activeTab));
-  const activeKey = $derived(activeTarget ? `${activeTarget.offerShow ? 'e' : 'd'}:${activeTarget.path}` : '');
+  const activeKey = $derived(activeTarget ? `${activeTarget.offerShow ? 'e' : 'd'}:${activeTarget.host ?? ''}:${activeTarget.path}` : '');
   $effect(() => {
     void activeKey;
     void fileTreeStore.ack;
@@ -101,13 +101,17 @@
   });
 
   // Editor dots: which rows have an editor tab, recomputed when the editors or the root change.
+  // A remote editor carries its host, so it marks rows only in a root on that host.
   $effect(() => {
     void fileTreeStore.subscribed;
-    const tabs: { id: string; path: string }[] = [];
+    const tabs: { id: string; path: string; host: string | null }[] = [];
     for (const ws of workspacesStore.workspaces) {
       for (const p of ws.panes) {
         for (const t of p.tabs) {
-          if (t.tab_type === 'editor' && t.editor_file && !t.editor_file.is_remote) tabs.push({ id: t.id, path: t.editor_file.file_path });
+          const f = t.tab_type === 'editor' ? t.editor_file : null;
+          if (!f) continue;
+          if (!f.is_remote) tabs.push({ id: t.id, path: f.file_path, host: null });
+          else if (f.remote_ssh_command) tabs.push({ id: t.id, path: f.remote_path ?? f.file_path, host: f.remote_ssh_command });
         }
       }
     }
@@ -117,24 +121,43 @@
   const place = $derived(fileTreeStore.place);
   const status = $derived(fileTreeStore.status);
 
-  // Asked for focus (Cmd+Shift+B) and there is no tree to take it — a missing folder, an ssh
-  // tab, an error: the column takes it, so the shortcut's next press closes it as promised.
+  // Asked for focus (Cmd+Shift+B) and there is no tree to take it — a missing folder, a host
+  // that couldn't be reached, an error: the column takes it, so the shortcut's next press closes it as promised.
   // Still resolving: wait, the tree will.
   let columnEl = $state<HTMLElement | null>(null);
   $effect(() => {
     if (!fileTreeStore.focusPending || !columnEl) return;
-    const settled = status === 'missing' || status === 'remote' || status === 'gone' || status === 'error'
+    const settled = status === 'missing' || status === 'gone' || status === 'error'
       || (status === 'none' && !!fileTreeStore.statusText);
     if (!settled) return;
     untrack(() => fileTreeStore.takeFocus());
     void tick().then(() => columnEl?.focus({ preventScroll: true }));
   });
 
+  /** What is wrong with a remote root's connection, read off Health's note (or the failed
+   *  open's error): `key` the host refused a login without a prompt, `limited` it has no
+   *  python3, `down` the helper is reconnecting. */
+  const sshTrouble = $derived.by((): 'key' | 'limited' | 'down' | null => {
+    if (place?.kind !== 'remote') return null;
+    const note = fileTreeStore.health?.note ?? (status === 'error' ? fileTreeStore.statusText : null) ?? '';
+    if (note.includes('needs key-based ssh')) return 'key';
+    if (note.includes('no python3')) return 'limited';
+    if (/reconnecting|not connected|no answer in time/.test(note)) return 'down';
+    return null;
+  });
+
+  const KEY_HELP = 'Files logs in without a prompt, so a password or passphrase can’t be typed for it. Add an ssh key for this host (or load it into your agent), or turn on this tab’s MCP bridge: Files shares the bridge’s connection.';
+
   /** The footer speaks only when there is something to say (§3.2): no permanent "all good". */
   const footer = $derived.by(() => {
     const parts: string[] = [];
     const h = fileTreeStore.health;
     if (h?.note) parts.push(h.note);
+    if (fileTreeStore.stale && (status === 'opening' || (status === 'ready' && !h?.note))) {
+      parts.push(`Showing what ${place?.host_label ?? 'the host'} last listed, until it answers`);
+    }
+    if (status === 'ready' && sshTrouble === 'key') parts.push(KEY_HELP);
+    if (status === 'ready' && sshTrouble === 'limited') parts.push('With python3 on the host, Files would update live, edit files, show git changes and find files there.');
     if (place?.fs_class === 'network' && !h?.note) parts.push('network mount: not watched');
     if (place?.shallow && status === 'ready') parts.push('large folder: only open folders are watched');
     const n = fileTreeStore.selection.size;
@@ -181,19 +204,28 @@
     <FindBar />
   {/if}
 
-  <div class="body" class:mono={preferencesStore.fileTreeIcons === 'mono'}>
+  <div class="body" class:mono={preferencesStore.fileTreeIcons === 'mono'} class:stale={fileTreeStore.stale && (status === 'ready' || status === 'opening')}>
     {#if status === 'ready' || status === 'opening'}
       <TreeBody {rowH} bind:this={treeBody} />
+    {:else if status === 'missing' && place?.kind === 'remote'}
+      <div class="state">
+        <p>Folder missing on <strong>{place.host_label ?? 'the ssh host'}</strong>: <span class="path">{fileTreeStore.statusText}</span></p>
+        <p class="hint">None of the folders this tab was known to be in is on the host now. Files never falls back to your home folder.</p>
+      </div>
     {:else if status === 'missing'}
       <div class="state">
         <p>Folder missing: <span class="path">{fileTreeStore.statusText}</span></p>
         <p class="hint">It may have been moved or renamed. Files never falls back to your home folder.</p>
         <button class="link" onclick={() => relocateStore.open({ mode: 'repoint', old: fileTreeStore.statusText ?? '', suggested: null })}>Move project…</button>
       </div>
-    {:else if status === 'remote'}
+    {:else if status === 'error' && place?.kind === 'remote'}
+      <!-- A host that couldn't be opened: why, what helps, and Retry (the helper won't retry
+           a refused login by itself, so as not to hammer the host). -->
       <div class="state">
-        <p>This tab is on <strong>{place?.host_label ?? 'an ssh host'}</strong>.</p>
-        <p class="hint">Files shows folders on this computer for now; folders on ssh hosts come in a later version.</p>
+        <p>Couldn’t open <span class="path">{place.root}</span> on <strong>{place.host_label ?? 'the ssh host'}</strong>.</p>
+        {#if fileTreeStore.statusText}<p class="hint">{fileTreeStore.statusText}</p>{/if}
+        {#if sshTrouble === 'key'}<p class="hint">{KEY_HELP}</p>{/if}
+        <button class="link" onclick={() => void fileTreeStore.retryRemote()}>Retry</button>
       </div>
     {:else if status === 'gone'}
       <div class="state">
@@ -218,9 +250,14 @@
     {/if}
   </div>
 
-  {#if footer.length > 0 || fileTreeStore.notice}
+  {#if footer.length > 0 || fileTreeStore.notice || (status === 'ready' && sshTrouble)}
     <div class="footer">
       {#each footer as line (line)}<div class="footer-line">{line}</div>{/each}
+      {#if status === 'ready' && sshTrouble}
+        <!-- Refresh asks the host's helper to try again now (ft_refresh retries a refused
+             login, a missing python3 and a backoff). -->
+        <div class="footer-line"><button class="link" onclick={() => fileTreeStore.refresh()}>Retry</button></div>
+      {/if}
       {#if fileTreeStore.notice}
         {@const n = fileTreeStore.notice}
         <div class="footer-line notice">
@@ -270,6 +307,13 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+
+  /* A remote root's last listing, painted before the host has confirmed it (§15.3). The rows
+     still work: an open or an expand goes to the host like any other. */
+  .body.stale {
+    opacity: 0.55;
+    transition: opacity 120ms ease-out;
   }
 
   .body.mono {

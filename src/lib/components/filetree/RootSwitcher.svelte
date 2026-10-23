@@ -93,9 +93,9 @@
     <div class="empty">No terminal tab has a folder yet.</div>
   {:else}
     {#each tabRoots as r (r.place.place)}
-      <Tooltip text={tildePath(r.place.root, fileTreeStore.home)} block>
+      <Tooltip text={fileTreeStore.displayRoot(r.place)} block>
         <button class="item" class:current={r.place.place === current} role="menuitem" onclick={() => choose(r.place.place)}>
-          <span class="label">{lastSegment(r.place.root)}</span>
+          <span class="label">{lastSegment(r.place.root) || r.place.root}{#if r.place.host_label} <span class="host">{r.place.host_label}</span>{/if}</span>
           <span class="tabs">
             {#each r.tabs as t (t.id)}
               {@const c = dotColor(t.id)}
@@ -199,6 +199,16 @@
   .label {
     font-weight: 600;
     overflow-wrap: anywhere;
+  }
+
+  /* The ssh host of a remote root, as the header's chip shows it. */
+  .host {
+    font-weight: 400;
+    font-size: 0.85em;
+    padding: 0 5px;
+    border-radius: 8px;
+    background: var(--bg-light);
+    color: var(--fg-dim);
   }
 
   .tabs {

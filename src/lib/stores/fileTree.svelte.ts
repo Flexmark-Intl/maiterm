@@ -41,7 +41,9 @@ import { attachToComposer } from '$lib/components/terminal/ComposerDock.svelte';
 import { isMac, isWindows } from '$lib/utils/platform';
 import { openGitDiff } from '$lib/utils/openGitDiff';
 import { relToAbs, lastSegment, tildePath } from '$lib/filetree/paths';
-import { settleActiveFile, type ActiveFileTarget } from '$lib/filetree/activeFile';
+import { activeFileOf, lookupIn, settleActiveFile, type ActiveFileTarget } from '$lib/filetree/activeFile';
+import { ledgerPathIs, onAnotherHost, remoteWithin, sameSshHost } from '$lib/filetree/remote';
+import { getBridgeInfo } from '$lib/stores/sshMcpBridge.svelte';
 import { AgentMarks, TurnTracker, agentLensItems, assignColours, changedThisTurn, cwdInRoot, folderBadges, isLasting, markWords, overlappingWriters, rowView, type RowAgentView } from '$lib/filetree/agents';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
 import { openBaselineDiff, openReadOnlyDiff } from '$lib/utils/openGitDiff';
@@ -54,10 +56,10 @@ import { toastStore } from '$lib/stores/toasts.svelte';
 import { getEditorByTabId, isEditorDirty } from '$lib/stores/editorRegistry.svelte';
 import { openInEditor, editorFileInfo } from '$lib/utils/openInEditor';
 import { editorTitleAfter } from '$lib/utils/editorTitle';
-import { insertPathsIntoTab } from '$lib/utils/insertPaths';
+import { insertPathsIntoTab, type InsertItem } from '$lib/utils/insertPaths';
 
 /** What the column shows when it isn't a tree. */
-export type TreeStatus = 'none' | 'resolving' | 'opening' | 'ready' | 'missing' | 'remote' | 'gone' | 'error';
+export type TreeStatus = 'none' | 'resolving' | 'opening' | 'ready' | 'missing' | 'gone' | 'error';
 
 export type OpenMode = 'preview' | 'pin' | 'side';
 
@@ -89,6 +91,9 @@ export interface OpNotice {
 const NOTICE_MS = 10_000;
 
 const PLATFORM: Platform = isMac() ? 'mac' : isWindows() ? 'windows' : 'linux';
+
+/** Whose words an op on this place is told in: a remote root's trash is the host's. */
+const platformOf = (p: TreePlace | null): Platform => (p?.kind === 'remote' ? 'remote' : PLATFORM);
 
 interface ViewState {
   model: TreeModel;
@@ -249,6 +254,14 @@ function createFileTreeStore() {
   /** Bumped per active-file lookup: only the newest may set the highlight. */
   let activeSeq = 0;
 
+  // Remote roots (§15). A root on an ssh host reopened from the LRU paints its last listing at
+  // once, dimmed until the host's helper has listed the root again (stale-while-revalidate).
+  let staleRoot = $state(false);
+  /** The machine the followed tab's shell last reported (OSC 7), for the wrong-host warning. */
+  let sourceOscHost = $state<string | null>(null);
+  /** This computer's name: an OSC 7 naming it is the local shell's, from before ssh. */
+  let localHost = $state<string | null>(null);
+
   /** Raw state: the tree reads it, and a reroot swaps it for another root's model while the
    *  tree stays mounted, so a plain `let` would leave the tree drawing the old root. */
   let model = $state.raw<TreeModel | null>(null);
@@ -320,12 +333,35 @@ function createFileTreeStore() {
   let notice = $state<OpNotice | null>(null);
   let noticeTimer: ReturnType<typeof setTimeout> | null = null;
   /** The tree's own clipboard of files (Cmd/Ctrl+C / X); never the OS clipboard. */
-  let clip = $state<{ place: string; rels: string[]; abs: string[]; cut: boolean } | null>(null);
+  let clip = $state<{ place: string; rels: string[]; abs: string[]; cut: boolean; remote: boolean } | null>(null);
   /** The folder a drag (or an OS drop) would land in now: '' the root, null none. */
   let dropTarget = $state<string | null>(null);
   const undo = new UndoStacks();
 
   homeDir().then((h) => { home = h; }).catch(() => {});
+
+  /** The place's host, or null for a root on this computer. */
+  function rootHost(p: TreePlace | null = place): string | null {
+    return p?.kind === 'remote' ? p.host_key : null;
+  }
+
+  /** Where a terminal tab's shell is: null on this computer (or not known to be elsewhere),
+   *  else an ssh spelling of its host: the bridge's, or with the bridge off the ssh command
+   *  saved with the tab. Read synchronously, for drag targets and the agent strip; typing
+   *  into a tab checks its live ssh again (`insertPathsIntoTab`). */
+  function tabHost(tabId: string): string | null {
+    const b = getBridgeInfo(tabId);
+    if (b) return b.hostKey;
+    const t = workspacesStore._locateTab(tabId)?.tab;
+    return t?.restore_ssh_command ?? null;
+  }
+
+  /** The tab's shell is on the root's machine. */
+  function tabOnRootHost(tabId: string): boolean {
+    const host = rootHost();
+    const th = tabHost(tabId);
+    return host === null ? th === null : th !== null && sameSshHost(th, host);
+  }
 
   // ── Small helpers ──────────────────────────────────────────────────────────────────────
 
@@ -543,12 +579,19 @@ function createFileTreeStore() {
     else expand(rel);
   }
 
+  /** A file's content now, from the disk it is on: a remote root's through the editor's own
+   *  remote read (scp over the place's ssh), which refuses what `readFile` refuses. */
+  function readNow(abs: string) {
+    const remote = remoteOf();
+    return remote ? commands.scpReadFile(remote.sshCommand, abs) : commands.readFile(abs);
+  }
+
   async function compareWithHead(rel: string) {
     const abs = absOf(rel);
     const sub = subId;
     if (!abs || sub === null) return;
     try {
-      await openGitDiff({ subId: sub, abs }, rel, 'HEAD');
+      await openGitDiff({ subId: sub, abs, read: readNow }, rel, 'HEAD');
     } catch (e) {
       toastStore.addToast('Couldn’t compare with HEAD', e instanceof Error ? e.message : String(e), 'error');
     }
@@ -684,6 +727,7 @@ function createFileTreeStore() {
     }
     if (superseded()) return;
     sourceTabId = tabId;
+    sourceOscHost = terminalsStore.getOsc(tabId)?.cwdHost ?? null;
     placeWorkspaceId = ws.id;
     await adoptPlace(p, token);
   }
@@ -698,22 +742,16 @@ function createFileTreeStore() {
       statusText = p.missing;
       return;
     }
-    if (p.kind !== 'local') {
-      saveView();
-      closeSub();
-      place = p;
-      status = 'remote';
-      statusText = null;
-      return;
-    }
     if (place && place.place === p.place && subId !== null) {
       place = p;
       moveYouAreHere(p.cwd_rel);
       return;
     }
     // Inside the current root: only the tick moves (`cd src/lib` reloads nothing). Pins
-    // always come back as their own place, so this is the follow case only.
-    if (place && subId !== null && ack && p.source !== 'pin' && place.source !== 'pin') {
+    // always come back as their own place, so this is the follow case only. Only on the same
+    // machine: a remote root keys the host's paths, which a local `/tmp/x` can spell too.
+    const sameMachine = !!place && place.kind === p.kind && (p.kind !== 'remote' || sameSshHost(place.host_key, p.host_key));
+    if (place && sameMachine && subId !== null && ack && p.source !== 'pin' && place.source !== 'pin') {
       const cwdAbs = relToAbs({ root_native: p.root, sep: ack.sep }, p.cwd_rel ?? '');
       const sub = subId;
       const located = await commands.ftLocate(sub, [cwdAbs]).catch(() => [null]);
@@ -738,7 +776,7 @@ function createFileTreeStore() {
   // ── Subscriptions ──────────────────────────────────────────────────────────────────────
 
   function saveView() {
-    if (!model || !place || place.kind !== 'local' || place.missing) return;
+    if (!model || !place || place.missing) return;
     roots.delete(place.place);
     roots.set(place.place, {
       model,
@@ -760,6 +798,7 @@ function createFileTreeStore() {
     subId = null;
     ack = null;
     health = null;
+    staleRoot = false;
     settleReveal('dropped');
     recursive = null;
     gitState = 'off';
@@ -805,6 +844,10 @@ function createFileTreeStore() {
     const kept = roots.get(p.place);
     roots.delete(p.place);
     model = kept?.model ?? newModel(p);
+    // A host's helper may take a second or more to start (or be down): its last listing is
+    // shown meanwhile, dimmed, until the root is listed again (§15.3). A local root answers in
+    // milliseconds and needs no such hint.
+    staleRoot = p.kind === 'remote' && kept?.model.dirs.get('')?.state === 'ok';
     model.setFilters(preferencesStore.fileTreeShowHidden, preferencesStore.fileTreeShowIgnored);
     // A kept model's decorations came from the old subscription; the new one starts with a
     // full update of its own (or none, with decorations off).
@@ -876,6 +919,7 @@ function createFileTreeStore() {
         const r = m.applyDir(env);
         if (r === 'resync') commands.ftRefresh(sub, env.rel).catch(() => {});
         else if (env.last) {
+          if (env.rel === '') staleRoot = false;
           onListed(env.rel);
           noteDiskChange(env.rel, null);
           pruneEdit();
@@ -885,7 +929,11 @@ function createFileTreeStore() {
       case 'not_modified': {
         const r = m.applyNotModified(env);
         if (r === 'resync') commands.ftRefresh(sub, env.rel).catch(() => {});
-        else onListed(env.rel);
+        else {
+          // The host confirmed what was painted.
+          if (env.rel === '') staleRoot = false;
+          onListed(env.rel);
+        }
         break;
       }
       case 'delta': {
@@ -900,6 +948,7 @@ function createFileTreeStore() {
       case 'dir_error': {
         const r = m.applyError(env);
         sendClose(r.close);
+        if (env.rel === '') staleRoot = false;
         break;
       }
       case 'health':
@@ -1136,7 +1185,9 @@ function createFileTreeStore() {
       outsideFile = null;
       return;
     }
-    const s = await settleActiveFile(target, async (abs) => (await commands.ftLocate(sub, [abs]))[0] ?? null);
+    // A file on another machine than the root is never under it, whatever its path spells.
+    const here = lookupIn(target, rootHost(), sameSshHost);
+    const s = await settleActiveFile(target, async (abs) => (here ? (await commands.ftLocate(sub, [abs]))[0] ?? null : null));
     if (my !== activeSeq || sub !== subId) return;
     activeFile = s.active;
     outsideFile = s.outside;
@@ -1145,12 +1196,15 @@ function createFileTreeStore() {
 
   /** "Reveal in Files" from a tab menu: the human asked, so the column opens (if it was
    *  closed), the row is selected and the tree takes focus. */
-  async function revealPath(abs: string) {
+  async function revealPath(abs: string, host: string | null = null) {
     await workspacesStore.setFileTreeOpen(true);
     // The column mounts and resolves; wait for a subscription before locating.
     for (let i = 0; i < 40 && subId === null; i++) await new Promise((r) => setTimeout(r, 50));
     if (subId === null) return;
-    const [rel] = await commands.ftLocate(subId, [abs]).catch(() => [null]);
+    // `host`: the ssh command a remote editor's file is behind. Only a root on that machine
+    // holds the file, whatever its path spells.
+    const here = lookupIn({ path: abs, offerShow: false, host }, rootHost(), sameSshHost);
+    const [rel] = here ? await commands.ftLocate(subId, [abs]).catch(() => [null]) : [null];
     if (rel == null) {
       toastStore.addToast('Files', 'That file is outside the folder Files is showing.', 'info');
       return;
@@ -1178,11 +1232,19 @@ function createFileTreeStore() {
     return ack ? relToAbs(ack, rel) : null;
   }
 
+  /** A remote root's files open through the editor's remote path (scp over the tab's own ssh
+   *  command, as a click on a remote path in a terminal does): the place's connect args. */
+  function remoteOf(p: TreePlace | null = place): { sshCommand: string } | null {
+    const host = rootHost(p);
+    return host ? { sshCommand: host } : null;
+  }
+
   async function openFile(rel: string, mode: OpenMode, keepFocus = false) {
     const abs = absOf(rel);
     const ws = workspacesStore.activeWorkspace;
     const pane = workspacesStore.activePane;
     if (!abs || !ws || !pane) return;
+    const remote = remoteOf();
     // A real open hands the keyboard to the editor; EditorPane won't take it from the tree
     // by itself (a preview keeps it here).
     const handOver = (tabId: string | null) => {
@@ -1194,8 +1256,8 @@ function createFileTreeStore() {
       if (mode === 'side') {
         const other = ws.panes.find((p) => p.id !== pane.id);
         const tabId = other
-          ? (await openInEditor({ abs, workspaceId: ws.id, paneId: other.id })).tabId
-          : await workspacesStore.openEditorInNewSplit(ws.id, pane.id, editorFileInfo(abs));
+          ? (await openInEditor({ abs, remote, workspaceId: ws.id, paneId: other.id })).tabId
+          : await workspacesStore.openEditorInNewSplit(ws.id, pane.id, editorFileInfo(abs, remote));
         handOver(tabId);
         return;
       }
@@ -1207,7 +1269,7 @@ function createFileTreeStore() {
         if (prev && loc && loc.paneId === pane.id && loc.tab.tab_type === 'editor' && !isEditorDirty(prev)) replaceTabId = prev;
         else previewTabs.delete(pane.id);
       }
-      const res = await openInEditor({ abs, workspaceId: ws.id, paneId: pane.id, replaceTabId });
+      const res = await openInEditor({ abs, remote, workspaceId: ws.id, paneId: pane.id, replaceTabId });
       if (usePreview) {
         if (!res.existing) previewTabs.set(pane.id, res.tabId);
       } else {
@@ -1240,10 +1302,13 @@ function createFileTreeStore() {
   let editorRels = $state.raw<Map<string, string[]>>(new Map());
   let editorKey = '';
 
-  /** Map this window's local editor tabs onto rows. Rust spells them (`ftLocate`); called
-   *  from an effect when the editor set or the root changes, so never per render. */
-  async function syncEditorMarks(tabs: { id: string; path: string }[]) {
+  /** Map this window's editor tabs onto rows. Rust spells them (`ftLocate`); called from an
+   *  effect when the editor set or the root changes, so never per render. Only the tabs on
+   *  the root's machine (`host`: null local, else the remote editor's ssh command). */
+  async function syncEditorMarks(all: { id: string; path: string; host: string | null }[]) {
     const sub = subId;
+    const host = rootHost();
+    const tabs = all.filter((t) => (host === null ? t.host === null : t.host !== null && sameSshHost(t.host, host)));
     const key = `${sub}\u0000${tabs.map((t) => `${t.id}=${t.path}`).join('\u0001')}`;
     if (key === editorKey) return;
     editorKey = key;
@@ -1289,15 +1354,19 @@ function createFileTreeStore() {
 
   async function revealInOs(rel: string) {
     const abs = absOf(rel);
-    if (abs) await commands.revealInFileManager(abs).catch((e) => toastStore.addToast('Couldn’t reveal', String(e), 'error'));
+    // The file manager and default apps are this computer's: a host's path means nothing here.
+    if (abs && !rootHost()) await commands.revealInFileManager(abs).catch((e) => toastStore.addToast('Couldn’t reveal', String(e), 'error'));
   }
 
   async function openWithDefaultApp(rel: string) {
     const abs = absOf(rel);
-    if (abs) await commands.openWithDefaultApp(abs).catch((e) => toastStore.addToast('Couldn’t open', String(e), 'error'));
+    if (abs && !rootHost()) await commands.openWithDefaultApp(abs).catch((e) => toastStore.addToast('Couldn’t open', String(e), 'error'));
   }
 
-  /** A new terminal tab whose shell starts in that folder (or the file's folder). */
+  /** A new terminal tab whose shell starts in that folder (or the file's folder). On a remote
+   *  root, a new ssh session to the host that starts there: the tab is started the way a
+   *  cloned ssh tab is (`ssh -t <host> '… cd <folder> && exec $SHELL -l'`, buildSshCommand),
+   *  so it gets its own tab identity and bridge like any maiTerm-started session. */
   async function openTerminalHere(rel: string) {
     const m = model;
     const ws = workspacesStore.activeWorkspace;
@@ -1307,8 +1376,9 @@ function createFileTreeStore() {
     const dirRel = rel === '' || (e && isExpandable(e)) ? rel : parentRel(rel);
     const cwd = absOf(dirRel);
     if (!cwd) return;
-    await workspacesStore.createTab(ws.id, pane.id, lastSegment(cwd), {
-      context: { cwd, sshCommand: null, remoteCwd: null },
+    const host = rootHost();
+    await workspacesStore.createTab(ws.id, pane.id, lastSegment(cwd) || cwd, {
+      context: host ? { cwd: null, sshCommand: host, remoteCwd: cwd } : { cwd, sshCommand: null, remoteCwd: null },
     });
   }
 
@@ -1325,11 +1395,18 @@ function createFileTreeStore() {
     return null;
   });
 
+  /** What `insertPathsIntoTab` is handed for these rows: local files, or paths on the root's
+   *  host, which go only to a tab on that same host (typed as they are, never uploaded). */
+  function insertItems(rels: string[]): InsertItem[] {
+    const host = rootHost();
+    return rels.map((r) => absOf(r)).filter((a): a is string => !!a).map((abs) => (host ? { abs, remote: { hostKey: host, path: abs } } : { abs }));
+  }
+
   /** Insert the paths into the followed tab's command line, never submitting (§9.5). */
   async function addToTab(rels: string[]) {
     const target = addTarget;
     if (!target || !rels.length) return;
-    const items = rels.map((r) => absOf(r)).filter((a): a is string => !!a).map((abs) => ({ abs }));
+    const items = insertItems(rels);
     const r = await insertPathsIntoTab(target.tabId, items);
     if (r.ok) announce(`Added ${items.length} path${items.length > 1 ? 's' : ''} to ${target.name}`);
   }
@@ -1399,8 +1476,10 @@ function createFileTreeStore() {
       for (const tabId of tabs) {
         const loc = workspacesStore._locateTab(tabId);
         const f = loc?.tab.editor_file;
-        if (!loc || loc.tab.tab_type !== 'editor' || !f || f.is_remote) continue;
-        const info = { ...f, file_path: abs, language: editorFileInfo(abs).language ?? f.language };
+        if (!loc || loc.tab.tab_type !== 'editor' || !f) continue;
+        // A remote editor (marked here only on its own host's root) keeps its ssh command and
+        // follows by its path there.
+        const info = { ...f, file_path: abs, remote_path: f.is_remote ? abs : f.remote_path, language: editorFileInfo(abs).language ?? f.language };
         // A title that is still the file's name follows it; one the human typed stays.
         const name = editorTitleAfter(loc.tab.name, f, info, isWindows());
         try {
@@ -1482,10 +1561,10 @@ function createFileTreeStore() {
       }
     }
 
-    const text = describeResult(op, r, PLATFORM);
+    const text = describeResult(op, r, platformOf(p));
     let action: OpNotice['action'] = null;
     if (o.undoing) {
-      const words = `Undid the ${o.undoing.label}${op.kind === 'trash' && r.done.length ? ` (moved to ${trashPlace(PLATFORM)})` : ''}`;
+      const words = `Undid the ${o.undoing.label}${op.kind === 'trash' && r.done.length ? ` (moved to ${trashPlace(platformOf(p))})` : ''}`;
       const extra = r.failed.length ? ` · ${r.failed[0].msg}` : '';
       if (r.done.length || r.failed.length) setNotice({ text: words + extra, action: null });
       announce(words + extra);
@@ -1493,7 +1572,8 @@ function createFileTreeStore() {
       if (r.undo && r.done.length) {
         const entry = undo.push(p.place, r.undo, undoLabel(op, r));
         action = { label: 'Undo', run: () => void undoLast(entry) };
-      } else if (op.kind === 'trash' && r.done.length && PLATFORM === 'mac') {
+      } else if (op.kind === 'trash' && r.done.length && platformOf(p) === 'mac') {
+        // (A remote trash always answers with an undo: its `restore` runs on the host.)
         // NSFileManager can't put things back from here: say where they went instead.
         action = { label: 'Show in Trash', run: () => void showTrash() };
       }
@@ -1613,10 +1693,13 @@ function createFileTreeStore() {
     const d = model.dirs.get(dir);
     const own = e.mode === 'rename' ? baseName(e.rel) : undefined;
     const names: [string, 'dir' | 'file'][] = d ? [...d.entries.values()].map((x) => [x.n, isFolderKind(x.k) ? 'dir' : 'file']) : [];
+    // The names the host's disk takes: a root on an ssh host follows its own rules, not this
+    // computer's (a `:` is fine on Linux, from a Windows client too).
+    const windows = PLATFORM === 'windows' && place?.kind !== 'remote';
     return {
       mode: e.mode,
-      strictWindows: PLATFORM === 'windows' || a.case_insensitive,
-      windows: PLATFORM === 'windows',
+      strictWindows: windows || a.case_insensitive,
+      windows,
       caseInsensitive: a.case_insensitive,
       nfc: a.nfc_names,
       sibling: siblingLookup(names, a.case_insensitive, a.nfc_names, own),
@@ -1680,7 +1763,8 @@ function createFileTreeStore() {
     if (!ack?.caps.trash) return deletePermanently(rels);
     const dirty = dirtyNames(rels);
     const go = () => runOp({ kind: 'trash', src: rels });
-    if (dirty.length) ask(`${unsavedNote(dirty)}${trashLabel(PLATFORM)} anyway?`, [{ label: trashLabel(PLATFORM), tone: 'danger', run: go }]);
+    const label = trashLabel(platformOf(place));
+    if (dirty.length) ask(`${unsavedNote(dirty)}${label} anyway?`, [{ label, tone: 'danger', run: go }]);
     else await go();
   }
 
@@ -1715,7 +1799,7 @@ function createFileTreeStore() {
   function clipTo(rels: string[], cut: boolean) {
     rels = rels.filter((r) => r !== '');
     if (!rels.length || !place || !ack) return;
-    clip = { place: place.place, rels, abs: rels.map((r) => relToAbs(ack!, r)), cut };
+    clip = { place: place.place, rels, abs: rels.map((r) => relToAbs(ack!, r)), cut, remote: place.kind === 'remote' };
     announce(`${quotedNames(rels)} ${cut ? 'cut' : 'copied'}: paste into a folder`);
   }
 
@@ -1738,6 +1822,14 @@ function createFileTreeStore() {
         const same = c.rels.every((s) => parentRel(s) === to);
         await runOp({ kind: 'copy', src: c.rels, dest: to, conflict: same ? 'keep_both' : 'fail' }, { select: true });
       }
+      return;
+    }
+    // An import reads its sources on this computer (onto a host too: Rust sends them over),
+    // so a cut or copy taken from a root on an ssh host has nothing here to read.
+    if (c.remote) {
+      const text = 'Files can’t copy from an ssh host into another folder yet: copy within that host’s folder instead';
+      setNotice({ text, action: null });
+      announce(text);
       return;
     }
     const r = await runOp({ kind: 'import', src: c.abs, dest: to }, { select: true });
@@ -1787,7 +1879,7 @@ function createFileTreeStore() {
     // stack until the answer, so Cancel loses nothing.
     const dirty = top.op.kind === 'trash' ? dirtyNames(top.op.src ?? []) : [];
     if (dirty.length) {
-      ask(`${unsavedNote(dirty)}Undoing the ${top.label} moves it to ${trashPlace(PLATFORM)}.`, [
+      ask(`${unsavedNote(dirty)}Undoing the ${top.label} moves it to ${trashPlace(platformOf(place))}.`, [
         { label: 'Undo Anyway', tone: 'danger', run: go },
       ]);
       return;
@@ -1799,18 +1891,22 @@ function createFileTreeStore() {
 
   /** Whether a drag of `srcs` would do anything at `t`. */
   function dropAccepts(srcs: string[], t: DropTarget, copy: boolean): boolean {
-    if (t.kind !== 'folder') return true;
+    // A host's files go only to a terminal on that host, typed as its paths; the composer
+    // attaches files from this computer, so it takes none of them.
+    if (t.kind === 'terminal') return !rootHost() || tabOnRootHost(t.tabId);
+    if (t.kind === 'composer') return !rootHost();
     return writable() && dropAccepted(srcs, t.rel, copy);
   }
 
   async function dropItems(srcs: string[], t: DropTarget, copy: boolean) {
     const abs = srcs.map((r) => absOf(r)).filter((a): a is string => !!a);
     if (t.kind === 'terminal') {
-      const r = await insertPathsIntoTab(t.tabId, abs.map((a) => ({ abs: a })));
+      const r = await insertPathsIntoTab(t.tabId, insertItems(srcs));
       if (r.ok) announce(`Added ${quotedNames(srcs)} to the tab`);
       return;
     }
     if (t.kind === 'composer') {
+      if (rootHost()) return;
       attachToComposer(t.tabId, abs);
       announce(`Attached ${quotedNames(srcs)}`);
       return;
@@ -1835,7 +1931,8 @@ function createFileTreeStore() {
    *  human writes the prompt and sends it (§9.5). The tree never submits. */
   function askAbout(rels: string[]) {
     const target = addTarget;
-    if (!target || !rels.length) return;
+    // Composer attachments are files on this computer (`canAskAbout`).
+    if (!target || !rels.length || rootHost()) return;
     const abs = rels.map((r) => absOf(r)).filter((a): a is string => !!a);
     if (!workspacesStore.isComposerOpen(target.tabId)) workspacesStore.toggleComposer(target.tabId);
     attachToComposer(target.tabId, abs);
@@ -1945,11 +2042,19 @@ function createFileTreeStore() {
     const marked = agentMarks.tabs();
     const counts = changedThisTurn(agentMarks, turns);
     const roots = [a.root_native, p.root];
+    const host = rootHost(p);
     return windowAgents
       .filter((t) => {
         if (marked.has(t.id)) return true;
         const cwd = agentStateStore.getState(t.id)?.cwd;
-        return !!cwd && cwdInRoot(cwd, roots, a.sep, a.case_insensitive);
+        if (!cwd) return false;
+        // A remote agent's folder is a path on its host (§15.3: host and path together), so
+        // it is in a remote root only when its tab's ssh reaches the root's host.
+        if (host) {
+          const th = tabHost(t.id);
+          return !!th && sameSshHost(th, host) && roots.some((r) => remoteWithin(cwd, r));
+        }
+        return cwdInRoot(cwd, roots, a.sep, a.case_insensitive);
       })
       .map((t) => ({
         tabId: t.id,
@@ -2018,6 +2123,7 @@ function createFileTreeStore() {
     const marks = agentMarks.marksOf(rel).filter((m) => isLasting(m.op)).sort((a, b) => b.at_ms - a.at_ms).slice(0, 4);
     if (!marks.length) return [];
     const abs = absOf(rel);
+    const host = rootHost();
     const ledgers = new Map<string, Promise<LedgerEntry[]>>();
     const out: string[] = [];
     for (const m of marks) {
@@ -2025,8 +2131,8 @@ function createFileTreeStore() {
       if (abs && m.evidence !== 'commit') {
         let l = ledgers.get(m.tab_id);
         if (!l) ledgers.set(m.tab_id, (l = commands.agentFilesActivity(m.tab_id, 'session', false).catch(() => [])));
-        const want = abs.normalize('NFC');
-        const hit = (await l).filter((e) => e.op === m.op && e.evidence === m.evidence && e.path.normalize('NFC') === want).pop();
+        // An ssh tab's ledger keys its paths by host (`host:/abs`).
+        const hit = (await l).filter((e) => e.op === m.op && e.evidence === m.evidence && ledgerPathIs(e.path, abs, host)).pop();
         tool = hit?.tool ?? null;
       }
       out.push(markWords(m, `“${tabName(m.tab_id)}”`, turns.isThisTurn(m), tool));
@@ -2040,7 +2146,7 @@ function createFileTreeStore() {
     if (!names.length) return fallback;
     const who = names.length === 1 ? `“${names[0]}” is` : names.length === 2 ? `“${names[0]}” and “${names[1]}” are` : `${names.length} agent tabs are`;
     const it = (op.src?.length ?? 0) > 1 ? 'them' : 'it';
-    const verb = op.kind === 'rename' ? `Rename ${it}` : op.kind === 'move' ? `Move ${it}` : op.kind === 'trash' ? trashLabel(PLATFORM) : op.kind === 'delete' ? `Delete ${it}` : 'Go ahead';
+    const verb = op.kind === 'rename' ? `Rename ${it}` : op.kind === 'move' ? `Move ${it}` : op.kind === 'trash' ? trashLabel(platformOf(place)) : op.kind === 'delete' ? `Delete ${it}` : 'Go ahead';
     return `${who} working on ${quotedNames(op.src ?? [])} right now, or changed ${it} this turn. ${verb} anyway?`;
   }
 
@@ -2102,7 +2208,13 @@ function createFileTreeStore() {
     for (let i = 0; i < 40 && subId === null && (status === 'resolving' || status === 'opening'); i++) await new Promise((r) => setTimeout(r, 50));
     const sub = subId;
     if (sub === null) {
-      return { result: 'outside_root', note: status === 'remote' ? 'Files is showing a folder on an ssh host, which it can only name, not browse.' : 'Files is not showing a folder right now.' };
+      return { result: 'outside_root', note: 'Files is not showing a folder right now.' };
+    }
+    // A path names a file on the caller's own machine: only a root on that machine holds it.
+    const host = rootHost();
+    const callerHost = callerTab ? tabHost(callerTab) : null;
+    if (host ? !callerHost || !sameSshHost(callerHost, host) : callerHost !== null) {
+      return { result: 'outside_root', note: host ? `Files is showing a folder on ${place?.host_label ?? host}, another machine than yours.` : 'Files is showing a folder on your human’s computer, not on your host.' };
     }
     const [rel] = await commands.ftLocate(sub, [path]).catch(() => [null]);
     if (sub !== subId) return { result: 'outside_root', note: 'Files moved to another folder meanwhile.' };
@@ -2151,11 +2263,12 @@ function createFileTreeStore() {
     const p = place;
     const humanIdleMs = lastHumanInputMs ? Date.now() - lastHumanInputMs : null;
     if (!p || p.missing) return { open, host: null, root: null, focused: null, selected: [] as string[], humanIdleMs };
-    if (p.kind !== 'local') return { open, host: p.host_label ?? p.host_key, root: p.root, focused: null, selected: [] as string[], humanIdleMs };
     // A closed column has no subscription and so no root to spell paths with: nothing is
-    // selected there that the human can see.
+    // selected there that the human can see. On a remote root the paths are the host's,
+    // named by `host`.
     const selected = [...selection].map((r) => absOf(r)).filter((x): x is string => !!x);
-    return { open, host: null, root: ack?.root_native ?? p.root, focused: focusKey ? absOf(focusKey) : null, selected, humanIdleMs };
+    const host = p.kind === 'remote' ? p.host_label ?? p.host_key : null;
+    return { open, host, root: ack?.root_native ?? p.root, focused: focusKey ? absOf(focusKey) : null, selected, humanIdleMs };
   }
 
   /** The pointer chip's "Show": the human asked, so the view may change. */
@@ -2185,7 +2298,7 @@ function createFileTreeStore() {
     if (!abs || !ed || !ws || !pane) return;
     let disk: string;
     try {
-      disk = (await commands.readFile(abs)).content;
+      disk = (await readNow(abs)).content;
     } catch (e) {
       toastStore.addToast('Couldn’t read the file on disk', e instanceof Error ? e.message : String(e), 'error');
       return;
@@ -2207,7 +2320,9 @@ function createFileTreeStore() {
    *  capture a baseline), newest first, and whether that was this turn. A change seen while a
    *  shell ran, or a commit, has no baseline (Compare with HEAD covers those). */
   function baselineWriters(rel: string): { tabId: string; name: string; thisTurn: boolean }[] {
-    if (!preferencesStore.fileTreeTurnBaselines || !preferencesStore.fileTreeAgentActivity || !absOf(rel)) return [];
+    // Baselines are read off this computer's disk at the agent's PreToolUse, so a remote
+    // agent's files have none: on a host the menu keeps Compare with HEAD only.
+    if (!preferencesStore.fileTreeTurnBaselines || !preferencesStore.fileTreeAgentActivity || !absOf(rel) || rootHost()) return [];
     const byTab = new Map<string, { at: number; thisTurn: boolean }>();
     for (const m of agentMarks.marksOf(rel)) {
       if (m.evidence !== 'tool' || !isLasting(m.op)) continue;
@@ -2360,6 +2475,7 @@ function createFileTreeStore() {
     attached = true;
     const offOsc = terminalsStore.onOscChange((tabId, osc) => {
       if (tabId !== sourceTabId) return;
+      if (sourceOscHost !== (osc.cwdHost ?? null)) sourceOscHost = osc.cwdHost ?? null;
       // Titles change constantly (an agent's spinner); only a folder signal is an edge.
       const key = `${osc.cwd}\u0000${osc.cwdHost}\u0000${osc.promptCwd}`;
       const prev = lastOscKey.get(tabId);
@@ -2402,8 +2518,19 @@ function createFileTreeStore() {
       () => window.removeEventListener('blur', onWindowBlur),
       () => window.removeEventListener('focus', onWindowFocus),
     ];
-    if (place && place.kind === 'local' && !place.missing) await reroot(place);
+    if (localHost === null) commands.ftLocalHostname().then((h) => { localHost = h; }).catch(() => {});
+    if (place && !place.missing) await reroot(place);
     void resolveNow(false);
+  }
+
+  /** A remote root that couldn't open (needs key-based ssh, no answer, a backoff): the host's
+   *  helper tries again now, and the root opens again, its last listing dimmed meanwhile. */
+  async function retryRemote() {
+    const p = place;
+    if (!p || p.kind !== 'remote' || p.missing) return;
+    await commands.ftRetryHost(p.place).catch((e) => logError(`[files] retry ${p.place}: ${e}`));
+    if (place !== p) return;
+    await reroot(p);
   }
 
   /** The column unmounted: close the subscription (not pause — the hub's 30 s grace and the
@@ -2587,9 +2714,12 @@ function createFileTreeStore() {
         return;
       }
       const t = workspacesStore.activeTab;
-      if (t?.tab_type === 'editor' && t.editor_file && !t.editor_file.is_remote) {
+      const target = t?.tab_type === 'editor' ? activeFileOf(t) : null;
+      if (target) {
         for (let i = 0; i < 40 && subId === null; i++) await new Promise((r) => setTimeout(r, 50));
-        const [rel] = subId !== null ? await commands.ftLocate(subId, [t.editor_file.file_path]).catch(() => [null]) : [null];
+        // A remote editor's file is found only in a root on its host, and vice versa.
+        const here = lookupIn(target, rootHost(), sameSshHost);
+        const [rel] = subId !== null && here ? await commands.ftLocate(subId, [target.path]).catch(() => [null]) : [null];
         if (rel) {
           // Not "Reveal in Files": find's results or the lens stay (see revealPlan).
           revealRel(rel, 'focus');
@@ -2670,7 +2800,8 @@ function createFileTreeStore() {
     // File operations (§10)
     get writable() { return !!ack?.caps.writable; },
     get canTrash() { return !!ack?.caps.trash; },
-    get platform(): Platform { return PLATFORM; },
+    /** Whose words the trash and its results use: the host's on a remote root. */
+    get platform(): Platform { return platformOf(place); },
     get edit() { return edit; },
     get confirm() { return confirm; },
     get notice() { return notice; },
@@ -2712,11 +2843,34 @@ function createFileTreeStore() {
 
     pin,
     unpin,
-    /** "Set as Root" on a folder row: its native path is a local place. */
+    /** "Set as Root" on a folder row: its native path is a local place; on a remote root the
+     *  place is `host:/abs`, as Rust spells it (`watch::place`). */
     async pinRel(rel: string) {
       const abs = absOf(rel);
-      if (abs) await pin(abs);
+      const host = rootHost();
+      if (abs) await pin(host ? `${host}:${abs}` : abs);
     },
+
+    // Remote roots (§15)
+    /** The root is on an ssh host. */
+    get remote() { return place?.kind === 'remote'; },
+    /** The last listing is painted, not yet confirmed by the host (dim it). Also while the
+     *  host's helper is down or can't log in: what is shown may be out of date. */
+    get stale() {
+      return staleRoot || (place?.kind === 'remote' && subId !== null && health?.watch === 'none');
+    },
+    /** The followed tab's shell reports another machine than the one shown (an onward ssh):
+     *  the header warns, naming both. */
+    get wrongHost(): { showing: string; shell: string } | null {
+      const p = place;
+      const a = ack;
+      if (!p || p.kind !== 'remote' || !a?.remote_hostname) return null;
+      if (!onAnotherHost(sourceOscHost, localHost, a.remote_hostname)) return null;
+      return { showing: p.host_label ?? a.remote_hostname, shell: sourceOscHost ?? '' };
+    },
+    retryRemote,
+    /** The followed agent can take these files in its composer (files on this computer). */
+    get canAskAbout() { return !rootHost(); },
 
     /** The roots of every terminal tab in the workspace, deduped, for the root switcher. */
     async tabRoots(): Promise<{ place: TreePlace; tabs: { id: string; name: string }[] }[]> {
@@ -2741,7 +2895,9 @@ function createFileTreeStore() {
     },
 
     displayRoot(p: TreePlace | null): string {
-      return p ? tildePath(p.root, home) : '';
+      if (!p) return '';
+      // This computer's home means nothing on a host: a remote root is named with its host.
+      return p.kind === 'remote' ? `${p.host_label ?? p.host_key}:${p.root}` : tildePath(p.root, home);
     },
   };
 }

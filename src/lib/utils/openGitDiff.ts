@@ -100,16 +100,21 @@ function readFailure(raw: string): string {
  * subscription, `abs` the file's native path (for reading the working copy and naming the
  * tab), `rel` its root-relative path. A file new since `ref` diffs against empty; a deleted
  * one against empty on the right. Throws with git's reason (binary, too large, no repo), or
- * with the reason a file still on disk couldn't be read.
+ * with the reason a file still on disk couldn't be read. `read` reads the working copy where
+ * it is (a root on an ssh host reads it there); this computer's disk by default.
  */
-export async function openGitDiff(target: { subId: number; abs: string }, rel: string, ref: 'HEAD' | 'index' = 'HEAD'): Promise<void> {
+export async function openGitDiff(
+  target: { subId: number; abs: string; read?: (abs: string) => Promise<{ content: string }> },
+  rel: string,
+  ref: 'HEAD' | 'index' = 'HEAD',
+): Promise<void> {
   const ws = workspacesStore.activeWorkspace;
   const pane = workspacesStore.activePane;
   if (!ws || !pane) throw new Error('No active pane');
   const base = await commands.ftDiffBase(target.subId, rel, ref);
   let current = '';
   try {
-    current = (await commands.readFile(target.abs)).content;
+    current = (await (target.read ?? commands.readFile)(target.abs)).content;
   } catch (e) {
     // Only a file that is gone diffs against empty. readFile refuses more than the base side
     // does (over 2 MB, or not UTF-8), and showing such a file as wholly deleted would be a

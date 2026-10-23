@@ -1155,12 +1155,17 @@
       }
     }
     // Files (docs/file-tree.md §3.1): reveals, and opens the column only because the human
-    // clicked. A local editor file is selected in the tree; a terminal tab is brought to the
-    // front so the tree follows it, and its folder is selected. Not for a stack service.
+    // clicked. An editor's file is selected in the tree (a remote one in a root on its host);
+    // a terminal tab is brought to the front so the tree follows it, and its folder is
+    // selected. Not for a stack service.
     if (preferencesStore.fileTreeEnabled) {
       if (editorFile && !editorFile.is_remote) {
         const path = editorFile.file_path;
         editorPathItems.push({ label: 'Reveal in Files', action: () => { void fileTreeStore.revealPath(path); } });
+      } else if (editorFile?.is_remote && editorFile.remote_ssh_command) {
+        const path = editorFile.remote_path ?? editorFile.file_path;
+        const host = editorFile.remote_ssh_command;
+        editorPathItems.push({ label: 'Reveal in Files', action: () => { void fileTreeStore.revealPath(path, host); } });
       } else if (isTerminalTab && !tabObj?.service_id) {
         editorPathItems.push({ label: 'Reveal in Files', action: () => { void fileTreeStore.revealTabFolder(workspaceId, pane.id, tabId); } });
       }
