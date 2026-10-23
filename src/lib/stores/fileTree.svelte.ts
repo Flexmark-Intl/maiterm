@@ -1277,14 +1277,15 @@ function createFileTreeStore() {
   }
 
   /** Renamed or moved files keep their editor tabs: each tab is pointed at the new path and
-   *  its watcher re-armed there (§10.3). Unsaved edits stay in the buffer. */
-  async function retargetEditors(done: OpItem[]) {
+   *  its watcher re-armed there (§10.3). Unsaved edits stay in the buffer. `root` and `eds`
+   *  are the root the op ran in and its editor marks. */
+  async function retargetEditors(done: OpItem[], root: OpenAck | null, eds: Map<string, string[]>) {
     const moves = done.filter((d): d is OpItem & { to: string } => !!d.to && d.from !== d.to);
-    if (!moves.length || !ack) return;
-    for (const [rel, tabs] of editorRels) {
+    if (!moves.length || !root) return;
+    for (const [rel, tabs] of eds) {
       const m = moves.find((d) => isWithin(rel, d.from));
       if (!m) continue;
-      const abs = relToAbs(ack, m.to + rel.slice(m.from.length));
+      const abs = relToAbs(root, m.to + rel.slice(m.from.length));
       for (const tabId of tabs) {
         const loc = workspacesStore._locateTab(tabId);
         const f = loc?.tab.editor_file;
@@ -1327,6 +1328,10 @@ function createFileTreeStore() {
   async function runOp(op: FileOp, o: RunOpts = {}): Promise<OpResult | null> {
     const sub = subId;
     const p = place;
+    // The root the op runs in, and its editor tabs: still the ones to retarget if the tree
+    // re-roots while a slow op (a cross-volume folder move) runs.
+    const a = ack;
+    const eds = editorRels;
     if (sub === null || !p) return null;
     confirm = null;
     let r: OpResult;
@@ -1342,6 +1347,8 @@ function createFileTreeStore() {
     } finally {
       undo.endOp(Date.now());
     }
+    // Before the re-root check: a tab left on the old path would save the file back there.
+    if (op.kind === 'rename' || op.kind === 'move') void retargetEditors(r.done, a, eds);
     if (sub !== subId) return r;
 
     if (r.needs) {
@@ -1361,8 +1368,6 @@ function createFileTreeStore() {
         if (left.length) void deletePermanently(left, n.detail);
       }
     }
-
-    void retargetEditors(op.kind === 'rename' || op.kind === 'move' ? r.done : []);
 
     const text = describeResult(op, r, PLATFORM);
     let action: OpNotice['action'] = null;
