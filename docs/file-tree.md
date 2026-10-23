@@ -22,6 +22,44 @@
 > - `TerminalPane.svelte:1391-1398`: the drop path types into a Claude tab with no dialog check.
 > - `lib.rs:270-274`: Rust already sees `WindowEvent::Focused`.
 > - The repo has no `tauri::ipc::Channel` anywhere yet.
+>
+> **As built, phase 1 backend (2026-10-22, `src-tauri/src/filetree/`).** Where it differs from the
+> text below:
+> - **Repo info is read off the disk**, not from `git rev-parse`: the nearest `.git` at or above the
+>   root (a folder, or a `gitdir:` file for worktrees/submodules, plus its `commondir`). The
+>   subprocess cost ~20 ms on the path to the first rows. `ft_resolve_place`'s root still comes
+>   from `share::git::toplevel`, cached.
+> - **The watcher starts in the background.** FSEvents' `FSEventStreamStart` blocks for seconds
+>   while fseventsd is busy (measured 1.5–4.5 s right after a 150k-file checkout). Until it runs,
+>   snapshots aren't trusted and every expand reads the disk; once it runs, every open folder is
+>   listed again. `caps.watch` reports what it will be ("live") meanwhile.
+> - **No `Resync` event.** An overflowed channel or a backend rescan re-lists the affected open
+>   folders in Rust and sends ordinary deltas, so the client never needs the round trip.
+> - **A folder's own rename or delete re-lists every open folder below it**: FSEvents and inotify
+>   report only the renamed path, never its descendants (the convergence test caught this).
+> - **Resume sends a whole `dir` per changed folder**, not a collapsed delta: the hub keeps one
+>   snapshot per folder, not the client's old one. A truncated folder (past 50k) is also always
+>   resent whole. There is no `toolarge` code; the cap is `truncated`.
+> - **A page reload is detected with `on_page_load` (Started)**: a Channel to a reloaded page
+>   still "sends" without an error, so the spec's "failed send" signal never fires.
+> - **NFC folding is macOS-only.** APFS/HFS+ treat NFC and NFD as one name; ext4 and NTFS keep
+>   them as two files, where folding would match a path to a file it doesn't name.
+> - **Linux polling can't see the viewport.** Polled folders are the over-budget open folders,
+>   checked every 2 s while a subscription to the hub is unpaused in a focused window. On
+>   `ENOSPC` or over budget the least recently opened folder (never the root) gives its watch up.
+> - **Remote places resolve but don't open.** `ft_resolve_place` answers an ssh tab with
+>   `kind: "remote"` and the remote cwd as root (no top level without the helper); `prompt_cwd`
+>   is accepted but unused, since dropping a fish `~/D/I/m/x` needs the helper's existence check.
+>   `ft_open` refuses a remote place until phase 6.
+> - **The cold-open first chunk is sent before the rest is sorted** (select the first 512, sort
+>   them, send, then sort the rest), only for a folder with no snapshot yet.
+> - `file_tree_exclude` lines are gitignore patterns (no separate GlobSet); a loop-flagged link
+>   keeps `k: "L"` with flag 4; `Health.git` is `"off"` and `StatInfo.numstat` null until phase 2.
+> - **Budgets measured** (release, this machine, loaded by other work): root open of the
+>   100k-file fixture 2–7 ms (budget 50); first chunk of a 50k folder 33–44 ms (budget 30) against
+>   a bare `read_dir` of the same folder of 22–77 ms in the same runs, so the disk floor alone can
+>   exceed the budget here. The ignored budget test asserts 30 ms or ≤8 ms above that floor.
+>   Idle: zero coalescer wakeups over 10 s.
 
 ## 1. Why
 
