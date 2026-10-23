@@ -596,6 +596,28 @@
 > - **Not checked in the running app** (no dev run in this step): the dev check (an agent edits a
 >   file twice in one turn, and the turn diff shows the pre-turn content) and the hook's time in
 >   a real session. A deleted file's diff relies on `read_file`'s "os error 2/3" wording.
+>
+> **As built, phase 5 review fixes (2026-10-23).** Where they changed the above:
+> - **Eviction takes only slots that hold content.** A new file's baseline and a refusal's record
+>   cost 0 bytes; evicting them first (they are often the oldest closed slots) freed nothing and
+>   reported a correct "diff against empty" as `evicted`.
+> - **Baselines are kept per session, two sessions per tab**, instead of dropped when another
+>   session captures. A headless `claude -p` the agent runs from Bash inherits `MAITERM_TAB_ID`
+>   and posts its own session's events: its capture used to drop the parent's baselines, and the
+>   parent's next call then read its own edits as the start. The ledger (`TabLedger.left`, the
+>   last 8) also remembers a session's turn and span when it switches away and carries them on
+>   when that session comes back, so the parent's calls stay in their turn instead of restarting
+>   at turn 1 (`turn_for_pre` mirrors this). The ledger still clears its entries on every switch,
+>   as before; only the turn number carries over.
+> - **The baseline follows the turn the call was filed in.** A prompt landing during the
+>   ≤25 ms read (a background subagent's call racing the human's next prompt) filed the call in
+>   turn N+1 while the baseline sat in N. `AgentFiles::record` now answers the turn it used
+>   (None for a dropped second copy) and the hook calls `Baselines::rekey`, which moves this
+>   call's slots there unless that turn already has one. The bytes were read before the tool ran,
+>   so they are the file as that turn's first edit found it.
+> - **The Turn lens's `+N −N` diff has a 200 ms deadline** (`similar`'s `timeout`). Myers is
+>   quadratic when most lines change (a rewritten 2 MB file took ~10 s per hover); past the
+>   deadline the rest counts as replaced.
 
 ## 1. Why
 
