@@ -883,6 +883,19 @@
 >   with `ENOSPC` answers `io` and leaves no file; a put slowed by 0.4 s and a put inside a
 >   folder are both followed by discards that leave nothing. Both fail against the old helper.
 >   **Not checked on a real full disk.**
+>
+> **As built, phase 6 Windows CI (2026-10-23).** The Test workflow's Windows job had failed
+> since the phase-6 commits; it passes again at `0dd13d8e` (run 39955303585). Where it changed
+> the above:
+> - **The crate builds on Windows.** `util/ssh_target.rs` `tunnel_socket` called the unix-only
+>   `cm_socket_path`; it now answers `None` on Windows, where no bridge tunnel is a
+>   ControlMaster, so a remote file there connects on its own.
+> - **The local-host tests are `#[cfg(unix)]`.** They make this computer stand in for the ssh host
+>   (`/bin/sh`, unix symlinks, select on pipes, `/`-absolute roots the helper insists on), and a
+>   host is always POSIX; Windows runs the Rust side only, against a host elsewhere. The registry,
+>   exit-classification and 3.6-gate tests still run on Windows. The helper harness reads
+>   `helper.py` as UTF-8 (Windows Python's cp1252 default could not decode it).
+>   **The Windows client against a real host (the phase-6 dev check) is still unchecked.**
 
 ## 1. Why
 
