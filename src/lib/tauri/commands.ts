@@ -1,6 +1,6 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
-import type { AgentMarkAbs, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
+import type { AgentMarkAbs, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
@@ -975,6 +975,12 @@ export async function agentFilesActivity(tabId: string, scope: 'turn' | 'session
  *  column draws on mount, before any `agent` event. */
 export async function agentFilesMarks(): Promise<AgentMarkAbs[]> {
   return invoke('agent_files_marks');
+}
+
+/** The current turn of each of this window's tabs, as the agent ledger counts them: what a
+ *  Files column that was closed starts its turn tracking from. */
+export async function agentFilesTurns(): Promise<TabTurn[]> {
+  return invoke('agent_files_turns');
 }
 
 /** A reload replaced `oldTabId` with `newTabId`: the agent ledger moves with it. */

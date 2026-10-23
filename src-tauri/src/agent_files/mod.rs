@@ -188,6 +188,8 @@ struct TabLedger {
     runtime: String,
     turn: u64,
     turn_open: bool,
+    /// When the current turn began and ended (None: open or never seen to end), ms epoch.
+    turn_span: (i64, Option<i64>),
     cwd: Option<String>,
     host: Option<String>,
     entries: VecDeque<LedgerEntry>,
@@ -196,7 +198,26 @@ struct TabLedger {
 
 impl TabLedger {
     fn new() -> Self {
-        TabLedger { session_id: String::new(), runtime: String::new(), turn: 0, turn_open: false, cwd: None, host: None, entries: VecDeque::new(), missing_since: None }
+        TabLedger {
+            session_id: String::new(),
+            runtime: String::new(),
+            turn: 0,
+            turn_open: false,
+            turn_span: (0, None),
+            cwd: None,
+            host: None,
+            entries: VecDeque::new(),
+            missing_since: None,
+        }
+    }
+
+    /// Stop, idle or an interrupt: the turn is over. Only the first of them is its end; an idle
+    /// notification after the Stop must not move it later.
+    fn end_turn(&mut self, now: i64) {
+        if self.turn_open {
+            self.turn_span.1 = Some(now);
+        }
+        self.turn_open = false;
     }
 
     fn push(&mut self, e: LedgerEntry) {
@@ -409,6 +430,7 @@ impl AgentFiles {
                     tab.entries.clear();
                     tab.turn = 0;
                     tab.turn_open = false;
+                    tab.turn_span = (0, None);
                     // The old session's shell calls are over too: left running, they would keep
                     // claiming the tree's changes for a session that is gone.
                     end_shells(&mut inner.shells, &rec.tab_id, None, None);
@@ -430,8 +452,9 @@ impl AgentFiles {
                     if rec.phase == Phase::Prompt {
                         tab.turn += 1;
                         tab.turn_open = true;
+                        tab.turn_span = (now, None);
                     } else {
-                        tab.turn_open = false;
+                        tab.end_turn(now);
                     }
                     end_shells(&mut inner.shells, &rec.tab_id, Some(""), None);
                 }
@@ -441,12 +464,12 @@ impl AgentFiles {
                     // call is settled. A background subagent's Bash may really still run, so only
                     // the main agent's shell calls end. The turn is over (an Esc sends no Stop).
                     tab.settle_unfinished(&rec.tab_id, None, None, false, now, &mut out);
-                    tab.turn_open = false;
+                    tab.end_turn(now);
                     end_shells(&mut inner.shells, &rec.tab_id, Some(""), None);
                 }
                 Phase::Interrupt => {
                     tab.settle_unfinished(&rec.tab_id, None, None, false, now, &mut out);
-                    tab.turn_open = false;
+                    tab.end_turn(now);
                     end_shells(&mut inner.shells, &rec.tab_id, None, None);
                 }
                 Phase::SubagentStop => {
@@ -471,6 +494,13 @@ impl AgentFiles {
                     // started mid-turn, or a background subagent outlived its parent's).
                     if !tab.turn_open {
                         tab.turn_open = true;
+                        // A call after the turn ended (a background subagent) carries the turn
+                        // on; one with no turn yet starts the first, as of now.
+                        if tab.turn == 0 {
+                            tab.turn_span = (now, None);
+                        } else {
+                            tab.turn_span.1 = None;
+                        }
                         tab.turn = tab.turn.max(1);
                     }
                     match &rec.extracted {
@@ -766,6 +796,20 @@ impl AgentFiles {
         out
     }
 
+    /// Each of `tabs`' current turn (None: every tab), for a window that was not listening to
+    /// the hooks: the standing marks carry only the turns something was written in, so a turn
+    /// that has only read, or not yet called a tool, is known here alone. Tabs with no turn yet
+    /// are left out.
+    pub fn turns(&self, tabs: Option<&HashSet<String>>) -> Vec<TabTurn> {
+        let inner = self.inner.lock();
+        inner
+            .tabs
+            .iter()
+            .filter(|(id, t)| t.turn > 0 && tabs.is_none_or(|s| s.contains(id.as_str())))
+            .map(|(id, t)| TabTurn { tab_id: id.clone(), turn: t.turn, open: t.turn_open, start_ms: t.turn_span.0, end_ms: t.turn_span.1 })
+            .collect()
+    }
+
     /// A reload replaced `old` with `new`: the same agent session goes on under the new id.
     pub fn remap_tab(&self, old: &str, new: &str) {
         let mut inner = self.inner.lock();
@@ -809,6 +853,18 @@ impl AgentFiles {
             }
         }
     }
+}
+
+/// A tab's current turn as the ledger counts it (`agent_files_turns`).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TabTurn {
+    pub tab_id: String,
+    pub turn: u64,
+    pub open: bool,
+    /// When it began (its prompt, or the first call when the prompt was not seen), ms epoch.
+    pub start_ms: i64,
+    /// When it ended; None while open, or when its end was never seen.
+    pub end_ms: Option<i64>,
 }
 
 /// One tab's ledger, for the tool and the command.

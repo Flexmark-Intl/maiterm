@@ -802,6 +802,7 @@ pub fn run() {
             filetree::commands::ft_prepare_delete,
             agent_files::commands::agent_files_activity,
             agent_files::commands::agent_files_marks,
+            agent_files::commands::agent_files_turns,
             agent_files::commands::agent_files_remap_tab,
             commands::workspace::set_split_ratio,
             commands::workspace::set_tab_scrollback,

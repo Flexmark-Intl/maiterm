@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tauri::State;
 
-use super::{AgentMarkAbs, LedgerEntry};
+use super::{AgentMarkAbs, LedgerEntry, TabTurn};
 use crate::filetree::FileTreeState;
 use crate::state::AppState;
 
@@ -28,21 +28,28 @@ pub async fn agent_files_activity(ft: State<'_, Arc<FileTreeState>>, tab_id: Str
 pub async fn agent_files_marks(window: tauri::Window, state: State<'_, Arc<AppState>>, ft: State<'_, Arc<FileTreeState>>) -> Result<Vec<AgentMarkAbs>, String> {
     let (st, ft) = (state.inner().clone(), ft.inner().clone());
     let label = window.label().to_string();
-    blocking(move || {
-        let tabs: HashSet<String> = {
-            let data = st.app_data.read();
-            data.windows
-                .iter()
-                .filter(|w| w.label == label)
-                .flat_map(|w| w.workspaces.iter())
-                .flat_map(|ws| ws.panes.iter())
-                .flat_map(|p| p.tabs.iter())
-                .map(|t| t.id.clone())
-                .collect()
-        };
-        Ok(ft.agents.standing_marks(Some(&tabs)))
-    })
-    .await
+    blocking(move || Ok(ft.agents.standing_marks(Some(&window_tabs(&st, &label))))).await
+}
+
+/// The current turn of each of this window's tabs, for a Files column that was closed while
+/// prompts and new sessions went by (§9.4): its turn tracker starts from these.
+#[tauri::command]
+pub async fn agent_files_turns(window: tauri::Window, state: State<'_, Arc<AppState>>, ft: State<'_, Arc<FileTreeState>>) -> Result<Vec<TabTurn>, String> {
+    let (st, ft) = (state.inner().clone(), ft.inner().clone());
+    let label = window.label().to_string();
+    blocking(move || Ok(ft.agents.turns(Some(&window_tabs(&st, &label))))).await
+}
+
+fn window_tabs(st: &AppState, label: &str) -> HashSet<String> {
+    let data = st.app_data.read();
+    data.windows
+        .iter()
+        .filter(|w| w.label == label)
+        .flat_map(|w| w.workspaces.iter())
+        .flat_map(|ws| ws.panes.iter())
+        .flat_map(|p| p.tabs.iter())
+        .map(|t| t.id.clone())
+        .collect()
 }
 
 /// A reload replaced tab `old_tab_id` with `new_tab_id` (a new id for the same agent session):

@@ -289,6 +289,34 @@ fn a_reload_moves_the_ledger_and_a_closed_tab_is_forgotten_after_a_minute() {
 }
 
 #[test]
+fn a_turn_that_only_read_is_still_the_tabs_current_one() {
+    let l = ledger();
+    l.record(rec(&prompt("/repo"), "t1"));
+    l.record(rec(&pre("Edit", json!({ "file_path": "/repo/a.ts", "old_string": "a", "new_string": "b" }), "e1", "/repo"), "t1"));
+    l.record(rec(&stop("/repo"), "t1"));
+    l.record(rec(&prompt("/repo"), "t1"));
+    l.record(rec(&pre("Read", json!({ "file_path": "/repo/b.ts" }), "r1", "/repo"), "t1"));
+    // The standing marks know only turn 1 (the edit); the window must hear turn 2 from here.
+    assert!(l.standing_marks(None).iter().all(|m| m.turn == 1));
+    let t = l.turns(None);
+    assert_eq!(t.len(), 1);
+    assert_eq!((t[0].turn, t[0].open, t[0].end_ms), (2, true, None));
+    assert!(t[0].start_ms > 0);
+    // Stop ends it, and a later idle notification does not move the end.
+    l.record(rec(&stop("/repo"), "t1"));
+    let ended = l.turns(None)[0].end_ms.expect("ended at the Stop");
+    std::thread::sleep(Duration::from_millis(5));
+    l.record(rec(&idle("/repo"), "t1"));
+    assert_eq!(l.turns(None)[0].end_ms, Some(ended));
+    // Only the asked tabs; a new session starts at no turn and is left out until it has one.
+    assert!(l.turns(Some(&HashSet::from(["t2".to_string()]))).is_empty());
+    let mut fresh = prompt("/repo");
+    fresh["session_id"] = json!("s2");
+    l.record(rec(&fresh, "t1"));
+    assert_eq!(l.turns(None)[0].turn, 1);
+}
+
+#[test]
 fn a_new_session_starts_its_own_history() {
     let l = ledger();
     l.record(rec(&pre("Edit", json!({ "file_path": "/repo/a.ts" }), "e1", "/repo"), "t1"));

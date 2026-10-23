@@ -2042,6 +2042,20 @@ function createFileTreeStore() {
     if (mode === 'turn' || mode === 'session') rebuildLens();
   }
 
+  /** The column opens: start each tab's turn from the ledger's count. The primed marks alone
+   *  would leave a turn that has only read (or not yet called a tool) unknown, and the
+   *  previous turn's writes would count as this one's. Asked as the hook listeners go up and
+   *  before the subscription is opened, so it normally lands before the primed marks; `seed`
+   *  never lowers a turn heard since, whichever comes first. */
+  async function seedTurns() {
+    const list = await commands.agentFilesTurns().catch(() => []);
+    if (!attached || list.length === 0) return;
+    for (const t of list) turns.seed(t.tab_id, t.turn, t.start_ms, t.end_ms);
+    bumpAgents();
+    const mode = viewMode();
+    if (mode === 'turn' || mode === 'session') rebuildLens();
+  }
+
   /** `revealInTree` (§9.6), in the caller's window. It never opens, resizes or focuses the
    *  column, and never moves a view the human is using: those cases leave a chip instead. */
   async function agentReveal(callerTab: string | undefined, path: string, select: boolean): Promise<{ result: string; note?: string }> {
@@ -2270,6 +2284,7 @@ function createFileTreeStore() {
     });
     onHook<{ tab_id?: string | null }>('agent-hook-user-prompt', (p) => { if (p.tab_id) onTurnEdge('prompt', p.tab_id); });
     onHook<{ tab_id?: string | null }>('agent-hook-stop', (p) => { if (p.tab_id) onTurnEdge('stop', p.tab_id); });
+    void seedTurns();
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('blur', onWindowBlur);
     window.addEventListener('focus', onWindowFocus);
@@ -2296,8 +2311,8 @@ function createFileTreeStore() {
     unlisteners = [];
     // With the hook listeners gone, a prompt or a new session (the ledger renumbers from 1)
     // would pass unseen, and noteMark only ever raises a turn: kept, the tracker could stay
-    // ahead of the ledger for good and no mark would count as this turn's. The next
-    // subscription's primed marks rebuild it.
+    // ahead of the ledger for good and no mark would count as this turn's. The next attach
+    // rebuilds it from the ledger's own count (seedTurns) and the primed marks.
     turns.clear();
     tabLastAt.clear();
     saveView();

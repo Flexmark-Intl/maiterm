@@ -107,6 +107,18 @@ export class TurnTracker {
     this.spans.delete(tabId);
   }
 
+  /** The ledger's own count for the tab, read when the column opens (`agentFilesTurns`): the
+   *  marks carry only turns something was written in, so a turn that has only read is known
+   *  from here alone. A newer turn seen since the read (a mark, a prompt hook) wins. */
+  seed(tabId: string, turn: number, start: number, end: number | null): void {
+    const cur = this.turn.get(tabId);
+    if (cur !== undefined && cur > turn) return;
+    const s = cur === turn ? this.spans.get(tabId) : undefined;
+    this.turn.set(tabId, turn);
+    // A Stop heard after the read already ended the turn the read still saw open.
+    this.spans.set(tabId, { start, end: end ?? s?.end ?? null });
+  }
+
   /** Forget every tab: what was learned can no longer be kept in step with the ledger. */
   clear(): void {
     this.turn.clear();

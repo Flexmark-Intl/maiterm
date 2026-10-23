@@ -101,14 +101,46 @@ describe('turns', () => {
     const turns = new TurnTracker();
     turns.noteMark(mark({ rel: 'a', turn: 9 }));
     // Closed: a /clear went by unseen and the ledger counts from 1 again. Reopened, the
-    // tracker is rebuilt from the primed marks.
+    // tracker is rebuilt from the primed marks and the ledger's own count.
     turns.clear();
     const primed = mark({ rel: 'b', turn: 3, at_ms: T0 + 5 });
     turns.noteMark(primed);
+    turns.seed('A', 3, T0, null);
     expect(turns.current('A')).toBe(3);
     expect(turns.isThisTurn(primed)).toBe(true);
     turns.turnStarted('A', T0 + 10);
     expect(turns.current('A')).toBe(4);
+  });
+
+  it('a reopened column knows a turn that has only read from the ledger, not the marks', () => {
+    const turns = new TurnTracker();
+    const written = mark({ rel: 'a.ts', turn: 3, at_ms: T0 });
+    turns.noteMark(written);
+    turns.turnStarted('A', T0 + 1000); // turn 4: reads only
+    turns.clear(); // the column closed
+    // Reopened: the standing marks hold only the turn-3 write; the ledger says turn 4.
+    turns.noteMark(written);
+    turns.seed('A', 4, T0 + 1000, null);
+    expect(turns.current('A')).toBe(4);
+    expect(turns.isThisTurn(written)).toBe(false);
+    expect(turns.span('A', T0, true)).toEqual({ start: T0 + 1000, end: Infinity });
+    // In either order: a seed that lands before the primed mark is not lowered by it.
+    const other = new TurnTracker();
+    other.seed('A', 4, T0 + 1000, T0 + 2000);
+    other.noteMark(written);
+    expect(other.current('A')).toBe(4);
+    expect(other.span('A', T0, false)).toEqual({ start: T0 + 1000, end: T0 + 2000 });
+  });
+
+  it('a turn heard after the ledger was read is not undone by the read', () => {
+    const turns = new TurnTracker();
+    turns.noteMark(mark({ rel: 'b', turn: 5, at_ms: T0 + 10 }));
+    turns.seed('A', 4, T0, T0 + 5);
+    expect(turns.current('A')).toBe(5);
+    // The same turn: a Stop heard after the read keeps its end.
+    turns.turnEnded('A', T0 + 20);
+    turns.seed('A', 5, T0 + 8, null);
+    expect(turns.span('A', T0, true)).toEqual({ start: T0 + 8, end: T0 + 20 });
   });
 
   it('a running write pulses; a failed one is outlined; a delete is struck', () => {

@@ -1248,6 +1248,17 @@ export interface AgentMarkAbs extends Omit<AgentMark, 'rel'> {
   path: string;
 }
 
+/** A tab's current turn as the agent ledger counts it (`agentFilesTurns`). */
+export interface TabTurn {
+  tab_id: string;
+  turn: number;
+  open: boolean;
+  /** When it began (its prompt, or its first call when the prompt was not seen), ms epoch. */
+  start_ms: number;
+  /** When it ended; null while open, or when its end was never seen. */
+  end_ms: number | null;
+}
+
 /** One entry of a tab's agent ledger (`agentFilesActivity`). `path` is absolute, or
  *  `user@host:/abs` for an ssh tab's. */
 export interface LedgerEntry {
