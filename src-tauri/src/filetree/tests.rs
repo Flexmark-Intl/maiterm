@@ -445,7 +445,10 @@ fn a_deleted_root_says_root_gone() {
     let root = temp_root("rootgone");
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
     let rec = Arc::new(Recorder::default());
-    ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+    let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+    // The watcher must be what notices: deleted before it runs, the root is only found gone
+    // when it starts, which under a loaded fseventsd is later than this test waits.
+    wait_watching(&ft.hub_of(ack.sub_id).unwrap());
     assert!(wait_for(&rec, Duration::from_secs(5), |e| matches!(e, TreeEvent::Dir { .. })).is_some());
     std::fs::remove_dir_all(&root).unwrap();
     assert!(wait_for(&rec, Duration::from_secs(10), |e| matches!(e, TreeEvent::RootGone)).is_some());
