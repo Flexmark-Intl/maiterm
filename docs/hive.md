@@ -581,12 +581,15 @@ learned this the hard way: workers in many worktrees silently drained users' quo
 checks these in Rust **before** a worker starts:
 
 - the worker cap (§3);
-- **spawns per hour and per day** for the Hive (defaults 20 and 100; Projects enforces 200
-  threads a day);
-- **a quota breaker.** When any Hive agent hits a usage limit or rate limit (the API error in
-  its transcript or Stop hook), the Hive stops starting workers for 60 minutes, tells the
-  coordinator, and shows "Paused · usage limit" in the header. Running workers carry on, since
-  Claude itself waits and resumes them when the limit resets.
+- **spawns per hour and per day**, counted **across every Hive on the machine**, not per Hive
+  (decided 2026-10-23): the Claude plan they draw on is shared, so two Hives each under their own
+  limits could still drain it together (defaults 20 and 100; Projects enforces 200 threads a day
+  across all of a user's projects). Each Hive's budget stays its own, and the header also shows
+  the total across Hives;
+- **a quota breaker**, also machine-wide. When any Hive agent hits a usage limit or rate limit
+  (the API error in its transcript or Stop hook), **every** Hive stops starting workers for 60
+  minutes, each coordinator is told, and each header shows "Paused · usage limit". Running
+  workers carry on, since Claude itself waits and resumes them when the limit resets.
 
 The coordinator is told its remaining headroom with every `hiveListWorkers`.
 
@@ -662,6 +665,29 @@ MRs from it, outside the Hive.
 The worker is retired: the agent exits, and its worktrees are removed **only if clean**. Its
 `scratch/` is removed only once everything in it the worker reported is in the gallery. The
 branches are kept.
+
+**A retired worker's chat stays readable** (decided 2026-10-23). Its card moves to Landed or
+Retired, and clicking it opens the same chat column, read-only, from the transcript the runtime
+already keeps on disk. maiTerm records the transcript's path on the task when the worker starts,
+so it survives the tab's removal. The column says "Retired · landed `a1b2c3d`" in place of a
+composer. "Why did it do that?" a week later is a click, not a search through
+`~/.claude/projects`.
+
+### 8.6 Undoing a land (decided 2026-10-23)
+
+Landing straight to main needs a way back. maiTerm keeps a **land log** per Hive: worker, repo,
+Base before, Base after, the commits, the time, and the coordinator's summary.
+
+- **Undo land** (on the card, in the log, and as `hiveUndoLand {land}` for the coordinator)
+  makes a **revert commit** for that land's commits on Base, through the same two guarded steps
+  as a land. It never resets or rewrites history: Base may have moved on, others may have
+  pulled, and a reset can't be pushed without force.
+- **A land that breaks Base stops landing.** After each land, the land check runs once more
+  in the coordinator's read copy at the new tip. A failure marks that land *suspect*, holds every
+  further land in that repo, and puts it to the coordinator first (undo it, or fix forward with a
+  worker). It goes to the human only if the coordinator can't settle it.
+- Undoing a land doesn't reopen the worker. The coordinator decides whether the work comes back
+  as a new task.
 
 ### 8.5 Pushing
 
@@ -917,6 +943,7 @@ copied into a folder, with names given or derived from titles.
 | Worker crash | Card → Failed; coordinator is told by a framed message; it may respawn (same task, new tab) |
 | Reload a Hive tab | The existing reload path (new tab id, `remapTab` for tasks); the card is keyed by task, so it doesn't move. Gallery assets keep the task id, not the tab id, for the same reason |
 | Pause (Hive header) | Stops new spawns and holds deliveries; running turns finish |
+| The goal is met (decided 2026-10-23) | At the start, the coordinator turns the one-line goal into **completion criteria**, each one checkable like a receipt (§7.7), and posts them where the human sees them first; a criterion can be changed in conversation. When all are met, it posts a **final report** against them (what landed, the assets that are final, what was spent, what it decided alone), marks the Hive **Done**, and stops. A Done Hive has no running agents, no watchers and costs nothing. A new message wakes the coordinator and reopens it |
 | Delete the Hive | A sheet lists every branch not landed, every dirty worktree and the gallery's size. Clean worktrees are removed; **dirty ones are kept and listed**; no branch is deleted; the gallery stays unless ticked. Same rule as Claude's worktree cleanup: never delete work |
 
 ## 12. Not in v1
@@ -969,6 +996,13 @@ Decided 2026-10-23:
    settings; decisions that reach the human become precedents that let the coordinator decide
    them next time, and earn it whole categories (§7.4–7.6). Darryl's direction; the mechanics are
    self-answered.
+10. **Undo:** a land log and Undo land, which makes a revert commit, never a reset; a land that
+    breaks Base holds further lands (§8.6).
+11. **Done:** completion criteria up front, a final report against them, then the Hive goes
+    quiet (§11).
+12. **Retired workers:** their chats stay readable from their cards (§8.4).
+13. **Several Hives:** spawn fuses and the quota breaker count across all Hives; budgets stay
+    per Hive (§7.8).
 
 ## 15. Prior art: what Hive takes and what it leaves
 
