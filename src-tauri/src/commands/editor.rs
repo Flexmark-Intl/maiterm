@@ -75,11 +75,103 @@ fn editor_file_identity_blocking(path: &str) -> String {
     format!("path:{}", canonical_editor_path_blocking(path))
 }
 
-/// `editor_file_identity_blocking` for several local paths in one round trip, in order.
+/// How long an open waits for the identities it asked for. A local stat takes microseconds; one
+/// that takes longer is a stored tab on a network share that went away (a dead SMB mount blocks
+/// for tens of seconds, a hard NFS mount forever), and that tab is the one least likely to be the
+/// file asked for. Past this its identity is unknown and the comparison falls back to spelling.
+const IDENTITY_DEADLINE: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// One path's identity, filled in by the thread that stats it.
+#[derive(Default)]
+struct IdentitySlot {
+    value: parking_lot::Mutex<Option<String>>,
+    ready: parking_lot::Condvar,
+}
+
+/// Stats in flight, by path. A request for a path already being stat'd waits on that stat instead
+/// of starting another, so a path stuck on a dead mount holds ONE thread however often the human
+/// retries, rather than one per open.
+fn identities_in_flight() -> &'static parking_lot::Mutex<std::collections::HashMap<String, Arc<IdentitySlot>>> {
+    static IN_FLIGHT: std::sync::OnceLock<
+        parking_lot::Mutex<std::collections::HashMap<String, Arc<IdentitySlot>>>,
+    > = std::sync::OnceLock::new();
+    IN_FLIGHT.get_or_init(Default::default)
+}
+
+/// Each path's identity, in order, or None for one not known within `deadline`. Every path is
+/// stat'd on its own thread, because every open stats every local editor tab in the window: run
+/// one after another, a single tab on a dead share would hold up the answer for all the others,
+/// including the file actually asked for.
+fn identities_within(
+    paths: &[String],
+    deadline: std::time::Duration,
+    identify: Arc<dyn Fn(&str) -> String + Send + Sync>,
+) -> Vec<Option<String>> {
+    let until = std::time::Instant::now() + deadline;
+    let mut slots = Vec::with_capacity(paths.len());
+    let mut to_start = Vec::new();
+    {
+        let mut in_flight = identities_in_flight().lock();
+        for p in paths {
+            let slot = in_flight
+                .entry(p.clone())
+                .or_insert_with(|| {
+                    let s = Arc::new(IdentitySlot::default());
+                    to_start.push((p.clone(), s.clone()));
+                    s
+                })
+                .clone();
+            slots.push(slot);
+        }
+    }
+    for (path, slot) in to_start {
+        let identify = identify.clone();
+        let spawned = std::thread::Builder::new()
+            .name("editor-identity".into())
+            .spawn({
+                let path = path.clone();
+                let slot = slot.clone();
+                move || {
+                    let id = identify(&path);
+                    *slot.value.lock() = Some(id);
+                    slot.ready.notify_all();
+                    forget_in_flight(&path, &slot);
+                }
+            });
+        if spawned.is_err() {
+            // Nothing will fill it: leave it unknown rather than have later requests wait on it.
+            forget_in_flight(&path, &slot);
+        }
+    }
+    slots
+        .iter()
+        .map(|slot| {
+            let mut value = slot.value.lock();
+            while value.is_none() {
+                if slot.ready.wait_until(&mut value, until).timed_out() {
+                    break;
+                }
+            }
+            value.clone()
+        })
+        .collect()
+}
+
+/// Drop a finished (or never started) stat from the in-flight map, unless a newer one took its
+/// place.
+fn forget_in_flight(path: &str, slot: &Arc<IdentitySlot>) {
+    let mut in_flight = identities_in_flight().lock();
+    if in_flight.get(path).is_some_and(|s| Arc::ptr_eq(s, slot)) {
+        in_flight.remove(path);
+    }
+}
+
+/// `editor_file_identity_blocking` for several local paths in one round trip, in order; None for
+/// a path whose stat didn't answer in time (`IDENTITY_DEADLINE`).
 #[command]
-pub async fn editor_file_identities(paths: Vec<String>) -> Result<Vec<String>, String> {
+pub async fn editor_file_identities(paths: Vec<String>) -> Result<Vec<Option<String>>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        paths.iter().map(|p| editor_file_identity_blocking(p)).collect()
+        identities_within(&paths, IDENTITY_DEADLINE, Arc::new(editor_file_identity_blocking))
     })
     .await
     .map_err(|e| e.to_string())
@@ -1687,5 +1779,52 @@ mod tests {
             format!("path:{}", canonical.with_file_name("new.ts").to_string_lossy())
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_stat_stuck_on_a_dead_mount_neither_delays_the_others_nor_takes_a_thread_per_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Unique paths: the in-flight map is process-wide and other tests may run beside this.
+        let tag = uuid::Uuid::new_v4();
+        let stuck = format!("/Volumes/gone-{tag}/notes.md");
+        let wanted = format!("/repo-{tag}/src/a.ts");
+        let other = format!("/repo-{tag}/src/b.ts");
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Arc::new(parking_lot::Mutex::new(release_rx));
+        let stuck_calls = Arc::new(AtomicUsize::new(0));
+        let identify: Arc<dyn Fn(&str) -> String + Send + Sync> = {
+            let stuck = stuck.clone();
+            let stuck_calls = stuck_calls.clone();
+            Arc::new(move |p: &str| {
+                if p == stuck {
+                    stuck_calls.fetch_add(1, Ordering::SeqCst);
+                    let _ = release_rx.lock().recv();
+                }
+                format!("id:{p}")
+            })
+        };
+
+        // The stuck tab sits FIRST in the list, ahead of the file asked for.
+        let paths = vec![stuck.clone(), wanted.clone(), other.clone()];
+        let started = std::time::Instant::now();
+        let got = identities_within(&paths, std::time::Duration::from_millis(200), identify.clone());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+        assert_eq!(got, vec![None, Some(format!("id:{wanted}")), Some(format!("id:{other}"))]);
+
+        // A retry joins the stat already in flight instead of parking another thread on it.
+        let again = identities_within(&paths, std::time::Duration::from_millis(100), identify.clone());
+        assert_eq!(again[0], None);
+        assert_eq!(again[1], Some(format!("id:{wanted}")));
+        assert_eq!(stuck_calls.load(Ordering::SeqCst), 1);
+
+        // Once the mount answers, the path is known again.
+        // Dropping the sender releases this stat and every later one.
+        drop(release_tx);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while identities_in_flight().lock().contains_key(&stuck) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let after = identities_within(&[stuck.clone()], std::time::Duration::from_secs(2), identify);
+        assert_eq!(after, vec![Some(format!("id:{stuck}"))]);
     }
 }

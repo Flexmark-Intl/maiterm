@@ -1437,9 +1437,10 @@ export async function canonicalEditorPath(path: string): Promise<string> {
 
 /**
  * What each local file IS (device + inode, or a canonical path), in order: two spellings of one
- * file — a symlinked folder, a symlink, a wrong-case name — get the same string.
+ * file — a symlinked folder, a symlink, a wrong-case name — get the same string. Null for a
+ * path whose stat didn't answer within a second (a tab on a network share that went away).
  */
-export async function editorFileIdentities(paths: string[]): Promise<string[]> {
+export async function editorFileIdentities(paths: string[]): Promise<(string | null)[]> {
   return invoke('editor_file_identities', { paths });
 }
 

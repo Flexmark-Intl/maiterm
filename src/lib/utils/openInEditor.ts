@@ -64,14 +64,21 @@ export function editorFileInfo(abs: string, remote?: { sshCommand: string } | nu
 
 /**
  * What each local path is on disk, keyed by the path, for `sameEditorFile`. Undefined when Rust
- * can't say, which leaves the comparison to its lexical fallback.
+ * can't say, which leaves the comparison to its lexical fallback. A path missing from the map is
+ * one whose stat didn't answer in time (Rust waits about a second, so one tab on a dead network
+ * share can't hold up every open); that tab compares by spelling.
  */
 export async function localFileIdentities(paths: string[]): Promise<Map<string, string> | undefined> {
   const unique = [...new Set(paths)];
   if (unique.length === 0) return new Map();
   const ids = await editorFileIdentities(unique).catch(() => null);
   if (!ids || ids.length !== unique.length) return undefined;
-  return new Map(unique.map((p, i) => [p, ids[i]]));
+  const out = new Map<string, string>();
+  unique.forEach((p, i) => {
+    const id = ids[i];
+    if (id != null) out.set(p, id);
+  });
+  return out;
 }
 
 export async function openInEditor(args: OpenInEditorArgs): Promise<OpenInEditorResult> {
