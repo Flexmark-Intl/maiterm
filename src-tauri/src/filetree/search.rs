@@ -468,14 +468,51 @@ fn git_ls_files(root: &Path) -> Option<Vec<String>> {
     if !out.status.success() {
         return None;
     }
-    Some(parse_ls_files_tagged(&out.stdout))
+    Some(parse_ls_files_tagged(&out.stdout, &mut OnDisk::new(root)))
+}
+
+/// Whether a root-relative path is on disk, remembering each folder's answer: a sparse
+/// checkout leaves whole folders out, so one lookup of the folder settles every file in it.
+struct OnDisk<'a> {
+    root: &'a Path,
+    dirs: HashMap<String, bool>,
+}
+
+impl<'a> OnDisk<'a> {
+    fn new(root: &'a Path) -> Self {
+        OnDisk { root, dirs: HashMap::new() }
+    }
+
+    fn file(&mut self, rel: &str) -> bool {
+        if let Some((parent, _)) = rel.rsplit_once('/') {
+            if !self.dir(parent) {
+                return false;
+            }
+        }
+        super::paths::rel_to_native(self.root, rel).is_ok_and(|abs| std::fs::symlink_metadata(abs).is_ok_and(|m| !m.is_dir()))
+    }
+
+    fn dir(&mut self, rel: &str) -> bool {
+        if let Some(&known) = self.dirs.get(rel) {
+            return known;
+        }
+        let up = match rel.rsplit_once('/') {
+            Some((parent, _)) => self.dir(parent),
+            None => true,
+        };
+        let here = up && super::paths::rel_to_native(self.root, rel).is_ok_and(|abs| abs.is_dir());
+        self.dirs.insert(rel.to_string(), here);
+        here
+    }
 }
 
 /// `ls-files -t -z` records: a one-letter tag, a space, the path. `R` (deleted from the
-/// worktree) removes a path the `H` record listed. `S` (skip-worktree: outside a sparse
-/// checkout's cone) is in the index but not on disk, and git never reports it deleted, so it
-/// is left out on its own. Every other tag lists one.
-fn parse_ls_files_tagged(out: &[u8]) -> Vec<String> {
+/// worktree) removes a path the `H` record listed. `S` (skip-worktree) is listed only when it
+/// is on disk (`on_disk`): outside a sparse checkout's cone it is in the index but not on
+/// disk, and git never reports it deleted; but `git update-index --skip-worktree`, the usual
+/// way to hide local edits to a config file, sets the same bit on a file that stays, and git
+/// status never names that one, so nothing else would bring it back. Every other tag lists one.
+fn parse_ls_files_tagged(out: &[u8], on_disk: &mut OnDisk<'_>) -> Vec<String> {
     let mut removed = std::collections::HashSet::new();
     let mut listed = Vec::new();
     for rec in out.split(|b| *b == 0) {
@@ -487,7 +524,11 @@ fn parse_ls_files_tagged(out: &[u8]) -> Vec<String> {
             b'R' => {
                 removed.insert(path);
             }
-            b'S' => {}
+            b'S' => {
+                if on_disk.file(&path) {
+                    listed.push(path);
+                }
+            }
             _ => listed.push(path),
         }
     }
@@ -602,13 +643,65 @@ mod tests {
     fn a_tracked_file_deleted_from_the_worktree_is_not_listed() {
         // `-c` lists the index; the `R` records (deleted) take those paths back out.
         let out = b"? new.ts\0H kept.ts\0H gone.ts\0H old/a.ts\0R gone.ts\0R old/a.ts\0H c.ts\0H c.ts\0";
-        assert_eq!(parse_ls_files_tagged(out), vec!["new.ts".to_string(), "kept.ts".to_string(), "c.ts".to_string()]);
+        let none = Path::new("/nonexistent");
+        assert_eq!(parse_ls_files_tagged(out, &mut OnDisk::new(none)), vec!["new.ts".to_string(), "kept.ts".to_string(), "c.ts".to_string()]);
     }
 
+    /// Skip-worktree is one bit for two things: a file outside a sparse checkout's cone (not
+    /// on disk) and a file hidden with `git update-index --skip-worktree` (on disk, and edited).
     #[test]
-    fn a_file_outside_a_sparse_checkout_is_not_listed() {
-        // `git sparse-checkout set in`: out/b is in the index, tagged `S`, and not on disk.
-        assert_eq!(parse_ls_files_tagged(b"H in/a\0S out/b\0H top\0"), vec!["in/a".to_string(), "top".to_string()]);
+    fn a_skip_worktree_file_is_listed_only_when_it_is_on_disk() {
+        let root = std::env::temp_dir().join(format!("ft-skip-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("in")).unwrap();
+        std::fs::create_dir_all(root.join("cfg")).unwrap();
+        for f in ["in/a", "top", "cfg/database.yml", ".env"] {
+            std::fs::write(root.join(f), "").unwrap();
+        }
+        // `git sparse-checkout set in` left out/ off disk; out/b and out/deep/c are tagged `S`.
+        // `cfg/database.yml` and `.env` were hidden with `--skip-worktree` and stayed.
+        let out = b"H in/a\0S out/b\0S out/deep/c\0S cfg/database.yml\0S .env\0S cfg/gone\0H top\0";
+        let mut on_disk = OnDisk::new(&root);
+        assert_eq!(parse_ls_files_tagged(out, &mut on_disk), ["in/a", "cfg/database.yml", ".env", "top"].map(String::from).to_vec());
+        // A folder off disk settles everything below it.
+        assert_eq!(on_disk.dirs.get("out"), Some(&false));
+        assert_eq!(on_disk.dirs.get("out/deep"), Some(&false));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same through real git: `--skip-worktree` on a file that stays, and a sparse
+    /// checkout that takes a folder off disk.
+    #[test]
+    fn find_lists_a_hidden_config_file_but_not_one_outside_the_sparse_cone() {
+        let root = std::env::temp_dir().join(format!("ft-skip-git-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::share::canon(&root);
+        let git = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .current_dir(&root)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args(["-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(root.join("in")).unwrap();
+        std::fs::create_dir_all(root.join("out")).unwrap();
+        for f in ["in/a", "out/b", ".env"] {
+            std::fs::write(root.join(f), "x").unwrap();
+        }
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "--no-verify", "-m", "init"]);
+        git(&["update-index", "--skip-worktree", ".env"]);
+        std::fs::write(root.join(".env"), "local edit").unwrap();
+        git(&["sparse-checkout", "set", "in"]);
+        assert!(!root.join("out/b").exists() && root.join(".env").exists());
+        let mut got = git_ls_files(&root).unwrap();
+        got.sort();
+        assert_eq!(got, [".env", "in/a"].map(String::from).to_vec());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
