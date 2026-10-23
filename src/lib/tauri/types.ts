@@ -659,31 +659,30 @@ export interface Preferences {
   follow_ups_scripts_unattended: boolean;
   /** The Chrome extension link (docs/browser-link.md): host manifests + the browser MCP tools. */
   browser_link_enabled: boolean;
-  // Files (docs/file-tree.md §16). Optional here only so the preferences store compiles before
-  // it learns them; Rust always sends them. `set_preferences` REPLACES the whole object, so the
-  // store must round-trip every one of these or a save resets it to its default.
+  // Files (docs/file-tree.md §16). Required: `set_preferences` REPLACES the whole object, so
+  // the store must round-trip every one of these or a save resets it to its default.
   /** Master switch: the column, Cmd/Ctrl+Shift+B and (later) the tree's MCP tools. Default true. */
-  file_tree_enabled?: boolean;
+  file_tree_enabled: boolean;
   /** Follow the active tab's folder (§4.2). Default true. */
-  file_tree_follow?: boolean;
+  file_tree_follow: boolean;
   /** Reveal the active editor's file when it is under the root. Default true. */
-  file_tree_auto_reveal?: boolean;
+  file_tree_auto_reveal: boolean;
   /** Single click opens a preview tab (§10.5). Default true. */
-  file_tree_preview_tabs?: boolean;
+  file_tree_preview_tabs: boolean;
   /** Show dotfiles (client filter on `Entry.f & 2`). Default true. */
-  file_tree_show_hidden?: boolean;
+  file_tree_show_hidden: boolean;
   /** Show gitignored entries, dimmed (client filter on `Entry.f & 1`). Default true. */
-  file_tree_show_ignored?: boolean;
+  file_tree_show_ignored: boolean;
   /** Extra names hidden by Rust's listing, as gitignore lines. Default []. */
-  file_tree_exclude?: string[];
+  file_tree_exclude: string[];
   /** Sticky ancestor rows; 0 = off. Default 5. */
-  file_tree_sticky_max?: number;
+  file_tree_sticky_max: number;
   /** 'compact' | 'normal' | 'comfortable' (row height 20/22/24). Default 'normal'. */
-  file_tree_density?: string;
+  file_tree_density: string;
   /** 'color' | 'mono'. Default 'color'. */
-  file_tree_icons?: string;
+  file_tree_icons: string;
   /** Vim keys in the tree (§11.2). Default false. */
-  file_tree_vim_keys?: boolean;
+  file_tree_vim_keys: boolean;
   overlord_rules: OverlordRule[];
   hidden_default_overlord_rules: string[];
   claude_ide: boolean;

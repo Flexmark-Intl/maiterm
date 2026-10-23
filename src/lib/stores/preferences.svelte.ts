@@ -70,6 +70,19 @@ function createPreferencesStore() {
   let followUpsResumeAgent = $state(true);
   let followUpsScriptsUnattended = $state(false);
   let browserLinkEnabled = $state(false);
+  // Files (docs/file-tree.md §16). Every one is round-tripped by `save()`: set_preferences
+  // replaces the whole object, so a field the store forgets is reset to its default.
+  let fileTreeEnabled = $state(true);
+  let fileTreeFollow = $state(true);
+  let fileTreeAutoReveal = $state(true);
+  let fileTreePreviewTabs = $state(true);
+  let fileTreeShowHidden = $state(true);
+  let fileTreeShowIgnored = $state(true);
+  let fileTreeExclude = $state<string[]>([]);
+  let fileTreeStickyMax = $state(5);
+  let fileTreeDensity = $state('normal');
+  let fileTreeIcons = $state('color');
+  let fileTreeVimKeys = $state(false);
   let overlordRules = $state<OverlordRule[]>([]);
   let hiddenDefaultOverlordRules = $state<string[]>([]);
   let claudeCodeIde = $state(false);
@@ -191,6 +204,17 @@ function createPreferencesStore() {
     /** Agents' watch scripts run without the human approving each (docs/follow-ups.md §5.1). */
     get followUpsScriptsUnattended() { return followUpsScriptsUnattended; },
     get browserLinkEnabled() { return browserLinkEnabled; },
+    get fileTreeEnabled() { return fileTreeEnabled; },
+    get fileTreeFollow() { return fileTreeFollow; },
+    get fileTreeAutoReveal() { return fileTreeAutoReveal; },
+    get fileTreePreviewTabs() { return fileTreePreviewTabs; },
+    get fileTreeShowHidden() { return fileTreeShowHidden; },
+    get fileTreeShowIgnored() { return fileTreeShowIgnored; },
+    get fileTreeExclude() { return fileTreeExclude; },
+    get fileTreeStickyMax() { return fileTreeStickyMax; },
+    get fileTreeDensity() { return fileTreeDensity; },
+    get fileTreeIcons() { return fileTreeIcons; },
+    get fileTreeVimKeys() { return fileTreeVimKeys; },
     get overlordRules() { return overlordRules; },
     get hiddenDefaultOverlordRules() { return hiddenDefaultOverlordRules; },
     get claudeCodeIde() { return claudeCodeIde; },
@@ -303,6 +327,17 @@ function createPreferencesStore() {
       followUpsResumeAgent = prefs.follow_ups_resume_agent ?? true;
       followUpsScriptsUnattended = prefs.follow_ups_scripts_unattended ?? false;
       browserLinkEnabled = prefs.browser_link_enabled ?? false;
+      fileTreeEnabled = prefs.file_tree_enabled ?? true;
+      fileTreeFollow = prefs.file_tree_follow ?? true;
+      fileTreeAutoReveal = prefs.file_tree_auto_reveal ?? true;
+      fileTreePreviewTabs = prefs.file_tree_preview_tabs ?? true;
+      fileTreeShowHidden = prefs.file_tree_show_hidden ?? true;
+      fileTreeShowIgnored = prefs.file_tree_show_ignored ?? true;
+      fileTreeExclude = prefs.file_tree_exclude ?? [];
+      fileTreeStickyMax = prefs.file_tree_sticky_max ?? 5;
+      fileTreeDensity = prefs.file_tree_density || 'normal';
+      fileTreeIcons = prefs.file_tree_icons || 'color';
+      fileTreeVimKeys = prefs.file_tree_vim_keys ?? false;
       overlordRules = prefs.overlord_rules ?? [];
       hiddenDefaultOverlordRules = prefs.hidden_default_overlord_rules ?? [];
       claudeCodeIde = prefs.claude_ide ?? false;
@@ -669,6 +704,22 @@ function createPreferencesStore() {
       await this.save();
     },
 
+    async setFileTreeEnabled(value: boolean) { fileTreeEnabled = value; await this.save(); },
+    async setFileTreeFollow(value: boolean) { fileTreeFollow = value; await this.save(); },
+    async setFileTreeAutoReveal(value: boolean) { fileTreeAutoReveal = value; await this.save(); },
+    async setFileTreePreviewTabs(value: boolean) { fileTreePreviewTabs = value; await this.save(); },
+    async setFileTreeShowHidden(value: boolean) { fileTreeShowHidden = value; await this.save(); },
+    async setFileTreeShowIgnored(value: boolean) { fileTreeShowIgnored = value; await this.save(); },
+    /** Gitignore lines Rust hides from every listing. Takes effect on the next open of a root. */
+    async setFileTreeExclude(value: string[]) { fileTreeExclude = value; await this.save(); },
+    async setFileTreeStickyMax(value: number) {
+      fileTreeStickyMax = Math.max(0, Math.min(10, Math.round(value)));
+      await this.save();
+    },
+    async setFileTreeDensity(value: string) { fileTreeDensity = value; await this.save(); },
+    async setFileTreeIcons(value: string) { fileTreeIcons = value; await this.save(); },
+    async setFileTreeVimKeys(value: boolean) { fileTreeVimKeys = value; await this.save(); },
+
     async setOverlordAnswersEscalations(value: boolean) {
       overlordAnswersEscalations = value;
       await this.save();
@@ -959,6 +1010,17 @@ function createPreferencesStore() {
       followUpsResumeAgent = prefs.follow_ups_resume_agent ?? true;
       followUpsScriptsUnattended = prefs.follow_ups_scripts_unattended ?? false;
       browserLinkEnabled = prefs.browser_link_enabled ?? false;
+      fileTreeEnabled = prefs.file_tree_enabled ?? true;
+      fileTreeFollow = prefs.file_tree_follow ?? true;
+      fileTreeAutoReveal = prefs.file_tree_auto_reveal ?? true;
+      fileTreePreviewTabs = prefs.file_tree_preview_tabs ?? true;
+      fileTreeShowHidden = prefs.file_tree_show_hidden ?? true;
+      fileTreeShowIgnored = prefs.file_tree_show_ignored ?? true;
+      fileTreeExclude = prefs.file_tree_exclude ?? [];
+      fileTreeStickyMax = prefs.file_tree_sticky_max ?? 5;
+      fileTreeDensity = prefs.file_tree_density || 'normal';
+      fileTreeIcons = prefs.file_tree_icons || 'color';
+      fileTreeVimKeys = prefs.file_tree_vim_keys ?? false;
       overlordRules = prefs.overlord_rules ?? [];
       hiddenDefaultOverlordRules = prefs.hidden_default_overlord_rules ?? [];
       claudeCodeIde = prefs.claude_ide ?? false;
@@ -1063,6 +1125,17 @@ function createPreferencesStore() {
         follow_ups_resume_agent: followUpsResumeAgent,
         follow_ups_scripts_unattended: followUpsScriptsUnattended,
         browser_link_enabled: browserLinkEnabled,
+        file_tree_enabled: fileTreeEnabled,
+        file_tree_follow: fileTreeFollow,
+        file_tree_auto_reveal: fileTreeAutoReveal,
+        file_tree_preview_tabs: fileTreePreviewTabs,
+        file_tree_show_hidden: fileTreeShowHidden,
+        file_tree_show_ignored: fileTreeShowIgnored,
+        file_tree_exclude: fileTreeExclude,
+        file_tree_sticky_max: fileTreeStickyMax,
+        file_tree_density: fileTreeDensity,
+        file_tree_icons: fileTreeIcons,
+        file_tree_vim_keys: fileTreeVimKeys,
         overlord_rules: overlordRules,
         hidden_default_overlord_rules: hiddenDefaultOverlordRules,
         claude_ide: claudeCodeIde,
