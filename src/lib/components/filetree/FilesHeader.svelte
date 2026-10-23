@@ -53,6 +53,16 @@
         void preferencesStore.setFileTreeFollow(!preferencesStore.fileTreeFollow).then(() => fileTreeStore.scheduleResolve(false));
       },
     },
+    {
+      // Follow agent (§9.3): armed on the chosen chip, off by default, this window only.
+      label: fileTreeStore.followAgent
+        ? `✓ Follow Agent “${fileTreeStore.tabName(fileTreeStore.followAgent)}”`
+        : fileTreeStore.agentFilter
+          ? `Follow Agent “${fileTreeStore.tabName(fileTreeStore.agentFilter)}”`
+          : 'Follow Agent (choose an agent chip first)',
+      disabled: !fileTreeStore.followAgent && !fileTreeStore.agentFilter,
+      action: () => fileTreeStore.setFollowAgent(!fileTreeStore.followAgent),
+    },
     { label: '', separator: true, action: () => {} },
     {
       label: 'Reveal Active File',

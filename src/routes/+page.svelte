@@ -602,6 +602,10 @@
         >
           <Icon name="folder" size={14} />
         </IconButton>
+        {#if fileTreeStore.pointerWaiting}
+          <!-- An agent pointed at a file while Files was closed (revealInTree never opens it). -->
+          <span class="files-pointed" aria-hidden="true"></span>
+        {/if}
       </div>
     {/if}
   </div>
@@ -851,6 +855,17 @@
     bottom: 0;
     display: flex;
     align-items: center;
+  }
+
+  .files-pointed {
+    position: absolute;
+    top: 9px;
+    right: 1px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    pointer-events: none;
   }
 
   .files-wrapper {

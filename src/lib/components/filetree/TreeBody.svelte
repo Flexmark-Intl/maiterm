@@ -13,7 +13,7 @@
    *   capture handler has already passed only its own shortcuts through (+layout).
    */
   import { tick, untrack } from 'svelte';
-  import { fileTreeStore } from '$lib/stores/fileTree.svelte';
+  import { fileTreeStore, type RowAgent } from '$lib/stores/fileTree.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -32,6 +32,7 @@
   import TooltipBubble from '$lib/components/TooltipBubble.svelte';
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
   import StickyAncestors from './StickyAncestors.svelte';
+  import EdgeChips from './EdgeChips.svelte';
   import { isMac, isWindows, modSymbol } from '$lib/utils/platform';
 
   interface Props {
@@ -421,9 +422,13 @@
       { label: rels.length > 1 ? 'Copy Relative Paths' : 'Copy Relative Path', shortcut: copyRelKey, action: () => void fileTreeStore.copyPaths(rels, true) },
     );
     items.push(SEP, ...writeItems(r, rels, single, folder));
-    if (single && !folder && fileTreeStore.gitOn) {
-      items.push(SEP, { label: 'Compare with HEAD', action: () => void fileTreeStore.compareWithHead(r.key) });
+    const compare: MenuItem[] = [];
+    if (single && !folder && fileTreeStore.gitOn) compare.push({ label: 'Compare with HEAD', action: () => void fileTreeStore.compareWithHead(r.key) });
+    // An agent wrote a file that has unsaved edits here (§9.3's conflict badge).
+    if (single && !folder && fileTreeStore.rowAgent(r.key, false, false)?.conflict?.buffer) {
+      compare.push({ label: 'Compare Buffer ↔ Disk', action: () => void fileTreeStore.compareBufferWithDisk(r.key) });
     }
+    if (compare.length) items.push(SEP, ...compare);
     if (single && folder && !(r.flags & TREE_FLAG_LOOP)) {
       items.push(SEP, { label: 'Set as Root (pins)', action: () => void fileTreeStore.pinRel(r.key) });
     }
@@ -521,7 +526,9 @@
       if (r.flags & TREE_FLAG_UNREADABLE) notes.push('can’t be read');
       const tabs = fileTreeStore.editorRels.get(r.key);
       if (tabs?.some((t) => isEditorDirty(t))) notes.push('unsaved changes in an editor tab');
-      if (!clipped && !alt && notes.length === 0) return;
+      const ag = fileTreeStore.rowAgent(r.key, isFolderKind(r.kind), fileTreeStore.isExpanded(r.key));
+      if (ag?.badge) notes.push(`${ag.badge.count} file${ag.badge.count === 1 ? '' : 's'} inside changed by agents this turn`);
+      if (!clipped && !alt && notes.length === 0 && !ag?.marks.length && !ag?.conflict) return;
       let text = r.key;
       if (!isFolderKind(r.kind) && fileTreeStore.ack) {
         const st = await commands.ftStat(fileTreeStore.ack.sub_id, r.key).catch(() => null);
@@ -535,6 +542,14 @@
         }
       }
       if (notes.length) text += `\n${notes.join(' · ')}`;
+      // The agents' marks in words, each with its evidence ("changed on disk while …’s Bash
+      // ran" is never "edited by").
+      if (ag?.marks.length) {
+        const words = await fileTreeStore.agentWords(r.key);
+        if (seq !== tipSeq) return;
+        if (words.length) text += `\n${words.join('\n')}`;
+      }
+      if (ag?.conflict) text += `\n⚠ ${ag.conflict.text}${ag.conflict.buffer ? ' · click ⚠ to compare buffer ↔ disk' : ''}`;
       if (seq === tipSeq) tip = { el: nameEl, text };
     }, TOOLTIP_DELAY_MS);
   }
@@ -564,12 +579,17 @@
     }
   }
 
-  function ariaLabel(r: Row, expanded: boolean, dirty: boolean, git: { letter: GitLetter; rollup: boolean } | null): string {
+  function ariaLabel(r: Row, expanded: boolean, dirty: boolean, git: { letter: GitLetter; rollup: boolean } | null, ag: RowAgent | null): string {
     const parts = [r.name];
     if (isExpandable(r)) parts.push(expanded ? 'expanded' : 'collapsed');
     if (git) parts.push(git.rollup ? `contains ${gitWord(git.letter)} files` : gitWord(git.letter));
     if (r.flags & TREE_FLAG_IGNORED) parts.push('ignored');
     if (dirty) parts.push('unsaved changes');
+    if (ag?.editing) parts.push('an agent is changing it now');
+    else if (ag?.deleted) parts.push(`deleted by ${fileTreeStore.tabName(ag.writers[0] ?? '')} this turn`);
+    else if (ag?.writers.length) parts.push(`changed by ${ag.writers.map((t) => fileTreeStore.tabName(t)).join(' and ')} this turn`);
+    if (ag?.badge) parts.push(`${ag.badge.count} changed inside this turn`);
+    if (ag?.conflict) parts.push(`conflict: ${ag.conflict.text}`);
     if (r.key === fileTreeStore.youAreHere) parts.push('this tab’s folder');
     return parts.join(', ');
   }
@@ -609,6 +629,8 @@
     {@const gcls = git ? gitClass(git.letter) : ''}
     {@const hl = typed ? undefined : fileTreeStore.highlightsFor(r.key)}
     {@const renaming = edit?.mode === 'rename' && edit.rel === r.key ? edit : null}
+    {@const ag = fileTreeStore.rowAgent(r.key, folder, expanded)}
+    {@const railLeft = Math.max(1, PAD + r.depth * INDENT - 4)}
     <!-- The container holds focus (aria-activedescendant); a row never does, so it has no
          tabindex: clicking it focuses the tree. -->
     <!-- svelte-ignore a11y_interactive_supports_focus -->
@@ -629,7 +651,7 @@
       aria-level={r.depth + 1}
       aria-expanded={expandable ? expanded : undefined}
       aria-selected={fileTreeStore.selection.has(r.key)}
-      aria-label={ariaLabel(r, expanded, dirty, git)}
+      aria-label={ariaLabel(r, expanded, dirty, git, ag)}
       style="transform: translateY({i * rowH}px); padding-left: {PAD}px"
       onmousedown={(e) => { if (e.detail > 1) e.preventDefault(); }}
       onpointerdown={(e) => onRowPointerDown(e, r)}
@@ -639,6 +661,19 @@
       onmouseenter={(e) => onRowEnter(e, r)}
       onmouseleave={hideTip}
     >
+      {#if ag?.rail}
+        <!-- The rail (§9.3): the op's colour; it pulses while the call runs, fades after a
+             completed write's sweep or a read's light. `--t0` is minus the mark's age, so a
+             row scrolled back into view carries on rather than starting over. -->
+        {@const t0 = `-${Math.max(0, Date.now() - ag.rail.t0)}ms`}
+        <span class="ft-rail op-{ag.rail.cls} m-{ag.rail.mode}" style="left: {railLeft}px; --t0: {t0}" aria-hidden="true"></span>
+        {#if ag.rail.mode === 'sweep' || ag.rail.mode === 'read'}
+          <span class="ft-glow op-{ag.rail.cls} g-{ag.rail.mode}" style="--t0: {t0}" aria-hidden="true"></span>
+        {/if}
+      {:else if ag && ag.writers.length > 1}
+        <!-- Two agents wrote it this turn: the rail splits into their colours. -->
+        <span class="ft-rail split" style="left: {railLeft}px; --c1: var(--ft-agent-{fileTreeStore.colourOf(ag.writers[0])}); --c2: var(--ft-agent-{fileTreeStore.colourOf(ag.writers[1])})" aria-hidden="true"></span>
+      {/if}
       {#if r.depth > 0}<span class="indent" style="width: {r.depth * INDENT}px"></span>{/if}
       {#if guide && i >= guide.start && i < guide.end}
         <span class="guide-hl" style="left: {PAD + guide.depth * INDENT + 6}px"></span>
@@ -661,9 +696,24 @@
           oncancel={() => fileTreeStore.cancelEdit()}
         />
       {:else}
-      <span class="name {git && !git.rollup ? gcls : ''}">{#if typed}<mark>{r.name.slice(0, typed)}</mark>{r.name.slice(typed)}{:else if hl}{#each highlightRuns(r.name, hl) as run, j (j)}{#if run.hit}<mark class="hit">{run.text}</mark>{:else}{run.text}{/if}{/each}{:else}{r.name}{/if}</span>
+      <span class="name {git && !git.rollup ? gcls : ''}" class:ag-deleted={ag?.deleted}>{#if typed}<mark>{r.name.slice(0, typed)}</mark>{r.name.slice(typed)}{:else if hl}{#each highlightRuns(r.name, hl) as run, j (j)}{#if run.hit}<mark class="hit">{run.text}</mark>{:else}{run.text}{/if}{/each}{:else}{r.name}{/if}</span>
       {/if}
       <span class="gutter">
+        {#if ag?.conflict}
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <span
+            class="ft-conflict"
+            class:actionable={ag.conflict.buffer}
+            aria-hidden="true"
+            onclick={(e) => { if (ag.conflict?.buffer) { e.stopPropagation(); fileTreeStore.humanTouched(); void fileTreeStore.compareBufferWithDisk(r.key); } }}
+          >⚠</span>
+        {/if}
+        {#if ag?.badge}<span class="ft-badge" style="color: var(--ft-agent-{ag.badge.colour})" aria-hidden="true">{ag.badge.count}✎</span>{/if}
+        {#if ag && ag.writers.length && !folder}
+          <!-- Written this turn: a dot in each writer's colour (two at most). -->
+          {#each ag.writers.slice(0, 2) as w (w)}<span class="ft-dot" style="background: var(--ft-agent-{fileTreeStore.colourOf(w)})" aria-hidden="true"></span>{/each}
+        {/if}
         {#if r.key === fileTreeStore.youAreHere}<span class="here" aria-hidden="true"></span>{/if}
         {#if tabs}<span class="ed-dot" class:dirty aria-hidden="true"></span>{/if}
         {#if git && folder}<span class="git-dot {gcls}" aria-hidden="true"></span>
@@ -673,9 +723,11 @@
   {/if}
 {/snippet}
 
+<div class="tree-wrap">
 <div
   class="tree"
   bind:this={el}
+  onwheel={() => fileTreeStore.humanTouched()}
   role="tree"
   tabindex="0"
   aria-label="Files"
@@ -698,12 +750,23 @@
     {/each}
   </div>
 </div>
+<EdgeChips {rows} {scrollTop} {viewportH} {rowH} headerRows={sticky.length} onjump={(i) => scrollIntoView(i)} />
+</div>
 
 {#if menu}
   <ContextMenu items={menu.items} x={menu.x} y={menu.y} onclose={() => { menu = null; void tick().then(() => el?.focus({ preventScroll: true })); }} />
 {/if}
 
 <style>
+  /* Holds the scrolling list and the edge chips over it (which must not scroll with it). */
+  .tree-wrap {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+
   .tree {
     --ft-guide: color-mix(in srgb, var(--fg-dim) 35%, transparent);
     flex: 1;
@@ -918,5 +981,113 @@
 
   .row.msg-empty {
     font-style: normal;
+  }
+
+  /* Agents (§9.3; tokens and keyframes in app.css). The rail is the op, the dot the agent. */
+  .ft-rail {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--rail-c);
+    pointer-events: none;
+  }
+
+  .op-read { --rail-c: var(--ft-read); }
+  .op-write { --rail-c: var(--ft-write); }
+  .op-create { --rail-c: var(--ft-create); }
+  .op-delete { --rail-c: var(--ft-delete); }
+
+  /* Editing now: pulses between Pre and Post. */
+  .ft-rail.m-pending {
+    animation: ft-pulse var(--ft-pulse-ms) ease-in-out infinite;
+    animation-delay: var(--t0, 0ms);
+  }
+
+  .ft-rail.m-sweep {
+    animation: ft-fade var(--ft-sweep-ms) ease-out forwards;
+    animation-delay: var(--t0, 0ms);
+  }
+
+  /* Reads light faintly and leave nothing behind. */
+  .ft-rail.m-read {
+    opacity: 0.7;
+    animation: ft-fade var(--ft-read-ms) linear forwards;
+    animation-delay: var(--t0, 0ms);
+  }
+
+  .ft-rail.m-failed {
+    background: transparent;
+    box-shadow: 0 0 0 1px var(--ft-fail);
+  }
+
+  .ft-rail.split {
+    background: linear-gradient(to bottom, var(--c1) 50%, var(--c2) 50%);
+  }
+
+  /* A completed write's sweep, and a read's faint light, across the row. */
+  .ft-glow {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    will-change: transform, opacity;
+  }
+
+  .ft-glow.g-sweep {
+    background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--rail-c) 30%, transparent), transparent);
+    animation: ft-sweep var(--ft-sweep-ms) ease-out forwards;
+    animation-delay: var(--t0, 0ms);
+  }
+
+  .ft-glow.g-read {
+    background: color-mix(in srgb, var(--ft-read) 9%, transparent);
+    animation: ft-fade var(--ft-read-ms) linear forwards;
+    animation-delay: var(--t0, 0ms);
+  }
+
+  /* Reduced motion: nothing moves or pulses; a static tint for as long as it would have run. */
+  @media (prefers-reduced-motion: reduce) {
+    .ft-rail.m-pending {
+      animation: none;
+    }
+
+    .ft-rail.m-sweep,
+    .ft-rail.m-read,
+    .ft-glow.g-sweep,
+    .ft-glow.g-read {
+      animation-name: ft-hold;
+      animation-timing-function: steps(1, end);
+    }
+  }
+
+  .name.ag-deleted {
+    text-decoration: line-through;
+    color: color-mix(in srgb, var(--ft-delete) 80%, var(--fg));
+  }
+
+  /* Written this turn: a small persistent dot in the agent's colour. */
+  .ft-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* A collapsed folder over activity: never opened for it. */
+  .ft-badge {
+    font-size: 0.8em;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ft-conflict {
+    color: var(--red);
+    font-weight: 700;
+    font-size: 0.9em;
+  }
+
+  .ft-conflict.actionable {
+    cursor: pointer;
   }
 </style>

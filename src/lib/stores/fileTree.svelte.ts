@@ -30,7 +30,7 @@ import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import { writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import * as commands from '$lib/tauri/commands';
-import type { BranchInfo, DirReq, FileOp, GitLetter, OpItem, OpResult, OpenAck, TreeEnvelope, TreePlace, TreeSearchHit } from '$lib/tauri/types';
+import type { AgentMark, BranchInfo, DirReq, FileOp, LedgerEntry, GitLetter, OpItem, OpResult, OpenAck, TreeEnvelope, TreePlace, TreeSearchHit } from '$lib/tauri/types';
 import { TREE_FLAG_IGNORED } from '$lib/tauri/types';
 import { TreeModel, ancestorsOf, baseName, dropAccepted, isExpandable, isFolderKind, isWithin, joinRel, matchHighlights, parentRel, prunedRows, revealPlan, type RevealKind, type Row } from '$lib/filetree/model';
 import { nameProblem, siblingLookup, type NameRules } from '$lib/filetree/names';
@@ -42,6 +42,9 @@ import { isMac, isWindows } from '$lib/utils/platform';
 import { openGitDiff } from '$lib/utils/openGitDiff';
 import { relToAbs, lastSegment, tildePath } from '$lib/filetree/paths';
 import { settleActiveFile, type ActiveFileTarget } from '$lib/filetree/activeFile';
+import { AgentMarks, TurnTracker, agentLensItems, assignColours, changedThisTurn, cwdInRoot, folderBadges, isLasting, markWords, overlappingWriters, rowView, type RowAgentView } from '$lib/filetree/agents';
+import { agentStateStore } from '$lib/stores/agentState.svelte';
+import { openReadOnlyDiff } from '$lib/utils/openGitDiff';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
@@ -94,8 +97,33 @@ interface ViewState {
   anchor: string | null;
 }
 
-/** What the tree body draws: the real tree, find's results, or the changed files. */
-export type ViewMode = 'tree' | 'find' | 'changed';
+/** The Lens bar (§9.4): the real tree, git's changed files, or what the agents changed this
+ *  turn or this session. */
+export type Lens = 'all' | 'changed' | 'turn' | 'session';
+
+/** What the tree body draws: the real tree, find's results, or a lens's pruned tree. */
+export type ViewMode = 'tree' | 'find' | Exclude<Lens, 'all'>;
+
+/** An agent tab working in the root, for the agent strip (§3.2 item 3). */
+export interface AgentChip {
+  tabId: string;
+  name: string;
+  /** Index into the six agent colours (`--ft-agent-N`). */
+  colour: number;
+  /** From agentState: 'active' | 'idle' | 'permission'; null when no session is registered. */
+  state: string | null;
+  /** Files it changed this turn under this root. */
+  changed: number;
+}
+
+/** A row's agent decorations, as TreeBody draws them. */
+export interface RowAgent extends RowAgentView {
+  /** Collapsed-folder badge: files changed under it this turn, in the busiest tab's colour. */
+  badge: { count: number; colour: number } | null;
+  /** The red ⚠ (§9.3), with the reason in words; `buffer` when an unsaved editor buffer is
+   *  involved (the row offers Compare buffer ↔ disk). */
+  conflict: { text: string; buffer: boolean } | null;
+}
 
 /** Where the view was before a lens or find replaced it: put back exactly on leaving. */
 interface SavedView {
@@ -241,8 +269,8 @@ function createFileTreeStore() {
   let branch = $state<BranchInfo | null>(null);
   let gitCount = $state(0);
 
-  // Find and the Changed lens (§8, §9.4).
-  let lens = $state<'all' | 'changed'>('all');
+  // Find and the lenses (§8, §9.4).
+  let lens = $state<Lens>('all');
   let find = $state.raw<FindState | null>(null);
   /** The find bar's input should take the keyboard (`/`, Cmd+F with the bar already open). */
   let findFocusSeq = $state(0);
@@ -250,9 +278,31 @@ function createFileTreeStore() {
   /** The pruned tree's rows, and the folders closed in it (open by default). */
   let lensRows: Row[] = [];
   const lensCollapsed = new Set<string>();
-  /** The view to put back when find (or the Changed lens) gives way. */
+  /** The view to put back when find (or a lens) gives way. */
   let savedForFind: SavedView | null = null;
-  let savedForChanged: SavedView | null = null;
+  let savedForLens: SavedView | null = null;
+
+  // Agents (§9.3). Marks are the current root's (cleared on a re-root: the new subscription
+  // is sent the marks still standing); turns and colours are the window's, by tab.
+  const agentMarks = new AgentMarks();
+  const turns = new TurnTracker();
+  /** Bumped per applied `agent` event and per turn edge: rows read marks through it. */
+  let agentVersion = $state(0);
+  /** Bumped when a lit row stops being lit (the edge chips' only clock, and only while
+   *  something is lit: idle sets no timer). */
+  let litVersion = $state(0);
+  let litTimer: ReturnType<typeof setTimeout> | null = null;
+  let litAt = Infinity;
+  /** tab → colour index, stable while the tab is in the window (`assignColours`). */
+  let colours = new Map<string, number>();
+  /** The chip the human chose: scopes the Turn and Session lenses (null: every agent). */
+  let agentFilter = $state<string | null>(null);
+  /** Follow agent (§9.3): off by default, per window, in memory only. */
+  let followAgent = $state<string | null>(null);
+  /** An agent pointed at a path (`revealInTree`) while the human was using the tree, or with
+   *  the column closed: a chip offers it instead of moving their view. */
+  let pointer = $state<{ abs: string; tabId: string; name: string } | null>(null);
+  let badgeCache: { v: number; map: Map<string, { count: number; tab: string }> } = { v: -1, map: new Map() };
 
   // File operations (§10).
   let edit = $state<EditState | null>(null);
@@ -284,13 +334,15 @@ function createFileTreeStore() {
 
   // ── Find and the Changed lens ─────────────────────────────────────────────────────────
 
-  /** Find with a query wins; then the Changed lens; else the real tree. Read untracked by
-   *  callers inside effects. */
+  /** Find with a query wins; then a lens; else the real tree. Read untracked by callers
+   *  inside effects. */
   function viewMode(): ViewMode {
     if (find && find.query.trim()) return 'find';
-    if (lens === 'changed') return 'changed';
+    if (lens !== 'all') return lens;
     return 'tree';
   }
+
+  const isLensMode = (m: ViewMode) => m !== 'tree' && m !== 'find';
 
   function snapshotView(): SavedView {
     return { scrollTop, selection: [...selection], focus: focusKey, anchor: anchorKey };
@@ -326,6 +378,11 @@ function createFileTreeStore() {
       const items = find.hits.map((h) => ({ rel: h.rel, kind: m.entry(h.rel)?.k ?? ('f' as const) }));
       const emptyText = find.unavailable ?? (find.indexing || find.pending ? 'Indexing…' : 'No matches');
       lensRows = prunedRows(items, lensCollapsed, entryOf, { showHidden, emptyText });
+    } else if (mode === 'turn' || mode === 'session') {
+      const items = agentLensItems(agentMarks, turns, mode, agentFilter, (rel) => m.entry(rel)?.k);
+      const who = agentFilter ? tabName(agentFilter) : 'the agents';
+      const emptyText = mode === 'turn' ? `Nothing changed by ${who} this turn` : `Nothing changed by ${who} this session`;
+      lensRows = prunedRows(items, lensCollapsed, entryOf, { showHidden, emptyText });
     } else {
       const emptyText = m.gitTruncated ? 'Too many changes to list here: changed folders are marked in the tree' : 'No changes';
       lensRows = prunedRows(m.changedItems(), lensCollapsed, entryOf, { showHidden, emptyText });
@@ -341,14 +398,15 @@ function createFileTreeStore() {
       restoreView(savedForFind);
       savedForFind = null;
     }
-    if (to === 'changed' && from === 'tree') savedForChanged = snapshotView();
-    else if (to === 'tree' && from === 'changed') {
-      restoreView(savedForChanged);
-      savedForChanged = null;
+    if (isLensMode(to) && from === 'tree') savedForLens = snapshotView();
+    else if (to === 'tree' && isLensMode(from)) {
+      restoreView(savedForLens);
+      savedForLens = null;
     }
     if (to !== 'tree') {
       lensCollapsed.clear();
-      if (from === 'tree' || to === 'find') scrollToTop();
+      // One lens to another keeps the tree's view held and starts the new list at its top.
+      if (from === 'tree' || to === 'find' || (isLensMode(from) && isLensMode(to))) scrollToTop();
     }
   }
 
@@ -430,28 +488,37 @@ function createFileTreeStore() {
     void openFile(r.key, 'pin');
   }
 
-  /** The branch row's "N changed": the Changed lens on or off. */
-  function toggleChanged() {
+  /** The Lens bar (and the branch row's "N changed"): show a lens, or the whole tree. */
+  function setLens(next: Lens) {
+    if (next === lens) return;
     const from = viewMode();
-    const wasOn = lens === 'changed';
-    lens = wasOn ? 'all' : 'changed';
+    const wasOn = lens !== 'all';
+    lens = next;
     const to = viewMode();
     if (from === 'find' && to === 'find') {
-      // The branch row stays clickable under find with a query, which stays in front: the
+      // The lens bar stays clickable under find with a query, which stays in front: the
       // lens changed the view BENEATH it, so what Escape puts back moves with it. Off: the
       // tree's own view (held for the lens) is now the one under find. On: the tree's view
-      // is held for the lens, and find will close onto the lens, from its top.
-      if (wasOn) {
-        savedForFind = savedForChanged;
-        savedForChanged = null;
-      } else {
-        savedForChanged = savedForFind;
+      // is held for the lens, and find will close onto the lens, from its top. One lens to
+      // another: find closes onto the new one, from its top.
+      if (wasOn && next === 'all') {
+        savedForFind = savedForLens;
+        savedForLens = null;
+      } else if (!wasOn) {
+        savedForLens = savedForFind;
         savedForFind = savedForFind ? { ...savedForFind, scrollTop: 0 } : null;
+      } else if (savedForFind) {
+        savedForFind = { ...savedForFind, scrollTop: 0 };
       }
     } else {
       changeMode(from, to);
     }
     rebuildLens();
+  }
+
+  /** The branch row's "N changed": the Changed lens on or off. */
+  function toggleChanged() {
+    setLens(lens === 'changed' ? 'all' : 'changed');
   }
 
   function toggle(rel: string) {
@@ -694,8 +761,12 @@ function createFileTreeStore() {
     find = null;
     lens = 'all';
     savedForFind = null;
-    savedForChanged = null;
+    savedForLens = null;
     lensRows = [];
+    // Marks are rels of the root being left; the next subscription is sent its own.
+    agentMarks.clear();
+    agentVersion++;
+    stopLitTimer();
     // An edit, a question and a result all name rels of the root being left. An unfinished
     // name is dropped, never committed (§10.4).
     edit = null;
@@ -824,7 +895,7 @@ function createFileTreeStore() {
       case 'health':
         health = env.note ? { watch: env.watch, git: env.git, note: env.note } : null;
         gitState = env.git;
-        if (env.git === 'off' && lens === 'changed') toggleChanged();
+        if (env.git === 'off' && lens === 'changed') setLens('all');
         break;
       case 'git':
         m.applyGit(env);
@@ -835,6 +906,9 @@ function createFileTreeStore() {
         break;
       case 'search_ready':
         if (find?.query.trim()) void runSearch();
+        break;
+      case 'agent':
+        applyAgentMarks(env.marks);
         break;
       case 'root_gone':
         // The hub is dead for good (Rust never revives a gone root), so drop the
@@ -985,11 +1059,11 @@ function createFileTreeStore() {
 
   /** Open the folders above `rel` and scroll it into view when it has a row; select it
    *  unless the reveal is automatic. Under find or the Changed lens, see `revealPlan`. */
-  function revealRel(rel: string, kind: RevealKind) {
-    if (!model) return;
+  function revealRel(rel: string, kind: RevealKind): ReturnType<typeof revealPlan> {
+    if (!model) return 'none';
     const select = kind !== 'auto';
     const plan = revealPlan(kind, viewMode() !== 'tree', rows.some((x) => x.key === rel));
-    if (plan === 'none') return;
+    if (plan === 'none') return plan;
     if (plan === 'scroll' || plan === 'select') {
       if (plan === 'select') {
         selection.clear();
@@ -998,13 +1072,13 @@ function createFileTreeStore() {
         anchorKey = rel;
       }
       requestScroll(rel);
-      return;
+      return plan;
     }
     if (plan === 'put-away') {
       // The real tree comes back to show it, with the lens and find put away first so the
       // restored view can't replace the selection.
       if (find) closeFind();
-      if (lens === 'changed') toggleChanged();
+      if (lens !== 'all') setLens('all');
     }
     const r = model.reveal(rel);
     sendOpen(r.open);
@@ -1012,6 +1086,7 @@ function createFileTreeStore() {
     if (r.open.length) scheduleSaveExpanded();
     pendingReveal = { rel, select };
     checkPendingReveal();
+    return plan;
   }
 
   /** The active tab's file: highlighted and revealed when it is under the root (with
@@ -1206,14 +1281,17 @@ function createFileTreeStore() {
     });
   }
 
-  /** The tab "Add to ‹tab›" types into: the tab the tree follows, when it's live. */
+  /** The tab "Add to ‹tab›" (and Alt+Enter) types into: the agent being followed when it is
+   *  live, else the tab the tree follows. */
   const addTarget = $derived.by(() => {
     void terminalsStore.instanceVersion;
-    const id = sourceTabId;
-    if (!id || !terminalsStore.get(id)) return null;
-    const loc = workspacesStore._locateTab(id);
-    if (!loc || loc.tab.service_id) return null;
-    return { tabId: id, name: loc.tab.name };
+    for (const id of [followAgent, sourceTabId]) {
+      if (!id || !terminalsStore.get(id)) continue;
+      const loc = workspacesStore._locateTab(id);
+      if (!loc || loc.tab.service_id) continue;
+      return { tabId: id, name: loc.tab.name };
+    }
+    return null;
   });
 
   /** Insert the paths into the followed tab's command line, never submitting (§9.5). */
@@ -1356,7 +1434,9 @@ function createFileTreeStore() {
     if (r.needs) {
       const n = r.needs;
       if (n.code === 'agent_active') {
-        ask(`${n.detail} Do it anyway?`, [{ label: 'Do It Anyway', tone: 'danger', run: () => runOp({ ...op, ack_agents: true }, o) }]);
+        // The second confirm (§10.3): name the agents at work, and resend with ack_agents
+        // (a delete's ticket is still good: Rust uses it up only after the guards).
+        ask(agentActiveQuestion(op, n.tabs, n.detail), [{ label: 'Do It Anyway', tone: 'danger', run: () => runOp({ ...op, ack_agents: true }, o) }]);
       } else if (n.code === 'live_cwd') {
         const folder = op.src?.length === 1 ? absOf(op.src[0]) : null;
         const suggested = op.kind === 'rename' && op.src?.length === 1 && op.name && ack
@@ -1420,7 +1500,7 @@ function createFileTreeStore() {
     if (!writable() || !model) return;
     const dir = parent ?? folderOf(focusKey);
     if (find) closeFind();
-    if (lens === 'changed') toggleChanged();
+    if (lens !== 'all') setLens('all');
     if (dir !== '') {
       revealRel(dir, 'auto');
       expand(dir);
@@ -1731,6 +1811,347 @@ function createFileTreeStore() {
     announce(`Attached ${quotedNames(rels)} to ${target.name}’s composer`);
   }
 
+  // ── Agents (§9.3–§9.6) ────────────────────────────────────────────────────────────────
+  //
+  // Rust sends this root's marks on the subscription (`agent` events, and the marks still
+  // standing whenever a subscription starts or resumes). What lives here is the human's side:
+  // how rows, folders, the strip and the lenses show them, follow-agent, and the two tools an
+  // agent asks this window (`revealInTree`, `getTreeSelection`).
+
+  /** Bump without subscribing: callers can run inside an effect (a re-root does). */
+  function bumpAgents() {
+    untrack(() => { agentVersion++; });
+  }
+
+  function tabName(tabId: string): string {
+    return workspacesStore._locateTab(tabId)?.tab.name ?? 'an agent';
+  }
+
+  /** tab → its newest mark's time: the end of a turn whose Stop this window never saw. */
+  const tabLastAt = new Map<string, number>();
+
+  function applyAgentMarks(marks: AgentMark[]) {
+    const now = Date.now();
+    for (const m of marks) {
+      turns.noteMark(m);
+      if ((tabLastAt.get(m.tab_id) ?? 0) < m.at_ms) tabLastAt.set(m.tab_id, m.at_ms);
+    }
+    agentMarks.merge(marks, now);
+    bumpAgents();
+    scheduleLit(now);
+    const mode = viewMode();
+    if (mode === 'turn' || mode === 'session') rebuildLens();
+    followAgentTo(marks);
+  }
+
+  function stopLitTimer() {
+    if (litTimer) clearTimeout(litTimer);
+    litTimer = null;
+    litAt = Infinity;
+  }
+
+  /** One timer, for the next lit row to go dark (a read's light, a write's sweep), and only
+   *  while one is lit. A running call needs none: its Post is an event of its own. */
+  function scheduleLit(now: number) {
+    let next = Infinity;
+    for (const slots of agentMarks.byRel.values()) {
+      const until = rowView([...slots.values()], now, turns).litUntil;
+      if (until !== null && until > now && until < next) next = until;
+    }
+    if (next === Infinity) {
+      stopLitTimer();
+      return;
+    }
+    if (litTimer && litAt <= next) return;
+    stopLitTimer();
+    litAt = next;
+    litTimer = setTimeout(() => {
+      litTimer = null;
+      litAt = Infinity;
+      const t = Date.now();
+      agentMarks.pruneReads(t);
+      untrack(() => { litVersion++; });
+      bumpAgents();
+      scheduleLit(t);
+    }, Math.max(0, next - now) + 20);
+  }
+
+  /** The window's agent tabs in window order: an agent session registered for the tab, or
+   *  marks from it in this root. Colours are assigned over this list, so a tab keeps its
+   *  colour whichever root is showing. */
+  const windowAgents = $derived.by(() => {
+    void agentVersion;
+    const marked = agentMarks.tabs();
+    const out: { id: string; name: string }[] = [];
+    for (const ws of workspacesStore.workspaces) {
+      for (const p of ws.panes) {
+        for (const t of p.tabs) {
+          if ((t.tab_type ?? 'terminal') !== 'terminal' || t.service_id) continue;
+          if (agentStateStore.getState(t.id) || marked.has(t.id)) out.push({ id: t.id, name: t.name });
+        }
+      }
+    }
+    return out;
+  });
+
+  const colourMap = $derived.by(() => {
+    const next = assignColours(colours, windowAgents.map((t) => t.id));
+    colours = next;
+    return next;
+  });
+
+  function colourOf(tabId: string): number {
+    return colourMap.get(tabId) ?? 0;
+  }
+
+  /** The agent strip (§3.2 item 3): agent tabs whose folder is in the root, or that left
+   *  marks in it. */
+  const agentChips = $derived.by((): AgentChip[] => {
+    void agentVersion;
+    const a = ack;
+    const p = place;
+    if (!a || !p || !preferencesStore.fileTreeAgentActivity) return [];
+    const marked = agentMarks.tabs();
+    const counts = changedThisTurn(agentMarks, turns);
+    const roots = [a.root_native, p.root];
+    return windowAgents
+      .filter((t) => {
+        if (marked.has(t.id)) return true;
+        const cwd = agentStateStore.getState(t.id)?.cwd;
+        return !!cwd && cwdInRoot(cwd, roots, a.sep, a.case_insensitive);
+      })
+      .map((t) => ({
+        tabId: t.id,
+        name: t.name,
+        colour: colourOf(t.id),
+        state: agentStateStore.getState(t.id)?.state ?? null,
+        changed: counts.get(t.id) ?? 0,
+      }));
+  });
+
+  /** How many paths the Turn and Session lenses would show now. */
+  const lensCounts = $derived.by(() => {
+    void agentVersion;
+    if (!preferencesStore.fileTreeAgentActivity) return { turn: 0, session: 0 };
+    const kind = () => undefined;
+    return {
+      turn: agentLensItems(agentMarks, turns, 'turn', agentFilter, kind).length,
+      session: agentLensItems(agentMarks, turns, 'session', agentFilter, kind).length,
+    };
+  });
+
+  function badges(): Map<string, { count: number; tab: string }> {
+    const v = agentVersion;
+    if (badgeCache.v !== v) badgeCache = { v, map: folderBadges(agentMarks, turns) };
+    return badgeCache.map;
+  }
+
+  /** A tab's newest turn as a time span, for the two-writer conflict. */
+  function turnSpan(tabId: string): { start: number; end: number } | null {
+    const st = agentStateStore.getState(tabId)?.state;
+    return turns.span(tabId, tabLastAt.get(tabId) ?? 0, st === 'active' || st === 'permission');
+  }
+
+  /** A row's agent decorations, read reactively through `agentVersion` (and the editor
+   *  dots, for the unsaved-buffer conflict). Null when there is nothing to draw. */
+  function rowAgent(key: string, folder: boolean, expanded: boolean): RowAgent | null {
+    void agentVersion;
+    if (!preferencesStore.fileTreeAgentActivity) return null;
+    let badge: RowAgent['badge'] = null;
+    // Collapsed folders over activity get a count; they never open by themselves (§9.3).
+    if (folder && !expanded) {
+      const b = badges().get(key);
+      if (b) badge = { count: b.count, colour: colourOf(b.tab) };
+    }
+    const marks = agentMarks.marksOf(key);
+    if (!marks.length) {
+      return badge ? { rail: null, writers: [], deleted: false, editing: false, litUntil: null, marks: [], badge, conflict: null } : null;
+    }
+    const v = rowView(marks, Date.now(), turns);
+    let conflict: RowAgent['conflict'] = null;
+    const dirty = !folder && v.writers.length > 0 && !!editorRels.get(key)?.some((t) => isEditorDirty(t));
+    if (dirty) {
+      const who = v.writers.map((t) => `“${tabName(t)}”`).join(' and ');
+      conflict = { text: `unsaved changes in an editor tab, and ${who} wrote this file this turn`, buffer: true };
+    } else if (!folder) {
+      const pair = overlappingWriters(marks, turns, turnSpan);
+      if (pair) conflict = { text: `“${tabName(pair[0])}” and “${tabName(pair[1])}” both wrote this file in turns that overlapped`, buffer: false };
+    }
+    return { ...v, badge, conflict };
+  }
+
+  /** The tooltip's words for a row's agent marks, newest first: who, what, and on what
+   *  evidence. The tool name comes from the tab's ledger (hover only, like `ftStat`). */
+  async function agentWords(rel: string): Promise<string[]> {
+    if (!preferencesStore.fileTreeAgentActivity) return [];
+    const marks = agentMarks.marksOf(rel).filter((m) => isLasting(m.op)).sort((a, b) => b.at_ms - a.at_ms).slice(0, 4);
+    if (!marks.length) return [];
+    const abs = absOf(rel);
+    const ledgers = new Map<string, Promise<LedgerEntry[]>>();
+    const out: string[] = [];
+    for (const m of marks) {
+      let tool: string | null = null;
+      if (abs && m.evidence !== 'commit') {
+        let l = ledgers.get(m.tab_id);
+        if (!l) ledgers.set(m.tab_id, (l = commands.agentFilesActivity(m.tab_id, 'session', false).catch(() => [])));
+        const want = abs.normalize('NFC');
+        const hit = (await l).filter((e) => e.op === m.op && e.evidence === m.evidence && e.path.normalize('NFC') === want).pop();
+        tool = hit?.tool ?? null;
+      }
+      out.push(markWords(m, `“${tabName(m.tab_id)}”`, turns.isThisTurn(m), tool));
+    }
+    return out;
+  }
+
+  /** The words for the second confirm (§10.3): which agent tabs, doing what. */
+  function agentActiveQuestion(op: FileOp, tabs: string[], fallback: string): string {
+    const names = [...new Set(tabs.map(tabName))];
+    if (!names.length) return fallback;
+    const who = names.length === 1 ? `“${names[0]}” is` : names.length === 2 ? `“${names[0]}” and “${names[1]}” are` : `${names.length} agent tabs are`;
+    const it = (op.src?.length ?? 0) > 1 ? 'them' : 'it';
+    const verb = op.kind === 'rename' ? `Rename ${it}` : op.kind === 'move' ? `Move ${it}` : op.kind === 'trash' ? trashLabel(PLATFORM) : op.kind === 'delete' ? `Delete ${it}` : 'Go ahead';
+    return `${who} working on ${quotedNames(op.src ?? [])} right now, or changed ${it} this turn. ${verb} anyway?`;
+  }
+
+  /** Follow agent (§9.3): reveal what the followed tab writes, but only once the human has
+   *  left the tree alone for 3 s, and never over an inline edit. */
+  function followAgentTo(marks: AgentMark[]) {
+    const id = followAgent;
+    if (!id || edit || viewMode() === 'find' || Date.now() - lastHumanInputMs < HUMAN_QUIET_MS) return;
+    let latest: AgentMark | null = null;
+    for (const m of marks) {
+      if (m.tab_id !== id || !isLasting(m.op) || m.op === 'delete' || m.phase === 'failed') continue;
+      if (!latest || m.at_ms >= latest.at_ms) latest = m;
+    }
+    if (latest && turns.isThisTurn(latest)) revealRel(latest.rel, 'auto');
+  }
+
+  /** The hook edges that move turns: a prompt starts one, Stop ends it, a new session (not a
+   *  compaction) starts the ledger's numbering again. Hook events reach every window. */
+  function onTurnEdge(kind: 'prompt' | 'stop' | 'session', tabId: string) {
+    const now = Date.now();
+    if (kind === 'prompt') turns.turnStarted(tabId, now);
+    else if (kind === 'stop') turns.turnEnded(tabId, now);
+    else {
+      turns.forget(tabId);
+      agentMarks.forgetTab(tabId);
+      tabLastAt.delete(tabId);
+    }
+    bumpAgents();
+    const mode = viewMode();
+    if (mode === 'turn' || mode === 'session') rebuildLens();
+  }
+
+  /** `revealInTree` (§9.6), in the caller's window. It never opens, resizes or focuses the
+   *  column, and never moves a view the human is using: those cases leave a chip instead. */
+  async function agentReveal(callerTab: string | undefined, path: string, select: boolean): Promise<{ result: string; note?: string }> {
+    const name = callerTab ? tabName(callerTab) : 'an agent';
+    const point = () => { pointer = { abs: path, tabId: callerTab ?? '', name }; };
+    if (!workspacesStore.fileTreeOpen) {
+      point();
+      return { result: 'tree_closed' };
+    }
+    for (let i = 0; i < 40 && subId === null && (status === 'resolving' || status === 'opening'); i++) await new Promise((r) => setTimeout(r, 50));
+    const sub = subId;
+    if (sub === null) {
+      return { result: 'outside_root', note: status === 'remote' ? 'Files is showing a folder on an ssh host, which it can only name, not browse.' : 'Files is not showing a folder right now.' };
+    }
+    const [rel] = await commands.ftLocate(sub, [path]).catch(() => [null]);
+    if (sub !== subId) return { result: 'outside_root', note: 'Files moved to another folder meanwhile.' };
+    if (rel == null) return { result: 'outside_root' };
+    if (edit || Date.now() - lastHumanInputMs < HUMAN_QUIET_MS) {
+      point();
+      return { result: 'noted' };
+    }
+    if (rel === '') {
+      scrollToTop();
+      return { result: 'revealed' };
+    }
+    const plan = revealRel(rel, select ? 'focus' : 'auto');
+    if (plan === 'none') {
+      point();
+      return { result: 'noted', note: 'Your human has the tree on a filtered view (find or a lens) that leaves this path out: a chip offers it instead.' };
+    }
+    return { result: 'revealed' };
+  }
+
+  /** `getTreeSelection` (§9.6): the human's selection, as absolute paths, in this window. */
+  function selectionForAgent() {
+    const open = workspacesStore.fileTreeOpen;
+    const p = place;
+    const humanIdleMs = lastHumanInputMs ? Date.now() - lastHumanInputMs : null;
+    if (!p || p.missing) return { open, host: null, root: null, focused: null, selected: [] as string[], humanIdleMs };
+    if (p.kind !== 'local') return { open, host: p.host_label ?? p.host_key, root: p.root, focused: null, selected: [] as string[], humanIdleMs };
+    // A closed column has no subscription and so no root to spell paths with: nothing is
+    // selected there that the human can see.
+    const selected = [...selection].map((r) => absOf(r)).filter((x): x is string => !!x);
+    return { open, host: null, root: ack?.root_native ?? p.root, focused: focusKey ? absOf(focusKey) : null, selected, humanIdleMs };
+  }
+
+  /** The pointer chip's "Show": the human asked, so the view may change. */
+  async function showPointer() {
+    const p = pointer;
+    const sub = subId;
+    pointer = null;
+    if (!p || sub === null) return;
+    const [rel] = await commands.ftLocate(sub, [p.abs]).catch(() => [null]);
+    if (sub !== subId) return;
+    if (rel == null) {
+      toastStore.addToast('Files', 'That path is outside the folder Files is showing.', 'info');
+      return;
+    }
+    if (rel) revealRel(rel, 'asked');
+    else scrollToTop();
+  }
+
+  /** "Compare buffer ↔ disk" (§9.3): an agent wrote a file that has unsaved edits in an
+   *  editor tab. The disk's version on the left, the unsaved buffer on the right. */
+  async function compareBufferWithDisk(rel: string) {
+    const abs = absOf(rel);
+    const tabId = editorRels.get(rel)?.find((t) => isEditorDirty(t)) ?? editorRels.get(rel)?.[0];
+    const ed = tabId ? getEditorByTabId(tabId) : undefined;
+    const ws = workspacesStore.activeWorkspace;
+    const pane = workspacesStore.activePane;
+    if (!abs || !ed || !ws || !pane) return;
+    let disk: string;
+    try {
+      disk = (await commands.readFile(abs)).content;
+    } catch (e) {
+      toastStore.addToast('Couldn’t read the file on disk', e instanceof Error ? e.message : String(e), 'error');
+      return;
+    }
+    await openReadOnlyDiff({
+      filePath: abs,
+      oldContent: disk,
+      newContent: ed.view.state.doc.toString(),
+      tabName: `Diff: ${baseName(rel)} (disk ↔ unsaved)`,
+      workspaceId: ws.id,
+      paneId: pane.id,
+      afterTabId: pane.active_tab_id,
+    }).catch((e) => toastStore.addToast('Couldn’t compare', String(e), 'error'));
+  }
+
+  /** A reload gave an agent tab a new id: what this window keeps by tab follows it. */
+  function remapAgentTab(oldId: string, newId: string) {
+    agentMarks.remapTab(oldId, newId);
+    turns.remap(oldId, newId);
+    const at = tabLastAt.get(oldId);
+    if (at !== undefined) {
+      tabLastAt.delete(oldId);
+      tabLastAt.set(newId, at);
+    }
+    const c = colours.get(oldId);
+    if (c !== undefined) {
+      colours = new Map(colours);
+      colours.delete(oldId);
+      colours.set(newId, c);
+    }
+    if (agentFilter === oldId) agentFilter = newId;
+    if (followAgent === oldId) followAgent = newId;
+    if (pointer?.tabId === oldId) pointer = { ...pointer, tabId: newId };
+    bumpAgents();
+  }
+
   // ── Selection and focus ───────────────────────────────────────────────────────────────
 
   function setFocus(key: string | null, scroll = true) {
@@ -1833,20 +2254,29 @@ function createFileTreeStore() {
     const offPrompt = activityStore.onShellPrompt((tabId) => {
       if (tabId === sourceTabId) scheduleResolve(false);
     });
-    let offStart: UnlistenFn | null = null;
-    listen<{ tab_id?: string }>('agent-hook-session-start', (e) => {
-      if (e.payload?.tab_id && e.payload.tab_id === sourceTabId) scheduleResolve(true);
-    }).then((u) => {
-      if (attached) offStart = u;
-      else u();
-    }).catch(() => {});
+    const hookOffs: UnlistenFn[] = [];
+    const onHook = <T>(event: string, fn: (p: T) => void) => {
+      listen<T>(event, (e) => { if (e.payload) fn(e.payload); }).then((u) => {
+        if (attached) hookOffs.push(u);
+        else u();
+      }).catch(() => {});
+    };
+    onHook<{ tab_id?: string; source?: string }>('agent-hook-session-start', (p) => {
+      if (!p.tab_id) return;
+      if (p.tab_id === sourceTabId) scheduleResolve(true);
+      // A startup, resume or /clear is a new session, numbered afresh. A compaction carries
+      // the turn on, and initSession's re-emit (no source) is the same session named late.
+      if (p.source && p.source !== 'compact') onTurnEdge('session', p.tab_id);
+    });
+    onHook<{ tab_id?: string | null }>('agent-hook-user-prompt', (p) => { if (p.tab_id) onTurnEdge('prompt', p.tab_id); });
+    onHook<{ tab_id?: string | null }>('agent-hook-stop', (p) => { if (p.tab_id) onTurnEdge('stop', p.tab_id); });
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('blur', onWindowBlur);
     window.addEventListener('focus', onWindowFocus);
     unlisteners = [
       offOsc,
       offPrompt,
-      () => offStart?.(),
+      () => { for (const u of hookOffs.splice(0)) u(); },
       () => document.removeEventListener('visibilitychange', onVisibility),
       () => window.removeEventListener('blur', onWindowBlur),
       () => window.removeEventListener('focus', onWindowFocus),
@@ -1897,7 +2327,63 @@ function createFileTreeStore() {
     get gitCount() { return gitCount; },
     get gitTruncated() { void gitVersion; return !!model?.gitTruncated; },
     get lens() { return lens; },
+    setLens,
     toggleChanged,
+    // Agents (§9.3–§9.6)
+    get agentChips() { return agentChips; },
+    get lensCounts() { return lensCounts; },
+    get agentFilter() { return agentFilter; },
+    get followAgent() { return followAgent; },
+    /** Bumped when a lit row goes dark: the edge chips re-read `litRels` on it. */
+    get litVersion() { return litVersion; },
+    rowAgent,
+    agentWords,
+    colourOf,
+    tabName,
+    /** Choose a chip (scoping Turn and Session to it), or clear the choice. */
+    chooseAgent(tabId: string | null) {
+      agentFilter = agentFilter === tabId ? null : tabId;
+      // Follow agent belongs to the chosen chip: choosing another stops following.
+      if (followAgent && followAgent !== agentFilter) followAgent = null;
+      const mode = viewMode();
+      if (mode === 'turn' || mode === 'session') rebuildLens();
+    },
+    /** The ⋯ menu's eye: follow the chosen chip's writes, or stop. */
+    setFollowAgent(on: boolean) {
+      followAgent = on ? agentFilter : null;
+    },
+    /** Rows lit now (running, sweeping, a read's light), for the edge chips. */
+    litRels(): { rel: string; editing: boolean }[] {
+      void litVersion;
+      void agentVersion;
+      if (!preferencesStore.fileTreeAgentActivity) return [];
+      const now = Date.now();
+      const out: { rel: string; editing: boolean }[] = [];
+      for (const [rel, slots] of agentMarks.byRel) {
+        const v = rowView([...slots.values()], now, turns);
+        if (v.litUntil !== null && v.litUntil > now) out.push({ rel, editing: v.editing });
+      }
+      return out;
+    },
+    agentReveal,
+    selectionForAgent,
+    get pointer() { return pointer; },
+    /** The pointer chip's path, root-relative when it is under the root. */
+    get pointerLabel(): string {
+      const p = pointer;
+      if (!p) return '';
+      const a = ack;
+      if (a && (p.abs === a.root_native || p.abs.startsWith(a.root_native.replace(/[\\/]$/, '') + a.sep))) {
+        return p.abs.slice(a.root_native.replace(/[\\/]$/, '').length + a.sep.length).split(a.sep).join('/') || lastSegment(p.abs);
+      }
+      return tildePath(p.abs, home);
+    },
+    /** An agent pointed at something while the column was closed: the titlebar button's dot. */
+    get pointerWaiting() { return !!pointer && !workspacesStore.fileTreeOpen; },
+    showPointer,
+    dismissPointer() { pointer = null; },
+    compareBufferWithDisk,
+    remapAgentTab,
     compareWithHead,
     // Find
     get find() { return find; },

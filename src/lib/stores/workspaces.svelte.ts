@@ -2816,6 +2816,9 @@ function createWorkspacesStore() {
       // The Files agent ledger (docs/file-tree.md §9.1) is keyed by tab id too: the resumed
       // session's turn and its marks carry on under the new one.
       commands.agentFilesRemapTab(tabId, newTab.id).catch(() => {});
+      // ...and so is what this window's Files column keeps per agent tab (its marks, turn,
+      // colour, chosen chip, follow-agent).
+      import('$lib/stores/fileTree.svelte').then(m => m.fileTreeStore.remapAgentTab(tabId, newTab.id)).catch(() => {});
       // Mounts it without focusing it (+page.svelte `handleActivateTab`).
       if (wasLive) window.dispatchEvent(new CustomEvent('activate-tab', { detail: newTab.id }));
       return newTab.id;

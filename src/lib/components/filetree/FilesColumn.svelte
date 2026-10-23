@@ -19,6 +19,8 @@
   import BranchRow from './BranchRow.svelte';
   import FindBar from './FindBar.svelte';
   import ConfirmStrip from './ConfirmStrip.svelte';
+  import AgentStrip from './AgentStrip.svelte';
+  import LensBar from './LensBar.svelte';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { dropPointToCss } from '$lib/utils/dropPoint';
   import { error as logError } from '@tauri-apps/plugin-log';
@@ -158,6 +160,22 @@
   <FilesHeader />
   {#if (status === 'ready' || status === 'opening') && fileTreeStore.gitOn}
     <BranchRow />
+  {/if}
+  {#if status === 'ready'}
+    <AgentStrip />
+  {/if}
+  {#if fileTreeStore.pointer && fileTreeStore.subscribed}
+    <!-- An agent pointed at a path while the human was using the tree (or with the column
+         closed): offered here, never acted on by itself (§9.6 revealInTree). -->
+    <div class="pointer">
+      <span class="pointer-text">“{fileTreeStore.pointer.name}” points at <span class="path">{fileTreeStore.pointerLabel}</span></span>
+      <button class="link" onclick={() => void fileTreeStore.showPointer()}>Show</button>
+      <span class="sep">·</span>
+      <button class="link" onclick={() => fileTreeStore.dismissPointer()} aria-label="Dismiss">✕</button>
+    </div>
+  {/if}
+  {#if status === 'ready' && (fileTreeStore.gitOn || fileTreeStore.agentChips.length > 0 || fileTreeStore.lensCounts.session > 0 || fileTreeStore.lens !== 'all')}
+    <LensBar />
   {/if}
   {#if (status === 'ready' || status === 'opening') && fileTreeStore.find}
     <FindBar />
@@ -321,6 +339,23 @@
 
   .notice {
     color: var(--fg);
+  }
+
+  .pointer {
+    flex-shrink: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 5px;
+    padding: 3px 10px;
+    font-size: 0.85em;
+    border-bottom: 1px solid var(--bg-light);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+
+  .pointer-text {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .notice .link {

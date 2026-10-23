@@ -19,6 +19,49 @@
 
   --header-height: 38px;
   --tab-height: 40px;
+
+  /* Files: agent activity on the tree's rows (docs/file-tree.md §9.3). Built on the theme's
+     own colours, so every theme gets them. The rail is the op; the dot is the agent. */
+  --ft-read: color-mix(in srgb, var(--magenta) 75%, var(--accent));
+  --ft-write: var(--yellow);
+  --ft-create: var(--green);
+  --ft-delete: var(--red);
+  --ft-fail: var(--red);
+  --ft-agent-0: var(--accent);
+  --ft-agent-1: var(--green);
+  --ft-agent-2: var(--magenta);
+  --ft-agent-3: var(--cyan);
+  --ft-agent-4: color-mix(in srgb, var(--red) 50%, var(--yellow));
+  --ft-agent-5: color-mix(in srgb, var(--red) 65%, var(--magenta));
+  --ft-pulse-ms: 1100ms;
+  --ft-sweep-ms: 1200ms;
+  --ft-read-ms: 2700ms;
+}
+
+/* Files rails (§9.3): one animation per element, opacity and transform only, started from the
+   mark's own time (`animation-delay` is minus its age), so a row scrolled back into view picks
+   up where it was rather than starting again. */
+@keyframes ft-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@keyframes ft-sweep {
+  0% { opacity: 0.55; transform: translateX(-60%); }
+  70% { opacity: 0.35; }
+  100% { opacity: 0; transform: translateX(60%); }
+}
+
+@keyframes ft-fade {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* Reduced motion: every animation becomes a static tint, held for as long as it would have
+   run and then gone (steps), so nothing moves and nothing lingers. */
+@keyframes ft-hold {
+  from { opacity: 0.45; }
+  to { opacity: 0; }
 }
 
 * {
