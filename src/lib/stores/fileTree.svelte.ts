@@ -356,6 +356,17 @@ function createFileTreeStore() {
     return t?.restore_ssh_command ?? null;
   }
 
+  /** `tabHost`, read live where it can be: a tab with a running shell says what holds its
+   *  terminal now (its ssh, or nothing), not what was last saved. For answers that refuse
+   *  (`revealInTree`), where a stale "on a host" turns a local agent away from a local root. */
+  async function liveTabHost(tabId: string): Promise<string | null> {
+    const b = getBridgeInfo(tabId);
+    if (b) return b.hostKey;
+    const inst = terminalsStore.get(tabId);
+    if (!inst) return tabHost(tabId);
+    return commands.getPtyInfo(inst.ptyId).then((i) => i.foreground_command ?? null).catch(() => tabHost(tabId));
+  }
+
   /** The tab's shell is on the root's machine. */
   function tabOnRootHost(tabId: string): boolean {
     const host = rootHost();
@@ -2212,7 +2223,7 @@ function createFileTreeStore() {
     }
     // A path names a file on the caller's own machine: only a root on that machine holds it.
     const host = rootHost();
-    const callerHost = callerTab ? tabHost(callerTab) : null;
+    const callerHost = callerTab ? await liveTabHost(callerTab) : null;
     if (host ? !callerHost || !sameSshHost(callerHost, host) : callerHost !== null) {
       return { result: 'outside_root', note: host ? `Files is showing a folder on ${place?.host_label ?? host}, another machine than yours.` : 'Files is showing a folder on your human’s computer, not on your host.' };
     }

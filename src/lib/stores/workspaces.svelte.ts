@@ -642,6 +642,7 @@ function createWorkspacesStore() {
                 info.foreground_command ?? null,
                 null, // remote_cwd — extracted on resume from prompt patterns
               );
+              tab.restore_ssh_command = info.foreground_command ?? null;
             } catch {
               // PTY may already be dead
             }
@@ -774,6 +775,7 @@ function createWorkspacesStore() {
                 info.foreground_command ?? null,
                 null,
               );
+              tab.restore_ssh_command = info.foreground_command ?? null;
             } catch { /* PTY may already be dead */ }
           }
 
@@ -1696,6 +1698,15 @@ function createWorkspacesStore() {
         }
       }
       return null;
+    },
+
+    /** The periodic restore snapshot (`setTabRestoreContext`) wrote this ssh command for the tab
+     *  in Rust, which emits nothing: the mirror follows, so what reads it synchronously (Files'
+     *  drag targets and agent strip, `revealInTree`) doesn't keep counting a tab as on a host
+     *  long after its ssh ended. Not persisted here: Rust already holds it. */
+    noteRestoreSsh(tabId: string, sshCommand: string | null) {
+      const tab = this._locateTab(tabId)?.tab;
+      if (tab && (tab.restore_ssh_command ?? null) !== sshCommand) tab.restore_ssh_command = sshCommand;
     },
 
     // maiLink "Archive" — archive a live tab by id (recoverable). Resolves the container and the

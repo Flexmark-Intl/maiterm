@@ -1641,6 +1641,7 @@
             }
 
             await setTabRestoreContext(workspaceId, paneId, tabId, cwd, sshCommand, remoteCwd);
+            workspacesStore.noteRestoreSsh(tabId, sshCommand ?? null);
           } catch {
             // PTY may be gone — ignore
           }
