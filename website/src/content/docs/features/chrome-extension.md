@@ -104,5 +104,6 @@ Console and network records start when the agent first uses the tab, so for a bu
 
 - **The debugging bar stays while tabs are linked.** The extension stays attached so it records console errors and requests while you use the page yourself; that is what lets an agent read the errors from a bug you just reproduced. If the bar bothers you, Chrome hides it when started with `--silent-debugger-extension-api`, which hides it for every extension, so use it knowingly.
 
+- **A password manager's popup can lock the agent out.** Password managers such as 1Password show their autofill menu inside the page as their own extension's frame, while a sign-in or secret field has focus, and Chrome lets no extension work in a tab while another extension's frame is in it. The agent waits a few seconds for it to close, then asks you to dismiss it (Escape, or a click elsewhere on the page). Turning off the password manager's in-page autofill menu stops it happening.
 - **It acts as you.** Clicking "Delete" in a linked tab deletes, in your account. Link a tab you're happy for the agent to work in, and say what it may and may not do.
 - **Agent tabs only.** The popup lists maiTerm tabs running an agent, not shells or stack services.
