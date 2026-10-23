@@ -544,44 +544,52 @@ impl GitCore {
         }
         let covers_root = |e: &StatusEntry| e.dir && e.letter == "?" && super::paths::is_at_or_under(&self.prefix, &norm(&e.path));
         let Some(i) = st.entries.iter().position(covers_root) else { return };
+        let Some(children) = self.untracked_children() else { return };
         st.entries.remove(i);
-        for (name, dir) in self.untracked_children() {
+        for (name, dir) in children {
             st.entries.push(StatusEntry { path: format!("{}/{name}", self.prefix), letter: "?", orig: None, dir });
         }
     }
 
     /// The root's top-level entries git counts as untracked, as `-unormal` would report them
     /// from the repository's top: a folder holding only ignored files (or nothing) is left
-    /// out, which is what `--no-empty-directory` asks for. Names go as literal pathspecs, in
-    /// batches so a crowded folder can't overrun a command line.
-    fn untracked_children(&self) -> Vec<(String, bool)> {
-        let names: Vec<OsString> = match std::fs::read_dir(&self.root) {
-            Ok(rd) => rd.flatten().map(|e| e.file_name()).filter(|n| n != ".git").collect(),
-            Err(_) => return Vec::new(),
-        };
+    /// out. Two runs with fixed arguments, since `--directory` from inside an untracked
+    /// folder collapses everything to `./`: `*` (which never crosses a `/` under `glob`)
+    /// lists the top-level files without descending, and `*/**` with `--directory` lists
+    /// each top-level folder holding something untracked, collapsed. Both cost one pass over
+    /// the folder: a pathspec per name made each run match every entry against every name,
+    /// seconds for a folder of 20k, and a batch of long names overran Windows' command line.
+    /// None (and the run keeps git's own entry) when either fails.
+    fn untracked_children(&self) -> Option<Vec<(String, bool)>> {
         let mut out = Vec::new();
-        for batch in names.chunks(256) {
+        for (spec, directory) in [(":(glob)*", false), (":(glob)*/**", true)] {
             let mut c = self.cmd();
-            c.args(["ls-files", "-o", "--exclude-standard", "--directory", "--no-empty-directory", "-z", "--"]);
-            for n in batch {
-                let mut spec = OsString::from(":(literal)");
-                spec.push(n);
-                c.arg(spec);
+            c.args(["ls-files", "-o", "--exclude-standard", "-z"]);
+            if directory {
+                c.args(["--directory", "--no-empty-directory"]);
             }
-            let Ok(o) = proc::output_timeout(&mut c, self.timing.timeout) else { continue };
-            if !o.status.success() {
-                continue;
-            }
+            c.args(["--", spec]);
+            let o = match proc::output_timeout(&mut c, self.timing.timeout) {
+                Ok(o) if o.status.success() => o,
+                Ok(o) => {
+                    log::debug!("filetree: listing the untracked root failed: {}", failure_from_stderr(&o.stderr).note());
+                    return None;
+                }
+                Err(e) => {
+                    log::debug!("filetree: listing the untracked root failed: {e}");
+                    return None;
+                }
+            };
             for raw in o.stdout.split(|b| *b == 0).filter(|f| !f.is_empty()) {
                 let p = String::from_utf8_lossy(raw);
-                let dir = p.ends_with('/');
                 let name = p.trim_end_matches('/');
-                if !name.is_empty() {
-                    out.push((name.to_string(), dir));
+                // Only the top level: the `*/**` run lists a folder as `name/`.
+                if !name.is_empty() && !name.contains('/') {
+                    out.push((name.to_string(), directory));
                 }
             }
         }
-        out
+        Some(out)
     }
 
     /// A repository path as a root-relative one; None when it is outside the root (or is it).

@@ -346,8 +346,16 @@ fn a_root_inside_a_wholly_untracked_folder_decorates_its_contents() {
     std::fs::write(r.join("new/sub/f.txt"), "f").unwrap();
     std::fs::write(r.join("new/sub/x/g.txt"), "g").unwrap();
     std::fs::write(r.join("new/sub/only_ignored/a.log"), "l").unwrap();
+    // A dotfile and a name a glob would read as a pattern are listed as they are.
+    std::fs::write(r.join("new/sub/.env"), "e").unwrap();
+    std::fs::write(r.join("new/sub/a [b].txt"), "b").unwrap();
+    std::fs::write(r.join("new/sub/top.log"), "l").unwrap();
     let pairs = |v: &[(&str, &str)]| v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>();
-    let cases = [(r.join("new/sub"), pairs(&[("f.txt", "?"), ("x/", "?")]), vec!["f.txt".to_string()]), (r.join("new"), pairs(&[("sub/", "?")]), vec![])];
+    let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let cases = [
+        (r.join("new/sub"), pairs(&[(".env", "?"), ("a [b].txt", "?"), ("f.txt", "?"), ("x/", "?")]), names(&[".env", "a [b].txt", "f.txt"])),
+        (r.join("new"), pairs(&[("sub/", "?")]), vec![]),
+    ];
     for (root, want, named) in cases {
         let core = GitCore::new(std::sync::Weak::new(), &GitConfig::default(), &root, &r, false, Arc::new(Slots::new(2)));
         let p = core.apply(core.epoch(), core.run_status(), Duration::ZERO).expect("the root's contents publish");
