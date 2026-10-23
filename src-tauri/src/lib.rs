@@ -200,7 +200,7 @@ fn second_instance_exit(opens_files: bool) {
     );
     #[cfg(all(not(target_os = "macos"), not(debug_assertions)))]
     if opens_files {
-        const TRIES: &str = "MAITERM_HANDOFF_TRIES";
+        const TRIES: &str = instance_lock::HANDOFF_TRIES_ENV;
         let mut context = app_context();
         context.config_mut().app.windows.clear();
         let _ = tauri::Builder::default()
@@ -229,7 +229,11 @@ pub fn run() {
     let argv: Vec<String> = std::env::args().collect();
     let opens_files = !share::open::paths_from_args(&argv, None).is_empty();
     let _instance = match instance_lock::acquire(instance_lock::launch_wait(opens_files)) {
-        instance_lock::Outcome::Held(lock) => Some(lock),
+        instance_lock::Outcome::Held(lock) => {
+            // Still single-threaded here, which is what makes this safe.
+            std::env::remove_var(instance_lock::HANDOFF_TRIES_ENV);
+            Some(lock)
+        }
         instance_lock::Outcome::Unguarded(why) => {
             // Logging isn't up yet; noted in setup() below.
             UNGUARDED_LAUNCH.get_or_init(|| why);

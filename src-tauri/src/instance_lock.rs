@@ -44,6 +44,11 @@ pub fn launch_wait(opens_files: bool) -> Duration {
     Duration::from_secs(if opens_files { 3 } else { 20 })
 }
 
+/// How many times a share-file handoff has relaunched itself looking for the instance
+/// (lib.rs `second_instance_exit`). Cleared by the process that wins the lock: left set, it
+/// would reach every PTY and every later relaunch, spending their budget before they start.
+pub const HANDOFF_TRIES_ENV: &str = "MAITERM_HANDOFF_TRIES";
+
 pub fn lock_path() -> Option<PathBuf> {
     dirs::data_dir().map(|p| p.join(crate::state::persistence::app_data_slug()).join("aiterm-instance.lock"))
 }
