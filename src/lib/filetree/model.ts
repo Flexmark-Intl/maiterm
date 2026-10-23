@@ -639,6 +639,24 @@ function lensCmp(a: [string, LensNode], b: [string, LensNode]): number {
   return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
 }
 
+/** Who wants a file revealed: the tree following the active file (`auto`), the focus
+ *  shortcut handing the keyboard back (`focus`), or the human's "Reveal in Files" (`asked`). */
+export type RevealKind = 'auto' | 'focus' | 'asked';
+
+/**
+ * What a reveal does. In the real tree it opens the folders above the file (and selects it
+ * unless `auto`). Under find or the Changed lens only "Reveal in Files" may put the pruned
+ * view away: the focus shortcut is how the keyboard gets back to find's results after Enter
+ * opened one, so it must not throw the query away, and neither it nor an automatic reveal
+ * opens folders in the hidden real tree (that would move what Escape restores).
+ */
+export function revealPlan(kind: RevealKind, pruned: boolean, rowShown: boolean): 'tree' | 'put-away' | 'select' | 'scroll' | 'none' {
+  if (!pruned) return 'tree';
+  if (kind === 'asked') return 'put-away';
+  if (!rowShown) return 'none';
+  return kind === 'focus' ? 'select' : 'scroll';
+}
+
 /**
  * The rows of a pruned tree: every item plus the folders above it, folders first, each open
  * unless it is in `collapsed`. The listing order is Rust's and these paths aren't all listed,

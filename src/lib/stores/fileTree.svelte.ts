@@ -32,7 +32,7 @@ import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import * as commands from '$lib/tauri/commands';
 import type { BranchInfo, DirReq, GitLetter, OpenAck, TreeEnvelope, TreePlace, TreeSearchHit } from '$lib/tauri/types';
 import { TREE_FLAG_IGNORED } from '$lib/tauri/types';
-import { TreeModel, ancestorsOf, isExpandable, isFolderKind, isWithin, joinRel, matchHighlights, parentRel, prunedRows, type Row } from '$lib/filetree/model';
+import { TreeModel, ancestorsOf, isExpandable, isFolderKind, isWithin, joinRel, matchHighlights, parentRel, prunedRows, revealPlan, type RevealKind, type Row } from '$lib/filetree/model';
 import { openGitDiff } from '$lib/utils/openGitDiff';
 import { relToAbs, lastSegment, tildePath } from '$lib/filetree/paths';
 import { settleActiveFile, type ActiveFileTarget } from '$lib/filetree/activeFile';
@@ -608,7 +608,7 @@ function createFileTreeStore() {
   function moveYouAreHere(rel: string | null) {
     if (youAreHere === rel) return;
     youAreHere = rel;
-    if (rel) revealRel(rel, false);
+    if (rel) revealRel(rel, 'auto');
   }
 
   // ── Subscriptions ──────────────────────────────────────────────────────────────────────
@@ -729,7 +729,7 @@ function createFileTreeStore() {
     sendClose([...asked].filter((r) => r !== '' && !m.interest.has(r)));
     for (const env of early) handle(env);
     if (typeof document !== 'undefined' && document.hidden) commands.ftPause(opened.sub_id, true).catch(() => {});
-    if (youAreHere && !kept) revealRel(youAreHere, false);
+    if (youAreHere && !kept) revealRel(youAreHere, 'auto');
     // The active file is placed by FilesColumn's effect, which re-runs on the new `ack`.
   }
 
@@ -922,20 +922,26 @@ function createFileTreeStore() {
 
   // ── Revealing ─────────────────────────────────────────────────────────────────────────
 
-  /** Open the folders above `rel` and scroll it into view when it has a row; select it only
-   *  when the human asked (`select`). */
-  function revealRel(rel: string, select: boolean) {
+  /** Open the folders above `rel` and scroll it into view when it has a row; select it
+   *  unless the reveal is automatic. Under find or the Changed lens, see `revealPlan`. */
+  function revealRel(rel: string, kind: RevealKind) {
     if (!model) return;
-    if (viewMode() !== 'tree') {
-      if (!select) {
-        // An automatic reveal (the active file, you-are-here) under find or the Changed lens:
-        // the view on screen is the lens's, and opening folders in the hidden real tree would
-        // move what Escape restores. Scroll to the row only if the lens shows it.
-        if (rows.some((x) => x.key === rel)) requestScroll(rel);
-        return;
+    const select = kind !== 'auto';
+    const plan = revealPlan(kind, viewMode() !== 'tree', rows.some((x) => x.key === rel));
+    if (plan === 'none') return;
+    if (plan === 'scroll' || plan === 'select') {
+      if (plan === 'select') {
+        selection.clear();
+        selection.add(rel);
+        focusKey = rel;
+        anchorKey = rel;
       }
-      // The human asked (Reveal in Files): the real tree comes back to show it, with the
-      // lens and find put away first so the restored view can't replace the selection.
+      requestScroll(rel);
+      return;
+    }
+    if (plan === 'put-away') {
+      // The real tree comes back to show it, with the lens and find put away first so the
+      // restored view can't replace the selection.
       if (find) closeFind();
       if (lens === 'changed') toggleChanged();
     }
@@ -967,7 +973,7 @@ function createFileTreeStore() {
     if (my !== activeSeq || sub !== subId) return;
     activeFile = s.active;
     outsideFile = s.outside;
-    if (preferencesStore.fileTreeAutoReveal && s.active) revealRel(s.active, false);
+    if (preferencesStore.fileTreeAutoReveal && s.active) revealRel(s.active, 'auto');
   }
 
   /** "Reveal in Files" from a tab menu: the human asked, so the column opens (if it was
@@ -982,7 +988,7 @@ function createFileTreeStore() {
       toastStore.addToast('Files', 'That file is outside the folder Files is showing.', 'info');
       return;
     }
-    if (rel) revealRel(rel, true);
+    if (rel) revealRel(rel, 'asked');
     focusPending = true;
   }
 
@@ -995,7 +1001,7 @@ function createFileTreeStore() {
     // Forced: the human asked for THIS tab's folder, so it moves the tree even with
     // following turned off (otherwise the previous tab's folder would be selected).
     await resolveNow(false, true);
-    if (youAreHere) revealRel(youAreHere, true);
+    if (youAreHere) revealRel(youAreHere, 'asked');
     focusPending = true;
   }
 
@@ -1402,7 +1408,8 @@ function createFileTreeStore() {
         for (let i = 0; i < 40 && subId === null; i++) await new Promise((r) => setTimeout(r, 50));
         const [rel] = subId !== null ? await commands.ftLocate(subId, [t.editor_file.file_path]).catch(() => [null]) : [null];
         if (rel) {
-          revealRel(rel, true);
+          // Not "Reveal in Files": find's results or the lens stay (see revealPlan).
+          revealRel(rel, 'focus');
           focusPending = true;
         }
       }
@@ -1468,8 +1475,8 @@ function createFileTreeStore() {
     revealTabFolder,
     syncActiveFile,
     /** "Reveal Active File" (⋯ menu): the human asked, so it reveals with auto-reveal off. */
-    revealActiveFile() { if (activeFile) revealRel(activeFile, false); },
-    revealYouAreHere() { if (youAreHere) revealRel(youAreHere, false); },
+    revealActiveFile() { if (activeFile) revealRel(activeFile, 'auto'); },
+    revealYouAreHere() { if (youAreHere) revealRel(youAreHere, 'auto'); },
     absOf,
     copyPaths,
     revealInOs,

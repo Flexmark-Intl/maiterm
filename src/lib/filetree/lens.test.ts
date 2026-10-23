@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { GitUpdate, TreeEntry } from '$lib/tauri/types';
 import { TREE_FLAG_IGNORED } from '$lib/tauri/types';
-import { TreeModel, highlightRuns, matchHighlights, prunedRows } from './model';
+import { TreeModel, highlightRuns, matchHighlights, prunedRows, revealPlan } from './model';
 
 const update = (u: Partial<GitUpdate>): GitUpdate => ({ gen: 1, full: false, files: [], dirs: [], del: [], branch: null, truncated: false, count: 0, ...u });
 
@@ -134,5 +134,26 @@ describe('find highlights', () => {
 
   it('no marks is one plain run', () => {
     expect(highlightRuns('name', undefined)).toEqual([{ text: 'name', hit: false }]);
+  });
+});
+
+describe('revealPlan', () => {
+  it('the real tree opens folders for every kind of reveal', () => {
+    for (const k of ['auto', 'focus', 'asked'] as const) expect(revealPlan(k, false, false)).toBe('tree');
+  });
+
+  it('only Reveal in Files puts find or the lens away', () => {
+    expect(revealPlan('asked', true, true)).toBe('put-away');
+    expect(revealPlan('asked', true, false)).toBe('put-away');
+  });
+
+  it('the focus shortcut keeps find results and the lens, selecting the row if shown', () => {
+    expect(revealPlan('focus', true, true)).toBe('select');
+    expect(revealPlan('focus', true, false)).toBe('none');
+  });
+
+  it('an automatic reveal under a pruned view only scrolls to a row it shows', () => {
+    expect(revealPlan('auto', true, true)).toBe('scroll');
+    expect(revealPlan('auto', true, false)).toBe('none');
   });
 });
