@@ -719,6 +719,77 @@ fn a_helper_leased_as_its_grace_ends_is_not_closed() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// The helper behind a slow link: everything maiTerm writes is passed on at `rate` bytes a
+/// second, and the helper gives up after `deadline` seconds of hearing nothing.
+struct Throttled {
+    home: PathBuf,
+    rate: u32,
+    deadline: &'static str,
+}
+
+impl Transport for Throttled {
+    fn helper(&self, _t: &Target) -> Command {
+        let throttle = format!("import os,time\nwhile 1:\n b=os.read(0,8192)\n if not b:\n  break\n time.sleep(len(b)/{})\n while b:\n  b=b[os.write(1,b):]\n", self.rate);
+        let mut c = Command::new("/bin/sh");
+        c.arg("-c").arg(format!("python3 -c '{throttle}' | {}", proto::remote_command()));
+        env(&mut c, &self.home);
+        c.env("MAITERM_FT_PING_DEADLINE", self.deadline);
+        c
+    }
+
+    fn shell(&self, t: &Target) -> Command {
+        Local { home: self.home.clone(), python: "python3" }.shell(t)
+    }
+}
+
+/// An import of a file that takes far longer to carry than a ping may wait: it arrives whole,
+/// the helper is never restarted, and pings went on meanwhile. One frame of the whole file used
+/// to hold stdin until it was written, so the ping behind it timed out and Rust killed the
+/// helper, and the helper itself, reading no ping until the payload was in, gave up too.
+#[test]
+fn a_slow_upload_is_not_taken_for_a_dead_helper() {
+    if !python3() {
+        return;
+    }
+    let home = scratch("slow");
+    let t = scratch("slow-root");
+    let src = scratch("slow-src");
+    let rs = Remotes::default();
+    // 1.25 MB at 512 KB/s: ~2.5 s to carry, against a 300 ms ping wait and a helper that
+    // gives up after a second of silence.
+    let timing = Timing { ping_every: Duration::from_millis(200), ping_timeout: Duration::from_millis(300), ..fast() };
+    rs.set_transport(Arc::new(Throttled { home: home.clone(), rate: 512 << 10, deadline: "1.0" }), timing);
+    let root = RemoteRoot::open(rs.lease("me@here", None), &t.to_string_lossy(), Vec::new()).unwrap();
+    let epoch = root.conn.st.lock().epoch;
+    let bytes: Vec<u8> = (0..1_310_720u32).map(|i| (i % 251) as u8).collect();
+    let file = src.join("big.bin");
+    std::fs::write(&file, &bytes).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+    }
+    let mut made = false;
+    upload(&root, &file, "big.bin", &mut made).unwrap();
+    assert!(made);
+    assert_eq!(std::fs::read(t.join("big.bin")).unwrap(), bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(t.join("big.bin")).unwrap().permissions().mode() & 0o777, 0o640, "the last frame sets the mode");
+    }
+    assert_eq!(root.conn.status(), Status::Live);
+    assert_eq!(root.conn.st.lock().epoch, epoch, "the helper was restarted during the upload");
+    // An append lands only on the file it continues, at the length it expects.
+    let r = root.root.clone();
+    assert_eq!(code(root.conn.call("append", json!({ "root": r, "rel": "big.bin", "at": 5, "more": false }), b"x", T)), "changed");
+    assert_eq!(code(root.conn.call("append", json!({ "root": r, "rel": "nothing.bin", "at": 0 }), b"x", T)), "gone");
+    drop(root);
+    for d in [&home, &t, &src] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
 #[test]
 fn the_helper_ends_with_its_input() {
     if !python3() {

@@ -42,7 +42,9 @@ MAX_HEADER = 1 << 20
 MAX_ENTRIES = 200000
 MAX_FILES = 1000000
 WALK_DEPTH = 20
-PING_DEADLINE = 60.0
+# Exit when nothing has come from maiTerm for this long (its pings come every 30 s). A test
+# shortens it; nothing else sets the variable.
+PING_DEADLINE = float(os.environ.get("MAITERM_FT_PING_DEADLINE") or 60)
 COALESCE = 0.15
 MAX_EVENT_PATHS = 4096
 BUILTIN_EXCLUDED = (b".git", b".DS_Store", b"Thumbs.db")
@@ -54,7 +56,8 @@ IN = sys.stdin.buffer
 OUT = sys.stdout.buffer
 OUT_LOCK = threading.Lock()
 PARENT = os.getppid()
-LAST_PING = [time.monotonic()]
+# When bytes last came in from maiTerm: a ping, any frame, or part of a long payload.
+LAST_HEARD = [time.monotonic()]
 
 
 def B(s):
@@ -1400,17 +1403,44 @@ def op_mkdir(req):
     return {}, b""
 
 
+def write_all(fd, payload):
+    view = memoryview(payload)
+    while view:
+        n = os.write(fd, view)
+        view = view[n:]
+
+
 def op_put(req, payload):
+    """A new file, never replacing anything. `more`: the rest follows in `append` frames,
+    so the file is made writable by its owner until the last one sets `mode`."""
     root = get_root(req["root"])
     p = contained(root.real, req["rel"], True)
     mode = int(req.get("mode", 0o644)) & 0o7777
     try:
-        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if req.get("more") else mode)
         try:
-            view = memoryview(payload)
-            while view:
-                n = os.write(fd, view)
-                view = view[n:]
+            write_all(fd, payload)
+        finally:
+            os.close(fd)
+    except OSError as e:
+        raise os_fail(e, req["rel"])
+    return {}, b""
+
+
+def op_append(req, payload):
+    """The next frame of a file `put` began: written only to a regular file exactly `at`
+    bytes long, so nothing else that took the name meanwhile is ever written to."""
+    root = get_root(req["root"])
+    p = contained(root.real, req["rel"], True)
+    try:
+        fd = os.open(p, os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_size != int(req["at"]):
+                raise Fail("changed", "%s changed while it was being sent" % req["rel"])
+            write_all(fd, payload)
+            if not req.get("more"):
+                os.fchmod(fd, int(req.get("mode", 0o644)) & 0o7777 & ~current_umask())
         finally:
             os.close(fd)
     except OSError as e:
@@ -1814,7 +1844,7 @@ OPS = {
     "forget": op_forget,
     "poll": op_poll,
 }
-PAYLOAD_OPS = {"write": op_write, "put": op_put}
+PAYLOAD_OPS = {"write": op_write, "put": op_put, "append": op_append}
 
 
 def handle(req, payload):
@@ -1843,19 +1873,36 @@ def read_frame():
     line = IN.readline(MAX_HEADER)
     if not line or not line.endswith(b"\n"):
         return None
+    LAST_HEARD[0] = time.monotonic()
     req = json.loads(line.decode("utf-8"))
     n = int(req.get("len") or 0)
-    payload = IN.read(n) if n else b""
+    payload = read_payload(n) if n else b""
     if len(payload) != n:
         return None
     return req, payload
 
 
+def read_payload(n):
+    """`n` bytes, or fewer at the end of the stream. Each piece that arrives counts as hearing
+    from maiTerm: a payload on a slow link can take longer than the ping deadline, and no ping
+    can be read until it is all in."""
+    parts = []
+    left = n
+    while left:
+        b = IN.read1(min(left, 1 << 16))
+        if not b:
+            break
+        parts.append(b)
+        left -= len(b)
+        LAST_HEARD[0] = time.monotonic()
+    return b"".join(parts)
+
+
 def liveness():
-    """Exit when the parent (the ssh session) is gone or maiTerm stopped pinging."""
+    """Exit when the parent (the ssh session) is gone or maiTerm has gone quiet."""
     while True:
-        time.sleep(5)
-        if os.getppid() != PARENT or time.monotonic() - LAST_PING[0] > PING_DEADLINE:
+        time.sleep(min(5.0, PING_DEADLINE / 4))
+        if os.getppid() != PARENT or time.monotonic() - LAST_HEARD[0] > PING_DEADLINE:
             die()
 
 
@@ -1874,7 +1921,6 @@ def main():
             die()
         req, payload = frame
         if req.get("op") == "ping":
-            LAST_PING[0] = time.monotonic()
             send({"id": req.get("id"), "ok": True})
             continue
         pool.submit(handle, req, payload)

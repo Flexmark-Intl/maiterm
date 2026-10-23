@@ -11,8 +11,11 @@
 //!
 //! **Lifetime.** Each root holds a lease on its host's helper; the helper outlives its last
 //! lease by 5 minutes, so switching back costs nothing. While it lives, Rust pings it every
-//! 30 s (the only timer an idle remote tree has) and the helper exits after 60 s without one,
-//! when its stdin ends, or when its parent goes: ssh without a terminal sends no hangup.
+//! 30 s (the only timer an idle remote tree has) and the helper exits after 60 s of hearing
+//! nothing (a ping, any frame, or part of a long one), when its stdin ends, or when its parent
+//! goes: ssh without a terminal sends no hangup. A missed ping kills the helper only when no
+//! bytes moved meanwhile (`Activity`), and imports go in 1 MB frames (`PUT_CHUNK`), so a big
+//! upload over a slow link is never taken for a dead helper.
 //!
 //! **Failures.** A helper that dies is started again with a backoff that recovers (1 s, 2 s,
 //! 4 s … 30 s, and back to 1 s after a success), unlike the editor's remote poll, which gives up
@@ -51,8 +54,10 @@ use crate::util::proc::RunError;
 
 /// A request's answer may take this long (a listing of a slow folder, a status run).
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
-/// Files bigger than this are not sent by an import: one frame holds a whole file.
+/// Files bigger than this are not sent by an import.
 const MAX_IMPORT_FILE: u64 = 256 << 20;
+/// One frame of an import (`PUT_CHUNK`, 1 MB) has this long: about 17 KB/s at the least.
+const PUT_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The helper's clock. Fields so tests needn't wait out real intervals.
 #[derive(Debug, Clone, Copy)]
@@ -214,6 +219,56 @@ struct Io {
     child: Arc<Mutex<Child>>,
 }
 
+/// When bytes last moved on the helper's pipes, either way. A ping that goes unanswered in
+/// time is evidence of a wedged helper only if nothing moved meanwhile: one stuck behind an
+/// upload's frame (stdin is one stream) or behind a big reply (stdout is one too) waited on a
+/// connection that was working.
+struct Activity {
+    base: Instant,
+    /// Milliseconds after `base`, plus one (0: never).
+    last: AtomicU64,
+}
+
+impl Activity {
+    fn new() -> Activity {
+        Activity { base: Instant::now(), last: AtomicU64::new(0) }
+    }
+
+    fn touch(&self) {
+        let ms = self.base.elapsed().as_millis() as u64 + 1;
+        self.last.fetch_max(ms, Ordering::SeqCst);
+    }
+
+    /// Bytes moved at or after `t`.
+    fn since(&self, t: Instant) -> bool {
+        let at = t.saturating_duration_since(self.base).as_millis() as u64 + 1;
+        self.last.load(Ordering::SeqCst) >= at
+    }
+}
+
+/// The helper's stdout, noting each read in `Activity`.
+struct Heard<R> {
+    inner: R,
+    activity: Arc<Activity>,
+}
+
+impl<R: Read> Read for Heard<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            self.activity.touch();
+        }
+        Ok(n)
+    }
+}
+
+/// A frame goes to the helper in slices this big, each after the first noted in `Activity`: a
+/// frame on a slow link takes as long as it takes, and the pinger has to see it moving.
+const WRITE_SLICE: usize = 64 << 10;
+/// An import sends a file in frames of at most this much, so a big file never holds the
+/// helper's stdin for long: listings, git and pings go out between its frames.
+const PUT_CHUNK: usize = 1 << 20;
+
 struct ConnState {
     status: Status,
     io: Option<Io>,
@@ -247,6 +302,7 @@ pub struct Conn {
     leases: AtomicUsize,
     grace_token: AtomicU64,
     hello: Mutex<Option<Hello>>,
+    activity: Arc<Activity>,
 }
 
 /// A root's hold on its host's helper: the last one going starts the grace period. Taken from
@@ -401,6 +457,7 @@ impl Conn {
             leases: AtomicUsize::new(0),
             grace_token: AtomicU64::new(0),
             hello: Mutex::new(None),
+            activity: Arc::new(Activity::new()),
         })
     }
 
@@ -484,6 +541,7 @@ impl Conn {
         }
         let weak = self.me.clone();
         let reader_child = child.clone();
+        let stdout = Heard { inner: stdout, activity: self.activity.clone() };
         let spawned = std::thread::Builder::new().name("ft-ssh-read".into()).spawn(move || reader(weak, epoch, stdout, reader_child, tail));
         if let Err(e) = spawned {
             let _ = child.lock().kill();
@@ -629,11 +687,18 @@ impl Conn {
             match c.status() {
                 Status::Closed => return,
                 Status::Live => {
+                    let asked = Instant::now();
                     if c.call("ping", json!({}), &[], timeout).is_err() && c.status() == Status::Live {
-                        // A helper that doesn't answer a ping is wedged or cut off: kill it and
-                        // let the backoff start a new one.
-                        log::info!("filetree: ssh helper for {} missed a ping", c.label());
-                        c.kill_current();
+                        if c.activity.since(asked) {
+                            // Late, but the pipes were moving: the ping waited behind an
+                            // upload's frame or a big reply on a working connection.
+                            log::debug!("filetree: ssh helper for {} answered no ping while busy", c.label());
+                        } else {
+                            // A helper that doesn't answer a ping, with nothing moving, is
+                            // wedged or cut off: kill it and let the backoff start a new one.
+                            log::info!("filetree: ssh helper for {} missed a ping", c.label());
+                            c.kill_current();
+                        }
                     }
                 }
                 _ => {}
@@ -652,8 +717,9 @@ impl Conn {
     }
 
     /// Send a request; `waiter` gets the answer. Waits up to `deadline` for the helper to be
-    /// live. The id is returned so a timed-out wait can be forgotten.
-    fn send(&self, op: &str, args: Value, payload: &[u8], waiter: Waiter, deadline: Instant) -> Result<u64, (CallError, Waiter)> {
+    /// live, and up to `lock_by` (None: as long as it takes) for another frame being written to
+    /// finish. The id is returned so a timed-out wait can be forgotten.
+    fn send(&self, op: &str, args: Value, payload: &[u8], waiter: Waiter, deadline: Instant, lock_by: Option<Instant>) -> Result<u64, (CallError, Waiter)> {
         self.ensure_started();
         let stdin = {
             let mut s = self.st.lock();
@@ -686,8 +752,30 @@ impl Conn {
         self.pending.lock().insert(id, waiter);
         let frame = proto::encode(&header, payload);
         let wrote = {
-            let mut w = stdin.lock();
-            w.write_all(&frame).and_then(|_| w.flush())
+            let w = match lock_by {
+                Some(by) => stdin.try_lock_until(by),
+                None => Some(stdin.lock()),
+            };
+            let Some(mut w) = w else {
+                // Another frame still going out: nothing of this one was written.
+                return match self.pending.lock().remove(&id) {
+                    Some(w) => Err((CallError::Timeout, w)),
+                    None => Ok(id),
+                };
+            };
+            let mut result = Ok(());
+            for (i, slice) in frame.chunks(WRITE_SLICE).enumerate() {
+                result = w.write_all(slice);
+                if result.is_err() {
+                    break;
+                }
+                // Only a big frame's later slices count: a first slice (a ping, any small
+                // request) lands in the pipe's buffer whether or not anyone reads it.
+                if i > 0 {
+                    self.activity.touch();
+                }
+            }
+            result.and_then(|_| w.flush())
         };
         if wrote.is_err() {
             let w = self.pending.lock().remove(&id);
@@ -705,7 +793,7 @@ impl Conn {
     pub fn call(&self, op: &str, args: Value, payload: &[u8], timeout: Duration) -> Reply {
         let deadline = Instant::now() + timeout;
         let (tx, rx) = mpsc::channel();
-        let id = match self.send(op, args, payload, Waiter::Sync(tx), deadline) {
+        let id = match self.send(op, args, payload, Waiter::Sync(tx), deadline, Some(deadline)) {
             Ok(id) => id,
             Err((e, _)) => return Err(e),
         };
@@ -743,7 +831,7 @@ impl Conn {
         if self.status() != Status::Live {
             return false;
         }
-        self.send(op, args, payload, Waiter::Async(Box::new(cb)), Instant::now()).is_ok()
+        self.send(op, args, payload, Waiter::Async(Box::new(cb)), Instant::now(), None).is_ok()
     }
 
     fn dispatch(&self, f: proto::Frame) {
@@ -877,7 +965,7 @@ fn new_marker() -> String {
 
 /// The reader of one helper process: frames to their callers and roots, then, at the end of the
 /// stream, how it ended.
-fn reader(weak: Weak<Conn>, epoch: u64, stdout: std::process::ChildStdout, child: Arc<Mutex<Child>>, tail: Arc<Mutex<Vec<u8>>>) {
+fn reader(weak: Weak<Conn>, epoch: u64, stdout: Heard<std::process::ChildStdout>, child: Arc<Mutex<Child>>, tail: Arc<Mutex<Vec<u8>>>) {
     let mut r = BufReader::with_capacity(1 << 18, stdout);
     let mut ready = false;
     loop {
@@ -1583,6 +1671,20 @@ fn import(env: &RemoteEnv, op: &FileOp) -> Result<OpResult, String> {
     Ok(result)
 }
 
+/// Fill `buf` from `f` unless the file ends first: the bytes read.
+fn read_full(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(n)
+}
+
 fn upload(r: &RemoteRoot, local: &Path, rel: &str, made: &mut bool) -> Result<(), (String, String)> {
     let io = |e: std::io::Error| ("io".to_string(), e.to_string());
     let remote_err = |e: CallError| match e {
@@ -1607,7 +1709,6 @@ fn upload(r: &RemoteRoot, local: &Path, rel: &str, made: &mut bool) -> Result<()
         if meta.len() > MAX_IMPORT_FILE {
             return Err(("io".into(), format!("{} is larger than Files sends to a host (256 MB)", local.display())));
         }
-        let bytes = std::fs::read(local).map_err(io)?;
         #[cfg(unix)]
         let mode = {
             use std::os::unix::fs::PermissionsExt;
@@ -1615,8 +1716,29 @@ fn upload(r: &RemoteRoot, local: &Path, rel: &str, made: &mut bool) -> Result<()
         };
         #[cfg(not(unix))]
         let mode = 0o644;
-        r.conn.call("put", json!({ "root": r.root, "rel": rel, "mode": mode }), &bytes, Duration::from_secs(300)).map_err(remote_err)?;
-        *made = true;
+        // In frames of PUT_CHUNK: one frame of the whole file held the helper's stdin for as
+        // long as the link took to carry it, so pings queued behind it and the helper was
+        // killed mid-upload (and every listing and git run on the host waited too). The first
+        // frame creates the file, refusing to replace anything; each next one appends at the
+        // offset it expects; the last sets the mode.
+        let mut file = std::fs::File::open(local).map_err(io)?;
+        let mut buf = vec![0u8; PUT_CHUNK];
+        let mut at: u64 = 0;
+        loop {
+            let n = read_full(&mut file, &mut buf).map_err(io)?;
+            let more = n == buf.len() && at + (n as u64) < meta.len();
+            let (op, req) = if at == 0 {
+                ("put", json!({ "root": r.root, "rel": rel, "mode": mode, "more": more }))
+            } else {
+                ("append", json!({ "root": r.root, "rel": rel, "mode": mode, "at": at, "more": more }))
+            };
+            r.conn.call(op, req, &buf[..n], PUT_CHUNK_TIMEOUT).map_err(remote_err)?;
+            *made = true;
+            at += n as u64;
+            if !more {
+                break;
+            }
+        }
     } else {
         return Err(("io".into(), format!("{}: only files, folders and links are copied", local.display())));
     }
