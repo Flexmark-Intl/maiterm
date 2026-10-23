@@ -35,10 +35,13 @@ pub enum Outcome {
 /// A relaunch (`restart()`, the updater, `restartMaiterm`) spawns the new process BEFORE the
 /// old one exits (tauri's `process::restart`), so the newcomer routinely finds the lock still
 /// held for the old one's shutdown. Waiting is free: nothing has been touched yet. A launch
-/// that opens share files is a human double-clicking one, which should reach the running
-/// instance at once rather than after the wait.
+/// that opens share files is usually a human double-clicking one, which should reach the
+/// running instance quickly, so it waits less. Never zero, though: a relaunch reuses the
+/// argv of the launch it replaces, so a maiTerm first opened from a share file relaunches
+/// looking like a file-open, and its parent is still exiting (it spawns first, then
+/// `exit(0)`s, its cleanup already done).
 pub fn launch_wait(opens_files: bool) -> Duration {
-    if opens_files { Duration::ZERO } else { Duration::from_secs(20) }
+    Duration::from_secs(if opens_files { 3 } else { 20 })
 }
 
 pub fn lock_path() -> Option<PathBuf> {

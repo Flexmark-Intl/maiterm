@@ -184,9 +184,11 @@ fn app_context() -> tauri::Context<tauri::Wry> {
 ///
 /// Windows/Linux hand a double-clicked share file to the running instance by launching a
 /// second process with the path in argv. That handoff is the single-instance plugin's, so a
-/// launch carrying one builds a bare app with that plugin alone: it forwards argv and exits
-/// during plugin init. If the holder vanished in between, setup() exits instead, before any
-/// window or state exists.
+/// launch carrying one builds a bare, windowless app with that plugin alone: it forwards argv
+/// and exits during plugin init. Reaching setup() means it found nobody to forward to: the
+/// holder is still starting (pre-`build()`) or already past its exit. Dropping the file would
+/// lose it, and a holder on its way out may be a relaunch that needs this process to BE the
+/// next instance, so it launches itself afresh to go through the lock again (capped).
 fn second_instance_exit(opens_files: bool) {
     use std::io::Write;
     // Not `eprintln!`: a relaunched child can outlive the stderr it inherited, and eprintln
@@ -198,10 +200,24 @@ fn second_instance_exit(opens_files: bool) {
     );
     #[cfg(all(not(target_os = "macos"), not(debug_assertions)))]
     if opens_files {
+        const TRIES: &str = "MAITERM_HANDOFF_TRIES";
+        let mut context = app_context();
+        context.config_mut().app.windows.clear();
         let _ = tauri::Builder::default()
             .plugin(tauri_plugin_single_instance::init(|_, _, _| {}))
-            .setup(|_| std::process::exit(0))
-            .run(app_context());
+            .setup(|_| {
+                let tries: u32 = std::env::var(TRIES).ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                if tries < 5 {
+                    if let Ok(exe) = std::env::current_exe() {
+                        let _ = std::process::Command::new(exe)
+                            .args(std::env::args_os().skip(1))
+                            .env(TRIES, (tries + 1).to_string())
+                            .spawn();
+                    }
+                }
+                std::process::exit(0)
+            })
+            .run(context);
     }
     let _ = opens_files;
 }
