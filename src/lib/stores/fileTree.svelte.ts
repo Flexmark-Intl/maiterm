@@ -668,7 +668,9 @@ function createFileTreeStore() {
     await workspacesStore.setActiveTab(workspaceId, paneId, tabId);
     await workspacesStore.setFileTreeOpen(true);
     for (let i = 0; i < 40 && !attached; i++) await new Promise((r) => setTimeout(r, 50));
-    await resolveNow(false);
+    // Forced: the human asked for THIS tab's folder, so it moves the tree even with
+    // following turned off (otherwise the previous tab's folder would be selected).
+    await resolveNow(false, true);
     if (youAreHere) revealRel(youAreHere, true);
     focusPending = true;
   }
