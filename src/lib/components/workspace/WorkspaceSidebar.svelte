@@ -20,6 +20,7 @@
   import { untrack } from 'svelte';
   import { updaterStore } from '$lib/stores/updater.svelte';
   import { overlordStore } from '$lib/stores/overlord.svelte';
+  import { fileTreeStore } from '$lib/stores/fileTree.svelte';
   import '$lib/overlord/deck.css';
   import ChangelogModal from '$lib/components/ChangelogModal.svelte';
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
@@ -644,7 +645,28 @@
         <StatusDot color="green" tooltip="IDE Connected" />
       </span>
     {/if}
-    <span style="margin-left:auto"><IconButton tooltip="Collapse sidebar ({modSymbol}B)" size={20} style="font-size: 1.231rem" onclick={() => workspacesStore.toggleSidebar()}>&#x2039;</IconButton></span>
+    <span class="titlebar-end">
+      {#if preferencesStore.fileTreeEnabled}
+        <!-- Files opens right beside this edge, so its toggle lives here rather than only behind
+             a shortcut; +page carries one in the titlebar for while the sidebar is collapsed. -->
+        <span class="files-toggle">
+          <IconButton
+            tooltip={`${workspacesStore.fileTreeOpen ? 'Hide' : 'Show'} Files (${modSymbol}⇧B)`}
+            size={20}
+            active={workspacesStore.fileTreeOpen}
+            aria-pressed={workspacesStore.fileTreeOpen}
+            onclick={() => fileTreeStore.toggleColumn()}
+          >
+            <Icon name="folder" size={12} />
+          </IconButton>
+          {#if fileTreeStore.pointerWaiting}
+            <!-- An agent pointed at a file while Files was closed (revealInTree never opens it). -->
+            <span class="files-pointed" aria-hidden="true"></span>
+          {/if}
+        </span>
+      {/if}
+      <IconButton tooltip="Collapse sidebar ({modSymbol}B)" size={20} style="font-size: 1.231rem" onclick={() => workspacesStore.toggleSidebar()}>&#x2039;</IconButton>
+    </span>
   </div>
   {#if preferencesStore.overlordEnabled}
     <Tooltip block text={overlordAttention > 0
@@ -924,6 +946,33 @@
     border-bottom: 1px solid var(--bg-light);
   }
 
+  /* At the 215px minimum the strip is full: the DEV badge alone overran it, and the Files
+     toggle adds 22px. The version number is the one thing that gives way (ellipsis), so
+     the chevron and the toggle are never pushed past the edge. */
+  .titlebar-end {
+    margin-left: auto;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .files-toggle {
+    position: relative;
+    display: flex;
+  }
+
+  .files-pointed {
+    position: absolute;
+    top: 1px;
+    right: 1px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    pointer-events: none;
+  }
+
   /* The full wordmark, not a compact mark: the emblem is illegible at this size
      (mesh collapses to specks below ~32px), so the sidebar carries the name. 13px
      is the ceiling — at 70px wide it leaves the DEV + version badges and the
@@ -937,12 +986,14 @@
   .sidebar-logo {
     height: 13px;
     aspect-ratio: 1661 / 320;
+    flex-shrink: 0;
     pointer-events: none;
     background: var(--logo-url, url(/logo-light.png)) center / contain no-repeat;
   }
 
   .dev-badge {
     margin-left: 6px;
+    flex-shrink: 0;
     font-size: 0.769rem;
     font-weight: 600;
     color: var(--bg-dark);
@@ -955,6 +1006,10 @@
 
   .version-badge {
     margin-left: 6px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 0.769rem;
     color: var(--fg-dim);
     cursor: pointer;

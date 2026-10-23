@@ -1378,8 +1378,8 @@
         {/snippet}
 
         <h3 class="section-heading">Files</h3>
-        <p class="section-desc">A project tree beside the terminals, following the active tab’s folder. Toggle it with {modLabel}+Shift+B or the folder button in the titlebar.</p>
-        {@render ftToggle('ft-enabled', 'Enable Files', 'The column, its shortcut and its titlebar button.', preferencesStore.fileTreeEnabled, (v) => preferencesStore.setFileTreeEnabled(v))}
+        <p class="section-desc">A project tree beside the terminals, following the active tab’s folder. Toggle it with {modLabel}+Shift+B or the folder button at the top of the sidebar.</p>
+        {@render ftToggle('ft-enabled', 'Enable Files', 'The column, its shortcut and its toggle button.', preferencesStore.fileTreeEnabled, (v) => preferencesStore.setFileTreeEnabled(v))}
         {@render ftToggle('ft-follow', 'Follow the Active Tab', 'Show the folder of the terminal tab in front. Off: the folder stays until you pick another.', preferencesStore.fileTreeFollow, (v) => preferencesStore.setFileTreeFollow(v))}
         {@render ftToggle('ft-reveal', 'Reveal the Active File', 'When an editor tab is in front, open the folders down to its file.', preferencesStore.fileTreeAutoReveal, (v) => preferencesStore.setFileTreeAutoReveal(v))}
         {@render ftToggle('ft-preview', 'Preview Tabs', 'A single click opens a file in an italic preview tab that the next click reuses. Edit it or double-click to keep it.', preferencesStore.fileTreePreviewTabs, (v) => preferencesStore.setFileTreePreviewTabs(v))}

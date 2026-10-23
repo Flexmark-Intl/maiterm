@@ -590,7 +590,8 @@
         >{titlebarText}</span>
       </Tooltip>
     {/if}
-    {#if !loading && preferencesStore.fileTreeEnabled}
+    {#if !loading && preferencesStore.fileTreeEnabled && workspacesStore.sidebarCollapsed}
+      <!-- The sidebar's top strip carries this toggle; it is here only while that is hidden. -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="titlebar-actions" onmousedown={(e) => e.stopPropagation()}>
         <IconButton

@@ -82,8 +82,10 @@
 >   follows it, then selects its folder.
 > - **Help** is the help window (`routes/help`), not a `HelpModal.svelte`; the shortcut row and
 >   a "Files" key section are there.
-> - **The titlebar button** sits at the titlebar's right end: the left holds the macOS traffic
->   lights (overlay title bar).
+> - **The toggle** sits in the sidebar's top strip, beside the collapse chevron, directly above
+>   where the column opens (moved 2026-10-23: alone at the titlebar's right end, nobody found
+>   it). The titlebar copy shows only while the sidebar is collapsed, so one is always visible.
+>   At the 215px minimum the strip is full; the version number ellipsizes to make room.
 > - Not in phase 1 by design: the find/filter bar (phase 2; Cmd+F and `/` do nothing in the
 >   tree yet), New File/Folder buttons and every write (phase 3), the agent strip, lenses,
 >   edge chips and follow-agent (phase 4).
@@ -477,7 +479,7 @@
 > - **`revealInTree`** with `select` uses the focus shortcut's plan (selects, never takes the
 >   keyboard). Besides "the human used the tree in the last 3 s", `noted` also answers when find
 >   or a lens leaves the path out; the chip ("‹tab› points at x · Show") sits under the strip,
->   and with the column closed the titlebar's Files button gets a dot until it opens.
+>   and with the column closed the Files toggle gets a dot until it opens.
 >   **`getTreeSelection`** adds `open`; a closed column has no subscription, so it reports no
 >   selection rather than paths it can't spell.
 > - **The agent_active question is the frontend's** ("“claude · tab 3” is working on “a.ts”
@@ -1034,7 +1036,7 @@ settings, so they create no Tab reload, duplicate or share obligations.
 
 **Toggle surfaces:**
 - **Cmd/Ctrl+Shift+B** (§11).
-- A Files `IconButton` in the titlebar next to the sidebar expander, with a `Tooltip`. Never `title=`.
+- A Files `IconButton` in the sidebar's top strip beside the collapse chevron (in the titlebar only while the sidebar is collapsed), with a `Tooltip`. Never `title=`.
 - "Reveal in Files" in the terminal and editor tab context menus (`TerminalTabs.svelte`). It reveals,
   and opens the column only because the human clicked it.
 
