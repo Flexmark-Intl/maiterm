@@ -936,6 +936,16 @@ export async function ftRefresh(subId: number, rel: string | null): Promise<void
   return invoke('ft_refresh', { subId, rel });
 }
 
+/** A remote place whose open failed: its host's Files helper tries again now (Retry). */
+export async function ftRetryHost(place: string): Promise<void> {
+  return invoke('ft_retry_host', { place });
+}
+
+/** This computer's name, for the remote root's wrong-host warning. */
+export async function ftLocalHostname(): Promise<string> {
+  return invoke('ft_local_hostname');
+}
+
 /** Absolute paths (an editor's file, a hook path) to rels spelled as the tree keys them; null =
  *  outside the root. The only abs → rel conversion: never strip prefixes in JS. */
 export async function ftLocate(subId: number, absPaths: string[]): Promise<(string | null)[]> {

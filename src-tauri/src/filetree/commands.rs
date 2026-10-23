@@ -120,6 +120,28 @@ pub async fn ft_refresh(ft: State<'_, Arc<FileTreeState>>, sub_id: u64, rel: Opt
     .await
 }
 
+/// A remote place's Retry, when opening it failed (§15.3): the host's helper, stuck on "needs
+/// key-based ssh", "no python3" or a reconnect backoff, tries again now. A subscription's
+/// Refresh does this through `ft_refresh`, but an open that failed has no subscription.
+#[tauri::command]
+pub async fn ft_retry_host(state: State<'_, Arc<AppState>>, ft: State<'_, Arc<FileTreeState>>, place: String) -> Result<(), String> {
+    let ft = ft.inner().clone();
+    let lookup = super::remote::tunnel_lookup(state.inner());
+    blocking(move || {
+        let (host, _) = super::place::split_remote(place.trim()).ok_or_else(|| format!("Not a folder on an ssh host: {place}"))?;
+        ft.remotes.conn(&host, Some(lookup)).retry();
+        Ok(())
+    })
+    .await
+}
+
+/// This computer's name, for the wrong-host guard (§15.3): OSC 7 naming it is the local shell's
+/// report from before ssh started, not a third machine.
+#[tauri::command]
+pub async fn ft_local_hostname() -> Result<String, String> {
+    blocking(|| Ok(sysinfo::System::host_name().unwrap_or_default())).await
+}
+
 /// Absolute paths (an editor's file, a hook's path) as rels under the root, spelled as the
 /// disk spells them; None for a path outside it.
 #[tauri::command]
