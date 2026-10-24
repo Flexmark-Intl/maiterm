@@ -1109,6 +1109,7 @@ pub fn run() {
             share::commands::share_clone_command,
             share::commands::share_import_build,
             share::open::take_pending_share_opens,
+            hive::launch::hive_launch_command,
             #[cfg(debug_assertions)]
             share::open::share_debug_open,
         ])

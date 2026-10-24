@@ -11,6 +11,12 @@ pub fn hives_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join(crate::state::persistence::app_data_slug()).join("hive"))
 }
 
+/// `<app data>/hive/bin`: the hook script and the port file it reads (§6.8). Shared by every
+/// Hive, outside every agent's writable paths, and on every `denyWrite`.
+pub fn hive_bin_dir() -> Option<PathBuf> {
+    hives_dir().map(|d| d.join("bin"))
+}
+
 /// `<app data>/hive/<id>`, or None for an id that isn't one safe path component. Ids are
 /// uuids maiTerm mints, but the state file is hand-editable, and this path gets removed from.
 pub fn hive_root(id: &str) -> Option<PathBuf> {
@@ -76,6 +82,11 @@ impl HivePaths {
     /// worktree and the gallery (§6.3).
     pub fn coordinator_home(&self) -> PathBuf {
         self.root.join("coordinator").join("home")
+    }
+
+    /// The rest of the coordinator's brief, which its invariant rules tell it to read (§7.1).
+    pub fn coordinator_brief(&self) -> PathBuf {
+        self.coordinator_home().join("brief.md")
     }
 
     /// The coordinator's `CLAUDE_CODE_TMPDIR` (§6.7).

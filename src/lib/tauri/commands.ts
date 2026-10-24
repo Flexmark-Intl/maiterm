@@ -2629,3 +2629,9 @@ export async function browserLinkPrepareUnpacked(): Promise<string> {
 export async function browserLinkOpenExtensionsPage(): Promise<boolean> {
   return invoke('browser_link_open_extensions_page');
 }
+
+/** The line a Hive tab's shell types to start or resume its agent (docs/hive.md §11.1). Type
+ * it as is, never through trigger interpolation; on an error type nothing. */
+export async function hiveLaunchCommand(tabId: string): Promise<string> {
+  return invoke('hive_launch_command', { tabId });
+}

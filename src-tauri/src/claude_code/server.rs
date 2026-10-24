@@ -355,6 +355,13 @@ pub fn prepare_server(state: &Arc<AppState>) -> Option<ServerSetup> {
     // spawns as well (docs/mcp-proxy.md §6).
     crate::mcp_proxy::entries::sync(port, &auth, &prefs);
     crate::browser_link::write_discovery(port);
+    // Hive tabs' command hooks read the port from beside their script on every call, so a
+    // restart can't strand them (docs/hive.md §6.8).
+    if let Some(bin) = crate::hive::paths::hive_bin_dir() {
+        if let Err(e) = crate::hive::settings::install_hook(&bin, port) {
+            log::warn!("hive: hook script not installed: {e}");
+        }
+    }
 
     log::info!("Claude Code IDE server bound on http://127.0.0.1:{}", port);
 
@@ -469,6 +476,8 @@ pub async fn serve_server(app_handle: AppHandle, state: Arc<AppState>, setup: Se
         .route("/hooks/inbox", get(mod_inbox_handler))
         // The maiterm-tab mod on an ssh host: the session's transcript grew (mailink/mirror.rs)
         .route("/hooks/appended", get(mod_appended_handler))
+        // Every Hive tab's fail-closed PreToolUse gate (docs/hive.md §6.8)
+        .route("/hive/gate", hive_gate_route(post(hive_gate_handler)))
         // MCP servers through maiTerm, one entry each (docs/mcp-proxy.md §3)
         .route("/mcp/x/{id}", post(proxy_post_handler).get(proxy_get_handler).delete(proxy_delete_handler))
         // The browser's return from an MCP server sign-in (docs/mcp-proxy.md §5). No auth header
@@ -572,6 +581,15 @@ fn persisted_resume_session_id(
 /// turn at all until its human types. Empty when the tab needs neither.
 fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
     let mut out = String::new();
+
+    // A Hive agent's invariant rules go first, under the 2,000 characters Claude re-sends whole
+    // after a compaction (docs/hive.md §7.1); the rest of its brief is a file they point to.
+    let hive_rules = crate::hive::hive_agent(&state.app_data.read(), tab_id)
+        .map(|(hive, role, paths)| crate::hive::brief::invariant_rules(&hive, &role, &paths));
+    if let Some(rules) = hive_rules {
+        out.push_str("\n\n");
+        out.push_str(&rules);
+    }
 
     // Overlord standing instruction (docs/overlord.md §8): only when the feature is on AND
     // this tab's window actually has an Overlord workspace.
@@ -4205,6 +4223,129 @@ async fn record_agent_files(
     }
 }
 
+/// A Hive agent's session started (docs/hive.md §11.1): it joins its task's session list, which
+/// is what a relaunch resumes, and the coordinator gets the kickoff until it has reached it. Off
+/// the hook's path: file I/O, then a delivery that may wait for the agent's input box.
+fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, transcript_path: Option<String>) {
+    let Some((hive, role, paths)) = crate::hive::hive_agent(&srv.state.app_data.read(), tab_id) else {
+        return;
+    };
+    let (app, handle, tab, sid) = (srv.state.clone(), srv.app_handle.clone(), tab_id.to_string(), session_id.to_string());
+    tauri::async_runtime::spawn(async move {
+        let kickoff = tokio::task::spawn_blocking(move || crate::hive::session_started(&hive, &role, &paths, &sid, transcript_path))
+            .await
+            .ok()
+            .flatten();
+        if let Some(claim) = kickoff {
+            deliver_hive_kickoff(&app, &handle, &tab, claim).await;
+        }
+    });
+}
+
+/// Recorded as delivered only once the agent has it. A refusal right at session start is mostly
+/// the agent not yet seen owning its terminal (a process snapshot from before `claude` exec'd),
+/// so it is tried again a few times; a held one waits for its outcome, which is only an event.
+/// Whatever is still pending goes out on the coordinator's next session start.
+async fn deliver_hive_kickoff(app: &Arc<AppState>, handle: &AppHandle, tab: &str, claim: crate::hive::KickoffClaim) {
+    use crate::mailink::draft_hold::{deliver_or_hold, Delivery};
+    use tauri::Listener;
+    for wait in [0u64, 2, 5, 10, 20] {
+        tokio::time::sleep(Duration::from_secs(wait)).await;
+        // Listening before the send, so no outcome can come before the listener.
+        let (tx, mut rx) = mpsc::unbounded_channel::<(String, String)>();
+        let want = tab.to_string();
+        let listener = handle.listen_any("agent-inbox-outcome", move |e| {
+            let Ok(v) = serde_json::from_str::<Value>(e.payload()) else { return };
+            if v["tab_id"] == want.as_str() {
+                let field = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+                let _ = tx.send((field("msg_id"), field("outcome")));
+            }
+        });
+        let typed = match deliver_or_hold(app, handle, tab, &claim.text, "Hive kickoff").await {
+            Delivery::Delivered(_) => Some(true),
+            Delivery::Held { msg_id, reason } => {
+                log::info!("hive: kickoff for coordinator tab {tab} held ({reason})");
+                let outcome = async {
+                    while let Some((id, outcome)) = rx.recv().await {
+                        if id == msg_id {
+                            return outcome == "typed";
+                        }
+                    }
+                    false
+                };
+                // Past the hold's own 30-minute expiry, which reports "dropped".
+                Some(tokio::time::timeout(Duration::from_secs(31 * 60), outcome).await.unwrap_or(false))
+            }
+            Delivery::Refused(why) => {
+                log::warn!("hive: kickoff for coordinator tab {tab} refused ({why})");
+                None
+            }
+        };
+        handle.unlisten(listener);
+        match typed {
+            Some(true) => {
+                log::info!("hive: kickoff delivered to coordinator tab {tab}");
+                claim.delivered();
+                return;
+            }
+            Some(false) => {
+                log::warn!("hive: held kickoff for coordinator tab {tab} was dropped; it goes out on the next session start");
+                return;
+            }
+            None => {}
+        }
+    }
+    log::warn!("hive: kickoff for coordinator tab {tab} still pending; it goes out on the next session start");
+}
+
+/// The gate decides on the tool, command, path and cwd, but Claude sends it the whole event, and
+/// a Write carries the file: axum's 2 MB default would block a large Write as a gate failure.
+const HIVE_GATE_BODY_LIMIT: usize = 64 * 1024 * 1024;
+
+fn hive_gate_route<S: Clone + Send + Sync + 'static>(r: axum::routing::MethodRouter<S>) -> axum::routing::MethodRouter<S> {
+    r.layer(axum::extract::DefaultBodyLimit::max(HIVE_GATE_BODY_LIMIT))
+}
+
+/// Past even that limit, the call is refused for what it is rather than as maiTerm being down.
+fn hive_gate_body(body: Result<String, axum::extract::rejection::StringRejection>) -> Result<String, String> {
+    body.map_err(|e| {
+        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            "This call's input is too large for maiTerm's Hive gate to check (over 64 MB), so it is blocked. Write the file in smaller parts.".to_string()
+        } else {
+            format!("maiTerm couldn't read this call ({}), so it is blocked.", e.body_text())
+        }
+    })
+}
+
+/// POST /hive/gate — every Hive tab's fail-closed PreToolUse gate (docs/hive.md §6.8). Its own
+/// route, and never subject to the maiterm-tab mod's dedup in `hooks_handler`: a dropped copy
+/// there answers an empty 200, which here would read as a decision. The hook script lets a call
+/// through only on the exact body `allow`.
+async fn hive_gate_handler(
+    State(srv): State<ServerState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+    body: Result<String, axum::extract::rejection::StringRejection>,
+) -> Response {
+    if extract_auth(&headers).as_deref() != Some(srv.expected_auth.as_str()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let body = match hive_gate_body(body) {
+        Ok(b) => b,
+        Err(reason) => return format!("deny:{reason}").into_response(),
+    };
+    let tab_id = params.get("tab_id").cloned().unwrap_or_default();
+    let agent = crate::hive::hive_agent(&srv.state.app_data.read(), &tab_id);
+    use crate::hive::gate::GateDecision;
+    let decision = tokio::task::spawn_blocking(move || crate::hive::gate::decide_event(&tab_id, agent, &body))
+        .await
+        .unwrap_or_else(|_| GateDecision::Deny("maiTerm's gate failed, so the call is blocked.".to_string()));
+    match decision {
+        GateDecision::Allow => "allow".into_response(),
+        GateDecision::Deny(reason) => format!("deny:{reason}").into_response(),
+    }
+}
+
 /// Handle POST /hooks — receives agent hook events (Claude today; other runtimes
 /// post here with a ?runtime= tag). SessionStart registers a session→tab mapping;
 /// other events use it to route Tauri events to the correct frontend tab.
@@ -4541,6 +4682,10 @@ async fn hooks_handler(
                         log::warn!("Failed to persist tab runtime for {}: {}", tab_id, e);
                     }
                 }
+            }
+
+            if !session_id.is_empty() && !tab_id.is_empty() {
+                hive_session_started(&srv, &tab_id, &session_id, transcript_path.clone());
             }
 
             emit_dual(&srv.app_handle, "agent-hook-session-start", "claude-hook-session-start", serde_json::json!({
@@ -5267,8 +5412,9 @@ async fn hooks_handler(
         let text = session_priming_text(&srv.state, tab);
         // The mod adds this reply to the session's context as it stands, so it carries the
         // identity line the command hook would have echoed ahead of it (lockfile.rs) — the
-        // same words, so an agent reads the same thing whichever path primed it.
-        if via_mod {
+        // same words, so an agent reads the same thing whichever path primed it. A Hive tab's
+        // own hook prints the reply as is too (hive/settings.rs).
+        if via_mod || params.get("via").map(String::as_str) == Some("hive") {
             // An ssh host's MCP entry is always `maiterm` (the bridge writes one name for every
             // build, sshMcpBridge.svelte.ts), whatever this build calls its local one.
             let bridged = srv.state.ssh_tunnels.read().values().any(|t| t.tab_ids.contains(tab));
@@ -5360,6 +5506,59 @@ mod tests {
         }
         // What the guard is for: elsewhere a windowId outranks the tab.
         assert_eq!(super::resolve_target_window(&state, &args).as_deref(), Some("win-b"));
+    }
+
+    /// The gate's route takes a Write far past axum's 2 MB default, and a body past even its own
+    /// limit is denied by name, never read as maiTerm being down.
+    #[tokio::test]
+    async fn the_hive_gate_takes_a_large_write_and_names_an_oversize_one() {
+        use axum::{body::Body, extract::rejection::StringRejection, routing::post, Router};
+        use tower::ServiceExt as _;
+        let app: Router = Router::new().route(
+            "/g",
+            super::hive_gate_route(post(|b: Result<String, StringRejection>| async move {
+                match super::hive_gate_body(b) {
+                    Ok(s) => format!("len:{}", s.len()),
+                    Err(r) => format!("deny:{r}"),
+                }
+            })),
+        );
+        let send = |len: usize| {
+            let app = app.clone();
+            async move {
+                let req = axum::http::Request::builder().method("POST").uri("/g").body(Body::from(vec![b'x'; len])).unwrap();
+                let res = app.oneshot(req).await.unwrap();
+                let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+                String::from_utf8_lossy(&bytes).to_string()
+            }
+        };
+        assert_eq!(send(3 * 1024 * 1024).await, format!("len:{}", 3 * 1024 * 1024));
+        let over = send(super::HIVE_GATE_BODY_LIMIT + 1).await;
+        assert!(over.starts_with("deny:This call's input is too large"), "{over}");
+    }
+
+    /// A Hive agent's priming opens with its invariant rules; nobody else's mentions a Hive.
+    #[test]
+    fn a_hive_agent_is_primed_with_its_rules_first() {
+        use std::sync::Arc;
+        let state = Arc::new(crate::state::AppState::new());
+        let (coord, plain) = {
+            let mut data = state.app_data.write();
+            let mut w = crate::state::WindowData::new("win".into());
+            let mut hive_ws = crate::state::Workspace::new("H".into());
+            hive_ws.hive = Some(crate::hive::Hive { id: "h-prime".into(), slug: "s".into(), goal: "Ship it".into(), ..Default::default() });
+            hive_ws.panes[0].tabs[0].hive_role = Some(crate::hive::ROLE_COORDINATOR.into());
+            let coord = hive_ws.panes[0].tabs[0].id.clone();
+            let ws = crate::state::Workspace::new("P".into());
+            let plain = ws.panes[0].tabs[0].id.clone();
+            w.workspaces.push(hive_ws);
+            w.workspaces.push(ws);
+            data.windows.push(w);
+            (coord, plain)
+        };
+        let text = super::session_priming_text(&state, &coord);
+        assert!(text.trim_start().starts_with("You are the coordinator of a maiTerm Hive. Its goal: Ship it."), "{text}");
+        assert!(!super::session_priming_text(&state, &plain).contains("Hive"));
     }
 
     fn norm_codex(name: &str, ev: serde_json::Value) -> HookPhase {

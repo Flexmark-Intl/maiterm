@@ -348,9 +348,16 @@ const NEWER_HOOK_EVENTS: &[&str] = &["PreModelSwitch"];
 /// Cached against every copy's path, size and mtime, because the drift check calls this every
 /// 30s and a binary is ~220 MB. A release-build scan stops at the first sighting, about 20 ms.
 fn events_installed_claude_knows() -> Vec<&'static str> {
+    events_every_claude_knows(NEWER_HOOK_EVENTS)
+}
+
+/// `events_installed_claude_knows` for any list of event names: the Hive's command hooks gate
+/// their own recent events (hive/settings.rs) by the same rule. Cached per list.
+pub(crate) fn events_every_claude_knows(names: &'static [&'static str]) -> Vec<&'static str> {
     use std::sync::Mutex;
     type Key = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
-    static CACHE: Mutex<Option<(Key, Vec<&'static str>)>> = Mutex::new(None);
+    type Cache = Vec<(&'static [&'static str], Key, Vec<&'static str>)>;
+    static CACHE: Mutex<Cache> = Mutex::new(Vec::new());
 
     let mut key: Key = Vec::new();
     for p in crate::accounts::cli_candidates(crate::accounts::Runtime::Claude.profile()) {
@@ -364,21 +371,21 @@ fn events_installed_claude_knows() -> Vec<&'static str> {
     if key.is_empty() {
         return Vec::new();
     }
-    if let Some((k, known)) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        if *k == key {
-            return known.clone();
-        }
+    if let Some((_, _, known)) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(n, k, _)| *n == names && *k == key) {
+        return known.clone();
     }
 
-    let mut known: Vec<&'static str> = NEWER_HOOK_EVENTS.to_vec();
+    let mut known: Vec<&'static str> = names.to_vec();
     for (path, _, _) in &key {
         let here = fs::File::open(path)
-            .map(|f| names_found_in(f, NEWER_HOOK_EVENTS, 8 << 20))
+            .map(|f| names_found_in(f, names, 8 << 20))
             .unwrap_or_default();
         log::info!("Claude at {} knows hook events {:?}", path.display(), here);
         known.retain(|e| here.contains(e));
     }
-    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, known.clone()));
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.retain(|(n, _, _)| *n != names);
+    cache.push((names, key, known.clone()));
     known
 }
 
