@@ -5341,6 +5341,13 @@ fn pending_question_for_tab(app: &AppState, tab_id: &str) -> Option<Value> {
 /// (compared without whitespace, so a wrap in a narrow pane doesn't matter) with no permission
 /// or plan dialog drawn below it. Not the footer: its "Enter to select · … · Esc to cancel" line
 /// wraps in a narrow pane, and a footer can't say WHICH question is up.
+/// False only while the tab's open prompt is a question whose selector isn't drawn at its first
+/// question: closed, or moved on by the human in the terminal. Any other prompt, or none, is true.
+pub(crate) fn open_question_untouched(app: &AppState, tab_id: &str) -> bool {
+    let Some((tool_input, _)) = open_question(app, tab_id) else { return true };
+    question_on_screen(&tool_input, &live_screen_text(app, tab_id).unwrap_or_default())
+}
+
 fn question_on_screen(tool_input: &Value, screen: &str) -> bool {
     let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
     let q0 = tool_input.get("questions").and_then(|q| q.get(0));

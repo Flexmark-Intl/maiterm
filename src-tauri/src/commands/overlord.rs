@@ -286,6 +286,14 @@ pub async fn answer_tab_prompt(
         return Ok(serde_json::json!({ "ok": false, "reason": "human_decision",
             "detail": "That tab is at Claude's workspace-trust dialog. Trusting a folder is the human's decision, and the dialog is already in front of them as a permission on their board: leave it, and do not ask them about it yourself." }));
     }
+    // The human's answers reach the mod without the screen check (a multi-question selector
+    // shows only its current question). The agent's don't: a selector moved past its first
+    // question is the human answering it in the terminal right now, and the agent's answers
+    // would replace theirs and close the dialog under their hands.
+    if !crate::mailink::open_question_untouched(&app, &tab_id) {
+        return Ok(serde_json::json!({ "ok": false, "reason": "human_answering",
+            "detail": "The human is answering that question in the terminal right now: leave it." }));
+    }
     Ok(crate::mailink::respond_to_prompt(
         &app,
         &tab_id,
