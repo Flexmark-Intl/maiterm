@@ -988,8 +988,8 @@ fn mesh_layout(state: &Arc<AppState>) -> Value {
                         .panes
                         .iter()
                         .flat_map(|p| p.tabs.iter())
-                        .filter(|t| t.runtime.is_some() && !t.is_service_tab())
-                        .map(|t| serde_json::json!({ "tab_id": t.id, "name": t.name }))
+                        .filter(|t| (t.runtime.is_some() || t.hive_role.is_some()) && !t.is_service_tab())
+                        .map(mesh_layout_agent)
                         .collect();
                     // The other workspaces in this window that share its group.
                     let linked: Vec<&str> = ws
@@ -1003,23 +1003,40 @@ fn mesh_layout(state: &Arc<AppState>) -> Value {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    serde_json::json!({
+                    let mut entry = serde_json::json!({
                         "workspace_id": ws.id,
                         "name": ws.name,
                         "mesh": ws.bridge_all,
                         "linked_with": linked,
                         "overlord": ws.overlord,
                         "agent_tabs": agents,
-                    })
+                    });
+                    if ws.hive.is_some() {
+                        entry["hive"] = Value::Bool(true);
+                    }
+                    entry
                 })
                 .collect();
             serde_json::json!({ "window_id": w.id, "window_name": w.name, "workspaces": workspaces })
         })
         .collect();
-    serde_json::json!({
-        "windows": windows,
-        "note": "Agents in a mesh workspace (and in workspaces linked with it) can message each other. Changing that needs the human's approval: setMesh, linkMeshes, unlinkMesh, and a moveTab that changes a tab's mesh file a request instead of acting.",
-    })
+    let mut note = String::from(
+        "Agents in a mesh workspace (and in workspaces linked with it) can message each other. Changing that needs the human's approval: setMesh, linkMeshes, unlinkMesh, and a moveTab that changes a tab's mesh file a request instead of acting.",
+    );
+    if app_data.windows.iter().flat_map(|w| w.workspaces.iter()).any(|ws| ws.hive.is_some()) {
+        note.push_str(" A workspace marked hive is a Hive: its agents (hive_member) talk only to their coordinator, and are never meshed, bridged or moved.");
+    }
+    serde_json::json!({ "windows": windows, "note": note })
+}
+
+/// One agent tab in `getMeshLayout`. A Hive agent is listed, marked, but never a mesh member
+/// (docs/hive.md §5).
+fn mesh_layout_agent(t: &crate::state::Tab) -> Value {
+    let mut v = serde_json::json!({ "tab_id": t.id, "name": t.name });
+    if t.hive_role.is_some() {
+        v["hive_member"] = Value::Bool(true);
+    }
+    v
 }
 
 /// `getRequestStatus`: what became of a request this tab filed (agent_requests.rs). Another tab's
@@ -3607,6 +3624,17 @@ async fn process_message(
                     );
                     return Some(serde_json::to_string(&resp).unwrap());
                 }
+                // The engine skips Hive agents (docs/hive.md §7.3); this holds whatever the
+                // frontend's checks say.
+                let hive_refusal = crate::hive::refuse_overlord_target(&state.app_data.read(), &tool_name, &arguments);
+                if let Some(msg) = hive_refusal {
+                    log::warn!("Refusing {tool_name}: its target is a Hive agent");
+                    let resp = JsonRpcResponse::success(
+                        id,
+                        serde_json::json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
+                    );
+                    return Some(serde_json::to_string(&resp).unwrap());
+                }
                 let tab_id_given = arguments
                     .get("tabId")
                     .and_then(|v| v.as_str())
@@ -5559,6 +5587,41 @@ mod tests {
         let text = super::session_priming_text(&state, &coord);
         assert!(text.trim_start().starts_with("You are the coordinator of a maiTerm Hive. Its goal: Ship it."), "{text}");
         assert!(!super::session_priming_text(&state, &plain).contains("Hive"));
+    }
+
+    /// getMeshLayout lists a Hive's agents, marked, and says nothing of Hives where there are none.
+    #[test]
+    fn the_mesh_layout_marks_hive_members() {
+        use std::sync::Arc;
+        let state = Arc::new(crate::state::AppState::new());
+        let (coord, plain) = {
+            let mut data = state.app_data.write();
+            let mut w = crate::state::WindowData::new("win".into());
+            let mut hive_ws = crate::state::Workspace::new("H".into());
+            hive_ws.hive = Some(crate::hive::Hive { id: "h-mesh".into(), slug: "s".into(), ..Default::default() });
+            // Not started yet, so no runtime: still listed.
+            hive_ws.panes[0].tabs[0].hive_role = Some(crate::hive::ROLE_COORDINATOR.into());
+            let coord = hive_ws.panes[0].tabs[0].id.clone();
+            let mut ws = crate::state::Workspace::new("P".into());
+            ws.panes[0].tabs[0].runtime = Some(AgentRuntime::Claude);
+            let plain = ws.panes[0].tabs[0].id.clone();
+            w.workspaces.push(hive_ws);
+            w.workspaces.push(ws);
+            data.windows.push(w);
+            (coord, plain)
+        };
+        let layout = super::mesh_layout(&state);
+        let wss = layout["windows"][0]["workspaces"].as_array().unwrap();
+        assert_eq!(wss[0]["hive"], true);
+        assert_eq!(wss[0]["agent_tabs"][0]["tab_id"], coord.as_str());
+        assert_eq!(wss[0]["agent_tabs"][0]["hive_member"], true);
+        assert!(wss[1].get("hive").is_none());
+        assert_eq!(wss[1]["agent_tabs"][0]["tab_id"], plain.as_str());
+        assert!(wss[1]["agent_tabs"][0].get("hive_member").is_none());
+        assert!(layout["note"].as_str().unwrap().contains("hive_member"));
+
+        state.app_data.write().windows[0].workspaces.remove(0);
+        assert!(!super::mesh_layout(&state)["note"].as_str().unwrap().contains("Hive"), "no Hive, no mention");
     }
 
     fn norm_codex(name: &str, ev: serde_json::Value) -> HookPhase {

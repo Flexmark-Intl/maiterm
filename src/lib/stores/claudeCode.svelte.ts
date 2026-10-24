@@ -29,6 +29,7 @@ import { isWindows } from '$lib/utils/platform';
 import { openBaselineDiff, openReadOnlyDiff } from '$lib/utils/openGitDiff';
 import { fileTreeStore } from '$lib/stores/fileTree.svelte';
 import { isServiceTab } from '$lib/workspace/hiddenTabs';
+import { HIVE_SUPERVISED_DETAIL } from '$lib/hive/model';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 export interface PendingSelection {
@@ -312,6 +313,7 @@ function createClaudeCodeStore() {
           if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
           else if (!overlordStore.isOverlordAgentTab(a.tabId)) result = { error: 'releaseDirective is available only to the Overlord agent tab.' };
           else if (!a.tab_id) result = { error: 'tab_id is required.' };
+          else if (overlordStore.isHiveTab(a.tab_id)) result = { released: false, reason: 'hive', detail: HIVE_SUPERVISED_DETAIL };
           else result = overlordStore.releaseDirective(a.tab_id);
           break;
         }
@@ -339,6 +341,7 @@ function createClaudeCodeStore() {
           // raised to reach the human, and the human would never see it.
           else if (a.tab_id === a.tabId) result = { ok: false, reason: 'cannot answer your own prompt' };
           else if (overlordStore.isExemptTab(a.tab_id)) result = { ok: false, reason: 'exempt', detail: 'That tab is exempt from Overlord — the human marked it, or its workspace, exempt. Leave it alone.' };
+          else if (overlordStore.isHiveTab(a.tab_id)) result = { ok: false, reason: 'hive', detail: HIVE_SUPERVISED_DETAIL };
           else if (!a.choice && !a.answers?.length) result = { ok: false, reason: 'bad_request', detail: 'pass choice (permission) or answers (question)' };
           else result = await overlordStore.answerPrompt(a.tab_id, a.prompt_id ?? null, a.choice ?? null, a.answers ?? null);
           break;
@@ -2337,6 +2340,11 @@ function createClaudeCodeStore() {
     const resolved = resolveActiveTab(args.tabId);
     if ('error' in resolved) return resolved;
     const { workspace, pane, tab } = resolved;
+    // A Hive agent's every launch is its builder's (docs/hive.md §11.1); an auto-resume command
+    // on it would be a second, generic launch path.
+    if (tab.hive_role) {
+      return { error: "A Hive agent has no auto-resume: maiTerm relaunches it from its Hive's launch record." };
+    }
 
     if (!args.enabled) {
       await workspacesStore.disableAutoResume(workspace.id, pane.id, tab.id);

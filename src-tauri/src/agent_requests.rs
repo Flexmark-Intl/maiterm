@@ -212,6 +212,7 @@ pub fn file(
     if !KINDS.contains(&kind) {
         return Err(format!("unknown request kind {kind}"));
     }
+    crate::hive::refuse_request(&state.app_data.read(), kind, &args)?;
     let _ = APP.set(app.clone());
     flush_lapsed();
     let now = now_ms();

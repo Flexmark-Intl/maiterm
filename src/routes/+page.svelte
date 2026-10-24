@@ -741,7 +741,7 @@
                     paneId={pane.id}
                     tabId={tab.id}
                     existingPtyId={(terminalsStore.get(tab.id) || terminalsStore.canReattach(tab.pty_id)) ? tab.pty_id : null}
-                    visible={inConsole || (meshStage ? agentMeshStore.isMeshMemberTab(tab.id) : (tab.id === pane.active_tab_id && ws.id === workspacesStore.activeWorkspaceId))}
+                    visible={!tab.hive_role && (inConsole || (meshStage ? agentMeshStore.isMeshMemberTab(tab.id) : (tab.id === pane.active_tab_id && ws.id === workspacesStore.activeWorkspaceId)))}
                     restoreCwd={tab.restore_cwd}
                     restoreSshCommand={tab.restore_ssh_command}
                     restoreRemoteCwd={tab.restore_remote_cwd}
@@ -753,6 +753,7 @@
                     autoResumePinned={tab.auto_resume_pinned}
                     autoResumeEnabled={tab.auto_resume_enabled}
                     triggerVariables={tab.trigger_variables}
+                    hiveRole={tab.hive_role}
                   />
                 {/if}
               {/each}

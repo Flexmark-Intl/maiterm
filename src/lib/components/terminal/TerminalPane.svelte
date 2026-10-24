@@ -43,6 +43,7 @@
   import { openFileFromTerminal } from '$lib/utils/openFile';
   import { enableBridge, disableBridge, hasBridge, getBridgeInfo, getBridgeStatus, buildUserSetupScript, isInteractiveSshSession, isRemoteShellForeground } from '$lib/stores/sshMcpBridge.svelte';
   import { claudeStateStore, resumeCommandFor } from '$lib/stores/agentState.svelte';
+  import { hiveLaunchLine } from '$lib/hive/launch';
   import { sshDisconnectStore } from '$lib/stores/sshDisconnect.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import Button from '$lib/components/ui/Button.svelte';
@@ -64,9 +65,11 @@
     autoResumePinned?: boolean;
     autoResumeEnabled?: boolean;
     triggerVariables?: Record<string, string>;
+    /** `Tab.hive_role`: the agent starts only through its Hive launch builder (docs/hive.md §11.1). */
+    hiveRole?: string | null;
   }
 
-  let { workspaceId, paneId, tabId, existingPtyId, visible, restoreCwd, restoreSshCommand, restoreRemoteCwd, autoResumeCwd, autoResumeSshCommand, autoResumeRemoteCwd, autoResumeCommand, autoResumeRememberedCommand, autoResumePinned, autoResumeEnabled, triggerVariables }: Props = $props();
+  let { workspaceId, paneId, tabId, existingPtyId, visible, restoreCwd, restoreSshCommand, restoreRemoteCwd, autoResumeCwd, autoResumeSshCommand, autoResumeRemoteCwd, autoResumeCommand, autoResumeRememberedCommand, autoResumePinned, autoResumeEnabled, triggerVariables, hiveRole }: Props = $props();
 
   let containerRef: HTMLDivElement;
   let terminal: Terminal;
@@ -959,11 +962,15 @@
         }
         reattachDroppedSsh = info.dropped_ssh ? cleanSshCommand(info.dropped_ssh) : null;
       } catch { /* grid unavailable — the refit below corrects it */ }
-      setTimeout(() => {
-        if (destroyed) return;
-        fitWithPadding();
-        resizeTerminal(ptyId, terminal.cols, terminal.rows).catch(e => logError(String(e)));
-      }, 300);
+      // A Hive agent's terminal is never laid out here, so a refit could only send its running
+      // agent a width change, which duplicates its scrollback.
+      if (!hiveRole) {
+        setTimeout(() => {
+          if (destroyed) return;
+          fitWithPadding();
+          resizeTerminal(ptyId, terminal.cols, terminal.rows).catch(e => logError(String(e)));
+        }, 300);
+      }
     }
 
     // If the source pane was running SSH (or last session had SSH), replay the command.
@@ -971,7 +978,20 @@
     // MAITERM_TAB_ID env var is available in the remote shell when Claude starts.
     // Skip all of this when reattaching to an existing PTY (e.g. tab moved between workspaces).
     if (!reattaching) {
-      if (ctx?.sshCommand) {
+      if (hiveRole) {
+        // A Hive agent starts through its builder on every spawn, whatever the tab's auto-resume
+        // fields say, and never from a one-shot `launchCommand`: the generic resume would bring it
+        // back unsandboxed, without its folders (docs/hive.md §11.1). A refusal types nothing.
+        setTimeout(async () => {
+          const line = await hiveLaunchLine(tabId);
+          if (!line || destroyed) return;
+          try {
+            await writeTerminal(ptyId, Array.from(new TextEncoder().encode(line + '\n')));
+          } catch (e) {
+            logError(`Failed to type the Hive launch: ${e}`);
+          }
+        }, 500);
+      } else if (ctx?.sshCommand) {
         // What the ssh command below baked as MAITERM_PORT. Handed to enableBridge so it can
         // correct the shell if the tunnel lands elsewhere — safe here, and only here, because
         // the poll below awaits the bridge before the agent is started.
@@ -1103,7 +1123,7 @@
 
       if (isModKey(e) && e.altKey && e.key === 'r') {
         e.preventDefault();
-        if (isAutoResume) {
+        if (isAutoResume || hiveRole) {
           replayAutoResume(tabId);
         }
         return false;
@@ -1111,6 +1131,8 @@
 
       if (isModKey(e) && !e.altKey && e.key === 'r') {
         e.preventDefault();
+        // A Hive agent has no auto-resume to toggle: its launch is the builder's.
+        if (hiveRole) return false;
         if (isAutoResume) {
           workspacesStore.disableAutoResume(workspaceId, paneId, tabId);
         } else {
@@ -2002,7 +2024,12 @@
         },
       ] : []),
       { label: '', separator: true, action: () => {} },
-      ...(isAutoResume ? [
+      ...(hiveRole ? [
+        {
+          label: 'Relaunch Hive Agent',
+          action: () => replayAutoResume(tabId),
+        },
+      ] : isAutoResume ? [
         {
           label: 'Replay Auto-Resume',
           action: () => replayAutoResume(tabId),

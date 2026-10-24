@@ -20,6 +20,7 @@ import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { SvelteMap } from 'svelte/reactivity';
 import type { AgentRequest, Task } from '$lib/tauri/types';
 import { isStripHidden } from '$lib/workspace/hiddenTabs';
+import { dispatchHiveOpenColumn, openTargetFor } from '$lib/hive/model';
 
 export type WaitingItem =
   | { kind: 'task'; key: string; at: number; task: Task }
@@ -127,6 +128,17 @@ function createWaitingStore() {
      *  as a stage has none, and an `open` nothing shows would be left to open by itself, unasked,
      *  when one next mounts. Those go to the Loom's Decisions. */
     async openOnTab(tabId: string, focus: string | null = null) {
+      // A Hive agent's waiting items are shown in its column of the Hive view (docs/hive.md §5),
+      // which scrolls to `focus`; it has no corner and is never made the active tab.
+      for (const w of workspacesStore.workspaces) {
+        const tab = w.panes.flatMap((p) => p.tabs).find((t) => t.id === tabId);
+        if (!tab) continue;
+        const target = openTargetFor(tab, w);
+        if (target.kind !== 'hive') break;
+        if (w.id !== workspacesStore.activeWorkspaceId) await workspacesStore.setActiveWorkspace(w.id);
+        dispatchHiveOpenColumn({ workspaceId: target.workspaceId, tabId: target.tabId, focus });
+        return;
+      }
       const { agentMeshStore } = await import('$lib/stores/agentMesh.svelte');
       const ws = workspacesStore.workspaces.find((w) => w.panes.some((p) => p.tabs.some((t) => t.id === tabId && !isStripHidden(t))));
       if (!ws || ws.suspended || (ws.bridge_all && agentMeshStore.isStageView(ws.id))) {

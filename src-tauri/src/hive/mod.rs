@@ -185,6 +185,62 @@ pub fn refuse_share(ws: &Workspace) -> Result<(), String> {
     Ok(())
 }
 
+/// A live tab with a `hive_role`, wherever it is. Refusals ask this rather than
+/// `find_hive_tab`: a role without its Hive record is still nobody else's to drive.
+fn is_hive_role_tab(data: &AppData, tab_id: &str) -> bool {
+    data.windows
+        .iter()
+        .flat_map(|w| w.workspaces.iter())
+        .any(|ws| live_tab(ws, tab_id).is_some_and(|t| t.hive_role.is_some()))
+}
+
+fn is_hive_workspace(data: &AppData, workspace_id: &str) -> bool {
+    data.windows.iter().flat_map(|w| w.workspaces.iter()).any(|ws| ws.id == workspace_id && ws.hive.is_some())
+}
+
+/// The Overlord tools that act on their target. Two supervisors driving one agent is the
+/// double-drive problem, and the coordinator already supervises its Hive (§7.3). `getTabPrompt`
+/// is a read and stays; archive and the coordinator's close have their own lifecycle refusals.
+pub const OVERLORD_TOOLS_REFUSING_HIVE: [&str; 7] =
+    ["driveTab", "releaseDirective", "answerTabPrompt", "recoverTab", "resumeTab", "archiveTab", "closeTab"];
+
+/// The Rust backstop for the engine's Hive skip: an Overlord tool whose `tab_id` names a Hive
+/// agent is refused before it reaches the frontend. A batch's `tab_ids` are left to the
+/// frontend, which refuses the Hive row (`retireGuard`, reason 'hive') and still acts on the
+/// rest: one bad row is not a bad call.
+pub fn refuse_overlord_target(data: &AppData, tool: &str, args: &serde_json::Value) -> Option<String> {
+    if !OVERLORD_TOOLS_REFUSING_HIVE.contains(&tool) {
+        return None;
+    }
+    let single = args.get("tab_id").and_then(|v| v.as_str());
+    single.is_some_and(|id| is_hive_role_tab(data, id)).then(|| {
+        format!("{tool} refused (reason 'hive'): a Hive's coordinator supervises this tab. Leave it alone.")
+    })
+}
+
+/// Agent requests that would put a Hive agent in a mesh or a bridge, move one, or add a tab or a
+/// mesh to a Hive workspace, refused when filed rather than shown to the human: no card should
+/// offer what the Hive refuses anyway (§5: workers talk to the coordinator, not to other agents).
+pub fn refuse_request(data: &AppData, kind: &str, args: &serde_json::Value) -> Result<(), String> {
+    let s = |k: &str| args.get(k).and_then(|v| v.as_str());
+    let hive_ws = |k: &str| s(k).is_some_and(|id| is_hive_workspace(data, id));
+    let hive_tab = |k: &str| s(k).is_some_and(|id| is_hive_role_tab(data, id));
+    let refusal = match kind {
+        "mesh_enable" | "mesh_disable" | "mesh_link" | "mesh_unlink" if hive_ws("workspace_id") || hive_ws("with_workspace_id") => {
+            "A Hive is never a mesh: its agents talk to their coordinator"
+        }
+        "tab_move" if hive_tab("tab_id") => "A Hive's agent can't be moved: it belongs to its Hive",
+        "tab_move" if hive_ws("to_workspace_id") => "A tab can't be moved into a Hive",
+        "workspace_move" if hive_ws("workspace_id") => "A Hive can't move to another window",
+        "tab_create" if hive_ws("workspace_id") => "A Hive's agents are started by the Hive, not as new tabs",
+        "bridge_connect" | "bridge_fork" if hive_tab("caller_tab_id") || hive_tab("target_tab_id") => {
+            "A Hive's agent is never bridged: it talks to its coordinator"
+        }
+        _ => return Ok(()),
+    };
+    Err(refusal.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +369,46 @@ mod tests {
         assert_eq!(launch::last_session(&paths.coordinator_task()).as_deref(), Some("s3"));
         assert!(session_started(&hive, ROLE_WORKER, &paths, "w1", None).is_none());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn overlord_tools_refuse_a_hive_target_and_nothing_else() {
+        let d = app();
+        use serde_json::json as j;
+        for tool in OVERLORD_TOOLS_REFUSING_HIVE {
+            let msg = refuse_overlord_target(&d, tool, &j!({ "tabId": "ov", "tab_id": "w1" })).expect(tool);
+            assert!(msg.contains("reason 'hive'") && msg.contains("coordinator supervises"), "{msg}");
+            assert!(refuse_overlord_target(&d, tool, &j!({ "tab_id": "plain-in-hive" })).is_none(), "{tool}: an ordinary tab in a Hive workspace");
+            assert!(refuse_overlord_target(&d, tool, &j!({ "tab_id": "t1" })).is_none(), "{tool}");
+        }
+        // A batch goes through: the frontend refuses the Hive row and closes the rest.
+        assert!(refuse_overlord_target(&d, "closeTab", &j!({ "tab_ids": ["t1", "coord"] })).is_none(), "one Hive agent in a batch");
+        assert!(refuse_overlord_target(&d, "archiveTab", &j!({ "tab_ids": ["coord", "w1"] })).is_none());
+        assert!(refuse_overlord_target(&d, "getTabPrompt", &j!({ "tab_id": "coord" })).is_none(), "a read");
+        assert!(refuse_overlord_target(&d, "listWorkspaces", &j!({ "tab_id": "coord" })).is_none());
+    }
+
+    #[test]
+    fn requests_that_would_mesh_bridge_or_move_a_hive_are_refused_when_filed() {
+        let d = app();
+        use serde_json::json as j;
+        let refused = |kind: &str, args: serde_json::Value| refuse_request(&d, kind, &args).is_err();
+        for kind in ["mesh_enable", "mesh_disable", "mesh_unlink"] {
+            assert!(refused(kind, j!({ "workspace_id": "hive-ws" })), "{kind}");
+            assert!(!refused(kind, j!({ "workspace_id": "plain-ws" })), "{kind}");
+        }
+        assert!(refused("mesh_link", j!({ "workspace_id": "plain-ws", "with_workspace_id": "hive-ws" })));
+        assert!(refused("tab_move", j!({ "tab_id": "w1", "to_workspace_id": "plain-ws" })));
+        assert!(refused("tab_move", j!({ "tab_id": "t1", "to_workspace_id": "hive-ws" })));
+        assert!(!refused("tab_move", j!({ "tab_id": "plain-in-hive", "to_workspace_id": "plain-ws" })));
+        assert!(refused("workspace_move", j!({ "workspace_id": "hive-ws" })));
+        assert!(refused("tab_create", j!({ "workspace_id": "hive-ws" })));
+        assert!(!refused("tab_create", j!({ "workspace_id": "plain-ws" })));
+        assert!(refused("bridge_connect", j!({ "caller_tab_id": "t1", "target_tab_id": "coord" })));
+        assert!(refused("bridge_fork", j!({ "caller_tab_id": "w1", "target_tab_id": "t1" })));
+        assert!(!refused("bridge_connect", j!({ "caller_tab_id": "t1", "target_tab_id": "plain-in-hive" })));
+        assert!(!refused("bridge_disconnect", j!({ "caller_tab_id": "coord", "partner_tab_id": "t1" })), "closing a bridge is always allowed");
+        assert!(!refused("restart", j!({ "update": false })));
     }
 
     #[test]

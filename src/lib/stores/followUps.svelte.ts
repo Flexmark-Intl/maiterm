@@ -531,16 +531,29 @@ function createFollowUpsStore() {
     if (typed !== undefined && typed > promptAt) return `${NO_AGENT}, and something is typed at the shell prompt — maiTerm won't add to it`;
     if (Date.now() - (terminalsStore.getLastOutputAt(tab.id) ?? 0) < 1500) return 'output still arriving';
     const runtime = workspacesStore.getTabRuntime(tab.id);
-    const text = interpolateVariables(tab.id, resumeCommandFor(runtime));
-    // A `%` left after substitution is a session id the tab never recorded: refuse rather than
-    // type a broken command (the Overlord's `no_session_id`).
-    if (text.includes('%')) return `${NO_AGENT}, and it has no saved session to resume — start it yourself`;
-    // The session must be one THIS machine has. A session id recorded while the agent ran over
-    // ssh (typed by hand, so no ssh field on the tab says so) names a remote session, and the
-    // tab's shell is now local: resuming it here is the wrong machine (review of 0a090e0).
-    const sessionId = interpolateVariables(tab.id, `%${sessionIdVar(runtime)}`);
-    if (sessionId.includes('%') || !(await commands.agentSessionIsLocal(runtime, sessionId))) {
-      return `${NO_AGENT}, and its session isn't on this machine (it may have run over ssh) — start it yourself`;
+    let text: string;
+    if (tab.hive_role) {
+      // A Hive agent relaunches only through its builder (docs/hive.md §11.1), whose record picks
+      // the session: neither session check below applies, and a refusal types nothing. Called
+      // directly rather than through `hiveLaunchLine`, so a refusal is this hold's reason, not a
+      // toast on every tick.
+      try {
+        text = await commands.hiveLaunchCommand(tab.id);
+      } catch (e) {
+        return `${NO_AGENT}, and maiTerm couldn't relaunch this Hive agent (${e})`;
+      }
+    } else {
+      text = interpolateVariables(tab.id, resumeCommandFor(runtime));
+      // A `%` left after substitution is a session id the tab never recorded: refuse rather than
+      // type a broken command (the Overlord's `no_session_id`).
+      if (text.includes('%')) return `${NO_AGENT}, and it has no saved session to resume — start it yourself`;
+      // The session must be one THIS machine has. A session id recorded while the agent ran over
+      // ssh (typed by hand, so no ssh field on the tab says so) names a remote session, and the
+      // tab's shell is now local: resuming it here is the wrong machine (review of 0a090e0).
+      const sessionId = interpolateVariables(tab.id, `%${sessionIdVar(runtime)}`);
+      if (sessionId.includes('%') || !(await commands.agentSessionIsLocal(runtime, sessionId))) {
+        return `${NO_AGENT}, and its session isn't on this machine (it may have run over ssh) — start it yourself`;
+      }
     }
     // LAST, nearest the write: ask the shell itself whether its command line is empty. Nothing
     // outside the shell knows — a paste or a dropped file stamps no keystroke, and type-ahead

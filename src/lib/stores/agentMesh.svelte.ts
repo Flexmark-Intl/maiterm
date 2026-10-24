@@ -182,7 +182,7 @@ function createAgentMeshStore() {
     const out: string[] = [];
     for (const pane of w.panes) {
       for (const tab of pane.tabs) {
-        if ((tab.tab_type ?? 'terminal') === 'terminal' && !isServiceTab(tab) && tab.custom_name) out.push(roleName(tab.name).toLowerCase());
+        if ((tab.tab_type ?? 'terminal') === 'terminal' && !isServiceTab(tab) && !tab.hive_role && tab.custom_name) out.push(roleName(tab.name).toLowerCase());
       }
     }
     return out;
@@ -215,8 +215,9 @@ function createAgentMeshStore() {
   /** Is this tab an agent participant in the mesh? A named terminal tab that has run (or is
    *  running) an agent. The name requirement is the join gate (§6 — a tab needs an explicit
    *  descriptive name to be addressable). */
-  function isAgentMember(tab: { id: string; tab_type?: string; custom_name?: boolean; name: string; runtime?: unknown; service_id?: string | null }): boolean {
-    if ((tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(tab)) return false;
+  function isAgentMember(tab: { id: string; tab_type?: string; custom_name?: boolean; name: string; runtime?: unknown; service_id?: string | null; hive_role?: string | null }): boolean {
+    // A Hive agent is never a mesh member: it talks to its coordinator (docs/hive.md §5).
+    if ((tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(tab) || tab.hive_role) return false;
     if (!tab.custom_name) return false;
     return !!claudeStateStore.getState(tab.id) || !!tab.runtime;
   }
@@ -271,7 +272,7 @@ function createAgentMeshStore() {
   function hasUnreadyMembers(ws: Workspace): boolean {
     for (const pane of ws.panes) {
       for (const tab of pane.tabs) {
-        if ((tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(tab)) continue; // stack services aren't agents
+        if ((tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(tab) || tab.hive_role) continue; // stack services aren't agents; Hive agents talk to their coordinator
         if (!tab.runtime) continue; // never an agent → not expected in the mesh
         if (!claudeStateStore.getState(tab.id)) return true; // was an agent, not running now
       }
@@ -734,7 +735,7 @@ function createAgentMeshStore() {
       if (!ws?.bridge_all || ws.suspended) return;
       for (const pane of ws.panes) {
         for (const tab of pane.tabs) {
-          if ((tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(tab)) continue; // stack services aren't agents
+          if ((tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(tab) || tab.hive_role) continue; // stack services aren't agents; Hive agents talk to their coordinator
           if (!tab.runtime) continue; // never an agent — nothing to initialize
           if (claudeStateStore.getState(tab.id)) continue; // already live
           const inst = terminalsStore.get(tab.id);

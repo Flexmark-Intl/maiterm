@@ -464,6 +464,9 @@
             // A service tab runs the user's dev server, not an agent — restarting it has
             // nothing to do with which account is active.
             if (isServiceTab(tab)) continue;
+            // A Hive agent is skipped (docs/hive.md §5): it keeps its account until its shell next
+            // starts, which its Hive's lifecycle decides, not an account switch.
+            if (tab.hive_role) continue;
             // Only live shells need moving. Anything else already starts under the active
             // account, so reloading it would spawn a shell nobody asked for.
             if (!terminalsStore.get(tab.id)) continue;

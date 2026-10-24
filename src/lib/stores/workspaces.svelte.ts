@@ -8,7 +8,7 @@ import { terminalsStore, type SplitContext } from '$lib/stores/terminals.svelte'
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { getCompiledPatterns } from '$lib/utils/promptPattern';
-import { error as logError, warn as logWarn } from '@tauri-apps/plugin-log';
+import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 import { pendingResumePanes } from '$lib/stores/resumeGate.svelte';
 // Static, not dynamic: archive/restore must patch the task mirror in the same synchronous
 // step the command returns in. tasks.svelte does not import this module, so no cycle.
@@ -18,6 +18,7 @@ import { MESH_IDENTITY_VARS } from '$lib/stores/meshRouting';
 import { CLAUDE_RESUME_COMMAND } from '$lib/triggers/defaults';
 import { disableBridge } from '$lib/stores/sshMcpBridge.svelte';
 import { isServiceTab, isStripHidden } from '$lib/workspace/hiddenTabs';
+import { dispatchHiveOpenColumn, openTargetFor } from '$lib/hive/model';
 
 /** Sidebar width bounds + default. The minimum reserves room for the footer's
  *  three agent-status indicators (working / waiting / finished) alongside the
@@ -364,6 +365,9 @@ function createWorkspacesStore() {
       for (const ws of workspaces) {
         for (const pane of ws.panes) {
           for (const tab of pane.tabs) {
+            // A Hive agent launches only through its builder (docs/hive.md §11.1): nothing here
+            // may give it a generic resume command.
+            if (tab.hive_role) continue;
             let migrated = false;
 
             // Update old auto-resume command templates (including legacy
@@ -2481,11 +2485,21 @@ function createWorkspacesStore() {
       await this.setActiveWorkspace(workspaceId);
     },
 
-    async duplicateTab(workspaceId: string, paneId: string, tabId: string, opts?: { shallow?: boolean }) {
+    async duplicateTab(workspaceId: string, paneId: string, tabId: string, opts?: { shallow?: boolean; reload?: boolean }) {
       const ws = workspaces.find(w => w.id === workspaceId);
       const pane = ws?.panes.find(p => p.id === paneId);
       const sourceTab = pane?.tabs.find(t => t.id === tabId);
       if (!sourceTab) return;
+      // Two agents on one worktree and one task (docs/hive.md §11.2). A reload replaces it, which
+      // is the one copy allowed.
+      if (sourceTab.hive_role && !opts?.reload) {
+        logInfo(`duplicateTab: refused for Hive tab ${tabId.slice(0, 8)}`);
+        return;
+      }
+      // A reload's copy of a Hive tab becomes hidden only once `reloadTab` carries the record
+      // over, so until then it is neither selected nor shown here: shown first, it would mount
+      // as an ordinary terminal and start no Hive launch.
+      const hiddenReload = !!opts?.reload && !!sourceTab.hive_role;
 
       const shallow = opts?.shallow ?? false;
 
@@ -2578,6 +2592,7 @@ function createWorkspacesStore() {
       const reordered = currentIds.filter(id => id !== newTab.id);
       reordered.splice(sourceIndex + 1, 0, newTab.id);
       await commands.reorderTabs(workspaceId, paneId, reordered);
+      if (hiddenReload) return newTab.id;
 
       // 10. Switch to the new tab
       await commands.setActiveTab(workspaceId, paneId, newTab.id);
@@ -2614,6 +2629,12 @@ function createWorkspacesStore() {
       if (!loc) return null;
       const { workspaceId, paneId, tab: sourceTab } = loc;
       if (sourceTab.tab_type !== 'terminal') return null;
+      // The duplicate refusal again (docs/hive.md §11.2): a plain `claude` in a Hive agent's
+      // folder is a second agent on its worktree, launched outside the builder and its sandbox.
+      if (sourceTab.hive_role) {
+        logInfo(`newConversationFrom: refused for Hive tab ${tabId.slice(0, 8)}`);
+        return null;
+      }
 
       const { instance, cwd, sshCommand } = await this._gatherTabContext(tabId);
       const newTab = await commands.createTab(workspaceId, paneId, sourceTab.name);
@@ -2722,13 +2743,14 @@ function createWorkspacesStore() {
       const sourceIndex = pane.tabs.findIndex(t => t.id === tabId);
       // Captured BEFORE the duplicate, which activates what it creates.
       const wasActiveBeforeDuplicate = pane.active_tab_id === tabId;
+      const activeBeforeDuplicate = pane.active_tab_id;
       // A live tab must come back live. In a workspace nobody is looking at, nothing mounts the
       // replacement until it is viewed, so its shell and auto-resume wait for that: an agent
       // reloaded there (an account switch, an agent's reloadTab) sat dead until someone looked.
       const wasLive = !!terminalsStore.get(tabId);
 
       // Deep duplicate: clones scrollback, CWD, SSH, notes, history, auto-resume, variables
-      const dupId = await this.duplicateTab(workspaceId, paneId, tabId);
+      const dupId = await this.duplicateTab(workspaceId, paneId, tabId, { reload: true });
 
       // Reload state to get the new tab
       const freshData = await commands.getWindowData();
@@ -2804,6 +2826,14 @@ function createWorkspacesStore() {
       // Names the replacement so the delete still goes through if a shutdown began mid-reload:
       // the duplicate is already saved, and refusing would bring back both.
       await commands.deleteTab(workspaceId, paneId, tabId, newTab.id);
+      // `create_tab` made the copy the pane's active tab, and it is hidden now that it carries the
+      // record: put back what the pane showed, or nothing (a Hive pane has no active tab).
+      if (reloadingSource?.hive_role) {
+        if (activeBeforeDuplicate && activeBeforeDuplicate !== tabId) {
+          await commands.setActiveTab(workspaceId, paneId, activeBeforeDuplicate).catch(() => {});
+        }
+        await commands.healPaneActiveTab(workspaceId, paneId).catch(() => {});
+      }
 
       // Final state reload
       const data = await commands.getWindowData();
@@ -3048,12 +3078,18 @@ export async function navigateToTab(tabId: string): Promise<void> {
         if (ws.id !== workspacesStore.activeWorkspaceId) {
           await workspacesStore.setActiveWorkspace(ws.id);
         }
+        const target = openTargetFor(tab, ws);
+        // A Hive agent opens as its column in the Hive view (docs/hive.md §5), never as a tab.
+        if (target.kind === 'hive') {
+          dispatchHiveOpenColumn({ workspaceId: target.workspaceId, tabId: target.tabId });
+          return;
+        }
         // "Go to this tab" for a service tab means showing its console: there is no tab to
         // switch to (docs/stack.md §7), and `setActiveTab` would refuse, leaving a toast
         // click or an Overlord chip doing nothing at all.
-        if (tab.service_id) {
+        if (target.kind === 'service') {
           const { stackStore } = await import('$lib/stores/stack.svelte');
-          stackStore.viewConsole(ws.id, tab.service_id);
+          stackStore.viewConsole(ws.id, target.serviceId);
           return;
         }
         if (pane.active_tab_id !== tabId) {

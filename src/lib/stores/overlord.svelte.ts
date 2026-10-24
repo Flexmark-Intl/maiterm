@@ -25,6 +25,7 @@ import { pruneHiddenDefaultOverlordRules, seedDefaultOverlordRules } from '$lib/
 import { DEFAULT_AGENT_STATES, guardsForCondition } from '$lib/overlord/format';
 import { getVariables, interpolateVariables, setVariable } from '$lib/stores/triggers.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
+import { engineSkips, HIVE_SUPERVISED_DETAIL } from '$lib/hive/model';
 import { summarizeBatch, type TabBatchRow, type TabBatchResult } from '$lib/stores/tabBatch';
 import { answerBlocker as answerBlockerText, dismissBlocker as dismissBlockerCheck, appendNote, findImportedDuplicate, isInFlight, isParked, isRetired, makeTask, normalizeTitle, statusFromAgent, type BlockerAnswer, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
@@ -777,14 +778,32 @@ function createOverlordStore() {
     return !!tab.overlord_exempt || !!ws.overlord_exempt;
   }
 
-  function isExemptTab(tabId: string): boolean {
+  function findTab(tabId: string): { tab: Tab; ws: Workspace } | null {
     for (const ws of workspacesStore.workspaces) {
       for (const pane of ws.panes) {
         const tab = pane.tabs.find((t) => t.id === tabId);
-        if (tab) return tabExempt(tab, ws);
+        if (tab) return { tab, ws };
       }
     }
-    return false;
+    return null;
+  }
+
+  function isExemptTab(tabId: string): boolean {
+    const hit = findTab(tabId);
+    return !!hit && tabExempt(hit.tab, hit.ws);
+  }
+
+  /** A Hive's agent: its coordinator supervises it, so the engine and the agent's tools leave it
+   *  alone (docs/hive.md §7.3), under their own reason rather than 'exempt'. */
+  function isHiveTab(tabId: string): boolean {
+    return !!findTab(tabId)?.tab.hive_role;
+  }
+
+  /** Off the engine's books: exempt, or a Hive's. What every engine path asks; the tools ask
+   *  the two apart, to say why. */
+  function engineSkipsTab(tabId: string): boolean {
+    const hit = findTab(tabId);
+    return !!hit && engineSkips(hit.tab, hit.ws);
   }
 
   const EXEMPT_DETAIL =
@@ -798,7 +817,7 @@ function createOverlordStore() {
         for (const tab of pane.tabs) {
           if ((tab.tab_type ?? 'terminal') !== 'terminal') continue;
           if (!tab.runtime) continue; // never hosted an agent → not supervised
-          if (tabExempt(tab, ws)) continue; // the human said hands off
+          if (engineSkips(tab, ws)) continue; // the human said hands off, or a Hive supervises it
           out.push({ tab, ws });
         }
       }
@@ -1645,7 +1664,7 @@ function createOverlordStore() {
       for (const pane of ws.panes) {
         for (const tab of pane.tabs) {
           present.add(tab.id);
-          if (!tabExempt(tab, ws)) live.add(tab.id);
+          if (!engineSkips(tab, ws)) live.add(tab.id);
         }
       }
     }
@@ -2054,7 +2073,7 @@ function createOverlordStore() {
         // just above can hold for minutes and return the instant the agent goes quiet — the
         // human who exempted the tab while watching Overlord type into it gets the next
         // step anyway unless this sits AFTER the wait and directly before the paste.
-        if (isExemptTab(tabId)) {
+        if (engineSkipsTab(tabId)) {
           ledger(tabId, rule.id, origin, i, step, 'aborted');
           return;
         }
@@ -2205,7 +2224,7 @@ function createOverlordStore() {
   function proposalStillHolds(p: OverlordProposal, now: number): boolean {
     // Exempted after the card was raised — very plausibly BECAUSE of the card. The sweep
     // drops it on the next tick; this is for "Send it" and "Run all" clicked before then.
-    if (isExemptTab(p.tabId)) return false;
+    if (engineSkipsTab(p.tabId)) return false;
     const rule = preferencesStore.overlordRules.find((r) => r.id === p.ruleId);
     // Rule deleted or switched off while the proposal waited.
     if (!rule || !rule.enabled) return false;
@@ -2564,7 +2583,7 @@ function createOverlordStore() {
    *  badge and eventually surfaces as a phantom "stale" card. */
   function isBoardableTab(tabId: string): boolean {
     const ws = workspaceForTab(tabId);
-    return !!ws && !ws.overlord && !isExemptTab(tabId);
+    return !!ws && !ws.overlord && !engineSkipsTab(tabId);
   }
 
   /** SCAN path: stand up a placeholder row for a running tab, or keep an existing one
@@ -2934,6 +2953,7 @@ function createOverlordStore() {
     allowParked = false,
   ): { reason: string; detail: string } | null {
     if (isExemptTab(tabId)) return { reason: 'exempt', detail: EXEMPT_DETAIL };
+    if (isHiveTab(tabId)) return { reason: 'hive', detail: HIVE_SUPERVISED_DETAIL };
     if (!isBoardableTab(tabId)) {
       return {
         reason: 'not_boardable',
@@ -3424,7 +3444,7 @@ function createOverlordStore() {
       // The RELAY is the supervisor's, and only it. Same split `startTask` makes, and for
       // the same reason — see the comment on the direct notice above.
       const relay = async (): Promise<'agent' | 'nobody'> => {
-        if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
+        if (!preferencesStore.overlordEnabled || engineSkipsTab(tabId) || !(await overlordAgentCanRelay())) {
           return 'nobody';
         }
         escalate(
@@ -3502,7 +3522,7 @@ function createOverlordStore() {
       // report a relay that cannot happen. It would also hand the exempt tab's name and the
       // task's detail to the supervisor, which is the exact thing exemption promises not to do.
       const relay = async (): Promise<'agent' | 'nobody'> => {
-        if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
+        if (!preferencesStore.overlordEnabled || engineSkipsTab(tabId) || !(await overlordAgentCanRelay())) {
           return 'nobody';
         }
         escalate(
@@ -3565,7 +3585,7 @@ function createOverlordStore() {
       const step: OverlordStep = { kind: 'process', text: r.message };
       // Same three conditions as startTask's fallback, for the same reasons.
       const relay = async (): Promise<'agent' | 'nobody'> => {
-        if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
+        if (!preferencesStore.overlordEnabled || engineSkipsTab(tabId) || !(await overlordAgentCanRelay())) {
           return 'nobody';
         }
         escalate(
@@ -3625,7 +3645,7 @@ function createOverlordStore() {
         `more, move it to its real status.`;
       const step: OverlordStep = { kind: 'process', text };
       const relay = async (): Promise<'agent' | 'nobody'> => {
-        if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
+        if (!preferencesStore.overlordEnabled || engineSkipsTab(tabId) || !(await overlordAgentCanRelay())) {
           return 'nobody';
         }
         escalate(
@@ -3721,7 +3741,7 @@ function createOverlordStore() {
       // and then refused by driveTab — a promise nothing can keep — while handing the exempt
       // tab's name and the task's detail to the supervisor, which is what exemption exists
       // to prevent.
-      if (!preferencesStore.overlordEnabled || !hasOverlordAgentTab() || isExemptTab(toTabId)) {
+      if (!preferencesStore.overlordEnabled || !hasOverlordAgentTab() || engineSkipsTab(toTabId)) {
         return 'nobody';
       }
       const stream = tasksStore.workstream(hit.workspaceId, task.workstream_id)?.name;
@@ -3910,6 +3930,12 @@ function createOverlordStore() {
       return isExemptTab(tabId);
     },
 
+    /** A Hive's agent, which its coordinator supervises (docs/hive.md §7.3): the tools refuse it
+     *  with reason 'hive'. */
+    isHiveTab(tabId: string): boolean {
+      return isHiveTab(tabId);
+    },
+
     /**
      * ONE vocabulary for what a tab's agent is doing, for every consumer that has to pick an
      * action for it — the deck, the doctrine, and `listWorkspaces`.
@@ -3963,6 +3989,7 @@ function createOverlordStore() {
       const loc = workspacesStore._locateTab(tabId);
       if (!loc) return { ok: false, reason: 'not_found', detail: 'No tab with that id in this window.' };
       if (isExemptTab(tabId)) return { ok: false, reason: 'exempt', detail: EXEMPT_DETAIL };
+      if (isHiveTab(tabId)) return { ok: false, reason: 'hive', detail: HIVE_SUPERVISED_DETAIL };
       // Workspace first. Testing `pty_id` first made `workspace_suspended` unreachable in the
       // exact case it was written for: suspendWorkspace leaves a stale `pty_id` in the mirror,
       // so every tab in a parked workspace answered "already live — nothing to resume".
@@ -4008,6 +4035,8 @@ function createOverlordStore() {
       tabId: string,
     ): Promise<{ sent: boolean; kind?: UnreadyKind; reason?: string; detail?: string }> {
       if (isExemptTab(tabId)) return { sent: false, reason: 'exempt', detail: EXEMPT_DETAIL };
+      // Never the generic resume for a Hive agent (docs/hive.md §11.1), and never two supervisors.
+      if (isHiveTab(tabId)) return { sent: false, reason: 'hive', detail: HIVE_SUPERVISED_DETAIL };
       // Terminal first. A tab with no mounted pane has no liveness entry either — the probe
       // only considers tabs it can reach — so asking `unreadyKind` first answered
       // `not_unready`, which reads as "nothing wrong with that tab" for a tab nothing can
@@ -4826,6 +4855,7 @@ function createOverlordStore() {
       text: string,
     ): Promise<{ sent: boolean; queued?: boolean; reason?: string; detail?: string }> {
       if (isExemptTab(tabId)) return { sent: false, reason: 'exempt', detail: EXEMPT_DETAIL };
+      if (isHiveTab(tabId)) return { sent: false, reason: 'hive', detail: HIVE_SUPERVISED_DETAIL };
       const step: OverlordStep = { kind, text };
       if (kind === 'slash') {
         const rt = workspacesStore.getTabRuntime(tabId);

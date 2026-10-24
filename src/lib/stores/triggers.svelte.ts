@@ -13,6 +13,7 @@ import { mergeAutoResumeContext } from '$lib/stores/autoResumeContext';
 import { parseCondition, evaluateCondition } from '$lib/triggers/variableCondition';
 import { isForkCommand, isResumeTemplate, sessionIdVar, toForkCommand } from '$lib/agents/resume';
 import { launchCommand } from '$lib/agents/descriptor';
+import { hiveLaunchLine, isHiveTab } from '$lib/hive/launch';
 import type { Trigger, MatchMode } from '$lib/tauri/types';
 import type { AgentRuntime } from '$lib/agents/types';
 
@@ -357,6 +358,9 @@ async function fireTrigger(
 export async function handleEnableAutoResume(tabId: string, commandTemplate: string) {
   const instance = terminalsStore.get(tabId);
   if (!instance) return;
+  // A Hive agent relaunches only through its builder: a generic resume command written here
+  // would bring it back unsandboxed, without its folders (docs/hive.md §11.1).
+  if (isHiveTab(tabId)) return;
   try {
     const info = await getPtyInfo(instance.ptyId);
     const sshCmd = info.foreground_command ? cleanSshCommand(info.foreground_command) : null;
@@ -473,6 +477,18 @@ export async function replayAutoResume(tabId: string) {
   const pane = ws?.panes.find(p => p.id === instance.paneId);
   const tab = pane?.tabs.find(t => t.id === tabId);
   if (!tab) return;
+
+  // Its builder's line, whatever the stored auto-resume says; on a refusal nothing is typed.
+  if (tab.hive_role) {
+    const line = await hiveLaunchLine(tabId);
+    if (!line) return;
+    try {
+      await writeTerminal(instance.ptyId, Array.from(new TextEncoder().encode(line + '\n')));
+    } catch (e) {
+      logError(`replay_auto_resume failed for Hive tab ${tabId}: ${e}`);
+    }
+    return;
+  }
 
   const sshCmd = tab.auto_resume_ssh_command ?? null;
   const remoteCwd = tab.auto_resume_remote_cwd ?? null;

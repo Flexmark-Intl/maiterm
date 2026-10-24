@@ -63,7 +63,8 @@ function locateTab(tabId: string): { ws: Workspace; paneId: string; tab: Tab } |
   return null;
 }
 
-const agentTabs = (ws: Workspace) => ws.panes.flatMap((p) => p.tabs).filter((t) => !!t.runtime && !isServiceTab(t));
+// A Hive agent is never a mesh member (docs/hive.md §5), so no card counts it as one.
+const agentTabs = (ws: Workspace) => ws.panes.flatMap((p) => p.tabs).filter((t) => !!t.runtime && !isServiceTab(t) && !t.hive_role);
 const names = (xs: { name: string }[]) => xs.map((x) => `“${x.name}”`).join(', ');
 const count = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
 
@@ -143,11 +144,14 @@ async function moveTab(a: { tabId?: string; tab_id?: string; to_workspace_id?: s
   const at = locateTab(a.tab_id);
   if (!at) return { error: 'Tab not found.' };
   if (isServiceTab(at.tab)) return { error: 'A stack service tab moves with its workspace, not on its own.' };
+  // Rust refuses both too (hive/mod.rs); said here before a card or a move is attempted.
+  if (at.tab.hive_role) return { error: "A Hive's agent can't be moved: it belongs to its Hive." };
   if (at.ws.overlord) return { error: 'Tabs in the Overlord workspace stay there.' };
   if (at.ws.id === a.to_workspace_id) return { error: 'The tab is already in that workspace.' };
   const windows = await moveTargets();
   const dest = windows.flatMap((w) => w.workspaces.map((ws) => ({ w, ws }))).find((x) => x.ws.id === a.to_workspace_id);
   if (!dest) return { error: 'Workspace not found (the Overlord workspace takes no tabs).' };
+  if (wsById(dest.ws.id)?.hive) return { error: "A tab can't be moved into a Hive." };
   const here = getCurrentWindow().label;
   const before = meshKey(at.ws);
   const after = meshKey(dest.ws);
@@ -211,6 +215,7 @@ async function setMesh(a: { tabId?: string; workspace_id?: string; enabled?: boo
   if (!ws) return { error: 'Workspace not found.' };
   if (typeof a.enabled !== 'boolean') return { error: 'enabled must be true or false.' };
   if (ws.overlord) return { error: 'The Overlord workspace cannot be a mesh.' };
+  if (ws.hive) return { error: 'A Hive is never a mesh: its agents talk to their coordinator.' };
   if (ws.bridge_all === a.enabled) return { unchanged: true, mesh: a.enabled };
   const agents = agentTabs(ws);
   if (a.enabled) {
@@ -235,6 +240,7 @@ async function linkMeshes(a: { tabId?: string; workspace_id?: string; with_works
   if (!x || !y) return { error: 'Both workspaces must be in the same window (getMeshLayout shows which are).' };
   if (x.id === y.id) return { error: 'A workspace cannot link with itself.' };
   if (x.overlord || y.overlord) return { error: 'The Overlord workspace cannot join a mesh.' };
+  if (x.hive || y.hive) return { error: 'A Hive is never a mesh: its agents talk to their coordinator.' };
   const sideX = meshOf(x);
   const sideY = meshOf(y);
   if (sideX.some((w) => w.id === y.id)) return { unchanged: true, note: 'They are already one mesh.' };
@@ -274,6 +280,7 @@ async function createTab(a: { tabId?: string; workspace_id?: string; cwd?: strin
   const ws = wsById(a.workspace_id);
   if (!ws) return { error: 'Workspace not found in this window (getMeshLayout lists them).' };
   if (ws.overlord) return { error: 'The Overlord workspace takes no new tabs.' };
+  if (ws.hive) return { error: "A Hive's agents are started by the Hive, not as new tabs." };
   // Nothing mounts in a suspended workspace, so its agent would not start until it is resumed.
   if (ws.suspended) return { error: `“${ws.name}” is suspended; its tabs start only when the human resumes it.` };
   const runtime = (a.runtime ?? 'claude') as AgentRuntime;
@@ -338,6 +345,7 @@ async function bridgeWith(a: { tabId?: string; with_tab_id?: string; fork?: bool
   const them = locateTab(a.with_tab_id);
   if (!them) return { error: 'That tab is not in your window. A bridge joins two tabs in one window (getMeshLayout / listWorkspaces show where each is).' };
   if (them.tab.id === me.tab.id) return { error: 'You cannot bridge with yourself.' };
+  if (me.tab.hive_role || them.tab.hive_role) return { error: "A Hive's agent is never bridged: it talks to its coordinator." };
   if ((them.tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(them.tab)) return { error: `“${them.tab.name}” is not an agent tab.` };
   if (!claudeStateStore.getState(them.tab.id)) return { error: `“${them.tab.name}” has no running agent session right now.` };
   const fork = a.fork === true;
@@ -419,8 +427,8 @@ async function restartMaiterm(a: { tabId?: string; update?: boolean; reason?: st
 // ── Reloads ─────────────────────────────────────────────────────────────────────────────────
 
 /** Whether a reloaded tab's agent comes back: the replacement types the tab's auto-resume
- *  command on mount (TerminalPane), and nothing else restarts it. */
-const resumesOnReload = (t: Tab) => t.auto_resume_enabled !== false && !!t.auto_resume_command;
+ *  command on mount (TerminalPane), or a Hive agent's builder line, and nothing else restarts it. */
+const resumesOnReload = (t: Tab) => !!t.hive_role || (t.auto_resume_enabled !== false && !!t.auto_resume_command);
 
 /** Reload a terminal tab as Cmd+Shift+R does (a replacement under a new id). The caller's OWN tab
  *  goes at once — it is the one interrupted — but only when it will come back; anyone else's
