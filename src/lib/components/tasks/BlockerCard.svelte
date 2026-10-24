@@ -2,9 +2,15 @@
   What a Blocked task is waiting for, and the controls to answer it (docs/tasks.md §3.1).
   One instance per task: the task panel, the loom's inspector and the decisions queue all
   render this, so the answer pinning lives in one place.
+
+  A Hive worker's question its coordinator holds (docs/hive.md §7.4) reads "With coordinator" on
+  every one of those surfaces: options read-only, no answer field, no Dismiss, and Take over under
+  the same two guards. `answerBlocker` refuses it meanwhile anyway, the phone's answer included.
 -->
 <script lang="ts">
   import { overlordStore } from '$lib/stores/overlord.svelte';
+  import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
+  import { coordinatorHolds, withCoordinatorText } from '$lib/hive/model';
   import { blockerDrafts } from '$lib/stores/waiting.svelte';
   import { BLOCKER_LABEL } from '$lib/tasks/model';
   import { fmtAge } from '$lib/overlord/format';
@@ -60,6 +66,35 @@
 
   let sending = $state(false);
 
+  /** The Hive route of a worker's question, and whether its coordinator holds it alone. */
+  const route = $derived(b ? hivePrompts.blockerOwner(task.id, b.asked_at) : null);
+  const held = $derived(coordinatorHolds(route));
+  /** "told in N min" moves on while it's held. */
+  let clock = $state(Date.now());
+  $effect(() => {
+    if (!held) return;
+    clock = Date.now();
+    const t = setInterval(() => (clock = Date.now()), 30_000);
+    return () => clearInterval(t);
+  });
+
+  async function takeOver(e: MouseEvent) {
+    if (!route || sending || secondClick(e)) return;
+    if (isFresh()) {
+      onnote?.('The agent just changed its question. Read it again before taking it over.');
+      return;
+    }
+    sending = true;
+    try {
+      await hivePrompts.takeOver(route.tab_id, route.key);
+      onnote?.("Yours now: the coordinator was told to leave it.");
+    } catch (err) {
+      onnote?.(`Not taken over: ${err instanceof Error ? err.message : err}`);
+    } finally {
+      sending = false;
+    }
+  }
+
   /** Anything that sends without text of the human's own on screen (an option, "I've done it",
    *  Enter in an empty field) answers whatever is showing now, so it is refused while the
    *  question is fresh. Visible typed text was typed under the current question: a re-ask
@@ -109,19 +144,26 @@
 </script>
 
 {#if b}
-  <div class="blocker {variant}" data-kind={b.kind}>
+  <div class="blocker {variant}" data-kind={b.kind} class:held>
     <div class="head">
       <span class="kind">{BLOCKER_LABEL[b.kind]} · {fmtAge(b.asked_at)}</span>
-      <Tooltip text="Already handled in the tab: close this without sending the agent anything">
-        <button class="dismiss" disabled={sending} onclick={dismiss}>Dismiss</button>
-      </Tooltip>
+      {#if held}
+        <Tooltip text="Answer it yourself: the coordinator is told to leave it">
+          <button class="dismiss take" disabled={sending} onclick={takeOver}>Take over</button>
+        </Tooltip>
+      {:else}
+        <Tooltip text="Already handled in the tab: close this without sending the agent anything">
+          <button class="dismiss" disabled={sending} onclick={dismiss}>Dismiss</button>
+        </Tooltip>
+      {/if}
     </div>
+    {#if held}<span class="with">{withCoordinatorText(route?.due_ms, clock)}</span>{/if}
     <span class="q"><TaskText text={b.question} of={task.id} /></span>
     {#if b.context}<span class="ctx"><TaskText text={b.context} of={task.id} /></span>{/if}
     {#if b.options?.length}
       <div class="opts">
         {#each b.options as o, i (i)}
-          <button class="opt" disabled={sending} onclick={(e) => { if (!secondClick(e)) answer(i); }}>
+          <button class="opt" disabled={sending || held} onclick={(e) => { if (!secondClick(e)) answer(i); }}>
             <b><TaskText text={o.label} of={task.id} />{#if o.recommended}<em> recommended</em>{/if}</b>
             {#if o.detail}<span><TaskText text={o.detail} of={task.id} /></span>{/if}
           </button>
@@ -129,6 +171,7 @@
       </div>
     {/if}
     {#if b.command}<code class="cmd">{b.command}</code>{/if}
+    {#if !held}
     <div class="answer">
       <input
         id="blocker-answer-{task.id}"
@@ -156,6 +199,7 @@
         <button class="send" disabled={sending} onclick={(e) => { if (!secondClick(e)) answer(undefined); }}>{b.kind === 'action' ? "I've done it" : 'It arrived'}</button>
       {/if}
     </div>
+    {/if}
   </div>
 {/if}
 
@@ -181,6 +225,9 @@
   }
   .blocker[data-kind='action'] { --kind: var(--red, #f7768e); }
   .blocker[data-kind='external'] { --kind: var(--cyan, #7dcfff); }
+  .blocker.held { --kind: var(--fg-dim); }
+  .with { color: var(--fg-dim); }
+  .dismiss.take { color: var(--accent); }
   .kind {
     color: var(--kind);
     font-size: 9.5px;

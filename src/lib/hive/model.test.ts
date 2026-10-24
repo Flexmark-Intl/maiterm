@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  adoptInstalled, charCount, dispatchHiveOpenColumn, engineSkips, folderName, HIVE_PROMPT_KINDS, hiveOwnsPrompt, isEligible, MAX_INSTRUCTIONS,
-  openTargetFor, slugify, takePendingHiveOpen, validateSpec,
+  adoptInstalled, charCount, checkpointAsks, checkpointFor, coordinatorHolds, dispatchHiveOpenColumn, engineSkips, folderName, HIVE_HUMAN_KIND,
+  HIVE_PROMPT_KINDS, hiveOwnsPromptIn, isEligible, MAX_INSTRUCTIONS, openTargetFor, slugify, takePendingHiveOpen, validateSpec, withCoordinatorText,
 } from './model';
 
 const ws = { id: 'w' };
@@ -150,10 +150,65 @@ describe('takePendingHiveOpen', () => {
   });
 });
 
-describe('hiveOwnsPrompt', () => {
-  it('owns nothing before hiveAnswerWorker (step 7): every prompt reaches the human', () => {
-    const tabs = [{ id: 'c', hive_role: 'coordinator' }, { id: 'k', hive_role: 'worker' }, { id: 't', hive_role: null }, null, undefined];
-    for (const tab of tabs) for (const kind of HIVE_PROMPT_KINDS) expect(hiveOwnsPrompt(tab, kind)).toBe(false);
+describe('hiveOwnsPromptIn', () => {
+  const hive = (over: Record<string, unknown> = {}) => ({ landing_mode: 'base', checkpoints: {} as Record<string, string>, status: 'active', ...over });
+  const worker = { id: 'k', hive_role: 'worker' };
+  const route = (kind: string, over: Record<string, unknown> = {}) => ({ tab_id: 'k', key: `${kind}-1`, kind, owner: 'coordinator', timed_out: false, taken_over: false, ...over });
+
+  it("only a worker's notices, in a live Hive, under a coordinator checkpoint", () => {
+    for (const tab of [{ id: 'c', hive_role: 'coordinator' }, { id: 't', hive_role: null }, null, undefined]) {
+      for (const kind of HIVE_PROMPT_KINDS) expect(hiveOwnsPromptIn(hive(), tab, kind, [])).toBe(false);
+    }
+    for (const kind of HIVE_PROMPT_KINDS) {
+      expect(hiveOwnsPromptIn(hive(), worker, kind, []), kind).toBe(true);
+      expect(hiveOwnsPromptIn(hive({ status: 'done' }), worker, kind, []), `done: ${kind}`).toBe(false);
+      expect(hiveOwnsPromptIn(null, worker, kind, [])).toBe(false);
+    }
+    expect(hiveOwnsPromptIn(hive(), worker, HIVE_HUMAN_KIND, []), "Rust's notice is never held back").toBe(false);
+  });
+
+  it('Ask me hands the kind back to the human; compaction and completion follow questions', () => {
+    const asks = hive({ checkpoints: { questions: 'ask' } });
+    for (const kind of ['question', 'compaction', 'completion']) expect(hiveOwnsPromptIn(asks, worker, kind, []), kind).toBe(false);
+    expect(hiveOwnsPromptIn(asks, worker, 'permission', [])).toBe(true);
+    expect(hiveOwnsPromptIn(hive({ checkpoints: { permissions: 'ask' } }), worker, 'permission', [])).toBe(false);
+  });
+
+  it('reads a route: held is owned; timed out, taken over or the human’s is not; unrouted reads owned', () => {
+    expect(hiveOwnsPromptIn(hive(), worker, 'permission', [route('permission')])).toBe(true);
+    expect(hiveOwnsPromptIn(hive(), worker, 'permission', [route('permission', { timed_out: true })])).toBe(false);
+    expect(hiveOwnsPromptIn(hive(), worker, 'permission', [route('permission', { owner: 'human', taken_over: true })])).toBe(false);
+    // Routed to the human outright: Rust's hive-prompt-notify was the notice, so the late one is held.
+    expect(hiveOwnsPromptIn(hive(), worker, 'question', [route('question', { owner: 'human', why: 'outside the allowlist' })])).toBe(true);
+    expect(hiveOwnsPromptIn(hive(), worker, 'permission', [route('permission', { owner: 'human', why: 'this Hive has no coordinator to answer it' })])).toBe(true);
+    expect(hiveOwnsPromptIn(hive(), worker, 'permission', [route('permission', { owner: 'human', why: 'take_over', taken_over: true })])).toBe(false);
+    expect(hiveOwnsPromptIn(hive(), worker, 'permission', [route('permission', { owner: 'human', why: 'ask' })])).toBe(false);
+    // Unrouted (Rust reads the screen about a second later): owned until Rust says otherwise.
+    expect(hiveOwnsPromptIn(hive(), worker, 'question', [route('permission', { owner: 'human' })])).toBe(true);
+    expect(hiveOwnsPromptIn(hive(), worker, 'permission', [route('permission', { tab_id: 'other', owner: 'human' })])).toBe(true);
+  });
+
+  it('a missing checkpoint key reads as its default for the landing mode', () => {
+    expect(checkpointAsks({ landing_mode: 'base', checkpoints: {} }, 'landing')).toBe(false);
+    expect(checkpointAsks({ landing_mode: 'integration', checkpoints: {} }, 'landing')).toBe(true);
+    expect(checkpointAsks({ landing_mode: 'integration', checkpoints: { plan: 'ask' } }, 'plan')).toBe(true);
+    expect(checkpointFor('trust')).toBeNull();
+  });
+});
+
+describe('"With coordinator"', () => {
+  it('is read-only only while the coordinator holds it alone', () => {
+    const r = { owner: 'coordinator', timed_out: false, taken_over: false };
+    expect(coordinatorHolds(r)).toBe(true);
+    expect(coordinatorHolds({ ...r, timed_out: true })).toBe(false);
+    expect(coordinatorHolds({ ...r, owner: 'human', taken_over: true })).toBe(false);
+    expect(coordinatorHolds(null)).toBe(false);
+  });
+
+  it('says when the human is told', () => {
+    expect(withCoordinatorText(10_000 + 4 * 60_000 + 1, 10_000)).toBe("With coordinator · you're told if it isn't answered in 5 min");
+    expect(withCoordinatorText(10_000, 20_000)).toBe("With coordinator · you're told if it isn't answered in 1 min");
+    expect(withCoordinatorText(0, 1)).toBe('With coordinator');
   });
 });
 

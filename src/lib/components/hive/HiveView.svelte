@@ -48,6 +48,9 @@
   import RunQueueModal from './RunQueueModal.svelte';
   import HiveDeleteSheet from './HiveDeleteSheet.svelte';
   import LandLogModal from './LandLogModal.svelte';
+  import HiveAutonomyModal from './HiveAutonomyModal.svelte';
+  import { autonomyLabel } from '$lib/hive/autonomy';
+  import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
   import HiveMemoryView from './HiveMemoryView.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
@@ -56,7 +59,7 @@
   import { hiveFeed } from '$lib/stores/hiveFeed.svelte';
   import { hiveView } from '$lib/stores/hiveView.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
-  import { clampCoord, clampRail, cycleOrder, fitColumns, nextFocus, W } from '$lib/hive/columns';
+  import { clampCoord, clampRail, cycleOrder, fitColumns, nextFocus, tabsOnScreen, W } from '$lib/hive/columns';
   import { escapeAction, HIVE_KEY, type HiveKeyAction, type HiveKeyDetail } from '$lib/hive/keys';
   import { modSymbol } from '$lib/utils/platform';
   import { dispatchHiveOpenColumn, HIVE_OPEN_COLUMN, takePendingHiveOpen, type HiveOpenColumnDetail } from '$lib/hive/model';
@@ -80,6 +83,8 @@
   let queueOpen = $state(false);
   /** Delete Hive (docs/hive.md §11.2): the sheet lists what stays before anything is touched. */
   let deleteOpen = $state(false);
+  /** Hive settings → Autonomy (docs/hive.md §7.4), from the header. */
+  let autonomyOpen = $state(false);
   /** The land log (docs/hive.md §8.6), whole from the header or one worker's from its column. */
   let landLog = $state<{ taskId: string | null } | null>(null);
   const queuedCount = $derived(hive?.settings?.run_queue?.commands.length ?? 0);
@@ -228,7 +233,18 @@
   });
   $effect(() => {
     const id = workspaceId;
-    return () => hiveView.setTerminalsOnScreen(id, []);
+    return () => {
+      hiveView.setTerminalsOnScreen(id, []);
+      hiveView.setColumnsOnScreen(id, []);
+    };
+  });
+  // The tabs whose column the layout shows, terminal or chat: what counts as visible for a Hive
+  // tab's notices (§4.7). A column given way, or a coordinator squeezed to its strip, is not.
+  const columnsOnScreen = $derived(tabsOnScreen(fit, coordId, (t) => cardByTask.get(t)?.worker.tab_id));
+  $effect(() => {
+    const id = workspaceId;
+    const ids = columnsOnScreen;
+    untrack(() => hiveView.setColumnsOnScreen(id, ids));
   });
 
   // The Files column follows the focused column's tab (fileTree `followableTab`), and a worker's
@@ -540,6 +556,8 @@
   onMount(() => {
     const feedFor = workspaceId;
     hiveFeed.attach(feedFor);
+    // Who holds each worker prompt; `hive-prompts-changed` keeps it after this (hivePrompts).
+    void hivePrompts.refresh(workspaceId);
     const pending = takePendingHiveOpen(workspaceId);
     if (pending) requestAnimationFrame(() => open(pending));
     const onOpen = (e: Event) => {
@@ -617,6 +635,9 @@
         <Tooltip text="Every land, undo and post-land check, and Undo">
           <button type="button" class="queue-btn" onclick={() => (landLog = { taskId: null })}>Land log</button>
         </Tooltip>
+        <Tooltip text="Which decisions the coordinator makes and which come to you, the prompt timeout and the daily digest">
+          <button type="button" class="queue-btn" onclick={() => (autonomyOpen = true)}>{autonomyLabel(hive)}</button>
+        </Tooltip>
         <Tooltip text="The heavy commands workers run only through the run queue (hiveRun), and what each needs">
           <button type="button" class="queue-btn" onclick={() => (queueOpen = true)}>
             Run queue: {queuedCount === 0 ? 'nothing queued' : `${queuedCount} command${queuedCount === 1 ? '' : 's'}`}
@@ -630,6 +651,9 @@
   </header>
   {#if queueOpen && hive}
     <RunQueueModal {workspaceId} {hive} onclose={() => (queueOpen = false)} />
+  {/if}
+  {#if autonomyOpen && hive}
+    <HiveAutonomyModal {workspaceId} {hive} onclose={() => (autonomyOpen = false)} />
   {/if}
   {#if deleteOpen && hive}
     <HiveDeleteSheet {workspaceId} name={ws?.name ?? ''} onclose={() => (deleteOpen = false)} />

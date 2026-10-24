@@ -5,7 +5,7 @@ import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { StackHeldAction, StackLeaseState } from './types';
 import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
 import type { HiveMemoryFileText, HiveMemoryView } from './types';
-import type { AutonomySettings, HivePromptRoute } from './types';
+import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
@@ -2842,6 +2842,14 @@ export async function hiveTakeOver(workspaceId: string, tabId: string, key: stri
 /** Who holds each open worker prompt of a Hive in this window; it then follows `hive-prompts-changed`. */
 export async function hivePromptRoutes(workspaceId: string): Promise<HivePromptRoute[]> {
   return invoke('hive_prompt_routes', { workspaceId });
+}
+
+/** The human answered a blocker in a Hive (docs/hive.md §7.6): Rust's decision log takes it, the
+ *  route goes, and the coordinator hears of a worker's. `blocker` is the store's copy from before
+ *  the answer cleared it. Answers the decision id, or null when nothing was written (not a Hive,
+ *  already logged). Called only by `overlordStore.answerBlocker`. */
+export async function hiveBlockerAnswered(workspaceId: string, taskId: string, blocker: TaskBlocker, answer: HiveBlockerAnswerArg): Promise<string | null> {
+  return invoke('hive_blocker_answered', { workspaceId, taskId, blocker, answer });
 }
 
 /** A retired Hive worker's chat (docs/hive.md §4.2, §8.4): the sessions Rust recorded for its task,

@@ -34,6 +34,9 @@ function createHiveViewStore() {
    *  shows. HiveView publishes it; it is what makes Rust render that terminal (`+page`'s
    *  `visible`). Not persisted. */
   let terminalsOnScreen = $state<Map<string, ReadonlySet<string>>>(new Map());
+  /** Per workspace, the tabs whose column the layout shows (`fitColumns`), chat or terminal:
+   *  HiveView publishes it. Not persisted. */
+  let columnsOnScreen = $state<Map<string, ReadonlySet<string>>>(new Map());
 
   function read(wsId: string): HiveViewState {
     const v = views.get(wsId);
@@ -165,6 +168,24 @@ function createHiveViewStore() {
       if (f === 'board') return null;
       if (f === 'coordinator') return coordinatorTabId(wsId);
       return taskTabs.get(wsId)?.get(f) ?? null;
+    },
+
+    /** Whether a Hive tab's column is open where the human is looking (§4.7, plan D27): its Hive
+     *  is the active workspace on a focused window, and the layout shows the tab's column — not
+     *  one given way on a narrow window, nor a coordinator collapsed or squeezed to its strip.
+     *  What `isTabVisible` counts for a Hive tab, which is never a pane's active tab. */
+    tabColumnOpen(tabId: string): boolean {
+      const ws = workspacesStore.activeWorkspace;
+      if (!ws?.hive) return false;
+      if (typeof document !== 'undefined' && !document.hasFocus()) return false;
+      return columnsOnScreen.get(ws.id)?.has(tabId) ?? false;
+    },
+
+    /** HiveView's on-screen columns' tabs; an empty list when it unmounts. */
+    setColumnsOnScreen(wsId: string, tabIds: readonly string[]) {
+      const had = columnsOnScreen.get(wsId);
+      if ((had?.size ?? 0) === tabIds.length && tabIds.every((t) => had?.has(t))) return;
+      columnsOnScreen = new Map(columnsOnScreen).set(wsId, new Set(tabIds));
     },
 
     /** HiveView's on-screen raw terminals; an empty list when it unmounts. */

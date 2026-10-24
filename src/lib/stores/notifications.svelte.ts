@@ -1,15 +1,18 @@
 import { activityStore } from './activity.svelte';
 import { preferencesStore } from './preferences.svelte';
 import { workspacesStore } from './workspaces.svelte';
+import { hiveView } from './hiveView.svelte';
 import { terminalsStore } from './terminals.svelte';
 import { dispatch } from './notificationDispatch';
 
 /** Tracks when each tab's command started (for duration check). */
 const commandStartTimes = new Map<string, number>();
 
+/** On screen: the active pane's active tab, or a Hive tab whose column is open (docs/hive.md §4.7). */
 function isTabVisible(tabId: string): boolean {
   const ws = workspacesStore.activeWorkspace;
   if (!ws) return false;
+  if (hiveView.tabColumnOpen(tabId)) return true;
   const pane = ws.panes.find(p => p.active_tab_id === tabId);
   if (!pane) return false;
   return pane.id === ws.active_pane_id;

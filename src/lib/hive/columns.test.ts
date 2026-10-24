@@ -9,6 +9,7 @@ import {
   openColumn,
   parseView,
   serializeView,
+  tabsOnScreen,
   togglePin,
   W,
   type OpenColumn,
@@ -77,6 +78,16 @@ describe('fitColumns', () => {
     expect(fit(1400, false)).toEqual({ coord: 'full', board: 'rail', shown: ['b'], suppressed: ['a'] });
     // 1100: one worker and the coordinator's strip.
     expect(fit(1100, false)).toEqual({ coord: 'strip', board: 'rail', shown: ['b'], suppressed: ['a'] });
+  });
+
+  it('counts only the columns it shows as on screen: not one given way, nor a strip', () => {
+    const tabOf = (t: string) => (t === 'w' ? null : `tab-${t}`);
+    expect(tabsOnScreen(fit(1800, false), 'coord', tabOf)).toEqual(['coord', 'tab-a', 'tab-b']);
+    expect(tabsOnScreen(fit(1400, false), 'coord', tabOf)).toEqual(['coord', 'tab-b']);
+    expect(tabsOnScreen(fit(1100, false), 'coord', tabOf)).toEqual(['tab-b']);
+    expect(tabsOnScreen(fit(1800, false, [], true), 'coord', tabOf)).toEqual([]);
+    // A waiting worker has no tab yet.
+    expect(tabsOnScreen(fit(1800, false, [col('w', 1)]), 'coord', tabOf)).toEqual(['coord']);
   });
 
   it('counts an open Files column in the budget', () => {

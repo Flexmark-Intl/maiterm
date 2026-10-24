@@ -46,18 +46,74 @@ export interface HiveOpenColumnDetail {
 /** What a notification is about, for `hiveOwnsPrompt` (docs/hive.md §4.7). */
 export type HivePromptKind = 'permission' | 'question' | 'compaction' | 'completion';
 export const HIVE_PROMPT_KINDS: readonly HivePromptKind[] = ['permission', 'question', 'compaction', 'completion'];
+/** Rust's "this worker prompt needs you" (`hive-prompt-notify`): not a `HivePromptKind`, so the
+ *  gate never holds it back. */
+export const HIVE_HUMAN_KIND = 'hive-human';
+export type NotifyKind = HivePromptKind | typeof HIVE_HUMAN_KIND;
+
+/** The checkpoint a notice of `kind` falls under (Rust's `checkpoints::for_prompt_kind`):
+ *  compaction and completion follow Workers' questions (plan D14). */
+export function checkpointFor(kind: string): 'permissions' | 'questions' | null {
+  if (kind === 'permission') return 'permissions';
+  if (kind === 'question' || kind === 'compaction' || kind === 'completion') return 'questions';
+  return null;
+}
+
+type CheckpointFields = { landing_mode: string; checkpoints?: Record<string, string> | null; status?: string };
+
+/** Whether `key` is set to Ask me; a key the record lacks reads as its default for the landing
+ *  mode (Rust's `checkpoints::asks`). */
+export function checkpointAsks(hive: CheckpointFields, key: string): boolean {
+  const set = hive.checkpoints?.[key] ?? (key === 'landing' && hive.landing_mode === 'integration' ? 'ask' : 'coordinator');
+  return set === 'ask';
+}
+
+/** A route as the gate and the cards read it (`HivePromptRoute`). */
+export type RouteFields = { tab_id: string; key: string; kind: string; owner: string; why?: string; timed_out: boolean; taken_over: boolean };
+
+/** The coordinator holds it alone: neither timed out nor taken over. Only then is the human's
+ *  side read-only (§7.4 "With coordinator"); Rust refuses the human's answer then too (plan D12). */
+export const coordinatorHolds = (r: Pick<RouteFields, 'owner' | 'timed_out' | 'taken_over'> | null | undefined): boolean =>
+  !!r && r.owner === 'coordinator' && !r.timed_out && !r.taken_over;
+
+/** Routed to the human at once (the allowlist's reason, no coordinator), under a coordinator
+ *  checkpoint: Rust's `route_in` sent `hive-prompt-notify` for it, so that is the human's one
+ *  notice. Claude's own permission Notification lands ~6 s after the hook Rust routes on. */
+const rustNotified = (r: RouteFields): boolean =>
+  r.owner === 'human' && !r.timed_out && !r.taken_over && !!r.why && !['ask', 'timeout', 'take_over'].includes(r.why);
 
 /** Whether this tab's prompt or notice of `kind` is its Hive coordinator's to answer, so no
  *  toast, OS notification or sound goes to the human for it (§4.7); it still shows in the Loom,
- *  the corner card and the card's dot. The phone's half is Rust's `hive::owns_prompt`.
+ *  the corner card and the card's dot. The TS twin of Rust's `hive::owns_prompt` (the phone's).
  *
- *  False for everything until `hiveAnswerWorker` ships (build step 7): before it a coordinator
- *  can't answer a prompt, so every worker prompt reaches the human as today. Asked at the choke
- *  point (`notificationDispatch.dispatch`) now so step 7 changes this, not its callers. */
-export function hiveOwnsPrompt(tab: Pick<TabFields, 'id' | 'hive_role'> | null | undefined, kind: HivePromptKind): boolean {
-  void tab;
-  void kind;
-  return false;
+ *  Only a worker's, in a Hive that isn't done, under a checkpoint that is the coordinator's. A
+ *  permission or question the coordinator holds is its own, and one Rust hasn't routed yet (the
+ *  screen is read about a second after the hook) reads as owned too: Rust sends
+ *  `hive-prompt-notify` if it turns out to be the human's after all (plan D13), and one it already
+ *  sent that for is held too, so the human hears of it once. */
+export function hiveOwnsPromptIn(
+  hive: CheckpointFields | null | undefined,
+  tab: Pick<TabFields, 'id' | 'hive_role'> | null | undefined,
+  kind: string,
+  routes: readonly RouteFields[],
+): boolean {
+  if (!hive || !tab || tab.hive_role !== 'worker' || hive.status === 'done') return false;
+  const cp = checkpointFor(kind);
+  if (!cp || checkpointAsks(hive, cp)) return false;
+  if (kind === 'compaction' || kind === 'completion') return true;
+  const mine = routes.filter((r) => r.tab_id === tab.id && r.kind === kind);
+  return mine.every((r) => coordinatorHolds(r) || rustNotified(r));
+}
+
+/** Why the human's answer to a held worker question is refused (the phone shows it as is). */
+export const HIVE_COORDINATOR_HOLDS =
+  "Your Hive's coordinator answers this question. Take it over in the worker's column, or answer it once you're told it waited too long.";
+
+/** "With coordinator" under a held prompt or question (§7.4): when the human hears of it. */
+export function withCoordinatorText(dueMs: number | null | undefined, now: number): string {
+  if (!dueMs) return 'With coordinator';
+  const mins = Math.max(1, Math.ceil((dueMs - now) / 60_000));
+  return `With coordinator · you're told if it isn't answered in ${mins} min`;
 }
 
 /** The last open asked for, kept briefly: `navigateToTab` switches workspace and dispatches at

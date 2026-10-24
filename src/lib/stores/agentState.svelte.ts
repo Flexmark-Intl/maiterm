@@ -3,6 +3,7 @@ import { info as logInfo } from '@tauri-apps/plugin-log';
 import { setVariable, handleEnableAutoResume } from './triggers.svelte';
 import { terminalsStore } from './terminals.svelte';
 import { workspacesStore } from './workspaces.svelte';
+import { hiveView } from './hiveView.svelte';
 import { activityStore } from './activity.svelte';
 import { dispatch } from './notificationDispatch';
 import { preferencesStore } from './preferences.svelte';
@@ -96,12 +97,13 @@ function buildActionString(runtime: AgentRuntime, toolName: string, toolInput: R
 }
 
 /** Is this tab the one currently on-screen (active tab of the active pane in the active
- *  workspace)? Used to gate "needs you" toasts to tabs the human isn't already looking at. */
+ *  workspace, or a Hive tab whose column is open: docs/hive.md §4.7)? Used to gate "needs you"
+ *  toasts to tabs the human isn't already looking at. */
 function isTabVisible(tabId: string): boolean {
   const ws = workspacesStore.activeWorkspace;
   if (!ws) return false;
   const pane = ws.panes.find((p) => p.active_tab_id === tabId);
-  return !!pane && pane.id === ws.active_pane_id;
+  return (!!pane && pane.id === ws.active_pane_id) || hiveView.tabColumnOpen(tabId);
 }
 
 function createAgentStateStore() {

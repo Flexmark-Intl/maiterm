@@ -332,6 +332,31 @@ fn drop_key(key: &str) -> Option<Routed> {
     remove(&tab, key)
 }
 
+/// Timed-out blocker routes a task write dropped, by key, with when (ms). The human's answer
+/// clears the row before `hive_blocker_answered` reaches Rust, so the task write usually drops the
+/// route first; its `after_timeout` is read from here then.
+static DROPPED_TIMED_OUT: LazyLock<Mutex<HashMap<String, i64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+const DROPPED_KEEP_MS: i64 = 10 * 60 * 1000;
+
+fn dropped_timed_out() -> MutexGuard<'static, HashMap<String, i64>> {
+    DROPPED_TIMED_OUT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn note_dropped(r: &Routed, now: i64) {
+    let mut d = dropped_timed_out();
+    d.retain(|_, at| now - *at < DROPPED_KEEP_MS);
+    if r.timed_out {
+        d.insert(r.key.clone(), now);
+    }
+}
+
+/// Whether `key`'s route had timed out: the live route's word, else what a task write dropped.
+fn take_after_timeout(key: &str) -> bool {
+    let dropped = dropped_timed_out().remove(key).is_some();
+    let live = routes().iter().find_map(|(_, v)| v.iter().find(|r| r.key == key).map(|r| r.timed_out));
+    live.unwrap_or(false) || dropped
+}
+
 // ── The allowlist ──
 
 /// Whether `hiveAnswerWorker` may answer this prompt at all (§7.4, plan D8), or why it is the
@@ -724,7 +749,10 @@ pub(crate) fn blockers_changed(state: Arc<AppState>, handle: AppHandle, workspac
 pub(crate) async fn blockers_changed_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, added: Vec<Task>, removed: Vec<(String, String)>) {
     let mut changed = false;
     for (task, asked_at) in &removed {
-        changed |= drop_key(&blocker_key(task, asked_at)).is_some();
+        if let Some(r) = drop_key(&blocker_key(task, asked_at)) {
+            note_dropped(&r, now_ms());
+            changed = true;
+        }
     }
     // Rust's own sandbox blockers (`external`) already told the coordinator.
     let added: Vec<Task> = added.into_iter().filter(|t| t.blocker.as_ref().is_some_and(|b| b.kind != "external")).collect();
@@ -1039,6 +1067,63 @@ pub(crate) async fn human_answered_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &
         tell_coordinator(ctx, caller, format!("[maiTerm] Your human answered {}\u{2019}s {what}: {}.", r.worker_name, one_line(answer, 300))).await;
     }
     emit(ctx, &caller.workspace_id);
+}
+
+/// A blocker the human answered through the window (`hive_blocker_answered`): logged by
+/// `decisions::record_blocker_answer`, its route dropped, and the coordinator told of a worker's
+/// (the worker was told by the window). Rust's copy of the question wins while the row still has
+/// it; a row this Hive doesn't have is refused.
+pub(crate) async fn blocker_answered_in<W: HiveWindow>(
+    ctx: &Ctx<'_, W>,
+    caller: &Caller,
+    task_id: &str,
+    blocker: TaskBlocker,
+    answer: decisions::BlockerAnswerArg,
+) -> Result<Option<String>, String> {
+    let row = super::tools::workspace_tasks(ctx.data, caller)?.into_iter().find(|t| t.id == task_id).ok_or("That task isn\u{2019}t in this Hive.")?;
+    let blocker = row.blocker.filter(|b| b.asked_at == blocker.asked_at).unwrap_or(blocker);
+    let key = blocker_key(task_id, &blocker.asked_at);
+    let after_timeout = take_after_timeout(&key);
+    let (paths, hive, task, b, a) = (caller.paths.clone(), caller.hive.clone(), task_id.to_string(), blocker.clone(), answer.clone());
+    let (line, workers) = blocking(move || {
+        let workers = worker::list_workers(&paths);
+        let line = decisions::record_blocker_answer(&paths, &hive, &workers, &task, &b, &a, after_timeout, &crate::commands::workspace::iso_now())?;
+        Ok((line, workers))
+    })
+    .await?;
+    if drop_key(&key).is_some() {
+        emit(ctx, &caller.workspace_id);
+    }
+    let Some(line) = line else { return Ok(None) };
+    log::info!("hive {}: the human answered {} on task {task_id} ({})", caller.hive.id, line.key.as_deref().unwrap_or_default(), line.category);
+    if let Some(w) = workers.iter().find(|w| w.task_id == task_id) {
+        tell_coordinator(ctx, caller, blocker_answer_notice(&worker_name(w), &blocker, &answer)).await;
+    }
+    Ok(Some(line.id))
+}
+
+/// The coordinator's word of a human's blocker answer. Only maiTerm's words and the human's share
+/// the `[maiTerm]` sentence: the worker's question and option labels sit on their own labelled
+/// lines, so a quote closed inside them can't read as the human speaking.
+fn blocker_answer_notice(worker: &str, blocker: &TaskBlocker, answer: &decisions::BlockerAnswerArg) -> String {
+    let what = if blocker.kind == "decision" { "question" } else { "blocker" };
+    let option = answer.option.as_deref().map(str::trim).and_then(|o| blocker.options.iter().position(|x| x.label == o));
+    let text = one_line(&answer.text, 300);
+    let how = match (option, blocker.kind.as_str()) {
+        (Some(i), _) => format!(": they chose the worker\u{2019}s option {}", i + 1),
+        (None, _) if !text.is_empty() => String::new(),
+        (None, "action") => ": they marked it done".to_string(),
+        (None, _) => ": they cleared it without words".to_string(),
+    };
+    let mut s = format!("[maiTerm] Your human answered {worker}\u{2019}s {what}{how}.");
+    if !text.is_empty() {
+        s.push_str(&format!("\nTheir words: {text}"));
+    }
+    s.push_str(&format!("\nThe worker\u{2019}s question: {}", one_line(&blocker.question, 300)));
+    if let Some(i) = option {
+        s.push_str(&format!("\nThe worker\u{2019}s option {}: {}", i + 1, one_line(&blocker.options[i].label, 120)));
+    }
+    s
 }
 
 /// The human took one prompt over: theirs alone from now on.

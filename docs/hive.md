@@ -3473,6 +3473,41 @@ several releases a day).
    asks `owns_prompt` before the 30 s collapse records a tab, so a ring nobody heard never swallows
    the human's next one. **Not yet:** the window's side (the TS gate, "With coordinator", the Autonomy modal and
    `hive-prompt-notify`'s listener are 7c), and precedents (7d) — `precedent` is stored as given.
+   **7c built** (2026-10-24, uncommitted at the time of writing): the window's side. The gate is
+   `hiveOwnsPromptIn` (`src/lib/hive/model.ts`), the TS twin of `owns_prompt` over the routes
+   `stores/hivePrompts.svelte.ts` mirrors from `hive-prompts-changed` (read whole by
+   `hive_prompt_routes` when a Hive view mounts); it differs in one way, on purpose: a prompt Rust
+   hasn't routed yet (the screen is read 800 ms after the hook) reads as the coordinator's under a
+   coordinator checkpoint, and Rust's `hive-prompt-notify` (dispatched as kind `hive-human`, which
+   the gate never holds back, a muted tab still silent) tells the human if it was theirs. A route
+   Rust made the human's outright (the allowlist's reason, no coordinator) is held too: Claude's
+   own permission Notification lands ~6 s after the hook Rust routes on, and the human hears once,
+   from Rust; Ask me, a timed-out and a taken-over route still let the window's notice through. The store
+   is started once per window by `+layout`, not by the Hive view, so that notice reaches the human
+   anywhere. `PromptCard` and `BlockerCard` read a held prompt or worker question as "With
+   coordinator · you're told if it isn't answered in N min", rows read-only, with Take over under
+   the cards' 1.5 s and double-click guards; since every surface renders those two cards, the
+   Loom's Decisions and the corner card read the same, and `overlordStore.answerBlocker` and
+   `dismissBlocker` refuse a held worker question too (the phone's answer goes through them, and
+   has no take-over yet). `isTabVisible` (agentState, notifications) counts a Hive tab whose column
+   the layout shows, on a focused window, as visible (`hiveView.tabColumnOpen`, plan D27, over the
+   tabs HiveView publishes from `fitColumns` via `tabsOnScreen`): a column given way on a narrow
+   window, or a coordinator squeezed to its strip, is not. The header's
+   "Autonomy: N ask you" opens `HiveAutonomyModal` (`hive/autonomy.ts`: six rows, Landing locked
+   at Ask me in the integration mode, the never-delegated list, the timeout in minutes 1–60, the
+   digest), saved by `hive_set_autonomy`. Every blocker the human answers in a Hive (a click, the
+   Loom, the phone) reaches Rust's log through `hive_blocker_answered`, called by `answerBlocker`
+   after its task write and reachable from no MCP call (plan D16): `record_blocker_answer` reuses
+   the route's `asked` line or writes one (a worker's row `questions`, `never` for what the
+   allowlist keeps from the coordinator; any other row `other`; a key a later step logged first
+   keeps that line's id and category), then `answered` by the human with the coordinator's recorded
+   recommendation on a worker's row and the blocker's own on the coordinator's, once per question;
+   the route is dropped, and the coordinator hears of a worker's answer. The task write that clears
+   the row usually drops the route first, so `blockers_changed_in` remembers a timed-out route it
+   dropped (10 min) and `after_timeout` is read from there. The coordinator's message keeps the
+   worker's question and option label on their own `The worker’s …` lines, outside maiTerm's
+   sentence about the human, so a quote closed inside them can't read as the human speaking.
+   Dismiss writes nothing.
 8. Gallery: store and index, `galleryAdd`/`List`/`Get`/`Tag`/`Collect`, thumbnails, the grid
    and detail view; then compare, Iterate/attach, collections, deliver (plain folders only,
    §7.3). The **budget**: recorded spend per paid render, the header total and the

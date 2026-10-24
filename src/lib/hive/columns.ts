@@ -126,6 +126,19 @@ export function fitColumns(p: FitInput): Fit {
   return { coord, board: 'rail', shown: shown.map((c) => c.taskId), suppressed };
 }
 
+/** The tabs whose column `fit` puts on screen: the coordinator unless it is a strip, and the
+ *  shown workers' (one without a tab yet has nothing to count). What a Hive tab's notices count as
+ *  visible (§4.7, plan D27); a column given way is not open to the human. */
+export function tabsOnScreen(fit: Pick<Fit, 'coord' | 'shown'>, coordTab: string | null | undefined, tabOf: (taskId: string) => string | null | undefined): string[] {
+  const ids: string[] = [];
+  if (coordTab && fit.coord === 'full') ids.push(coordTab);
+  for (const taskId of fit.shown) {
+    const tab = tabOf(taskId);
+    if (tab) ids.push(tab);
+  }
+  return ids;
+}
+
 /** The focus stops of Cmd+Shift+[ / ], left to right. The board (or rail) is one: Files keeps its
  *  last root while it holds focus. Every open column is a stop, given way or not: focused, one
  *  becomes `fitColumns`' keeper and shows again, where stops taken from `Fit.shown` would lose

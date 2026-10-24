@@ -25,7 +25,9 @@ import { pruneHiddenDefaultOverlordRules, seedDefaultOverlordRules } from '$lib/
 import { DEFAULT_AGENT_STATES, guardsForCondition } from '$lib/overlord/format';
 import { getVariables, interpolateShell, setVariable } from '$lib/stores/triggers.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { engineSkips, HIVE_SUPERVISED_DETAIL } from '$lib/hive/model';
+import { coordinatorHolds, engineSkips, HIVE_COORDINATOR_HOLDS, HIVE_SUPERVISED_DETAIL } from '$lib/hive/model';
+import { recordHumanBlockerAnswer } from '$lib/hive/prompts';
+import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
 import { summarizeBatch, type TabBatchRow, type TabBatchResult } from '$lib/stores/tabBatch';
 import { answerBlocker as answerBlockerText, dismissBlocker as dismissBlockerCheck, appendNote, findImportedDuplicate, isInFlight, isParked, isRetired, makeTask, normalizeTitle, statusFromAgent, type BlockerAnswer, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
@@ -3577,8 +3579,16 @@ function createOverlordStore() {
       const { workspaceId, task } = hit;
       const r = answerBlockerText(task, answer);
       if (!r.ok) return { answered: false, told: 'nobody', reason: r.reason, detail: r.detail };
+      // A Hive worker's question its coordinator holds is read-only here, the phone included,
+      // until it times out or the human takes it over (docs/hive.md §7.4, plan D12).
+      const blocker = task.blocker;
+      if (blocker && coordinatorHolds(hivePrompts.blockerOwner(id, blocker.asked_at))) {
+        return { answered: false, told: 'nobody', reason: 'coordinator', detail: HIVE_COORDINATOR_HOLDS };
+      }
       tasksStore.update(workspaceId, id, { status: 'active', notes: appendNote(task, r.note, 'human') });
       bumpLive();
+      // Into the Hive's decision log (plan D16): the one path every human blocker answer takes.
+      if (blocker) void recordHumanBlockerAnswer(workspacesStore.workspaces.find((w) => w.id === workspaceId), id, blocker, answer, (m) => logWarn(m));
       const tabId = task.tab_id;
       if (!tabId) return { answered: true, told: 'nobody' };
 
@@ -3617,6 +3627,7 @@ function createOverlordStore() {
       const { workspaceId, task } = hit;
       const r = dismissBlockerCheck(task, askedAt);
       if (!r.ok) return { dismissed: false, detail: r.detail };
+      if (coordinatorHolds(hivePrompts.blockerOwner(id, askedAt))) return { dismissed: false, detail: HIVE_COORDINATOR_HOLDS };
       tasksStore.update(workspaceId, id, { status: 'active', notes: appendNote(task, r.note, 'human') });
       bumpLive();
       return { dismissed: true };

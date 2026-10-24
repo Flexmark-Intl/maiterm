@@ -11,7 +11,7 @@ import {
 import { info as logInfo } from '@tauri-apps/plugin-log';
 import { playSystemSound } from '$lib/tauri/commands';
 import type { Tab } from '$lib/tauri/types';
-import { hiveOwnsPrompt } from '$lib/hive/model';
+import { hiveOwnsPrompt } from './hivePrompts.svelte';
 
 // NOTE: The `extra` field is passed through to Rust but only used on mobile (iOS/Android).
 // On desktop, tauri-plugin-notification uses notify_rust which discards extra data and has
@@ -144,8 +144,9 @@ export async function dispatch(
   }
 
   // A Hive worker's prompt its coordinator answers notifies nobody either; it still shows where
-  // the human looks on purpose, as a muted tab's does (docs/hive.md §4.7).
-  if (source?.kind && hiveOwnsPrompt(tab, source.kind)) {
+  // the human looks on purpose, as a muted tab's does (docs/hive.md §4.7). Rust's own
+  // `hive-human` notice, sent when one turns out to be the human's, is never held back.
+  if (source?.kind && hiveOwnsPrompt(tab?.id, source.kind)) {
     logInfo(`Notification (Hive coordinator's ${source.kind}, tab ${source.tabId}): ${title}`);
     return;
   }

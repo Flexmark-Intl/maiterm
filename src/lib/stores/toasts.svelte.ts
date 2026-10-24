@@ -1,10 +1,11 @@
 import { preferencesStore } from './preferences.svelte';
-import type { HivePromptKind } from '$lib/hive/model';
+import type { NotifyKind } from '$lib/hive/model';
 
 export interface ToastSource {
   tabId: string;
-  /** What it is about, when a Hive's coordinator may be the one to answer it (`hiveOwnsPrompt`). */
-  kind?: HivePromptKind;
+  /** What it is about, when a Hive's coordinator may be the one to answer it (`hiveOwnsPrompt`),
+   *  or `hive-human`: Rust says a worker's prompt needs the human, which nothing holds back. */
+  kind?: NotifyKind;
 }
 
 export interface Toast {

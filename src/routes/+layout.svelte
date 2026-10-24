@@ -32,6 +32,7 @@
   import { browserLinkStore } from '$lib/stores/browserLink.svelte';
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
   import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
+  import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
   import { agentDelivery } from '$lib/stores/agentDeliveryLive';
   import { toastStore } from '$lib/stores/toasts.svelte';
   import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -789,6 +790,9 @@
     // Agent requests the human approves (docs/agent-requests.md): the waiting list, and this
     // window's share of carrying out approved ones and telling the agent.
     void agentRequestsStore.init();
+    // Hive prompt routes (docs/hive.md §4.7): the notification gate's mirror, and Rust's word that
+    // a worker's prompt needs the human, wherever they are in this window.
+    void hivePrompts.init();
 
     // OS notification click → deep-link to workspace+tab.
     // NOTE: onAction only fires on mobile (iOS/Android). On desktop (macOS/Linux/Windows),
@@ -1490,6 +1494,7 @@
       agentBridgeStore.destroy();
       agentMeshStore.destroy();
       agentRequestsStore.destroy();
+      hivePrompts.destroy();
       agentDelivery.destroy(); // the mailbox both of them share
       unlistenNotificationAction?.unregister();
       unlistenFocus?.();

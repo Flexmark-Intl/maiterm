@@ -1199,6 +1199,7 @@ pub fn run() {
             hive::checkpoints::hive_set_autonomy,
             hive::prompts::hive_take_over,
             hive::prompts::hive_prompt_routes,
+            hive::decisions::hive_blocker_answered,
             #[cfg(debug_assertions)]
             share::open::share_debug_open,
         ])

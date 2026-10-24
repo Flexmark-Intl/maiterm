@@ -7,10 +7,17 @@
   The same two click guards as BlockerCard: nothing is answered in a prompt's first 1.5 s on
   screen (a card that appears under the pointer takes no click meant for what was there), and
   the second click of a double-click is never an answer.
+
+  A Hive worker's prompt its coordinator holds (docs/hive.md §7.4) reads "With coordinator": the
+  rows read-only, and Take over, under the same two guards, to make it the human's. Rust refuses
+  the human's answer meanwhile anyway (plan D12); past the timeout either may answer.
 -->
 <script lang="ts">
   import { answerTabPromptAsHuman, getTabPrompt, type PromptAnswer, type TabPrompt } from '$lib/tauri/commands';
   import { info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
+  import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
+  import { withCoordinatorText } from '$lib/hive/model';
+  import Tooltip from '$lib/components/Tooltip.svelte';
 
   interface Props {
     tabId: string;
@@ -52,6 +59,7 @@
     const forTab = tabId;
     const n = ++reqSeq;
     const p = await getTabPrompt(forTab).catch(() => null);
+    clock = Date.now();
     // A read started for the previous chat must not paint its prompt into this one.
     if (forTab !== tabId || n < appliedSeq) return;
     appliedSeq = n;
@@ -166,12 +174,47 @@
     void answer(e, null, answers);
   }
 
+  /** The poll's clock, for "told in N min". */
+  let clock = $state(Date.now());
+  /** The Hive's coordinator holds it alone: read-only here until it times out or is taken over. */
+  const held = $derived(prompt?.owner === 'coordinator' && !prompt.timed_out);
+
+  async function takeOver(e: MouseEvent) {
+    if (!prompt || e.detail > 1 || sending) return;
+    if (guarded(e)) {
+      note = 'That prompt only just appeared. Check it, then click again.';
+      return;
+    }
+    sending = true;
+    const forTab = tabId;
+    const pid = prompt.prompt_id;
+    try {
+      await hivePrompts.takeOver(forTab, pid);
+      logInfo(`Loom prompt card: took over ${pid} on ${forTab} from the Hive's coordinator`);
+      if (forTab === tabId) note = "Yours now: the coordinator was told to leave it.";
+    } catch (err) {
+      logWarn(`Loom prompt card: take over of ${pid} on ${forTab} failed: ${err}`);
+      if (forTab === tabId) note = `Not taken over: ${err instanceof Error ? err.message : err}`;
+    } finally {
+      sending = false;
+      void refresh(true);
+    }
+  }
+
   /** A refusal is styled as one by its label, the way the phone does. */
   const refusal = (label: string) => /^(no\b|deny|tell claude)/i.test(label.trim());
 </script>
 
 {#if prompt}
-  <section class="prompt" data-kind={prompt.kind} aria-live="polite">
+  <section class="prompt" data-kind={prompt.kind} class:held aria-live="polite">
+    {#if held}
+      <div class="held-bar">
+        <span>{withCoordinatorText(prompt.due_at, clock)}</span>
+        <Tooltip text="Answer it yourself: the coordinator is told to leave it">
+          <button class="take" disabled={sending} onclick={takeOver}>Take over</button>
+        </Tooltip>
+      </div>
+    {/if}
     {#if prompt.kind === 'trust'}
       <h5>Trust this folder?</h5>
       <p class="what">{prompt.path}</p>
@@ -186,7 +229,7 @@
       <p class="what">{prompt.tool ?? 'A tool'}{prompt.detail ? `: ${prompt.detail}` : ''}</p>
       <div class="opts">
         {#each prompt.options ?? ['Yes', 'No'] as o (o)}
-          <button class:no={refusal(o)} disabled={sending} onclick={(e) => answer(e, o, null)}>{o}</button>
+          <button class:no={refusal(o)} disabled={sending || held} onclick={(e) => answer(e, o, null)}>{o}</button>
         {/each}
       </div>
     {:else if questions.length}
@@ -198,6 +241,7 @@
             {#each q.options ?? [] as o (o.label)}
               <button
                 class="pick"
+                disabled={held}
                 aria-pressed={(picks[qi] ?? []).includes(o.label)}
                 onclick={(e) => { if (e.detail <= 1) toggle(qi, o.label, !!q.multiSelect); }}
               >
@@ -206,6 +250,7 @@
             {/each}
             <input
               class="other"
+              disabled={held}
               placeholder="Or answer in your own words"
               value={others[qi] ?? ''}
               oninput={(e) => {
@@ -218,7 +263,7 @@
         </div>
       {/each}
       <div class="opts">
-        <button class="send" disabled={!complete || sending} onclick={submitQuestions}>Send answer{questions.length > 1 ? 's' : ''}</button>
+        <button class="send" disabled={!complete || sending || held} onclick={submitQuestions}>Send answer{questions.length > 1 ? 's' : ''}</button>
       </div>
     {:else}
       <h5>The agent is asking a question</h5>
@@ -244,6 +289,12 @@
   }
   .prompt[data-kind='question'] { --c: var(--orange, #ff9e64); }
   .prompt[data-kind='trust'] { --c: var(--yellow); }
+  .prompt.held { --c: var(--fg-dim); }
+  .held-bar { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px; font-size: 11.5px; color: var(--fg-dim); }
+  .take { background: none; border: 1px solid var(--bg-light); border-radius: 6px; color: var(--accent); font: inherit; font-size: 11.5px; padding: 2px 9px; cursor: pointer; }
+  .take:hover:not(:disabled) { border-color: var(--accent); }
+  .take:disabled { opacity: 0.5; cursor: default; }
+  .pick:disabled, .other:disabled { opacity: 0.6; cursor: default; }
   h5 { margin: 0; font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
   .hdr { font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--c); }
   .what { margin: 0; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; overflow-wrap: anywhere; white-space: pre-wrap; }

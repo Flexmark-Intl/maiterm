@@ -564,6 +564,26 @@ export interface HivePromptRoute {
   timed_out: boolean;
 }
 
+/** hive/prompts.rs `HumanNotice`, sent as `hive-prompt-notify`: a worker's prompt needs the
+ *  human after all (outside the allowlist, the coordinator's time ran out, a checkpoint now Ask me). */
+export interface HivePromptNotice {
+  workspace_id: string;
+  tab_id: string;
+  /** "permission" | "question" | "trust" | "blocker". */
+  kind: string;
+  /** `Hive · #2 Session store`. */
+  title: string;
+  /** "timeout", "ask", "take_over", or the reason it is the human's. */
+  why: string;
+}
+
+/** hive/decisions.rs `BlockerAnswerArg`: what the human chose on a blocker card. */
+export interface HiveBlockerAnswerArg {
+  /** The option's label, or null for words only. */
+  option: string | null;
+  text: string;
+}
+
 /** hive/record.rs `LandSettings` (docs/hive.md §8.1, §6.8). */
 export interface LandSettings {
   /** Paths the human adds to the config rule: a land touching one goes to the human. */
