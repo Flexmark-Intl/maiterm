@@ -360,7 +360,7 @@ fn collect(app_data: &AppData) -> (Vec<Candidate>, HashSet<String>) {
 }
 
 fn scripts_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|p| p.join(crate::state::persistence::app_data_slug()).join("watch-scripts"))
+    crate::state::persistence::app_data_dir().map(|p| p.join("watch-scripts"))
 }
 
 /// Script and state files whose follow-up is gone — delivered, cancelled, expired and cleared,

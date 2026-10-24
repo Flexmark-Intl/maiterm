@@ -1,5 +1,7 @@
 import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskBlocker, TaskStatus, Service, ServiceRestart } from '$lib/tauri/types';
 import { stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
+import { refusedAgentEdits } from '$lib/stack/model';
+import { isMaitermOwnedVar } from '$lib/triggers/shellInterpolate';
 import { followUpsStore } from '$lib/stores/followUps.svelte';
 import { hostLabel, isScriptKind, needsApproval, triggerText, type CreateArgs } from '$lib/followUps/model';
 import * as commands from '$lib/tauri/commands';
@@ -1142,6 +1144,12 @@ function createClaudeCodeStore() {
     if ('error' in scope) return scope;
     const s = resolveService(scope.workspace, args.service);
     if ('error' in s) return s;
+    // The human's own definition is theirs to change (Hive spike 15): refused whole, so nothing
+    // half-applies, and named so the agent knows what it may still report.
+    const refused = refusedAgentEdits(s, args);
+    if (refused.length) {
+      return { error: `"${s.name}" was defined by your human, so only they can change its ${refused.join(', ')}. You may still report its port, url, ready and note.` };
+    }
     const patch: Partial<Service> = {};
     if (args.name !== undefined) patch.name = args.name;
     if (args.command !== undefined) patch.command = args.command;
@@ -1150,6 +1158,8 @@ function createClaudeCodeStore() {
     if (args.auto_start !== undefined) patch.auto_start = args.auto_start;
     if (args.restart !== undefined) patch.restart = args.restart;
     if (args.ready_pattern !== undefined) patch.ready_pattern = args.ready_pattern;
+    // Every agent definition write is recorded, so the flag stays true of anything an agent wrote.
+    if (Object.keys(patch).length) patch.agent_edited = true;
     try {
       if (Object.keys(patch).length) await stackStore.updateService(scope.workspace.id, s.id, patch);
       await stackStore.reportEndpoint(scope.workspace.id, s.id, { port: args.port, url: args.url, ready: args.ready, note: args.note });
@@ -2319,6 +2329,8 @@ function createClaudeCodeStore() {
   async function handleSetTriggerVariable(args: { tabId?: string; name: string; value: string | null }) {
     const tab = resolveActiveTab(args.tabId);
     if ('error' in tab) return tab;
+    // Typed verbatim into the tab's shell by auto-resume, so only the SSH bridge writes these.
+    if (isMaitermOwnedVar(args.name)) return { error: `%${args.name} is set by maiTerm itself; an agent can't set or clear it.` };
     await setVariable(tab.tab.id, args.name, args.value);
     return { success: true, tabId: tab.tab.id, name: args.name, value: args.value };
   }

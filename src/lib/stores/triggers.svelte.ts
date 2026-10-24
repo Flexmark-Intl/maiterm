@@ -8,9 +8,10 @@ import { stripAnsi } from '$lib/utils/ansi';
 import { pasteSettleMs } from '$lib/utils/agentPrompt';
 import { getCompiledTitlePatterns, getCompiledPatterns, extractDirFromTitle } from '$lib/utils/promptPattern';
 import { dispatch } from './notificationDispatch';
-import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
+import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 import { mergeAutoResumeContext } from '$lib/stores/autoResumeContext';
 import { parseCondition, evaluateCondition } from '$lib/triggers/variableCondition';
+import { interpolateShellWith, isMaitermOwnedVar } from '$lib/triggers/shellInterpolate';
 import { isForkCommand, isResumeTemplate, sessionIdVar, toForkCommand } from '$lib/agents/resume';
 import { launchCommand } from '$lib/agents/descriptor';
 import { hiveLaunchLine, isHiveTab } from '$lib/hive/launch';
@@ -266,6 +267,8 @@ function extractAndStoreVariables(
   for (const v of variables) {
     const raw = match[v.group];
     if (raw === undefined) continue;
+    // Terminal output never writes what auto-resume types verbatim (shellInterpolate.ts).
+    if (isMaitermOwnedVar(v.name)) continue;
     const value = v.template ? v.template.replace(/%/g, raw) : raw;
     if (vars.get(v.name) !== value) {
       vars.set(v.name, value);
@@ -296,11 +299,8 @@ async function executeActions(
       const instance = terminalsStore.get(tabId);
       if (!instance) continue;
       try {
-        let cmd = entry.command;
-        const vars = variableMap.get(tabId);
-        if (vars) {
-          cmd = cmd.replace(/%(\w+)/g, (m, name) => vars.has(name) ? vars.get(name)! : m);
-        }
+        // Typed into the tab: a captured value a shell would act on is left as its `%name`.
+        const cmd = interpolateShell(tabId, entry.command);
         // Enter is a CR sent as its own keystroke after a settle delay: an agent TUI
         // reads '\n' (Ctrl+J) as "insert newline", and treats text+CR arriving in one
         // burst as a paste that swallows the CR. A shell accepts either.
@@ -514,7 +514,7 @@ export async function replayAutoResume(tabId: string) {
       );
       let payload = ssh + '\n';
       if (cmd) {
-        payload += interpolateVariables(tabId, cmd, true) + '\n';
+        payload += interpolateShell(tabId, cmd, true) + '\n';
       }
       const bytes = Array.from(new TextEncoder().encode(payload));
       await writeTerminal(instance.ptyId, bytes);
@@ -526,7 +526,7 @@ export async function replayAutoResume(tabId: string) {
       if (localCwd) {
         payload += `cd ${shellEscapePath(localCwd)}\n`;
       }
-      payload += interpolateVariables(tabId, cmd, true) + '\n';
+      payload += interpolateShell(tabId, cmd, true) + '\n';
       const bytes = Array.from(new TextEncoder().encode(payload));
       await writeTerminal(instance.ptyId, bytes);
     }
@@ -808,4 +808,12 @@ export function interpolateVariables(tabId: string, text: string, clearUnresolve
     if (vars?.has(name)) return vars.get(name)!;
     return clearUnresolved ? '' : m;
   });
+}
+
+/** `interpolateVariables` for text typed into a shell: a value outside the shell-safe set
+ *  counts as unresolved, and is logged (`triggers/shellInterpolate.ts`). */
+export function interpolateShell(tabId: string, text: string, clearUnresolved = false): string {
+  return interpolateShellWith(variableMap.get(tabId), text, clearUnresolved, (name) =>
+    logWarn(`trigger variable %${name} on tab ${tabId.slice(0, 8)} has characters a shell would act on: not typed`),
+  );
 }

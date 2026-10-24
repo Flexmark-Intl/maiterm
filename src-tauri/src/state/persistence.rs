@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use super::workspace::{AppData, Layout, SplitDirection, SplitNode, TabType, Task, WindowData};
 
@@ -66,17 +66,11 @@ const CONFLICT_PREFIX: &str = "aiterm-state.conflict-";
 const SUPERSEDED_PREFIX: &str = "aiterm-state.superseded-";
 
 fn get_conflict_path(timestamp_ms: u64) -> Option<PathBuf> {
-    dirs::data_dir().map(|p| {
-        p.join(app_data_slug())
-            .join(format!("{}{}.json", CONFLICT_PREFIX, timestamp_ms))
-    })
+    app_data_dir().map(|p| p.join(format!("{}{}.json", CONFLICT_PREFIX, timestamp_ms)))
 }
 
 fn get_superseded_path(timestamp_ms: u64) -> Option<PathBuf> {
-    dirs::data_dir().map(|p| {
-        p.join(app_data_slug())
-            .join(format!("{}{}.json", SUPERSEDED_PREFIX, timestamp_ms))
-    })
+    app_data_dir().map(|p| p.join(format!("{}{}.json", SUPERSEDED_PREFIX, timestamp_ms)))
 }
 
 /// How many snapshots to keep per kind. A conflict is retried on every save, so
@@ -85,7 +79,7 @@ fn get_superseded_path(timestamp_ms: u64) -> Option<PathBuf> {
 const MAX_SNAPSHOTS: usize = 5;
 
 fn prune_snapshots(prefix: &str) {
-    let Some(dir) = dirs::data_dir().map(|p| p.join(app_data_slug())) else { return };
+    let Some(dir) = app_data_dir() else { return };
     let Ok(entries) = fs::read_dir(&dir) else { return };
     let mut snapshots: Vec<PathBuf> = entries
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -154,38 +148,45 @@ pub fn get_save_stats() -> (u64, u64, u64, u64) {
     )
 }
 
+/// The data folder's name: `com.aiterm.app`, `com.aiterm.dev`, or `com.aiterm.dev.<name>` for an
+/// isolated dev instance (`MAITERM_INSTANCE`, crate::instance).
 pub fn app_data_slug() -> &'static str {
-    if cfg!(debug_assertions) {
-        "com.aiterm.dev"
-    } else {
-        "com.aiterm.app"
-    }
+    static SLUG: OnceLock<String> = OnceLock::new();
+    SLUG.get_or_init(crate::instance::slug)
+}
+
+/// `<OS data dir>/<app_data_slug()>`: the one place the two are joined, so nothing can reach
+/// another instance's folder by joining them itself (`no_data_dir_outside_the_helpers`).
+pub fn app_data_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|p| p.join(app_data_slug()))
+}
+
+/// The OS's own data dir, for paths that are not maiTerm's (Chrome's user-data roots).
+pub fn os_data_dir() -> Option<PathBuf> {
+    dirs::data_dir()
 }
 
 pub fn get_state_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|p| p.join(app_data_slug()).join("aiterm-state.json"))
+    app_data_dir().map(|p| p.join("aiterm-state.json"))
 }
 
 fn get_backup_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|p| p.join(app_data_slug()).join("aiterm-state.bak.json"))
+    app_data_dir().map(|p| p.join("aiterm-state.bak.json"))
 }
 
 /// Per-process temp file. SAVE_LOCK keeps this process's own saves off each other's
 /// toes, but a second instance sharing the data dir has its own lock — a shared temp
 /// name lets its rename pull the file out from under ours mid-save.
 fn get_temp_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|p| {
-        p.join(app_data_slug())
-            .join(format!("aiterm-state.tmp-{}.json", std::process::id()))
-    })
+    app_data_dir().map(|p| p.join(format!("aiterm-state.tmp-{}.json", std::process::id())))
 }
 
 fn get_memory_trend_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|p| p.join(app_data_slug()).join("aiterm-memory-trend.json"))
+    app_data_dir().map(|p| p.join("aiterm-memory-trend.json"))
 }
 
 fn get_crash_marker_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|p| p.join(app_data_slug()).join("aiterm-running.marker"))
+    app_data_dir().map(|p| p.join("aiterm-running.marker"))
 }
 
 /// Snapshot of the previous run's exit state, captured at startup.
@@ -200,7 +201,6 @@ pub struct PreviousRunInfo {
     pub marker_mtime_secs: Option<u64>,
 }
 
-use std::sync::OnceLock;
 static PREVIOUS_RUN: OnceLock<PreviousRunInfo> = OnceLock::new();
 
 /// Capture the previous run's state and arm the marker for this run.
@@ -319,7 +319,7 @@ pub(crate) fn parse_state(contents: &str) -> Result<AppData, serde_json::Error> 
 }
 
 fn get_corrupt_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|p| p.join(app_data_slug()).join("aiterm-state.corrupt.json"))
+    app_data_dir().map(|p| p.join("aiterm-state.corrupt.json"))
 }
 
 /// Preserve a corrupt state file so the user can recover data manually.
@@ -1206,5 +1206,44 @@ mod migration_tests {
         let mut data = window_with_legacy("ws-1", serde_json::json!([]));
         migrate_app_data(&mut data);
         assert!(data.windows[0].workspaces[0].tasks.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod data_dir_tests {
+    /// Every path into maiTerm's data folder goes through `app_data_dir`, so an isolated
+    /// instance (`MAITERM_INSTANCE`) can't reach dev's folder through a call site that joins
+    /// the slug itself. The OS dir itself is `os_data_dir`'s, for folders that aren't ours.
+    #[test]
+    fn no_data_dir_outside_the_helpers() {
+        let needle = ["dirs::", "data_dir()"].concat();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let rel = path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+                let allowed = if rel == "state/persistence.rs" { 2 } else { 0 };
+                let found = text.matches(&needle).count();
+                if found != allowed {
+                    offenders.push(format!("{rel}: {found}"));
+                }
+            }
+        }
+        assert!(offenders.is_empty(), "use persistence::app_data_dir (or os_data_dir): {offenders:?}");
+    }
+
+    #[test]
+    fn the_data_dir_is_the_os_dir_joined_with_the_slug() {
+        assert_eq!(super::app_data_dir(), super::os_data_dir().map(|d| d.join(super::app_data_slug())));
     }
 }

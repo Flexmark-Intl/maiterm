@@ -7,7 +7,7 @@
 
 import { hiveLaunchCommand } from '$lib/tauri/commands';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
-import { interpolateVariables } from '$lib/stores/triggers.svelte';
+import { interpolateShell } from '$lib/stores/triggers.svelte';
 import { resumeCommandFor } from '$lib/stores/agentState.svelte';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { error as logError } from '@tauri-apps/plugin-log';
@@ -33,5 +33,5 @@ export async function hiveLaunchLine(tabId: string): Promise<string | null> {
  *  is known; a Hive tab gets its builder line, or null when that was refused. */
 export async function relaunchLine(tabId: string): Promise<string | null> {
   if (isHiveTab(tabId)) return hiveLaunchLine(tabId);
-  return interpolateVariables(tabId, resumeCommandFor(workspacesStore.getTabRuntime(tabId)));
+  return interpolateShell(tabId, resumeCommandFor(workspacesStore.getTabRuntime(tabId)));
 }

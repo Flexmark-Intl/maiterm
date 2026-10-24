@@ -1366,6 +1366,8 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
                 port: None,
                 url: None,
                 origin: "human".to_string(),
+                // The human approved the file: an agent edit before it was shared doesn't follow.
+                agent_edited: false,
                 created_at: now.clone(),
                 updated_at: now.clone(),
             }
@@ -1687,6 +1689,8 @@ mod tests {
         assert_eq!(tabs[1].auto_resume_command, None, "and never runs the remote's resume command locally");
         assert!(none.launches.is_empty());
         assert!(!none.workspace.stack[0].auto_start);
+        let imported = &none.workspace.stack[0];
+        assert!(imported.origin == "human" && !imported.agent_edited, "an import is the human's definition");
 
         let approved = [
             tab_review_key(&local, "resume"),

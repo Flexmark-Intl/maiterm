@@ -1975,6 +1975,11 @@ export async function getMcpAuth(): Promise<string | null> {
   return invoke('get_mcp_auth');
 }
 
+/** Why the SSH MCP bridge is off in this launch (an isolated test instance), or null. */
+export async function getSshBridgeRefusal(): Promise<string | null> {
+  return invoke('get_ssh_bridge_refusal');
+}
+
 /**
  * The bridge values to export in a tab's ssh command, for the host that command targets.
  * Answerable before the tunnel exists — see buildSshCommand. Null while the MCP server

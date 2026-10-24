@@ -24,7 +24,7 @@ pub fn is_reserved_folder_name(name: &str) -> bool {
 
 /// `<app data>/hive`.
 pub fn hives_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join(crate::state::persistence::app_data_slug()).join("hive"))
+    crate::state::persistence::app_data_dir().map(|d| d.join("hive"))
 }
 
 /// `<app data>/hive/bin`: the hook script and the port file it reads (§6.8). Shared by every

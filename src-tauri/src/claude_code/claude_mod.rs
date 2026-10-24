@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::state::persistence::app_data_slug;
+use crate::state::persistence::app_data_dir;
 
 /// Set once, by `install` at startup: the folder tabs are pointed at, or `None` when it could
 /// not be written (and then no tab is).
@@ -54,7 +54,7 @@ pub fn files() -> &'static [(&'static str, &'static str)] {
 /// Where this build installs the mod. Per build flavor (`app_data_slug`), so a dev maiTerm and
 /// the installed one never overwrite each other's copy.
 pub fn plugin_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join(app_data_slug()).join("claude-mod").join(PLUGIN))
+    app_data_dir().map(|d| d.join("claude-mod").join(PLUGIN))
 }
 
 /// Writes the mod's files where `plugin_dir` says, rewriting only those that changed: a running

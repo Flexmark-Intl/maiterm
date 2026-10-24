@@ -12,6 +12,7 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "tauri:dev": "lsof -ti :1420 | xargs kill -9 2>/dev/null; tauri dev --features mcp-bridge --config src-tauri/tauri.dev.conf.json",
+    "tauri:dev:isolated": "node scripts/dev-isolated.mjs",
     "tauri:build": "./scripts/build-release.sh",
     "website:dev": "npm --prefix website run dev",
     "website:review": "npm --prefix website run review",

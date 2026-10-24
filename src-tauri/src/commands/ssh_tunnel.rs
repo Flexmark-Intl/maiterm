@@ -13,9 +13,14 @@ use crate::state::AppState;
 /// 104 bytes — the app data dir doesn't reliably fit.
 #[cfg(unix)]
 pub fn cm_socket_path(host_key: &str) -> Option<std::path::PathBuf> {
-    let dir = dirs::home_dir()?
-        .join(".maiterm")
-        .join(if cfg!(debug_assertions) { "cm-dev" } else { "cm" });
+    // An isolated instance has its own: its startup sweep kills whatever holds a socket here,
+    // and a shared file name would hand dev's master to it.
+    let flavor = match crate::instance::name() {
+        Some(n) => format!("cm-dev.{n}"),
+        None if cfg!(debug_assertions) => "cm-dev".to_string(),
+        None => "cm".to_string(),
+    };
+    let dir = dirs::home_dir()?.join(".maiterm").join(flavor);
     let safe: String = host_key
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@') { c } else { '_' })
@@ -237,10 +242,7 @@ struct RemotePortBook {
 }
 
 fn remote_port_book_path() -> Option<std::path::PathBuf> {
-    dirs::data_dir().map(|p| {
-        p.join(crate::state::persistence::app_data_slug())
-            .join("aiterm-remote-ports.json")
-    })
+    crate::state::persistence::app_data_dir().map(|p| p.join("aiterm-remote-ports.json"))
 }
 
 /// The in-process copy. Loaded once, written through on every change — the file only
@@ -473,6 +475,9 @@ pub async fn start_ssh_tunnel(
     tab_id: String,
     local_port: u16,
 ) -> Result<SshTunnelInfo, String> {
+    if let Some(why) = ssh_bridge_refusal() {
+        return Err(why);
+    }
     // Serialize same-host starts (single-flight): an app restart re-bridges dozens of
     // tabs at once, many to the same server. Without this they all pass the exists-check
     // below before any has stored an entry, and every tab spawns its own redundant
@@ -883,6 +888,18 @@ pub fn get_mcp_port(state: tauri::State<'_, Arc<AppState>>) -> Option<u16> {
     *state.mcp_port.read()
 }
 
+/// Why the SSH MCP bridge is off in this launch, or None. Its remote setup rewrites the host's
+/// `~/.codex/config.toml` and hooks with this instance's tunnel port and token, which would point
+/// the other maiTerms' agents on that host at an isolated instance (crate::instance).
+#[tauri::command]
+pub fn get_ssh_bridge_refusal() -> Result<Option<String>, String> {
+    Ok(ssh_bridge_refusal())
+}
+
+fn ssh_bridge_refusal() -> Option<String> {
+    crate::instance::global_write_refusal()
+}
+
 /// Get the MCP auth token (needed by frontend to write remote lockfile).
 #[tauri::command]
 pub fn get_mcp_auth(state: tauri::State<'_, Arc<AppState>>) -> Option<String> {
@@ -1135,6 +1152,9 @@ pub async fn ssh_run_setup(
     ssh_args: String,
     setup_script: String,
 ) -> Result<(), String> {
+    if let Some(why) = ssh_bridge_refusal() {
+        return Err(why);
+    }
     let mut cmd_args: Vec<String> = Vec::new();
     // Fully independent connection — never share the user's ControlMaster socket (see
     // start_ssh_tunnel: sharing it lets the bridge poison the user's own `ssh <host>`).

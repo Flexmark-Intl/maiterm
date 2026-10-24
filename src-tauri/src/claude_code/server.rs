@@ -305,7 +305,12 @@ pub struct ServerSetup {
 /// Returns `None` when the IDE integration is disabled in preferences or when
 /// we couldn't bind any port.
 pub fn prepare_server(state: &Arc<AppState>) -> Option<ServerSetup> {
-    cleanup_stale_lockfiles();
+    // An isolated instance (crate::instance) writes none of the global config: the lockfiles,
+    // `~/.claude.json`, hooks, skill and Codex config belong to the maiTerms agents really use.
+    let global_writes = crate::instance::global_write_refusal().is_none();
+    if global_writes {
+        cleanup_stale_lockfiles();
+    }
 
     if registrar::enabled_registrars(&state.app_data.read().preferences).is_empty() {
         log::info!("No agent IDE integration enabled in preferences");
@@ -314,12 +319,26 @@ pub fn prepare_server(state: &Arc<AppState>) -> Option<ServerSetup> {
 
     let mut rng = rand::thread_rng();
     let mut bound = None;
-    for _ in 0..100 {
-        let port = rng.gen_range(10000..65535u16);
-        if let Ok(l) = std::net::TcpListener::bind(format!("127.0.0.1:{}", port)) {
-            bound = Some(l);
-            break;
+    match crate::instance::mcp_port() {
+        Ok(Some(port)) => match std::net::TcpListener::bind(format!("127.0.0.1:{}", port)) {
+            Ok(l) => bound = Some(l),
+            // `instance::startup_refusal` probed it free; losing it since is a race, and an
+            // isolated instance never runs as a different test subject than asked for.
+            Err(e) => {
+                log::error!("MCP server: the pinned port {port} is not free: {e}; isolated instance exiting");
+                std::process::exit(1);
+            }
+        },
+        Ok(None) => {
+            for _ in 0..100 {
+                let port = rng.gen_range(10000..65535u16);
+                if let Ok(l) = std::net::TcpListener::bind(format!("127.0.0.1:{}", port)) {
+                    bound = Some(l);
+                    break;
+                }
+            }
         }
+        Err(e) => log::error!("MCP server: {e}"),
     }
     let std_listener = match bound {
         Some(l) => l,
@@ -348,13 +367,15 @@ pub fn prepare_server(state: &Arc<AppState>) -> Option<ServerSetup> {
     // Snapshot prefs (clone) so no app_data lock is held during the registrars'
     // filesystem I/O. workspace_folders is collected above to avoid a nested read.
     let prefs = state.app_data.read().preferences.clone();
-    for r in registrar::enabled_registrars(&prefs) {
-        r.install(port, &auth, &workspace_folders, &prefs);
+    if global_writes {
+        for r in registrar::enabled_registrars(&prefs) {
+            r.install(port, &auth, &workspace_folders, &prefs);
+        }
+        // Proxied MCP servers' entries name this port too, so they are written before any tab
+        // spawns as well (docs/mcp-proxy.md §6).
+        crate::mcp_proxy::entries::sync(port, &auth, &prefs);
+        crate::browser_link::write_discovery(port);
     }
-    // Proxied MCP servers' entries name this port too, so they are written before any tab
-    // spawns as well (docs/mcp-proxy.md §6).
-    crate::mcp_proxy::entries::sync(port, &auth, &prefs);
-    crate::browser_link::write_discovery(port);
     // Hive tabs' command hooks read the port from beside their script on every call, so a
     // restart can't strand them (docs/hive.md §6.8).
     if let Some(bin) = crate::hive::paths::hive_bin_dir() {
@@ -396,7 +417,12 @@ pub async fn serve_server(app_handle: AppHandle, state: Arc<AppState>, setup: Se
     let reassert_port = setup.port;
     let reassert_auth = setup.auth.clone();
     let reassert_state = state.clone();
+    // An isolated instance registered nothing, so it has nothing to re-assert.
+    let reassert = crate::instance::global_write_refusal().is_none();
     tauri::async_runtime::spawn(async move {
+        if !reassert {
+            return;
+        }
         let mut ticker = tokio::time::interval(MCP_REASSERT_INTERVAL);
         ticker.tick().await; // consume the immediate first tick
         loop {
@@ -580,6 +606,11 @@ fn persisted_resume_session_id(
 /// reaches an agent that never calls `initSession` — including a resumed one, which takes no
 /// turn at all until its human types. Empty when the tab needs neither.
 fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
+    // An isolated instance registered no tools for its agents (crate::instance): every
+    // instruction below would name tools they don't have, or another maiTerm's.
+    if let Some(name) = crate::instance::name() {
+        return crate::instance::agent_priming(name);
+    }
     let mut out = String::new();
 
     // A Hive agent's invariant rules go first, under the 2,000 characters Claude re-sends whole
@@ -3008,7 +3039,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 78] = [
 /// The agent-request tools (agent_requests.rs) are here for the same reason from the other side:
 /// a request is shown to the human as "the agent in <tab> asks…", so the tab named must be the
 /// caller, and a request's status is only its own tab's to read.
-const OWN_TAB_ONLY_TOOLS: [&str; 45] = [
+const OWN_TAB_ONLY_TOOLS: [&str; 56] = [
     // What a tab's shell runs on its next spawn is that tab's own business: with any `tabId`,
     // one agent could set the command another tab replays (found by the Hive spike 15 audit,
     // 2026-10-23). The only in-repo use is an agent fixing its OWN auto-resume.
@@ -3062,7 +3093,26 @@ const OWN_TAB_ONLY_TOOLS: [&str; 45] = [
     "hiveRun",
     "hiveReport",
     "hiveVerdict",
+    // The stack tools resolve their workspace from `tabId` (docs/stack.md §6.1): another tab's
+    // is another project's database to stop or shell to type into. Reads too, which name the
+    // commands and output of a project that isn't the caller's (Hive spike 15, 2026-10-23).
+    "listStack",
+    "getServiceOutput",
+    "waitForService",
+    "startService",
+    "stopService",
+    "restartService",
+    "startStack",
+    "stopStack",
+    "updateService",
+    "createService",
+    "removeService",
 ];
+
+/// The stack reads: own-tab-only, but off `PEER_ADDRESSING_TOOLS`, so a connection inferred
+/// after a reconnect still reads its own project's stack (docs/stack.md §6.1).
+#[cfg(test)]
+const STACK_READS: [&str; 3] = ["listStack", "getServiceOutput", "waitForService"];
 
 /// Tools gated on the caller BEING the Overlord agent (docs/overlord.md). The gate is judged on
 /// `tabId`, so the caller is always the connection's own STATED tab (`pin_overlord_caller`).
@@ -3127,7 +3177,7 @@ fn own_tab_refusal(tool_name: &str, explicit_tab: Option<&str>, affinity: Option
             "{tool_name} needs to know which tab is yours: run /maiterm init, then call it without a tabId."
         )),
         // No tabId: the connection's own binding is used — and an inferred one is refused by
-        // `refuse_on_inferred_identity`, since these are all on PEER_ADDRESSING_TOOLS.
+        // `refuse_on_inferred_identity`, since all but the stack reads are on PEER_ADDRESSING_TOOLS.
         (None, _) => None,
     }
 }
@@ -6326,11 +6376,41 @@ mod tests {
             // tab matched the guess. A guess vouches for nothing.
             assert!(own_tab_only_refusal(tool, Some("other"), Some(("other", false))).is_some(), "{tool}: tabId matching an inferred binding");
             // With no tabId, an inferred binding falls to the peer-addressing refusal instead.
+            // The stack reads keep the reconnect convenience: a guess reads the guessed tab's
+            // own stack, never one a tabId names.
+            if super::STACK_READS.contains(&tool) {
+                assert!(!PEER_ADDRESSING_TOOLS.contains(&tool), "{tool} is a read");
+                continue;
+            }
             assert!(PEER_ADDRESSING_TOOLS.contains(&tool), "{tool} must refuse an inferred identity");
             assert!(refuse_on_inferred_identity(tool, Some(false), false));
         }
         // Every other tool keeps its ordinary tabId behaviour.
         assert!(own_tab_only_refusal("setTabNotes", Some("other"), Some(("mine", true))).is_none());
+    }
+
+    #[test]
+    fn every_stack_tool_acts_only_as_the_callers_own_tab() {
+        // Spike 15: the stack verbs took a foreign tabId, so any agent could stop another
+        // project's database or type a start line into its shell; the reads named its commands.
+        let stack = [
+            "listStack", "getServiceOutput", "waitForService", "startService", "stopService", "restartService",
+            "startStack", "stopStack", "updateService", "createService", "removeService",
+        ];
+        for tool in stack {
+            assert!(OWN_TAB_ONLY_TOOLS.contains(&tool), "{tool}");
+            let refusal = own_tab_only_refusal(tool, Some("other"), Some(("mine", true))).expect(tool);
+            assert!(refusal.contains(tool) && refusal.contains("Leave tabId out"), "{refusal}");
+            assert!(own_tab_only_refusal(tool, None, Some(("mine", true))).is_none(), "{tool}: the normal call");
+            assert!(own_tab_only_refusal(tool, Some("mine"), Some(("mine", true))).is_none(), "{tool}: itself");
+        }
+        // Every one of them is listed to agents (an unlisted name here would guard nothing).
+        use crate::claude_code::protocol::{tool_list_response, ToolGates};
+        let gates = ToolGates { tasks: true, stack: true, follow_ups_live: true, escalations_to_overlord: true, browser_link: true, file_tree: true, hive: None };
+        let listed = tool_list_response(gates).to_string();
+        for tool in stack {
+            assert!(listed.contains(&format!("\"name\":\"{tool}\"")), "{tool} is not a tool");
+        }
     }
 
     #[test]

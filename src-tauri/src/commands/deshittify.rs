@@ -1226,6 +1226,10 @@ pub fn seed_default_rules() {
 /// there is nothing to do.
 #[tauri::command]
 pub async fn build_deshittify_setup_script() -> Result<String, String> {
+    // The script removes there every rule that is off here (crate::instance).
+    if let Some(why) = crate::instance::global_write_refusal() {
+        return Err(why);
+    }
     tauri::async_runtime::spawn_blocking(render_remote_setup_script)
         .await
         .map_err(|e| format!("Render task failed: {e}"))
@@ -1233,6 +1237,10 @@ pub async fn build_deshittify_setup_script() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn deshittify_status() -> Result<DeshittifyStatus, String> {
+    // Reading the status self-heals files in ~/.maiterm and ~/.claude (crate::instance).
+    if let Some(why) = crate::instance::global_write_refusal() {
+        return Err(why);
+    }
     tauri::async_runtime::spawn_blocking(build_status)
         .await
         .map_err(|e| format!("Status task failed: {e}"))
@@ -1242,6 +1250,9 @@ pub async fn deshittify_status() -> Result<DeshittifyStatus, String> {
 /// reflects disk rather than what it hoped happened.
 #[tauri::command]
 pub async fn deshittify_set_rule(id: String, enabled: bool) -> Result<DeshittifyStatus, String> {
+    if let Some(why) = crate::instance::global_write_refusal() {
+        return Err(why);
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let result = apply_rule(&id, enabled);
         result.map(|_| build_status())
@@ -1259,6 +1270,9 @@ pub async fn deshittify_set_rules(
     ids: Vec<String>,
     enabled: bool,
 ) -> Result<(DeshittifyStatus, Vec<String>), String> {
+    if let Some(why) = crate::instance::global_write_refusal() {
+        return Err(why);
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let mut errors = Vec::new();
         let before = build_status();

@@ -36,7 +36,7 @@ import { stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { resumeCommandFor } from '$lib/stores/agentState.svelte';
-import { interpolateVariables } from '$lib/stores/triggers.svelte';
+import { interpolateShell } from '$lib/stores/triggers.svelte';
 import { sessionIdVar } from '$lib/agents/resume';
 import {
   resolveCreate, isDue, isExpired, dueAt, envelope, statusOf, serviceOutcome, taskOutcome, isWaitingOnEvent, triggerText, clockText,
@@ -543,14 +543,14 @@ function createFollowUpsStore() {
         return `${NO_AGENT}, and maiTerm couldn't relaunch this Hive agent (${e})`;
       }
     } else {
-      text = interpolateVariables(tab.id, resumeCommandFor(runtime));
+      text = interpolateShell(tab.id, resumeCommandFor(runtime));
       // A `%` left after substitution is a session id the tab never recorded: refuse rather than
       // type a broken command (the Overlord's `no_session_id`).
       if (text.includes('%')) return `${NO_AGENT}, and it has no saved session to resume — start it yourself`;
       // The session must be one THIS machine has. A session id recorded while the agent ran over
       // ssh (typed by hand, so no ssh field on the tab says so) names a remote session, and the
       // tab's shell is now local: resuming it here is the wrong machine (review of 0a090e0).
-      const sessionId = interpolateVariables(tab.id, `%${sessionIdVar(runtime)}`);
+      const sessionId = interpolateShell(tab.id, `%${sessionIdVar(runtime)}`);
       if (sessionId.includes('%') || !(await commands.agentSessionIsLocal(runtime, sessionId))) {
         return `${NO_AGENT}, and its session isn't on this machine (it may have run over ssh) — start it yourself`;
       }

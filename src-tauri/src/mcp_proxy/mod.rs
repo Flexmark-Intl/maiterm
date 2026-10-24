@@ -204,7 +204,7 @@ fn now_ms() -> u64 {
 }
 
 fn store_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|p| p.join(crate::state::persistence::app_data_slug()).join("mcp-servers.json"))
+    crate::state::persistence::app_data_dir().map(|p| p.join("mcp-servers.json"))
 }
 
 fn load() -> StoreFile {

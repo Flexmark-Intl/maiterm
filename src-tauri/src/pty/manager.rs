@@ -7,7 +7,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 use crate::state::{AppState, PtyCommand, PtyHandle, PtyStats};
-use crate::state::persistence::app_data_slug;
+use crate::state::persistence::app_data_dir;
 use crate::terminal::event_proxy::AitermEventProxy;
 use crate::terminal::handle::{create_terminal, TerminalHandle};
 use crate::terminal::osc::OscEvent;
@@ -201,8 +201,8 @@ pub fn spawn_pty(
 
         // Set up per-tab history file
         let safe_tab_id = tab_id.replace(['/', '\\', '.'], "");
-        if let Some(data_dir) = dirs::data_dir() {
-            let history_dir = data_dir.join(app_data_slug()).join("history");
+        if let Some(app_dir) = app_data_dir() {
+            let history_dir = app_dir.join("history");
             let _ = std::fs::create_dir_all(&history_dir);
             let history_file = history_dir.join(format!("{}.history", safe_tab_id));
             let history_path = history_file.to_string_lossy().to_string();
@@ -347,6 +347,10 @@ pub fn spawn_pty(
     // cross-talk when both are running).
     if let Some(port) = state.mcp_port.read().as_ref() {
         cmd.env("MAITERM_PORT", port.to_string());
+    } else if crate::instance::is_isolated() {
+        // An isolated instance with no server: never the parent tab's inherited port, whose
+        // maiTerm's hooks would then report this tab to it (crate::instance).
+        cmd.env("MAITERM_PORT", crate::instance::NO_SERVER_PORT);
     }
     // And the auth token, so a hook COMMAND can authenticate without the token being
     // written into its definition. Codex records trust against the exact hook command, so
@@ -355,6 +359,8 @@ pub fn spawn_pty(
     // export all three via buildSshCommand / ~/.aiterm; this is the local equivalent.
     if let Some(auth) = state.mcp_auth.read().as_ref() {
         cmd.env("MAITERM_AUTH", auth);
+    } else if crate::instance::is_isolated() {
+        cmd.env_remove("MAITERM_AUTH");
     }
 
     // Managed accounts (docs/login.md §5). This is what makes "launch under the active
@@ -2039,8 +2045,7 @@ fi
 /// real config and add precmd hooks for title and/or command completion.
 #[cfg(unix)]
 fn setup_zsh_integration(title: bool, shell_integration: bool) -> Result<std::path::PathBuf, String> {
-    let data_dir = dirs::data_dir().ok_or("No data directory")?;
-    let zsh_dir = data_dir.join(app_data_slug()).join("shell-integration").join("zsh");
+    let zsh_dir = app_data_dir().ok_or("No data directory")?.join("shell-integration").join("zsh");
     std::fs::create_dir_all(&zsh_dir).map_err(|e| e.to_string())?;
 
     let zshenv_content = r#"# maiTerm shell integration - do not edit
@@ -2097,8 +2102,7 @@ fi
 /// Returns the path to the written file.
 #[cfg(unix)]
 fn write_ls_function() -> Result<std::path::PathBuf, String> {
-    let data_dir = dirs::data_dir().ok_or("No data directory")?;
-    let integration_dir = data_dir.join(app_data_slug()).join("shell-integration");
+    let integration_dir = app_data_dir().ok_or("No data directory")?.join("shell-integration");
     std::fs::create_dir_all(&integration_dir).map_err(|e| e.to_string())?;
 
     let path = integration_dir.join("l_function.sh");

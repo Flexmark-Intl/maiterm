@@ -3133,7 +3133,7 @@ several releases a day).
    (`HiveTerminal.svelte`, `data-hive-terminal`, scrolling both ways), and `+page` makes Rust
    render a Hive terminal only while the layout shows it. Every applied resize is logged
    (`pty resize applied`), which spike 3's live check counts.
-   **Part e built**: the keyboard (§4.6, `hive/keys.ts`). `+layout` reads the Hive's Cmd keys
+   **Part e built** (`42aa772a`): the keyboard (§4.6, `hive/keys.ts`). `+layout` reads the Hive's Cmd keys
    ahead of its tab handlers, only while the active workspace is a Hive, and sends them to
    `HiveView` as `hive-key` (so Cmd+1-9, Shift+[ ] and W never reach a hidden tab); they count
    as `isAppShortcut`, so they work from a composer, the Files tree or a raw terminal. Cmd+1

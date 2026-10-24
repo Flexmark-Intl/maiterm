@@ -6,7 +6,7 @@ use tauri::{Emitter, State};
 
 use crate::state::{save_state, AppState, Pane, Preferences, Tab, Workspace};
 use crate::state::workspace::WorkspaceNote;
-use crate::state::persistence::{app_data_slug, parse_state};
+use crate::state::persistence::{app_data_dir, app_data_slug, parse_state};
 use crate::state::workspace::{EditorFileInfo, SplitDirection, TabType};
 use crate::state::ScrollbackDb;
 use crate::commands::window::{TabContext, clone_workspace_with_id_mapping};
@@ -114,7 +114,8 @@ pub fn run_shutdown_cleanup(state: &Arc<AppState>) {
     }
     let port = *state.mcp_port.read();
     let auth = state.mcp_auth.read().clone().unwrap_or_default();
-    if let Some(port) = port {
+    // An isolated instance registered nothing; unregistering would remove dev's own entries.
+    if let Some(port) = port.filter(|_| crate::instance::global_write_refusal().is_none()) {
         for r in crate::claude_code::registrar::all_registrars() {
             r.unregister(port, &auth);
         }
@@ -2052,8 +2053,7 @@ pub fn set_tab_trigger_variables(
 
 #[tauri::command]
 pub fn copy_tab_history(source_tab_id: String, dest_tab_id: String) -> Result<(), String> {
-    let data_dir = dirs::data_dir().ok_or("No data directory")?;
-    let history_dir = data_dir.join(app_data_slug()).join("history");
+    let history_dir = app_data_dir().ok_or("No data directory")?.join("history");
 
     let safe_source = source_tab_id.replace(['/', '\\', '.'], "");
     let safe_dest = dest_tab_id.replace(['/', '\\', '.'], "");
@@ -3711,13 +3711,16 @@ pub fn read_app_logs(lines: Option<usize>, level: Option<String>, search: Option
     let file_name = if is_dev { "aiterm-dev" } else { "aiterm" };
 
     // Resolve log directory (matches tauri-plugin-log default)
-    let log_dir = dirs::data_dir()
+    // An isolated instance's bundle identifier is its data folder's name (scripts/dev-isolated.mjs).
+    let bundle = if crate::instance::is_isolated() { app_data_slug() } else { "com.aiterm.app" };
+    let log_dir = crate::state::persistence::os_data_dir()
         .or_else(dirs::config_dir)
         .map(|d| {
             if cfg!(target_os = "macos") {
                 // macOS: ~/Library/Logs/com.aiterm.app/
                 dirs::home_dir().unwrap_or(d.clone())
-                    .join("Library/Logs/com.aiterm.app")
+                    .join("Library/Logs")
+                    .join(bundle)
             } else {
                 // Linux/Windows: config_dir/aiterm/logs/
                 d.join("aiterm/logs")

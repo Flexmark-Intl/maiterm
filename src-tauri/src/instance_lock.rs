@@ -50,7 +50,7 @@ pub fn launch_wait(opens_files: bool) -> Duration {
 pub const HANDOFF_TRIES_ENV: &str = "MAITERM_HANDOFF_TRIES";
 
 pub fn lock_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|p| p.join(crate::state::persistence::app_data_slug()).join("aiterm-instance.lock"))
+    crate::state::persistence::app_data_dir().map(|p| p.join("aiterm-instance.lock"))
 }
 
 pub fn acquire(wait: Duration) -> Outcome {

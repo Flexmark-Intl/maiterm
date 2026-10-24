@@ -19,8 +19,7 @@ use std::path::PathBuf;
 /// session (see mirror.rs). Path only — existence is the caller's concern.
 pub fn shadow_path(session_id: &str) -> Option<PathBuf> {
     Some(
-        dirs::data_dir()?
-            .join(crate::state::persistence::app_data_slug())
+        crate::state::persistence::app_data_dir()?
             .join("remote-tasks")
             .join(format!("{session_id}.json")),
     )

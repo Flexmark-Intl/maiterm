@@ -7,6 +7,7 @@ mod commands;
 mod comms;
 mod filetree;
 mod hive;
+mod instance;
 mod instance_lock;
 mod mailink;
 mod mcp_proxy;
@@ -225,6 +226,13 @@ fn second_instance_exit(opens_files: bool) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // A bad MAITERM_INSTANCE or port override must not fall back to dev's folder or a port the
+    // other maiTerms own (instance.rs). Before the lock, which is per data dir.
+    if let Some(why) = instance::startup_refusal() {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "maiTerm not started: {why}");
+        return;
+    }
     // One instance per data dir, before ANYTHING reads or writes it (instance_lock.rs).
     // Bound for the whole of run(); the app's own exit releases it with the process.
     let argv: Vec<String> = std::env::args().collect();
@@ -399,6 +407,13 @@ pub fn run() {
             if let Some(why) = UNGUARDED_LAUNCH.get() {
                 log::warn!("Single-instance lock unavailable, running unguarded: {why}");
             }
+            if let Some(name) = instance::name() {
+                log::info!(
+                    "Isolated instance {name:?}: data in {:?}, no global writes, maiLink {}",
+                    state::persistence::app_data_dir(),
+                    if instance::mailink_refusal().is_none() { "on its own port" } else { "off" }
+                );
+            }
 
             match fd_limit_raise {
                 Some((old, new)) => log::info!("Raised RLIMIT_NOFILE soft limit {} -> {}", old, new),
@@ -413,7 +428,9 @@ pub fn run() {
             // Default-on deshittification rules, once per user account. The "already
             // settled" marker lives beside ~/.claude, not in AppData, so it needs no
             // state-loaded gate.
-            commands::deshittify::seed_default_rules();
+            if instance::global_write_refusal().is_none() {
+                commands::deshittify::seed_default_rules();
+            }
 
             // Account config roots no account claims (docs/login.md §10). Removing an account
             // deletes its root, but a runtime process launched under it holds CLAUDE_CONFIG_DIR
@@ -498,7 +515,7 @@ pub fn run() {
 
             for label in extra_windows {
                 let url = if cfg!(debug_assertions) {
-                    tauri::WebviewUrl::External("http://localhost:1420".parse().unwrap())
+                    commands::window::dev_url(app.handle(), "")
                 } else {
                     tauri::WebviewUrl::App("index.html".into())
                 };
@@ -664,7 +681,7 @@ pub fn run() {
 
             // The Chrome extension's native-messaging host (docs/browser-link.md §2), rewritten
             // each launch so a moved or updated app heals itself.
-            if app_state.app_data.read().preferences.browser_link_enabled {
+            if app_state.app_data.read().preferences.browser_link_enabled && instance::global_write_refusal().is_none() {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
                     browser_link::install::sync(true);
@@ -683,7 +700,7 @@ pub fn run() {
             // maiLink mobile-companion LAN bridge (docs/mailink-protocol.md): a separate,
             // opt-in TLS listener — only started when the user has enabled it. Kept distinct
             // from the localhost-only Claude-Code server above.
-            if app_state.app_data.read().preferences.mailink_enabled {
+            if app_state.app_data.read().preferences.mailink_enabled && instance::mailink_refusal().is_none() {
                 if let Err(e) = mailink::start(&app_state, app.handle().clone()) {
                     log::error!("[maiLink] {e}");
                 }
@@ -1076,6 +1093,7 @@ pub fn run() {
             commands::ssh_tunnel::get_ssh_tunnel,
             commands::ssh_tunnel::get_mcp_port,
             commands::ssh_tunnel::get_mcp_auth,
+            commands::ssh_tunnel::get_ssh_bridge_refusal,
             commands::ssh_tunnel::get_remote_bridge_env,
             commands::ssh_tunnel::get_maiterm_skill_scripts,
             commands::ssh_tunnel::build_codex_setup_script,

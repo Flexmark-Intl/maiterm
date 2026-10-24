@@ -647,6 +647,13 @@ pub struct Service {
     pub url: Option<String>,
     /// "human" | "agent" | "suggested".
     pub origin: String,
+    /// An agent wrote this definition (`createService`, or `updateService` on a field of it).
+    /// A service is HUMAN-DEFINED only when `origin != "agent"` and this is false: agents may
+    /// then report its endpoint but never edit it, and a Hive worker may run only those
+    /// (docs/hive.md §13.1 spike 15). Kept on duplicate; a share import starts it false, the
+    /// human having approved the file. An older build drops it, which only locks agents out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agent_edited: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -2956,5 +2963,22 @@ mod pref_migration_tests {
         let empty: Preferences = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(empty.codex_ide && empty.codex_hooks && empty.codex_ide_ssh && empty.codex_auto_resume);
         assert!(!empty.codex_hooks_bypass_trust);
+    }
+}
+
+#[cfg(test)]
+mod service_tests {
+    use super::Service;
+
+    #[test]
+    fn agent_edited_is_absent_from_old_state_and_from_new_state_while_false() {
+        let old = r#"{"id":"s","name":"web","command":"npm run dev","cwd":"/a","origin":"human","created_at":"","updated_at":""}"#;
+        let s: Service = serde_json::from_str(old).unwrap();
+        assert!(!s.agent_edited);
+        // A legacy row round-trips to the same keys: nothing new on disk until an agent writes.
+        assert!(!serde_json::to_string(&s).unwrap().contains("agent_edited"));
+        let edited = Service { agent_edited: true, ..s };
+        let back: Service = serde_json::from_str(&serde_json::to_string(&edited).unwrap()).unwrap();
+        assert!(back.agent_edited);
     }
 }

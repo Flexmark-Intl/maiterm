@@ -28,6 +28,25 @@ export function startLine(service: Pick<Service, 'cwd' | 'env' | 'command'>): st
   return parts.join(' && ');
 }
 
+// ── Who may edit a definition (Hive spike 15) ──────────────────────────────────────
+
+/** `updateService` fields that rewrite what runs. An agent sets them only on a service an
+ *  agent defined; on the human's it may only report `port`, `url`, `ready` and `note`. */
+export const DEFINITION_FIELDS = ['name', 'command', 'cwd', 'env', 'auto_start', 'restart', 'ready_pattern'] as const;
+
+/** The human wrote it and no agent ever has: what a Hive worker may run, and what agents
+ *  may not rewrite. */
+export function isHumanDefined(service: Pick<Service, 'origin' | 'agent_edited'>): boolean {
+  return service.origin !== 'agent' && !service.agent_edited;
+}
+
+/** The definition fields an agent's `updateService` call is refused, in the tool's order
+ *  (empty when it may make them). */
+export function refusedAgentEdits(service: Pick<Service, 'origin' | 'agent_edited'>, args: Record<string, unknown>): string[] {
+  if (!isHumanDefined(service)) return [];
+  return DEFINITION_FIELDS.filter((f) => args[f] !== undefined);
+}
+
 /** SIGINT (130) and a clean exit both mean "it stopped"; anything else crashed. */
 export function exitIsCrash(code: number): boolean {
   return code !== 0 && code !== 130;

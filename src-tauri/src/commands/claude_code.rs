@@ -43,6 +43,10 @@ pub fn claude_code_notify_selection(
 /// Codex from Preferences and have ~/.codex configured immediately, without a restart.
 #[tauri::command]
 pub fn refresh_agent_integrations(state: State<'_, Arc<AppState>>) {
+    if let Some(why) = crate::instance::global_write_refusal() {
+        log::info!("Agent integrations not refreshed: {why}");
+        return;
+    }
     let port = match *state.mcp_port.read() {
         Some(p) => p,
         None => return,

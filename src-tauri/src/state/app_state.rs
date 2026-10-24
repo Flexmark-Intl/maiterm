@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
-use super::persistence::app_data_slug;
+use super::persistence::app_data_dir;
 use super::scrollback_db::ScrollbackDb;
 use super::workspace::AppData;
 use crate::terminal::handle::TerminalHandle;
@@ -321,10 +321,7 @@ impl AppState {
         let db_path = if cfg!(test) {
             test_scrollback_db_path()
         } else {
-            dirs::data_dir()
-                .expect("No data directory found")
-                .join(app_data_slug())
-                .join("aiterm-scrollback.db")
+            app_data_dir().expect("No data directory found").join("aiterm-scrollback.db")
         };
         let scrollback_db = ScrollbackDb::open(db_path)
             .expect("Failed to open scrollback database");

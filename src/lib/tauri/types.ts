@@ -348,6 +348,9 @@ export interface Service {
   port?: number | null;
   url?: string | null;
   origin: ServiceOrigin;
+  /** An agent wrote this definition. Human-defined = `origin !== 'agent' && !agent_edited`:
+   *  agents may report its endpoint, never edit it (`stack/model.ts` `refusedAgentEdits`). */
+  agent_edited?: boolean;
   created_at: string;
   updated_at: string;
 }

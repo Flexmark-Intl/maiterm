@@ -34,7 +34,7 @@
   import { insertPathsIntoTab } from '$lib/utils/insertPaths';
   import { buildShellIntegrationSnippet, buildInstallSnippet } from '$lib/utils/shellIntegration';
   import ResizableTextarea from '$lib/components/ResizableTextarea.svelte';
-  import { processOutput, cleanupTab, loadTabVariables, interpolateVariables, getVariables, clearTabVariables, suppressTab, unsuppressTab, replayAutoResume } from '$lib/stores/triggers.svelte';
+  import { processOutput, cleanupTab, loadTabVariables, interpolateShell, getVariables, clearTabVariables, suppressTab, unsuppressTab, replayAutoResume } from '$lib/stores/triggers.svelte';
   import { dispatch } from '$lib/stores/notificationDispatch';
   import { toastStore } from '$lib/stores/toasts.svelte';
   import { sessionIdVar } from '$lib/agents/resume';
@@ -1062,7 +1062,7 @@
               await typeLaunch(splitCtx);
             } else if ((autoResumeEnabled ?? true) && autoResumeCommand) {
               try {
-                const bytes = Array.from(new TextEncoder().encode(interpolateVariables(tabId, autoResumeCommand, true) + '\n'));
+                const bytes = Array.from(new TextEncoder().encode(interpolateShell(tabId, autoResumeCommand, true) + '\n'));
                 await writeTerminal(ptyId, bytes);
               } catch (e) {
                 logError(`Failed to send auto-resume after bridge: ${e}`);
@@ -1077,7 +1077,7 @@
         // Local auto-resume: send command after shell starts (also fires on reload)
         setTimeout(async () => {
           try {
-            const bytes = Array.from(new TextEncoder().encode(interpolateVariables(tabId, autoResumeCommand, true) + '\n'));
+            const bytes = Array.from(new TextEncoder().encode(interpolateShell(tabId, autoResumeCommand, true) + '\n'));
             await writeTerminal(ptyId, bytes);
           } catch (e) {
             logError(`Failed to replay auto-resume command: ${e}`);
@@ -1883,7 +1883,7 @@
     const resumeCmd = autoResumeCommand ?? autoResumeRememberedCommand ?? null;
     if (resumeCmd) {
       try {
-        await writeTerminal(ptyId, Array.from(new TextEncoder().encode(interpolateVariables(tabId, resumeCmd, true) + '\n')));
+        await writeTerminal(ptyId, Array.from(new TextEncoder().encode(interpolateShell(tabId, resumeCmd, true) + '\n')));
       } catch (e) {
         logError(`Failed to send auto-resume after reconnect: ${e}`);
       }

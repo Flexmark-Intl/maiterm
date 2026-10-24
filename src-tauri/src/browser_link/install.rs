@@ -19,7 +19,7 @@ pub fn host_name() -> &'static str {
 /// exists, i.e. a browser that is installed and has been run.
 #[cfg(target_os = "macos")]
 fn browser_roots() -> Vec<(&'static str, PathBuf)> {
-    let Some(base) = dirs::data_dir() else { return Vec::new() };
+    let Some(base) = crate::state::persistence::os_data_dir() else { return Vec::new() };
     [
         ("Chrome", "Google/Chrome"),
         ("Chrome Beta", "Google/Chrome Beta"),
@@ -88,6 +88,10 @@ fn browser_has_run(root: &std::path::Path) -> bool {
 /// Write (or, with `enabled` false, remove) our host manifest for every installed browser.
 /// Rewritten at each launch while enabled, so a moved or updated app heals itself.
 pub fn sync(enabled: bool) {
+    // The manifests are Chrome's, shared by every dev build (crate::instance).
+    if crate::instance::global_write_refusal().is_some() {
+        return;
+    }
     #[cfg(not(windows))]
     {
         let manifest = if enabled { manifest_json() } else { None };
@@ -111,7 +115,7 @@ pub fn sync(enabled: bool) {
     {
         use winreg::enums::HKEY_CURRENT_USER;
         use winreg::RegKey;
-        let Some(dir) = dirs::data_dir().map(|p| p.join(crate::state::persistence::app_data_slug())) else { return };
+        let Some(dir) = crate::state::persistence::app_data_dir() else { return };
         let path = dir.join(format!("{}.json", host_name()));
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         if enabled {
@@ -169,7 +173,7 @@ pub fn extension_dir(app: &AppHandle) -> Option<PathBuf> {
         return PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chrome-extension").canonicalize().ok();
     }
     let _ = app;
-    dirs::data_dir().map(|p| p.join(crate::state::persistence::app_data_slug()).join("chrome-extension"))
+    crate::state::persistence::app_data_dir().map(|p| p.join("chrome-extension"))
 }
 
 /// Refresh the release build's copy of the extension from the app bundle.

@@ -23,7 +23,7 @@ import { dispatch } from '$lib/stores/notificationDispatch';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { pruneHiddenDefaultOverlordRules, seedDefaultOverlordRules } from '$lib/overlord/defaults';
 import { DEFAULT_AGENT_STATES, guardsForCondition } from '$lib/overlord/format';
-import { getVariables, interpolateVariables, setVariable } from '$lib/stores/triggers.svelte';
+import { getVariables, interpolateShell, setVariable } from '$lib/stores/triggers.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { engineSkips, HIVE_SUPERVISED_DETAIL } from '$lib/hive/model';
 import { summarizeBatch, type TabBatchRow, type TabBatchResult } from '$lib/stores/tabBatch';
@@ -4067,7 +4067,7 @@ function createOverlordStore() {
       }
       // Interpolates %<runtime>SessionId from the tab's trigger variables, the same way
       // auto-resume does — so this resumes the tab's own session, not a fresh one.
-      const text = interpolateVariables(tabId, resumeCommandFor(runtime));
+      const text = interpolateShell(tabId, resumeCommandFor(runtime));
       if (text.includes('%')) return { sent: false, kind, reason: 'no_session_id' };
 
       const step: OverlordStep = { kind: 'process', text };

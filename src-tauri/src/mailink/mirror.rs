@@ -43,7 +43,7 @@ use crate::state::AppState;
 /// Where shadow files live: `<data_dir>/<slug>/remote-transcripts/<session_id>.jsonl`.
 /// Session ids are globally unique, so files are flat and unambiguous.
 pub fn shadow_dir() -> Option<PathBuf> {
-    Some(dirs::data_dir()?.join(crate::state::persistence::app_data_slug()).join("remote-transcripts"))
+    Some(crate::state::persistence::app_data_dir()?.join("remote-transcripts"))
 }
 
 /// Backoff after a failed fetch. Long enough not to hammer a dead tunnel from the hook

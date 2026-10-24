@@ -72,12 +72,15 @@ pub fn instance_label() -> &'static str {
 
 /// `browser-link.json` in the app data dir: what the native host hands the extension.
 pub fn discovery_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|p| p.join(crate::state::persistence::app_data_slug()).join("browser-link.json"))
+    crate::state::persistence::app_data_dir().map(|p| p.join("browser-link.json"))
 }
 
 /// Write the discovery file once the MCP server has its port. Owner-only: the token in it is
 /// what lets a socket drive the human's browser.
 pub fn write_discovery(port: u16) {
+    if crate::instance::global_write_refusal().is_some() {
+        return;
+    }
     let Some(path) = discovery_path() else { return };
     let body = serde_json::json!({
         "port": port,

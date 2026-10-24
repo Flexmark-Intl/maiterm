@@ -826,6 +826,8 @@ function createStackStore() {
         port: null,
         url: null,
         origin: input.origin ?? 'human',
+        // `createService` over MCP: an agent wrote every field of it.
+        agent_edited: input.origin === 'agent',
         created_at: now,
         updated_at: now,
       };

@@ -539,6 +539,7 @@ pub fn worker_preflight(paths: &HivePaths, w: &WorkerRecord) -> Result<(), Strin
     if cfg!(windows) {
         return Err("A Hive needs Claude's sandbox, which native Windows doesn't have.".to_string());
     }
+    crate::instance::hive_refusal()?;
     claude_new_enough()?;
     let homes = crate::relocate::agents::Homes::real().ok_or("Couldn't find the home folder")?;
     check_worker_trust(&homes.claude_json, paths, w)
@@ -583,6 +584,7 @@ pub fn prepare_launch(hive: &Hive, role: &str, tab_id: &str, tasks: &[crate::sta
     if cfg!(windows) {
         return Err("A Hive needs Claude's sandbox, which native Windows doesn't have.".to_string());
     }
+    crate::instance::hive_refusal()?;
     let root = hive_root(&hive.id).ok_or_else(|| format!("\"{}\" can't name a Hive folder", hive.id))?;
     let paths = HivePaths::new(root);
     match role {

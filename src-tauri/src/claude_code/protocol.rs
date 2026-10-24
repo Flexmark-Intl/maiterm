@@ -867,7 +867,7 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
         },
         {
             "name": "updateService",
-            "description": "Report what you observed, or edit a service. maiTerm already watches a service's output for the address it announces, so the common case is handled — report a `port`/`url` here when you know one it could not read (a service that prints nothing, or an address only you can work out), or to CORRECT one it got wrong. `ready: true` marks a service up. `note` is one line shown in the sidebar (why it is held, what you changed). `command`/`cwd`/`env`/`auto_start`/`restart`/`ready_pattern` edit the definition and take effect on the next start.",
+            "description": "Report what you observed, or edit a service. maiTerm already watches a service's output for the address it announces, so the common case is handled — report a `port`/`url` here when you know one it could not read (a service that prints nothing, or an address only you can work out), or to CORRECT one it got wrong. `ready: true` marks a service up. `note` is one line shown in the sidebar (why it is held, what you changed). `name`/`command`/`cwd`/`env`/`auto_start`/`restart`/`ready_pattern` edit the definition and take effect on the next start, only on a service an agent registered: a service your human defined is theirs, and a call changing any of those on it is refused whole.",
             "inputSchema": { "type": "object", "properties": {
                 "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
                 "service": { "type": "string", "description": "Service name or id" },

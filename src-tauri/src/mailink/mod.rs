@@ -205,8 +205,7 @@ fn rings_attention(prev_key: Option<&str>, prev_registered: bool, key: &str, reg
 
 /// `~/Library/Application Support/<slug>/mailink/` (or the OS equivalent).
 fn mailink_dir() -> Option<PathBuf> {
-    dirs::data_dir()
-        .map(|p| p.join(crate::state::persistence::app_data_slug()).join("mailink"))
+    crate::state::persistence::app_data_dir().map(|p| p.join("mailink"))
 }
 
 /// Load the persisted self-signed cert, or generate + persist one on first run. Persisting
@@ -298,6 +297,9 @@ pub fn start(app_state: &Arc<AppState>, app_handle: tauri::AppHandle) -> Result<
     if app_state.mailink_info.read().is_some() {
         return Ok(()); // already running
     }
+    if let Some(why) = crate::instance::mailink_refusal() {
+        return Err(why);
+    }
     let cfg = prepare(app_state).ok_or("maiLink bridge failed to initialize (see logs)")?;
     let st = Arc::clone(app_state);
     tauri::async_runtime::spawn(async move {
@@ -335,7 +337,8 @@ pub fn prepare(app_state: &Arc<AppState>) -> Option<MailinkConfig> {
             return None;
         }
     };
-    let port = DEFAULT_PORT;
+    // An isolated instance runs maiLink only on the port it was given (crate::instance).
+    let port = crate::instance::mailink_port().ok().flatten().unwrap_or(DEFAULT_PORT);
     // Publish (fp, port) so the pairing-code command can build the QR payload.
     *app_state.mailink_info.write() = Some((fingerprint.clone(), port));
     log::info!("[maiLink] bridge enabled — listening on 0.0.0.0:{port} (TLS). Pin fp = {fingerprint}");

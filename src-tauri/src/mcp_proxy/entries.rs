@@ -181,6 +181,10 @@ fn wanted_servers() -> Vec<ProxyServer> {
 /// Bring both runtimes' configs in line with the enabled servers. Cheap when nothing changed:
 /// files are compared before anything is written. Returns the collisions found, by runtime.
 pub fn sync(port: u16, auth: &str, prefs: &Preferences) -> Collisions {
+    // The agents' configs are the other maiTerms' to write (crate::instance).
+    if crate::instance::global_write_refusal().is_some() {
+        return Collisions::default();
+    }
     super::ensure_loaded();
     let _g = WRITE.lock();
     // Read what is wanted only once the lock is held: a pass that waited behind another must not
@@ -328,6 +332,9 @@ fn roots_drifted(wanted: &[(String, Value)], collisions: &[String]) -> bool {
 
 /// Remove every entry of ours (app exit).
 pub fn remove_all() {
+    if crate::instance::global_write_refusal().is_some() {
+        return;
+    }
     let _g = WRITE.lock();
     if let Some(path) = crate::claude_code::lockfile::claude_settings_path() {
         if path.exists() {
@@ -458,6 +465,9 @@ fn codex_duplicates(doc: &toml_edit::DocumentMut, url: &str) -> Vec<String> {
 /// Remove the human's native entries for this URL (and a native entry holding the server's
 /// name), on their click of **Move to maiTerm**. Returns what was removed.
 pub fn adopt_native(id: &str, url: &str) -> Result<Vec<String>, String> {
+    if let Some(why) = crate::instance::global_write_refusal() {
+        return Err(why);
+    }
     let name = entry_name(id);
     let _g = WRITE.lock();
     let mut removed = Vec::new();

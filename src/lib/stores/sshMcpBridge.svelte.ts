@@ -757,6 +757,16 @@ function buildSetupScript(
   return script.join('\n');
 }
 
+/** Fixed for the launch, so asked once. A failed ask reads as no refusal: Rust still refuses. */
+let bridgeRefusalAsk: Promise<string | null> | null = null;
+function bridgeRefusal(): Promise<string | null> {
+  bridgeRefusalAsk ??= commands.getSshBridgeRefusal().then((why) => {
+    if (why) logInfo(`SSH MCP bridge off: ${why}`);
+    return why;
+  }, () => null);
+  return bridgeRefusalAsk;
+}
+
 /** In-flight enableBridge attempts, keyed by tab. */
 const inFlightBridges = new Map<string, Promise<boolean>>();
 
@@ -804,6 +814,9 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
   if (!claudeOn && !codexOn) {
     return false;
   }
+  // An isolated test instance never bridges: its setup would rewrite the host's Codex config and
+  // hooks for every maiTerm there. Off quietly, like the preference; Rust refuses it as well.
+  if (await bridgeRefusal()) return false;
 
   // Just the ssh arguments — callers may pass the full ps command, or a stored one that kept the
   // user's ssh program (a full path, autossh); the tunnel runs maiTerm's own `ssh` with these.

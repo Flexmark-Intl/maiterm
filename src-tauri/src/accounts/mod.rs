@@ -40,7 +40,7 @@ pub mod vault;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::state::persistence::app_data_slug;
+use crate::state::persistence::app_data_dir;
 
 /// Agent runtimes maiTerm can hold accounts for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -287,7 +287,7 @@ impl RuntimeProfile {
 
 /// `<data>/<slug>/accounts` — the parent of every account root.
 pub fn accounts_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|p| p.join(app_data_slug()).join("accounts"))
+    app_data_dir().map(|p| p.join("accounts"))
 }
 
 /// The config root for one account. Namespaced by runtime so the same account id can exist for

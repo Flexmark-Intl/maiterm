@@ -140,7 +140,7 @@ fn shell_check(state: &Arc<AppState>, tab_id: &str) -> Result<(), String> {
 /// Hives' Rust-owned folders and secrets on an agent's reach list, and its `denyWrite` would
 /// cover the coordinator's own home (§6.2).
 fn app_data_dir() -> Option<PathBuf> {
-    let d = super::paths::hives_dir()?.parent()?.to_path_buf();
+    let d = crate::state::persistence::app_data_dir()?;
     Some(std::fs::canonicalize(&d).unwrap_or(d))
 }
 
@@ -197,6 +197,7 @@ pub async fn hive_preflight(
     workspace_id: String,
     from_tab_ids: Option<Vec<String>>,
 ) -> Result<Preflight, String> {
+    crate::instance::hive_refusal()?;
     let label = window.label().to_string();
     let (structural, from_cwds) = {
         let data = state.app_data.read();
@@ -589,6 +590,7 @@ pub async fn hive_create(
     spec: HiveSpec,
 ) -> Result<HiveCreated, String> {
     platform_refusal(cfg!(windows))?;
+    crate::instance::hive_refusal()?;
     let label = window.label().to_string();
     let ceiling = machine_ceiling();
     validate_spec(&spec, ceiling)?;

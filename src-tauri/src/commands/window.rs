@@ -593,7 +593,7 @@ pub fn open_preferences_window(window: tauri::WebviewWindow, app: tauri::AppHand
     // while the main thread waits for the sync command to return.
     std::thread::spawn(move || {
         let url = if cfg!(debug_assertions) {
-            tauri::WebviewUrl::External("http://localhost:1420/preferences".parse().unwrap())
+            dev_url(&app, "preferences")
         } else {
             tauri::WebviewUrl::App("preferences".into())
         };
@@ -665,7 +665,7 @@ pub fn open_help_window(window: tauri::WebviewWindow, app: tauri::AppHandle, sec
         };
 
         let url = if cfg!(debug_assertions) {
-            tauri::WebviewUrl::External(format!("http://localhost:1420/{}", path).parse().unwrap())
+            dev_url(&app, &path)
         } else {
             tauri::WebviewUrl::App(path.into())
         };
@@ -697,9 +697,16 @@ pub fn open_help_window(window: tauri::WebviewWindow, app: tauri::AppHandle, sec
     Ok(())
 }
 
+/// A dev build's page on the frontend dev server: the config's `devUrl`, which an isolated
+/// instance moves off 1420 (scripts/dev-isolated.mjs). A copy on 1420 may be another checkout.
+pub(crate) fn dev_url(app: &tauri::AppHandle, path: &str) -> tauri::WebviewUrl {
+    let base = app.config().build.dev_url.as_ref().map(|u| u.to_string()).unwrap_or_else(|| "http://localhost:1420".to_string());
+    tauri::WebviewUrl::External(format!("{}/{}", base.trim_end_matches('/'), path).parse().unwrap())
+}
+
 fn build_window_sync(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     let url = if cfg!(debug_assertions) {
-        tauri::WebviewUrl::External("http://localhost:1420".parse().unwrap())
+        dev_url(app, "")
     } else {
         tauri::WebviewUrl::App("index.html".into())
     };
@@ -1040,6 +1047,7 @@ mod clone_ids_tests {
             port: None,
             url: None,
             origin: "human".to_string(),
+            agent_edited: true,
             created_at: String::new(),
             updated_at: String::new(),
         });
@@ -1055,6 +1063,7 @@ mod clone_ids_tests {
 
         assert_ne!(cloned.stack[0].id, "svc-1");
         assert_eq!(cloned.stack[0].name, "web");
+        assert!(cloned.stack[0].agent_edited, "a copy keeps who wrote the definition");
         assert_ne!(cloned.workspace_notes[0].id, "note-1");
         assert_eq!(cloned.workspace_notes[0].content, "hi");
     }
