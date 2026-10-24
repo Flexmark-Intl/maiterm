@@ -1411,7 +1411,13 @@ export interface TabContext {
   remote_cwd: string | null;
 }
 
-export async function duplicateWindow(tabContexts: TabContext[]): Promise<string> {
+export interface DuplicatedWindow {
+  label: string;
+  /** Names of the Hive workspaces left out of the copy (docs/hive.md §11.2). */
+  skipped_hives: string[];
+}
+
+export async function duplicateWindow(tabContexts: TabContext[]): Promise<DuplicatedWindow> {
   return invoke('duplicate_window', { tabContexts });
 }
 

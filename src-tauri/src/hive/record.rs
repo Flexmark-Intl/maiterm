@@ -1,0 +1,224 @@
+//! The Hive record, `Workspace.hive` (docs/hive.md §3.2).
+//!
+//! Every kind field is a String and every field defaults: an older build that meets an unknown
+//! enum variant fails the whole state file and starts empty. Fields a later build adds survive
+//! a load/save here in `extra`, so a downgrade-then-upgrade doesn't lose them.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+pub const LANDING_BASE: &str = "base";
+pub const LANDING_INTEGRATION: &str = "integration";
+pub const KIND_GIT: &str = "git";
+pub const KIND_PLAIN: &str = "plain";
+pub const STATUS_ACTIVE: &str = "active";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Hive {
+    /// Its own uuid, never the workspace id: `<app data>/hive/<id>/` is named by it, and a
+    /// window duplicate or an import re-mints workspace ids.
+    pub id: String,
+    pub goal: String,
+    pub instructions: String,
+    pub folders: Vec<HiveFolder>,
+    /// Workers at once, enforced in Rust (§3.1).
+    pub cap: u32,
+    /// `"base"` | `"integration"`. Fixed at creation: it's a branch topology (§3).
+    pub landing_mode: String,
+    pub models: HiveModels,
+    pub tools: Vec<String>,
+    /// checkpoint → `"coordinator"` | `"ask"` (§7.4).
+    pub checkpoints: BTreeMap<String, String>,
+    pub budget_cents: u64,
+    pub push_after_land: bool,
+    pub settings: HiveSettings,
+    /// Completion criteria, current list (§11.4).
+    pub criteria: Vec<String>,
+    /// `"active"` | `"paused"` | `"done"`.
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done_at: Option<i64>,
+    /// Names the `hive/<slug>` branches (§6.4). Kept on the record so renaming the workspace
+    /// never renames a branch out from under its worktrees.
+    pub slug: String,
+    pub created_at: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl Default for Hive {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            goal: String::new(),
+            instructions: String::new(),
+            folders: Vec::new(),
+            cap: 4,
+            landing_mode: LANDING_BASE.to_string(),
+            models: HiveModels::default(),
+            tools: Vec::new(),
+            checkpoints: BTreeMap::new(),
+            budget_cents: 1000,
+            push_after_land: false,
+            settings: HiveSettings::default(),
+            criteria: Vec::new(),
+            status: STATUS_ACTIVE.to_string(),
+            done_at: None,
+            slug: String::new(),
+            created_at: String::new(),
+            extra: Map::new(),
+        }
+    }
+}
+
+impl Hive {
+    pub fn primary(&self) -> Option<&HiveFolder> {
+        self.folders.iter().find(|f| f.primary)
+    }
+
+    pub fn git_folders(&self) -> impl Iterator<Item = &HiveFolder> {
+        self.folders.iter().filter(|f| f.is_git())
+    }
+
+    pub fn is_integration(&self) -> bool {
+        self.landing_mode == LANDING_INTEGRATION
+    }
+
+    /// The landing target branch in integration mode (§6.4).
+    pub fn integration_branch(&self) -> String {
+        format!("hive/{}", self.slug)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HiveFolder {
+    /// How briefs, `hiveSpawnWorker` and the worktree paths name it: one path component.
+    pub name: String,
+    /// Canonical (symlinks resolved) when added.
+    pub path: String,
+    /// `"git"` | `"plain"`.
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub land_check: Option<String>,
+    pub primary: bool,
+    /// Local-path remotes, read when the folder is added: each goes on every agent's
+    /// `denyWrite`, since no deny rule reliably stops a push (§7.3).
+    pub local_remotes: Vec<String>,
+}
+
+impl HiveFolder {
+    pub fn is_git(&self) -> bool {
+        self.kind == KIND_GIT
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HiveModels {
+    pub coordinator: HiveModel,
+    pub worker: HiveModel,
+}
+
+impl Default for HiveModels {
+    fn default() -> Self {
+        Self {
+            coordinator: HiveModel::new("claude", "opus", "medium"),
+            worker: HiveModel::new("claude", "sonnet", "high"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HiveModel {
+    pub runtime: String,
+    pub model: String,
+    pub effort: String,
+}
+
+impl HiveModel {
+    pub fn new(runtime: &str, model: &str, effort: &str) -> Self {
+        Self { runtime: runtime.to_string(), model: model.to_string(), effort: effort.to_string() }
+    }
+}
+
+/// The other settings sections (§3.2) arrive with the steps that own them; until then whatever
+/// is here round-trips untouched.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HiveSettings {
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Workspace;
+
+    #[test]
+    fn a_workspace_saved_before_hives_loads_without_one() {
+        let ws = Workspace::new("Old".into());
+        let mut v = serde_json::to_value(&ws).unwrap();
+        assert!(v.get("hive").is_none(), "no Hive, no key: an older build sees nothing new");
+        v.as_object_mut().unwrap().remove("hive");
+        let back: Workspace = serde_json::from_value(v).unwrap();
+        assert!(back.hive.is_none());
+    }
+
+    #[test]
+    fn a_sparse_record_takes_the_defaults() {
+        let h: Hive = serde_json::from_str(r#"{"id":"h1","goal":"ship it"}"#).unwrap();
+        assert_eq!(h.cap, 4);
+        assert_eq!(h.landing_mode, LANDING_BASE);
+        assert_eq!(h.status, STATUS_ACTIVE);
+        assert_eq!(h.models.coordinator.model, "opus");
+        assert_eq!(h.models.worker.effort, "high");
+        assert!(h.extra.is_empty());
+    }
+
+    #[test]
+    fn fields_a_later_build_added_survive_a_load_and_save() {
+        let text = r#"{
+            "id": "h1", "slug": "s", "landing_mode": "integration", "status": "paused",
+            "future_field": {"a": [1, 2]},
+            "folders": [{"name": "web", "path": "/r/web", "kind": "git", "primary": true, "folder_future": 7}],
+            "settings": {"prompt_timeout_secs": 300},
+            "models": {"coordinator": {"runtime": "codex", "model": "m", "effort": "low"}}
+        }"#;
+        let h: Hive = serde_json::from_str(text).unwrap();
+        assert_eq!(h.extra.get("future_field"), Some(&serde_json::json!({"a": [1, 2]})));
+        assert_eq!(h.settings.extra.get("prompt_timeout_secs"), Some(&serde_json::json!(300)));
+        assert!(h.is_integration());
+        assert_eq!(h.integration_branch(), "hive/s");
+        assert_eq!(h.primary().map(|f| f.name.as_str()), Some("web"));
+        assert_eq!(h.models.worker, HiveModel::new("claude", "sonnet", "high"), "a missing half defaults");
+
+        let again: Hive = serde_json::from_value(serde_json::to_value(&h).unwrap()).unwrap();
+        assert_eq!(again, h);
+        // A field on a nested struct without an `extra` map is dropped: only the record and its
+        // settings promise round-trips.
+        assert!(!serde_json::to_string(&again).unwrap().contains("folder_future"));
+    }
+
+    #[test]
+    fn an_unknown_kind_string_still_loads() {
+        let ws_text = {
+            let mut ws = Workspace::new("H".into());
+            ws.hive = Some(Hive { id: "h".into(), landing_mode: "someday".into(), status: "archived".into(), ..Hive::default() });
+            serde_json::to_string(&ws).unwrap()
+        };
+        let back: Workspace = serde_json::from_str(&ws_text).unwrap();
+        let h = back.hive.unwrap();
+        assert_eq!(h.landing_mode, "someday");
+        assert_eq!(h.status, "archived");
+    }
+}

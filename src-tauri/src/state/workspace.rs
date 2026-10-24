@@ -907,6 +907,12 @@ pub struct Workspace {
     /// Copied with a duplicated workspace, rebased by Move project, never in a share file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_tree_pin: Option<String>,
+    /// This workspace is a Hive (docs/hive.md §3.2); None for an ordinary one. Never copied:
+    /// a duplicate is refused, a window duplicate skips it, a move to another window is
+    /// refused, and a share file leaves it out. An older build drops it on save, and its tabs
+    /// come back as plain shells with the Hive's folders left on disk (accepted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hive: Option<crate::hive::Hive>,
     #[serde(default)]
     pub archived_tabs: Vec<Tab>,
     /// Transient flag set after merge import — cleared on workspace activation.
@@ -2559,6 +2565,7 @@ impl Workspace {
             overlord_exempt: false,
             muted: false,
             file_tree_pin: None,
+            hive: None,
             archived_tabs: Vec::new(),
             import_highlight: false,
             suspended: false,

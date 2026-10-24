@@ -6,6 +6,7 @@ mod claude_code;
 mod commands;
 mod comms;
 mod filetree;
+mod hive;
 mod instance_lock;
 mod mailink;
 mod mcp_proxy;

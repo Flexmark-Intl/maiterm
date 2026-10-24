@@ -99,17 +99,24 @@ pub struct TabContext {
     pub remote_cwd: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DuplicatedWindow {
+    pub label: String,
+    /// Names of the Hive workspaces left out of the copy (docs/hive.md §11.2).
+    pub skipped_hives: Vec<String>,
+}
+
 #[tauri::command]
 pub fn duplicate_window(
     window: tauri::Window,
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     tab_contexts: Vec<TabContext>,
-) -> Result<String, String> {
+) -> Result<DuplicatedWindow, String> {
     let source_label = window.label().to_string();
     let new_label = format!("window-{}", uuid::Uuid::new_v4());
 
-    let data_clone = {
+    let (data_clone, skipped_hives) = {
         let mut app_data = state.app_data.write();
         let source = app_data.window(&source_label)
             .ok_or_else(|| format!("Source window '{}' not found", source_label))?
@@ -136,7 +143,11 @@ pub fn duplicate_window(
         new_win.overlord_ledger = Vec::new();
         new_win.overlord_tasks = Vec::new();
 
-        for ws in &source.workspaces {
+        let (copied, skipped) = split_out_hives(&source.workspaces);
+        if !skipped.is_empty() {
+            log::info!("duplicate_window: skipped {} Hive workspace(s): {}", skipped.len(), skipped.join(", "));
+        }
+        for ws in &copied {
             let cloned = clone_workspace_with_new_ids(ws, &tab_contexts);
             new_win.workspaces.push(cloned);
         }
@@ -144,11 +155,23 @@ pub fn duplicate_window(
 
         // Set active workspace to the cloned version of the source's active
         if let Some(ref active_id) = source.active_workspace_id {
-            // Find the index of the active workspace in source
-            if let Some(idx) = source.workspaces.iter().position(|w| w.id == *active_id) {
+            // Find the index of the active workspace among the copied ones
+            if let Some(idx) = copied.iter().position(|w| w.id == *active_id) {
                 if let Some(cloned_ws) = new_win.workspaces.get(idx) {
                     new_win.active_workspace_id = Some(cloned_ws.id.clone());
                 }
+            }
+        }
+        // Skipping Hives can leave nothing (or only the Overlord's) to show: a new window's
+        // "Default", as `move_workspace_to_window` leaves behind. A skipped active one hands
+        // over to the first ordinary workspace.
+        if !skipped.is_empty() {
+            if !new_win.workspaces.iter().any(|w| !w.overlord) {
+                let fresh = Workspace::new("Default".to_string());
+                new_win.active_workspace_id = Some(fresh.id.clone());
+                new_win.workspaces.push(fresh);
+            } else if new_win.active_workspace_id.is_none() {
+                new_win.active_workspace_id = new_win.workspaces.iter().find(|w| !w.overlord).map(|w| w.id.clone());
             }
         }
 
@@ -165,7 +188,7 @@ pub fn duplicate_window(
         }
 
         app_data.windows.push(new_win);
-        app_data.clone()
+        (app_data.clone(), skipped)
     };
     save_state(&data_clone)?;
 
@@ -178,7 +201,15 @@ pub fn duplicate_window(
         }
     });
 
-    Ok(new_label)
+    Ok(DuplicatedWindow { label: new_label, skipped_hives })
+}
+
+/// The workspaces a window duplicate copies, and the names of the Hives it leaves out: a
+/// copy of a Hive is either hidden tabs with no Hive or a second Hive on the same worktrees
+/// (docs/hive.md §11.2).
+pub(crate) fn split_out_hives(workspaces: &[Workspace]) -> (Vec<&Workspace>, Vec<String>) {
+    let (hives, copied): (Vec<&Workspace>, Vec<&Workspace>) = workspaces.iter().partition(|w| w.hive.is_some());
+    (copied, hives.into_iter().map(|w| w.name.clone()).collect())
 }
 
 /// Follow-ups discarded with a window's workspaces (docs/follow-ups.md §3). Logged from these
@@ -307,6 +338,7 @@ pub fn move_workspace_to_window(
         if source.workspaces[index].overlord {
             return Err("The Overlord workspace belongs to its window and cannot move".to_string());
         }
+        crate::hive::refuse_workspace_move(&source.workspaces[index])?;
         let ws = source.workspaces.remove(index);
 
         if !source.workspaces.iter().any(|w| !w.overlord) {
@@ -353,12 +385,14 @@ pub fn move_tab_to_window(
     }
     let data_clone = {
         let mut app_data = state.app_data.write();
-        let target_ok = app_data.window(&target_label)
+        let target_ws = app_data.window(&target_label)
             .and_then(|w| w.workspaces.iter().find(|ws| ws.id == target_workspace_id))
-            .is_some_and(|ws| !ws.panes.is_empty());
-        if !target_ok {
-            return Err("Target workspace not found".to_string());
-        }
+            .filter(|ws| !ws.panes.is_empty())
+            .ok_or("Target workspace not found")?;
+        let source_ws = app_data.window(&source_label)
+            .and_then(|w| w.workspaces.iter().find(|ws| ws.id == source_workspace_id))
+            .ok_or("Source workspace not found")?;
+        crate::hive::refuse_tab_move(source_ws, &tab_id, Some(target_ws))?;
 
         let source = app_data.window_mut(&source_label).ok_or("Window not found")?;
         let source_ws = source.workspaces.iter_mut().find(|w| w.id == source_workspace_id)
@@ -953,6 +987,9 @@ pub(crate) fn clone_workspace_with_id_mapping(
         muted: ws.muted,
         // A pin names a folder, not a tab: the copy is the same project and keeps its root.
         file_tree_pin: ws.file_tree_pin.clone(),
+        // Callers refuse or skip a Hive (docs/hive.md §11.2); this is the backstop, with
+        // `hive_role: None` per tab above.
+        hive: None,
         archived_tabs: Vec::new(),
         import_highlight: false,
         suspended: false,

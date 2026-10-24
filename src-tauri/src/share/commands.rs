@@ -12,10 +12,11 @@ use crate::state::{save_state, AppState, Workspace};
 
 fn find_workspace(state: &AppState, label: &str, workspace_id: &str) -> Result<Workspace, String> {
     let data = state.app_data.read();
-    data.window(label)
+    let ws = data.window(label)
         .and_then(|w| w.workspaces.iter().find(|ws| ws.id == workspace_id))
-        .cloned()
-        .ok_or_else(|| "Workspace not found".to_string())
+        .ok_or_else(|| "Workspace not found".to_string())?;
+    crate::hive::refuse_share(ws)?;
+    Ok(ws.clone())
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {

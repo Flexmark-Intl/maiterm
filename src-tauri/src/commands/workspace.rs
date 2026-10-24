@@ -289,6 +289,9 @@ pub fn delete_pane(
     let (data_clone, tab_ids) = {
         let mut app_data = state.app_data.write();
         let win = app_data.window_mut(&label).ok_or("Window not found")?;
+        if let Some(workspace) = win.workspaces.iter().find(|w| w.id == workspace_id) {
+            crate::hive::refuse_pane_close(workspace, &pane_id)?;
+        }
         // Collect tab IDs before removal for SQLite cleanup
         let tab_ids: Vec<String> = win.workspaces.iter()
             .filter(|w| w.id == workspace_id)
@@ -476,6 +479,7 @@ pub fn delete_tab(
         let mut app_data = state.app_data.write();
         let win = app_data.window_mut(&label).ok_or("Window not found")?;
         if let Some(workspace) = win.workspaces.iter_mut().find(|w| w.id == workspace_id) {
+            crate::hive::refuse_tab_close(workspace, &tab_id, replaced_by.as_deref())?;
             if let Some(pane) = workspace.panes.iter_mut().find(|p| p.id == pane_id) {
                 if pane.active_tab_id.as_ref() == Some(&tab_id) {
                     let old_index = pane.tabs.iter().position(|t| t.id == tab_id).unwrap_or(0);
@@ -506,6 +510,11 @@ pub fn move_tab_to_workspace(
     let data_clone = {
         let mut app_data = state.app_data.write();
         let win = app_data.window_mut(&label).ok_or("Window not found")?;
+        {
+            let find = |id: &str| win.workspaces.iter().find(|w| w.id == id);
+            let source_ws = find(&source_workspace_id).ok_or("Source workspace not found")?;
+            crate::hive::refuse_tab_move(source_ws, &tab_id, find(&target_workspace_id))?;
+        }
 
         // Extract the tab from source pane
         let source_ws = win.workspaces.iter_mut().find(|w| w.id == source_workspace_id)
@@ -565,6 +574,7 @@ pub fn move_tab_to_pane(
         if !workspace.panes.iter().any(|p| p.id == target_pane_id) {
             return Err("Target pane not found".to_string());
         }
+        crate::hive::refuse_tab_move(workspace, &tab_id, None)?;
 
         // Extract the tab from the source pane
         let source_pane = workspace.panes.iter_mut().find(|p| p.id == source_pane_id)
@@ -624,6 +634,7 @@ pub fn move_tab_to_split(
         if !workspace.panes.iter().any(|p| p.id == target_pane_id) {
             return Err("Target pane not found".to_string());
         }
+        crate::hive::refuse_tab_move(workspace, &tab_id, None)?;
 
         let source_pane = workspace.panes.iter_mut().find(|p| p.id == source_pane_id)
             .ok_or("Source pane not found")?;
@@ -1981,6 +1992,7 @@ pub fn duplicate_workspace(
             .find(|w| w.id == workspace_id)
             .ok_or("Workspace not found")?
             .clone();
+        crate::hive::refuse_workspace_duplicate(&source)?;
 
         let (mut cloned, tab_id_map) = clone_workspace_with_id_mapping(&source, &tab_contexts);
         // Same window as its source: staying linked would put every role on the mesh twice.
@@ -2863,6 +2875,7 @@ pub fn archive_tab(
         let workspace = win.workspaces.iter_mut()
             .find(|w| w.id == workspace_id)
             .ok_or("Workspace not found")?;
+        crate::hive::refuse_tab_archive(workspace, &tab_id)?;
         let pane = workspace.panes.iter_mut()
             .find(|p| p.id == pane_id)
             .ok_or("Pane not found")?;

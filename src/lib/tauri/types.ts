@@ -447,9 +447,66 @@ export interface Workspace {
    *  "/abs" locally, "user@host:/abs" on an ssh host. Absent/null = follow the active tab.
    *  Changed only through `setWorkspaceFileTreePin`. */
   file_tree_pin?: string | null;
+  /** This workspace is a Hive (docs/hive.md §3.2); absent for an ordinary one. Never copied:
+   *  duplicate and move-to-window are refused, a window duplicate skips it, share leaves it out. */
+  hive?: Hive | null;
   archived_tabs: Tab[];
   import_highlight?: boolean;
   suspended?: boolean;
+}
+
+/** `Workspace.hive` (docs/hive.md §3.2). Every kind field is a string in Rust, never an enum.
+ *  Fields a later build adds round-trip through Rust untouched. */
+export interface Hive {
+  /** Its own uuid, never the workspace id: names `<app data>/hive/<id>/`. */
+  id: string;
+  goal: string;
+  instructions: string;
+  folders: HiveFolder[];
+  /** Workers at once, enforced in Rust. */
+  cap: number;
+  /** "base" | "integration"; fixed at creation. */
+  landing_mode: string;
+  models: HiveModels;
+  tools: string[];
+  /** checkpoint → "coordinator" | "ask". */
+  checkpoints: Record<string, string>;
+  budget_cents: number;
+  push_after_land: boolean;
+  settings: Record<string, unknown>;
+  criteria: string[];
+  /** "active" | "paused" | "done". */
+  status: string;
+  done_at?: number | null;
+  /** Names the `hive/<slug>` branches; stable across workspace renames. */
+  slug: string;
+  created_at: string;
+}
+
+export interface HiveFolder {
+  /** One path component: how briefs and worktree paths name it. */
+  name: string;
+  /** Canonical, symlinks resolved. */
+  path: string;
+  /** "git" | "plain". */
+  kind: string;
+  base?: string | null;
+  setup?: string | null;
+  land_check?: string | null;
+  primary: boolean;
+  /** Local-path remotes, read when added; on every agent's denyWrite (§7.3). */
+  local_remotes: string[];
+}
+
+export interface HiveModels {
+  coordinator: HiveModel;
+  worker: HiveModel;
+}
+
+export interface HiveModel {
+  runtime: string;
+  model: string;
+  effort: string;
 }
 
 export type CursorStyle = 'block' | 'underline' | 'bar';
