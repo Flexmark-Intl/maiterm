@@ -866,6 +866,59 @@ export interface HiveLandLog {
   integration: boolean;
 }
 
+/** hive/memory `MemoryFileView`: one file in the Hive's memory folder (docs/hive.md §9). */
+export interface HiveMemoryFile {
+  /** Relative to `memory/`, `/`-separated in a subfolder. */
+  name: string;
+  title: string;
+  description: string;
+  type: string;
+  modified_ms: number;
+  size: number;
+  /** Rust's provenance: `coordinator`, `#2 Session store`, `human`, `unknown`, `maiTerm`. */
+  by: string;
+  /** `coordinator` | `worker` | `human` | `unknown` | `maiterm`. */
+  by_kind: string;
+  created_by: string;
+  indexed: boolean;
+  /** Folded into an `archive-*.md` line to keep MEMORY.md inside what Claude reads. */
+  folded: boolean;
+  /** Linked from the kept block, so not listed again in the index. */
+  pinned: boolean;
+  /** Listed, never indexed (plan D6). */
+  in_subfolder: boolean;
+  /** maiTerm's own archive fold: read-only. */
+  archive: boolean;
+}
+
+export interface HiveMemoryBudget {
+  lines: number;
+  bytes: number;
+  kept_lines: number;
+  kept_bytes: number;
+  max_lines: number;
+  max_bytes: number;
+  kept_max_lines: number;
+  kept_max_bytes: number;
+}
+
+/** hive/memory `MemoryView`: what the Memory view shows. */
+export interface HiveMemoryView {
+  files: HiveMemoryFile[];
+  /** The kept block as it is on disk. */
+  kept: string[];
+  /** `unfiled.md`'s lines not yet kept there by the human. */
+  unfiled: string[];
+  status: string | null;
+  kept_changed: boolean;
+  budget: HiveMemoryBudget;
+}
+
+export interface HiveMemoryFileText {
+  text: string;
+  sha256: string;
+}
+
 /** hive/land/undo.rs `UndoPreview`: what the human's Undo would do, before anything is written. */
 export interface HiveUndoPreview {
   id: string;

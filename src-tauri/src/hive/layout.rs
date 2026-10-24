@@ -139,14 +139,14 @@ fn local_path(url: &str, top: &Path) -> Option<PathBuf> {
 /// Write lost one's lines, so it exists before any agent does). The goal is the kept block's
 /// first line; fence markers inside it are defused so the goal can never close a fence.
 pub fn memory_seed(goal: &str) -> String {
-    let goal = goal.split_whitespace().collect::<Vec<_>>().join(" ").replace("<!--", "<! --").replace("-->", "-- >");
-    format!(
-        "<!-- maiterm:kept:begin — human and pinned lines; maiTerm never rewrites these -->\n\
-         - Goal: {goal}\n\
-         <!-- maiterm:kept:end -->\n\
-         <!-- maiterm:index:begin — generated from the files; edit the files, not these lines -->\n\
-         <!-- maiterm:index:end -->\n"
-    )
+    use super::memory::index::{kept_block, INDEX_BEGIN_LINE, INDEX_END_LINE};
+    format!("{}{INDEX_BEGIN_LINE}\n{INDEX_END_LINE}\n", kept_block(&seed_kept(goal)))
+}
+
+/// The kept block maiTerm seeds: the goal, one line, fence markers defused.
+pub fn seed_kept(goal: &str) -> Vec<String> {
+    let goal = super::memory::index::defuse(&goal.split_whitespace().collect::<Vec<_>>().join(" "));
+    vec![format!("- Goal: {goal}")]
 }
 
 /// What `create_layout` needs to be true before it touches the disk.
@@ -206,6 +206,11 @@ pub fn create_layout(root: &Path, hive: &Hive) -> Result<(), String> {
         Ok(mut f) => f.write_all(memory_seed(&hive.goal).as_bytes()).map_err(|e| format!("MEMORY.md: {e}"))?,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(format!("MEMORY.md: {e}")),
+    }
+    // Rust's copy of the human's kept block (plan D4): what a changed block is measured against.
+    if super::memory::record::load(&p).is_none() {
+        let rec = super::memory::record::MemoryRecord { v: super::memory::record::RECORD_VERSION, kept: seed_kept(&hive.goal), ..Default::default() };
+        super::memory::record::save(&p, &rec)?;
     }
 
     let mut added: Vec<Added> = Vec::new();
@@ -357,6 +362,9 @@ mod tests {
         assert!(memory.starts_with("<!-- maiterm:kept:begin"));
         assert!(memory.contains("- Goal: Ship the <! -- thing -- >\n<!-- maiterm:kept:end -->\n"));
         assert!(memory.contains("<!-- maiterm:index:begin — generated from the files; edit the files, not these lines -->\n<!-- maiterm:index:end -->"));
+        let rec = crate::hive::memory::record::load(&p).expect("the memory record");
+        assert_eq!(rec.kept, vec!["- Goal: Ship the <! -- thing -- >".to_string()], "the seed's kept block is the human's");
+        assert_eq!(crate::hive::memory::index::split(&memory).unwrap().kept, rec.kept);
 
         // A second run keeps MEMORY.md and refuses to reuse the read copy.
         fs::write(p.memory_index(), "edited").unwrap();

@@ -713,6 +713,9 @@ pub fn run() {
             // under its own id and deadline (docs/hive.md §8.1, §8.3). The windows read the list
             // when they load.
             hive::land::approval::refile_pending(&app_state, app.handle());
+            // Each Hive's MEMORY.md rebuilt once (agents may have written while maiTerm was down),
+            // then its memory folder watched (docs/hive.md §9). Off the setup thread.
+            hive::memory::watch_all(&app_state, app.handle());
 
             // Stack copies' branch checkouts whose branch is gone (docs/hive.md §6.9). Git, so off
             // the setup thread.
@@ -1186,6 +1189,13 @@ pub fn run() {
             hive::land::hive_retry_land,
             hive::diffstat::hive_diff_stats,
             hive::feed::hive_worker_metas,
+            hive::memory::hive_memory_list,
+            hive::memory::hive_memory_read,
+            hive::memory::hive_memory_write,
+            hive::memory::hive_memory_delete,
+            hive::memory::hive_memory_kept,
+            hive::memory::hive_memory_pin,
+            hive::memory::hive_memory_unfiled,
             #[cfg(debug_assertions)]
             share::open::share_debug_open,
         ])

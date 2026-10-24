@@ -154,9 +154,12 @@ export interface HiveViewState {
   coordCollapsed: boolean;
   /** 'coordinator' or task ids whose raw terminal is shown (§4.5, build step 5d). */
   terminalShown: string[];
-  /** Board only until the gallery and memory exist. */
-  view: 'board';
+  /** What the main area shows beside the coordinator (§4.1); the gallery arrives in step 8. */
+  view: HiveViewName;
 }
+
+export type HiveViewName = 'board' | 'memory';
+export const HIVE_VIEWS: readonly HiveViewName[] = ['board', 'memory'];
 
 export const defaultView = (): HiveViewState => ({ open: [], focused: 'coordinator', coordFocusedAt: 0, coordCollapsed: false, terminalShown: [], view: 'board' });
 
@@ -194,6 +197,7 @@ export function parseView(raw: string | null): HiveViewState {
   if (Number.isFinite(coordAt)) v.coordFocusedAt = coordAt;
   v.coordCollapsed = o.coord_collapsed === true;
   if (Array.isArray(o.terminal_shown)) v.terminalShown = [...new Set(o.terminal_shown.filter((s): s is string => typeof s === 'string' && !!s))];
+  if (HIVE_VIEWS.includes(o.view as HiveViewName)) v.view = o.view as HiveViewName;
   return v;
 }
 

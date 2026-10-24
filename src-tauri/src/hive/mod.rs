@@ -31,6 +31,9 @@
 //! Hive without deleting work (`delete`). Step 6b: reviewers, their verdicts and escalations
 //! (`review`). Step 6c: `hiveLand` and the land engine (`land`): to Base, pinned, under a lock
 //! per repo, its check queued, its log append-only.
+//!
+//! Step 7a: shared memory (`memory`): `MEMORY.md`'s index rebuilt from the files, each file's
+//! author in Rust's own record, the folder watched, and the Memory view's commands.
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
@@ -51,6 +54,7 @@ pub mod job_sandbox;
 pub mod land;
 pub mod launch;
 pub mod layout;
+pub mod memory;
 pub mod paths;
 pub mod pressure;
 // Ignored probes that run a sandboxed `claude -p` through `sh`: Unix only, as the sandbox is.
@@ -124,6 +128,8 @@ pub fn hive_agent(data: &AppData, tab_id: &str) -> Option<(Hive, String, paths::
 pub struct SessionStart {
     pub kickoff: Option<KickoffClaim>,
     pub phase_changed: bool,
+    /// The start's memory rebuild changed the folder: the Memory view refetches.
+    pub memory_changed: bool,
 }
 
 /// A Hive agent's session started (its SessionStart hook): list it on the task, and while the
@@ -137,15 +143,20 @@ pub fn session_started(
     session_id: &str,
     transcript_path: Option<String>,
 ) -> SessionStart {
+    // An agent reads MEMORY.md at start: a current index even if the watcher missed an event.
+    let memory_changed = memory::rebuild_now(&hive.id, paths).unwrap_or_else(|e| {
+        log::warn!("hive {}: memory not rebuilt at a session start: {e}", hive.id);
+        false
+    });
     let mut phase_changed = false;
     let (task, text) = match role {
         ROLE_COORDINATOR => (paths.coordinator_task(), kickoff_text(hive, paths)),
         ROLE_WORKER => {
             let Some(w) = worker::worker_for_tab(paths, tab_id) else {
                 log::warn!("hive {}: session {session_id} in tab {tab_id}, which no worker.json names", hive.id);
-                return SessionStart::default();
+                return SessionStart { memory_changed, ..SessionStart::default() };
             };
-            let Ok(task) = worker::task_dir(paths, &w.task_id) else { return SessionStart::default() };
+            let Ok(task) = worker::task_dir(paths, &w.task_id) else { return SessionStart { memory_changed, ..SessionStart::default() } };
             let res = worker::update_worker(&task, |w| {
                 let was = (w.setup_done, w.fresh_next, w.phase.clone());
                 w.setup_done = true;
@@ -163,7 +174,7 @@ pub fn session_started(
             }
             (task, worker_kickoff_text(paths, &w))
         }
-        _ => return SessionStart::default(),
+        _ => return SessionStart { memory_changed, ..SessionStart::default() },
     };
     let entry = launch::SessionEntry {
         session_id: session_id.to_string(),
@@ -174,7 +185,7 @@ pub fn session_started(
         log::warn!("hive {}: session {session_id} not recorded: {e}", hive.id);
     }
     let kickoff = launch::kickoff_pending(&task).then(|| KickoffClaim::take(task, text)).flatten();
-    SessionStart { kickoff, phase_changed }
+    SessionStart { kickoff, phase_changed, memory_changed }
 }
 
 /// The invariant rules a Hive agent is primed with at every session start (§7.1). Blocks on a

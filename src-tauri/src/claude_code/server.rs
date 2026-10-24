@@ -4406,6 +4406,9 @@ fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, trans
         if let (true, Some((label, ws))) = (started.phase_changed, &board) {
             crate::hive::rpc::emit_workers_changed(&handle, label, ws);
         }
+        if let (true, Some((label, ws))) = (started.memory_changed, &board) {
+            crate::hive::memory::emit_changed(&handle, label, ws);
+        }
         if let Some(claim) = started.kickoff {
             deliver_hive_kickoff(&app, &handle, &tab, claim).await;
         }

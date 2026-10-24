@@ -4,6 +4,7 @@ import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { StackHeldAction, StackLeaseState } from './types';
 import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
+import type { HiveMemoryFileText, HiveMemoryView } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
@@ -2840,6 +2841,40 @@ export async function hiveDelete(workspaceId: string, deleteGallery: boolean): P
  *  (docs/hive.md §8.6). */
 export async function hiveLandLog(workspaceId: string): Promise<HiveLandLog> {
   return invoke('hive_land_log', { workspaceId });
+}
+
+/** The Hive's Memory view (docs/hive.md §9): the folder rebuilt first, then listed. */
+export async function hiveMemoryList(workspaceId: string): Promise<HiveMemoryView> {
+  return invoke('hive_memory_list', { workspaceId });
+}
+
+/** A memory file's text and the hash a later write or delete must name. */
+export async function hiveMemoryRead(workspaceId: string, name: string): Promise<HiveMemoryFileText> {
+  return invoke('hive_memory_read', { workspaceId, name });
+}
+
+/** The human's create (`expectSha` null) or edit of a memory file: provenance `human`. */
+export async function hiveMemoryWrite(workspaceId: string, name: string, text: string, expectSha: string | null): Promise<HiveMemoryView> {
+  return invoke('hive_memory_write', { workspaceId, name, text, expectSha });
+}
+
+export async function hiveMemoryDelete(workspaceId: string, name: string, expectSha: string): Promise<HiveMemoryView> {
+  return invoke('hive_memory_delete', { workspaceId, name, expectSha });
+}
+
+/** The kept block: `set` the human's lines, `accept` the block on disk, `restore` the recorded one.
+ *  `seen` is the block the view showed when they acted: refused if it changed since. */
+export async function hiveMemoryKept(workspaceId: string, action: 'set' | 'accept' | 'restore', lines: string[] | null, seen: string[]): Promise<HiveMemoryView> {
+  return invoke('hive_memory_kept', { workspaceId, action, lines, seen });
+}
+
+/** A file's index line into the kept block. */
+export async function hiveMemoryPin(workspaceId: string, name: string): Promise<HiveMemoryView> {
+  return invoke('hive_memory_pin', { workspaceId, name });
+}
+
+export async function hiveMemoryUnfiled(workspaceId: string, line: string, action: 'keep' | 'pin' | 'delete'): Promise<HiveMemoryView> {
+  return invoke('hive_memory_unfiled', { workspaceId, line, action });
 }
 
 /** What undoing land log line `id` would write, for the inline confirmation. */

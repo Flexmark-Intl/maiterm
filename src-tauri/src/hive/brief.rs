@@ -26,6 +26,13 @@ fn shell_safe(s: &str, max: usize) -> String {
 
 const TITLE_IN_RULES: usize = 120;
 
+/// How shared memory works, in both briefs (§9): the index is maiTerm's, and memory is read only
+/// at start.
+const MEMORY_RULE: &str = "maiTerm keeps MEMORY.md\u{2019}s index from each memory file\u{2019}s `name` and `description`; a \
+     line you add there is folded into it, so write a memory file instead. Other agents write memory at the same time: \
+     a new file gets a name no file in memory/ has yet (Read it first), or one agent\u{2019}s Write replaces another\u{2019}s. \
+     Memory is read at start: running workers learn a decision only by message.";
+
 /// The rules that must survive every compaction: who the agent is, how it asks, what it may
 /// never do, and where the rest is. A worker's need its record (`worker`), which names its
 /// brief; without one it gets only what every Hive agent is told.
@@ -165,8 +172,8 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths) -> String {
         paths.gallery().display()
     ));
     b.push_str(&format!(
-        "## How this Hive runs\n\n- Workers at once: {}.\n- Landing: {}.\n- Memory is shared and read at start, so a \
-         decision running workers need also goes to them by message.\n",
+        "## How this Hive runs\n\n- Workers at once: {}.\n- Landing: {}.\n- {MEMORY_RULE} So a decision running workers \
+         need also goes to them by message (hiveMessageWorker).\n",
         hive.cap,
         if hive.is_integration() { format!("into `{}`, each land approved by your human", hive.integration_branch()) } else { "straight into each folder\u{2019}s Base".to_string() }
     ));
@@ -268,6 +275,7 @@ pub fn worker_brief_md(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, task_br
          checks: `commits` (shas on your branch), `files` (paths in your folders) and `checks` (`hiveRun` jobs that passed on \
          your committed tip). A done report without receipts is refused.\n",
     );
+    b.push_str(&format!("- Shared memory is `{}`. {MEMORY_RULE}\n", paths.memory().display()));
     b.push_str(&queued_lines(hive, w.folders.iter().filter(|f| f.worktree.is_some()).map(|f| f.name.as_str()).collect(), true));
     if !hive.tools.is_empty() {
         b.push_str(&format!("- Tools this Hive has: {}. A tool that isn\u{2019}t listed isn\u{2019}t there.\n", hive.tools.join(", ")));
@@ -491,5 +499,17 @@ mod tests {
         assert!(b.contains(h.instructions.trim()), "never truncated");
         assert!(b.contains("## Roles") && b.contains(&crate::hive::roles::catalogue_lines()), "the catalogue, names and lines only");
         assert!(b.find("## Roles") < b.find("## Instructions from your human"), "the human's words come last");
+    }
+
+    /// §9: both briefs say the index is maiTerm's and memory is read at start; the coordinator's
+    /// rules still say to write files, not the index.
+    #[test]
+    fn both_briefs_say_how_shared_memory_works() {
+        let (h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        for b in [brief_md(&h, &p), worker_brief_md(&h, &p, &w, "", None)] {
+            assert!(b.contains(MEMORY_RULE), "{b}");
+        }
+        assert!(worker_brief_md(&h, &p, &w, "", None).contains(&format!("Shared memory is `{}`", p.memory().display())));
+        assert!(invariant_rules(&h, ROLE_COORDINATOR, &p, None).contains("write memory files rather than editing the index"));
     }
 }

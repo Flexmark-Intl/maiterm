@@ -68,6 +68,22 @@ impl HivePaths {
         self.memory().join("MEMORY.md")
     }
 
+    /// Where the index goes when `MEMORY.md` can't take it (the kept block over its cap, §9).
+    pub fn memory_generated(&self) -> PathBuf {
+        self.memory().join("MEMORY.generated.md")
+    }
+
+    /// Lines found in `MEMORY.md` that link no memory file: moved here, never dropped (§9).
+    pub fn memory_unfiled(&self) -> PathBuf {
+        self.memory().join("unfiled.md")
+    }
+
+    /// Rust's record of the memory folder: who wrote each file, and the human's kept block. Under
+    /// `logs/`, which no Hive agent may write (§9 "Provenance comes from maiTerm").
+    pub fn memory_record(&self) -> PathBuf {
+        self.logs().join("memory.json")
+    }
+
     pub fn gallery(&self) -> PathBuf {
         self.root.join("gallery")
     }
@@ -229,6 +245,9 @@ mod tests {
         assert_eq!(p.coordinator_worktree("web"), Path::new("/x/hive/h/wt.noindex/coordinator/web"));
         assert_eq!(p.coordinator_task(), Path::new("/x/hive/h/tasks/coordinator"));
         assert_eq!(p.memory_index(), Path::new("/x/hive/h/memory/MEMORY.md"));
+        assert_eq!(p.memory_record(), Path::new("/x/hive/h/logs/memory.json"));
+        assert_eq!(p.memory_generated(), Path::new("/x/hive/h/memory/MEMORY.generated.md"));
+        assert_eq!(p.memory_unfiled(), Path::new("/x/hive/h/memory/unfiled.md"));
         assert_eq!(p.worker_worktree("api-auth", "web"), Path::new("/x/hive/h/wt.noindex/api-auth/web"));
         assert_eq!(p.worker_scratch("api-auth"), Path::new("/x/hive/h/wt.noindex/api-auth/scratch"));
         assert_eq!(p.worker_tmp("api-auth"), Path::new("/x/hive/h/wt.noindex/api-auth/claude-tmp"));

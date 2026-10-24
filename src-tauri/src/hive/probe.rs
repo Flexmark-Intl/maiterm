@@ -656,6 +656,61 @@ fn spike_1_memory_lands_in_the_hive_under_dont_ask() {
     assert!(default_memory("cobalt-heron").is_empty(), "it leaked into the per-project default after /compact");
 }
 
+/// Spike 5 (§9), with the index rebuild: two real sessions with the Hive's settings save one memory
+/// each at the same time while the watcher runs. Each file ends up in the index exactly once, no
+/// pointer line is left over in `unfiled.md`, and nothing lands in the per-project memory.
+#[test]
+#[ignore = "runs claude -p against the logged-in account"]
+fn spike_5_concurrent_memory_probe() {
+    let p = Probe::new();
+    let maiterm = FakeMaiterm::start(&p);
+    let (id, paths) = (p.hive.id.clone(), p.paths.clone());
+    let _watch = super::memory::start_watcher(&p.paths.memory(), move || {
+        let _ = super::memory::rebuild_now(&id, &paths);
+    })
+    .expect("the watcher");
+    // Each its own file name: left to choose, both sessions named theirs `probe-codeword.md` and
+    // the second Write replaced the first (measured 2026-10-24), which no index can repair.
+    let save = |word: &str| {
+        format!(
+            "Save this to your auto memory now, so future sessions know it: the probe codeword is {word}. Put it in its own \
+             memory file named codeword-{word}.md, and do everything else the way your memory instructions say. Then reply \
+             with the single word DONE."
+        )
+    };
+    let words = ["amber-falcon", "cobalt-heron"];
+    let (probe, port, save) = (&p, maiterm.port, &save);
+    let runs: Vec<Run> = std::thread::scope(|sc| {
+        let hs: Vec<_> = words.iter().map(|w| sc.spawn(move || probe.ask(port, None, &save(w)))).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for r in &runs {
+        println!("--- session\n{}\n", r.summary());
+    }
+    // Past the watcher's debounce, then one more rebuild so the check reads a settled folder.
+    std::thread::sleep(Duration::from_secs(3));
+    super::memory::rebuild_now(&p.hive.id, &p.paths).unwrap();
+    let index = fs::read_to_string(p.paths.memory_index()).unwrap();
+    println!("MEMORY.md:\n{index}");
+    for w in words {
+        let files: Vec<String> = fs::read_dir(p.paths.memory())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".md") && n != "MEMORY.md" && n != "unfiled.md")
+            .filter(|n| fs::read_to_string(p.paths.memory().join(n)).is_ok_and(|t| t.contains(w)))
+            .collect();
+        assert_eq!(files.len(), 1, "{w}: one memory file, found {files:?}");
+        let link = format!("]({})", files[0]);
+        assert_eq!(index.matches(&link).count(), 1, "{w}: {link} is in the index exactly once:\n{index}");
+        let leaked: Vec<PathBuf> = p.claude_project_dirs().iter().map(|d| d.join("memory")).filter(|d| d.is_dir()).collect();
+        assert!(leaked.iter().all(|d| fs::read_dir(d).into_iter().flatten().flatten().all(|e| !fs::read_to_string(e.path()).is_ok_and(|t| t.contains(w)))), "{w} leaked into the per-project memory");
+    }
+    let unfiled = fs::read_to_string(p.paths.memory_unfiled()).unwrap_or_default();
+    assert!(super::memory::index::split(&index).is_some(), "the fences stand");
+    assert!(!unfiled.lines().any(|l| !super::memory::index::link_targets(l).is_empty()), "a pointer line was left unfiled:\n{unfiled}");
+}
+
 /// A scratch Hive with two repos, `web` (primary, with a bare local remote) and `api`, and one
 /// worker on both, made by the real `create_worker_worktrees`, with its `worker.json` and
 /// launch record as a spawn writes them.

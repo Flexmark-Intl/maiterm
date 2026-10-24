@@ -1048,6 +1048,31 @@ mod tests {
         (worker_settings_json(&h, &r, &w, &p, &worker_ctx(), &env()).unwrap(), w)
     }
 
+    /// §9: every role's settings name the Hive's memory folder, absolute, and leave writing it to
+    /// Claude's own exemption for `autoMemoryDirectory`: no sandbox list names it either way.
+    #[cfg(unix)]
+    #[test]
+    fn every_role_points_its_memory_at_the_hive_folder_and_no_write_list_names_it() {
+        let (h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        let mut reviewer = w.clone();
+        reviewer.task_id = "t-rev".into();
+        reviewer.slug = "auth-review".into();
+        reviewer.reviews = Some("t-auth".into());
+        let coord = hive_settings_json(&h, &coordinator_record(&h, &p), &p, &env()).unwrap();
+        let worker = worker_settings_json(&h, &crate::hive::launch::worker_record(&h, &p, &w), &w, &p, &worker_ctx(), &env()).unwrap();
+        let rev = worker_settings_json(&h, &crate::hive::launch::worker_record(&h, &p, &reviewer), &reviewer, &p, &worker_ctx(), &env()).unwrap();
+        let mem = p.memory();
+        for (role, s) in [("coordinator", &coord), ("worker", &worker), ("reviewer", &rev)] {
+            assert_eq!(s["autoMemoryDirectory"].as_str(), Some(&*mem.to_string_lossy()), "{role}");
+            for list in ["allowWrite", "denyWrite"] {
+                let entries = s["sandbox"]["filesystem"][list].as_array().map(|a| strings(&Value::Array(a.clone()))).unwrap_or_default();
+                for e in entries {
+                    assert!(!Path::new(&e).starts_with(&mem) && !mem.starts_with(&e), "{role}: {list} names {e}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn each_role_has_only_its_own_settings() {
         let (h, p, w) = crate::hive::launch::tests::sample_worker_hive();

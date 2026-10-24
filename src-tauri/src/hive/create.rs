@@ -693,6 +693,7 @@ pub struct HiveCreated {
 #[tauri::command]
 pub async fn hive_create(
     window: tauri::Window,
+    app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     workspace_id: String,
     spec: HiveSpec,
@@ -769,6 +770,9 @@ pub async fn hive_create(
     };
     if let Some(r) = &replaced {
         let _ = state.scrollback_db.delete(&r.tab_id);
+    }
+    if let Some(root) = hive_root(&hive_id) {
+        super::memory::watch(state.inner(), &app_handle, &hive_id, &HivePaths::new(root));
     }
     log::info!("hive {hive_id}: created in workspace {workspace_id} (coordinator tab {coordinator_tab_id})");
     Ok(HiveCreated { workspace, coordinator_tab_id, replace_tab: replaced })

@@ -10,8 +10,12 @@
   The board is static cards in waves (§4.3, §4.4), with dependency strings between them. It reads
   no transcript: Rust's worker records are fetched when this window hears `hive-workers-changed`
   or its tasks change, diff stats and meta are pushed (hiveFeed), and the rest (lane, blocker,
-  note, agent state and the activity line) comes live from the stores. Pause, Gallery and Memory
-  arrive with later steps.
+  note, agent state and the activity line) comes live from the stores. Pause and Gallery arrive
+  with later steps.
+
+  Memory (§9, step 7a) is the header's other view (Board · Memory, Cmd+Shift+Y): HiveMemoryView
+  takes the board's place and the worker columns', which stay mounted, hidden, so their drafts
+  survive. The coordinator column stays put.
 
   Worker columns (§4.1): opening one turns the board into a rail; at most two show, and on a
   narrow window one gives way, then the coordinator goes to its strip (`hive/columns.ts`). Which
@@ -44,6 +48,7 @@
   import RunQueueModal from './RunQueueModal.svelte';
   import HiveDeleteSheet from './HiveDeleteSheet.svelte';
   import LandLogModal from './LandLogModal.svelte';
+  import HiveMemoryView from './HiveMemoryView.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -185,12 +190,17 @@
   });
   // A column opened before the board arrived (a restart's saved view) waits for its card.
   const openCols = $derived(board ? view.open.filter((c) => cardByTask.has(c.taskId)) : []);
+  /** Memory (§9) takes the board's place and the worker columns' (kept mounted, hidden), so the
+   *  layout fits as if none were open: no rail, no worker terminal on screen. */
+  const showMemory = $derived(view.view === 'memory');
+  const VIEW_TABS = [{ key: 'board', label: 'Board' }, { key: 'memory', label: 'Memory' }] as const;
+  const layoutCols = $derived(showMemory ? [] : openCols);
   const fit = $derived(fitColumns({
     main: mainW > 0 ? mainW : Number.POSITIVE_INFINITY,
     coordW: width,
     railW,
     coordCollapsed: view.coordCollapsed,
-    open: openCols,
+    open: layoutCols,
     focused: view.focused,
     coordFocusedAt: view.coordFocusedAt,
   }));
@@ -397,6 +407,8 @@
       return;
     }
     pendingWorker = null;
+    // A worker's column lives in the board view.
+    hiveView.setView(workspaceId, 'board');
     if (hiveView.open(workspaceId, w.task_id).refused) {
       toastStore.addToast('Both worker columns are pinned', `Unpin one to open #${w.badge} ${w.title}.`, 'info');
       return;
@@ -439,7 +451,7 @@
   /** Cmd+Shift+[ / ], over every open column: one squeezed out by the window comes back when
    *  focused (`fitColumns`' keeper). */
   function cycle(dir: -1 | 1) {
-    const order = cycleOrder(openCols, view.coordCollapsed);
+    const order = cycleOrder(layoutCols, view.coordCollapsed);
     const to = nextFocus(order, view.focused, dir);
     hiveView.focus(workspaceId, to);
     focusDom(to);
@@ -492,7 +504,8 @@
         cycle(a.dir);
         return;
       case 'cycle-view':
-        // Board → Gallery → Memory; only the board exists until steps 7 and 8.
+        // Board → Memory; the gallery joins in step 8.
+        hiveView.cycleView(workspaceId);
         return;
       case 'close-focused':
         closeFocused();
@@ -567,6 +580,21 @@
     <div class="title">
       <b>{ws?.name ?? ''}</b>
       {#if hive?.goal}<span class="goal">{hive.goal}</span>{/if}
+      <div class="views" role="tablist" aria-label="Hive view">
+        {#each VIEW_TABS as { key, label }, i (key)}
+          {#if i}<span class="sep" aria-hidden="true">·</span>{/if}
+          <Tooltip text="{label} ({modSymbol}⇧Y switches)">
+            <button
+              type="button"
+              role="tab"
+              class="view-btn"
+              class:active={view.view === key}
+              aria-selected={view.view === key}
+              onclick={() => hiveView.setView(workspaceId, key)}
+            >{label}</button>
+          </Tooltip>
+        {/each}
+      </div>
     </div>
     <div class="facts">
       <span>
@@ -680,6 +708,7 @@
     <section
       bind:this={boardEl}
       class="board"
+      class:gone={showMemory}
       class:rail={boardMode === 'rail'}
       class:focused={focusedKey === 'board' && boardMode === 'rail'}
       style={boardMode === 'rail' ? `width: ${railW}px` : undefined}
@@ -747,6 +776,9 @@
         </div>
       {/if}
     </section>
+    {#if showMemory}
+      <HiveMemoryView {workspaceId} />
+    {/if}
     {#if boardMode === 'rail'}
       <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
       <div
@@ -817,7 +849,13 @@
   .coord.flash { box-shadow: inset 0 0 0 1px var(--accent); }
   .coord.focused { box-shadow: inset 0 2px 0 var(--accent); }
   .coord.dragging { user-select: none; }
-  .coord.gone, .wslot.gone { display: none; }
+  .coord.gone, .wslot.gone, .board.gone { display: none; }
+  .views { display: flex; align-items: baseline; gap: 6px; margin-top: 4px; font-size: 12px; }
+  .views .sep { color: var(--fg-dim); }
+  .view-btn { background: none; border: none; padding: 0 0 1px; color: var(--fg-dim); font: inherit; cursor: pointer; border-bottom: 1px solid transparent; }
+  .view-btn:hover { color: var(--fg); }
+  .view-btn.active { color: var(--fg); border-bottom-color: var(--accent); }
+  .view-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   /* §4.1: the coordinator collapsed to 44 px, with a dot when it has news. */
   .cols > :global(.tooltip-wrapper) { flex: none; display: flex; }
   .strip { width: 44px; flex: none; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 12px 0; background: var(--bg-medium); border: none; border-right: 1px solid var(--bg-light); color: var(--fg-dim); font: inherit; cursor: pointer; }

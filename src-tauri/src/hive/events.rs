@@ -62,6 +62,10 @@ pub(crate) fn feed_actions(event: &str, tool: Option<&str>) -> &'static [Action]
 /// handler's mod dedup, which would drop this copy for the mod's: only this one says it is a
 /// Hive tab's, and the tab is checked against the state here.
 pub fn observed(state: &Arc<AppState>, handle: &AppHandle, tab_id: &str, event_name: &str, event: &Value) {
+    // Any Hive tab's write into the memory folder, the coordinator's too (§9 provenance).
+    if let Some(path) = super::memory::tool_write_target(event_name, event) {
+        super::memory::attribute_tool_write(state, handle, tab_id, path);
+    }
     let actions = feed_actions(event_name, event.get("tool_name").and_then(Value::as_str));
     if actions.is_empty() {
         return;

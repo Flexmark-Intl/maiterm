@@ -16,8 +16,10 @@ import {
   togglePin,
   validFocus,
   type HiveFocus,
+  type HiveViewName,
   type HiveViewState,
 } from '$lib/hive/columns';
+import { nextView } from '$lib/hive/memory';
 
 const key = (wsId: string) => `hive.view.${wsId}`;
 
@@ -126,6 +128,18 @@ function createHiveViewStore() {
       const v = read(wsId);
       if (v.terminalShown.includes(which) === shown) return;
       write(wsId, { ...v, terminalShown: shown ? [...v.terminalShown, which] : v.terminalShown.filter((k) => k !== which) });
+    },
+
+    /** Board or Memory beside the coordinator (§4.1). */
+    setView(wsId: string, next: HiveViewName) {
+      const v = read(wsId);
+      if (v.view !== next) write(wsId, { ...v, view: next });
+    },
+
+    /** Cmd+Shift+Y (§4.6). */
+    cycleView(wsId: string) {
+      const v = read(wsId);
+      write(wsId, { ...v, view: nextView(v.view) });
     },
 
     /** Columns whose worker the board no longer has (a rolled-back spawn) close. */

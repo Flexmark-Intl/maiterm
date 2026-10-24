@@ -457,6 +457,8 @@ pub(crate) async fn delete_hive<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         log::warn!("hive {}: deleted, the state not saved: {e}", caller.hive.id);
     }
     let requests_failed = ctx.window.fail_requests(&tabs, "its Hive was deleted");
+    // No rebuild may write into the folder as it goes.
+    super::memory::unwatch(&caller.hive.id);
 
     let (hive, paths, recs) = (caller.hive.clone(), caller.paths.clone(), workers.clone());
     let (disk, branches) = blocking(move || {
