@@ -4556,6 +4556,15 @@ async fn hooks_handler(
         .unwrap_or(crate::state::AgentRuntime::Claude);
     let runtime_key = runtime.as_key();
 
+    // A Hive worker's crash or sandbox refusal (docs/hive.md §6.7, §11.3), from its tab's own
+    // command hook. Ahead of the mod dedup below, which would drop this copy for the mod's, and
+    // only this one says it comes from a Hive tab; `observed` checks the tab against the state.
+    if params.get("via").map(String::as_str) == Some("hive") {
+        if let Some(tab) = params.get("tab_id").filter(|t| !t.is_empty()) {
+            crate::hive::events::observed(&srv.state, &srv.app_handle, tab, hook_event_name, &event);
+        }
+    }
+
     // The maiterm-tab mod (claude_mod.rs) sends a Claude session's events itself, each naming
     // its tab, and sends each one BEFORE the settings.json hooks beneath it run. So a hook's copy
     // of an event the mod sent moments ago, for the same session, is a duplicate — whether it

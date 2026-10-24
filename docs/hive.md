@@ -3029,6 +3029,41 @@ several releases a day).
      only when another tab hit it, and told not to ask again. A plan's capacity 429 does
      nothing. The tab that hit the limit is never typed into. `hive_resume` un-pauses and
      closes the row (no button yet). Nothing reserves yet: `hiveSpawnWorker` (4d) does.
+   - 4e: `hiveReport` (`hive/report.rs`: commits must be on the worker's branch and not already on
+     its landing target when it started; files must exist in its worktrees or scratch, symlinks
+     resolved; `assets` and `checks` refused until steps 8 and 5b; `done` needs one), and the
+     coordinator's `hiveMessageWorker`, `hiveStopWorker` and `hiveRestartWorker`
+     (`hive/control.rs`). A stop marks the worker `stopped` before it signals, and signals only a
+     `claude` the terminal shows in front, through `kill_pty_foreground_job`; anything else in front
+     (a first launch's setup, with `&& … claude` typed after it) or a front it can't read refuses
+     the stop and puts the phase back, since a `stopped` agent would run uncounted. A restart takes
+     only a `failed` or `stopped` worker, or a `running` one at its shell's empty prompt (or whose
+     tab is gone); one stopped before it ever launched goes back to `waiting` instead. It needs no
+     agent in front, takes a reservation with its own slot not counted twice, and types the
+     builder's line through the follow-ups' empty-prompt gate (`followUpsStore.relaunchAgent`), or
+     mounts the tab, or gives the task a new hidden tab when its tab is gone. A relaunch the window
+     never answers puts an exited `running` worker back `failed`, so a late wake types nothing, and
+     a new tab's unanswered spawn gets its `hive.unspawn` queued after it. A waiter's launch writes
+     `launching` only over the `waiting` record it read: a stop meanwhile stands. Every Hive task write
+     is a window verb the tasks store applies (`hive.task`: note, status, blocker), and a rolled-back
+     waiter's row is put back (`hive.unspawn` `restore_task`), never removed. Everything maiTerm
+     types into a Hive agent goes through `hive/deliver.rs`: the draft-hold gate, and a hold while
+     that tab waits out a usage limit (the reset `assess_limit` saw, in memory), re-armed waits
+     included, and the draft-hold queue holds maiTerm's own messages through one too; worker text
+     is `frame_escape`d (no `⟦`/`⟧` or look-alikes, no line opening `[maiTerm]` after any line
+     break a reader honours, U+2028/2029 included, no control or invisible characters).
+     Crashes and sandbox refusals are read off a worker's own `via=hive` hooks ahead of the mod
+     dedup (`hive/events.rs`, which would otherwise drop that copy for the mod's): a SessionEnd
+     (not `/clear`) with the shell back at its prompt, or a PTY that exited on its own, fails a
+     `launching`/`running` worker and tells the coordinator (a PTY's worker is found by its
+     `worker.json`, since the window closes the tab on `pty-close`, often first); a refused host or path files one
+     `external` blocker per target (`violations_seen`) and tells the coordinator it can't widen
+     the sandbox. Waiters (`hive/waiters.rs`) are polled after every Hive task write, report,
+     stop, crash and resume, one poll per Hive at a time: met = the dependency's task is done (or
+     its row gone), failed or dropped blocks with one notice, and a launch refused past its
+     reservation backs off five minutes. The worker and coordinator settings also deny the
+     Overlord's tools (`OVERLORD_CALLER_TOOLS`). Not yet: a poll when the breaker's reset passes
+     (the next task write does it), and the hold for a usage-limit wait is lost on a restart.
 5. The activity feed, diff stat, worker columns, raw terminal (`fixedSize`, spike 3), keyboard.
 5b. The stack feature first: any service on any branch (§6.9: `Tab.service_target`, re-rooted
    cwd, placeholders, Run on ▸, copies per branch, `shared_from`). Then the Hive run queue:

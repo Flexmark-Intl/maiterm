@@ -848,6 +848,16 @@ function createFollowUpsStore() {
       return held;
     },
 
+    /** Relaunch the exited agent in `tabId` through §6.2's gate (an empty shell prompt of its own,
+     *  nothing typed since): a Hive's `hiveRestartWorker`, whose decision stands in for the human's
+     *  click, so the preference doesn't hold it. Null when typed; otherwise why not. */
+    async relaunchAgent(tabId: string): Promise<string | null> {
+      const tab = locate(tabId)?.tab;
+      if (!tab) return 'the tab is gone';
+      const keys = terminalsStore.getLastTakeoverInputAt(tabId);
+      return resumeAgent(tab, true, () => terminalsStore.getLastTakeoverInputAt(tabId) === keys);
+    },
+
     /** Run the tick now (tests). */
     tick,
   };

@@ -1686,7 +1686,7 @@ mod tests {
         let listed = |hive: Option<&'static str>| names(ToolGates { hive, ..ToolGates::from_prefs(&prefs) });
         let hive_names = |v: Vec<String>| v.into_iter().filter(|n| n.starts_with("hive")).collect::<Vec<_>>();
         assert!(hive_names(listed(None)).is_empty(), "an ordinary agent carries no Hive schema");
-        assert!(hive_names(listed(Some("worker"))).is_empty(), "a worker's own tools arrive with hiveReport");
+        assert_eq!(hive_names(listed(Some("worker"))), crate::hive::tools::WORKER_TOOLS.to_vec(), "a worker reports, and holds nothing else");
         assert_eq!(hive_names(listed(Some("coordinator"))), crate::hive::tools::COORDINATOR_TOOLS.to_vec());
         assert!(hive_names(listed(Some("reviewer"))).is_empty());
     }

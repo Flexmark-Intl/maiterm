@@ -477,7 +477,10 @@ pub fn spawn_pty(
     let state_clone = Arc::clone(state);
     let pty_id_owned = pty_id.to_string();
     let tab_id_owned = tab_id.to_string();
+    let exit_app = app_handle.clone();
     thread::spawn(move || {
+        // The shell exited on its own, as opposed to a kill maiTerm sent (close, suspend, reload).
+        let mut exited = false;
         loop {
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(PtyCommand::Write(data)) => {
@@ -495,6 +498,9 @@ pub fn spawn_pty(
                     });
                 }
                 Ok(PtyCommand::Kill) => {
+                    // The window closes a tab whose shell exited, and that kill can beat the
+                    // poll below: a shell already gone died on its own all the same.
+                    exited = matches!(child.try_wait(), Ok(Some(_)));
                     let _ = child.kill();
                     let _ = child.wait();
                     break;
@@ -502,6 +508,7 @@ pub fn spawn_pty(
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     // Check if child is still alive
                     if let Ok(Some(_)) = child.try_wait() {
+                        exited = true;
                         break;
                     }
                 }
@@ -526,6 +533,10 @@ pub fn spawn_pty(
             if tab_map.get(&tab_id_owned).map(|id| id == &pty_id_owned).unwrap_or(false) {
                 tab_map.remove(&tab_id_owned);
             }
+        }
+        // A Hive worker whose terminal died mid-task has crashed (docs/hive.md §11.3).
+        if exited {
+            crate::hive::events::pty_exited(&state_clone, &exit_app, &tab_id_owned);
         }
     });
 

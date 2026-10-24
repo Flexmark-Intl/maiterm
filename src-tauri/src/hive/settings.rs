@@ -178,7 +178,27 @@ pub fn coordinator_only_mcp_tools() -> impl Iterator<Item = &'static str> {
 }
 
 pub fn worker_denied_mcp_tools() -> Vec<&'static str> {
-    ESCAPE_MCP_TOOLS.iter().chain(WORKER_EXTRA_DENIED_MCP_TOOLS).copied().chain(coordinator_only_mcp_tools()).collect()
+    let mut out: Vec<&'static str> = Vec::new();
+    for t in ESCAPE_MCP_TOOLS.iter().chain(WORKER_EXTRA_DENIED_MCP_TOOLS).copied().chain(coordinator_only_mcp_tools()).chain(overlord_mcp_tools()) {
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// The Overlord's own tools (close, archive, recover or drive the human's tabs), denied to every
+/// Hive agent in its settings as well as in Rust (`refuse_agent_tool`): a Hive agent is never the
+/// Overlord. Never one the coordinator is allowed.
+pub fn overlord_mcp_tools() -> impl Iterator<Item = &'static str> {
+    crate::claude_code::server::OVERLORD_CALLER_TOOLS.iter().copied().filter(|t| !COORDINATOR_MCP_TOOLS.contains(t))
+}
+
+/// The coordinator's denies: `ESCAPE_MCP_TOOLS` and the Overlord's tools, once each.
+pub fn coordinator_denied_mcp_tools() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = ESCAPE_MCP_TOOLS.to_vec();
+    out.extend(overlord_mcp_tools().filter(|t| !ESCAPE_MCP_TOOLS.contains(t)));
+    out
 }
 
 /// The package registries a worker's sandbox reaches (§14.16). Generator hosts join with the
@@ -311,7 +331,7 @@ pub fn hive_settings_json(hive: &Hive, record: &LaunchRecord, paths: &HivePaths,
 
     let mut deny_rules: Vec<String> = vec!["WebFetch".into(), "WebSearch".into()];
     deny_rules.extend(PUSH_DENIES.iter().chain(GIT_ESCAPE_DENIES).map(|s| s.to_string()));
-    deny_rules.extend(ESCAPE_MCP_TOOLS.iter().map(|t| format!("mcp__{mcp}__{t}")));
+    deny_rules.extend(coordinator_denied_mcp_tools().iter().map(|t| format!("mcp__{mcp}__{t}")));
     for d in &deny {
         deny_rules.push(abs_rule("Write", &d.path, d.dir));
         deny_rules.push(abs_rule("Edit", &d.path, d.dir));
@@ -768,6 +788,16 @@ mod tests {
             assert!(deny.contains(&rule) && !allow.contains(&rule), "{rule}");
         }
         assert!(!COORDINATOR_MCP_TOOLS.iter().any(|t| ESCAPE_MCP_TOOLS.contains(t)));
+        // The Overlord's tools are denied it too, as Rust refuses them to any Hive role.
+        for t in crate::claude_code::server::OVERLORD_CALLER_TOOLS {
+            let rule = format!("mcp__{mcp}__{t}");
+            assert!(deny.contains(&rule) && !allow.contains(&rule), "{rule}");
+        }
+        let mcp_denies: Vec<&String> = deny.iter().filter(|r| r.starts_with("mcp__")).collect();
+        let mut unique = mcp_denies.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), mcp_denies.len(), "each tool denied once");
         for r in deny.iter().chain(&allow) {
             let inner = r.split_once('(').map(|(_, i)| i.trim_end_matches(')')).unwrap_or("");
             assert!(!inner.trim_end_matches(":*").contains(":*"), "a mid-pattern :* matches nothing: {r}");
@@ -1129,6 +1159,14 @@ mod tests {
         for t in ["createBackup", "getTabContext", "getServiceOutput", "getTabPrompt", "readLogs", "getDiagnostics", "readCommsChannel"] {
             assert!(deny.contains(&format!("mcp__{mcp}__{t}")), "{t}");
         }
+        for t in crate::claude_code::server::OVERLORD_CALLER_TOOLS {
+            assert!(deny.contains(&format!("mcp__{mcp}__{t}")), "the Overlord's: {t}");
+        }
+        let n = worker_denied_mcp_tools().len();
+        let mut once = worker_denied_mcp_tools();
+        once.sort();
+        once.dedup();
+        assert_eq!(once.len(), n, "each tool denied once");
         assert!(ESCAPE_MCP_TOOLS.contains(&"createBackup"), "the coordinator's too");
         assert!(!allow.iter().any(|r| r.starts_with("mcp__")), "auto mode: no MCP allow list");
         // A bare verb has its own rule wherever the pattern holds another wildcard.

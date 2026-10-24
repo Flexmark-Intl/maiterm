@@ -21,6 +21,7 @@ use tauri::State;
 #[tauri::command]
 pub fn set_workspace_tasks(
     window: tauri::Window,
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     workspace_id: String,
     mut tasks: Vec<Task>,
@@ -85,7 +86,13 @@ pub fn set_workspace_tasks(
         workspace.workstreams = workstreams;
         app_data.clone()
     };
-    save_state(&data_clone)
+    save_state(&data_clone)?;
+    // A Hive's waiting workers launch once their dependencies' tasks are done (docs/hive.md §3.1).
+    let is_hive = data_clone.window(&label).and_then(|w| w.workspaces.iter().find(|w| w.id == workspace_id)).is_some_and(|w| w.hive.is_some());
+    if is_hive {
+        crate::hive::waiters::poll_soon(state.inner().clone(), app, workspace_id);
+    }
+    Ok(())
 }
 
 /// Every task in this window, as `(workspace_id, tasks)` pairs in workspace order. The

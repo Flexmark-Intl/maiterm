@@ -232,6 +232,7 @@ fn why_text(why: &str) -> &'static str {
         "box_unreadable" => "the agent's input box can't be read off the screen",
         "ordering" => "an earlier prompt is still waiting for its turn",
         "queued_behind" => "an earlier message is still waiting",
+        "usage_limit" => "the agent is waiting out a usage limit",
         _ => "waiting",
     }
 }
@@ -301,12 +302,15 @@ async fn worker(app: Arc<AppState>, tab_id: String) {
             drop_all(&tab_id, "its terminal is gone", "terminal_gone");
             return;
         };
+        // A Hive agent waiting out a usage limit (docs/hive.md §7.8): any keystroke would end its
+        // wait, so maiTerm's own messages wait with it, and don't expire meanwhile.
+        let limited = crate::hive::fuses::limit_wait(&tab_id, crate::hive::fuses::now_ms()).is_some();
         // Expire from the front: everything behind waited no longer than it.
         {
             let mut queues = QUEUES.lock();
             let Some(q) = queues.get_mut(&tab_id) else { return };
             let now = super::now_ms();
-            while q.items.front().is_some_and(|(_, at, _)| now.saturating_sub(*at) > HOLD_MAX_MS) {
+            while !limited && q.items.front().is_some_and(|(_, at, _)| now.saturating_sub(*at) > HOLD_MAX_MS) {
                 let (h, _, why) = q.items.pop_front().unwrap();
                 log::warn!("[inbox] held {} for tab {tab_id} dropped after 30 min ({})", h.what, why_text(why));
                 record(&tab_id, &h, "dropped", Some("expired"));
@@ -327,11 +331,11 @@ async fn worker(app: Arc<AppState>, tab_id: String) {
         // reading ChatDetail mid-typing (up to ~1 s, more with images) must still find it in
         // `held`, not in neither list — which reads as "never delivered". Only this worker pops,
         // and `hold` appends at the back, so the front is still this item afterwards.
-        let Some((paths, text)) = QUEUES
+        let Some((paths, text, desktop)) = QUEUES
             .lock()
             .get(&tab_id)
             .and_then(|q| q.items.front())
-            .map(|(h, _, _)| (h.paths.clone(), h.text.clone()))
+            .map(|(h, _, _)| (h.paths.clone(), h.text.clone(), h.desktop))
         else {
             continue;
         };
@@ -340,6 +344,11 @@ async fn worker(app: Arc<AppState>, tab_id: String) {
                 front.2 = why;
             }
         };
+        // The phone's messages are the human's own, theirs to end the wait with.
+        if limited && desktop {
+            set_why("usage_limit");
+            continue;
+        }
         // Typed paths can't go to the mod, and wait out an unstarted mod prompt like any typing.
         let why = if paths.is_empty() {
             hold_reason(&app, &tab_id, &text)

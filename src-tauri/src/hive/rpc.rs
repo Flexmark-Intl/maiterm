@@ -22,12 +22,38 @@ pub(crate) const TIMEOUT: Duration = Duration::from_secs(20);
 
 pub(crate) const VERB_SPAWN: &str = "hive.spawn";
 pub(crate) const VERB_UNSPAWN: &str = "hive.unspawn";
+/// A worker's task row patched by the store: a note appended, a status, a blocker.
+pub(crate) const VERB_TASK: &str = "hive.task";
+/// A worker's agent relaunched in its own tab: typed at an empty prompt, or the tab mounted.
+pub(crate) const VERB_RELAUNCH: &str = "hive.relaunch";
 
 /// The window a Hive lives in, as the tools see it: the app's in production, a stub in tests.
 pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     fn request(&self, verb: &'static str, args: Value) -> impl Future<Output = Outcome> + Send;
     /// The Hive's workers changed (a spawn, a rollback): its board refetches.
     fn workers_changed(&self, workspace_id: &str);
+    /// Types `text` into `tab`'s agent through the delivery gate (`deliver::deliver`).
+    fn deliver(&self, tab: &str, text: String, what: &'static str) -> impl Future<Output = Sent> + Send;
+    /// What holds `tab`'s terminal now.
+    fn front(&self, tab: &str) -> impl Future<Output = Front> + Send;
+    /// SIGTERM to `tab`'s agent, and only while it is the terminal's foreground job: never the
+    /// shell, never by name. Whether a signal went.
+    fn stop_agent(&self, tab: &str) -> impl Future<Output = Result<bool, String>> + Send;
+}
+
+pub(crate) use super::deliver::Sent;
+
+/// What holds a tab's terminal (`get_pty_foreground_job`, read fresh).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Front {
+    /// No PTY: the tab isn't mounted, or its terminal is gone.
+    NoTerminal,
+    /// The shell, at its prompt: no agent is running.
+    Shell,
+    /// Another job: the agent, or whatever replaced it.
+    Job,
+    /// It can't be told.
+    Unknown,
 }
 
 #[derive(Clone)]
@@ -51,23 +77,91 @@ impl HiveWindow for AppWindow {
             log::warn!("hive: workers-changed not sent to window {}: {e}", self.label);
         }
     }
+
+    fn deliver(&self, tab: &str, text: String, what: &'static str) -> impl Future<Output = Sent> + Send {
+        let (this, tab) = (self.clone(), tab.to_string());
+        async move { super::deliver::deliver(&this.app, &this.handle, &tab, &text, what).await }
+    }
+
+    fn front(&self, tab: &str) -> impl Future<Output = Front> + Send {
+        let (app, pty) = (self.app.clone(), crate::mailink::pty_for_tab(&self.app, tab));
+        async move {
+            let Some(pty) = pty else { return Front::NoTerminal };
+            let fg = tokio::task::spawn_blocking(move || crate::pty::get_pty_foreground_job(&app, &pty, true)).await;
+            match fg {
+                Ok(Ok(f)) => match f.shell_at_prompt {
+                    Some(true) => Front::Shell,
+                    Some(false) => Front::Job,
+                    None => Front::Unknown,
+                },
+                // Gone between the lookup and the read.
+                Ok(Err(e)) if e == "PTY not found" => Front::NoTerminal,
+                _ => Front::Unknown,
+            }
+        }
+    }
+
+    fn stop_agent(&self, tab: &str) -> impl Future<Output = Result<bool, String>> + Send {
+        let (app, pty) = (self.app.clone(), crate::mailink::pty_for_tab(&self.app, tab));
+        async move {
+            let Some(pty) = pty else { return Ok(false) };
+            tokio::task::spawn_blocking(move || stop_foreground_agent(&app, &pty))
+                .await
+                .map_err(|e| format!("maiTerm's worker thread failed: {e}"))?
+        }
+    }
+}
+
+/// The foreground job's pid, read fresh, and signalled through `kill_pty_foreground_job`, which
+/// reads it again and sends nothing if another process took the terminal meanwhile. Only a job
+/// that is `claude` (its program, or the script a runtime runs it as) is signalled. Ok(false) is
+/// only "the shell has its prompt": a front that can't be read is an error, never "no agent".
+fn stop_foreground_agent(app: &Arc<AppState>, pty: &str) -> Result<bool, String> {
+    let fg = crate::pty::get_pty_foreground_job(app, pty, true)?;
+    match fg.shell_at_prompt {
+        Some(true) => return Ok(false),
+        Some(false) => {}
+        None => return Err("maiTerm can't tell what holds its terminal, so nothing was signalled".to_string()),
+    }
+    let Some(pid) = fg.pid else { return Err("the program in front of its terminal has no pid maiTerm can read, so nothing was signalled".to_string()) };
+    if !fg.command.as_deref().is_some_and(names_claude) {
+        return Err(format!(
+            "the program in front of its terminal ({}) isn't its agent, so nothing was signalled",
+            fg.executable.as_deref().unwrap_or("unknown")
+        ));
+    }
+    crate::pty::kill_pty_foreground_job(app, pty, pid, false)
+}
+
+/// A command line whose program, or whose script under an interpreter (`node …/claude`), is claude.
+fn names_claude(cmd: &str) -> bool {
+    cmd.split_whitespace().take(2).any(|w| std::path::Path::new(w).file_name().is_some_and(|n| n == "claude"))
 }
 
 /// The window's answer as the spawn reads it: done, or why not. A timeout is not done: the
 /// spawn is rolled back, and the window, if it wakes, undoes its half on the unspawn after it.
 pub(crate) fn accepted(outcome: Outcome) -> Result<Value, String> {
+    answer(outcome, "nothing was started")
+}
+
+/// As `accepted`, for a change to a worker that exists (its task row, its relaunch).
+pub(crate) fn applied(outcome: Outcome) -> Result<Value, String> {
+    answer(outcome, "nothing was changed")
+}
+
+fn answer(outcome: Outcome, so: &str) -> Result<Value, String> {
     match outcome {
         Outcome::Answered(v) => match v.get("error").and_then(Value::as_str) {
             Some(err) => Err(format!("maiTerm's window refused it: {err}")),
             None => Ok(v),
         },
         Outcome::Timeout => Err(format!(
-            "maiTerm's window didn't confirm within {} s (its screen may be asleep), so nothing was started.",
+            "maiTerm's window didn't confirm within {} s (its screen may be asleep), so {so}.",
             TIMEOUT.as_secs()
         )),
-        Outcome::Disconnected => Err("maiTerm's window dropped the request, so nothing was started.".to_string()),
-        Outcome::NoWindow => Err("This Hive's window isn't open, so nothing was started.".to_string()),
-        Outcome::NoHandle => Err("No maiTerm window to ask, so nothing was started.".to_string()),
+        Outcome::Disconnected => Err(format!("maiTerm's window dropped the request, so {so}.")),
+        Outcome::NoWindow => Err(format!("This Hive's window isn't open, so {so}.")),
+        Outcome::NoHandle => Err(format!("No maiTerm window to ask, so {so}.")),
     }
 }
 
@@ -92,5 +186,15 @@ mod tests {
             assert!(e.ends_with("nothing was started."), "{e}");
         }
         assert!(window_answered(&Outcome::Answered(json!({}))) && !window_answered(&Outcome::Timeout));
+    }
+
+    #[test]
+    fn only_claude_in_front_is_its_agent() {
+        assert!(names_claude("claude --resume s1 --settings /x"));
+        assert!(names_claude("/Users/x/.local/bin/claude --model sonnet"));
+        assert!(names_claude("node /usr/local/lib/node_modules/.bin/claude --model sonnet"));
+        for other in ["vim notes.md", "-zsh", "node server.js claude", "python3 claude.py", "sleep 100"] {
+            assert!(!names_claude(other), "{other}");
+        }
     }
 }

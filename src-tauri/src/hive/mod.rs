@@ -13,13 +13,19 @@
 //! same builder, with its own record, settings, brief and gate scope, and only once `fuses` has
 //! reserved it a slot under the cap, the machine-wide spawn counts and the quota breaker. `tools`
 //! holds the Hive's MCP tools and who may call what; what they need done in a window (the task
-//! list, a tab's PTY) goes over `rpc`, the Hive's own webview request channel.
+//! list, a tab's PTY) goes over `rpc`, the Hive's own webview request channel. A worker's report
+//! and its checked receipts are `report`; the coordinator's message, stop and restart `control`;
+//! a crash and a sandbox refusal, read off the worker's own hooks, `events`; workers waiting on
+//! dependencies `waiters`; and everything maiTerm types into a Hive agent goes through `deliver`.
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
 
 pub mod brief;
+pub(crate) mod control;
 pub mod create;
+pub(crate) mod deliver;
+pub mod events;
 pub mod fuses;
 pub mod gate;
 pub(crate) mod git;
@@ -29,12 +35,14 @@ pub mod paths;
 #[cfg(test)]
 mod probe;
 pub mod record;
+pub(crate) mod report;
 pub mod roles;
 pub(crate) mod rpc;
 pub mod sandbox_events;
 pub mod settings;
 pub mod tools;
 pub mod trust;
+pub mod waiters;
 pub mod worker;
 pub mod worktree;
 

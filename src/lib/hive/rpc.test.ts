@@ -7,14 +7,19 @@ const remove = vi.fn();
 const adoptHiveTab = vi.fn();
 const dropHiveTab = vi.fn();
 const logError = vi.fn();
-const workspaces: { id: string; hive?: object | null }[] = [];
+const update = vi.fn();
+const terminalGet = vi.fn();
+const relaunchAgent = vi.fn();
+const workspaces: { id: string; hive?: object | null; panes?: { tabs: { id: string; hive_role?: string | null }[] }[] }[] = [];
 
 vi.mock('$lib/tauri/commands', () => ({ claudeCodeRespond }));
 vi.mock('@tauri-apps/plugin-log', () => ({ error: logError }));
-vi.mock('$lib/stores/tasks.svelte', () => ({ tasksStore: { adoptHiveTask, find, remove } }));
+vi.mock('$lib/stores/tasks.svelte', () => ({ tasksStore: { adoptHiveTask, find, remove, update } }));
 vi.mock('$lib/stores/workspaces.svelte', () => ({
   workspacesStore: { get workspaces() { return workspaces; }, adoptHiveTab, dropHiveTab },
 }));
+vi.mock('$lib/stores/terminals.svelte', () => ({ terminalsStore: { get: terminalGet } }));
+vi.mock('$lib/stores/followUps.svelte', () => ({ followUpsStore: { relaunchAgent } }));
 
 const activated: string[] = [];
 (globalThis as unknown as { window: unknown }).window = {
@@ -37,7 +42,80 @@ describe('handleHiveRequest', () => {
     vi.clearAllMocks();
     activated.length = 0;
     workspaces.length = 0;
-    workspaces.push({ id: 'ws', hive: { id: 'h1' } }, { id: 'plain', hive: null });
+    workspaces.push(
+      { id: 'ws', hive: { id: 'h1' }, panes: [{ tabs: [{ id: 'coord', hive_role: 'coordinator' }, { id: 'tab-w', hive_role: 'worker' }] }] },
+      { id: 'plain', hive: null, panes: [{ tabs: [{ id: 't1' }] }] },
+    );
+  });
+
+  it('a task patch appends the note, sets the status and the blocker, on the row that is here', async () => {
+    find.mockReturnValue({ ...task, notes: [{ at: 'x', text: 'started', by: 'agent' }] });
+    const blocker = { kind: 'external', question: 'The sandbox refused host example.com', asked_at: 'now', asked_by: 'agent' };
+    await handleHiveRequest({ request_id: 'p1', verb: 'hive.task', args: { workspace_id: 'ws', task_id: 't1', note: 'Reported done: built it', status: 'review' } });
+    await handleHiveRequest({ request_id: 'p2', verb: 'hive.task', args: { workspace_id: 'ws', task_id: 't1', status: 'blocked', blocker } });
+    await handleHiveRequest({ request_id: 'p3', verb: 'hive.task', args: { workspace_id: 'ws', task_id: 't1', note: 'Stopped', status: null } });
+    const [first, second, third] = update.mock.calls;
+    expect(first[0]).toBe('ws');
+    expect(first[1]).toBe('t1');
+    expect(first[2].status).toBe('review');
+    expect(first[2].notes.map((n: { text: string }) => n.text)).toEqual(['started', 'Reported done: built it']);
+    expect(second[2]).toEqual({ status: 'blocked', blocker });
+    expect(third[2].status).toBeUndefined();
+    expect(answered().map((a) => a.result)).toEqual([{ ok: true }, { ok: true }, { ok: true }]);
+    find.mockReset();
+  });
+
+  it('a task patch is refused for a row not here, a status off the lanes, or a blocker off Blocked', async () => {
+    find.mockReturnValueOnce(undefined);
+    await handleHiveRequest({ request_id: 'q1', verb: 'hive.task', args: { workspace_id: 'ws', task_id: 'gone', note: 'x' } });
+    find.mockReturnValue(task);
+    await handleHiveRequest({ request_id: 'q2', verb: 'hive.task', args: { workspace_id: 'ws', task_id: 't1', status: 'finished' } });
+    await handleHiveRequest({ request_id: 'q3', verb: 'hive.task', args: { workspace_id: 'ws', task_id: 't1', blocker: { question: 'q' } } });
+    await handleHiveRequest({ request_id: 'q4', verb: 'hive.task', args: { workspace_id: 'ws' } });
+    expect(update).not.toHaveBeenCalled();
+    expect(answered().every((a) => typeof (a.result as { error?: string }).error === 'string')).toBe(true);
+    find.mockReset();
+  });
+
+  it('a relaunch goes through the follow-ups gate on a mounted terminal, and mounts one that is not', async () => {
+    terminalGet.mockReturnValue({ ptyId: 'p' });
+    relaunchAgent.mockResolvedValueOnce(null).mockResolvedValueOnce('someone is typing in the tab');
+    await handleHiveRequest({ request_id: 'l1', verb: 'hive.relaunch', args: { workspace_id: 'ws', tab_id: 'tab-w' } });
+    await handleHiveRequest({ request_id: 'l2', verb: 'hive.relaunch', args: { workspace_id: 'ws', tab_id: 'tab-w' } });
+    expect(relaunchAgent).toHaveBeenCalledWith('tab-w');
+    expect(activated).toEqual([]);
+    terminalGet.mockReturnValue(undefined);
+    await handleHiveRequest({ request_id: 'l3', verb: 'hive.relaunch', args: { workspace_id: 'ws', tab_id: 'tab-w' } });
+    expect(activated).toEqual(['tab-w']);
+    for (const tab_id of ['coord', 't1', 'nope']) {
+      await handleHiveRequest({ request_id: tab_id, verb: 'hive.relaunch', args: { workspace_id: 'ws', tab_id } });
+    }
+    expect(answered().map((a) => a.result)).toEqual([
+      { ok: true },
+      { error: 'someone is typing in the tab' },
+      { ok: true },
+      { error: 'This window holds no such worker tab.' },
+      { error: 'This window holds no such worker tab.' },
+      { error: 'This window holds no such worker tab.' },
+    ]);
+    expect(relaunchAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('a relaunch that throws is still answered', async () => {
+    terminalGet.mockReturnValue({ ptyId: 'p' });
+    relaunchAgent.mockRejectedValueOnce(new Error('probe failed'));
+    await handleHiveRequest({ request_id: 'l4', verb: 'hive.relaunch', args: { workspace_id: 'ws', tab_id: 'tab-w' } });
+    expect(answered()).toEqual([{ id: 'l4', result: { error: 'probe failed' } }]);
+    terminalGet.mockReset();
+  });
+
+  it('an unspawn with restore_task puts a waiting worker’s row back instead of removing it', async () => {
+    const was = { ...task, status: 'todo', tab_id: null };
+    await handleHiveRequest({ request_id: 'u3', verb: 'hive.unspawn', args: { workspace_id: 'ws', tab_id: 'tab-w', restore_task: was } });
+    expect(dropHiveTab).toHaveBeenCalledWith('ws', 'tab-w');
+    expect(adoptHiveTask).toHaveBeenCalledWith('ws', was, null);
+    expect(remove).not.toHaveBeenCalled();
+    expect(answered().map((a) => a.result)).toEqual([{ ok: true }]);
   });
 
   it('a launched worker: tab adopted, row adopted, tab mounted, then answered', async () => {

@@ -74,6 +74,9 @@ pub struct FuseBook {
     /// tab → when it hit a limit Claude waits out, the last 24 h. Memory only, like Claude's own
     /// re-arm count: a restart kills the PTY, and the resumed agent starts that count over.
     waited: HashMap<String, Vec<i64>>,
+    /// tab → the reset its usage-limit wait runs to: any delivery there before it would end the
+    /// wait (§7.8), so Hive deliveries hold until then. Memory only, as `waited`.
+    waiting: HashMap<String, i64>,
 }
 
 impl FuseBook {
@@ -91,7 +94,7 @@ impl FuseBook {
                 FuseState::default()
             }
         };
-        Self { path, state, pending: HashMap::new(), waited: HashMap::new() }
+        Self { path, state, pending: HashMap::new(), waited: HashMap::new(), waiting: HashMap::new() }
     }
 
     fn save(&mut self) -> Result<(), String> {
@@ -253,7 +256,15 @@ impl Fuses {
         let hits = b.waited.entry(tab.to_string()).or_default();
         hits.push(now);
         let pause = (hits.len() > REARMS).then_some(PauseCause::Rearmed);
+        b.waiting.retain(|_, u| now < *u);
+        b.waiting.insert(tab.to_string(), until);
         Some(Assessment { text, until: Some(until), pause })
+    }
+
+    /// When `tab`'s usage-limit wait ends, while it hasn't.
+    pub fn limit_wait(&self, tab: &str, now: i64) -> Option<i64> {
+        let mut g = self.lock().ok()?;
+        g.book().waiting.get(tab).copied().filter(|u| now < *u)
     }
 }
 
@@ -392,6 +403,10 @@ pub fn trip_breaker(until: i64, reason: &str) -> bool {
 
 pub fn assess_limit(tab: &str, event: &Value, now: i64, on_subscription: bool) -> Option<Assessment> {
     BOOK.assess_limit(tab, event, now, on_subscription)
+}
+
+pub fn limit_wait(tab: &str, now: i64) -> Option<i64> {
+    BOOK.limit_wait(tab, now)
 }
 
 /// The words of a rate limit a StopFailure reports, or None for another error kind. An empty
@@ -770,9 +785,12 @@ pub async fn hive_resume(
         hive.id.clone()
     };
     let now = crate::mailink::board::iso_now();
-    commit_change(&state, &app, &hive_id, |data| resume_in(data, &hive_id, &now))
+    let hive = commit_change(&state, &app, &hive_id, |data| resume_in(data, &hive_id, &now))
         .map(|c| c.hive)
-        .ok_or_else(|| "This Hive isn't paused any more".to_string())
+        .ok_or_else(|| "This Hive isn't paused any more".to_string())?;
+    // Workers that waited out the pause launch now, where their dependencies allow.
+    super::waiters::poll_soon(state.inner().clone(), app, workspace_id);
+    Ok(hive)
 }
 
 #[cfg(test)]
@@ -1072,6 +1090,22 @@ mod tests {
         assert_eq!((a.until, a.pause), (until, Some(PauseCause::Rearmed)), "the breaker trips and the Hive pauses");
         // A day on, the old waits have left the count.
         assert_eq!(f.assess_limit("w1", &ev, now + DAY_MS + 11, true).unwrap().pause, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Hive deliveries to a tab hold while its wait is on screen: typing there ends it (§7.8).
+    #[test]
+    fn a_tab_waiting_out_a_limit_is_known_until_its_reset() {
+        let (dir, f) = scratch();
+        let now = today_at(T0, 10, 0);
+        let until = today_at(T0, 15, 0) + 60_000;
+        assert_eq!(f.limit_wait("w1", now), None);
+        f.assess_limit("w1", &stop("rate_limit", "You've hit your session limit \u{b7} resets 3pm (UTC)"), now, true).unwrap();
+        assert_eq!(f.limit_wait("w1", now + 1), Some(until));
+        assert_eq!(f.limit_wait("w2", now + 1), None, "per tab");
+        assert_eq!(f.limit_wait("w1", until), None, "over at the reset");
+        f.assess_limit("w3", &stop("rate_limit", "You've hit your weekly limit \u{b7} resets Oct 25, 3pm (UTC)"), now, true).unwrap();
+        assert_eq!(f.limit_wait("w3", now), None, "nothing waits out a weekly limit, so nothing holds for it");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
