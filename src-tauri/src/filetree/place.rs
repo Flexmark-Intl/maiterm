@@ -365,7 +365,7 @@ fn gather(state: &Arc<AppState>, tab_id: &str, fresh: bool) -> Result<PlaceInput
             for ws in &w.workspaces {
                 for t in ws.panes.iter().flat_map(|p| p.tabs.iter()).chain(ws.archived_tabs.iter()) {
                     if t.id == tab_id {
-                        i.is_service = t.service_id.is_some();
+                        i.is_service = t.is_service_tab();
                         i.last_cwd = t.last_cwd.clone();
                         i.auto_resume_cwd = t.auto_resume_cwd.clone();
                         i.restore_cwd = t.restore_cwd.clone();

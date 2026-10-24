@@ -805,6 +805,9 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 // The stack definition travels with the workspace (below), but none of
                 // its services are running in the copy, so no tab in it may claim one.
                 service_id: None,
+                // A copy of a Hive agent is not a Hive agent: the Hive's launch record and
+                // worktrees belong to the original (docs/hive.md §5).
+                hive_role: None,
                 // A follow-up is one agent's note about its own session. The copy is a new
                 // tab with a new agent; carrying them would deliver each one twice.
                 follow_ups: Vec::new(),
@@ -1055,6 +1058,20 @@ mod clone_ids_tests {
 
         assert_eq!(ws.panes[0].tabs[0].follow_ups.len(), 1, "the original keeps its own");
         assert!(cloned.panes[0].tabs[0].follow_ups.is_empty());
+    }
+
+    #[test]
+    fn a_duplicated_workspace_has_no_hive_tabs() {
+        // A copy of a Hive agent is not a Hive agent (docs/hive.md §5): carrying the role
+        // would hide the copy from the strip with no Hive to show it.
+        let mut ws = Workspace::new("proj".to_string());
+        ws.panes[0].tabs[0].hive_role = Some("worker".to_string());
+
+        let (cloned, _) = clone_workspace_with_id_mapping(&ws, &[]);
+
+        assert_eq!(ws.panes[0].tabs[0].hive_role.as_deref(), Some("worker"));
+        assert_eq!(cloned.panes[0].tabs[0].hive_role, None);
+        assert!(Tab::new("t".to_string()).hive_role.is_none(), "nor does a fresh tab");
     }
 
     #[test]

@@ -6,6 +6,7 @@
   import { error as logError } from '@tauri-apps/plugin-log';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
+  import { isStripHidden } from '$lib/workspace/hiddenTabs';
 
   interface Props {
     open: boolean;
@@ -264,9 +265,10 @@
     const pane = workspacesStore.activePane;
     if (pane) {
       for (const tab of pane.tabs) {
-        // Never a stack service tab (docs/stack.md §7): running a `cd` in one would type
-        // over a dev server, and the human would not even see where it went.
-        if (tab.service_id) continue;
+        // Never a strip-hidden tab (docs/stack.md §7, docs/hive.md §5): running a `cd` in one
+        // would type over a dev server or a Hive agent, and the human would not even see where
+        // it went.
+        if (isStripHidden(tab)) continue;
         if (tab.tab_type === 'terminal') {
           const inst = terminalsStore.get(tab.id);
           if (inst) return { tabId: tab.id, ptyId: inst.ptyId };

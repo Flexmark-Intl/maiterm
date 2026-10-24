@@ -311,7 +311,7 @@ fn list_tabs(state: &Arc<AppState>, app: &AppHandle) -> Value {
         let window = w.name.clone().unwrap_or_else(|| w.label.clone());
         for ws in &w.workspaces {
             for t in ws.panes.iter().flat_map(|p| p.tabs.iter()) {
-                if t.runtime.is_none() || t.service_id.is_some() {
+                if t.runtime.is_none() || t.is_service_tab() {
                     continue;
                 }
                 let linked: Vec<Value> = links

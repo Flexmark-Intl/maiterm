@@ -34,6 +34,7 @@
   import StickyAncestors from './StickyAncestors.svelte';
   import EdgeChips from './EdgeChips.svelte';
   import { isMac, isWindows, modSymbol } from '$lib/utils/platform';
+  import { isServiceTab } from '$lib/workspace/hiddenTabs';
 
   interface Props {
     rowH: number;
@@ -489,7 +490,10 @@
       label: srcs.length === 1 ? r.name : `${srcs.length} items`,
       mac,
       hitTree,
-      isTerminal: (id) => !!terminalsStore.get(id) && !workspacesStore._locateTab(id)?.tab.service_id,
+      isTerminal: (id) => {
+        const loc = workspacesStore._locateTab(id);
+        return !!terminalsStore.get(id) && !(loc && isServiceTab(loc.tab));
+      },
       accepts: (t, copy) => fileTreeStore.dropAccepts(srcs, t, copy),
       scroller: () => el,
       onHover: (t) => fileTreeStore.setDropTarget(t?.kind === 'folder' ? t.rel : null),

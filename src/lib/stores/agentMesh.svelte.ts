@@ -13,6 +13,7 @@ import { performMeshSend, type MeshEdge, type MeshSendResult } from '$lib/stores
 import { createLoopController, type LoopReason } from '$lib/stores/meshLoopControl';
 import { getVariables, setVariable, replayAutoResume } from '$lib/stores/triggers.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
+import { isServiceTab } from '$lib/workspace/hiddenTabs';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 /**
@@ -181,7 +182,7 @@ function createAgentMeshStore() {
     const out: string[] = [];
     for (const pane of w.panes) {
       for (const tab of pane.tabs) {
-        if ((tab.tab_type ?? 'terminal') === 'terminal' && !tab.service_id && tab.custom_name) out.push(roleName(tab.name).toLowerCase());
+        if ((tab.tab_type ?? 'terminal') === 'terminal' && !isServiceTab(tab) && tab.custom_name) out.push(roleName(tab.name).toLowerCase());
       }
     }
     return out;
@@ -215,7 +216,7 @@ function createAgentMeshStore() {
    *  running) an agent. The name requirement is the join gate (§6 — a tab needs an explicit
    *  descriptive name to be addressable). */
   function isAgentMember(tab: { id: string; tab_type?: string; custom_name?: boolean; name: string; runtime?: unknown; service_id?: string | null }): boolean {
-    if ((tab.tab_type ?? 'terminal') !== 'terminal' || tab.service_id) return false;
+    if ((tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(tab)) return false;
     if (!tab.custom_name) return false;
     return !!claudeStateStore.getState(tab.id) || !!tab.runtime;
   }
@@ -270,7 +271,7 @@ function createAgentMeshStore() {
   function hasUnreadyMembers(ws: Workspace): boolean {
     for (const pane of ws.panes) {
       for (const tab of pane.tabs) {
-        if ((tab.tab_type ?? 'terminal') !== 'terminal' || tab.service_id) continue; // stack services aren't agents
+        if ((tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(tab)) continue; // stack services aren't agents
         if (!tab.runtime) continue; // never an agent → not expected in the mesh
         if (!claudeStateStore.getState(tab.id)) return true; // was an agent, not running now
       }
@@ -733,7 +734,7 @@ function createAgentMeshStore() {
       if (!ws?.bridge_all || ws.suspended) return;
       for (const pane of ws.panes) {
         for (const tab of pane.tabs) {
-          if ((tab.tab_type ?? 'terminal') !== 'terminal' || tab.service_id) continue; // stack services aren't agents
+          if ((tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(tab)) continue; // stack services aren't agents
           if (!tab.runtime) continue; // never an agent — nothing to initialize
           if (claudeStateStore.getState(tab.id)) continue; // already live
           const inst = terminalsStore.get(tab.id);

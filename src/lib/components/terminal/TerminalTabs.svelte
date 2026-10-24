@@ -33,6 +33,7 @@
   import { error as logError } from '@tauri-apps/plugin-log';
   import { fileTreeStore } from '$lib/stores/fileTree.svelte';
   import { observeResizeNextFrame } from '$lib/utils/frameResize';
+  import { isServiceTab, isStripHidden } from '$lib/workspace/hiddenTabs';
 
   interface Props {
     workspaceId: string;
@@ -133,9 +134,10 @@
   //
   /** The tabs this strip shows. A stack service's tab is NOT one of them (docs/stack.md §7):
    *  it has no close button to kill the service with, takes no slot in Cmd+1-9, and is
-   *  watched in the console drawer instead. Everything below derives from this, never from
-   *  `pane.tabs` — a raw count here reads "3 tabs" to the user's "1". */
-  const visibleTabs = $derived(pane.tabs.filter(t => !t.service_id));
+   *  watched in the console drawer instead. Nor is a Hive tab (docs/hive.md §5), seen in the
+   *  Hive view. Everything below derives from this, never from `pane.tabs` — a raw count
+   *  here reads "3 tabs" to the user's "1". */
+  const visibleTabs = $derived(pane.tabs.filter(t => !isStripHidden(t)));
   const groupedTabs = $derived.by(() => {
     const pinned = visibleTabs.filter(t => t.pinned);
     const rest = visibleTabs.filter(t => !t.pinned);
@@ -932,9 +934,9 @@
           const [moved] = ids.splice(fromIndex, 1);
           ids.splice(toIndex, 0, moved);
           // `reorderTabs` persists the WHOLE pane; the strip only knows its visible tabs,
-          // so the hidden service tabs have to ride along or this drag deletes them
+          // so the hidden service and Hive tabs have to ride along or this drag deletes them
           // (docs/stack.md §7).
-          const hidden = pane.tabs.filter(t => !!t.service_id).map(t => t.id);
+          const hidden = pane.tabs.filter(t => isStripHidden(t)).map(t => t.id);
           workspacesStore.reorderTabs(workspaceId, pane.id, [...ids, ...hidden]);
           dropped = true;
         }
@@ -1169,7 +1171,7 @@
         const path = editorFile.remote_path ?? editorFile.file_path;
         const host = editorFile.remote_ssh_command;
         editorPathItems.push({ label: 'Reveal in Files', action: () => { void fileTreeStore.revealPath(path, host); } });
-      } else if (isTerminalTab && !tabObj?.service_id) {
+      } else if (isTerminalTab && !(tabObj && isServiceTab(tabObj))) {
         editorPathItems.push({ label: 'Reveal in Files', action: () => { void fileTreeStore.revealTabFolder(workspaceId, pane.id, tabId); } });
       }
     }

@@ -17,6 +17,7 @@ import { getVariables } from '$lib/stores/triggers.svelte';
 import { MESH_IDENTITY_VARS } from '$lib/stores/meshRouting';
 import { CLAUDE_RESUME_COMMAND } from '$lib/triggers/defaults';
 import { disableBridge } from '$lib/stores/sshMcpBridge.svelte';
+import { isServiceTab, isStripHidden } from '$lib/workspace/hiddenTabs';
 
 /** Sidebar width bounds + default. The minimum reserves room for the footer's
  *  three agent-status indicators (working / waiting / finished) alongside the
@@ -112,10 +113,11 @@ function allTabNames(ws: Workspace): string[] {
  * Falls back to adjacent tab by index if no live tabs remain.
  */
 function pickNextActiveTab(allTabs: Tab[], closedIndex: number): string | null {
-  // A stack service tab is never a pane's active tab (docs/stack.md §7). It is also the
-  // likeliest pick here, being live and adjacent, and choosing it would leave the strip
-  // with nothing selected and `activeTab` pointing at something the human cannot see.
-  const tabs = allTabs.filter(t => !t.service_id);
+  // A strip-hidden tab (stack service or Hive) is never a pane's active tab (docs/stack.md §7,
+  // docs/hive.md §5). It is also the likeliest pick here, being live and adjacent, and choosing
+  // it would leave the strip with nothing selected and `activeTab` pointing at something the
+  // human cannot see.
+  const tabs = allTabs.filter(t => !isStripHidden(t));
   if (tabs.length === 0) return null;
   if (preferencesStore.groupActiveTabs) {
     // Prefer live (non-suspended) terminal tabs, searching outward from closedIndex
@@ -330,15 +332,15 @@ function createWorkspacesStore() {
       notesVisible = seeded;
       tasksVisible = seededTasks;
 
-      // Self-heal: a pane whose active tab is a stack service tab. Only state written
-      // before service tabs left the strip can look like this (docs/stack.md §7), but the
-      // result is a pane with nothing selected and an `activeTab` the human cannot see, so
+      // Self-heal: a pane whose active tab is strip-hidden (a service or Hive tab). Only state
+      // written before service tabs left the strip can look like this (docs/stack.md §7), but
+      // the result is a pane with nothing selected and an `activeTab` the human cannot see, so
       // move to the first tab that IS in the strip.
       for (const ws of workspaces) {
         for (const pane of ws.panes) {
           const active = pane.tabs.find(t => t.id === pane.active_tab_id);
-          if (!active?.service_id) continue;
-          const replacement = pane.tabs.find(t => !t.service_id);
+          if (!active || !isStripHidden(active)) continue;
+          const replacement = pane.tabs.find(t => !isStripHidden(t));
           pane.active_tab_id = replacement?.id ?? null;
           // Through Rust either way: when there is no replacement, writing only the mirror
           // would leave the service tab persisted as active and the heal would run, and
@@ -750,10 +752,10 @@ function createWorkspacesStore() {
         for (const tab of pane.tabs) {
           if (tab.tab_type !== 'terminal') continue;
           if (tab.id === activeTabId) continue;
-          // "Suspend other tabs" means the tabs the human can see. A service tab is not
-          // one of them, and suspending it kills the service (docs/stack.md §7) — the
+          // "Suspend other tabs" means the tabs the human can see. A service or Hive tab is
+          // not one of them, and suspending a service kills it (docs/stack.md §7) — the
           // stack has its own Stop for that.
-          if (tab.service_id) continue;
+          if (isStripHidden(tab)) continue;
 
           const instance = terminalsStore.get(tab.id);
           if (!instance) continue;
@@ -1535,7 +1537,7 @@ function createWorkspacesStore() {
       if (!tab) return;
       // Archiving lifts a tab out of the pane tree, which would kill a running service and
       // strand its binding — `restoreArchivedTab` does not re-bind (docs/stack.md §7).
-      if (tab.service_id) return;
+      if (isServiceTab(tab)) return;
 
       // Gather context (terminal-specific for terminal tabs, null for editor/diff)
       let scrollback: string | null = null;
@@ -2035,11 +2037,11 @@ function createWorkspacesStore() {
 
     async setActiveTab(workspaceId: string, paneId: string, tabId: string) {
       // The invariant the whole hidden-service-tab design rests on (docs/stack.md §7): a
-      // service tab is never a pane's active tab, so `activeTab` and its many consumers
-      // (notes, tasks, composer, Cmd+D, the agent tools) can never be handed one. Callers
-      // that mean "show me this service" open the console drawer instead.
+      // service tab (or Hive tab, docs/hive.md §5) is never a pane's active tab, so `activeTab`
+      // and its many consumers (notes, tasks, composer, Cmd+D, the agent tools) can never be
+      // handed one. Callers that mean "show me this service" open the console drawer instead.
       const target = findTab(workspaceId, paneId, tabId).tab;
-      if (target?.service_id) return;
+      if (target && isStripHidden(target)) return;
       await commands.setActiveTab(workspaceId, paneId, tabId);
       const { pane, tab } = findTab(workspaceId, paneId, tabId);
       if (pane) pane.active_tab_id = tabId;
@@ -2781,11 +2783,12 @@ function createWorkspacesStore() {
       reordered.splice(reordered.indexOf(tabId), 1);
       await commands.reorderTabs(workspaceId, paneId, reordered);
 
-      // A reloaded SERVICE tab must not drag the pane onto itself: it is not in the strip,
-      // so showing it would leave the pane blank with nothing selected (docs/stack.md §7).
-      // `carry_tab_state_on_reload` copies `service_id` to the replacement, so read it
-      // from the source tab we are about to delete.
-      const reloadingService = !!freshPane.tabs.find(t => t.id === tabId)?.service_id;
+      // A reloaded strip-hidden tab (service or Hive) must not drag the pane onto itself: it
+      // is not in the strip, so showing it would leave the pane blank with nothing selected
+      // (docs/stack.md §7). `carry_tab_state_on_reload` copies `service_id` and `hive_role`
+      // to the replacement, so read them from the source tab we are about to delete.
+      const reloadingSource = freshPane.tabs.find(t => t.id === tabId);
+      const reloadingHidden = !!reloadingSource && isStripHidden(reloadingSource);
       // Only follow the replacement when the pane was ALREADY showing the tab being reloaded.
       // Unconditional was invisible while every caller passed the active tab (menu reload,
       // Cmd+Shift+R); the account switch is the first caller that reloads BACKGROUND tabs, and
@@ -2795,7 +2798,7 @@ function createWorkspacesStore() {
       // the time `freshPane` is fetched the pane is already showing the duplicate and this
       // would answer false for the tab that really was active.
       const wasActive = wasActiveBeforeDuplicate;
-      if (!reloadingService && wasActive) {
+      if (!reloadingHidden && wasActive) {
         await commands.setActiveTab(workspaceId, paneId, newTab.id);
       }
       // Names the replacement so the delete still goes through if a shutdown began mid-reload:

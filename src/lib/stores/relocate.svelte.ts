@@ -22,6 +22,7 @@ import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
 import { setFallback, clearFallback, wantedFolder } from '$lib/stores/relocateFallback';
+import { isServiceTab } from '$lib/workspace/hiddenTabs';
 
 let home: string | null = null;
 async function getHome(): Promise<string> {
@@ -65,7 +66,7 @@ export async function liveTabsUnder(roots: string[], fold: boolean, agentRoots: 
   for (const ws of workspacesStore.workspaces) {
     for (const pane of ws.panes) {
       for (const tab of pane.tabs) {
-        if (tab.service_id) continue;
+        if (isServiceTab(tab)) continue;
         const inst = terminalsStore.get(tab.id);
         if (!inst) continue;
         const wanted = wantedFolder(tab.id);

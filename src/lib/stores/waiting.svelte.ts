@@ -19,6 +19,7 @@ import { decisionsQueue } from '$lib/loom/model';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { SvelteMap } from 'svelte/reactivity';
 import type { AgentRequest, Task } from '$lib/tauri/types';
+import { isStripHidden } from '$lib/workspace/hiddenTabs';
 
 export type WaitingItem =
   | { kind: 'task'; key: string; at: number; task: Task }
@@ -127,7 +128,7 @@ function createWaitingStore() {
      *  when one next mounts. Those go to the Loom's Decisions. */
     async openOnTab(tabId: string, focus: string | null = null) {
       const { agentMeshStore } = await import('$lib/stores/agentMesh.svelte');
-      const ws = workspacesStore.workspaces.find((w) => w.panes.some((p) => p.tabs.some((t) => t.id === tabId && !t.service_id)));
+      const ws = workspacesStore.workspaces.find((w) => w.panes.some((p) => p.tabs.some((t) => t.id === tabId && !isStripHidden(t))));
       if (!ws || ws.suspended || (ws.bridge_all && agentMeshStore.isStageView(ws.id))) {
         window.dispatchEvent(new CustomEvent('open-loom', { detail: { mode: 'decisions' } }));
         return;

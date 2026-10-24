@@ -12,6 +12,7 @@
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { getSavedScrollbackText } from '$lib/tauri/commands';
   import { modLabel } from '$lib/utils/platform';
+  import { isStripHidden } from '$lib/workspace/hiddenTabs';
 
   interface Props {
     workspaceId: string;
@@ -47,8 +48,8 @@
    *  from the pane body (docs/stack.md §7) — it is watched in the console drawer, which
    *  claims its terminal through the same `data-terminal-slot` portal. Rendering a slot for
    *  it here would win that claim (the portal takes the first match in the DOM) and the
-   *  drawer would come up empty. */
-  const visibleTabs = $derived(pane.tabs.filter((t) => !t.service_id));
+   *  drawer would come up empty. A Hive tab is likewise not this pane's (docs/hive.md §5). */
+  const visibleTabs = $derived(pane.tabs.filter((t) => !isStripHidden(t)));
 
   // Notify portaled TerminalPanes that their slots are ready
   onMount(() => {

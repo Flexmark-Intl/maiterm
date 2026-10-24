@@ -4,6 +4,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { countedListen as listen } from '$lib/utils/listenCounter';
+  import { isServiceTab, isStripHidden } from '$lib/workspace/hiddenTabs';
   import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
   import { wakeTab, type WakeAction } from '$lib/agents/wake';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -462,7 +463,7 @@
           for (const tab of pane.tabs) {
             // A service tab runs the user's dev server, not an agent — restarting it has
             // nothing to do with which account is active.
-            if (tab.service_id) continue;
+            if (isServiceTab(tab)) continue;
             // Only live shells need moving. Anything else already starts under the active
             // account, so reloading it would spawn a shell nobody asked for.
             if (!terminalsStore.get(tab.id)) continue;
@@ -834,10 +835,10 @@
     }
 
     /** What the keyboard can reach: the tabs in the strip, in strip order. Stack service
-     *  tabs are not in the strip (docs/stack.md §7), so Cmd+1-9 must not spend a number on
+     *  and Hive tabs are not in the strip (docs/stack.md §7, docs/hive.md §5), so Cmd+1-9 must not spend a number on
      *  one and cycling must not land on one — there would be nothing to see. */
     function tabCycleList(tabs: Tab[]): Tab[] {
-      const visible = tabs.filter(t => !t.service_id);
+      const visible = tabs.filter(t => !isStripHidden(t));
       if (!preferencesStore.groupActiveTabs) return visible;
       return visible.filter(t => !isSuspendedTerminal(t));
     }
@@ -1006,9 +1007,9 @@
         const ws = workspacesStore.activeWorkspace;
         const pane = workspacesStore.activePane;
         if (ws && pane) {
-          // Visible tabs only — hidden service tabs would make the next one "Terminal 5"
+          // Visible tabs only — hidden service/Hive tabs would make the next one "Terminal 5"
           // in a strip showing one (docs/stack.md §7).
-          const count = pane.tabs.filter(t => !t.service_id).length + 1;
+          const count = pane.tabs.filter(t => !isStripHidden(t)).length + 1;
           workspacesStore.createTab(ws.id, pane.id, `Terminal ${count}`);
         }
         return;

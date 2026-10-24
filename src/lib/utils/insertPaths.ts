@@ -30,6 +30,7 @@ import { shellQuote, localShellKind } from '$lib/utils/shellQuote';
 import { isWindows } from '$lib/utils/platform';
 import { basenameOf } from '$lib/utils/pathForm';
 import { sameSshHost } from '$lib/filetree/remote';
+import { isServiceTab } from '$lib/workspace/hiddenTabs';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 export interface InsertItem {
@@ -87,7 +88,8 @@ export async function insertPathsIntoTab(
   // 1. Live, and not a stack service.
   const inst = terminalsStore.get(tabId);
   if (!inst) return refuse('That tab has no running terminal.');
-  if (workspacesStore._locateTab(tabId)?.tab.service_id) return refuse('That tab runs a stack service.');
+  const loc = workspacesStore._locateTab(tabId);
+  if (loc && isServiceTab(loc.tab)) return refuse('That tab runs a stack service.');
   const ptyId = inst.ptyId;
 
   // 2. No dialog on screen. Asked again right before anything is typed, since an upload can

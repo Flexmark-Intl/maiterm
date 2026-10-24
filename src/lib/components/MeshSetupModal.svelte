@@ -9,6 +9,7 @@
   import { replayAutoResume } from '$lib/stores/triggers.svelte';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
+  import { isServiceTab } from '$lib/workspace/hiddenTabs';
   import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
   interface Props {
@@ -69,7 +70,7 @@
     const seen = new Set<string>();
     for (const pane of ws.panes) {
       for (const tab of pane.tabs) {
-        if ((tab.tab_type ?? 'terminal') !== 'terminal' || tab.service_id) continue; // stack services aren't agents
+        if ((tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(tab)) continue; // stack services aren't agents
         const inst = terminalsStore.get(tab.id);
         if (!inst || !tab.runtime || claudeStateStore.getState(tab.id)) continue; // only ambiguous tabs
         seen.add(tab.id);
@@ -110,7 +111,7 @@
     const out: Row[] = [];
     for (const pane of ws.panes) {
       for (const tab of pane.tabs) {
-        if ((tab.tab_type ?? 'terminal') !== 'terminal' || tab.service_id) continue; // stack services aren't agents
+        if ((tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(tab)) continue; // stack services aren't agents
         const inst = terminalsStore.get(tab.id);
         const termLive = !!inst;                                // terminal/PTY attached
         const agentLive = !!claudeStateStore.getState(tab.id);  // agent SESSION running + init'd

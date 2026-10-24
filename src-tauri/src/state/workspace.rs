@@ -355,6 +355,14 @@ pub struct Tab {
     /// workspace may name a given service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_id: Option<String>,
+    /// This tab's part in its workspace's Hive (docs/hive.md §5): `"coordinator"` or
+    /// `"worker"`, None for an ordinary tab. A STRING, never an enum: an older build that
+    /// meets an unknown variant loads empty state. Like a service tab it is out of the
+    /// strip and never `pane.active_tab_id`, but unlike one it is an agent. A reload
+    /// carries it (whole-record copy); a duplicate or cloned workspace never gets it, since
+    /// a copy of a Hive agent is not a Hive agent; a share file never carries it (allowlist).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hive_role: Option<String>,
     /// Prompts scheduled to be delivered back into THIS tab's agent later (docs/follow-ups.md).
     /// Every path that copies a tab has to decide what happens to these (§3): a reload MOVES
     /// them (carried by the whole-record copy, then cleared on the original in
@@ -2346,6 +2354,19 @@ impl Preferences {
 }
 
 impl Tab {
+    /// Not in the tab strip, so never `pane.active_tab_id`: a stack service or a Hive tab
+    /// (docs/hive.md §5). Twin of the frontend's `isStripHidden`.
+    pub fn is_strip_hidden(&self) -> bool {
+        self.service_id.is_some() || self.hive_role.is_some()
+    }
+
+    /// Runs a stack service, so it is not an agent. A Hive tab is hidden but IS an agent,
+    /// which is why "is this an agent" asks this and not `is_strip_hidden`. Twin of the
+    /// frontend's `isServiceTab`.
+    pub fn is_service_tab(&self) -> bool {
+        self.service_id.is_some()
+    }
+
     pub fn new(name: String) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -2393,6 +2414,7 @@ impl Tab {
             comms_monitor: None,
             comms_thread_receipts: Vec::new(),
             service_id: None,
+            hive_role: None,
             follow_ups: Vec::new(),
         }
     }
@@ -2444,6 +2466,7 @@ impl Tab {
             comms_monitor: None,
             comms_thread_receipts: Vec::new(),
             service_id: None,
+            hive_role: None,
             follow_ups: Vec::new(),
         }
     }
@@ -2495,6 +2518,7 @@ impl Tab {
             comms_monitor: None,
             comms_thread_receipts: Vec::new(),
             service_id: None,
+            hive_role: None,
             follow_ups: Vec::new(),
         }
     }

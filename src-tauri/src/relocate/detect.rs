@@ -93,7 +93,7 @@ pub fn find_missing(data: &AppData) -> Vec<MissingRoot> {
     for w in &data.windows {
         for ws in &w.workspaces {
             for t in ws.panes.iter().flat_map(|p| p.tabs.iter()).chain(ws.archived_tabs.iter()) {
-                if t.service_id.is_some() {
+                if t.is_service_tab() {
                     continue; // its service's cwd is the one that counts, below
                 }
                 if let Some(cwd) = spawn_cwd(t) {

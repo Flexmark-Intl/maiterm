@@ -104,6 +104,11 @@ export interface Tab {
   /** The stack service this tab runs (docs/stack.md §3–§5); absent for an ordinary tab.
    *  The binding lives here and nowhere else. */
   service_id?: string | null;
+  /** This tab's part in its workspace's Hive (docs/hive.md §5): "coordinator" | "worker",
+   *  absent for an ordinary tab. A string in Rust, never an enum. Out of the strip like a
+   *  service, but an agent: ask `isStripHidden`/`isServiceTab`, never this field directly.
+   *  A reload carries it; a duplicate never does. */
+  hive_role?: string | null;
   /** Prompts scheduled back into this tab's agent (docs/follow-ups.md). Omitted by Rust when
    *  empty, so read it as `tab.follow_ups ?? []`. A reload moves them; a duplicate starts
    *  without them. */

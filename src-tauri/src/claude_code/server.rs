@@ -970,7 +970,7 @@ fn mesh_layout(state: &Arc<AppState>) -> Value {
                         .panes
                         .iter()
                         .flat_map(|p| p.tabs.iter())
-                        .filter(|t| t.runtime.is_some() && t.service_id.is_none())
+                        .filter(|t| t.runtime.is_some() && !t.is_service_tab())
                         .map(|t| serde_json::json!({ "tab_id": t.id, "name": t.name }))
                         .collect();
                     // The other workspaces in this window that share its group.

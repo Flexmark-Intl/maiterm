@@ -2271,7 +2271,7 @@ pub async fn account_reload_targets(
                         .iter()
                         .flat_map(|p| p.tabs.iter())
                         .filter(|t| {
-                            t.service_id.is_none()
+                            !t.is_service_tab()
                                 && tab_pty
                                     .get(&t.id)
                                     .is_some_and(|pty_id| ptys.contains_key(pty_id))

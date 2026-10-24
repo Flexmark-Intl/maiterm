@@ -28,6 +28,7 @@ import { editorTitleAfter } from '$lib/utils/editorTitle';
 import { isWindows } from '$lib/utils/platform';
 import { openBaselineDiff, openReadOnlyDiff } from '$lib/utils/openGitDiff';
 import { fileTreeStore } from '$lib/stores/fileTree.svelte';
+import { isServiceTab } from '$lib/workspace/hiddenTabs';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 export interface PendingSelection {
@@ -2022,9 +2023,10 @@ function createClaudeCodeStore() {
    *  is not there and reachable from nowhere. Exactly the state `archive_tab`'s
    *  cross-workspace release exists to prevent. */
   /** Tabs that can carry work: a stack service's tab runs a dev server, not an agent, so
-   *  assigning a task to it parks that task forever (docs/stack.md §7). */
+   *  assigning a task to it parks that task forever (docs/stack.md §7). A Hive tab is hidden
+   *  but an agent, so it owns its task (docs/hive.md §5). */
   function tabIdsInWorkspace(ws: Workspace): Set<string> {
-    return new Set(ws.panes.flatMap((p) => p.tabs.filter((t) => !t.service_id).map((t) => t.id)));
+    return new Set(ws.panes.flatMap((p) => p.tabs.filter((t) => !isServiceTab(t)).map((t) => t.id)));
   }
 
   function handleUpdateTasks(args: { tabId?: string; updates?: TaskToolUpdate[] }) {

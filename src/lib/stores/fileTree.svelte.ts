@@ -60,6 +60,7 @@ import { getEditorByTabId, isEditorDirty } from '$lib/stores/editorRegistry.svel
 import { openInEditor, editorFileInfo } from '$lib/utils/openInEditor';
 import { editorTitleAfter } from '$lib/utils/editorTitle';
 import { insertPathsIntoTab, type InsertItem } from '$lib/utils/insertPaths';
+import { isServiceTab, isStripHidden } from '$lib/workspace/hiddenTabs';
 
 /** What the column shows when it isn't a tree. */
 export type TreeStatus = 'none' | 'resolving' | 'opening' | 'ready' | 'missing' | 'gone' | 'error';
@@ -645,10 +646,10 @@ function createFileTreeStore() {
 
   // ── Resolving the root (§4) ───────────────────────────────────────────────────────────
 
-  /** The tab the tree follows: the active pane's active terminal tab, never a service. */
+  /** The tab the tree follows: the active pane's active terminal tab, never a strip-hidden one. */
   function followableTab(): string | null {
     const t = workspacesStore.activeTab;
-    if (t && (t.tab_type ?? 'terminal') === 'terminal' && !t.service_id) return t.id;
+    if (t && (t.tab_type ?? 'terminal') === 'terminal' && !isStripHidden(t)) return t.id;
     return null;
   }
 
@@ -659,7 +660,7 @@ function createFileTreeStore() {
     if (!ws) return null;
     const panes = [...ws.panes].sort((a, b) => (a.id === ws.active_pane_id ? -1 : b.id === ws.active_pane_id ? 1 : 0));
     for (const p of panes) {
-      const t = p.tabs.find((x) => (x.tab_type ?? 'terminal') === 'terminal' && !x.service_id);
+      const t = p.tabs.find((x) => (x.tab_type ?? 'terminal') === 'terminal' && !isStripHidden(x));
       if (t) return t.id;
     }
     return null;
@@ -1415,7 +1416,7 @@ function createFileTreeStore() {
     for (const id of [followAgent, sourceTabId]) {
       if (!id || !terminalsStore.get(id)) continue;
       const loc = workspacesStore._locateTab(id);
-      if (!loc || loc.tab.service_id) continue;
+      if (!loc || isServiceTab(loc.tab)) continue;
       return { tabId: id, name: loc.tab.name };
     }
     return null;
@@ -2040,7 +2041,7 @@ function createFileTreeStore() {
     for (const ws of workspacesStore.workspaces) {
       for (const p of ws.panes) {
         for (const t of p.tabs) {
-          if ((t.tab_type ?? 'terminal') !== 'terminal' || t.service_id) continue;
+          if ((t.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(t)) continue;
           if (agentStateStore.getState(t.id) || marked.has(t.id)) out.push({ id: t.id, name: t.name });
         }
       }
@@ -2911,7 +2912,7 @@ function createFileTreeStore() {
     async tabRoots(onUpdate: (roots: { place: TreePlace; tabs: { id: string; name: string }[] }[]) => void): Promise<void> {
       const ws = workspacesStore.activeWorkspace;
       if (!ws) return;
-      const tabs = ws.panes.flatMap((p) => p.tabs).filter((t) => (t.tab_type ?? 'terminal') === 'terminal' && !t.service_id);
+      const tabs = ws.panes.flatMap((p) => p.tabs).filter((t) => (t.tab_type ?? 'terminal') === 'terminal' && !isServiceTab(t));
       const answers: (TreePlace | null)[] = tabs.map(() => null);
       const publish = () => {
         const out = new Map<string, { place: TreePlace; tabs: { id: string; name: string }[] }>();

@@ -1,5 +1,6 @@
 import type { Workspace } from '$lib/tauri/types';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
+import { isServiceTab } from './hiddenTabs';
 
 /** Whether a workspace is awake: what the sidebar draws undimmed and the Loom lists.
  *
@@ -18,7 +19,7 @@ export function workspaceIsLive(ws: Workspace): boolean {
     for (const tab of pane.tabs) {
       // A running service is not the workspace being awake: a workspace whose own tabs
       // are all suspended would read as live forever behind its dev server.
-      if (tab.service_id) continue;
+      if (isServiceTab(tab)) continue;
       const isTerminal = tab.tab_type === 'terminal' || !tab.tab_type;
       if (!isTerminal) continue;
       hasTerminalTab = true;

@@ -28,6 +28,7 @@
   import { toastStore } from '$lib/stores/toasts.svelte';
   import ChatColumn, { asking as askingIn, type ChatSource } from './ChatColumn.svelte';
   import type { Task, Workspace } from '$lib/tauri/types';
+  import { isServiceTab } from '$lib/workspace/hiddenTabs';
 
   interface Props {
     workspaces: Workspace[];
@@ -63,7 +64,7 @@
   const agentTabIds = $derived(
     workspaces
       .flatMap((w) => w.panes.flatMap((p) => p.tabs))
-      .filter((t) => t.tab_type === 'terminal' && !t.service_id && claudeStateStore.getState(t.id))
+      .filter((t) => t.tab_type === 'terminal' && !isServiceTab(t) && claudeStateStore.getState(t.id))
       .map((t) => t.id)
       .join(','),
   );
@@ -81,7 +82,7 @@
     workspaces.flatMap((w) =>
       w.panes.flatMap((p) =>
         p.tabs
-          .filter((t) => t.tab_type === 'terminal' && !t.service_id)
+          .filter((t) => t.tab_type === 'terminal' && !isServiceTab(t))
           .map((t) => {
             const s = claudeStateStore.getState(t.id);
             const ask = asking(t.id);

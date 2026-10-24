@@ -371,11 +371,12 @@ pub fn create_tab(
 }
 
 /// Which tab a pane shows after the active one is closed or archived: the nearest tab to
-/// its left, skipping stack service tabs.
+/// its left, skipping strip-hidden tabs (stack services and Hive tabs).
 ///
-/// A service tab is never a pane's active tab (docs/stack.md §7) — it is not in the strip,
-/// so selecting one leaves the strip with nothing selected and the pane blank. It is also
-/// the likeliest neighbour to land on, since services sit at the end of the tab list. The
+/// A strip-hidden tab is never a pane's active tab (docs/stack.md §7, docs/hive.md §5) — it
+/// is not in the strip, so selecting one leaves the strip with nothing selected and the pane
+/// blank. It is also the likeliest neighbour to land on, since services sit at the end of
+/// the tab list. The
 /// frontend enforces the same rule in `pickNextActiveTab`; this is the copy that survives
 /// a restart, because `active_tab_id` is persisted from here.
 pub(crate) fn pick_active_after_close(tabs: &[crate::state::Tab], closed_index: usize) -> Option<String> {
@@ -387,23 +388,24 @@ pub(crate) fn pick_active_after_close(tabs: &[crate::state::Tab], closed_index: 
     // order as before service tabs existed, just skipping them.
     let start = closed_index.saturating_sub(1).min(tabs.len() - 1);
     for tab in tabs[..=start].iter().rev() {
-        if tab.service_id.is_none() {
+        if !tab.is_strip_hidden() {
             return Some(tab.id.clone());
         }
     }
     for tab in &tabs[start + 1..] {
-        if tab.service_id.is_none() {
+        if !tab.is_strip_hidden() {
             return Some(tab.id.clone());
         }
     }
     None
 }
 
-/// Apply the invariant to one pane: if its active tab is a stack service tab (or it has
-/// none), select the first tab that IS in the strip, or nothing when there is none.
+/// Apply the invariant to one pane: if its active tab is strip-hidden (a stack service or a
+/// Hive tab) or it has none, select the first tab that IS in the strip, or nothing when
+/// there is none.
 ///
 /// `set_active_tab` can only name a tab, and the frontend needs "none" as an answer: a pane
-/// whose only remaining tabs are services is a legal state (docs/stack.md §7), and
+/// whose only remaining tabs are hidden is a legal state (docs/stack.md §7, docs/hive.md §5), and
 /// `create_tab` makes every new tab active — including a service tab minted into such a
 /// pane, which would otherwise persist as its active tab with nothing to put back.
 #[tauri::command]
@@ -431,14 +433,14 @@ pub fn heal_pane_active_tab(
             .active_tab_id
             .as_ref()
             .and_then(|id| pane.tabs.iter().find(|t| &t.id == id))
-            .is_some_and(|t| t.service_id.is_none());
+            .is_some_and(|t| !t.is_strip_hidden());
         if healthy {
             return Ok(pane.active_tab_id.clone());
         }
         pane.active_tab_id = pane
             .tabs
             .iter()
-            .find(|t| t.service_id.is_none())
+            .find(|t| !t.is_strip_hidden())
             .map(|t| t.id.clone());
         let active = pane.active_tab_id.clone();
         (app_data.clone(), active)
@@ -3807,6 +3809,18 @@ mod active_tab_pick_tests {
         assert_eq!(pick_active_after_close(&t, 0), None);
         assert_eq!(pick_active_after_close(&[], 0), None);
     }
+
+    #[test]
+    fn never_lands_on_a_hive_tab() {
+        // A Hive tab is out of the strip like a service (docs/hive.md §5).
+        let mut t = tabs(&[("coord", false), ("shell", false), ("worker", false)]);
+        t[0].hive_role = Some("coordinator".to_string());
+        t[2].hive_role = Some("worker".to_string());
+        assert_eq!(pick_active_after_close(&t, 0).as_deref(), Some("shell"));
+        assert_eq!(pick_active_after_close(&t, 3).as_deref(), Some("shell"));
+        t.remove(1);
+        assert_eq!(pick_active_after_close(&t, 1), None);
+    }
 }
 
 #[cfg(test)]
@@ -3913,6 +3927,9 @@ mod reload_carry_tests {
             // stack store, and the original is deleted in the same operation, so the
             // one-tab-per-service rule holds (docs/stack.md §5).
             service_id: Some("svc-web".to_string()),
+            // A reload carries the Hive role: the replacement is the same Hive agent, and
+            // dropping it would put a Hive tab back in the strip (docs/hive.md §5).
+            hive_role: Some("worker".to_string()),
             // Carried to the replacement AND cleared off the original — a move, not a copy
             // (`release_moved_claims`; docs/follow-ups.md §3).
             follow_ups: vec![FollowUp {

@@ -734,7 +734,7 @@ fn tab_place(tab: &Tab, ctx: Option<&TabShareContext>) -> (Option<String>, Optio
 
 /// A tab left out of the share, and why — shown in the export dialog.
 fn dropped_reason(tab: &Tab) -> Option<&'static str> {
-    if tab.service_id.is_some() {
+    if tab.is_service_tab() {
         return Some("a stack service's console — the service itself is shared below");
     }
     match tab.tab_type {
@@ -832,7 +832,7 @@ fn build(ws: &Workspace, contexts: &[TabShareContext], opts: &ExportOptions, for
         for tab in &pane.tabs {
             let ctx = ctx_of(&tab.id);
             if let Some(reason) = dropped_reason(tab) {
-                if tab.service_id.is_none() {
+                if !tab.is_service_tab() {
                     previews.push(TabPreview {
                         id: tab.id.clone(),
                         name: tab.name.clone(),

@@ -36,6 +36,7 @@ import type { AgentRuntime } from '$lib/agents/types';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { isEditorDirty } from '$lib/stores/editorRegistry.svelte';
 import { parseSshTarget } from '$lib/utils/sshTarget';
+import { isServiceTab } from '$lib/workspace/hiddenTabs';
 
 type ToolResult = Record<string, unknown>;
 
@@ -62,7 +63,7 @@ function locateTab(tabId: string): { ws: Workspace; paneId: string; tab: Tab } |
   return null;
 }
 
-const agentTabs = (ws: Workspace) => ws.panes.flatMap((p) => p.tabs).filter((t) => !!t.runtime && !t.service_id);
+const agentTabs = (ws: Workspace) => ws.panes.flatMap((p) => p.tabs).filter((t) => !!t.runtime && !isServiceTab(t));
 const names = (xs: { name: string }[]) => xs.map((x) => `“${x.name}”`).join(', ');
 const count = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
 
@@ -141,7 +142,7 @@ async function moveTab(a: { tabId?: string; tab_id?: string; to_workspace_id?: s
   if (!a.tab_id || !a.to_workspace_id) return { error: 'tab_id and to_workspace_id are required.' };
   const at = locateTab(a.tab_id);
   if (!at) return { error: 'Tab not found.' };
-  if (at.tab.service_id) return { error: 'A stack service tab moves with its workspace, not on its own.' };
+  if (isServiceTab(at.tab)) return { error: 'A stack service tab moves with its workspace, not on its own.' };
   if (at.ws.overlord) return { error: 'Tabs in the Overlord workspace stay there.' };
   if (at.ws.id === a.to_workspace_id) return { error: 'The tab is already in that workspace.' };
   const windows = await moveTargets();
@@ -337,7 +338,7 @@ async function bridgeWith(a: { tabId?: string; with_tab_id?: string; fork?: bool
   const them = locateTab(a.with_tab_id);
   if (!them) return { error: 'That tab is not in your window. A bridge joins two tabs in one window (getMeshLayout / listWorkspaces show where each is).' };
   if (them.tab.id === me.tab.id) return { error: 'You cannot bridge with yourself.' };
-  if ((them.tab.tab_type ?? 'terminal') !== 'terminal' || them.tab.service_id) return { error: `“${them.tab.name}” is not an agent tab.` };
+  if ((them.tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(them.tab)) return { error: `“${them.tab.name}” is not an agent tab.` };
   if (!claudeStateStore.getState(them.tab.id)) return { error: `“${them.tab.name}” has no running agent session right now.` };
   const fork = a.fork === true;
   const mine = livePartner(me.tab.id);
@@ -430,7 +431,7 @@ async function reloadTab(a: { tabId?: string; tab_id?: string; reason?: string }
   const own = target === a.tabId;
   const at = locateTab(target);
   if (!at) return { error: own ? 'Your tab is not in this window.' : 'Tab not found (listWorkspaces gives tab ids).' };
-  if (at.tab.service_id) return { error: `“${at.tab.name}” runs a stack service; use restartService.` };
+  if (isServiceTab(at.tab)) return { error: `“${at.tab.name}” runs a stack service; use restartService.` };
   if ((at.tab.tab_type ?? 'terminal') !== 'terminal') return { error: `“${at.tab.name}” is not a terminal tab.` };
   // A suspended or never-opened tab has no shell to restart; reloading it would spawn one nobody asked for.
   if (!terminalsStore.get(target)) return { error: `“${at.tab.name}” has no running terminal (it is suspended or not opened yet), so there is nothing to reload.` };

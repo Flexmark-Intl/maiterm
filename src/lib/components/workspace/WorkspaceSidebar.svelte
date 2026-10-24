@@ -31,6 +31,7 @@
   import { error as logError } from '@tauri-apps/plugin-log';
   import type { MoveTargetWindow, Workspace } from '$lib/tauri/types';
   import { workspaceMoveItem } from '$lib/stores/windowMove';
+  import { isServiceTab, isStripHidden } from '$lib/workspace/hiddenTabs';
   import type { ChangelogEntry } from '$lib/components/ChangelogModal.svelte';
   import type { Update } from '@tauri-apps/plugin-updater';
 
@@ -178,25 +179,31 @@
     navigateToTab(next);
   }
 
-  /** Tabs the human can actually see in this workspace. Stack service tabs are excluded
-   *  (docs/stack.md §7): a dev server writing to its log all day would otherwise hold the
-   *  workspace row's activity dot on permanently, for a tab that is not in any strip. */
+  /** Tabs in this workspace's strips — the row's count badge (docs/stack.md §7,
+   *  docs/hive.md §5). */
   function visibleTabIds(ws: Workspace): string[] {
-    return ws.panes.flatMap(p => p.tabs.filter(t => !t.service_id).map(t => t.id));
+    return ws.panes.flatMap(p => p.tabs.filter(t => !isStripHidden(t)).map(t => t.id));
+  }
+
+  /** Tabs whose state the row's status signals read. Services are excluded — a dev server
+   *  writing to its log all day would otherwise hold the activity dot on permanently — but a
+   *  strip-hidden Hive agent is not: its waiting prompt must still show here (docs/hive.md §5). */
+  function signalTabIds(ws: Workspace): string[] {
+    return ws.panes.flatMap(p => p.tabs.filter(t => !isServiceTab(t)).map(t => t.id));
   }
 
   function workspaceHasActivity(workspaceId: string): boolean {
     if (workspaceId === workspacesStore.activeWorkspaceId) return false;
     const ws = workspacesStore.workspaces.find(w => w.id === workspaceId);
     if (!ws) return false;
-    const tabIds = visibleTabIds(ws);
+    const tabIds = signalTabIds(ws);
     return activityStore.hasAnyActivity(tabIds);
   }
 
   function workspaceTabState(workspaceId: string): 'alert' | 'question' | null {
     const ws = workspacesStore.workspaces.find(w => w.id === workspaceId);
     if (!ws) return null;
-    const tabIds = visibleTabIds(ws);
+    const tabIds = signalTabIds(ws);
     return activityStore.getWorkspaceTabState(tabIds);
   }
 
@@ -204,7 +211,7 @@
     if (workspaceId === workspacesStore.activeWorkspaceId) return null;
     const ws = workspacesStore.workspaces.find(w => w.id === workspaceId);
     if (!ws) return null;
-    const tabIds = visibleTabIds(ws);
+    const tabIds = signalTabIds(ws);
     return claudeStateStore.getWorkspaceClaudeState(tabIds);
   }
 

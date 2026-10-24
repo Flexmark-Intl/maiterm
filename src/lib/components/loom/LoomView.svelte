@@ -16,6 +16,7 @@
   import BlockerCard from '$lib/components/tasks/BlockerCard.svelte';
   import TaskText from '$lib/components/tasks/TaskText.svelte';
   import type { Task, TaskStatus, Workspace } from '$lib/tauri/types';
+  import { isServiceTab } from '$lib/workspace/hiddenTabs';
 
   interface Props {
     workspaces: Workspace[];
@@ -32,7 +33,7 @@
     workspaces.flatMap((w) =>
       w.panes.flatMap((p) =>
         p.tabs
-          .filter((t) => t.tab_type === 'terminal' && !t.service_id)
+          .filter((t) => t.tab_type === 'terminal' && !isServiceTab(t))
           .map((t) => {
             const s = claudeStateStore.getState(t.id);
             return { tabId: t.id, name: tabDisplayName(t.id), state: s?.state ?? null, toolDetail: s?.toolDetail ?? s?.toolName ?? null };
