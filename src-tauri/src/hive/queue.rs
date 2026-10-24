@@ -24,7 +24,7 @@
 //! - **Memory only.** After a restart the queue is empty and every job row is swept on load
 //!   (`sweep_jobs`). The record that outlives it is `logs/runs.jsonl`, append-only.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +51,8 @@ pub const BY_HUMAN: &str = "human";
 pub const BY_TIMEOUT: &str = "timeout";
 pub const BY_RELEASE: &str = "release";
 pub const BY_RESTART: &str = "restart";
+/// The worker itself, stopping or restarting its own copy of a service.
+pub const BY_WORKER: &str = "worker";
 
 pub const DEFAULT_TIMEOUT_S: u64 = 30 * 60;
 pub const MAX_TIMEOUT_S: u64 = 4 * 3600;
@@ -148,6 +150,12 @@ pub struct JobSpec {
     pub commit: Option<String>,
     pub dirty: bool,
     pub priority: i64,
+    /// A human-defined service run on the worker's branch (`run::worker_service_verb`): its id,
+    /// its folder re-rooted in the worktree, and its own command, run by `/bin/sh` inside the
+    /// profile with its placeholders filled per job.
+    pub service_id: Option<String>,
+    pub cwd: Option<String>,
+    pub command: Option<String>,
 }
 
 /// One job, as the run log records it.
@@ -187,6 +195,10 @@ pub struct Job {
     pub leases: Vec<String>,
     /// Why it is `invalid` or `interrupted`.
     pub error: Option<String>,
+    /// As `JobSpec`'s: set only for a worker's run of a human-defined service.
+    pub service_id: Option<String>,
+    pub cwd: Option<String>,
+    pub command: Option<String>,
     #[serde(skip)]
     pub env: Vec<(String, String)>,
     #[serde(skip)]
@@ -290,6 +302,9 @@ pub struct Queue {
     handoff: HashMap<String, i64>,
     /// task → its finished jobs' tabs, closed when its next job starts or it retires.
     old_tabs: HashMap<String, Vec<OldTab>>,
+    /// Workspaces being suspended, or suspended: nothing of theirs is queued or started, so a
+    /// job's PTY that the suspend kills ends a released job, never one mid-run.
+    parked: HashSet<String>,
     seq: u64,
     gate: Gate,
 }
@@ -333,6 +348,9 @@ impl Queue {
         if spec.task_id.is_empty() || spec.hive_id.is_empty() || spec.window.is_empty() {
             return Err("A job belongs to a Hive worker".to_string());
         }
+        if self.parked.contains(&spec.workspace_id) {
+            return Err("Your Hive is being suspended: nothing new runs until it is resumed.".to_string());
+        }
         let needs = expand_needs(&spec.needs, &spec.worker_slug)?;
         let timeout_s = match spec.timeout_s {
             0 => DEFAULT_TIMEOUT_S,
@@ -366,6 +384,9 @@ impl Queue {
             extra_write: spec.extra_write,
             shares: spec.shares,
             seq: self.seq,
+            service_id: spec.service_id,
+            cwd: spec.cwd,
+            command: spec.command,
             ..Job::default()
         };
         self.jobs.push(job.clone());
@@ -416,7 +437,10 @@ impl Queue {
         }
         let mut started = Vec::new();
         for i in self.order() {
-            if !self.has_room(&self.jobs[i]) || self.jobs[i].leases.iter().any(|k| self.lease_blocked(k, now)) {
+            if self.parked.contains(&self.jobs[i].workspace_id)
+                || !self.has_room(&self.jobs[i])
+                || self.jobs[i].leases.iter().any(|k| self.lease_blocked(k, now))
+            {
                 continue;
             }
             let (id, hive) = (self.jobs[i].id.clone(), self.jobs[i].hive_id.clone());
@@ -436,6 +460,15 @@ impl Queue {
     pub fn set_ports(&mut self, id: &str, ports: Vec<u16>) {
         if let Some(j) = self.job_mut(id) {
             j.ports = ports;
+        }
+    }
+
+    /// The worktree as the job starts on it, read just before its line is typed: what it was
+    /// when queued may have changed while it waited, and only what it ran on is a receipt.
+    pub fn set_tree(&mut self, id: &str, commit: String, dirty: bool) {
+        if let Some(j) = self.job_mut(id) {
+            j.commit = Some(commit);
+            j.dirty = dirty;
         }
     }
 
@@ -587,6 +620,23 @@ impl Queue {
         ids.iter().filter_map(|id| self.interrupt(id, by, why, now)).collect()
     }
 
+    /// A workspace is being suspended: nothing of it queues or starts until `unpark`.
+    pub fn park(&mut self, workspace_id: &str) {
+        self.parked.insert(workspace_id.to_string());
+    }
+
+    pub fn unpark(&mut self, workspace_id: &str) {
+        self.parked.remove(workspace_id);
+    }
+
+    /// The tasks with an active job in a workspace.
+    pub fn tasks_in(&self, workspace_id: &str) -> Vec<String> {
+        let mut tasks: Vec<String> = self.jobs.iter().filter(|j| j.is_active() && j.workspace_id == workspace_id).map(|j| j.task_id.clone()).collect();
+        tasks.sort();
+        tasks.dedup();
+        tasks
+    }
+
     /// A worker retired: what it has in the queue is released, and every job tab it has left
     /// (the ones just ended among them) is taken, to close.
     pub fn retire_worker(&mut self, task_id: &str, why: &str, now: i64) -> (Vec<Ended>, Vec<OldTab>) {
@@ -695,6 +745,23 @@ impl Queue {
     /// The window carried out what waited on the copy: it may be leased again.
     pub fn lease_done(&mut self, key: &str) {
         self.handoff.remove(key);
+    }
+
+    /// A queued job's place in line, 1 first; None once it has left the queue.
+    pub fn place(&self, id: &str) -> Option<usize> {
+        self.order().iter().position(|&i| self.jobs[i].id == id).map(|p| p + 1)
+    }
+
+    /// The worker's active job running its copy of `service_id`.
+    pub fn active_service_job(&self, task_id: &str, service_id: &str) -> Option<&Job> {
+        self.jobs.iter().find(|j| j.is_active() && j.task_id == task_id && j.service_id.as_deref() == Some(service_id))
+    }
+
+    /// The ports of a worker's copy of `service_id` running as a job on `target`, if one is
+    /// active (empty until it is prepared). Its ports are booked under its job id, not the copy
+    /// key, so a run that leases that copy or names `{port:<svc>}` finds them here.
+    pub fn copy_job_ports(&self, service_id: &str, target: &str) -> Option<Vec<u16>> {
+        self.jobs.iter().find(|j| j.is_active() && j.service_id.as_deref() == Some(service_id) && j.target == target).map(|j| j.ports.clone())
     }
 
     /// The coordinator's `hiveRunPriority`: to the front, or one place up.
@@ -869,14 +936,91 @@ pub fn enqueue(spec: JobSpec) -> Result<Job, String> {
     Ok(job)
 }
 
-/// Every job of a worker that stopped, crashed, retired or was suspended (§6.8).
+/// Every job of a worker that stopped, crashed, retired or whose task was dropped (§6.8). It is
+/// told once, for all of them (`run::released`), never once per job.
 pub fn release_worker(task_id: &str, why: &str) -> usize {
+    release(task_id, why, true)
+}
+
+/// As `release_worker`, for a worker whose tab is being suspended: its notice waits for its
+/// next session start rather than being typed into an agent about to go.
+pub fn release_worker_later(task_id: &str, why: &str) -> usize {
+    release(task_id, why, false)
+}
+
+fn release(task_id: &str, why: &str, tell_now: bool) -> usize {
     let ended = queue().release_worker(task_id, BY_RELEASE, why, super::fuses::now_ms());
     let n = ended.len();
+    tell_released(&ended, why, tell_now);
     for e in ended {
         spawn_finish(e);
     }
     n
+}
+
+/// Every worker with a job in this workspace: the Hive is being suspended. Told on resume.
+pub fn release_workspace(workspace_id: &str, why: &str) -> usize {
+    let tasks = queue().tasks_in(workspace_id);
+    tasks.iter().map(|t| release(t, why, false)).sum()
+}
+
+/// A Hive is being suspended, before its PTYs are killed: nothing of it queues or starts from
+/// here, and what it has is released (each worker told once, at its next session start). Its
+/// job tabs then die with nothing left to end.
+pub fn park_workspace(workspace_id: &str, why: &str) -> usize {
+    queue().park(workspace_id);
+    release_workspace(workspace_id, why)
+}
+
+/// The Hive was resumed: its workers' runs queue again.
+pub fn unpark_workspace(workspace_id: &str) {
+    queue().unpark(workspace_id);
+}
+
+fn tell_released(ended: &[Ended], why: &str, tell_now: bool) {
+    let Some(first) = ended.first() else { return };
+    let jobs: Vec<Job> = ended.iter().map(|e| e.job.clone()).collect();
+    let Some(d) = DRIVER.get() else { return };
+    let (hive, task, why) = (first.job.hive_id.clone(), first.job.task_id.clone(), why.to_string());
+    tauri::async_runtime::spawn(async move { super::run::released(&d.app, &d.handle, &hive, &task, &jobs, &why, tell_now).await });
+}
+
+/// The window's place in line for a queued job, None once it has left the queue.
+pub fn place(id: &str) -> Option<usize> {
+    queue().place(id)
+}
+
+/// The worker's active job running its copy of a service.
+pub fn active_service_job(task_id: &str, service_id: &str) -> Option<Job> {
+    queue().active_service_job(task_id, service_id).cloned()
+}
+
+/// Stop one job: dropped if queued, interrupted if started (^C under the window's guard).
+pub fn interrupt(id: &str, by: &str, why: &str) -> Option<Job> {
+    let ended = queue().interrupt(id, by, why, super::fuses::now_ms())?;
+    let job = ended.job.clone();
+    spawn_finish(ended);
+    Some(job)
+}
+
+/// `hiveRunPriority`: only a job of the caller's own Hive moves. Answers its new place.
+pub fn move_job(id: &str, mv: Move, hive_id: &str) -> Result<usize, String> {
+    let place = {
+        let mut q = queue();
+        match q.job(id) {
+            Some(j) if j.hive_id == hive_id => {}
+            _ => return Err(format!("This Hive has no job {id}")),
+        }
+        q.move_job(id, mv)?;
+        q.place(id).unwrap_or(1)
+    };
+    kick();
+    Ok(place)
+}
+
+/// Who leases a copy now.
+pub fn lease_of(copy_key: &str) -> LeaseState {
+    queue().lease_state(&[copy_key.to_string()]).pop().unwrap_or(LeaseState { copy_key: copy_key.to_string(), job: None, holders: 0 })
 }
 
 /// A worker retired: its jobs are released as above, and every job tab it left closes, the
@@ -884,6 +1028,7 @@ pub fn release_worker(task_id: &str, why: &str) -> usize {
 pub fn retire_worker(task_id: &str, why: &str) -> usize {
     let (ended, tabs) = queue().retire_worker(task_id, why, super::fuses::now_ms());
     let n = ended.len();
+    tell_released(&ended, why, true);
     let mut by_window: BTreeMap<(String, String), (Vec<String>, Vec<String>)> = BTreeMap::new();
     for t in tabs {
         by_window.entry((t.window, t.workspace_id)).or_default().0.push(t.tab_id);
@@ -1022,6 +1167,8 @@ struct Prepared {
     line: String,
     row: Service,
     ports: Vec<u16>,
+    /// The worktree's commit and dirty flag now, as it starts.
+    tree: (String, bool),
 }
 
 fn prepare(app: &AppState, job: &Job) -> Result<Prepared, String> {
@@ -1044,7 +1191,20 @@ fn prepare(app: &AppState, job: &Job) -> Result<Prepared, String> {
         .iter()
         .find(|f| f.name == job.folder && f.worktree.is_some())
         .ok_or_else(|| format!("{} has no worktree of {}", w.slug, job.folder))?;
-    let cwd = PathBuf::from(folder.worktree.clone().unwrap_or_default());
+    let worktree = PathBuf::from(folder.worktree.clone().unwrap_or_default());
+    let tree = super::run::worktree_state(folder)?;
+    // A service's folder, re-rooted in the worktree when it was queued: still inside it now.
+    let cwd = match &job.cwd {
+        Some(c) => {
+            let real = std::fs::canonicalize(c).map(|p| crate::share::canon(&p)).map_err(|_| format!("{c} doesn't exist in {}'s worktree", w.slug))?;
+            let root = std::fs::canonicalize(&worktree).map(|p| crate::share::canon(&p)).map_err(|e| format!("{}: {e}", worktree.display()))?;
+            if !real.starts_with(&root) {
+                return Err(format!("{c} isn't inside {}'s worktree of {}", w.slug, job.folder));
+            }
+            real
+        }
+        None => worktree.clone(),
+    };
     let bin = super::paths::hive_bin_dir().ok_or("Couldn't find maiTerm's data folder")?;
     let ctx = super::settings::WorkerContext::gather(&hive, &paths, &w);
     let lists = super::settings::worker_write_lists(&hive, &w, &paths, &ctx, &bin)?;
@@ -1052,21 +1212,32 @@ fn prepare(app: &AppState, job: &Job) -> Result<Prepared, String> {
     // Placeholders in the entry's env and extra paths, as data: `{checkout}` is fine in both
     // (a path, which the profile and the quoting refuse if it can't be named).
     let as_values: Vec<(String, String)> = job.env.iter().cloned().chain(job.extra_write.iter().map(|p| (String::new(), p.clone()))).collect();
-    let needs = Needs::of("", &as_values);
+    // A service's own command is the human's text with placeholders in it: filled per job,
+    // `{checkout}` refused there as in any command.
+    let needs = Needs::of(job.command.as_deref().unwrap_or(""), &as_values);
     let mut values = Values {
         branch: folder.branch.clone(),
         worker: Some(w.slug.clone()),
-        checkout: Some(cwd.to_string_lossy().to_string()),
+        checkout: Some(worktree.to_string_lossy().to_string()),
         ..Values::default()
     };
     let mut reach: Vec<u16> = Vec::new();
     for name in &needs.port_of {
         let want = Service::normalize_name(name);
         let s = stack.iter().filter(|s| !s.is_job()).find(|s| Service::normalize_name(&s.name) == want);
-        let port = s.and_then(|s| match &s.shared_from {
-            Some(r) => crate::stack::shared_source(&app.app_data.read(), r).and_then(|(_, src)| src.port),
-            None => s.port,
-        });
+        // The copy on this job's own checkout first: the worker's (a job), or one the stack runs
+        // there; only then the definition's own port.
+        let port = match s {
+            Some(s) if s.shared_from.is_none() => {
+                let copy = queue().copy_job_ports(&s.id, &job.target);
+                match copy {
+                    Some(ps) => Some(ps.first().copied().ok_or_else(|| format!("{{port:{name}}}: your copy of {name} hasn't started yet"))?),
+                    None => crate::stack::ports::held(&crate::stack::copy_key(&s.id, &job.target)).first().copied().or(s.port),
+                }
+            }
+            Some(s) => s.shared_from.as_ref().and_then(|r| crate::stack::shared_source(&app.app_data.read(), r).and_then(|(_, src)| src.port)),
+            None => None,
+        };
         match port {
             Some(p) => {
                 values.port_of.push((name.clone(), p));
@@ -1085,6 +1256,13 @@ fn prepare(app: &AppState, job: &Job) -> Result<Prepared, String> {
     values.port = ports.first().copied();
     values.port2 = ports.get(1).copied();
     let env: Vec<(String, String)> = job.env.iter().map(|(k, v)| Ok((k.clone(), fill(v, &values)?))).collect::<Result<_, String>>().map_err(release)?;
+    let (argv, command) = match &job.command {
+        Some(c) => {
+            let filled = fill(c, &values).map_err(release)?;
+            (super::job_sandbox::service_argv(&filled), filled)
+        }
+        None => (job.argv.clone(), job.argv.join(" ")),
+    };
     let home = dirs::home_dir();
     let mut extra: Vec<PathBuf> = Vec::new();
     for p in &job.extra_write {
@@ -1098,11 +1276,16 @@ fn prepare(app: &AppState, job: &Job) -> Result<Prepared, String> {
         }
         extra.push(path);
     }
-    // The leased copies' ports: what the port book holds for them, and the own folder's port.
+    // The leased copies' ports: what the port book holds for them, the own folder's port, and a
+    // copy the worker runs as a job (booked under its job id).
     for key in &job.leases {
         reach.extend(crate::stack::ports::held(key));
         if let Some(s) = stack.iter().find(|s| s.id == *key) {
             reach.extend(s.port);
+        }
+        if let Some(s) = stack.iter().filter(|s| !s.is_job()).find(|s| crate::stack::copy_key(&s.id, &job.target) == *key) {
+            let copy = queue().copy_job_ports(&s.id, &job.target);
+            reach.extend(copy.unwrap_or_default());
         }
     }
 
@@ -1147,7 +1330,7 @@ fn prepare(app: &AppState, job: &Job) -> Result<Prepared, String> {
         unset: super::launch::unset_vars(&prefs),
         env: line_env,
         profile: profile_path,
-        argv: job.argv.clone(),
+        argv,
         pass_mark: mark,
         exit_mark,
     })
@@ -1157,7 +1340,7 @@ fn prepare(app: &AppState, job: &Job) -> Result<Prepared, String> {
         id: job.id.clone(),
         name: format!("{} · {}", job.entry, w.slug),
         normalized_name: String::new(),
-        command: job.argv.join(" "),
+        command,
         cwd: s(&cwd),
         env: Vec::new(),
         ssh_command: None,
@@ -1176,7 +1359,7 @@ fn prepare(app: &AppState, job: &Job) -> Result<Prepared, String> {
         created_at: now.clone(),
         updated_at: now,
     };
-    Ok(Prepared { line, row, ports })
+    Ok(Prepared { line, row, ports, tree })
 }
 
 fn set_row(app: &AppState, job: &Job, row: Option<Service>) -> bool {
@@ -1207,7 +1390,11 @@ async fn start_job(d: &'static Driver, job: Job) {
             return;
         }
     };
-    queue().set_ports(&job.id, p.ports.clone());
+    {
+        let mut q = queue();
+        q.set_ports(&job.id, p.ports.clone());
+        q.set_tree(&job.id, p.tree.0.clone(), p.tree.1);
+    }
     // Rust's row first: `create_tab` binds the job's tab to it, which a Hive allows only for a
     // row of its own stack (`refuse_tab_create`). Never saved: a job row is swept on load.
     if !set_row(&d.app, &job, Some(p.row.clone())) {
@@ -1289,19 +1476,41 @@ fn spawn_finish(e: Ended) {
 /// for the next start.
 async fn finish(d: &'static Driver, e: Ended) {
     use tauri::Emitter;
-    let job = e.job.clone();
+    let mut job = e.job.clone();
+    // Read before anything closes its tab: the result's tail is the job's own screen.
+    let tail = super::run::screen_tail(&d.app, job.pty_id.as_deref());
     set_row(&d.app, &job, None);
     crate::stack::ports::release(&job.id);
     let logged = job.clone();
-    let wrote = tauri::async_runtime::spawn_blocking(move || match super::paths::hive_root(&logged.hive_id) {
-        Some(root) => append_run(&HivePaths::new(root), &logged),
-        None => Err("no Hive folder".to_string()),
+    // A pass is checked against the worktree as it is now before it is logged as one.
+    let wrote = tauri::async_runtime::spawn_blocking(move || {
+        let mut logged = logged;
+        let res = match super::paths::hive_root(&logged.hive_id) {
+            Some(root) => {
+                let paths = HivePaths::new(root);
+                super::run::recheck_tree(&paths, &mut logged);
+                append_run(&paths, &logged)
+            }
+            None => Err("no Hive folder".to_string()),
+        };
+        (logged, res)
     })
     .await;
-    let wrote = wrote.map_err(|e| e.to_string()).and_then(|r| r);
-    if let Err(err) = wrote {
-        log::warn!("hive queue: {} not in the run log: {err}", job.id);
+    match wrote {
+        Ok((logged, res)) => {
+            if logged.dirty != job.dirty {
+                queue().set_tree(&logged.id, logged.commit.clone().unwrap_or_default(), logged.dirty);
+            }
+            job = logged;
+            if let Err(err) = res {
+                log::warn!("hive queue: {} not in the run log: {err}", job.id);
+            }
+        }
+        Err(err) => log::warn!("hive queue: {} not in the run log: {err}", job.id),
     }
+    // Its worker's `⟦HIVE RUN⟧`: off this path, since it may wait out `hiveRun`'s own answer.
+    let (ended, app, handle) = (job.clone(), d.app.clone(), d.handle.clone());
+    tauri::async_runtime::spawn(async move { super::run::job_ended(&app, &handle, &ended, &tail).await });
     for h in &e.freed {
         if let Err(err) = d.handle.emit_to(&h.window, LEASE_FREED_EVENT, h) {
             log::warn!("hive queue: {} not sent to window {}: {err}", LEASE_FREED_EVENT, h.window);
@@ -1324,6 +1533,18 @@ async fn finish(d: &'static Driver, e: Ended) {
 #[tauri::command]
 pub fn stack_job_arm(job_id: String, tab_id: String, pty_id: String) -> Result<(), String> {
     queue().arm(&job_id, &tab_id, &pty_id)
+}
+
+/// The window is about to suspend this Hive: its runs are released before its PTYs (job tabs
+/// among them) are killed, so each worker hears one release notice on resume rather than a
+/// "its tab went away" per job, and nothing of it starts mid-suspend. Answers how many went.
+#[tauri::command]
+pub fn hive_suspend_runs(workspace_id: String) -> Result<usize, String> {
+    let n = park_workspace(&workspace_id, "your Hive was suspended");
+    if n > 0 {
+        log::info!("hive queue: {n} run(s) in workspace {workspace_id} released: it is being suspended");
+    }
+    Ok(n)
 }
 
 /// Which of these copies a job leases now: checked before every stop and retarget (§6.8).
@@ -1368,8 +1589,8 @@ pub fn stack_lease_done(copy_key: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Stop anyway: the jobs leasing the copy are interrupted, never a receipt, and their workers
-/// are told (5b-5). Answers the interrupted job ids.
+/// Stop anyway: the jobs leasing the copy are interrupted, never a receipt, and each worker is
+/// told by its run's `⟦HIVE RUN⟧` (`run::job_ended`). Answers the interrupted job ids.
 #[tauri::command]
 pub fn hive_lease_override(copy_key: String) -> Result<Vec<String>, String> {
     let ended = queue().override_lease(&copy_key, super::fuses::now_ms());

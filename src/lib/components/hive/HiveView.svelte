@@ -41,6 +41,7 @@
   import WorkerCard from './WorkerCard.svelte';
   import WorkerColumn from './WorkerColumn.svelte';
   import HiveTerminal from './HiveTerminal.svelte';
+  import RunQueueModal from './RunQueueModal.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -68,6 +69,9 @@
   const coordId = $derived(coordinator?.id ?? null);
   const source = $derived(coordId ? { kind: 'tab' as const, tabId: coordId } : null);
   const tasks = $derived(tasksStore.forWorkspace(workspaceId));
+  /** Hive settings → Run queue (docs/hive.md §6.8), from the header. */
+  let queueOpen = $state(false);
+  const queuedCount = $derived(hive?.settings?.run_queue?.commands.length ?? 0);
 
   // ── The board: Rust's worker records, refetched on its event and on task changes (§4.4). ──
   let board = $state<HiveBoard | null>(null);
@@ -572,8 +576,18 @@
         <span class="warn">{board.hive_status === 'paused' ? 'Paused: no new workers start' : `Hive is ${board.hive_status}`}</span>
       {/if}
       <span>{hive?.landing_mode === 'integration' ? `Lands to hive/${hive.slug}, each with your approval` : 'Lands to Base'}</span>
+      {#if hive}
+        <Tooltip text="The heavy commands workers run only through the run queue (hiveRun), and what each needs">
+          <button type="button" class="queue-btn" onclick={() => (queueOpen = true)}>
+            Run queue: {queuedCount === 0 ? 'nothing queued' : `${queuedCount} command${queuedCount === 1 ? '' : 's'}`}
+          </button>
+        </Tooltip>
+      {/if}
     </div>
   </header>
+  {#if queueOpen && hive}
+    <RunQueueModal {workspaceId} {hive} onclose={() => (queueOpen = false)} />
+  {/if}
 
   <div class="cols" bind:this={colsEl}>
     {#if fit.coord === 'strip'}
@@ -768,6 +782,9 @@
   .title b { font-size: 14px; overflow-wrap: anywhere; }
   .goal { font-size: 12px; color: var(--fg-dim); overflow-wrap: anywhere; }
   .facts { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--fg-dim); align-items: flex-end; text-align: right; }
+  .queue-btn { background: none; border: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-align: right; }
+  .queue-btn:hover { text-decoration: underline; }
+  .queue-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .cols { flex: 1; min-height: 0; display: flex; min-width: 0; overflow: hidden; }
   .coord { flex: none; display: flex; flex-direction: column; min-height: 0; min-width: 0; max-width: calc(100% - 264px); transition: box-shadow 0.3s; }
   .coord > :global(.convo) { flex: 1; }

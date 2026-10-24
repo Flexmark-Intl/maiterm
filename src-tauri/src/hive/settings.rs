@@ -177,10 +177,12 @@ pub fn coordinator_only_mcp_tools() -> impl Iterator<Item = &'static str> {
     COORDINATOR_MCP_TOOLS.iter().copied().filter(|t| t.starts_with("hive") || *t == "galleryDeliver")
 }
 
+/// A worker's denies. Its stack verbs (`run::SERVICE_VERBS`) aren't among them: Rust routes a
+/// worker's start, restart or stop to the run queue, under its sandbox, before any window sees it.
 pub fn worker_denied_mcp_tools() -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
     for t in ESCAPE_MCP_TOOLS.iter().chain(WORKER_EXTRA_DENIED_MCP_TOOLS).copied().chain(coordinator_only_mcp_tools()).chain(overlord_mcp_tools()) {
-        if !out.contains(&t) {
+        if !out.contains(&t) && !super::run::SERVICE_VERBS.contains(&t) {
             out.push(t);
         }
     }
@@ -1195,8 +1197,13 @@ mod tests {
         let deny = strings(&s["permissions"]["deny"]);
         let allow = strings(&s["permissions"]["allow"]);
         let mcp = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
-        for t in ESCAPE_MCP_TOOLS.iter().chain(&["stopService", "stopStack", "replyToOverlord", "restoreArchivedTab", "hiveSpawnWorker", "hiveLand", "galleryDeliver"]) {
+        let routed = crate::hive::run::SERVICE_VERBS;
+        for t in ESCAPE_MCP_TOOLS.iter().filter(|t| !routed.contains(t)).chain(&["stopStack", "replyToOverlord", "restoreArchivedTab", "hiveSpawnWorker", "hiveLand", "galleryDeliver"]) {
             assert!(deny.contains(&format!("mcp__{mcp}__{t}")), "{t}");
+        }
+        // Allowed to call, never to run: Rust routes them to the run queue, under the sandbox.
+        for t in routed {
+            assert!(!deny.contains(&format!("mcp__{mcp}__{t}")), "{t} reaches Rust's queue routing");
         }
         assert!(!worker_denied_mcp_tools().contains(&"listTasks") && !worker_denied_mcp_tools().contains(&"galleryAdd"));
         // createBackup writes the whole state, comms token and every tab's scrollback included,

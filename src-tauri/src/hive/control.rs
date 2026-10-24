@@ -126,6 +126,8 @@ pub(crate) async fn stop_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
             worker_label(&w)
         ));
     }
+    // Its queued runs go, and running ones are interrupted: a stopped worker holds no resource.
+    let released = super::queue::release_worker(&w.task_id, "your coordinator stopped you");
     // A stop is never held back by the board: its note is best effort.
     let note = format!("Stopped by the coordinator: {reason}");
     if let Err(e) = task_note(ctx, caller, &w.task_id, &note, None).await {
@@ -142,6 +144,7 @@ pub(crate) async fn stop_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         "badge": w.badge,
         "phase": worker::PHASE_STOPPED,
         "agent": agent,
+        "runs_released": released,
         "note": "Its worktrees, branches and chat are kept; hiveRestartWorker brings it back.",
     }))
 }

@@ -636,6 +636,16 @@ function createWorkspacesStore() {
       // Mark as suspending so pty-close handlers don't delete tabs
       suspendingWorkspaceIds.add(workspaceId);
 
+      // A Hive's runs are released before step 2 kills their job tabs: each worker hears one
+      // release notice on resume, not "its tab went away" per job, and nothing starts meanwhile.
+      if (ws.hive) {
+        try {
+          await commands.hiveSuspendRuns(workspaceId);
+        } catch (e) {
+          logWarn(`suspendWorkspace: Hive runs not released before the PTYs: ${e}`);
+        }
+      }
+
       // 1. Save scrollback and snapshot restore context for all terminal tabs
       for (const pane of ws.panes) {
         for (const tab of pane.tabs) {

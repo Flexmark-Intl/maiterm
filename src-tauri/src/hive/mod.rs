@@ -25,6 +25,7 @@
 //! The run queue (step 5b): `queue` holds the jobs, resources and leases and starts each job
 //! through its window's stack store; `job_sandbox` draws the job's Seatbelt profile from the
 //! worker's own write lists and builds its line; `pressure` holds starts back when memory is short.
+//! `run` is the worker's way in (`hiveRun`, its service verbs) and the `⟦HIVE RUN⟧` it hears back.
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
@@ -53,6 +54,7 @@ pub mod record;
 pub(crate) mod report;
 pub mod roles;
 pub(crate) mod rpc;
+pub mod run;
 pub mod sandbox_events;
 pub mod settings;
 pub mod tools;

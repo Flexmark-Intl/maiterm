@@ -37,7 +37,13 @@ pub struct GateScope {
     /// Git must find the repo each root is, never one nested under it: another agent can write
     /// inside these roots, and a repo it made there runs its config's commands as this agent.
     pub roots_are_repos: bool,
+    /// A worker's: the queued commands' words (`run::queued_prefixes`), which it runs through
+    /// `hiveRun`, never directly (§6.8).
+    pub queued: Vec<Vec<String>>,
 }
+
+/// In every queued-command refusal: `decide_event` puts those on the run log too.
+pub const QUEUED_DENY: &str = "is queued in this Hive";
 
 /// The coordinator writes its home and the memory folder (§7.1, §9). Its git reads go only to
 /// repos maiTerm made: its read copies, each worker's worktrees and the human's folders, never
@@ -56,6 +62,7 @@ pub fn scope_for(hive: &Hive, role: &str, paths: &HivePaths) -> GateScope {
         write_roots: vec![paths.coordinator_home(), paths.memory()],
         git_roots,
         roots_are_repos: true,
+        queued: Vec::new(),
     }
 }
 
@@ -71,7 +78,21 @@ pub fn worker_scope(paths: &HivePaths, w: &super::worker::WorkerRecord) -> GateS
     write_roots.extend([scratch.clone(), paths.memory()]);
     let mut git_roots = worktrees;
     git_roots.push(scratch);
-    GateScope { role: super::ROLE_WORKER.to_string(), write_roots, git_roots, roots_are_repos: false }
+    GateScope { role: super::ROLE_WORKER.to_string(), write_roots, git_roots, roots_are_repos: false, queued: Vec::new() }
+}
+
+/// The queued command `word args…` starts with, word by word, if any. Programs compare by
+/// basename on both sides, so `/usr/bin/cargo test` is `cargo test` and `scripts/e2e.sh` is
+/// `./scripts/e2e.sh`; a queued path matches only a word run by path, never a bare `test` that
+/// the shell finds on PATH.
+fn queued_match<'a>(word: &str, args: &[String], queued: &'a [Vec<String>]) -> Option<&'a Vec<String>> {
+    let prog = program(word);
+    let by_path = |w: &str| w.contains(['/', '\\']);
+    queued.iter().find(|q| {
+        q.first().is_some_and(|p| program(p) == prog && (!by_path(p) || by_path(word)))
+            && q.len() - 1 <= args.len()
+            && q[1..].iter().zip(args).all(|(a, b)| a == b)
+    })
 }
 
 /// A repo git would find from `p` below `root`: a `.git` entry, or a folder that is itself a git
@@ -434,6 +455,16 @@ fn check_segment(words: &[String], cwd: Option<&Path>, scope: &GateScope, depth:
             continue;
         }
         let args = &words[i + 1..];
+        if let Some(q) = queued_match(w, args, &scope.queued) {
+            // The queued word as the human wrote it: what hiveRun matches.
+            let full: Vec<&str> = q.first().map(String::as_str).into_iter().chain(args.iter().map(String::as_str)).collect();
+            return Err(format!(
+                "`{}` {QUEUED_DENY}: run it with hiveRun {{command: \"{}\"}}; it's scheduled with the machine's other runs and becomes a \
+                 receipt.",
+                q.join(" "),
+                full.join(" ").replace('"', "'")
+            ));
+        }
         return match prog {
             p if SHELLS.contains(&p) => match shell_command_string(args) {
                 Some(s) => check_command(s, cwd, scope, depth + 1),
@@ -612,7 +643,7 @@ pub fn decide_event(tab_id: &str, agent: Option<(Hive, String, HivePaths)>, body
     let cwd = event.get("cwd").and_then(Value::as_str).map(PathBuf::from);
     let scope = if role == super::ROLE_WORKER {
         match super::worker::worker_for_tab(&paths, tab_id) {
-            Some(w) => worker_scope(&paths, &w),
+            Some(w) => GateScope { queued: super::run::queued_prefixes(&hive), ..worker_scope(&paths, &w) },
             None => {
                 log::warn!("hive {}: gate: no worker.json names tab {tab_id}; refused", hive.id);
                 return GateDecision::Deny("maiTerm has no record of this worker, so the call is blocked.".to_string());
@@ -625,8 +656,25 @@ pub fn decide_event(tab_id: &str, agent: Option<(Hive, String, HivePaths)>, body
     if let GateDecision::Deny(reason) = &decision {
         log::info!("hive {}: gate refused {tool} in tab {tab_id}: {reason}", hive.id);
         log_refusal(&paths, tab_id, tool, &describe(&input), reason);
+        if reason.contains(QUEUED_DENY) {
+            log_queued_deny(&paths, tab_id, &describe(&input));
+        }
     }
     decision
+}
+
+/// A queued command run directly, on the run log beside the runs (§6.8): the audit trail of a
+/// worker that went around the queue, or tried to.
+pub fn log_queued_deny(paths: &HivePaths, tab_id: &str, command: &str) {
+    let line = serde_json::json!({
+        "type": "deny",
+        "at": crate::commands::workspace::iso_now(),
+        "tab_id": tab_id,
+        "command": command.chars().take(500).collect::<String>(),
+    });
+    if let Err(e) = super::queue::append_line(&paths.run_log(), &line) {
+        log::warn!("hive: queued-command refusal not on the run log: {e}");
+    }
 }
 
 /// One line per refusal in `logs/gate.log`: the audit trail §6.8 promises.
@@ -1019,6 +1067,78 @@ mod tests {
         crate::hive::worker::write_worker(&f.paths.task("t-auth"), &w).unwrap();
         assert_eq!(decide_event("tab-w", agent(), &commit), GateDecision::Allow);
         assert!(matches!(decide_event("another-tab", agent(), &commit), GateDecision::Deny(_)));
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// Spike 9's wrappers around a queued command: each is the same `cargo test` to the gate.
+    #[test]
+    fn a_worker_runs_queued_commands_only_through_hive_run() {
+        let f = fx();
+        let (w, scope) = worker_fx(&f);
+        let scope = GateScope { queued: vec![vec!["cargo".into(), "test".into()], vec!["npm".into(), "run".into(), "tauri:dev".into()]], ..scope };
+        let wt = f.paths.worker_worktree("auth", "web");
+        let bash = |cmd: &str| gate_decision("Bash", &json!({ "command": cmd }), Some(&wt), &scope);
+        for cmd in [
+            "cargo test",
+            "cargo test -p core --release",
+            "sh -c 'cargo test'",
+            "bash -lc \"cargo test -p core\"",
+            "env X=1 cargo test",
+            "env -u HOME cargo test",
+            "RUST_LOG=debug cargo test",
+            "/usr/local/bin/cargo test",
+            "/Users/x/.cargo/bin/cargo test",
+            "command cargo test",
+            "nohup cargo test &",
+            "timeout 600 cargo test",
+            "echo start && cargo test",
+            "cd crates/core; cargo test",
+            "echo $(cargo test)",
+            "npm run tauri:dev",
+            "eval cargo test",
+        ] {
+            match bash(cmd) {
+                GateDecision::Deny(r) => assert!(r.contains(QUEUED_DENY) && r.contains("hiveRun"), "{cmd}: {r}"),
+                GateDecision::Allow => panic!("should refuse: {cmd}"),
+            }
+        }
+        for cmd in ["cargo build", "cargo check", "cargo testing", "echo cargo test", "npm run tauri:dev:isolated", "npm test", "git commit -m 'cargo test passes'"] {
+            assert_eq!(bash(cmd), GateDecision::Allow, "not queued: {cmd}");
+        }
+        let GateDecision::Deny(r) = bash("env X=1 /usr/bin/cargo test -p core") else { panic!() };
+        assert!(r.contains("`cargo test` is queued") && r.contains("command: \"cargo test -p core\""), "names the hiveRun to make: {r}");
+
+        // A queued path matches however the script is reached by path, never a bare word on PATH.
+        let paths_scope = GateScope { queued: vec![vec!["./scripts/e2e.sh".into()], vec!["bin/test".into()]], ..scope.clone() };
+        let bash_p = |cmd: &str| gate_decision("Bash", &json!({ "command": cmd }), Some(&wt), &paths_scope);
+        for cmd in ["./scripts/e2e.sh --all", "scripts/e2e.sh", "sh -c './scripts/e2e.sh --all'", "/abs/wt/bin/test -v", "bin/test"] {
+            match bash_p(cmd) {
+                GateDecision::Deny(r) => assert!(r.contains(QUEUED_DENY), "{cmd}: {r}"),
+                GateDecision::Allow => panic!("should refuse: {cmd}"),
+            }
+        }
+        let GateDecision::Deny(r) = bash_p("scripts/e2e.sh --all") else { panic!() };
+        assert!(r.contains("command: \"./scripts/e2e.sh --all\""), "names the queued word: {r}");
+        for cmd in ["test -f x", "e2e.sh", "echo ./scripts/e2e.sh"] {
+            assert_eq!(bash_p(cmd), GateDecision::Allow, "not the queued script: {cmd}");
+        }
+
+        // From the event: the worker's scope carries the Hive's queued commands, and the refusal
+        // is on the run log as well as the gate log.
+        crate::hive::worker::write_worker(&f.paths.task("t-auth"), &w).unwrap();
+        let mut hive = crate::hive::launch::tests::sample_hive();
+        hive.settings.run_queue.commands = vec![crate::hive::record::QueuedCommand { folder: "web".into(), prefix: "cargo test".into(), ..Default::default() }];
+        let agent = Some((hive.clone(), crate::hive::ROLE_WORKER.to_string(), HivePaths::new(f.paths.root.clone())));
+        let ev = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "sh -c 'cargo test'"}, "cwd": wt}).to_string();
+        assert!(matches!(decide_event("tab-w", agent.clone(), &ev), GateDecision::Deny(r) if r.contains(QUEUED_DENY)));
+        let log = fs::read_to_string(f.paths.run_log()).unwrap();
+        let line: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+        assert_eq!((line["type"].as_str(), line["tab_id"].as_str(), line["command"].as_str()), (Some("deny"), Some("tab-w"), Some("sh -c 'cargo test'")));
+        let push = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": wt}).to_string();
+        assert!(matches!(decide_event("tab-w", agent, &push), GateDecision::Deny(_)));
+        assert_eq!(fs::read_to_string(f.paths.run_log()).unwrap().lines().count(), 1, "only queued-command refusals go on the run log");
+        let coordinator = scope_for(&hive, crate::hive::ROLE_COORDINATOR, &f.paths);
+        assert!(coordinator.queued.is_empty(), "the coordinator runs no cargo anyway: its rules have no such Bash");
         let _ = fs::remove_dir_all(&f.base);
     }
 

@@ -3168,6 +3168,15 @@ several releases a day).
    tests), Run on ▸, `shared_from`, the agents' `on` argument, and the Create sheet's real Stack
    step (docs/stack.md §14). Services can't yet start inside a Hive workspace: part 4 lets
    service and job tabs exist there.
+   **Part 4 built** (`55960c5b`): the run queue engine (`hive/queue.rs`, `job_sandbox.rs`,
+   `pressure.rs`). One machine-wide queue by priority then age; pools cargo 2, tauri-dev 1,
+   e2e 1, gpu 1 across Hives (a Hive may only lower its share), `migrate:<ns>` exclusive per
+   Hive. A job runs in a hidden bound tab as `sandbox-exec` under a profile built from the
+   worker's own write lists (loopback only to its own and leased ports, no TIOCSTI, symlinks
+   resolved first), its line built in Rust with no `sh -c`. It ends only on a D after its own
+   B plus an exit mark the shell writes outside the sandbox, or when its terminal dies.
+   Leases hold a stop or retarget behind the jobs using a copy. Memory pressure, sampled only
+   while a job is queued or running, stops new starts and spawns.
 6. Reviewers (`hiveVerdict`, three attempts, escalation). Landing: land to Base (default)
    pinned to the reviewed sha, including several repos, the config-touching land rule (§8.1),
    the approval mode (chosen at creation, §3) through agent requests; the **land log and Undo**

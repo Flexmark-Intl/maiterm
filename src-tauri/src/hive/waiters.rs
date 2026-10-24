@@ -6,6 +6,7 @@
 //! Polled after every task write of a Hive workspace (`set_workspace_tasks`) and after a worker's
 //! phase changes (a report, a stop, a crash, a resumed Hive). One poll per Hive at a time; a
 //! request meanwhile runs it once more after, so no change is missed and no waiter launches twice.
+//! The same poll releases the queued and running jobs of a worker whose task was dropped.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -142,11 +143,29 @@ fn back_off(task_id: &str, now: i64) {
     BACKOFF.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(task_id.to_string(), now + BACKOFF_MS);
 }
 
+/// Workers whose own task row was dropped: what they have in the run queue is released (§6.8),
+/// told once. Only an explicit `dropped`: a row missing from a read never releases anyone.
+/// Answers how many runs went.
+pub(crate) fn release_dropped(workers: &[WorkerRecord], tasks: &[Task]) -> usize {
+    workers
+        .iter()
+        .filter(|w| tasks.iter().any(|t| t.id == w.task_id && t.status == "dropped"))
+        .map(|w| {
+            let n = super::queue::release_worker(&w.task_id, "your task was dropped");
+            if n > 0 {
+                log::info!("hive: {n} run(s) of {} released: its task was dropped", worker_label(w));
+            }
+            n
+        })
+        .sum()
+}
+
 /// One pass over the Hive's waiters, in badge order. Returns the slugs launched.
 pub(crate) async fn poll_once<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller) -> Vec<String> {
     let Ok(tasks) = super::tools::workspace_tasks(ctx.data, caller) else { return Vec::new() };
     let paths = caller.paths.clone();
     let Ok(workers) = blocking(move || Ok(worker::list_workers(&paths))).await else { return Vec::new() };
+    release_dropped(&workers, &tasks);
     let mut launched: Vec<String> = Vec::new();
     for w in workers.iter().filter(|w| w.phase == worker::PHASE_WAITING) {
         // Its own row gone or retired: the coordinator or the human took it off the board.
@@ -222,4 +241,46 @@ async fn tell_coordinator<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text
     let Some(c) = super::tools::coordinator_tab(ctx.data, caller) else { return };
     let sent = ctx.window.deliver(&c, text, "Hive notice").await;
     log::info!("hive {}: notice to the coordinator: {}", caller.hive.id, sent.describe());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hive::queue::{self, JobSpec};
+
+    fn row(id: &str, status: &str) -> Task {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "title": "t", "status": status, "origin": "agent", "created_at": "", "updated_at": ""
+        }))
+        .unwrap()
+    }
+
+    /// A dropped task's runs leave the queue (the app's own, so the ids are this test's alone).
+    #[test]
+    fn a_dropped_task_releases_its_workers_runs() {
+        let (dropped, kept) = (format!("t-drop-{}", uuid::Uuid::new_v4()), format!("t-keep-{}", uuid::Uuid::new_v4()));
+        let enqueue = |task: &str| {
+            let spec = JobSpec {
+                hive_id: "h-drop".into(),
+                window: "main".into(),
+                task_id: task.into(),
+                worker_slug: "w".into(),
+                argv: vec!["cargo".into(), "test".into()],
+                ..JobSpec::default()
+            };
+            queue::enqueue(spec).unwrap().id
+        };
+        let (a, b) = (enqueue(&dropped), enqueue(&kept));
+        let worker = |task: &str| WorkerRecord { task_id: task.into(), slug: "w".into(), ..WorkerRecord::default() };
+        let workers = vec![worker(&dropped), worker(&kept)];
+
+        assert_eq!(release_dropped(&workers, &[row(&dropped, "active"), row(&kept, "active")]), 0, "nothing dropped");
+        assert_eq!(release_dropped(&workers, &[row(&kept, "active")]), 0, "a row missing from a read releases nobody");
+        assert_eq!(release_dropped(&workers, &[row(&dropped, "dropped"), row(&kept, "active")]), 1);
+        let j = queue::job(&a).unwrap();
+        assert_eq!((j.state.as_str(), j.stopped_by.as_deref()), (queue::INTERRUPTED, Some(queue::BY_RELEASE)));
+        assert!(queue::job(&b).unwrap().is_active(), "another worker's run stays");
+        assert_eq!(release_dropped(&workers, &[row(&dropped, "dropped")]), 0, "once");
+        queue::release_worker(&kept, "test over");
+    }
 }

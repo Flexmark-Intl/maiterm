@@ -795,6 +795,7 @@ pub fn suspend_workspace(window: tauri::Window, state: State<'_, Arc<AppState>>,
     let win = app_data.window_mut(&label).ok_or("Window not found")?;
     let ws = win.workspaces.iter_mut().find(|w| w.id == workspace_id).ok_or("Workspace not found")?;
     ws.suspended = true;
+    let hive = ws.hive.is_some();
     // Give the workspace's live terminal tabs their proper suspended status — the
     // frontend already killed the PTYs, so leaving pty_id set would relapse the
     // high-watermark and make these tabs read as "live" on the next restart.
@@ -810,6 +811,12 @@ pub fn suspend_workspace(window: tauri::Window, state: State<'_, Arc<AppState>>,
         }
     }
     save_state(&app_data)?;
+    drop(app_data);
+    // A suspended Hive's workers hold no queued run or resource (docs/hive.md §6.8): told on resume.
+    // The window released them before killing the PTYs (`hive_suspend_runs`); this is the backstop.
+    if hive {
+        crate::hive::queue::park_workspace(&workspace_id, "your Hive was suspended");
+    }
     Ok(())
 }
 
@@ -820,6 +827,7 @@ pub fn resume_workspace(window: tauri::Window, state: State<'_, Arc<AppState>>, 
     let win = app_data.window_mut(&label).ok_or("Window not found")?;
     let ws = win.workspaces.iter_mut().find(|w| w.id == workspace_id).ok_or("Workspace not found")?;
     ws.suspended = false;
+    crate::hive::queue::unpark_workspace(&workspace_id);
     // Hand back the tabs that were live when this workspace was suspended so the
     // frontend can respawn them (consumed — the flags clear here).
     let mut wake_tab_ids = Vec::new();
@@ -934,9 +942,13 @@ pub fn suspend_tab(
     tab.suspended_at = Some(iso_now());
     // Explicitly suspended — don't auto-wake it on workspace resume.
     tab.wake_on_resume = false;
+    let worker = tab.hive_role.as_deref() == Some(crate::hive::ROLE_WORKER);
 
     let data_clone = app_data.clone();
     drop(app_data);
+    if worker {
+        crate::hive::run::release_for_tab(state.inner().clone(), tab_id, "your tab was suspended");
+    }
     save_state(&data_clone)
 }
 

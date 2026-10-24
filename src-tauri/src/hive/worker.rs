@@ -64,6 +64,9 @@ pub struct WorkerRecord {
     pub last_report: Option<WorkerReport>,
     /// Sandbox refusals already turned into a blocker, so a retry doesn't file another.
     pub violations_seen: Vec<String>,
+    /// Its queued runs not yet answered, and `⟦HIVE RUN⟧` results not yet delivered (§6.8):
+    /// Rust's, keyed by job, so a reload or a restart still reaches it exactly once.
+    pub pending_runs: Vec<PendingRun>,
     pub created_at: String,
     pub launched_at: Option<String>,
     #[serde(flatten)]
@@ -91,6 +94,7 @@ impl Default for WorkerRecord {
             cargo_target: String::new(),
             last_report: None,
             violations_seen: Vec::new(),
+            pending_runs: Vec::new(),
             created_at: String::new(),
             launched_at: None,
             extra: Map::new(),
@@ -157,6 +161,34 @@ pub struct WorkerReceipts {
     pub commits: Vec<String>,
     pub files: Vec<String>,
     pub assets: Vec<String>,
+    /// `hiveRun` jobs maiTerm checked against its run log (§7.7).
+    pub checks: Vec<CheckReceipt>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CheckReceipt {
+    pub job: String,
+    pub summary: String,
+}
+
+/// A run still open: queued or running.
+pub const RUN_OPEN: &str = "open";
+/// A run's `⟦HIVE RUN⟧` result, waiting to be delivered.
+pub const RUN_RESULT: &str = "result";
+
+/// One entry of `pending_runs`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PendingRun {
+    pub job: String,
+    /// `"open"` | `"result"`.
+    pub state: String,
+    /// The command while it is open; the message to type once it is a result.
+    pub text: String,
+    pub at: String,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

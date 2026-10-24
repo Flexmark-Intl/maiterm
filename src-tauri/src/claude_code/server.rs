@@ -3754,6 +3754,10 @@ async fn process_message(
                     );
                     return Some(serde_json::to_string(&resp).unwrap());
                 }
+                // A worker's start, restart or stop goes to the run queue (docs/hive.md §6.8), never
+                // to the window's stack store, which would type the command into an unsandboxed shell.
+                // Decided on the request's own identities, like the role check above.
+                let worker_verb_tab = crate::hive::run::queued_verb_caller(&state.app_data.read(), &callers, &tool_name);
                 let tab_id_given = arguments
                     .get("tabId")
                     .and_then(|v| v.as_str())
@@ -3904,8 +3908,16 @@ async fn process_message(
                     }
                 }
 
+                let queued = match &worker_verb_tab {
+                    Some(tab) => Some(crate::hive::run::worker_service_verb(&tool_name, &arguments, tab, state, app_handle).await),
+                    None => None,
+                };
                 // Backend-only tools: handle directly without emitting to frontend
-                if let Some(result) = handle_backend_tool(&tool_name, &arguments, state, app_handle).await {
+                let backend = match queued {
+                    Some(v) => Some(v),
+                    None => handle_backend_tool(&tool_name, &arguments, state, app_handle).await,
+                };
+                if let Some(result) = backend {
                     // `__mcp_content`: the tool built its own content array (an image, or text
                     // that would read badly as escaped JSON).
                     let content = match result.get("__mcp_content") {
@@ -4384,6 +4396,7 @@ fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, trans
     let (app, handle, tab, sid) = (srv.state.clone(), srv.app_handle.clone(), tab_id.to_string(), session_id.to_string());
     tauri::async_runtime::spawn(async move {
         let tab_id = tab.clone();
+        let is_worker = role == crate::hive::ROLE_WORKER;
         let started = tokio::task::spawn_blocking(move || crate::hive::session_started(&hive, &role, &paths, &tab_id, &sid, transcript_path))
             .await
             .unwrap_or_default();
@@ -4393,6 +4406,10 @@ fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, trans
         }
         if let Some(claim) = started.kickoff {
             deliver_hive_kickoff(&app, &handle, &tab, claim).await;
+        }
+        // Run results a crash or a restart kept from it (docs/hive.md §6.8).
+        if is_worker {
+            crate::hive::run::on_session_started(&app, &handle, &tab).await;
         }
     });
 }

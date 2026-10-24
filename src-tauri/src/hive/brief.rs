@@ -43,8 +43,9 @@ pub fn invariant_rules(hive: &Hive, role: &str, paths: &HivePaths, worker: Optio
              read {}: it holds your task, your role, your folders and your human\u{2019}s Instructions. You write only in \
              your own worktrees and your scratch folder ({}); commit your work on your branch as you go. When you need a \
              decision or something you can\u{2019}t do, block your task with a blocker: it goes to your coordinator, not to \
-             your human; never use AskUserQuestion. Report with hiveReport: done is refused without receipts (commits on \
-             your branch, or files in your folders). Temp is shared with every other sandboxed session: make files with \
+             your human; never use AskUserQuestion. Run queued commands with hiveRun, never in your shell. Report with \
+             hiveReport: done is refused without receipts (commits on your branch, files in your folders, or hiveRun jobs). \
+             Temp is shared with every other sandboxed session: make files with \
              mktemp -p \"$TMPDIR\" and keep nothing there that matters. No agent in a Hive pushes, changes git remotes or \
              merges pull requests: maiTerm refuses those, and only maiTerm pushes landed work. A tool you need that is \
              missing is a question for your coordinator, never something to mock or substitute.",
@@ -75,6 +76,39 @@ pub fn invariant_rules(hive: &Hive, role: &str, paths: &HivePaths, worker: Optio
          never something to mock or substitute.",
     );
     out
+}
+
+/// The queued commands of `folders` (§6.8), as a brief's bullet: a worker runs them only through
+/// `hiveRun`; the coordinator moves a run forward with `hiveRunPriority`.
+fn queued_lines(hive: &Hive, folders: Vec<&str>, worker: bool) -> String {
+    let listed: Vec<String> = hive
+        .settings
+        .run_queue
+        .commands
+        .iter()
+        .filter(|c| folders.contains(&c.folder.as_str()) && !c.words().is_empty())
+        .map(|c| {
+            let needs = if c.needs.is_empty() { String::new() } else { format!(" (needs {})", c.needs.join(", ")) };
+            format!("`{}` in {}{needs}", c.words().join(" "), c.folder)
+        })
+        .collect();
+    if listed.is_empty() {
+        return if worker { "- Nothing is queued in your folders: run tests and builds in your own shell.\n".to_string() } else { String::new() };
+    }
+    if worker {
+        format!(
+            "- Queued commands run only through `hiveRun` (your shell refuses them): {}. maiTerm schedules each with the machine's \
+             other runs, runs it under your sandbox and sends you the result as a ⟦HIVE RUN⟧ message; a pass on a committed tree \
+             is a `checks` receipt. Further arguments are fine; shell syntax isn't.\n",
+            listed.join("; ")
+        )
+    } else {
+        format!(
+            "- Your workers run these through the run queue, never directly: {}. `hiveRunPriority` moves one of their runs \
+             forward (the run a land waits on); maiTerm decides when it starts.\n",
+            listed.join("; ")
+        )
+    }
 }
 
 /// `brief.md`: the rest of the coordinator's brief, rewritten on every launch from the current
@@ -125,6 +159,7 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths) -> String {
         "- Your maiTerm tools are in your tool list. If one you need is missing, ask your human with a blocker; never \
          substitute or mock it.\n",
     );
+    b.push_str(&queued_lines(hive, hive.git_folders().map(|f| f.name.as_str()).collect(), false));
     b.push_str(
         "\n## Roles\n\nGive each worker one of these. The worker gets the role's full text in its own brief; you see only \
          this list. Pair a builder with its checker unless you have a reason not to, and say the reason.\n\n",
@@ -195,9 +230,10 @@ pub fn worker_brief_md(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, task_br
          - The sandbox refuses network hosts and folders outside your own. A refusal is a blocker to report, never \
          something to work around.\n\
          - Report with `hiveReport`: `status` done, blocked or failed, a `summary`, and for done the `receipts` maiTerm \
-         checks: `commits` (shas on your branch) and `files` (paths in your folders). A done report without receipts is \
-         refused.\n",
+         checks: `commits` (shas on your branch), `files` (paths in your folders) and `checks` (`hiveRun` jobs that passed on \
+         your committed tip). A done report without receipts is refused.\n",
     );
+    b.push_str(&queued_lines(hive, w.folders.iter().filter(|f| f.worktree.is_some()).map(|f| f.name.as_str()).collect(), true));
     if !hive.tools.is_empty() {
         b.push_str(&format!("- Tools this Hive has: {}. A tool that isn\u{2019}t listed isn\u{2019}t there.\n", hive.tools.join(", ")));
     }

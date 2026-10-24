@@ -178,6 +178,7 @@ pub(crate) async fn mark_failed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         }
     };
     log::warn!("hive {}: worker {} failed: {how} without a report", caller.hive.id, worker_label(&w));
+    super::queue::release_worker(&w.task_id, &format!("you stopped without reporting ({how})"));
     ctx.window.workers_changed(&caller.workspace_id);
     let note = format!("Failed: {how} without a report");
     if let Err(e) = super::control::task_note(ctx, caller, &w.task_id, &note, None).await {

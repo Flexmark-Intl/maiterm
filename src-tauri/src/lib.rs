@@ -703,6 +703,9 @@ pub fn run() {
 
             // The Hive run queue starts jobs through its windows from here on (docs/hive.md §6.8).
             hive::queue::install(app_state.clone(), app.handle().clone());
+            // Runs open when maiTerm stopped are interrupted, and each worker hears so at its next
+            // session start. Before any tab is up, so no session start can come first.
+            hive::run::restart_notices(&app_state.app_data);
 
             // Stack copies' branch checkouts whose branch is gone (docs/hive.md §6.9). Git, so off
             // the setup thread.
@@ -981,6 +984,8 @@ pub fn run() {
             hive::queue::stack_lease_hold,
             hive::queue::stack_lease_done,
             hive::queue::hive_lease_override,
+            hive::queue::hive_suspend_runs,
+            hive::run::hive_set_run_queue,
             commands::accounts::list_account_runtimes,
             commands::accounts::reconcile_account,
             commands::accounts::read_account_identity,

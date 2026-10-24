@@ -3,7 +3,7 @@ import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { StackHeldAction, StackLeaseState } from './types';
-import type { Hive, HiveBoard, HiveCreated, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HivePreflight, HiveSpec } from './types';
+import type { Hive, HiveBoard, HiveCreated, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HivePreflight, HiveSpec, RunQueueSettings } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
@@ -1439,6 +1439,10 @@ export async function stackLeaseDone(copyKey: string): Promise<void> {
 export async function hiveLeaseOverride(copyKey: string): Promise<string[]> {
   return invoke('hive_lease_override', { copyKey });
 }
+/** A Hive is about to be suspended: its runs are released before its PTYs die. How many went. */
+export async function hiveSuspendRuns(workspaceId: string): Promise<number> {
+  return invoke('hive_suspend_runs', { workspaceId });
+}
 
 /** Add one follow-up to a tab (docs/follow-ups.md). Returns the tab's list as it now stands. */
 export async function addTabFollowUp(workspaceId: string, tabId: string, followUp: FollowUp): Promise<FollowUp[]> {
@@ -2806,4 +2810,10 @@ export async function hiveWorkerMetas(workspaceId: string): Promise<HiveWorkerMe
  *  The machine-wide breaker is timed and not lifted by this. */
 export async function hiveResume(workspaceId: string): Promise<Hive> {
   return invoke('hive_resume', { workspaceId });
+}
+
+/** The human's queued commands and resource limits (docs/hive.md §6.8), checked and saved in
+ *  Rust. Answers the Hive as saved; the window's mirror also follows `hive-changed`. */
+export async function hiveSetRunQueue(workspaceId: string, runQueue: RunQueueSettings): Promise<Hive> {
+  return invoke('hive_set_run_queue', { workspaceId, runQueue });
 }

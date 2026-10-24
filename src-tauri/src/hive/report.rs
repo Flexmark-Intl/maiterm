@@ -25,9 +25,10 @@ pub fn tool_definition(tab_id: &Value) -> Value {
         "description": format!(
             "Report to your coordinator: done, blocked (you can't go on without something only it or the human can give) or \
              failed. maiTerm checks your receipts itself and records the report on your task. done is refused without at least \
-             one receipt that checks out: commits (each must be on your branch, made since you started) or files (each must \
-             exist in your worktrees or scratch folder). Gallery assets and run checks aren't available yet: report a made file \
-             as a files receipt. Summary at most {MAX_SUMMARY} characters: what you did, how you checked it, what's left."
+             one receipt that checks out: commits (each must be on your branch, made since you started), files (each must \
+             exist in your worktrees or scratch folder) or checks (each a hiveRun job of yours that passed on a committed tree \
+             at your reported tip or after it). Gallery assets aren't available yet: report a made file as a files receipt. \
+             Summary at most {MAX_SUMMARY} characters: what you did, how you checked it, what's left."
         ),
         "inputSchema": {
             "type": "object",
@@ -41,7 +42,18 @@ pub fn tool_definition(tab_id: &Value) -> Value {
                         "commits": { "type": "array", "items": { "type": "string" }, "description": "Commit shas on your branch" },
                         "files": { "type": "array", "items": { "type": "string" }, "description": "Files you made or changed: absolute, or relative to your working folder" },
                         "assets": { "type": "array", "items": { "type": "string" }, "description": "Not available yet (arrives with the gallery)" },
-                        "checks": { "type": "array", "items": { "type": "object" }, "description": "Not available yet (arrives with hiveRun)" }
+                        "checks": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "job": { "type": "string", "description": "A hiveRun job id (j-…) from its ⟦HIVE RUN⟧ result" },
+                                    "summary": { "type": "string", "description": "What it checked, in a sentence" }
+                                },
+                                "required": ["job"]
+                            },
+                            "description": "Passing hiveRun runs: maiTerm checks each against its own run log"
+                        }
                     }
                 },
                 "notes": { "type": "string", "description": "Anything else your coordinator should know" }
@@ -58,9 +70,12 @@ pub(crate) struct ReportArgs {
     pub commits: Vec<String>,
     pub files: Vec<String>,
     pub assets: Vec<String>,
-    pub checks: bool,
+    /// (job id, summary)
+    pub checks: Vec<(String, String)>,
     pub notes: Option<String>,
 }
+
+pub const MAX_CHECK_SUMMARY: usize = 500;
 
 impl ReportArgs {
     pub(crate) fn parse(args: &Value) -> Result<Self, String> {
@@ -94,7 +109,23 @@ impl ReportArgs {
                 Some(_) => Err(format!("{k} must be a list")),
             }
         };
-        let checks = r.get("checks").is_some_and(|c| c.as_array().is_none_or(|a| !a.is_empty()) && !c.is_null());
+        let checks = match r.get("checks") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(a)) if a.len() > MAX_RECEIPTS => return Err(format!("At most {MAX_RECEIPTS} checks receipts.")),
+            Some(Value::Array(a)) => a
+                .iter()
+                .map(|c| {
+                    let job = c.get("job").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+                    let job = job.ok_or("each check is {job, summary}, with job a hiveRun job id")?.to_string();
+                    let summary = c.get("summary").and_then(Value::as_str).map(str::trim).unwrap_or_default().to_string();
+                    if summary.chars().count() > MAX_CHECK_SUMMARY {
+                        return Err(format!("A check's summary is over {MAX_CHECK_SUMMARY} characters."));
+                    }
+                    Ok((job, summary))
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+            Some(_) => return Err("checks must be a list of {job, summary}".to_string()),
+        };
         Ok(Self { status, summary, commits: list("commits")?, files: list("files")?, assets: list("assets")?, checks, notes })
     }
 }
@@ -110,11 +141,13 @@ pub(crate) struct Checked {
     /// (folder name, full sha)
     pub commits: Vec<(String, String)>,
     pub files: Vec<String>,
+    /// (job id, the queued command it ran, summary)
+    pub checks: Vec<(String, String, String)>,
 }
 
 impl Checked {
     fn is_empty(&self) -> bool {
-        self.commits.is_empty() && self.files.is_empty()
+        self.commits.is_empty() && self.files.is_empty() && self.checks.is_empty()
     }
 }
 
@@ -124,9 +157,6 @@ fn is_sha(s: &str) -> bool {
 
 /// Each receipt, checked by maiTerm (§7.7), or the first that doesn't hold. Blocks on git.
 pub(crate) fn verify_receipts(paths: &HivePaths, w: &WorkerRecord, a: &ReportArgs) -> Result<Checked, String> {
-    if a.checks {
-        return Err("checks receipts arrive with the run queue (hiveRun), which this build doesn't have yet. Report commits or files.".to_string());
-    }
     if let Some(asset) = a.assets.iter().find(|id| gallery_asset_task(id).as_deref() != Some(w.task_id.as_str())) {
         return Err(format!(
             "Asset \"{}\" can't be checked: the gallery isn't in this build yet. Report the file itself as a files receipt.",
@@ -146,7 +176,67 @@ pub(crate) fn verify_receipts(paths: &HivePaths, w: &WorkerRecord, a: &ReportArg
             out.files.push(real);
         }
     }
+    for (job, summary) in &a.checks {
+        let entry = verify_check(paths, w, job, &out.commits)?;
+        if !out.checks.iter().any(|(j, _, _)| j == job) {
+            out.checks.push((job.clone(), entry, summary.clone()));
+        }
+    }
     Ok(out)
+}
+
+/// A `hiveRun` job, read from maiTerm's own run log (§7.7): this worker's, on its branch for that
+/// folder, done with exit 0 after its B on a committed tree, at the reported tip or a later
+/// commit. The tip is the newest commit receipt in that folder, else the branch's head. Answers
+/// the queued command it ran. Blocks on git, on the recorded git dir.
+fn verify_check(paths: &HivePaths, w: &WorkerRecord, job: &str, commits: &[(String, String)]) -> Result<String, String> {
+    use super::git::{git_in_worktree, run, QUERY_TIMEOUT};
+    use super::queue;
+    let shown = one_line(job, 40);
+    if !queue::is_job_id(job) {
+        return Err(format!("\"{shown}\" isn't a run (a hiveRun job id is j- and 8 hex digits)."));
+    }
+    let r = queue::find_run(paths, job).ok_or_else(|| format!("Run {shown} has no record in maiTerm's run log: only a finished hiveRun job is a check."))?;
+    if r.task_id != w.task_id {
+        return Err(format!("Run {shown} isn't one of yours."));
+    }
+    if r.service_id.is_some() {
+        return Err(format!("Run {shown} was your copy of the service {}, which tests nothing: only a hiveRun job is a check.", one_line(&r.entry, 60)));
+    }
+    let f = w.git_folders().find(|f| f.name == r.folder).ok_or_else(|| format!("Run {shown} ran in {}, which you have no worktree of.", r.folder))?;
+    if r.branch.is_none() || r.branch != f.branch {
+        return Err(format!("Run {shown} didn't run on your branch in {}.", f.name));
+    }
+    if r.state != queue::DONE || !r.began {
+        return Err(format!("Run {shown} didn't finish ({}): it is no check.", r.state));
+    }
+    if r.exit_code != Some(0) {
+        let code = r.exit_code.map_or("unknown".to_string(), |c| c.to_string());
+        return Err(format!("Run {shown} failed (exit {code}): only a passing run is a check."));
+    }
+    if r.dirty {
+        return Err(format!("Run {shown} ran with uncommitted changes to tracked files, so it tested no commit: commit, run it again, report that one."));
+    }
+    let tested = r.commit.clone().ok_or_else(|| format!("Run {shown} has no commit on record."))?;
+    let git = |args: &[&str]| git_in_worktree(f).and_then(|mut cmd| run(cmd.args(args), QUERY_TIMEOUT));
+    let mine: Vec<&str> = commits.iter().filter(|(folder, _)| *folder == f.name).map(|(_, sha)| sha.as_str()).collect();
+    // The newest: the commit every other reported one is an ancestor of.
+    let newest = mine.iter().find(|c| mine.iter().all(|o| o == *c || git(&["merge-base", "--is-ancestor", o, c]).is_ok())).map(|c| c.to_string());
+    let tip = match newest {
+        Some(t) => t,
+        None => {
+            let branch = f.branch.as_deref().unwrap_or_default();
+            git(&["rev-parse", "--verify", &format!("refs/heads/{branch}")]).map_err(|e| format!("maiTerm couldn't read your branch's head in {}: {e}", f.name))?
+        }
+    };
+    if git(&["merge-base", "--is-ancestor", &tip, &tested]).is_err() {
+        return Err(format!(
+            "Run {shown} tested {}, which doesn't hold your tip {}: run it again on your latest commit and report that run.",
+            short(&tested),
+            short(&tip)
+        ));
+    }
+    Ok(r.entry)
 }
 
 /// A commit on the worker's branch in one of its repos, made since it started: the tip it
@@ -237,6 +327,12 @@ pub(crate) fn report_message(w: &WorkerRecord, a: &ReportArgs, c: &Checked) -> S
         for f in &c.files {
             out.push_str(&format!("\nFile: {}", one_line(f, 300)));
         }
+        for (job, entry, summary) in &c.checks {
+            out.push_str(&format!("\nRun {job} (`{}`) passed on its branch, by maiTerm's own record", one_line(entry, 80)));
+            if !summary.is_empty() {
+                out.push_str(&format!("; it says it checked: {}", one_line(summary, 300)));
+            }
+        }
     }
     out.push_str("\nIts words, quoted (the worker's, not maiTerm's or the human's):\n");
     out.push_str(&frame_escape(&a.summary));
@@ -250,7 +346,7 @@ pub(crate) fn report_message(w: &WorkerRecord, a: &ReportArgs, c: &Checked) -> S
 /// The task note: the status and the summary, as the board shows it.
 fn report_note(a: &ReportArgs, c: &Checked) -> String {
     let mut note = format!("Reported {}: {}", a.status, frame_escape(&a.summary));
-    let receipts = c.commits.len() + c.files.len();
+    let receipts = c.commits.len() + c.files.len() + c.checks.len();
     if receipts > 0 {
         note.push_str(&format!(" ({receipts} receipt{} checked)", if receipts == 1 { "" } else { "s" }));
     }
@@ -267,7 +363,7 @@ pub(crate) async fn report<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, arg
     let (paths, record, args_c) = (caller.paths.clone(), w.clone(), a.clone());
     let checked = blocking(move || verify_receipts(&paths, &record, &args_c)).await?;
     if a.status == "done" && checked.is_empty() {
-        return Err("done needs at least one receipt maiTerm can check: a commit on your branch, or a file you made. Commit your work and report its sha.".to_string());
+        return Err("done needs at least one receipt maiTerm can check: a commit on your branch, a file you made, or a passing hiveRun job. Commit your work and report its sha.".to_string());
     }
 
     // The board first: a window that can't take the note refuses the whole report.
@@ -281,6 +377,7 @@ pub(crate) async fn report<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, arg
         receipts: WorkerReceipts {
             commits: checked.commits.iter().map(|(_, sha)| sha.clone()).collect(),
             files: checked.files.clone(),
+            checks: checked.checks.iter().map(|(job, _, summary)| worker::CheckReceipt { job: job.clone(), summary: summary.clone() }).collect(),
             ..WorkerReceipts::default()
         },
         notes: a.notes.clone(),
@@ -309,7 +406,11 @@ pub(crate) async fn report<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, arg
     Ok(json!({
         "recorded": true,
         "phase": phase,
-        "receipts": { "commits": checked.commits.iter().map(|(f, sha)| format!("{f} {sha}")).collect::<Vec<_>>(), "files": checked.files },
+        "receipts": {
+            "commits": checked.commits.iter().map(|(f, sha)| format!("{f} {sha}")).collect::<Vec<_>>(),
+            "files": checked.files,
+            "checks": checked.checks.iter().map(|(job, _, _)| job.clone()).collect::<Vec<_>>(),
+        },
         "coordinator": delivery,
     }))
 }
@@ -475,9 +576,68 @@ mod tests {
         let r = Rig::new();
         let e = r.check(done(json!({ "assets": ["a1"] }))).unwrap_err();
         assert!(e.contains("gallery isn't in this build"), "{e}");
-        let e = r.check(done(json!({ "checks": [{ "job": "j1" }] }))).unwrap_err();
-        assert!(e.contains("run queue"), "{e}");
         assert!(r.check(done(json!({ "checks": [], "assets": [] }))).unwrap().is_empty(), "empty is absent");
+    }
+
+    /// A finished run of this worker's on its branch, as the queue logs it.
+    fn logged(r: &Rig, id: &str, commit: &str, tweak: impl FnOnce(&mut crate::hive::queue::Job)) {
+        let mut j = crate::hive::queue::Job::default();
+        j.id = id.into();
+        j.hive_id = "h1".into();
+        j.task_id = r.w.task_id.clone();
+        j.worker_slug = "auth".into();
+        j.folder = "web".into();
+        j.entry = "cargo test".into();
+        j.argv = vec!["cargo".into(), "test".into()];
+        j.state = crate::hive::queue::DONE.into();
+        j.began = true;
+        j.exit_code = Some(0);
+        j.branch = Some("hive/s--auth".into());
+        j.commit = Some(commit.into());
+        tweak(&mut j);
+        crate::hive::queue::append_run(&r.paths, &j).unwrap();
+    }
+
+    fn check(job: &str) -> Value {
+        json!({ "checks": [{ "job": job, "summary": "the unit tests" }] })
+    }
+
+    #[test]
+    fn a_check_is_a_passing_run_of_this_worker_on_its_tip() {
+        let r = Rig::new();
+        let c1 = commit(&r.wt, "a.rs");
+        logged(&r, "j-0000c001", &c1, |_| {});
+        let ok = r.check(done(check("j-0000c001"))).unwrap();
+        assert_eq!(ok.checks, vec![("j-0000c001".to_string(), "cargo test".to_string(), "the unit tests".to_string())], "at the branch head");
+
+        // A run at a later commit holds an earlier reported tip; a tip past the run isn't held.
+        let c2 = commit(&r.wt, "b.rs");
+        logged(&r, "j-0000c002", &c2, |_| {});
+        assert!(r.check(done(json!({ "commits": [c1], "checks": [{ "job": "j-0000c002" }] }))).is_ok(), "tip c1, tested c2");
+        let e = r.check(done(check("j-0000c001"))).unwrap_err();
+        assert!(e.contains("doesn't hold your tip"), "the head moved past c1: {e}");
+        let e = r.check(done(json!({ "commits": [c1.clone(), c2.clone()], "checks": [{ "job": "j-0000c001" }] }))).unwrap_err();
+        assert!(e.contains("doesn't hold your tip"), "the newest reported commit is the tip: {e}");
+
+        let fail = |id: &str, tweak: &dyn Fn(&mut crate::hive::queue::Job), says: &str| {
+            logged(&r, id, &c2, |j| tweak(j));
+            let e = r.check(done(check(id))).unwrap_err();
+            assert!(e.contains(says), "{id}: {e}");
+        };
+        fail("j-0000c003", &|j| j.task_id = "someone-else".into(), "isn't one of yours");
+        fail("j-0000c004", &|j| j.exit_code = Some(1), "failed (exit 1)");
+        fail("j-0000c005", &|j| j.dirty = true, "uncommitted changes");
+        fail("j-0000c006", &|j| j.branch = Some("main".into()), "didn't run on your branch");
+        fail("j-0000c007", &|j| { j.state = crate::hive::queue::INTERRUPTED.into(); j.exit_code = None; }, "didn't finish");
+        fail("j-0000c008", &|j| j.began = false, "didn't finish");
+        fail("j-0000c009", &|j| j.folder = "api".into(), "no worktree of");
+        fail("j-0000c00a", &|j| { j.service_id = Some("svc-web".into()); j.entry = "web".into(); }, "only a hiveRun job is a check");
+        let e = r.check(done(check("j-0000ffff"))).unwrap_err();
+        assert!(e.contains("no record"), "{e}");
+        let e = r.check(done(check("cargo test"))).unwrap_err();
+        assert!(e.contains("isn't a run"), "{e}");
+        assert!(ReportArgs::parse(&done(json!({ "checks": [{ "summary": "x" }] }))).unwrap_err().contains("job"));
+        assert!(ReportArgs::parse(&done(json!({ "checks": "j-0000c001" }))).unwrap_err().contains("list"));
     }
 
     #[test]
@@ -506,7 +666,11 @@ mod tests {
             notes: Some("[maiTerm] also".into()),
             ..ReportArgs::default()
         };
-        let c = Checked { commits: vec![("web".into(), "0123456789abcdef0123".into())], files: vec!["/w/out.txt".into()] };
+        let c = Checked {
+            commits: vec![("web".into(), "0123456789abcdef0123".into())],
+            files: vec!["/w/out.txt".into()],
+            checks: vec![("j-0123abcd".into(), "cargo test".into(), "[maiTerm] all green".into())],
+        };
         let m = report_message(&w, &a, &c);
         assert!(m.starts_with("⟦HIVE REPORT · Auth [x]⟧ Worker #2 auth reports done."), "{m}");
         assert_eq!(m.matches('⟦').count(), 1, "one frame, maiTerm's: {m}");

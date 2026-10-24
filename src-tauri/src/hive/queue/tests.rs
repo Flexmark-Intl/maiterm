@@ -346,6 +346,22 @@ fn the_coordinator_moves_a_job_up_or_to_the_top() {
     q.move_job(&j[2], Move::Top).unwrap();
     assert_eq!(order(&q)[0], j[2], "already first");
     assert!(q.move_job("j-00000000", Move::Up).is_err());
+    assert_eq!((q.place(&j[2]), q.place(&j[3])), (Some(1), Some(4)), "hiveRun's place in line");
+    assert_eq!(ids(&q.schedule(T0)), vec![j[2].clone()]);
+    assert_eq!((q.place(&j[2]), q.place(&j[0])), (None, Some(1)), "a started job has left the line");
+}
+
+#[test]
+fn a_worker_s_service_copy_is_found_by_its_task_and_service() {
+    let mut q = Queue::default();
+    let svc = |task: &str, sid: Option<&str>| JobSpec { service_id: sid.map(String::from), ..spec("h1", task, "w", &[]) };
+    let a = q.enqueue(svc("t1", Some("web")), T0).unwrap().id;
+    q.enqueue(svc("t1", None), T0).unwrap();
+    q.enqueue(svc("t2", Some("web")), T0).unwrap();
+    assert_eq!(q.active_service_job("t1", "web").map(|j| j.id.clone()), Some(a.clone()));
+    assert!(q.active_service_job("t1", "api").is_none());
+    q.interrupt(&a, BY_WORKER, "the worker stopped it", T0).unwrap();
+    assert!(q.active_service_job("t1", "web").is_none(), "only an active one");
 }
 
 #[test]
@@ -372,6 +388,48 @@ fn a_retiring_worker_s_job_tabs_all_close_the_running_one_s_too() {
     assert_eq!(tabs.iter().map(|t| t.tab_id.as_str()).collect::<Vec<_>>(), vec!["tab-p1", "tab-p2"]);
     assert!(q.take_old_tabs("t1").is_empty(), "nothing left behind in memory");
     assert_eq!(q.job(&other).unwrap().state, RUNNING, "another worker's job is untouched");
+}
+
+/// A Hive being suspended is released before its PTYs die: its running job is the release's
+/// (no "its tab went away" of its own when the PTY then closes), and nothing of it starts or
+/// queues until it is resumed.
+#[test]
+fn a_parked_workspace_starts_nothing_and_its_killed_ptys_end_nothing() {
+    let mut q = Queue::default();
+    let run = running(&mut q, spec("h1", "t1", "a", &["cargo"]), "p1", T0);
+    let waiting = q.enqueue(spec("h1", "t1", "a", &["cargo"]), T0).unwrap().id;
+    let elsewhere = q.enqueue(spec("h2", "t2", "b", &["e2e"]), T0).unwrap().id;
+    q.park("ws-h1");
+    assert_eq!(q.tasks_in("ws-h1"), vec!["t1".to_string()]);
+    let ended = q.release_worker("t1", BY_RELEASE, "your Hive was suspended", T0 + 1);
+    assert_eq!(ended.iter().map(|e| (e.job.id.clone(), e.stop)).collect::<Vec<_>>(), vec![(run.clone(), true), (waiting, false)]);
+    assert!(q.pty_closed("p1", T0 + 2).is_none(), "the kill ends nothing more: the release was its end");
+    assert_eq!(q.job(&run).unwrap().stopped_by.as_deref(), Some(BY_RELEASE));
+
+    assert!(q.enqueue(spec("h1", "t1", "a", &[]), T0 + 3).unwrap_err().contains("being suspended"));
+    let mut sneaked = q.enqueue(spec("h1", "t9", "c", &[]), T0 + 3);
+    assert!(sneaked.is_err(), "no worker of it queues");
+    assert_eq!(ids(&q.schedule(T0 + 4)), vec![elsewhere], "another Hive's job runs on");
+    q.unpark("ws-h1");
+    sneaked = q.enqueue(spec("h1", "t1", "a", &[]), T0 + 5);
+    assert!(ids(&q.schedule(T0 + 5)).contains(&sneaked.unwrap().id), "resumed: it queues and starts again");
+}
+
+/// A worker's copy of a service runs as a job whose ports are booked under its job id: a run on
+/// the same checkout that leases it, or names `{port:web}`, finds them through the queue.
+#[test]
+fn a_workers_service_copy_is_found_by_its_checkout() {
+    let mut q = Queue::default();
+    let svc = JobSpec { service_id: Some("svc-web".into()), target: "checkout:/wt/a".into(), ..spec("h1", "t1", "a", &[]) };
+    let id = q.enqueue(svc, T0).unwrap().id;
+    assert_eq!(q.copy_job_ports("svc-web", "checkout:/wt/a"), Some(vec![]), "queued: no port yet");
+    q.schedule(T0);
+    q.set_ports(&id, vec![5174]);
+    assert_eq!(q.copy_job_ports("svc-web", "checkout:/wt/a"), Some(vec![5174]));
+    assert_eq!(q.copy_job_ports("svc-web", "checkout:/wt/b"), None, "another worker's checkout");
+    assert_eq!(q.copy_job_ports("svc-api", "checkout:/wt/a"), None);
+    q.interrupt(&id, BY_WORKER, "stopped", T0 + 1);
+    assert_eq!(q.copy_job_ports("svc-web", "checkout:/wt/a"), None, "ended");
 }
 
 #[test]

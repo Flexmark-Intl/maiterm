@@ -36,8 +36,9 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The Hive tools built so far: what `tools/list` offers each role and the handler answers.
 /// The rest of the coordinator's (settings' `COORDINATOR_MCP_TOOLS`) are refused as not yet here.
-pub const COORDINATOR_TOOLS: [&str; 5] = ["hiveSpawnWorker", "hiveListWorkers", "hiveMessageWorker", "hiveStopWorker", "hiveRestartWorker"];
-pub const WORKER_TOOLS: [&str; 1] = ["hiveReport"];
+pub const COORDINATOR_TOOLS: [&str; 6] =
+    ["hiveSpawnWorker", "hiveListWorkers", "hiveMessageWorker", "hiveStopWorker", "hiveRestartWorker", "hiveRunPriority"];
+pub const WORKER_TOOLS: [&str; 2] = ["hiveReport", "hiveRun"];
 /// A worker's own Hive tools (§7.2), some built by later steps; the coordinator's are refused to it.
 const WORKER_HIVE_TOOLS: [&str; 3] = ["hiveReport", "hiveRun", "hiveVerdict"];
 pub const MAX_MESSAGE: usize = 16_000;
@@ -147,7 +148,7 @@ pub fn listed_role(data: &AppData, tab_id: &str) -> Option<&'static str> {
 pub fn tool_definitions(role: &str) -> Vec<Value> {
     let tab_id = json!({ "type": "string", "description": "Your own tab (auto-injected)" });
     if role == ROLE_WORKER {
-        return vec![super::report::tool_definition(&tab_id)];
+        return vec![super::report::tool_definition(&tab_id), super::run::tool_definition(&tab_id)];
     }
     if role != ROLE_COORDINATOR {
         return Vec::new();
@@ -232,7 +233,7 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
             "required": ["worker"]
         }
     });
-    vec![spawn, list, message, stop, restart]
+    vec![spawn, list, message, stop, restart, super::run::priority_tool_definition(&tab_id)]
 }
 
 /// The coordinator a tool call comes from, with its Hive, cloned out of the state lock.
@@ -368,6 +369,8 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         "hiveStopWorker" => super::control::stop_worker(&ctx, &caller, args).await,
         "hiveRestartWorker" => super::control::restart_worker(&ctx, &caller, args).await,
         "hiveReport" => super::report::report(&ctx, &caller, args).await,
+        "hiveRun" => super::run::run_tool(&ctx, &caller, args).await,
+        "hiveRunPriority" => super::run::priority_tool(&caller, args).await,
         t => Err(format!("{t} isn't available in this build of maiTerm yet.")),
     };
     // A worker's phase changed: a freed slot or a failed dependency is news to the waiters.
@@ -1372,8 +1375,8 @@ mod tests {
         let d = roles_app();
         let refused = |callers: &[&str], tool: &str| refuse_agent_tool(&d, callers, tool).is_some();
         let worker_refused = [
-            "createService", "updateService", "removeService", "startService", "restartService", "startStack", "stopStack",
-            "stopService", "replyToOverlord", "createTab", "moveTab", "moveWorkspace", "setMesh", "linkMeshes", "unlinkMesh",
+            "createService", "updateService", "removeService", "startStack", "stopStack",
+            "replyToOverlord", "createTab", "moveTab", "moveWorkspace", "setMesh", "linkMeshes", "unlinkMesh",
             "bridgeWith", "disconnectBridge", "sendToBridgedAgent", "startTopic", "completeTopic", "createFollowUp",
             "setPreference", "addMcpServer", "restoreArchivedTab", "switchTab", "setAutoResume", "setTriggerVariable",
             "driveTab", "answerTabPrompt", "restartMaiterm", "createBackup", "readLogs", "getTabContext",
@@ -1383,6 +1386,16 @@ mod tests {
             assert!(refused(&["w1", "t1"], tool), "a worker naming an ordinary tab is still a worker: {tool}");
             assert!(!refused(&["t1"], tool), "an ordinary agent: {tool}");
         }
+        // A worker's start, restart and stop pass the role check only to be routed to the run queue,
+        // decided on the same identities: never the window's store (docs/hive.md §6.8).
+        for tool in crate::hive::run::SERVICE_VERBS {
+            assert!(!refused(&["w1"], tool), "{tool} reaches the queue routing");
+            assert_eq!(crate::hive::run::queued_verb_caller(&d, &["w1"], tool).as_deref(), Some("w1"), "{tool}");
+            assert_eq!(crate::hive::run::queued_verb_caller(&d, &["t1", "w1"], tool).as_deref(), Some("w1"), "naming an ordinary tab: {tool}");
+            assert_eq!(crate::hive::run::queued_verb_caller(&d, &["t1"], tool), None, "an ordinary agent's goes to its window: {tool}");
+            assert_eq!(crate::hive::run::queued_verb_caller(&d, &["coord"], tool), None, "the coordinator's settings deny it: {tool}");
+        }
+        assert_eq!(crate::hive::run::queued_verb_caller(&d, &["w1"], "createService"), None, "refused by the role check instead");
         for tool in ["listTasks", "createTasks", "updateTasks", "getTabNotes", "setTabNotes", "writeWorkspaceNote"] {
             assert!(!refused(&["w1"], tool), "a worker keeps {tool}");
             assert!(!refused(&["coord"], tool), "the coordinator keeps {tool}");
