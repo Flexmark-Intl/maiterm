@@ -1115,6 +1115,7 @@ pub fn run() {
             hive::create::hive_detect_tools,
             hive::create::hive_create,
             hive::fuses::hive_resume,
+            hive::tools::hive_live_worker_tabs,
             #[cfg(debug_assertions)]
             share::open::share_debug_open,
         ])

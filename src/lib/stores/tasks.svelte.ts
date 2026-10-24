@@ -140,6 +140,25 @@ function createTasksStore() {
       streamsByWorkspace = new Map(streamsByWorkspace);
     },
 
+    /** A Hive worker's row, exactly as Rust minted it (docs/hive.md §7.2: `hiveSpawnWorker`'s
+     *  `hive.spawn`). Its id is the worker's task folder, so it is taken as is, never through the
+     *  title dedup, and replaces a row with that id. Its workstream is the Hive's: added when this
+     *  copy lacks it, or the row is filed under the one this copy already has by that name. */
+    adoptHiveTask(workspaceId: string, task: Task, workstream: Workstream | null) {
+      let row = task;
+      if (workstream) {
+        const streams = this.workstreams(workspaceId);
+        const same = streams.find((w) => w.id === workstream.id) ?? findWorkstream(streams, workstream.name);
+        if (!same) {
+          streamsByWorkspace.set(workspaceId, [...streams, workstream]);
+          streamsByWorkspace = new Map(streamsByWorkspace);
+        } else if (same.id !== workstream.id) {
+          row = { ...task, workstream_id: same.id };
+        }
+      }
+      commit(workspaceId, [...this.forWorkspace(workspaceId).filter((t) => t.id !== task.id), row]);
+    },
+
     add(workspaceId: string, input: TaskInput): Task {
       const list = this.forWorkspace(workspaceId);
       const dup = findDuplicate(list, input.title, input.tab_id, input.workstream_id);

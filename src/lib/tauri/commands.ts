@@ -2659,6 +2659,12 @@ export async function hiveCreate(workspaceId: string, spec: HiveSpec): Promise<H
   return invoke('hive_create', { workspaceId, spec });
 }
 
+/** The worker tabs a Hive view mounts: those whose worker is in a live phase (docs/hive.md §11.2).
+ *  A stopped or failed worker stays down until its coordinator restarts it. */
+export async function hiveLiveWorkerTabs(workspaceId: string): Promise<string[]> {
+  return invoke('hive_live_worker_tabs', { workspaceId });
+}
+
 /** A Hive paused by a usage limit it couldn't wait out starts workers again (docs/hive.md §7.8).
  *  The machine-wide breaker is timed and not lifted by this. */
 export async function hiveResume(workspaceId: string): Promise<Hive> {

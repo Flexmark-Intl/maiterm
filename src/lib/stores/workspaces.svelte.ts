@@ -2516,6 +2516,29 @@ function createWorkspacesStore() {
       if (replacedTabId) import('$lib/stores/navHistory.svelte').then(m => m.navHistoryStore.removeTab(replacedTabId)).catch(() => {});
     },
 
+    /** A Hive worker's hidden tab, which Rust has already put in its state (docs/hive.md §7.2):
+     *  mirrored into the first pane, never made active (§5: a Hive's pane has none). */
+    adoptHiveTab(workspaceId: string, tab: Tab) {
+      const ws = workspaces.find(w => w.id === workspaceId);
+      const pane = ws?.panes[0];
+      if (!ws?.hive || !pane) throw new Error('This window holds no such Hive.');
+      if (tab.hive_role !== 'worker') throw new Error('Only a worker tab is adopted this way.');
+      if (!pane.tabs.some(t => t.id === tab.id)) pane.tabs.push(tab);
+    },
+
+    /** A spawn Rust rolled back: its tab leaves the mirror, which unmounts its terminal and kills
+     *  the PTY. Rust has already taken it out of its state. */
+    dropHiveTab(workspaceId: string, tabId: string) {
+      const ws = workspaces.find(w => w.id === workspaceId);
+      if (!ws) return;
+      for (const pane of ws.panes) {
+        if (!pane.tabs.some(t => t.id === tabId && t.hive_role)) continue;
+        pane.tabs = pane.tabs.filter(t => t.id !== tabId);
+        if (pane.active_tab_id === tabId) pane.active_tab_id = null;
+      }
+      import('$lib/stores/navHistory.svelte').then(m => m.navHistoryStore.removeTab(tabId)).catch(() => {});
+    },
+
     async duplicateTab(workspaceId: string, paneId: string, tabId: string, opts?: { shallow?: boolean; reload?: boolean }) {
       const ws = workspaces.find(w => w.id === workspaceId);
       const pane = ws?.panes.find(p => p.id === paneId);

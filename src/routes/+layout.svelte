@@ -724,6 +724,12 @@
       const { handleMailinkRequest } = await import('$lib/stores/mailinkRequests');
       await handleMailinkRequest(event.payload);
     }).then(unlisten => { unlistenMailinkRequests = unlisten; });
+    // A Hive tool's window half (docs/hive.md §7.2): its own event, never the MCP tool switch.
+    let unlistenHiveRequests: (() => void) | undefined;
+    appWindow.listen<import('$lib/hive/rpc').HiveRequest>('hive-frontend-request', async (event) => {
+      const { handleHiveRequest } = await import('$lib/hive/rpc');
+      await handleHiveRequest(event.payload);
+    }).then(unlisten => { unlistenHiveRequests = unlisten; });
 
     // Chat-monitor summon events: pickups, queued summons, unauthorized attempts.
     let unlistenCommsSummon: (() => void) | undefined;
@@ -1463,6 +1469,7 @@
       unlistenCommsBindings?.();
       unlistenMailinkTasks?.();
       unlistenMailinkRequests?.();
+      unlistenHiveRequests?.();
       claudeStateStore.destroy();
       stackStore.destroy();
       followUpsStore.destroy();

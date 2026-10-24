@@ -58,6 +58,20 @@ pub(crate) async fn request_with_timeout(
     args: Value,
     timeout: std::time::Duration,
 ) -> Outcome {
+    request_on(app, handle, EVENT, window_label, verb, args, timeout).await
+}
+
+/// The same request on another event: a feature whose verbs must not ride this one's
+/// dispatcher (the Hive's, hive/rpc.rs) gets its own listener, answered through the same map.
+pub(crate) async fn request_on(
+    app: &Arc<AppState>,
+    handle: Option<&AppHandle>,
+    event: &str,
+    window_label: &str,
+    verb: &str,
+    args: Value,
+    timeout: std::time::Duration,
+) -> Outcome {
     let Some(handle) = handle else { return Outcome::NoHandle };
     if !app.app_data.read().windows.iter().any(|w| w.label == window_label) {
         return Outcome::NoWindow;
@@ -66,7 +80,7 @@ pub(crate) async fn request_with_timeout(
     let (tx, rx) = tokio::sync::oneshot::channel::<Value>();
     app.ide_pending.write().insert(request_id.clone(), tx);
     let payload = json!({ "request_id": request_id, "verb": verb, "args": args });
-    if handle.emit_to(window_label, EVENT, payload).is_err() {
+    if handle.emit_to(window_label, event, payload).is_err() {
         app.ide_pending.write().remove(&request_id);
         return Outcome::NoWindow;
     }

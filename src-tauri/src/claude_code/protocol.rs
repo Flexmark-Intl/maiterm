@@ -64,6 +64,9 @@ pub struct ToolGates {
     pub browser_link: bool,
     /// The Files tools (docs/file-tree.md §9.6): `file_tree_enabled && file_tree_agent_tools`.
     pub file_tree: bool,
+    /// The caller's `hive_role` (docs/hive.md §7.2), from the tab its request names: the Hive
+    /// tools that role holds. None for every other agent, so no one else carries their schemas.
+    pub hive: Option<&'static str>,
 }
 
 impl ToolGates {
@@ -75,6 +78,7 @@ impl ToolGates {
             escalations_to_overlord: prefs.escalations_to_overlord(),
             browser_link: prefs.browser_link_enabled,
             file_tree: file_tree_tools_on(prefs),
+            hive: None,
         }
     }
 }
@@ -86,7 +90,7 @@ pub fn file_tree_tools_on(prefs: &crate::state::workspace::Preferences) -> bool 
 }
 
 pub fn tool_list_response(gates: ToolGates) -> Value {
-    let ToolGates { tasks: tasks_enabled, stack: stack_enabled, follow_ups_live, escalations_to_overlord, browser_link, file_tree } = gates;
+    let ToolGates { tasks: tasks_enabled, stack: stack_enabled, follow_ups_live, escalations_to_overlord, browser_link, file_tree, hive } = gates;
     // Tools are built in batches to stay under the serde_json::json! macro recursion limit (128).
     // Each batch is a small Vec<Value> that gets extended into the final tools array.
 
@@ -1360,6 +1364,9 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
     if file_tree {
         tools.extend(file_tree_tools());
     }
+    if let Some(role) = hive {
+        tools.extend(crate::hive::tools::tool_definitions(role));
+    }
 
     serde_json::json!({ "tools": tools })
 }
@@ -1668,8 +1675,19 @@ mod tests {
 
     #[test]
     fn every_listed_tool_name_is_unique() {
-        let all = names(ToolGates { tasks: true, stack: true, follow_ups_live: true, escalations_to_overlord: true, browser_link: true, file_tree: true });
+        let all = names(ToolGates { tasks: true, stack: true, follow_ups_live: true, escalations_to_overlord: true, browser_link: true, file_tree: true, hive: Some("coordinator") });
         let set: std::collections::HashSet<&String> = all.iter().collect();
         assert_eq!(set.len(), all.len());
+    }
+
+    #[test]
+    fn hive_tools_are_listed_only_for_the_role_that_holds_them() {
+        let prefs = crate::state::workspace::Preferences::default();
+        let listed = |hive: Option<&'static str>| names(ToolGates { hive, ..ToolGates::from_prefs(&prefs) });
+        let hive_names = |v: Vec<String>| v.into_iter().filter(|n| n.starts_with("hive")).collect::<Vec<_>>();
+        assert!(hive_names(listed(None)).is_empty(), "an ordinary agent carries no Hive schema");
+        assert!(hive_names(listed(Some("worker"))).is_empty(), "a worker's own tools arrive with hiveReport");
+        assert_eq!(hive_names(listed(Some("coordinator"))), crate::hive::tools::COORDINATOR_TOOLS.to_vec());
+        assert!(hive_names(listed(Some("reviewer"))).is_empty());
     }
 }

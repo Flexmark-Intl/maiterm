@@ -2696,6 +2696,7 @@ pub fn carry_tab_state_on_reload(
         .iter_mut()
         .find(|w| w.id == workspace_id)
         .ok_or("Workspace not found")?;
+    let hive = workspace.hive.clone();
     let pane = workspace
         .panes
         .iter_mut()
@@ -2727,6 +2728,7 @@ pub fn carry_tab_state_on_reload(
         .iter_mut()
         .find(|t| t.id == to_tab_id)
         .ok_or("Replacement tab not found")?;
+    let worker_hive = hive.filter(|_| src.hive_role.as_deref() == Some(crate::hive::ROLE_WORKER));
     *tab = carry_tab_record(src, tab);
 
     // The Overlord ledger records what was typed into the tab by its id. The replacement resumes
@@ -2738,6 +2740,11 @@ pub fn carry_tab_state_on_reload(
 
     let data_clone = app_data.clone();
     drop(app_data);
+    // A Hive worker's record names its tab, and its launch is found by it (docs/hive.md §11.2):
+    // moved before the new tab mounts, which the frontend does only after this returns.
+    if let Some(h) = &worker_hive {
+        crate::hive::tools::remap_worker_tab(h, &from_tab_id, &to_tab_id);
+    }
     // The Chrome tab linked to it goes with it (docs/browser-link.md §1.5).
     crate::browser_link::remap_tab(tauri::Manager::app_handle(&window), &from_tab_id, &to_tab_id);
     save_state(&data_clone)

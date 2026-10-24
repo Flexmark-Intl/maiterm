@@ -11,7 +11,9 @@
 //! (`worktree`, over the shared git helpers in `git`), the role catalogue (`roles`), and the
 //! sandbox refusals read off a failed call (`sandbox_events`). A worker launches through the
 //! same builder, with its own record, settings, brief and gate scope, and only once `fuses` has
-//! reserved it a slot under the cap, the machine-wide spawn counts and the quota breaker.
+//! reserved it a slot under the cap, the machine-wide spawn counts and the quota breaker. `tools`
+//! holds the Hive's MCP tools and who may call what; what they need done in a window (the task
+//! list, a tab's PTY) goes over `rpc`, the Hive's own webview request channel.
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
@@ -28,13 +30,16 @@ pub mod paths;
 mod probe;
 pub mod record;
 pub mod roles;
+pub(crate) mod rpc;
 pub mod sandbox_events;
 pub mod settings;
+pub mod tools;
 pub mod trust;
 pub mod worker;
 pub mod worktree;
 
 pub use record::Hive;
+pub use tools::refuse_agent_tool;
 
 use crate::state::{AppData, Tab, Workspace};
 

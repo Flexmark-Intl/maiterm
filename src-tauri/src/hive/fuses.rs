@@ -61,6 +61,9 @@ pub struct FuseState {
 #[derive(Debug, Clone)]
 struct Pending {
     hive_id: String,
+    /// The worker's task id: once its `worker.json` says `launching` it is counted live, and
+    /// this slot no longer counts on top.
+    worker: String,
     at: i64,
 }
 
@@ -106,8 +109,10 @@ impl FuseBook {
         self.state.spawns.iter().filter(|t| now - **t < window).count()
     }
 
-    fn pending_for(&self, hive_id: &str) -> usize {
-        self.pending.values().filter(|p| p.hive_id == hive_id).count()
+    /// `hive_id`'s reservations whose worker isn't among `live` (task ids), so a worker written
+    /// `launching` before its commit is counted once.
+    fn pending_for(&self, hive_id: &str, live: &[String]) -> usize {
+        self.pending.values().filter(|p| p.hive_id == hive_id && !live.contains(&p.worker)).count()
     }
 
     fn breaker(&self, now: i64) -> Option<i64> {
@@ -147,10 +152,17 @@ impl Fuses {
         Ok(Guard(g))
     }
 
-    /// Takes a slot for one launch of `hive`'s workers, or says why not. `live` counts the Hive's
-    /// workers in `LIVE_PHASES`; it's called under the lock, so two spawns can't both read a count
-    /// from before either committed. It must not touch the fuses itself.
-    pub fn reserve(&self, hive: &Hive, live: impl FnOnce() -> usize, now: i64) -> Result<Reservation<'_>, String> {
+    /// Takes a slot for the launch of `hive`'s worker `worker` (its task id), or says why not.
+    /// `live` lists the task ids of the Hive's workers in `LIVE_PHASES`; it's called under the
+    /// lock, so two spawns can't both read a count from before either committed. It must not touch
+    /// the fuses itself.
+    pub fn reserve(
+        &self,
+        hive: &Hive,
+        worker: &str,
+        live: impl FnOnce() -> Vec<String>,
+        now: i64,
+    ) -> Result<Reservation<'_>, String> {
         let mut g = self.lock()?;
         let b = g.book();
         b.prune(now);
@@ -166,7 +178,8 @@ impl Fuses {
                 reset_hhmm(until)
             ));
         }
-        let held = live() + b.pending_for(&hive.id);
+        let live = live();
+        let held = live.len() + b.pending_for(&hive.id, &live);
         if held >= hive.cap as usize {
             return Err(format!("The Hive's cap is reached: {held} of {} workers at once.", hive.cap));
         }
@@ -181,16 +194,17 @@ impl Fuses {
             }
         }
         let id = uuid::Uuid::new_v4().to_string();
-        b.pending.insert(id.clone(), Pending { hive_id: hive.id.clone(), at: now });
+        b.pending.insert(id.clone(), Pending { hive_id: hive.id.clone(), worker: worker.to_string(), at: now });
         Ok(Reservation { fuses: self, id, done: false })
     }
 
-    pub fn headroom(&self, hive: &Hive, live: usize, now: i64) -> Headroom {
-        let mut h = Headroom { cap: hive.cap, live, ..Headroom::default() };
+    /// `live` as for `reserve`.
+    pub fn headroom(&self, hive: &Hive, live: &[String], now: i64) -> Headroom {
+        let mut h = Headroom { cap: hive.cap, live: live.len(), ..Headroom::default() };
         let Ok(mut g) = self.lock() else { return h };
         let b = g.book();
         b.prune(now);
-        h.pending = b.pending_for(&hive.id);
+        h.pending = b.pending_for(&hive.id, live);
         let all = b.pending.len();
         h.hour_left = PER_HOUR.saturating_sub(b.committed_within(now, HOUR_MS) + all);
         h.day_left = PER_DAY.saturating_sub(b.committed_within(now, DAY_MS) + all);
@@ -294,7 +308,8 @@ impl Guard<'_> {
 }
 
 /// One launch's slot. Commit it once the window has confirmed the tab and the worker's phase is
-/// `launching` on disk, so the slot moves from pending to live with no gap. Dropped uncommitted
+/// `launching` on disk, so the slot moves from pending to live with no gap; meanwhile the worker
+/// is counted once, live, since the slot is keyed by its task id. Dropped uncommitted
 /// (an error, a panic, a rollback) it is given back.
 ///
 /// A crash between the window's confirmation and the commit undercounts the spawns by one; the
@@ -358,11 +373,16 @@ pub struct Headroom {
     pub breaker_reason: Option<String>,
 }
 
-pub fn reserve(hive: &Hive, live: impl FnOnce() -> usize, now: i64) -> Result<Reservation<'static>, String> {
-    BOOK.reserve(hive, live, now)
+/// The app's book, for a caller that holds a reservation across an await (a spawn).
+pub fn book() -> &'static Fuses {
+    &BOOK
 }
 
-pub fn headroom(hive: &Hive, live: usize, now: i64) -> Headroom {
+pub fn reserve(hive: &Hive, worker: &str, live: impl FnOnce() -> Vec<String>, now: i64) -> Result<Reservation<'static>, String> {
+    BOOK.reserve(hive, worker, live, now)
+}
+
+pub fn headroom(hive: &Hive, live: &[String], now: i64) -> Headroom {
     BOOK.headroom(hive, live, now)
 }
 
@@ -773,6 +793,12 @@ mod tests {
     }
 
     const T0: i64 = 1_800_000_000_000;
+    /// A worker no live list names, for reservations whose worker doesn't matter.
+    const W: &str = "a worker";
+
+    fn ids(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("live-{i}")).collect()
+    }
 
     #[test]
     fn sixteen_spawns_at_once_take_exactly_the_cap() {
@@ -783,7 +809,7 @@ mod tests {
         std::thread::scope(|s| {
             for _ in 0..16 {
                 s.spawn(|| {
-                    if let Ok(r) = f.reserve(&h, || 0, T0) {
+                    if let Ok(r) = f.reserve(&h, W, Vec::new, T0) {
                         won.fetch_add(1, Ordering::SeqCst);
                         held.lock().unwrap().push(r);
                     }
@@ -792,14 +818,33 @@ mod tests {
         });
         assert_eq!(won.load(Ordering::SeqCst), 4);
         let mut held = held.into_inner().unwrap();
-        let err = f.reserve(&h, || 0, T0).err().unwrap();
+        let err = f.reserve(&h, W, Vec::new, T0).err().unwrap();
         assert!(err.contains("cap is reached: 4 of 4"), "{err}");
-        assert!(f.reserve(&hive("h2", 4), || 0, T0).is_ok(), "the cap is per Hive");
+        assert!(f.reserve(&hive("h2", 4), W, Vec::new, T0).is_ok(), "the cap is per Hive");
         drop(held.pop());
-        assert!(f.reserve(&h, || 0, T0).is_ok(), "a dropped reservation frees its slot");
+        assert!(f.reserve(&h, W, Vec::new, T0).is_ok(), "a dropped reservation frees its slot");
         // Live workers count with the pending ones.
         drop(held);
-        assert!(f.reserve(&h, || 4, T0).is_err());
+        assert!(f.reserve(&h, W, || ids(4), T0).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A spawn writes its worker `launching` before it commits (§7.8's no-gap rule): in between,
+    /// that worker is live on disk AND holds its reservation, and must count once.
+    #[test]
+    fn a_launching_worker_holding_its_reservation_counts_once() {
+        let (dir, f) = scratch();
+        let h = hive("h1", 2);
+        let a = f.reserve(&h, "task-a", Vec::new, T0).unwrap();
+        // A's worker.json now says `launching`; its window hasn't answered yet.
+        let on_disk = || vec!["task-a".to_string()];
+        assert_eq!(f.headroom(&h, &on_disk(), T0).pending, 0, "A counts as live, not as starting too");
+        let b = f.reserve(&h, "task-b", on_disk, T0).expect("one worker of two: B fits");
+        let err = f.reserve(&h, "task-c", on_disk, T0).err().unwrap();
+        assert!(err.contains("cap is reached: 2 of 2"), "A live and B pending: {err}");
+        let hr = f.headroom(&h, &on_disk(), T0);
+        assert_eq!((hr.live, hr.pending), (1, 1));
+        drop((a, b));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -807,13 +852,13 @@ mod tests {
     fn a_committed_spawn_moves_from_pending_to_live() {
         let (dir, f) = scratch();
         let h = hive("h1", 1);
-        let r = f.reserve(&h, || 0, T0).unwrap();
+        let r = f.reserve(&h, W, Vec::new, T0).unwrap();
         assert!(r.is_live(T0 + 1000));
         r.commit(T0 + 1000).unwrap();
         // The worker is now `launching` in its worker.json, which the caller counts as live.
-        assert!(f.reserve(&h, || 0, T0 + 2000).is_ok(), "committed, so no longer pending");
-        assert!(f.reserve(&h, || 1, T0 + 2000).is_err());
-        let hr = f.headroom(&h, 1, T0 + 2000);
+        assert!(f.reserve(&h, W, Vec::new, T0 + 2000).is_ok(), "committed, so no longer pending");
+        assert!(f.reserve(&h, W, || ids(1), T0 + 2000).is_err());
+        let hr = f.headroom(&h, &ids(1), T0 + 2000);
         assert_eq!((hr.cap, hr.live, hr.pending, hr.hour_left, hr.day_left), (1, 1, 0, PER_HOUR - 1, PER_DAY - 1));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -823,13 +868,13 @@ mod tests {
         let (dir, f) = scratch();
         let h = hive("h1", 1);
         let late = T0 + ttl_ms();
-        let r = f.reserve(&h, || 0, T0).unwrap();
+        let r = f.reserve(&h, W, Vec::new, T0).unwrap();
         assert!(r.is_live(late - 1) && !r.is_live(late));
-        let again = f.reserve(&h, || 0, late).expect("the expired slot is free again");
+        let again = f.reserve(&h, W, Vec::new, late).expect("the expired slot is free again");
         assert!(r.commit(late).is_err());
         assert!(again.is_live(late), "the old one's drop doesn't release the new one");
         again.commit(late + 1).unwrap();
-        assert_eq!(f.headroom(&h, 0, late + 2).hour_left, PER_HOUR - 1, "only the confirmed spawn counted");
+        assert_eq!(f.headroom(&h, &[], late + 2).hour_left, PER_HOUR - 1, "only the confirmed spawn counted");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -840,33 +885,33 @@ mod tests {
         let mut t = T0;
         for i in 0..PER_HOUR {
             let h = big(if i % 2 == 0 { "a" } else { "b" });
-            f.reserve(&h, || 0, t).unwrap().commit(t).unwrap();
+            f.reserve(&h, W, Vec::new, t).unwrap().commit(t).unwrap();
             t += 1000;
         }
-        let err = f.reserve(&big("c"), || 0, t).err().unwrap();
+        let err = f.reserve(&big("c"), W, Vec::new, t).err().unwrap();
         assert!(err.contains("in the last hour across every Hive") && err.contains("after"), "{err}");
         // A pending reservation counts too: with 19 committed, one pending fills the hour.
         let (dir2, g) = scratch();
         for _ in 0..PER_HOUR - 1 {
-            g.reserve(&big("a"), || 0, T0).unwrap().commit(T0).unwrap();
+            g.reserve(&big("a"), W, Vec::new, T0).unwrap().commit(T0).unwrap();
         }
-        let p = g.reserve(&big("a"), || 0, T0).unwrap();
-        assert!(g.reserve(&big("b"), || 0, T0).is_err());
+        let p = g.reserve(&big("a"), W, Vec::new, T0).unwrap();
+        assert!(g.reserve(&big("b"), W, Vec::new, T0).is_err());
         drop(p);
-        assert!(g.reserve(&big("b"), || 0, T0).is_ok());
+        assert!(g.reserve(&big("b"), W, Vec::new, T0).is_ok());
 
         // An hour after the first, the hour has room; the day fills at PER_DAY.
         t = T0 + HOUR_MS;
-        assert!(f.reserve(&big("c"), || 0, t).is_ok());
+        assert!(f.reserve(&big("c"), W, Vec::new, t).is_ok());
         let mut n = PER_HOUR;
         while n < PER_DAY {
             t += HOUR_MS / PER_HOUR as i64 + 1;
-            f.reserve(&big("a"), || 0, t).unwrap().commit(t).unwrap();
+            f.reserve(&big("a"), W, Vec::new, t).unwrap().commit(t).unwrap();
             n += 1;
         }
-        let err = f.reserve(&big("a"), || 0, t + HOUR_MS).err().unwrap();
+        let err = f.reserve(&big("a"), W, Vec::new, t + HOUR_MS).err().unwrap();
         assert!(err.contains("in the last day"), "{err}");
-        assert!(f.reserve(&big("a"), || 0, T0 + DAY_MS + HOUR_MS).is_ok(), "the first spawns left the day");
+        assert!(f.reserve(&big("a"), W, Vec::new, T0 + DAY_MS + HOUR_MS).is_ok(), "the first spawns left the day");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
     }
@@ -876,17 +921,17 @@ mod tests {
         let (dir, f) = scratch();
         let mut h = hive("h1", 4);
         h.status = STATUS_PAUSED.into();
-        assert!(f.reserve(&h, || 0, T0).err().unwrap().contains("paused"));
+        assert!(f.reserve(&h, W, Vec::new, T0).err().unwrap().contains("paused"));
         h.status = "done".into();
-        assert!(f.reserve(&h, || 0, T0).err().unwrap().contains("done"));
+        assert!(f.reserve(&h, W, Vec::new, T0).err().unwrap().contains("done"));
         h.status = STATUS_ACTIVE.into();
         assert!(f.trip_breaker(T0 + HOUR_MS, "session limit"));
         assert!(!f.trip_breaker(T0 + 60_000, "an earlier reset changes nothing"));
-        let err = f.reserve(&h, || 0, T0).err().unwrap();
+        let err = f.reserve(&h, W, Vec::new, T0).err().unwrap();
         assert!(err.starts_with("Paused \u{b7} usage limit until "), "{err}");
-        assert_eq!(f.headroom(&h, 0, T0).breaker_until, Some(T0 + HOUR_MS));
-        assert!(f.reserve(&h, || 0, T0 + HOUR_MS).is_ok(), "lifted at the reset");
-        assert_eq!(f.headroom(&h, 0, T0 + HOUR_MS).breaker_until, None);
+        assert_eq!(f.headroom(&h, &[], T0).breaker_until, Some(T0 + HOUR_MS));
+        assert!(f.reserve(&h, W, Vec::new, T0 + HOUR_MS).is_ok(), "lifted at the reset");
+        assert_eq!(f.headroom(&h, &[], T0 + HOUR_MS).breaker_until, None);
         assert!(f.trip_breaker(T0 + 2 * HOUR_MS, "later"), "a later reset extends it");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -896,7 +941,7 @@ mod tests {
         let (dir, f) = scratch();
         let path = dir.join(FUSES_FILE);
         let h = hive("h1", 4);
-        f.reserve(&h, || 0, T0).unwrap().commit(T0).unwrap();
+        f.reserve(&h, W, Vec::new, T0).unwrap().commit(T0).unwrap();
         f.trip_breaker(T0 + HOUR_MS, "session limit");
         // A later build's field, written beside ours.
         let mut v: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -904,17 +949,17 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
 
         let reloaded = Fuses::at(path.clone());
-        let hr = reloaded.headroom(&h, 0, T0 + 1);
+        let hr = reloaded.headroom(&h, &[], T0 + 1);
         assert_eq!((hr.hour_left, hr.breaker_until), (PER_HOUR - 1, Some(T0 + HOUR_MS)));
         assert_eq!(hr.breaker_reason.as_deref(), Some("session limit"));
-        assert!(reloaded.reserve(&h, || 0, T0 + 1).is_err(), "a restart doesn't lift a pause");
-        reloaded.reserve(&h, || 0, T0 + HOUR_MS).unwrap().commit(T0 + HOUR_MS).unwrap();
+        assert!(reloaded.reserve(&h, W, Vec::new, T0 + 1).is_err(), "a restart doesn't lift a pause");
+        reloaded.reserve(&h, W, Vec::new, T0 + HOUR_MS).unwrap().commit(T0 + HOUR_MS).unwrap();
         let back: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(back["future"], json!({ "kept": true }));
         assert_eq!(back["version"], FUSES_VERSION);
         assert_eq!(back["spawns"].as_array().unwrap().len(), 2);
         // An old spawn leaves the file once it's a day old.
-        reloaded.reserve(&h, || 0, T0 + DAY_MS + 5).unwrap().commit(T0 + DAY_MS + 5).unwrap();
+        reloaded.reserve(&h, W, Vec::new, T0 + DAY_MS + 5).unwrap().commit(T0 + DAY_MS + 5).unwrap();
         let back: FuseState = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(back.spawns, vec![T0 + HOUR_MS, T0 + DAY_MS + 5]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -924,7 +969,7 @@ mod tests {
     fn an_unreadable_fuses_json_starts_over() {
         let (dir, f) = scratch();
         std::fs::write(dir.join(FUSES_FILE), b"{not json").unwrap();
-        assert!(f.reserve(&hive("h1", 1), || 0, T0).is_ok());
+        assert!(f.reserve(&hive("h1", 1), W, Vec::new, T0).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1004,10 +1049,10 @@ mod tests {
         let until = parse_reset(&stop("rate_limit", "You've hit your session limit \u{b7} resets 3pm (UTC)"), now).unwrap();
         assert!(f.trip_breaker(until, "session limit"));
         assert!(breaker_notice(until).contains("until 15:00."), "{}", breaker_notice(until));
-        let err = f.reserve(&hive("h1", 4), || 0, now).err().unwrap();
+        let err = f.reserve(&hive("h1", 4), W, Vec::new, now).err().unwrap();
         assert!(err.contains("until 15:00:"), "{err}");
-        assert!(f.reserve(&hive("h1", 4), || 0, until - 1).is_err(), "still inside 15:00");
-        assert!(f.reserve(&hive("h1", 4), || 0, until).is_ok());
+        assert!(f.reserve(&hive("h1", 4), W, Vec::new, until - 1).is_err(), "still inside 15:00");
+        assert!(f.reserve(&hive("h1", 4), W, Vec::new, until).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

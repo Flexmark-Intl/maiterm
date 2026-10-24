@@ -1179,6 +1179,8 @@ async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<App
             Some(serde_json::json!({ "error": FILES_TOOLS_OFF }))
         }
         t if crate::browser_link::is_browser_tool(t) => Some(crate::browser_link::handle_tool(t, arguments, state, app_handle).await),
+        // Every `hive*` name, built or not, so none falls through to the frontend's switch.
+        t if t.starts_with("hive") => Some(crate::hive::tools::handle(t, arguments, state, app_handle).await),
         "postCommsReply" => Some(handle_post_comms_reply(arguments, state, app_handle).await),
         "startCommsThread" => Some(handle_start_comms_thread(arguments, state, app_handle).await),
         "unbindCommsThread" => {
@@ -2886,7 +2888,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 63] = [
+const PEER_ADDRESSING_TOOLS: [&str; 78] = [
     // A tab's auto-resume command and its trigger variables (interpolated unescaped into that
     // command, e.g. `%claudeSessionId`) run in that tab's shell at its next spawn or recover:
     // set on another tab, they plant a command there.
@@ -2979,6 +2981,23 @@ const PEER_ADDRESSING_TOOLS: [&str; 63] = [
     "browserEval",
     "browserConsole",
     "browserNetwork",
+    // Hive tools (docs/hive.md §7.2) are authorized by the CALLER's `hive_role`: on a guessed
+    // identity they would spawn, land or report as another Hive's agent.
+    "hiveSpawnWorker",
+    "hiveListWorkers",
+    "hiveMessageWorker",
+    "hiveLand",
+    "hiveUndoLand",
+    "hiveStopWorker",
+    "hiveRestartWorker",
+    "hiveFinish",
+    "hiveAnswerWorker",
+    "hiveRunPriority",
+    "hivePrecedents",
+    "hiveRecordPrecedent",
+    "hiveRun",
+    "hiveReport",
+    "hiveVerdict",
 ];
 
 /// Tools that may only ever address the CALLING tab (docs/follow-ups.md §2). Elsewhere an
@@ -2989,7 +3008,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 63] = [
 /// The agent-request tools (agent_requests.rs) are here for the same reason from the other side:
 /// a request is shown to the human as "the agent in <tab> asks…", so the tab named must be the
 /// caller, and a request's status is only its own tab's to read.
-const OWN_TAB_ONLY_TOOLS: [&str; 30] = [
+const OWN_TAB_ONLY_TOOLS: [&str; 45] = [
     // What a tab's shell runs on its next spawn is that tab's own business: with any `tabId`,
     // one agent could set the command another tab replays (found by the Hive spike 15 audit,
     // 2026-10-23). The only in-repo use is an agent fixing its OWN auto-resume.
@@ -3026,11 +3045,30 @@ const OWN_TAB_ONLY_TOOLS: [&str; 30] = [
     "browserEval",
     "browserConsole",
     "browserNetwork",
+    // A Hive tool acts as the caller's role in the caller's Hive (docs/hive.md §7.2): a named
+    // tab must be the caller, never a coordinator a worker names.
+    "hiveSpawnWorker",
+    "hiveListWorkers",
+    "hiveMessageWorker",
+    "hiveLand",
+    "hiveUndoLand",
+    "hiveStopWorker",
+    "hiveRestartWorker",
+    "hiveFinish",
+    "hiveAnswerWorker",
+    "hiveRunPriority",
+    "hivePrecedents",
+    "hiveRecordPrecedent",
+    "hiveRun",
+    "hiveReport",
+    "hiveVerdict",
 ];
 
 /// Tools gated on the caller BEING the Overlord agent (docs/overlord.md). The gate is judged on
 /// `tabId`, so the caller is always the connection's own STATED tab (`pin_overlord_caller`).
-const OVERLORD_CALLER_TOOLS: [&str; 12] = [
+/// The Overlord is never a Hive agent, so Rust refuses these to any Hive role
+/// (`hive::refuse_agent_tool`).
+pub(crate) const OVERLORD_CALLER_TOOLS: [&str; 12] = [
     "listEscalations",
     "proposeRuleChanges",
     "driveTab",
@@ -3226,7 +3264,12 @@ async fn process_message(
         }
         "notifications/initialized" => None,
         "tools/list" => {
-            let gates = ToolGates::from_prefs(&state.app_data.read().preferences);
+            let gates = {
+                let data = state.app_data.read();
+                // A Hive agent's tools by its role; every other agent carries none of them.
+                let hive = declared_tab.and_then(|t| crate::hive::tools::listed_role(&data, t));
+                ToolGates { hive, ..ToolGates::from_prefs(&data.preferences) }
+            };
             let resp = JsonRpcResponse::success(id, tool_list_response(gates));
             Some(serde_json::to_string(&resp).unwrap())
         }
@@ -3254,6 +3297,20 @@ async fn process_message(
                                 "content": [{ "type": "text", "text": "Error: tabId is required. Read your tab ID from the SessionStart hook context or $MAITERM_TAB_ID environment variable." }],
                                 "isError": true
                             }),
+                        );
+                        return Some(serde_json::to_string(&resp).unwrap());
+                    }
+
+                    // A Hive agent repairs only its own identity (docs/hive.md §7.2): a stated bind
+                    // to another tab would let it act as that tab, the Overlord's included.
+                    let stated = connection_tabs.read().get(connection_id).filter(|a| a.stated).map(|a| a.tab_id.clone());
+                    let own: Vec<&str> = declared_tab.into_iter().chain(stated.as_deref()).collect();
+                    let rebind = crate::hive::tools::refuse_rebind(&state.app_data.read(), &own, &tab_id);
+                    if let Some(msg) = rebind {
+                        log::warn!("Refusing initSession for {}: {msg}", &connection_id[..connection_id.len().min(11)]);
+                        let resp = JsonRpcResponse::success(
+                            id,
+                            serde_json::json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
                         );
                         return Some(serde_json::to_string(&resp).unwrap());
                     }
@@ -3647,6 +3704,18 @@ async fn process_message(
                 let hive_refusal = crate::hive::refuse_overlord_target(&state.app_data.read(), &tool_name, &arguments);
                 if let Some(msg) = hive_refusal {
                     log::warn!("Refusing {tool_name}: its target is a Hive agent");
+                    let resp = JsonRpcResponse::success(
+                        id,
+                        serde_json::json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
+                    );
+                    return Some(serde_json::to_string(&resp).unwrap());
+                }
+                // Hive roles (docs/hive.md §7.2), judged on every identity the request carries for
+                // itself, never on a `tabId` it names: a worker naming another tab is still a worker.
+                let callers: Vec<&str> = affinity.as_ref().map(|a| a.tab_id.as_str()).into_iter().chain(declared_tab).collect();
+                let role_refusal = crate::hive::refuse_agent_tool(&state.app_data.read(), &callers, &tool_name);
+                if let Some(msg) = role_refusal {
+                    log::warn!("Refusing {tool_name} for {}: {msg}", &connection_id[..connection_id.len().min(11)]);
                     let resp = JsonRpcResponse::success(
                         id,
                         serde_json::json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),

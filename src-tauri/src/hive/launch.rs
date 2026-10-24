@@ -530,6 +530,19 @@ fn check_worker_trust(claude_json: &[PathBuf], paths: &HivePaths, w: &WorkerReco
     Ok(())
 }
 
+/// What a spawn checks once its worktrees exist and before its tab does: a launch the builder
+/// would refuse (an old Claude, a repo nobody has trusted) refuses the spawn instead, rather than
+/// leaving a worker in `launching`, holding a slot it never uses. Blocks: the version probe and
+/// the trust reads (and a scratch-only worker's trust write).
+pub fn worker_preflight(paths: &HivePaths, w: &WorkerRecord) -> Result<(), String> {
+    if cfg!(windows) {
+        return Err("A Hive needs Claude's sandbox, which native Windows doesn't have.".to_string());
+    }
+    claude_new_enough()?;
+    let homes = crate::relocate::agents::Homes::real().ok_or("Couldn't find the home folder")?;
+    check_worker_trust(&homes.claude_json, paths, w)
+}
+
 /// What runs before a worker's first session (§6.4, §6.5): the slim cargo seed, then each git
 /// folder's setup command in its worktree, typed ahead of the agent so a failure shows in the
 /// raw terminal and stops the launch. Setup is the human's command, run on a fresh worktree at
@@ -586,6 +599,14 @@ fn prepare_worker(hive: &Hive, paths: &HivePaths, tab_id: &str, tasks: &[crate::
         "launch record missing".to_string()
     };
     let mut w = super::worker::worker_for_tab(paths, tab_id).ok_or_else(|| missing("no worker.json names this tab".to_string()))?;
+    // A mount (session restore, the Hive view, a resume) never brings back an agent the Hive has
+    // stopped or that failed: only `hiveRestartWorker` does, which takes a slot first.
+    if !w.is_live() {
+        return Err(format!(
+            "Worker {} is {}, so it doesn't start on its own. Its coordinator restarts it with hiveRestartWorker.",
+            w.slug, w.phase
+        ));
+    }
     let task = super::worker::task_dir(paths, &w.task_id).map_err(missing)?;
     let existing = read_record(&task).map_err(missing)?;
     claude_new_enough()?;

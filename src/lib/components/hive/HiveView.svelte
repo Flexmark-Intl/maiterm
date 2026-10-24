@@ -7,7 +7,9 @@
   scrollback (principle 3). Workers, Pause, Gallery and Memory arrive with later steps.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import { hiveLiveWorkerTabs } from '$lib/tauri/commands';
+  import { error as logError } from '@tauri-apps/plugin-log';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -75,6 +77,19 @@
   $effect(() => {
     const id = coordId;
     if (id && !terminalsStore.get(id)) window.dispatchEvent(new CustomEvent('activate-tab', { detail: id }));
+  });
+
+  // So do its live workers (after a restart, or a reopen): Rust names the tabs whose worker is in
+  // a live phase. A stopped or failed one stays down until its coordinator restarts it.
+  $effect(() => {
+    const id = workspaceId;
+    untrack(() => {
+      hiveLiveWorkerTabs(id)
+        .then((tabs) => {
+          for (const t of tabs) if (!terminalsStore.get(t)) window.dispatchEvent(new CustomEvent('activate-tab', { detail: t }));
+        })
+        .catch((e) => logError(`hive: live workers of ${id.slice(0, 8)} not mounted: ${e}`));
+    });
   });
 
   // ── "Open this Hive agent" (navigateToTab, the waiting cards): focus its column. ──
