@@ -1468,7 +1468,7 @@ fn browser_tools() -> Vec<Value> {
         },
         {
             "name": "browserType",
-            "description": format!("Type text into an element of your linked Chrome tab (by ref from browserSnapshot), or into the focused element when no ref is given. Clears the field first unless clear is false. {LINKED}"),
+            "description": format!("Type text into an element of your linked Chrome tab (by ref from browserSnapshot), or into the focused element when no ref is given. Clears the field first unless clear is false. Never fill in a sign-in form or type a password, one-time code or other credential: ask your human to sign in themselves. A typed secret stays in your transcript, and focusing those fields opens password managers' in-page popups, which lock you out of the tab. {LINKED}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {

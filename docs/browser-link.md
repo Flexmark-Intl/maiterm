@@ -193,7 +193,10 @@ stored console messages, so messages at or before the newest one recorded (or th
 `clear`) are skipped (`consoleFloor`); and requests in flight across the gap never report their
 end, so they are marked `failed: unknown…`. Both "Detached while handling command" and "Debugger is
 not attached" (a detach between two commands) count as the same thing. Turning off the
-password manager's in-page autofill menu stops it at the source.
+password manager's in-page autofill menu stops it at the source (1Password: Autofill & save →
+Suggestions → "Show autofill suggestions when a field is selected"; the website names the switch).
+It appears on any field it can fill, not only sign-in ones. `browserType`'s description tells
+agents never to fill sign-in forms or type credentials: they ask the human to sign in.
 
 Refs are `e<backendDOMNodeId>`: stable for a node's life and needing no per-snapshot table, so a
 ref from an older snapshot still works if the node still exists, and fails cleanly if not.
