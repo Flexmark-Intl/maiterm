@@ -860,36 +860,60 @@ pub fn sweep_jobs(data: &mut AppData) -> usize {
     n
 }
 
+/// maiTerm itself, the pilot repo (§6.8): its `tauri:dev:isolated` is `scripts/dev-isolated.mjs`,
+/// which takes the instance's name and ports from the environment.
+fn is_maiterm(pkg: &Value) -> bool {
+    pkg.get("scripts").and_then(|s| s.get("tauri:dev:isolated")).and_then(Value::as_str).is_some_and(|c| c.contains("dev-isolated.mjs"))
+}
+
+/// The pilot's isolated instance per worker: named for the worker, on its two booked ports.
+/// `{instance}`, not `{worker}`: a slug runs to 60 and an instance name to 32.
+pub const PILOT_ENV: [(&str, &str); 3] = [("MAITERM_INSTANCE", "{instance}"), ("MAITERM_VITE_PORT", "{port}"), ("MAITERM_MCP_PORT", "{port2}")];
+
+/// What that instance writes outside the worker's folders: everything its bundle identifier
+/// names (`instance::slug_for`), its data folder, WebKit storage, caches and logs.
+pub fn pilot_extra_write() -> Vec<String> {
+    let id = crate::instance::slug_for(true, &Ok(Some("{instance}".to_string())));
+    ["Application Support", "WebKit", "Caches", "Logs"].iter().map(|d| format!("~/Library/{d}/{id}")).collect()
+}
+
 /// The queued commands a new Hive starts with, read from each git folder (§6.8): `cargo test`
 /// and `cargo build` need `cargo`; `npm run tauri:dev` (and `:isolated`) need `tauri-dev` and
-/// `cargo`; Playwright needs `e2e`. The human edits them in Hive settings. Reads the disk.
+/// `cargo`; Playwright needs `e2e`. maiTerm's own folder gets its isolated instance per worker
+/// (`PILOT_ENV`) and never `tauri:dev`, which is the human's dev instance: it kills whatever
+/// holds 1420 and shares dev's data folder. The human edits them in Hive settings. Reads the disk.
 pub fn detect_commands(folders: &[crate::hive::record::HiveFolder]) -> crate::hive::record::RunQueueSettings {
     use crate::hive::record::QueuedCommand;
     let mut commands: Vec<QueuedCommand> = Vec::new();
-    let mut add = |folder: &str, prefix: &str, needs: &[&str]| {
-        commands.push(QueuedCommand {
-            folder: folder.to_string(),
-            prefix: prefix.to_string(),
-            needs: needs.iter().map(|s| s.to_string()).collect(),
-            ..QueuedCommand::default()
-        });
+    let queued = |folder: &str, prefix: &str, needs: &[&str]| QueuedCommand {
+        folder: folder.to_string(),
+        prefix: prefix.to_string(),
+        needs: needs.iter().map(|s| s.to_string()).collect(),
+        ..QueuedCommand::default()
     };
     for f in folders.iter().filter(|f| f.is_git()) {
         let root = Path::new(&f.path);
         if has_cargo(root) {
-            add(&f.name, "cargo test", &["cargo"]);
-            add(&f.name, "cargo build", &["cargo"]);
+            commands.push(queued(&f.name, "cargo test", &["cargo"]));
+            commands.push(queued(&f.name, "cargo build", &["cargo"]));
         }
         let pkg: Value = std::fs::read(root.join("package.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+        let pilot = is_maiterm(&pkg);
         for script in ["tauri:dev", "tauri:dev:isolated"] {
-            if pkg.get("scripts").and_then(|s| s.get(script)).is_some() {
-                add(&f.name, &format!("npm run {script}"), &["tauri-dev", "cargo"]);
+            if pkg.get("scripts").and_then(|s| s.get(script)).is_none() || (pilot && script == "tauri:dev") {
+                continue;
             }
+            let mut c = queued(&f.name, &format!("npm run {script}"), &["tauri-dev", "cargo"]);
+            if pilot {
+                c.env = PILOT_ENV.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+                c.extra_write = pilot_extra_write();
+            }
+            commands.push(c);
         }
         let has_dep = |name: &str| ["dependencies", "devDependencies"].iter().any(|k| pkg.get(k).and_then(|d| d.get(name)).is_some());
         let config = ["ts", "js", "mjs", "cjs"].iter().any(|e| root.join(format!("playwright.config.{e}")).is_file());
         if has_dep("@playwright/test") || config {
-            add(&f.name, "npx playwright test", &["e2e"]);
+            commands.push(queued(&f.name, "npx playwright test", &["e2e"]));
         }
     }
     crate::hive::record::RunQueueSettings { commands, resources: BTreeMap::new() }
@@ -1163,28 +1187,36 @@ fn emit_throttled(d: &Driver, gate: Gate) {
 }
 
 /// The job's row, profile and line, worked out off the lock. Blocks on the disk and git.
-struct Prepared {
-    line: String,
-    row: Service,
-    ports: Vec<u16>,
+pub(crate) struct Prepared {
+    pub(crate) line: String,
+    pub(crate) row: Service,
+    pub(crate) ports: Vec<u16>,
     /// The worktree's commit and dirty flag now, as it starts.
-    tree: (String, bool),
+    pub(crate) tree: (String, bool),
 }
 
 fn prepare(app: &AppState, job: &Job) -> Result<Prepared, String> {
+    let forbidden = crate::stack::ports::forbidden(*app.mcp_port.read(), app.mailink_info.read().as_ref().map(|(_, p)| *p));
+    let paths = HivePaths::new(super::paths::hive_root(&job.hive_id).ok_or("The Hive's folder can't be named")?);
+    let bin = super::paths::hive_bin_dir().ok_or("Couldn't find maiTerm's data folder")?;
+    prepare_in(&app.app_data, job, &paths, &bin, &forbidden)
+}
+
+/// `prepare` with the Hive's folder, maiTerm's hook folder and the ports no job may take given:
+/// what spike 15's test runs against a scratch Hive. The ports it takes are booked under the
+/// job's id until `stack::ports::release`.
+pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: &HivePaths, bin: &Path, forbidden: &[u16]) -> Result<Prepared, String> {
     use crate::stack::placeholders::{check, fill, Needs, Values};
     super::job_sandbox::supported()?;
-    let (hive, stack, prefs, forbidden) = {
-        let data = app.app_data.read();
+    let (hive, stack, prefs) = {
+        let data = data.read();
         let ws = data
             .window(&job.window)
             .and_then(|w| w.workspaces.iter().find(|ws| ws.id == job.workspace_id))
             .ok_or("The Hive's workspace is gone")?;
         let hive = ws.hive.clone().filter(|h| h.id == job.hive_id).ok_or("The workspace is no longer this Hive")?;
-        let forbidden = crate::stack::ports::forbidden(*app.mcp_port.read(), app.mailink_info.read().as_ref().map(|(_, p)| *p));
-        (hive, ws.stack.clone(), data.preferences.clone(), forbidden)
+        (hive, ws.stack.clone(), data.preferences.clone())
     };
-    let paths = HivePaths::new(super::paths::hive_root(&hive.id).ok_or("The Hive's folder can't be named")?);
     let w = super::worker::read_worker(&paths.task(&job.task_id))?;
     let folder = w
         .folders
@@ -1205,9 +1237,8 @@ fn prepare(app: &AppState, job: &Job) -> Result<Prepared, String> {
         }
         None => worktree.clone(),
     };
-    let bin = super::paths::hive_bin_dir().ok_or("Couldn't find maiTerm's data folder")?;
-    let ctx = super::settings::WorkerContext::gather(&hive, &paths, &w);
-    let lists = super::settings::worker_write_lists(&hive, &w, &paths, &ctx, &bin)?;
+    let ctx = super::settings::WorkerContext::gather(&hive, paths, &w);
+    let lists = super::settings::worker_write_lists(&hive, &w, paths, &ctx, bin)?;
 
     // Placeholders in the entry's env and extra paths, as data: `{checkout}` is fine in both
     // (a path, which the profile and the quoting refuse if it can't be named).
@@ -1235,7 +1266,7 @@ fn prepare(app: &AppState, job: &Job) -> Result<Prepared, String> {
                     None => crate::stack::ports::held(&crate::stack::copy_key(&s.id, &job.target)).first().copied().or(s.port),
                 }
             }
-            Some(s) => s.shared_from.as_ref().and_then(|r| crate::stack::shared_source(&app.app_data.read(), r).and_then(|(_, src)| src.port)),
+            Some(s) => s.shared_from.as_ref().and_then(|r| crate::stack::shared_source(&data.read(), r).and_then(|(_, src)| src.port)),
             None => None,
         };
         match port {
@@ -1248,7 +1279,7 @@ fn prepare(app: &AppState, job: &Job) -> Result<Prepared, String> {
     }
     check(&needs, &values)?;
     let n = if needs.port2 { 2 } else if needs.port { 1 } else { 0 };
-    let ports = if n > 0 { crate::stack::ports::take(&job.id, n, crate::stack::ports::DEFAULT_BASE, false, &forbidden)? } else { Vec::new() };
+    let ports = if n > 0 { crate::stack::ports::take(&job.id, n, crate::stack::ports::DEFAULT_BASE, false, forbidden)? } else { Vec::new() };
     let release = |e: String| {
         crate::stack::ports::release(&job.id);
         e

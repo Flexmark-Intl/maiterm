@@ -1012,65 +1012,29 @@ service on a branch is that same line with the folder moved onto the branch's wo
 restart. **This is built into the stack itself, not into Hive**, so every workspace gets it and a
 Hive simply uses it.
 
-**What a service gains:**
+**Built in step 5b; the details are in `docs/stack.md` §14**, which is now their one home. In
+short:
 
-- **Copies, keyed by `(service_id, target)`.** A `target` says which checkout a copy runs: empty
-  means the service's own folder, as today; otherwise it names a worktree (a Hive worker's, or
-  one maiTerm made for a branch). The target lives on the **tab** that runs the copy, as
-  `Tab.service_target` beside `Tab.service_id`: carried on reload, cleared on duplicate (like
-  `service_id`), never shared between tabs. Today one tab per service is the invariant
-  (`set_tab_service_id` clears the service from other tabs, `commands/workspace.rs:1562-1571`;
-  `boundTab` takes the first match; runtime status is keyed by service id). All of those are
-  re-keyed by the pair: uniqueness, `boundTab`, runtime status and the Rust mirror. Running
-  intent is per copy too (`was_running` per `(service_id, target)`), so a relaunch brings each
-  copy back on its own branch, rather than one persisted `target` field on the service.
-- **The folder follows the branch.** The service's `cwd` is taken relative to its repo's top level
-  and re-rooted in the target worktree: `~/code/app/web` on main becomes
-  `<worktree>/web` on `session-store`. The mapping is computed in Rust (paths are Rust's,
-  `docs/file-tree.md`), never by string-prefixing in JS.
-- **Placeholders** in the command and env, filled in per target: `{port}` (a free port maiTerm
-  picks), `{branch}`, `{worker}`, `{checkout}`. `DATABASE_URL=postgres://localhost/app_{worker}` is
-  how one shared database gives each branch its own namespace (§6.8).
-
-**One verb, three ways to reach it:**
-
-- **The human:** the service's menu in the sidebar gets **Run on ▸** main, each open worktree, and
-  "Other branch…". The row then reads `web · on session-store :5174`.
-- **Any agent:** an optional `on: "main" | "<branch>" | "<worker>"` on the existing tools,
-  keeping their `service` argument: `startService`, `stopService`, `restartService`,
-  `waitForService`, `getServiceOutput` and `updateService`. Without `on`, a tool acts on the
-  service's only running copy; with several copies running and no `on`, it's refused with the
-  list of copies, never a guess.
-- **The Hive's run queue,** which is just a caller of the same verb.
-
-Every one of these checks the copy's lease first (§6.8): a copy a running job depends on is
-never retargeted or stopped out from under it.
-
-A branch with no worktree yet gets one, never by switching the human's own checkout, because
-other agents are working in it:
-
-- An **existing checkout of that branch** (a Hive worker's worktree, say) is used as it is.
-- Otherwise maiTerm makes a **detached** worktree under the app's data folder, in a `.noindex`
-  folder so Spotlight leaves it alone (§6.2), reused next time
-  and removed when its branch is gone. Detached means it doesn't move when the branch does, so
-  before each start maiTerm runs `git checkout --detach <branch>` there to bring it to the
-  branch's tip, refuses (and says why) if that worktree has tracked changes, and the row shows
-  the commit it runs: `web · on session-store@3f2a91c :5174`.
-
-**Several branches at once, or in turns:**
-
-- A service whose command or env uses `{port}` can run as **several copies**, one per branch, each
-  in its own hidden service tab (`web@main :5173`, `web@session-store :5174`), up to a
-  per-service copy limit and the machine's headroom (§6.8). `listStack`, the sidebar and the
-  console drawer show **one row per copy**.
-- A service that hard-codes its port (or a data folder) runs **one copy at a time**. Retargeting it
-  stops the copy that's up and starts it on the new branch (once its lease is free), which takes
-  seconds for most dev servers, since the worktree's dependencies are already installed.
-
-The run queue decides **when** and **on which branch**; the stack runs the copies, the job kind
-and leases of §6.8 keep a retarget from cutting a run short, and a code-bearing copy on a worker
-branch runs under that worker's sandbox profile (§6.7). When this is built, its details move
-into `docs/stack.md`, whose §3 (one tab per service) changes with it.
+- **Copies, keyed by `(service_id, target)`**, the target on the tab that runs the copy
+  (`Tab.service_target`), intent per copy (`was_running` for the own folder, `running_targets`
+  for the rest), so a relaunch brings each copy back on its own branch (stack §14.1).
+- **The folder follows the branch**, re-rooted in Rust; a branch with no checkout gets a detached
+  worktree under the app's data folder in a `.noindex` folder, brought to the branch tip before
+  each start and refused while it has tracked changes; the human's own checkout never switches
+  (stack §14.1, §14.2).
+- **Placeholders**, filled from strict charsets, never quoted: `{port}`, `{port2}`,
+  `{port:<service>}`, `{branch}`, `{worker}`, `{instance}` (the worker's name in at most 32, for
+  `MAITERM_INSTANCE`), and `{checkout}` in env only.
+  `DATABASE_URL=postgres://localhost/app_{worker}` is how one shared database gives each branch
+  its own namespace (§6.8, stack §14.2).
+- **One verb, three ways to reach it:** the human's **Run on ▸**, an agent's `on` on six stack
+  tools (refused with the list of copies when several run and none is named), and the run queue,
+  which is a caller of the same verb (stack §14.3, §14.4, §14.7).
+- **Several branches at once, or in turns:** a service with `{port}` runs up to 3 copies; one
+  that hard-codes its port runs one at a time and is moved, never doubled (stack §14.2, §14.3).
+- **Leases:** every path that stops or moves a copy checks it first, so a running job is never
+  cut short (§6.8, stack §14.7). A code-bearing copy on a worker's branch runs under that
+  worker's sandbox profile (§6.7).
 
 ## 7. Agents, tools and authority
 
@@ -2441,10 +2405,11 @@ a foreign `tabId`, and must be refused or seen running under the sandbox profile
 Found beyond Hive:
 - **Fixed in `fb9f1c2f`:** `setAutoResume` and `setTriggerVariable` accepted any `tabId`, so any
   agent could plant the command another tab replays.
-- **Still open, on the task board:**
-  - `updateService` can rewrite a human service;
-  - the stack verbs accept a foreign `tabId`;
-  - trigger variables are interpolated into commands unescaped.
+- **Fixed in step 5b part 1 (`0e1e4335`):** `updateService` rewriting a human service (definition
+  edits only on agent-made services, `Service.agent_edited`), the stack verbs accepting a foreign
+  `tabId` (all eleven own-tab-only), and trigger variables interpolated into commands unescaped
+  (shell-typed values must be shell-inert). The table's acceptance test is under step 5b's
+  results below.
 
 **Spike 12:** see item 12 above and §7.9.
 
@@ -2803,6 +2768,72 @@ in its log). All four pass:
 - **Still by hand** (they need an interactive tab): spike 2's trust dialog under a managed account
   and after an account switch; `/memory` after suspend and resume, a maiTerm restart and a tab
   reload; and hook events still arriving at a real maiTerm through those relaunches.
+
+**Step 5b's acceptance (2026-10-24, Claude Code 2.1.310, `claude-haiku-5-5`).**
+
+- **Spike 15, every path: passes, as a normal test** (`hive/spike15.rs`, `spike_15_every_path`).
+  Each row of the table above is called from a worker tab naming no tab, itself, an ordinary
+  tab and its coordinator, and as a worker whose connection was bound to an ordinary tab while
+  its header names the worker, through the server's checks in the server's order
+  (`refuse_overlord_target`, `refuse_agent_tool`, `queued_verb_caller`, `own_tab_only_refusal`).
+  None reaches the window's stores. Everything but `hiveRun` and the three service verbs is
+  refused there, a foreign `tabId` included; the Overlord's tools aimed at a Hive tab are refused
+  from an ordinary agent too.
+  - `hiveRun`: shell syntax and unlisted commands (`/usr/bin/cargo test`, `cargo testx`, the
+    human's `npm run tauri:dev`) are refused by its own validation. A listed one goes through the
+    real `build_spec` and the queue's real `prepare` (`queue::prepare_in`, against the scratch
+    Hive's folder): its line is `cd <worktree> && env -u … K=V … /usr/bin/sandbox-exec -f
+    <profile> <argv…>`, nothing but removals and assignments before `sandbox-exec`, no `sh -c`
+    outside it, and the profile's write allow and deny lists are exactly `worker_write_lists`
+    (plus its job temp and the entry's extra writes), the network closed but for loopback to the
+    job's own booked ports.
+  - The service verbs, through the real `run::service_verb` into the real queue: an agent-made,
+    agent-edited, shared, unknown or port-fixed service is refused, as is any `on` that isn't the
+    worker's branch; a human-defined `{port}` service is re-rooted in the worktree and its job line
+    is `sandbox-exec … /bin/sh -c '<its command, port filled>'` under the same profile. A second
+    start is refused, a restart is a new job and stops the old one, a stop takes only its own copy.
+  - maiTerm's own git on worker content passes `-c core.fsmonitor=false -c core.hooksPath=/dev/null`
+    and the git dir it recorded.
+  - **Not covered, by design for now:** a land check (step 6, not built), and **setup**. A first
+    launch's setup still runs unsandboxed in the worker's tab, ahead of its agent
+    (`launch::first_launch_setup`): it is the human's command, run on a fresh worktree at the
+    landing target's tip before the agent has written anything, so it runs Base's code, not the
+    worker's. Moving it under the worker's profile needs a network decision first (a job's
+    profile closes the network, and `npm ci` needs its registry), so it waits for the step that
+    owns setup again (step 6's land checks share the problem).
+- **Spike 9, the queued deny: passes** (`hive/probe.rs`, `spike_9_queued_deny_probe`, `#[ignore]`).
+  A worker launched by the real `worker_record` and `worker_settings_json`, in a Hive that queues
+  `cargo test`; the hook script's port file names the probe's listener, which answers the gate
+  with the real `decide_event` and the Hive's queued prefixes, while `MAITERM_PORT` names a closed
+  port (its MCP server shows `failed`, so `hiveRun` itself is out of reach). Asked to run `cargo
+  test` and `sh -c 'cargo test --lib'`, each call is refused with "`cargo test` is queued in this
+  Hive: run it with hiveRun {command: "cargo test"}" (the wrapped one names `cargo test --lib`),
+  cargo never runs, `gate.log` has one line per call and `runs.jsonl` one `{"type":"deny"}` line
+  per call, both naming the tab. The model stopped and named hiveRun rather than routing around
+  it. The installed maiTerm's log gained no line naming the probe's tab or Hive. With MCP down the
+  probe can't show the worker then calling `hiveRun`; that half is the hand pilot's.
+- **The pilot's queued commands** (`queue::detect_commands`): a folder whose `tauri:dev:isolated`
+  script is `scripts/dev-isolated.mjs` is maiTerm, and gets `cargo test` and `cargo build`
+  (`cargo`) and `npm run tauri:dev:isolated` (`tauri-dev`, `cargo`; env `MAITERM_INSTANCE={instance}`,
+  `MAITERM_VITE_PORT={port}`, `MAITERM_MCP_PORT={port2}`; extra writes for its bundle
+  identifier's `Application Support`, `WebKit`, `Caches` and `Logs` folders). It never gets `npm run
+  tauri:dev`, which is the human's dev instance: it kills whatever holds 1420 and shares dev's data
+  folder. Tested against this repo's own `package.json`, and through spike 15's real `prepare`.
+  - `cargo test` runs at the worktree's top, and maiTerm's `Cargo.toml` is in `src-tauri/`, so a
+    maiTerm worker passes `--manifest-path src-tauri/Cargo.toml` (`cargo test` is the prefix, so
+    `hiveRun` takes it and the gate still denies a direct `cd src-tauri && cargo test`).
+  - `{instance}`, not `{worker}`: a slug runs to 60 characters and an instance name to 32
+    (`dev-isolated.mjs`, `instance::valid_name`), so a plain `{worker}` failed every task title
+    over 32 only after the job had taken `tauri-dev` and two ports. `{instance}` is the slug when
+    it fits, else its first 23 characters and 8 hex of its hash (`instance::name_for_worker`): the
+    same instance, and the same four folders, every run. Spike 15's worker has a 35-character slug.
+- **Not run: the hand pilot.** One worker's isolated maiTerm coming up under its job profile
+  beside the dev and installed apps, and `checks` accepting its passing `cargo test`, need a GUI
+  and a real Hive. Open questions it answers: whether WKWebView needs folders beyond the four
+  extra writes (`~/Library/HTTPStorages/<identifier>` is the likely one), and whether the job's
+  `(allow default)` profile, which doesn't restrict signals, should also deny signalling
+  processes outside its own sandbox (a job's `lsof … | xargs kill` would reach the human's
+  processes; the worker's own Bash is in the same position).
 
 ## 14. Decisions
 
@@ -3177,6 +3208,28 @@ several releases a day).
    B plus an exit mark the shell writes outside the sandbox, or when its terminal dies.
    Leases hold a stop or retarget behind the jobs using a copy. Memory pressure, sampled only
    while a job is queued or running, stops new starts and spawns.
+   **Part 5 built** (`1aec6dda`): the worker-facing half (`hive/run.rs`). `hiveRun` refuses shell
+   syntax, matches a queued command word by word and takes everything but its words from that
+   entry; it answers at once (or inline within 5 s) and the result comes as one `⟦HIVE RUN⟧`
+   through the delivery gate, kept in `worker.json` `pending_runs` until it is typed, so a crash
+   or reload delivers it once and a restart turns an open run into "interrupted". The
+   coordinator's `hiveRunPriority`. A worker's direct run of a queued command is denied by its
+   gate with the `hiveRun` to make, logged to `gate.log` and `runs.jsonl`. A worker's
+   `startService`/`restartService`/`stopService` are routed in Rust into the queue (a
+   human-defined `{port}` service, on its own branch, under its sandbox). Release on stop, crash,
+   retirement, a dropped task and suspend, told once. `checks` receipts by job id, checked
+   against the run log (its task, its branch, exit 0 on a committed tree that didn't change while
+   it ran, the reported tip an ancestor of the job's commit). `RunQueueModal` edits the queued
+   commands. Fix-ups along the way: `587c9fe3` and `f1bb8d6f` (Unix-only tests for shell
+   metacharacters in branch names), `b1abcf78` (run-queue lines swept into an unrelated commit).
+   **Part 6 built** (2026-10-24, uncommitted at the time of writing): the acceptance. Spike 15 as a
+   normal test (`hive/spike15.rs`), spike 9's queued deny as an ignored probe that was run and
+   passes (`hive/probe.rs`), the pilot's queued commands for maiTerm itself
+   (`queue::detect_commands`), and §6.9's details moved into `docs/stack.md` §14 (§14.7 for jobs,
+   leases and the worker's verbs). Results in §13.1. `queue::prepare_in` and
+   `run::service_spec` split out of the job start and the worker's service verb so the test runs
+   their real code against a scratch Hive. **Not done:** the hand pilot (a GUI), and setup under
+   the worker's profile (§13.1). **Step 5b is complete** but for those.
 6. Reviewers (`hiveVerdict`, three attempts, escalation). Landing: land to Base (default)
    pinned to the reviewed sha, including several repos, the config-touching land rule (§8.1),
    the approval mode (chosen at creation, §3) through agent requests; the **land log and Undo**

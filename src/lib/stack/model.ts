@@ -73,7 +73,7 @@ export function copyTabName(name: string, target: string, label?: string | null)
 }
 
 /** The placeholders in `text`, as Rust's `placeholders::scan` reads them: `{port}`, `{port2}`,
- *  `{branch}`, `{worker}`, `{checkout}`, `{port:<svc>}`; every other brace is left alone. */
+ *  `{branch}`, `{worker}`, `{instance}`, `{checkout}`, `{port:<svc>}`; every other brace is left alone. */
 export function placeholdersIn(text: string): string[] {
   const out: string[] = [];
   let i = 0;
@@ -85,7 +85,7 @@ export function placeholdersIn(text: string): string[] {
     if (j < 0) break;
     if (rest[j] === '}') {
       const inner = rest.slice(0, j);
-      const named = ['port', 'port2', 'branch', 'worker', 'checkout'].includes(inner);
+      const named = ['port', 'port2', 'branch', 'worker', 'instance', 'checkout'].includes(inner);
       const portOf = inner.startsWith('port:') && [...inner.slice(5)].length >= 1 && [...inner.slice(5)].length <= 64;
       if (named || portOf) {
         out.push(inner);

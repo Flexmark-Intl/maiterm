@@ -632,7 +632,9 @@ the line typed is the line typed before copies existed. Otherwise:
 
 - the folder is re-rooted onto the target (Rust, never a JS prefix strip);
 - `{port}`, `{port2}`, `{port:<service>}`, `{branch}`, `{worker}` are filled from strict
-  charsets, refused otherwise, never quoted; `{checkout}` is a path and allowed in env values
+  charsets, refused otherwise, never quoted; `{instance}` is the worker's name cut to 32 with a
+  hash suffix when longer (`instance::name_for_worker`), what an isolated maiTerm takes as
+  `MAITERM_INSTANCE`; `{checkout}` is a path and allowed in env values
   only (`ServiceModal` and `createService`/`updateService` refuse it in a command too);
 - ports come from Rust's in-memory port book; a copy keeps its last port when it is free, and
   the store releases them (`stack_release_copy`) when the copy stops or crashes.
@@ -691,8 +693,8 @@ guess (`pickCopy`).
   definition edit needs no `on`.
 - The priming lists each copy that isn't stopped (`web on session-store (running)`).
 
-The run queue's leases (docs/hive.md §6.8) are not built yet: today nothing stops a human or
-an agent from moving a copy a job depends on.
+Every one of these checks the copy's lease first (§14.7): a copy a run-queue job depends on is
+never stopped or moved out from under it.
 
 ### 14.5 `shared_from`
 
@@ -727,6 +729,44 @@ is the repo's code, has to run per branch, and is offered unticked, pointing at 
 rather than imported beside it, so the sheet never blocks its own default with a name clash.
 The name-clash error is left for clashes the human made by editing.
 
-**Not yet:** a Hive's workspace opens no tabs but its agents' (`hive::refuse_tab_create`), so a
-service cannot start there until the run queue mints its hidden tabs (Hive step 5b-4); a start
-says so in the row's note.
+A Hive's workspace opens no tabs but its agents' and its own stack's (`hive::refuse_tab_create`
+lets a tab through only when it is bound, as it is made, to a row of that workspace's stack): a
+service tab or a job tab, never a free shell.
+
+### 14.7 Jobs, leases and Hive workers (Hive step 5b, docs/hive.md §6.8)
+
+A Hive's run queue is a caller of this stack, not a second one. Rust decides when a job runs
+(`hive/queue.rs`); this store runs it in a stack tab.
+
+- **A job is a stack row of `kind: "job"`** (`Service.kind`, a String, `"service"` by default).
+  Rust inserts the row when the job starts and removes it when it ends, and every job row (and a
+  tab bound to a job id with no row) is swept on load: after a restart none runs. Clone and share
+  drop them. The store keeps a job's row in `jobRows`, never in the workspace's mirror, so a job
+  is out of the priming line, the rollup, the Overlord rules, `was_running` and every restart.
+  It never restarts and never marks intent; a non-zero exit is the job's result, never `crashed`.
+- **Starting one is an rpc** (`stack.job.start {workspace_id, row, target, line}`), answered
+  `{accepted, confirmed, tab_id, pty_id}`: the store mints a hidden bound tab, types the line
+  Rust built through the usual prompt guard, and confirms once the shell's own B is seen. No OSC
+  133 in that shell answers `needs shell integration`, and the job is `invalid`, never a pass.
+  The exit is read in Rust off the PTY (`hive::queue::on_osc133`), never reported by the
+  webview. `stack.job.stop` is ^C under the pid guard; `stack.job.cleanup` closes a worker's
+  old job tabs.
+- **The line is Rust's, under the worker's sandbox** (`hive/job_sandbox.rs`): `cd <folder> &&
+  env -u … K=V … /usr/bin/sandbox-exec -f <profile> <argv…>`, every word `sh_quote`d, never an
+  `sh -c` of anything a worker wrote. The profile is the worker's own write lists, with the
+  network closed but for loopback to the ports the job was booked and the copies it leases.
+  Off macOS a job is refused.
+- **Leases.** A job leases the copies its queued entry names (its `services`, on the job's own
+  checkout). `stop` and `retarget` check `stack_lease_state` first and refuse a leased copy
+  with a `LeaseHeldError`; the human gets **Run when free** (the stop, restart or move is held
+  in Rust and carried out on `stack-lease-freed`) or **Stop anyway** (`hive_lease_override`: the
+  jobs leasing it are interrupted, never a receipt) in `LeaseHeldChoice`. An agent's stop or
+  retarget of a leased copy is held the same way and answers `{queued_behind: job}`.
+- **A Hive worker's stack verbs never reach this store.** `startService`, `restartService` and
+  `stopService` from a worker tab are routed in Rust before frontend dispatch
+  (`hive::run::worker_service_verb`): only a human-defined service (`origin != "agent"` and never
+  agent-edited), not shared, that takes `{port}` (a one-copy service on the worker's branch would
+  take the human's away), only on the worker's own branch, re-rooted in its worktree and run as a
+  queued job under its sandbox. Its `stopService` stops only its own copy.
+  `createService`, `updateService`, `removeService`, `startStack` and `stopStack` are refused to a
+  worker outright (`hive::refuse_agent_tool`), and every stack tool is own-tab-only.

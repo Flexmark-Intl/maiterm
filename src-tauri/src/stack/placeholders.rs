@@ -1,7 +1,7 @@
 //! Placeholders in a service's command and env, filled per copy (docs/hive.md §6.9).
 //!
-//! One left-to-right pass finds `{port}`, `{port2}`, `{branch}`, `{worker}`, `{checkout}` and
-//! `{port:<service>}`; every other brace is left as it is, so the shell's own brace expansion
+//! One left-to-right pass finds `{port}`, `{port2}`, `{branch}`, `{worker}`, `{instance}`,
+//! `{checkout}` and `{port:<service>}`; every other brace is left as it is, so the shell's own brace expansion
 //! still works. A value is DATA: it must match its placeholder's charset or the copy is refused.
 //! Nothing is quoted to make a value safe, and no charset admits a shell metacharacter, so a
 //! value is inert in any quoting context. `{checkout}` is a path (spaces under Application
@@ -15,6 +15,9 @@ pub enum Placeholder {
     Port2,
     Branch,
     Worker,
+    /// The worker's name capped at 32 (`instance::name_for_worker`): what an isolated maiTerm
+    /// accepts as `MAITERM_INSTANCE`, where a slug can run to 60. Needs the worker's value.
+    Instance,
     Checkout,
     /// `{port:<service>}`: that service's port, the name as written.
     PortOf(String),
@@ -47,6 +50,7 @@ fn placeholder(inner: &str) -> Option<Placeholder> {
         "port2" => Placeholder::Port2,
         "branch" => Placeholder::Branch,
         "worker" => Placeholder::Worker,
+        "instance" => Placeholder::Instance,
         "checkout" => Placeholder::Checkout,
         _ => {
             let name = inner.strip_prefix("port:")?;
@@ -80,7 +84,7 @@ impl Needs {
                     Placeholder::Port => n.port = true,
                     Placeholder::Port2 => n.port2 = true,
                     Placeholder::Branch => n.branch = true,
-                    Placeholder::Worker => n.worker = true,
+                    Placeholder::Worker | Placeholder::Instance => n.worker = true,
                     Placeholder::Checkout if in_command => n.checkout_in_command = true,
                     Placeholder::Checkout => n.checkout = true,
                     Placeholder::PortOf(s) if !n.port_of.contains(&s) => n.port_of.push(s),
@@ -186,6 +190,7 @@ pub fn fill(text: &str, v: &Values) -> Result<String, String> {
             Placeholder::Port2 => v.port2.map(|p| p.to_string()),
             Placeholder::Branch => v.branch.clone().filter(|b| valid_branch(b)),
             Placeholder::Worker => v.worker.clone().filter(|w| valid_worker(w)),
+            Placeholder::Instance => v.worker.as_deref().filter(|w| valid_worker(w)).map(crate::instance::name_for_worker),
             Placeholder::Checkout => v.checkout.clone().filter(|c| valid_checkout(c)),
             Placeholder::PortOf(name) => v.port_of.iter().find(|(n, _)| n == name).map(|(_, p)| p.to_string()),
         };
@@ -205,9 +210,10 @@ mod tests {
     }
 
     #[test]
-    fn only_the_six_shapes_are_placeholders() {
+    fn only_the_seven_shapes_are_placeholders() {
         assert_eq!(kinds("vite --port {port} --hmr {port2}"), vec![Placeholder::Port, Placeholder::Port2]);
         assert_eq!(kinds("DATABASE_URL=postgres://localhost/app_{worker}"), vec![Placeholder::Worker]);
+        assert_eq!(kinds("MAITERM_INSTANCE={instance}"), vec![Placeholder::Instance]);
         assert_eq!(kinds("{port:db}"), vec![Placeholder::PortOf("db".into())]);
         assert_eq!(kinds("{{port}}"), vec![Placeholder::Port], "the inner pair is one");
         // Brace expansion, ${VAR}, JSON and near misses all stay verbatim.
@@ -257,6 +263,14 @@ mod tests {
         let v = Values { branch: Some("x".into()), worker: Some("w".into()), ..Values::default() };
         assert_eq!(fill("{branch}{worker}", &v).unwrap(), "xw");
         assert!(fill("{port2}", &Values::default()).is_err());
+        // `{instance}` is the worker's name, capped at what MAITERM_INSTANCE accepts.
+        let slug = "move-session-persistence-into-redis";
+        let v = Values { worker: Some(slug.into()), ..Values::default() };
+        assert!(Needs::of("", &[("I".into(), "{instance}".into())]).worker);
+        assert_eq!(fill("{worker}", &v).unwrap(), slug);
+        let inst = fill("{instance}", &v).unwrap();
+        assert!(crate::instance::valid_name(&inst) && inst.starts_with("move-session-persistenc-"), "{inst}");
+        assert!(fill("{instance}", &Values::default()).is_err());
     }
 
     #[test]

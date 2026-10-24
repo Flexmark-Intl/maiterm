@@ -30,6 +30,19 @@ pub fn valid_name(name: &str) -> bool {
     (1..=32).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// A Hive worker's instance name (the `{instance}` placeholder): its slug when that fits, else
+/// the slug cut to 23 and 8 hex of its hash, so a 60-character slug still names one instance,
+/// the same one every run. `slug` is `[a-z0-9-]`, as `placeholders::valid_worker` checks.
+pub fn name_for_worker(slug: &str) -> String {
+    if slug.len() <= 32 {
+        return slug.to_string();
+    }
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(slug.as_bytes());
+    let hex: String = hash.iter().take(4).map(|b| format!("{b:02x}")).collect();
+    format!("{}-{hex}", slug[..23].trim_end_matches('-'))
+}
+
 /// What `MAITERM_INSTANCE` asks for: `Ok(None)` for a normal launch (and always in release).
 pub fn parse_name(debug: bool, raw: Option<&str>) -> Result<Option<String>, String> {
     match raw {
@@ -183,6 +196,20 @@ mod tests {
         // Release never reads the variable at all.
         assert_eq!(parse_name(false, Some("pilot")), Ok(None));
         assert_eq!(slug_for(false, &parse_name(false, Some("pilot"))), "com.aiterm.app");
+    }
+
+    #[test]
+    fn every_worker_slug_names_a_valid_instance() {
+        assert_eq!(name_for_worker("auth"), "auth");
+        assert_eq!(name_for_worker(&"a".repeat(32)), "a".repeat(32));
+        // `create::slugify` allows 60; a cut that ends on a dash doesn't leave two.
+        for slug in ["move-session-persistence-into-redis", "move-session-persistence-into-redis-and-postgres-and-more-x", "abcdefghij-klmnopqrstu-vwxyz-0123456789"] {
+            let name = name_for_worker(slug);
+            assert!(valid_name(&name), "{slug} -> {name}");
+            assert!(!name.contains("--"), "{name}");
+            assert_eq!(name, name_for_worker(slug), "the same instance every run");
+        }
+        assert_ne!(name_for_worker(&format!("{}-one", "x".repeat(30))), name_for_worker(&format!("{}-two", "x".repeat(30))), "a shared first 23 is still two instances");
     }
 
     #[test]

@@ -185,7 +185,7 @@ pub struct QueuedCommand {
     pub needs: Vec<String>,
     /// Stack services it leases, by name, for as long as it runs.
     pub services: Vec<String>,
-    /// Set for the job, placeholders filled per worker (`MAITERM_INSTANCE={worker}`).
+    /// Set for the job, placeholders filled per worker (`MAITERM_INSTANCE={instance}`).
     pub env: Vec<(String, String)>,
     /// Paths beyond the worker's own that the job's sandbox may also write, placeholders and
     /// `~` expanded.

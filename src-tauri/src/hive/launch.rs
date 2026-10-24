@@ -548,8 +548,9 @@ pub fn worker_preflight(paths: &HivePaths, w: &WorkerRecord) -> Result<(), Strin
 /// What runs before a worker's first session (§6.4, §6.5): the slim cargo seed, then each git
 /// folder's setup command in its worktree, typed ahead of the agent so a failure shows in the
 /// raw terminal and stops the launch. Setup is the human's command, run on a fresh worktree at
-/// the landing target's tip, before the agent has written anything; it moves under the worker's
-/// sandbox profile with the run queue (step 5b).
+/// the landing target's tip, before the agent has written anything, so it runs Base's code. It
+/// isn't under the worker's sandbox profile yet: a job's profile closes the network, which `npm
+/// ci` needs (docs/hive.md §13.1, step 5b's acceptance).
 fn first_launch_setup(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> Result<String, String> {
     let seed = super::worktree::worker_uses_own_cargo_target(hive, w).then(|| super::worktree::worker_seed_source(hive, w)).flatten();
     if let Some(src) = seed {

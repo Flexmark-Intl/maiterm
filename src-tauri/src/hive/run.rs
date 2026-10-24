@@ -807,20 +807,74 @@ fn service_place(paths: &HivePaths, s: &Service, w: &WorkerRecord) -> Result<(St
     Err(format!("{} runs in a repo you have no worktree of, so it can't run on your branch.", s.name))
 }
 
+/// The job a worker's start of human-defined service `s` queues: its own command under the
+/// worker's sandbox, in `folder`'s worktree at `cwd` (`service_place`), needing what a queued
+/// entry for that command needs, else nothing. Blocks on git.
+pub(crate) fn service_spec(caller: &Caller, w: &WorkerRecord, s: &Service, stack: &[Service], folder: &str, cwd: &std::path::Path) -> Result<JobSpec, String> {
+    let f = w.folders.iter().find(|f| f.name == folder && f.worktree.is_some()).ok_or("Your folder of it is gone")?;
+    let target = format!("{}{}", crate::stack::target::CHECKOUT, f.worktree.as_deref().unwrap_or_default());
+    let key = crate::stack::copy_key(&s.id, &target);
+    let q = &caller.hive.settings.run_queue;
+    let words: Vec<String> = s.command.split_whitespace().map(str::to_string).collect();
+    let entry = match_entry(q, folder, &words);
+    let (commit, dirty) = worktree_state(f)?;
+    let leases = match entry {
+        Some(e) => leases_for(e, stack, &target)?.into_iter().filter(|k| *k != key).collect(),
+        None => Vec::new(),
+    };
+    let mut env = s.env.clone();
+    for (k, v) in entry.iter().flat_map(|e| e.env.iter()) {
+        env.retain(|(o, _)| o != k);
+        env.push((k.clone(), v.clone()));
+    }
+    Ok(JobSpec {
+        hive_id: caller.hive.id.clone(),
+        workspace_id: caller.workspace_id.clone(),
+        window: caller.label.clone(),
+        task_id: w.task_id.clone(),
+        worker_slug: w.slug.clone(),
+        folder: folder.to_string(),
+        target,
+        argv: super::job_sandbox::service_argv(&s.command),
+        entry: s.name.clone(),
+        needs: entry.map(|e| e.needs.clone()).unwrap_or_default(),
+        env,
+        extra_write: entry.map(|e| e.extra_write.clone()).unwrap_or_default(),
+        leases,
+        shares: q.resources.clone(),
+        // A service runs until it's stopped: the longest a job may.
+        timeout_s: queue::MAX_TIMEOUT_S,
+        branch: f.branch.clone(),
+        commit: Some(commit),
+        dirty,
+        service_id: Some(s.id.clone()),
+        cwd: Some(cwd.to_string_lossy().to_string()),
+        command: Some(s.command.clone()),
+        ..JobSpec::default()
+    })
+}
+
 /// A worker's `startService`, `restartService` or `stopService` (§6.8, §7.2): only a human-defined
 /// service, only on its own branch, as a queued job under its sandbox; a stop takes only its own
 /// copy. Called for any request a worker tab makes, whatever `tabId` it names.
-pub async fn worker_service_verb(tool: &str, args: &Value, worker_tab: &str, state: &Arc<AppState>, handle: &AppHandle) -> Value {
-    let res = service_verb(tool, args, worker_tab, state, handle).await;
+pub async fn worker_service_verb(tool: &str, args: &Value, worker_tab: &str, state: &Arc<AppState>, _handle: &AppHandle) -> Value {
+    let caller = super::tools::caller_for_tab(&state.app_data.read(), worker_tab).map(|mut c| {
+        c.tab_id = worker_tab.to_string();
+        c
+    });
+    let res = match caller {
+        Some(c) => service_verb(tool, args, &c, &state.app_data).await,
+        None => Err("Only a Hive's worker can call this, from its own tab.".to_string()),
+    };
     res.unwrap_or_else(|e| {
         log::info!("hive: {tool} from worker tab {worker_tab} refused: {e}");
         json!({ "error": e })
     })
 }
 
-async fn service_verb(tool: &str, args: &Value, worker_tab: &str, state: &Arc<AppState>, _handle: &AppHandle) -> Result<Value, String> {
-    let mut caller = super::tools::caller_for_tab(&state.app_data.read(), worker_tab).ok_or("Only a Hive's worker can call this, from its own tab.")?;
-    caller.tab_id = worker_tab.to_string();
+/// `worker_service_verb` for the worker whose tab is `caller.tab_id`.
+pub(crate) async fn service_verb(tool: &str, args: &Value, caller: &Caller, data: &parking_lot::RwLock<AppData>) -> Result<Value, String> {
+    let caller = caller.clone();
     let w = calling_worker(&caller).await?;
     let name = args.get("service").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).ok_or("service is required")?;
     let on = args.get("on").and_then(Value::as_str).unwrap_or_default();
@@ -830,7 +884,7 @@ async fn service_verb(tool: &str, args: &Value, worker_tab: &str, state: &Arc<Ap
             one_line(on, 60)
         ));
     }
-    let stack = workspace_stack(&state.app_data, &caller);
+    let stack = workspace_stack(data, &caller);
     let s = worker_service(&stack, name)?.clone();
     if tool != "stopService" {
         one_copy_refusal(&s)?;
@@ -863,46 +917,8 @@ async fn service_verb(tool: &str, args: &Value, worker_tab: &str, state: &Arc<Ap
         }
         _ => {}
     }
-    let q = caller.hive.settings.run_queue.clone();
-    let words: Vec<String> = s.command.split_whitespace().map(str::to_string).collect();
-    let entry = match_entry(&q, &folder, &words).cloned();
-    let f = w.folders.iter().find(|f| f.name == folder).cloned().ok_or("Your folder of it is gone")?;
-    let (commit, dirty) = blocking(move || worktree_state(&f)).await?;
-    let leases = match &entry {
-        Some(e) => leases_for(e, &stack, &target)?.into_iter().filter(|k| *k != key).collect(),
-        None => Vec::new(),
-    };
-    let mut env = s.env.clone();
-    for (k, v) in entry.iter().flat_map(|e| e.env.iter()) {
-        env.retain(|(o, _)| o != k);
-        env.push((k.clone(), v.clone()));
-    }
-    let branch = w.folders.iter().find(|f| f.name == folder).and_then(|f| f.branch.clone());
-    let spec = JobSpec {
-        hive_id: caller.hive.id.clone(),
-        workspace_id: caller.workspace_id.clone(),
-        window: caller.label.clone(),
-        task_id: w.task_id.clone(),
-        worker_slug: w.slug.clone(),
-        folder,
-        target,
-        argv: super::job_sandbox::service_argv(&s.command),
-        entry: s.name.clone(),
-        needs: entry.as_ref().map(|e| e.needs.clone()).unwrap_or_default(),
-        env,
-        extra_write: entry.as_ref().map(|e| e.extra_write.clone()).unwrap_or_default(),
-        leases,
-        shares: q.resources.clone(),
-        // A service runs until it's stopped: the longest a job may.
-        timeout_s: queue::MAX_TIMEOUT_S,
-        branch,
-        commit: Some(commit),
-        dirty,
-        service_id: Some(s.id.clone()),
-        cwd: Some(cwd.to_string_lossy().to_string()),
-        command: Some(s.command.clone()),
-        ..JobSpec::default()
-    };
+    let (c, rec, svc) = (caller.clone(), w.clone(), s.clone());
+    let spec = blocking(move || service_spec(&c, &rec, &svc, &stack, &folder, &cwd)).await?;
     let job = queue::enqueue(spec)?;
     let dir = worker::task_dir(&caller.paths, &w.task_id)?;
     let (d, id, cmd) = (dir, job.id.clone(), s.name.clone());

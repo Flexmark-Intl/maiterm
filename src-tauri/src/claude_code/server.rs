@@ -3138,7 +3138,7 @@ const OVERLORD_TARGETED_TOOLS: [&str; 9] = [
 /// caller. Found live: a connection whose header named tab A was inferred onto tab B (A already
 /// had a connection, B was the sole unbound one), and `tabId: B` then matched the inferred
 /// binding and scheduled a prompt into B's agent.
-fn own_tab_only_refusal(tool_name: &str, explicit_tab: Option<&str>, affinity: Option<(&str, bool)>) -> Option<String> {
+pub(crate) fn own_tab_only_refusal(tool_name: &str, explicit_tab: Option<&str>, affinity: Option<(&str, bool)>) -> Option<String> {
     if !OWN_TAB_ONLY_TOOLS.contains(&tool_name) {
         return None;
     }

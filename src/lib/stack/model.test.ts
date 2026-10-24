@@ -35,6 +35,7 @@ describe('copies (docs/hive.md §6.9)', () => {
   it('reads placeholders as Rust does, leaving every other brace alone', () => {
     expect(placeholdersIn('vite --port {port} --hmr {port2} {port:db}')).toEqual(['port', 'port2', 'port:db']);
     expect(placeholdersIn('{{port}}')).toEqual(['port']);
+    expect(placeholdersIn('MAITERM_INSTANCE={instance} DB=app_{worker}')).toEqual(['instance', 'worker']);
     for (const t of ['cp a.{js,map} out', 'echo ${PORT}', '{"port": 1}', '{Port}', '{ port }', '{port:}', '{branch']) {
       expect(placeholdersIn(t)).toEqual([]);
     }

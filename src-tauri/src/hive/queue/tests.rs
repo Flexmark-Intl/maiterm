@@ -529,6 +529,67 @@ fn create_detects_the_usual_queued_commands() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// maiTerm as its own Hive's primary folder (the 5b pilot): recognised by its isolated-instance
+/// script, it queues that instance per worker on its own ports and folders, and never the
+/// human's `tauri:dev`. Read off this repo's own package.json too, so a renamed script fails here.
+#[test]
+fn maiterm_is_detected_as_the_pilot_repo() {
+    use crate::hive::record::{Hive, HiveFolder, KIND_GIT};
+    use crate::stack::placeholders::{fill, Values};
+    let base = std::env::temp_dir().join(format!("hive-pilot-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(base.join("src-tauri")).unwrap();
+    std::fs::write(base.join("src-tauri/Cargo.toml"), "[package]").unwrap();
+    std::fs::write(
+        base.join("package.json"),
+        r#"{"scripts":{"tauri:dev":"lsof -ti :1420 | xargs kill -9; tauri dev","tauri:dev:isolated":"node scripts/dev-isolated.mjs"}}"#,
+    )
+    .unwrap();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+    let folder = |p: &Path| HiveFolder { name: "maiterm".into(), path: p.to_string_lossy().to_string(), kind: KIND_GIT.into(), primary: true, ..HiveFolder::default() };
+    let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    for root in [base.clone(), repo] {
+        let got = detect_commands(&[folder(&root)]);
+        let prefixes: Vec<&str> = got.commands.iter().map(|c| c.prefix.as_str()).collect();
+        assert_eq!(prefixes, vec!["cargo test", "cargo build", "npm run tauri:dev:isolated"], "{}: never the human's tauri:dev", root.display());
+        let iso = &got.commands[2];
+        assert_eq!(iso.needs, v(&["tauri-dev", "cargo"]));
+        assert_eq!(iso.env, PILOT_ENV.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>());
+        assert_eq!(got.commands[0].needs, v(&["cargo"]));
+        assert!(got.commands[0].env.is_empty() && got.commands[0].extra_write.is_empty(), "cargo test is the plain entry");
+        // The human's settings check takes them as detected.
+        let hive = Hive { id: "h".into(), folders: vec![folder(&root)], ..Hive::default() };
+        assert_eq!(crate::hive::run::validate_run_queue(&hive, &got).unwrap(), got);
+    }
+    // Filled per worker: its own data folder, WebKit storage, caches and logs, and its two ports.
+    let iso = &detect_commands(&[folder(&base)]).commands[2];
+    let values = Values { worker: Some("auth".into()), port: Some(5174), port2: Some(5175), ..Values::default() };
+    let filled: Vec<String> = iso.extra_write.iter().map(|p| fill(p, &values).unwrap()).collect();
+    assert_eq!(
+        filled,
+        vec![
+            "~/Library/Application Support/com.aiterm.dev.auth",
+            "~/Library/WebKit/com.aiterm.dev.auth",
+            "~/Library/Caches/com.aiterm.dev.auth",
+            "~/Library/Logs/com.aiterm.dev.auth",
+        ]
+    );
+    let env: Vec<(String, String)> = iso.env.iter().map(|(k, x)| (k.clone(), fill(x, &values).unwrap())).collect();
+    assert_eq!(env, vec![("MAITERM_INSTANCE".into(), "auth".into()), ("MAITERM_VITE_PORT".into(), "5174".into()), ("MAITERM_MCP_PORT".into(), "5175".into())]);
+    // A slug over 32 (`slugify` allows 60) still names an instance `dev-isolated.mjs` takes, and
+    // its extra writes are that same instance's folders.
+    let long = Values { worker: Some("move-session-persistence-into-redis".into()), port: Some(5174), port2: Some(5175), ..Values::default() };
+    let name = fill(&iso.env[0].1, &long).unwrap();
+    assert!(crate::instance::valid_name(&name), "{name}");
+    let ids: Vec<String> = iso.extra_write.iter().map(|p| fill(p, &long).unwrap()).collect();
+    assert!(ids.iter().all(|p| p.ends_with(&format!("/{}", crate::instance::slug_for(true, &crate::instance::parse_name(true, Some(&name)))))), "{ids:?}");
+    // Another Tauri app's isolated script is just a script.
+    std::fs::write(base.join("package.json"), r#"{"scripts":{"tauri:dev":"tauri dev","tauri:dev:isolated":"node x"}}"#).unwrap();
+    let other = detect_commands(&[folder(&base)]);
+    assert_eq!(other.commands.iter().map(|c| c.prefix.as_str()).collect::<Vec<_>>(), vec!["cargo test", "cargo build", "npm run tauri:dev", "npm run tauri:dev:isolated"]);
+    assert!(other.commands.iter().all(|c| c.env.is_empty() && c.extra_write.is_empty()));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// The job's sandbox, for real (macOS only): a profile drawn from a worker's write lists over
 /// scratch folders, and the line typed through `zsh`. Nothing here touches maiTerm's data folder
 /// or any running maiTerm.

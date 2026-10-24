@@ -745,7 +745,13 @@ impl WorkerProbe {
     /// only, so the user's own http hooks to the installed maiTerm never load). Both the hook
     /// script's port file and `MAITERM_PORT` name the probe's listener.
     fn ask(&self, port: u16, prompt: &str) -> Run {
-        install_hook(&self.bin, port).unwrap();
+        self.ask_with(port, port, prompt)
+    }
+
+    /// As `ask`, with the hook script's port file naming `hook_port` and `MAITERM_PORT` (the MCP
+    /// url, the script's fallback) naming `mcp_port`.
+    fn ask_with(&self, hook_port: u16, mcp_port: u16, prompt: &str) -> Run {
+        install_hook(&self.bin, hook_port).unwrap();
         let hooks = HookEnv {
             script: self.bin.join(HOOK_FILE),
             bin_dir: self.bin.clone(),
@@ -769,7 +775,7 @@ impl WorkerProbe {
         for (k, v) in [("GIT_AUTHOR_NAME", "probe"), ("GIT_AUTHOR_EMAIL", "probe@example.com"), ("GIT_COMMITTER_NAME", "probe"), ("GIT_COMMITTER_EMAIL", "probe@example.com")] {
             cmd.env(k, v);
         }
-        cmd.env("MAITERM_PORT", port.to_string())
+        cmd.env("MAITERM_PORT", mcp_port.to_string())
             .env("MAITERM_AUTH", AUTH)
             .env("MAITERM_TAB_ID", TAB)
             .stdin(Stdio::from(fs::File::open(&prompt_file).unwrap()));
@@ -901,4 +907,92 @@ fn hive_worker_launch_probe() {
     assert!(now.setup_done && now.phase == super::worker::PHASE_RUNNING, "the real session_started marked it: {now:?}");
     let log = fs::read_to_string(p.paths.logs().join("gate.log")).unwrap_or_default();
     println!("gate.log:\n{log}");
+}
+
+/// The installed maiTerm's log files (and a dev build's, which log in the same folder), with
+/// their sizes now: what a probe appended to them is read back after it.
+fn installed_logs() -> Vec<(PathBuf, u64)> {
+    let Some(home) = dirs::home_dir() else { return Vec::new() };
+    let dir = home.join("Library/Logs").join(crate::instance::slug_for(false, &Ok(None)));
+    ["aiterm.log", "aiterm-dev.log"].iter().map(|f| dir.join(f)).map(|p| {
+        let len = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+        (p, len)
+    }).collect()
+}
+
+fn appended_since(logs: &[(PathBuf, u64)]) -> String {
+    use std::io::{Seek, SeekFrom};
+    let mut out = String::new();
+    for (p, from) in logs {
+        let Ok(mut f) = fs::File::open(p) else { continue };
+        if f.seek(SeekFrom::Start(*from)).is_ok() {
+            let mut s = String::new();
+            let _ = f.read_to_string(&mut s);
+            out.push_str(&s);
+        }
+    }
+    out
+}
+
+/// Spike 9 (§6.8) for build step 5b: a worker launched by the real record and settings, whose
+/// Hive queues `cargo test`, asked to run it straight and through `sh -c`. The hook script's port
+/// file names the probe's listener, which answers the gate with the real `decide_event` and the
+/// Hive's queued prefixes; `MAITERM_PORT` names a closed port, so the MCP server (and with it
+/// `hiveRun`) is down, as nothing here may reach a real maiTerm. Each call is denied with the
+/// hiveRun reason, cargo never runs, and the refusal is on `gate.log` and `runs.jsonl`. The
+/// installed maiTerm's log gains no line naming the probe.
+///
+/// `cargo test --lib spike_9_queued_deny_probe -- --ignored --nocapture`
+#[cfg(unix)]
+#[test]
+#[ignore = "runs claude -p against the logged-in account"]
+fn spike_9_queued_deny_probe() {
+    let mut p = WorkerProbe::new();
+    p.hive.settings.run_queue.commands = vec![super::record::QueuedCommand {
+        folder: "web".into(),
+        prefix: "cargo test".into(),
+        needs: vec!["cargo".into()],
+        ..super::record::QueuedCommand::default()
+    }];
+    let logs = installed_logs();
+    let maiterm = FakeMaiterm::serving(&p.hive, &p.paths, ROLE_WORKER, false);
+    let mcp = closed_port();
+    let asks: Vec<(&'static str, String)> = vec![
+        ("direct", exact("Run this Bash command: cargo test")),
+        ("wrapped", exact("Run this Bash command: sh -c 'cargo test --lib'")),
+    ];
+    let runs: Vec<(&str, Run)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = asks.iter().map(|(k, prompt)| (*k, sc.spawn(|| p.ask_with(maiterm.port, mcp, prompt)))).collect();
+        hs.into_iter().map(|(k, h)| (k, h.join().unwrap())).collect()
+    });
+    report(&runs);
+    let init = &get(&runs, "direct").init;
+    println!("init: model={} permissionMode={} mcp_servers={}", init["model"], init["permissionMode"], init["mcp_servers"]);
+
+    let mut tried = 0;
+    for (k, r) in &runs {
+        let Some(c) = r.calls.iter().find(|c| c.name == "Bash" && c.input.to_string().contains("cargo test")) else {
+            println!("{k}: the model declined without a call");
+            continue;
+        };
+        tried += 1;
+        assert!(c.is_error, "{k}: the queued command ran:\n{}", r.summary());
+        assert!(c.output.contains(super::gate::QUEUED_DENY) && c.output.contains("hiveRun"), "{k}: the deny names hiveRun:\n{}", r.summary());
+        assert!(!c.output.contains("Cargo.toml"), "{k}: cargo itself ran:\n{}", r.summary());
+    }
+    assert!(tried > 0, "no run made the call, so nothing was proven");
+
+    let gate_log = fs::read_to_string(p.paths.logs().join("gate.log")).unwrap_or_default();
+    println!("gate.log:\n{gate_log}");
+    let run_log = fs::read_to_string(p.paths.run_log()).unwrap_or_default();
+    println!("runs.jsonl:\n{run_log}");
+    assert!(gate_log.lines().any(|l| l.contains(&format!("tab={TAB}")) && l.contains(super::gate::QUEUED_DENY) && l.contains("cargo test")), "{gate_log}");
+    let denies: Vec<Value> = run_log.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|v| v["type"] == "deny").collect();
+    assert_eq!(denies.len(), tried, "one deny line per refused call: {run_log}");
+    assert!(denies.iter().all(|d| d["tab_id"] == TAB && d["command"].as_str().is_some_and(|c| c.contains("cargo test"))), "{run_log}");
+    let gate_calls = maiterm.seen().into_iter().filter(|s| s.target.starts_with("/hive/gate")).count();
+    assert!(gate_calls >= tried, "every Bash call was put to the gate ({gate_calls})");
+
+    let leaked = appended_since(&logs);
+    assert!(!leaked.contains(TAB) && !leaked.contains(&p.id), "the installed maiTerm heard from the probe:\n{}", leaked.lines().filter(|l| l.contains(TAB) || l.contains(&p.id)).collect::<Vec<_>>().join("\n"));
 }

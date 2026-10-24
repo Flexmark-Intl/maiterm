@@ -122,8 +122,8 @@
           </div>
           <div class="row">
             <label class="field grow">
-              <span class="label">Environment <span class="opt">KEY=value per line; {'{worker}'}, {'{port}'} fill in</span></span>
-              <textarea class="text-input mono" rows="2" bind:value={row.env} placeholder={'MAITERM_INSTANCE={worker}'} spellcheck="false"></textarea>
+              <span class="label">Environment <span class="opt">KEY=value per line; {'{worker}'}, {'{instance}'} (the worker's name in 32 or fewer), {'{port}'} fill in</span></span>
+              <textarea class="text-input mono" rows="2" bind:value={row.env} placeholder={'MAITERM_INSTANCE={instance}'} spellcheck="false"></textarea>
             </label>
             <label class="field grow">
               <span class="label">Also writes <span class="opt">absolute paths, one per line</span></span>
