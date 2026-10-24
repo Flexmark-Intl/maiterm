@@ -374,15 +374,33 @@ async function press(tabId, combo) {
   await send(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', ...base });
 }
 
-/** Select an editable's whole contents, so typing replaces them (works with React-style inputs).
- *  'inner': focus is inside a frame or shadow root this page can't select in. */
+/** The element that really has focus: through open shadow roots and same-origin frames. Stops at
+ *  a cross-origin frame or a closed shadow root, which the page can't see into. */
+const DEEPEST_FOCUS = `function () {
+  let el = this;
+  for (;;) {
+    const inner = el.shadowRoot ? el.shadowRoot.activeElement
+      : (el.tagName === 'IFRAME' || el.tagName === 'FRAME') ? (() => { try { const d = el.contentDocument; return d && d.activeElement !== d.body ? d.activeElement : null; } catch { return null; } })()
+      : null;
+    if (!inner) return el;
+    el = inner;
+  }
+}`;
+
+/** Select an editable's whole contents, so typing replaces them (works with React-style inputs). */
 const SELECT_ALL = `function () {
   if (typeof this.select === 'function' && ('value' in this)) { this.select(); return true; }
-  if (this.isContentEditable) { const r = document.createRange(); r.selectNodeContents(this);
-    const s = getSelection(); s.removeAllRanges(); s.addRange(r); return true; }
-  if (this.tagName === 'IFRAME' || this.tagName === 'FRAME' || this.shadowRoot) return 'inner';
+  if (this.isContentEditable) { const r = this.ownerDocument.createRange(); r.selectNodeContents(this);
+    const s = this.ownerDocument.getSelection(); s.removeAllRanges(); s.addRange(r); return true; }
   return false;
 }`;
+
+/** Focus is past what the page can reach: a cross-origin frame, or a closed shadow root (which only
+ *  the debugger can see). Only there is select-all-by-keyboard the way to clear the field. */
+async function focusIsOutOfReach(tabId, objectId) {
+  const { node } = await send(tabId, 'DOM.describeNode', { objectId, depth: 1, pierce: true });
+  return node.nodeName === 'IFRAME' || node.nodeName === 'FRAME' || (node.shadowRoots ?? []).some((r) => r.shadowRootType === 'closed');
+}
 
 async function type(tabId, args) {
   const text = String(args.text ?? '');
@@ -402,14 +420,17 @@ async function type(tabId, args) {
   }
   let notCleared = false;
   if (args.clear !== false && objectId) {
-    const { result } = await send(tabId, 'Runtime.callFunctionOn', { objectId, functionDeclaration: SELECT_ALL, returnByValue: true });
-    // Focus inside an iframe: the page sees only the <iframe> element, and a cross-origin one can't
-    // be reached from here. Select all with the keyboard instead, which goes to whatever has focus.
+    const deepest = (await send(tabId, 'Runtime.callFunctionOn', { objectId, functionDeclaration: DEEPEST_FOCUS })).result.objectId ?? objectId;
+    const { result } = await send(tabId, 'Runtime.callFunctionOn', { objectId: deepest, functionDeclaration: SELECT_ALL, returnByValue: true });
+    let selected = result.value === true;
+    // Out of the page's reach: select all with the keyboard, which goes to whatever has focus.
     // Only then: on a list row or a button, Mod+A could select every item and Delete remove them.
-    if (result.value === 'inner') await press(tabId, 'Mod+A');
-    if (result.value === true || result.value === 'inner') {
-      if (!text) await press(tabId, 'Delete');
-    } else notCleared = true;
+    if (!selected && (await focusIsOutOfReach(tabId, deepest).catch(() => false))) {
+      await press(tabId, 'Mod+A');
+      selected = true;
+    }
+    if (!selected) notCleared = true;
+    else if (!text) await press(tabId, 'Delete');
   }
   if (text) await send(tabId, 'Input.insertText', { text });
   if (args.submit) {
@@ -418,7 +439,7 @@ async function type(tabId, args) {
   }
   return {
     typed: true,
-    ...(notCleared ? { note: "That element isn't a text field, so nothing was cleared; the text went where the caret was." } : {}),
+    ...(notCleared ? { note: "What has focus isn't a text field, so nothing was cleared, and the text may have gone nowhere: take a snapshot to check." } : {}),
     ...(await tabInfo(tabId)),
   };
 }
