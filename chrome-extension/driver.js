@@ -374,13 +374,14 @@ async function press(tabId, combo) {
   await send(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', ...base });
 }
 
-/** The element that really has focus: through open shadow roots and same-origin frames. Stops at
- *  a cross-origin frame or a closed shadow root, which the page can't see into. */
+/** The element that really has focus: through open shadow roots and same-origin frames (into an
+ *  editable body too: a rich-text editor's frame keeps focus on its body). Stops at a cross-origin
+ *  frame or a closed shadow root, which the page can't see into. */
 const DEEPEST_FOCUS = `function () {
   let el = this;
   for (;;) {
     const inner = el.shadowRoot ? el.shadowRoot.activeElement
-      : (el.tagName === 'IFRAME' || el.tagName === 'FRAME') ? (() => { try { const d = el.contentDocument; return d && d.activeElement !== d.body ? d.activeElement : null; } catch { return null; } })()
+      : (el.tagName === 'IFRAME' || el.tagName === 'FRAME') ? (() => { try { const d = el.contentDocument; return d && (d.activeElement !== d.body || d.body?.isContentEditable) ? d.activeElement : null; } catch { return null; } })()
       : null;
     if (!inner) return el;
     el = inner;
@@ -399,7 +400,16 @@ const SELECT_ALL = `function () {
  *  the debugger can see). Only there is select-all-by-keyboard the way to clear the field. */
 async function focusIsOutOfReach(tabId, objectId) {
   const { node } = await send(tabId, 'DOM.describeNode', { objectId, depth: 1, pierce: true });
-  return node.nodeName === 'IFRAME' || node.nodeName === 'FRAME' || (node.shadowRoots ?? []).some((r) => r.shadowRootType === 'closed');
+  if (node.nodeName === 'IFRAME' || node.nodeName === 'FRAME') {
+    // A frame the walk could read but stopped at has nothing focused inside: typing goes nowhere.
+    const { result } = await send(tabId, 'Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: 'function () { try { return !this.contentDocument; } catch { return true; } }',
+      returnByValue: true,
+    });
+    return result.value === true;
+  }
+  return (node.shadowRoots ?? []).some((r) => r.shadowRootType === 'closed');
 }
 
 async function type(tabId, args) {
