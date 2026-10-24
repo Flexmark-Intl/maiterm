@@ -5,7 +5,8 @@
 
 use super::paths::HivePaths;
 use super::record::Hive;
-use super::ROLE_COORDINATOR;
+use super::worker::WorkerRecord;
+use super::{ROLE_COORDINATOR, ROLE_WORKER};
 
 /// Claude shows only a preview of SessionStart context past 10,000 characters; the rules go
 /// first and stay well under the 2,000-character preview.
@@ -23,15 +24,38 @@ fn shell_safe(s: &str, max: usize) -> String {
     out
 }
 
+const TITLE_IN_RULES: usize = 120;
+
 /// The rules that must survive every compaction: who the agent is, how it asks, what it may
-/// never do, and where the rest is.
-pub fn invariant_rules(hive: &Hive, role: &str, paths: &HivePaths) -> String {
+/// never do, and where the rest is. A worker's need its record (`worker`), which names its
+/// brief; without one it gets only what every Hive agent is told.
+pub fn invariant_rules(hive: &Hive, role: &str, paths: &HivePaths, worker: Option<&WorkerRecord>) -> String {
     let goal = shell_safe(&hive.goal, GOAL_IN_RULES);
     // Paths verbatim: a path changed to be echo-safe would name a folder that isn't there.
     let home = paths.coordinator_home().to_string_lossy().to_string();
     let memory = paths.memory().to_string_lossy().to_string();
     let brief = paths.coordinator_brief().to_string_lossy().to_string();
     let mut out = String::new();
+    if let Some(w) = worker.filter(|_| role == ROLE_WORKER) {
+        // The title is the coordinator's words: made echo-safe and capped like the goal.
+        out.push_str(&format!(
+            "You are worker {} ({}) in a maiTerm Hive, in the {} role. The Hive\u{2019}s goal: {goal}. Before anything else, \
+             read {}: it holds your task, your role, your folders and your human\u{2019}s Instructions. You write only in \
+             your own worktrees and your scratch folder ({}); commit your work on your branch as you go. When you need a \
+             decision or something you can\u{2019}t do, block your task with a blocker: it goes to your coordinator, not to \
+             your human; never use AskUserQuestion. Report with hiveReport: done is refused without receipts (commits on \
+             your branch, or files in your folders). Temp is shared with every other sandboxed session: make files with \
+             mktemp -p \"$TMPDIR\" and keep nothing there that matters. No agent in a Hive pushes, changes git remotes or \
+             merges pull requests: maiTerm refuses those, and only maiTerm pushes landed work. A tool you need that is \
+             missing is a question for your coordinator, never something to mock or substitute.",
+            w.badge,
+            shell_safe(&w.title, TITLE_IN_RULES),
+            shell_safe(&w.role, 40),
+            paths.worker_brief(&w.slug).display(),
+            paths.worker_scratch(&w.slug).display(),
+        ));
+        return out;
+    }
     if role == ROLE_COORDINATOR {
         out.push_str(&format!(
             "You are the coordinator of a maiTerm Hive. Its goal: {goal}. You plan, start workers, review, land and curate; \
@@ -112,6 +136,77 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths) -> String {
     b
 }
 
+/// A worker's `scratch/brief.md`, rewritten on every launch (§6.3, §7.1, §7.7): the goal, its
+/// task as the coordinator briefed it, its role's whole body, each folder with what it is to this
+/// worker, the rules every worker works by, and the Hive's Instructions whole.
+pub fn worker_brief_md(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, task_brief: &str) -> String {
+    let mut b = String::from("# Your task in this Hive\n\nmaiTerm writes this file on every launch; edits to it don't last.\n\n");
+    b.push_str(&format!("## The Hive's goal\n\n{}\n\n", hive.goal.trim()));
+    b.push_str(&format!("## Your task: {}\n\nYou are worker {} in this Hive. Your coordinator's brief:\n\n", w.title.trim(), w.badge));
+    b.push_str(if task_brief.trim().is_empty() { "(The coordinator gave no brief beyond the title.)" } else { task_brief.trim() });
+    b.push_str("\n\n");
+    match super::roles::role(&w.role) {
+        Some(r) => b.push_str(&format!("## Your role: {}\n\n{}\n\n", r.name, r.body)),
+        None => b.push_str(&format!("## Your role: {}\n\nThis role isn't in maiTerm's catalogue, so it has no text here. Work from the brief.\n\n", w.role)),
+    }
+
+    b.push_str("## Folders\n\n");
+    let cwd = w.cwd(paths);
+    for f in &w.folders {
+        let line = match (&f.worktree, &f.branch) {
+            (Some(wt), branch) => {
+                let lands = f.target.as_deref().unwrap_or("its Base");
+                let branch = branch.as_deref().unwrap_or("its own branch");
+                if std::path::Path::new(wt) == cwd {
+                    format!("- **{}** (git, your worktree and working directory, lands to {lands}): `{wt}`, on branch `{branch}`.\n", f.name)
+                } else {
+                    format!(
+                        "- **{}** (git, your worktree, lands to {lands}): `{wt}`, on branch `{branch}`. Run git here with `git -C {wt} …`: \
+                         `cd {wt} && git …` is refused.\n",
+                        f.name
+                    )
+                }
+            }
+            (None, _) => {
+                let path = hive.folders.iter().find(|h| h.name == f.name).map(|h| h.path.as_str()).unwrap_or("(no longer in the Hive)");
+                format!("- **{}** (plain, read-only): `{path}`. Nothing you make goes here; maiTerm delivers results.\n", f.name)
+            }
+        };
+        b.push_str(&line);
+    }
+    b.push_str(&format!(
+        "- **scratch** (yours): `{}`. Drafts, renders, downloads, notes: anything that isn't the repo's.\n\nThe gallery \
+         (`{}`) holds the Hive's results and is read-only to you. Temp is shared with every other sandboxed session, every \
+         other worker's included: make files with `mktemp -p \"$TMPDIR\"` (plain `mktemp` fails in the sandbox), keep nothing \
+         there that matters, and don't trust what you find there.\n\n",
+        paths.worker_scratch(&w.slug).display(),
+        paths.gallery().display()
+    ));
+
+    b.push_str(
+        "## How you work\n\n\
+         - Commit your work on your branch as you go, with messages that say why. Nobody pushes: maiTerm lands reviewed \
+         work.\n\
+         - Shared files have one owner. Lockfiles, manifests and files every task touches (`package-lock.json`, \
+         `Cargo.lock`, a routes table) belong to one worker at a time, as your coordinator assigns. If you need a change in \
+         one you don't own, say so in your report instead of making it.\n\
+         - When something is missing or you need a decision, block your task with a blocker. It goes to your coordinator, \
+         who answers or asks your human. Never substitute or mock a missing tool, file or service.\n\
+         - The sandbox refuses network hosts and folders outside your own. A refusal is a blocker to report, never \
+         something to work around.\n\
+         - Report with `hiveReport`: `status` done, blocked or failed, a `summary`, and for done the `receipts` maiTerm \
+         checks: `commits` (shas on your branch) and `files` (paths in your folders). A done report without receipts is \
+         refused.\n",
+    );
+    if !hive.tools.is_empty() {
+        b.push_str(&format!("- Tools this Hive has: {}. A tool that isn\u{2019}t listed isn\u{2019}t there.\n", hive.tools.join(", ")));
+    }
+    if !hive.instructions.trim().is_empty() {
+        b.push_str(&format!("\n## Instructions from your human\n\n{}\n", hive.instructions.trim()));
+    }
+    b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,10 +216,48 @@ mod tests {
         let mut h = crate::hive::launch::tests::sample_hive();
         h.goal = "x".repeat(16_000);
         let long = HivePaths::new(format!("/Users/{}/Library/Application Support/com.aiterm.app/hive/0b6f1d2e-0000-4000-8000-000000000000", "u".repeat(60)));
-        for role in [ROLE_COORDINATOR, crate::hive::ROLE_WORKER] {
-            let r = invariant_rules(&h, role, &long);
+        let (_, _, mut w) = crate::hive::launch::tests::sample_worker_hive();
+        w.title = "t".repeat(16_000);
+        w.slug = "s".repeat(100);
+        for (role, worker) in [(ROLE_COORDINATOR, None), (ROLE_WORKER, None), (ROLE_WORKER, Some(&w))] {
+            let r = invariant_rules(&h, role, &long, worker);
             assert!(r.chars().count() < INVARIANT_CAP, "{} chars for {role}", r.chars().count());
         }
+    }
+
+    #[test]
+    fn a_workers_rules_name_its_brief_and_its_coordinator_and_are_echo_safe() {
+        let (mut h, p, mut w) = crate::hive::launch::tests::sample_worker_hive();
+        h.goal = "Don\u{27}t break\\n the build".into();
+        w.title = "Fix the user\u{27}s `login`\nflow".into();
+        let r = invariant_rules(&h, ROLE_WORKER, &p, Some(&w));
+        assert!(!r.contains('\'') && !r.contains('\\') && !r.chars().any(|c| c.is_control()), "{r}");
+        assert!(r.contains(&*p.worker_brief("auth").to_string_lossy()), "{r}");
+        assert!(r.starts_with("You are worker 3 ("));
+        for must in ["your coordinator, not to your human", "AskUserQuestion", "pushes", "receipts", "mktemp -p"] {
+            assert!(r.contains(must), "{must}: {r}");
+        }
+        assert!(!r.contains("Anything a worker writes"), "that line is the coordinator's");
+    }
+
+    #[test]
+    fn the_worker_brief_has_its_task_role_folders_and_the_instructions() {
+        let (mut h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        h.instructions = "Use the house style.\n".repeat(800);
+        let b = worker_brief_md(&h, &p, &w, "Add refresh tokens to /auth.");
+        assert!(b.contains("## Your task: Auth tokens") && b.contains("Add refresh tokens to /auth."));
+        assert!(b.contains("## Your role: backend") && b.contains(&crate::hive::roles::role("backend").unwrap().body));
+        let web = p.worker_worktree("auth", "web").to_string_lossy().to_string();
+        let api = p.worker_worktree("auth", "api").to_string_lossy().to_string();
+        assert!(b.contains(&format!("**web** (git, your worktree and working directory, lands to main): `{web}`, on branch `hive/ship-it--auth`")));
+        assert!(b.contains(&format!("Run git here with `git -C {api} …`")), "a secondary repo is committed with -C");
+        assert!(!b.contains(&format!("`git -C {web}")), "not the cwd's");
+        assert!(b.contains("**brand** (plain, read-only): `/r/brand assets`"));
+        assert!(b.contains("mktemp -p \"$TMPDIR\"") && b.contains("one owner") && b.contains("hiveReport"));
+        assert!(b.contains(h.instructions.trim()), "never truncated");
+        assert!(b.find("## How you work") < b.find("## Instructions from your human"), "the human's words come last");
+        let unknown = worker_brief_md(&h, &p, &crate::hive::worker::WorkerRecord { role: "wizard".into(), ..w }, "");
+        assert!(unknown.contains("isn't in maiTerm's catalogue") && unknown.contains("no brief beyond the title"));
     }
 
     #[test]
@@ -132,7 +265,7 @@ mod tests {
         let mut h = crate::hive::launch::tests::sample_hive();
         h.goal = "Don\u{27}t break\\n the\nbuild".into();
         let p = crate::hive::launch::tests::sample_paths();
-        let r = invariant_rules(&h, ROLE_COORDINATOR, &p);
+        let r = invariant_rules(&h, ROLE_COORDINATOR, &p, None);
         assert!(!r.contains('\'') && !r.contains('\\') && !r.chars().any(|c| c.is_control()), "{r}");
         assert!(r.contains(&*p.coordinator_brief().to_string_lossy()));
         assert!(r.contains("blocker") && r.contains("pushes"));

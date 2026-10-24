@@ -23,6 +23,9 @@ pub const PHASE_BLOCKED: &str = "blocked";
 pub const PHASE_REPORTED: &str = "reported";
 pub const PHASE_FAILED: &str = "failed";
 pub const PHASE_STOPPED: &str = "stopped";
+
+pub const CARGO_TARGET_OWN: &str = "own";
+pub const CARGO_TARGET_NONE: &str = "none";
 /// The phases that hold a slot under the cap (§3.1). Reported counts until the worker lands or
 /// is stopped; waiting holds none.
 pub const LIVE_PHASES: [&str; 4] = [PHASE_LAUNCHING, PHASE_RUNNING, PHASE_BLOCKED, PHASE_REPORTED];
@@ -54,6 +57,10 @@ pub struct WorkerRecord {
     pub setup_done: bool,
     /// The next launch starts a new session instead of resuming (`hiveRestartWorker` fresh).
     pub fresh_next: bool,
+    /// `"own"` (its `CARGO_TARGET_DIR` under `wt.noindex/`) | `"none"` | `""` (not decided yet).
+    /// Decided once, at its first launch: re-probed each time, a human's `cargo build` or
+    /// `cargo clean` would move its builds between relaunches and lose the warm target (§6.5).
+    pub cargo_target: String,
     pub last_report: Option<WorkerReport>,
     /// Sandbox refusals already turned into a blocker, so a retry doesn't file another.
     pub violations_seen: Vec<String>,
@@ -81,6 +88,7 @@ impl Default for WorkerRecord {
             wait_reason: None,
             setup_done: false,
             fresh_next: false,
+            cargo_target: String::new(),
             last_report: None,
             violations_seen: Vec::new(),
             created_at: String::new(),
@@ -97,6 +105,11 @@ impl WorkerRecord {
 
     pub fn git_folders(&self) -> impl Iterator<Item = &WorkerFolder> {
         self.folders.iter().filter(|f| f.worktree.is_some())
+    }
+
+    /// Where it works (§6.3): the worktree of its first git folder, or its `scratch/`.
+    pub fn cwd(&self, paths: &HivePaths) -> PathBuf {
+        self.git_folders().find_map(|f| f.worktree.as_ref()).map(PathBuf::from).unwrap_or_else(|| paths.worker_scratch(&self.slug))
     }
 }
 
@@ -165,6 +178,20 @@ pub fn read_worker(task_dir: &Path) -> Result<WorkerRecord, String> {
 
 pub fn write_worker(task_dir: &Path, w: &WorkerRecord) -> Result<(), String> {
     super::launch::write_json(&task_dir.join(WORKER_FILE), &serde_json::to_value(w).map_err(|e| e.to_string())?)
+}
+
+static UPDATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Read, change and write one record under one lock, so a session start and a spawn or report
+/// never write over each other's change. `f` answers whether it changed anything; nothing is
+/// written when it didn't. Returns the record as it now is.
+pub fn update_worker(task_dir: &Path, f: impl FnOnce(&mut WorkerRecord) -> bool) -> Result<WorkerRecord, String> {
+    let _held = UPDATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut w = read_worker(task_dir)?;
+    if f(&mut w) {
+        write_worker(task_dir, &w)?;
+    }
+    Ok(w)
 }
 
 /// Every worker of the Hive, by badge. A record that doesn't load, or claims a task other than

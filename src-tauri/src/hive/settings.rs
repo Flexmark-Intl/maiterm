@@ -15,9 +15,10 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use super::launch::{sh_quote, LaunchRecord};
-use super::paths::{hive_bin_dir, HivePaths};
+use super::paths::{hive_bin_dir, is_component, HivePaths, COORDINATOR_SLUG, LAND_SLUG, RESERVED_SLUGS};
 use super::record::Hive;
-use super::ROLE_COORDINATOR;
+use super::worker::{list_workers, WorkerFolder, WorkerRecord};
+use super::{ROLE_COORDINATOR, ROLE_WORKER};
 
 /// The hook script, bundled at build time; `install_hook` writes it beside the port file.
 pub const HOOK_SCRIPT: &str = include_str!("../../resources/hive/maiterm-hive-hook.sh");
@@ -129,6 +130,8 @@ pub const ESCAPE_MCP_TOOLS: &[&str] = &[
     "startStack",
     "saveDocument",
     "openFile",
+    // Writes the whole state, every tab's scrollback and the comms token, to any folder.
+    "createBackup",
     "browserNavigate",
     "browserClick",
     "browserType",
@@ -148,6 +151,45 @@ pub const ESCAPE_MCP_TOOLS: &[&str] = &[
     "restartMaiterm",
     "addMcpServer",
 ];
+
+/// Denied to every worker on top of `ESCAPE_MCP_TOOLS`: stopping what others run, the Overlord's
+/// channel, a tab restore (it replays a stored launch), reads of other tabs' output and of
+/// maiTerm's own logs and diagnostics (the human's terminals, outside the sandbox), and the
+/// coordinator's own tools (`coordinator_only_mcp_tools`). Rust refuses these too, by
+/// `hive_role` (§7.2). Auto mode has no allow list, so this is a worker's only static bound on
+/// maiTerm's tools: a new tool that acts outside the sandbox goes here or on `ESCAPE_MCP_TOOLS`.
+const WORKER_EXTRA_DENIED_MCP_TOOLS: &[&str] = &[
+    "stopService",
+    "stopStack",
+    "replyToOverlord",
+    "restoreArchivedTab",
+    "getTabContext",
+    "getServiceOutput",
+    "getTabPrompt",
+    "readLogs",
+    "getDiagnostics",
+    "readCommsChannel",
+    "readCommsThread",
+];
+
+/// The hive and gallery tools only a coordinator holds.
+pub fn coordinator_only_mcp_tools() -> impl Iterator<Item = &'static str> {
+    COORDINATOR_MCP_TOOLS.iter().copied().filter(|t| t.starts_with("hive") || *t == "galleryDeliver")
+}
+
+pub fn worker_denied_mcp_tools() -> Vec<&'static str> {
+    ESCAPE_MCP_TOOLS.iter().chain(WORKER_EXTRA_DENIED_MCP_TOOLS).copied().chain(coordinator_only_mcp_tools()).collect()
+}
+
+/// The package registries a worker's sandbox reaches (§14.16). Generator hosts join with the
+/// gallery (step 8).
+pub const PACKAGE_REGISTRIES: &[&str] =
+    &["registry.npmjs.org", "crates.io", "index.crates.io", "static.crates.io", "pypi.org", "files.pythonhosted.org"];
+
+/// Git verbs a worker's rules allow without the auto-mode classifier, each in its `-C` form for
+/// a secondary repo (§6.3) and with a bare twin: a trailing ` *` is optional only in a pattern
+/// with no other wildcard (the 3e probe).
+const WORKER_GIT_VERBS: &[&str] = &["status", "diff", "log", "show", "add", "commit"];
 
 /// Where the hooks find their script, and which recent events to install.
 #[derive(Debug, Clone)]
@@ -241,10 +283,11 @@ pub fn hive_hooks(script: &Path, known_newer: &[&str]) -> Value {
     Value::Object(hooks)
 }
 
-/// The `--settings` file for one launch. Coordinator only until workers arrive (build step 4).
+/// The coordinator's `--settings` file. A worker's is `worker_settings_json`, which needs its
+/// `worker.json` and what surrounds it.
 pub fn hive_settings_json(hive: &Hive, record: &LaunchRecord, paths: &HivePaths, hooks: &HookEnv) -> Result<Value, String> {
     if record.role != ROLE_COORDINATOR {
-        return Err(format!("No settings for a Hive \"{}\" yet", record.role));
+        return Err(format!("No coordinator settings for a Hive \"{}\"", record.role));
     }
     let home = paths.coordinator_home();
     let deny = deny_write_paths(hive, paths, &hooks.bin_dir);
@@ -291,6 +334,304 @@ pub fn hive_settings_json(hive: &Hive, record: &LaunchRecord, paths: &HivePaths,
         },
         // Absolute, the only kind Claude honours; re-passed on every launch or the first
         // compaction moves memory to the human's per-repo folder (§9, spike 1).
+        "autoMemoryDirectory": path_str(&paths.memory()),
+        "permissions": { "allow": allow, "deny": deny_rules },
+        "hooks": hive_hooks(&hooks.script, &hooks.known_newer),
+    }))
+}
+
+/// What a worker's settings need from outside its own record, read at each launch.
+#[derive(Debug, Clone, Default)]
+pub struct WorkerContext {
+    /// Every other worker's folder under `wt.noindex/`, as known at this launch.
+    pub other_workers: Vec<PathBuf>,
+    /// The hosts of the Hive repos' network remotes, which stay unreachable so no agent pushes
+    /// (§7.3): a host allowlist can't tell a fetch from a push.
+    pub remote_hosts: Vec<String>,
+    /// The shared build caches it may write (§6.5).
+    pub caches: Vec<PathBuf>,
+    /// Write/Edit deny rules for the human's checkouts (`checkout_denies`).
+    pub checkout_denies: Vec<DenyPath>,
+}
+
+/// The human's checkouts as Write/Edit deny rules. Claude folds an Edit deny rule into the
+/// sandbox's write denials (the 4b probe: `Edit(//<checkout>/**)` refused the commit's
+/// `.git/worktrees/<N>/index.lock`), so a checkout holding a `.git` the worker commits into is
+/// denied entry by entry (`deny_around`), leaving that `.git` to the per-file allowWrite and
+/// denyWrite. That covers a checkout it has a worktree of and one a nested repo it works sits
+/// in. An entry made after this launch is still refused by the sandbox (outside every writable
+/// path) and by the gate, which reads the real path; any other checkout is denied whole. Blocks
+/// on the disk.
+pub fn checkout_denies(hive: &Hive, w: &WorkerRecord) -> Vec<DenyPath> {
+    let keep = git_keep(w);
+    let mut out: Vec<DenyPath> = Vec::new();
+    for f in hive.git_folders() {
+        deny_around(Path::new(&f.path), true, &keep, &mut out);
+    }
+    out
+}
+
+/// What a worker's commits write in the human's repos: each one's `.git` (its config, hooks
+/// and info are denied by name) and admin dir, and its worktrees.
+fn git_keep(w: &WorkerRecord) -> Vec<PathBuf> {
+    w.git_folders().flat_map(|f| [&f.common_dir, &f.admin_dir, &f.worktree]).flatten().map(PathBuf::from).collect()
+}
+
+/// `path` as deny entries that leave every `keep` path out: whole when none is inside it, else
+/// its entries one by one, descending only toward a kept path, so a Hive folder nested in
+/// another (or a local remote that is one) never takes the `.git` a commit writes. Nothing for
+/// a path inside a kept one. A symlink's entry names the link; its target is outside every
+/// writable path anyway. Blocks on the disk.
+fn deny_around(path: &Path, dir: bool, keep: &[PathBuf], out: &mut Vec<DenyPath>) {
+    if keep.iter().any(|k| path.starts_with(k)) {
+        return;
+    }
+    if !dir || !keep.iter().any(|k| k.starts_with(path)) {
+        if !out.iter().any(|d| d.path == path) {
+            out.push(DenyPath { path: path.to_path_buf(), dir });
+        }
+        return;
+    }
+    let Ok(rd) = fs::read_dir(path) else {
+        log::warn!("hive: {} can't be listed; its Write/Edit rules are left to the sandbox and the gate", path.display());
+        return;
+    };
+    let mut entries: Vec<(PathBuf, bool)> = rd.flatten().map(|e| (e.path(), e.file_type().is_ok_and(|t| t.is_dir()))).collect();
+    entries.sort();
+    for (p, d) in entries {
+        deny_around(&p, d, keep, out);
+    }
+}
+
+impl WorkerContext {
+    /// Blocks on the disk and git.
+    pub fn gather(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> Self {
+        let other_workers = list_workers(paths)
+            .into_iter()
+            .filter(|o| o.task_id != w.task_id && o.slug != w.slug && is_component(&o.slug) && !RESERVED_SLUGS.contains(&o.slug.as_str()))
+            .map(|o| paths.worker_dir(&o.slug))
+            .collect();
+        let mut remote_hosts: Vec<String> = Vec::new();
+        for f in hive.git_folders() {
+            for host in remote_urls(Path::new(&f.path)).iter().filter_map(|u| url_host(u)) {
+                if !remote_hosts.contains(&host) {
+                    remote_hosts.push(host);
+                }
+            }
+        }
+        Self { other_workers, remote_hosts, caches: shared_caches(), checkout_denies: checkout_denies(hive, w) }
+    }
+}
+
+/// Every fetch and push url of a repo's remotes. None at all is git's exit 1.
+fn remote_urls(repo: &Path) -> Vec<String> {
+    let mut cmd = super::git::git_in(repo);
+    cmd.args(["config", "--get-regexp", r"^remote\..*\.(push)?url$"]);
+    match super::git::run(&mut cmd, super::git::QUERY_TIMEOUT) {
+        Ok(out) => out.lines().filter_map(|l| l.split_once(' ').map(|(_, v)| v.trim().to_string())).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The host a git remote url names, lowercased; None for a local path or `file://`.
+pub fn url_host(url: &str) -> Option<String> {
+    let url = url.trim();
+    let authority = match url.split_once("://") {
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("file") => return None,
+        Some((_, rest)) => rest.split('/').next()?,
+        // scp-like `[user@]host:path`; a colon after a slash belongs to a path.
+        None => url.split_once(':').map(|(h, _)| h).filter(|h| !h.contains('/'))?,
+    };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next()?,
+        None => host.split(':').next()?,
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// The shared caches a build writes outside the worker's folders (§6.5): cargo's registry and
+/// git checkouts with the lock files cargo takes beside them (never all of `~/.cargo`, whose
+/// `bin/` is on the human's PATH), npm's cache and sccache's. A residual channel, like the
+/// shared object store: what a worker writes there, other workers and the human's builds read.
+pub fn shared_caches() -> Vec<PathBuf> {
+    let Some(home) = dirs::home_dir() else { return Vec::new() };
+    let env_dir = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let cargo = env_dir("CARGO_HOME").unwrap_or_else(|| home.join(".cargo"));
+    let mut out: Vec<PathBuf> = ["registry", "git", ".package-cache", ".package-cache-mutate", ".global-cache"].iter().map(|p| cargo.join(p)).collect();
+    out.push(env_dir("npm_config_cache").unwrap_or_else(|| home.join(".npm")));
+    let sccache_default = || dirs::cache_dir().map(|c| c.join(if cfg!(target_os = "macos") { "Mozilla.sccache" } else { "sccache" }));
+    out.extend(env_dir("SCCACHE_DIR").or_else(sccache_default));
+    out
+}
+
+fn git_dirs_of(w: &WorkerRecord, f: &WorkerFolder) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+    match (&f.worktree, &f.common_dir, &f.admin_dir) {
+        (Some(wt), Some(common), Some(admin)) => Ok((PathBuf::from(wt), PathBuf::from(common), PathBuf::from(admin))),
+        _ => Err(format!("Worker {}'s record doesn't name the git folders of \"{}\", so its sandbox can't be drawn", w.slug, f.name)),
+    }
+}
+
+/// A worker's `denyWrite` (§6.7, §14.16), each path mirrored by Write/Edit deny rules: in each
+/// of its repos the git files that would have git run a command or look elsewhere, the project
+/// settings Claude would load unseen, the other agents' folders and the Hive's Rust-owned ones,
+/// the hook script's folder, every local-path remote, and the plain folders (read-only inputs,
+/// §6.1). The human's checkouts are not here: whole, they'd take the `.git` entries a commit
+/// needs; they get Write/Edit rules only.
+pub fn worker_deny_write_paths(hive: &Hive, w: &WorkerRecord, paths: &HivePaths, ctx: &WorkerContext, bin_dir: &Path) -> Result<Vec<DenyPath>, String> {
+    let mut out: Vec<DenyPath> = Vec::new();
+    let mut add = |path: PathBuf, dir: bool| {
+        if !out.iter().any(|d| d.path == path) {
+            out.push(DenyPath { path, dir });
+        }
+    };
+    for f in w.git_folders() {
+        let (wt, common, admin) = git_dirs_of(w, f)?;
+        add(common.join("config"), false);
+        add(common.join("hooks"), true);
+        add(common.join("info"), true);
+        for file in ["commondir", "gitdir", "config.worktree"] {
+            add(admin.join(file), false);
+        }
+        // Rewritten, the worktree's `.git` would point Claude's own git, which runs outside the
+        // sandbox, at a repo (and a config) the worker made.
+        add(wt.join(".git"), false);
+        add(wt.join(".claude"), true);
+        add(wt.join(".mcp.json"), false);
+    }
+    // A scratch-only worker's cwd: a repo made here would be the one Claude's own git reads.
+    let scratch = paths.worker_scratch(&w.slug);
+    add(scratch.join(".git"), true);
+    add(scratch.join(".claude"), true);
+    add(scratch.join(".mcp.json"), false);
+    add(paths.worktrees().join(COORDINATOR_SLUG), true);
+    add(paths.worktrees().join(LAND_SLUG), true);
+    for o in &ctx.other_workers {
+        add(o.clone(), true);
+    }
+    add(paths.gallery(), true);
+    add(paths.tasks(), true);
+    add(paths.logs(), true);
+    add(paths.precedents(), true);
+    add(bin_dir.to_path_buf(), true);
+    // Folders that may hold a repo this worker commits into, or its own folders and caches (a
+    // plain folder of `~`): split around them rather than denied over them.
+    let mut keep = git_keep(w);
+    keep.push(paths.worker_dir(&w.slug));
+    keep.extend(ctx.caches.iter().cloned());
+    for f in &hive.folders {
+        for r in &f.local_remotes {
+            deny_around(Path::new(r), true, &keep, &mut out);
+        }
+        if !f.is_git() {
+            deny_around(Path::new(&f.path), true, &keep, &mut out);
+        }
+    }
+    Ok(out)
+}
+
+/// A worker's `--settings` file (§6.7, §14.16): the sandbox with its write lists derived from
+/// `worker.json`, the registries and nothing else on the network, the Hive's memory folder,
+/// deny rules mirroring `denyWrite` plus the human's checkouts, the push and git-option denies
+/// every Hive agent has, the maiTerm tools no worker may call, and the same command hooks.
+pub fn worker_settings_json(hive: &Hive, record: &LaunchRecord, w: &WorkerRecord, paths: &HivePaths, ctx: &WorkerContext, hooks: &HookEnv) -> Result<Value, String> {
+    if record.role != ROLE_WORKER {
+        return Err(format!("No worker settings for a Hive \"{}\"", record.role));
+    }
+    let deny = worker_deny_write_paths(hive, w, paths, ctx, &hooks.bin_dir)?;
+    let cwd = PathBuf::from(&record.cwd);
+    let mcp = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
+    let path_str = |p: &Path| p.to_string_lossy().to_string();
+
+    // The cwd is writable already; everything else it writes is named (spike 10 re-run). For a
+    // linked worktree that is its own corner of the main repo's `.git`: per-file branch entries,
+    // never `refs/heads/` (it would move Base or another worker's branch) or `packed-refs`.
+    let mut allow_write: Vec<String> = Vec::new();
+    let mut own: Vec<PathBuf> = vec![paths.worker_scratch(&w.slug)];
+    {
+        let mut aw = |p: PathBuf| {
+            let s = path_str(&p);
+            if !allow_write.contains(&s) {
+                allow_write.push(s);
+            }
+        };
+        for f in w.git_folders() {
+            let (wt, common, admin) = git_dirs_of(w, f)?;
+            if wt != cwd {
+                aw(wt.clone());
+            }
+            own.push(wt);
+            aw(admin);
+            aw(common.join("objects"));
+            if let Some(b) = f.branch.as_deref() {
+                let r = common.join("refs").join("heads").join(b);
+                aw(PathBuf::from(format!("{}.lock", r.to_string_lossy())));
+                aw(r);
+                aw(common.join("logs").join("refs").join("heads").join(b));
+            }
+        }
+        aw(paths.worker_scratch(&w.slug));
+        aw(paths.worker_tmp(&w.slug));
+        aw(paths.worker_cargo_target(&w.slug));
+        for c in &ctx.caches {
+            aw(c.clone());
+        }
+    }
+
+    let mut allow: Vec<String> = Vec::new();
+    for verb in WORKER_GIT_VERBS {
+        allow.push(format!("Bash(git {verb} *)"));
+        allow.push(format!("Bash(git -C * {verb})"));
+        allow.push(format!("Bash(git -C * {verb} *)"));
+    }
+    for d in &own {
+        allow.push(abs_rule("Write", d, true));
+        allow.push(abs_rule("Edit", d, true));
+    }
+
+    let mut deny_rules: Vec<String> = record.disallowed_tools.clone();
+    deny_rules.extend(PUSH_DENIES.iter().chain(GIT_ESCAPE_DENIES).map(|s| s.to_string()));
+    deny_rules.extend(worker_denied_mcp_tools().iter().map(|t| format!("mcp__{mcp}__{t}")));
+    for d in &deny {
+        deny_rules.push(abs_rule("Write", &d.path, d.dir));
+        deny_rules.push(abs_rule("Edit", &d.path, d.dir));
+    }
+    for d in &ctx.checkout_denies {
+        deny_rules.push(abs_rule("Write", &d.path, d.dir));
+        deny_rules.push(abs_rule("Edit", &d.path, d.dir));
+    }
+
+    let domains: Vec<&str> = PACKAGE_REGISTRIES.iter().copied().filter(|d| !ctx.remote_hosts.iter().any(|h| h.eq_ignore_ascii_case(d))).collect();
+    Ok(json!({
+        "sandbox": {
+            "enabled": true,
+            "failIfUnavailable": true,
+            "allowUnsandboxedCommands": false,
+            // `autoAllowBashIfSandboxed` keeps its default: a worker's Bash runs freely, inside.
+            // Never `excludedCommands`. Each switch that weakens the sandbox is pinned off rather
+            // than left unset, so no other settings file can turn it on: `allowLocalBinding`
+            // opens every local port, maiTerm's MCP included (§6.7).
+            "allowAppleEvents": false,
+            "allowNestedUserNamespaces": false,
+            "enableWeakerNestedSandbox": false,
+            "enableWeakerNetworkIsolation": false,
+            "filesystem": {
+                "allowWrite": allow_write,
+                "denyWrite": deny.iter().map(|d| path_str(&d.path)).collect::<Vec<_>>(),
+                "disabled": false,
+            },
+            "network": {
+                "allowedDomains": domains,
+                "strictAllowlist": true,
+                "allowLocalBinding": false,
+                "allowAllUnixSockets": false,
+                // Blocked even if another source allows them: no remote is reachable, so no
+                // agent pushes (§7.3).
+                "deniedDomains": ctx.remote_hosts,
+            },
+        },
+        // Every Hive hook is the gate or maiTerm's observer; nothing may switch them off.
+        "disableAllHooks": false,
         "autoMemoryDirectory": path_str(&paths.memory()),
         "permissions": { "allow": allow, "deny": deny_rules },
         "hooks": hive_hooks(&hooks.script, &hooks.known_newer),
@@ -635,11 +976,270 @@ mod tests {
         }
     }
 
+    fn worker_ctx() -> WorkerContext {
+        WorkerContext {
+            other_workers: vec![PathBuf::from("/Users/x/Library/Application Support/com.aiterm.dev/hive/h1/wt.noindex/billing")],
+            remote_hosts: vec!["github.com".into(), "crates.io".into()],
+            caches: vec![PathBuf::from("/Users/x/.cargo/registry"), PathBuf::from("/Users/x/.npm")],
+            checkout_denies: vec![
+                DenyPath { path: PathBuf::from("/r/web/README.md"), dir: false },
+                DenyPath { path: PathBuf::from("/r/web/src"), dir: true },
+                DenyPath { path: PathBuf::from("/r/api/src"), dir: true },
+            ],
+        }
+    }
+
+    fn worker_settings() -> (Value, crate::hive::worker::WorkerRecord) {
+        let (h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        let r = crate::hive::launch::worker_record(&h, &p, &w);
+        (worker_settings_json(&h, &r, &w, &p, &worker_ctx(), &env()).unwrap(), w)
+    }
+
     #[test]
-    fn workers_have_no_settings_yet() {
-        let (h, p) = (crate::hive::launch::tests::sample_hive(), crate::hive::launch::tests::sample_paths());
-        let mut r = coordinator_record(&h, &p);
-        r.role = crate::hive::ROLE_WORKER.into();
-        assert!(hive_settings_json(&h, &r, &p, &env()).is_err());
+    fn each_role_has_only_its_own_settings() {
+        let (h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        let wr = crate::hive::launch::worker_record(&h, &p, &w);
+        assert!(hive_settings_json(&h, &wr, &p, &env()).is_err(), "a worker never gets the coordinator's");
+        assert!(worker_settings_json(&h, &coordinator_record(&h, &p), &w, &p, &worker_ctx(), &env()).is_err());
+        let mut lost = w.clone();
+        lost.folders[1].admin_dir = None;
+        let err = worker_settings_json(&h, &wr, &lost, &p, &worker_ctx(), &env()).unwrap_err();
+        assert!(err.contains("\"api\""), "no git dirs, no sandbox to draw: {err}");
+    }
+
+    #[test]
+    fn the_worker_sandbox_fails_closed_and_opens_no_localhost() {
+        let (s, _) = worker_settings();
+        let sb = &s["sandbox"];
+        assert_eq!(sb["enabled"], true);
+        assert_eq!(sb["failIfUnavailable"], true);
+        assert_eq!(sb["allowUnsandboxedCommands"], false);
+        assert!(sb.get("autoAllowBashIfSandboxed").is_none(), "left at its default for workers");
+        assert!(sb.get("allowLocalBinding").is_none() && sb.get("excludedCommands").is_none());
+        // Pinned off, not left unset: unset, a user or project file could switch them on.
+        for weakener in [&sb["network"]["allowLocalBinding"], &sb["network"]["allowAllUnixSockets"], &sb["allowAppleEvents"], &sb["allowNestedUserNamespaces"], &sb["enableWeakerNestedSandbox"], &sb["enableWeakerNetworkIsolation"], &sb["filesystem"]["disabled"], &s["disableAllHooks"]] {
+            assert_eq!(weakener, &json!(false));
+        }
+        assert_eq!(strings(&sb["network"]["deniedDomains"]), vec!["github.com", "crates.io"], "a remote's host is denied whatever else allows it");
+        assert_eq!(sb["network"]["strictAllowlist"], true);
+        let text = s.to_string();
+        assert!(!text.contains("127.0.0.1") && !text.contains("localhost"), "no localhost anywhere");
+        let domains = strings(&sb["network"]["allowedDomains"]);
+        assert!(domains.contains(&"registry.npmjs.org".to_string()) && domains.contains(&"pypi.org".to_string()));
+        assert!(!domains.contains(&"crates.io".to_string()), "a git remote's host is never allowed: {domains:?}");
+        assert!(!domains.contains(&"github.com".to_string()));
+        let mem = s["autoMemoryDirectory"].as_str().unwrap();
+        assert!(Path::new(mem).is_absolute() && mem.ends_with("/memory"));
+    }
+
+    #[test]
+    fn the_worker_writes_its_own_corner_of_each_repo_and_no_more() {
+        let (s, _) = worker_settings();
+        let p = crate::hive::launch::tests::sample_paths();
+        let allow = strings(&s["sandbox"]["filesystem"]["allowWrite"]);
+        let deny = strings(&s["sandbox"]["filesystem"]["denyWrite"]);
+        let sp = |x: PathBuf| x.to_string_lossy().to_string();
+        for must in [
+            sp(p.worker_worktree("auth", "api")),
+            sp(p.worker_scratch("auth")),
+            sp(p.worker_tmp("auth")),
+            sp(p.worker_cargo_target("auth")),
+            "/r/web/.git/worktrees/web".into(),
+            "/r/web/.git/objects".into(),
+            "/r/web/.git/refs/heads/hive/ship-it--auth".into(),
+            "/r/web/.git/refs/heads/hive/ship-it--auth.lock".into(),
+            "/r/web/.git/logs/refs/heads/hive/ship-it--auth".into(),
+            "/r/api/.git/objects".into(),
+            "/Users/x/.cargo/registry".into(),
+        ] {
+            assert!(allow.contains(&must), "{must} in allowWrite");
+        }
+        assert!(!allow.contains(&sp(p.worker_worktree("auth", "web"))), "the cwd is writable already");
+        for a in &allow {
+            assert!(!a.ends_with("/refs/heads") && !a.ends_with("/refs") && !a.contains("packed-refs"), "per-file branch entries only: {a}");
+        }
+        for must in [
+            "/r/web/.git/config",
+            "/r/web/.git/hooks",
+            "/r/api/.git/info",
+            "/r/api/.git/worktrees/api/commondir",
+            "/r/api/.git/worktrees/api/gitdir",
+            "/r/web/.git/worktrees/web/config.worktree",
+            "/srv/web.git",
+            "/r/brand assets",
+        ] {
+            assert!(deny.contains(&must.to_string()), "{must} in denyWrite");
+        }
+        let wt = p.worker_worktree("auth", "web");
+        for must in [wt.join(".git"), wt.join(".claude"), wt.join(".mcp.json"), p.worker_scratch("auth").join(".claude"), p.worker_scratch("auth").join(".git")] {
+            assert!(deny.contains(&sp(must.clone())), "{}", must.display());
+        }
+        for must in [p.coordinator_worktree("web").parent().unwrap().to_path_buf(), p.worktrees().join("billing"), p.gallery(), p.tasks(), p.logs(), p.precedents(), env().bin_dir] {
+            assert!(deny.contains(&sp(must.clone())), "{}", must.display());
+        }
+        assert!(!deny.iter().any(|d| *d == sp(p.memory())), "memory is written through Claude's own exemption");
+    }
+
+    #[test]
+    fn worker_deny_rules_mirror_deny_write_and_hold_the_human_checkouts() {
+        let (s, _) = worker_settings();
+        let deny_write = strings(&s["sandbox"]["filesystem"]["denyWrite"]);
+        let deny = strings(&s["permissions"]["deny"]);
+        let (h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        let listed = worker_deny_write_paths(&h, &w, &p, &worker_ctx(), &env().bin_dir).unwrap();
+        assert_eq!(listed.len(), deny_write.len());
+        for d in &listed {
+            for tool in ["Write", "Edit"] {
+                assert!(deny.contains(&abs_rule(tool, &d.path, d.dir)), "{tool} rule for {}", d.path.display());
+            }
+        }
+        // The human's checkouts: Write/Edit rules, never on denyWrite, and never over the whole
+        // tree, which Claude folds into the sandbox and so takes the `.git` entries a commit needs.
+        for r in ["Write(//r/web/src/**)", "Edit(//r/web/src/**)", "Write(//r/web/README.md)", "Edit(//r/api/src/**)"] {
+            assert!(deny.contains(&r.to_string()), "{r}");
+        }
+        for checkout in ["/r/web", "/r/api"] {
+            assert!(!deny.iter().any(|r| r.ends_with(&format!("(/{checkout}/**)"))), "no whole-tree rule on {checkout}");
+            assert!(!deny_write.iter().any(|d| d == checkout || d.starts_with(&format!("{checkout}/src"))), "{checkout} is not on denyWrite");
+        }
+        for r in deny.iter().chain(&strings(&s["permissions"]["allow"])) {
+            let inner = r.split_once('(').map(|(_, i)| i.trim_end_matches(')')).unwrap_or("");
+            if r.starts_with("Write(") || r.starts_with("Edit(") {
+                assert!(inner.starts_with("//"), "absolute paths need the // form: {r}");
+            }
+            assert!(!inner.trim_end_matches(":*").contains(":*") && !inner.ends_with(":*"), "{r}");
+        }
+        for r in ["WebFetch", "WebSearch", "Bash(git * push*)", "Bash(git remote*)", "Bash(gh pr merge*)", "Bash(git * -c *)", "Bash(git *--config-env*)", "Bash(git *--no-index*)"] {
+            assert!(deny.contains(&r.to_string()), "{r}");
+        }
+    }
+
+    #[test]
+    fn workers_are_denied_the_tools_that_leave_the_sandbox_or_belong_to_the_coordinator() {
+        let (s, _) = worker_settings();
+        let deny = strings(&s["permissions"]["deny"]);
+        let allow = strings(&s["permissions"]["allow"]);
+        let mcp = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
+        for t in ESCAPE_MCP_TOOLS.iter().chain(&["stopService", "stopStack", "replyToOverlord", "restoreArchivedTab", "hiveSpawnWorker", "hiveLand", "galleryDeliver"]) {
+            assert!(deny.contains(&format!("mcp__{mcp}__{t}")), "{t}");
+        }
+        assert!(!worker_denied_mcp_tools().contains(&"listTasks") && !worker_denied_mcp_tools().contains(&"galleryAdd"));
+        // createBackup writes the whole state, comms token and every tab's scrollback included,
+        // to a folder the worker names; the reads hand it the human's own terminals.
+        for t in ["createBackup", "getTabContext", "getServiceOutput", "getTabPrompt", "readLogs", "getDiagnostics", "readCommsChannel"] {
+            assert!(deny.contains(&format!("mcp__{mcp}__{t}")), "{t}");
+        }
+        assert!(ESCAPE_MCP_TOOLS.contains(&"createBackup"), "the coordinator's too");
+        assert!(!allow.iter().any(|r| r.starts_with("mcp__")), "auto mode: no MCP allow list");
+        // A bare verb has its own rule wherever the pattern holds another wildcard.
+        for r in ["Bash(git -C * commit)", "Bash(git -C * commit *)", "Bash(git commit *)", "Bash(git -C * status)"] {
+            assert!(allow.contains(&r.to_string()), "{r}");
+        }
+        let p = crate::hive::launch::tests::sample_paths();
+        assert!(allow.contains(&abs_rule("Write", &p.worker_worktree("auth", "api"), true)));
+        let web_rules: Vec<_> = s["hooks"]["PreToolUse"].as_array().unwrap().iter().filter(|e| e["matcher"] == GATE_MATCHER).collect();
+        assert_eq!(web_rules.len(), 1, "the same fail-closed gate as the coordinator");
+    }
+
+    #[test]
+    fn a_checkout_with_a_worktree_is_denied_entry_by_entry_and_never_its_git() {
+        let base = std::env::temp_dir().join(format!("hive-checkout-{}", uuid::Uuid::new_v4()));
+        for d in ["web/.git/worktrees/web1", "web/src", "api/src"] {
+            fs::create_dir_all(base.join(d)).unwrap();
+        }
+        fs::write(base.join("web/README.md"), "r").unwrap();
+        let (mut h, _, mut w) = crate::hive::launch::tests::sample_worker_hive();
+        h.folders.iter_mut().find(|f| f.name == "web").unwrap().path = base.join("web").to_string_lossy().to_string();
+        h.folders.iter_mut().find(|f| f.name == "api").unwrap().path = base.join("api").to_string_lossy().to_string();
+        w.folders.retain(|f| f.name != "api");
+        let web = w.folders.iter_mut().find(|f| f.name == "web").unwrap();
+        web.common_dir = Some(base.join("web/.git").to_string_lossy().to_string());
+        web.admin_dir = Some(base.join("web/.git/worktrees/web1").to_string_lossy().to_string());
+        let got = checkout_denies(&h, &w);
+        assert_eq!(
+            got,
+            vec![
+                DenyPath { path: base.join("web/README.md"), dir: false },
+                DenyPath { path: base.join("web/src"), dir: true },
+                DenyPath { path: base.join("api"), dir: true },
+            ],
+            "web's entries but .git; api, which it has no worktree of, whole"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Nothing stops one Hive folder sitting inside another. A whole-folder denial over a `.git`
+    /// the worker commits into fails its commit on `index.lock`, as the whole-checkout Edit rule
+    /// did in the 4b probe, so each is split around that `.git`.
+    #[test]
+    fn a_nested_folder_never_denies_the_git_a_commit_writes() {
+        let base = std::env::temp_dir().join(format!("hive-nested-{}", uuid::Uuid::new_v4()));
+        for d in ["work/app/.git/worktrees/app1", "work/app/src", "work/docs", "app/.git/worktrees/x", "app/src", "app/sdk/.git/worktrees/sdk1", "app/sdk/lib"] {
+            fs::create_dir_all(base.join(d)).unwrap();
+        }
+        fs::write(base.join("work/README.md"), "r").unwrap();
+        let sp = |rel: &str| base.join(rel).to_string_lossy().to_string();
+        let git = |name: &str, path: &str, admin: &str| crate::hive::worker::WorkerFolder {
+            name: name.into(),
+            kind: crate::hive::record::KIND_GIT.into(),
+            worktree: Some(format!("/wt/{name}")),
+            common_dir: Some(sp(&format!("{path}/.git"))),
+            admin_dir: Some(sp(&format!("{path}/.git/worktrees/{admin}"))),
+            ..Default::default()
+        };
+        let folder = |name: &str, rel: &str, kind: &str| crate::hive::record::HiveFolder { name: name.into(), path: sp(rel), kind: kind.into(), ..Default::default() };
+        let p = crate::hive::launch::tests::sample_paths();
+        // What a commit writes: the admin dir's index.lock and the object store.
+        let blocks_commit = |paths: &[PathBuf], repo: &str, admin: &str| {
+            let writes = [base.join(repo).join(".git/worktrees").join(admin).join("index.lock"), base.join(repo).join(".git/objects/ab/cd")];
+            paths.iter().find(|d| writes.iter().any(|x| x.starts_with(d))).cloned()
+        };
+
+        // A plain folder holding a git folder the worker works.
+        let h = crate::hive::record::Hive { id: "h".into(), folders: vec![folder("work", "work", "plain"), folder("app", "work/app", "git")], ..Default::default() };
+        let w = WorkerRecord { slug: "w".into(), folders: vec![git("app", "work/app", "app1")], ..Default::default() };
+        let ctx = WorkerContext { checkout_denies: checkout_denies(&h, &w), ..Default::default() };
+        let deny: Vec<PathBuf> = worker_deny_write_paths(&h, &w, &p, &ctx, Path::new("/bin-dir")).unwrap().into_iter().map(|d| d.path).collect();
+        for must in ["work/README.md", "work/docs", "work/app/.git/config", "work/app/.git/hooks"] {
+            assert!(deny.contains(&base.join(must)), "{must}: {deny:?}");
+        }
+        assert_eq!(blocks_commit(&deny, "work/app", "app1"), None);
+        let rules: Vec<PathBuf> = ctx.checkout_denies.iter().map(|d| d.path.clone()).collect();
+        assert_eq!(rules, vec![base.join("work/app/src")], "the checkout's own entries but its .git");
+
+        // A git folder inside another, the worker on the inner one only, then on both.
+        let h = crate::hive::record::Hive { id: "h".into(), folders: vec![folder("app", "app", "git"), folder("sdk", "app/sdk", "git")], ..Default::default() };
+        let inner = WorkerRecord { slug: "w".into(), folders: vec![git("sdk", "app/sdk", "sdk1")], ..Default::default() };
+        let rules: Vec<PathBuf> = checkout_denies(&h, &inner).into_iter().map(|d| d.path).collect();
+        assert_eq!(rules, vec![base.join("app/.git"), base.join("app/sdk/lib"), base.join("app/src")], "the outer repo's .git is denied, the inner one's isn't");
+        assert_eq!(blocks_commit(&rules, "app/sdk", "sdk1"), None);
+        let both = WorkerRecord { slug: "w".into(), folders: vec![git("app", "app", "x"), git("sdk", "app/sdk", "sdk1")], ..Default::default() };
+        let rules: Vec<PathBuf> = checkout_denies(&h, &both).into_iter().map(|d| d.path).collect();
+        assert_eq!(rules, vec![base.join("app/sdk/lib"), base.join("app/src")], "each once, neither .git");
+
+        // A local remote that is another Hive folder, as `/r/api` is to `/r/web`.
+        let mut h = h;
+        h.folders[0].local_remotes = vec![sp("app/sdk")];
+        let deny: Vec<PathBuf> = worker_deny_write_paths(&h, &inner, &p, &WorkerContext::default(), Path::new("/bin-dir")).unwrap().into_iter().map(|d| d.path).collect();
+        assert!(deny.contains(&base.join("app/sdk/lib")), "{deny:?}");
+        assert_eq!(blocks_commit(&deny, "app/sdk", "sdk1"), None);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn remote_hosts_are_read_from_every_url_form() {
+        for (url, host) in [
+            ("https://github.com/o/r.git", Some("github.com")),
+            ("ssh://git@GitLab.example.com:2222/o/r.git", Some("gitlab.example.com")),
+            ("git@github.com:o/r.git", Some("github.com")),
+            ("https://user:tok@host.io:8443/r", Some("host.io")),
+            ("ssh://[::1]:22/r", Some("::1")),
+            ("/srv/web.git", None),
+            ("file:///srv/web.git", None),
+            ("../sibling.git", None),
+            ("./a:b", None),
+        ] {
+            assert_eq!(url_host(url).as_deref(), host, "{url}");
+        }
     }
 }

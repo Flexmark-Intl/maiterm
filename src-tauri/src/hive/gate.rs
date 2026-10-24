@@ -34,21 +34,60 @@ pub struct GateScope {
     pub write_roots: Vec<PathBuf>,
     /// Where `git -C`, `--git-dir` and `--work-tree` may point.
     pub git_roots: Vec<PathBuf>,
+    /// Git must find the repo each root is, never one nested under it: another agent can write
+    /// inside these roots, and a repo it made there runs its config's commands as this agent.
+    pub roots_are_repos: bool,
 }
 
-/// The coordinator writes its home and the memory folder (§7.1, §9); its git reads go to the
-/// Hive's worktrees and folders, never its home: a repo it wrote there (`.git/config`, or a bare
-/// one's `config`) runs `core.fsmonitor` on the next `git diff` (the 3e review). Workers get
-/// theirs in build step 4.
+/// The coordinator writes its home and the memory folder (§7.1, §9). Its git reads go only to
+/// repos maiTerm made: its read copies, each worker's worktrees and the human's folders, never
+/// its home or anything else under `wt.noindex/`, where workers write. A repo an agent wrote
+/// (`.git/config`, or a bare one's `config`) runs `core.fsmonitor` on the next `git diff` (the 3e
+/// review), so one nested inside a worker's worktree is refused too. A worker's is `worker_scope`.
+/// Blocks on the disk: the workers' worktrees are read from their records.
 pub fn scope_for(hive: &Hive, role: &str, paths: &HivePaths) -> GateScope {
-    let mut git_roots = vec![paths.worktrees()];
+    let mut git_roots: Vec<PathBuf> = hive.git_folders().map(|f| paths.coordinator_worktree(&f.name)).collect();
+    for w in super::worker::list_workers(paths) {
+        git_roots.extend(w.git_folders().filter_map(|f| f.worktree.as_ref()).map(PathBuf::from));
+    }
     git_roots.extend(hive.folders.iter().map(|f| PathBuf::from(&f.path)));
     GateScope {
         role: role.to_string(),
         write_roots: vec![paths.coordinator_home(), paths.memory()],
         git_roots,
+        roots_are_repos: true,
     }
 }
+
+/// A worker writes its own worktrees, its `scratch/` and the memory folder; its git runs in its
+/// own worktrees and `scratch/` only, never `git -C` into a human checkout or another agent's
+/// worktree. The git options and variables that run a command stay refused (`check_git`), as for
+/// the coordinator; its own commits pass. A repo nested in its own folders is its own, and its
+/// git runs inside its sandbox, so that isn't refused.
+pub fn worker_scope(paths: &HivePaths, w: &super::worker::WorkerRecord) -> GateScope {
+    let worktrees: Vec<PathBuf> = w.git_folders().filter_map(|f| f.worktree.as_ref()).map(PathBuf::from).collect();
+    let scratch = paths.worker_scratch(&w.slug);
+    let mut write_roots = worktrees.clone();
+    write_roots.extend([scratch.clone(), paths.memory()]);
+    let mut git_roots = worktrees;
+    git_roots.push(scratch);
+    GateScope { role: super::ROLE_WORKER.to_string(), write_roots, git_roots, roots_are_repos: false }
+}
+
+/// A repo git would find from `p` below `root`: a `.git` entry, or a folder that is itself a git
+/// dir (a bare repo, or anywhere inside a `.git`), between them. The root's own `.git` is fine.
+fn nested_repo(root: &Path, p: &Path) -> Option<PathBuf> {
+    let is_git_dir = |d: &Path| d.join("HEAD").is_file() && (d.join("objects").is_dir() || d.join("commondir").is_file());
+    p.ancestors()
+        .take_while(|d| *d != root && d.starts_with(root))
+        .find(|d| std::fs::symlink_metadata(d.join(".git")).is_ok() || is_git_dir(d) || d.file_name().is_some_and(|n| n.eq_ignore_ascii_case(".git")))
+        .map(Path::to_path_buf)
+}
+
+/// Names under a write root no agent's Write or Edit may create: project settings and MCP
+/// servers Claude would load unseen, and a repo (or a worktree's `.git` pointer) whose config
+/// Claude's own unsandboxed git would read. The deny rules hold these too; this reads the path.
+const PROTECTED_NAMES: &[&str] = &[".claude", ".mcp.json", ".git"];
 
 const MAX_DEPTH: usize = 8;
 
@@ -79,11 +118,14 @@ fn check_write(p: &str, cwd: Option<&Path>, scope: &GateScope) -> Result<(), Str
         format!("{p} is outside the folders this agent may write ({}).", roots.join(", "))
     };
     let real = resolve(cwd, p).ok_or_else(refuse)?;
-    if scope.write_roots.iter().filter_map(|r| real_path(r)).any(|r| real.starts_with(&r)) {
-        Ok(())
-    } else {
-        Err(refuse())
+    let Some(root) = scope.write_roots.iter().filter_map(|r| real_path(r)).find(|r| real.starts_with(r)) else {
+        return Err(refuse());
+    };
+    let first = real.strip_prefix(&root).ok().and_then(|rest| rest.components().next()).map(|c| c.as_os_str().to_string_lossy().to_string());
+    if first.is_some_and(|n| PROTECTED_NAMES.iter().any(|p| n.eq_ignore_ascii_case(p))) {
+        return Err(format!("{p} is refused in a Hive: no agent writes .claude, .mcp.json or .git, which would run outside its sandbox."));
     }
+    Ok(())
 }
 
 /// `p` against `base` (`~` expanded), with symlinks resolved as far as the path exists. None for
@@ -461,12 +503,32 @@ const GIT_VERB_OPTS_REFUSED: &[&str] = &["--ext-diff", "--textconv", "--output",
 
 fn check_git(args: &[String], cwd: Option<&Path>, scope: &GateScope) -> Result<(), String> {
     let mut base: Option<PathBuf> = cwd.and_then(real_path);
-    let in_roots = |r: &Path| scope.git_roots.iter().filter_map(|g| real_path(g)).any(|g| r.starts_with(&g));
+    let roots: Vec<PathBuf> = scope.git_roots.iter().filter_map(|g| real_path(g)).collect();
+    // The deepest root holding `r`: a Hive folder inside another is checked as itself.
+    let root_of = |r: &Path| roots.iter().filter(|g| r.starts_with(g)).max_by_key(|g| g.components().count());
+    let in_roots = |r: &Path| root_of(r).is_some();
     let check_path = |base: &Option<PathBuf>, p: &str, flag: &str| -> Result<PathBuf, String> {
         match resolve(base.as_deref(), p) {
             Some(r) if in_roots(&r) => Ok(r),
             _ => Err(format!("git {flag} {p} points outside this agent's folders, so it is blocked.")),
         }
+    };
+    // The repo git discovers from here must be one maiTerm made, never one the agent could write
+    // (its home, or anywhere a `cd` left it), nor one another agent nested inside a root.
+    let repo_check = |b: Option<&Path>| -> Result<(), String> {
+        let Some(root) = b.and_then(|b| root_of(b)) else {
+            return Err("git runs here only in the Hive's read copies and folders: name one with git -C <folder>.".to_string());
+        };
+        match b.and_then(|b| nested_repo(root, b)).filter(|_| scope.roots_are_repos) {
+            Some(n) => Err(format!("git in {} would read a repo an agent could have made there, so it is blocked.", n.display())),
+            None => Ok(()),
+        }
+    };
+    // A git dir named outright skips the discovery `repo_check` reads; the coordinator's rules
+    // deny `--git-dir` too.
+    let git_dir_check = |flag: &str| match scope.roots_are_repos && flag == "--git-dir" {
+        true => Err("git --git-dir is refused here: name the folder with git -C <folder>.".to_string()),
+        false => Ok(()),
     };
     // Not just `alias.*`: `core.fsmonitor`, `diff.external` and their kin run any command, so a
     // `git -C <copy> -c core.fsmonitor=… diff` was general Bash under a diff rule (the 3e review).
@@ -486,12 +548,14 @@ fn check_git(args: &[String], cwd: Option<&Path>, scope: &GateScope) -> Result<(
             "--git-dir" | "--work-tree" => {
                 let p = args.get(j + 1).ok_or("a git option with no folder")?;
                 check_path(&base, p, a)?;
+                git_dir_check(a)?;
                 j += 2;
             }
             "--namespace" | "--super-prefix" => j += 2,
             _ if a.starts_with("--git-dir=") || a.starts_with("--work-tree=") => {
                 let (flag, p) = a.split_once('=').unwrap_or((a, ""));
                 check_path(&base, p, flag)?;
+                git_dir_check(flag)?;
                 j += 1;
             }
             _ if a.starts_with('-') => j += 1,
@@ -505,11 +569,7 @@ fn check_git(args: &[String], cwd: Option<&Path>, scope: &GateScope) -> Result<(
                 return Err(format!("maiTerm can't tell which git command `{a}` is, so it is blocked."));
             }
             _ => {
-                // The repo git discovers from here must be one maiTerm made, never one the agent
-                // could write (its home, or anywhere a `cd` left it).
-                if !base.as_deref().is_some_and(|b| in_roots(b)) {
-                    return Err("git runs here only in the Hive's read copies and folders: name one with git -C <folder>.".to_string());
-                }
+                repo_check(base.as_deref())?;
                 let refused = args[j + 1..]
                     .iter()
                     .find(|o| GIT_VERB_OPTS_REFUSED.iter().any(|r| o.as_str() == *r || o.strip_prefix(r).is_some_and(|rest| rest.starts_with('='))));
@@ -550,7 +610,18 @@ pub fn decide_event(tab_id: &str, agent: Option<(Hive, String, HivePaths)>, body
     let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let input = event.get("tool_input").cloned().unwrap_or(Value::Null);
     let cwd = event.get("cwd").and_then(Value::as_str).map(PathBuf::from);
-    let decision = gate_decision(tool, &input, cwd.as_deref(), &scope_for(&hive, &role, &paths));
+    let scope = if role == super::ROLE_WORKER {
+        match super::worker::worker_for_tab(&paths, tab_id) {
+            Some(w) => worker_scope(&paths, &w),
+            None => {
+                log::warn!("hive {}: gate: no worker.json names tab {tab_id}; refused", hive.id);
+                return GateDecision::Deny("maiTerm has no record of this worker, so the call is blocked.".to_string());
+            }
+        }
+    } else {
+        scope_for(&hive, &role, &paths)
+    };
+    let decision = gate_decision(tool, &input, cwd.as_deref(), &scope);
     if let GateDecision::Deny(reason) = &decision {
         log::info!("hive {}: gate refused {tool} in tab {tab_id}: {reason}", hive.id);
         log_refusal(&paths, tab_id, tool, &describe(&input), reason);
@@ -816,6 +887,136 @@ mod tests {
         let push = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": home}).to_string();
         assert!(matches!(decide_event("t", agent(), &push), GateDecision::Deny(_)));
         assert!(fs::read_to_string(f.paths.logs().join("gate.log")).unwrap().contains("git push"), "the refusal is on the record");
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// A worker of the fixture's Hive with real folders: its web worktree and scratch, another
+    /// worker's worktree beside it, and the human's checkout.
+    fn worker_fx(f: &Fx) -> (crate::hive::worker::WorkerRecord, GateScope) {
+        for d in [f.paths.worker_worktree("auth", "web"), f.paths.worker_scratch("auth"), f.paths.worker_worktree("billing", "web")] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let w = crate::hive::worker::WorkerRecord {
+            task_id: "t-auth".into(),
+            slug: "auth".into(),
+            tab_id: Some("tab-w".into()),
+            folders: vec![crate::hive::worker::WorkerFolder {
+                name: "web".into(),
+                kind: "git".into(),
+                worktree: Some(f.paths.worker_worktree("auth", "web").to_string_lossy().to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let scope = worker_scope(&f.paths, &w);
+        (w, scope)
+    }
+
+    #[test]
+    fn a_worker_writes_and_runs_git_only_in_its_own_folders() {
+        let f = fx();
+        let (_, scope) = worker_fx(&f);
+        let wt = f.paths.worker_worktree("auth", "web");
+        let human = f.base.join("repo/web");
+        let w = |p: &Path| gate_decision("Write", &json!({ "file_path": p }), Some(&wt), &scope);
+        assert_eq!(w(&wt.join("src/lib.rs")), GateDecision::Allow);
+        assert_eq!(w(&f.paths.worker_scratch("auth").join("render.png")), GateDecision::Allow);
+        assert_eq!(w(&f.paths.memory().join("note.md")), GateDecision::Allow);
+        for refused in [f.paths.worker_worktree("billing", "web").join("x"), human.join("x"), f.paths.coordinator_worktree("web").join("x"), f.paths.coordinator_home().join("x")] {
+            assert!(matches!(w(&refused), GateDecision::Deny(_)), "{}", refused.display());
+        }
+        let bash = |cmd: &str| gate_decision("Bash", &json!({ "command": cmd }), Some(&wt), &scope);
+        for ok in ["git add -A".to_string(), "git commit -m 'Pass the -c flag through'".into(), format!("git -C '{}' log --oneline", wt.display()), "npm test".into()] {
+            assert_eq!(bash(&ok), GateDecision::Allow, "{ok}");
+        }
+        for refused in [
+            format!("git -C '{}' log", human.display()),
+            format!("git -C '{}' status", f.paths.worker_worktree("billing", "web").display()),
+            format!("git -C '{}' diff", f.paths.coordinator_worktree("web").display()),
+            "git push".into(),
+            "git -c core.fsmonitor='touch x' status".into(),
+            "GIT_CONFIG_COUNT=1 git status".into(),
+            "git diff --ext-diff".into(),
+            format!("cd '{}' && git commit -m x", human.display()),
+        ] {
+            assert!(matches!(bash(&refused), GateDecision::Deny(_)), "should refuse: {refused}");
+        }
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// Workers write under `wt.noindex/`, so the coordinator's git goes only to the repos maiTerm
+    /// made there: a repo a worker nested in its worktree or scratch (`core.fsmonitor` in its
+    /// config) would run the worker's command as the coordinator.
+    #[test]
+    fn the_coordinator_never_runs_git_in_a_repo_a_worker_made() {
+        let f = fx();
+        let (w, _) = worker_fx(&f);
+        crate::hive::worker::write_worker(&f.paths.task("t-auth"), &w).unwrap();
+        let wt = f.paths.worker_worktree("auth", "web");
+        fs::write(wt.join(".git"), "gitdir: /r/web/.git/worktrees/web\n").unwrap();
+        let scratch = f.paths.worker_scratch("auth");
+        for nested in [wt.join("pkg"), scratch.join("x")] {
+            fs::create_dir_all(nested.join(".git")).unwrap();
+        }
+        let bare = wt.join("evil.git");
+        fs::create_dir_all(bare.join("objects")).unwrap();
+        fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let mut hive = crate::hive::launch::tests::sample_hive();
+        hive.folders.truncate(1);
+        hive.folders[0].path = f.base.join("repo/web").to_string_lossy().to_string();
+        let scope = scope_for(&hive, crate::hive::ROLE_COORDINATOR, &f.paths);
+        let bash = |cmd: &str| gate_decision("Bash", &json!({ "command": cmd }), Some(&f.paths.coordinator_home()), &scope);
+
+        assert_eq!(bash(&format!("git -C '{}' log --oneline", wt.display())), GateDecision::Allow, "the worktree maiTerm made");
+        assert_eq!(bash(&format!("git -C '{}' diff", wt.join("src").display())), GateDecision::Allow, "a folder of it finds its own repo");
+        assert_eq!(bash(&format!("git -C '{}' diff", f.paths.coordinator_worktree("web").display())), GateDecision::Allow);
+        for cmd in [
+            format!("git -C '{}' diff", wt.join("pkg").display()),
+            format!("git -C '{}' diff", wt.join("pkg/src").display()),
+            format!("git -C '{}' diff", scratch.join("x").display()),
+            format!("git -C '{}' log", scratch.display()),
+            format!("git -C '{}' diff HEAD~1", bare.display()),
+            format!("git -C '{}' log", f.paths.worker_dir("auth").display()),
+            format!("git -C '{}' log", f.paths.worktrees().display()),
+            format!("git -C '{}' --git-dir='{}' log", wt.display(), wt.join("pkg/.git").display()),
+            format!("git -C '{}' log", f.base.join("repo/web/.git").display()),
+        ] {
+            assert!(matches!(bash(&cmd), GateDecision::Deny(_)), "should refuse: {cmd}");
+        }
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// The deny rules hold these too; the gate reads the real path, so a symlink or a relative
+    /// path doesn't slip past a glob.
+    #[test]
+    fn no_agent_writes_claude_settings_mcp_servers_or_a_git_pointer() {
+        let f = fx();
+        let (_, scope) = worker_fx(&f);
+        let wt = f.paths.worker_worktree("auth", "web");
+        let w = |p: &str| gate_decision("Write", &json!({ "file_path": p }), Some(&wt), &scope);
+        for p in [".claude/settings.json", ".mcp.json", ".git", ".git/config", ".CLAUDE/settings.local.json"] {
+            assert!(matches!(w(p), GateDecision::Deny(r) if r.contains("refused in a Hive")), "{p}");
+        }
+        assert!(matches!(w(&f.paths.worker_scratch("auth").join(".git/config").to_string_lossy()), GateDecision::Deny(_)));
+        assert_eq!(w("docs/.claude-notes.md"), GateDecision::Allow, "only the names themselves, at the root");
+        assert_eq!(w("packages/x/.gitignore"), GateDecision::Allow);
+        let coord = gate_decision("Edit", &json!({ "file_path": ".claude/settings.json" }), Some(&f.paths.coordinator_home()), &f.scope);
+        assert!(matches!(coord, GateDecision::Deny(_)), "the coordinator's home too");
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_worker_the_gate_cannot_find_is_refused() {
+        let f = fx();
+        let (w, _) = worker_fx(&f);
+        let hive = crate::hive::launch::tests::sample_hive();
+        let agent = || Some((hive.clone(), crate::hive::ROLE_WORKER.to_string(), HivePaths::new(f.paths.root.clone())));
+        let wt = f.paths.worker_worktree("auth", "web").to_string_lossy().to_string();
+        let commit = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}, "cwd": wt}).to_string();
+        assert!(matches!(decide_event("tab-w", agent(), &commit), GateDecision::Deny(r) if r.contains("no record of this worker")));
+        crate::hive::worker::write_worker(&f.paths.task("t-auth"), &w).unwrap();
+        assert_eq!(decide_event("tab-w", agent(), &commit), GateDecision::Allow);
+        assert!(matches!(decide_event("another-tab", agent(), &commit), GateDecision::Deny(_)));
         let _ = fs::remove_dir_all(&f.base);
     }
 

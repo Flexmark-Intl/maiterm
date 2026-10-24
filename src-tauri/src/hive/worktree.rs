@@ -376,22 +376,47 @@ fn copy_one(repo: &Path, wt: &Path, rel: &str) -> io::Result<bool> {
 /// The target dir to seed a worker's from: `<folder>/target/debug`, or one level down
 /// (`<folder>/src-tauri/target/debug`), beside a `Cargo.toml`, holding `.fingerprint`.
 pub fn seed_source(folder: &Path) -> Option<PathBuf> {
-    let at = |dir: &Path| {
-        let debug = dir.join("target").join("debug");
-        (dir.join("Cargo.toml").is_file() && debug.join(".fingerprint").is_dir()).then_some(debug)
-    };
-    if let Some(d) = at(folder) {
-        return Some(d);
+    cargo_dirs(folder).into_iter().map(|d| d.join("target").join("debug")).find(|debug| debug.join(".fingerprint").is_dir())
+}
+
+/// The folders holding a `Cargo.toml`: `folder` itself, then one level down, by name.
+fn cargo_dirs(folder: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    if folder.join("Cargo.toml").is_file() {
+        out.push(folder.to_path_buf());
     }
-    let mut children: Vec<PathBuf> = fs::read_dir(folder)
-        .ok()?
+    let Ok(rd) = fs::read_dir(folder) else { return out };
+    let mut children: Vec<PathBuf> = rd
         .flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter(|e| !e.file_name().to_string_lossy().starts_with('.') && e.file_name() != "node_modules" && e.file_name() != "target")
         .map(|e| e.path())
+        .filter(|c| c.join("Cargo.toml").is_file())
         .collect();
     children.sort();
-    children.iter().find_map(|c| at(c))
+    out.extend(children);
+    out
+}
+
+fn worker_human_folders<'a>(hive: &'a Hive, w: &'a super::worker::WorkerRecord) -> impl Iterator<Item = &'a Path> + 'a {
+    w.git_folders().filter_map(|f| hive.folders.iter().find(|h| h.name == f.name && h.is_git())).map(|h| Path::new(&h.path))
+}
+
+/// The worker's seed: the human's built target of its first git folder that has one. One
+/// `CARGO_TARGET_DIR` serves all its Rust repos, and the seed matters only for the first build.
+pub fn worker_seed_source(hive: &Hive, w: &super::worker::WorkerRecord) -> Option<PathBuf> {
+    worker_human_folders(hive, w).find_map(seed_source)
+}
+
+/// Whether the worker builds in its own `CARGO_TARGET_DIR`: as recorded at its first launch,
+/// or, before that, whether any of its git folders is a Rust project. Never whether the human
+/// has a built target right now, which comes and goes (`cargo clean`).
+pub fn worker_uses_own_cargo_target(hive: &Hive, w: &super::worker::WorkerRecord) -> bool {
+    match w.cargo_target.as_str() {
+        super::worker::CARGO_TARGET_OWN => true,
+        super::worker::CARGO_TARGET_NONE => false,
+        _ => worker_human_folders(hive, w).any(|h| !cargo_dirs(h).is_empty()),
+    }
 }
 
 /// Seed a worker's `CARGO_TARGET_DIR` (`dst`) from `src_debug` with APFS clones of only

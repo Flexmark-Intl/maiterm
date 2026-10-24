@@ -766,9 +766,15 @@ inside its folders".
   worktrees' admin dirs, `.claude/**` and `.mcp.json` in every worktree, the gallery (§6.3), the
   hook scripts of §6.8 and any local-path git remote (§7.3). Each also has its
   `Write(//…)`/`Edit(//…)` deny rule (above).
-- **The human's checkouts** get a `Write(//…)`/`Edit(//…)` deny rule on the whole checkout. In
-  the sandbox they are refused by default (outside every working folder) and aren't put on
-  `denyWrite` whole, since that would also cover the `.git` entries a worker's commit needs.
+- **The human's checkouts** get `Write(//…)`/`Edit(//…)` deny rules. In the sandbox they are
+  refused by default (outside every working folder) and aren't put on `denyWrite` whole, since
+  that would also cover the `.git` entries a worker's commit needs. **Nor can the rule cover the
+  whole checkout** (measured, step 4b's probe): Claude folds an `Edit` deny rule into the
+  sandbox's write denials, and `Edit(//<checkout>/**)` refused the commit's
+  `.git/worktrees/<N>/index.lock`. So a checkout the worker has a worktree of is denied entry by
+  entry, everything at its top but `.git` (`settings::checkout_denies`); an entry made after the
+  launch is still refused by the sandbox and by the gate, which reads the real path. A checkout
+  it has no worktree of is denied whole.
 - maiTerm's own git calls on worker content pass `-c core.fsmonitor=false -c
   core.hooksPath=/dev/null`, so a hook or fsmonitor a worker planted never runs as maiTerm.
 
@@ -2738,6 +2744,62 @@ in its log). All four pass:
     the stream showed a `compact_boundary`. A second save after that still landed in the Hive's
     `memory/`, not in the per-repo default. So the builder re-passing `--settings` on every
     launch closes §9's compaction leak.
+- **Step 4b's worker probe: passes, after one fix to the generator**
+  (`hive_worker_launch_probe`, `claude-haiku-5-5` on 2.1.310). It sets up a scratch Hive with `web`
+  (primary, a bare local remote) and `api`, and a worker with worktrees of both, made by the real
+  `create_worker_worktrees`. The launch is the real `worker_record`, `worker_settings_json` and
+  line, setting sources included. `MAITERM_PORT` and the port file name the probe's own
+  listener, which answers the gate with the real `decide_event`. Both repos check in a hostile
+  `.claude/settings.json` (`allowedDomains: [example.com]`, `allowLocalBinding`,
+  `excludedCommands: [curl *]`, `allowWrite: [/]`, `disableAllHooks`), which the worktrees carry
+  from Base. The results:
+  - `init` shows `permissionMode: auto`, and neither WebFetch nor WebSearch is offered.
+  - `git commit` in the cwd worktree and `git -C <api worktree> commit` both land on
+    `hive/probe--probe-w`. The secondary repo prints the harmless `packed-refs.lock` error §6.7
+    predicts.
+  - `echo x > <api>/.git/hooks/x` gets `Operation not permitted`.
+  - The Write tool's `<wt>/.claude/settings.json` is refused by the deny rule, and a `python3
+    open()` of it by the sandbox.
+  - `curl https://example.com` gets a 403 and a `<sandbox_violations>` note. The
+    `PostToolUseFailure` command hook forwards it, and `parse_violations` names the host.
+  - `curl 127.0.0.1:<listener>` never reaches the listener.
+  - `git push local` is refused by the gate, and the bare repo gets no ref.
+  - SessionStart arrives as `via=hive`, and the real `session_started` marks the worker running.
+  - **The fix:** at first both commits failed on `index.lock` in the admin dir, which was on
+    `allowWrite`. The cause was the whole-checkout `Edit` deny rule, which Claude also applies
+    to the sandbox (§6.7).
+  - **A refused write carries no `<sandbox_violations>` note** on macOS, only the program's own
+    `Operation not permitted`, so `parse_violations` also reads the absolute path off those
+    lines of a failed Bash call: only in a write's shape (a shell redirect, git's `Unable to
+    create`, Python's `PermissionError`) and only for a path outside the worker's `allowWrite`
+    or under its `denyWrite`, since most EPERMs (a privacy-protected read, a chmod) aren't the
+    sandbox's. A refused localhost connect carries no note either. The auto-mode classifier
+    sometimes refuses the hook write before the sandbox sees it.
+  - **The hostile project file takes nothing:** example.com still gets the proxy's 403, curl
+    stays sandboxed, localhost stays closed, the hooks still fire. In `-p` the folder is
+    untrusted, so this shows the run, not a trusted worktree; what holds there is that Claude
+    2.1.310's settings schema ignores a project file's sandbox values once `--settings` sets
+    `allowUnsandboxedCommands: false`, and `strictAllowlist` drops its `allowedDomains`.
+- **Review fixes after the 4b probe** (all in the generator; the probe re-passed):
+  - **Workers load project settings only**, like the coordinator (plan decision 12 assumed
+    `--settings` outranks everything, but Claude merges the sandbox's lists across sources and
+    honours a USER file's `allowLocalBinding` and `allowedDomains`). Each switch that weakens the
+    sandbox is pinned off in `--settings` (`network.allowLocalBinding`, `allowAllUnixSockets`,
+    `allowAppleEvents`, `allowNestedUserNamespaces`, `enableWeakerNestedSandbox`,
+    `enableWeakerNetworkIsolation`, `filesystem.disabled`, `disableAllHooks`), and the remotes'
+    hosts go on `network.deniedDomains`, which beats any allow from any source.
+  - **The coordinator's git roots are the repos maiTerm made**: its read copies, each worker's
+    recorded worktrees and the human's folders, never all of `wt.noindex/`, where workers now
+    write. A git base under a nested `.git` or git dir below its root is refused, as is
+    `--git-dir`: a repo a worker planted there ran its `core.fsmonitor` as the coordinator.
+  - **A whole-folder denial never covers a `.git` the worker commits into** (`deny_around`): a
+    Hive folder inside another, or a local remote that is one, is denied entry by entry.
+  - **A worker's `CARGO_TARGET_DIR` is decided once**, at its first launch, by whether any of its
+    git folders is a Rust project (`worker.json` `cargo_target`), never by whether the human has
+    a built target that moment.
+  - `createBackup` joins `ESCAPE_MCP_TOOLS`; reads of other tabs' output, maiTerm's logs and
+    diagnostics, and comms are denied to workers. A worker's priming drops the Overlord,
+    stack and follow-up lines and says its blocker goes to its coordinator.
 - **Still by hand** (they need an interactive tab): spike 2's trust dialog under a managed account
   and after an account switch; `/memory` after suspend and resume, a maiTerm restart and a tab
   reload; and hook events still arriving at a real maiTerm through those relaunches.
@@ -2945,6 +3007,11 @@ several releases a day).
      slim cargo seed (`hive/worktree.rs`, over the git helpers moved to `hive/git.rs`), and the
      role catalogue (`hive/roles.rs`), listed in the coordinator's brief. Nothing launches a
      worker yet.
+   - 4b: a worker launches through the step 3 builder: `launch::worker_record` (auto mode,
+     `--disallowedTools`, its own temp and cargo target), `settings::worker_settings_json`,
+     `scratch/brief.md` and the worker's invariant rules, `gate::worker_scope`, the worker branch
+     of `session_started`, and `hive/sandbox_events.rs`. Nothing calls it yet but tests and the
+     acceptance probe (§13.1).
 5. The activity feed, diff stat, worker columns, raw terminal (`fixedSize`, spike 3), keyboard.
 5b. The stack feature first: any service on any branch (§6.9: `Tab.service_target`, re-rooted
    cwd, placeholders, Run on ▸, copies per branch, `shared_from`). Then the Hive run queue:

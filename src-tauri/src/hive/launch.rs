@@ -16,7 +16,8 @@ use tauri::State;
 
 use super::paths::{hive_root, HivePaths};
 use super::record::Hive;
-use super::ROLE_COORDINATOR;
+use super::worker::WorkerRecord;
+use super::{ROLE_COORDINATOR, ROLE_WORKER};
 use crate::state::AppState;
 
 pub const LAUNCH_VERSION: u32 = 1;
@@ -66,7 +67,19 @@ pub struct LaunchRecord {
     pub setting_sources: Option<String>,
     pub settings_path: String,
     pub mcp_config_path: String,
+    /// `--permission-mode` for a worker (`"auto"`); the coordinator's `dontAsk` is fixed in the
+    /// builder, never read from here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    /// `--disallowedTools`, by name: WebFetch on every worker, WebSearch unless its role has `web`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub disallowed_tools: Vec<String>,
+    /// The worker's task; empty for the coordinator.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub task_id: String,
 }
+
+pub const WORKER_PERMISSION_MODE: &str = "auto";
 
 /// One session the task's agent ran, in `tasks/<task>/sessions.json` (§4.2): the last is what a
 /// relaunch resumes.
@@ -114,6 +127,75 @@ pub fn coordinator_record(hive: &Hive, paths: &HivePaths) -> LaunchRecord {
         setting_sources: Some("project".to_string()),
         settings_path: s(&task.join(SETTINGS_FILE)),
         mcp_config_path: s(&task.join(MCP_FILE)),
+        permission_mode: None,
+        disallowed_tools: Vec::new(),
+        task_id: String::new(),
+    }
+}
+
+/// A worker's record, derived from the Hive and its `worker.json` on every launch (§6.3, §6.7):
+/// its first worktree (or `scratch/`) as cwd; its other worktrees, the plain folders it was
+/// given, `scratch/` and the gallery as `--add-dir`; its own temp and, for a Rust worker, its
+/// own cargo target. Project settings only, as the coordinator: `--settings` outranks only the
+/// keys it sets, and Claude merges the sandbox's lists across sources and honours a user
+/// setting's `allowLocalBinding` or `allowedDomains`, so the human's own settings would widen
+/// every worker's sandbox. Under `allowUnsandboxedCommands: false` and `strictAllowlist` from
+/// `--settings`, Claude ignores a project file's sandbox values (2.1.310's settings schema).
+pub fn worker_record(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> LaunchRecord {
+    let task = paths.task(&w.task_id);
+    let cwd = w.cwd(paths);
+    let mut add_dirs: Vec<String> = Vec::new();
+    let mut add = |p: String| {
+        if !add_dirs.contains(&p) {
+            add_dirs.push(p);
+        }
+    };
+    for f in &w.folders {
+        match &f.worktree {
+            Some(wt) if Path::new(wt) != cwd => add(wt.clone()),
+            Some(_) => {}
+            None => {
+                if let Some(h) = hive.folders.iter().find(|h| h.name == f.name && !h.is_git()) {
+                    add(h.path.clone());
+                }
+            }
+        }
+    }
+    add(s(&paths.worker_scratch(&w.slug)));
+    add(s(&paths.gallery()));
+    // Also its cwd, so the sandbox and permission scopes name it the same way (spike 13).
+    add_dirs.retain(|d| Path::new(d) != cwd);
+    add_dirs.push(s(&cwd));
+
+    let mut env = vec![
+        ("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD".to_string(), "1".to_string()),
+        ("CLAUDE_CODE_TMPDIR".to_string(), s(&paths.worker_tmp(&w.slug))),
+    ];
+    if super::worktree::worker_uses_own_cargo_target(hive, w) {
+        env.push(("CARGO_TARGET_DIR".to_string(), s(&paths.worker_cargo_target(&w.slug))));
+    }
+    let web = super::roles::role(&w.role).is_some_and(|r| r.web);
+    let mut disallowed = vec!["WebFetch".to_string()];
+    if !web {
+        disallowed.push("WebSearch".to_string());
+    }
+    let model = &hive.models.worker;
+    let or = |mine: &str, hive: &str| if mine.is_empty() { hive.to_string() } else { mine.to_string() };
+    LaunchRecord {
+        version: LAUNCH_VERSION,
+        role: ROLE_WORKER.to_string(),
+        runtime: if model.runtime.is_empty() { "claude".to_string() } else { model.runtime.clone() },
+        model: or(&w.model, &model.model),
+        effort: or(&w.effort, &model.effort),
+        cwd: s(&cwd),
+        add_dirs,
+        env,
+        setting_sources: Some("project".to_string()),
+        settings_path: s(&task.join(SETTINGS_FILE)),
+        mcp_config_path: s(&task.join(MCP_FILE)),
+        permission_mode: Some(WORKER_PERMISSION_MODE.to_string()),
+        disallowed_tools: disallowed,
+        task_id: w.task_id.clone(),
     }
 }
 
@@ -189,6 +271,14 @@ pub fn hive_launch_args(record: &LaunchRecord, resume: Option<&str>) -> Vec<Stri
     }
     if record.role == ROLE_COORDINATOR {
         a.extend(["--tools", COORDINATOR_TOOLS, "--permission-mode", "dontAsk"].map(String::from));
+    } else if let Some(mode) = record.permission_mode.as_deref().filter(|m| !m.is_empty()) {
+        a.push("--permission-mode".to_string());
+        a.push(mode.to_string());
+    }
+    // One value, comma-joined: the flag is variadic, and a second word could swallow what follows.
+    if !record.disallowed_tools.is_empty() {
+        a.push("--disallowedTools".to_string());
+        a.push(record.disallowed_tools.join(","));
     }
     if let Some(sid) = resume.filter(|s| !s.is_empty()) {
         a.push("--resume".to_string());
@@ -302,6 +392,14 @@ pub fn mark_kickoff_delivered(task_dir: &Path) -> Result<(), String> {
     write_json(&task_dir.join(KICKOFF_FILE), &serde_json::to_value(&k).map_err(|e| e.to_string())?)
 }
 
+/// A fresh session is told again: its context starts empty.
+pub fn reset_kickoff(task_dir: &Path) -> Result<(), String> {
+    match fs::remove_file(task_dir.join(KICKOFF_FILE)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", task_dir.join(KICKOFF_FILE).display())),
+        _ => Ok(()),
+    }
+}
+
 fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
     let v = text.split_whitespace().next()?;
     let mut it = v.split('.').map(|p| p.parse::<u32>().ok());
@@ -374,17 +472,160 @@ pub fn write_launch_files(hive: &Hive, paths: &HivePaths, record: &LaunchRecord,
     Ok(())
 }
 
-/// The launch line for a Hive tab (§11.1), or why it can't start. Blocks: trust writes, the
-/// version probe, file writes.
-pub fn prepare_launch(hive: &Hive, role: &str, prefs: &crate::state::Preferences) -> Result<String, String> {
+/// A worker's launch files: its settings (§6.7), the MCP config, and `scratch/brief.md` (§7.1).
+pub fn write_worker_launch_files(
+    hive: &Hive,
+    paths: &HivePaths,
+    record: &LaunchRecord,
+    w: &WorkerRecord,
+    ctx: &super::settings::WorkerContext,
+    task_brief: &str,
+    hooks: &super::settings::HookEnv,
+) -> Result<(), String> {
+    let settings = super::settings::worker_settings_json(hive, record, w, paths, ctx, hooks)?;
+    write_json(Path::new(&record.settings_path), &settings)?;
+    write_json(Path::new(&record.mcp_config_path), &super::settings::hive_mcp_config())?;
+    write_bytes(&paths.worker_brief(&w.slug), super::brief::worker_brief_md(hive, paths, w, task_brief).as_bytes())
+}
+
+const NO_CLAUDE_YET: &str =
+    "Claude Code hasn't run on this computer yet, so there's nowhere to record folder trust. Run claude once in any tab, then try again.";
+
+/// Trust a folder maiTerm made itself (the coordinator's home, a scratch-only worker's scratch)
+/// in every root, re-verified before every launch: the tab may come up under another account
+/// than the one this was last written for, and nothing may answer the dialog (§6.6).
+fn ensure_trust(paths: &HivePaths, dir: &Path) -> Result<(), String> {
+    let homes = crate::relocate::agents::Homes::real().ok_or("Couldn't find the home folder")?;
+    let trust = super::trust::write_trust(&homes, paths, dir)?;
+    if !trust.failed.is_empty() {
+        return Err(format!("Couldn't record Claude's folder trust: {}", trust.failed.join("; ")));
+    }
+    if trust.written.is_empty() && trust.already.is_empty() {
+        return Err(NO_CLAUDE_YET.to_string());
+    }
+    Ok(())
+}
+
+/// A worktree inherits its main repo's trust (§6.6), so maiTerm writes none for a worker's: a
+/// repo the human hasn't trusted is theirs to trust, and the launch is refused instead of
+/// raising the dialog. Checked in every root a Claude has run under.
+fn check_worker_trust(claude_json: &[PathBuf], paths: &HivePaths, w: &WorkerRecord) -> Result<(), String> {
+    if w.git_folders().next().is_none() {
+        return ensure_trust(paths, &paths.worker_scratch(&w.slug));
+    }
+    let roots: Vec<PathBuf> = claude_json.iter().filter(|f| f.is_file()).cloned().collect();
+    if roots.is_empty() {
+        return Err(NO_CLAUDE_YET.to_string());
+    }
+    for f in w.git_folders() {
+        let wt = f.worktree.as_deref().unwrap_or_default();
+        if !super::trust::trusted_in_all(&roots, Path::new(wt)) {
+            return Err(format!(
+                "Claude Code doesn't trust the repo behind \"{}\", so starting this worker would raise its trust dialog, which \
+                 nothing may answer for you. Open that repo in Claude Code once and trust it, then restart the worker.",
+                f.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What runs before a worker's first session (§6.4, §6.5): the slim cargo seed, then each git
+/// folder's setup command in its worktree, typed ahead of the agent so a failure shows in the
+/// raw terminal and stops the launch. Setup is the human's command, run on a fresh worktree at
+/// the landing target's tip, before the agent has written anything; it moves under the worker's
+/// sandbox profile with the run queue (step 5b).
+fn first_launch_setup(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> Result<String, String> {
+    let seed = super::worktree::worker_uses_own_cargo_target(hive, w).then(|| super::worktree::worker_seed_source(hive, w)).flatten();
+    if let Some(src) = seed {
+        let target = paths.worker_cargo_target(&w.slug);
+        // maiTerm copies unsandboxed into a folder that becomes the worker's: never through a link.
+        if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
+            log::warn!("hive {}: {} is a symlink; not seeded", hive.id, target.display());
+        } else {
+            match super::worktree::seed_cargo_target(&src, &target) {
+                Ok(true) => log::info!("hive {}: seeded {} from {}", hive.id, target.display(), src.display()),
+                Ok(false) => {}
+                Err(e) => log::warn!("hive {}: cargo seed failed, worker {} builds cold: {e}", hive.id, w.slug),
+            }
+        }
+    }
+    let mut prefix = String::new();
+    for f in w.git_folders() {
+        let setup = hive.folders.iter().find(|h| h.name == f.name).and_then(|h| h.setup.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+        let (Some(setup), Some(wt)) = (setup, f.worktree.as_deref()) else { continue };
+        if setup.chars().any(char::is_control) {
+            return Err(format!("The setup command of \"{}\" has a line break in it, so it can't be typed as one line. Fix it in the Hive's settings.", f.name));
+        }
+        prefix.push_str(&format!("( cd {} && {setup} ) && ", sh_quote(wt)));
+    }
+    Ok(prefix)
+}
+
+/// The launch line for a Hive tab (§11.1), or why it can't start. `tasks` is the workspace's
+/// task list, where a worker's brief is its task's detail. Blocks: trust writes, the version
+/// probe, file writes, and before a worker's first session its cargo seed.
+pub fn prepare_launch(hive: &Hive, role: &str, tab_id: &str, tasks: &[crate::state::Task], prefs: &crate::state::Preferences) -> Result<String, String> {
     if cfg!(windows) {
         return Err("A Hive needs Claude's sandbox, which native Windows doesn't have.".to_string());
     }
-    if role != ROLE_COORDINATOR {
-        return Err("Only a Hive's coordinator can be launched in this version.".to_string());
-    }
     let root = hive_root(&hive.id).ok_or_else(|| format!("\"{}\" can't name a Hive folder", hive.id))?;
     let paths = HivePaths::new(root);
+    match role {
+        ROLE_COORDINATOR => prepare_coordinator(hive, &paths, prefs),
+        ROLE_WORKER => prepare_worker(hive, &paths, tab_id, tasks, prefs),
+        other => Err(format!("A Hive has no \"{other}\" agent to launch.")),
+    }
+}
+
+fn prepare_worker(hive: &Hive, paths: &HivePaths, tab_id: &str, tasks: &[crate::state::Task], prefs: &crate::state::Preferences) -> Result<String, String> {
+    // No record, no launch: without worker.json and launch.json the fallback is the generic
+    // launch, unsandboxed in the human's folder.
+    let missing = |why: String| {
+        log::warn!("hive {}: tab {tab_id}: {why}", hive.id);
+        "launch record missing".to_string()
+    };
+    let mut w = super::worker::worker_for_tab(paths, tab_id).ok_or_else(|| missing("no worker.json names this tab".to_string()))?;
+    let task = super::worker::task_dir(paths, &w.task_id).map_err(missing)?;
+    let existing = read_record(&task).map_err(missing)?;
+    claude_new_enough()?;
+    if w.cargo_target.is_empty() {
+        let own = super::worktree::worker_uses_own_cargo_target(hive, &w);
+        w = super::worker::update_worker(&task, |w| {
+            let first = w.cargo_target.is_empty();
+            if first {
+                w.cargo_target = if own { super::worker::CARGO_TARGET_OWN } else { super::worker::CARGO_TARGET_NONE }.to_string();
+            }
+            first
+        })?;
+    }
+
+    let record = worker_record(hive, paths, &w);
+    if record != existing {
+        write_record(&task, &record)?;
+    }
+    let homes = crate::relocate::agents::Homes::real().ok_or("Couldn't find the home folder")?;
+    check_worker_trust(&homes.claude_json, paths, &w)?;
+
+    let hooks = super::settings::HookEnv::current()?;
+    let ctx = super::settings::WorkerContext::gather(hive, paths, &w);
+    let brief = tasks.iter().find(|t| t.id == w.task_id).and_then(|t| t.detail.clone()).unwrap_or_default();
+    write_worker_launch_files(hive, paths, &record, &w, &ctx, &brief, &hooks)?;
+    // A fresh start (`hiveRestartWorker` fresh) is a new session, told its kickoff again; the
+    // flag clears when that session starts.
+    let resume = if w.fresh_next {
+        reset_kickoff(&task)?;
+        None
+    } else {
+        last_session(&task)
+    };
+    let setup = if w.setup_done { String::new() } else { first_launch_setup(hive, paths, &w)? };
+    let args = hive_launch_args(&record, resume.as_deref());
+    log::info!("hive {}: launching worker {} ({})", hive.id, w.slug, if resume.is_some() { "resume" } else { "new session" });
+    Ok(format!("{setup}{}", hive_launch_line(&record, &args, &unset_vars(prefs))))
+}
+
+fn prepare_coordinator(hive: &Hive, paths: &HivePaths, prefs: &crate::state::Preferences) -> Result<String, String> {
     let task = paths.coordinator_task();
     // No record, no launch: the fallback would be exactly the generic launch this replaces.
     let existing = read_record(&task).map_err(|e| {
@@ -395,24 +636,15 @@ pub fn prepare_launch(hive: &Hive, role: &str, prefs: &crate::state::Preferences
 
     // The coordinator's record is all derived from the Hive, so a folder added since the last
     // launch reaches this one.
-    let record = coordinator_record(hive, &paths);
+    let record = coordinator_record(hive, paths);
     if record != existing {
         write_record(&task, &record)?;
     }
 
-    // Re-verified before every launch, in every root: the tab may come up under another account
-    // than the one this was last written for, and nothing may answer the dialog (§6.6).
-    let homes = crate::relocate::agents::Homes::real().ok_or("Couldn't find the home folder")?;
-    let trust = super::trust::write_trust(&homes, &paths, &paths.coordinator_home())?;
-    if !trust.failed.is_empty() {
-        return Err(format!("Couldn't record Claude's folder trust: {}", trust.failed.join("; ")));
-    }
-    if trust.written.is_empty() && trust.already.is_empty() {
-        return Err("Claude Code hasn't run on this computer yet, so there's nowhere to record folder trust. Run claude once in any tab, then try again.".to_string());
-    }
+    ensure_trust(paths, &paths.coordinator_home())?;
 
     let hooks = super::settings::HookEnv::current()?;
-    write_launch_files(hive, &paths, &record, &hooks)?;
+    write_launch_files(hive, paths, &record, &hooks)?;
     let resume = last_session(&task);
     let args = hive_launch_args(&record, resume.as_deref());
     log::info!("hive {}: launching the coordinator ({})", hive.id, if resume.is_some() { "resume" } else { "first launch" });
@@ -423,13 +655,16 @@ pub fn prepare_launch(hive: &Hive, role: &str, prefs: &crate::state::Preferences
 /// is; an error is shown, and nothing else is ever typed in its place.
 #[tauri::command]
 pub async fn hive_launch_command(state: State<'_, Arc<AppState>>, tab_id: String) -> Result<String, String> {
-    let (hive, role, prefs) = {
+    let (hive, role, tasks, prefs) = {
         let data = state.app_data.read();
         let (ws, tab) = super::find_hive_tab(&data, &tab_id).ok_or("Not a Hive tab")?;
         let hive = ws.hive.clone().ok_or("Not a Hive tab")?;
-        (hive, tab.hive_role.clone().unwrap_or_default(), data.preferences.clone())
+        let role = tab.hive_role.clone().unwrap_or_default();
+        // Only a worker's brief comes from the task list.
+        let tasks = if role == ROLE_WORKER { ws.tasks.clone() } else { Vec::new() };
+        (hive, role, tasks, data.preferences.clone())
     };
-    tauri::async_runtime::spawn_blocking(move || prepare_launch(&hive, &role, &prefs))
+    tauri::async_runtime::spawn_blocking(move || prepare_launch(&hive, &role, &tab_id, &tasks, &prefs))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -438,6 +673,7 @@ pub async fn hive_launch_command(state: State<'_, Arc<AppState>>, tab_id: String
 pub(crate) mod tests {
     use super::*;
     use crate::hive::record::{HiveFolder, KIND_GIT, KIND_PLAIN};
+    use crate::hive::worker::WorkerFolder;
 
     pub(crate) fn sample_hive() -> Hive {
         Hive {
@@ -614,12 +850,188 @@ pub(crate) mod tests {
         let prefs = crate::state::Preferences::default();
         let mut h = sample_hive();
         h.id = uuid::Uuid::new_v4().to_string();
-        let err = prepare_launch(&h, ROLE_COORDINATOR, &prefs).unwrap_err();
+        let err = prepare_launch(&h, ROLE_COORDINATOR, "t", &[], &prefs).unwrap_err();
         assert!(err == "launch record missing" || cfg!(windows), "{err}");
         assert!(!hive_root(&h.id).unwrap().exists(), "nothing was created");
-        assert!(prepare_launch(&h, crate::hive::ROLE_WORKER, &prefs).is_err());
+        let err = prepare_launch(&h, ROLE_WORKER, "t", &[], &prefs).unwrap_err();
+        assert!(err == "launch record missing" || cfg!(windows), "no worker.json names the tab: {err}");
+        assert!(!hive_root(&h.id).unwrap().exists());
+        assert!(prepare_launch(&h, "reviewer", "t", &[], &prefs).is_err());
         h.id = "../escape".into();
-        assert!(prepare_launch(&h, ROLE_COORDINATOR, &prefs).is_err());
+        assert!(prepare_launch(&h, ROLE_COORDINATOR, "t", &[], &prefs).is_err());
+    }
+
+    /// A worker of `sample_hive` plus an `api` repo: worktrees of web and api, the plain brand
+    /// folder, as `create_worker_worktrees` would record them.
+    pub(crate) fn sample_worker_hive() -> (Hive, HivePaths, WorkerRecord) {
+        let mut h = sample_hive();
+        h.folders.push(HiveFolder { name: "api".into(), path: "/r/api".into(), kind: KIND_GIT.into(), base: Some("main".into()), ..HiveFolder::default() });
+        let p = sample_paths();
+        let git = |name: &str| WorkerFolder {
+            name: name.into(),
+            kind: KIND_GIT.into(),
+            worktree: Some(s(&p.worker_worktree("auth", name))),
+            branch: Some("hive/ship-it--auth".into()),
+            target: Some("main".into()),
+            base_sha: Some("abc".into()),
+            common_dir: Some(format!("/r/{name}/.git")),
+            admin_dir: Some(format!("/r/{name}/.git/worktrees/{name}")),
+            ..WorkerFolder::default()
+        };
+        let w = WorkerRecord {
+            task_id: "t-auth".into(),
+            slug: "auth".into(),
+            title: "Auth tokens".into(),
+            role: "backend".into(),
+            badge: 3,
+            phase: crate::hive::worker::PHASE_LAUNCHING.into(),
+            tab_id: Some("tab-w".into()),
+            folders: vec![git("web"), git("api"), WorkerFolder { name: "brand".into(), kind: KIND_PLAIN.into(), ..WorkerFolder::default() }],
+            ..WorkerRecord::default()
+        };
+        (h, p, w)
+    }
+
+    #[test]
+    fn the_coordinators_arguments_are_unchanged() {
+        let r = coordinator_record(&sample_hive(), &sample_paths());
+        let p = sample_paths();
+        let mut want: Vec<String> = vec!["--settings".into(), r.settings_path.clone(), "--mcp-config".into(), r.mcp_config_path.clone()];
+        want.extend(["--strict-mcp-config", "--setting-sources", "project"].map(String::from));
+        for d in [s(&p.coordinator_worktree("web")), "/r/brand assets".to_string(), s(&p.gallery()), s(&p.coordinator_home())] {
+            want.push("--add-dir".into());
+            want.push(d);
+        }
+        want.extend(["--model", "opus", "--effort", "medium", "--tools", COORDINATOR_TOOLS, "--permission-mode", "dontAsk", "--resume", "sid"].map(String::from));
+        assert_eq!(hive_launch_args(&r, Some("sid")), want);
+        let text = serde_json::to_string(&r).unwrap();
+        for absent in ["permission_mode", "disallowed_tools", "task_id"] {
+            assert!(!text.contains(absent), "the coordinator's launch.json gains no {absent}");
+        }
+        // A record written before these fields reads as it always did.
+        let old: LaunchRecord = serde_json::from_str(&text).unwrap();
+        assert_eq!(old, r);
+    }
+
+    #[test]
+    fn the_worker_record_comes_from_its_worker_json() {
+        let (h, p, w) = sample_worker_hive();
+        let r = worker_record(&h, &p, &w);
+        let web = s(&p.worker_worktree("auth", "web"));
+        assert_eq!((r.role.as_str(), r.cwd.as_str(), r.task_id.as_str()), (ROLE_WORKER, web.as_str(), "t-auth"));
+        assert_eq!(
+            r.add_dirs,
+            vec![s(&p.worker_worktree("auth", "api")), "/r/brand assets".to_string(), s(&p.worker_scratch("auth")), s(&p.gallery()), web.clone()],
+            "the other worktree, the plain folder, scratch, the gallery, then the cwd"
+        );
+        assert_eq!((r.model.as_str(), r.effort.as_str()), ("sonnet", "high"), "the Hive's worker model when the worker names none");
+        assert!(r.env.contains(&("CLAUDE_CODE_TMPDIR".into(), s(&p.worker_tmp("auth")))));
+        assert!(r.env.contains(&("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD".into(), "1".into())));
+        assert!(!r.env.iter().any(|(k, _)| k == "CARGO_TARGET_DIR"), "no Rust folder, no target of its own");
+        assert_eq!(r.setting_sources.as_deref(), Some("project"), "never the human's user settings");
+        assert_eq!(r.permission_mode.as_deref(), Some(WORKER_PERMISSION_MODE));
+        assert_eq!(r.disallowed_tools, vec!["WebFetch", "WebSearch"]);
+        assert!(r.settings_path.starts_with(&s(&p.task("t-auth"))));
+
+        let mut docs = w.clone();
+        docs.role = "docs".into();
+        docs.model = "opus".into();
+        docs.effort = "max".into();
+        let r = worker_record(&h, &p, &docs);
+        assert_eq!(r.disallowed_tools, vec!["WebFetch"], "a web role keeps WebSearch, never WebFetch");
+        assert_eq!((r.model.as_str(), r.effort.as_str()), ("opus", "max"));
+
+        let mut scratch_only = w.clone();
+        scratch_only.folders.retain(|f| f.worktree.is_none());
+        let r = worker_record(&h, &p, &scratch_only);
+        assert_eq!(r.cwd, s(&p.worker_scratch("auth")));
+        assert_eq!(r.add_dirs, vec!["/r/brand assets".to_string(), s(&p.gallery()), s(&p.worker_scratch("auth"))], "scratch once, as the cwd");
+    }
+
+    #[test]
+    fn worker_arguments_carry_auto_mode_and_the_removed_tools() {
+        let (h, p, w) = sample_worker_hive();
+        let r = worker_record(&h, &p, &w);
+        let a = hive_launch_args(&r, Some("sid-9"));
+        assert_eq!(flag_values(&a, "--permission-mode"), vec!["auto"]);
+        assert_eq!(flag_values(&a, "--disallowedTools"), vec!["WebFetch,WebSearch"]);
+        assert!(flag_values(&a, "--tools").is_empty());
+        assert_eq!(flag_values(&a, "--setting-sources"), vec!["project"]);
+        assert_eq!(flag_values(&a, "--add-dir").len(), r.add_dirs.len());
+        assert_eq!(a.last().map(String::as_str), Some("sid-9"), "--resume after the variadic flags");
+    }
+
+    /// The cargo target is decided once: a Rust worker gets its own whether or not the human
+    /// has built, and the record keeps it across a human's `cargo build` or `cargo clean`.
+    #[test]
+    fn the_cargo_target_stays_put_across_relaunches() {
+        let base = scratch("cargo");
+        fs::create_dir_all(base.join("web/src-tauri")).unwrap();
+        fs::write(base.join("web/src-tauri/Cargo.toml"), "[package]\n").unwrap();
+        let (mut h, p, mut w) = sample_worker_hive();
+        h.folders[0].path = s(&base.join("web"));
+        w.folders.retain(|f| f.name == "web");
+        let target = |w: &WorkerRecord| worker_record(&h, &p, w).env.iter().find(|(k, _)| k == "CARGO_TARGET_DIR").map(|(_, v)| v.clone());
+        assert_eq!(target(&w), Some(s(&p.worker_cargo_target("auth"))), "a Rust folder with nothing built yet");
+        assert!(crate::hive::worktree::worker_seed_source(&h, &w).is_none());
+        fs::create_dir_all(base.join("web/src-tauri/target/debug/.fingerprint")).unwrap();
+        assert_eq!(target(&w), Some(s(&p.worker_cargo_target("auth"))), "the human's build changes nothing");
+
+        w.cargo_target = crate::hive::worker::CARGO_TARGET_NONE.into();
+        assert_eq!(target(&w), None, "decided at its first launch: it keeps building where it did");
+        w.cargo_target = crate::hive::worker::CARGO_TARGET_OWN.into();
+        fs::remove_dir_all(base.join("web")).unwrap();
+        assert_eq!(target(&w), Some(s(&p.worker_cargo_target("auth"))), "a cargo clean, even the folder gone");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // POSIX-shell only, like the coordinator's.
+    #[cfg(unix)]
+    #[test]
+    fn the_worker_line_with_setup_is_valid_shell() {
+        let (mut h, _, mut w) = sample_worker_hive();
+        let p = HivePaths::new("/Users/o'brien/Library/Application Support/com.aiterm.dev/hive/h1");
+        for f in &mut w.folders {
+            if let Some(wt) = f.worktree.as_mut() {
+                *wt = s(&p.worker_worktree("auth", &f.name));
+            }
+        }
+        h.folders[0].setup = Some("npm ci --no-audit".into());
+        h.folders[2].setup = Some("  ".into());
+        let r = worker_record(&h, &p, &w);
+        let line = format!("{}{}", first_launch_setup(&h, &p, &w).unwrap(), hive_launch_line(&r, &hive_launch_args(&r, None), &["CLAUDECODE".to_string()]));
+        assert!(line.starts_with("( cd '/Users/o'\\''brien/Library/Application Support/"), "{line}");
+        assert_eq!(line.matches("( cd ").count(), 1, "a blank setup is none: {line}");
+        assert!(line.contains(" && npm ci --no-audit ) && cd "), "{line}");
+        let out = std::process::Command::new("sh").arg("-n").arg("-c").arg(&line).output().expect("sh is available");
+        assert!(out.status.success(), "not valid shell:\n{line}\n{}", String::from_utf8_lossy(&out.stderr));
+
+        h.folders[0].setup = Some("npm ci\nrm -rf ~".into());
+        assert!(first_launch_setup(&h, &p, &w).unwrap_err().contains("line break"));
+    }
+
+    #[test]
+    fn a_fresh_start_resets_the_kickoff() {
+        let dir = scratch("kickoff");
+        assert!(kickoff_pending(&dir));
+        reset_kickoff(&dir).unwrap();
+        mark_kickoff_delivered(&dir).unwrap();
+        assert!(!kickoff_pending(&dir));
+        reset_kickoff(&dir).unwrap();
+        assert!(kickoff_pending(&dir), "told again in the new session");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_untrusted_worktree_repo_refuses_the_launch() {
+        let base = scratch("trust");
+        let root = base.join(".claude.json");
+        fs::write(&root, r#"{"projects":{}}"#).unwrap();
+        let (_, p, w) = sample_worker_hive();
+        let err = check_worker_trust(&[root.clone()], &p, &w).unwrap_err();
+        assert!(err.contains("trust dialog") && err.contains("\"web\""), "{err}");
+        assert_eq!(check_worker_trust(&[base.join("missing.json")], &p, &w).unwrap_err(), NO_CLAUDE_YET, "no root a Claude ran under");
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

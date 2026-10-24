@@ -8,7 +8,9 @@
 //! `create` is the Create sheet's side: preflight, detection and `hive_create` (§3).
 //!
 //! Workers (step 4): their record (`worker`), their worktrees, scratch and build-cache seed
-//! (`worktree`, over the shared git helpers in `git`), and the role catalogue (`roles`).
+//! (`worktree`, over the shared git helpers in `git`), the role catalogue (`roles`), and the
+//! sandbox refusals read off a failed call (`sandbox_events`). A worker launches through the
+//! same builder, with its own record, settings, brief and gate scope.
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
@@ -24,6 +26,7 @@ pub mod paths;
 mod probe;
 pub mod record;
 pub mod roles;
+pub mod sandbox_events;
 pub mod settings;
 pub mod trust;
 pub mod worker;
@@ -51,13 +54,41 @@ pub fn hive_agent(data: &AppData, tab_id: &str) -> Option<(Hive, String, paths::
 }
 
 /// A Hive agent's session started (its SessionStart hook): list it on the task, and while the
-/// coordinator's kickoff hasn't reached it, claim the next try. Blocks on file I/O.
-pub fn session_started(hive: &Hive, role: &str, paths: &paths::HivePaths, session_id: &str, transcript_path: Option<String>) -> Option<KickoffClaim> {
-    // A worker's task folder arrives with workers (build step 4).
-    if role != ROLE_COORDINATOR {
-        return None;
-    }
-    let task = paths.coordinator_task();
+/// agent's kickoff hasn't reached it, claim the next try. A worker is found by its tab; its
+/// first start also marks its setup done and its phase running. Blocks on file I/O.
+pub fn session_started(
+    hive: &Hive,
+    role: &str,
+    paths: &paths::HivePaths,
+    tab_id: &str,
+    session_id: &str,
+    transcript_path: Option<String>,
+) -> Option<KickoffClaim> {
+    let (task, text) = match role {
+        ROLE_COORDINATOR => (paths.coordinator_task(), kickoff_text(hive, paths)),
+        ROLE_WORKER => {
+            let Some(w) = worker::worker_for_tab(paths, tab_id) else {
+                log::warn!("hive {}: session {session_id} in tab {tab_id}, which no worker.json names", hive.id);
+                return None;
+            };
+            let task = worker::task_dir(paths, &w.task_id).ok()?;
+            let res = worker::update_worker(&task, |w| {
+                let was = (w.setup_done, w.fresh_next, w.phase.clone());
+                w.setup_done = true;
+                // The fresh session it asked for has started: the next launch resumes it.
+                w.fresh_next = false;
+                if w.phase == worker::PHASE_LAUNCHING {
+                    w.phase = worker::PHASE_RUNNING.to_string();
+                }
+                was != (w.setup_done, w.fresh_next, w.phase.clone())
+            });
+            if let Err(e) = res {
+                log::warn!("hive {}: worker {} not marked started: {e}", hive.id, w.slug);
+            }
+            (task, worker_kickoff_text(paths, &w))
+        }
+        _ => return None,
+    };
     let entry = launch::SessionEntry {
         session_id: session_id.to_string(),
         transcript_path,
@@ -69,7 +100,14 @@ pub fn session_started(hive: &Hive, role: &str, paths: &paths::HivePaths, sessio
     if !launch::kickoff_pending(&task) {
         return None;
     }
-    KickoffClaim::take(task, kickoff_text(hive, paths))
+    KickoffClaim::take(task, text)
+}
+
+/// The invariant rules a Hive agent is primed with at every session start (§7.1). Blocks on a
+/// small read: a worker's come from its `worker.json`.
+pub fn priming_rules(hive: &Hive, role: &str, paths: &paths::HivePaths, tab_id: &str) -> String {
+    let w = (role == ROLE_WORKER).then(|| worker::worker_for_tab(paths, tab_id)).flatten();
+    brief::invariant_rules(hive, role, paths, w.as_ref())
 }
 
 /// Kickoffs being delivered now, by task folder: two hooks report one start, and a held kickoff
@@ -116,6 +154,11 @@ pub fn kickoff_text(hive: &Hive, paths: &paths::HivePaths) -> String {
         paths.coordinator_brief().display(),
         hive.goal.trim()
     )
+}
+
+/// A worker's first words from maiTerm, once per session it starts fresh.
+pub fn worker_kickoff_text(paths: &paths::HivePaths, w: &worker::WorkerRecord) -> String {
+    format!("[maiTerm] Read {}, then start.", paths.worker_brief(&w.slug).display())
 }
 
 pub const ROLE_COORDINATOR: &str = "coordinator";
@@ -396,7 +439,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("hive-kickoff-{}", uuid::Uuid::new_v4()));
         let paths = paths::HivePaths::new(&root);
         let hive = Hive { id: "h1".into(), goal: "Ship it".into(), ..Hive::default() };
-        let start = |sid: &str| session_started(&hive, ROLE_COORDINATOR, &paths, sid, None);
+        let start = |sid: &str| session_started(&hive, ROLE_COORDINATOR, &paths, "coord", sid, None);
 
         let first = start("s1").expect("a kickoff on the first session");
         assert!(first.text.starts_with("[maiTerm] ") && first.text.contains("brief.md") && first.text.ends_with("Ship it"));
@@ -409,7 +452,41 @@ mod tests {
         assert!(start("s2").is_none() && start("s3").is_none(), "delivered once, never again");
         assert!(!launch::kickoff_pending(&paths.coordinator_task()), "recorded on disk, so a restart keeps it");
         assert_eq!(launch::last_session(&paths.coordinator_task()).as_deref(), Some("s3"));
-        assert!(session_started(&hive, ROLE_WORKER, &paths, "w1", None).is_none());
+        assert!(session_started(&hive, ROLE_WORKER, &paths, "no-such-tab", "w1", None).is_none(), "no worker.json names the tab");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_workers_first_start_marks_it_running_and_kicks_it_off_once() {
+        let root = std::env::temp_dir().join(format!("hive-worker-start-{}", uuid::Uuid::new_v4()));
+        let paths = paths::HivePaths::new(&root);
+        let hive = Hive { id: "h1".into(), goal: "Ship it".into(), ..Hive::default() };
+        let (_, _, mut w) = launch::tests::sample_worker_hive();
+        w.fresh_next = true;
+        let task = worker::task_dir(&paths, &w.task_id).unwrap();
+        worker::write_worker(&task, &w).unwrap();
+        let start = |sid: &str| session_started(&hive, ROLE_WORKER, &paths, "tab-w", sid, None);
+
+        let claim = start("s1").expect("the worker's kickoff");
+        assert_eq!(claim.text, format!("[maiTerm] Read {}, then start.", paths.worker_brief("auth").display()));
+        let now = worker::read_worker(&task).unwrap();
+        assert!(now.setup_done && !now.fresh_next, "setup never runs again; the next launch resumes");
+        assert_eq!(now.phase, worker::PHASE_RUNNING);
+        claim.delivered();
+        drop(claim);
+        assert!(start("s1").is_none() && start("s2").is_none(), "a resume is not told again");
+        assert_eq!(launch::last_session(&task).as_deref(), Some("s2"));
+
+        // A worker that reported keeps that phase when it resumes.
+        worker::update_worker(&task, |w| {
+            w.phase = worker::PHASE_REPORTED.into();
+            true
+        })
+        .unwrap();
+        let _ = start("s3");
+        assert_eq!(worker::read_worker(&task).unwrap().phase, worker::PHASE_REPORTED);
+        let rules = priming_rules(&hive, ROLE_WORKER, &paths, "tab-w");
+        assert!(rules.contains(&*paths.worker_brief("auth").to_string_lossy()), "{rules}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

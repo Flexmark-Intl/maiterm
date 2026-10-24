@@ -584,18 +584,23 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
 
     // A Hive agent's invariant rules go first, under the 2,000 characters Claude re-sends whole
     // after a compaction (docs/hive.md §7.1); the rest of its brief is a file they point to.
-    let hive_rules = crate::hive::hive_agent(&state.app_data.read(), tab_id)
-        .map(|(hive, role, paths)| crate::hive::brief::invariant_rules(&hive, &role, &paths));
-    if let Some(rules) = hive_rules {
+    let hive_agent = crate::hive::hive_agent(&state.app_data.read(), tab_id);
+    let hive_role = hive_agent.as_ref().map(|(_, role, _)| role.clone());
+    if let Some((hive, role, paths)) = hive_agent {
         out.push_str("\n\n");
-        out.push_str(&rules);
+        out.push_str(&crate::hive::priming_rules(&hive, &role, &paths, tab_id));
     }
+    // A Hive agent is told only what its own settings let it do: the Overlord skips it
+    // (docs/hive.md §7.3), and replyToOverlord, follow-ups and the stack writes are denied it.
+    let in_hive = hive_role.is_some();
+    let hive_worker = hive_role.as_deref() == Some(crate::hive::ROLE_WORKER);
 
     // Overlord standing instruction (docs/overlord.md §8): only when the feature is on AND
     // this tab's window actually has an Overlord workspace.
     let (overlord_present, escalations_to_overlord, is_overlord_agent) = {
         let app_data = state.app_data.read();
-        let present = app_data.preferences.overlord_enabled
+        let present = !in_hive
+            && app_data.preferences.overlord_enabled
             && app_data.windows.iter().any(|w| {
                 w.workspaces.iter().any(|ws| ws.overlord)
                     && w.workspaces.iter().any(|ws| {
@@ -637,7 +642,20 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
     // is mid-project holding a live list, and without it the work already in flight stays
     // invisible until the agent's next multi-step task. Re-sending is safe — createTasks
     // dedups on normalized title within the tab.
-    if state.app_data.read().preferences.tasks_enabled {
+    let tasks_enabled = state.app_data.read().preferences.tasks_enabled;
+    if tasks_enabled && hive_worker {
+        // A worker's blocker asks its coordinator, unlike every other agent's (docs/hive.md
+        // §7.2), and its task is the one it was spawned on.
+        out.push_str(
+            "\n\nTrack your steps with the maiTerm task tools (createTasks/updateTasks) rather \
+             than the todo tool built into your runtime, and keep statuses current. Your coordinator and \
+             your human read every title, note and question you write there without having seen \
+             your session: name things by what they are, never by a task id. When you need a \
+             decision or something you cannot do, block your task with a `blocker`: it goes to \
+             your coordinator, which answers it or asks your human. That is the one way to ask: \
+             never AskUserQuestion.",
+        );
+    } else if tasks_enabled {
         out.push_str(
             "\n\nTrack multi-step work with the maiTerm task tools (createTasks/updateTasks) \
              rather than your runtime's own todo list, so your human and this window's board \
@@ -668,7 +686,7 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
     // text: the point is that an agent resuming mid-project knows what is up right now.
     // Status comes from the mirror the frontend store publishes (`publish_stack_runtime`);
     // a service it has never reported is `stopped`.
-    if let Some(list) = stack_priming_list(state, tab_id) {
+    if let Some(list) = stack_priming_list(state, tab_id).filter(|_| !in_hive) {
         out.push_str(&format!(
             "\n\nThis workspace runs a stack maiTerm manages: {}. Use listStack / \
              getServiceOutput / restartService rather than starting these yourself. If you \
@@ -679,7 +697,7 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
         ));
     }
 
-    if let Some(line) = follow_ups_priming(state, tab_id) {
+    if let Some(line) = follow_ups_priming(state, tab_id).filter(|_| !in_hive) {
         out.push_str(&line);
     }
 
@@ -4260,7 +4278,8 @@ fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, trans
     };
     let (app, handle, tab, sid) = (srv.state.clone(), srv.app_handle.clone(), tab_id.to_string(), session_id.to_string());
     tauri::async_runtime::spawn(async move {
-        let kickoff = tokio::task::spawn_blocking(move || crate::hive::session_started(&hive, &role, &paths, &sid, transcript_path))
+        let tab_id = tab.clone();
+        let kickoff = tokio::task::spawn_blocking(move || crate::hive::session_started(&hive, &role, &paths, &tab_id, &sid, transcript_path))
             .await
             .ok()
             .flatten();
@@ -4273,7 +4292,7 @@ fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, trans
 /// Recorded as delivered only once the agent has it. A refusal right at session start is mostly
 /// the agent not yet seen owning its terminal (a process snapshot from before `claude` exec'd),
 /// so it is tried again a few times; a held one waits for its outcome, which is only an event.
-/// Whatever is still pending goes out on the coordinator's next session start.
+/// Whatever is still pending goes out on the agent's next session start.
 async fn deliver_hive_kickoff(app: &Arc<AppState>, handle: &AppHandle, tab: &str, claim: crate::hive::KickoffClaim) {
     use crate::mailink::draft_hold::{deliver_or_hold, Delivery};
     use tauri::Listener;
@@ -4292,7 +4311,7 @@ async fn deliver_hive_kickoff(app: &Arc<AppState>, handle: &AppHandle, tab: &str
         let typed = match deliver_or_hold(app, handle, tab, &claim.text, "Hive kickoff").await {
             Delivery::Delivered(_) => Some(true),
             Delivery::Held { msg_id, reason } => {
-                log::info!("hive: kickoff for coordinator tab {tab} held ({reason})");
+                log::info!("hive: kickoff for Hive tab {tab} held ({reason})");
                 let outcome = async {
                     while let Some((id, outcome)) = rx.recv().await {
                         if id == msg_id {
@@ -4305,25 +4324,25 @@ async fn deliver_hive_kickoff(app: &Arc<AppState>, handle: &AppHandle, tab: &str
                 Some(tokio::time::timeout(Duration::from_secs(31 * 60), outcome).await.unwrap_or(false))
             }
             Delivery::Refused(why) => {
-                log::warn!("hive: kickoff for coordinator tab {tab} refused ({why})");
+                log::warn!("hive: kickoff for Hive tab {tab} refused ({why})");
                 None
             }
         };
         handle.unlisten(listener);
         match typed {
             Some(true) => {
-                log::info!("hive: kickoff delivered to coordinator tab {tab}");
+                log::info!("hive: kickoff delivered to Hive tab {tab}");
                 claim.delivered();
                 return;
             }
             Some(false) => {
-                log::warn!("hive: held kickoff for coordinator tab {tab} was dropped; it goes out on the next session start");
+                log::warn!("hive: held kickoff for Hive tab {tab} was dropped; it goes out on the next session start");
                 return;
             }
             None => {}
         }
     }
-    log::warn!("hive: kickoff for coordinator tab {tab} still pending; it goes out on the next session start");
+    log::warn!("hive: kickoff for Hive tab {tab} still pending; it goes out on the next session start");
 }
 
 /// The gate decides on the tool, command, path and cwd, but Claude sends it the whole event, and
@@ -5587,6 +5606,47 @@ mod tests {
         let text = super::session_priming_text(&state, &coord);
         assert!(text.trim_start().starts_with("You are the coordinator of a maiTerm Hive. Its goal: Ship it."), "{text}");
         assert!(!super::session_priming_text(&state, &plain).contains("Hive"));
+    }
+
+    /// A worker is told only what its settings let it do: its blocker asks the coordinator
+    /// (docs/hive.md §7.2), and the Overlord's, the stack's and follow-ups' lines, whose tools
+    /// it is denied, aren't there. Nor are they a coordinator's.
+    #[test]
+    fn a_hive_agent_is_never_primed_with_tools_it_is_denied() {
+        use std::sync::Arc;
+        let state = Arc::new(crate::state::AppState::new());
+        let (coord, worker, plain) = {
+            let mut data = state.app_data.write();
+            data.preferences.overlord_enabled = true;
+            data.preferences.tasks_enabled = true;
+            data.preferences.follow_ups_enabled = true;
+            let mut w = crate::state::WindowData::new("win".into());
+            let mut overlord = crate::state::Workspace::new("O".into());
+            overlord.overlord = true;
+            let mut hive_ws = crate::state::Workspace::new("H".into());
+            hive_ws.hive = Some(crate::hive::Hive { id: "h-prime-2".into(), slug: "s".into(), goal: "Ship it".into(), ..Default::default() });
+            hive_ws.panes[0].tabs[0].hive_role = Some(crate::hive::ROLE_COORDINATOR.into());
+            let mut wt = crate::state::Tab::new("worker".into());
+            wt.hive_role = Some(crate::hive::ROLE_WORKER.into());
+            let ids = (hive_ws.panes[0].tabs[0].id.clone(), wt.id.clone());
+            hive_ws.panes[0].tabs.push(wt);
+            let ws = crate::state::Workspace::new("P".into());
+            let plain = ws.panes[0].tabs[0].id.clone();
+            w.workspaces.extend([overlord, hive_ws, ws]);
+            data.windows.push(w);
+            (ids.0, ids.1, plain)
+        };
+        let plain_text = super::session_priming_text(&state, &plain);
+        assert!(plain_text.contains("replyToOverlord with kind:") && plain_text.contains("createFollowUp"), "the fixture primes an ordinary tab with both: {plain_text}");
+        for tab in [&coord, &worker] {
+            let text = super::session_priming_text(&state, tab);
+            assert!(!text.contains("Call replyToOverlord") && !text.contains("createFollowUp") && !text.contains("createService"), "{text}");
+        }
+        let text = super::session_priming_text(&state, &worker);
+        assert!(text.contains("it goes to your coordinator, which answers it or asks your human"), "{text}");
+        assert!(!text.contains("When you need your human to decide"), "the generic line says the opposite: {text}");
+        assert!(!text.contains('\''), "no apostrophes in priming text: {text}");
+        assert!(super::session_priming_text(&state, &coord).contains("When you need your human to decide"), "a coordinator asks its human");
     }
 
     /// getMeshLayout lists a Hive's agents, marked, and says nothing of Hives where there are none.
