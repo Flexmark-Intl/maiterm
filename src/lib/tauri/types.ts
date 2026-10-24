@@ -104,6 +104,11 @@ export interface Tab {
   /** The stack service this tab runs (docs/stack.md §3–§5); absent for an ordinary tab.
    *  The binding lives here and nowhere else. */
   service_id?: string | null;
+  /** Which checkout this tab runs its service on (docs/hive.md §6.9): absent for the service's
+   *  own folder, else `"checkout:<abs>"` | `"branch:<name>"`. A string in Rust; one tab per
+   *  `(service_id, service_target)`. Rides with `service_id`: carried on reload, never on a
+   *  duplicate, cleared by a move. */
+  service_target?: string | null;
   /** This tab's part in its workspace's Hive (docs/hive.md §5): "coordinator" | "worker",
    *  absent for an ordinary tab. A string in Rust, never an enum. Out of the strip like a
    *  service, but an agent: ask `isStripHidden`/`isServiceTab`, never this field directly.
@@ -351,8 +356,19 @@ export interface Service {
   /** An agent wrote this definition. Human-defined = `origin !== 'agent' && !agent_edited`:
    *  agents may report its endpoint, never edit it (`stack/model.ts` `refusedAgentEdits`). */
   agent_edited?: boolean;
+  /** Running intent per copy on another checkout, by target (docs/hive.md §6.9); the own
+   *  folder's copy keeps `was_running`. Cleared on duplicate, never shared. */
+  running_targets?: string[];
+  /** Another workspace's service, used here: never started, stopped or retargeted from here. */
+  shared_from?: ServiceRef | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Where a `shared_from` service really lives. */
+export interface ServiceRef {
+  workspace_id: string;
+  service_id: string;
 }
 
 /** One line in a task's progress log. Mirrors the Rust `TaskNote`.

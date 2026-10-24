@@ -214,6 +214,17 @@ pub enum AgentSessionState {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StackRuntimeRow {
     pub service_id: String,
+    /// Which copy (docs/hive.md §6.9): `""` is the service's own folder, the only copy an
+    /// older store publishes. With `service_id` it makes the mirror's key (`stack::copy_key`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target: String,
+    /// The folder the copy runs in, as `stack_resolve_copy` gave it; empty means the
+    /// service's own `cwd`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cwd: String,
+    /// What to call the copy ("session-store", a worker's slug); empty for the own folder.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
     /// "stopped" | "starting" | "running" | "ready" | "crashed"
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -224,7 +235,7 @@ pub struct StackRuntimeRow {
 
 pub struct AppState {
     pub scrollback_db: ScrollbackDb,
-    /// Stack service status mirror, keyed by service id. See `StackRuntimeRow`.
+    /// Stack service status mirror, keyed by copy key (`stack::copy_key`). See `StackRuntimeRow`.
     pub stack_runtime: RwLock<HashMap<String, StackRuntimeRow>>,
     pub pty_registry: RwLock<HashMap<String, PtyHandle>>,
     /// alacritty_terminal instances keyed by pty_id

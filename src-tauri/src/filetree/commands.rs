@@ -202,7 +202,8 @@ fn live_cwd_holders(state: &AppState) -> Vec<CwdHolder> {
                 names.insert(t.id.clone(), t.name.clone());
                 if let Some(sid) = &t.service_id {
                     if let Some(svc) = ws.stack.iter().find(|s| &s.id == sid) {
-                        services.insert(sid.clone(), (t.id.clone(), svc.cwd.clone()));
+                        let key = crate::stack::copy_key(sid, t.service_target.as_deref().unwrap_or_default());
+                        services.insert(key, (t.id.clone(), svc.cwd.clone()));
                     }
                 }
             }
@@ -230,7 +231,9 @@ fn live_cwd_holders(state: &AppState) -> Vec<CwdHolder> {
         if !matches!(row.status.as_str(), "starting" | "running" | "ready") {
             continue;
         }
-        if let Some((tab, cwd)) = services.get(&row.service_id) {
+        // Keyed by copy: a copy on another checkout holds ITS folder, which the row carries.
+        if let Some((tab, cwd)) = services.get(&crate::stack::copy_key(&row.service_id, &row.target)) {
+            let cwd = if row.cwd.is_empty() { cwd } else { &row.cwd };
             out.push(CwdHolder { tab_id: tab.clone(), tab_name: name(tab), cwd: CwdOf::Path(cwd.into()) });
         }
     }

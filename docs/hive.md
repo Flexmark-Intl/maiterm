@@ -3150,6 +3150,14 @@ several releases a day).
    jobs under the worker's sandbox profile (spikes 9 and 15). `checks` receipts by job id
    (§7.7) arrive here. For maiTerm as the pilot repo, the `tauri:dev` data-folder and port
    override comes first. No batching yet: it needs landing.
+   **Part 1 built** (`0e1e4335`): `MAITERM_INSTANCE=<name>` (debug builds only) runs an isolated
+   dev instance on `com.aiterm.dev.<name>` (`src-tauri/src/instance.rs`; every data-folder path
+   goes through `persistence::app_data_dir`, held by a source scan). It makes no global writes,
+   runs no maiLink unless `MAITERM_MAILINK_PORT` is set, binds `MAITERM_MCP_PORT` exactly, and
+   its tabs never inherit the parent's port and auth. `npm run tauri:dev:isolated` needs
+   `MAITERM_INSTANCE` and `MAITERM_VITE_PORT`. With it, spike 15's three hardenings: definition
+   edits only on agent-made services (`Service.agent_edited`), all stack tools own-tab-only,
+   and shell-typed trigger values must be shell-inert (`triggers/shellInterpolate.ts`).
 6. Reviewers (`hiveVerdict`, three attempts, escalation). Landing: land to Base (default)
    pinned to the reviewed sha, including several repos, the config-touching land rule (§8.1),
    the approval mode (chosen at creation, §3) through agent requests; the **land log and Undo**

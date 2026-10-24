@@ -402,7 +402,7 @@ pub fn move_tab_to_window(
         let tab_pos = source_pane.tabs.iter().position(|t| t.id == tab_id)
             .ok_or("Tab not found")?;
         let mut tab: Tab = source_pane.tabs.remove(tab_pos);
-        tab.service_id = None;
+        tab.unbind_service();
         if source_pane.active_tab_id.as_ref() == Some(&tab_id) {
             source_pane.active_tab_id = super::workspace::pick_active_after_close(&source_pane.tabs, tab_pos);
         }
@@ -846,6 +846,7 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 // The stack definition travels with the workspace (below), but none of
                 // its services are running in the copy, so no tab in it may claim one.
                 service_id: None,
+                service_target: None,
                 // A copy of a Hive agent is not a Hive agent: the Hive's launch record and
                 // worktrees belong to the original (docs/hive.md §5).
                 hive_role: None,
@@ -984,6 +985,8 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 id: uuid::Uuid::new_v4().to_string(),
                 // Nothing runs in the copy; starting it there would fight the source for its port.
                 was_running: false,
+                running_targets: Vec::new(),
+                // `shared_from` stays: it names the other workspace, which the copy shares too.
                 ..s.clone()
             })
             .collect(),
@@ -1048,9 +1051,13 @@ mod clone_ids_tests {
             url: None,
             origin: "human".to_string(),
             agent_edited: true,
+            running_targets: vec!["branch:session-store".to_string()],
+            shared_from: Some(crate::state::workspace::ServiceRef { workspace_id: "ws-db".into(), service_id: "svc-db".into() }),
             created_at: String::new(),
             updated_at: String::new(),
         });
+        ws.panes[0].tabs[0].service_id = Some("svc-1".to_string());
+        ws.panes[0].tabs[0].service_target = Some("branch:session-store".to_string());
         ws.workspace_notes.push(WorkspaceNote {
             id: "note-1".to_string(),
             content: "hi".to_string(),
@@ -1064,6 +1071,10 @@ mod clone_ids_tests {
         assert_ne!(cloned.stack[0].id, "svc-1");
         assert_eq!(cloned.stack[0].name, "web");
         assert!(cloned.stack[0].agent_edited, "a copy keeps who wrote the definition");
+        assert!(cloned.stack[0].running_targets.is_empty(), "no copy runs in the duplicate");
+        assert_eq!(cloned.stack[0].shared_from, ws.stack[0].shared_from, "it still uses the other workspace's");
+        let tab = &cloned.panes[0].tabs[0];
+        assert!(tab.service_id.is_none() && tab.service_target.is_none());
         assert_ne!(cloned.workspace_notes[0].id, "note-1");
         assert_eq!(cloned.workspace_notes[0].content, "hi");
     }

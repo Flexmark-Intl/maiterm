@@ -14,6 +14,7 @@ mod mcp_proxy;
 mod pty;
 mod state;
 mod share;
+mod stack;
 mod terminal;
 mod util;
 mod watch;
@@ -697,6 +698,18 @@ pub fn run() {
             // every shadow file forever.
             mailink::mirror::prune_stale_shadows();
 
+            // Stack copies' branch checkouts whose branch is gone (docs/hive.md §6.9). Git, so off
+            // the setup thread.
+            {
+                let state = app_state.clone();
+                std::thread::spawn(move || {
+                    let n = stack::prune_worktrees(&state);
+                    if n > 0 {
+                        log::info!("stack: pruned {n} branch checkout(s)");
+                    }
+                });
+            }
+
             // maiLink mobile-companion LAN bridge (docs/mailink-protocol.md): a separate,
             // opt-in TLS listener — only started when the user has enabled it. Kept distinct
             // from the localhost-only Claude-Code server above.
@@ -951,6 +964,11 @@ pub fn run() {
             commands::workspace::follow_up_watch_status,
             commands::workspace::publish_stack_runtime,
             commands::stack::suggest_stack,
+            stack::stack_resolve_copy,
+            stack::stack_release_copy,
+            stack::stack_copy_targets,
+            stack::stack_target_for,
+            stack::stack_prune_worktrees,
             commands::accounts::list_account_runtimes,
             commands::accounts::reconcile_account,
             commands::accounts::read_account_identity,

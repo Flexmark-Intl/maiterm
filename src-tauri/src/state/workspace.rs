@@ -355,6 +355,13 @@ pub struct Tab {
     /// workspace may name a given service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_id: Option<String>,
+    /// Which checkout this tab runs its service on (docs/hive.md §6.9): None (or `""`) for the
+    /// service's own folder, `"checkout:<abs>"` or `"branch:<name>"` for a copy elsewhere
+    /// (`crate::stack::target`). A STRING: an unknown kind still loads and is refused when used.
+    /// One tab per `(service_id, target)`. Rides with `service_id`: carried on reload, never on a
+    /// duplicate or clone, cleared by a move, never in a share file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_target: Option<String>,
     /// This tab's part in its workspace's Hive (docs/hive.md §5): `"coordinator"` or
     /// `"worker"`, None for an ordinary tab. A STRING, never an enum: an older build that
     /// meets an unknown variant loads empty state. Like a service tab it is out of the
@@ -654,8 +661,26 @@ pub struct Service {
     /// human having approved the file. An older build drops it, which only locks agents out.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub agent_edited: bool,
+    /// Running intent for each copy on another checkout (docs/hive.md §6.9), by target: what a
+    /// relaunch brings back besides the default copy, which keeps `was_running`. Cleared on
+    /// duplicate (the copy would fight the source for its ports); never in a share file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub running_targets: Vec<String>,
+    /// This service is another workspace's, used here (docs/hive.md §6.8): its port fills
+    /// `{port:<name>}`, and it is never started, stopped or retargeted from here. Kept on
+    /// duplicate (it names the other workspace, not this one); never in a share file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_from: Option<ServiceRef>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Where a `shared_from` service really lives. Strings only, all defaulted: persisted.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ServiceRef {
+    pub workspace_id: String,
+    pub service_id: String,
 }
 
 fn default_restart_policy() -> String {
@@ -2380,6 +2405,13 @@ impl Tab {
         self.service_id.is_some()
     }
 
+    /// Drop the stack binding and the copy it named: a tab leaving its workspace takes the
+    /// process with it but not the binding (docs/stack.md §5).
+    pub fn unbind_service(&mut self) {
+        self.service_id = None;
+        self.service_target = None;
+    }
+
     pub fn new(name: String) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -2427,6 +2459,7 @@ impl Tab {
             comms_monitor: None,
             comms_thread_receipts: Vec::new(),
             service_id: None,
+            service_target: None,
             hive_role: None,
             follow_ups: Vec::new(),
         }
@@ -2479,6 +2512,7 @@ impl Tab {
             comms_monitor: None,
             comms_thread_receipts: Vec::new(),
             service_id: None,
+            service_target: None,
             hive_role: None,
             follow_ups: Vec::new(),
         }
@@ -2531,6 +2565,7 @@ impl Tab {
             comms_monitor: None,
             comms_thread_receipts: Vec::new(),
             service_id: None,
+            service_target: None,
             hive_role: None,
             follow_ups: Vec::new(),
         }
@@ -2980,5 +3015,28 @@ mod service_tests {
         let edited = Service { agent_edited: true, ..s };
         let back: Service = serde_json::from_str(&serde_json::to_string(&edited).unwrap()).unwrap();
         assert!(back.agent_edited);
+    }
+
+    #[test]
+    fn copies_load_from_old_state_and_write_nothing_until_used() {
+        let old = r#"{"id":"s","name":"web","command":"npm run dev","cwd":"/a","origin":"human","created_at":"","updated_at":""}"#;
+        let s: Service = serde_json::from_str(old).unwrap();
+        assert!(s.running_targets.is_empty() && s.shared_from.is_none());
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("running_targets") && !json.contains("shared_from"), "{json}");
+
+        // A kind this build doesn't know still loads: refused when used, never a lost state file.
+        let newer = r#"{"id":"s","name":"web","command":"x","cwd":"/a","origin":"human","created_at":"","updated_at":"",
+            "running_targets":["branch:a","vm:alpine"],"shared_from":{"workspace_id":"w","future":1}}"#;
+        let s: Service = serde_json::from_str(newer).unwrap();
+        assert_eq!(s.running_targets, vec!["branch:a", "vm:alpine"]);
+        assert_eq!(s.shared_from.as_ref().map(|r| (r.workspace_id.as_str(), r.service_id.as_str())), Some(("w", "")));
+
+        let tab: super::Tab = serde_json::from_str(r#"{"id":"t","name":"web","service_id":"s","service_target":"branch:a"}"#).unwrap();
+        assert_eq!(tab.service_target.as_deref(), Some("branch:a"));
+        let mut moved = tab.clone();
+        moved.unbind_service();
+        assert!(moved.service_id.is_none() && moved.service_target.is_none(), "a move drops both");
+        assert!(super::Tab::new("t".into()).service_target.is_none(), "a duplicate never gets one");
     }
 }

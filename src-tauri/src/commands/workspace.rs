@@ -534,7 +534,7 @@ pub fn move_tab_to_workspace(
         // The stack is per-workspace (docs/stack.md §5): a service tab that leaves takes
         // the process with it but not the binding, or the source workspace would show a
         // running service with no tab and mint a second process on the next start.
-        tab.service_id = None;
+        tab.unbind_service();
 
         // Fix source pane's active tab if we removed the active one
         if source_pane.active_tab_id.as_ref() == Some(&tab_id) {
@@ -1281,8 +1281,9 @@ pub fn set_workspace_muted(
 
 /// The frontend stack store publishes its runtime snapshot here on every change, so the
 /// SessionStart priming can name what is up without asking the webview. Whole-map replace
-/// per window's worth of rows is overkill; rows are keyed by service id, so a publish just
-/// upserts the ones it carries and drops the ids it names as gone.
+/// per window's worth of rows is overkill; rows are keyed by copy key (`stack::copy_key`: the
+/// service id for its own folder), so a publish just upserts the ones it carries and drops the
+/// keys it names as gone.
 #[tauri::command]
 pub fn publish_stack_runtime(
     state: State<'_, Arc<AppState>>,
@@ -1290,11 +1291,11 @@ pub fn publish_stack_runtime(
     removed: Option<Vec<String>>,
 ) -> Result<(), String> {
     let mut map = state.stack_runtime.write();
-    for id in removed.unwrap_or_default() {
-        map.remove(&id);
+    for key in removed.unwrap_or_default() {
+        map.remove(&key);
     }
     for row in rows {
-        map.insert(row.service_id.clone(), row);
+        map.insert(crate::stack::copy_key(&row.service_id, &row.target), row);
     }
     Ok(())
 }
@@ -1558,11 +1559,12 @@ pub fn follow_up_watch_status() -> std::collections::HashMap<String, crate::watc
     crate::watch::status()
 }
 
-/// Bind a tab to a stack service, or clear the binding (docs/stack.md §3–§5). At most one
-/// tab in a workspace may name a given service: binding one clears the same service from
-/// any other tab in the workspace inside the same write, so no reader ever sees two tabs
-/// claiming it — the same shape as the comms-binding hand-over in
-/// `carry_tab_state_on_reload`.
+/// Bind a tab to a copy of a stack service, or clear the binding (docs/stack.md §3–§5,
+/// docs/hive.md §6.9). At most one tab in a workspace may run a given copy, `(service_id,
+/// service_target)`: binding one clears the same copy from any other tab in the workspace
+/// inside the same write, so no reader ever sees two tabs claiming it — the same shape as the
+/// comms-binding hand-over in `carry_tab_state_on_reload`. No target is the service's own
+/// folder, as before copies existed.
 #[tauri::command]
 pub fn set_tab_service_id(
     window: tauri::Window,
@@ -1571,6 +1573,7 @@ pub fn set_tab_service_id(
     pane_id: String,
     tab_id: String,
     service_id: Option<String>,
+    service_target: Option<String>,
 ) -> Result<(), String> {
     let label = window.label().to_string();
     let mut app_data = state.app_data.write();
@@ -1578,15 +1581,37 @@ pub fn set_tab_service_id(
     let workspace = win.workspaces.iter_mut()
         .find(|w| w.id == workspace_id)
         .ok_or("Workspace not found")?;
+    bind_service_copy(workspace, &pane_id, &tab_id, service_id, service_target)?;
 
+    let data_clone = app_data.clone();
+    drop(app_data);
+    save_state(&data_clone)
+}
+
+/// `set_tab_service_id`'s write, on one workspace. Unbinding drops the target with the id.
+fn bind_service_copy(
+    workspace: &mut crate::state::Workspace,
+    pane_id: &str,
+    tab_id: &str,
+    service_id: Option<String>,
+    service_target: Option<String>,
+) -> Result<(), String> {
+    // "" and None are both the own folder; only None is stored, so old state compares equal.
+    let target = service_target.filter(|t| !t.is_empty() && service_id.is_some());
+    if let Some(t) = &target {
+        crate::stack::target::parse(t)?;
+    }
     if let Some(sid) = &service_id {
         if !workspace.stack.iter().any(|s| &s.id == sid) {
             return Err("Service not found in this workspace".to_string());
         }
+        if !workspace.panes.iter().any(|p| p.id == pane_id && p.tabs.iter().any(|t| t.id == tab_id)) {
+            return Err("Tab not found".to_string());
+        }
         for pane in workspace.panes.iter_mut() {
             for t in pane.tabs.iter_mut() {
-                if t.id != tab_id && t.service_id.as_deref() == Some(sid.as_str()) {
-                    t.service_id = None;
+                if t.id != tab_id && t.service_id.as_deref() == Some(sid.as_str()) && t.service_target == target {
+                    t.unbind_service();
                 }
             }
         }
@@ -1599,10 +1624,8 @@ pub fn set_tab_service_id(
         .find(|t| t.id == tab_id)
         .ok_or("Tab not found")?;
     tab.service_id = service_id;
-
-    let data_clone = app_data.clone();
-    drop(app_data);
-    save_state(&data_clone)
+    tab.service_target = target;
+    Ok(())
 }
 
 #[tauri::command]
@@ -3960,6 +3983,8 @@ mod reload_carry_tests {
             // stack store, and the original is deleted in the same operation, so the
             // one-tab-per-service rule holds (docs/stack.md §5).
             service_id: Some("svc-web".to_string()),
+            // And the copy it runs (docs/hive.md §6.9): the replacement runs the same one.
+            service_target: Some("branch:session-store".to_string()),
             // A reload carries the Hive role: the replacement is the same Hive agent, and
             // dropping it would put a Hive tab back in the strip (docs/hive.md §5).
             hive_role: Some("worker".to_string()),
@@ -4138,5 +4163,54 @@ mod reload_carry_tests {
         assert!(out.suspended_at.is_none());
         assert!(!out.wake_on_resume);
         assert!(!out.import_highlight);
+    }
+}
+
+#[cfg(test)]
+mod service_copy_binding_tests {
+    use super::bind_service_copy;
+    use crate::state::{Service, Tab, Workspace};
+
+    fn ws() -> (Workspace, String, Vec<String>) {
+        let mut ws = Workspace::new("proj".to_string());
+        ws.stack.push(serde_json::from_str::<Service>(r#"{"id":"svc","name":"web","command":"x","cwd":"/a","origin":"human","created_at":"","updated_at":""}"#).unwrap());
+        for i in 0..2 {
+            ws.panes[0].tabs.push(Tab::new(format!("t{i}")));
+        }
+        let pane = ws.panes[0].id.clone();
+        let tabs = ws.panes[0].tabs.iter().map(|t| t.id.clone()).collect();
+        (ws, pane, tabs)
+    }
+
+    fn bound(ws: &Workspace) -> Vec<(Option<String>, Option<String>)> {
+        ws.panes[0].tabs.iter().map(|t| (t.service_id.clone(), t.service_target.clone())).collect()
+    }
+
+    #[test]
+    fn one_tab_per_copy_not_per_service() {
+        let (mut ws, pane, tabs) = ws();
+        let svc = || Some("svc".to_string());
+        bind_service_copy(&mut ws, &pane, &tabs[0], svc(), None).unwrap();
+        bind_service_copy(&mut ws, &pane, &tabs[1], svc(), Some("branch:session-store".into())).unwrap();
+        assert_eq!(bound(&ws)[0], (svc(), None), "a copy on a branch leaves the own-folder copy alone");
+        assert_eq!(bound(&ws)[1], (svc(), Some("branch:session-store".into())));
+
+        // The same copy again moves it, as one service did before copies existed.
+        bind_service_copy(&mut ws, &pane, &tabs[2], svc(), Some(String::new())).unwrap();
+        assert_eq!(bound(&ws)[0], (None, None));
+        assert_eq!(bound(&ws)[2], (svc(), None), "\"\" is stored as no target");
+
+        bind_service_copy(&mut ws, &pane, &tabs[1], None, Some("branch:x".into())).unwrap();
+        assert_eq!(bound(&ws)[1], (None, None), "unbinding drops the target too");
+    }
+
+    #[test]
+    fn an_unknown_target_kind_or_a_missing_tab_changes_nothing() {
+        let (mut ws, pane, tabs) = ws();
+        bind_service_copy(&mut ws, &pane, &tabs[0], Some("svc".into()), None).unwrap();
+        let before = bound(&ws);
+        assert!(bind_service_copy(&mut ws, &pane, &tabs[1], Some("svc".into()), Some("vm:alpine".into())).is_err());
+        assert!(bind_service_copy(&mut ws, &pane, "nope", Some("svc".into()), None).is_err());
+        assert_eq!(bound(&ws), before);
     }
 }

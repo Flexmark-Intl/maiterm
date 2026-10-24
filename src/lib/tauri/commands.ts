@@ -1314,27 +1314,89 @@ export async function suggestStack(cwd: string): Promise<StackSuggestion[]> {
   return invoke('suggest_stack', { cwd });
 }
 
-/** One service's live status, as published to Rust for the SessionStart priming. */
+/** One copy's live status, as published to Rust for the SessionStart priming. Keyed in Rust
+ *  by copy key (`service_id`, or `service_id@target`). */
 export interface StackRuntimeRow {
   service_id: string;
   status: string;
   note?: string | null;
   since_ms?: number | null;
+  /** Which copy (docs/hive.md §6.9); absent/'' for the service's own folder. */
+  target?: string;
+  /** The folder the copy runs in (`ResolvedCopy.cwd`); absent means the service's own cwd. */
+  cwd?: string;
+  /** What to call the copy (`ResolvedCopy.label`). */
+  label?: string;
 }
-/** Upsert the stack store's runtime snapshot in Rust; `removed` drops ids that no longer exist. */
+/** Upsert the stack store's runtime snapshot in Rust; `removed` drops copy keys that no longer exist. */
 export async function publishStackRuntime(rows: StackRuntimeRow[], removed: string[] = []): Promise<void> {
   return invoke('publish_stack_runtime', { rows, removed });
 }
 
-/** Bind a tab to a stack service (or clear with null). Rust clears the same service from
- *  any other tab in the workspace in the same write — one tab per service. */
+/** Bind a tab to a copy of a stack service (or clear with null). Rust clears the same copy
+ *  from any other tab in the workspace in the same write — one tab per `(service, target)`.
+ *  No target is the service's own folder. */
 export async function setTabServiceId(
   workspaceId: string,
   paneId: string,
   tabId: string,
-  serviceId: string | null
+  serviceId: string | null,
+  serviceTarget: string | null = null
 ): Promise<void> {
-  return invoke('set_tab_service_id', { workspaceId, paneId, tabId, serviceId });
+  return invoke('set_tab_service_id', { workspaceId, paneId, tabId, serviceId, serviceTarget });
+}
+
+/** What to type for one copy of a service (docs/hive.md §6.9): Rust's re-rooted cwd and the
+ *  command/env with placeholders filled. A service on its own folder with no placeholders comes
+ *  back exactly as defined. */
+export interface ResolvedCopy {
+  copy_key: string;
+  cwd: string;
+  command: string;
+  env: [string, string][];
+  /** Ports maiTerm booked for `{port}`/`{port2}`; null when it booked none. */
+  port: number | null;
+  port2: number | null;
+  branch: string | null;
+  /** Short commit the checkout is at. */
+  commit: string | null;
+  /** The checkout's root; null on the own folder. */
+  checkout: string | null;
+  /** The worker's slug when it runs in a worker's worktree. */
+  worker: string | null;
+  /** What a row calls the copy; '' for the own folder. */
+  label: string;
+  /** No `{port}`: only one copy runs at a time. */
+  one_copy: boolean;
+}
+/** Resolve a copy; target '' (default) is the own folder, else `checkout:<abs>` / `branch:<name>`. */
+export async function stackResolveCopy(workspaceId: string, serviceId: string, target = ''): Promise<ResolvedCopy> {
+  return invoke('stack_resolve_copy', { workspaceId, serviceId, target });
+}
+/** Free a stopped copy's ports. False if it held none. */
+export async function stackReleaseCopy(copyKey: string): Promise<boolean> {
+  return invoke('stack_release_copy', { copyKey });
+}
+/** One "Run on ▸" choice. */
+export interface CopyTarget {
+  target: string;
+  kind: 'own' | 'worktree' | 'branch' | (string & {});
+  label: string;
+  branch?: string;
+  worker?: string;
+  path?: string;
+}
+/** The own folder, the repo's other worktrees (workers named), and up to 50 branches. */
+export async function stackCopyTargets(workspaceId: string, serviceId: string): Promise<CopyTarget[]> {
+  return invoke('stack_copy_targets', { workspaceId, serviceId });
+}
+/** An agent's `on` as a target: "main" → '', a worker (badge or name) → its worktree, else a branch. */
+export async function stackTargetFor(workspaceId: string, serviceId: string, on: string): Promise<string> {
+  return invoke('stack_target_for', { workspaceId, serviceId, on });
+}
+/** Remove maiTerm's branch checkouts whose branch is gone and that nothing targets. */
+export async function stackPruneWorktrees(): Promise<number> {
+  return invoke('stack_prune_worktrees');
 }
 
 /** Add one follow-up to a tab (docs/follow-ups.md). Returns the tab's list as it now stands. */

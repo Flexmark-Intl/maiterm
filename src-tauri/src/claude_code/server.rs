@@ -836,25 +836,7 @@ fn stack_priming_list(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
         return None;
     }
     let runtime = state.stack_runtime.read();
-    let parts: Vec<String> = ws
-        .stack
-        .iter()
-        .map(|s| {
-            let status = runtime.get(&s.id).map(|r| r.status.as_str()).unwrap_or("stopped");
-            let mut d = format!("{} ({}", s.name, status);
-            // The endpoint is remembered across runs (listStack shows it as `stale`), but
-            // "dev (stopped, http://localhost:5174/)" reads as an invitation to curl it.
-            let up = matches!(status, "running" | "ready");
-            if let (true, Some(url)) = (up, &s.url) {
-                d.push_str(&format!(", {}", url));
-            } else if let (true, Some(port)) = (up, s.port) {
-                d.push_str(&format!(", :{}", port));
-            }
-            d.push(')');
-            d
-        })
-        .collect();
-    Some(parts.join(", "))
+    Some(crate::stack::priming_entries(&app_data, ws, &runtime).join(", "))
 }
 
 /// Pure selection rule for the empty-sessionId path of `initSession` (unit-tested): which

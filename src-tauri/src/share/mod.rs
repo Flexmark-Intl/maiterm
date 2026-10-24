@@ -1368,6 +1368,9 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
                 origin: "human".to_string(),
                 // The human approved the file: an agent edit before it was shared doesn't follow.
                 agent_edited: false,
+                // Neither is in `SharedService`: copies and other workspaces are the sender's.
+                running_targets: Vec::new(),
+                shared_from: None,
                 created_at: now.clone(),
                 updated_at: now.clone(),
             }
@@ -1707,6 +1710,33 @@ mod tests {
         assert_eq!(all.launches.len(), 1);
         assert_eq!(all.launches[0].fork_session_id.as_deref(), Some("11111111-aaaa"));
         assert!(all.workspace.stack[0].auto_start);
+    }
+
+    /// Copies on other checkouts and services borrowed from another workspace are the sender's
+    /// (docs/hive.md §6.9): none of the three fields reaches the file or the import.
+    #[test]
+    fn service_copies_never_travel() {
+        let mut ws = sample_ws();
+        let mut svc: Service = serde_json::from_value(serde_json::json!({
+            "id": "svc-1", "name": "web", "command": "npm run dev", "cwd": std::env::temp_dir(), "origin": "human",
+            "created_at": "", "updated_at": "",
+            "running_targets": ["branch:session-store"],
+            "shared_from": {"workspace_id": "ws-db", "service_id": "svc-db"}
+        }))
+        .unwrap();
+        svc.was_running = true;
+        ws.stack.push(svc);
+        ws.panes[0].tabs[0].service_id = Some("svc-1".to_string());
+        ws.panes[0].tabs[0].service_target = Some("checkout:/Users/sender/wt-xyz".to_string());
+        let opts = ExportOptions { services: vec![ServiceChoice { id: "svc-1".into(), env_values: vec![] }], ..Default::default() };
+        let file = export_file(&ws, &[], &opts);
+        let json = serde_json::to_string(&file).unwrap();
+        for key in ["service_target", "running_targets", "shared_from", "session-store", "wt-xyz", "ws-db"] {
+            assert!(!json.contains(key), "{key} leaked: {json}");
+        }
+        let built = build_workspace(&file, &ImportOptions { services: vec![0], ..Default::default() });
+        let s = &built.workspace.stack[0];
+        assert!(s.running_targets.is_empty() && s.shared_from.is_none() && !s.was_running);
     }
 
     #[test]

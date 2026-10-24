@@ -1,6 +1,7 @@
 //! maiTerm's own git on a Hive's repos, shared by the coordinator's read copies (`layout`) and
-//! the workers' worktrees (`worktree`): the hardened invocation, the one for a worktree a worker
-//! has written in, and taking back a worktree add.
+//! the workers' worktrees (`worktree`), and by the stack's copies on other checkouts
+//! (`crate::stack::target`): the hardened invocation, the one for a worktree a worker has written
+//! in, and taking back a worktree add.
 //!
 //! Everything here blocks on git: callers run it under `spawn_blocking`.
 
@@ -11,13 +12,13 @@ use std::time::Duration;
 use super::worker::WorkerFolder;
 use crate::util::proc;
 
-pub(super) const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 /// A checkout of a large repo takes a while; one that takes longer is a hung filesystem.
-pub(super) const WORKTREE_TIMEOUT: Duration = Duration::from_secs(600);
+pub(crate) const WORKTREE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// maiTerm's own git on a Hive repo runs no hooks and no fsmonitor daemon: a worker can write
 /// a repo's hook or config, and maiTerm must not run what it wrote (§13.1).
-pub(super) fn git_in(repo: &Path) -> std::process::Command {
+pub(crate) fn git_in(repo: &Path) -> std::process::Command {
     let mut cmd = proc::git();
     cmd.arg("-C").arg(repo).args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]);
     cmd
@@ -26,7 +27,7 @@ pub(super) fn git_in(repo: &Path) -> std::process::Command {
 /// maiTerm's git in a worker's worktree, on the git dir maiTerm recorded when it made it. The
 /// worktree's `.git` file is the worker's to rewrite, and followed, it would point git at a repo
 /// whose config the worker wrote (a filter driver runs whatever that names, as maiTerm).
-pub(super) fn git_in_worktree(f: &WorkerFolder) -> Result<std::process::Command, String> {
+pub(crate) fn git_in_worktree(f: &WorkerFolder) -> Result<std::process::Command, String> {
     let wt = f.worktree.as_deref().ok_or("no worktree")?;
     let admin = f.admin_dir.as_deref().ok_or("no recorded git dir")?;
     // The worker writes its admin dir but not `commondir` (denyWrite). Without that file git
@@ -39,7 +40,7 @@ pub(super) fn git_in_worktree(f: &WorkerFolder) -> Result<std::process::Command,
     Ok(cmd)
 }
 
-pub(super) fn run(cmd: &mut std::process::Command, timeout: Duration) -> Result<String, String> {
+pub(crate) fn run(cmd: &mut std::process::Command, timeout: Duration) -> Result<String, String> {
     let out = proc::output_timeout(cmd, timeout).map_err(|e| e.to_string())?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -58,7 +59,7 @@ pub(super) struct Added {
 
 /// Undo a `worktree add` that failed partway, so a retry isn't refused by its leftovers. The
 /// folder didn't exist before the add and sits under the Hive's own root, so removing it is safe.
-pub(super) fn clean_failed_add(repo: &Path, worktree: &Path, branch: Option<(&str, &str)>) {
+pub(crate) fn clean_failed_add(repo: &Path, worktree: &Path, branch: Option<(&str, &str)>) {
     if fs::symlink_metadata(worktree).is_ok() {
         if let Err(e) = fs::remove_dir_all(worktree) {
             log::warn!("hive: half-made worktree {} left in place: {e}", worktree.display());
