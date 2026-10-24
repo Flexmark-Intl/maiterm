@@ -246,6 +246,19 @@ pub(crate) fn propagate_to_account_roots() {
     });
 }
 
+/// `~/.claude.json`'s mtime at the last check, so an unchanged file costs one `stat` per tick.
+static LAST_HOME_MTIME: parking_lot::Mutex<Option<std::time::SystemTime>> = parking_lot::Mutex::new(None);
+
+/// Resync the account roots when `~/.claude.json` changed since the previous call. The first
+/// call only records the mtime: startup already pushed through `write_mcp_settings`.
+fn propagate_if_home_changed(path: &PathBuf) {
+    let Ok(mtime) = fs::metadata(path).and_then(|m| m.modified()) else { return };
+    let previous = LAST_HOME_MTIME.lock().replace(mtime);
+    if previous.is_some_and(|p| p != mtime) {
+        propagate_to_account_roots();
+    }
+}
+
 /// Re-assert `mcpServers.<key>` in ~/.claude.json *only if it has drifted* from
 /// the live port/transport/token. `~/.claude.json` is co-owned by the `claude`
 /// CLI, which rewrites the whole file on its own events — a long-lived session
@@ -264,6 +277,12 @@ pub fn ensure_mcp_settings(port: u16, auth: &str) -> Result<bool, String> {
         if let Ok(raw) = fs::read_to_string(&path) {
             if let Ok(settings) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if settings.get("mcpServers").and_then(|m| m.get(mcp_server_key())) == Some(&expected) {
+                    // Our entry is fine, but the file is not only ours: the OTHER build flavor
+                    // rewrites its own entry (`maiterm` vs `maiterm-dev`, a new port and token
+                    // every launch) and never resyncs OUR account roots — only its own. Without
+                    // this, a prod-managed tab dials the dev server's previous port until prod
+                    // itself next writes. Push whenever the file moved since we last looked.
+                    propagate_if_home_changed(&path);
                     return Ok(false);
                 }
             }
