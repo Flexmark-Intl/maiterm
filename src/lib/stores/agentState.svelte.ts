@@ -408,7 +408,7 @@ function createAgentStateStore() {
         // even when the agent never calls initSession (e.g. Codex via the hook path).
         workspacesStore.setTabRuntimeLocal(tab_id, runtime);
         if (source === 'compact') {
-          dispatch(getDescriptor(runtime).displayName, 'Compaction complete', 'info', { tabId: tab_id });
+          dispatch(getDescriptor(runtime).displayName, 'Compaction complete', 'info', { tabId: tab_id, kind: 'compaction' });
         }
         logInfo(`Claude state: session ${session_id.slice(0, 8)} started (${source ?? 'unknown'}) → tab ${tab_id.slice(0, 8)} = ${started}`);
       });
@@ -457,7 +457,7 @@ function createAgentStateStore() {
         const runtime = runtimeOf(e.payload);
         if (notification_type === 'permission_prompt') {
           setState(tab_id, session_id, 'permission', undefined, undefined, runtime);
-          dispatch(getDescriptor(runtime).displayName, 'Needs permission approval', 'info', { tabId: tab_id });
+          dispatch(getDescriptor(runtime).displayName, 'Needs permission approval', 'info', { tabId: tab_id, kind: 'permission' });
         } else if (notification_type === 'idle_prompt') {
           setState(tab_id, session_id, 'idle', undefined, undefined, runtime);
           // Notification disabled — the Stop hook already notifies when Claude finishes,
@@ -534,7 +534,7 @@ function createAgentStateStore() {
         // looking at (e.g. a background mesh agent), surface a toast + deep-link so it isn't
         // missed. Agents must NOT also print the question or write a note (no double-messaging).
         if (tool_name === 'AskUserQuestion' && !isTabVisible(tab_id)) {
-          dispatch(getDescriptor(runtime).displayName, 'Needs your input', 'info', { tabId: tab_id });
+          dispatch(getDescriptor(runtime).displayName, 'Needs your input', 'info', { tabId: tab_id, kind: 'question' });
         }
       });
       unlisteners.push(u7);
@@ -629,7 +629,7 @@ function createAgentStateStore() {
             }
           }, COMPACT_STALE_MS));
         }
-        dispatch(getDescriptor(runtime).displayName, `Compacting conversation (${trigger})...`, 'info', { tabId: tab_id });
+        dispatch(getDescriptor(runtime).displayName, `Compacting conversation (${trigger})...`, 'info', { tabId: tab_id, kind: 'compaction' });
       });
       unlisteners.push(u9);
     },

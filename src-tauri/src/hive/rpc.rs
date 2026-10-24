@@ -56,6 +56,18 @@ pub(crate) enum Front {
     Unknown,
 }
 
+/// Tells the Hive in `workspace_id`, in window `label`, that its workers changed: its board
+/// refetches. For the paths that change a worker outside a tool call (a session start, a reload,
+/// the breaker).
+pub(crate) fn emit_workers_changed(handle: &AppHandle, label: &str, workspace_id: &str) {
+    use tauri::Emitter;
+    // To the Hive's window only: `emit` would reach every window's board.
+    let payload = serde_json::json!({ "workspace_id": workspace_id });
+    if let Err(e) = handle.emit_to(label, super::tools::WORKERS_CHANGED_EVENT, payload) {
+        log::warn!("hive: workers-changed not sent to window {label}: {e}");
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct AppWindow {
     pub app: Arc<AppState>,
@@ -70,12 +82,7 @@ impl HiveWindow for AppWindow {
     }
 
     fn workers_changed(&self, workspace_id: &str) {
-        use tauri::Emitter;
-        // To the Hive's window only: `emit` would reach every window's board.
-        let payload = serde_json::json!({ "workspace_id": workspace_id });
-        if let Err(e) = self.handle.emit_to(self.label.as_str(), super::tools::WORKERS_CHANGED_EVENT, payload) {
-            log::warn!("hive: workers-changed not sent to window {}: {e}", self.label);
-        }
+        emit_workers_changed(&self.handle, &self.label, workspace_id);
     }
 
     fn deliver(&self, tab: &str, text: String, what: &'static str) -> impl Future<Output = Sent> + Send {

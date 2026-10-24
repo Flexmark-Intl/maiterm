@@ -577,6 +577,73 @@ export interface HiveCreated {
   replace_tab: HiveReplaceable | null;
 }
 
+/** A worker's last verified `hiveReport` (hive/worker.rs `WorkerReport`). */
+export interface HiveWorkerReport {
+  /** "done" | "blocked" | "failed". */
+  status: string;
+  summary: string;
+  receipts: { commits: string[]; files: string[]; assets: string[] };
+  notes?: string | null;
+  at: string;
+}
+
+export interface HiveCardFolder {
+  name: string;
+  /** "git" | "plain". */
+  kind: string;
+  branch?: string | null;
+  target?: string | null;
+  /** Commits its landing target doesn't have; null on the board, which runs no git. */
+  ahead?: number | null;
+}
+
+/** One worker on the Hive board (hive/tools.rs `WorkerCard`, docs/hive.md §4.3). The task's lane,
+ *  blocker and notes and the agent's state are read live from their stores, not from here. */
+export interface HiveWorkerCard {
+  badge: number;
+  /** Its slug. */
+  worker: string;
+  title: string;
+  task_id: string;
+  tab_id?: string | null;
+  role: string;
+  /** "waiting" | "launching" | "running" | "blocked" | "reported" | "failed" | "stopped", or a
+   *  phase a newer build wrote. */
+  phase: string;
+  wait_reason?: string | null;
+  /** Task ids it waits on. */
+  depends_on: string[];
+  /** The same, as `#badge slug`. */
+  depends_on_labels: string[];
+  folders: HiveCardFolder[];
+  model: string;
+  effort: string;
+  last_report?: HiveWorkerReport | null;
+  created_at: string;
+  launched_at?: string | null;
+}
+
+export interface HiveHeadroom {
+  cap: number;
+  live: number;
+  starting: number;
+  spawns_left_this_hour: number;
+  spawns_left_today: number;
+  /** Claude's reset minute ("HH:MM") while the usage-limit breaker holds. */
+  usage_limit_until?: string | null;
+  usage_limit_reason?: string | null;
+}
+
+export interface HiveBoard {
+  workers: HiveWorkerCard[];
+  headroom: HiveHeadroom;
+  hive_status: string;
+  starts_workers: boolean;
+  /** Epoch ms when the headroom changes with no event (the breaker ends, a spawn ages out of
+   *  the hour or day): the board refetches then. */
+  refresh_at?: number | null;
+}
+
 export type CursorStyle = 'block' | 'underline' | 'bar';
 
 export type TriggerActionType = 'notify' | 'send_command' | 'set_tab_state' | 'enable_auto_resume' | 'replay_auto_resume';

@@ -3002,17 +3002,17 @@ several releases a day).
    - every worker launch and relaunch through the step 3 builder.
    Receipts accept **commits, files and assets only**; `checks` waits for 5b. Gated on spike 10
    (and 14); on native Windows the sheet refuses to create a Hive (§14.16).
-   Being built in six parts (4a–4f):
-   - 4a: `worker.json` (`hive/worker.rs`), a worker's worktrees, `.worktreeinclude` copy and
+   **Built 2026-10-24**, in six parts:
+   - 4a `3e8c0b56`: `worker.json` (`hive/worker.rs`), a worker's worktrees, `.worktreeinclude` copy and
      slim cargo seed (`hive/worktree.rs`, over the git helpers moved to `hive/git.rs`), and the
      role catalogue (`hive/roles.rs`), listed in the coordinator's brief. Nothing launches a
      worker yet.
-   - 4b: a worker launches through the step 3 builder: `launch::worker_record` (auto mode,
+   - 4b `bd22543e`: a worker launches through the step 3 builder: `launch::worker_record` (auto mode,
      `--disallowedTools`, its own temp and cargo target), `settings::worker_settings_json`,
      `scratch/brief.md` and the worker's invariant rules, `gate::worker_scope`, the worker branch
      of `session_started`, and `hive/sandbox_events.rs`. Nothing calls it yet but tests and the
      acceptance probe (§13.1).
-   - 4c: the fuses and the spawn reservation (`hive/fuses.rs`): cap, hour and day counts and
+   - 4c `c9e37a8e`: the fuses and the spawn reservation (`hive/fuses.rs`): cap, hour and day counts and
      the breaker under one `std::sync::Mutex`, the counts and breaker in
      `<app data>/hive/fuses.json` (not the state file: Rust's alone), pending reservations in
      memory with a 120 s expiry and released on drop. The StopFailure wiring reads Claude's own
@@ -3029,7 +3029,18 @@ several releases a day).
      only when another tab hit it, and told not to ask again. A plan's capacity 429 does
      nothing. The tab that hit the limit is never typed into. `hive_resume` un-pauses and
      closes the row (no button yet). Nothing reserves yet: `hiveSpawnWorker` (4d) does.
-   - 4e: `hiveReport` (`hive/report.rs`: commits must be on the worker's branch and not already on
+   - 4d `264ec00d`: `hiveSpawnWorker` and `hiveListWorkers` (`hive/tools.rs`). A spawn registers
+     under one lock, then reserves, makes the worktrees, runs the preflight (Claude's version,
+     repo trust), writes the launch record and puts the hidden worker tab and its task row in one
+     unsaved write; the window adopts them over the Hive's own request channel
+     (`hive-frontend-request`, `hive/rpc.rs` and `src/lib/hive/rpc.ts`, unreachable from MCP), and
+     only then is it saved and the reservation committed. Every failure after the reservation
+     takes back the tab, row, worktrees, branches, task folder and slot. A worker with unmet
+     dependencies waits without a slot. `tools/list` shows Hive tools only to their role, and Rust
+     refuses Hive tools to the wrong role, escape and Overlord tools to every Hive agent, and an
+     `initSession` that would rebind a Hive agent to another tab. A reload moves `worker.json`'s
+     tab; live workers remount when the Hive view does.
+   - 4e `54ee4d6a`: `hiveReport` (`hive/report.rs`: commits must be on the worker's branch and not already on
      its landing target when it started; files must exist in its worktrees or scratch, symlinks
      resolved; `assets` and `checks` refused until steps 8 and 5b; `done` needs one), and the
      coordinator's `hiveMessageWorker`, `hiveStopWorker` and `hiveRestartWorker`
@@ -3064,6 +3075,29 @@ several releases a day).
      reservation backs off five minutes. The worker and coordinator settings also deny the
      Overlord's tools (`OVERLORD_CALLER_TOOLS`). Not yet: a poll when the breaker's reset passes
      (the next task write does it), and the hold for a usage-limit wait is lost on a restart.
+   - 4f: static cards and the board. `hive_workers` returns the board (`tools::board_view`, the
+     view `hiveListWorkers` also reads, without its git count): each worker's record with its tab,
+     dependencies as task ids, and times, plus the headroom. `HiveView` refetches it when its
+     window hears `hive-workers-changed` (`emit_to`, never a broadcast), when its tasks change,
+     when its Hive's status or its workers' tab ids do, and at the board's `refresh_at` (Rust's
+     instant for a change no event reports: the breaker ending, a spawn leaving the hour or day).
+     It never polls. Besides the tools, three paths change a worker's view outside a tool call, and
+     each emits: a session start that moves `launching` to `running` (`SessionStart.phase_changed`),
+     a reload's `remap_worker_tab`, and a tripped breaker (to every Hive). Starting is
+     `launching` (or `waiting`) only: a running worker with no hook state, as after a webview
+     reload, reads Idle. A Needs-you card always shows its count. A card's lane, blocker, note and agent state are
+     read live from their stores (`src/lib/hive/cards.ts`: `cardState`, `sortCards`, `waves`), so
+     none of it waits on a fetch. The step 4 states are Needs you (a blocker on a task in Blocked,
+     or a permission prompt or AskUserQuestion while the worker is live), Blocked, Working,
+     Starting (with its `wait_reason`), Idle, Reported, Failed/Stopped and Suspended. A busy agent
+     reads Working even in `reported` or `blocked`, since a coordinator's message sets it going
+     without changing its phase. Waves wrap under each other on a narrow board instead of
+     scrolling it sideways. A card has no buttons: a click sends `HIVE_OPEN_COLUMN` (with the
+     task id, since a waiting worker has no tab), which focuses the card until worker columns
+     arrive in step 5. `hiveOwnsPrompt` (TS: `notificationDispatch.dispatch`, fed a `kind` by
+     agentState's permission, question and compaction notices and by command completion) and
+     its Rust twin `hive::owns_prompt` (`ring_devices`, which every doorbell path goes through)
+     return false until step 7. Not yet: a watch script waiting doesn't count toward Needs you.
 5. The activity feed, diff stat, worker columns, raw terminal (`fixedSize`, spike 3), keyboard.
 5b. The stack feature first: any service on any branch (§6.9: `Tab.service_target`, re-rooted
    cwd, placeholders, Run on ▸, copies per branch, `shared_from`). Then the Hive run queue:

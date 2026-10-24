@@ -6823,6 +6823,11 @@ async fn ring_devices(
         log::debug!("[maiLink] doorbell: tab {tab_id} is muted, no push ({kind})");
         return;
     }
+    // A Hive worker's prompt its coordinator answers rings nobody (docs/hive.md §4.7).
+    if crate::hive::owns_prompt(&app.app_data.read(), tab_id, kind) {
+        log::debug!("[maiLink] doorbell: tab {tab_id}'s {kind} is its Hive coordinator's, no push");
+        return;
+    }
     let targets: Vec<(String, String, Option<String>, String)> = app
         .app_data
         .read()

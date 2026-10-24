@@ -49,7 +49,7 @@ async function handleCommandComplete(tabId: string, exitCode: number) {
     : `"${name}" has finished (exit code ${exitCode})`;
 
   const type = exitCode === 0 ? 'success' as const : 'error' as const;
-  await dispatch('Command Completed', body, type, { tabId });
+  await dispatch('Command Completed', body, type, { tabId, kind: 'completion' });
 }
 
 function handleCommandStart(tabId: string) {

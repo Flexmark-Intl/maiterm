@@ -2,7 +2,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
-import type { Hive, HiveCreated, HiveDetectedTool, HiveFolderInfo, HivePreflight, HiveSpec } from './types';
+import type { Hive, HiveBoard, HiveCreated, HiveDetectedTool, HiveFolderInfo, HivePreflight, HiveSpec } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
@@ -2663,6 +2663,12 @@ export async function hiveCreate(workspaceId: string, spec: HiveSpec): Promise<H
  *  A stopped or failed worker stays down until its coordinator restarts it. */
 export async function hiveLiveWorkerTabs(workspaceId: string): Promise<string[]> {
   return invoke('hive_live_worker_tabs', { workspaceId });
+}
+
+/** The Hive board's cards and headroom (docs/hive.md §4.3). Fetched on `hive-workers-changed` and
+ *  task changes, never polled. */
+export async function hiveWorkers(workspaceId: string): Promise<HiveBoard> {
+  return invoke('hive_workers', { workspaceId });
 }
 
 /** A Hive paused by a usage limit it couldn't wait out starts workers again (docs/hive.md §7.8).

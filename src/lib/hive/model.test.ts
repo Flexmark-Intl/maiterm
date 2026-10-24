@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  charCount, dispatchHiveOpenColumn, engineSkips, folderName, isEligible, MAX_INSTRUCTIONS, openTargetFor, slugify,
-  takePendingHiveOpen, validateSpec,
+  charCount, dispatchHiveOpenColumn, engineSkips, folderName, HIVE_PROMPT_KINDS, hiveOwnsPrompt, isEligible, MAX_INSTRUCTIONS,
+  openTargetFor, slugify, takePendingHiveOpen, validateSpec,
 } from './model';
 
 const ws = { id: 'w' };
@@ -147,5 +147,12 @@ describe('takePendingHiveOpen', () => {
     expect(takePendingHiveOpen('w')).toBeNull();
     dispatchHiveOpenColumn({ workspaceId: 'w', tabId: 'c' });
     expect(takePendingHiveOpen('w', Date.now() + 5000)).toBeNull();
+  });
+});
+
+describe('hiveOwnsPrompt', () => {
+  it('owns nothing before hiveAnswerWorker (step 7): every prompt reaches the human', () => {
+    const tabs = [{ id: 'c', hive_role: 'coordinator' }, { id: 'k', hive_role: 'worker' }, { id: 't', hive_role: null }, null, undefined];
+    for (const tab of tabs) for (const kind of HIVE_PROMPT_KINDS) expect(hiveOwnsPrompt(tab, kind)).toBe(false);
   });
 });

@@ -35,9 +35,29 @@ export const HIVE_OPEN_COLUMN = 'hive-open-column';
 
 export interface HiveOpenColumnDetail {
   workspaceId: string;
+  /** The agent's tab; empty for a waiting worker, which has none yet (then `taskId` names it). */
   tabId: string;
+  /** A worker's task: its card's identity, tab or not (§4.3). */
+  taskId?: string | null;
   /** The waiting item to scroll to, as `waitingStore.open` takes it. */
   focus?: string | null;
+}
+
+/** What a notification is about, for `hiveOwnsPrompt` (docs/hive.md §4.7). */
+export type HivePromptKind = 'permission' | 'question' | 'compaction' | 'completion';
+export const HIVE_PROMPT_KINDS: readonly HivePromptKind[] = ['permission', 'question', 'compaction', 'completion'];
+
+/** Whether this tab's prompt or notice of `kind` is its Hive coordinator's to answer, so no
+ *  toast, OS notification or sound goes to the human for it (§4.7); it still shows in the Loom,
+ *  the corner card and the card's dot. The phone's half is Rust's `hive::owns_prompt`.
+ *
+ *  False for everything until `hiveAnswerWorker` ships (build step 7): before it a coordinator
+ *  can't answer a prompt, so every worker prompt reaches the human as today. Asked at the choke
+ *  point (`notificationDispatch.dispatch`) now so step 7 changes this, not its callers. */
+export function hiveOwnsPrompt(tab: Pick<TabFields, 'id' | 'hive_role'> | null | undefined, kind: HivePromptKind): boolean {
+  void tab;
+  void kind;
+  return false;
 }
 
 /** The last open asked for, kept briefly: `navigateToTab` switches workspace and dispatches at

@@ -4342,17 +4342,24 @@ async fn record_agent_files(
 /// is what a relaunch resumes, and the coordinator gets the kickoff until it has reached it. Off
 /// the hook's path: file I/O, then a delivery that may wait for the agent's input box.
 fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, transcript_path: Option<String>) {
-    let Some((hive, role, paths)) = crate::hive::hive_agent(&srv.state.app_data.read(), tab_id) else {
+    let (agent, board) = {
+        let data = srv.state.app_data.read();
+        (crate::hive::hive_agent(&data, tab_id), crate::hive::hive_board_of(&data, tab_id))
+    };
+    let Some((hive, role, paths)) = agent else {
         return;
     };
     let (app, handle, tab, sid) = (srv.state.clone(), srv.app_handle.clone(), tab_id.to_string(), session_id.to_string());
     tauri::async_runtime::spawn(async move {
         let tab_id = tab.clone();
-        let kickoff = tokio::task::spawn_blocking(move || crate::hive::session_started(&hive, &role, &paths, &tab_id, &sid, transcript_path))
+        let started = tokio::task::spawn_blocking(move || crate::hive::session_started(&hive, &role, &paths, &tab_id, &sid, transcript_path))
             .await
-            .ok()
-            .flatten();
-        if let Some(claim) = kickoff {
+            .unwrap_or_default();
+        // A worker's card still reads the `launching` its spawn or restart sent.
+        if let (true, Some((label, ws))) = (started.phase_changed, &board) {
+            crate::hive::rpc::emit_workers_changed(&handle, label, ws);
+        }
+        if let Some(claim) = started.kickoff {
             deliver_hive_kickoff(&app, &handle, &tab, claim).await;
         }
     });
@@ -4383,7 +4390,15 @@ fn hive_stop_failure(srv: &ServerState, tab_id: &str, event: &Value) {
             let reason = a.text.clone();
             if tokio::task::spawn_blocking(move || fuses::trip_breaker(until, &reason)).await.unwrap_or(false) {
                 let text = fuses::breaker_notice(until);
-                notices.extend(fuses::coordinator_tabs(&app.app_data.read()).into_iter().map(|c| (c, text.clone())));
+                let boards = {
+                    let data = app.app_data.read();
+                    notices.extend(fuses::coordinator_tabs(&data).into_iter().map(|c| (c, text.clone())));
+                    crate::hive::hive_boards(&data)
+                };
+                // Every header shows the breaker; its expiry the board times itself (`refresh_at`).
+                for (label, ws) in boards {
+                    crate::hive::rpc::emit_workers_changed(&handle, &label, &ws);
+                }
             }
         }
         if let Some(cause) = a.pause {

@@ -1084,54 +1084,178 @@ fn commits_ahead(f: &WorkerFolder) -> Option<u64> {
     out.ok()?.trim().parse().ok()
 }
 
-/// The workers as `hiveListWorkers` answers (§7.2) and the headroom it reports with them (§7.8).
-/// Blocks: worker records and one git call per worktree.
-pub(crate) fn list_view(hive: &Hive, paths: &HivePaths, tasks: &[Task], fuses: &Fuses, now: i64) -> Value {
+/// One worker as the board shows it and `hiveListWorkers` reports it (§4.3, §7.2). Only what
+/// Rust alone knows: the task's lane, blocker and notes and the agent's hook state are the
+/// window's own, read live there, so a card never waits on this to change (§4.4).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct WorkerCard {
+    pub badge: u32,
+    /// Its slug.
+    pub worker: String,
+    pub title: String,
+    pub task_id: String,
+    pub tab_id: Option<String>,
+    pub role: String,
+    /// `worker.json`'s phase, a string: one a later build adds still shows.
+    pub phase: String,
+    pub wait_reason: Option<String>,
+    /// The task ids it waits on: the board's waves (§4.4).
+    pub depends_on: Vec<String>,
+    /// The same as `#badge slug`, or the bare id of one that isn't a worker's.
+    pub depends_on_labels: Vec<String>,
+    pub folders: Vec<CardFolder>,
+    /// Its own, or the Hive's worker default.
+    pub model: String,
+    pub effort: String,
+    pub last_report: Option<worker::WorkerReport>,
+    pub created_at: String,
+    pub launched_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CardFolder {
+    pub name: String,
+    pub kind: String,
+    pub branch: Option<String>,
+    pub target: Option<String>,
+    /// Commits its landing target doesn't have; None when not counted or not countable.
+    pub ahead: Option<u64>,
+}
+
+/// The cap and fuses as the header and `hiveListWorkers` show them (§7.8).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct HeadroomView {
+    pub cap: u32,
+    pub live: usize,
+    pub starting: usize,
+    pub spawns_left_this_hour: usize,
+    pub spawns_left_today: usize,
+    /// Claude's reset minute, `HH:MM`, while the usage-limit breaker holds.
+    pub usage_limit_until: Option<String>,
+    pub usage_limit_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct HiveBoard {
+    pub workers: Vec<WorkerCard>,
+    pub headroom: HeadroomView,
+    pub hive_status: String,
+    /// Whether a spawn could start a worker now (active, no breaker); the cap is the caller's.
+    pub starts_workers: bool,
+    /// Epoch ms when the headroom changes with no event (the breaker ends, a spawn ages out of a
+    /// window): the board refetches then.
+    pub refresh_at: Option<i64>,
+}
+
+/// The Hive's workers by badge, with its headroom. `ahead` counts commits per worktree (one git
+/// call each), which only the coordinator's list needs. Blocks: worker records.
+pub(crate) fn board_view(hive: &Hive, paths: &HivePaths, fuses: &Fuses, now: i64, ahead: bool) -> HiveBoard {
     let workers = worker::list_workers(paths);
     let live: Vec<String> = workers.iter().filter(|w| w.is_live()).map(|w| w.task_id.clone()).collect();
     let by_task: HashMap<&str, &WorkerRecord> = workers.iter().map(|w| (w.task_id.as_str(), w)).collect();
     let or = |mine: &str, hive: &str| if mine.is_empty() { hive.to_string() } else { mine.to_string() };
-    let rows: Vec<Value> = workers
+    let cards = workers
         .iter()
-        .map(|w| {
-            let folders: Vec<Value> = w
+        .map(|w| WorkerCard {
+            badge: w.badge,
+            worker: w.slug.clone(),
+            title: w.title.clone(),
+            task_id: w.task_id.clone(),
+            tab_id: w.tab_id.clone(),
+            role: w.role.clone(),
+            phase: w.phase.clone(),
+            wait_reason: w.wait_reason.clone(),
+            depends_on: w.depends_on.clone(),
+            depends_on_labels: w.depends_on.iter().map(|id| by_task.get(id.as_str()).map_or_else(|| id.clone(), |d| worker_label(d))).collect(),
+            folders: w
                 .folders
                 .iter()
-                .map(|f| json!({ "name": f.name, "kind": f.kind, "branch": f.branch, "target": f.target, "ahead": commits_ahead(f) }))
-                .collect();
-            let deps: Vec<String> = w.depends_on.iter().map(|id| by_task.get(id.as_str()).map_or_else(|| id.clone(), |d| worker_label(d))).collect();
-            json!({
-                "badge": w.badge,
-                "worker": w.slug,
-                "title": w.title,
-                "task_id": w.task_id,
-                "task_status": tasks.iter().find(|t| t.id == w.task_id).map(|t| t.status.clone()),
-                "role": w.role,
-                "phase": w.phase,
-                "wait_reason": w.wait_reason,
-                "depends_on": deps,
-                "folders": folders,
-                "model": or(&w.model, &hive.models.worker.model),
-                "effort": or(&w.effort, &hive.models.worker.effort),
-                "last_report": w.last_report,
-            })
+                .map(|f| CardFolder {
+                    name: f.name.clone(),
+                    kind: f.kind.clone(),
+                    branch: f.branch.clone(),
+                    target: f.target.clone(),
+                    ahead: if ahead { commits_ahead(f) } else { None },
+                })
+                .collect(),
+            model: or(&w.model, &hive.models.worker.model),
+            effort: or(&w.effort, &hive.models.worker.effort),
+            last_report: w.last_report.clone(),
+            created_at: w.created_at.clone(),
+            launched_at: w.launched_at.clone(),
         })
         .collect();
     let h = fuses.headroom(hive, &live, now);
+    HiveBoard {
+        workers: cards,
+        starts_workers: hive.status == STATUS_ACTIVE && h.breaker_until.is_none(),
+        refresh_at: h.changes_at,
+        headroom: HeadroomView {
+            cap: h.cap,
+            live: h.live,
+            starting: h.pending,
+            spawns_left_this_hour: h.hour_left,
+            spawns_left_today: h.day_left,
+            usage_limit_until: h.breaker_until.map(super::fuses::reset_hhmm),
+            usage_limit_reason: h.breaker_reason,
+        },
+        hive_status: hive.status.clone(),
+    }
+}
+
+/// The workers as `hiveListWorkers` answers (§7.2) and the headroom it reports with them (§7.8):
+/// the board's view, with each task's lane and without the tab ids and times a card uses.
+/// Blocks: worker records and one git call per worktree.
+pub(crate) fn list_view(hive: &Hive, paths: &HivePaths, tasks: &[Task], fuses: &Fuses, now: i64) -> Value {
+    let board = board_view(hive, paths, fuses, now, true);
+    let rows: Vec<Value> = board
+        .workers
+        .iter()
+        .map(|c| {
+            json!({
+                "badge": c.badge,
+                "worker": c.worker,
+                "title": c.title,
+                "task_id": c.task_id,
+                "task_status": tasks.iter().find(|t| t.id == c.task_id).map(|t| t.status.clone()),
+                "role": c.role,
+                "phase": c.phase,
+                "wait_reason": c.wait_reason,
+                "depends_on": c.depends_on_labels,
+                "folders": c.folders,
+                "model": c.model,
+                "effort": c.effort,
+                "last_report": c.last_report,
+            })
+        })
+        .collect();
     json!({
         "workers": rows,
-        "headroom": {
-            "cap": h.cap,
-            "live": h.live,
-            "starting": h.pending,
-            "spawns_left_this_hour": h.hour_left,
-            "spawns_left_today": h.day_left,
-            "usage_limit_until": h.breaker_until.map(super::fuses::reset_hhmm),
-            "usage_limit_reason": h.breaker_reason,
-        },
-        "hive_status": hive.status,
-        "starts_workers": hive.status == STATUS_ACTIVE && h.breaker_until.is_none(),
+        "headroom": board.headroom,
+        "hive_status": board.hive_status,
+        "starts_workers": board.starts_workers,
     })
+}
+
+/// The Hive board's cards (§4.3), fetched when its window hears `hive-workers-changed` or a task
+/// change, never on a timer (§4.4).
+#[tauri::command]
+pub async fn hive_workers(
+    window: tauri::Window,
+    state: tauri::State<'_, Arc<AppState>>,
+    workspace_id: String,
+) -> Result<HiveBoard, String> {
+    let hive = {
+        let data = state.app_data.read();
+        let ws = data
+            .window(window.label())
+            .and_then(|w| w.workspaces.iter().find(|w| w.id == workspace_id))
+            .ok_or("Workspace not found")?;
+        ws.hive.clone().ok_or("That workspace isn't a Hive")?
+    };
+    let root = super::paths::hive_root(&hive.id).ok_or("No Hive folder")?;
+    let fuses = super::fuses::book();
+    blocking(move || Ok(board_view(&hive, &HivePaths::new(root), fuses, super::fuses::now_ms(), false))).await
 }
 
 // ── The Hive view's mount ──
@@ -1177,15 +1301,16 @@ pub(crate) fn live_worker_tabs(paths: &HivePaths, tabs: &[String]) -> Vec<String
 }
 
 /// A reload's new tab takes over its worker (§11.2): `worker.json` names the tab, so it follows.
+/// True when it moved, which the board must hear: its card still names the old tab.
 /// Blocks: reads the Hive's worker records.
-pub fn remap_worker_tab(hive: &Hive, from: &str, to: &str) {
-    let Some(root) = super::paths::hive_root(&hive.id) else { return };
-    remap_worker_tab_in(&HivePaths::new(root), from, to);
+pub fn remap_worker_tab(hive: &Hive, from: &str, to: &str) -> bool {
+    let Some(root) = super::paths::hive_root(&hive.id) else { return false };
+    remap_worker_tab_in(&HivePaths::new(root), from, to)
 }
 
-pub(crate) fn remap_worker_tab_in(paths: &HivePaths, from: &str, to: &str) {
-    let Some(w) = worker::worker_for_tab(paths, from) else { return };
-    let Ok(dir) = worker::task_dir(paths, &w.task_id) else { return };
+pub(crate) fn remap_worker_tab_in(paths: &HivePaths, from: &str, to: &str) -> bool {
+    let Some(w) = worker::worker_for_tab(paths, from) else { return false };
+    let Ok(dir) = worker::task_dir(paths, &w.task_id) else { return false };
     let res = worker::update_worker(&dir, |w| {
         let mine = w.tab_id.as_deref() == Some(from);
         if mine {
@@ -1194,8 +1319,14 @@ pub(crate) fn remap_worker_tab_in(paths: &HivePaths, from: &str, to: &str) {
         mine
     });
     match res {
-        Ok(_) => log::info!("hive: worker {} moved from tab {from} to {to} (reload)", w.slug),
-        Err(e) => log::warn!("hive: worker {} not moved to tab {to}, so its relaunch will be refused: {e}", w.slug),
+        Ok(now) => {
+            log::info!("hive: worker {} moved from tab {from} to {to} (reload)", w.slug);
+            now.tab_id.as_deref() == Some(to)
+        }
+        Err(e) => {
+            log::warn!("hive: worker {} not moved to tab {to}, so its relaunch will be refused: {e}", w.slug);
+            false
+        }
     }
 }
 
@@ -1852,6 +1983,31 @@ mod tests {
         let h = &v["headroom"];
         assert_eq!((h["cap"].as_u64(), h["live"].as_u64(), h["spawns_left_this_hour"].as_u64()), (Some(4), Some(1), Some(PER_HOUR as u64 - 1)));
         assert_eq!(v["starts_workers"], true);
+        assert!(rows[0].get("tab_id").is_none(), "the coordinator's list carries no tab ids");
+    }
+
+    #[tokio::test]
+    async fn the_board_carries_tabs_dependencies_and_times_without_git() {
+        let rig = Rig::new("board", 4);
+        rig.spawn(accept, args("Login API")).await.unwrap();
+        rig.spawn(accept, json!({ "title": "Docs", "role": "docs", "brief": "b", "depends_on": [1] })).await.unwrap();
+        let ws = worker::list_workers(&rig.caller.paths);
+        let b = board_view(&rig.caller.hive, &rig.caller.paths, rig.fuses, crate::hive::fuses::now_ms(), false);
+        assert_eq!(b.workers.iter().map(|c| c.badge).collect::<Vec<_>>(), vec![1, 2]);
+        let (one, two) = (&b.workers[0], &b.workers[1]);
+        assert_eq!(one.tab_id, ws[0].tab_id);
+        assert!(one.tab_id.is_some() && one.launched_at.is_some() && !one.created_at.is_empty());
+        assert_eq!((two.phase.as_str(), two.tab_id.as_ref()), ("waiting", None));
+        assert_eq!(two.depends_on, vec![ws[0].task_id.clone()], "task ids, for the waves");
+        assert_eq!(two.depends_on_labels, vec!["#1 login-api".to_string()]);
+        assert!(one.folders.iter().all(|f| f.ahead.is_none()), "cards don't run git");
+        assert_eq!((b.headroom.cap, b.headroom.live), (4, 1));
+        // The spawn counts against the hour until it ages out: the board's own clock refetches then.
+        let hour = b.refresh_at.expect("a spawn in the hour") - crate::hive::fuses::now_ms();
+        assert!(hour > 3_500_000 && hour <= 3_600_000, "{hour}");
+        let v = serde_json::to_value(&b).unwrap();
+        assert_eq!(v["workers"][0]["tab_id"], json!(one.tab_id), "snake_case on the wire");
+        assert_eq!(v["headroom"]["spawns_left_today"].as_u64(), Some(b.headroom.spawns_left_today as u64));
     }
 
     #[tokio::test]
@@ -1872,10 +2028,10 @@ mod tests {
         assert_eq!(live_worker_tabs(p, &tabs), vec![one.clone()], "a stopped worker stays down");
         assert!(live_worker_tabs(p, &[two]).is_empty());
 
-        remap_worker_tab_in(p, &one, "one-reloaded");
+        assert!(remap_worker_tab_in(p, &one, "one-reloaded"), "moved: the board is told");
         assert_eq!(worker::worker_for_tab(p, "one-reloaded").map(|w| w.slug), Some("one".into()));
         assert!(worker::worker_for_tab(p, &one).is_none());
-        remap_worker_tab_in(p, "not-a-worker", "x");
+        assert!(!remap_worker_tab_in(p, "not-a-worker", "x"));
     }
 
     // ── Reports, stops, restarts, messages, crashes, sandbox refusals and waiters (4e) ──

@@ -10,6 +10,8 @@ import {
 } from '@tauri-apps/plugin-notification';
 import { info as logInfo } from '@tauri-apps/plugin-log';
 import { playSystemSound } from '$lib/tauri/commands';
+import type { Tab } from '$lib/tauri/types';
+import { hiveOwnsPrompt } from '$lib/hive/model';
 
 // NOTE: The `extra` field is passed through to Rust but only used on mobile (iOS/Android).
 // On desktop, tauri-plugin-notification uses notify_rust which discards extra data and has
@@ -100,14 +102,15 @@ export function playNotificationSound() {
   }
 }
 
-/** Check if a tab belongs to the current window's workspaces. */
-function tabBelongsToWindow(tabId: string): boolean {
+/** The tab, if it belongs to the current window's workspaces. */
+function tabInWindow(tabId: string): Tab | null {
   for (const ws of workspacesStore.workspaces) {
     for (const pane of ws.panes) {
-      if (pane.tabs.some(t => t.id === tabId)) return true;
+      const tab = pane.tabs.find(t => t.id === tabId);
+      if (tab) return tab;
     }
   }
-  return false;
+  return null;
 }
 
 /**
@@ -129,13 +132,21 @@ export async function dispatch(
 
   // If the notification is scoped to a specific tab, only show it in the window that owns that tab.
   // Tauri events broadcast to all windows, so without this check every window would show the toast.
-  if (source?.tabId && !tabBelongsToWindow(source.tabId)) return;
+  const tab = source?.tabId ? tabInWindow(source.tabId) : null;
+  if (source?.tabId && !tab) return;
 
   // A muted tab or workspace notifies nothing: no toast, OS notification or sound, requests
   // included (docs/mute.md). What waits on the human still shows in the Loom, the tab's corner
   // card and its indicators, which is why this can be total.
   if (source?.tabId && workspacesStore.isTabMuted(source.tabId)) {
     logInfo(`Notification (muted tab ${source.tabId}): ${title}`);
+    return;
+  }
+
+  // A Hive worker's prompt its coordinator answers notifies nobody either; it still shows where
+  // the human looks on purpose, as a muted tab's does (docs/hive.md §4.7).
+  if (source?.kind && hiveOwnsPrompt(tab, source.kind)) {
+    logInfo(`Notification (Hive coordinator's ${source.kind}, tab ${source.tabId}): ${title}`);
     return;
   }
 

@@ -2743,7 +2743,10 @@ pub fn carry_tab_state_on_reload(
     // A Hive worker's record names its tab, and its launch is found by it (docs/hive.md §11.2):
     // moved before the new tab mounts, which the frontend does only after this returns.
     if let Some(h) = &worker_hive {
-        crate::hive::tools::remap_worker_tab(h, &from_tab_id, &to_tab_id);
+        // Its card names the old tab, and a reload changes neither the task's lane nor the Hive.
+        if crate::hive::tools::remap_worker_tab(h, &from_tab_id, &to_tab_id) {
+            crate::hive::rpc::emit_workers_changed(tauri::Manager::app_handle(&window), &label, &workspace_id);
+        }
     }
     // The Chrome tab linked to it goes with it (docs/browser-link.md §1.5).
     crate::browser_link::remap_tab(tauri::Manager::app_handle(&window), &from_tab_id, &to_tab_id);

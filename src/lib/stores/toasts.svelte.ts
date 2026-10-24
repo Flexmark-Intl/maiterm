@@ -1,7 +1,10 @@
 import { preferencesStore } from './preferences.svelte';
+import type { HivePromptKind } from '$lib/hive/model';
 
 export interface ToastSource {
   tabId: string;
+  /** What it is about, when a Hive's coordinator may be the one to answer it (`hiveOwnsPrompt`). */
+  kind?: HivePromptKind;
 }
 
 export interface Toast {

@@ -213,6 +213,7 @@ impl Fuses {
         h.day_left = PER_DAY.saturating_sub(b.committed_within(now, DAY_MS) + all);
         h.breaker_until = b.breaker(now);
         h.breaker_reason = h.breaker_until.and(b.state.breaker_reason.clone());
+        h.changes_at = [h.breaker_until, b.frees_at(now, HOUR_MS), b.frees_at(now, DAY_MS)].into_iter().flatten().min();
         h
     }
 
@@ -382,6 +383,9 @@ pub struct Headroom {
     /// The end of the minute Claude showed as the reset: show it with `reset_hhmm`.
     pub breaker_until: Option<i64>,
     pub breaker_reason: Option<String>,
+    /// When this changes with no event to say so: the breaker ends, or a spawn leaves the hour's
+    /// or the day's window. The board refetches then (§4.4: a clock, not a poll).
+    pub changes_at: Option<i64>,
 }
 
 /// The app's book, for a caller that holds a reservation across an await (a spawn).
@@ -932,6 +936,20 @@ mod tests {
         assert!(f.reserve(&big("a"), W, Vec::new, T0 + DAY_MS + HOUR_MS).is_ok(), "the first spawns left the day");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn headroom_says_when_it_next_changes_with_no_event() {
+        let (dir, f) = scratch();
+        let h = hive("h1", 4);
+        assert_eq!(f.headroom(&h, &[], T0).changes_at, None, "nothing counted, nothing to wait for");
+        f.reserve(&h, W, Vec::new, T0).unwrap().commit(T0).unwrap();
+        assert_eq!(f.headroom(&h, &[], T0 + 1).changes_at, Some(T0 + HOUR_MS), "the spawn leaves the hour");
+        // Past the hour, the day's window is next.
+        assert_eq!(f.headroom(&h, &[], T0 + HOUR_MS).changes_at, Some(T0 + DAY_MS));
+        f.trip_breaker(T0 + 60_000, "session limit");
+        assert_eq!(f.headroom(&h, &[], T0 + 1).changes_at, Some(T0 + 60_000), "the breaker ends first");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
