@@ -2670,7 +2670,7 @@ mod tests {
         assert_eq!(out["worktrees_removed"], json!([]));
         assert!(out["kept"][0].as_str().unwrap().contains(".git file isn't the one git wrote"), "{out}");
         assert_eq!(fs::read_to_string(wt.join(".git")).unwrap(), forged, "nothing rewrote it");
-        assert!(git(&rig.web, &["worktree", "list"]).contains(wt.to_str().unwrap()), "git still has it");
+        assert!(git(&rig.web, &["worktree", "list"]).replace('\\', "/").contains(&wt.to_str().unwrap().replace('\\', "/")), "git still has it");
     }
 
     #[tokio::test]
@@ -2838,7 +2838,7 @@ mod tests {
         for kept in [p.worker_dir(&w.slug), p.worktrees().join("ghost"), task.clone()] {
             assert!(out.kept.iter().any(|k| k.contains(&kept.display().to_string())), "{kept:?} listed: {:?}", out.kept);
         }
-        assert!(git(&rig.web, &["worktree", "list"]).contains(wt.to_str().unwrap()), "git still has it");
+        assert!(git(&rig.web, &["worktree", "list"]).replace('\\', "/").contains(&wt.to_str().unwrap().replace('\\', "/")), "git still has it");
         assert!(out.folder_left.is_some());
     }
 
