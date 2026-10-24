@@ -29,10 +29,16 @@ const APPROVED_TTL_MS: u64 = 5 * 60 * 1000;
 const RESTART_APPROVED_TTL_MS: u64 = 30 * 60 * 1000;
 /// Pending requests one tab may hold: enough for a real reorganisation, not a flood of cards.
 const MAX_PENDING_PER_TAB: usize = 5;
+/// A Hive's land waits on the human a day (plan D14): a land is work already done and reviewed,
+/// and the human may be away for the evening. Re-filed from `worker.json` after a restart.
+const HIVE_PENDING_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+/// Rust carries an approved Hive land out itself and settles it once it is under way; a lock
+/// wait or a merge in a big repo can take a while before that.
+const HIVE_APPROVED_TTL_MS: u64 = 30 * 60 * 1000;
 
 /// What a request asks for. A string on the wire (never a serde enum: an unknown variant in
 /// stored state wipes it on a downgrade), checked against this list when filed.
-pub const KINDS: [&str; 14] = [
+pub const KINDS: [&str; 16] = [
     "mesh_enable",
     "mesh_disable",
     "mesh_link",
@@ -54,7 +60,22 @@ pub const KINDS: [&str; 14] = [
     // A remote MCP server maiTerm signs in to and serves to every agent (docs/mcp-proxy.md §7).
     // Asked like a new agent: it changes what every agent session in its workspaces can reach.
     "mcp_add",
+    // A Hive's land the human approves (docs/hive.md §8.1's config rule, Landing = Ask me, §8.3's
+    // integration mode), and the coordinator's undo of one (§8.6). Filed and carried out by Rust
+    // alone (`hive::land::approval`), never by a window.
+    "hive_land",
+    "hive_undo",
 ];
+
+/// The kinds Rust files and carries out itself: no window files one, and an approval runs in
+/// Rust (`hive::land::approval::on_approved`) instead of being handed to a window.
+pub fn is_hive_kind(kind: &str) -> bool {
+    matches!(kind, "hive_land" | "hive_undo")
+}
+
+fn pending_ttl(kind: &str) -> u64 {
+    if is_hive_kind(kind) { HIVE_PENDING_TTL_MS } else { PENDING_TTL_MS }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentRequest {
@@ -112,6 +133,10 @@ fn flush_lapsed() {
         for r in &lapsed {
             log::info!("[requests] {} {} ({})", r.kind, r.status, r.id);
             let _ = app.emit("agent-request-settled", r);
+            // A Hive's land that lapsed puts its worker back; Rust tells the coordinator.
+            if is_hive_kind(&r.kind) {
+                crate::hive::land::approval::on_closed(app, r);
+            }
         }
         let _ = app.emit("agent-requests-changed", ());
     }
@@ -121,7 +146,8 @@ fn flush_lapsed() {
 fn sweep(list: &mut Vec<AgentRequest>, now: u64) {
     let mut moved = Vec::new();
     for r in list.iter_mut() {
-        if r.status == "pending" && now.saturating_sub(r.requested_at) >= PENDING_TTL_MS {
+        // By its own deadline: a Hive land re-filed after a restart keeps the one it had.
+        if r.status == "pending" && now >= r.expires_at {
             r.status = "expired".into();
             r.decided_at = Some(now);
             moved.push(r.clone());
@@ -130,7 +156,11 @@ fn sweep(list: &mut Vec<AgentRequest>, now: u64) {
         // reloaded. Said so, rather than showing "approved" for good.
         // A restart that installs an update first downloads it, which can take longer than any
         // other kind runs; reporting it failed meanwhile told the agent so while it went ahead.
-        let ttl = if r.kind == "restart" { RESTART_APPROVED_TTL_MS } else { APPROVED_TTL_MS };
+        let ttl = match r.kind.as_str() {
+            "restart" => RESTART_APPROVED_TTL_MS,
+            k if is_hive_kind(k) => HIVE_APPROVED_TTL_MS,
+            _ => APPROVED_TTL_MS,
+        };
         if r.status == "approved" && now.saturating_sub(r.decided_at.unwrap_or(now)) >= ttl {
             r.status = "failed".into();
             r.outcome = Some("approved, but the window that was to carry it out never reported back".into());
@@ -206,25 +236,102 @@ pub fn file(
     kind: &str,
     args: Value,
     summary: String,
-    mut effects: Vec<String>,
+    effects: Vec<String>,
     reason: Option<String>,
 ) -> Result<AgentRequest, String> {
     if !KINDS.contains(&kind) {
         return Err(format!("unknown request kind {kind}"));
     }
+    // Its card's words and arguments are Rust's, from the Hive's own records: a window (and so
+    // an agent's tool call through one) never files one.
+    if is_hive_kind(kind) {
+        return Err("maiTerm files a Hive's land and undo requests itself".to_string());
+    }
     crate::hive::refuse_request(&state.app_data.read(), kind, &args)?;
+    file_inner(app, state, tab_id, window_label, kind, args, summary, effects, reason, None)
+}
+
+/// A Hive's land or undo card (docs/hive.md §8.1, §8.3), filed by Rust from the coordinator's
+/// tab. One per land (`args.land_id`): the same land again is the same card, and a newer land of
+/// the same task supersedes an older card. `keep` is the id and filing time a restart re-files
+/// it under, so it keeps its place and its deadline.
+#[allow(clippy::too_many_arguments)]
+pub fn file_hive(
+    app: &AppHandle,
+    state: &crate::state::AppState,
+    tab_id: &str,
+    window_label: &str,
+    kind: &str,
+    args: Value,
+    summary: String,
+    effects: Vec<String>,
+    reason: Option<String>,
+    keep: Option<(String, u64)>,
+) -> Result<AgentRequest, String> {
+    if !is_hive_kind(kind) {
+        return Err(format!("{kind} isn't a Hive request"));
+    }
+    let superseded = supersede(&mut REQUESTS.lock(), kind, &args, now_ms());
+    for r in &superseded {
+        log::info!("[requests] {} failed ({}): superseded", r.kind, r.id);
+        let _ = app.emit("agent-request-settled", r);
+    }
+    file_inner(app, state, tab_id, window_label, kind, args, summary, effects, reason, keep)
+}
+
+/// Pending Hive requests of the same task for another land end as failed: the task's newer
+/// land is the one the human is asked about.
+fn supersede(list: &mut [AgentRequest], kind: &str, args: &Value, now: u64) -> Vec<AgentRequest> {
+    let key = |a: &Value, k: &str| a.get(k).and_then(Value::as_str).map(str::to_string);
+    let (hive, task, land) = (key(args, "hive_id"), key(args, "task_id"), key(args, "land_id"));
+    if task.is_none() {
+        return Vec::new();
+    }
+    list.iter_mut()
+        .filter(|r| r.status == "pending" && r.kind == kind && key(&r.args, "hive_id") == hive && key(&r.args, "task_id") == task && key(&r.args, "land_id") != land)
+        .map(|r| {
+            r.status = "failed".into();
+            r.decided_at = Some(now);
+            r.outcome = Some("superseded by a newer land of the same work".to_string());
+            r.clone()
+        })
+        .collect()
+}
+
+/// The pending one this would duplicate: the same land for a Hive kind, else the same arguments
+/// from the same tab.
+fn same_pending<'a>(list: &'a [AgentRequest], tab_id: &str, kind: &str, args: &Value) -> Option<&'a AgentRequest> {
+    let land = |a: &Value| a.get("land_id").and_then(Value::as_str).map(str::to_string);
+    list.iter().find(|r| {
+        r.status == "pending"
+            && r.kind == kind
+            && if is_hive_kind(kind) { land(&r.args).is_some() && land(&r.args) == land(args) } else { r.tab_id == tab_id && r.args == *args }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn file_inner(
+    app: &AppHandle,
+    state: &crate::state::AppState,
+    tab_id: &str,
+    window_label: &str,
+    kind: &str,
+    args: Value,
+    summary: String,
+    mut effects: Vec<String>,
+    reason: Option<String>,
+    keep: Option<(String, u64)>,
+) -> Result<AgentRequest, String> {
     let _ = APP.set(app.clone());
     flush_lapsed();
     let now = now_ms();
     let mut list = REQUESTS.lock();
     sweep(&mut list, now);
-    if let Some(same) = list
-        .iter()
-        .find(|r| r.status == "pending" && r.tab_id == tab_id && r.kind == kind && r.args == args)
-    {
+    if let Some(same) = keep.as_ref().and_then(|(id, _)| list.iter().find(|r| &r.id == id)).or_else(|| same_pending(&list, tab_id, kind, &args)) {
         return Ok(same.clone());
     }
-    if list.iter().filter(|r| r.status == "pending" && r.tab_id == tab_id).count() >= MAX_PENDING_PER_TAB {
+    // A Hive's lands are one per worker, each already through its coordinator: not a flood.
+    if !is_hive_kind(kind) && list.iter().filter(|r| r.status == "pending" && r.tab_id == tab_id).count() >= MAX_PENDING_PER_TAB {
         return Err(format!(
             "this tab already has {MAX_PENDING_PER_TAB} requests waiting for the human; wait for those to be answered"
         ));
@@ -252,8 +359,10 @@ pub fn file(
         });
     }
     let mut list = REQUESTS.lock();
+    let refiled = keep.is_some();
+    let (id, requested_at) = keep.unwrap_or_else(|| (format!("r_{}", uuid::Uuid::new_v4().simple()), now));
     let r = AgentRequest {
-        id: format!("r_{}", uuid::Uuid::new_v4().simple()),
+        id,
         tab_id: tab_id.to_string(),
         window_label: window_label.to_string(),
         kind: kind.to_string(),
@@ -263,8 +372,8 @@ pub fn file(
         reason: reason.filter(|s| !s.trim().is_empty()),
         asker_title,
         asker_workspace,
-        requested_at: now,
-        expires_at: now + PENDING_TTL_MS,
+        requested_at,
+        expires_at: requested_at + pending_ttl(kind),
         status: "pending".into(),
         decided_at: None,
         decided_by: None,
@@ -272,10 +381,11 @@ pub fn file(
     };
     list.push(r.clone());
     drop(list);
-    log::info!("[requests] {} filed by tab {}: {}", r.kind, &r.tab_id[..r.tab_id.len().min(8)], r.summary);
+    log::info!("[requests] {} {} by tab {}: {}", r.kind, if refiled { "re-filed" } else { "filed" }, &r.tab_id[..r.tab_id.len().min(8)], r.summary);
     // The phone's doorbell (kind `request`), drained by its loop; a tap opens the asking chat.
-    // Only for a tab exposed to maiLink: an excluded tab's title must not reach the relay.
-    if state.mailink_info.read().is_some() && crate::mailink::is_designated(state, tab_id) {
+    // Only for a tab exposed to maiLink: an excluded tab's title must not reach the relay. A card
+    // re-filed after a restart rang when it was first filed.
+    if !refiled && state.mailink_info.read().is_some() && crate::mailink::is_designated(state, tab_id) {
         let mut q = state.mailink_pending_rings.lock();
         q.push((r.tab_id.clone(), r.asker_title.clone(), "request"));
         if q.len() > crate::mailink::overlord::MAX_PENDING_RINGS {
@@ -337,10 +447,16 @@ pub fn decide(app: &AppHandle, id: &str, approve: bool, by: &str) -> Option<Agen
     flush_lapsed();
     let r = r?;
     log::info!("[requests] {} {} ({}) by {by}", r.kind, r.status, &r.id);
-    if approve {
+    if approve && is_hive_kind(&r.kind) {
+        // Carried out in Rust from the stored arguments; it settles the request itself.
+        crate::hive::land::approval::on_approved(app, &r);
+    } else if approve {
         let _ = app.emit_to(r.window_label.as_str(), "agent-request-approved", &r);
     } else {
         let _ = app.emit("agent-request-settled", &r);
+        if is_hive_kind(&r.kind) {
+            crate::hive::land::approval::on_closed(app, &r);
+        }
     }
     changed(app);
     Some(r)
@@ -375,9 +491,31 @@ pub fn fail_for_tabs(app: &AppHandle, tab_ids: &[String], why: &str) -> usize {
     failed.len()
 }
 
+/// One request withdrawn, with `why`, if it hasn't settled: a Hive land whose worker was stopped,
+/// retired or reported again while its card waited.
+pub fn fail_request(app: &AppHandle, id: &str, why: &str) -> bool {
+    let failed = {
+        let mut list = REQUESTS.lock();
+        let ids = [id.to_string()];
+        fail_open_where(&mut list, |r| ids.contains(&r.id), why, now_ms())
+    };
+    for r in &failed {
+        log::info!("[requests] {} failed ({}): {why}", r.kind, r.id);
+        let _ = app.emit("agent-request-settled", r);
+    }
+    if !failed.is_empty() {
+        changed(app);
+    }
+    !failed.is_empty()
+}
+
 fn fail_open(list: &mut [AgentRequest], tab_ids: &[String], why: &str, now: u64) -> Vec<AgentRequest> {
+    fail_open_where(list, |r| tab_ids.contains(&r.tab_id), why, now)
+}
+
+fn fail_open_where(list: &mut [AgentRequest], pick: impl Fn(&AgentRequest) -> bool, why: &str, now: u64) -> Vec<AgentRequest> {
     list.iter_mut()
-        .filter(|r| tab_ids.contains(&r.tab_id) && (r.status == "pending" || r.status == "approved"))
+        .filter(|r| pick(r) && (r.status == "pending" || r.status == "approved"))
         .map(|r| {
             r.status = "failed".into();
             r.decided_at.get_or_insert(now);
@@ -491,6 +629,83 @@ mod tests {
         assert_eq!(l.iter().map(|r| r.status.as_str()).collect::<Vec<_>>(), vec!["failed", "failed", "denied", "pending"]);
         assert_eq!((l[0].decided_at, l[1].decided_at), (Some(9), Some(5)));
         assert_eq!(l[0].outcome.as_deref(), Some("its Hive was deleted"));
+    }
+
+    fn hive(id: &str, task: &str, land: &str) -> AgentRequest {
+        AgentRequest {
+            id: id.into(),
+            kind: "hive_land".into(),
+            args: serde_json::json!({ "hive_id": "h1", "task_id": task, "land_id": land }),
+            expires_at: HIVE_PENDING_TTL_MS,
+            ..req("pending", 0, None)
+        }
+    }
+
+    #[test]
+    fn a_hive_land_waits_a_day_and_its_approval_has_time_to_run() {
+        let mut l = vec![hive("hive-ttl", "t1", "L-1")];
+        sweep(&mut l, PENDING_TTL_MS);
+        assert_eq!(l[0].status, "pending", "not the 30 minutes of the others");
+        sweep(&mut l, HIVE_PENDING_TTL_MS);
+        assert_eq!(l[0].status, "expired");
+        let mut l = vec![AgentRequest { id: "hive-approved".into(), ..hive("x", "t1", "L-1") }];
+        l[0].status = "approved".into();
+        l[0].decided_at = Some(0);
+        sweep(&mut l, APPROVED_TTL_MS);
+        assert_eq!(l[0].status, "approved");
+        sweep(&mut l, HIVE_APPROVED_TTL_MS);
+        assert_eq!(l[0].status, "failed");
+    }
+
+    #[test]
+    fn a_hive_land_is_one_card_per_land_and_a_newer_land_supersedes_it() {
+        let mut l = vec![hive("a", "t1", "L-1"), hive("b", "t2", "L-2"), AgentRequest { kind: "restart".into(), ..hive("c", "t1", "L-9") }];
+        // The same land again, whatever tab or arguments, is the same card.
+        let again = serde_json::json!({ "hive_id": "h1", "task_id": "t1", "land_id": "L-1", "why": "config" });
+        assert_eq!(same_pending(&l, "other-tab", "hive_land", &again).map(|r| r.id.as_str()), Some("a"));
+        assert!(same_pending(&l, "t", "hive_land", &serde_json::json!({ "task_id": "t1" })).is_none(), "no land id, no match");
+        // Its task's newer land ends the older card; another task's and other kinds stay.
+        let newer = serde_json::json!({ "hive_id": "h1", "task_id": "t1", "land_id": "L-3" });
+        let gone = supersede(&mut l, "hive_land", &newer, 7);
+        assert_eq!(gone.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(l.iter().map(|r| r.status.as_str()).collect::<Vec<_>>(), vec!["failed", "pending", "pending"]);
+        assert!(supersede(&mut l, "hive_land", &serde_json::json!({ "task_id": "t2", "hive_id": "h1", "land_id": "L-2" }), 8).is_empty(), "its own land");
+    }
+
+    /// Only the human approves (docs/agent-requests.md): `decide` is called by the click's Tauri
+    /// command and the phone's authenticated endpoint, nowhere else, so no Hive path (an agent's
+    /// tool call, a land) can approve its own card.
+    #[test]
+    fn decide_is_reached_only_from_the_click_and_the_phone() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&src, &mut files);
+        // Split, so this test's own lines don't match.
+        let (path_call, local_call) = (concat!("agent_requests::", "decide("), concat!(" decide", "(&app"));
+        let mut callers = Vec::new();
+        for f in files {
+            let text = std::fs::read_to_string(&f).unwrap();
+            let rel = f.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+            for (i, line) in text.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or_default();
+                if code.contains(path_call) || (rel == "agent_requests.rs" && code.contains(local_call)) {
+                    callers.push(format!("{rel}:{}", i + 1));
+                }
+            }
+        }
+        let mut files: Vec<&str> = callers.iter().map(|c| c.split(':').next().unwrap()).collect();
+        files.sort_unstable();
+        assert_eq!(files, vec!["agent_requests.rs", "mailink/mod.rs"], "{callers:?}");
     }
 
     #[test]

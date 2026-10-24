@@ -7,9 +7,10 @@
 //! Its state is `worker.json`'s `land`, persisted before every irreversible step, so a restart
 //! knows how far it got (`reconcile`). Every kind is a String (§3.2).
 //!
-//! Step 6c lands to Base with the coordinator's checkpoint only: a land the human must approve
-//! (the config rule, Landing = Ask me, the integration mode) is refused until 6d files its card.
+//! A land the human must approve (§8.1's config rule, Landing = Ask me, §8.3's integration mode)
+//! waits on an agent request card (`approval`), and goes on from its pinned shas once approved.
 
+pub mod approval;
 pub mod config_rule;
 pub mod driver;
 pub mod git;
@@ -74,6 +75,15 @@ pub struct LandState {
     pub held_reason: Option<String>,
     /// Whose lock it waits on.
     pub waiting_for: Option<String>,
+    /// Why its latest card asks the human: `config` | `ask` | `integration` (`approval`).
+    pub approval: Option<String>,
+    /// That card's agent request, and when it was first filed (ms): a restart re-files it under
+    /// both, so it keeps its place and its deadline.
+    pub request: Option<String>,
+    pub request_at: u64,
+    /// `desktop` | `phone`, once the human approved it: the land is theirs in the log, and Ask me
+    /// or the integration mode doesn't ask again for it.
+    pub approved_by: Option<String>,
     pub started_at: String,
     pub updated_at: String,
     #[serde(flatten)]
@@ -112,13 +122,32 @@ pub struct LandRepo {
     pub pushed: Option<String>,
     /// Its line is in the land log.
     pub logged: bool,
+    /// The config rule's catch (§8.1) from Base to `tested` (or, on a card filed before step 1,
+    /// from the merge base to `pinned`), and its fingerprint (`config_rule::Caught`).
+    pub config_hits: Vec<String>,
+    pub config_fp: Option<String>,
+    /// The fingerprint the human approved: the land goes on while the catch still has it.
+    pub config_approved: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+impl LandRepo {
+    /// Its config change, as it stands, isn't one the human approved.
+    pub fn config_unapproved(&self) -> bool {
+        self.status != REPO_LANDED
+            && !self.config_hits.is_empty()
+            && (self.config_fp.is_none() || self.config_approved.as_deref() != self.config_fp.as_deref())
+    }
 }
 
 impl LandState {
     pub fn is_held(&self) -> bool {
         self.state == STATE_HELD
+    }
+
+    pub fn awaits_human(&self) -> bool {
+        self.state == STATE_AWAITING_HUMAN
     }
 
     /// Running now: a lock, a check or a step 2 under way.
@@ -157,6 +186,8 @@ pub struct LandView {
     pub state: String,
     pub held_reason: Option<String>,
     pub waiting_for: Option<String>,
+    /// The card it waits on (`awaiting_human`): the worker's column shows that request.
+    pub request: Option<String>,
     pub repos: Vec<LandRepoView>,
 }
 
@@ -175,6 +206,7 @@ impl LandView {
             state: l.state.clone(),
             held_reason: l.held_reason.clone(),
             waiting_for: l.waiting_for.clone(),
+            request: l.request.clone().filter(|_| l.awaits_human()),
             repos: l.repos.iter().map(|r| LandRepoView { folder: r.folder.clone(), status: r.status.clone(), pushed: r.pushed.clone() }).collect(),
         }
     }
@@ -198,7 +230,11 @@ pub fn tool_definition(tab_id: &Value) -> Value {
              report again (after merging Base, say): then land its new commits, reviewed, and what already landed stays as it \
              landed; hiveRetireWorker abandons a held land. Without a land check the answer is the result; with one it says \
              checking, and the result arrives as ⟦HIVE LAND⟧. When it lands, the worker is retired and workers waiting on it \
-             launch from the new Base."
+             launch from the new Base. Some lands wait for the human's approval on a card first: every land in integration \
+             mode, every land while the Landing checkpoint is Ask me, and any land whose diff changes agent or execution \
+             config (.claude/, CLAUDE.md, git hooks, CI, package.json scripts…). The answer then says awaiting_human; the \
+             result arrives as ⟦HIVE LAND⟧ once they answer, and a denial, or no answer within 24 hours, puts the worker back \
+             in Reported. Don't ask them again yourself."
         ),
         "inputSchema": {
             "type": "object",
@@ -308,6 +344,9 @@ pub(crate) fn refusal(
     match (w.phase.as_str(), w.land.as_ref()) {
         (worker::PHASE_REPORTED, _) if done => {}
         (worker::PHASE_LANDING, Some(l)) if l.is_held() => {}
+        (worker::PHASE_LANDING, Some(l)) if l.awaits_human() => {
+            return Err(format!("Worker {label}'s land {} waits for the human's approval: its result comes as ⟦HIVE LAND⟧ once they answer.", l.id))
+        }
         (worker::PHASE_LANDING, Some(l)) => return Err(format!("Worker {label}'s land {} is {} now: its result comes as ⟦HIVE LAND⟧.", l.id, l.state)),
         (worker::PHASE_REPORTED, _) => return Err(format!("Worker {label} reported {}, not done: only done work lands.", w.last_report.as_ref().map_or("nothing", |r| r.status.as_str()))),
         (p, _) => return Err(format!("Worker {label} is {p}: only a worker that has reported done lands.")),
@@ -371,16 +410,22 @@ pub(crate) fn refusal(
             review_standing(w, &left, a.accept_review, workers)?
         }
     };
-    for f in w.git_folders() {
+    // The integration mode lands on `hive/<slug>`, whatever Base was.
+    for f in w.git_folders().filter(|_| !hive.is_integration()) {
         let base = hive.folders.iter().find(|h| h.name == f.name).and_then(|h| h.base.clone());
         if base.is_none() {
             return Err(format!("{}'s Base was a detached HEAD when this Hive was made, so a land there has nowhere to go.", f.name));
         }
     }
-    if hive.is_integration() || hive.checkpoints.get("landing").is_some_and(|c| c == "ask") {
-        return Err("This land needs the human's approval, which arrives in the next build of maiTerm: land it by hand for now.".to_string());
-    }
     Ok(review)
+}
+
+/// The branch a land in this folder moves: Base, or `hive/<slug>` in the integration mode (§8.3).
+pub fn land_target(hive: &Hive, folder: &str) -> String {
+    if hive.is_integration() {
+        return hive.integration_branch();
+    }
+    hive.folders.iter().find(|f| f.name == folder).and_then(|f| f.base.clone()).unwrap_or_default()
 }
 
 /// The worktrees' uncommitted or untracked files, one line per dirty worktree. Blocks on git.
@@ -442,6 +487,10 @@ pub(crate) async fn land_tool_with<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
     }
     ctx.window.workers_changed(&caller.workspace_id);
     ::log::info!("hive {}: land {id} of worker {} started ({} repos)", caller.hive.id, worker_label(&w), a.commits.len());
+    // Integration mode and Landing = Ask me: the card comes first, before step 1 (§8.3), pinned.
+    if let Some(why) = approval::asks_first(&caller.hive).filter(|_| land.approved_by.is_none()) {
+        return approval::await_human(ctx, caller, &w, land, why).await.answer();
+    }
     driver::drive(ctx, caller, &w.task_id, &opts, false).await.answer()
 }
 
@@ -454,9 +503,11 @@ fn start_state(hive: &Hive, w: &WorkerRecord, a: &LandArgs, review: &str) -> Lan
     let prior = w.land.clone().filter(|l| l.is_held() && l.landed().iter().all(|r| pinned(r)) && (!l.landed().is_empty() || l.repos.iter().all(pinned)));
     let mut land = prior.unwrap_or_else(|| LandState { id: new_land_id(), started_at: now.clone(), ..LandState::default() });
     let mut repos: Vec<LandRepo> = Vec::new();
+    let mut repinned = false;
     for hf in &hive.folders {
         let Some(f) = w.git_folders().find(|f| f.name == hf.name) else { continue };
         let kept = land.repos.iter().find(|r| r.folder == f.name).filter(|r| r.status == REPO_LANDED || pinned(r)).cloned();
+        repinned |= kept.is_none();
         let mut r = kept.unwrap_or_else(|| LandRepo {
             folder: f.name.clone(),
             pinned: a.commits.get(&f.name).cloned().unwrap_or_default(),
@@ -464,7 +515,7 @@ fn start_state(hive: &Hive, w: &WorkerRecord, a: &LandArgs, review: &str) -> Lan
             ..LandRepo::default()
         });
         r.branch = f.branch.clone().unwrap_or_default();
-        r.target = hf.base.clone().unwrap_or_default();
+        r.target = land_target(hive, &f.name);
         if r.status != REPO_LANDED {
             // A resumed repo starts its step 2 attempts again, and its tested commit is reused only
             // while Base is where step 1 found it (`driver::prepare`).
@@ -477,6 +528,12 @@ fn start_state(hive: &Hive, w: &WorkerRecord, a: &LandArgs, review: &str) -> Lan
         repos.push(r);
     }
     land.repos = repos;
+    // The human approved these pins: a held land resumed on them keeps that, a new pin doesn't.
+    if repinned {
+        land.approved_by = None;
+        land.request = None;
+        land.approval = None;
+    }
     land.state = STATE_LOCKING.to_string();
     land.summary = a.summary.clone();
     land.order = a.order.clone();
@@ -494,6 +551,7 @@ pub fn describe(l: &LandState) -> String {
         STATE_LOCKING => l.waiting_for.as_ref().map_or_else(|| "taking the land lock".to_string(), |w| format!("waiting for {w}")),
         STATE_CHECKING => "land check running".to_string(),
         STATE_ADVANCING => "advancing Base".to_string(),
+        STATE_AWAITING_HUMAN => "waiting for the human's approval".to_string(),
         other => other.to_string(),
     }
 }
@@ -523,6 +581,7 @@ pub(crate) fn reconcile_in(hive: &Hive, paths: &HivePaths) -> usize {
         let Some(land) = w.land.clone().filter(|l| l.in_progress() || l.state == STATE_LANDED) else { continue };
         let Ok(dir) = worker::task_dir(paths, &w.task_id) else { continue };
         let mut land = land;
+        let request = driver::approved_request(&land);
         for r in land.repos.iter_mut() {
             let Some(repo) = hive.folders.iter().find(|f| f.name == r.folder).map(|f| std::path::PathBuf::from(&f.path)) else { continue };
             if let Some(tmp) = r.tmp.take() {
@@ -540,7 +599,7 @@ pub(crate) fn reconcile_in(hive: &Hive, paths: &HivePaths) -> usize {
                         r.base_after = Some(tested.clone());
                         r.tree_landed = git::tree_of(&repo, &tested);
                         r.pushed.get_or_insert_with(|| "held: maiTerm restarted before its push".to_string());
-                        driver::log_repo(paths, hive, &w, &land.id, &land.summary, &land.review, r);
+                        driver::log_repo(paths, hive, &w, &land.id, &land.summary, &land.review, request.clone(), r);
                     } else {
                         r.status = REPO_TESTED.to_string();
                     }
@@ -579,13 +638,15 @@ pub(crate) fn reconcile_in(hive: &Hive, paths: &HivePaths) -> usize {
     n
 }
 
-/// Refused while a land holds a lock or is advancing (plan D13): a held land is over for now, and
-/// one every repo of which landed holds nothing either.
+/// Refused while a land holds a lock or is advancing (plan D13): a held land is over for now, one
+/// waiting on the human holds no lock (plan D4), and one every repo of which landed holds nothing
+/// either.
 pub fn in_flight(w: &WorkerRecord) -> bool {
-    w.phase == worker::PHASE_LANDING && !w.land.as_ref().is_some_and(|l| l.is_held() || l.state == STATE_LANDED)
+    w.phase == worker::PHASE_LANDING && !w.land.as_ref().is_some_and(|l| l.is_held() || l.awaits_human() || l.state == STATE_LANDED)
 }
 
-/// A landing worker whose land is held: it may be resumed, report again, stop or be retired.
+/// A landing worker whose land is held, or waits on the human: nothing of it runs, so the worker
+/// may report again, stop or be retired (its card then withdrawn), and a held one resumed.
 pub fn held(w: &WorkerRecord) -> bool {
-    w.phase == worker::PHASE_LANDING && w.land.as_ref().is_some_and(LandState::is_held)
+    w.phase == worker::PHASE_LANDING && w.land.as_ref().is_some_and(|l| l.is_held() || l.awaits_human())
 }

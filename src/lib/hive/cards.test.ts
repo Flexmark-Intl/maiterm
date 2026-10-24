@@ -114,6 +114,12 @@ describe('cardState', () => {
     expect(cardState(worker({ phase: 'landing' }), null, idle, null).sub).toBeNull();
   });
 
+  it("a land waiting on the human's card is Landing (§4.3), whatever its agent does", () => {
+    const land = { id: 'L-1', state: 'awaiting_human', request: 'r_1', repos: [] };
+    const s = cardState(worker({ phase: 'landing', land }), null, active, null);
+    expect([s.state, s.sub]).toEqual(['landing', 'waiting for your approval']);
+  });
+
   it('landed and retired: no agent read, the retirement reason and the undone qualifier shown', () => {
     const retired = { reason: 'Wrong approach', at: 'now', kept: [] };
     const r = cardState(worker({ phase: 'retired', tab_id: null, retired }), null, { state: 'permission' }, null);

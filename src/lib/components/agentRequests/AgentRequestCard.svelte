@@ -54,6 +54,8 @@
           : r.kind === 'mcp_add' ? 'Add this MCP server for every agent?'
           : r.kind === 'tab_reload' ? 'Allow this reload?'
           : r.kind === 'window_reload' ? 'Reload this window?'
+          : r.kind === 'hive_land' ? 'Allow this land?'
+          : r.kind === 'hive_undo' ? 'Allow this undo?'
           : r.kind.startsWith('bridge') ? 'Allow this bridge change?'
             : r.kind.startsWith('mesh') ? 'Allow this mesh change?' : 'Allow this move?',
   );
@@ -71,7 +73,9 @@
         !done
           ? 'It was already answered, or it lapsed.'
           : approve
-            ? r.kind === 'restart' ? 'Approved. maiTerm is restarting.' : 'Approved. It is being carried out, and the agent will be told.'
+            ? r.kind === 'restart' ? 'Approved. maiTerm is restarting.'
+              : r.kind === 'hive_land' ? 'Approved. maiTerm lands it now, and the coordinator will be told.'
+              : 'Approved. It is being carried out, and the agent will be told.'
             : 'Denied. The agent will be told.',
       );
     } catch (err) {

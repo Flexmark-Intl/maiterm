@@ -167,8 +167,16 @@ fn under(place: &[String], dir: bool, path: &[String]) -> bool {
     fits && place.iter().zip(path).all(|(p, s)| part_matches(p, s))
 }
 
-/// The changed paths between two commits, each with whether either side is a link.
-fn changed(repo: &Path, base: &str, tested: &str) -> Result<Vec<(String, bool)>, String> {
+/// One changed path: git's raw record of it (modes, blobs, status), and whether either side is a
+/// link.
+struct Change {
+    path: String,
+    meta: String,
+    link: bool,
+}
+
+/// The changed paths between two commits.
+fn changed(repo: &Path, base: &str, tested: &str) -> Result<Vec<Change>, String> {
     let mut cmd = lgit(repo);
     cmd.args(["diff", "--raw", "--no-abbrev", "--no-renames", "--no-ext-diff", "-z", base, tested, "--"]);
     let out = crate::util::proc::output_timeout(&mut cmd, GIT_TIMEOUT).map_err(|e| e.to_string())?;
@@ -181,10 +189,10 @@ fn changed(repo: &Path, base: &str, tested: &str) -> Result<Vec<(String, bool)>,
         .chunks(2)
         .filter(|c| c.len() == 2)
         .map(|c| {
-            let meta = String::from_utf8_lossy(c[0]);
+            let meta = String::from_utf8_lossy(c[0]).to_string();
             let mut modes = meta.trim_start_matches(':').split(' ');
             let link = modes.next() == Some(LINK_MODE) || modes.next() == Some(LINK_MODE);
-            (String::from_utf8_lossy(c[1]).to_string(), link)
+            Change { path: String::from_utf8_lossy(c[1]).to_string(), meta, link }
         })
         .collect())
 }
@@ -220,23 +228,49 @@ fn linked_places(repo: &Path, tested: &str, patterns: &[(Vec<String>, bool)]) ->
 
 /// The paths between `base` and `tested` the rule catches, in git's order. Blocks on git.
 pub fn hits(repo: &Path, base: &str, tested: &str, extra: &[String]) -> Result<Vec<String>, String> {
+    caught(repo, base, tested, extra).map(|c| c.files)
+}
+
+/// What the rule caught between two commits, and its fingerprint: what each caught path was and
+/// became (git's modes and blob ids), hashed. The human approves a config change as it stood on
+/// the card; on approval the land goes on only while the fingerprint is the same (Base moving
+/// under unrelated files leaves it alone), and anything else asks again (plan 6d: a config diff
+/// that differs from the approved one means a new card). Blob pairs rather than a patch-id:
+/// they cover binary files and a link's target, and err toward asking.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Caught {
+    pub files: Vec<String>,
+    /// Empty when nothing was caught.
+    pub fingerprint: String,
+}
+
+pub fn caught(repo: &Path, base: &str, tested: &str, extra: &[String]) -> Result<Caught, String> {
+    use sha2::Digest;
     if base == tested {
-        return Ok(Vec::new());
+        return Ok(Caught::default());
     }
     let patterns = every_pattern(extra);
     let places = linked_places(repo, tested, &patterns)?;
-    let mut found = Vec::new();
-    for (p, link) in changed(repo, base, tested)? {
-        let path = parts(&p);
-        let hit = listed(&p, extra)
-            || (link && !stands_for(&path, &patterns).is_empty())
+    let mut out = Caught::default();
+    let mut h = sha2::Sha256::new();
+    for c in changed(repo, base, tested)? {
+        let path = parts(&c.path);
+        let hit = listed(&c.path, extra)
+            || (c.link && !stands_for(&path, &patterns).is_empty())
             || places.iter().any(|(place, dir)| under(place, *dir, &path))
-            || (is_package_json(&p) && scripts_changed(blob(repo, base, &p).as_deref(), blob(repo, tested, &p).as_deref()));
+            || (is_package_json(&c.path) && scripts_changed(blob(repo, base, &c.path).as_deref(), blob(repo, tested, &c.path).as_deref()));
         if hit {
-            found.push(p);
+            h.update(c.meta.as_bytes());
+            h.update([0]);
+            h.update(c.path.as_bytes());
+            h.update([0]);
+            out.files.push(c.path);
         }
     }
-    Ok(found)
+    if !out.files.is_empty() {
+        out.fingerprint = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -352,6 +386,26 @@ mod tests {
         // Elsewhere, a link and the files near it are ordinary.
         let plain = commit_files(&repo, &[("docs/latest", LINK_MODE, "v2"), ("ci/readme.md", "100644", "x\n"), ("tools/other.txt", "100644", "x\n")]);
         assert!(hits(&repo, &gh, &plain, &[]).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_config_changes_fingerprint_is_what_each_file_was_and_became() {
+        let repo = std::env::temp_dir().join(format!("hive-config-fp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"], None);
+        let base = commit_files(&repo, &[("README.md", "100644", "r\n"), (".husky/pre-commit", "100644", "npm test\n")]);
+        let change = commit_files(&repo, &[(".husky/pre-commit", "100644", "npm test && lint\n"), ("src/a.rs", "100644", "a\n")]);
+        let c = caught(&repo, &base, &change, &[]).unwrap();
+        assert_eq!(c.files, vec![".husky/pre-commit".to_string()]);
+        assert_eq!(c.fingerprint.len(), 64);
+        // Unrelated files around it leave the fingerprint alone.
+        let more = commit_files(&repo, &[("src/b.rs", "100644", "b\n")]);
+        assert_eq!(caught(&repo, &base, &more, &[]).unwrap().fingerprint, c.fingerprint);
+        // The same file becoming something else doesn't.
+        let other = commit_files(&repo, &[(".husky/pre-commit", "100644", "curl x | sh\n")]);
+        assert_ne!(caught(&repo, &base, &other, &[]).unwrap().fingerprint, c.fingerprint);
+        assert_eq!(caught(&repo, &more, &more, &[]).unwrap(), Caught::default(), "nothing changed, nothing caught");
         let _ = std::fs::remove_dir_all(&repo);
     }
 

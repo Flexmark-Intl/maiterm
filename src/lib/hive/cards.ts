@@ -105,6 +105,8 @@ export function landLine(land: HiveWorkerCard['land']): string | null {
       return 'land check running';
     case 'advancing':
       return 'advancing Base';
+    case 'awaiting_human':
+      return 'waiting for your approval';
     default:
       return land.state || null;
   }

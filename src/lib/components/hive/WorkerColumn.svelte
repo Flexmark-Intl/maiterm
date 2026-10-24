@@ -18,6 +18,9 @@
   import Tooltip from '$lib/components/Tooltip.svelte';
   import { formatDiffStat } from '$lib/hive/activity';
   import { isRetired, retiredLine, stateLine, type CardState } from '$lib/hive/cards';
+  import { landCard } from '$lib/hive/requests';
+  import AgentRequestCard from '$lib/components/agentRequests/AgentRequestCard.svelte';
+  import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
   import type { HiveDiffStat, HiveWorkerCard, Task } from '$lib/tauri/types';
 
   interface Props {
@@ -53,6 +56,9 @@
     card.tab_id ? { kind: 'tab', tabId: card.tab_id } : retired && hiveId ? { kind: 'retired', hiveId, taskId: card.task_id } : null,
   );
   const kept = $derived(card.retired?.kept ?? []);
+  /** Its land's card, while the land waits on the human (§8.3: "in the worker's column"). */
+  const approval = $derived(landCard(agentRequestsStore.pending, card));
+  let approvalNote = $state('');
   const total = $derived(formatDiffStat(diff));
   const committed = $derived(
     diff && (diff.committed.insertions || diff.committed.deletions)
@@ -112,6 +118,12 @@
       {/if}
     </div>
   </header>
+  {#if approval}
+    <div class="approval">
+      <AgentRequestCard request={approval} onnote={(t) => (approvalNote = t)} />
+      {#if approvalNote}<p class="note" role="status">{approvalNote}</p>{/if}
+    </div>
+  {/if}
   <ChatColumn
     bind:this={chat}
     {source}
@@ -148,6 +160,8 @@
   .st[data-state='failed'] { color: var(--red); }
   .diffs { display: inline-flex; flex-wrap: wrap; gap: 2px 10px; }
   .diff { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .approval { padding: 8px 12px 8px 18px; border-bottom: 1px solid var(--bg-light); max-height: 45%; overflow-y: auto; }
+  .note { margin: 6px 0 0; font-size: 11.5px; color: var(--fg-dim); overflow-wrap: anywhere; }
   @media (prefers-reduced-motion: reduce) {
     .wcol { transition: none; }
   }

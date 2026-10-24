@@ -709,6 +709,10 @@ pub fn run() {
             // Lands a stopped maiTerm left running are settled from the repos and held, so the
             // coordinator's next hiveLand resumes each (docs/hive.md §8.1). Git, before any tab.
             hive::land::reconcile(&app_state.app_data);
+            // Agent requests live in memory: every land waiting on the human gets its card back,
+            // under its own id and deadline (docs/hive.md §8.1, §8.3). The windows read the list
+            // when they load.
+            hive::land::approval::refile_pending(&app_state, app.handle());
 
             // Stack copies' branch checkouts whose branch is gone (docs/hive.md §6.9). Git, so off
             // the setup thread.

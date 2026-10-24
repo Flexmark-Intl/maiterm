@@ -12,7 +12,10 @@ use crate::hive::paths::HivePaths;
 
 pub const LOG_VERSION: u32 = 1;
 pub const KIND_LAND: &str = "land";
+/// A land onto `hive/<slug>` by a `--no-ff` merge of the approved sha (§8.3).
+pub const KIND_INTEGRATION: &str = "integration";
 pub const BY_COORDINATOR: &str = "coordinator";
+pub const BY_HUMAN: &str = "human";
 pub const REVIEW_PASS: &str = "pass";
 pub const REVIEW_ACCEPTED: &str = "accepted";
 pub const REVIEW_NONE: &str = "none";

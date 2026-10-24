@@ -103,6 +103,7 @@ pub(crate) async fn stop_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
             // A held land resumed meanwhile is running again.
             ok = w.phase != worker::PHASE_LANDING || super::land::held(w);
             if ok {
+                super::land::approval::hold_if_partial(w, "its coordinator stopped the worker");
                 w.phase = worker::PHASE_STOPPED.to_string();
                 w.wait_reason = None;
             }
@@ -118,12 +119,14 @@ pub(crate) async fn stop_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     // Something other than its agent holds the terminal: on a first launch that is its setup,
     // with `&& … claude` typed after it. Marked stopped, that agent would start uncounted.
     if let Err(e) = &signalled {
-        let back = was.clone();
+        let (back, back_land) = (was.clone(), w.land.clone());
         let restored = blocking(move || {
             worker::update_worker(&dir, |w| {
                 let ours = w.phase == worker::PHASE_STOPPED;
                 if ours {
                     w.phase = back;
+                    // Its land as it was too: a card still waits on it (`hold_if_partial`).
+                    w.land = back_land;
                 }
                 ours
             })
@@ -140,6 +143,7 @@ pub(crate) async fn stop_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     }
     // Its queued runs go, and running ones are interrupted: a stopped worker holds no resource.
     let released = super::queue::release_worker(&w.task_id, "your coordinator stopped you");
+    super::land::approval::withdraw(&ctx.window, &w, "its coordinator stopped the worker, so nothing would land");
     // A stop is never held back by the board: its note is best effort.
     let note = format!("Stopped by the coordinator: {reason}");
     if let Err(e) = task_note(ctx, caller, &w.task_id, &note, None).await {

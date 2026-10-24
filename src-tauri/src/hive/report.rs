@@ -400,6 +400,7 @@ pub(crate) async fn report<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, arg
             // Its held land resumed meanwhile: that land runs on the commits it pinned.
             ok = w.phase != worker::PHASE_LANDING || super::land::held(w);
             if ok {
+                super::land::approval::hold_if_partial(w, "the worker reported again");
                 w.phase = phase.to_string();
                 w.last_report = Some(report);
             }
@@ -408,6 +409,8 @@ pub(crate) async fn report<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, arg
         if ok { Ok(()) } else { Err("Your coordinator has just resumed landing your work: report once it's done or sent back to you.".to_string()) }
     })
     .await?;
+    // A land waiting on the human was of the commits reported before this.
+    super::land::approval::withdraw(&ctx.window, &w, "the worker reported again, so its coordinator lands its new commits instead");
     ctx.window.workers_changed(&caller.workspace_id);
     // A report is read beside the work it reports: measure it now rather than at the next Stop.
     ctx.window.diff_stat_touch(caller, &w.task_id);

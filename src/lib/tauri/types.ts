@@ -726,6 +726,8 @@ export interface HiveLandView {
   held_reason?: string | null;
   /** Whose land lock it waits on. */
   waiting_for?: string | null;
+  /** The agent request it waits on while "awaiting_human": the worker's column shows that card. */
+  request?: string | null;
   /** Per repo: "pending" | "checking" | "tested" | "advancing" | "held" | "landed", and once it
    *  landed its push: "ok" | "held: <why>" | "off". */
   repos: { folder: string; status: string; pushed?: string | null }[];
@@ -1175,7 +1177,9 @@ export interface AgentRequest {
   /** The window that filed it and carries it out. */
   window_label: string;
   kind: 'mesh_enable' | 'mesh_disable' | 'mesh_link' | 'mesh_unlink' | 'tab_move' | 'workspace_move' | 'tab_create' | 'restart'
-    | 'tab_reload' | 'window_reload' | 'bridge_connect' | 'bridge_fork' | 'bridge_disconnect' | 'mcp_add';
+    | 'tab_reload' | 'window_reload' | 'bridge_connect' | 'bridge_fork' | 'bridge_disconnect' | 'mcp_add'
+    // A Hive's land or undo (docs/hive.md §8.1, §8.3): filed and carried out by Rust, never a window.
+    | 'hive_land' | 'hive_undo';
   /** Exactly what runs on approval, built by maiTerm. */
   args: Record<string, unknown>;
   /** What the card says will happen, written by maiTerm. */

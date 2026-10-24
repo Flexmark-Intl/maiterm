@@ -29,6 +29,7 @@ import { getAdapter } from '$lib/agents/adapter';
 import { overlordStore } from '$lib/stores/overlord.svelte';
 import { updaterStore } from '$lib/stores/updater.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
+import { unannouncedHiveCards, windowCarriesOut, windowTellsAsker } from '$lib/hive/requests';
 import { dispatch as notify } from '$lib/stores/notificationDispatch';
 import { moveTabToWindow, moveWorkspaceToWindow } from '$lib/stores/windowMove';
 import { getDescriptor } from '$lib/agents/descriptor';
@@ -789,6 +790,10 @@ async function execute(r: AgentRequest): Promise<string> {
       window.location.reload();
       return 'the window is reloading';
     }
+    case 'hive_land':
+    case 'hive_undo':
+      // Never handed to a window (windowCarriesOut); Rust carries it out.
+      throw new Error('a Hive’s land is carried out by maiTerm itself');
   }
 }
 
@@ -819,6 +824,8 @@ async function carryOut(r: AgentRequest) {
 /** Tell the agent that asked. Only the window holding its terminal can. */
 async function onSettled(r: AgentRequest) {
   toastStore.removeByKey(`agent-request:${r.id}`);
+  // A Hive's land: Rust tells its coordinator itself (⟦HIVE LAND⟧).
+  if (!windowTellsAsker(r)) return;
   if (!terminalsStore.get(r.tab_id)) {
     // A tab moving here (an approved cross-window move of the asking tab itself) can be in
     // neither window when the settle arrives: gone from the old one, not yet in this one's list.
@@ -857,8 +864,13 @@ function createAgentRequestsStore() {
    *  (review of 3973dc21). This read is the clock. */
   let sweepTimer: ReturnType<typeof setInterval> | undefined;
 
+  /** Rust-filed (Hive) cards already announced in this window. */
+  const announced = new Set<string>();
+
   async function refresh() {
     requests = await commands.listAgentRequests().catch(() => requests);
+    const me = getCurrentWindow().label;
+    for (const r of unannouncedHiveCards(requests.filter((x) => x.window_label === me), announced)) announce(r);
   }
 
   return {
@@ -892,9 +904,10 @@ function createAgentRequestsStore() {
       const me = getCurrentWindow().label;
       unlisten = await Promise.all([
         listen('agent-requests-changed', () => void refresh()),
-        // Emitted to the filing window only (Rust `emit_to`); checked again in case.
+        // Emitted to the filing window only (Rust `emit_to`); checked again in case. A Hive's
+        // land is never sent here: Rust carries it out.
         listen<AgentRequest>('agent-request-approved', (e) => {
-          if (e.payload.window_label === me) void onApproved(e.payload);
+          if (windowCarriesOut(e.payload, me)) void onApproved(e.payload);
         }),
         listen<AgentRequest>('agent-request-settled', (e) => void onSettled(e.payload)),
       ]);

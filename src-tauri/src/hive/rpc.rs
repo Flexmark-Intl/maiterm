@@ -68,6 +68,28 @@ pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     /// A land whose lock stayed busy past `hiveLand`'s wait carries on outside the tool call
     /// (`land::driver::resume_background`). A test window runs its lands inline.
     fn continue_land(&self, _caller: &super::tools::Caller, _task_id: &str) {}
+    /// Files a card only the human approves (`agent_requests::file_hive`, docs/hive.md §8.1,
+    /// §8.3) in this window, from the coordinator's tab. Its id.
+    fn file_request(&self, _req: HiveRequest) -> Result<String, String> {
+        Err("This window can't ask the human".to_string())
+    }
+    /// Reports what became of an approved Hive request (`agent_requests::settle`).
+    fn settle_request(&self, _id: &str, _ok: bool, _outcome: String) {}
+    /// Withdraws a card no longer true (its worker stopped, retired or reported again).
+    fn withdraw_request(&self, _id: &str, _why: &str) {}
+}
+
+/// A Hive's card for the human, as Rust builds it: every word maiTerm's but `reason`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HiveRequest {
+    pub tab_id: String,
+    pub kind: &'static str,
+    pub args: Value,
+    pub summary: String,
+    pub effects: Vec<String>,
+    pub reason: Option<String>,
+    /// The id and filing time a restart re-files it under (`agent_requests::file_hive`).
+    pub keep: Option<(String, u64)>,
 }
 
 pub(crate) use super::deliver::Sent;
@@ -162,6 +184,21 @@ impl HiveWindow for AppWindow {
 
     fn continue_land(&self, caller: &super::tools::Caller, task_id: &str) {
         super::land::driver::resume_background(self.app.clone(), self.handle.clone(), caller.clone(), task_id.to_string());
+    }
+
+    fn file_request(&self, req: HiveRequest) -> Result<String, String> {
+        let r = crate::agent_requests::file_hive(&self.handle, &self.app, &req.tab_id, &self.label, req.kind, req.args, req.summary, req.effects, req.reason, req.keep)?;
+        Ok(r.id)
+    }
+
+    fn settle_request(&self, id: &str, ok: bool, outcome: String) {
+        if crate::agent_requests::settle(&self.handle, id, ok, outcome).is_none() {
+            log::info!("hive: request {id} wasn't waiting to be settled");
+        }
+    }
+
+    fn withdraw_request(&self, id: &str, why: &str) {
+        crate::agent_requests::fail_request(&self.handle, id, why);
     }
 }
 

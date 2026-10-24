@@ -76,6 +76,17 @@ pub fn is_ancestor(repo: &Path, a: &str, b: &str) -> bool {
     out.is_ok_and(|o| o.status.success())
 }
 
+/// The best common ancestor of two commits.
+pub fn merge_base_of(repo: &Path, a: &str, b: &str) -> Option<String> {
+    run(lgit(repo).args(["merge-base", a, b]), QUERY_TIMEOUT).ok().filter(|s| !s.is_empty())
+}
+
+/// `git diff --shortstat <target>...<pinned>`: what the worker's commits change, for a card
+/// ("3 files changed, 40 insertions(+), 2 deletions(-)").
+pub fn shortstat(repo: &Path, target: &str, pinned: &str) -> Result<String, String> {
+    run(lgit(repo).args(["diff", "--shortstat", "--no-ext-diff", "--no-textconv"]).arg(format!("{target}...{pinned}")).arg("--"), GIT_TIMEOUT)
+}
+
 /// The repo's git common dir, canonical: where its land lock lives.
 pub fn common_dir(repo: &Path) -> Result<PathBuf, String> {
     let d = run(lgit(repo).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]), QUERY_TIMEOUT)?;
@@ -204,7 +215,8 @@ pub fn remove_temp(repo: &Path, path: &Path) {
 /// What step 1 came to in one repo.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Merged {
-    /// The tested commit: the merge, or the pinned sha when Base was already in it.
+    /// The tested commit: the merge, the pinned sha when Base was already in it, or (integration)
+    /// the branch's tip when the pin was already in that.
     Tested { sha: String, merged: bool },
     /// The merge conflicted in these files; it was aborted.
     Conflict(Vec<String>),
@@ -216,9 +228,25 @@ pub fn merge_base(repo: &Path, tmp: &Temp, base_sha: &str, pinned: &str, message
     if is_ancestor(repo, base_sha, pinned) {
         return Ok(Merged::Tested { sha: pinned.to_string(), merged: false });
     }
+    merge_in(repo, tmp, &[], message, base_sha)
+}
+
+/// The integration mode's merge (§8.3): exactly the pinned sha, `--no-ff`, into the temporary
+/// worktree made at the integration branch's tip (`head`), so the branch gets a merge commit
+/// naming it. A pin the branch already contains (a repo the worker never committed in) merges
+/// nothing: git answers "Already up to date" and HEAD, an earlier land's merge commit perhaps,
+/// would read as this land's.
+pub fn merge_pinned(repo: &Path, tmp: &Temp, head: &str, pinned: &str, message: &str) -> Result<Merged, String> {
+    if is_ancestor(repo, pinned, head) {
+        return Ok(Merged::Tested { sha: head.to_string(), merged: false });
+    }
+    merge_in(repo, tmp, &["--no-ff"], message, pinned)
+}
+
+fn merge_in(repo: &Path, tmp: &Temp, flags: &[&str], message: &str, rev: &str) -> Result<Merged, String> {
     let f = tmp.folder("land");
     let mut cmd = lgit_wt(&f)?;
-    cmd.args(identity(repo)).args(["merge", "--no-edit", "--no-verify", "-m", message, base_sha]);
+    cmd.args(identity(repo)).arg("merge").args(flags).args(["--no-edit", "--no-verify", "-m", message, rev]);
     let out = crate::util::proc::output_timeout(&mut cmd, GIT_TIMEOUT).map_err(|e| e.to_string())?;
     if !out.status.success() {
         let files = run(lgit_wt(&f)?.args(["diff", "--name-only", "--diff-filter=U"]), QUERY_TIMEOUT).unwrap_or_default();

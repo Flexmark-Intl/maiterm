@@ -140,6 +140,8 @@ pub(crate) enum Outcome {
     Held(Value),
     Checking(Value),
     Waiting(Value),
+    /// It waits on the human's card (`approval`), holding no lock.
+    Awaiting(Value),
     /// The land is off and the worker back in Reported.
     Refused(String),
     /// Nothing of it to run (another path settled it meanwhile).
@@ -151,7 +153,7 @@ impl Outcome {
         match self {
             Outcome::Refused(e) => Err(e),
             Outcome::Gone => Err("The land isn't running any more: look with hiveListWorkers.".to_string()),
-            Outcome::Landed(v) | Outcome::Held(v) | Outcome::Checking(v) | Outcome::Waiting(v) => Ok(v),
+            Outcome::Landed(v) | Outcome::Held(v) | Outcome::Checking(v) | Outcome::Waiting(v) | Outcome::Awaiting(v) => Ok(v),
         }
     }
 
@@ -159,14 +161,14 @@ impl Outcome {
     pub fn message(&self, w: &WorkerRecord) -> Option<String> {
         let says = match self {
             Outcome::Refused(e) => e.clone(),
-            Outcome::Landed(v) | Outcome::Held(v) | Outcome::Waiting(v) => v.get("result").and_then(Value::as_str)?.to_string(),
+            Outcome::Landed(v) | Outcome::Held(v) | Outcome::Waiting(v) | Outcome::Awaiting(v) => v.get("result").and_then(Value::as_str)?.to_string(),
             Outcome::Checking(_) | Outcome::Gone => return None,
         };
         Some(format!("⟦HIVE LAND · {}⟧ {says}", one_line(&w.title, 120)))
     }
 }
 
-fn hive_folder<'a>(hive: &'a Hive, folder: &str) -> Result<&'a HiveFolder, String> {
+pub(super) fn hive_folder<'a>(hive: &'a Hive, folder: &str) -> Result<&'a HiveFolder, String> {
     hive.folders.iter().find(|f| f.name == folder && f.is_git()).ok_or_else(|| format!("This Hive has no repo called \"{folder}\" now"))
 }
 
@@ -174,14 +176,14 @@ fn short(sha: &str) -> &str {
     &sha[..sha.len().min(10)]
 }
 
-fn files_line(files: &[String]) -> String {
+pub(super) fn files_line(files: &[String]) -> String {
     let shown: Vec<String> = files.iter().take(10).map(|f| format!("`{}`", one_line(f, 200))).collect();
     let more = files.len().saturating_sub(10);
     if more > 0 { format!("{} and {more} more", shown.join(", ")) } else { shown.join(", ") }
 }
 
 /// The land written into `worker.json`, if it is still this land there.
-async fn save(dir: &Path, land: &LandState) -> Result<(), String> {
+pub(super) async fn save(dir: &Path, land: &LandState) -> Result<(), String> {
     let (d, mut l) = (dir.to_path_buf(), land.clone());
     l.updated_at = crate::commands::workspace::iso_now();
     blocking(move || {
@@ -240,7 +242,7 @@ async fn take_locks(caller: &Caller, land: &LandState, wait: Duration) -> Result
 
 /// The land's temporary worktrees removed, its queued checks stopped and its locks released.
 /// Blocks.
-fn cleanup(hive: &Hive, paths: &HivePaths, land: &mut LandState) {
+pub(super) fn cleanup(hive: &Hive, paths: &HivePaths, land: &mut LandState) {
     for r in land.repos.iter_mut() {
         if let Some(job) = r.job.take().filter(|_| r.status == REPO_CHECKING) {
             crate::hive::queue::interrupt(&job, crate::hive::queue::BY_RELEASE, "its land ended");
@@ -271,12 +273,30 @@ fn step1(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, land_id: &str, r: &mu
         lg::remove_temp(&repo, Path::new(&t));
     }
     let base = r.target.clone();
-    let base_sha = lg::branch_tip(&repo, &base).ok_or_else(|| format!("{}: its Base, {base}, doesn't exist any more", r.folder))?;
-    let tmp = lg::add_temp(&repo, &paths.land_worktree(land_id, &r.folder), &r.pinned).map_err(|e| format!("{}: {e}", r.folder))?;
+    let base_sha = lg::branch_tip(&repo, &base).ok_or_else(|| format!("{}: its landing target, {base}, doesn't exist any more", r.folder))?;
+    // The integration mode merges exactly the pinned sha `--no-ff` into its branch's tip (§8.3);
+    // land to Base merges Base's sha into the pinned commit (§8.1).
+    let integration = hive.is_integration();
+    let start = if integration { base_sha.as_str() } else { r.pinned.as_str() };
+    let tmp = lg::add_temp(&repo, &paths.land_worktree(land_id, &r.folder), start).map_err(|e| format!("{}: {e}", r.folder))?;
     r.tmp = Some(tmp.path.to_string_lossy().to_string());
     r.tmp_admin = Some(tmp.admin.to_string_lossy().to_string());
-    let message = format!("Land {} onto {base} [maiTerm {land_id}]", w.title.replace(['\n', '\r'], " "));
-    match lg::merge_base(&repo, &tmp, &base_sha, &r.pinned, &message).map_err(|e| format!("{}: {e}", r.folder))? {
+    let title = w.title.replace(['\n', '\r'], " ");
+    let merged = if integration {
+        let message = format!("Land {title} ({}) [maiTerm {land_id}]", &r.pinned[..r.pinned.len().min(7)]);
+        lg::merge_pinned(&repo, &tmp, &base_sha, &r.pinned, &message)
+    } else {
+        lg::merge_base(&repo, &tmp, &base_sha, &r.pinned, &format!("Land {title} onto {base} [maiTerm {land_id}]"))
+    };
+    match merged.map_err(|e| format!("{}: {e}", r.folder))? {
+        Merged::Conflict(files) if integration => {
+            return Err(format!(
+                "Merging the reviewed commit into {base} conflicts in {}: {}. Tell the worker to merge {base} into its branch, resolve \
+                 them and report done again; review what it commits.",
+                r.folder,
+                files_line(&files)
+            ))
+        }
         Merged::Conflict(files) => {
             return Err(format!(
                 "Merging {base} into the reviewed commit conflicts in {}: {}. Tell the worker to merge {base} into its branch, resolve \
@@ -293,16 +313,11 @@ fn step1(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, land_id: &str, r: &mu
             r.status = REPO_PENDING.to_string();
         }
     }
+    // What it changes from its target: a catch goes to the human before step 2 (`advance_all`).
     let tested = r.tested.clone().unwrap_or_default();
-    let hits = super::config_rule::hits(&repo, &base_sha, &tested, &hive.settings.land.config_paths).map_err(|e| format!("{}: {e}", r.folder))?;
-    if !hits.is_empty() {
-        return Err(format!(
-            "This land changes agent or execution config in {} ({}), so it goes to the human, always. That approval arrives in the \
-             next build of maiTerm: land it by hand for now.",
-            r.folder,
-            files_line(&hits)
-        ));
-    }
+    let caught = super::config_rule::caught(&repo, &base_sha, &tested, &hive.settings.land.config_paths).map_err(|e| format!("{}: {e}", r.folder))?;
+    r.config_fp = Some(caught.fingerprint).filter(|f| !f.is_empty());
+    r.config_hits = caught.files;
     Ok(())
 }
 
@@ -471,6 +486,11 @@ async fn advance_all<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &Worke
                 let why = format!("{folder} isn't ready to land ({})", r.status);
                 return fail(ctx, caller, w, land, why).await;
             }
+            // The config rule (§8.1), before anything moves: a change the human hasn't approved
+            // as it now stands sends the whole land to one card, whatever the checkpoint says.
+            if land.repos.iter().any(LandRepo::config_unapproved) {
+                return super::approval::await_human(ctx, caller, w, land, super::approval::WHY_CONFIG).await;
+            }
             if let Some(seam) = opts.before_advance.clone() {
                 let f = folder.clone();
                 let _ = blocking(move || {
@@ -495,8 +515,8 @@ async fn advance_all<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &Worke
             let res = blocking(move || lg::advance(&rp, &base, &from, &to)).await;
             match res {
                 Ok(Step2::Advanced) => {
-                    let (hive, paths, rec, id, summary, review) =
-                        (caller.hive.clone(), caller.paths.clone(), w.clone(), land.id.clone(), land.summary.clone(), land.review.clone());
+                    let (hive, paths, rec, id, summary, review, request) =
+                        (caller.hive.clone(), caller.paths.clone(), w.clone(), land.id.clone(), land.summary.clone(), land.review.clone(), approved_request(&land));
                     let mut done = r.clone();
                     let done = blocking(move || {
                         done.status = REPO_LANDED.to_string();
@@ -504,7 +524,7 @@ async fn advance_all<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &Worke
                         done.base_after = done.tested.clone();
                         done.tree_landed = lg::tree_of(&repo, &format!("refs/heads/{}", done.target));
                         done.pushed = Some(if hive.push_after_land && !hive.is_integration() { lg::push(&repo, &done.target) } else { landlog::PUSHED_OFF.to_string() });
-                        log_repo(&paths, &hive, &rec, &id, &summary, &review, &mut done);
+                        log_repo(&paths, &hive, &rec, &id, &summary, &review, request, &mut done);
                         Ok(done)
                     })
                     .await;
@@ -558,8 +578,15 @@ fn r_target(land: &LandState, folder: &str) -> String {
     land.repos.iter().find(|r| r.folder == folder).map(|r| r.target.clone()).unwrap_or_default()
 }
 
-/// One repo's line in the land log, unless it has one. Blocks.
-pub(crate) fn log_repo(paths: &HivePaths, hive: &Hive, w: &WorkerRecord, land_id: &str, summary: &str, review: &str, r: &mut LandRepo) {
+/// The agent request a land was approved through, for its log line (`by: human`).
+pub(crate) fn approved_request(land: &LandState) -> Option<String> {
+    land.approved_by.as_ref().and(land.request.clone())
+}
+
+/// One repo's line in the land log, unless it has one: an integration-mode land names its own
+/// merge commit, and a land the human approved names the request. Blocks.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn log_repo(paths: &HivePaths, hive: &Hive, w: &WorkerRecord, land_id: &str, summary: &str, review: &str, request: Option<String>, r: &mut LandRepo) {
     if r.logged {
         return;
     }
@@ -568,9 +595,14 @@ pub(crate) fn log_repo(paths: &HivePaths, hive: &Hive, w: &WorkerRecord, land_id
         r.logged = true;
         return;
     }
+    let integration = hive.is_integration();
     let entry = LandLogEntry {
         id,
         land: land_id.to_string(),
+        kind: if integration { landlog::KIND_INTEGRATION } else { landlog::KIND_LAND }.to_string(),
+        merge_commit: r.tested.clone().filter(|_| integration && r.merged),
+        by: if request.is_some() { landlog::BY_HUMAN } else { landlog::BY_COORDINATOR }.to_string(),
+        request,
         hive_id: hive.id.clone(),
         task_id: w.task_id.clone(),
         worker: w.slug.clone(),
@@ -596,7 +628,7 @@ pub(crate) fn log_repo(paths: &HivePaths, hive: &Hive, w: &WorkerRecord, land_id
 }
 
 /// A failure before anything landed refuses the land; after, it holds what's left.
-async fn fail<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, mut land: LandState, why: String) -> Outcome {
+pub(super) async fn fail<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, mut land: LandState, why: String) -> Outcome {
     if land.landed().is_empty() {
         return refuse(ctx, caller, w, land, why).await;
     }
@@ -716,6 +748,15 @@ async fn finish<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerReco
     end_hold(w);
 
     let shas: Vec<String> = land.repos.iter().map(|r| format!("{} {} → {}", r.folder, short(r.base_after.as_deref().unwrap_or_default()), r.target)).collect();
+    // Approved hours ago, perhaps: a worker whose branch moved on since its pin landed only the
+    // pin, and keeps its newer commits for a land of their own (plan 6d).
+    if land.approved_by.is_some() {
+        let (hive, l) = (caller.hive.clone(), land.clone());
+        let moved = blocking(move || Ok(branches_moved(&hive, &l))).await.unwrap_or_default();
+        if !moved.is_empty() {
+            return landed_unretired(ctx, caller, w, land, &shas, moved).await;
+        }
+    }
     let spec = RetireSpec {
         phase: worker::PHASE_LANDED,
         from: vec![worker::PHASE_LANDING],
@@ -797,6 +838,91 @@ async fn unretired<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerR
     }))
 }
 
+/// The repos whose worker branch isn't at its pin any more. Blocks on git.
+fn branches_moved(hive: &Hive, land: &LandState) -> Vec<String> {
+    land.repos
+        .iter()
+        .filter(|r| !r.branch.is_empty())
+        .filter(|r| hive_folder(hive, &r.folder).is_ok_and(|hf| lg::branch_tip(Path::new(&hf.path), &r.branch).as_deref() != Some(r.pinned.as_str())))
+        .map(|r| r.folder.clone())
+        .collect()
+}
+
+/// An approved land whose worker's branch moved on since its pin: the pin landed, and the worker
+/// stays, back in Reported with its branch as it is, the land kept as history.
+async fn landed_unretired<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, mut land: LandState, shas: &[String], moved: Vec<String>) -> Outcome {
+    let label = worker_label(w);
+    land.state = STATE_LANDED.to_string();
+    land.updated_at = crate::commands::workspace::iso_now();
+    if let Ok(dir) = worker::task_dir(&caller.paths, &w.task_id) {
+        let l = land.clone();
+        let res = blocking(move || {
+            worker::update_worker(&dir, |cur| {
+                let ours = cur.phase == worker::PHASE_LANDING && cur.land.as_ref().is_some_and(|x| x.id == l.id);
+                if ours {
+                    cur.phase = worker::PHASE_REPORTED.to_string();
+                    cur.land = Some(l);
+                }
+                ours
+            })
+        })
+        .await;
+        if let Err(e) = res {
+            log::warn!("hive {}: worker {label} landed but wasn't put back in Reported: {e}", caller.hive.id);
+        }
+    }
+    let (hive, paths, l) = (caller.hive.clone(), caller.paths.clone(), land.clone());
+    let notes = blocking(move || Ok(move_read_copies(&hive, &paths, &l))).await.unwrap_or_default();
+    let line = format!(
+        "Landed ({}): {}. Its branch moved since the human approved it, in {}: those newer commits need a land of their own.",
+        land.id,
+        shas.join(", "),
+        moved.join(", ")
+    );
+    if let Err(e) = crate::hive::control::task_note(ctx, caller, &w.task_id, &line, None).await {
+        log::info!("hive {}: land note for {label} not written: {e}", caller.hive.id);
+    }
+    ctx.window.workers_changed(&caller.workspace_id);
+    log::info!("hive {}: land {} of {label} landed its pin; the branch moved since, so the worker stays", caller.hive.id, land.id);
+    let mut result = format!(
+        "Worker {label} landed the commits the human approved: {}. Its branch has moved since you named them, in {}: those newer \
+         commits didn't land and need a land of their own (review them, then hiveLand). It is back in Reported, not retired.",
+        shas.join(", "),
+        moved.join(", ")
+    );
+    for n in &notes {
+        result.push_str(&format!(" {n}"));
+    }
+    Outcome::Landed(json!({
+        "land": land.id,
+        "state": STATE_LANDED,
+        "repos": land.repos.iter().map(|r| json!({ "folder": r.folder, "target": r.target, "landed": r.base_after, "pushed": r.pushed })).collect::<Vec<_>>(),
+        "review": land.review,
+        "retired": Value::Null,
+        "branch_moved": moved,
+        "notes": notes,
+        "result": result,
+    }))
+}
+
+/// The coordinator's read copies moved to Base's new tip unless one has changes (§8.1). In the
+/// integration mode a read copy holds `hive/<slug>` itself, so step 2's fast-forward there
+/// already moved it, and a detached checkout would take it off its branch. Blocks.
+fn move_read_copies(hive: &Hive, paths: &HivePaths, land: &LandState) -> Vec<String> {
+    let mut notes = Vec::new();
+    if hive.is_integration() {
+        return notes;
+    }
+    for r in &land.repos {
+        let (Ok(hf), Some(to)) = (hive_folder(hive, &r.folder), r.base_after.as_deref()) else { continue };
+        if let Err(e) = lg::move_read_copy(Path::new(&hf.path), &paths.coordinator_worktree(&r.folder), to) {
+            log::info!("hive {}: read copy of {} not moved: {e}", hive.id, r.folder);
+            notes.push(format!("Your read copy of {} stays where it was ({e}).", r.folder));
+        }
+    }
+    notes
+}
+
 /// After a land: the worker's branch moved to exactly what landed (compare-and-swap from the pin
 /// when its worktree went, a fast-forward in a kept one), and the coordinator's read copy moved to
 /// Base's new tip unless it has changes. What didn't happen, in words. Blocks.
@@ -817,17 +943,12 @@ fn after_land(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, land: &LandState
         if !moved && lg::branch_tip(&repo, &r.branch).as_deref() != Some(tested) {
             notes.push(format!("{}'s branch {} wasn't moved to what landed: it has moved past the commit you reviewed.", r.folder, r.branch));
         }
-        if let Some(to) = r.base_after.as_deref() {
-            if let Err(e) = lg::move_read_copy(&repo, &paths.coordinator_worktree(&r.folder), to) {
-                log::info!("hive {}: read copy of {} not moved: {e}", hive.id, r.folder);
-                notes.push(format!("Your read copy of {} stays where it was ({e}).", r.folder));
-            }
-        }
     }
+    notes.extend(move_read_copies(hive, paths, land));
     notes
 }
 
-fn end_hold(w: &WorkerRecord) {
+pub(super) fn end_hold(w: &WorkerRecord) {
     if let Some(t) = &w.tab_id {
         crate::hive::deliver::end_land_hold(t);
     }
@@ -922,6 +1043,11 @@ pub(crate) async fn on_check_end<W: HiveWindow>(
 
 async fn tell<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, o: &Outcome) {
     let Some(text) = o.message(w) else { return };
+    tell_text(ctx, caller, w, text).await;
+}
+
+/// A `⟦HIVE LAND⟧` typed into the coordinator through the delivery gate.
+pub(super) async fn tell_text<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, text: String) {
     match coordinator_tab(ctx.data, caller) {
         Some(c) => {
             let sent = ctx.window.deliver(&c, text, "Hive land").await;
