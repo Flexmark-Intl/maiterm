@@ -340,6 +340,15 @@ const IS_MAC = /Mac/i.test(navigator.userAgentData?.platform ?? navigator.platfo
 // all, undo…) never runs unless it is named.
 const EDIT_COMMANDS = { a: 'selectAll', z: 'undo', x: 'cut', c: 'copy', v: 'paste' };
 
+/** A letter or digit has its own key code. Punctuation's character code is ANOTHER key's code
+ *  ("." is 46, Delete; "(" is 40, ArrowDown), which Chrome runs instead of typing it, so it is sent
+ *  as key code 0 and only its text is typed. */
+function singleChar(ch) {
+  if (/[a-z]/i.test(ch)) return { code: `Key${ch.toUpperCase()}`, keyCode: ch.toUpperCase().charCodeAt(0), text: ch };
+  if (/[0-9]/.test(ch)) return { code: `Digit${ch}`, keyCode: ch.charCodeAt(0), text: ch };
+  return { code: '', keyCode: 0, text: ch };
+}
+
 /** One key, or a combination like Shift+Tab or Mod+A. Goes to whatever has focus, in any frame. */
 async function press(tabId, combo) {
   const parts = String(combo).split('+');
@@ -350,9 +359,14 @@ async function press(tabId, combo) {
     if (!bit) throw new Error(`Unknown modifier "${m}" in "${combo}". Use Shift, Alt, Ctrl, Meta (Cmd) or Mod (Cmd on a Mac, Ctrl elsewhere).`);
     modifiers |= bit;
   }
-  const k = KEYS[key] ?? (key?.length === 1 ? { code: /[a-z]/i.test(key) ? `Key${key.toUpperCase()}` : '', keyCode: key.toUpperCase().charCodeAt(0), text: key } : null);
+  const k = KEYS[key] ?? (key?.length === 1 ? singleChar(key) : null);
   if (!k) throw new Error(`Unknown key "${key}". Use Enter, Tab, Escape, Backspace, Delete, an arrow key, Home, End, PageUp, PageDown, Space or one character, optionally after modifiers (Shift+Tab, Mod+A).`);
-  const command = modifiers & (IS_MAC ? 4 : 2) ? EDIT_COMMANDS[key.toLowerCase()] : undefined;
+  // Mod alone runs the editing command; Mod+Shift+Z is redo, and any other Shift or Alt combination
+  // is left to the page (Mod+Shift+V is not a plain paste).
+  const mod = IS_MAC ? 4 : 2;
+  const lower = key.toLowerCase();
+  const command =
+    modifiers === mod ? EDIT_COMMANDS[lower] : modifiers === (mod | 8) && lower === 'z' ? 'redo' : undefined;
   // With Ctrl, Alt or Cmd held a key types nothing.
   const text = modifiers & 7 ? undefined : k.text;
   const base = { key: k.key ?? key, code: k.code, windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode, modifiers };
@@ -360,11 +374,13 @@ async function press(tabId, combo) {
   await send(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', ...base });
 }
 
-/** Select an editable's whole contents, so typing replaces them (works with React-style inputs). */
+/** Select an editable's whole contents, so typing replaces them (works with React-style inputs).
+ *  'inner': focus is inside a frame or shadow root this page can't select in. */
 const SELECT_ALL = `function () {
   if (typeof this.select === 'function' && ('value' in this)) { this.select(); return true; }
   if (this.isContentEditable) { const r = document.createRange(); r.selectNodeContents(this);
     const s = getSelection(); s.removeAllRanges(); s.addRange(r); return true; }
+  if (this.tagName === 'IFRAME' || this.tagName === 'FRAME' || this.shadowRoot) return 'inner';
   return false;
 }`;
 
@@ -384,21 +400,27 @@ async function type(tabId, args) {
   } catch (e) {
     throw staleRef(e);
   }
-  if (args.clear !== false) {
-    const { result } = objectId
-      ? await send(tabId, 'Runtime.callFunctionOn', { objectId, functionDeclaration: SELECT_ALL, returnByValue: true })
-      : { result: {} };
+  let notCleared = false;
+  if (args.clear !== false && objectId) {
+    const { result } = await send(tabId, 'Runtime.callFunctionOn', { objectId, functionDeclaration: SELECT_ALL, returnByValue: true });
     // Focus inside an iframe: the page sees only the <iframe> element, and a cross-origin one can't
     // be reached from here. Select all with the keyboard instead, which goes to whatever has focus.
-    if (result.value !== true) await press(tabId, 'Mod+A');
-    if (!text) await press(tabId, 'Delete');
+    // Only then: on a list row or a button, Mod+A could select every item and Delete remove them.
+    if (result.value === 'inner') await press(tabId, 'Mod+A');
+    if (result.value === true || result.value === 'inner') {
+      if (!text) await press(tabId, 'Delete');
+    } else notCleared = true;
   }
   if (text) await send(tabId, 'Input.insertText', { text });
   if (args.submit) {
     await press(tabId, 'Enter');
     await sleep(300);
   }
-  return { typed: true, ...(await tabInfo(tabId)) };
+  return {
+    typed: true,
+    ...(notCleared ? { note: "That element isn't a text field, so nothing was cleared; the text went where the caret was." } : {}),
+    ...(await tabInfo(tabId)),
+  };
 }
 
 // ── the rest ────────────────────────────────────────────────────────────────
