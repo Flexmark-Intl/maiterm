@@ -720,7 +720,9 @@ pub async fn hive_create(
         // A coordinator that can't start is a broken Hive: refuse here rather than at launch.
         launch::claude_new_enough()?;
         let folders = resolve_folders(&spec_for_disk.folders, &trust_roots(&prefs), app_data_dir().as_deref())?;
-        let hive = build_hive(&spec_for_disk, uuid::Uuid::new_v4().to_string(), folders);
+        let mut hive = build_hive(&spec_for_disk, uuid::Uuid::new_v4().to_string(), folders);
+        // The queued commands it starts with, read from the folders (§6.8); edited in settings.
+        hive.settings.run_queue = super::queue::detect_commands(&hive.folders);
         layout::validate(&hive)?;
         let root = hive_root(&hive.id).ok_or("Couldn't find the app data folder")?;
         layout::create_layout(&root, &hive).inspect_err(|_| {
@@ -1134,6 +1136,8 @@ mod tests {
         (data, runtime, web, pg)
     }
 
+    // Unix paths (`/p`): not absolute on Windows, where a Hive is refused anyway.
+    #[cfg(unix)]
     #[test]
     fn the_stack_step_imports_definitions_fresh_and_references_infrastructure() {
         let (data, runtime, _web, pg) = running_elsewhere();
@@ -1156,6 +1160,8 @@ mod tests {
         assert_eq!(d.normalized_name, "dev");
     }
 
+    // Unix paths (`/p`): not absolute on Windows, where a Hive is refused anyway.
+    #[cfg(unix)]
     #[test]
     fn a_fixed_port_that_another_workspace_holds_is_refused_and_named() {
         let (data, mut runtime, web, _) = running_elsewhere();
@@ -1168,6 +1174,8 @@ mod tests {
         assert_eq!(import_stack(&[], &[copy], &data, &runtime, "ws").unwrap().len(), 1);
     }
 
+    // Unix paths (`/p`): not absolute on Windows, where a Hive is refused anyway.
+    #[cfg(unix)]
     #[test]
     fn bad_stack_rows_are_refused_and_existing_names_kept() {
         let (data, runtime, _, pg) = running_elsewhere();
