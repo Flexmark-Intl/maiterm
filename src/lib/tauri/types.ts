@@ -531,7 +531,16 @@ export interface Hive {
 /** Hive settings: the sections built so far, the rest round-tripped as they are. */
 export interface HiveSettings {
   run_queue?: RunQueueSettings;
+  land?: LandSettings;
   [section: string]: unknown;
+}
+
+/** hive/record.rs `LandSettings` (docs/hive.md §8.1, §6.8). */
+export interface LandSettings {
+  /** Paths the human adds to the config rule: a land touching one goes to the human. */
+  config_paths: string[];
+  /** Lands passed to `hiveLand` in one repo share one land check. */
+  batch: boolean;
 }
 
 /** Which commands a worker runs only through the queue, and the Hive's resource limits (§6.8). */
@@ -704,6 +713,22 @@ export interface HiveWorkerCard {
   reviews?: string | null;
   /** A builder's reviews so far. */
   review?: HiveReviewView | null;
+  /** Its land while one runs or holds (docs/hive.md §8.1), and once landed. */
+  land?: HiveLandView | null;
+}
+
+/** hive/land/mod.rs `LandView`: a land as its card shows it. */
+export interface HiveLandView {
+  id: string;
+  /** "locking" | "checking" | "advancing" | "held" | "awaiting_human" | "queued_batch", or a newer one. */
+  state: string;
+  /** "Landed web; holding api: …" while held. */
+  held_reason?: string | null;
+  /** Whose land lock it waits on. */
+  waiting_for?: string | null;
+  /** Per repo: "pending" | "checking" | "tested" | "advancing" | "held" | "landed", and once it
+   *  landed its push: "ok" | "held: <why>" | "off". */
+  repos: { folder: string; status: string; pushed?: string | null }[];
 }
 
 /** hive/review.rs `ReviewView`: a builder's reviews as its card shows them. */

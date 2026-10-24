@@ -414,6 +414,10 @@ pub fn is_pass(job: &Job) -> bool {
 /// it ran (or maiTerm can't tell), it tested no one commit, so it is marked dirty, no receipt.
 /// Blocks on git.
 pub(crate) fn recheck_tree(paths: &HivePaths, job: &mut Job) {
+    if let Some(l) = job.land.clone() {
+        recheck_land(paths, job, &l);
+        return;
+    }
     if !is_pass(job) {
         return;
     }
@@ -429,6 +433,26 @@ pub(crate) fn recheck_tree(paths: &HivePaths, job: &mut Job) {
     };
     if let Some(why) = why {
         log::info!("hive: {} is no receipt: {why}", job.id);
+        job.dirty = true;
+        job.error = Some(why);
+    }
+}
+
+/// A passing land check's temporary worktree, read again at its end: its HEAD must still be the
+/// tested commit. Files its setup changed (a lockfile `npm install` rewrites) don't count against
+/// it: only the commit lands, and it is the commit that was tested. Blocks on git.
+pub(crate) fn recheck_land(paths: &HivePaths, job: &mut Job, l: &queue::LandRun) {
+    if job.state != queue::DONE || job.exit_code != Some(0) {
+        return;
+    }
+    let head = queue::land_place(paths, l).and_then(|f| worktree_state(&f)).map(|(h, _)| h);
+    let why = match head {
+        Ok(h) if job.commit.as_deref() == Some(h.as_str()) => None,
+        Ok(h) => Some(format!("its worktree's HEAD moved to {} while it ran", short(&h))),
+        Err(e) => Some(format!("maiTerm couldn't read its worktree when it ended ({})", one_line(&e, 120))),
+    };
+    if let Some(why) = why {
+        log::info!("hive: land check {} tested nothing that lands: {why}", job.id);
         job.dirty = true;
         job.error = Some(why);
     }
@@ -508,6 +532,11 @@ pub fn gets_own_result(job: &Job) -> bool {
 /// worker asked for, by its own tool's answer.
 pub async fn job_ended(app: &Arc<AppState>, handle: &AppHandle, job: &Job, tail: &str) {
     if job.task_id.is_empty() {
+        return;
+    }
+    // A land check is its land's, never a run the worker is owed a result for.
+    if job.land.is_some() {
+        super::land::driver::check_ended(app, handle, job, tail).await;
         return;
     }
     let Some(root) = super::paths::hive_root(&job.hive_id) else { return };

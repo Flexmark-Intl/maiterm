@@ -99,6 +99,26 @@ impl HivePaths {
         self.logs().join("runs.jsonl")
     }
 
+    /// The land log: one line per repo per land, undo or base check, append-only (§8.6).
+    pub fn land_log(&self) -> PathBuf {
+        self.logs().join("lands.jsonl")
+    }
+
+    /// One land's temporary worktrees and its check's temp folder (§8.1).
+    pub fn land_dir(&self, land_id: &str) -> PathBuf {
+        self.worktrees().join(LAND_SLUG).join(land_id)
+    }
+
+    pub fn land_worktree(&self, land_id: &str, folder: &str) -> PathBuf {
+        self.land_dir(land_id).join(folder)
+    }
+
+    /// A land check's `TMPDIR`: beside its worktrees, never inside the tree it tests. A dot name,
+    /// which no Hive folder can have (`is_component`), so it never is one of those worktrees.
+    pub fn land_tmp(&self, land_id: &str) -> PathBuf {
+        self.land_dir(land_id).join(".tmp")
+    }
+
     /// Each job's sandbox profile and pass mark, Rust's alone: on every worker's `denyWrite`, so
     /// neither a worker nor its job can plant a mark or rewrite a profile.
     pub fn runs(&self) -> PathBuf {

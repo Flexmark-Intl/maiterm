@@ -491,6 +491,34 @@ fn the_run_log_is_appended_and_indexed() {
 }
 
 #[test]
+fn land_checks_go_first_one_per_repo_per_hive_and_keep_their_place() {
+    let land = |hive: &str, task: &str, id: &str| JobSpec {
+        priority: crate::hive::land::driver::LAND_PRIORITY,
+        land: Some(LandRun { land_id: id.into(), worktree: format!("/h/wt.noindex/land/{id}/web"), admin: "/r/.git/worktrees/web".into(), profile: "worker".into() }),
+        ..spec(hive, task, "w", &["land:web", "cargo"])
+    };
+    let mut q = Queue::default();
+    let run = q.enqueue(spec("h1", "t0", "r", &["cargo"]), T0).unwrap().id;
+    let a = q.enqueue(land("h1", "t1", "L-aaaaaaaa"), T0 + 1).unwrap();
+    let b = q.enqueue(land("h1", "t2", "L-bbbbbbbb"), T0 + 2).unwrap().id;
+    let other = q.enqueue(land("h2", "t3", "L-cccccccc"), T0 + 3).unwrap().id;
+    assert_eq!(a.land.as_ref().map(|l| l.land_id.as_str()), Some("L-aaaaaaaa"), "a land check keeps its place");
+    assert_eq!(ids(&q.schedule(T0)), vec![a.id.clone(), other.clone()], "ahead of the run queued first; one per repo in a Hive, the other Hive's beside it");
+    assert_eq!(q.place(&b), Some(1));
+    assert_eq!(q.place(&run), Some(2));
+    q.fail_start(&a.id, "x", T0).unwrap();
+    assert_eq!(ids(&q.schedule(T0)), vec![b], "the next land check of that repo once the first ends");
+
+    // The run log carries where it ran.
+    let root = std::env::temp_dir().join(format!("hive-landrun-{}", uuid::Uuid::new_v4()));
+    let paths = HivePaths::new(&root);
+    let ended = q.interrupt(&other, BY_RELEASE, "its land ended", T0).unwrap();
+    append_run(&paths, &ended.job).unwrap();
+    assert_eq!(find_run(&paths, &other).unwrap().land.unwrap().land_id, "L-cccccccc");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn create_detects_the_usual_queued_commands() {
     use crate::hive::record::{HiveFolder, KIND_GIT, KIND_PLAIN};
     let base = std::env::temp_dir().join(format!("hive-detect-{}", uuid::Uuid::new_v4()));

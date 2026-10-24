@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cardAge, cardState, isRetired, latestNote, onScreenAgent, retiredLine, reviewLine, sortCards, stateLine, STATE_ORDER, waves } from './cards';
+import { cardAge, cardState, isRetired, landLine, latestNote, onScreenAgent, pushHeld, retiredLine, reviewLine, sortCards, stateLine, STATE_ORDER, waves } from './cards';
 import type { HiveWorkerCard, TaskBlocker } from '$lib/tauri/types';
 
 const worker = (over: Partial<HiveWorkerCard> = {}): HiveWorkerCard => ({
@@ -101,6 +101,19 @@ describe('cardState', () => {
     expect(cardState(worker({ phase: 'landing' }), null, { state: 'permission' }, null).state).toBe('needs_you');
   });
 
+  it('a Landing card says what its land waits on, and a held one says so', () => {
+    const land = (over: Partial<NonNullable<HiveWorkerCard['land']>>) => ({ id: 'L-1', state: 'checking', repos: [], ...over });
+    const held = cardState(worker({ phase: 'landing', land: land({ state: 'held', held_reason: 'Landed web; holding api: main keeps moving (3 tries)' }) }), null, idle, null);
+    expect(stateLine(held)).toBe('Landing · held');
+    expect(held.sub).toBe('Landed web; holding api: main keeps moving (3 tries)');
+    expect(cardState(worker({ phase: 'landing', land: land({}) }), null, idle, null).sub).toBe('land check running');
+    expect(landLine(land({ state: 'locking', waiting_for: 'land L-2 of maiTerm prod (pid 9) in web' }))).toBe('waiting for land L-2 of maiTerm prod (pid 9) in web');
+    expect(landLine(land({ state: 'locking' }))).toBe('taking the land lock');
+    expect(landLine(land({ state: 'someday' }))).toBe('someday');
+    expect(landLine(null)).toBeNull();
+    expect(cardState(worker({ phase: 'landing' }), null, idle, null).sub).toBeNull();
+  });
+
   it('landed and retired: no agent read, the retirement reason and the undone qualifier shown', () => {
     const retired = { reason: 'Wrong approach', at: 'now', kept: [] };
     const r = cardState(worker({ phase: 'retired', tab_id: null, retired }), null, { state: 'permission' }, null);
@@ -109,6 +122,18 @@ describe('cardState', () => {
     expect([l.state, l.order, stateLine(l)]).toEqual(['landed', 10, 'Landed · undone']);
     expect(stateLine(cardState(worker({ phase: 'landed' }), null, null, null))).toBe('Landed');
     expect(cardState(worker({ phase: 'retired' }), { status: 'blocked', blocker: blocker('action') }, null, null).state).toBe('needs_you');
+  });
+
+  it('a Landed card says a push that was held, naming the repo when there were several', () => {
+    const land = (repos: { folder: string; status: string; pushed?: string | null }[]) => ({ id: 'L-1', state: 'landed', repos });
+    const one = land([{ folder: 'web', status: 'landed', pushed: 'held: the remote has moved on' }]);
+    expect(stateLine(cardState(worker({ phase: 'landed', land: one }), null, null, null))).toBe('Landed · push held: the remote has moved on');
+    const two = land([{ folder: 'web', status: 'landed', pushed: 'ok' }, { folder: 'api', status: 'landed', pushed: 'held: no auth' }]);
+    expect(pushHeld(two)).toBe('push held: api: no auth');
+    expect(pushHeld(land([{ folder: 'web', status: 'landed', pushed: 'ok' }]))).toBeNull();
+    expect(pushHeld(land([{ folder: 'web', status: 'landed', pushed: 'off' }]))).toBeNull();
+    expect(stateLine(cardState(worker({ phase: 'landed', land: one, undone: true }), null, null, null))).toBe('Landed · undone');
+    expect(retiredLine({ phase: 'landed', retired: null, land: one })).toBe('Retired · landed · push held: the remote has moved on');
   });
 });
 

@@ -36,7 +36,7 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The Hive tools built so far: what `tools/list` offers each role and the handler answers.
 /// The rest of the coordinator's (settings' `COORDINATOR_MCP_TOOLS`) are refused as not yet here.
-pub const COORDINATOR_TOOLS: [&str; 8] = [
+pub const COORDINATOR_TOOLS: [&str; 9] = [
     "hiveSpawnWorker",
     "hiveListWorkers",
     "hiveMessageWorker",
@@ -45,6 +45,7 @@ pub const COORDINATOR_TOOLS: [&str; 8] = [
     "hiveRunPriority",
     "hiveRetireWorker",
     "hiveResolve",
+    "hiveLand",
 ];
 /// Every worker is offered all three; Rust refuses `hiveReport` to a reviewer and `hiveVerdict`
 /// to a builder (`review`).
@@ -256,6 +257,7 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
         super::run::priority_tool_definition(&tab_id),
         super::retire::tool_definition(&tab_id),
         super::review::resolve_tool_definition(&tab_id),
+        super::land::tool_definition(&tab_id),
     ]
 }
 
@@ -397,10 +399,11 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         "hiveRetireWorker" => super::retire::retire_tool(&ctx, &caller, args).await,
         "hiveVerdict" => super::review::verdict(&ctx, &caller, args).await,
         "hiveResolve" => super::review::resolve(&ctx, &caller, args).await,
+        "hiveLand" => super::land::land_tool(&ctx, &caller, args).await,
         t => Err(format!("{t} isn't available in this build of maiTerm yet.")),
     };
     // A worker's phase changed: a freed slot or a failed dependency is news to the waiters.
-    if res.is_ok() && matches!(tool, "hiveStopWorker" | "hiveReport" | "hiveRestartWorker" | "hiveRetireWorker" | "hiveResolve") {
+    if res.is_ok() && matches!(tool, "hiveStopWorker" | "hiveReport" | "hiveRestartWorker" | "hiveRetireWorker" | "hiveResolve" | "hiveLand") {
         super::waiters::poll_soon(state.clone(), handle.clone(), caller.workspace_id.clone());
     }
     // The reviewer is ended once its answer has reached it: retiring it inside its own tool call
@@ -1223,6 +1226,9 @@ pub struct WorkerCard {
     pub reviews: Option<String>,
     /// A builder's reviews so far (§7.7).
     pub review: Option<super::review::ReviewView>,
+    /// Its land while one runs or holds (§8.1), the card's Landing line; once landed, what its
+    /// pushes came to.
+    pub land: Option<super::land::LandView>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -1300,6 +1306,8 @@ pub(crate) fn board_view(hive: &Hive, paths: &HivePaths, fuses: &Fuses, now: i64
             undone: w.undone,
             reviews: w.reviews.as_ref().filter(|_| w.is_reviewer()).map(|id| by_task.get(id.as_str()).map_or_else(|| id.clone(), |b| worker_label(b))),
             review: w.review.as_ref().map(super::review::ReviewView::of),
+            // Landed too: its card says a push that was held (§8.5).
+            land: w.land.as_ref().filter(|_| matches!(w.phase.as_str(), worker::PHASE_LANDING | worker::PHASE_LANDED)).map(super::land::LandView::of),
         })
         .collect();
     let h = fuses.headroom(hive, &live, now);
@@ -1346,6 +1354,7 @@ pub(crate) fn list_view(hive: &Hive, paths: &HivePaths, tasks: &[Task], fuses: &
                 "retired": c.retired,
                 "reviews": c.reviews,
                 "review": c.review,
+                "land": c.land,
             })
         })
         .collect();

@@ -2800,7 +2800,12 @@ in its log). All four pass:
     landing target's tip before the agent has written anything, so it runs Base's code, not the
     worker's. Moving it under the worker's profile needs a network decision first (a job's
     profile closes the network, and `npm ci` needs its registry), so it waits for the step that
-    owns setup again (step 6's land checks share the problem).
+    owns setup again. Step 6c's land checks decided it for themselves: the network stays closed and
+    a land check never runs setup. The temporary worktree is seeded instead with what the worker's
+    setup and work left in its own worktree (each top-level ignored entry, APFS-cloned, never
+    through a link: `land::git::seed_ignored`), made under the worker's sandbox and run under the
+    same profile. The cost: a check runs against the worker's installed dependencies, which may lag
+    a lockfile Base changed meanwhile.
 - **Spike 9, the queued deny: passes** (`hive/probe.rs`, `spike_9_queued_deny_probe`, `#[ignore]`).
   A worker launched by the real `worker_record` and `worker_settings_json`, in a Hive that queues
   `cargo test`; the hook script's port file names the probe's listener, which answers the gate
@@ -3284,6 +3289,50 @@ several releases a day).
    `accept` records, `revise` delivers a brief kept in `brief_revisions` (the builder's brief.md
    carries it) and resets the attempts, `reassign`/`decompose`/`defer` retire the builder, task
    `dropped`. Cards show "Reviewing #3 x" and the builder's review line.
+   **6c built** (2026-10-24, uncommitted at the time of writing): the land engine and `hiveLand`
+   (`hive/land/`), land to Base on the coordinator's checkpoint only. `hiveLand {worker, summary,
+   commits, order?, accept_review?, fix_forward?}` refuses, before anything is written: a worker
+   that isn't reported done (or a held land), commits that aren't exactly its repos with full shas,
+   a branch tip that moved, a dirty worktree (untracked included), an agent mid-turn (its hook state
+   `Active`), a review still running or whose last verdict isn't a pass at exactly these shas
+   (`accept_review` after `hiveResolve accept`), a detached Base, and, until 6d, anything that needs
+   the human (integration mode, Landing = Ask me, the config rule). `worker.json` `land` holds the
+   state, persisted before every irreversible step. The lock (`land/lock.rs`) is
+   `<common dir>/maiterm-land.lock` by `create_new`, stale when its pid is gone or is ours and not
+   held; waits wake on a condvar and re-read every 2 s; `hiveLand` waits 10 s, then the land carries
+   on in the background and tells the coordinator who holds the lock after an hour. Step 1
+   (`land/git.rs`) merges Base's sha into the pin in `wt.noindex/land/<L>/<folder>` (hooks off,
+   C locale, no rerere, unsigned, `maiTerm Hive` when the repo has no identity); a conflict answers
+   the files, aborts and puts the worker back in Reported. The config rule (`land/config_rule.rs`)
+   errs wide (D9; `package.json` by its parsed `scripts`; a folder pattern matches the folder's own
+   path, a changed symlink standing for any part of a pattern counts, and a link in the tested tree
+   standing for one puts its target on the list, so `.claude -> tools/agent` can't carry a hook past
+   it). The land check runs the folder's land check only, never its setup (the job's network is
+   closed; §13.1 has the decision): the worker's ignored entries are seeded in. It is a queued job
+   (`JobSpec.land`, `land:<folder>` plus the matched entry's needs, priority 100) whose cwd is the
+   temporary worktree, under the worker's lists with that worktree added (its `.git` and every other
+   land's folder still denied) and `land/<L>/.tmp` as its temp; its end goes to
+   `land::driver::check_ended`, and only its HEAD is rechecked (a setup may rewrite a lockfile).
+   Step 2 fast-forwards Base's checkout (`--ff-only --no-autostash`; a file in the way, a checkout
+   mid-merge or a locked index holds; nothing stashed) or compare-and-swaps the ref; Base moving
+   redoes step 1 and the check, three tries, then holds. Several repos: every step 1 and check
+   before any step 2, then in `order`, stopping at the first hold ("Landed web; holding api: …"); a
+   failure once something landed holds instead of refusing, and a held land resumes with the same
+   commits, reusing a tested commit while Base hasn't moved. A held land is never a dead end
+   (`land::held`): its worker may report again (a conflict it must resolve), stop, or be retired
+   (abandoning the rest; what landed stays landed, the land kept as history), and a resumed partial
+   land keeps its landed repos' pins while a repo still to land may take a new commit, its tip and
+   its review checked for the unlanded repos only. Each repo is pushed (Push after land: never
+   forced, hooks off, 60 s; a refusal holds only the push) and logged (`logs/lands.jsonl`,
+   `land/log.rs`) right after its fast-forward; then the worker retires as landed, task done, its
+   branch moved to what landed, the coordinator's read copy following Base. The land reads
+   `landed` only once the worker has retired: until then it stays `advancing` with every repo
+   landed, so a restart (or a retirement that fails) holds it and the next `hiveLand` retires the
+   worker. Deliveries to a landing worker are held (`deliver::hold_for_land`) until the run ends; a
+   running land's worker can't be stopped, retired or report; delete is refused only while a land
+   runs (`land::in_flight`). `land::reconcile` at startup settles a land caught in step 2 from the
+   repo and holds it. Cards read "Landing · held" with the reason, and a Landed card "Landed · push
+   held: <reason>" (its land rides on the card once landed).
 7. Shared memory: `autoMemoryDirectory`, index rebuild, Memory view; checkpoints,
    `hiveAnswerWorker`, precedents in Rust storage, the decision log and earned autonomy.
 8. Gallery: store and index, `galleryAdd`/`List`/`Get`/`Tag`/`Collect`, thumbnails, the grid

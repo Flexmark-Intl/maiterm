@@ -157,8 +157,28 @@ impl HiveModel {
 pub struct HiveSettings {
     /// Which commands are queued and what they need (§6.8).
     pub run_queue: RunQueueSettings,
+    /// The config rule's extra paths and batching (§8.1, §6.8).
+    pub land: LandSettings,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// How lands behave beyond the defaults (§8.1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LandSettings {
+    /// Paths the human adds to the config rule: a land touching one goes to the human.
+    pub config_paths: Vec<String>,
+    /// Lands already passed to `hiveLand` in one repo share one land check (§6.8).
+    pub batch: bool,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl Default for LandSettings {
+    fn default() -> Self {
+        Self { config_paths: Vec::new(), batch: true, extra: Map::new() }
+    }
 }
 
 /// The queued commands per folder and the Hive's own resource limits (§6.8).
@@ -262,6 +282,18 @@ mod tests {
         assert_eq!(again, h);
         let bare: Hive = serde_json::from_str(r#"{"id":"h1"}"#).unwrap();
         assert!(bare.settings.run_queue.commands.is_empty());
+    }
+
+    #[test]
+    fn the_land_settings_default_to_batching_and_keep_later_fields() {
+        let bare: Hive = serde_json::from_str(r#"{"id":"h1"}"#).unwrap();
+        assert!(bare.settings.land.batch && bare.settings.land.config_paths.is_empty(), "batching is on by default (§6.8)");
+        let h: Hive = serde_json::from_str(r#"{"id":"h1","settings":{"land":{"config_paths":["scripts/**"],"batch":false,"later":1},"other":2}}"#).unwrap();
+        assert_eq!((h.settings.land.config_paths.clone(), h.settings.land.batch), (vec!["scripts/**".to_string()], false));
+        assert_eq!(h.settings.land.extra.get("later"), Some(&serde_json::json!(1)));
+        assert_eq!(h.settings.extra.get("other"), Some(&serde_json::json!(2)));
+        let again: Hive = serde_json::from_value(serde_json::to_value(&h).unwrap()).unwrap();
+        assert_eq!(again, h);
     }
 
     #[test]

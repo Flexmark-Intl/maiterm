@@ -8,10 +8,12 @@
 //! maiTerm's own words (a `⟦…⟧` frame, a line opening `[maiTerm]`) and anything that could leave
 //! the paste (control characters, a bracketed-paste end) before it is framed.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use tauri::AppHandle;
+use tokio::sync::Notify;
 
 use crate::state::AppState;
 
@@ -39,7 +41,54 @@ impl Sent {
 /// A usage-limit hold types this long after the reset, once Claude's own wait has resumed.
 const AFTER_RESET: Duration = Duration::from_secs(30);
 
+/// Worker tabs whose land is running (§8): nothing is typed into them until it ends, so nothing
+/// prompts the worker to commit underneath it. Only while the land executes: a land waiting on
+/// the human is pinned to its sha instead (plan D5). Memory only, like the land's run.
+static LANDING: LazyLock<Mutex<HashMap<String, Arc<Notify>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn hold_for_land(tab: &str) {
+    LANDING.lock().unwrap_or_else(|e| e.into_inner()).entry(tab.to_string()).or_insert_with(|| Arc::new(Notify::new()));
+}
+
+pub(crate) fn end_land_hold(tab: &str) {
+    if let Some(n) = LANDING.lock().unwrap_or_else(|e| e.into_inner()).remove(tab) {
+        n.notify_waiters();
+    }
+}
+
+pub(crate) fn land_hold(tab: &str) -> Option<Arc<Notify>> {
+    LANDING.lock().unwrap_or_else(|e| e.into_inner()).get(tab).cloned()
+}
+
+/// Until `tab`'s land hold ends.
+async fn wait_for_land(tab: &str) {
+    while let Some(n) = land_hold(tab) {
+        let notified = n.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        // Ended between the lookup and the enable: its notify went to nobody.
+        if land_hold(tab).is_none_or(|m| !Arc::ptr_eq(&m, &n)) {
+            continue;
+        }
+        notified.await;
+    }
+}
+
 pub(crate) async fn deliver(app: &Arc<AppState>, handle: &AppHandle, tab: &str, text: &str, what: &'static str) -> Sent {
+    if land_hold(tab).is_some() {
+        let (app, handle, tab, text) = (app.clone(), handle.clone(), tab.to_string(), text.to_string());
+        log::info!("hive: {what} for tab {tab} held while its land runs");
+        tauri::async_runtime::spawn(async move {
+            wait_for_land(&tab).await;
+            let sent = deliver_unheld(&app, &handle, &tab, &text, what).await;
+            log::info!("hive: {what} for tab {tab}, held for its land: {}", sent.describe());
+        });
+        return Sent::Held("its land is in progress".to_string());
+    }
+    deliver_unheld(app, handle, tab, text, what).await
+}
+
+async fn deliver_unheld(app: &Arc<AppState>, handle: &AppHandle, tab: &str, text: &str, what: &'static str) -> Sent {
     let now = super::fuses::now_ms();
     if let Some(until) = super::fuses::limit_wait(tab, now) {
         // Memory only, like the wait itself: a restart kills the PTY, and the wait with it.
@@ -187,6 +236,21 @@ mod tests {
         assert_eq!(waits, 2, "the re-armed wait is waited out, not typed into");
         assert_eq!(asked.load(Ordering::SeqCst), 2);
         assert!(start.elapsed() >= Duration::from_millis(30), "{:?}", start.elapsed());
+    }
+
+    #[tokio::test]
+    async fn a_land_hold_waits_until_its_land_ends() {
+        let tab = format!("tab-{}", uuid::Uuid::new_v4());
+        wait_for_land(&tab).await;
+        hold_for_land(&tab);
+        assert!(land_hold(&tab).is_some());
+        let t = tab.clone();
+        let waiter = tokio::spawn(async move { wait_for_land(&t).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "held while the land runs");
+        end_land_hold(&tab);
+        tokio::time::timeout(Duration::from_secs(2), waiter).await.expect("released when it ends").unwrap();
+        assert!(land_hold(&tab).is_none());
     }
 
     #[test]

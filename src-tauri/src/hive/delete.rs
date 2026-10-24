@@ -219,7 +219,7 @@ pub(crate) fn preview(hive: &Hive, paths: &HivePaths, has_coordinator: bool) -> 
         if w.is_live() {
             p.live_agents.push(worker_label(w));
         }
-        if w.phase == worker::PHASE_LANDING {
+        if super::land::in_flight(w) {
             p.lands_in_flight.push(worker_label(w));
         }
     }
@@ -379,7 +379,7 @@ fn heal(pane: &mut crate::state::Pane) -> PaneActive {
 pub(crate) async fn delete_hive<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, delete_gallery: bool) -> Result<HiveDeleteResult, String> {
     let paths = caller.paths.clone();
     let workers = blocking(move || Ok(worker::list_workers(&paths))).await?;
-    if let Some(w) = workers.iter().find(|w| w.phase == worker::PHASE_LANDING) {
+    if let Some(w) = workers.iter().find(|w| super::land::in_flight(w)) {
         return Err(format!("Worker {} is landing: delete the Hive once its land has finished or been held.", worker_label(w)));
     }
     super::queue::park_workspace(&caller.workspace_id, "your Hive was deleted");

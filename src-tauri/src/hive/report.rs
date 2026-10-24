@@ -363,6 +363,11 @@ pub(crate) async fn report<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, arg
     if w.phase == worker::PHASE_STOPPED {
         return Err("Your coordinator has stopped you: there's nothing to report to. Finish here.".to_string());
     }
+    // A held land is over for now: a worker sent to change its work (a conflict) reports again,
+    // and its coordinator lands the new commits from there.
+    if w.phase == worker::PHASE_LANDING && !super::land::held(&w) {
+        return Err("Your coordinator is landing the work you reported: there's nothing to report until it's done or sent back to you.".to_string());
+    }
     let (paths, record, args_c) = (caller.paths.clone(), w.clone(), a.clone());
     let checked = blocking(move || verify_receipts(&paths, &record, &args_c)).await?;
     if a.status == "done" && checked.is_empty() {
@@ -390,11 +395,17 @@ pub(crate) async fn report<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, arg
     let phase = phase_for(&a.status);
     let dir = worker::task_dir(&caller.paths, &w.task_id)?;
     blocking(move || {
+        let mut ok = false;
         worker::update_worker(&dir, |w| {
-            w.phase = phase.to_string();
-            w.last_report = Some(report);
-            true
-        })
+            // Its held land resumed meanwhile: that land runs on the commits it pinned.
+            ok = w.phase != worker::PHASE_LANDING || super::land::held(w);
+            if ok {
+                w.phase = phase.to_string();
+                w.last_report = Some(report);
+            }
+            ok
+        })?;
+        if ok { Ok(()) } else { Err("Your coordinator has just resumed landing your work: report once it's done or sent back to you.".to_string()) }
     })
     .await?;
     ctx.window.workers_changed(&caller.workspace_id);

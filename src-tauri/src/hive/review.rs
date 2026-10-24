@@ -544,6 +544,7 @@ async fn retire_given<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, me: &Wor
         task_status: "done",
         note: format!("Review given: {given}"),
         landed: None,
+        held_land: false,
     };
     retire_worker(ctx, caller, me, spec).await.map(|_| ())
 }
@@ -606,7 +607,7 @@ pub(crate) async fn resolve<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, ar
     let note = format!("Escalated review resolved by the coordinator: {kind}: {reason}");
 
     if RETIRING.contains(&kind.as_str()) {
-        if let Some(why) = retire_refusal(&label, &w.phase) {
+        if let Some(why) = retire_refusal(&label, &w.phase, super::land::held(&w)) {
             return Err(why);
         }
         let spec = RetireSpec {
@@ -616,6 +617,7 @@ pub(crate) async fn resolve<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, ar
             task_status: "dropped",
             note,
             landed: None,
+            held_land: true,
         };
         let out = retire_worker(ctx, caller, &w, spec).await?;
         record_resolution(caller, &w, resolution, None).await;

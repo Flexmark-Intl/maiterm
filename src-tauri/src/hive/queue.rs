@@ -156,6 +156,19 @@ pub struct JobSpec {
     pub service_id: Option<String>,
     pub cwd: Option<String>,
     pub command: Option<String>,
+    /// A land check (§8.1): run in the land's temporary worktree, its end routed to the land.
+    pub land: Option<LandRun>,
+}
+
+/// Where a land check runs: the land's temporary worktree, and the git dir git gave it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LandRun {
+    pub land_id: String,
+    pub worktree: String,
+    pub admin: String,
+    /// `worker`: the worker's own write lists, plus the land's folder.
+    pub profile: String,
 }
 
 /// One job, as the run log records it.
@@ -199,6 +212,8 @@ pub struct Job {
     pub service_id: Option<String>,
     pub cwd: Option<String>,
     pub command: Option<String>,
+    /// A land check's place, as `JobSpec`'s.
+    pub land: Option<LandRun>,
     #[serde(skip)]
     pub env: Vec<(String, String)>,
     #[serde(skip)]
@@ -387,6 +402,7 @@ impl Queue {
             service_id: spec.service_id,
             cwd: spec.cwd,
             command: spec.command,
+            land: spec.land,
             ..Job::default()
         };
         self.jobs.push(job.clone());
@@ -1002,10 +1018,11 @@ pub fn unpark_workspace(workspace_id: &str) {
 }
 
 fn tell_released(ended: &[Ended], why: &str, tell_now: bool) {
-    let Some(first) = ended.first() else { return };
-    let jobs: Vec<Job> = ended.iter().map(|e| e.job.clone()).collect();
+    // A land check isn't the worker's run: its end goes to its land, which tells the coordinator.
+    let jobs: Vec<Job> = ended.iter().map(|e| e.job.clone()).filter(|j| j.land.is_none()).collect();
+    let Some(first) = jobs.first() else { return };
     let Some(d) = DRIVER.get() else { return };
-    let (hive, task, why) = (first.job.hive_id.clone(), first.job.task_id.clone(), why.to_string());
+    let (hive, task, why) = (first.hive_id.clone(), first.task_id.clone(), why.to_string());
     tauri::async_runtime::spawn(async move { super::run::released(&d.app, &d.handle, &hive, &task, &jobs, &why, tell_now).await });
 }
 
@@ -1228,8 +1245,13 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
         .iter()
         .find(|f| f.name == job.folder && f.worktree.is_some())
         .ok_or_else(|| format!("{} has no worktree of {}", w.slug, job.folder))?;
-    let worktree = PathBuf::from(folder.worktree.clone().unwrap_or_default());
-    let tree = super::run::worktree_state(folder)?;
+    // A land check runs in its land's temporary worktree, never the worker's own (§8.1).
+    let land = job.land.as_ref().map(|l| land_place(paths, l)).transpose()?;
+    let worktree = match &land {
+        Some(f) => PathBuf::from(f.worktree.clone().unwrap_or_default()),
+        None => PathBuf::from(folder.worktree.clone().unwrap_or_default()),
+    };
+    let tree = super::run::worktree_state(land.as_ref().unwrap_or(folder))?;
     // A service's folder, re-rooted in the worktree when it was queued: still inside it now.
     let cwd = match &job.cwd {
         Some(c) => {
@@ -1326,7 +1348,10 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
     }
 
     let run_dir = paths.run(&job.id);
-    let job_tmp = paths.worker_job_tmp(&w.slug);
+    let job_tmp = match &job.land {
+        Some(l) => paths.land_tmp(&l.land_id),
+        None => paths.worker_job_tmp(&w.slug),
+    };
     for d in [&run_dir, &job_tmp] {
         std::fs::create_dir_all(d).map_err(|e| release(format!("{}: {e}", d.display())))?;
     }
@@ -1336,12 +1361,22 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
         let _ = std::fs::remove_file(m);
     }
     // Every path the job may write is the worker's to plant a link in: resolved only above it.
-    let writable: Vec<PathBuf> = lists.allow.iter().cloned().chain([job_tmp.clone()]).chain(extra.iter().cloned()).collect();
+    let mut writable: Vec<PathBuf> = lists.allow.iter().cloned().chain([job_tmp.clone()]).chain(extra.iter().cloned()).collect();
+    let mut deny = lists.deny.clone();
+    if let Some(l) = &job.land {
+        // The worker's lists deny every land's folder: this one's comes out, the others stay, and
+        // its worktree's `.git` stays maiTerm's.
+        let dir = paths.land_dir(&l.land_id);
+        deny.retain(|d| !dir.starts_with(&d.path));
+        super::settings::deny_around(&paths.worktrees().join(super::paths::LAND_SLUG), true, std::slice::from_ref(&dir), &mut deny);
+        deny.push(super::settings::DenyPath { path: worktree.join(".git"), dir: false });
+        writable.push(worktree.clone());
+    }
     let named = |p: &Path| super::job_sandbox::profile_path(p, &writable);
     let spec = (|| -> Result<super::job_sandbox::ProfileSpec, String> {
         Ok(super::job_sandbox::ProfileSpec {
             allow: writable.iter().map(|p| named(p)).collect::<Result<_, _>>()?,
-            deny: lists.deny.iter().map(|d| Ok(super::settings::DenyPath { path: named(&d.path)?, dir: d.dir })).collect::<Result<_, String>>()?,
+            deny: deny.iter().map(|d| Ok(super::settings::DenyPath { path: named(&d.path)?, dir: d.dir })).collect::<Result<_, String>>()?,
             own_ports: ports.clone(),
             reach_ports: reach,
         })
@@ -1396,6 +1431,23 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
         updated_at: now,
     };
     Ok(Prepared { line, row, ports, tree })
+}
+
+/// A land check's temporary worktree as a folder git runs on by its recorded git dir: only one
+/// inside its own land's folder, which the land made.
+pub(crate) fn land_place(paths: &HivePaths, l: &LandRun) -> Result<super::worker::WorkerFolder, String> {
+    let real = |p: &Path| std::fs::canonicalize(p).map(|r| crate::share::canon(&r)).map_err(|e| format!("{}: {e}", p.display()));
+    let wt = real(Path::new(&l.worktree))?;
+    if !super::paths::is_component(&l.land_id) || !wt.starts_with(real(&paths.land_dir(&l.land_id))?) {
+        return Err(format!("{} isn't a worktree of land {}", wt.display(), l.land_id));
+    }
+    Ok(super::worker::WorkerFolder {
+        name: "land".to_string(),
+        kind: crate::hive::record::KIND_GIT.to_string(),
+        worktree: Some(wt.to_string_lossy().to_string()),
+        admin_dir: Some(l.admin.clone()),
+        ..super::worker::WorkerFolder::default()
+    })
 }
 
 fn set_row(app: &AppState, job: &Job, row: Option<Service>) -> bool {

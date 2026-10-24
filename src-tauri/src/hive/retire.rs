@@ -222,6 +222,8 @@ pub(crate) struct RetireSpec {
     /// The note on its task.
     pub note: String,
     pub landed: Option<String>,
+    /// A landing worker may leave too, while its land is held (abandoning it).
+    pub held_land: bool,
 }
 
 pub(crate) struct Outcome {
@@ -242,10 +244,11 @@ pub(crate) async fn retire_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Call
     let (d, from, phase, now) = (dir.clone(), spec.from.clone(), spec.phase, crate::commands::workspace::iso_now());
     let retired = Retired { reason: spec.reason.clone(), at: now, landed: spec.landed.clone(), ..Retired::default() };
     let label = worker_label(w);
+    let held_land = spec.held_land;
     let record = blocking(move || {
         let mut moved = false;
         let r = worker::update_worker(&d, |cur| {
-            moved = from.contains(&cur.phase.as_str());
+            moved = from.contains(&cur.phase.as_str()) || (held_land && super::land::held(cur));
             if moved {
                 cur.phase = phase.to_string();
                 cur.wait_reason = None;
@@ -361,7 +364,8 @@ pub(crate) fn tool_definition(tab_id: &Value) -> Value {
             always kept; each worktree is removed only if it holds nothing uncommitted or untracked (the answer lists what \
             was kept); its scratch folder is kept. Its chat stays readable in its column. For a stopped, failed, waiting or \
             reported worker; one still working (starting, running, blocked) is refused: hiveStopWorker it first. A landing \
-            worker can't be retired. The reason goes on its task.",
+            worker is retired only while its land is held, abandoning the rest of it (what landed stays landed). The reason \
+            goes on its task.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -374,14 +378,16 @@ pub(crate) fn tool_definition(tab_id: &Value) -> Value {
     })
 }
 
-/// Why `phase` can't be retired by the coordinator, or None.
-pub(crate) fn retire_refusal(label: &str, phase: &str) -> Option<String> {
+/// Why `phase` can't be retired by the coordinator, or None. `held`: a landing worker's land is
+/// held (`land::held`), so retiring it abandons the rest.
+pub(crate) fn retire_refusal(label: &str, phase: &str, held: bool) -> Option<String> {
     match phase {
         p if RETIRABLE.contains(&p) => None,
+        worker::PHASE_LANDING if held => None,
         worker::PHASE_LAUNCHING | worker::PHASE_RUNNING | worker::PHASE_BLOCKED => Some(format!(
             "Worker {label} is {phase}: its agent may still be working. hiveStopWorker stops it; retire it after."
         )),
-        worker::PHASE_LANDING => Some(format!("Worker {label} is landing: its land finishes or is held first.")),
+        worker::PHASE_LANDING => Some(format!("Worker {label} is landing: retire it once its land is held, or let it finish.")),
         worker::PHASE_LANDED | worker::PHASE_RETIRED => Some(format!("Worker {label} is already {phase}.")),
         other => Some(format!("Worker {label} is {other}: only a stopped, failed, waiting or reported worker is retired.")),
     }
@@ -396,7 +402,7 @@ pub(crate) async fn retire_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         return Err(format!("Keep the reason under {} characters.", super::control::MAX_REASON));
     }
     let w = super::control::named_worker(caller, args).await?;
-    if let Some(why) = retire_refusal(&worker_label(&w), &w.phase) {
+    if let Some(why) = retire_refusal(&worker_label(&w), &w.phase, super::land::held(&w)) {
         return Err(why);
     }
     let spec = RetireSpec {
@@ -406,10 +412,11 @@ pub(crate) async fn retire_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         task_status: "dropped",
         note: format!("Retired by the coordinator: {reason}"),
         landed: None,
+        held_land: true,
     };
     let out = retire_worker(ctx, caller, &w, spec).await?;
     let branches: Vec<String> = w.git_folders().filter_map(|f| f.branch.as_ref().map(|b| format!("{}: {b}", f.name))).collect();
-    Ok(json!({
+    let mut answer = json!({
         "worker": w.slug,
         "badge": w.badge,
         "phase": worker::PHASE_RETIRED,
@@ -420,7 +427,13 @@ pub(crate) async fn retire_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         "kept": out.disk.kept,
         "branches_kept": branches,
         "note": "Its chat stays readable in its column. Workers that depend on it are blocked: you'll be told which.",
-    }))
+    });
+    // A held land's landed repos stay landed: its record and the land log keep them.
+    let landed: Vec<String> = w.land.as_ref().map(|l| l.landed().iter().map(|r| r.folder.clone()).collect()).unwrap_or_default();
+    if !landed.is_empty() {
+        answer["landed"] = json!(landed);
+    }
+    Ok(answer)
 }
 
 // ── A retired worker's chat ──
@@ -576,8 +589,10 @@ mod tests {
     #[test]
     fn the_coordinator_retires_only_a_worker_whose_agent_isnt_working() {
         for p in RETIRABLE {
-            assert!(retire_refusal("#1 a", p).is_none(), "{p}");
+            assert!(retire_refusal("#1 a", p, false).is_none(), "{p}");
         }
+        assert!(retire_refusal("#1 a", worker::PHASE_LANDING, true).is_none(), "a held land is abandoned");
+        assert!(retire_refusal("#1 a", worker::PHASE_RUNNING, true).is_some());
         for (p, says) in [
             (worker::PHASE_LAUNCHING, "hiveStopWorker"),
             (worker::PHASE_RUNNING, "hiveStopWorker"),
@@ -587,7 +602,7 @@ mod tests {
             (worker::PHASE_RETIRED, "already"),
             ("reviewing", "only a stopped"),
         ] {
-            let e = retire_refusal("#1 a", p).unwrap();
+            let e = retire_refusal("#1 a", p, false).unwrap();
             assert!(e.contains(says), "{p}: {e}");
         }
     }

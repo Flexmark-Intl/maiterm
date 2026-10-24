@@ -706,6 +706,9 @@ pub fn run() {
             // Runs open when maiTerm stopped are interrupted, and each worker hears so at its next
             // session start. Before any tab is up, so no session start can come first.
             hive::run::restart_notices(&app_state.app_data);
+            // Lands a stopped maiTerm left running are settled from the repos and held, so the
+            // coordinator's next hiveLand resumes each (docs/hive.md §8.1). Git, before any tab.
+            hive::land::reconcile(&app_state.app_data);
 
             // Stack copies' branch checkouts whose branch is gone (docs/hive.md §6.9). Git, so off
             // the setup thread.

@@ -29,7 +29,8 @@
 //!
 //! Step 6a: a worker leaving for good and its chat read back after (`retire`), and deleting a
 //! Hive without deleting work (`delete`). Step 6b: reviewers, their verdicts and escalations
-//! (`review`).
+//! (`review`). Step 6c: `hiveLand` and the land engine (`land`): to Base, pinned, under a lock
+//! per repo, its check queued, its log append-only.
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
@@ -47,6 +48,7 @@ pub mod fuses;
 pub mod gate;
 pub(crate) mod git;
 pub mod job_sandbox;
+pub mod land;
 pub mod launch;
 pub mod layout;
 pub mod paths;

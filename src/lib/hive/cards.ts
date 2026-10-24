@@ -50,7 +50,7 @@ export interface CardState {
   urgent: boolean;
   /** What waits on the human (a task blocker, a prompt on screen); 0 unless Needs you. */
   waiting: number;
-  /** Landed's qualifier (§4.3): `undone`. */
+  /** Landed's qualifier (§4.3, §8.5): `undone`, or `push held: <why>`; Landing's: `held`. */
   qualifier?: string | null;
 }
 
@@ -68,10 +68,11 @@ const LIVE_PHASES = ['launching', 'running', 'blocked', 'reported', 'landing'];
 export const isRetired = (w: Pick<HiveWorkerCard, 'phase'>) => w.phase === 'landed' || w.phase === 'retired';
 
 /** What a retired worker's column says in place of a composer: "Retired · landed a1b2c3d". */
-export function retiredLine(w: Pick<HiveWorkerCard, 'phase' | 'retired' | 'undone'>): string {
+export function retiredLine(w: Pick<HiveWorkerCard, 'phase' | 'retired' | 'undone'> & Partial<Pick<HiveWorkerCard, 'land'>>): string {
   if (w.phase === 'landed') {
     const sha = w.retired?.landed?.trim();
-    return `Retired · landed${sha ? ` ${sha.slice(0, 7)}` : ''}${w.undone ? ' · undone' : ''}`;
+    const push = w.undone ? null : pushHeld(w.land);
+    return `Retired · landed${sha ? ` ${sha.slice(0, 7)}` : ''}${w.undone ? ' · undone' : ''}${push ? ` · ${push}` : ''}`;
   }
   const why = w.retired?.reason?.trim();
   return why ? `Retired · ${why}` : 'Retired';
@@ -91,7 +92,36 @@ export function reviewLine(w: Pick<HiveWorkerCard, 'reviews' | 'review'>): { tex
   return { text: `Review failed · ${r.attempts}/${r.max_attempts}`, urgent: false };
 }
 
-type WorkerFields = Pick<HiveWorkerCard, 'phase' | 'wait_reason' | 'depends_on_labels' | 'last_report'> & Partial<Pick<HiveWorkerCard, 'retired' | 'undone'>>;
+/** What a Landing card's line says (hive/land/mod.rs `describe`): why it holds, whose lock it
+ *  waits on, or the step it is at. */
+export function landLine(land: HiveWorkerCard['land']): string | null {
+  if (!land) return null;
+  switch (land.state) {
+    case 'held':
+      return land.held_reason?.trim() || 'held';
+    case 'locking':
+      return land.waiting_for ? `waiting for ${land.waiting_for}` : 'taking the land lock';
+    case 'checking':
+      return 'land check running';
+    case 'advancing':
+      return 'advancing Base';
+    default:
+      return land.state || null;
+  }
+}
+
+/** A Landed card's qualifier when a push after land was refused (§8.5): "push held: <why>", each
+ *  repo named when the land had several. The land stands; the next land pushes both. */
+export function pushHeld(land: HiveWorkerCard['land']): string | null {
+  const repos = land?.repos ?? [];
+  const held = repos.filter((r) => r.pushed?.startsWith('held'));
+  if (!held.length) return null;
+  const why = (p: string | null | undefined) => (p ?? '').replace(/^held:?\s*/, '').trim() || 'held';
+  if (repos.length === 1) return `push held: ${why(held[0].pushed)}`;
+  return `push held: ${held.map((r) => `${r.folder}: ${why(r.pushed)}`).join('; ')}`;
+}
+
+type WorkerFields = Pick<HiveWorkerCard, 'phase' | 'wait_reason' | 'depends_on_labels' | 'last_report'> & Partial<Pick<HiveWorkerCard, 'retired' | 'undone' | 'land'>>;
 type TaskFields = { status: TaskStatus; blocker?: TaskBlocker | null } | null | undefined;
 type AgentFields = { state: AgentState; toolName?: string } | null | undefined;
 /** `suspended`: the tab's PTY was parked by a suspend, its own or its workspace's (§11.2). */
@@ -127,7 +157,7 @@ export function cardState(worker: WorkerFields, task: TaskFields, agent: AgentFi
     case 'stopped':
       return make('stopped');
     case 'landed':
-      return make('landed', null, { qualifier: worker.undone ? 'undone' : null });
+      return make('landed', null, { qualifier: worker.undone ? 'undone' : pushHeld(worker.land) });
     case 'retired':
       return make('retired', worker.retired?.reason?.trim() || null);
     case 'waiting': {
@@ -138,7 +168,7 @@ export function cardState(worker: WorkerFields, task: TaskFields, agent: AgentFi
   if (suspended) return make('suspended');
   if (prompt) return make('needs_you', prompt, { waiting: 1 });
   // Merging, held or waiting on the human: what it is, whatever its agent is doing meanwhile.
-  if (worker.phase === 'landing') return make('landing');
+  if (worker.phase === 'landing') return make('landing', landLine(worker.land), { qualifier: worker.land?.state === 'held' ? 'held' : null });
   if (onScreen?.state === 'active') return make('working');
   switch (worker.phase) {
     case 'blocked':

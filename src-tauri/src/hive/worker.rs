@@ -89,6 +89,9 @@ pub struct WorkerRecord {
     pub reviewed: BTreeMap<String, String>,
     /// A builder's reviews: every verdict, the attempt count and any escalation (§7.7).
     pub review: Option<Review>,
+    /// Its land while one is under way, held or waiting (§8.1): persisted before every
+    /// irreversible step, so a restart knows how far it got (`land::reconcile`).
+    pub land: Option<super::land::LandState>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -216,6 +219,7 @@ impl Default for WorkerRecord {
             reviews: None,
             reviewed: BTreeMap::new(),
             review: None,
+            land: None,
             extra: Map::new(),
         }
     }

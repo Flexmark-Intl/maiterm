@@ -78,6 +78,11 @@ pub(crate) async fn stop_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     if w.phase == worker::PHASE_STOPPED {
         return Err(format!("Worker {} is already stopped.", worker_label(&w)));
     }
+    // Stopped mid-land, a worker would leave its land nothing to retire. A held land is over for
+    // now: it stays on record, and the worker, restarted and reported again, lands from there.
+    if w.phase == worker::PHASE_LANDING && !super::land::held(&w) {
+        return Err(format!("Worker {} is landing: stop it once its land is held, or let it finish.", worker_label(&w)));
+    }
     let tab = live_tab(ctx, caller, &w);
     let front = match &tab {
         Some(t) => ctx.window.front(t).await,
@@ -91,12 +96,19 @@ pub(crate) async fn stop_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     let dir = worker::task_dir(&caller.paths, &w.task_id)?;
     let was = w.phase.clone();
     let d = dir.clone();
+    let label = worker_label(&w);
     blocking(move || {
-        worker::update_worker(&d, |w| {
-            w.phase = worker::PHASE_STOPPED.to_string();
-            w.wait_reason = None;
-            true
-        })
+        let mut ok = false;
+        let r = worker::update_worker(&d, |w| {
+            // A held land resumed meanwhile is running again.
+            ok = w.phase != worker::PHASE_LANDING || super::land::held(w);
+            if ok {
+                w.phase = worker::PHASE_STOPPED.to_string();
+                w.wait_reason = None;
+            }
+            ok
+        })?;
+        if ok { Ok(()) } else { Err(format!("Worker {label} is {} now: look again with hiveListWorkers.", r.phase)) }
     })
     .await?;
     let signalled = match (&tab, front) {

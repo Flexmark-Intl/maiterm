@@ -407,7 +407,7 @@ fn git_keep(w: &WorkerRecord) -> Vec<PathBuf> {
 /// another (or a local remote that is one) never takes the `.git` a commit writes. Nothing for
 /// a path inside a kept one. A symlink's entry names the link; its target is outside every
 /// writable path anyway. Blocks on the disk.
-fn deny_around(path: &Path, dir: bool, keep: &[PathBuf], out: &mut Vec<DenyPath>) {
+pub(crate) fn deny_around(path: &Path, dir: bool, keep: &[PathBuf], out: &mut Vec<DenyPath>) {
     if keep.iter().any(|k| path.starts_with(k)) {
         return;
     }

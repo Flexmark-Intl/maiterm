@@ -61,6 +61,13 @@ pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     fn fail_requests(&self, _tab_ids: &[String], _why: &str) -> usize {
         0
     }
+    /// Whether `tab`'s agent is mid-turn (its hook state, `Active`): a land waits for idle (§8).
+    fn agent_busy(&self, _tab: &str) -> bool {
+        false
+    }
+    /// A land whose lock stayed busy past `hiveLand`'s wait carries on outside the tool call
+    /// (`land::driver::resume_background`). A test window runs its lands inline.
+    fn continue_land(&self, _caller: &super::tools::Caller, _task_id: &str) {}
 }
 
 pub(crate) use super::deliver::Sent;
@@ -146,6 +153,15 @@ impl HiveWindow for AppWindow {
 
     fn fail_requests(&self, tab_ids: &[String], why: &str) -> usize {
         crate::agent_requests::fail_for_tabs(&self.handle, tab_ids, why)
+    }
+
+    fn agent_busy(&self, tab: &str) -> bool {
+        use crate::state::app_state::AgentSessionState;
+        self.app.agent_sessions.read().values().any(|s| s.tab_id == tab && s.state == AgentSessionState::Active)
+    }
+
+    fn continue_land(&self, caller: &super::tools::Caller, task_id: &str) {
+        super::land::driver::resume_background(self.app.clone(), self.handle.clone(), caller.clone(), task_id.to_string());
     }
 }
 
