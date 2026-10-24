@@ -116,6 +116,8 @@ fn a_shared_service_or_an_unknown_kind_is_refused() {
     assert!(target::parse("checkout:relative/x").is_err());
 }
 
+// Unix only: git stores a branch as a file, and Windows refuses `>`, `"` and the like in a name.
+#[cfg(unix)]
 #[test]
 fn branch_names_with_shell_in_them_are_refused_before_git_sees_them() {
     let base = scratch("evil");
@@ -496,4 +498,61 @@ fn a_request_reads_ports_through_shared_from() {
     assert_eq!(req.shared_from_workspace.as_deref(), Some("Infra"));
     assert!(request_for(&data, "main", &ws_id, "nope", "").is_err());
     assert!(request_for(&data, "other", &ws_id, &web.id, "").is_err());
+}
+
+#[test]
+fn a_shared_service_reads_its_source_from_the_mirror_in_any_window() {
+    let mut data = AppData::default();
+    let mut other_window = WindowData::new("other".into());
+    let mut infra = Workspace::new("Infra".into());
+    let mut db = service(Path::new("/db"), "postgres", &[]);
+    db.name = "postgres".into();
+    db.port = Some(5432);
+    infra.stack.push(db.clone());
+    let infra_id = infra.id.clone();
+    other_window.workspaces.push(infra);
+    data.windows.push(WindowData::new("main".into()));
+    data.windows.push(other_window);
+
+    let mut runtime: HashMap<String, StackRuntimeRow> = HashMap::new();
+    let got = shared_row(&data, &runtime, &infra_id, &db.id).unwrap();
+    assert_eq!((got.workspace_name.as_str(), got.service_name.as_str(), got.status.as_str(), got.port), ("Infra", "postgres", "stopped", Some(5432)), "nothing published reads stopped");
+
+    runtime.insert(db.id.clone(), row(&db.id, "", "ready", ""));
+    // A copy of the source elsewhere is not the source.
+    runtime.insert(copy_key(&db.id, "branch:x"), row(&db.id, "branch:x", "crashed", "x"));
+    assert_eq!(shared_row(&data, &runtime, &infra_id, &db.id).unwrap().status, "ready");
+
+    assert!(shared_row(&data, &runtime, &infra_id, "gone").is_none());
+    assert!(shared_row(&data, &runtime, "gone", &db.id).is_none());
+    let json = serde_json::to_value(shared_row(&data, &runtime, &infra_id, &db.id).unwrap()).unwrap();
+    assert!(json.get("url").is_none() && json.get("note").is_none(), "{json}");
+}
+
+#[test]
+fn a_shared_source_that_is_itself_shared_is_not_followed() {
+    let mut data = AppData::default();
+    let mut win = WindowData::new("main".into());
+    let mut a = Workspace::new("A".into());
+    let mut b = Workspace::new("B".into());
+    let db = service(Path::new("/db"), "postgres", &[]);
+    let mut relay = service(Path::new("/db"), "", &[]);
+    relay.shared_from = Some(ServiceRef { workspace_id: a.id.clone(), service_id: db.id.clone() });
+    a.stack.push(db);
+    b.stack.push(relay.clone());
+    let b_id = b.id.clone();
+    win.workspaces.push(a);
+    win.workspaces.push(b);
+    data.windows.push(win);
+    assert!(shared_row(&data, &HashMap::new(), &b_id, &relay.id).is_none());
+}
+
+#[test]
+fn a_legacy_row_publishes_and_keys_as_it_always_did() {
+    // What the store sends for a service's own folder carries no target, cwd or label; Rust
+    // keys it by the bare service id, so an older reader of the mirror sees no change.
+    let legacy: StackRuntimeRow = serde_json::from_value(serde_json::json!({"service_id": "s1", "status": "ready", "note": null, "since_ms": 5})).unwrap();
+    assert_eq!(copy_key(&legacy.service_id, &legacy.target), "s1");
+    let back = serde_json::to_value(&legacy).unwrap();
+    assert!(back.get("target").is_none() && back.get("cwd").is_none() && back.get("label").is_none(), "{back}");
 }
