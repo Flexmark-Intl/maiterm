@@ -43,6 +43,7 @@
   import HiveTerminal from './HiveTerminal.svelte';
   import RunQueueModal from './RunQueueModal.svelte';
   import HiveDeleteSheet from './HiveDeleteSheet.svelte';
+  import LandLogModal from './LandLogModal.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -74,6 +75,8 @@
   let queueOpen = $state(false);
   /** Delete Hive (docs/hive.md §11.2): the sheet lists what stays before anything is touched. */
   let deleteOpen = $state(false);
+  /** The land log (docs/hive.md §8.6), whole from the header or one worker's from its column. */
+  let landLog = $state<{ taskId: string | null } | null>(null);
   const queuedCount = $derived(hive?.settings?.run_queue?.commands.length ?? 0);
 
   // ── The board: Rust's worker records, refetched on its event and on task changes (§4.4). ──
@@ -579,7 +582,13 @@
         <span class="warn">{board.hive_status === 'paused' ? 'Paused: no new workers start' : `Hive is ${board.hive_status}`}</span>
       {/if}
       <span>{hive?.landing_mode === 'integration' ? `Lands to hive/${hive.slug}, each with your approval` : 'Lands to Base'}</span>
+      {#if board?.suspect_repos?.length}
+        <span class="warn">Suspect: {board.suspect_repos.join(', ')} fails its land check alone</span>
+      {/if}
       {#if hive}
+        <Tooltip text="Every land, undo and post-land check, and Undo">
+          <button type="button" class="queue-btn" onclick={() => (landLog = { taskId: null })}>Land log</button>
+        </Tooltip>
         <Tooltip text="The heavy commands workers run only through the run queue (hiveRun), and what each needs">
           <button type="button" class="queue-btn" onclick={() => (queueOpen = true)}>
             Run queue: {queuedCount === 0 ? 'nothing queued' : `${queuedCount} command${queuedCount === 1 ? '' : 's'}`}
@@ -596,6 +605,9 @@
   {/if}
   {#if deleteOpen && hive}
     <HiveDeleteSheet {workspaceId} name={ws?.name ?? ''} onclose={() => (deleteOpen = false)} />
+  {/if}
+  {#if landLog && hive}
+    <LandLogModal {workspaceId} taskId={landLog.taskId} refreshKey={board} onclose={() => (landLog = null)} />
   {/if}
 
   <div class="cols" bind:this={colsEl}>
@@ -778,6 +790,8 @@
             onpin={() => hiveView.togglePin(workspaceId, col.taskId)}
             onclose={() => closeColumn(col.taskId)}
             onterminal={(shown) => hiveView.setTerminalShown(workspaceId, col.taskId, shown)}
+            {workspaceId}
+            onlandlog={() => (landLog = { taskId: col.taskId })}
           />
         </div>
       {/if}

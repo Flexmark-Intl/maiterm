@@ -295,6 +295,9 @@ fn settle_line(out: &Outcome) -> (bool, String) {
 /// otherwise step 1 and the check run again, and a config change that differs from the approved
 /// one files a new card. The request is settled here, and the coordinator told.
 pub(crate) async fn approved<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, d: &Decision, opts: &driver::Opts) -> Outcome {
+    if d.kind == super::undo::KIND {
+        return super::undo::approved(ctx, caller, d, opts).await;
+    }
     if d.kind != KIND {
         ctx.window.settle_request(&d.id, false, "maiTerm can't carry out this kind of Hive request in this build".to_string());
         return Outcome::Gone;
@@ -364,6 +367,9 @@ pub(crate) async fn approved<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, d
 /// its branch as it was), or holds what's left once something of it landed. None when the card
 /// is no longer the worker's land's (it was stopped, retired or reported again meanwhile).
 pub(crate) async fn closed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, d: &Decision, status: &str) -> Option<Outcome> {
+    if d.kind == super::undo::KIND {
+        return super::undo::closed(ctx, caller, d, status).await;
+    }
     let dir = worker::task_dir(&caller.paths, arg(&d.args, "task_id")).ok()?;
     let w = blocking(move || worker::read_worker(&dir)).await.ok()?;
     if stale(&w, d).is_some() {
@@ -442,10 +448,13 @@ pub fn refile_pending(state: &Arc<crate::state::AppState>, handle: &tauri::AppHa
     let callers = crate::hive::tools::hive_callers(&state.app_data.read());
     let n: usize = callers
         .iter()
-        .map(|c| refile_in(&crate::hive::rpc::AppWindow { app: state.clone(), handle: handle.clone(), label: c.label.clone() }, c))
+        .map(|c| {
+            let window = crate::hive::rpc::AppWindow { app: state.clone(), handle: handle.clone(), label: c.label.clone() };
+            refile_in(&window, c) + super::undo::refile_in(&window, c)
+        })
         .sum();
     if n > 0 {
-        log::info!("hive: {n} land card(s) put to the human again after the restart");
+        log::info!("hive: {n} land or undo card(s) put to the human again after the restart");
     }
     n
 }

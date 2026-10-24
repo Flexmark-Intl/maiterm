@@ -3,7 +3,7 @@ import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { StackHeldAction, StackLeaseState } from './types';
-import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HivePreflight, HiveSpec, RunQueueSettings } from './types';
+import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
@@ -2834,4 +2834,26 @@ export async function hiveDeletePreview(workspaceId: string): Promise<HiveDelete
  *  branch stay, the gallery stays unless `deleteGallery`. */
 export async function hiveDelete(workspaceId: string, deleteGallery: boolean): Promise<HiveDeleteResult> {
   return invoke('hive_delete', { workspaceId, deleteGallery });
+}
+
+/** The Hive's land log, folded: undone and suspect lines, each repo's standing, open undos
+ *  (docs/hive.md §8.6). */
+export async function hiveLandLog(workspaceId: string): Promise<HiveLandLog> {
+  return invoke('hive_land_log', { workspaceId });
+}
+
+/** What undoing land log line `id` would write, for the inline confirmation. */
+export async function hiveUndoPreview(workspaceId: string, id: string): Promise<HiveUndoPreview> {
+  return invoke('hive_undo_preview', { workspaceId, id });
+}
+
+/** The human's Undo: their confirmation is the approval. `configFp` is what it showed, so a revert
+ *  that has come to change other config is refused rather than written. Answers the result. */
+export async function hiveUndoLand(workspaceId: string, id: string, configFp: string | null): Promise<{ state: string; result?: string }> {
+  return invoke('hive_undo_land', { workspaceId, id, configFp });
+}
+
+/** Retry a held land with its own commits (the worker column's menu). Answers its result. */
+export async function hiveRetryLand(workspaceId: string, taskId: string): Promise<{ state: string; result?: string; note?: string }> {
+  return invoke('hive_retry_land', { workspaceId, taskId });
 }

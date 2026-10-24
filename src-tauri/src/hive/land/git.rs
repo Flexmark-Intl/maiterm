@@ -46,7 +46,7 @@ pub fn lgit_wt(f: &WorkerFolder) -> Result<Command, String> {
 }
 
 /// `-c user.name=… -c user.email=…` when the repo has no identity of its own (plan D8).
-fn identity(repo: &Path) -> Vec<String> {
+pub(crate) fn identity(repo: &Path) -> Vec<String> {
     let has = |key: &str| run(git_in(repo).args(["config", "--get", key]), QUERY_TIMEOUT).is_ok_and(|v| !v.trim().is_empty());
     let mut out = Vec::new();
     if !has("user.name") {
@@ -410,6 +410,124 @@ pub fn move_read_copy(repo: &Path, copy: &Path, to: &str) -> Result<(), String> 
         return Err("it has uncommitted changes".to_string());
     }
     run(lgit_wt(&f)?.args(["checkout", "--detach", "--quiet", to]), GIT_TIMEOUT).map(|_| ())
+}
+
+// ── Undo (§8.6) ──
+
+/// `git merge-tree --write-tree --merge-base` arrived in git 2.40.
+pub const MERGE_TREE_MIN: (u32, u32) = (2, 40);
+
+/// `git version 2.54.0 (Apple Git-157)` → (2, 54).
+pub fn parse_version(s: &str) -> Option<(u32, u32)> {
+    let v = s.trim().strip_prefix("git version ")?.split_whitespace().next()?;
+    let mut parts = v.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// Undoing a fast-forward land needs `merge-tree --merge-base`: older git is refused in words.
+pub fn merge_tree_supported() -> Result<(), String> {
+    let v = run(crate::util::proc::command("git").arg("--version"), QUERY_TIMEOUT)?;
+    match parse_version(&v) {
+        Some(have) if have >= MERGE_TREE_MIN => Ok(()),
+        _ => Err(format!(
+            "undoing a fast-forward land needs git {}.{} or newer, and this machine has {}: update git, or revert it by hand",
+            MERGE_TREE_MIN.0,
+            MERGE_TREE_MIN.1,
+            v.trim()
+        )),
+    }
+}
+
+/// What applying a land's inverse onto the target's tip came to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Inverse {
+    Tree(String),
+    /// Later work changed the same lines: these files.
+    Conflict(Vec<String>),
+}
+
+/// The inverse of `base_before..base_after` applied three-way onto `tip` (§8.6):
+/// `merge-tree --write-tree --merge-base=<base_after> <tip> <base_before>`, which writes only
+/// objects. Exit 1 is a conflict, its files listed after the tree.
+pub fn inverse_tree(repo: &Path, base_after: &str, tip: &str, base_before: &str) -> Result<Inverse, String> {
+    let mut cmd = lgit(repo);
+    cmd.args(["merge-tree", "--write-tree", "--name-only", "--no-messages"]).arg(format!("--merge-base={base_after}")).args([tip, base_before]);
+    let out = crate::util::proc::output_timeout(&mut cmd, GIT_TIMEOUT).map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let mut lines = text.lines();
+    let tree = lines.next().map(str::trim).unwrap_or_default().to_string();
+    match out.status.code() {
+        Some(0) if !tree.is_empty() => Ok(Inverse::Tree(tree)),
+        Some(1) => {
+            let mut files: Vec<String> = lines.map(str::trim).take_while(|l| !l.is_empty()).map(str::to_string).collect();
+            files.dedup();
+            Ok(Inverse::Conflict(files))
+        }
+        _ => Err(format!("git merge-tree: {}", String::from_utf8_lossy(&out.stderr).trim())),
+    }
+}
+
+/// A commit of `tree` on `parent`, unsigned, in the repo's identity (plan D8). Writes no ref.
+pub fn commit_tree(repo: &Path, tree: &str, parent: &str, message: &str) -> Result<String, String> {
+    run(lgit(repo).args(identity(repo)).args(["commit-tree", tree, "-p", parent, "-m", message]), QUERY_TIMEOUT)
+}
+
+/// What `git revert -m 1` of a merge came to in a temporary worktree.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reverted {
+    Commit(String),
+    Conflict(Vec<String>),
+    /// Reverting it changes nothing: its change is already gone.
+    Empty,
+}
+
+/// `git revert -m 1 <merge>` in the temporary worktree (its HEAD the target's tip), committed
+/// with maiTerm's message, hooks off. A conflict is aborted.
+pub fn revert_merge(repo: &Path, tmp: &Temp, merge: &str, message: &str) -> Result<Reverted, String> {
+    let f = tmp.folder("land");
+    let out = crate::util::proc::output_timeout(lgit_wt(&f)?.args(identity(repo)).args(["revert", "-m", "1", "--no-commit", merge]), GIT_TIMEOUT)
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let files = run(lgit_wt(&f)?.args(["diff", "--name-only", "--diff-filter=U"]), QUERY_TIMEOUT).unwrap_or_default();
+        let files: Vec<String> = files.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
+        if let Err(e) = run(lgit_wt(&f)?.args(["revert", "--abort"]), QUERY_TIMEOUT) {
+            log::info!("hive undo: revert --abort in {}: {e}", tmp.path.display());
+        }
+        if files.is_empty() {
+            return Err(format!("git revert failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        return Ok(Reverted::Conflict(files));
+    }
+    let staged = crate::util::proc::output_timeout(lgit_wt(&f)?.args(["diff", "--cached", "--quiet"]), QUERY_TIMEOUT).map_err(|e| e.to_string())?;
+    if staged.status.success() {
+        return Ok(Reverted::Empty);
+    }
+    run(lgit_wt(&f)?.args(identity(repo)).args(["commit", "--no-verify", "--quiet", "-m", message]), GIT_TIMEOUT)?;
+    Ok(Reverted::Commit(run(lgit_wt(&f)?.args(["rev-parse", "--verify", "HEAD"]), QUERY_TIMEOUT)?))
+}
+
+/// One commit an undo reverts, for the human's confirmation.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CommitLine {
+    pub sha: String,
+    pub subject: String,
+}
+
+/// The commits in `range` (`a..b`), newest first, at most `limit`, and how many there are.
+pub fn commits_in(repo: &Path, range: &str, limit: usize) -> Result<(Vec<CommitLine>, usize), String> {
+    let total = run(lgit(repo).args(["rev-list", "--count", range]), QUERY_TIMEOUT)?.trim().parse::<usize>().unwrap_or(0);
+    let text = run(lgit(repo).args(["log", "--no-color", "--format=%H%x09%s"]).arg(format!("--max-count={limit}")).arg(range).arg("--"), QUERY_TIMEOUT)?;
+    let lines = text
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(sha, subject)| CommitLine { sha: sha.to_string(), subject: crate::hive::deliver::one_line(subject, 200) })
+        .collect();
+    Ok((lines, total))
+}
+
+/// `git diff --shortstat a b`, for a card: what a commit range changes.
+pub fn shortstat_between(repo: &Path, a: &str, b: &str) -> Result<String, String> {
+    run(lgit(repo).args(["diff", "--shortstat", "--no-ext-diff", "--no-textconv", a, b, "--"]), GIT_TIMEOUT)
 }
 
 /// `ok`, `held: <why>`: Base pushed to its upstream (§8.5), never forced, hooks off.

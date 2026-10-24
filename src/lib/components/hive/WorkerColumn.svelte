@@ -21,6 +21,8 @@
   import { landCard } from '$lib/hive/requests';
   import AgentRequestCard from '$lib/components/agentRequests/AgentRequestCard.svelte';
   import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
+  import { hiveRetryLand } from '$lib/tauri/commands';
+  import { error as logError } from '@tauri-apps/plugin-log';
   import type { HiveDiffStat, HiveWorkerCard, Task } from '$lib/tauri/types';
 
   interface Props {
@@ -40,8 +42,12 @@
     onpin: () => void;
     onclose: () => void;
     onterminal: (shown: boolean) => void;
+    /** The Hive's workspace id: Retry and the land log act in it. */
+    workspaceId: string;
+    /** Opens the land log on this worker's lines, where its Undo is (§8.6). */
+    onlandlog: () => void;
   }
-  let { hiveId, card, cardState, diff, workspace, tasks, active, pinned, focused, terminalShown, onpin, onclose, onterminal }: Props = $props();
+  let { hiveId, card, cardState, diff, workspace, tasks, active, pinned, focused, terminalShown, onpin, onclose, onterminal, workspaceId, onlandlog }: Props = $props();
 
   let chat = $state<ChatColumn | undefined>();
   let rootEl = $state<HTMLElement | undefined>();
@@ -84,9 +90,30 @@
     const r = menuBtn?.getBoundingClientRect();
     if (r) menu = { x: r.left, y: r.bottom + 4 };
   }
-  // Land and Stop wait for landing (build step 6). A worker with no tab has no terminal.
+  /** Something of it landed: its lines are in the land log, with their Undo (§8.6). */
+  const hasLanded = $derived(card.phase === 'landed' || (card.land?.repos ?? []).some((r) => r.status === 'landed'));
+  const heldLand = $derived(card.phase === 'landing' && card.land?.state === 'held');
+  let retrying = $state(false);
+  let landNote = $state('');
+  async function retryLand() {
+    if (retrying) return;
+    retrying = true;
+    landNote = '';
+    try {
+      const r = await hiveRetryLand(workspaceId, card.task_id);
+      landNote = r.result ?? r.note ?? (r.state === 'checking' ? 'Its land check runs now.' : r.state);
+    } catch (e) {
+      landNote = String(e).replace(/^Error: /, '');
+      logError(`hive: retry of ${card.worker}'s land refused: ${e}`);
+    } finally {
+      retrying = false;
+    }
+  }
+  // A worker with no tab has no terminal. Undo is in the land log, never on its card (§4.3).
   const items = $derived<MenuItem[]>([
     ...(card.tab_id ? [{ label: terminalShown ? 'Hide terminal' : 'Show terminal', action: () => onterminal(!terminalShown) }] : []),
+    ...(heldLand ? [{ label: retrying ? 'Retrying held land…' : 'Retry held land', action: () => void retryLand() }] : []),
+    ...(hasLanded ? [{ label: card.undone ? 'Land log' : 'Undo land…', action: onlandlog }] : []),
     { label: pinned ? 'Unpin column' : 'Pin column', action: onpin },
     { label: 'Close column', action: onclose },
   ]);
@@ -118,6 +145,9 @@
       {/if}
     </div>
   </header>
+  {#if landNote}
+    <p class="note land-note" role="status">{landNote}</p>
+  {/if}
   {#if approval}
     <div class="approval">
       <AgentRequestCard request={approval} onnote={(t) => (approvalNote = t)} />
@@ -162,6 +192,7 @@
   .diff { font-variant-numeric: tabular-nums; white-space: nowrap; }
   .approval { padding: 8px 12px 8px 18px; border-bottom: 1px solid var(--bg-light); max-height: 45%; overflow-y: auto; }
   .note { margin: 6px 0 0; font-size: 11.5px; color: var(--fg-dim); overflow-wrap: anywhere; }
+  .land-note { margin: 0; padding: 6px 12px 6px 18px; border-bottom: 1px solid var(--bg-light); white-space: pre-wrap; }
   @media (prefers-reduced-motion: reduce) {
     .wcol { transition: none; }
   }

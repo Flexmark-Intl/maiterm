@@ -709,6 +709,8 @@ export interface HiveWorkerCard {
   retired?: HiveRetired | null;
   /** A land of its was undone (§8.6). */
   undone?: boolean;
+  /** A land of its is suspect: its target failed its land check alone after it (§8.6). */
+  suspect?: boolean;
   /** A reviewer's builder, as `#badge slug` (docs/hive.md §7.7). */
   reviews?: string | null;
   /** A builder's reviews so far. */
@@ -803,6 +805,83 @@ export interface HiveBoard {
   /** Epoch ms when the headroom changes with no event (the breaker ends, a spawn ages out of
    *  the hour or day): the board refetches then. */
   refresh_at?: number | null;
+  /** Folders whose target fails its land check alone: lands there need fix_forward (§8.6). */
+  suspect_repos?: string[];
+}
+
+/** hive/land/log.rs `LandLogEntry` folded (`FoldedEntry`): one line of the land log (§8.6). */
+export interface HiveLandLogEntry {
+  /** `L-…/<folder>`, `U-…/<folder>` for an undo, `B-…/<folder>` for a post-land check. */
+  id: string;
+  land: string;
+  /** "land" | "batch_member" | "integration" | "undo" | "base_check", or a newer one. */
+  kind: string;
+  task_id: string;
+  worker: string;
+  title: string;
+  folder: string;
+  target: string;
+  reviewed_sha: string;
+  tested_sha: string;
+  merge_commit?: string | null;
+  base_before: string;
+  base_after: string;
+  summary: string;
+  /** "coordinator" | "human". */
+  by: string;
+  request?: string | null;
+  /** "pass" | "accepted" | "none". */
+  review: string;
+  undoes?: string | null;
+  /** "ok" | "held: <why>" | "off". */
+  pushed: string;
+  /** "passed" | "failed" (a post-land check), "passed" on a land whose check passed, else "". */
+  check: string;
+  at: string;
+  /** The undo line that reverted it. */
+  undone_by?: string | null;
+  suspect: boolean;
+}
+
+/** hive/land/log.rs `RepoStanding`. */
+export interface HiveRepoStanding {
+  folder: string;
+  target: string;
+  suspect: boolean;
+  failed_check?: string | null;
+  failed_at?: string | null;
+  suspects: string[];
+}
+
+/** hive/land/undo.rs `LandLogView`: what the land log view shows. */
+export interface HiveLandLog {
+  /** Oldest first. */
+  entries: HiveLandLogEntry[];
+  repos: HiveRepoStanding[];
+  /** Undos that run, wait on the human or hold. */
+  undos: { id: string; undoes: string; state: string; by: string; held_reason?: string | null; request?: string | null }[];
+  /** The integration mode: Undo is the human's alone. */
+  integration: boolean;
+}
+
+/** hive/land/undo.rs `UndoPreview`: what the human's Undo would do, before anything is written. */
+export interface HiveUndoPreview {
+  id: string;
+  land: string;
+  folder: string;
+  target: string;
+  title: string;
+  worker: string;
+  /** "fast-forward": one commit holding the inverse; "merge": a revert of its merge commit. */
+  method: string;
+  commits: { sha: string; subject: string }[];
+  commits_total: number;
+  tip: string;
+  config_files: string[];
+  config_fp?: string | null;
+  has_check: boolean;
+  /** Why it can't be undone now, in words. */
+  refusal?: string | null;
 }
 
 /** `git diff --shortstat`, parsed. */

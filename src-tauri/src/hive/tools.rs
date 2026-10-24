@@ -36,7 +36,7 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The Hive tools built so far: what `tools/list` offers each role and the handler answers.
 /// The rest of the coordinator's (settings' `COORDINATOR_MCP_TOOLS`) are refused as not yet here.
-pub const COORDINATOR_TOOLS: [&str; 9] = [
+pub const COORDINATOR_TOOLS: [&str; 10] = [
     "hiveSpawnWorker",
     "hiveListWorkers",
     "hiveMessageWorker",
@@ -46,6 +46,7 @@ pub const COORDINATOR_TOOLS: [&str; 9] = [
     "hiveRetireWorker",
     "hiveResolve",
     "hiveLand",
+    "hiveUndoLand",
 ];
 /// Every worker is offered all three; Rust refuses `hiveReport` to a reviewer and `hiveVerdict`
 /// to a builder (`review`).
@@ -258,6 +259,7 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
         super::retire::tool_definition(&tab_id),
         super::review::resolve_tool_definition(&tab_id),
         super::land::tool_definition(&tab_id),
+        super::land::undo::tool_definition(&tab_id),
     ]
 }
 
@@ -400,10 +402,11 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         "hiveVerdict" => super::review::verdict(&ctx, &caller, args).await,
         "hiveResolve" => super::review::resolve(&ctx, &caller, args).await,
         "hiveLand" => super::land::land_tool(&ctx, &caller, args).await,
+        "hiveUndoLand" => super::land::undo::undo_tool(&ctx, &caller, args).await,
         t => Err(format!("{t} isn't available in this build of maiTerm yet.")),
     };
     // A worker's phase changed: a freed slot or a failed dependency is news to the waiters.
-    if res.is_ok() && matches!(tool, "hiveStopWorker" | "hiveReport" | "hiveRestartWorker" | "hiveRetireWorker" | "hiveResolve" | "hiveLand") {
+    if res.is_ok() && matches!(tool, "hiveStopWorker" | "hiveReport" | "hiveRestartWorker" | "hiveRetireWorker" | "hiveResolve" | "hiveLand" | "hiveUndoLand") {
         super::waiters::poll_soon(state.clone(), handle.clone(), caller.workspace_id.clone());
     }
     // The reviewer is ended once its answer has reached it: retiring it inside its own tool call
@@ -1222,6 +1225,8 @@ pub struct WorkerCard {
     /// How it left, once it has (§8.4): its column reads its recorded sessions then.
     pub retired: Option<worker::Retired>,
     pub undone: bool,
+    /// A land of its is suspect: a base check failed after it, and nothing has passed since (§8.6).
+    pub suspect: bool,
     /// A reviewer's builder, as `#badge slug` (or its task id once its record is gone).
     pub reviews: Option<String>,
     /// A builder's reviews so far (§7.7).
@@ -1264,12 +1269,16 @@ pub struct HiveBoard {
     /// Epoch ms when the headroom changes with no event (the breaker ends, a spawn ages out of a
     /// window): the board refetches then.
     pub refresh_at: Option<i64>,
+    /// Folders whose target fails its land check alone: lands there need `fix_forward` (§8.6).
+    pub suspect_repos: Vec<String>,
 }
 
 /// The Hive's workers by badge, with its headroom. `ahead` counts commits per worktree (one git
 /// call each), which only the coordinator's list needs. Blocks: worker records.
 pub(crate) fn board_view(hive: &Hive, paths: &HivePaths, fuses: &Fuses, now: i64, ahead: bool) -> HiveBoard {
     let workers = worker::list_workers(paths);
+    let folded = super::land::log::folded(paths);
+    let suspect_tasks: Vec<&str> = folded.entries.iter().filter(|e| e.suspect).map(|e| e.entry.task_id.as_str()).collect();
     let live: Vec<String> = workers.iter().filter(|w| w.is_live()).map(|w| w.task_id.clone()).collect();
     let by_task: HashMap<&str, &WorkerRecord> = workers.iter().map(|w| (w.task_id.as_str(), w)).collect();
     let or = |mine: &str, hive: &str| if mine.is_empty() { hive.to_string() } else { mine.to_string() };
@@ -1304,6 +1313,7 @@ pub(crate) fn board_view(hive: &Hive, paths: &HivePaths, fuses: &Fuses, now: i64
             launched_at: w.launched_at.clone(),
             retired: w.retired.clone(),
             undone: w.undone,
+            suspect: suspect_tasks.contains(&w.task_id.as_str()),
             reviews: w.reviews.as_ref().filter(|_| w.is_reviewer()).map(|id| by_task.get(id.as_str()).map_or_else(|| id.clone(), |b| worker_label(b))),
             review: w.review.as_ref().map(super::review::ReviewView::of),
             // Landed too: its card says a push that was held (§8.5).
@@ -1315,6 +1325,7 @@ pub(crate) fn board_view(hive: &Hive, paths: &HivePaths, fuses: &Fuses, now: i64
         workers: cards,
         starts_workers: hive.status == STATUS_ACTIVE && h.breaker_until.is_none(),
         refresh_at: h.changes_at,
+        suspect_repos: folded.suspect_folders(),
         headroom: HeadroomView {
             cap: h.cap,
             live: h.live,
@@ -1352,6 +1363,8 @@ pub(crate) fn list_view(hive: &Hive, paths: &HivePaths, tasks: &[Task], fuses: &
                 "effort": c.effort,
                 "last_report": c.last_report,
                 "retired": c.retired,
+                "undone": c.undone,
+                "suspect": c.suspect,
                 "reviews": c.reviews,
                 "review": c.review,
                 "land": c.land,
@@ -1363,6 +1376,7 @@ pub(crate) fn list_view(hive: &Hive, paths: &HivePaths, tasks: &[Task], fuses: &
         "headroom": board.headroom,
         "hive_status": board.hive_status,
         "starts_workers": board.starts_workers,
+        "suspect_repos": board.suspect_repos,
     })
 }
 

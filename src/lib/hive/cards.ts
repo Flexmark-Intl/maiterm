@@ -67,12 +67,20 @@ const LIVE_PHASES = ['launching', 'running', 'blocked', 'reported', 'landing'];
 /** A worker that left for good (§8.4): no tab, its column reads its recorded sessions. */
 export const isRetired = (w: Pick<HiveWorkerCard, 'phase'>) => w.phase === 'landed' || w.phase === 'retired';
 
+/** A Landed card's qualifier (§4.3, §8.6): undone wins, then suspect (its target failed its land
+ *  check alone after it), then a held push. */
+export function landedQualifier(w: Partial<Pick<HiveWorkerCard, 'undone' | 'suspect' | 'land'>>): string | null {
+  if (w.undone) return 'undone';
+  if (w.suspect) return 'suspect';
+  return pushHeld(w.land);
+}
+
 /** What a retired worker's column says in place of a composer: "Retired · landed a1b2c3d". */
-export function retiredLine(w: Pick<HiveWorkerCard, 'phase' | 'retired' | 'undone'> & Partial<Pick<HiveWorkerCard, 'land'>>): string {
+export function retiredLine(w: Pick<HiveWorkerCard, 'phase' | 'retired' | 'undone'> & Partial<Pick<HiveWorkerCard, 'land' | 'suspect'>>): string {
   if (w.phase === 'landed') {
     const sha = w.retired?.landed?.trim();
-    const push = w.undone ? null : pushHeld(w.land);
-    return `Retired · landed${sha ? ` ${sha.slice(0, 7)}` : ''}${w.undone ? ' · undone' : ''}${push ? ` · ${push}` : ''}`;
+    const q = landedQualifier(w);
+    return `Retired · landed${sha ? ` ${sha.slice(0, 7)}` : ''}${q ? ` · ${q}` : ''}`;
   }
   const why = w.retired?.reason?.trim();
   return why ? `Retired · ${why}` : 'Retired';
@@ -123,7 +131,7 @@ export function pushHeld(land: HiveWorkerCard['land']): string | null {
   return `push held: ${held.map((r) => `${r.folder}: ${why(r.pushed)}`).join('; ')}`;
 }
 
-type WorkerFields = Pick<HiveWorkerCard, 'phase' | 'wait_reason' | 'depends_on_labels' | 'last_report'> & Partial<Pick<HiveWorkerCard, 'retired' | 'undone' | 'land'>>;
+type WorkerFields = Pick<HiveWorkerCard, 'phase' | 'wait_reason' | 'depends_on_labels' | 'last_report'> & Partial<Pick<HiveWorkerCard, 'retired' | 'undone' | 'suspect' | 'land'>>;
 type TaskFields = { status: TaskStatus; blocker?: TaskBlocker | null } | null | undefined;
 type AgentFields = { state: AgentState; toolName?: string } | null | undefined;
 /** `suspended`: the tab's PTY was parked by a suspend, its own or its workspace's (§11.2). */
@@ -158,8 +166,11 @@ export function cardState(worker: WorkerFields, task: TaskFields, agent: AgentFi
       return make('failed', worker.last_report?.status === 'failed' ? report : null);
     case 'stopped':
       return make('stopped');
-    case 'landed':
-      return make('landed', null, { qualifier: worker.undone ? 'undone' : pushHeld(worker.land) });
+    case 'landed': {
+      const qualifier = landedQualifier(worker);
+      // A suspect land sorts with Needs you while it stands (§4.3 row 10).
+      return make('landed', null, qualifier === 'suspect' ? { qualifier, order: STATE_ORDER.needs_you } : { qualifier });
+    }
     case 'retired':
       return make('retired', worker.retired?.reason?.trim() || null);
     case 'waiting': {

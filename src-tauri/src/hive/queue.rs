@@ -167,9 +167,18 @@ pub struct LandRun {
     pub land_id: String,
     pub worktree: String,
     pub admin: String,
-    /// `worker`: the worker's own write lists, plus the land's folder.
+    /// `worker`: the worker's own write lists, plus the land's folder. `land`: only the temporary
+    /// worktree, its temp folder and the shared package caches (an undo's or a base check's,
+    /// which run no worker's work).
     pub profile: String,
+    /// Whose check it is: `""` a land's, `undo`, or `base_check` (§8.6). Its end goes there.
+    pub kind: String,
 }
+
+/// A land check under the worker's own lists (§8.1).
+pub const PROFILE_WORKER: &str = "worker";
+/// An undo's or a post-land check (§8.6): no worker's folders, branch or cargo target.
+pub const PROFILE_LAND: &str = "land";
 
 /// One job, as the run log records it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -232,6 +241,12 @@ impl Job {
     /// Holds resources: started or being started.
     fn holds(&self) -> bool {
         matches!(self.state.as_str(), WAITING_WINDOW | RUNNING)
+    }
+
+    /// An undo's or a post-land check (§8.6): it runs no work of the worker's, which lends it
+    /// only a name and is often retired already.
+    pub fn is_land_profile(&self) -> bool {
+        self.land.as_ref().is_some_and(|l| l.profile == PROFILE_LAND)
     }
 }
 
@@ -630,9 +645,17 @@ impl Queue {
             .collect()
     }
 
-    /// Everything a worker has in the queue: queued jobs dropped, started ones interrupted.
+    /// Everything a worker has in the queue: queued jobs dropped, started ones interrupted. Never
+    /// an undo's or a post-land check filed under its task (`is_land_profile`): the worker stopping
+    /// or retiring after a failed land would otherwise lose the verdict on Base without a word.
     pub fn release_worker(&mut self, task_id: &str, by: &str, why: &str, now: i64) -> Vec<Ended> {
-        let ids: Vec<String> = self.jobs.iter().filter(|j| j.task_id == task_id && j.is_active()).map(|j| j.id.clone()).collect();
+        self.release_task(task_id, false, by, why, now)
+    }
+
+    /// As `release_worker`, `land_too` releasing the land-profile jobs as well (a suspend).
+    pub fn release_task(&mut self, task_id: &str, land_too: bool, by: &str, why: &str, now: i64) -> Vec<Ended> {
+        let ids: Vec<String> =
+            self.jobs.iter().filter(|j| j.task_id == task_id && j.is_active() && (land_too || !j.is_land_profile())).map(|j| j.id.clone()).collect();
         ids.iter().filter_map(|id| self.interrupt(id, by, why, now)).collect()
     }
 
@@ -688,7 +711,9 @@ impl Queue {
                 self.by_pty.remove(p);
             }
         }
-        if let Some(t) = &job.tab_id {
+        // A land-profile job's tab isn't the worker's to read, and its worker may never start or
+        // retire again: `finish` closes it at once instead.
+        if let Some(t) = job.tab_id.as_ref().filter(|_| !job.is_land_profile()) {
             let tabs = self.old_tabs.entry(job.task_id.clone()).or_default();
             if !tabs.iter().any(|o| &o.tab_id == t) {
                 tabs.push(OldTab { window: job.window.clone(), workspace_id: job.workspace_id.clone(), tab_id: t.clone() });
@@ -989,7 +1014,11 @@ pub fn release_worker_later(task_id: &str, why: &str) -> usize {
 }
 
 fn release(task_id: &str, why: &str, tell_now: bool) -> usize {
-    let ended = queue().release_worker(task_id, BY_RELEASE, why, super::fuses::now_ms());
+    release_jobs(task_id, false, why, tell_now)
+}
+
+fn release_jobs(task_id: &str, land_too: bool, why: &str, tell_now: bool) -> usize {
+    let ended = queue().release_task(task_id, land_too, BY_RELEASE, why, super::fuses::now_ms());
     let n = ended.len();
     tell_released(&ended, why, tell_now);
     for e in ended {
@@ -998,10 +1027,11 @@ fn release(task_id: &str, why: &str, tell_now: bool) -> usize {
     n
 }
 
-/// Every worker with a job in this workspace: the Hive is being suspended. Told on resume.
+/// Every worker with a job in this workspace, land-profile jobs too: the Hive is being
+/// suspended. Told on resume.
 pub fn release_workspace(workspace_id: &str, why: &str) -> usize {
     let tasks = queue().tasks_in(workspace_id);
-    tasks.iter().map(|t| release(t, why, false)).sum()
+    tasks.iter().map(|t| release_jobs(t, true, why, false)).sum()
 }
 
 /// A Hive is being suspended, before its PTYs are killed: nothing of it queues or starts from
@@ -1240,11 +1270,16 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
         (hive, ws.stack.clone(), data.preferences.clone())
     };
     let w = super::worker::read_worker(&paths.task(&job.task_id))?;
-    let folder = w
-        .folders
-        .iter()
-        .find(|f| f.name == job.folder && f.worktree.is_some())
-        .ok_or_else(|| format!("{} has no worktree of {}", w.slug, job.folder))?;
+    // An undo's check or a base check runs no worker's work (§8.6): its worker, retired perhaps,
+    // lends it only a name, never its folders.
+    let land_profile = job.is_land_profile();
+    let own = w.folders.iter().find(|f| f.name == job.folder && f.worktree.is_some()).filter(|_| !land_profile).cloned();
+    let folder = match own {
+        Some(f) => f,
+        None if land_profile => super::worker::WorkerFolder { name: job.folder.clone(), ..Default::default() },
+        None => return Err(format!("{} has no worktree of {}", w.slug, job.folder)),
+    };
+    let folder = &folder;
     // A land check runs in its land's temporary worktree, never the worker's own (§8.1).
     let land = job.land.as_ref().map(|l| land_place(paths, l)).transpose()?;
     let worktree = match &land {
@@ -1265,7 +1300,7 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
         None => worktree.clone(),
     };
     let ctx = super::settings::WorkerContext::gather(&hive, paths, &w);
-    let lists = super::settings::worker_write_lists(&hive, &w, paths, &ctx, bin)?;
+    let lists = if land_profile { land_write_lists(&hive, &job.folder, &ctx)? } else { super::settings::worker_write_lists(&hive, &w, paths, &ctx, bin)? };
 
     // Placeholders in the entry's env and extra paths, as data: `{checkout}` is fine in both
     // (a path, which the profile and the quoting refuse if it can't be named).
@@ -1274,7 +1309,7 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
     // `{checkout}` refused there as in any command.
     let needs = Needs::of(job.command.as_deref().unwrap_or(""), &as_values);
     let mut values = Values {
-        branch: folder.branch.clone(),
+        branch: folder.branch.clone().filter(|_| !land_profile),
         worker: Some(w.slug.clone()),
         checkout: Some(worktree.to_string_lossy().to_string()),
         ..Values::default()
@@ -1388,7 +1423,10 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
 
     let s = |p: &Path| p.to_string_lossy().to_string();
     let mut line_env = vec![("TMPDIR".to_string(), s(&job_tmp))];
-    if super::worktree::worker_uses_own_cargo_target(&hive, &w) {
+    if land_profile {
+        // Its own target in its own temp folder, seeded from the checkout's (`land::base_check`).
+        line_env.push(("CARGO_TARGET_DIR".to_string(), s(&job_tmp.join(LAND_CARGO_TARGET))));
+    } else if super::worktree::worker_uses_own_cargo_target(&hive, &w) {
         line_env.push(("CARGO_TARGET_DIR".to_string(), s(&paths.worker_cargo_target(&w.slug))));
     }
     line_env.push(("CARGO_NET_OFFLINE".to_string(), "true".to_string()));
@@ -1431,6 +1469,23 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
         updated_at: now,
     };
     Ok(Prepared { line, row, ports, tree })
+}
+
+/// A land-profile job's cargo target, under its land's temp folder.
+pub const LAND_CARGO_TARGET: &str = "cargo-target";
+
+/// What a land-profile job writes (§8.6): the shared package caches its build reads through
+/// (cargo's registry lock, npm's cache); the land adds its temporary worktree and temp folder.
+/// Its repo's `config`, `hooks` and `info` are denied whatever else is allowed.
+fn land_write_lists(hive: &crate::hive::record::Hive, folder: &str, ctx: &super::settings::WorkerContext) -> Result<super::settings::WriteLists, String> {
+    let hf = hive.folders.iter().find(|f| f.name == folder && f.is_git()).ok_or_else(|| format!("This Hive has no repo called \"{folder}\""))?;
+    let common = super::land::git::common_dir(Path::new(&hf.path))?;
+    let deny = vec![
+        super::settings::DenyPath { path: common.join("config"), dir: false },
+        super::settings::DenyPath { path: common.join("hooks"), dir: true },
+        super::settings::DenyPath { path: common.join("info"), dir: true },
+    ];
+    Ok(super::settings::WriteLists { allow: ctx.caches.clone(), deny, own: Vec::new() })
 }
 
 /// A land check's temporary worktree as a folder git runs on by its recorded git dir: only one
@@ -1620,6 +1675,10 @@ async fn finish(d: &'static Driver, e: Ended) {
         if let Err(err) = super::rpc::applied(out) {
             log::warn!("hive queue: {} not stopped in its tab: {err}", job.id);
         }
+    }
+    // Its tail is read and on its way: an undo's or post-land check's tab closes now (`end`).
+    if let Some(t) = job.tab_id.as_ref().filter(|_| job.is_land_profile()) {
+        cleanup(d, &job.window, &job.workspace_id, json!({ "tab_ids": [t], "force": true }));
     }
     super::rpc::emit_workers_changed(&d.handle, &job.window, &job.workspace_id);
     kick();

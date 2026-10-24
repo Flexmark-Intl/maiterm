@@ -3363,6 +3363,36 @@ several releases a day).
    once. `approval::refile_pending` files every waiting card again at startup under its id and
    first filing time. The card shows in the Loom's Decisions, on the phone, and in the worker's
    column; the worker's card reads Landing · waiting for your approval (§4.3 row 7).
+   **6e built** (2026-10-24, uncommitted at the time of writing): the land log view, Undo and the
+   post-land check. The log is folded, never edited (`land/log.rs` `fold`): an `undo` line marks
+   the line it `undoes`; per repo, a land or undo whose land check passed on exactly the tree that
+   landed (`check: passed`, `tree_landed == tree_tested`) or a passing `base_check` is a pass, and a
+   failing `base_check` makes every line since the last pass *suspect*, until the next pass clears
+   the repo and its lines. Undo (`land/undo.rs`, state in `logs/undos/<U-…>.json`) takes the repo's
+   land lock and reverts against the target's tip: a fast-forward land as one commit holding
+   `merge-tree --write-tree --merge-base=<base_after> <tip> <base_before>` (git 2.40+, refused in
+   words below), a merge-commit land (integration, later batch members) by `revert -m 1` in a
+   temporary worktree; a conflict refuses ("fix forward"), nothing to revert refuses, then the
+   config rule, the land check under the new `land` profile (`queue::PROFILE_LAND`: only the
+   temporary worktree, its temp folder and the shared package caches, the repo's `config`, `hooks`
+   and `info` denied, its own cargo target in the land temp folder, seeded from the checkout's),
+   step 2 with the dirty hold and three Base-moved rebuilds; a held undo resumes on the next undo
+   of the same line. It logs `kind: undo`, marks the worker `undone` (its waiters block, "…'s land
+   was undone") and never reopens it. `hiveUndoLand {land, reason}` (coordinator; refused in the
+   integration mode; `L-…` alone only for a one-repo land) files a `hive_undo` card when the revert
+   changes config; the human's Undo (`hive_land_log`, `hive_undo_preview`, `hive_undo_land`;
+   `LandLogModal` from the header and the worker column's menu) is a direct command whose inline
+   confirmation names the repo, the branch, the commits and the config files, and is refused if the
+   revert's config fingerprint is no longer the one it showed. The post-land check
+   (`land/base_check.rs`, `B-…`, in memory, its leftovers swept at startup) runs the land check alone
+   on the target's tip after a land or undo check fails and after a land whose landed tree isn't
+   the tested one; Base failing alone tells the coordinator the suspects and to undo or fix forward
+   (a blocker if it can't), and `hiveLand` there is refused without `fix_forward`. Cards read
+   Landed · suspect; the column menu has Retry held land (`hive_retry_land`, the land's own pins)
+   and Undo land…. A delete waits for a running undo. **Decided here:** the land profile writes the
+   shared package caches too (cargo's registry lock, npm's cache), or no build could run in it; an
+   undo that finds the lock busy past the inline wait holds rather than queueing in the background;
+   a land approved after its repo turned suspect isn't re-refused.
 7. Shared memory: `autoMemoryDirectory`, index rebuild, Memory view; checkpoints,
    `hiveAnswerWorker`, precedents in Rust storage, the decision log and earned autonomy.
 8. Gallery: store and index, `galleryAdd`/`List`/`Get`/`Tag`/`Collect`, thumbnails, the grid

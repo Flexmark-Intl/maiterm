@@ -141,6 +141,21 @@ describe('cardState', () => {
     expect(stateLine(cardState(worker({ phase: 'landed', land: one, undone: true }), null, null, null))).toBe('Landed · undone');
     expect(retiredLine({ phase: 'landed', retired: null, land: one })).toBe('Retired · landed · push held: the remote has moved on');
   });
+
+  it('a suspect land says so, below undone and above a held push (§8.6)', () => {
+    const one = { id: 'L-1', state: 'landed', repos: [{ folder: 'web', status: 'landed', pushed: 'held: no auth' }] };
+    expect(stateLine(cardState(worker({ phase: 'landed', land: one, suspect: true }), null, null, null))).toBe('Landed · suspect');
+    expect(stateLine(cardState(worker({ phase: 'landed', suspect: true, undone: true }), null, null, null))).toBe('Landed · undone');
+    expect(retiredLine({ phase: 'landed', retired: null, suspect: true })).toBe('Retired · landed · suspect');
+  });
+
+  it('a suspect land sorts with Needs you while it stands, an undone or cleared one with Landed (§4.3)', () => {
+    const at = (badge: number, over: Partial<HiveWorkerCard>) => ({ state: cardState(worker({ phase: 'landed', ...over }), null, null, null), worker: { badge } });
+    const blocked = { state: cardState(worker({ phase: 'running' }), { status: 'blocked', blocker: blocker('decision') }, null, null), worker: { badge: 2 } };
+    const out = sortCards([at(1, {}), at(4, { suspect: true, undone: true }), at(3, { suspect: true }), blocked, { state: cardState(worker({ phase: 'running' }), null, active, null), worker: { badge: 5 } }]);
+    expect(out.map((c) => c.worker.badge)).toEqual([2, 3, 5, 1, 4]);
+    expect(at(3, { suspect: true }).state.state).toBe('landed');
+  });
 });
 
 describe('retired workers', () => {

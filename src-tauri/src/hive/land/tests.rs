@@ -105,12 +105,17 @@ impl Checker for NoChecker {
     }
 }
 
-/// Runs the check where the queue would, to its end, and counts its runs.
+/// Runs the check where the queue would, to its end, and counts its runs by kind.
 #[derive(Default)]
-struct ShChecker(Mutex<Vec<String>>);
+struct ShChecker(Mutex<Vec<(&'static str, String)>>);
+impl ShChecker {
+    fn runs(&self, kind: &str) -> usize {
+        self.0.lock().unwrap().iter().filter(|(k, _)| *k == kind).count()
+    }
+}
 impl Checker for ShChecker {
     fn start(&self, req: &CheckRequest) -> Result<CheckStart, String> {
-        self.0.lock().unwrap().push(req.folder.clone());
+        self.0.lock().unwrap().push((req.kind, req.folder.clone()));
         let out = Command::new("/bin/sh").arg("-c").arg(&req.command).current_dir(&req.tmp.path).output().map_err(|e| e.to_string())?;
         let tail = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         Ok(CheckStart::Done { passed: out.status.success(), tail })
@@ -118,7 +123,7 @@ impl Checker for ShChecker {
 }
 
 fn opts() -> Opts {
-    Opts { lock_wait: Duration::from_secs(20), checker: Arc::new(NoChecker), before_advance: None }
+    Opts { lock_wait: Duration::from_secs(20), checker: Arc::new(NoChecker), before_advance: None, after_advance: None }
 }
 
 struct Rig {
@@ -264,6 +269,16 @@ impl Rig {
 
     fn told(&self) -> Vec<String> {
         self.seen.lock().unwrap().delivered.iter().filter(|(t, _)| t == "coord").map(|(_, s)| s.clone()).collect()
+    }
+
+    /// The coordinator's `hiveUndoLand`.
+    async fn undo(&self, line: &str) -> Result<Value, String> {
+        undo::undo_tool_with(&self.ctx(), &self.caller, &json!({ "land": line, "reason": "Broke it." }), &opts()).await
+    }
+
+    /// The land log line a single-repo land wrote.
+    fn line_of(out: &Value, folder: &str) -> String {
+        format!("{}/{folder}", out["land"].as_str().expect("a land id"))
     }
 
     /// Nothing a land holds is left: no lock file, no temporary worktree, no land folder.
@@ -694,17 +709,56 @@ async fn a_failing_check_refuses_with_its_output_and_a_passing_one_lands() {
     assert_eq!(rig.main_tip("web"), before);
     assert_eq!(rig.record(&bad.task_id).phase, worker::PHASE_REPORTED);
     rig.assert_no_leftovers();
+    // A failed check runs the post-land check on Base alone (§8.6): main has no verdict either,
+    // so Base fails too and web is suspect, though no land of the Hive's caused it.
+    assert_eq!(checker.runs(CHECK_BASE), 1);
+    let folded = log::folded(&rig.caller.paths);
+    assert!(folded.repos["web"].suspect, "{folded:?}");
+    let told = rig.told().join("\n");
+    assert!(told.contains("⟦HIVE BASE CHECK · web⟧ main fails web's land check alone") && told.contains("No land of this Hive's has landed there"), "{told}");
 
     let good = rig.reported("good", &["web"], "verdict.txt", "ok\n");
-    // Without the worker's installed state the check has nothing to run against.
     let e = rig.land_with(&good, json!({}), o.clone()).await.unwrap_err();
+    assert!(e.contains("web is suspect") && e.contains("fix_forward: true"), "{e}");
+    // Without the worker's installed state the check has nothing to run against.
+    let e = rig.land_with(&good, json!({ "fix_forward": true }), o.clone()).await.unwrap_err();
     assert!(e.contains("FAIL: verdict is not ok") && !e.contains("the setup ran"), "{e}");
     let wt = installed(&good);
-    let out = rig.land_with(&good, json!({}), o).await.unwrap();
+    let out = rig.land_with(&good, json!({ "fix_forward": true }), o).await.unwrap();
     assert_eq!(out["state"], STATE_LANDED, "{out}");
-    assert_eq!(checker.0.lock().unwrap().len(), 3, "one check per land");
+    assert_eq!(checker.runs(CHECK_LAND), 3, "one check per land");
+    assert_eq!(checker.runs(CHECK_BASE), 2, "and Base alone after each failure");
+    assert_eq!(rig.log().iter().filter(|e| e.kind == "land").map(|e| e.check.as_str()).collect::<Vec<_>>(), vec!["passed"]);
+    assert!(!log::folded(&rig.caller.paths).repos["web"].suspect, "a fix forward whose check passed clears it");
     assert!(!rig.repo("web").join("node_modules").exists(), "seeded into the temporary worktree, not the checkout");
     assert!(!wt.exists() || wt.join("node_modules/dep/index.js").exists(), "copied, not moved");
+    rig.assert_no_leftovers();
+}
+
+/// The post-land check judges Base alone, often against the very worker whose check just failed:
+/// nothing that worker's agent left in its worktree (ignored files) reaches it.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_post_land_check_is_never_seeded_from_the_failing_workers_worktree() {
+    let rig = Rig::with("baseseed", &["web"], |h| {
+        h.folders[0].land_check = Some("test ! -e node_modules/poison && grep -q ok verdict.txt || { echo 'FAIL'; exit 3; }".into());
+    });
+    commit(rig.repo("web"), ".gitignore", "node_modules/\n");
+    commit(rig.repo("web"), "verdict.txt", "ok\n");
+    let checker = Arc::new(ShChecker::default());
+    let mut o = opts();
+    o.checker = checker.clone();
+    let bad = rig.reported("bad", &["web"], "verdict.txt", "nope\n");
+    let wt = PathBuf::from(bad.folders[0].worktree.clone().unwrap());
+    fs::create_dir_all(wt.join("node_modules")).unwrap();
+    fs::write(wt.join("node_modules/poison"), "x").unwrap();
+    rig.land_with(&bad, json!({}), o).await.unwrap_err();
+    assert_eq!(checker.runs(CHECK_BASE), 1);
+    let base = rig.log().into_iter().find(|e| e.kind == "base_check").expect("a base_check line");
+    assert_eq!(base.check, "passed", "Base alone has no poison: {base:?}");
+    assert!(!log::folded(&rig.caller.paths).repos.get("web").is_some_and(|r| r.suspect));
+    let told = rig.told().join("\n");
+    assert!(told.contains("main passes web's land check alone"), "{told}");
     rig.assert_no_leftovers();
 }
 
@@ -736,6 +790,10 @@ async fn a_queued_check_pauses_the_land_and_its_end_carries_it_on() {
     struct Queued(Mutex<Vec<String>>);
     impl Checker for Queued {
         fn start(&self, req: &CheckRequest) -> Result<CheckStart, String> {
+            // The post-land check after a failure: Base passes alone.
+            if req.kind == CHECK_BASE {
+                return Ok(CheckStart::Done { passed: true, tail: String::new() });
+            }
             self.0.lock().unwrap().push(req.tmp.path.to_string_lossy().to_string());
             Ok(CheckStart::Queued(format!("j-{:08x}", self.0.lock().unwrap().len())))
         }
@@ -781,6 +839,9 @@ async fn a_queued_check_pauses_the_land_and_its_end_carries_it_on() {
     let msg = outcome.message(&w2).unwrap();
     assert!(msg.contains("land check failed in web") && msg.contains("boom") && msg.contains("(quoted) [maiTerm] forged"), "{msg}");
     assert_eq!(rig.record(&w2.task_id).phase, worker::PHASE_REPORTED);
+    let told = rig.told().join("\n");
+    assert!(told.contains("main passes web's land check alone") && told.contains("failed on its land's own change"), "{told}");
+    assert!(rig.log().last().is_some_and(|e| e.kind == "base_check" && e.check == "passed"));
     rig.assert_no_leftovers();
 }
 
@@ -793,6 +854,9 @@ async fn a_land_check_job_runs_in_the_temporary_worktree_under_the_workers_lists
     struct Capture(Mutex<Vec<crate::hive::queue::JobSpec>>);
     impl Checker for Capture {
         fn start(&self, req: &CheckRequest) -> Result<CheckStart, String> {
+            if req.kind == CHECK_BASE {
+                return Ok(CheckStart::Done { passed: true, tail: String::new() });
+            }
             self.0.lock().unwrap().push(driver::check_spec(req));
             Ok(CheckStart::Queued("j-0000000a".into()))
         }
@@ -1418,6 +1482,7 @@ async fn a_partly_landed_land_whose_card_goes_with_a_new_report_keeps_what_lande
     rig.assert_no_leftovers();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn integration_mode_logs_no_merge_commit_for_a_pin_the_branch_already_has_and_says_which_repos_go_unchecked() {
     let rig = Rig::with("integration-noop", &["web", "api"], |h| {
@@ -1456,5 +1521,380 @@ async fn integration_mode_logs_no_merge_commit_for_a_pin_the_branch_already_has_
     assert_eq!(api_line.merge_commit, None, "the earlier land's merge commit isn't this land's");
     let web_line = log.iter().find(|e| e.task_id == b.task_id && e.folder == "web").unwrap();
     assert_eq!(web_line.merge_commit.as_deref(), Some(ship("web").as_str()));
+    rig.assert_no_leftovers();
+}
+
+// ── Undo (plan 6e, §8.6) ──
+
+#[tokio::test]
+async fn undo_reverts_a_fast_forward_land_on_a_moved_base_and_refuses_one_later_work_builds_on() {
+    let rig = Rig::new("undo-ff", &["web"]);
+    let w = rig.reported("feat", &["web"], "feat.rs", "fn feat() {}\n");
+    let id = Rig::line_of(&rig.land(&w).await.unwrap(), "web");
+    // The human moves on meanwhile: the revert goes on top of their commit.
+    let human = commit(rig.repo("web"), "docs.md", "docs\n");
+    let v = rig.undo(&id).await.unwrap();
+    assert_eq!(v["state"], undo::STATE_DONE, "{v}");
+    let tip = rig.main_tip("web");
+    assert_eq!(git(rig.repo("web"), &["rev-parse", &format!("{tip}^")]), human, "a commit on top: nothing reset");
+    assert_eq!(git(rig.repo("web"), &["rev-parse", "HEAD"]), tip, "the checkout fast-forwarded");
+    assert!(!rig.repo("web").join("feat.rs").exists() && rig.repo("web").join("docs.md").exists());
+    let msg = git(rig.repo("web"), &["log", "-1", "--format=%s", &tip]);
+    assert!(msg.starts_with(&format!("Revert land {id} (Title feat) [maiTerm U-")), "{msg}");
+    let log = rig.log();
+    let u = log.last().unwrap();
+    assert_eq!((u.kind.as_str(), u.undoes.as_deref(), u.by.as_str()), ("undo", Some(id.as_str()), "coordinator"));
+    assert_eq!((u.base_before.as_str(), u.base_after.as_str(), u.summary.as_str()), (human.as_str(), tip.as_str(), "Broke it."));
+    assert_eq!(log::folded(&rig.caller.paths).get(&id).unwrap().undone_by.as_deref(), Some(u.id.as_str()));
+    let r = rig.record(&w.task_id);
+    assert!(r.undone && r.phase == worker::PHASE_LANDED, "marked undone, not reopened");
+    assert!(rig.undo(&id).await.unwrap_err().contains("already undone"));
+    assert!(rig.undo(&u.id).await.unwrap_err().contains("is an undo itself"));
+    // Workers waiting on it stay blocked, though its task is done.
+    let waiter = WorkerRecord { task_id: "t-next".into(), slug: "next".into(), depends_on: vec![w.task_id.clone()], phase: worker::PHASE_WAITING.into(), ..Default::default() };
+    let row: crate::state::Task = serde_json::from_value(json!({ "id": w.task_id, "title": "t", "status": "done", "origin": "agent", "created_at": "", "updated_at": "" })).unwrap();
+    let s = crate::hive::waiters::standing(&waiter, &worker::list_workers(&rig.caller.paths), &[row]);
+    assert_eq!(s, crate::hive::waiters::Standing::Blocked("blocked: #1 feat's land was undone".into()));
+    let board = crate::hive::tools::board_view(&rig.caller.hive, &rig.caller.paths, rig.fuses, crate::hive::fuses::now_ms(), false);
+    assert!(board.workers.iter().any(|c| c.task_id == w.task_id && c.undone));
+    rig.assert_no_leftovers();
+
+    // Later work changes the same lines: a revert can't take it back.
+    let w2 = rig.reported("lines", &["web"], "shared.txt", "one\nworker\nthree\n");
+    let id2 = Rig::line_of(&rig.land(&w2).await.unwrap(), "web");
+    commit(rig.repo("web"), "shared.txt", "one\nworker and human\nthree\n");
+    let before = rig.main_tip("web");
+    let p = undo::preview(&rig.caller.hive, &rig.caller.paths, &id2).unwrap();
+    assert!(p.refusal.as_deref().is_some_and(|r| r.contains("conflicts with later work")), "{p:?}");
+    let e = rig.undo(&id2).await.unwrap_err();
+    assert!(e.contains("conflicts with later work") && e.contains("`shared.txt`") && e.contains("fix forward"), "{e}");
+    assert!(e.contains("Nothing was written to main in web"), "{e}");
+    assert_eq!(rig.main_tip("web"), before);
+    assert!(!rig.record(&w2.task_id).undone);
+    rig.assert_no_leftovers();
+}
+
+/// Base moves between the undo's fast-forward and the read of what landed: that tree is nothing
+/// a check passed, so the post-land check judges it, as after a land (§8.6).
+#[cfg(unix)]
+#[tokio::test]
+async fn an_undo_whose_landed_tree_isnt_its_tested_one_gets_the_post_land_check() {
+    let rig = Rig::with("undo-moved", &["web"], |h| h.folders[0].land_check = Some("true".into()));
+    let checker = Arc::new(ShChecker::default());
+    let mut o = Opts { checker: checker.clone(), ..opts() };
+    let w = rig.reported("feat", &["web"], "feat.rs", "fn feat() {}\n");
+    let id = Rig::line_of(&rig.land_with(&w, json!({}), o.clone()).await.unwrap(), "web");
+    assert_eq!(checker.runs(CHECK_BASE), 0, "the land landed what it tested");
+    let web = rig.repo("web").to_path_buf();
+    o.after_advance = Some(Arc::new(move |_: &str| {
+        commit(&web, "late.md", "late\n");
+    }));
+    let v = undo::undo_tool_with(&rig.ctx(), &rig.caller, &json!({ "land": id, "reason": "r" }), &o).await.unwrap();
+    assert_eq!(v["state"], undo::STATE_DONE, "{v}");
+    let log = rig.log();
+    let u = log.iter().find(|e| e.kind == "undo").unwrap();
+    assert_ne!(u.tree_landed, u.tree_tested);
+    let base = log.iter().find(|e| e.kind == "base_check").expect("the post-land check ran");
+    assert!(base.summary.contains(&format!("{} landed a tree other than the one its check passed", u.land)) && base.check == "passed", "{base:?}");
+    assert_eq!(checker.runs(CHECK_BASE), 1);
+    rig.assert_no_leftovers();
+}
+
+#[tokio::test]
+async fn a_land_in_several_repos_is_undone_one_repo_at_a_time() {
+    let rig = Rig::new("undo-multi", &["web", "api"]);
+    let w = rig.reported("pair", &["web", "api"], "pair.txt", "pair\n");
+    let out = rig.land(&w).await.unwrap();
+    let land = out["land"].as_str().unwrap().to_string();
+    let e = rig.undo(&land).await.unwrap_err();
+    assert!(e.contains("landed in several repos") && e.contains(&format!("{land}/web")) && e.contains(&format!("{land}/api")), "{e}");
+    assert!(rig.undo("L-00000000/web").await.unwrap_err().contains("No land L-00000000/web"));
+    let api0 = rig.main_tip("api");
+    assert_eq!(rig.undo(&format!("{land}/web")).await.unwrap()["state"], undo::STATE_DONE);
+    assert!(!rig.repo("web").join("pair.txt").exists() && rig.repo("api").join("pair.txt").exists());
+    assert_eq!(rig.main_tip("api"), api0, "api untouched");
+}
+
+#[tokio::test]
+async fn a_dirty_base_checkout_holds_the_undo_and_undoing_again_resumes_it() {
+    let rig = Rig::new("undo-dirty", &["web"]);
+    let w = rig.reported("touch", &["web"], "shared.txt", "one\nTWO\nthree\n");
+    let id = Rig::line_of(&rig.land(&w).await.unwrap(), "web");
+    let landed = rig.main_tip("web");
+    fs::write(rig.repo("web").join("shared.txt"), "the human's\n").unwrap();
+    let v = rig.undo(&id).await.unwrap();
+    assert_eq!(v["state"], STATE_HELD, "{v}");
+    assert!(v["reason"].as_str().unwrap().contains("uncommitted changes to `shared.txt`"), "{v}");
+    assert_eq!(rig.main_tip("web"), landed, "nothing written");
+    assert_eq!(fs::read_to_string(rig.repo("web").join("shared.txt")).unwrap(), "the human's\n", "nothing stashed or overwritten");
+    assert!(!rig.record(&w.task_id).undone);
+    rig.assert_no_leftovers();
+    let view = undo::log_view(&rig.caller.hive, &rig.caller.paths);
+    assert_eq!((view.undos.len(), view.undos[0].state.as_str()), (1, STATE_HELD));
+
+    git(rig.repo("web"), &["checkout", "--", "shared.txt"]);
+    let v = rig.undo(&id).await.unwrap();
+    assert_eq!(v["state"], undo::STATE_DONE, "{v}");
+    assert_eq!(v["undo"], view.undos[0].id.as_str(), "the held undo resumed");
+    assert_eq!(fs::read_to_string(rig.repo("web").join("shared.txt")).unwrap(), "one\ntwo\nthree\n");
+    assert!(undo::log_view(&rig.caller.hive, &rig.caller.paths).undos.is_empty());
+    rig.assert_no_leftovers();
+}
+
+#[tokio::test]
+async fn the_coordinators_undo_of_config_files_a_card_and_the_humans_own_undo_goes_on_what_it_showed() {
+    let rig = Rig::new("undo-config", &["web"]);
+    git(rig.repo("web"), &["checkout", "-q", "--detach"]);
+    let w = rig.reported("hook", &["web"], ".claude/settings.json", "{}\n");
+    assert_eq!(rig.land(&w).await.unwrap()["state"], STATE_AWAITING_HUMAN);
+    let (_, d) = rig.last_card();
+    approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await.answer().unwrap();
+    let id = rig.log()[0].id.clone();
+    let before = rig.main_tip("web");
+
+    let v = rig.undo(&id).await.unwrap();
+    assert_eq!(v["state"], STATE_AWAITING_HUMAN, "{v}");
+    assert_eq!(rig.main_tip("web"), before, "nothing written while the human decides");
+    rig.assert_no_leftovers();
+    let (req, d) = rig.last_card();
+    assert_eq!((req.kind, req.tab_id.as_str(), req.reason.as_deref()), (undo::KIND, "coord", Some("Broke it.")));
+    assert_eq!(req.summary, "Undo land “Title hook” on main in web");
+    assert!(req.effects.iter().any(|e| e == "Changes agent or execution config in web: `.claude/settings.json`."), "{:?}", req.effects);
+    assert!(req.effects.iter().any(|e| e.starts_with(&format!("Reverts land {id} (1 file changed"))), "{:?}", req.effects);
+    assert!(rig.undo(&id).await.unwrap_err().contains("waits for the human's approval"));
+    // A restart files it again under its id.
+    assert_eq!(undo::refile_in(&rig.ctx().window, &rig.caller), 1);
+    assert_eq!(rig.last_card().0.keep.map(|k| k.0), Some(d.id.clone()));
+
+    let v = approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await.answer().unwrap();
+    assert_eq!(v["state"], undo::STATE_DONE, "{v}");
+    assert!(git(rig.repo("web"), &["ls-tree", "--name-only", "-r", "refs/heads/main"]).lines().all(|l| l != ".claude/settings.json"));
+    let u = rig.log().last().cloned().unwrap();
+    assert_eq!((u.by.as_str(), u.request.as_deref()), ("human", Some(d.id.as_str())));
+    assert!(rig.seen.lock().unwrap().settled.iter().any(|(i, ok, _)| *i == d.id && *ok));
+    assert!(rig.told().iter().any(|t| t.starts_with("⟦HIVE UNDO · Title hook⟧ The human approved undoing")), "{:?}", rig.told());
+
+    // The human's own Undo: no card, but only on the config files its confirmation showed.
+    let w2 = rig.reported("mcp", &["web"], ".mcp.json", "{}\n");
+    assert_eq!(rig.land(&w2).await.unwrap()["state"], STATE_AWAITING_HUMAN);
+    let (_, d2) = rig.last_card();
+    approval::approved(&rig.ctx(), &rig.caller, &d2, &opts()).await.answer().unwrap();
+    let id2 = rig.log().iter().rev().find(|e| e.kind == "land").unwrap().id.clone();
+    let p = undo::preview(&rig.caller.hive, &rig.caller.paths, &id2).unwrap();
+    assert_eq!((p.config_files.clone(), p.method.as_str(), p.refusal.clone()), (vec![".mcp.json".to_string()], "fast-forward", None));
+    assert_eq!((p.commits.len(), p.commits[0].subject.as_str()), (1, "edit .mcp.json"));
+    let filed = rig.seen.lock().unwrap().filed.len();
+    let e = undo::human_undo(&rig.ctx(), &rig.caller, &id2, None, &opts()).await.unwrap_err();
+    assert!(e.contains("your confirmation didn't show"), "{e}");
+    let v = undo::human_undo(&rig.ctx(), &rig.caller, &id2, p.config_fp.clone(), &opts()).await.unwrap();
+    assert_eq!(v["state"], undo::STATE_DONE, "{v}");
+    assert_eq!(rig.seen.lock().unwrap().filed.len(), filed, "the human's Undo never files a card");
+    assert_eq!(rig.log().last().unwrap().by, "human");
+    assert!(rig.told().iter().any(|t| t.contains("The human started undoing")), "{:?}", rig.told());
+    rig.assert_no_leftovers();
+}
+
+#[tokio::test]
+async fn an_integration_land_is_undone_by_the_human_with_revert_m1_and_never_by_the_coordinator() {
+    let rig = Rig::with("undo-integration", &["web"], |h| h.landing_mode = LANDING_INTEGRATION.into());
+    let repo = rig.repo("web").to_path_buf();
+    let rc = rig.caller.paths.coordinator_worktree("web");
+    fs::create_dir_all(rc.parent().unwrap()).unwrap();
+    git(&repo, &["worktree", "add", "-q", "-b", "hive/ship", rc.to_str().unwrap(), "main"]);
+    let w = rig.reported("feat", &["web"], "feat.rs", "f\n");
+    rig.land(&w).await.unwrap();
+    let (_, d) = rig.last_card();
+    approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await.answer().unwrap();
+    let line = rig.log()[0].clone();
+    let merge = line.merge_commit.clone().expect("an integration land's own merge commit");
+
+    let e = rig.undo(&line.id).await.unwrap_err();
+    assert!(e.contains("Undo is theirs"), "{e}");
+    let p = undo::preview(&rig.caller.hive, &rig.caller.paths, &line.id).unwrap();
+    assert_eq!((p.method.as_str(), p.target.as_str(), p.refusal.clone()), ("merge", "hive/ship", None));
+    assert!(p.commits.iter().any(|c| c.subject == "edit feat.rs"), "{:?}", p.commits);
+    let v = undo::human_undo(&rig.ctx(), &rig.caller, &line.id, p.config_fp.clone(), &opts()).await.unwrap();
+    assert_eq!(v["state"], undo::STATE_DONE, "{v}");
+    let tip = git(&repo, &["rev-parse", "refs/heads/hive/ship"]);
+    assert_eq!(git(&repo, &["rev-parse", &format!("{tip}^")]), merge, "a revert on top of the merge");
+    assert!(git(&repo, &["ls-tree", "--name-only", &tip, "feat.rs"]).is_empty());
+    assert_eq!(git(&rc, &["rev-parse", "HEAD"]), tip, "the read copy on hive/ship moved with it");
+    assert!(git(&repo, &["log", "-1", "--format=%s", &tip]).starts_with(&format!("Revert land {} (Title feat) [maiTerm U-", line.id)));
+    rig.assert_no_leftovers();
+}
+
+#[tokio::test]
+async fn reconcile_settles_an_undo_caught_in_step_2() {
+    let rig = Rig::new("undo-reconcile", &["web"]);
+    git(rig.repo("web"), &["checkout", "-q", "--detach"]);
+    let w = rig.reported("crash", &["web"], "c.rs", "c\n");
+    let id = Rig::line_of(&rig.land(&w).await.unwrap(), "web");
+    let e = rig.log()[0].clone();
+    // The revert made and moved onto main, then maiTerm died before its bookkeeping.
+    let tip = rig.main_tip("web");
+    let revert = git(rig.repo("web"), &["commit-tree", &format!("{}^{{tree}}", e.base_before), "-p", &tip, "-m", "revert"]);
+    git(rig.repo("web"), &["update-ref", "refs/heads/main", &revert]);
+    let mut u = undo::UndoState {
+        id: "U-0000000c".into(),
+        undoes: id.clone(),
+        land: e.land.clone(),
+        folder: "web".into(),
+        target: "main".into(),
+        task_id: w.task_id.clone(),
+        worker: w.slug.clone(),
+        title: w.title.clone(),
+        by: "coordinator".into(),
+        reason: "r".into(),
+        state: STATE_ADVANCING.into(),
+        tip: Some(tip.clone()),
+        revert: Some(revert.clone()),
+        ..undo::UndoState::default()
+    };
+    let p = rig.caller.paths.undos().join("U-0000000c.json");
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(&p, serde_json::to_vec(&u).unwrap()).unwrap();
+    // And one caught before its step 2: it holds.
+    u.id = "U-0000000d".into();
+    u.state = STATE_CHECKING.into();
+    u.undoes = "L-99999999/web".into();
+    fs::write(rig.caller.paths.undos().join("U-0000000d.json"), serde_json::to_vec(&u).unwrap()).unwrap();
+
+    assert_eq!(undo::reconcile_in(&rig.caller.hive, &rig.caller.paths), 2);
+    assert_eq!(undo::read_one(&rig.caller.paths, "U-0000000c").unwrap().state, undo::STATE_DONE);
+    assert_eq!(undo::read_one(&rig.caller.paths, "U-0000000d").unwrap().state, STATE_HELD);
+    let last = rig.log().last().cloned().unwrap();
+    assert_eq!((last.kind.as_str(), last.base_after.as_str()), ("undo", revert.as_str()));
+    assert!(rig.record(&w.task_id).undone);
+    assert_eq!(undo::reconcile_in(&rig.caller.hive, &rig.caller.paths), 0, "settled once");
+}
+
+#[tokio::test]
+async fn the_humans_retry_resumes_a_held_land_with_its_own_commits() {
+    let rig = Rig::new("retry", &["web"]);
+    let w = rig.reported("held", &["web"], "shared.txt", "one\nTWO\nthree\n");
+    fs::write(rig.repo("web").join("shared.txt"), "the human's\n").unwrap();
+    assert_eq!(rig.land(&w).await.unwrap()["state"], STATE_HELD);
+    assert!(retry(&rig.ctx(), &rig.caller, "t-nobody", opts()).await.is_err());
+    git(rig.repo("web"), &["checkout", "--", "shared.txt"]);
+    let v = retry(&rig.ctx(), &rig.caller, &w.task_id, opts()).await.unwrap();
+    assert_eq!(v["state"], STATE_LANDED, "{v}");
+    assert!(rig.told().iter().any(|t| t.starts_with("⟦HIVE LAND · Title held⟧ The human retried worker #1 held's held land L-")), "{:?}", rig.told());
+    assert!(retry(&rig.ctx(), &rig.caller, &w.task_id, opts()).await.unwrap_err().contains("no held land"));
+}
+
+// ── The post-land check (§8.6) ──
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_base_that_fails_alone_makes_the_lands_since_it_passed_suspect_until_a_fix_passes() {
+    let rig = Rig::new("suspect", &["web"]);
+    let checked = {
+        let mut c = rig.caller.clone();
+        c.hive.folders[0].land_check = Some("test ! -f broken.txt || { echo 'FAIL: broken'; exit 1; }".into());
+        c
+    };
+    let checker = Arc::new(ShChecker::default());
+    let o = Opts { checker: checker.clone(), ..opts() };
+    let land = |w: &WorkerRecord, extra: Value| {
+        let mut args = json!({ "worker": w.slug, "summary": "s", "commits": rig.tips(w) });
+        for (k, v) in extra.as_object().unwrap() {
+            args[k] = v.clone();
+        }
+        let (ctx, c, o) = (rig.ctx(), checked.clone(), o.clone());
+        async move { land_tool_with(&ctx, &c, &args, o).await }
+    };
+    // Landed before the folder had a land check: nothing proved what it left.
+    let w1 = rig.reported("breaks", &["web"], "broken.txt", "x\n");
+    let id1 = Rig::line_of(&rig.land(&w1).await.unwrap(), "web");
+
+    // An innocent land's check fails on the merge; Base alone fails too: the land since Base last
+    // passed is suspect, and so is the repo.
+    let w2 = rig.reported("innocent", &["web"], "ok.rs", "ok\n");
+    let e = land(&w2, json!({})).await.unwrap_err();
+    assert!(e.contains("land check failed in web"), "{e}");
+    let folded = log::folded(&rig.caller.paths);
+    assert_eq!(folded.repos["web"].suspects, vec![id1.clone()], "{folded:?}");
+    assert!(folded.get(&id1).unwrap().suspect);
+    let told = rig.told().join("\n");
+    assert!(told.contains(&format!("The lands since it last passed are suspect: {id1} (breaks, “Title breaks”)")) && told.contains("FAIL: broken"), "{told}");
+    let board = crate::hive::tools::board_view(&checked.hive, &rig.caller.paths, rig.fuses, crate::hive::fuses::now_ms(), false);
+    assert_eq!(board.suspect_repos, vec!["web".to_string()]);
+    assert!(board.workers.iter().any(|c| c.task_id == w1.task_id && c.suspect));
+
+    // Every land there is held but the fix.
+    let fix = rig.reported("fix", &["web"], "fix.rs", "fix\n");
+    let wt = PathBuf::from(fix.folders[0].worktree.clone().unwrap());
+    fs::remove_file(wt.join("broken.txt")).unwrap();
+    git(&wt, &["add", "-A"]);
+    git(&wt, &["commit", "-q", "--no-verify", "-m", "remove broken.txt"]);
+    let e = land(&fix, json!({})).await.unwrap_err();
+    assert!(e.contains("web is suspect") && e.contains("fix_forward: true"), "{e}");
+    let out = land(&fix, json!({ "fix_forward": true })).await.unwrap();
+    assert_eq!(out["state"], STATE_LANDED, "{out}");
+    let folded = log::folded(&rig.caller.paths);
+    assert!(!folded.repos["web"].suspect && !folded.get(&id1).unwrap().suspect, "a fix whose check passed on what landed clears it");
+    assert_eq!(checker.runs(CHECK_BASE), 1, "only the failure ran Base alone");
+    assert_eq!(land(&w2, json!({})).await.unwrap()["state"], STATE_LANDED, "lands go on as before");
+    rig.assert_no_leftovers();
+}
+
+/// An undo's check is a job under the land profile: the temporary worktree and its temp folder,
+/// no worker's folders, the repo's config denied, its own cargo target.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn an_undo_check_runs_under_the_land_profile_and_its_end_lands_the_revert() {
+    struct Capture(Mutex<Vec<crate::hive::queue::JobSpec>>);
+    impl Checker for Capture {
+        fn start(&self, req: &CheckRequest) -> Result<CheckStart, String> {
+            if req.kind == CHECK_LAND {
+                return Ok(CheckStart::Done { passed: true, tail: String::new() });
+            }
+            self.0.lock().unwrap().push(driver::check_spec(req));
+            Ok(CheckStart::Queued("j-0000000e".into()))
+        }
+    }
+    let rig = Rig::with("undo-job", &["web"], |h| h.folders[0].land_check = Some("cargo test".into()));
+    let cap = Arc::new(Capture(Mutex::new(Vec::new())));
+    let o = Opts { checker: cap.clone(), ..opts() };
+    let w = rig.reported("job", &["web"], "j.rs", "j\n");
+    let id = Rig::line_of(&rig.land_with(&w, json!({}), o.clone()).await.unwrap(), "web");
+    let before = rig.main_tip("web");
+    let v = undo::undo_tool_with(&rig.ctx(), &rig.caller, &json!({ "land": id, "reason": "r" }), &o).await.unwrap();
+    assert_eq!(v["state"], STATE_CHECKING, "{v}");
+    assert_eq!(rig.main_tip("web"), before);
+    let common = git::common_dir(rig.repo("web")).unwrap();
+    assert!(lock::lock_path(&common).exists(), "the lock is held across the check");
+    let spec = cap.0.lock().unwrap()[0].clone();
+    let run = spec.land.clone().unwrap();
+    assert_eq!((run.kind.as_str(), run.profile.as_str(), spec.entry.as_str()), (CHECK_UNDO, "land", "undo check"));
+    let job = crate::hive::queue::Queue::default().enqueue(spec, 0).unwrap();
+    let bin = rig.base.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let p = crate::hive::queue::prepare_in(&rig.data, &job, &rig.caller.paths, &bin, &[]);
+    crate::stack::ports::release(&job.id);
+    let p = p.unwrap();
+    let tmp = PathBuf::from(&run.worktree);
+    let land_tmp = rig.caller.paths.land_tmp(&run.land_id);
+    assert!(p.line.starts_with(&format!("cd {} ", crate::hive::launch::sh_quote(&tmp.to_string_lossy()))), "{}", p.line);
+    let target_dir = land_tmp.join(crate::hive::queue::LAND_CARGO_TARGET);
+    assert!(p.line.contains(&format!("CARGO_TARGET_DIR={}", crate::hive::launch::sh_quote(&target_dir.to_string_lossy()))), "{}", p.line);
+    let profile = fs::read_to_string(rig.caller.paths.run(&job.id).join(crate::hive::job_sandbox::PROFILE_FILE)).unwrap();
+    let (allow, deny) = profile.split_once("(deny file-write*\n").unwrap();
+    let canon = |p: &Path| crate::share::canon(&fs::canonicalize(p).unwrap()).to_string_lossy().to_string();
+    assert!(allow.contains(&format!("(subpath \"{}\")", canon(&tmp))), "{profile}");
+    assert!(!allow.contains(&canon(&rig.caller.paths.worker_dir(&w.slug))) && !allow.contains("objects"), "no worker's folders: {profile}");
+    assert!(deny.contains(&format!("(literal \"{}\")", canon(&common.join("config")))), "{profile}");
+
+    let mut j = crate::hive::queue::Job::default();
+    j.id = "j-0000000e".into();
+    j.task_id = w.task_id.clone();
+    j.state = crate::hive::queue::DONE.into();
+    j.began = true;
+    j.exit_code = Some(0);
+    let out = undo::on_check_end(&rig.ctx(), &rig.caller, &j, &run, "", &o).await.unwrap();
+    assert!(matches!(out, driver::Outcome::Landed(_)), "{out:?}");
+    assert!(!rig.repo("web").join("j.rs").exists());
+    assert_eq!(rig.log().last().unwrap().check, "passed");
+    assert!(rig.told().iter().any(|t| t.starts_with("⟦HIVE UNDO · Title job⟧ Land ")), "{:?}", rig.told());
     rig.assert_no_leftovers();
 }

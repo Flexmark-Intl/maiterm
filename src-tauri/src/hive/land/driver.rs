@@ -50,6 +50,9 @@ pub(crate) struct CheckRequest {
     /// The folder's land check: the human's own text. Never its setup, which needs the network
     /// the job's profile closes (`git::seed_ignored` stands in for it).
     pub command: String,
+    /// Whose check: a land's (`CHECK_LAND`), an undo's or the post-land check (§8.6), which run
+    /// under the land profile and end in their own modules.
+    pub kind: &'static str,
 }
 
 pub(crate) enum CheckStart {
@@ -85,6 +88,11 @@ pub(crate) fn check_spec(req: &CheckRequest) -> crate::hive::queue::JobSpec {
     if let Some(e) = crate::hive::run::match_entry(q, &req.folder, &words) {
         needs.extend(e.needs.iter().cloned());
     }
+    let (entry, profile) = match req.kind {
+        super::CHECK_UNDO => ("undo check", crate::hive::queue::PROFILE_LAND),
+        super::CHECK_BASE => ("post-land check", crate::hive::queue::PROFILE_LAND),
+        _ => ("land check", crate::hive::queue::PROFILE_WORKER),
+    };
     JobSpec {
         hive_id: req.caller.hive.id.clone(),
         workspace_id: req.caller.workspace_id.clone(),
@@ -94,7 +102,7 @@ pub(crate) fn check_spec(req: &CheckRequest) -> crate::hive::queue::JobSpec {
         folder: req.folder.clone(),
         target: format!("{}{}", crate::stack::target::CHECKOUT, req.tmp.path.display()),
         argv: crate::hive::job_sandbox::service_argv(&req.command),
-        entry: "land check".to_string(),
+        entry: entry.to_string(),
         needs,
         shares: q.resources.clone(),
         commit: Some(req.tested.clone()),
@@ -103,7 +111,8 @@ pub(crate) fn check_spec(req: &CheckRequest) -> crate::hive::queue::JobSpec {
             land_id: req.land_id.clone(),
             worktree: req.tmp.path.to_string_lossy().to_string(),
             admin: req.tmp.admin.to_string_lossy().to_string(),
-            profile: "worker".to_string(),
+            profile: profile.to_string(),
+            kind: req.kind.to_string(),
         }),
         ..JobSpec::default()
     }
@@ -125,11 +134,14 @@ pub(crate) struct Opts {
     pub checker: Arc<dyn Checker>,
     /// A test's seam, run just before each step 2 (a commit to Base, to move it).
     pub before_advance: Option<Seam>,
+    /// A test's seam, run just after an undo's step 2 moved the target and before its landed
+    /// tree is read (a commit to Base, so that tree isn't the tested one).
+    pub after_advance: Option<Seam>,
 }
 
 impl Opts {
     pub fn production() -> Self {
-        Self { lock_wait: LOCK_INLINE_WAIT, checker: Arc::new(QueueChecker), before_advance: None }
+        Self { lock_wait: LOCK_INLINE_WAIT, checker: Arc::new(QueueChecker), before_advance: None, after_advance: None }
     }
 }
 
@@ -309,6 +321,7 @@ fn step1(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, land_id: &str, r: &mu
             r.tree_tested = lg::tree_of(&repo, &sha);
             r.tested = Some(sha);
             r.merged = merged;
+            r.checked = false;
             r.base_before = Some(base_sha.clone());
             r.status = REPO_PENDING.to_string();
         }
@@ -354,9 +367,13 @@ async fn prepare(caller: &Caller, w: &WorkerRecord, land: &mut LandState, only: 
     res
 }
 
+/// Why a land can't go on, and the folder whose land check failed, if that is why: the post-land
+/// check then tells a broken worker from a broken Base (§8.6).
+type Stop = (String, Option<String>);
+
 /// The land checks of the repos step 1 just prepared. A check that ran inline and failed is
 /// Err; queued ones leave their repo `checking`.
-async fn start_checks(caller: &Caller, w: &WorkerRecord, land: &mut LandState, opts: &Opts) -> Result<(), String> {
+async fn start_checks(caller: &Caller, w: &WorkerRecord, land: &mut LandState, opts: &Opts) -> Result<(), Stop> {
     for r in land.repos.iter_mut().filter(|r| r.status == REPO_PENDING && r.tested.is_some()) {
         let check = caller.hive.folders.iter().find(|f| f.name == r.folder).and_then(|f| f.land_check.clone()).filter(|c| !c.trim().is_empty());
         let Some(check) = check else {
@@ -371,6 +388,7 @@ async fn start_checks(caller: &Caller, w: &WorkerRecord, land: &mut LandState, o
             tmp: Temp { path: PathBuf::from(r.tmp.clone().unwrap_or_default()), admin: PathBuf::from(r.tmp_admin.clone().unwrap_or_default()) },
             tested: r.tested.clone().unwrap_or_default(),
             command: check,
+            kind: super::CHECK_LAND,
         };
         let checker = opts.checker.clone();
         let own = w.git_folders().find(|f| f.name == r.folder).cloned();
@@ -385,19 +403,32 @@ async fn start_checks(caller: &Caller, w: &WorkerRecord, land: &mut LandState, o
             }
             checker.start(&req)
         });
-        match started.await.map_err(|e| format!("{}: its land check couldn't be queued: {e}", r.folder))? {
+        match started.await.map_err(|e| (format!("{}: its land check couldn't be queued: {e}", r.folder), None))? {
             CheckStart::Queued(job) => {
                 r.status = REPO_CHECKING.to_string();
                 r.job = Some(job);
             }
-            CheckStart::Done { passed: true, .. } => r.status = REPO_TESTED.to_string(),
-            CheckStart::Done { passed: false, tail } => return Err(check_failed(&r.folder, &tail)),
+            CheckStart::Done { passed: true, .. } => {
+                r.status = REPO_TESTED.to_string();
+                r.checked = true;
+            }
+            CheckStart::Done { passed: false, tail } => return Err((check_failed(&r.folder, &tail), Some(r.folder.clone()))),
         }
     }
     Ok(())
 }
 
-fn check_failed(folder: &str, tail: &str) -> String {
+/// The land fails, then, if a land check was why, the post-land check runs on its Base alone.
+async fn stop<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, land: LandState, (why, failed): Stop, opts: &Opts) -> Outcome {
+    let id = land.id.clone();
+    let out = fail(ctx, caller, w, land, why).await;
+    if let Some(folder) = failed {
+        super::base_check::run(ctx, caller, w, &folder, &format!("land {id}'s check failed there"), true, opts).await;
+    }
+    out
+}
+
+pub(super) fn check_failed(folder: &str, tail: &str) -> String {
     let lines: Vec<&str> = tail.trim_end().lines().collect();
     let tail = lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n");
     let mut out = format!("The land check failed in {folder}, so nothing landed.");
@@ -456,7 +487,7 @@ pub(crate) async fn drive<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, task
 async fn proceed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, mut land: LandState, opts: &Opts) -> Outcome {
     let Ok(dir) = worker::task_dir(&caller.paths, &w.task_id) else { return Outcome::Gone };
     if let Err(e) = start_checks(caller, w, &mut land, opts).await {
-        return fail(ctx, caller, w, land, e).await;
+        return stop(ctx, caller, w, land, e, opts).await;
     }
     let jobs: Vec<String> = land.repos.iter().filter(|r| r.status == REPO_CHECKING).filter_map(|r| r.job.clone()).collect();
     if !jobs.is_empty() {
@@ -473,8 +504,20 @@ async fn proceed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRec
     advance_all(ctx, caller, w, land, opts).await
 }
 
-/// Step 2 in order (§8.1, §8.2), then the finish.
-async fn advance_all<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, mut land: LandState, opts: &Opts) -> Outcome {
+/// Step 2 in order (§8.1, §8.2), then the finish. A repo whose landed tree isn't the tree its
+/// check passed (Base moved between its fast-forward and the read) gets the post-land check
+/// once the land's run ends, whatever it ended as (§8.6).
+async fn advance_all<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, land: LandState, opts: &Opts) -> Outcome {
+    let id = land.id.clone();
+    let mut post: Vec<String> = Vec::new();
+    let out = advance_inner(ctx, caller, w, land, opts, &mut post).await;
+    for folder in post {
+        super::base_check::run(ctx, caller, w, &folder, &format!("land {id} landed a tree other than the one its check passed"), false, opts).await;
+    }
+    out
+}
+
+async fn advance_inner<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, mut land: LandState, opts: &Opts, post: &mut Vec<String>) -> Outcome {
     let Ok(dir) = worker::task_dir(&caller.paths, &w.task_id) else { return Outcome::Gone };
     land.state = STATE_ADVANCING.to_string();
     for folder in land.ordered() {
@@ -529,7 +572,12 @@ async fn advance_all<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &Worke
                     })
                     .await;
                     match done {
-                        Ok(done) => *land.repo_mut(&folder).expect("just found") = done,
+                        Ok(done) => {
+                            if done.tree_landed != done.tree_tested {
+                                post.push(folder.clone());
+                            }
+                            *land.repo_mut(&folder).expect("just found") = done
+                        }
                         Err(e) => return fail(ctx, caller, w, land, e).await,
                     }
                     warn_save(caller, save(&dir, &land).await);
@@ -552,7 +600,7 @@ async fn advance_all<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &Worke
                         return fail(ctx, caller, w, land, e).await;
                     }
                     if let Err(e) = start_checks(caller, w, &mut land, opts).await {
-                        return fail(ctx, caller, w, land, e).await;
+                        return stop(ctx, caller, w, land, e, opts).await;
                     }
                     if land.repo_mut(&folder).is_some_and(|r| r.status == REPO_CHECKING) {
                         land.state = STATE_CHECKING.to_string();
@@ -618,6 +666,7 @@ pub(crate) fn log_repo(paths: &HivePaths, hive: &Hive, w: &WorkerRecord, land_id
         summary: summary.to_string(),
         review: if review.is_empty() { landlog::REVIEW_NONE.to_string() } else { review.to_string() },
         pushed: r.pushed.clone().unwrap_or_else(|| landlog::PUSHED_OFF.to_string()),
+        check: if r.checked { landlog::CHECK_PASSED.to_string() } else { String::new() },
         at: crate::commands::workspace::iso_now(),
         ..LandLogEntry::default()
     };
@@ -984,6 +1033,16 @@ pub async fn check_ended(app: &Arc<crate::state::AppState>, handle: &tauri::AppH
     let Some(run) = job.land.clone() else { return };
     let Some(caller) = crate::hive::tools::hive_callers(&app.app_data.read()).into_iter().find(|c| c.hive.id == job.hive_id) else { return };
     let ctx = crate::hive::tools::app_ctx(app, handle, &caller);
+    match run.kind.as_str() {
+        super::CHECK_UNDO => {
+            if super::undo::on_check_end(&ctx, &caller, job, &run, tail, &Opts::production()).await.is_some() {
+                crate::hive::waiters::poll_soon(app.clone(), handle.clone(), caller.workspace_id.clone());
+            }
+            return;
+        }
+        super::CHECK_BASE => return super::base_check::on_check_end(&ctx, &caller, job, &run, tail).await,
+        _ => {}
+    }
     let outcome = on_check_end(&ctx, &caller, job, &run, tail, &Opts::production()).await;
     if let Some((w, o)) = outcome {
         tell(&ctx, &caller, &w, &o).await;
@@ -1010,6 +1069,7 @@ pub(crate) async fn on_check_end<W: HiveWindow>(
             let Some(l) = cur.land.as_mut().filter(|l| l.id == land_id && l.state == STATE_CHECKING) else { return false };
             let Some(r) = l.repos.iter_mut().find(|r| r.status == REPO_CHECKING && r.job.as_deref() == Some(job_id.as_str())) else { return false };
             r.status = if passed { REPO_TESTED } else { REPO_PENDING }.to_string();
+            r.checked = passed;
             out = Some((r.folder.clone(), l.repos.iter().all(|r| r.status != REPO_CHECKING)));
             true
         })?;
@@ -1027,7 +1087,7 @@ pub(crate) async fn on_check_end<W: HiveWindow>(
                 "The land check in {folder} moved the tested commit ({}), so it tested nothing that would land.",
                 job.error.as_deref().map(|e| one_line(e, 200)).unwrap_or_default()
             ),
-            crate::hive::queue::DONE => check_failed(&folder, tail),
+            crate::hive::queue::DONE => return Some((w.clone(), stop(ctx, caller, &w, land, (check_failed(&folder, tail), Some(folder)), opts).await)),
             _ => format!(
                 "The land check in {folder} didn't finish ({}), so nothing landed.",
                 job.error.as_deref().map(|e| one_line(e, 200)).unwrap_or_else(|| job.state.clone())

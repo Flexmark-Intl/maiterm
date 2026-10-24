@@ -9,8 +9,13 @@
 //!
 //! A land the human must approve (§8.1's config rule, Landing = Ask me, §8.3's integration mode)
 //! waits on an agent request card (`approval`), and goes on from its pinned shas once approved.
+//!
+//! A land is undone by a revert commit landed through the same guarded steps (`undo`, §8.6), and
+//! a Base that fails its land check alone makes the lands since it last passed suspect
+//! (`base_check`), which holds every further land there but a fix-forward one.
 
 pub mod approval;
+pub mod base_check;
 pub mod config_rule;
 pub mod driver;
 pub mod git;
@@ -18,6 +23,7 @@ pub mod lock;
 pub mod log;
 #[cfg(test)]
 mod tests;
+pub mod undo;
 
 use std::collections::BTreeMap;
 
@@ -56,6 +62,12 @@ pub const REPO_LANDED: &str = "landed";
 pub const MAX_ATTEMPTS: u32 = 3;
 pub const MAX_SUMMARY: usize = 2_000;
 
+/// Whose land check a queued job is (`queue::LandRun.kind`): a land's, an undo's, or the
+/// post-land check on the target's tip alone (§8.6).
+pub const CHECK_LAND: &str = "";
+pub const CHECK_UNDO: &str = "undo";
+pub const CHECK_BASE: &str = "base_check";
+
 /// A land in `worker.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -84,6 +96,8 @@ pub struct LandState {
     /// `desktop` | `phone`, once the human approved it: the land is theirs in the log, and Ask me
     /// or the integration mode doesn't ask again for it.
     pub approved_by: Option<String>,
+    /// Passed `fix_forward`: it may land into a repo marked suspect, as its fix (§8.6).
+    pub fix_forward: bool,
     pub started_at: String,
     pub updated_at: String,
     #[serde(flatten)]
@@ -105,6 +119,9 @@ pub struct LandRepo {
     pub tested: Option<String>,
     /// Whether step 1 made a merge commit (Base wasn't already in the pinned commit).
     pub merged: bool,
+    /// Its land check passed on `tested`: the log says so, and a land that lands exactly that
+    /// tree proves its target (§8.6, `log::fold`).
+    pub checked: bool,
     pub tree_tested: Option<String>,
     pub base_after: Option<String>,
     pub tree_landed: Option<String>,
@@ -234,7 +251,10 @@ pub fn tool_definition(tab_id: &Value) -> Value {
              mode, every land while the Landing checkpoint is Ask me, and any land whose diff changes agent or execution \
              config (.claude/, CLAUDE.md, git hooks, CI, package.json scripts…). The answer then says awaiting_human; the \
              result arrives as ⟦HIVE LAND⟧ once they answer, and a denial, or no answer within 24 hours, puts the worker back \
-             in Reported. Don't ask them again yourself."
+             in Reported. Don't ask them again yourself. If a land check fails, maiTerm also runs it on Base alone: when Base \
+             fails too, that repo is suspect, the lands since it last passed are named, and every land there needs \
+             fix_forward: true until a land or an undo there passes its check (undo the land that broke it with \
+             hiveUndoLand, or land a fix)."
         ),
         "inputSchema": {
             "type": "object",
@@ -245,7 +265,7 @@ pub fn tool_definition(tab_id: &Value) -> Value {
                 "commits": { "type": "object", "additionalProperties": { "type": "string" }, "description": "folder → the full sha you reviewed there, for every repo of the worker" },
                 "order": { "type": "array", "items": { "type": "string" }, "description": "Which repos land first (default: the Hive's folder order)" },
                 "accept_review": { "type": "boolean", "description": "Land on hiveResolve accept, past a review that didn't pass" },
-                "fix_forward": { "type": "boolean", "description": "Land into a repo marked suspect, as its fix (not needed yet)" }
+                "fix_forward": { "type": "boolean", "description": "Land into a repo marked suspect (its Base fails its land check alone), as the fix" }
             },
             "required": ["worker", "summary", "commits"]
         }
@@ -329,7 +349,9 @@ pub(crate) fn review_standing(w: &WorkerRecord, commits: &BTreeMap<String, Strin
 
 /// Every refusal `hiveLand` makes before anything is written, in the plan's order. `tips` are the
 /// branch tips read from the repos, `dirty` each worktree's uncommitted files, `busy` whether its
-/// agent is mid-turn. Answers what the log records of its review.
+/// agent is mid-turn, `suspect` the folders whose Base fails its land check alone (§8.6).
+/// Answers what the log records of its review.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn refusal(
     hive: &Hive,
     w: &WorkerRecord,
@@ -338,6 +360,7 @@ pub(crate) fn refusal(
     dirty: &[String],
     busy: bool,
     workers: &[WorkerRecord],
+    suspect: &[String],
 ) -> Result<&'static str, String> {
     let label = worker_label(w);
     let done = w.last_report.as_ref().is_some_and(|r| r.status == "done");
@@ -410,6 +433,14 @@ pub(crate) fn refusal(
             review_standing(w, &left, a.accept_review, workers)?
         }
     };
+    // A Base that fails its land check alone holds every land there but its fix (§8.6).
+    if let Some(f) = left.keys().find(|f| suspect.contains(f)).filter(|_| !a.fix_forward) {
+        return Err(format!(
+            "{f} is suspect: its {} fails its land check alone since an earlier land, so lands there are held. Undo the land \
+             that broke it (hiveUndoLand; the land log names the suspects), or land the fix with fix_forward: true.",
+            land_target(hive, f)
+        ));
+    }
     // The integration mode lands on `hive/<slug>`, whatever Base was.
     for f in w.git_folders().filter(|_| !hive.is_integration()) {
         let base = hive.folders.iter().find(|h| h.name == f.name).and_then(|h| h.base.clone());
@@ -453,13 +484,13 @@ pub(crate) async fn land_tool_with<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
     let a = LandArgs::parse(args)?;
     let w = named_worker(caller, args).await?;
     let (hive, paths, rec) = (caller.hive.clone(), caller.paths.clone(), w.clone());
-    let (tips, dirty, workers) = blocking(move || {
+    let (tips, dirty, workers, suspect) = blocking(move || {
         let tips = super::worktree::builder_tips(&hive, &rec);
-        Ok((tips, dirty_worktrees(&rec), worker::list_workers(&paths)))
+        Ok((tips, dirty_worktrees(&rec), worker::list_workers(&paths), log::folded(&paths).suspect_folders()))
     })
     .await?;
     let busy = w.tab_id.as_deref().filter(|t| super::tools::has_tab(ctx.data, caller, t)).is_some_and(|t| ctx.window.agent_busy(t));
-    let review = refusal(&caller.hive, &w, &a, &tips, &dirty, busy, &workers)?;
+    let review = refusal(&caller.hive, &w, &a, &tips, &dirty, busy, &workers, &suspect)?;
 
     if w.git_folders().next().is_none() {
         return driver::land_without_repos(ctx, caller, &w, &a).await;
@@ -537,6 +568,7 @@ fn start_state(hive: &Hive, w: &WorkerRecord, a: &LandArgs, review: &str) -> Lan
     land.state = STATE_LOCKING.to_string();
     land.summary = a.summary.clone();
     land.order = a.order.clone();
+    land.fix_forward = a.fix_forward;
     land.review = review.to_string();
     land.held_reason = None;
     land.waiting_for = None;
@@ -566,7 +598,15 @@ pub fn reconcile(data: &parking_lot::RwLock<crate::state::AppData>) -> usize {
     if n > 0 {
         ::log::info!("hive: {n} land(s) interrupted by the restart held; the coordinator's hiveLand resumes each");
     }
-    n
+    let u: usize = callers.iter().map(|c| undo::reconcile_in(&c.hive, &c.paths)).sum();
+    if u > 0 {
+        ::log::info!("hive: {u} undo(s) interrupted by the restart settled");
+    }
+    // A post-land check is in memory only: what one left on disk goes.
+    for c in &callers {
+        base_check::sweep(&c.hive, &c.paths);
+    }
+    n + u
 }
 
 pub(crate) fn reconcile_in(hive: &Hive, paths: &HivePaths) -> usize {
@@ -649,4 +689,66 @@ pub fn in_flight(w: &WorkerRecord) -> bool {
 /// may report again, stop or be retired (its card then withdrawn), and a held one resumed.
 pub fn held(w: &WorkerRecord) -> bool {
     w.phase == worker::PHASE_LANDING && w.land.as_ref().is_some_and(|l| l.is_held() || l.awaits_human())
+}
+
+// ── The human's commands ──
+
+/// The Hive in workspace `workspace_id` of this window, as maiTerm acts in it for the human.
+pub(crate) fn caller_in(state: &std::sync::Arc<crate::state::AppState>, label: &str, workspace_id: &str) -> Result<Caller, String> {
+    super::tools::caller_for_workspace(&state.app_data.read(), workspace_id)
+        .filter(|c| c.label == label)
+        .ok_or_else(|| "That workspace isn't a Hive in this window.".to_string())
+}
+
+/// The arguments a held land resumes with (plan D6, the column menu's Retry): its own pins,
+/// summary, order and flags, so nothing the coordinator didn't name lands.
+pub(crate) fn retry_args(w: &WorkerRecord) -> Result<Value, String> {
+    let label = worker_label(w);
+    let Some(l) = w.land.as_ref().filter(|l| w.phase == worker::PHASE_LANDING && l.is_held()) else {
+        return Err(format!("Worker {label} has no held land to retry."));
+    };
+    let commits: Map<String, Value> = l.repos.iter().map(|r| (r.folder.clone(), json!(r.pinned))).collect();
+    Ok(json!({
+        "worker": w.task_id,
+        "summary": l.summary,
+        "commits": commits,
+        "order": l.order,
+        "accept_review": l.review == log::REVIEW_ACCEPTED,
+        "fix_forward": l.fix_forward,
+    }))
+}
+
+/// Retry a held land (plan D6): the human's click in the worker's column, the same as the
+/// coordinator's `hiveLand` with the same commits. The coordinator hears what it came to.
+pub(crate) async fn retry<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, task_id: &str, opts: driver::Opts) -> Result<Value, String> {
+    let dir = worker::task_dir(&caller.paths, task_id)?;
+    let w = blocking(move || worker::read_worker(&dir)).await?;
+    let args = retry_args(&w)?;
+    let label = worker_label(&w);
+    let land_id = w.land.as_ref().map(|l| l.id.clone()).unwrap_or_default();
+    let res = land_tool_with(ctx, caller, &args, opts).await;
+    let says = match &res {
+        Ok(v) if v.get("state").and_then(Value::as_str) == Some(STATE_CHECKING) => Some("Its land check runs now; the result follows as ⟦HIVE LAND⟧.".to_string()),
+        Ok(v) => v.get("result").and_then(Value::as_str).map(str::to_string),
+        Err(e) => Some(e.clone()),
+    };
+    if let Some(says) = says {
+        driver::tell_text(ctx, caller, &w, format!("⟦HIVE LAND · {}⟧ The human retried worker {label}'s held land {land_id}. {says}", one_line(&w.title, 120))).await;
+    }
+    res
+}
+
+#[tauri::command]
+pub async fn hive_retry_land(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+    workspace_id: String,
+    task_id: String,
+) -> Result<Value, String> {
+    let caller = caller_in(&state, window.label(), &workspace_id)?;
+    let ctx = super::tools::app_ctx(state.inner(), &app, &caller);
+    let res = retry(&ctx, &caller, &task_id, driver::Opts::production()).await;
+    super::waiters::poll_soon(state.inner().clone(), app.clone(), caller.workspace_id.clone());
+    res
 }

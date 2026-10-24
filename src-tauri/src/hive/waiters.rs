@@ -1,7 +1,8 @@
 //! Workers waiting on `depends_on` (docs/hive.md §3.1): a waiter launches once every dependency's
 //! task is done (landing sets that in step 6; a human can by hand now), re-checked against the
 //! cap, the fuses and the breaker at that moment. Refused, it keeps waiting with the reason on
-//! its card. A dependency that failed or was dropped blocks it, and the coordinator is told once.
+//! its card. A dependency that failed, was dropped or whose land was undone blocks it, and the
+//! coordinator is told once.
 //!
 //! Polled after every task write of a Hive workspace (`set_workspace_tasks`) and after a worker's
 //! phase changes (a report, a stop, a crash, a resumed Hive). One poll per Hive at a time; a
@@ -82,7 +83,7 @@ pub(crate) enum Standing {
     Ready,
     /// Some aren't done yet: "waits on #1 schema, #2 api".
     Waits(String),
-    /// One failed or was dropped: "blocked: #1 schema failed".
+    /// One failed, was dropped or was undone: "blocked: #1 schema failed".
     Blocked(String),
 }
 
@@ -103,6 +104,10 @@ pub(crate) fn standing(w: &WorkerRecord, workers: &[WorkerRecord], tasks: &[Task
         }
         if rec.is_some_and(|x| x.phase == worker::PHASE_FAILED) && row.is_none_or(|t| t.status != "done") {
             return Standing::Blocked(format!("blocked: {name} failed"));
+        }
+        // Its task stays done, but what it landed was taken back (§8.6).
+        if rec.is_some_and(|x| x.undone) {
+            return Standing::Blocked(format!("blocked: {name}'s land was undone"));
         }
         if row.is_some_and(|t| t.status != "done") {
             waits.push(name);

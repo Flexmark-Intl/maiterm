@@ -1180,6 +1180,10 @@ pub fn run() {
             hive::retire::get_task_transcript,
             hive::delete::hive_delete_preview,
             hive::delete::hive_delete,
+            hive::land::undo::hive_land_log,
+            hive::land::undo::hive_undo_preview,
+            hive::land::undo::hive_undo_land,
+            hive::land::hive_retry_land,
             hive::diffstat::hive_diff_stats,
             hive::feed::hive_worker_metas,
             #[cfg(debug_assertions)]

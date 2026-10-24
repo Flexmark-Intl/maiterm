@@ -390,6 +390,32 @@ fn a_retiring_worker_s_job_tabs_all_close_the_running_one_s_too() {
     assert_eq!(q.job(&other).unwrap().state, RUNNING, "another worker's job is untouched");
 }
 
+/// An undo's or post-land check borrows a worker's task id: the worker stopping, retiring or
+/// crashing after a failed land never cancels it (a lost verdict on Base, §8.6), its tab isn't
+/// left filed under a task that may never start or retire again, and a suspend still takes it.
+#[test]
+fn a_land_profile_job_is_no_part_of_its_worker_s_release_or_its_old_tabs() {
+    let land = |kind: &str| JobSpec {
+        land: Some(LandRun { land_id: "B-1".into(), profile: PROFILE_LAND.into(), kind: kind.into(), ..LandRun::default() }),
+        ..spec("h1", "t1", "a", &[])
+    };
+    let mut q = Queue::default();
+    let check = running(&mut q, land("base_check"), "p1", T0);
+    let queued = q.enqueue(land("undo"), T0).unwrap().id;
+    let own = q.enqueue(spec("h1", "t1", "a", &["tauri-dev"]), T0).unwrap().id;
+    let (ended, tabs) = q.retire_worker("t1", "you were retired", T0 + 1);
+    assert_eq!(ids(&ended.iter().map(|e| e.job.clone()).collect::<Vec<_>>()), vec![own], "only the worker's own job");
+    assert!(tabs.is_empty());
+    assert_eq!((q.job(&check).unwrap().state.as_str(), q.job(&queued).unwrap().state.as_str()), (RUNNING, QUEUED));
+
+    q.complete(&check, Some(1), Marks::Exited, T0 + 2);
+    assert_eq!(q.job(&check).unwrap().state, DONE, "it concludes");
+    assert!(q.take_old_tabs("t1").is_empty(), "its tab is closed by `finish`, not left under a retired task");
+
+    let ended = q.release_task("t1", true, BY_RELEASE, "your Hive was suspended", T0 + 3);
+    assert_eq!(ids(&ended.iter().map(|e| e.job.clone()).collect::<Vec<_>>()), vec![queued], "a suspend releases it");
+}
+
 /// A Hive being suspended is released before its PTYs die: its running job is the release's
 /// (no "its tab went away" of its own when the PTY then closes), and nothing of it starts or
 /// queues until it is resumed.
@@ -494,7 +520,7 @@ fn the_run_log_is_appended_and_indexed() {
 fn land_checks_go_first_one_per_repo_per_hive_and_keep_their_place() {
     let land = |hive: &str, task: &str, id: &str| JobSpec {
         priority: crate::hive::land::driver::LAND_PRIORITY,
-        land: Some(LandRun { land_id: id.into(), worktree: format!("/h/wt.noindex/land/{id}/web"), admin: "/r/.git/worktrees/web".into(), profile: "worker".into() }),
+        land: Some(LandRun { land_id: id.into(), worktree: format!("/h/wt.noindex/land/{id}/web"), admin: "/r/.git/worktrees/web".into(), profile: "worker".into(), kind: String::new() }),
         ..spec(hive, task, "w", &["land:web", "cargo"])
     };
     let mut q = Queue::default();

@@ -223,6 +223,9 @@ pub(crate) fn preview(hive: &Hive, paths: &HivePaths, has_coordinator: bool) -> 
             p.lands_in_flight.push(worker_label(w));
         }
     }
+    for u in super::land::undo::in_flight(paths) {
+        p.lands_in_flight.push(format!("the undo of {}", u.undoes));
+    }
     for f in hive.git_folders() {
         let wt = paths.coordinator_worktree(&f.name);
         if fs::symlink_metadata(&wt).is_err() {
@@ -378,9 +381,12 @@ fn heal(pane: &mut crate::state::Pane) -> PaneActive {
 /// (rows kept, their tabs cleared), its queue released, its open requests failed, then its disk.
 pub(crate) async fn delete_hive<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, delete_gallery: bool) -> Result<HiveDeleteResult, String> {
     let paths = caller.paths.clone();
-    let workers = blocking(move || Ok(worker::list_workers(&paths))).await?;
+    let (workers, undos) = blocking(move || Ok((worker::list_workers(&paths), super::land::undo::in_flight(&paths)))).await?;
     if let Some(w) = workers.iter().find(|w| super::land::in_flight(w)) {
         return Err(format!("Worker {} is landing: delete the Hive once its land has finished or been held.", worker_label(w)));
+    }
+    if let Some(u) = undos.first() {
+        return Err(format!("The undo of {} is running: delete the Hive once it has finished or been held.", u.undoes));
     }
     super::queue::park_workspace(&caller.workspace_id, "your Hive was deleted");
 

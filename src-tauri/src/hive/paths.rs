@@ -104,6 +104,12 @@ impl HivePaths {
         self.logs().join("lands.jsonl")
     }
 
+    /// Undos while they run, wait or hold (§8.6), one file each: under `logs/`, which no Hive
+    /// agent may write.
+    pub fn undos(&self) -> PathBuf {
+        self.logs().join("undos")
+    }
+
     /// One land's temporary worktrees and its check's temp folder (§8.1).
     pub fn land_dir(&self, land_id: &str) -> PathBuf {
         self.worktrees().join(LAND_SLUG).join(land_id)
