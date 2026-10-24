@@ -143,7 +143,8 @@ function createToastStore() {
     fireTimer(id, ts, computeRemaining(ts));
   }
 
-  function addToast(title: string, body: string, type: Toast['type'] = 'info', source?: ToastSource, focused?: boolean, action?: () => void) {
+  /** Returns the toast's id, for a caller that takes it back early (`removeToast`). */
+  function addToast(title: string, body: string, type: Toast['type'] = 'info', source?: ToastSource, focused?: boolean, action?: () => void): string {
     const id = crypto.randomUUID();
     const durationMs = preferencesStore.toastDuration * 1000;
     const toast: Toast = { id, title, body, type, createdAt: Date.now(), duration: durationMs, source, action };
@@ -163,6 +164,7 @@ function createToastStore() {
     }
 
     evictOverflow();
+    return id;
   }
 
   /** A request that waits for the human: no timer, no progress bar, and it stays until its

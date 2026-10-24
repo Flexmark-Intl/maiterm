@@ -3119,12 +3119,31 @@ several releases a day).
    state; the last tool held 4 s, a long tool still named after agentState's stale timer clears
    it, via `staleTool`), the diff stat and model/context from the push (`stores/hiveFeed`), and
    dependency strings (`hive/strings.ts`). A 30 s clock drives age labels only.
-   **Part c built**: worker columns (`WorkerColumn.svelte`, transcript only, so no PTY width ever
+   **Part c built** (`f0efeae2`): worker columns (`WorkerColumn.svelte`, transcript only, so no PTY width ever
    changes), the layout and its give-way (`hive/columns.ts`; the focused or just-opened column is
    never the one squeezed out), per-workspace view state in localStorage (`stores/hiveView`), and
    Files following the focused column: a Hive tab's place is `source: "hive"`, rooted at its
    worktree (worker) or read copy / plain primary (coordinator), always re-rooting, a human pin
    still winning.
+   **Part d built** (`fd2bf322`): the raw terminal (§4.5). Every Hive PTY spawns at 120×40
+   whatever the frontend asks (`HIVE_PTY_SIZE`, `AppState.fixed_size_ptys`), and `resize_pty`
+   refuses any change to one with a repaint (`resize_plan`; a Hive tab that missed the spawn lock
+   locks on its first resize). `TerminalPane`'s `fixedSize` mode skips every fit (`fitAndSync`)
+   and never creates its ResizeObserver. Show terminal opens a split under a column's chat
+   (`HiveTerminal.svelte`, `data-hive-terminal`, scrolling both ways), and `+page` makes Rust
+   render a Hive terminal only while the layout shows it. Every applied resize is logged
+   (`pty resize applied`), which spike 3's live check counts.
+   **Part e built**: the keyboard (§4.6, `hive/keys.ts`). `+layout` reads the Hive's Cmd keys
+   ahead of its tab handlers, only while the active workspace is a Hive, and sends them to
+   `HiveView` as `hive-key` (so Cmd+1-9, Shift+[ ] and W never reach a hidden tab); they count
+   as `isAppShortcut`, so they work from a composer, the Files tree or a raw terminal. Cmd+1
+   focuses the coordinator's composer (expanding its strip), Cmd+2…9 open badges 1…8,
+   Cmd+Shift+[ ] cycle coordinator → board → shown workers (a coordinator the human collapsed is
+   skipped), Cmd+W closes the focused worker column on a second press within 2 s (a toast after
+   the first; never the coordinator, never an agent), and Cmd+Shift+Y is bound and does nothing
+   until a second view exists. Escape, read by `HiveView` after anything inside handled it: a raw
+   terminal's own; in a composer, blur, leaving the keyboard on its worker's column; there, close
+   it. **Step 5 is complete.**
 5b. The stack feature first: any service on any branch (§6.9: `Tab.service_target`, re-rooted
    cwd, placeholders, Run on ▸, copies per branch, `shared_from`). Then the Hive run queue:
    namespaces, job kind, `hiveRun`, leases, the PreToolUse deny, pressure-aware capacity, and

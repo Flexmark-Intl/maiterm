@@ -21,6 +21,10 @@
   Show terminal (§4.5) adds a column's raw terminal under its chat (HiveTerminal). The panes are
   `fixedSize`, so that touches no PTY either; this view tells `+page` which ones are on screen
   (`hiveView.setTerminalsOnScreen`), which is all that makes Rust render them.
+
+  The keyboard (§4.6, `hive/keys.ts`): Cmd+1 the coordinator, Cmd+2…9 a worker by badge,
+  Cmd+Shift+[ ] between columns, Cmd+W (twice) closes the focused worker column, Escape blurs a
+  composer or closes a worker column, and inside a raw terminal stays the agent's.
 -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
@@ -44,7 +48,9 @@
   import { hiveFeed } from '$lib/stores/hiveFeed.svelte';
   import { hiveView } from '$lib/stores/hiveView.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
-  import { clampCoord, clampRail, fitColumns, W } from '$lib/hive/columns';
+  import { clampCoord, clampRail, cycleOrder, fitColumns, nextFocus, W } from '$lib/hive/columns';
+  import { escapeAction, HIVE_KEY, type HiveKeyAction, type HiveKeyDetail } from '$lib/hive/keys';
+  import { modSymbol } from '$lib/utils/platform';
   import { dispatchHiveOpenColumn, HIVE_OPEN_COLUMN, takePendingHiveOpen, type HiveOpenColumnDetail } from '$lib/hive/model';
   import { cardAge, cardState, latestNote, onScreenAgent, sortCards, STATE_LABEL, STATE_ORDER, waves, type CardStateName } from '$lib/hive/cards';
   import { activityLine, contextGauge, formatDiffStat } from '$lib/hive/activity';
@@ -385,10 +391,15 @@
       toastStore.addToast('Both worker columns are pinned', `Unpin one to open #${w.badge} ${w.title}.`, 'info');
       return;
     }
+    // A third column evicts one: an arm on it goes too (`closeColumn`).
+    if (closeArm && !hiveView.view(workspaceId).open.some((c) => c.taskId === closeArm?.taskId)) disarmClose();
     // After the column mounts: its composer, or the column itself for a worker with no chat.
     requestAnimationFrame(() => workerCols[w.task_id]?.focusColumn());
   }
+  /** Every way a column closes (Cmd+W, Escape, its menu) takes back a Cmd+W armed on it, so a
+   *  reopened column never closes on one press. */
   function closeColumn(taskId: string) {
+    if (closeArm?.taskId === taskId) disarmClose();
     hiveView.close(workspaceId, taskId);
   }
   /** Whichever column the keyboard or a click went to: the one the Files column follows. */
@@ -402,6 +413,107 @@
   function openCard(taskId: string, tabId: string | null | undefined) {
     dispatchHiveOpenColumn({ workspaceId, tabId: tabId ?? '', taskId });
   }
+
+  // ── The keyboard (§4.6). The Cmd keys come from `+layout` as `hive-key`, ahead of its tab
+  // handlers; Escape is read here. ──
+  let boardEl = $state<HTMLElement | undefined>();
+  /** The keyboard to a focus stop, once the layout has shown it (a column coming back from a
+   *  give-way is display:none until then). */
+  function focusDom(to: string) {
+    requestAnimationFrame(() => {
+      if (to === 'coordinator') column?.focusComposer();
+      else if (to === 'board') boardEl?.focus({ preventScroll: true });
+      else workerCols[to]?.focusColumn();
+    });
+  }
+  /** Cmd+Shift+[ / ], over every open column: one squeezed out by the window comes back when
+   *  focused (`fitColumns`' keeper). */
+  function cycle(dir: -1 | 1) {
+    const order = cycleOrder(openCols, view.coordCollapsed);
+    const to = nextFocus(order, view.focused, dir);
+    hiveView.focus(workspaceId, to);
+    focusDom(to);
+  }
+
+  /** Cmd+W closes the focused worker's column (never its agent, never the coordinator's) on a
+   *  second press within 2 s, as tabs do; the first says so in a toast, taken back when the
+   *  window lapses or the column closes. */
+  let closeArm: { taskId: string; toast: string; timer: ReturnType<typeof setTimeout> } | null = null;
+  function disarmClose() {
+    if (!closeArm) return;
+    clearTimeout(closeArm.timer);
+    toastStore.removeToast(closeArm.toast);
+    closeArm = null;
+  }
+  function closeFocused() {
+    const f = view.focused;
+    const c = cardByTask.get(f);
+    if (!c || !view.open.some((o) => o.taskId === f)) return;
+    if (closeArm?.taskId === f) {
+      disarmClose();
+      closeAndRefocus(f);
+      return;
+    }
+    disarmClose();
+    const toast = toastStore.addToast(
+      `Press ${modSymbol}W again to close #${c.worker.badge}`,
+      `${c.worker.title}: the column closes, the worker keeps running.`,
+      'info',
+    );
+    closeArm = { taskId: f, toast, timer: setTimeout(disarmClose, 2000) };
+  }
+  function closeAndRefocus(taskId: string) {
+    closeColumn(taskId);
+    focusDom(hiveView.view(workspaceId).focused);
+  }
+
+  function onHiveKey(a: HiveKeyAction) {
+    switch (a.kind) {
+      case 'focus-coordinator':
+        if (coordId) expandCoordinator();
+        return;
+      case 'open-badge': {
+        // Badges are spawn order, kept for the task's life (§4.6); past 8, a click.
+        const w = board?.workers.find((c) => c.badge === a.badge);
+        if (w) open({ workspaceId, tabId: w.tab_id ?? '', taskId: w.task_id });
+        return;
+      }
+      case 'cycle':
+        cycle(a.dir);
+        return;
+      case 'cycle-view':
+        // Board → Gallery → Memory; only the board exists until steps 7 and 8.
+        return;
+      case 'close-focused':
+        closeFocused();
+        return;
+    }
+  }
+
+  /** Escape (§4.6), after anything inside handled it (a menu, a card's own field). In a raw
+   *  terminal it's the agent's (it interrupts), so it passes. A composer blurs, leaving the
+   *  keyboard on its worker's column, where a second Escape closes it. */
+  function onKeydown(e: KeyboardEvent) {
+    if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
+    const t = e.target as HTMLElement | null;
+    if (!t?.closest) return;
+    const colEl = t.closest<HTMLElement>('[data-hive-column]');
+    const act = escapeAction({
+      terminal: !!t.closest('[data-hive-terminal], .xterm'),
+      editable: t.isContentEditable || !!t.closest('input, textarea, select'),
+      workerColumn: colEl?.dataset.hiveColumn ?? null,
+    });
+    if (!act) return;
+    e.preventDefault();
+    if (act.kind === 'blur') {
+      // ChatColumn's composer has already blurred itself; any other field hasn't.
+      t.blur();
+      colEl?.focus({ preventScroll: true });
+    } else {
+      closeAndRefocus(act.taskId);
+    }
+  }
+
   onMount(() => {
     const feedFor = workspaceId;
     hiveFeed.attach(feedFor);
@@ -412,6 +524,11 @@
       open((e as CustomEvent<HiveOpenColumnDetail>).detail);
     };
     window.addEventListener(HIVE_OPEN_COLUMN, onOpen);
+    const onKey = (e: Event) => {
+      const d = (e as CustomEvent<HiveKeyDetail>).detail;
+      if (d?.workspaceId === workspaceId) onHiveKey(d.action);
+    };
+    window.addEventListener(HIVE_KEY, onKey);
     // Sent to this window only (`emit_to`), so another window's Hive never refetches here.
     let unlisten: (() => void) | undefined;
     let gone = false;
@@ -427,11 +544,15 @@
       if (fetchTimer) clearTimeout(fetchTimer);
       if (flashTimer) clearTimeout(flashTimer);
       window.removeEventListener(HIVE_OPEN_COLUMN, onOpen);
+      window.removeEventListener(HIVE_KEY, onKey);
+      disarmClose();
     };
   });
 </script>
 
-<div class="hive">
+<!-- Escape bubbling out of the columns (§4.6); every control inside keeps its own keys. -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="hive" onkeydown={onKeydown}>
   <header class="hive-h">
     <div class="title">
       <b>{ws?.name ?? ''}</b>
@@ -519,11 +640,15 @@
         onkeydown={(e) => onResizerKey(e, 'coord')}
       ></div>
     {/if}
+    <!-- A focus stop of its own for Cmd+Shift+[ ] (§4.6); Tab goes on into its cards. -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <section
+      bind:this={boardEl}
       class="board"
       class:rail={boardMode === 'rail'}
+      class:focused={focusedKey === 'board' && boardMode === 'rail'}
       style={boardMode === 'rail' ? `width: ${railW}px` : undefined}
+      tabindex="-1"
       aria-label="Board"
       onfocusin={focusTo('board')}
       onpointerdown={focusTo('board')}
@@ -666,6 +791,8 @@
   .waves { position: relative; flex: 1; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 16px 24px; padding: 14px 16px; min-width: 0; }
   .wave { position: relative; z-index: 1; flex: 1 1 220px; max-width: 340px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
   .board.rail { flex: none; min-width: 200px; max-width: 240px; }
+  .board:focus { outline: none; }
+  .board.focused { box-shadow: inset 0 2px 0 var(--accent); }
   .rail-list { flex: 1; display: flex; flex-direction: column; gap: 6px; padding: 10px; min-width: 0; }
   /* Strings run under the cards (they're opaque), so one that skips a wave passes behind it. The
      Weave's vocabulary (docs/loom.md): moving dots = the upstream is active, a slow amber dash

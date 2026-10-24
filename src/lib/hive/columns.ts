@@ -127,9 +127,12 @@ export function fitColumns(p: FitInput): Fit {
 }
 
 /** The focus stops of Cmd+Shift+[ / ], left to right. The board (or rail) is one: Files keeps its
- *  last root while it holds focus. */
-export function cycleOrder(fit: Pick<Fit, 'shown'>): HiveFocus[] {
-  return ['coordinator', 'board', ...fit.shown];
+ *  last root while it holds focus. Every open column is a stop, given way or not: focused, one
+ *  becomes `fitColumns`' keeper and shows again, where stops taken from `Fit.shown` would lose
+ *  the workers a focused coordinator pushed out. A coordinator the human collapsed is skipped:
+ *  the keyboard never sits on a strip. */
+export function cycleOrder(open: readonly Pick<OpenColumn, 'taskId'>[], coordCollapsed: boolean): HiveFocus[] {
+  return [...(coordCollapsed ? [] : ['coordinator']), 'board', ...open.map((c) => c.taskId)];
 }
 
 /** The next stop, wrapping. A focus not in the order (a column that just closed) starts from an end. */

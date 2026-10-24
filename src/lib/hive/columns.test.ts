@@ -136,8 +136,28 @@ describe('fitColumns', () => {
 });
 
 describe('focus order', () => {
-  it('cycles coordinator, board, then the shown columns, wrapping both ways', () => {
-    const order = cycleOrder({ shown: ['a', 'b'] });
+  it('skips a coordinator the human collapsed', () => {
+    expect(cycleOrder([col('a', 1)], true)).toEqual(['board', 'a']);
+  });
+
+  it('reaches a worker a focused coordinator pushed out of a narrow window', () => {
+    // 1000 < 440 + 220 + 420 + 8: with the coordinator focused, a gives way.
+    const open = [col('a', 1)];
+    const at = (focused: string, coordFocusedAt: number) =>
+      fitColumns({ main: 1000, coordW: W.COORD_DEFAULT, railW: W.RAIL_DEFAULT, coordCollapsed: false, open, focused, coordFocusedAt });
+    expect(at('coordinator', 2).shown).toEqual([]);
+    const order = cycleOrder(open, false);
+    // The board keeps the coordinator as the keeper, so a is still out; one more step reaches it.
+    expect(nextFocus(order, 'coordinator', 1)).toBe('board');
+    expect(at('board', 2).shown).toEqual([]);
+    expect(nextFocus(order, 'board', 1)).toBe('a');
+    expect(nextFocus(order, 'coordinator', -1)).toBe('a');
+    // Focused, it is the keeper and shows again.
+    expect(at('a', 2).shown).toEqual(['a']);
+  });
+
+  it('cycles coordinator, board, then the open columns, wrapping both ways', () => {
+    const order = cycleOrder([col('a', 1), col('b', 2)], false);
     expect(order).toEqual(['coordinator', 'board', 'a', 'b']);
     expect(nextFocus(order, 'b', 1)).toBe('coordinator');
     expect(nextFocus(order, 'coordinator', -1)).toBe('b');

@@ -55,6 +55,7 @@
   import { claudeSetupStore } from '$lib/stores/claudeSetup.svelte';
   import ClaudeSetupModal from '$lib/components/ClaudeSetupModal.svelte';
   import { fileTreeStore } from '$lib/stores/fileTree.svelte';
+  import { HIVE_KEY, hiveKeyAction, isHiveAppShortcut, type HiveKeyDetail } from '$lib/hive/keys';
 
   interface Props {
     children: import('svelte').Snippet;
@@ -924,10 +925,12 @@
      * Cmd key belongs to CodeMirror) and in the Files tree (where every other key belongs to
      * the tree). Tab management (Cmd+T/W/1-9/Shift+[/]), window and workspace management
      * (Cmd+N/Shift+N — these must never stop opening a window), zoom, preferences, open
-     * file, the sidebar, notes, tasks, the Loom, the mesh cockpit and Files.
+     * file, the sidebar, notes, tasks, the Loom, the mesh cockpit and Files. In a Hive, its
+     * own keys too (docs/hive.md §4.6), Cmd+Shift+Y the only one not already here.
      */
     function isAppShortcut(e: KeyboardEvent): boolean {
       if (!isModKey(e)) return false;
+      if (workspacesStore.activeWorkspace?.hive && isHiveAppShortcut(e, isMac())) return true;
       const key = e.key.toLowerCase();
       return (
         // Tab management
@@ -980,6 +983,17 @@
           // Alt+Arrow keys etc — let editor handle
           return;
         }
+      }
+
+      // A Hive's keys (docs/hive.md §4.6), ahead of the tab handlers below: a Hive has no tab
+      // strip, and Cmd+1-9 / Shift+[ ] / W would act on its hidden tabs. HiveView acts on them.
+      const hiveWs = workspacesStore.activeWorkspace;
+      const hiveAction = hiveWs?.hive ? hiveKeyAction(e, isMac()) : null;
+      if (hiveWs && hiveAction) {
+        e.preventDefault();
+        e.stopPropagation();
+        window.dispatchEvent(new CustomEvent<HiveKeyDetail>(HIVE_KEY, { detail: { workspaceId: hiveWs.id, action: hiveAction } }));
+        return;
       }
 
       // Cmd/Ctrl+Shift+B - Files column: open and focus, focus, or close (§11.2)
