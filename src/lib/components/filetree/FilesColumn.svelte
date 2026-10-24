@@ -75,10 +75,13 @@
   });
 
   // Follow: the active tab (or workspace) changed. Debounced in the store; an editor tab
-  // only reveals its file there, never re-roots.
+  // only reveals its file there, never re-roots. In a Hive, the focused column's tab: derived,
+  // so a view change that leaves the tab alone (a pin, a resize) resolves nothing.
+  const followed = $derived(fileTreeStore.followedTab);
   $effect(() => {
     void workspacesStore.activeWorkspaceId;
     void workspacesStore.activeTab?.id;
+    void followed;
     untrack(() => fileTreeStore.scheduleResolve(false));
   });
 

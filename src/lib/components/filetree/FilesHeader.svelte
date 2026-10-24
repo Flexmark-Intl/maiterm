@@ -22,7 +22,7 @@
   const rootTip = $derived.by(() => {
     if (!place) return 'Choose a folder';
     const where = fileTreeStore.displayRoot(place);
-    const why = place.source === 'pin' ? 'pinned for this workspace' : 'following the active tab';
+    const why = place.source === 'pin' ? 'pinned for this workspace' : place.source === 'hive' ? 'following the focused Hive column' : 'following the active tab';
     const host = place.kind === 'remote' ? `\non the ssh host ${place.host_label ?? place.host_key}` : '';
     return `${where}${host}\n${why} · click to switch`;
   });

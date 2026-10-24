@@ -3112,7 +3112,19 @@ several releases a day).
    Stop → both, SessionStart → both (meta 2 s); an accepted report touches the diff stat, a
    rolled-back spawn forgets both. Pushed as `hive-diff-stat` / `hive-worker-meta` by `emit_to`
    only when changed; `hive_diff_stats` / `hive_worker_metas` answer the view's mount from the
-   cache, computing a missing entry once. No timer exists for an idle worker.
+   cache, computing a missing entry once. No timer exists for an idle worker. Windows CI and
+   `git_in_worktree` (every maiTerm git call into a worker repo uses the recorded admin dir):
+   `fbee5a95`.
+   **Part b built** (`6fce3fb5`): cards carry the activity line (`hive/activity.ts`, from hook
+   state; the last tool held 4 s, a long tool still named after agentState's stale timer clears
+   it, via `staleTool`), the diff stat and model/context from the push (`stores/hiveFeed`), and
+   dependency strings (`hive/strings.ts`). A 30 s clock drives age labels only.
+   **Part c built**: worker columns (`WorkerColumn.svelte`, transcript only, so no PTY width ever
+   changes), the layout and its give-way (`hive/columns.ts`; the focused or just-opened column is
+   never the one squeezed out), per-workspace view state in localStorage (`stores/hiveView`), and
+   Files following the focused column: a Hive tab's place is `source: "hive"`, rooted at its
+   worktree (worker) or read copy / plain primary (coordinator), always re-rooting, a human pin
+   still winning.
 5b. The stack feature first: any service on any branch (§6.9: `Tab.service_target`, re-rooted
    cwd, placeholders, Run on ▸, copies per branch, `shared_from`). Then the Hive run queue:
    namespaces, job kind, `hiveRun`, leases, the PreToolUse deny, pressure-aware capacity, and

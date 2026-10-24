@@ -61,6 +61,7 @@ import { openInEditor, editorFileInfo } from '$lib/utils/openInEditor';
 import { editorTitleAfter } from '$lib/utils/editorTitle';
 import { insertPathsIntoTab, type InsertItem } from '$lib/utils/insertPaths';
 import { isServiceTab, isStripHidden } from '$lib/workspace/hiddenTabs';
+import { hiveView } from '$lib/stores/hiveView.svelte';
 
 /** What the column shows when it isn't a tree. */
 export type TreeStatus = 'none' | 'resolving' | 'opening' | 'ready' | 'missing' | 'gone' | 'error';
@@ -646,8 +647,12 @@ function createFileTreeStore() {
 
   // ── Resolving the root (§4) ───────────────────────────────────────────────────────────
 
-  /** The tab the tree follows: the active pane's active terminal tab, never a strip-hidden one. */
+  /** The tab the tree follows: the active pane's active terminal tab, never a strip-hidden one.
+   *  A Hive has no active tab: there it's the focused column's (docs/hive.md §4.1), and none while
+   *  the board has focus, which keeps the last root. */
   function followableTab(): string | null {
+    const ws = workspacesStore.activeWorkspace;
+    if (ws?.hive) return hiveView.focusedTabId(ws.id);
     const t = workspacesStore.activeTab;
     if (t && (t.tab_type ?? 'terminal') === 'terminal' && !isStripHidden(t)) return t.id;
     return null;
@@ -658,6 +663,8 @@ function createFileTreeStore() {
   function fallbackTab(): string | null {
     const ws = workspacesStore.activeWorkspace;
     if (!ws) return null;
+    // A Hive's tabs are all strip-hidden: its coordinator is where the tree starts.
+    if (ws.hive) return hiveView.coordinatorTabId(ws.id);
     const panes = [...ws.panes].sort((a, b) => (a.id === ws.active_pane_id ? -1 : b.id === ws.active_pane_id ? 1 : 0));
     for (const p of panes) {
       const t = p.tabs.find((x) => (x.tab_type ?? 'terminal') === 'terminal' && !isStripHidden(x));
@@ -2722,6 +2729,8 @@ function createFileTreeStore() {
     attach,
     detach,
     scheduleResolve,
+    /** The tab the tree follows now (reactive): the column re-resolves when it changes. */
+    get followedTab(): string | null { return followableTab(); },
     /** The human asked the tree to follow the tab now (the gone banner's button): forced,
      *  so it acts even with following turned off. */
     followTabNow() { return resolveNow(true, true); },

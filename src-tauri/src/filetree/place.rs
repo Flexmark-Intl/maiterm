@@ -17,6 +17,9 @@
 //! A saved folder that no longer exists comes back as `missing`, never as home: a tree that
 //! quietly showed `$HOME` would invite the human to work in the wrong place (docs/relocate.md
 //! §4). The root is the git top level of the folder, else the folder itself.
+//!
+//! A Hive agent's tab (docs/hive.md §4.1) skips the chain: its root is the folder the Hive knows
+//! it works in (`source: "hive"`). The workspace pin still wins over it.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -50,6 +53,8 @@ pub struct PlaceInputs {
     pub tunnel_host: Option<String>,
     /// The workspace's Files pin.
     pub pin: Option<String>,
+    /// A Hive agent's folder (`hive::files::files_root`): replaces the chain, never the pin.
+    pub hive_root: Option<String>,
 }
 
 /// The folder the chain landed on.
@@ -355,11 +360,26 @@ pub fn place_for(pick: Option<&Pick>, pin: Option<&str>) -> Result<TreePlace, St
     Ok(TreePlace { project: top.is_some(), ..local_place(&root, Some(&cwd), pick.source) })
 }
 
+/// A Hive agent's place: rooted at the folder the Hive gave it, whatever its shell did. The
+/// pick only places the tick, when it is inside. A worktree that went away is missing, never
+/// the chain's guess.
+pub fn hive_place(root: &str, pick: Option<&Pick>) -> TreePlace {
+    let dir = Path::new(root);
+    if !dir.is_dir() {
+        return missing_place(root, "hive");
+    }
+    let root = crate::share::canon(dir);
+    let cwd = pick.filter(|p| p.remote_host.is_none() && !p.missing).map(|p| PathBuf::from(&p.cwd));
+    TreePlace { project: toplevel_cached(&root).is_some(), ..local_place(&root, cwd.as_deref(), "hive") }
+}
+
 /// Gather a tab's inputs from app state.
 fn gather(state: &Arc<AppState>, tab_id: &str, fresh: bool) -> Result<PlaceInputs, String> {
     let mut i = PlaceInputs::default();
+    let hive_agent;
     {
         let data = state.app_data.read();
+        hive_agent = crate::hive::hive_agent(&data, tab_id);
         let mut found = false;
         'outer: for w in &data.windows {
             for ws in &w.workspaces {
@@ -382,6 +402,11 @@ fn gather(state: &Arc<AppState>, tab_id: &str, fresh: bool) -> Result<PlaceInput
         if !found {
             return Err("Tab not found".into());
         }
+    }
+    // Out of the state lock: a worker is found by its `worker.json`. A pin wins, so it isn't read.
+    if let Some((hive, role, paths)) = hive_agent.filter(|_| non_empty(&i.pin).is_none()) {
+        let w = (role == crate::hive::ROLE_WORKER).then(|| crate::hive::worker::worker_for_tab(&paths, tab_id)).flatten();
+        i.hive_root = crate::hive::files::files_root(&hive, &role, &paths, w.as_ref()).map(|p| p.to_string_lossy().into_owned());
     }
     let pty = state.tab_pty_map.read().get(tab_id).cloned();
     if let Some(pty) = pty {
@@ -438,6 +463,10 @@ pub fn resolve(state: &Arc<AppState>, ft: &super::FileTreeState, tab_id: &str, h
         return Err("A stack service tab is never the Files source".into());
     }
     let picked = pick(&inputs, hints, &local_hostname(), &|p: &Path| p.is_dir());
+    // A human's pin still wins over the Hive's folder.
+    if let Some(root) = non_empty(&inputs.hive_root).filter(|_| non_empty(&inputs.pin).is_none()) {
+        return Ok(hive_place(root, picked.as_ref().ok()));
+    }
     match (&picked, inputs.pin.as_deref()) {
         (_, Some(pin)) => place_for(picked.as_ref().ok(), Some(pin)),
         (Ok(p), None) => {
@@ -604,6 +633,27 @@ mod tests {
         assert!(!plain.project, "a folder in no repository roots at itself");
         let pinned = place_for(Some(&at("proj/src")), Some(&tmp.join("proj").to_string_lossy())).unwrap();
         assert!(!pinned.project, "a pin never re-roots by this rule");
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn a_hive_agent_is_rooted_at_its_hive_folder_whatever_its_shell_did() {
+        let tmp = std::env::temp_dir().join(format!("ft-hive-{}", uuid::Uuid::new_v4()));
+        let wt = tmp.join("wt.noindex").join("auth").join("web");
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(&wt).status().is_ok_and(|s| s.success());
+        assert!(ok, "git init");
+        let root = crate::share::canon(&wt);
+        let at = |p: &Path| Pick { cwd: p.to_string_lossy().into(), source: "pty", remote_host: None, missing: false };
+        // Inside: the tick follows the shell.
+        let p = hive_place(&wt.to_string_lossy(), Some(&at(&wt.join("src"))));
+        assert_eq!((p.source.as_str(), p.root.clone(), p.cwd_rel.as_deref(), p.project), ("hive", root.to_string_lossy().into_owned(), Some("src"), true));
+        // A setup that cd'd elsewhere doesn't move the root.
+        let p = hive_place(&wt.to_string_lossy(), Some(&at(&tmp)));
+        assert_eq!((p.root, p.cwd_rel), (root.to_string_lossy().into_owned(), None));
+        // A worktree that went away is missing, never the chain's guess.
+        let gone = tmp.join("wt.noindex").join("gone").to_string_lossy().into_owned();
+        assert_eq!(hive_place(&gone, Some(&at(&wt))).missing.as_deref(), Some(gone.as_str()));
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 

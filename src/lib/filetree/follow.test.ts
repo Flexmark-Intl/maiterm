@@ -43,4 +43,10 @@ describe('followStep', () => {
     expect(followStep(local('/a', { source: 'pin' }), local('/a/b'))).toBe('reroot');
     expect(followStep(local('/a'), local('/a/b', { source: 'pin' }))).toBe('reroot');
   });
+
+  it('roots at a Hive folder even when it is no repository and lies inside the root', () => {
+    // A coordinator on a plain primary, or a worker with only its scratch dir, from a home root.
+    expect(followStep(local('/Users/me'), local('/Users/me/footage', { source: 'hive' }))).toBe('reroot');
+    expect(followStep(local('/Users/me/footage', { source: 'hive' }), local('/Users/me/footage', { source: 'hive' }))).toBe('same');
+  });
 });

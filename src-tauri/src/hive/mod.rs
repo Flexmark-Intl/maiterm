@@ -19,7 +19,8 @@
 //! dependencies `waiters`; and everything maiTerm types into a Hive agent goes through `deliver`.
 //!
 //! The board's pushed feed (step 5): each worker's diff stat (`diffstat`) and model/context meta
-//! (`feed`), recomputed off its own hooks and sent to its Hive's window only.
+//! (`feed`), recomputed off its own hooks and sent to its Hive's window only. `files` names the
+//! folder the Files column shows for a Hive agent's column.
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
@@ -31,6 +32,7 @@ pub(crate) mod deliver;
 pub mod diffstat;
 pub mod events;
 pub mod feed;
+pub mod files;
 pub mod fuses;
 pub mod gate;
 pub(crate) mod git;

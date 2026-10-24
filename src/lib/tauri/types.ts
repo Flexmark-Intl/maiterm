@@ -1224,7 +1224,8 @@ export interface TreePlace {
   /** The tab's folder relative to the root: the you-are-here tick. Null when it IS the root,
    *  or isn't under it (a pinned root elsewhere). Reveal it; never select it. */
   cwd_rel: string | null;
-  /** 'pty' | 'osc7' | 'agent' | 'last_cwd' | 'auto_resume' | 'restore' | 'prompt' | 'pin'. */
+  /** 'pty' | 'osc7' | 'agent' | 'last_cwd' | 'auto_resume' | 'restore' | 'prompt' | 'pin' |
+   *  'hive' (a Hive agent's worktree or read copy, docs/hive.md §4.1). */
   source: string;
   /** 'local' | 'network' | 'unknown'. */
   fs_class: string;

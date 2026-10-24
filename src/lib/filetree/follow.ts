@@ -20,7 +20,8 @@ export function followStep(current: Placed | null, next: Placed & Pick<TreePlace
   if (!current) return 'reroot';
   if (current.place === next.place) return 'same';
   // A pin always comes back as its own place, and a pinned root is left only for another pin.
-  if (next.source === 'pin' || current.source === 'pin') return 'reroot';
+  // A Hive agent's folder is its root too, repository or not (a plain primary, a scratch dir).
+  if (next.source === 'pin' || next.source === 'hive' || current.source === 'pin') return 'reroot';
   // A remote root keys the host's paths, which a local `/tmp/x` can spell too.
   const sameMachine = current.kind === next.kind && (next.kind !== 'remote' || sameSshHost(current.host_key, next.host_key));
   if (!sameMachine) return 'reroot';
