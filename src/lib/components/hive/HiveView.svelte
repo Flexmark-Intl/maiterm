@@ -1,6 +1,7 @@
 <!--
   A Hive workspace's main area (docs/hive.md §4.1): the header, the coordinator's column and
-  the board. In place of the split tree, never over it: a Hive has no visible terminal.
+  the board. In place of the split tree, never over it: a Hive's terminals show only under their
+  own column's chat, when the human asks (Show terminal).
 
   The coordinator's column is its transcript (ChatColumn), never its terminal: dragging the
   column's width touches no PTY, and a width change at a streaming Claude duplicates its
@@ -16,6 +17,10 @@
   narrow window one gives way, then the coordinator goes to its strip (`hive/columns.ts`). Which
   are open and which has focus is `hiveView`'s, per workspace; the focused column's tab is what
   the Files column follows here. Every column is a transcript, so none of this touches a PTY.
+
+  Show terminal (§4.5) adds a column's raw terminal under its chat (HiveTerminal). The panes are
+  `fixedSize`, so that touches no PTY either; this view tells `+page` which ones are on screen
+  (`hiveView.setTerminalsOnScreen`), which is all that makes Rust render them.
 -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
@@ -31,6 +36,7 @@
   import ChatColumn from '$lib/components/loom/ChatColumn.svelte';
   import WorkerCard from './WorkerCard.svelte';
   import WorkerColumn from './WorkerColumn.svelte';
+  import HiveTerminal from './HiveTerminal.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -176,6 +182,28 @@
   const boardMode = $derived(fit.board);
   const railCards = $derived(boardMode === 'rail' ? sortCards(cards) : []);
   const focusedKey = $derived(view.focused);
+
+  // ── Raw terminals (§4.5): the ones whose column the layout shows are on screen. A column given
+  // way keeps its slot mounted but hidden, and Rust stops rendering it. ──
+  const coordTerminal = $derived(!!coordId && view.terminalShown.includes('coordinator'));
+  const terminalsOnScreen = $derived.by(() => {
+    const ids: string[] = [];
+    if (coordTerminal && fit.coord === 'full') ids.push(coordId!);
+    for (const taskId of fit.shown) {
+      const tab = cardByTask.get(taskId)?.worker.tab_id;
+      if (tab && view.terminalShown.includes(taskId)) ids.push(tab);
+    }
+    return ids;
+  });
+  $effect(() => {
+    const id = workspaceId;
+    const ids = terminalsOnScreen;
+    untrack(() => hiveView.setTerminalsOnScreen(id, ids));
+  });
+  $effect(() => {
+    const id = workspaceId;
+    return () => hiveView.setTerminalsOnScreen(id, []);
+  });
 
   // The Files column follows the focused column's tab (fileTree `followableTab`), and a worker's
   // tab is its card's. A column whose worker the board no longer has (a rolled-back spawn) closes.
@@ -461,9 +489,18 @@
       >
         {#snippet header()}
           <span class="role">coordinator</span>
+          {#if coordId}
+            <IconButton
+              tooltip={coordTerminal ? 'Hide the terminal' : 'Show the terminal'}
+              onclick={() => hiveView.setTerminalShown(workspaceId, 'coordinator', !coordTerminal)}
+            ><Icon name="terminal" size={12} /></IconButton>
+          {/if}
           <IconButton tooltip="Collapse to a strip" onclick={collapseCoordinator}><Icon name="collapse-all" size={12} /></IconButton>
         {/snippet}
       </ChatColumn>
+      {#if coordTerminal}
+        <HiveTerminal tabId={coordId!} onhide={() => hiveView.setTerminalShown(workspaceId, 'coordinator', false)} />
+      {/if}
     </section>
     {#if fit.coord === 'full'}
       <!-- A focusable separator is a control (ARIA), which the a11y lint doesn't know. -->
@@ -588,8 +625,10 @@
             active={fit.shown.includes(col.taskId)}
             pinned={col.pinned}
             focused={focusedKey === col.taskId}
+            terminalShown={view.terminalShown.includes(col.taskId)}
             onpin={() => hiveView.togglePin(workspaceId, col.taskId)}
             onclose={() => closeColumn(col.taskId)}
+            onterminal={(shown) => hiveView.setTerminalShown(workspaceId, col.taskId, shown)}
           />
         </div>
       {/if}

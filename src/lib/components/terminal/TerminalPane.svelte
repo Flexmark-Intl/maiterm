@@ -44,6 +44,7 @@
   import { enableBridge, disableBridge, hasBridge, getBridgeInfo, getBridgeStatus, buildUserSetupScript, isInteractiveSshSession, isRemoteShellForeground } from '$lib/stores/sshMcpBridge.svelte';
   import { claudeStateStore, resumeCommandFor } from '$lib/stores/agentState.svelte';
   import { hiveLaunchLine } from '$lib/hive/launch';
+  import { fitAndSyncAllowed, wheelScrollsSlot, HIVE_PTY_COLS, HIVE_PTY_ROWS } from '$lib/hive/fixedSize';
   import { sshDisconnectStore } from '$lib/stores/sshDisconnect.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import Button from '$lib/components/ui/Button.svelte';
@@ -67,9 +68,13 @@
     triggerVariables?: Record<string, string>;
     /** `Tab.hive_role`: the agent starts only through its Hive launch builder (docs/hive.md §11.1). */
     hiveRole?: string | null;
+    /** The PTY keeps one size for life (a Hive agent's, docs/hive.md §4.5): nothing here fits xterm
+     *  or resizes the PTY, xterm keeps the PTY's size, and the slot scrolls. Rust refuses the
+     *  resize anyway. A font change re-renders at the new cell size only. */
+    fixedSize?: boolean;
   }
 
-  let { workspaceId, paneId, tabId, existingPtyId, visible, restoreCwd, restoreSshCommand, restoreRemoteCwd, autoResumeCwd, autoResumeSshCommand, autoResumeRemoteCwd, autoResumeCommand, autoResumeRememberedCommand, autoResumePinned, autoResumeEnabled, triggerVariables, hiveRole }: Props = $props();
+  let { workspaceId, paneId, tabId, existingPtyId, visible, restoreCwd, restoreSshCommand, restoreRemoteCwd, autoResumeCwd, autoResumeSshCommand, autoResumeRemoteCwd, autoResumeCommand, autoResumeRememberedCommand, autoResumePinned, autoResumeEnabled, triggerVariables, hiveRole, fixedSize = false }: Props = $props();
 
   let containerRef: HTMLDivElement;
   let terminal: Terminal;
@@ -388,6 +393,8 @@
   // Uses proposeDimensions() + a single resize instead of fit() + resize()
   // to avoid a double reflow.
   function fitWithPadding() {
+    // A fixed-size terminal's xterm holds the PTY's size; its slot scrolls instead.
+    if (fixedSize) return;
     // Guard: skip if container is not in the document (detached during split re-render)
     if (!containerRef?.isConnected) return;
     const dims = fitAddon.proposeDimensions();
@@ -405,6 +412,15 @@
     // now: it repaints in full, and keeps every frame full until the grid
     // matches — otherwise deltas land on a reflowed buffer at the wrong rows.
     if (ptyId) refreshTerminalFrame(ptyId, cols, rows).catch(() => {});
+  }
+
+  /** Fit xterm, then size the PTY to match: what showing, re-homing and re-fonting a terminal
+   *  does. Never for a fixed-size one (docs/hive.md §4.5). Callers keep their own gates. */
+  function fitAndSync() {
+    if (fixedSize) return;
+    fitWithPadding();
+    const { cols, rows } = terminal;
+    resizeTerminal(ptyId, cols, rows).catch(e => logError(String(e)));
   }
   let contextMenu = $state<{ x: number; y: number } | null>(null);
   let hoveredLinkUri: string | null = null;
@@ -485,11 +501,7 @@
     if (slot && containerRef && containerRef.parentElement !== slot) {
       slot.appendChild(containerRef);
       if (visible && initialized) {
-        afterLayout(() => {
-          fitWithPadding();
-          const { cols, rows } = terminal;
-          resizeTerminal(ptyId, cols, rows).catch(e => logError(String(e)));
-        });
+        afterLayout(fitAndSync);
       }
     }
   }
@@ -590,7 +602,11 @@
     // avoids an 80×24→fitted width jump on first view, which makes a running
     // TUI (Claude Code) re-render its transcript into scrollback as permanent
     // duplicate blocks.
-    if (!visible && !reattaching) {
+    if (fixedSize && !reattaching) {
+      // The one size this PTY will ever have, so no saved layout applies. Rust spawns a Hive
+      // tab's PTY at it whatever this sends; sending it too keeps xterm and the grid in step.
+      terminal.resize(HIVE_PTY_COLS, HIVE_PTY_ROWS);
+    } else if (!visible && !reattaching) {
       try {
         const saved = await getSavedTerminalSize(tabId);
         if (saved && saved[0] >= 10 && saved[1] >= 2) {
@@ -967,8 +983,7 @@
       if (!hiveRole) {
         setTimeout(() => {
           if (destroyed) return;
-          fitWithPadding();
-          resizeTerminal(ptyId, terminal.cols, terminal.rows).catch(e => logError(String(e)));
+          fitAndSync();
         }, 300);
       }
     }
@@ -1207,16 +1222,19 @@
 
     // Handle resize — fit immediately for visual update,
     // debounce PTY resize to avoid rapid-fire SIGWINCH during window drag.
-    resizeObserver = new ResizeObserver(() => {
-      if (!visible || !containerRef?.isConnected) return;
-      fitWithPadding();
-      clearTimeout(resizePtyTimeout);
-      resizePtyTimeout = setTimeout(() => {
-        const { cols, rows } = terminal;
-        resizeTerminal(ptyId, cols, rows).catch(e => logError(String(e)));
-      }, 150);
-    });
-    resizeObserver.observe(containerRef);
+    // A fixed-size terminal has nothing to follow, so it gets no observer at all.
+    if (!fixedSize) {
+      resizeObserver = new ResizeObserver(() => {
+        if (!fitAndSyncAllowed(fixedSize, visible, !!containerRef?.isConnected)) return;
+        fitWithPadding();
+        clearTimeout(resizePtyTimeout);
+        resizePtyTimeout = setTimeout(() => {
+          const { cols, rows } = terminal;
+          resizeTerminal(ptyId, cols, rows).catch(e => logError(String(e)));
+        }, 150);
+      });
+      resizeObserver.observe(containerRef);
+    }
 
     // Intercept mouse wheel for Rust-managed scrollback navigation.
     // In alternate screen mode (TUI apps), let xterm.js handle scrolling
@@ -1224,6 +1242,12 @@
     // Uses velocity-sensitive scrolling: small movements = 1 line, fast flicks = many lines.
     let scrollAccumulator = 0;
     containerRef.addEventListener('wheel', (e) => {
+      // A Hive raw terminal is wider than its column (docs/hive.md §4.5): a sideways gesture
+      // scrolls its slot natively. Keep it from xterm, but don't cancel the scroll.
+      if (wheelScrollsSlot(fixedSize, e.deltaX, e.deltaY, e.shiftKey)) {
+        e.stopPropagation();
+        return;
+      }
       if (lastFrameAlternateScreen) {
         // Guard against an xterm.js freeze: its alt-screen wheel→arrow-key path
         // (taken because we run scrollback:0) divides deltaY by the measured row
@@ -1390,7 +1414,7 @@
     // below when it is actually shown, and a stack service's terminal never takes it at all
     // (docs/stack.md §7): starting a service must not move the cursor out of the tab you
     // are typing in, and a drawer that holds focus has no keyboard dismiss.
-    if (visible && !isServiceTab()) terminal.focus();
+    if (visible && !isServiceTab() && !fixedSize) terminal.focus();
     // Delay activity tracking and trigger actions so initial shell prompt
     // and restored/auto-resumed output don't fire indicators or triggers.
     // Auto-resume (especially SSH + Claude) can take much longer to produce
@@ -1485,18 +1509,17 @@
     if (visible && initialized && fitAddon) {
       // Delay fit to ensure container is visible
       afterLayout(() => {
-        fitWithPadding();
         // Always sync PTY dimensions when becoming visible — the PTY may have been
         // writing at a different size while the terminal was in the background
         // (e.g. auto-resume reconnecting to Claude Code at default 80x24).
-        const { cols, rows } = terminal;
-        resizeTerminal(ptyId, cols, rows).catch(e => logError(String(e)));
+        fitAndSync();
         // A stack service's terminal never takes the keyboard on its own (docs/stack.md
         // §7): becoming visible means its console drawer opened over the tab you are
         // working in, and a peek must not move your cursor into a dev server's shell.
         // Click into it to type. It also keeps Escape as the drawer's dismiss rather than
-        // a byte only the shell would see.
-        if (!autoResumePrompt && !isServiceTab()) terminal.focus();
+        // a byte only the shell would see. A Hive agent's raw terminal is the same peek:
+        // its column's composer keeps the keyboard.
+        if (!autoResumePrompt && !isServiceTab() && !fixedSize) terminal.focus();
       });
       untrack(() => {
         activityStore.clearActive(tabId);
@@ -1570,13 +1593,9 @@
     terminal.options.cursorStyle = cursorStyle;
     terminal.options.theme = getTheme(themeId, preferencesStore.customThemes).terminal;
 
-    // Re-fit after font changes
+    // Re-fit after font changes (a fixed-size terminal only re-renders at the new cell size)
     afterLayout(() => {
-      if (fitAddon && visible) {
-        fitWithPadding();
-        const { cols, rows } = terminal;
-        resizeTerminal(ptyId, cols, rows).catch(e => logError(String(e)));
-      }
+      if (fitAddon && visible) fitAndSync();
     });
   });
 
@@ -2199,6 +2218,7 @@
 <div
   class="terminal-container"
   class:hidden={!visible}
+  class:fixed={fixedSize}
   bind:this={containerRef}
   oncontextmenu={handleContextMenu}
 >
@@ -2392,6 +2412,14 @@
 
   .terminal-container :global(.xterm) {
     height: 100%;
+  }
+
+  /* A fixed-size terminal is as big as its grid, never its slot's size: the slot scrolls
+     (docs/hive.md §4.5). */
+  .terminal-container.fixed:not(.hidden) {
+    flex: none;
+    width: max-content;
+    height: max-content;
   }
 
   /* Hide the default dashed underline on OSC 8 hyperlinks — only show underline on hover.

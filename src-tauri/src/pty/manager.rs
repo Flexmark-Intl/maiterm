@@ -139,10 +139,12 @@ pub fn spawn_pty(
                     let _ = old_handle.sender.send(PtyCommand::Kill);
                 }
                 state.pty_stats.write().remove(&old_pty_id);
+                state.fixed_size_ptys.write().remove(&old_pty_id);
             }
         }
         tab_map.insert(tab_id.to_string(), pty_id.to_string());
     }
+    let (cols, rows) = spawn_size(state, pty_id, tab_id, cols, rows);
 
     let pty_system = native_pty_system();
 
@@ -527,6 +529,7 @@ pub fn spawn_pty(
         // Cleanup: remove PTY handle, terminal handle, and tab mapping on exit
         state_clone.pty_registry.write().remove(&pty_id_owned);
         state_clone.terminal_registry.write().remove(&pty_id_owned);
+        state_clone.fixed_size_ptys.write().remove(&pty_id_owned);
         // Only remove tab mapping if it still points to this PTY (a new spawn may have already replaced it)
         {
             let mut tab_map = state_clone.tab_pty_map.write();
@@ -854,7 +857,8 @@ pub fn resize_pty(
         return Err("PTY not found".to_string());
     }
 
-    let pending_exists = {
+    let fixed = is_fixed_size(state, pty_id);
+    let pending_exists = !fixed && {
         let mut pending = state.pending_resizes.write();
         match pending.get_mut(pty_id) {
             Some(entry) => {
@@ -871,14 +875,6 @@ pub fn resize_pty(
         return Ok(());
     }
 
-    // No-op resizes never reach the PTY — but still repaint, since the caller is a
-    // frontend that just re-fitted its xterm (tab shown, font change, window moved
-    // back to where it was) and may be holding a viewport the fit blanked.
-    if state.live_grid_size(pty_id) == Some((cols, rows)) {
-        emit_frame(app_handle, state, pty_id);
-        return Ok(());
-    }
-
     let output_hot = {
         use std::sync::atomic::Ordering;
         let stats = state.pty_stats.read();
@@ -888,16 +884,88 @@ pub fn resize_pty(
             .unwrap_or(false)
     };
 
-    if !output_hot {
-        return apply_resize(app_handle, state, pty_id, cols, rows);
+    match resize_plan(fixed, state.live_grid_size(pty_id), (cols, rows), output_hot) {
+        ResizePlan::Refuse => {
+            // The frontend should never ask (`fixedSize` mode): one that did may be holding a
+            // re-fitted viewport, so it gets the grid back at the grid's size.
+            state.pending_resizes.write().remove(pty_id);
+            log::warn!("resize_pty refused: fixed-size Hive pty {} {}x{}", pty_id, cols, rows);
+            emit_frame(app_handle, state, pty_id);
+            Ok(())
+        }
+        // No-op resizes never reach the PTY — but still repaint, since the caller is a
+        // frontend that just re-fitted its xterm (tab shown, font change, window moved
+        // back to where it was) and may be holding a viewport the fit blanked.
+        ResizePlan::Repaint => {
+            emit_frame(app_handle, state, pty_id);
+            Ok(())
+        }
+        ResizePlan::Apply => apply_resize(app_handle, state, pty_id, cols, rows),
+        ResizePlan::Defer => {
+            state.pending_resizes.write().insert(
+                pty_id.to_string(),
+                crate::state::PendingResize { cols, rows, last_request: std::time::Instant::now() },
+            );
+            spawn_resize_applier(app_handle.clone(), Arc::clone(state), pty_id.to_string());
+            Ok(())
+        }
     }
+}
 
-    state.pending_resizes.write().insert(
-        pty_id.to_string(),
-        crate::state::PendingResize { cols, rows, last_request: std::time::Instant::now() },
-    );
-    spawn_resize_applier(app_handle.clone(), Arc::clone(state), pty_id.to_string());
-    Ok(())
+/// Every Hive agent's PTY lives at this size, whatever the frontend asked at spawn: its columns
+/// render the transcript, so no layout ever needs another, and a width change at a streaming
+/// Claude duplicates its scrollback (docs/hive.md §4.5, spike 3). Mirrored in `hive/fixedSize.ts`.
+pub const HIVE_PTY_SIZE: (u16, u16) = (120, 40);
+
+#[derive(Debug, PartialEq, Eq)]
+enum ResizePlan {
+    /// A fixed-size PTY: nothing changes, the frontend gets a repaint.
+    Refuse,
+    /// Already that size.
+    Repaint,
+    /// Output is hot: coalesce behind the trailing debounce.
+    Defer,
+    Apply,
+}
+
+fn resize_plan(fixed: bool, current: Option<(u16, u16)>, req: (u16, u16), hot: bool) -> ResizePlan {
+    if fixed {
+        ResizePlan::Refuse
+    } else if current == Some(req) {
+        ResizePlan::Repaint
+    } else if hot {
+        ResizePlan::Defer
+    } else {
+        ResizePlan::Apply
+    }
+}
+
+/// Whether `pty_id` is size-locked. Spawn locks every Hive tab's PTY; a Hive tab's PTY that
+/// somehow got past it (a spawn racing the tab's record) locks here, at whatever size it has.
+fn is_fixed_size(state: &AppState, pty_id: &str) -> bool {
+    if state.fixed_size_ptys.read().contains(pty_id) {
+        return true;
+    }
+    let tab_id = state.tab_pty_map.read().iter().find(|(_, p)| p.as_str() == pty_id).map(|(t, _)| t.clone());
+    let Some(tab_id) = tab_id else { return false };
+    if !crate::hive::is_hive_role_tab(&state.app_data.read(), &tab_id) {
+        return false;
+    }
+    log::warn!("resize_pty: Hive tab {} pty {} was not size-locked; locking it now", tab_id, pty_id);
+    state.fixed_size_ptys.write().insert(pty_id.to_string());
+    true
+}
+
+/// The size a PTY spawns at: a Hive tab's is `HIVE_PTY_SIZE`, and its PTY is locked there.
+fn spawn_size(state: &AppState, pty_id: &str, tab_id: &str, cols: u16, rows: u16) -> (u16, u16) {
+    if !crate::hive::is_hive_role_tab(&state.app_data.read(), tab_id) {
+        return (cols, rows);
+    }
+    if (cols, rows) != HIVE_PTY_SIZE {
+        log::warn!("spawn_pty: Hive tab {} asked for {}x{}; spawning at {}x{}", tab_id, cols, rows, HIVE_PTY_SIZE.0, HIVE_PTY_SIZE.1);
+    }
+    state.fixed_size_ptys.write().insert(pty_id.to_string());
+    HIVE_PTY_SIZE
 }
 
 /// Waits out the trailing debounce, then applies the latest pending size.
@@ -987,6 +1055,8 @@ fn apply_resize(
             .send(PtyCommand::Resize { cols, rows })
             .map_err(|e| e.to_string())?;
     }
+    // Every SIGWINCH a TUI sees, by PTY: what the Hive's fixed-size acceptance test counts.
+    log::info!("pty resize applied pty={} {}x{}", pty_id, cols, rows);
 
     // Also resize the alacritty_terminal instance
     {
@@ -1017,6 +1087,7 @@ pub fn kill_pty(state: &Arc<AppState>, pty_id: &str) -> Result<(), String> {
 
     // Drop any resize still waiting on the debounce
     state.pending_resizes.write().remove(pty_id);
+    state.fixed_size_ptys.write().remove(pty_id);
 
     // Clean up tab → pty mapping (reverse lookup)
     {
@@ -2169,5 +2240,85 @@ mod tests {
         // wildly out-of-range pid has no descendants — both must read as gone.
         assert!(!agent_process_alive(u32::MAX, &["codex"]));
         assert!(!agent_process_alive(1, &["definitely-not-a-real-binary-xyz"]));
+    }
+}
+
+#[cfg(test)]
+mod fixed_size_tests {
+    use super::*;
+    use crate::state::{WindowData, Workspace};
+
+    #[test]
+    fn a_fixed_pty_is_refused_whatever_it_asks() {
+        for current in [None, Some((120, 40)), Some((80, 24))] {
+            for req in [(120, 40), (80, 24), (200, 60)] {
+                for hot in [false, true] {
+                    assert_eq!(resize_plan(true, current, req, hot), ResizePlan::Refuse, "{current:?} {req:?} {hot}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_ordinary_pty_keeps_todays_plan() {
+        assert_eq!(resize_plan(false, Some((80, 24)), (80, 24), false), ResizePlan::Repaint);
+        assert_eq!(resize_plan(false, Some((80, 24)), (80, 24), true), ResizePlan::Repaint);
+        assert_eq!(resize_plan(false, Some((80, 24)), (100, 30), true), ResizePlan::Defer);
+        assert_eq!(resize_plan(false, Some((80, 24)), (100, 30), false), ResizePlan::Apply);
+        // No grid yet: nothing to match, so it's a real resize.
+        assert_eq!(resize_plan(false, None, (80, 24), false), ResizePlan::Apply);
+        assert_eq!(resize_plan(false, None, (80, 24), true), ResizePlan::Defer);
+    }
+
+    /// One workspace: a Hive worker tab and a plain tab.
+    fn state() -> AppState {
+        let app = AppState::new();
+        {
+            let mut data = app.app_data.write();
+            let mut win = WindowData::new("main".into());
+            let mut ws = Workspace::new("Hive".into());
+            ws.panes[0].tabs[0].id = "plain".into();
+            let mut worker = crate::state::Tab::new("worker".into());
+            worker.id = "worker".into();
+            worker.hive_role = Some(crate::hive::ROLE_WORKER.into());
+            ws.panes[0].tabs.push(worker);
+            win.workspaces.push(ws);
+            data.windows.push(win);
+        }
+        app
+    }
+
+    #[test]
+    fn a_hive_tab_spawns_at_the_fixed_size_and_is_locked() {
+        let app = state();
+        assert_eq!(spawn_size(&app, "p-worker", "worker", 80, 24), HIVE_PTY_SIZE);
+        assert!(app.fixed_size_ptys.read().contains("p-worker"));
+        assert!(is_fixed_size(&app, "p-worker"));
+    }
+
+    #[test]
+    fn an_ordinary_tab_spawns_at_what_it_asked_and_stays_resizable() {
+        let app = state();
+        assert_eq!(spawn_size(&app, "p-plain", "plain", 97, 31), (97, 31));
+        assert!(app.fixed_size_ptys.read().is_empty());
+        app.tab_pty_map.write().insert("plain".into(), "p-plain".into());
+        assert!(!is_fixed_size(&app, "p-plain"));
+        assert!(!is_fixed_size(&app, "unknown"));
+    }
+
+    #[test]
+    fn a_hive_pty_that_missed_the_spawn_lock_locks_on_its_first_resize() {
+        let app = state();
+        app.tab_pty_map.write().insert("worker".into(), "p-late".into());
+        assert!(is_fixed_size(&app, "p-late"));
+        assert!(app.fixed_size_ptys.read().contains("p-late"));
+    }
+
+    #[test]
+    fn a_killed_pty_is_unlocked() {
+        let app = Arc::new(state());
+        spawn_size(&app, "p-worker", "worker", 120, 40);
+        kill_pty(&app, "p-worker").unwrap();
+        assert!(!app.fixed_size_ptys.read().contains("p-worker"));
     }
 }

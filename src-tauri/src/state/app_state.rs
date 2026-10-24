@@ -232,6 +232,9 @@ pub struct AppState {
     /// Maps tab_id → pty_id so we can auto-kill a previous PTY when a new one
     /// is spawned for the same tab (e.g. HMR remount, frontend crash recovery).
     pub tab_pty_map: RwLock<HashMap<String, String>>,
+    /// PTYs whose size never changes: every Hive agent's (docs/hive.md §4.5). `resize_pty`
+    /// refuses them, whatever the frontend asks.
+    pub fixed_size_ptys: RwLock<std::collections::HashSet<String>>,
     pub app_data: RwLock<AppData>,
     // File watchers keyed by tab ID
     pub file_watchers: RwLock<HashMap<String, FileWatcherHandle>>,
@@ -331,6 +334,7 @@ impl AppState {
             pty_registry: RwLock::new(HashMap::new()),
             terminal_registry: RwLock::new(HashMap::new()),
             tab_pty_map: RwLock::new(HashMap::new()),
+            fixed_size_ptys: RwLock::new(std::collections::HashSet::new()),
             app_data: RwLock::new(AppData::default()),
             file_watchers: RwLock::new(HashMap::new()),
             scp_uploads: RwLock::new(HashMap::new()),

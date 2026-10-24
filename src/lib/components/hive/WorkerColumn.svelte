@@ -2,13 +2,15 @@
   One worker's column in a Hive (docs/hive.md §4.1, §4.2): its own header (badge, title, folders
   and branches, the diff stat and, apart, what's committed, and a menu), then its transcript
   through ChatColumn. A transcript, never the terminal: opening, closing or squeezing this column
-  touches no PTY (principle 3). The raw terminal arrives with build step 5d.
+  touches no PTY (principle 3). Show terminal adds the raw terminal under the chat (HiveTerminal),
+  at the PTY's own fixed size.
 
   The header sits outside ChatColumn so a waiting worker, which has no tab and so no chat
   header, can still be pinned and closed.
 -->
 <script lang="ts">
   import ChatColumn from '$lib/components/loom/ChatColumn.svelte';
+  import HiveTerminal from './HiveTerminal.svelte';
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
@@ -27,10 +29,13 @@
     active: boolean;
     pinned: boolean;
     focused: boolean;
+    /** Show terminal is on for this column (it shows only while the worker has a tab). */
+    terminalShown: boolean;
     onpin: () => void;
     onclose: () => void;
+    onterminal: (shown: boolean) => void;
   }
-  let { card, cardState, diff, workspace, tasks, active, pinned, focused, onpin, onclose }: Props = $props();
+  let { card, cardState, diff, workspace, tasks, active, pinned, focused, terminalShown, onpin, onclose, onterminal }: Props = $props();
 
   let chat = $state<ChatColumn | undefined>();
   let rootEl = $state<HTMLElement | undefined>();
@@ -66,8 +71,9 @@
     const r = menuBtn?.getBoundingClientRect();
     if (r) menu = { x: r.left, y: r.bottom + 4 };
   }
-  // Land and Stop wait for landing (build step 6), Show terminal for 5d.
+  // Land and Stop wait for landing (build step 6). A worker with no tab has no terminal.
   const items = $derived<MenuItem[]>([
+    ...(card.tab_id ? [{ label: terminalShown ? 'Hide terminal' : 'Show terminal', action: () => onterminal(!terminalShown) }] : []),
     { label: pinned ? 'Unpin column' : 'Pin column', action: onpin },
     { label: 'Close column', action: onclose },
   ]);
@@ -106,6 +112,9 @@
     actions={null}
     emptyText={waitingText}
   />
+  {#if terminalShown && card.tab_id}
+    <HiveTerminal tabId={card.tab_id} onhide={() => onterminal(false)} />
+  {/if}
   {#if menu}
     <ContextMenu {items} x={menu.x} y={menu.y} anchor={menuBtn} onclose={() => (menu = null)} />
   {/if}

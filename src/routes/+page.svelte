@@ -10,6 +10,7 @@
   import SplitContainer from '$lib/components/pane/SplitContainer.svelte';
   import MeshStageView from '$lib/components/MeshStageView.svelte';
   import HiveView from '$lib/components/hive/HiveView.svelte';
+  import { hiveView } from '$lib/stores/hiveView.svelte';
   import ServiceConsole from '$lib/components/stack/ServiceConsole.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import TerminalPane from '$lib/components/terminal/TerminalPane.svelte';
@@ -748,7 +749,10 @@
                     paneId={pane.id}
                     tabId={tab.id}
                     existingPtyId={(terminalsStore.get(tab.id) || terminalsStore.canReattach(tab.pty_id)) ? tab.pty_id : null}
-                    visible={!tab.hive_role && (inConsole || (meshStage ? agentMeshStore.isMeshMemberTab(tab.id) : (tab.id === pane.active_tab_id && ws.id === workspacesStore.activeWorkspaceId)))}
+                    visible={tab.hive_role
+                      ? ws.id === workspacesStore.activeWorkspaceId && hiveView.terminalVisible(ws.id, tab.id)
+                      : (inConsole || (meshStage ? agentMeshStore.isMeshMemberTab(tab.id) : (tab.id === pane.active_tab_id && ws.id === workspacesStore.activeWorkspaceId)))}
+                    fixedSize={!!tab.hive_role}
                     restoreCwd={tab.restore_cwd}
                     restoreSshCommand={tab.restore_ssh_command}
                     restoreRemoteCwd={tab.restore_remote_cwd}

@@ -312,7 +312,7 @@ pub fn refuse_share(ws: &Workspace) -> Result<(), String> {
 
 /// A live tab with a `hive_role`, wherever it is. Refusals ask this rather than
 /// `find_hive_tab`: a role without its Hive record is still nobody else's to drive.
-fn is_hive_role_tab(data: &AppData, tab_id: &str) -> bool {
+pub fn is_hive_role_tab(data: &AppData, tab_id: &str) -> bool {
     data.windows
         .iter()
         .flat_map(|w| w.workspaces.iter())

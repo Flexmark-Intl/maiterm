@@ -28,6 +28,10 @@ function createHiveViewStore() {
   const stored = new Map<string, HiveViewState>();
   /** Per workspace, task id → its worker's tab. */
   let taskTabs = $state<Map<string, Map<string, string>>>(new Map());
+  /** Per workspace, the tabs whose raw terminal is on screen now: shown, in a column the layout
+   *  shows. HiveView publishes it; it is what makes Rust render that terminal (`+page`'s
+   *  `visible`). Not persisted. */
+  let terminalsOnScreen = $state<Map<string, ReadonlySet<string>>>(new Map());
 
   function read(wsId: string): HiveViewState {
     const v = views.get(wsId);
@@ -117,7 +121,7 @@ function createHiveViewStore() {
       write(wsId, { ...v, coordCollapsed: collapsed, focused });
     },
 
-    /** Build step 5d's Show terminal. */
+    /** Show terminal (§4.5), for the coordinator's column or a worker's (by task id). */
     setTerminalShown(wsId: string, which: 'coordinator' | string, shown: boolean) {
       const v = read(wsId);
       if (v.terminalShown.includes(which) === shown) return;
@@ -147,6 +151,18 @@ function createHiveViewStore() {
       if (f === 'board') return null;
       if (f === 'coordinator') return coordinatorTabId(wsId);
       return taskTabs.get(wsId)?.get(f) ?? null;
+    },
+
+    /** HiveView's on-screen raw terminals; an empty list when it unmounts. */
+    setTerminalsOnScreen(wsId: string, tabIds: readonly string[]) {
+      const had = terminalsOnScreen.get(wsId);
+      if ((had?.size ?? 0) === tabIds.length && tabIds.every((t) => had?.has(t))) return;
+      terminalsOnScreen = new Map(terminalsOnScreen).set(wsId, new Set(tabIds));
+    },
+
+    /** Whether a Hive tab's TerminalPane is on screen, so Rust should render it. */
+    terminalVisible(wsId: string, tabId: string): boolean {
+      return terminalsOnScreen.get(wsId)?.has(tabId) ?? false;
     },
 
     coordinatorTabId,
