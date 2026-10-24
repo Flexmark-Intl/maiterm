@@ -333,11 +333,30 @@ const KEYS = {
   Space: { code: 'Space', keyCode: 32, text: ' ', key: ' ' },
 };
 
-async function press(tabId, key) {
-  const k = KEYS[key] ?? (key?.length === 1 ? { code: '', keyCode: key.toUpperCase().charCodeAt(0), text: key } : null);
-  if (!k) throw new Error(`Unknown key "${key}". Use Enter, Tab, Escape, Backspace, Delete, an arrow key, Home, End, PageUp, PageDown, Space or one character.`);
-  const base = { key: k.key ?? key, code: k.code, windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode };
-  await send(tabId, 'Input.dispatchKeyEvent', { type: k.text ? 'keyDown' : 'rawKeyDown', ...base, ...(k.text ? { text: k.text } : {}) });
+// CDP modifier bits. "Mod" is Cmd on a Mac and Ctrl elsewhere, so an agent needn't know which.
+const MODIFIERS = { Alt: 1, Ctrl: 2, Control: 2, Meta: 4, Cmd: 4, Shift: 8 };
+const IS_MAC = /Mac/i.test(navigator.userAgentData?.platform ?? navigator.platform ?? '');
+// A synthetic Cmd/Ctrl+letter is only a key event: the browser's editing command behind it (select
+// all, undo…) never runs unless it is named.
+const EDIT_COMMANDS = { a: 'selectAll', z: 'undo', x: 'cut', c: 'copy', v: 'paste' };
+
+/** One key, or a combination like Shift+Tab or Mod+A. Goes to whatever has focus, in any frame. */
+async function press(tabId, combo) {
+  const parts = String(combo).split('+');
+  const key = parts.length > 1 && parts.at(-1) === '' ? '+' : parts.pop(); // "Mod++" is Mod and "+"
+  let modifiers = 0;
+  for (const m of parts.filter(Boolean)) {
+    const bit = m === 'Mod' ? (IS_MAC ? 4 : 2) : MODIFIERS[m];
+    if (!bit) throw new Error(`Unknown modifier "${m}" in "${combo}". Use Shift, Alt, Ctrl, Meta (Cmd) or Mod (Cmd on a Mac, Ctrl elsewhere).`);
+    modifiers |= bit;
+  }
+  const k = KEYS[key] ?? (key?.length === 1 ? { code: /[a-z]/i.test(key) ? `Key${key.toUpperCase()}` : '', keyCode: key.toUpperCase().charCodeAt(0), text: key } : null);
+  if (!k) throw new Error(`Unknown key "${key}". Use Enter, Tab, Escape, Backspace, Delete, an arrow key, Home, End, PageUp, PageDown, Space or one character, optionally after modifiers (Shift+Tab, Mod+A).`);
+  const command = modifiers & (IS_MAC ? 4 : 2) ? EDIT_COMMANDS[key.toLowerCase()] : undefined;
+  // With Ctrl, Alt or Cmd held a key types nothing.
+  const text = modifiers & 7 ? undefined : k.text;
+  const base = { key: k.key ?? key, code: k.code, windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode, modifiers };
+  await send(tabId, 'Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', ...base, ...(text ? { text } : {}), ...(command ? { commands: [command] } : {}) });
   await send(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', ...base });
 }
 
@@ -365,8 +384,13 @@ async function type(tabId, args) {
   } catch (e) {
     throw staleRef(e);
   }
-  if (args.clear !== false && objectId) {
-    await send(tabId, 'Runtime.callFunctionOn', { objectId, functionDeclaration: SELECT_ALL });
+  if (args.clear !== false) {
+    const { result } = objectId
+      ? await send(tabId, 'Runtime.callFunctionOn', { objectId, functionDeclaration: SELECT_ALL, returnByValue: true })
+      : { result: {} };
+    // Focus inside an iframe: the page sees only the <iframe> element, and a cross-origin one can't
+    // be reached from here. Select all with the keyboard instead, which goes to whatever has focus.
+    if (result.value !== true) await press(tabId, 'Mod+A');
     if (!text) await press(tabId, 'Delete');
   }
   if (text) await send(tabId, 'Input.insertText', { text });

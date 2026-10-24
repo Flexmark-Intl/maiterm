@@ -1484,13 +1484,13 @@ fn browser_tools() -> Vec<Value> {
         },
         {
             "name": "browserPressKey",
-            "description": format!("Press one key in your linked Chrome tab: Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space, or a single character. {LINKED}"),
+            "description": format!("Press a key in your linked Chrome tab, in whatever has focus (inside an iframe too): Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space, or a single character, optionally with modifiers joined by +: Shift+Tab, Mod+A (Mod is Cmd on a Mac, Ctrl elsewhere; Mod+A/Z/X/C/V run select all, undo, cut, copy, paste), Alt, Ctrl, Meta. {LINKED}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "tabId": tab_id,
                     "tab": tab,
-                    "key": { "type": "string", "description": "The key, e.g. Enter" }
+                    "key": { "type": "string", "description": "The key or combination, e.g. Enter, Shift+Tab, Mod+A" }
                 },
                 "required": ["key"]
             }
