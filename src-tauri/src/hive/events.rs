@@ -166,10 +166,13 @@ pub(crate) async fn mark_failed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
             }
             moved
         })?;
-        Ok(moved.then_some(after))
+        // A reviewer has no report, only a verdict: one that gave it just ended early.
+        let given = after.reviews.as_deref().filter(|_| after.is_reviewer()).and_then(|id| worker::task_dir(&paths, id).ok()).and_then(|d| worker::read_worker(&d).ok());
+        let given = given.is_some_and(|b| super::review::verdict_given(&b, &after).is_some());
+        Ok(moved.then_some((after, given)))
     })
     .await;
-    let w = match moved {
+    let (w, given) = match moved {
         Ok(Some(w)) => w,
         Ok(None) => return false,
         Err(e) => {
@@ -177,6 +180,13 @@ pub(crate) async fn mark_failed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
             return false;
         }
     };
+    if given {
+        // Not news to the coordinator, which has its verdict: its retirement is owed (the caller polls).
+        log::info!("hive {}: reviewer {} ended after its verdict: {how}", caller.hive.id, worker_label(&w));
+        super::queue::release_worker(&w.task_id, "your review is done");
+        ctx.window.workers_changed(&caller.workspace_id);
+        return true;
+    }
     log::warn!("hive {}: worker {} failed: {how} without a report", caller.hive.id, worker_label(&w));
     super::queue::release_worker(&w.task_id, &format!("you stopped without reporting ({how})"));
     ctx.window.workers_changed(&caller.workspace_id);

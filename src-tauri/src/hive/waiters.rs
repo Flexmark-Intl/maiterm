@@ -6,7 +6,8 @@
 //! Polled after every task write of a Hive workspace (`set_workspace_tasks`) and after a worker's
 //! phase changes (a report, a stop, a crash, a resumed Hive). One poll per Hive at a time; a
 //! request meanwhile runs it once more after, so no change is missed and no waiter launches twice.
-//! The same poll releases the queued and running jobs of a worker whose task was dropped.
+//! The same poll releases the queued and running jobs of a worker whose task was dropped, and
+//! retires a reviewer that gave its verdict but wasn't retired (`review::retire_owed`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -166,6 +167,10 @@ pub(crate) async fn poll_once<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller) 
     let paths = caller.paths.clone();
     let Ok(workers) = blocking(move || Ok(worker::list_workers(&paths))).await else { return Vec::new() };
     release_dropped(&workers, &tasks);
+    let owed = super::review::retire_owed(ctx, caller, &workers).await;
+    if owed > 0 {
+        log::info!("hive {}: {owed} reviewer(s) retired that had given their verdict", caller.hive.id);
+    }
     let mut launched: Vec<String> = Vec::new();
     for w in workers.iter().filter(|w| w.phase == worker::PHASE_WAITING) {
         // Its own row gone or retired: the coordinator or the human took it off the board.

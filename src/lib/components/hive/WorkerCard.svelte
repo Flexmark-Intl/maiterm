@@ -11,7 +11,7 @@
 -->
 <script lang="ts">
   import Tooltip from '$lib/components/Tooltip.svelte';
-  import { stateLine, type CardState } from '$lib/hive/cards';
+  import { reviewLine, stateLine, type CardState } from '$lib/hive/cards';
   import type { Activity, contextGauge } from '$lib/hive/activity';
   import type { HiveWorkerCard } from '$lib/tauri/types';
 
@@ -41,6 +41,8 @@
   const showActivity = $derived(activity.tone !== 'none' && !idleLine && activity.text !== state.sub);
   // A rail row has one line under its title: what the agent is doing, else its state.
   const railLine = $derived(activity.tone === 'none' || activity.tone === 'idle' ? label : activity.text);
+  // §7.7: what a reviewer reviews, or how a builder's reviews stand.
+  const review = $derived(reviewLine(card));
 </script>
 
 <button
@@ -76,6 +78,7 @@
       <span class="lbl">{label}</span>
       {#if state.sub}<span class="sub">{state.sub}</span>{/if}
     </span>
+    {#if review}<span class="rev" class:urgent-rev={review.urgent}>{review.text}</span>{/if}
     {#if showActivity}<span class="act" data-tone={activity.tone}>{activity.text}</span>{/if}
     <!-- A note can run to paragraphs: three lines here, the whole of it on hover. -->
     {#if note}<Tooltip text={note} block><span class="note">“{note}”</span></Tooltip>{/if}
@@ -158,6 +161,8 @@
   .act[data-tone='wait'] { color: var(--needs); opacity: 1; }
   .act[data-tone='idle'], .act[data-tone='state'] { color: var(--fg-dim); opacity: 1; }
   .compact .act { font-size: 11px; padding-left: 15px; }
+  .rev { font-size: 11px; color: var(--fg-dim); overflow-wrap: anywhere; }
+  .rev.urgent-rev { color: var(--needs); }
   .note { font-size: 11.5px; line-height: 1.35; color: var(--fg); opacity: 0.8; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   .row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; min-width: 0; }
   .m { font-size: 10.5px; color: var(--fg-dim); overflow-wrap: anywhere; min-width: 0; }

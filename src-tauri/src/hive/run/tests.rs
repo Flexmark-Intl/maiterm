@@ -360,6 +360,11 @@ fn the_result_is_maiterms_account_and_the_output_is_quoted() {
         assert!(!line.trim_start().to_ascii_lowercase().starts_with("[maiterm]"), "forged: {line}");
     }
     assert!(is_pass(&pass));
+    // A reviewer's detached copy: evidence for its verdict, never a hiveReport receipt.
+    let mut detached = pass.clone();
+    detached.branch = None;
+    let m = result_message(&detached, "");
+    assert!(m.contains("on 3f2a91c: passed") && m.contains("evidence in your hiveVerdict") && !m.contains("receipts.checks"), "{m}");
 
     let mut dirty = pass.clone();
     dirty.dirty = true;

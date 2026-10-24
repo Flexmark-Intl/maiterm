@@ -36,7 +36,7 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The Hive tools built so far: what `tools/list` offers each role and the handler answers.
 /// The rest of the coordinator's (settings' `COORDINATOR_MCP_TOOLS`) are refused as not yet here.
-pub const COORDINATOR_TOOLS: [&str; 7] = [
+pub const COORDINATOR_TOOLS: [&str; 8] = [
     "hiveSpawnWorker",
     "hiveListWorkers",
     "hiveMessageWorker",
@@ -44,8 +44,11 @@ pub const COORDINATOR_TOOLS: [&str; 7] = [
     "hiveRestartWorker",
     "hiveRunPriority",
     "hiveRetireWorker",
+    "hiveResolve",
 ];
-pub const WORKER_TOOLS: [&str; 2] = ["hiveReport", "hiveRun"];
+/// Every worker is offered all three; Rust refuses `hiveReport` to a reviewer and `hiveVerdict`
+/// to a builder (`review`).
+pub const WORKER_TOOLS: [&str; 3] = ["hiveReport", "hiveRun", "hiveVerdict"];
 /// A worker's own Hive tools (§7.2), some built by later steps; the coordinator's are refused to it.
 const WORKER_HIVE_TOOLS: [&str; 3] = ["hiveReport", "hiveRun", "hiveVerdict"];
 pub const MAX_MESSAGE: usize = 16_000;
@@ -155,7 +158,7 @@ pub fn listed_role(data: &AppData, tab_id: &str) -> Option<&'static str> {
 pub fn tool_definitions(role: &str) -> Vec<Value> {
     let tab_id = json!({ "type": "string", "description": "Your own tab (auto-injected)" });
     if role == ROLE_WORKER {
-        return vec![super::report::tool_definition(&tab_id), super::run::tool_definition(&tab_id)];
+        return vec![super::report::tool_definition(&tab_id), super::run::tool_definition(&tab_id), super::review::verdict_tool_definition(&tab_id)];
     }
     if role != ROLE_COORDINATOR {
         return Vec::new();
@@ -170,8 +173,12 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
              Refused above the Hive's cap, past the spawn fuses (shared by every Hive on this machine), or while a usage \
              limit or a pause holds; the answer says which. With depends_on, the worker waits as a task and a card, and \
              launches only once every dependency's task is done, branching from what has landed by then. A title whose \
-             worker or branch already exists is refused: it names the branch. inputs and reviews aren't available yet. \
-             Brief at most {MAX_BRIEF} characters."
+             worker or branch already exists is refused: it names the branch. With reviews, it is a reviewer of a worker that \
+             reported done: it gets that worker's folders as copies pinned at its branch tip (no branch of its own), reads \
+             nothing of the branch's project settings, and answers once with hiveVerdict; one reviewer per worker at a time, \
+             and none after {} failed reviews until hiveResolve. inputs isn't available yet. Brief at most {MAX_BRIEF} \
+             characters.",
+            super::review::MAX_ATTEMPTS
         ),
         "inputSchema": {
             "type": "object",
@@ -185,7 +192,7 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
                 "model": { "type": "string", "description": "Model (default: the Hive's worker model)" },
                 "effort": { "type": "string", "enum": EFFORTS, "description": "Effort (default: the Hive's worker effort)" },
                 "inputs": { "type": "array", "items": { "type": "string" }, "description": "Not available yet (arrives with the gallery)" },
-                "reviews": { "type": "string", "description": "Not available yet (arrives with reviews)" }
+                "reviews": { "type": ["string", "number"], "description": "Makes it the reviewer of this worker (badge, name or task id), which must have reported done. No folders or depends_on with it" }
             },
             "required": ["title", "role", "brief"]
         }
@@ -240,7 +247,16 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
             "required": ["worker"]
         }
     });
-    vec![spawn, list, message, stop, restart, super::run::priority_tool_definition(&tab_id), super::retire::tool_definition(&tab_id)]
+    vec![
+        spawn,
+        list,
+        message,
+        stop,
+        restart,
+        super::run::priority_tool_definition(&tab_id),
+        super::retire::tool_definition(&tab_id),
+        super::review::resolve_tool_definition(&tab_id),
+    ]
 }
 
 /// The coordinator a tool call comes from, with its Hive, cloned out of the state lock.
@@ -379,11 +395,26 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         "hiveRun" => super::run::run_tool(&ctx, &caller, args).await,
         "hiveRunPriority" => super::run::priority_tool(&caller, args).await,
         "hiveRetireWorker" => super::retire::retire_tool(&ctx, &caller, args).await,
+        "hiveVerdict" => super::review::verdict(&ctx, &caller, args).await,
+        "hiveResolve" => super::review::resolve(&ctx, &caller, args).await,
         t => Err(format!("{t} isn't available in this build of maiTerm yet.")),
     };
     // A worker's phase changed: a freed slot or a failed dependency is news to the waiters.
-    if res.is_ok() && matches!(tool, "hiveStopWorker" | "hiveReport" | "hiveRestartWorker" | "hiveRetireWorker") {
+    if res.is_ok() && matches!(tool, "hiveStopWorker" | "hiveReport" | "hiveRestartWorker" | "hiveRetireWorker" | "hiveResolve") {
         super::waiters::poll_soon(state.clone(), handle.clone(), caller.workspace_id.clone());
+    }
+    // The reviewer is ended once its answer has reached it: retiring it inside its own tool call
+    // would kill the agent waiting on the reply.
+    if res.is_ok() && tool == "hiveVerdict" {
+        let (state, handle, caller) = (state.clone(), handle.clone(), caller.clone());
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(super::review::RETIRE_AFTER).await;
+            let ctx = app_ctx(&state, &handle, &caller);
+            if let Err(e) = super::review::retire_reviewer(&ctx, &caller, &caller.tab_id).await {
+                log::warn!("hive {}: reviewer in tab {} not retired after its verdict: {e}", caller.hive.id, caller.tab_id);
+            }
+            super::waiters::poll_soon(state.clone(), handle.clone(), caller.workspace_id.clone());
+        });
     }
     res.unwrap_or_else(|e| {
         log::info!("hive {}: {tool} refused: {e}", caller.hive.id);
@@ -417,6 +448,8 @@ pub(crate) struct SpawnArgs {
     pub depends_on: Vec<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// The worker this one reviews, as the coordinator names it.
+    pub reviews: Option<String>,
 }
 
 fn present(v: Option<&Value>) -> bool {
@@ -434,9 +467,13 @@ impl SpawnArgs {
         if present(args.get("inputs")) {
             return Err("inputs arrive with the gallery, which this build doesn't have yet. Put any file paths the worker starts from in its brief.".to_string());
         }
-        if present(args.get("reviews")) {
-            return Err("reviews arrive with reviewers, which this build doesn't have yet. Spawn a code-reviewer with the branch named in its brief.".to_string());
-        }
+        let reviews = match args.get("reviews") {
+            Some(Value::Number(n)) => Some(format!("#{n}")),
+            Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
+            v if !present(v) => None,
+            Some(_) => return Err("reviews names one worker: its badge, name or task id".to_string()),
+            None => None,
+        };
         let strings = |k: &str| -> Result<Option<Vec<String>>, String> {
             match args.get(k) {
                 None | Some(Value::Null) => Ok(None),
@@ -460,6 +497,7 @@ impl SpawnArgs {
             depends_on: strings("depends_on")?.unwrap_or_default(),
             model: s("model"),
             effort: s("effort"),
+            reviews,
         })
     }
 }
@@ -477,6 +515,8 @@ pub(crate) struct Plan {
     /// As given; empty takes the Hive's worker default at each launch.
     pub model: String,
     pub effort: String,
+    /// A reviewer's builder, by task id.
+    pub reviews: Option<String>,
 }
 
 /// A worker of this Hive by badge (`3`, `#3`), name or task id.
@@ -510,7 +550,25 @@ pub(crate) fn validate(hive: &Hive, workers: &[WorkerRecord], a: SpawnArgs) -> R
     if a.brief.chars().count() > MAX_BRIEF {
         return Err(format!("The brief is over {MAX_BRIEF} characters: split the task, or move detail into a file in its folder."));
     }
+    // A reviewer works on the builder's folders, at once: its copies are pinned at the builder's tip.
+    let builder = match &a.reviews {
+        None => None,
+        Some(name) => {
+            let b = find_worker(workers, name).ok_or_else(|| format!("reviews: this Hive has no worker \"{name}\" (use its badge, name or task id)."))?;
+            if a.folders.is_some() {
+                return Err("A reviewer gets the folders of the worker it reviews: leave out folders.".to_string());
+            }
+            if !a.depends_on.is_empty() {
+                return Err("A reviewer starts on work that is already reported: leave out depends_on.".to_string());
+            }
+            if let Some(why) = super::review::spawn_refusal(b, workers) {
+                return Err(why);
+            }
+            Some(b)
+        }
+    };
     let folders = match a.folders {
+        _ if builder.is_some() => builder.map(|b| b.folders.iter().map(|f| f.name.clone()).collect()).unwrap_or_default(),
         None => hive.primary().map(|f| vec![f.name.clone()]).unwrap_or_default(),
         Some(names) => {
             let mut out: Vec<String> = Vec::new();
@@ -542,7 +600,8 @@ pub(crate) fn validate(hive: &Hive, workers: &[WorkerRecord], a: SpawnArgs) -> R
     if !effort.is_empty() && !EFFORTS.contains(&effort.as_str()) {
         return Err(format!("effort must be one of {}.", EFFORTS.join(", ")));
     }
-    Ok(Plan { title, slug, role: a.role, brief: a.brief, folders, depends_on, model, effort })
+    let reviews = builder.map(|b| b.task_id.clone());
+    Ok(Plan { title, slug, role: a.role, brief: a.brief, folders, depends_on, model, effort, reviews })
 }
 
 /// Badges and slugs are taken under this, from the records on disk, so two spawns at once never
@@ -600,6 +659,7 @@ pub(crate) fn register(hive: &Hive, paths: &HivePaths, a: SpawnArgs, tasks: &[Ta
         depends_on: plan.depends_on,
         wait_reason: (!unmet.is_empty()).then(|| format!("waits on {}", unmet.join(", "))),
         created_at: now.to_string(),
+        reviews: plan.reviews,
         ..WorkerRecord::default()
     };
     worker::write_worker(&task_dir, &w).inspect_err(|_| {
@@ -954,16 +1014,30 @@ async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: Re
         Err(e) => return Err(Refusal { why: undo.run(ctx, caller, e).await, at_reserve: true }),
     }
 
-    // `create_worker_worktrees` takes back its own half-made folders when it fails.
+    // `create_worker_worktrees` takes back its own half-made folders when it fails. A reviewer's
+    // are copies of its builder's branch, pinned at its tip now (§7.7).
     let (hive, paths, slug) = (caller.hive.clone(), caller.paths.clone(), w.slug.clone());
     let names: Vec<String> = w.folders.iter().map(|f| f.name.clone()).collect();
-    match blocking(move || super::worktree::create_worker_worktrees(&hive, &paths, &slug, &names)).await {
-        Ok(folders) => {
+    let reviews = w.reviews.clone().filter(|_| w.is_reviewer());
+    let made = blocking(move || match reviews {
+        None => super::worktree::create_worker_worktrees(&hive, &paths, &slug, &names).map(|f| (f, None)),
+        Some(id) => {
+            let builder = worker::read_worker(&worker::task_dir(&paths, &id)?).map_err(|_| "The worker it reviews is gone from this Hive.".to_string())?;
+            super::worktree::create_review_worktrees(&hive, &paths, &slug, &builder).map(|f| (f, Some(worker_label(&builder))))
+        }
+    })
+    .await;
+    let builder_label = match made {
+        Ok((folders, label)) => {
             undo.worktrees = Some(folders.clone());
+            if label.is_some() {
+                w.reviewed = folders.iter().filter_map(|f| f.worktree.as_ref().and(f.base_sha.clone()).map(|s| (f.name.clone(), s))).collect();
+            }
             w.folders = folders;
+            label
         }
         Err(e) => return Err(fail(undo.run(ctx, caller, e).await)),
-    }
+    };
 
     let tab = worker_tab(&w);
     let now = crate::commands::workspace::iso_now();
@@ -996,8 +1070,12 @@ async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: Re
         return Err(fail(undo.run(ctx, caller, e).await));
     }
 
+    let mut row = worker_task(&w, &reg.brief, Some(&tab.id), &now);
+    if let (Some(label), Some(n)) = (&builder_label, row.notes.first_mut()) {
+        n.text = super::review::spawn_note(&w, label);
+    }
     let inserted = match &waiting_row {
-        None => insert_rows(ctx.data, caller, worker_task(&w, &reg.brief, Some(&tab.id), &now), Some(&tab)).map(|(r, t, s)| (r, t, Some(s))),
+        None => insert_rows(ctx.data, caller, row, Some(&tab)).map(|(r, t, s)| (r, t, Some(s))),
         Some(_) => insert_tab_rows(ctx.data, caller, &w, &tab, &now).map(|(r, t, _)| (r, t, None)),
     };
     let (rows, task, stream) = match inserted {
@@ -1024,6 +1102,18 @@ async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: Re
         .iter()
         .map(|f| json!({ "name": f.name, "kind": f.kind, "branch": f.branch, "worktree": f.worktree, "target": f.target }))
         .collect();
+    if let Some(label) = builder_label {
+        return Ok(json!({
+            "worker": w.slug,
+            "badge": w.badge,
+            "task_id": w.task_id,
+            "state": "launching",
+            "reviews": label,
+            "reviewed": w.reviewed,
+            "folders": folders,
+            "note": "It reviews exactly these commits and answers with hiveVerdict, which reaches you as ⟦HIVE VERDICT⟧.",
+        }));
+    }
     Ok(json!({
         "worker": w.slug,
         "badge": w.badge,
@@ -1129,6 +1219,10 @@ pub struct WorkerCard {
     /// How it left, once it has (§8.4): its column reads its recorded sessions then.
     pub retired: Option<worker::Retired>,
     pub undone: bool,
+    /// A reviewer's builder, as `#badge slug` (or its task id once its record is gone).
+    pub reviews: Option<String>,
+    /// A builder's reviews so far (§7.7).
+    pub review: Option<super::review::ReviewView>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -1204,6 +1298,8 @@ pub(crate) fn board_view(hive: &Hive, paths: &HivePaths, fuses: &Fuses, now: i64
             launched_at: w.launched_at.clone(),
             retired: w.retired.clone(),
             undone: w.undone,
+            reviews: w.reviews.as_ref().filter(|_| w.is_reviewer()).map(|id| by_task.get(id.as_str()).map_or_else(|| id.clone(), |b| worker_label(b))),
+            review: w.review.as_ref().map(super::review::ReviewView::of),
         })
         .collect();
     let h = fuses.headroom(hive, &live, now);
@@ -1248,6 +1344,8 @@ pub(crate) fn list_view(hive: &Hive, paths: &HivePaths, tasks: &[Task], fuses: &
                 "effort": c.effort,
                 "last_report": c.last_report,
                 "retired": c.retired,
+                "reviews": c.reviews,
+                "review": c.review,
             })
         })
         .collect();
@@ -1541,7 +1639,9 @@ mod tests {
         refused(json!({ "title": "x", "role": "backend", "brief": "b", "effort": "extreme" }), "effort must be one of");
         refused(json!({ "title": "x", "role": "backend", "brief": "b", "model": "opus; rm -rf /" }), "isn't a model name");
         refused(json!({ "title": "x", "role": "backend", "brief": "b", "inputs": ["a1"] }), "gallery");
-        refused(json!({ "title": "x", "role": "backend", "brief": "b", "reviews": "auth" }), "reviewers");
+        refused(json!({ "title": "x", "role": "backend", "brief": "b", "reviews": "auth" }), "only a worker that has reported done");
+        refused(json!({ "title": "x", "role": "backend", "brief": "b", "reviews": "auth", "depends_on": [2] }), "leave out depends_on");
+        refused(json!({ "title": "x", "role": "backend", "brief": "b", "reviews": ["auth"] }), "reviews names one worker");
         refused(json!({ "title": "Auth", "role": "backend", "brief": "b" }), "already called \"auth\"");
         refused(json!({ "title": "Coordinator", "role": "backend", "brief": "b" }), "reserved");
         refused(json!({ "title": "!!!", "role": "backend", "brief": "b" }), "letter or digit");
@@ -2868,5 +2968,266 @@ mod tests {
         assert_eq!(crate::hive::trust::written_entries(&p).len(), 1);
         assert!(out.kept.iter().any(|k| k.starts_with("trust for") && k.contains(locked.to_str().unwrap())), "{:?}", out.kept);
         assert!(out.folder_left.is_some());
+    }
+
+    // ── Reviewers (6b) ──
+
+    impl Rig {
+        /// A worker on `web` that committed and reported done.
+        async fn reported(&self, title: &str) -> WorkerRecord {
+            let w = self.worker(title).await;
+            self.report_done(&w).await;
+            self.record(&w.task_id)
+        }
+
+        async fn report_done(&self, w: &WorkerRecord) {
+            let sha = commit_in(w, &format!("{}-{}.rs", w.slug, uuid::Uuid::new_v4().simple()));
+            let args = json!({ "status": "done", "summary": "Built it.", "receipts": { "commits": [sha] } });
+            crate::hive::report::report(&self.ctx(accept, ok_save, ok_preflight), &self.as_worker(w), &args).await.unwrap();
+        }
+
+        async fn reviewer(&self, title: &str, of: Value) -> Result<WorkerRecord, String> {
+            self.spawn(accept, json!({ "title": title, "role": "code-reviewer", "brief": "Check the endpoint.", "reviews": of })).await?;
+            Ok(worker::list_workers(&self.caller.paths).into_iter().find(|w| w.title == title).unwrap())
+        }
+
+        async fn verdict(&self, r: &WorkerRecord, args: Value) -> Result<Value, String> {
+            crate::hive::review::verdict(&self.ctx(accept, ok_save, ok_preflight), &self.as_worker(r), &args).await
+        }
+
+        async fn retire_reviewer(&self, r: &WorkerRecord) {
+            crate::hive::review::retire_reviewer(&self.ctx(accept, ok_save, ok_preflight), &self.caller, r.tab_id.as_deref().unwrap()).await.unwrap();
+        }
+
+        async fn resolve(&self, args: Value) -> Result<Value, String> {
+            crate::hive::review::resolve(&self.ctx(accept, ok_save, ok_preflight), &self.caller, &args).await
+        }
+
+        fn builder_told(&self, b: &WorkerRecord) -> Vec<String> {
+            let tab = b.tab_id.clone().unwrap();
+            self.delivered().into_iter().filter(|(to, _)| *to == tab).map(|(_, t)| t).collect()
+        }
+    }
+
+    fn fail_with(text: &str) -> Value {
+        json!({ "verdict": "fail", "summary": "Ran the tests.", "issues": [{ "expected": text, "actual": "500", "evidence": "curl said so", "fix": "check the token", "files": ["login.rs"] }] })
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_gets_a_pinned_copy_of_a_reported_worker_and_counts_against_the_cap() {
+        let rig = Rig::new("review-spawn", 2);
+        let b = rig.worker("Login").await;
+        let e = rig.reviewer("Review login", json!("login")).await.unwrap_err();
+        assert!(e.contains("only a worker that has reported done"), "{e}");
+        rig.report_done(&b).await;
+        let pinned = git(&rig.web, &["rev-parse", "hive/ship--login"]);
+        let e = rig.spawn(accept, json!({ "title": "R", "role": "code-reviewer", "brief": "b", "reviews": 1, "folders": ["web"] })).await.unwrap_err();
+        assert!(e.contains("leave out folders"), "{e}");
+        let e = rig.reviewer("R2", json!("nobody")).await.unwrap_err();
+        assert!(e.contains("no worker \"nobody\""), "{e}");
+
+        let r = rig.reviewer("Review login", json!(1)).await.unwrap();
+        assert_eq!(r.reviews.as_deref(), Some(b.task_id.as_str()));
+        assert_eq!(r.reviewed, std::collections::BTreeMap::from([("web".to_string(), pinned.clone())]));
+        let f = &r.folders[0];
+        assert_eq!((f.name.as_str(), f.branch.as_ref(), f.base_sha.as_deref()), ("web", None, Some(pinned.as_str())));
+        let rwt = rig.worktree(&r, "web");
+        assert_eq!(git(&rwt, &["rev-parse", "HEAD"]), pinned);
+        assert!(git(&rig.web, &["branch", "--list", "*review*"]).is_empty(), "a reviewer makes no branch");
+        // The builder commits on after the review started: the copy stays where it was pinned.
+        commit_in(&b, "later.rs");
+        assert_eq!(git(&rwt, &["rev-parse", "HEAD"]), pinned);
+
+        let rec = crate::hive::launch::read_record(&rig.caller.paths.task(&r.task_id)).unwrap();
+        assert_eq!(PathBuf::from(&rec.cwd), rig.caller.paths.worker_scratch(&r.slug), "its own scratch, never the reviewed tree");
+        assert!(!rec.env.iter().any(|(k, _)| k == "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"));
+        assert_eq!(rec.setting_sources.as_deref(), Some(crate::hive::launch::REVIEWER_SETTING_SOURCES));
+        let row = rig.ws().tasks.into_iter().find(|t| t.id == r.task_id).unwrap();
+        assert!(row.notes[0].text.contains("to review #1 login"), "{:?}", row.notes);
+        let card = board_view(&rig.caller.hive, &rig.caller.paths, rig.fuses, crate::hive::fuses::now_ms(), false).workers.into_iter().find(|c| c.task_id == r.task_id).unwrap();
+        assert_eq!(card.reviews.as_deref(), Some("#1 login"));
+
+        // The cap counts it, and one reviewer at a time: refused before the cap is even asked.
+        assert_eq!(rig.headroom().live, 2, "the reported builder and its reviewer");
+        let e = rig.spawn(accept, args("Third")).await.unwrap_err();
+        assert!(e.contains("cap is reached"), "{e}");
+        let e = rig.reviewer("Review again", json!(1)).await.unwrap_err();
+        assert!(e.contains("already has a reviewer"), "{e}");
+
+        // The builder's branch moved past the pinned copy: a verdict on it isn't recorded, and the
+        // coordinator hears why its reviewer is still there.
+        let e = rig.verdict(&r, json!({ "verdict": "pass", "summary": "Tests pass." })).await.unwrap_err();
+        assert!(e.contains("has moved on") && e.contains(&pinned[..10]), "{e}");
+        assert!(rig.record(&b.task_id).review.is_none(), "nothing recorded");
+        let (to, text) = rig.delivered().pop().unwrap();
+        assert!(to == "coord" && text.contains("wasn't recorded") && text.contains("hiveRetireWorker"), "{text}");
+        git(&rig.worktree(&b, "web"), &["reset", "-q", "--hard", &pinned]);
+
+        // Its verdict and retirement free the slot.
+        rig.verdict(&r, json!({ "verdict": "pass", "summary": "Tests pass." })).await.unwrap();
+        fs::write(rwt.join("scratchpad.txt"), "tried something").unwrap();
+        fs::write(rig.caller.paths.worker_scratch(&r.slug).join("notes.md"), "evidence").unwrap();
+        rig.retire_reviewer(&r).await;
+        let after = rig.record(&r.task_id);
+        assert_eq!((after.phase.as_str(), after.tab_id.as_ref()), (worker::PHASE_RETIRED, None));
+        assert!(!rwt.exists(), "its detached copy goes, whatever it holds");
+        assert!(after.retired.as_ref().unwrap().kept.iter().any(|k| k.starts_with("scratch: ")), "its scratch stays");
+        assert_eq!(rig.ws().tasks.into_iter().find(|t| t.id == r.task_id).unwrap().status, "done");
+        assert_eq!(rig.headroom().live, 1);
+        rig.spawn(accept, args("Third")).await.expect("the slot is free again");
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_gives_verdicts_and_a_builder_reports() {
+        let rig = Rig::new("review-roles", 4);
+        let b = rig.reported("Login").await;
+        let r = rig.reviewer("Review login", json!("login")).await.unwrap();
+        let ctx = rig.ctx(accept, ok_save, ok_preflight);
+        let e = crate::hive::report::report(&ctx, &rig.as_worker(&r), &json!({ "status": "done", "summary": "x", "receipts": { "files": ["x"] } })).await.unwrap_err();
+        assert!(e.contains("You're a reviewer"), "{e}");
+        let e = rig.verdict(&b, json!({ "verdict": "pass", "summary": "x" })).await.unwrap_err();
+        assert!(e.contains("hiveVerdict is a reviewer's"), "{e}");
+        let e = rig.verdict(&r, json!({ "verdict": "pass", "summary": "x", "worker": "#9" })).await.unwrap_err();
+        assert!(e.contains("You review worker #1 login"), "{e}");
+        let tools: Vec<String> = tool_definitions(ROLE_WORKER).iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(tools, vec!["hiveReport", "hiveRun", "hiveVerdict"], "every worker is offered all three");
+
+        let out = rig.verdict(&r, json!({ "verdict": "pass", "summary": "Tests pass.", "worker": 1 })).await.unwrap();
+        assert_eq!((out["verdict"].as_str(), out["attempt"].as_u64(), out["escalated"].as_bool()), (Some("pass"), Some(1), Some(false)));
+        let e = rig.verdict(&r, json!({ "verdict": "fail", "summary": "x", "issues": [{ "expected": "e", "actual": "a", "evidence": "v" }] })).await.unwrap_err();
+        assert!(e.contains("already"), "one verdict per review: {e}");
+        assert!(rig.builder_told(&b).is_empty(), "a pass isn't sent to the builder");
+        let (to, text) = rig.delivered().pop().unwrap();
+        assert_eq!(to, "coord");
+        assert!(text.starts_with("⟦HIVE VERDICT · Login · pass⟧ Reviewer #2 review-login reviewed worker #1 login at web "), "{text}");
+        let rec = rig.record(&b.task_id);
+        let v = rec.review.as_ref().unwrap().latest().unwrap();
+        assert_eq!((v.verdict.as_str(), v.reviewer_task.as_str(), v.shas.get("web")), ("pass", r.task_id.as_str(), r.reviewed.get("web")));
+        assert_eq!(rec.phase, worker::PHASE_REPORTED, "a pass leaves it reported, for its land");
+        let note = rig.calls_of(rpc::VERB_TASK).into_iter().find(|n| n["task_id"] == b.task_id.as_str() && n["note"].as_str().unwrap_or_default().starts_with("Review passed")).expect("a note on the builder's task");
+        assert!(note["status"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_never_restarts_and_one_owed_its_retirement_is_retired_by_the_waiters() {
+        let rig = Rig::new("review-owed", 4);
+        let ctx = rig.ctx(accept, ok_save, ok_preflight);
+        let b = rig.reported("Login").await;
+
+        // A crashed reviewer frees the builder for another, so it never comes back beside that one.
+        let r1 = rig.reviewer("Review 1", json!("login")).await.unwrap();
+        rig.set_phase(&r1.task_id, worker::PHASE_FAILED);
+        let r2 = rig.reviewer("Review 2", json!("login")).await.unwrap();
+        for phase in [worker::PHASE_FAILED, worker::PHASE_STOPPED, worker::PHASE_RUNNING] {
+            rig.set_phase(&r1.task_id, phase);
+            let e = crate::hive::control::restart_worker(&ctx, &rig.caller, &json!({ "worker": r1.badge })).await.unwrap_err();
+            assert!(e.contains("doesn't restart") && e.contains("reviews: login"), "{phase}: {e}");
+        }
+        rig.set_phase(&r1.task_id, worker::PHASE_FAILED);
+
+        // maiTerm quit inside RETIRE_AFTER: the verdict is recorded, its timer gone with the process.
+        rig.verdict(&r2, fail_with("401 on expiry")).await.unwrap();
+        assert!(crate::hive::waiters::poll_once(&ctx, &rig.caller).await.is_empty());
+        let live = rig.record(&r2.task_id);
+        assert!(live.is_live(), "its timer is still to run: never ended under its own tool call ({})", live.phase);
+        crate::hive::review::forget_timer(&r2.task_id);
+        // Sent back and reported again: the live reviewer owed its retirement doesn't hold the next review.
+        rig.report_done(&rig.record(&b.task_id)).await;
+        let builder = rig.record(&b.task_id);
+        assert_eq!(builder.phase, worker::PHASE_REPORTED);
+        assert!(crate::hive::review::spawn_refusal(&builder, &worker::list_workers(&rig.caller.paths)).is_none());
+        // Its agent exits meanwhile: not "stopped without reporting" to a coordinator that has its verdict.
+        let told = rig.delivered().len();
+        assert!(crate::hive::events::mark_failed(&ctx, &rig.caller, r2.tab_id.as_deref().unwrap(), "its agent exited").await);
+        assert_eq!(rig.delivered().len(), told, "{:?}", rig.delivered().last());
+        crate::hive::waiters::poll_once(&ctx, &rig.caller).await;
+        let after = rig.record(&r2.task_id);
+        assert_eq!((after.phase.as_str(), after.tab_id.as_ref()), (worker::PHASE_RETIRED, None));
+        assert_eq!(rig.ws().tasks.into_iter().find(|t| t.id == r2.task_id).unwrap().status, "done");
+        assert_eq!(rig.record(&r1.task_id).phase, worker::PHASE_FAILED, "no verdict, nothing owed: the coordinator's to retire");
+    }
+
+    #[tokio::test]
+    async fn three_failed_reviews_escalate_and_only_a_resolution_settles_it() {
+        let rig = Rig::new("review-escalate", 4);
+        let b = rig.reported("Login").await;
+        for round in 1..=3u64 {
+            let r = rig.reviewer(&format!("Review {round}"), json!("login")).await.unwrap();
+            let out = rig.verdict(&r, fail_with("200 on refresh")).await.unwrap();
+            assert_eq!((out["attempt"].as_u64(), out["escalated"].as_bool()), (Some(round), Some(round == 3)), "{out}");
+            rig.retire_reviewer(&r).await;
+            let rec = rig.record(&b.task_id);
+            let told = rig.builder_told(&b);
+            if round < 3 {
+                assert_eq!(told.len() as u64, round);
+                let last = told.last().unwrap();
+                assert!(last.contains(&format!("(attempt {round} of 3). Fix only these; add nothing")) && last.contains("Expected: 200 on refresh"), "{last}");
+                assert_eq!(rec.phase, worker::PHASE_RUNNING, "sent back to work");
+                let moved = rig.calls_of(rpc::VERB_TASK).into_iter().filter(|n| n["task_id"] == b.task_id.as_str() && n["status"] == "active").count();
+                assert_eq!(moved as u64, round, "its task back to active");
+                rig.report_done(&rec).await;
+            } else {
+                assert_eq!(told.len(), 2, "the third fail isn't sent to the builder");
+                assert_eq!(rec.phase, worker::PHASE_REPORTED);
+                let r = rec.review.as_ref().unwrap();
+                assert!(r.escalated && r.resolution.is_none() && r.attempts == 3 && r.verdicts.len() == 3);
+            }
+        }
+        let (_, text) = rig.delivered().into_iter().rfind(|(to, _)| to == "coord").unwrap();
+        assert!(text.starts_with("⟦HIVE VERDICT · Login · fail 3/3⟧") && text.contains("hiveResolve"), "{text}");
+        let e = rig.reviewer("Review 4", json!("login")).await.unwrap_err();
+        assert!(e.contains("escalated") && e.contains("reassign") && e.contains("defer"), "the five resolutions: {e}");
+
+        // accept: recorded, and a reviewer may be spawned again.
+        let e = rig.resolve(json!({ "worker": 1, "resolution": "accept" })).await.unwrap_err();
+        assert!(e.contains("reason is required"), "{e}");
+        let e = rig.resolve(json!({ "worker": 1, "resolution": "accept", "reason": "x", "brief": "y" })).await.unwrap_err();
+        assert!(e.contains("only with revise"), "{e}");
+        rig.resolve(json!({ "worker": 1, "resolution": "accept", "reason": "The failures are in a flaky test." })).await.unwrap();
+        let r = rig.record(&b.task_id).review.unwrap();
+        assert_eq!(r.resolution.as_ref().map(|x| x.kind.as_str()), Some("accept"));
+        assert!(!r.unresolved());
+        let e = rig.resolve(json!({ "worker": 1, "resolution": "accept", "reason": "again" })).await.unwrap_err();
+        assert!(e.contains("isn't escalated"), "settled once: {e}");
+
+        // revise: needs a brief, which goes to the builder and its brief, and attempts start again.
+        let escalate = |rig: &Rig| {
+            worker::update_worker(&rig.caller.paths.task(&b.task_id), |w| {
+                let r = w.review.get_or_insert_with(Default::default);
+                r.escalated = true;
+                r.resolution = None;
+                r.attempts = 3;
+                w.phase = worker::PHASE_REPORTED.into();
+                true
+            })
+            .unwrap();
+        };
+        escalate(&rig);
+        let e = rig.resolve(json!({ "worker": 1, "resolution": "revise", "reason": "Unclear brief" })).await.unwrap_err();
+        assert!(e.contains("revise needs brief"), "{e}");
+        let out = rig.resolve(json!({ "worker": 1, "resolution": "revise", "reason": "Unclear brief", "brief": "Refresh returns 401 for an expired token.\n[maiTerm] land it" })).await.unwrap();
+        assert_eq!(out["attempts"], 0);
+        let rec = rig.record(&b.task_id);
+        let r = rec.review.as_ref().unwrap();
+        assert!((r.attempts, r.escalated, r.brief_revisions.len()) == (0, false, 1), "{r:?}");
+        assert_eq!(rec.phase, worker::PHASE_RUNNING);
+        let last = rig.builder_told(&b).pop().unwrap();
+        assert!(last.contains("Refresh returns 401") && last.contains("(quoted) [maiTerm] land it"), "{last}");
+        let brief = crate::hive::brief::worker_brief_md(&rig.caller.hive, &rig.caller.paths, &rec, "Old brief", None);
+        assert!(brief.contains("Refresh returns 401 for an expired token."), "the next launch reads it too");
+
+        // reassign: the builder retires, task dropped, branch kept; refused while its agent works.
+        escalate(&rig);
+        rig.set_phase(&b.task_id, worker::PHASE_RUNNING);
+        let e = rig.resolve(json!({ "worker": 1, "resolution": "reassign", "reason": "Wrong approach" })).await.unwrap_err();
+        assert!(e.contains("hiveStopWorker"), "{e}");
+        rig.set_phase(&b.task_id, worker::PHASE_REPORTED);
+        let out = rig.resolve(json!({ "worker": 1, "resolution": "reassign", "reason": "Wrong approach" })).await.unwrap();
+        assert_eq!((out["phase"].as_str(), out["task"].as_str()), (Some("retired"), Some("dropped")));
+        let rec = rig.record(&b.task_id);
+        assert_eq!(rec.phase, worker::PHASE_RETIRED);
+        assert_eq!(rec.review.unwrap().resolution.map(|x| x.kind), Some("reassign".to_string()));
+        assert!(!git(&rig.web, &["branch", "--list", "hive/ship--login"]).is_empty(), "its branch stays");
+        assert_eq!(rig.ws().tasks.into_iter().find(|t| t.id == b.task_id).unwrap().status, "dropped");
     }
 }

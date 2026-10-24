@@ -5,6 +5,7 @@
 //! fields can't strand a worker. Every kind is a String and every field defaults (an older build
 //! that meets an unknown enum variant loads nothing); fields a later build adds survive in `extra`.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -80,6 +81,93 @@ pub struct WorkerRecord {
     pub retired: Option<Retired>,
     /// A land of its was undone (§8.6): its waiters block, its card says so.
     pub undone: bool,
+    /// A reviewer's builder, by task id (§7.7). A reviewer keeps `hive_role = "worker"`: this is
+    /// what tells it apart (plan D2).
+    pub reviews: Option<String>,
+    /// A reviewer's pinned commits, folder → sha: its detached worktrees sit there, and its
+    /// verdict is about exactly these.
+    pub reviewed: BTreeMap<String, String>,
+    /// A builder's reviews: every verdict, the attempt count and any escalation (§7.7).
+    pub review: Option<Review>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// A builder's review record (§7.7): three failed attempts escalate, and only `hiveResolve`
+/// settles an escalation.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Review {
+    /// Failed verdicts since the brief was last revised.
+    pub attempts: u32,
+    pub verdicts: Vec<Verdict>,
+    pub escalated: bool,
+    pub resolution: Option<Resolution>,
+    /// Briefs the coordinator revised after an escalation, oldest first.
+    pub brief_revisions: Vec<BriefRevision>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl Review {
+    /// Escalated, and no resolution has settled it: no new reviewer, no land.
+    pub fn unresolved(&self) -> bool {
+        self.escalated && self.resolution.is_none()
+    }
+
+    pub fn latest(&self) -> Option<&Verdict> {
+        self.verdicts.last()
+    }
+}
+
+/// One `hiveVerdict`, as maiTerm checked it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Verdict {
+    pub reviewer_task: String,
+    /// The review round it closed, from 1.
+    pub attempt: u32,
+    /// `"pass"` | `"fail"`.
+    pub verdict: String,
+    /// The commits reviewed, folder → sha.
+    pub shas: BTreeMap<String, String>,
+    pub summary: String,
+    pub issues: Vec<ReviewIssue>,
+    pub at: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// One issue in a fail (§7.7's fail-report shape).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewIssue {
+    pub expected: String,
+    pub actual: String,
+    pub evidence: String,
+    pub fix: String,
+    pub files: Vec<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// How an escalation was settled: `"reassign"` | `"decompose"` | `"revise"` | `"accept"` | `"defer"`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Resolution {
+    pub kind: String,
+    pub reason: String,
+    pub at: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BriefRevision {
+    pub brief: String,
+    pub reason: String,
+    pub at: String,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -125,6 +213,9 @@ impl Default for WorkerRecord {
             launched_at: None,
             retired: None,
             undone: false,
+            reviews: None,
+            reviewed: BTreeMap::new(),
+            review: None,
             extra: Map::new(),
         }
     }
@@ -135,12 +226,21 @@ impl WorkerRecord {
         LIVE_PHASES.contains(&self.phase.as_str())
     }
 
+    pub fn is_reviewer(&self) -> bool {
+        self.reviews.as_deref().is_some_and(|t| !t.is_empty())
+    }
+
     pub fn git_folders(&self) -> impl Iterator<Item = &WorkerFolder> {
         self.folders.iter().filter(|f| f.worktree.is_some())
     }
 
-    /// Where it works (§6.3): the worktree of its first git folder, or its `scratch/`.
+    /// Where it works (§6.3): the worktree of its first git folder, or its `scratch/`. A
+    /// reviewer's is always its `scratch/`: under `--setting-sources project` the cwd is the one
+    /// project whose settings load, and the reviewed branch's must not (plan D1).
     pub fn cwd(&self, paths: &HivePaths) -> PathBuf {
+        if self.is_reviewer() {
+            return paths.worker_scratch(&self.slug);
+        }
         self.git_folders().find_map(|f| f.worktree.as_ref()).map(PathBuf::from).unwrap_or_else(|| paths.worker_scratch(&self.slug))
     }
 }
@@ -444,6 +544,32 @@ mod tests {
         r.retired = Some(Retired { reason: "abandoned".into(), at: "now".into(), kept: vec!["web: dirty".into()], ..Retired::default() });
         write_worker(&dir, &r).unwrap();
         assert_eq!(read_worker(&dir).unwrap(), r);
+        let _ = fs::remove_dir_all(&p.root);
+    }
+
+    #[test]
+    fn a_reviewer_works_from_its_scratch_and_a_review_round_trips_with_later_fields() {
+        let p = scratch();
+        let dir = task_dir(&p, "r1").unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let text = r#"{
+            "task_id": "r1", "slug": "rev", "phase": "running", "reviews": "t-builder",
+            "reviewed": {"web": "abc"},
+            "folders": [{"name": "web", "kind": "git", "worktree": "/wt/rev/web"}],
+            "review": {"attempts": 2, "escalated": true, "review_future": 1,
+                       "verdicts": [{"verdict": "fail", "issues": [{"expected": "e", "files": ["a.rs"], "issue_future": 2}]}]}
+        }"#;
+        fs::write(dir.join(WORKER_FILE), text).unwrap();
+        let w = read_worker(&dir).unwrap();
+        assert!(w.is_reviewer());
+        assert_eq!(w.cwd(&p), p.worker_scratch("rev"), "never the reviewed worktree");
+        let r = w.review.as_ref().unwrap();
+        assert!(r.unresolved() && r.latest().unwrap().issues[0].files == vec!["a.rs"]);
+        write_worker(&dir, &w).unwrap();
+        let saved = fs::read_to_string(dir.join(WORKER_FILE)).unwrap();
+        assert!(saved.contains("review_future") && saved.contains("issue_future"));
+        let builder = WorkerRecord { reviews: Some(String::new()), ..WorkerRecord::default() };
+        assert!(!builder.is_reviewer(), "an empty id reviews nothing");
         let _ = fs::remove_dir_all(&p.root);
     }
 }

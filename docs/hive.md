@@ -3251,6 +3251,39 @@ several releases a day).
    worktrees go (workers', the read copies, land temp ones forced once vouched for), dirty ones,
    scratch with work, every branch and the gallery (unless ticked) stay; the trust maiTerm wrote
    is removed, open agent requests of the Hive's tabs fail, the rows stay with their tabs cleared.
+   **6b built** (2026-10-24, uncommitted at the time of writing): reviewers (`hive/review.rs`).
+   `hiveSpawnWorker {reviews}` takes a worker that reported done, one live reviewer at a time,
+   none while an escalation is open; the reviewer keeps `hive_role = "worker"` and is told apart
+   by `worker.json` `reviews` (builder task id) and `reviewed` (folder → pinned sha). Its folders
+   are `worktree::create_review_worktrees`: `git worktree add --detach` at the builder's branch tip
+   read from the repo's refs, no branch, so its sandbox gets no ref entries. **It launches with
+   `--setting-sources local` from its own empty `scratch/`, not §7.7's `user` nor plan D1's
+   `project`**: user settings widen the sandbox, and under `project` Claude 2.1.310 loads
+   `.claude/skills`, `commands` and `agents` from every `--add-dir`, which a builder can commit
+   into its branch past its denyWrite (`git update-index --cacheinfo`) or write into its own
+   scratch (measured: a skill and a subagent in an add-dir were listed under `project`, not under
+   `local`). The copies go in as `--add-dir`, no
+   `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`, no setup commands (they would run the builder's
+   code unsandboxed), and the builder's scratch readable. `hive/probe.rs`
+   `hive_reviewer_never_loads_the_reviewed_branchs_settings_probe` planted a SessionStart and
+   UserPromptSubmit hook, a CLAUDE.md, a skill, a slash command and a subagent on the branch: none
+   loaded, and maiTerm's own `--settings` hooks still ran (run, passes, 2.1.310; under `project`
+   it fails on the skill). A reviewer never restarts (`hiveRestartWorker` refuses it: one live
+   reviewer per builder is checked only at spawn, and its copies stay pinned), and a verdict is
+   refused while the builder's branch tips differ from the reviewer's `reviewed`.
+   `hiveVerdict` (Rust refuses it to a builder and `hiveReport` to a reviewer): a fail needs an
+   issue, a pass carries none, 20 issues and 2,000 characters a field; the builder's task note
+   first, then `Review.verdicts`; a fail below 3 goes back to the builder ("Fix only these; add
+   nothing", `reported` → `running`, task `active`, only once delivered), the third escalates and
+   the builder isn't told; the coordinator gets `⟦HIVE VERDICT · title · fail n/3⟧` with every field
+   flattened and escaped. The reviewer is retired 3 s after its answer, and a retirement that
+   timer never got to (maiTerm quit inside it) is owed: the waiters poll retires any reviewer whose
+   verdict is in its builder's `review.verdicts`, a mount never relaunches one, and spawn ignores
+   it (task `done`, its detached
+   copies removed with `--force` once their `.git` is vouched for, scratch kept). `hiveResolve`:
+   `accept` records, `revise` delivers a brief kept in `brief_revisions` (the builder's brief.md
+   carries it) and resets the attempts, `reassign`/`decompose`/`defer` retire the builder, task
+   `dropped`. Cards show "Reviewing #3 x" and the builder's review line.
 7. Shared memory: `autoMemoryDirectory`, index rebuild, Memory view; checkpoints,
    `hiveAnswerWorker`, precedents in Rust storage, the decision log and earned autonomy.
 8. Gallery: store and index, `galleryAdd`/`List`/`Get`/`Tag`/`Collect`, thumbnails, the grid

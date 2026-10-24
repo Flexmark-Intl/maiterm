@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cardAge, cardState, isRetired, latestNote, onScreenAgent, retiredLine, sortCards, stateLine, STATE_ORDER, waves } from './cards';
+import { cardAge, cardState, isRetired, latestNote, onScreenAgent, retiredLine, reviewLine, sortCards, stateLine, STATE_ORDER, waves } from './cards';
 import type { HiveWorkerCard, TaskBlocker } from '$lib/tauri/types';
 
 const worker = (over: Partial<HiveWorkerCard> = {}): HiveWorkerCard => ({
@@ -123,6 +123,26 @@ describe('retired workers', () => {
     expect(retiredLine({ phase: 'landed', retired: null, undone: true })).toBe('Retired · landed · undone');
     expect(retiredLine({ phase: 'retired', retired: { reason: 'Wrong approach', at: 'now', kept: [] } })).toBe('Retired · Wrong approach');
     expect(retiredLine({ phase: 'retired' })).toBe('Retired');
+  });
+});
+
+describe('reviewLine', () => {
+  const review = (over: Partial<NonNullable<HiveWorkerCard['review']>> = {}) => ({ attempts: 0, max_attempts: 3, verdicts: 0, last: null, escalated: false, resolution: null, ...over });
+
+  it('a reviewer names what it reviews', () => {
+    expect(reviewLine({ reviews: '#3 login' })).toEqual({ text: 'Reviewing #3 login', urgent: false });
+  });
+
+  it('a builder shows how its reviews stand, an open escalation as urgent', () => {
+    expect(reviewLine({})).toBeNull();
+    expect(reviewLine({ review: review() })).toBeNull();
+    expect(reviewLine({ review: review({ verdicts: 1, last: 'pass' }) })?.text).toBe('Review passed');
+    expect(reviewLine({ review: review({ verdicts: 2, last: 'fail', attempts: 2 }) })).toEqual({ text: 'Review failed · 2/3', urgent: false });
+    expect(reviewLine({ review: review({ verdicts: 3, last: 'fail', attempts: 3, escalated: true }) })).toEqual({ text: 'Escalated · 3 failed reviews', urgent: true });
+    expect(reviewLine({ review: review({ verdicts: 3, last: 'fail', attempts: 3, escalated: true, resolution: 'accept' }) })?.text).toBe('Review accepted as is');
+    expect(reviewLine({ review: review({ verdicts: 3, last: 'fail', attempts: 3, escalated: true, resolution: 'reassign' }) })?.text).toBe('Review resolved: reassign');
+    expect(reviewLine({ review: review({ verdicts: 3, last: 'fail', resolution: 'revise' }) })?.text).toBe('Brief revised after review');
+    expect(reviewLine({ review: review({ verdicts: 4, last: 'fail', attempts: 1, resolution: 'revise' }) })?.text).toBe('Review failed · 1/3');
   });
 });
 

@@ -127,6 +127,26 @@ pub(crate) fn found_folder(name: &str, repo: &Path, wt: &Path) -> Option<WorkerF
     None
 }
 
+/// A reviewer's detached copy (§7.7) goes even with changes in it: it holds no work, only what
+/// the reviewer tried, and its verdict carries the evidence. Forced, so git runs no status
+/// there, and still only once its `.git` file names the recorded admin dir. Blocks.
+pub(crate) fn remove_detached(repo: &Path, f: &WorkerFolder) -> Removal {
+    let Some(wt) = f.worktree.as_deref().map(Path::new) else { return Removal::Gone };
+    if fs::symlink_metadata(wt).is_err() {
+        drop_entry(repo, wt);
+        return Removal::Gone;
+    }
+    let label = &f.name;
+    let vouched = f.admin_dir.as_deref().is_some_and(|admin| git_file_names(wt, Path::new(admin)));
+    if !vouched {
+        return Removal::Kept(format!("{label}: {} (its .git file isn't the one git wrote, so maiTerm ran no git there)", wt.display()));
+    }
+    match run(git_in(repo).args(["worktree", "remove", "--force"]).arg(wt), WORKTREE_TIMEOUT) {
+        Ok(_) => Removal::Removed,
+        Err(e) => Removal::Kept(format!("{label}: {} (git kept it: {e})", wt.display())),
+    }
+}
+
 /// Drops git's entry for a worktree whose folder is gone: nothing there to lose.
 fn drop_entry(repo: &Path, wt: &Path) {
     if let Err(e) = run(git_in(repo).args(["worktree", "remove", "--force"]).arg(wt), QUERY_TIMEOUT) {
@@ -157,8 +177,9 @@ pub(crate) struct Disk {
     pub kept: Vec<String>,
 }
 
-/// A retiring worker's disk (§8.4): each clean worktree goes, maiTerm's own caches go (a warm
-/// cargo target is gigabytes, and no work lives in either), its scratch and branches stay. Blocks.
+/// A retiring worker's disk (§8.4): each clean worktree goes (a reviewer's detached copies
+/// whatever they hold), maiTerm's own caches go (a warm cargo target is gigabytes, and no work
+/// lives in either), its scratch and branches stay. Blocks.
 pub(crate) fn retire_disk(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> Disk {
     let mut out = Disk::default();
     for f in w.git_folders() {
@@ -166,7 +187,8 @@ pub(crate) fn retire_disk(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> D
             out.kept.push(format!("{}: {} (this Hive has no such folder now)", f.name, f.worktree.as_deref().unwrap_or_default()));
             continue;
         };
-        match remove_if_clean(&repo, f) {
+        let removal = if w.is_reviewer() && f.branch.is_none() { remove_detached(&repo, f) } else { remove_if_clean(&repo, f) };
+        match removal {
             Removal::Removed => out.removed.push(f.name.clone()),
             Removal::Gone => {}
             Removal::Kept(why) => out.kept.push(why),
@@ -329,7 +351,7 @@ fn drop_into_history<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, task_id: 
 // ── hiveRetireWorker ──
 
 /// The phases the coordinator may retire a worker from: its agent isn't working (§8.4).
-const RETIRABLE: [&str; 4] = [worker::PHASE_STOPPED, worker::PHASE_FAILED, worker::PHASE_WAITING, worker::PHASE_REPORTED];
+pub(crate) const RETIRABLE: [&str; 4] = [worker::PHASE_STOPPED, worker::PHASE_FAILED, worker::PHASE_WAITING, worker::PHASE_REPORTED];
 
 pub(crate) fn tool_definition(tab_id: &Value) -> Value {
     json!({

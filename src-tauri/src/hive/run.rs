@@ -470,6 +470,9 @@ pub fn result_message(job: &Job, tail: &str) -> String {
             _ => "your worktree had uncommitted changes to tracked files when it started".to_string(),
         };
         out.push_str(&format!("\nThis run is no receipt: {why}. Commit, then run it again."));
+    } else if is_pass(job) && job.branch.is_none() {
+        // Only a reviewer's copies are detached: its runs are evidence for its verdict, never receipts.
+        out.push_str(&format!("\nCite it ({}) as evidence in your hiveVerdict.", job.id));
     } else if is_pass(job) {
         out.push_str(&format!("\nA receipt: report it in hiveReport as receipts.checks [{{\"job\": \"{}\", \"summary\": \"…\"}}].", job.id));
     } else if job.state != queue::DONE {

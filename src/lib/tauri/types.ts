@@ -700,6 +700,23 @@ export interface HiveWorkerCard {
   retired?: HiveRetired | null;
   /** A land of its was undone (§8.6). */
   undone?: boolean;
+  /** A reviewer's builder, as `#badge slug` (docs/hive.md §7.7). */
+  reviews?: string | null;
+  /** A builder's reviews so far. */
+  review?: HiveReviewView | null;
+}
+
+/** hive/review.rs `ReviewView`: a builder's reviews as its card shows them. */
+export interface HiveReviewView {
+  /** Failed verdicts since its brief was last revised. */
+  attempts: number;
+  max_attempts: number;
+  verdicts: number;
+  /** "pass" | "fail": the latest verdict. */
+  last?: string | null;
+  escalated: boolean;
+  /** "reassign" | "decompose" | "revise" | "accept" | "defer". */
+  resolution?: string | null;
 }
 
 /** hive/worker.rs `Retired`. */

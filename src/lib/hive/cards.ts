@@ -77,6 +77,20 @@ export function retiredLine(w: Pick<HiveWorkerCard, 'phase' | 'retired' | 'undon
   return why ? `Retired · ${why}` : 'Retired';
 }
 
+/** A card's review line (§7.7): a reviewer names what it reviews; a builder its reviews so far.
+ *  `urgent` while an escalation waits on the coordinator's `hiveResolve`. */
+export function reviewLine(w: Pick<HiveWorkerCard, 'reviews' | 'review'>): { text: string; urgent: boolean } | null {
+  if (w.reviews) return { text: `Reviewing ${w.reviews}`, urgent: false };
+  const r = w.review;
+  if (!r || (!r.verdicts && !r.escalated)) return null;
+  if (r.escalated && !r.resolution) return { text: `Escalated · ${r.attempts} failed reviews`, urgent: true };
+  if (r.escalated) return { text: r.resolution === 'accept' ? 'Review accepted as is' : `Review resolved: ${r.resolution}`, urgent: false };
+  // A revise starts the attempts again: its earlier fails no longer count.
+  if (r.resolution === 'revise' && r.attempts === 0 && r.last !== 'pass') return { text: 'Brief revised after review', urgent: false };
+  if (r.last === 'pass') return { text: 'Review passed', urgent: false };
+  return { text: `Review failed · ${r.attempts}/${r.max_attempts}`, urgent: false };
+}
+
 type WorkerFields = Pick<HiveWorkerCard, 'phase' | 'wait_reason' | 'depends_on_labels' | 'last_report'> & Partial<Pick<HiveWorkerCard, 'retired' | 'undone'>>;
 type TaskFields = { status: TaskStatus; blocker?: TaskBlocker | null } | null | undefined;
 type AgentFields = { state: AgentState; toolName?: string } | null | undefined;

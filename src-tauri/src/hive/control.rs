@@ -155,6 +155,13 @@ pub(crate) async fn restart_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
     let fresh = args.get("fresh").and_then(Value::as_bool).unwrap_or(false);
     let w = named_worker(caller, args).await?;
     let label = worker_label(&w);
+    if let Some(id) = w.reviews.clone().filter(|_| w.is_reviewer()) {
+        let paths = caller.paths.clone();
+        let builder = blocking(move || Ok(worker::task_dir(&paths, &id).ok().and_then(|d| worker::read_worker(&d).ok()))).await?;
+        if let Some(why) = restart_refusal_for_reviewer(&w, builder.as_ref()) {
+            return Err(why);
+        }
+    }
     match w.phase.as_str() {
         worker::PHASE_FAILED | worker::PHASE_STOPPED | worker::PHASE_RUNNING => {}
         worker::PHASE_WAITING => {
@@ -263,6 +270,20 @@ pub(crate) async fn restart_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
         "session": if fresh { "new" } else { "resumed" },
         "tab": if new_tab.is_some() { "new (its old tab was gone)" } else { "its own" },
     }))
+}
+
+/// A reviewer never restarts (§7.7): one live reviewer per builder is checked only at spawn, and
+/// its copies stay pinned at the commits it was spawned on, so a restarted one could run beside
+/// a newer reviewer, or judge work the builder has since fixed. A fresh spawn re-pins.
+pub(crate) fn restart_refusal_for_reviewer(w: &WorkerRecord, builder: Option<&WorkerRecord>) -> Option<String> {
+    let id = w.reviews.as_deref().filter(|_| w.is_reviewer())?;
+    let of = builder.map_or_else(|| super::deliver::one_line(id, 80), |b| b.slug.clone());
+    Some(format!(
+        "Worker {} is a reviewer, and a reviewer doesn't restart: its copies are pinned at the commits it was spawned on. Retire it \
+         (hiveStopWorker first if it's running, then hiveRetireWorker), and once its builder has reported done, spawn a new reviewer \
+         with reviews: {of}.",
+        worker_label(w),
+    ))
 }
 
 /// A worker stopped before it ever launched goes back to waiting (the caller polls the waiters).

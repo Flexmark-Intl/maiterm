@@ -28,7 +28,8 @@
 //! `run` is the worker's way in (`hiveRun`, its service verbs) and the `⟦HIVE RUN⟧` it hears back.
 //!
 //! Step 6a: a worker leaving for good and its chat read back after (`retire`), and deleting a
-//! Hive without deleting work (`delete`).
+//! Hive without deleting work (`delete`). Step 6b: reviewers, their verdicts and escalations
+//! (`review`).
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
@@ -57,6 +58,7 @@ pub mod queue;
 pub mod record;
 pub(crate) mod report;
 pub mod retire;
+pub mod review;
 pub mod roles;
 pub(crate) mod rpc;
 pub mod run;

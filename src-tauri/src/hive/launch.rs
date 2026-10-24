@@ -80,6 +80,8 @@ pub struct LaunchRecord {
 }
 
 pub const WORKER_PERMISSION_MODE: &str = "auto";
+/// A reviewer's `--setting-sources` (§7.7): nothing from the reviewed branch, nor the human's user settings.
+pub const REVIEWER_SETTING_SOURCES: &str = "local";
 
 /// One session the task's agent ran, in `tasks/<task>/sessions.json` (§4.2): the last is what a
 /// relaunch resumes.
@@ -161,19 +163,32 @@ pub fn worker_record(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> Launch
             }
         }
     }
+    // A reviewer reads the builder's scratch too (its brief, its made files); its sandbox's
+    // denyWrite of other workers' folders keeps that read-only.
+    if let Some(builder) = w.reviews.as_deref().and_then(|id| super::worker::task_dir(paths, id).ok()).and_then(|d| super::worker::read_worker(&d).ok()) {
+        add(s(&paths.worker_scratch(&builder.slug)));
+    }
     add(s(&paths.worker_scratch(&w.slug)));
     add(s(&paths.gallery()));
     // Also its cwd, so the sandbox and permission scopes name it the same way (spike 13).
     add_dirs.retain(|d| Path::new(d) != cwd);
     add_dirs.push(s(&cwd));
 
-    let mut env = vec![
-        ("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD".to_string(), "1".to_string()),
-        ("CLAUDE_CODE_TMPDIR".to_string(), s(&paths.worker_tmp(&w.slug))),
-    ];
+    let mut env = Vec::new();
+    // A reviewer's added folders are the builder's branch: its CLAUDE.md is the builder's words.
+    if !w.is_reviewer() {
+        env.push(("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD".to_string(), "1".to_string()));
+    }
+    env.push(("CLAUDE_CODE_TMPDIR".to_string(), s(&paths.worker_tmp(&w.slug))));
     if super::worktree::worker_uses_own_cargo_target(hive, w) {
         env.push(("CARGO_TARGET_DIR".to_string(), s(&paths.worker_cargo_target(&w.slug))));
     }
+    // A reviewer's sources leave out `project`: under it Claude 2.1.310 loads `.claude/skills`,
+    // `commands` and `agents` from every `--add-dir`, and the builder commits what it likes into
+    // the pinned copies (and writes its own scratch). `local` reads only the cwd's
+    // `settings.local.json`, and its scratch's `.claude` is on denyWrite; `--settings` still
+    // carries the sandbox, permissions and maiTerm's hooks.
+    let sources = if w.is_reviewer() { REVIEWER_SETTING_SOURCES } else { "project" };
     let web = super::roles::role(&w.role).is_some_and(|r| r.web);
     let mut disallowed = vec!["WebFetch".to_string()];
     if !web {
@@ -190,7 +205,7 @@ pub fn worker_record(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> Launch
         cwd: s(&cwd),
         add_dirs,
         env,
-        setting_sources: Some("project".to_string()),
+        setting_sources: Some(sources.to_string()),
         settings_path: s(&task.join(SETTINGS_FILE)),
         mcp_config_path: s(&task.join(MCP_FILE)),
         permission_mode: Some(WORKER_PERMISSION_MODE.to_string()),
@@ -485,7 +500,8 @@ pub fn write_worker_launch_files(
     let settings = super::settings::worker_settings_json(hive, record, w, paths, ctx, hooks)?;
     write_json(Path::new(&record.settings_path), &settings)?;
     write_json(Path::new(&record.mcp_config_path), &super::settings::hive_mcp_config())?;
-    write_bytes(&paths.worker_brief(&w.slug), super::brief::worker_brief_md(hive, paths, w, task_brief).as_bytes())
+    let builder = w.reviews.as_deref().and_then(|id| super::worker::task_dir(paths, id).ok()).and_then(|d| super::worker::read_worker(&d).ok());
+    write_bytes(&paths.worker_brief(&w.slug), super::brief::worker_brief_md(hive, paths, w, task_brief, builder.as_ref()).as_bytes())
 }
 
 const NO_CLAUDE_YET: &str =
@@ -510,7 +526,8 @@ fn ensure_trust(paths: &HivePaths, dir: &Path) -> Result<(), String> {
 /// repo the human hasn't trusted is theirs to trust, and the launch is refused instead of
 /// raising the dialog. Checked in every root a Claude has run under.
 fn check_worker_trust(claude_json: &[PathBuf], paths: &HivePaths, w: &WorkerRecord) -> Result<(), String> {
-    if w.git_folders().next().is_none() {
+    // A reviewer's cwd is its scratch, a folder maiTerm made: trusted like a scratch-only worker's.
+    if w.git_folders().next().is_none() || w.is_reviewer() {
         return ensure_trust(paths, &paths.worker_scratch(&w.slug));
     }
     let roots: Vec<PathBuf> = claude_json.iter().filter(|f| f.is_file()).cloned().collect();
@@ -567,6 +584,11 @@ fn first_launch_setup(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> Resul
         }
     }
     let mut prefix = String::new();
+    // A reviewer's worktrees hold the builder's unlanded code, and setup runs unsandboxed: an
+    // `npm ci` there would run the builder's install scripts as the human.
+    if w.is_reviewer() {
+        return Ok(prefix);
+    }
     for f in w.git_folders() {
         let setup = hive.folders.iter().find(|h| h.name == f.name).and_then(|h| h.setup.as_deref()).map(str::trim).filter(|s| !s.is_empty());
         let (Some(setup), Some(wt)) = (setup, f.worktree.as_deref()) else { continue };
@@ -610,6 +632,13 @@ fn prepare_worker(hive: &Hive, paths: &HivePaths, tab_id: &str, tasks: &[crate::
             "Worker {} is {}, so it doesn't start on its own. Its coordinator restarts it with hiveRestartWorker.",
             w.slug, w.phase
         ));
+    }
+    // A reviewer that gave its verdict has nothing left to do: its retirement is owed (the waiters
+    // poll does it), and a relaunch would only hold its slot.
+    if let Some(b) = w.reviews.as_deref().filter(|_| w.is_reviewer()).and_then(|id| super::worker::task_dir(paths, id).ok()).and_then(|d| super::worker::read_worker(&d).ok()) {
+        if super::review::verdict_given(&b, &w).is_some() {
+            return Err(format!("Reviewer {} has given its verdict, so it doesn't start again: maiTerm retires it.", w.slug));
+        }
     }
     let task = super::worker::task_dir(paths, &w.task_id).map_err(missing)?;
     let existing = read_record(&task).map_err(missing)?;
@@ -971,6 +1000,62 @@ pub(crate) mod tests {
         let r = worker_record(&h, &p, &scratch_only);
         assert_eq!(r.cwd, s(&p.worker_scratch("auth")));
         assert_eq!(r.add_dirs, vec!["/r/brand assets".to_string(), s(&p.gallery()), s(&p.worker_scratch("auth"))], "scratch once, as the cwd");
+    }
+
+    /// Plan D1: a reviewer runs from its empty scratch under `local` sources only, so the reviewed
+    /// branch's settings, hooks, MCP servers, skills, commands and agents never load, nor (with the
+    /// env var gone) its CLAUDE.md.
+    #[test]
+    fn a_reviewer_launches_from_its_scratch_without_the_branchs_claude_md_or_setup() {
+        let base = scratch("reviewer");
+        let (mut h, _, builder) = sample_worker_hive();
+        let p = HivePaths::new(base.join("hive/h1"));
+        crate::hive::worker::write_worker(&p.task("t-auth"), &builder).unwrap();
+        let mut r = builder.clone();
+        r.task_id = "t-rev".into();
+        r.slug = "auth-review".into();
+        r.reviews = Some("t-auth".into());
+        for f in r.folders.iter_mut().filter(|f| f.worktree.is_some()) {
+            f.worktree = Some(s(&p.worker_worktree("auth-review", &f.name)));
+            f.branch = None;
+        }
+        let rec = worker_record(&h, &p, &r);
+        let scratch_dir = s(&p.worker_scratch("auth-review"));
+        assert_eq!(rec.cwd, scratch_dir, "never the reviewed tree");
+        assert_eq!(
+            rec.add_dirs,
+            vec![
+                s(&p.worker_worktree("auth-review", "web")),
+                s(&p.worker_worktree("auth-review", "api")),
+                "/r/brand assets".to_string(),
+                s(&p.worker_scratch("auth")),
+                s(&p.gallery()),
+                scratch_dir.clone(),
+            ],
+            "its review worktrees, the plain folder, the builder's scratch to read, the gallery, then its own scratch as cwd"
+        );
+        assert!(!rec.env.iter().any(|(k, _)| k == "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"), "{:?}", rec.env);
+        assert_eq!(rec.setting_sources.as_deref(), Some("local"), "project loads the added folders' skills, commands and agents");
+        let a = hive_launch_args(&rec, None);
+        assert_eq!(flag_values(&a, "--setting-sources"), vec!["local"]);
+        assert_eq!(worker_record(&h, &p, &builder).setting_sources.as_deref(), Some("project"), "a builder keeps project sources");
+        h.folders[0].setup = Some("npm ci".into());
+        assert_eq!(first_launch_setup(&h, &p, &r).unwrap(), "", "no setup over the builder's code, unsandboxed");
+        assert!(first_launch_setup(&h, &p, &builder).unwrap().contains("npm ci"), "the builder's own launch runs it");
+
+        // A reviewer whose verdict is in never launches again (a restore, a mount): it is owed its retirement.
+        r.tab_id = Some("tab-rev".into());
+        crate::hive::worker::write_worker(&p.task("t-rev"), &r).unwrap();
+        let mut b = builder.clone();
+        b.review = Some(crate::hive::worker::Review {
+            verdicts: vec![crate::hive::worker::Verdict { reviewer_task: "t-rev".into(), verdict: "fail".into(), ..Default::default() }],
+            ..Default::default()
+        });
+        crate::hive::worker::write_worker(&p.task("t-auth"), &b).unwrap();
+        let prefs = crate::state::Preferences::default();
+        let e = prepare_worker(&h, &p, "tab-rev", &[], &prefs).unwrap_err();
+        assert!(e.contains("has given its verdict"), "{e}");
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

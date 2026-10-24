@@ -357,6 +357,9 @@ pub(crate) async fn report<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, arg
     let a = ReportArgs::parse(args)?;
     let (paths, tab) = (caller.paths.clone(), caller.tab_id.clone());
     let w = blocking(move || worker::worker_for_tab(&paths, &tab).ok_or_else(|| "No worker record names your tab.".to_string())).await?;
+    if w.is_reviewer() {
+        return Err("You're a reviewer: answer with hiveVerdict (pass, or fail with the issues). hiveReport is a builder's.".to_string());
+    }
     if w.phase == worker::PHASE_STOPPED {
         return Err("Your coordinator has stopped you: there's nothing to report to. Finish here.".to_string());
     }

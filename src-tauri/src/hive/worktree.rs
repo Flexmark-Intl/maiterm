@@ -4,6 +4,7 @@
 //!
 //! Everything here blocks on git or the disk: callers run it under `spawn_blocking`.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -29,9 +30,20 @@ struct Plan<'a> {
     folder: &'a HiveFolder,
     repo: PathBuf,
     worktree: PathBuf,
-    branch: String,
+    /// The worker's own new branch, or None for a reviewer's detached copy.
+    branch: Option<String>,
     target: Option<String>,
     sha: String,
+}
+
+fn check_slug(hive: &Hive, slug: &str) -> Result<(), String> {
+    if RESERVED_SLUGS.contains(&slug) || !is_component(slug) || slug.contains("--") {
+        return Err(format!("\"{slug}\" can't name a worker"));
+    }
+    if hive.slug.is_empty() {
+        return Err("This Hive has no slug to name its branches".to_string());
+    }
+    Ok(())
 }
 
 /// Make everything one worker has on disk but its task folder: `wt.noindex/<slug>/` with its
@@ -40,12 +52,7 @@ struct Plan<'a> {
 /// them, never this. If anything fails, what this call made is taken back and the human's
 /// checkouts are untouched.
 pub fn create_worker_worktrees(hive: &Hive, paths: &HivePaths, slug: &str, folders: &[String]) -> Result<Vec<WorkerFolder>, String> {
-    if RESERVED_SLUGS.contains(&slug) || !is_component(slug) || slug.contains("--") {
-        return Err(format!("\"{slug}\" can't name a worker"));
-    }
-    if hive.slug.is_empty() {
-        return Err("This Hive has no slug to name its branches".to_string());
-    }
+    check_slug(hive, slug)?;
     let mut chosen: Vec<&HiveFolder> = Vec::new();
     for name in folders {
         let f = hive.folders.iter().find(|f| f.name == *name).ok_or_else(|| format!("This Hive has no folder called \"{name}\""))?;
@@ -81,9 +88,65 @@ pub fn create_worker_worktrees(hive: &Hive, paths: &HivePaths, slug: &str, folde
         };
         let sha = run(git_in(&repo).args(["rev-parse", "--verify", "--quiet"]).arg(format!("{rev}^{{commit}}")), QUERY_TIMEOUT)
             .map_err(|_| format!("{}: no branch or commit \"{}\"", f.name, target.as_deref().unwrap_or("HEAD")))?;
-        plans.push(Plan { folder: f, repo, worktree: paths.worker_worktree(slug, &f.name), branch, target, sha });
+        plans.push(Plan { folder: f, repo, worktree: paths.worker_worktree(slug, &f.name), branch: Some(branch), target, sha });
     }
+    make_worktrees(hive, paths, slug, &chosen, plans)
+}
 
+/// A reviewer's folders (§7.7): for each of the builder's git folders, a detached worktree at
+/// the builder's branch tip as it is now, pinned there, so a later builder commit never moves
+/// what is being reviewed. No branch is made: the reviewer's sandbox gets no ref entries, and
+/// nothing it commits in its copy can reach the builder. Its plain folders are the builder's.
+/// Taken back whole on a failure, as a worker's. Blocks on git.
+pub fn create_review_worktrees(hive: &Hive, paths: &HivePaths, slug: &str, builder: &super::worker::WorkerRecord) -> Result<Vec<WorkerFolder>, String> {
+    check_slug(hive, slug)?;
+    let mut chosen: Vec<&HiveFolder> = Vec::new();
+    for bf in &builder.folders {
+        let f = hive.folders.iter().find(|f| f.name == bf.name).ok_or_else(|| format!("This Hive has no folder called \"{}\" now", bf.name))?;
+        if is_reserved_folder_name(&f.name) {
+            return Err(format!("\"{}\" can't be a folder name: a worker's own folder has it", f.name));
+        }
+        if f.is_git() != bf.worktree.is_some() {
+            return Err(format!("{}: the builder's folder and the Hive's no longer agree on what it is", f.name));
+        }
+        chosen.push(f);
+    }
+    let dir = paths.worker_dir(slug);
+    if fs::symlink_metadata(&dir).is_ok() {
+        return Err(format!("A worker called \"{slug}\" already has folders at {}", dir.display()));
+    }
+    let mut plans: Vec<Plan> = Vec::new();
+    for f in chosen.iter().copied().filter(|f| f.is_git()) {
+        let bf = builder.folders.iter().find(|b| b.name == f.name).expect("chosen from the builder's folders");
+        let sha = branch_tip(f, bf)?;
+        plans.push(Plan { folder: f, repo: PathBuf::from(&f.path), worktree: paths.worker_worktree(slug, &f.name), branch: None, target: bf.target.clone(), sha });
+    }
+    make_worktrees(hive, paths, slug, &chosen, plans)
+}
+
+/// The builder's branch tip in one folder. Read from the repo's refs, never through the
+/// builder's worktree, whose `.git` it writes. Blocks on git.
+fn branch_tip(f: &HiveFolder, bf: &WorkerFolder) -> Result<String, String> {
+    let branch = bf.branch.as_deref().ok_or_else(|| format!("{}: the builder has no branch here to review", f.name))?;
+    run(git_in(Path::new(&f.path)).args(["rev-parse", "--verify", "--quiet"]).arg(format!("refs/heads/{branch}^{{commit}}")), QUERY_TIMEOUT)
+        .map_err(|_| format!("{}: the builder's branch \"{branch}\" is gone", f.name))
+}
+
+/// The builder's branch tips now, folder → sha: what a reviewer's `reviewed` must still equal
+/// for its verdict to be about the builder's work. Blocks on git.
+pub fn builder_tips(hive: &Hive, builder: &super::worker::WorkerRecord) -> Result<BTreeMap<String, String>, String> {
+    let mut out = BTreeMap::new();
+    for bf in builder.folders.iter().filter(|b| b.worktree.is_some()) {
+        let f = hive.folders.iter().find(|f| f.name == bf.name && f.is_git()).ok_or_else(|| format!("This Hive has no repo called \"{}\" now", bf.name))?;
+        out.insert(bf.name.clone(), branch_tip(f, bf)?);
+    }
+    Ok(out)
+}
+
+/// Claims `wt.noindex/<slug>/`, makes its scratch and temp folders and adds each planned
+/// worktree, in `chosen`'s order (a plain folder gets none). Takes everything back on a failure.
+fn make_worktrees(hive: &Hive, paths: &HivePaths, slug: &str, chosen: &[&HiveFolder], plans: Vec<Plan>) -> Result<Vec<WorkerFolder>, String> {
+    let dir = paths.worker_dir(slug);
     fs::create_dir_all(paths.worktrees()).map_err(|e| format!("{}: {e}", paths.worktrees().display()))?;
     // `create_dir`, not `_all`: it's the claim on the slug, and a second spawn racing this one
     // for it gets AlreadyExists here.
@@ -119,13 +182,18 @@ pub fn create_worker_worktrees(hive: &Hive, paths: &HivePaths, slug: &str, folde
             return fail(&added, format!("{}: {} already exists", p.folder.name, p.worktree.display()));
         }
         let mut cmd = git_in(&p.repo);
-        cmd.args(["worktree", "add", "--quiet", "-b", &p.branch]).arg(&p.worktree).arg(&p.sha);
+        cmd.args(["worktree", "add", "--quiet"]);
+        match &p.branch {
+            Some(b) => cmd.args(["-b", b]),
+            None => cmd.arg("--detach"),
+        };
+        cmd.arg(&p.worktree).arg(&p.sha);
         if let Err(e) = run(&mut cmd, WORKTREE_TIMEOUT) {
             // git makes the `-b` branch before the checkout, and a killed add leaves its folder.
-            clean_failed_add(&p.repo, &p.worktree, Some((&p.branch, &p.sha)));
+            clean_failed_add(&p.repo, &p.worktree, p.branch.as_deref().map(|b| (b, p.sha.as_str())));
             return fail(&added, format!("{}: {e}", p.folder.name));
         }
-        added.push(Added { repo: p.repo.clone(), worktree: p.worktree.clone(), branch: Some((p.branch.clone(), p.sha.clone())) });
+        added.push(Added { repo: p.repo.clone(), worktree: p.worktree.clone(), branch: p.branch.clone().map(|b| (b, p.sha.clone())) });
         let dirs = run(
             git_in(&p.worktree).args(["rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir"]),
             QUERY_TIMEOUT,
@@ -138,12 +206,18 @@ pub fn create_worker_worktrees(hive: &Hive, paths: &HivePaths, slug: &str, folde
         if let Err(e) = copy_worktree_include(&p.repo, &p.worktree) {
             return fail(&added, format!("{}: {INCLUDE_FILE}: {e}", p.folder.name));
         }
-        log::info!("hive {}: worker {slug} worktree of {} at {} on {}", hive.id, p.repo.display(), p.worktree.display(), p.branch);
+        log::info!(
+            "hive {}: worker {slug} worktree of {} at {} on {}",
+            hive.id,
+            p.repo.display(),
+            p.worktree.display(),
+            p.branch.as_deref().map_or_else(|| format!("{} (detached)", p.sha), str::to_string)
+        );
         out.push(WorkerFolder {
             name: p.folder.name.clone(),
             kind: KIND_GIT.to_string(),
             worktree: Some(p.worktree.to_string_lossy().to_string()),
-            branch: Some(p.branch),
+            branch: p.branch,
             target: p.target,
             base_sha: Some(p.sha),
             common_dir: Some(common),
@@ -567,6 +641,52 @@ mod tests {
             assert!(git(r, &["branch", "--list", "hive/*"]).is_empty());
             assert!(!git(r, &["worktree", "list"]).contains("wt.noindex"));
         }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_reviewers_worktree_is_detached_at_the_builders_tip_and_stays_there() {
+        let base = scratch("review");
+        let web = repo(&base, "web");
+        let brand = base.join("brand");
+        fs::create_dir_all(&brand).unwrap();
+        let h = hive(LANDING_BASE, vec![folder("web", &web, KIND_GIT), folder("brand", &brand, KIND_PLAIN)]);
+        let p = HivePaths::new(base.join("hive/h1"));
+        let folders = create_worker_worktrees(&h, &p, "auth", &names(&["web", "brand"])).unwrap();
+        let bwt = p.worker_worktree("auth", "web");
+        fs::write(bwt.join("login.rs"), "v1").unwrap();
+        git(&bwt, &["add", "-A"]);
+        git(&bwt, &["commit", "-q", "--no-verify", "-m", "v1"]);
+        let pinned = git(&bwt, &["rev-parse", "HEAD"]);
+        let builder = super::super::worker::WorkerRecord { slug: "auth".into(), folders, ..Default::default() };
+
+        let got = create_review_worktrees(&h, &p, "auth-review", &builder).unwrap();
+        assert_eq!(got.iter().map(|f| (f.name.as_str(), f.kind.as_str())).collect::<Vec<_>>(), vec![("web", KIND_GIT), ("brand", KIND_PLAIN)]);
+        let rwt = p.worker_worktree("auth-review", "web");
+        assert_eq!((got[0].branch.as_ref(), got[0].base_sha.as_deref()), (None, Some(pinned.as_str())), "no ref of its own");
+        assert_eq!(got[0].target.as_deref(), Some("main"));
+        assert!(got[0].admin_dir.is_some() && got[0].common_dir.is_some());
+        assert_eq!(git(&rwt, &["rev-parse", "HEAD"]), pinned);
+        assert_eq!(git(&rwt, &["rev-parse", "--abbrev-ref", "HEAD"]), "HEAD", "detached");
+        assert_eq!(fs::read_to_string(rwt.join("login.rs")).unwrap(), "v1");
+
+        // The builder commits on: the review stays on what it was given.
+        fs::write(bwt.join("login.rs"), "v2").unwrap();
+        git(&bwt, &["commit", "-q", "-a", "--no-verify", "-m", "v2"]);
+        assert_eq!(git(&rwt, &["rev-parse", "HEAD"]), pinned);
+        // And nothing the reviewer commits in its copy reaches the builder's branch.
+        git(&rwt, &["commit", "-q", "--allow-empty", "--no-verify", "-m", "reviewer"]);
+        assert_ne!(git(&web, &["rev-parse", "hive/ship-it--auth"]), git(&rwt, &["rev-parse", "HEAD"]));
+        assert!(git(&web, &["branch", "--list"]).lines().count() == 2, "main and the builder's branch only");
+
+        remove_worker_worktrees(&h, &p, "auth-review", &got).unwrap();
+        assert!(!p.worker_dir("auth-review").exists());
+        assert!(!git(&web, &["branch", "--list", "hive/ship-it--auth"]).is_empty(), "the builder's branch is never the reviewer's to take back");
+
+        let mut gone = builder.clone();
+        gone.folders[0].branch = Some("hive/ship-it--nobody".into());
+        assert!(create_review_worktrees(&h, &p, "r2", &gone).unwrap_err().contains("is gone"));
+        assert!(!p.worker_dir("r2").exists(), "refused before anything was made");
         let _ = fs::remove_dir_all(&base);
     }
 
