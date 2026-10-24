@@ -3099,6 +3099,20 @@ several releases a day).
      its Rust twin `hive::owns_prompt` (`ring_devices`, which every doorbell path goes through)
      return false until step 7. Not yet: a watch script waiting doesn't count toward Needs you.
 5. The activity feed, diff stat, worker columns, raw terminal (`fixedSize`, spike 3), keyboard.
+   **5a built** (the pushed feed, Rust only, nothing renders it yet): `hive/diffstat.rs` measures
+   each worktree (merge base with `refs/heads/<target>`, else `base_sha`; total, committed,
+   untracked) on the git dir `worker.json` recorded, never the worktree's own `.git` file, which
+   is the worker's to rewrite; with `--no-ext-diff --no-textconv --no-color`, `LC_ALL=C` and
+   `diff.autoRefreshIndex=false`, since git 2.54's `git diff` wrote the refreshed index back with
+   `GIT_OPTIONAL_LOCKS=0` set (a test holds the index byte-identical). `hive/feed.rs` holds the
+   per-key `Debounce` (the first touch sets the deadline, one compute per key at a time, a touch
+   during one queues one rerun) and the worker meta (`mailink::tab_agent_meta`: `getTabMeta`
+   without the `pending_queue` scan). `events::observed` routes through `feed_actions`:
+   PostToolUse(Failure) on Edit/Write/MultiEdit/NotebookEdit/Bash/PowerShell → diff stat (5 s),
+   Stop → both, SessionStart → both (meta 2 s); an accepted report touches the diff stat, a
+   rolled-back spawn forgets both. Pushed as `hive-diff-stat` / `hive-worker-meta` by `emit_to`
+   only when changed; `hive_diff_stats` / `hive_worker_metas` answer the view's mount from the
+   cache, computing a missing entry once. No timer exists for an idle worker.
 5b. The stack feature first: any service on any branch (§6.9: `Tab.service_target`, re-rooted
    cwd, placeholders, Run on ▸, copies per branch, `shared_from`). Then the Hive run queue:
    namespaces, job kind, `hiveRun`, leases, the PreToolUse deny, pressure-aware capacity, and

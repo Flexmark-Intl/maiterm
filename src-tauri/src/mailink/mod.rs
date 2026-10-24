@@ -5918,6 +5918,15 @@ pub(crate) fn tab_meta_view(app: &AppState, tab_id: &str) -> Option<Value> {
     Some(m)
 }
 
+/// `tab_meta_view` without `queued`: what a Hive worker's card is pushed on each Stop (docs/hive.md
+/// §4.4), which mustn't scan the transcript's tail for queued messages every time.
+pub(crate) fn tab_agent_meta(app: &AppState, tab_id: &str) -> Option<Value> {
+    let (rt, _) = resolved_session_for_tab(app, tab_id)?;
+    let mut m = build_meta(app, tab_id).unwrap_or_else(|| json!({}));
+    m["runtime"] = json!(rt.as_key());
+    Some(m)
+}
+
 /// Everything the tab's agent has SAID since `since_ms`, joined oldest-first.
 ///
 /// This is the tail Overlord reads to harvest an answer to a directive it typed. Overlord

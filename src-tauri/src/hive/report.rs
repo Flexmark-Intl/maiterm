@@ -301,6 +301,8 @@ pub(crate) async fn report<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, arg
     })
     .await?;
     ctx.window.workers_changed(&caller.workspace_id);
+    // A report is read beside the work it reports: measure it now rather than at the next Stop.
+    ctx.window.diff_stat_touch(caller, &w.task_id);
 
     let delivery = match super::tools::coordinator_tab(ctx.data, caller) {
         Some(c) => ctx.window.deliver(&c, report_message(&w, &a, &checked), "Hive report").await.describe(),

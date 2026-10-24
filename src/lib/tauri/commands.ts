@@ -2,7 +2,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
-import type { Hive, HiveBoard, HiveCreated, HiveDetectedTool, HiveFolderInfo, HivePreflight, HiveSpec } from './types';
+import type { Hive, HiveBoard, HiveCreated, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HivePreflight, HiveSpec } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
@@ -2669,6 +2669,29 @@ export async function hiveLiveWorkerTabs(workspaceId: string): Promise<string[]>
  *  task changes, never polled. */
 export async function hiveWorkers(workspaceId: string): Promise<HiveBoard> {
   return invoke('hive_workers', { workspaceId });
+}
+
+/** Every worker's diff stat for the Hive view's mount (docs/hive.md §4.4): cached, or measured once
+ *  now. After this the view keeps up through `hive-diff-stat`. */
+export async function hiveDiffStats(workspaceId: string): Promise<HiveDiffStat[]> {
+  return invoke('hive_diff_stats', { workspaceId });
+}
+
+/** A worker tab's meta: {@link TabMeta} without `queued`. */
+export interface HiveWorkerMeta {
+  tab_id: string;
+  meta: TabMeta | null;
+}
+
+/** `hive-worker-meta`, sent to the Hive's window only. */
+export interface HiveWorkerMetaEvent extends HiveWorkerMeta {
+  workspace_id: string;
+}
+
+/** Every worker tab's meta for the Hive view's mount, read once for any not cached. After this the
+ *  view keeps up through `hive-worker-meta`; nothing polls. */
+export async function hiveWorkerMetas(workspaceId: string): Promise<HiveWorkerMeta[]> {
+  return invoke('hive_worker_metas', { workspaceId });
 }
 
 /** A Hive paused by a usage limit it couldn't wait out starts workers again (docs/hive.md §7.8).

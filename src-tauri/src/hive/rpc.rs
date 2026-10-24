@@ -39,6 +39,9 @@ pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     /// SIGTERM to `tab`'s agent, and only while it is the terminal's foreground job: never the
     /// shell, never by name. Whether a signal went.
     fn stop_agent(&self, tab: &str) -> impl Future<Output = Result<bool, String>> + Send;
+    /// A worker's files may have changed outside its own hooks (an accepted report): its diff
+    /// stat recomputes, debounced. A test window has no board to push to.
+    fn diff_stat_touch(&self, _caller: &super::tools::Caller, _task_id: &str) {}
 }
 
 pub(crate) use super::deliver::Sent;
@@ -116,6 +119,10 @@ impl HiveWindow for AppWindow {
                 .await
                 .map_err(|e| format!("maiTerm's worker thread failed: {e}"))?
         }
+    }
+
+    fn diff_stat_touch(&self, caller: &super::tools::Caller, task_id: &str) {
+        super::diffstat::touch(&self.handle, caller, task_id);
     }
 }
 

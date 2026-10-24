@@ -1117,6 +1117,8 @@ pub fn run() {
             hive::fuses::hive_resume,
             hive::tools::hive_live_worker_tabs,
             hive::tools::hive_workers,
+            hive::diffstat::hive_diff_stats,
+            hive::feed::hive_worker_metas,
             #[cfg(debug_assertions)]
             share::open::share_debug_open,
         ])

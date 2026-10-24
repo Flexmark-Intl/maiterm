@@ -644,6 +644,34 @@ export interface HiveBoard {
   refresh_at?: number | null;
 }
 
+/** `git diff --shortstat`, parsed. */
+export interface HiveShortstat {
+  files: number;
+  insertions: number;
+  deletions: number;
+}
+
+/** A worker's changes against its landing target, summed over its worktrees (docs/hive.md §4.4).
+ *  `hive_diff_stats` at mount, then `hive-diff-stat` ({@link HiveDiffStatEvent}) when it moves. */
+export interface HiveDiffStat {
+  task_id: string;
+  /** Tracked files, committed and not, against the merge base. */
+  total: HiveShortstat;
+  /** Untracked, unignored files: `total` can't see them. */
+  untracked: number;
+  /** Commits only: what a land would take. */
+  committed: HiveShortstat;
+  /** Epoch ms. */
+  computed_at: number;
+  /** A worktree that couldn't be measured, by folder name; the sums leave it out. */
+  error?: string | null;
+}
+
+export interface HiveDiffStatEvent {
+  workspace_id: string;
+  stat: HiveDiffStat;
+}
+
 export type CursorStyle = 'block' | 'underline' | 'bar';
 
 export type TriggerActionType = 'notify' | 'send_command' | 'set_tab_state' | 'enable_auto_resume' | 'replay_auto_resume';

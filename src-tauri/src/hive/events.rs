@@ -27,30 +27,73 @@ const CRASHABLE: [&str; 2] = [worker::PHASE_LAUNCHING, worker::PHASE_RUNNING];
 /// A SessionEnd comes as the agent exits: the shell has its prompt back a moment later.
 const SETTLE: Duration = Duration::from_secs(2);
 
+/// What a worker's hook sets off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Action {
+    /// Its agent may have exited: a crash?
+    SessionEnded,
+    /// A failed call: a sandbox refusal?
+    ToolFailed,
+    /// Its files may have changed: the diff stat, debounced (§4.4).
+    DiffStat,
+    /// Its model or context may have moved: the card's meta, debounced (§4.4).
+    Meta,
+}
+
+/// The tools that change files: a shell command can as much as an edit.
+const EDITING_TOOLS: [&str; 6] = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"];
+
+/// The routing table of `observed`. A failed shell command may still have written files, so it
+/// touches the diff stat too. SessionStart covers a compaction (`source: compact`).
+pub(crate) fn feed_actions(event: &str, tool: Option<&str>) -> &'static [Action] {
+    let edits = tool.is_some_and(|t| EDITING_TOOLS.contains(&t));
+    match event {
+        "SessionEnd" => &[Action::SessionEnded],
+        "PostToolUseFailure" if edits => &[Action::ToolFailed, Action::DiffStat],
+        "PostToolUseFailure" => &[Action::ToolFailed],
+        "PostToolUse" if edits => &[Action::DiffStat],
+        "Stop" => &[Action::DiffStat, Action::Meta],
+        "SessionStart" => &[Action::Meta, Action::DiffStat],
+        _ => &[],
+    }
+}
+
 /// Every event a Hive tab's own command hook forwards (`via=hive`). Called before the hooks
 /// handler's mod dedup, which would drop this copy for the mod's: only this one says it is a
 /// Hive tab's, and the tab is checked against the state here.
 pub fn observed(state: &Arc<AppState>, handle: &AppHandle, tab_id: &str, event_name: &str, event: &Value) {
-    if !matches!(event_name, "SessionEnd" | "PostToolUseFailure") {
+    let actions = feed_actions(event_name, event.get("tool_name").and_then(Value::as_str));
+    if actions.is_empty() {
         return;
     }
     let Some(caller) = worker_caller(state, tab_id) else { return };
-    let (state, handle, tab, event, name) = (state.clone(), handle.clone(), tab_id.to_string(), event.clone(), event_name.to_string());
-    tauri::async_runtime::spawn(async move {
-        let ctx = super::tools::app_ctx(&state, &handle, &caller);
-        if name == "SessionEnd" {
-            // A `/clear` ends one session and starts the next in the same process.
-            if event.get("reason").and_then(Value::as_str) == Some("clear") {
-                return;
+    for action in actions {
+        match action {
+            Action::DiffStat => super::diffstat::touch_tab(handle, &caller, tab_id),
+            Action::Meta => super::feed::meta_touch(state, handle, &caller, tab_id),
+            Action::SessionEnded => {
+                // A `/clear` ends one session and starts the next in the same process.
+                if event.get("reason").and_then(Value::as_str) == Some("clear") {
+                    continue;
+                }
+                let (state, handle, caller, tab) = (state.clone(), handle.clone(), caller.clone(), tab_id.to_string());
+                tauri::async_runtime::spawn(async move {
+                    let ctx = super::tools::app_ctx(&state, &handle, &caller);
+                    tokio::time::sleep(SETTLE).await;
+                    if session_ended(&ctx, &caller, &tab).await {
+                        super::waiters::poll_soon(state.clone(), handle.clone(), caller.workspace_id.clone());
+                    }
+                });
             }
-            tokio::time::sleep(SETTLE).await;
-            if session_ended(&ctx, &caller, &tab).await {
-                super::waiters::poll_soon(state.clone(), handle.clone(), caller.workspace_id.clone());
+            Action::ToolFailed => {
+                let (state, handle, caller, tab, event) = (state.clone(), handle.clone(), caller.clone(), tab_id.to_string(), event.clone());
+                tauri::async_runtime::spawn(async move {
+                    let ctx = super::tools::app_ctx(&state, &handle, &caller);
+                    tool_failed(&ctx, &caller, &tab, &event).await;
+                });
             }
-        } else {
-            tool_failed(&ctx, &caller, &tab, &event).await;
         }
-    });
+    }
 }
 
 /// A worker tab's terminal died on its own (not killed by maiTerm: a suspend, close or reload
@@ -243,4 +286,28 @@ async fn notify<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text: String) 
     let Some(c) = super::tools::coordinator_tab(ctx.data, caller) else { return };
     let sent = ctx.window.deliver(&c, text, "Hive notice").await;
     log::info!("hive {}: notice to the coordinator: {}", caller.hive.id, sent.describe());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use Action::*;
+
+    #[test]
+    fn hooks_route_to_their_actions() {
+        for tool in EDITING_TOOLS {
+            assert_eq!(feed_actions("PostToolUse", Some(tool)), &[DiffStat], "{tool}");
+            assert_eq!(feed_actions("PostToolUseFailure", Some(tool)), &[ToolFailed, DiffStat], "{tool}");
+        }
+        for tool in [Some("Read"), Some("Grep"), Some("mcp__maiterm__hiveReport"), Some("edit"), None] {
+            assert_eq!(feed_actions("PostToolUse", tool), &[] as &[Action], "{tool:?}: changes no file");
+            assert_eq!(feed_actions("PostToolUseFailure", tool), &[ToolFailed], "{tool:?}");
+        }
+        assert_eq!(feed_actions("Stop", None), &[DiffStat, Meta]);
+        assert_eq!(feed_actions("SessionStart", None), &[Meta, DiffStat]);
+        assert_eq!(feed_actions("SessionEnd", None), &[SessionEnded]);
+        for quiet in ["PreToolUse", "Notification", "UserPromptSubmit", "PreCompact", "SubagentStop", "StopFailure", ""] {
+            assert!(feed_actions(quiet, Some("Edit")).is_empty(), "{quiet}");
+        }
+    }
 }

@@ -846,6 +846,10 @@ impl Undo {
             }
         }
         drop(self.reservation);
+        super::diffstat::forget(&caller.hive.id, &self.task_id);
+        if let Some(tab) = self.rows.as_ref().and_then(|r| r.tab_id.as_deref()) {
+            super::feed::forget_meta(tab);
+        }
         log::info!("hive {}: spawn of worker {} rolled back: {why}", caller.hive.id, self.slug);
         if stayed.is_empty() {
             why
