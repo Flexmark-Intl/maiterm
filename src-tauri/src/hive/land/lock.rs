@@ -188,6 +188,18 @@ pub fn release(common_dir: &Path, land_id: &str) {
     WAKE.notify_all();
 }
 
+/// Who holds the lock now, without taking it: None when it is free or stale, Some(None) when its
+/// file can't be read yet.
+pub fn holder(common_dir: &Path) -> Option<Option<LockInfo>> {
+    let path = lock_path(common_dir);
+    let held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+    if fs::symlink_metadata(&path).is_err() {
+        return None;
+    }
+    let info = read_info(&path);
+    (!stale(&path, info.as_ref(), &held)).then_some(info)
+}
+
 /// Whether this process holds the lock for `land_id`.
 pub fn holds(common_dir: &Path, land_id: &str) -> bool {
     HELD.lock().unwrap_or_else(|e| e.into_inner()).get(&lock_path(common_dir)).is_some_and(|l| l == land_id)

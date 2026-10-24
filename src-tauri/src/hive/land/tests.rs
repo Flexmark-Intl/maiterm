@@ -126,6 +126,23 @@ fn opts() -> Opts {
     Opts { lock_wait: Duration::from_secs(20), checker: Arc::new(NoChecker), before_advance: None, after_advance: None }
 }
 
+/// The land a test's `hold_lock` stands in for.
+const HOLDER: &str = "L-h01d0000";
+
+/// Each check made into the job the queue would run (kept, to count), then run where it would.
+#[derive(Default)]
+struct QueueCounter {
+    jobs: Mutex<Vec<crate::hive::queue::Job>>,
+    sh: ShChecker,
+}
+impl Checker for QueueCounter {
+    fn start(&self, req: &CheckRequest) -> Result<CheckStart, String> {
+        let job = crate::hive::queue::Queue::default().enqueue(driver::check_spec(req), 0)?;
+        self.jobs.lock().unwrap().push(job);
+        self.sh.start(req)
+    }
+}
+
 struct Rig {
     base: PathBuf,
     repos: HashMap<String, PathBuf>,
@@ -279,6 +296,28 @@ impl Rig {
     /// The land log line a single-repo land wrote.
     fn line_of(out: &Value, folder: &str) -> String {
         format!("{}/{folder}", out["land"].as_str().expect("a land id"))
+    }
+
+    /// Another land holds `folder`'s lock, so one-repo lands there queue for a batch. Its common
+    /// dir, for `lock::release(.., HOLDER)`.
+    fn hold_lock(&self, folder: &str) -> PathBuf {
+        let common = git::common_dir(self.repo(folder)).unwrap();
+        assert_eq!(lock::try_take(&common, &lock::LockInfo::ours(&self.caller.hive.id, HOLDER)).unwrap(), lock::Taken::Taken);
+        common
+    }
+
+    /// `hiveLand` of each, every one answering that it waits for a batch.
+    async fn queue_all(&self, ws: &[WorkerRecord], o: &Opts) {
+        for w in ws {
+            let out = self.land_with(w, json!({}), o.clone()).await.unwrap();
+            assert_eq!(out["state"], STATE_QUEUED_BATCH, "{out}");
+            assert_eq!(self.record(&w.task_id).land.unwrap().state, STATE_QUEUED_BATCH);
+        }
+    }
+
+    /// The repo's batch queue run to empty, as `continue_batch` does outside a test.
+    async fn run_batch(&self, folder: &str, o: &Opts) {
+        batch::run(&self.ctx(), &self.caller, folder, o, &|| {}).await;
     }
 
     /// Nothing a land holds is left: no lock file, no temporary worktree, no land folder.
@@ -1179,6 +1218,12 @@ fn a_cards_line_says_what_the_land_waits_on() {
     l.request = Some("r_9".into());
     assert_eq!(describe(&l), "waiting for the human's approval");
     assert_eq!(LandView::of(&l).request.as_deref(), Some("r_9"), "the worker's column finds its card");
+    l.state = STATE_QUEUED_BATCH.into();
+    assert_eq!(describe(&l), "waiting to land in a batch");
+    assert!(l.in_progress(), "a place in a batch queue is a land under way: a restart holds it");
+    l.state = STATE_CHECKING.into();
+    l.batch = Some("Q-1a2b3c4d".into());
+    assert_eq!((describe(&l).as_str(), LandView::of(&l).batch.as_deref()), ("batch land check running", Some("Q-1a2b3c4d")));
 }
 
 // ── The human's approval (plan 6d) ──
@@ -1897,4 +1942,450 @@ async fn an_undo_check_runs_under_the_land_profile_and_its_end_lands_the_revert(
     assert_eq!(rig.log().last().unwrap().check, "passed");
     assert!(rig.told().iter().any(|t| t.starts_with("⟦HIVE UNDO · Title job⟧ Land ")), "{:?}", rig.told());
     rig.assert_no_leftovers();
+}
+
+// ── Batched land checks (§6.8) ──
+
+#[cfg(unix)]
+#[tokio::test]
+async fn three_waiting_lands_cost_one_check_and_base_moves_to_their_chain_tip() {
+    let rig = Rig::with("batch3", &["web"], |h| h.folders[0].land_check = Some("test -f a.rs && test -f b.rs && test -f c.rs".into()));
+    let counter = Arc::new(QueueCounter::default());
+    let o = Opts { checker: counter.clone(), ..opts() };
+    let ws: Vec<WorkerRecord> = ["a", "b", "c"].iter().map(|s| rig.reported(s, &["web"], &format!("{s}.rs"), "x\n")).collect();
+    let pins: Vec<String> = ws.iter().map(|w| rig.tips(w)["web"].as_str().unwrap().to_string()).collect();
+    let before = rig.main_tip("web");
+    let common = rig.hold_lock("web");
+    rig.queue_all(&ws, &o).await;
+    assert_eq!(rig.main_tip("web"), before, "nothing lands while the repo is busy");
+    lock::release(&common, HOLDER);
+    rig.run_batch("web", &o).await;
+
+    let jobs = counter.jobs.lock().unwrap().clone();
+    assert_eq!(jobs.len(), 1, "three lands, one queued check");
+    let run = jobs[0].land.clone().unwrap();
+    assert_eq!((run.kind.as_str(), run.profile.as_str(), jobs[0].needs.clone()), (CHECK_BATCH, "land", vec!["land:web".to_string()]));
+    assert_eq!((counter.sh.runs(CHECK_BATCH), counter.sh.runs(CHECK_LAND)), (1, 0));
+
+    let tip = rig.main_tip("web");
+    let log = rig.log();
+    assert_eq!(log.len(), 3, "{log:?}");
+    let mut parent = before.clone();
+    for (i, e) in log.iter().enumerate() {
+        let merge = e.merge_commit.clone().expect("a member's own merge commit");
+        assert_eq!((e.kind.as_str(), e.task_id.as_str(), e.reviewed_sha.as_str()), ("batch_member", ws[i].task_id.as_str(), pins[i].as_str()));
+        assert_eq!((e.tested_sha.as_str(), e.base_before.as_str(), e.base_after.as_str(), e.check.as_str()), (tip.as_str(), before.as_str(), tip.as_str(), "passed"));
+        assert_eq!(e.tree_tested, e.tree_landed);
+        git(rig.repo("web"), &["merge-base", "--is-ancestor", &merge, &tip]);
+        assert_eq!(git(rig.repo("web"), &["rev-parse", &format!("{merge}^1")]), parent, "merged in hiveLand order");
+        assert_eq!(git(rig.repo("web"), &["rev-parse", &format!("{merge}^2")]), pins[i], "--no-ff of exactly the pinned commit");
+        let subject = git(rig.repo("web"), &["log", "-1", "--format=%s", &merge]);
+        assert_eq!(subject, format!("Land Title {} ({}) [maiTerm {}]", ws[i].slug, &pins[i][..7], e.land));
+        parent = merge;
+    }
+    assert_eq!(parent, tip, "Base is exactly the chain's tip");
+    for (w, pin) in ws.iter().zip(&pins) {
+        let r = rig.record(&w.task_id);
+        assert_eq!((r.phase.as_str(), r.land.as_ref().unwrap().state.as_str()), (worker::PHASE_LANDED, STATE_LANDED));
+        assert_eq!(&git(rig.repo("web"), &["rev-parse", &format!("refs/heads/hive/ship--{}", w.slug)]), pin, "a member's branch isn't moved");
+    }
+    let told = rig.told().join("\n");
+    for w in &ws {
+        assert!(told.contains(&format!("⟦HIVE LAND · Title {}⟧ Worker", w.slug)) && told.contains("It landed in batch Q-"), "{told}");
+    }
+    assert!(log::folded(&rig.caller.paths).suspect_folders().is_empty());
+    rig.assert_no_leftovers();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failing_batch_is_split_until_the_bad_land_stands_alone_and_the_others_land() {
+    let rig = Rig::with("bisect", &["web"], |h| h.folders[0].land_check = Some("test ! -e bad.txt || { echo 'FAIL: bad.txt'; exit 3; }".into()));
+    let checker = Arc::new(ShChecker::default());
+    let o = Opts { checker: checker.clone(), ..opts() };
+    let a = rig.reported("a", &["web"], "a.rs", "a\n");
+    let b = rig.reported("b", &["web"], "bad.txt", "bad\n");
+    let c = rig.reported("c", &["web"], "c.rs", "c\n");
+    let common = rig.hold_lock("web");
+    rig.queue_all(&[a.clone(), b.clone(), c.clone()], &o).await;
+    lock::release(&common, HOLDER);
+    rig.run_batch("web", &o).await;
+
+    // abc fails; ab fails; a passes; b fails alone; c passes.
+    assert_eq!(checker.runs(CHECK_BATCH), 5);
+    assert_eq!(checker.runs(CHECK_BASE), 1, "Base alone, once, after the culprit is found");
+    for (f, there) in [("a.rs", true), ("c.rs", true), ("bad.txt", false)] {
+        assert_eq!(git(rig.repo("web"), &["ls-tree", "--name-only", "refs/heads/main", f]).is_empty(), !there, "{f}");
+    }
+    assert_eq!((rig.record(&a.task_id).phase.as_str(), rig.record(&c.task_id).phase.as_str()), (worker::PHASE_LANDED, worker::PHASE_LANDED));
+    let r = rig.record(&b.task_id);
+    assert_eq!(r.phase, worker::PHASE_REPORTED);
+    assert!(r.land.is_none());
+    let members: Vec<String> = rig.log().iter().filter(|e| e.kind == "batch_member").map(|e| e.worker.clone()).collect();
+    assert_eq!(members, vec!["a", "c"]);
+    let told = rig.told().join("\n");
+    assert!(told.contains("Worker #2 b didn't land") && told.contains("split down to this land alone") && told.contains("FAIL: bad.txt"), "{told}");
+    assert!(told.contains("main passes web's land check alone"), "{told}");
+    rig.assert_no_leftovers();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_conflicting_member_and_a_config_member_leave_the_batch_and_land_alone() {
+    let rig = Rig::with("leave", &["web"], |h| h.folders[0].land_check = Some("true".into()));
+    let checker = Arc::new(ShChecker::default());
+    let o = Opts { checker: checker.clone(), ..opts() };
+    let a = rig.reported("a", &["web"], "shared.txt", "one\nA\nthree\n");
+    let b = rig.reported("b", &["web"], "shared.txt", "one\nB\nthree\n");
+    let c = rig.reported("c", &["web"], ".claude/settings.json", "{}\n");
+    let d = rig.reported("d", &["web"], "d.rs", "d\n");
+    let common = rig.hold_lock("web");
+    rig.queue_all(&[a.clone(), b.clone(), c.clone(), d.clone()], &o).await;
+    lock::release(&common, HOLDER);
+    rig.run_batch("web", &o).await;
+
+    assert_eq!(checker.runs(CHECK_BATCH), 1, "a and d, checked once");
+    let members: Vec<String> = rig.log().iter().filter(|e| e.kind == "batch_member").map(|e| e.worker.clone()).collect();
+    assert_eq!(members, vec!["a", "d"]);
+    // b, alone, merges the Base a left into its commit: the conflict is its own to resolve.
+    let rb = rig.record(&b.task_id);
+    assert_eq!(rb.phase, worker::PHASE_REPORTED);
+    let told = rig.told().join("\n");
+    assert!(told.contains("Worker #2 b didn't land") && told.contains("conflicts in web: `shared.txt`"), "{told}");
+    // c, alone, runs its own check and goes to the human's card.
+    assert_eq!(checker.runs(CHECK_LAND), 1);
+    let rc = rig.record(&c.task_id);
+    assert_eq!((rc.phase.as_str(), rc.land.as_ref().unwrap().state.as_str()), (worker::PHASE_LANDING, STATE_AWAITING_HUMAN));
+    let filed = rig.seen.lock().unwrap().filed.clone();
+    assert_eq!(filed.len(), 1);
+    assert!(filed[0].effects.iter().any(|e| e.contains(".claude/settings.json")), "{:?}", filed[0].effects);
+    assert!(!git(rig.repo("web"), &["ls-tree", "--name-only", "-r", "refs/heads/main"]).contains(".claude"), "config never lands without the human");
+    rig.assert_no_leftovers();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn base_moving_before_the_fast_forward_rebuilds_the_batch_then_holds_and_a_held_member_resumes_alone() {
+    let rig = Rig::with("batchmoved", &["web"], |h| h.folders[0].land_check = Some("true".into()));
+    let checker = Arc::new(ShChecker::default());
+    let repo = rig.repo("web").to_path_buf();
+    let side = rig.base.join("side");
+    git(&repo, &["checkout", "-q", "--detach"]);
+    git(&repo, &["worktree", "add", "-q", side.to_str().unwrap(), "main"]);
+    let a = rig.reported("a", &["web"], "a.rs", "a\n");
+    let b = rig.reported("b", &["web"], "b.rs", "b\n");
+    let (s, n) = (side.clone(), Arc::new(Mutex::new(0)));
+    let once = n.clone();
+    let o = Opts {
+        checker: checker.clone(),
+        before_advance: Some(Arc::new(move |_f: &str| {
+            let mut n = n.lock().unwrap();
+            if *n == 0 {
+                commit(&s, "side-0.txt", "side\n");
+            }
+            *n += 1;
+        })),
+        ..opts()
+    };
+    let common = rig.hold_lock("web");
+    rig.queue_all(&[a.clone(), b.clone()], &o).await;
+    lock::release(&common, HOLDER);
+    rig.run_batch("web", &o).await;
+    assert_eq!((*once.lock().unwrap(), checker.runs(CHECK_BATCH)), (2, 2), "rebuilt and checked again once");
+    let moved = git(&repo, &["log", "-1", "--format=%H", "refs/heads/main", "--", "side-0.txt"]);
+    let log = rig.log();
+    assert!(log.iter().all(|e| e.kind == "batch_member" && e.base_before == moved), "rebuilt from the moved Base: {log:?}");
+    for f in ["side-0.txt", "a.rs", "b.rs"] {
+        assert!(!git(&repo, &["ls-tree", "--name-only", "refs/heads/main", f]).is_empty(), "{f}");
+    }
+
+    // Base moving every time: three tries, then both held, their chain forgotten.
+    let c = rig.reported("c", &["web"], "c.rs", "c\n");
+    let d = rig.reported("d", &["web"], "d.rs", "d\n");
+    let (s, n) = (side.clone(), Arc::new(Mutex::new(0)));
+    let tries = n.clone();
+    let o2 = Opts {
+        checker: checker.clone(),
+        before_advance: Some(Arc::new(move |_f: &str| {
+            let mut n = n.lock().unwrap();
+            git(&s, &["reset", "-q", "--hard", "main"]);
+            commit(&s, &format!("again-{}.txt", *n), "x\n");
+            *n += 1;
+        })),
+        ..opts()
+    };
+    let common = rig.hold_lock("web");
+    rig.queue_all(&[c.clone(), d.clone()], &o2).await;
+    lock::release(&common, HOLDER);
+    rig.run_batch("web", &o2).await;
+    assert_eq!((*tries.lock().unwrap(), checker.runs(CHECK_BATCH)), (3, 5));
+    for w in [&c, &d] {
+        let l = rig.record(&w.task_id).land.unwrap();
+        assert!(l.is_held() && l.batch.is_none(), "{l:?}");
+        assert!(l.held_reason.as_deref().unwrap().contains("main keeps moving (3 tries)"), "{l:?}");
+        assert!(l.repos[0].tested.is_none() && l.repos[0].chain_tip.is_none(), "a held member never lands its chain merge alone: {l:?}");
+    }
+    // The repo free, hiveLand again lands it alone, from its pin.
+    let out = rig.land_with(&c, json!({}), Opts { checker: checker.clone(), ..opts() }).await.unwrap();
+    assert_eq!(out["state"], STATE_LANDED, "{out}");
+    assert_eq!(rig.log().last().unwrap().kind, "land");
+    assert!(git(&repo, &["ls-tree", "--name-only", "refs/heads/main", "d.rs"]).is_empty(), "only c's work");
+    rig.assert_no_leftovers();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_multi_repo_worker_never_batches_nor_does_a_land_that_must_stand_alone() {
+    let rig = Rig::with("batchmulti", &["web", "api"], |h| {
+        h.folders[0].land_check = Some("true".into());
+        h.folders[1].land_check = Some("true".into());
+    });
+    let both = rig.reported("both", &["web", "api"], "b.rs", "b\n");
+    let common = rig.hold_lock("web");
+    let o = Opts { lock_wait: Duration::from_millis(300), checker: Arc::new(ShChecker::default()), ..opts() };
+    let out = rig.land_with(&both, json!({}), o).await.unwrap();
+    assert_eq!(out["state"], STATE_LOCKING, "it waits for the lock, alone: {out}");
+    lock::release(&common, HOLDER);
+
+    let one = rig.reported("one", &["web"], "o.rs", "o\n");
+    let land = LandState { repos: vec![LandRepo { folder: "web".into(), status: REPO_PENDING.into(), ..LandRepo::default() }], ..LandState::default() };
+    let hive = rig.caller.hive.clone();
+    assert!(batch::eligible(&hive, &one, &land));
+    assert!(!batch::eligible(&hive, &both, &land), "two repos");
+    let not = |edit: &dyn Fn(&mut Hive, &mut LandState)| {
+        let (mut h, mut l) = (hive.clone(), land.clone());
+        edit(&mut h, &mut l);
+        !batch::eligible(&h, &one, &l)
+    };
+    assert!(not(&|h, _| h.settings.land.batch = false), "batching off");
+    assert!(not(&|h, _| h.folders[0].land_check = None), "no land check to share");
+    assert!(not(&|h, _| h.landing_mode = LANDING_INTEGRATION.into()), "the approval mode never batches");
+    assert!(not(&|h, _| {
+        h.checkpoints.insert("landing".into(), "ask".into());
+    }), "Landing = Ask me");
+    assert!(not(&|_, l| l.fix_forward = true), "a fix forward");
+    assert!(not(&|_, l| l.approved_by = Some("desktop".into())), "an approved land");
+    assert!(not(&|_, l| l.repos[0].status = REPO_TESTED.into()), "its step 1 started");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_queued_batch_check_is_awaited_and_a_member_is_undone_by_reverting_its_merge() {
+    struct Queued;
+    impl Checker for Queued {
+        fn start(&self, req: &CheckRequest) -> Result<CheckStart, String> {
+            if req.kind != CHECK_BATCH {
+                return Ok(CheckStart::Done { passed: true, tail: String::new() });
+            }
+            let id = format!("j-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+            let (job_id, batch_id, task) = (id.clone(), req.land_id.clone(), req.worker.task_id.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                let mut j = crate::hive::queue::Job::default();
+                j.id = job_id;
+                j.task_id = task;
+                j.state = crate::hive::queue::DONE.into();
+                j.began = true;
+                j.exit_code = Some(0);
+                j.land = Some(crate::hive::queue::LandRun { land_id: batch_id, kind: CHECK_BATCH.into(), ..Default::default() });
+                batch::on_check_end(&j, "");
+            });
+            Ok(CheckStart::Queued(id))
+        }
+    }
+    let rig = Rig::with("batchqueued", &["web"], |h| h.folders[0].land_check = Some("cargo test".into()));
+    let o = Opts { checker: Arc::new(Queued), ..opts() };
+    let a = rig.reported("a", &["web"], "a.rs", "a\n");
+    let b = rig.reported("b", &["web"], "b.rs", "b\n");
+    let common = rig.hold_lock("web");
+    rig.queue_all(&[a.clone(), b.clone()], &o).await;
+    lock::release(&common, HOLDER);
+    rig.run_batch("web", &o).await;
+    assert_eq!((rig.record(&a.task_id).phase.as_str(), rig.record(&b.task_id).phase.as_str()), (worker::PHASE_LANDED, worker::PHASE_LANDED));
+
+    // Undo of a member reverts its own merge (`revert -m 1`), leaving the other's work.
+    let line = rig.log().into_iter().find(|e| e.worker == "a").unwrap().id;
+    let v = undo::undo_tool_with(&rig.ctx(), &rig.caller, &json!({ "land": line, "reason": "Broke it." }), &o).await.unwrap();
+    assert_eq!(v["state"], undo::STATE_DONE, "{v}");
+    let main = git(rig.repo("web"), &["ls-tree", "--name-only", "refs/heads/main"]);
+    assert!(!main.contains("a.rs") && main.contains("b.rs"), "{main}");
+    rig.assert_no_leftovers();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_restart_holds_queued_and_mid_batch_members_and_never_reuses_a_chain_merge() {
+    let rig = Rig::with("batchrestart", &["web"], |h| h.folders[0].land_check = Some("true".into()));
+    let o = Opts { checker: Arc::new(ShChecker::default()), ..opts() };
+    let a = rig.reported("a", &["web"], "a.rs", "a\n");
+    let b = rig.reported("b", &["web"], "b.rs", "b\n");
+    let common = rig.hold_lock("web");
+    rig.queue_all(&[a.clone(), b.clone()], &o).await;
+    lock::release(&common, HOLDER);
+    // b was in a batch's check when maiTerm stopped.
+    let main = rig.main_tip("web");
+    worker::update_worker(&rig.caller.paths.task(&b.task_id), |cur| {
+        let l = cur.land.as_mut().unwrap();
+        l.state = STATE_CHECKING.into();
+        l.batch = Some("Q-dead0000".into());
+        let r = &mut l.repos[0];
+        r.status = REPO_CHECKING.into();
+        r.tested = Some(main.clone());
+        r.chain_tip = Some(main.clone());
+        r.base_before = Some(main.clone());
+        r.job = Some("j-dead0000".into());
+        true
+    })
+    .unwrap();
+    // Its chain's temporary worktree, left behind.
+    let chain = rig.caller.paths.land_worktree("Q-dead0000", "web");
+    fs::create_dir_all(chain.parent().unwrap()).unwrap();
+    git(rig.repo("web"), &["worktree", "add", "-q", "--detach", chain.to_str().unwrap(), &main]);
+
+    assert_eq!(reconcile_in(&rig.caller.hive, &rig.caller.paths), 2);
+    batch::sweep(&rig.caller.hive, &rig.caller.paths);
+    let la = rig.record(&a.task_id).land.unwrap();
+    assert!(la.is_held() && la.held_reason.as_deref().unwrap().contains("interrupted by a maiTerm restart"), "{la:?}");
+    let lb = rig.record(&b.task_id).land.unwrap();
+    assert!(lb.is_held() && lb.batch.is_none(), "{lb:?}");
+    assert!(lb.repos[0].tested.is_none() && lb.repos[0].chain_tip.is_none() && lb.repos[0].status == REPO_PENDING, "{lb:?}");
+
+    // Resumed with the repo free, each lands alone from its pin.
+    for w in [&a, &b] {
+        let out = rig.land_with(w, json!({}), o.clone()).await.unwrap();
+        assert_eq!(out["state"], STATE_LANDED, "{out}");
+    }
+    assert!(rig.log().iter().all(|e| e.kind == "land"));
+    rig.assert_no_leftovers();
+}
+
+/// A restart between a batch's fast-forward and its members' records: a merge in the target is
+/// logged as `land_members` would log it (its check passed on the tree that landed), and one not in
+/// it goes back to waiting from its pin.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_restart_mid_advance_logs_a_landed_member_as_checked_and_detaches_one_that_didnt_land() {
+    let rig = Rig::with("batchadv", &["web"], |h| h.folders[0].land_check = Some("true".into()));
+    let checker = Arc::new(ShChecker::default());
+    let repo = rig.repo("web").to_path_buf();
+    // The restart, just before step 2: Base already at the chain's tip (the fast-forward done), or
+    // moved by someone else (it wasn't). Reconcile's log lines and records are read there.
+    let restart = |ff: bool| -> (Opts, Arc<Mutex<Vec<log::LandLogEntry>>>) {
+        let (hive, paths, r) = (rig.caller.hive.clone(), rig.caller.paths.clone(), repo.clone());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let o = Opts {
+            checker: checker.clone(),
+            before_advance: Some(Arc::new(move |_f: &str| {
+                let tip = worker::list_workers(&paths)
+                    .into_iter()
+                    .filter_map(|w| w.land.filter(|l| l.state == STATE_ADVANCING).and_then(|l| l.repos[0].chain_tip.clone()))
+                    .next()
+                    .expect("a member advancing");
+                if ff {
+                    git(&r, &["merge", "--ff-only", "-q", &tip]);
+                } else {
+                    commit(&r, "other.txt", "x\n");
+                }
+                reconcile_in(&hive, &paths);
+                *s.lock().unwrap() = log::read(&paths);
+            })),
+            ..opts()
+        };
+        (o, seen)
+    };
+
+    let a = rig.reported("a", &["web"], "a.rs", "a\n");
+    let b = rig.reported("b", &["web"], "b.rs", "b\n");
+    let before = rig.main_tip("web");
+    let (o, seen) = restart(true);
+    let common = rig.hold_lock("web");
+    rig.queue_all(&[a.clone(), b.clone()], &o).await;
+    lock::release(&common, HOLDER);
+    rig.run_batch("web", &o).await;
+    let tip = rig.main_tip("web");
+    let lines = seen.lock().unwrap().clone();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    for (e, w) in lines.iter().zip([&a, &b]) {
+        assert_eq!((e.kind.as_str(), e.task_id.as_str(), e.check.as_str()), ("batch_member", w.task_id.as_str(), "passed"), "{e:?}");
+        assert_eq!((e.base_before.as_str(), e.base_after.as_str(), e.tested_sha.as_str()), (before.as_str(), tip.as_str(), tip.as_str()));
+        assert!(!e.tree_tested.is_empty() && e.tree_tested == e.tree_landed, "{e:?}");
+    }
+    assert!(log::folded(&rig.caller.paths).suspect_folders().is_empty());
+    for w in [&a, &b] {
+        let l = rig.record(&w.task_id).land.unwrap();
+        assert!(l.is_held() && l.repos[0].status == REPO_LANDED, "{l:?}");
+        let again = Opts { checker: checker.clone(), ..opts() };
+        assert_eq!(rig.land_with(w, json!({}), again).await.unwrap()["state"], STATE_LANDED, "hiveLand again retires it");
+    }
+    assert_eq!(rig.log().len(), 2, "logged once");
+
+    let c = rig.reported("c", &["web"], "c.rs", "c\n");
+    let d = rig.reported("d", &["web"], "d.rs", "d\n");
+    let (o, seen) = restart(false);
+    let common = rig.hold_lock("web");
+    rig.queue_all(&[c.clone(), d.clone()], &o).await;
+    lock::release(&common, HOLDER);
+    rig.run_batch("web", &o).await;
+    assert_eq!(seen.lock().unwrap().len(), 2, "nothing logged for merges not in the target");
+    for w in [&c, &d] {
+        let l = rig.record(&w.task_id).land.unwrap();
+        assert!(l.is_held() && l.batch.is_none(), "{l:?}");
+        let r = &l.repos[0];
+        assert!(r.status == REPO_PENDING && r.tested.is_none() && r.chain_tip.is_none() && !r.checked, "{l:?}");
+    }
+    rig.assert_no_leftovers();
+}
+
+/// A member that left its batch lands alone once, however often Base moved under the batch: a
+/// second drive would detach the first one's queued check and remake its temporary worktree.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_member_that_left_its_batch_lands_alone_once_however_often_the_batch_is_rebuilt() {
+    struct QueueLand(Mutex<Vec<String>>);
+    impl Checker for QueueLand {
+        fn start(&self, req: &CheckRequest) -> Result<CheckStart, String> {
+            if req.kind != CHECK_LAND {
+                return Ok(CheckStart::Done { passed: true, tail: String::new() });
+            }
+            let id = format!("j-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+            self.0.lock().unwrap().push(id.clone());
+            Ok(CheckStart::Queued(id))
+        }
+    }
+    let rig = Rig::with("batchonce", &["web"], |h| h.folders[0].land_check = Some("true".into()));
+    let repo = rig.repo("web").to_path_buf();
+    let side = rig.base.join("side");
+    git(&repo, &["checkout", "-q", "--detach"]);
+    git(&repo, &["worktree", "add", "-q", side.to_str().unwrap(), "main"]);
+    let a = rig.reported("a", &["web"], "shared.txt", "one\nA\nthree\n");
+    let b = rig.reported("b", &["web"], "shared.txt", "one\nB\nthree\n");
+    let c = rig.reported("c", &["web"], "c.rs", "c\n");
+    let checker = Arc::new(QueueLand(Mutex::new(Vec::new())));
+    let (s, n) = (side.clone(), Arc::new(Mutex::new(0)));
+    let o = Opts {
+        checker: checker.clone(),
+        before_advance: Some(Arc::new(move |_f: &str| {
+            let mut n = n.lock().unwrap();
+            git(&s, &["reset", "-q", "--hard", "main"]);
+            commit(&s, &format!("again-{}.txt", *n), "x\n");
+            *n += 1;
+        })),
+        ..opts()
+    };
+    let common = rig.hold_lock("web");
+    rig.queue_all(&[a.clone(), b.clone(), c.clone()], &o).await;
+    lock::release(&common, HOLDER);
+    rig.run_batch("web", &o).await;
+
+    for w in [&a, &c] {
+        assert!(rig.record(&w.task_id).land.unwrap().held_reason.unwrap().contains("keeps moving"));
+    }
+    let jobs = checker.0.lock().unwrap().clone();
+    assert_eq!(jobs.len(), 1, "b's own check queued once: {jobs:?}");
+    let lb = rig.record(&b.task_id).land.unwrap();
+    assert_eq!((lb.state.as_str(), lb.repos[0].job.as_deref()), (STATE_CHECKING, Some(jobs[0].as_str())), "{lb:?}");
+    let tmp = lb.repos[0].tmp.clone().expect("its temporary worktree");
+    assert!(Path::new(&tmp).exists());
+    let told = rig.told().join("\n");
+    assert_eq!(told.matches("⟦HIVE LAND · Title b⟧").count(), 0, "a running check says nothing yet: {told}");
 }

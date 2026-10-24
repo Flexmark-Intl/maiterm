@@ -91,6 +91,8 @@ pub(crate) fn check_spec(req: &CheckRequest) -> crate::hive::queue::JobSpec {
     let (entry, profile) = match req.kind {
         super::CHECK_UNDO => ("undo check", crate::hive::queue::PROFILE_LAND),
         super::CHECK_BASE => ("post-land check", crate::hive::queue::PROFILE_LAND),
+        // A chain of several workers' work: no one worker's folders are its to write.
+        super::CHECK_BATCH => ("batch land check", crate::hive::queue::PROFILE_LAND),
         _ => ("land check", crate::hive::queue::PROFILE_WORKER),
     };
     JobSpec {
@@ -631,8 +633,9 @@ pub(crate) fn approved_request(land: &LandState) -> Option<String> {
     land.approved_by.as_ref().and(land.request.clone())
 }
 
-/// One repo's line in the land log, unless it has one: an integration-mode land names its own
-/// merge commit, and a land the human approved names the request. Blocks.
+/// One repo's line in the land log, unless it has one: an integration-mode land and a batch
+/// member name their own merge commit (a member's check ran on its chain's tip), and a land the
+/// human approved names the request. Blocks.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn log_repo(paths: &HivePaths, hive: &Hive, w: &WorkerRecord, land_id: &str, summary: &str, review: &str, request: Option<String>, r: &mut LandRepo) {
     if r.logged {
@@ -644,11 +647,19 @@ pub(crate) fn log_repo(paths: &HivePaths, hive: &Hive, w: &WorkerRecord, land_id
         return;
     }
     let integration = hive.is_integration();
+    let member = r.chain_tip.is_some();
+    let kind = if member {
+        landlog::KIND_BATCH_MEMBER
+    } else if integration {
+        landlog::KIND_INTEGRATION
+    } else {
+        landlog::KIND_LAND
+    };
     let entry = LandLogEntry {
         id,
         land: land_id.to_string(),
-        kind: if integration { landlog::KIND_INTEGRATION } else { landlog::KIND_LAND }.to_string(),
-        merge_commit: r.tested.clone().filter(|_| integration && r.merged),
+        kind: kind.to_string(),
+        merge_commit: r.tested.clone().filter(|_| member || (integration && r.merged)),
         by: if request.is_some() { landlog::BY_HUMAN } else { landlog::BY_COORDINATOR }.to_string(),
         request,
         hive_id: hive.id.clone(),
@@ -658,7 +669,7 @@ pub(crate) fn log_repo(paths: &HivePaths, hive: &Hive, w: &WorkerRecord, land_id
         folder: r.folder.clone(),
         target: r.target.clone(),
         reviewed_sha: r.pinned.clone(),
-        tested_sha: r.tested.clone().unwrap_or_default(),
+        tested_sha: r.chain_tip.clone().or_else(|| r.tested.clone()).unwrap_or_default(),
         base_before: r.base_before.clone().unwrap_or_default(),
         base_after: r.base_after.clone().unwrap_or_default(),
         tree_tested: r.tree_tested.clone().unwrap_or_default(),
@@ -692,7 +703,7 @@ pub(super) async fn fail<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &W
 }
 
 /// Nothing landed: the land is off, the worker back in Reported with its branch as it was.
-async fn refuse<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, mut land: LandState, why: String) -> Outcome {
+pub(super) async fn refuse<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, mut land: LandState, why: String) -> Outcome {
     let label = worker_label(w);
     if let Ok(dir) = worker::task_dir(&caller.paths, &w.task_id) {
         let id = land.id.clone();
@@ -731,7 +742,7 @@ async fn refuse<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerReco
 
 /// A repo held (§8.1): the land stops there, what landed stays landed, its locks and temporary
 /// worktrees go, and `hiveLand` with the same commits resumes it.
-async fn hold<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, mut land: LandState, folder: &str, why: String) -> Outcome {
+pub(super) async fn hold<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, mut land: LandState, folder: &str, why: String) -> Outcome {
     let label = worker_label(w);
     let why = one_line(&why, 600);
     if let Some(r) = land.repo_mut(folder) {
@@ -778,7 +789,7 @@ async fn hold<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord
 /// Every repo landed: the locks and temporary worktrees go, the worker retires as landed (its
 /// task done, so its waiters launch from the new Base), its branch moves to what landed, and the
 /// coordinator's read copies follow Base.
-async fn finish<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, mut land: LandState) -> Outcome {
+pub(super) async fn finish<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, mut land: LandState) -> Outcome {
     let label = worker_label(w);
     land.held_reason = None;
     let (hive, paths, mut l) = (caller.hive.clone(), caller.paths.clone(), land.clone());
@@ -980,7 +991,8 @@ fn after_land(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, land: &LandState
     for r in &land.repos {
         let Ok(hf) = hive_folder(hive, &r.folder) else { continue };
         let repo = PathBuf::from(&hf.path);
-        let (Some(tested), false) = (r.tested.as_deref(), r.branch.is_empty()) else { continue };
+        // A batch member's branch stays at its pin: its merge commit carries other members' work.
+        let (Some(tested), false, None) = (r.tested.as_deref(), r.branch.is_empty(), r.chain_tip.as_ref()) else { continue };
         let kept = w.git_folders().find(|f| f.name == r.folder).filter(|f| f.worktree.as_deref().is_some_and(|wt| Path::new(wt).exists()));
         let moved = match kept.filter(|_| !removed.contains(&r.folder)) {
             Some(f) if f.admin_dir.as_deref().is_some_and(|a| crate::hive::retire::git_file_names(Path::new(f.worktree.as_deref().unwrap_or_default()), Path::new(a))) => {
@@ -1041,6 +1053,8 @@ pub async fn check_ended(app: &Arc<crate::state::AppState>, handle: &tauri::AppH
             return;
         }
         super::CHECK_BASE => return super::base_check::on_check_end(&ctx, &caller, job, &run, tail).await,
+        // The batch's run awaits it (`batch::await_check`).
+        super::CHECK_BATCH => return super::batch::on_check_end(job, tail),
         _ => {}
     }
     let outcome = on_check_end(&ctx, &caller, job, &run, tail, &Opts::production()).await;
@@ -1101,7 +1115,7 @@ pub(crate) async fn on_check_end<W: HiveWindow>(
     Some((w.clone(), advance_all(ctx, caller, &w, land, opts).await))
 }
 
-async fn tell<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, o: &Outcome) {
+pub(super) async fn tell<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, o: &Outcome) {
     let Some(text) = o.message(w) else { return };
     tell_text(ctx, caller, w, text).await;
 }
@@ -1114,6 +1128,17 @@ pub(super) async fn tell_text<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, 
             log::info!("hive {}: land result for {}: {}", caller.hive.id, worker_label(w), sent.describe());
         }
         None => log::info!("hive {}: land result for {} not delivered: no coordinator tab", caller.hive.id, worker_label(w)),
+    }
+}
+
+/// The land run to its end, a busy lock waited out `opts.lock_wait` at a time rather than handed
+/// off: a batch's lone member, or one that left its batch, lands so (`batch`).
+pub(crate) async fn drive_to_end<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, task_id: &str, opts: &Opts) -> Outcome {
+    loop {
+        match drive(ctx, caller, task_id, opts, true).await {
+            Outcome::Waiting(_) => continue,
+            o => return o,
+        }
     }
 }
 

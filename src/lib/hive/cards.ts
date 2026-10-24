@@ -110,11 +110,13 @@ export function landLine(land: HiveWorkerCard['land']): string | null {
     case 'locking':
       return land.waiting_for ? `waiting for ${land.waiting_for}` : 'taking the land lock';
     case 'checking':
-      return 'land check running';
+      return land.batch ? 'batch land check running' : 'land check running';
     case 'advancing':
       return 'advancing Base';
     case 'awaiting_human':
       return 'waiting for your approval';
+    case 'queued_batch':
+      return 'waiting to land in a batch';
     default:
       return land.state || null;
   }

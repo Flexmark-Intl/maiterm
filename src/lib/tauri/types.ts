@@ -730,6 +730,8 @@ export interface HiveLandView {
   waiting_for?: string | null;
   /** The agent request it waits on while "awaiting_human": the worker's column shows that card. */
   request?: string | null;
+  /** The batch (`Q-…`) it lands in (docs/hive.md §6.8). */
+  batch?: string | null;
   /** Per repo: "pending" | "checking" | "tested" | "advancing" | "held" | "landed", and once it
    *  landed its push: "ok" | "held: <why>" | "off". */
   repos: { folder: string; status: string; pushed?: string | null }[];

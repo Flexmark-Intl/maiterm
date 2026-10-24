@@ -109,6 +109,8 @@ describe('cardState', () => {
     expect(cardState(worker({ phase: 'landing', land: land({}) }), null, idle, null).sub).toBe('land check running');
     expect(landLine(land({ state: 'locking', waiting_for: 'land L-2 of maiTerm prod (pid 9) in web' }))).toBe('waiting for land L-2 of maiTerm prod (pid 9) in web');
     expect(landLine(land({ state: 'locking' }))).toBe('taking the land lock');
+    expect(landLine(land({ state: 'queued_batch' }))).toBe('waiting to land in a batch');
+    expect(landLine(land({ batch: 'Q-1a2b3c4d' }))).toBe('batch land check running');
     expect(landLine(land({ state: 'someday' }))).toBe('someday');
     expect(landLine(null)).toBeNull();
     expect(cardState(worker({ phase: 'landing' }), null, idle, null).sub).toBeNull();

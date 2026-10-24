@@ -171,7 +171,8 @@ pub struct LandRun {
     /// worktree, its temp folder and the shared package caches (an undo's or a base check's,
     /// which run no worker's work).
     pub profile: String,
-    /// Whose check it is: `""` a land's, `undo`, or `base_check` (§8.6). Its end goes there.
+    /// Whose check it is: `""` a land's, `undo`, `base_check` (§8.6), or `batch` (a batch's chain,
+    /// §6.8, under the land profile). Its end goes there.
     pub kind: String,
 }
 

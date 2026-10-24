@@ -264,6 +264,12 @@ fn merge_in(repo: &Path, tmp: &Temp, flags: &[&str], message: &str, rev: &str) -
     Ok(Merged::Tested { sha, merged: true })
 }
 
+/// A temporary worktree's HEAD and files put back to `to`: a batch chain drops a member's merge
+/// that tripped the config rule (§6.8). Only ever maiTerm's own scratch.
+pub fn reset_temp(tmp: &Temp, to: &str) -> Result<(), String> {
+    run(lgit_wt(&tmp.folder("land"))?.args(["reset", "--hard", "--quiet", to]), GIT_TIMEOUT).map(|_| ())
+}
+
 /// The worktree that has `refs/heads/<branch>` checked out, if any.
 pub fn checkout_of(repo: &Path, branch: &str) -> Result<Option<PathBuf>, String> {
     let mut cmd = lgit(repo);

@@ -3393,6 +3393,30 @@ several releases a day).
    shared package caches too (cargo's registry lock, npm's cache), or no build could run in it; an
    undo that finds the lock busy past the inline wait holds rather than queueing in the background;
    a land approved after its repo turned suspect isn't re-refused.
+   **6f built** (2026-10-24, uncommitted at the time of writing): batched land checks
+   (`hive/land/batch.rs`). A one-repo land whose repo is busy at `hiveLand` (another land holds its
+   lock, or a batch run is under way there) answers `queued_batch` and waits in that repo's queue,
+   in `hiveLand` order (`LandState.queued_at`), when batching is on, the folder has a land check, the
+   Hive lands to Base, Landing is the coordinator's, and it is neither a fix forward nor approved;
+   multi-repo workers always land alone (plan D10). One run per repo drains the queue under its own
+   lock (`Q-…`): a lone member lands alone, two or more are merged `--no-ff` in turn onto the target's
+   tip in a temporary worktree ("Land <title> (<sha7>) [maiTerm <L>]"), and the chain's tip gets one
+   land check (`CHECK_BATCH`, under the **land profile**: the chain holds several workers' work, so
+   no one worker's folders are its to write; seeded from its first member's worktree as a lone land
+   is). A member whose merge conflicts or merges nothing, or whose own merge (`<merge>^1..<merge>`)
+   trips the config rule, leaves and lands alone afterwards (its own step 1, or the card). Pass:
+   the target fast-forwards (or compare-and-swaps) to exactly the tip, each member whose merge is
+   then in it is logged as `batch_member` with its merge commit (`LandRepo.chain_tip` holds the
+   tip; `tested` is the member's merge, so Undo is `revert -m 1`), pushed once, and retired as
+   landed with its branch left at its pin. Fail: halves, each rebuilt from the target and checked,
+   down to a singleton (plan D11), whose land is refused with the output, then the post-land check
+   once per batch. A check that moved its tested commit or timed out fails (bisected); one stopped
+   otherwise refuses the set. The target moving before the fast-forward rebuilds the set, three
+   times, then holds it, with every set still waiting. A queued check's end reaches the awaiting run
+   through `batch::on_check_end`. The run is in memory: `reconcile_in` holds queued and mid-batch
+   members, and a member caught mid-batch loses its chain fields so a resumed land starts from its
+   pin, never from a merge that sits on other members' work. Cards read "waiting to land in a batch"
+   and "batch land check running". **Step 6 is complete.**
 7. Shared memory: `autoMemoryDirectory`, index rebuild, Memory view; checkpoints,
    `hiveAnswerWorker`, precedents in Rust storage, the decision log and earned autonomy.
 8. Gallery: store and index, `galleryAdd`/`List`/`Get`/`Tag`/`Collect`, thumbnails, the grid

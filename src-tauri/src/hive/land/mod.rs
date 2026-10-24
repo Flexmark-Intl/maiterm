@@ -13,9 +13,13 @@
 //! A land is undone by a revert commit landed through the same guarded steps (`undo`, §8.6), and
 //! a Base that fails its land check alone makes the lands since it last passed suspect
 //! (`base_check`), which holds every further land there but a fix-forward one.
+//!
+//! Lands that would wait on a busy repo queue up instead and land together (`batch`, §6.8): one
+//! land check on a chain of their merges, bisected when it fails.
 
 pub mod approval;
 pub mod base_check;
+pub mod batch;
 pub mod config_rule;
 pub mod driver;
 pub mod git;
@@ -67,6 +71,8 @@ pub const MAX_SUMMARY: usize = 2_000;
 pub const CHECK_LAND: &str = "";
 pub const CHECK_UNDO: &str = "undo";
 pub const CHECK_BASE: &str = "base_check";
+/// A batch's one land check, on the chain of its members' merges (§6.8).
+pub const CHECK_BATCH: &str = "batch";
 
 /// A land in `worker.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -98,6 +104,10 @@ pub struct LandState {
     pub approved_by: Option<String>,
     /// Passed `fix_forward`: it may land into a repo marked suspect, as its fix (§8.6).
     pub fix_forward: bool,
+    /// The batch it lands in (`Q-…`, §6.8), while it is one's member.
+    pub batch: Option<String>,
+    /// Its place in its repo's batch queue: batches merge their members in `hiveLand` order.
+    pub queued_at: u64,
     pub started_at: String,
     pub updated_at: String,
     #[serde(flatten)]
@@ -145,6 +155,10 @@ pub struct LandRepo {
     pub config_fp: Option<String>,
     /// The fingerprint the human approved: the land goes on while the catch still has it.
     pub config_approved: Option<String>,
+    /// A batch member's chain tip, the commit its batch's check passed (§6.8). `tested` is then
+    /// the member's own merge commit in that chain: it landed once that is in its target, and an
+    /// undo reverts it with `revert -m 1`. Its branch isn't moved.
+    pub chain_tip: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -167,9 +181,9 @@ impl LandState {
         self.state == STATE_AWAITING_HUMAN
     }
 
-    /// Running now: a lock, a check or a step 2 under way.
+    /// Running now: a lock, a check or a step 2 under way, or a place in a batch queue.
     pub fn in_progress(&self) -> bool {
-        matches!(self.state.as_str(), STATE_LOCKING | STATE_CHECKING | STATE_ADVANCING)
+        matches!(self.state.as_str(), STATE_LOCKING | STATE_CHECKING | STATE_ADVANCING | STATE_QUEUED_BATCH)
     }
 
     pub fn repo_mut(&mut self, folder: &str) -> Option<&mut LandRepo> {
@@ -205,6 +219,8 @@ pub struct LandView {
     pub waiting_for: Option<String>,
     /// The card it waits on (`awaiting_human`): the worker's column shows that request.
     pub request: Option<String>,
+    /// The batch it lands in (§6.8).
+    pub batch: Option<String>,
     pub repos: Vec<LandRepoView>,
 }
 
@@ -224,6 +240,7 @@ impl LandView {
             held_reason: l.held_reason.clone(),
             waiting_for: l.waiting_for.clone(),
             request: l.request.clone().filter(|_| l.awaits_human()),
+            batch: l.batch.clone(),
             repos: l.repos.iter().map(|r| LandRepoView { folder: r.folder.clone(), status: r.status.clone(), pushed: r.pushed.clone() }).collect(),
         }
     }
@@ -254,7 +271,10 @@ pub fn tool_definition(tab_id: &Value) -> Value {
              in Reported. Don't ask them again yourself. If a land check fails, maiTerm also runs it on Base alone: when Base \
              fails too, that repo is suspect, the lands since it last passed are named, and every land there needs \
              fix_forward: true until a land or an undo there passes its check (undo the land that broke it with \
-             hiveUndoLand, or land a fix)."
+             hiveUndoLand, or land a fix). A one-repo land that finds its repo busy with another land answers queued_batch: \
+             the lands waiting there are merged in turn and checked once together, a failing batch split until the culprit is \
+             found; each one's result arrives as ⟦HIVE LAND⟧. A member that conflicts with another or changes config lands \
+             alone. Its branch isn't moved: its own merge commit is what landed."
         ),
         "inputSchema": {
             "type": "object",
@@ -522,6 +542,10 @@ pub(crate) async fn land_tool_with<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
     if let Some(why) = approval::asks_first(&caller.hive).filter(|_| land.approved_by.is_none()) {
         return approval::await_human(ctx, caller, &w, land, why).await.answer();
     }
+    // A busy repo: it waits in that repo's batch queue rather than for the lock alone (§6.8).
+    if let Some(out) = batch::try_join(ctx, caller, &w, &land).await {
+        return out.answer();
+    }
     driver::drive(ctx, caller, &w.task_id, &opts, false).await.answer()
 }
 
@@ -581,9 +605,11 @@ pub fn describe(l: &LandState) -> String {
     match l.state.as_str() {
         STATE_HELD => l.held_reason.clone().unwrap_or_else(|| "held".to_string()),
         STATE_LOCKING => l.waiting_for.as_ref().map_or_else(|| "taking the land lock".to_string(), |w| format!("waiting for {w}")),
+        STATE_CHECKING if l.batch.is_some() => "batch land check running".to_string(),
         STATE_CHECKING => "land check running".to_string(),
         STATE_ADVANCING => "advancing Base".to_string(),
         STATE_AWAITING_HUMAN => "waiting for the human's approval".to_string(),
+        STATE_QUEUED_BATCH => "waiting to land in a batch".to_string(),
         other => other.to_string(),
     }
 }
@@ -602,14 +628,17 @@ pub fn reconcile(data: &parking_lot::RwLock<crate::state::AppData>) -> usize {
     if u > 0 {
         ::log::info!("hive: {u} undo(s) interrupted by the restart settled");
     }
-    // A post-land check is in memory only: what one left on disk goes.
+    // A post-land check and a batch run are in memory only: what one left on disk goes.
     for c in &callers {
         base_check::sweep(&c.hive, &c.paths);
+        batch::sweep(&c.hive, &c.paths);
     }
     n + u
 }
 
 pub(crate) fn reconcile_in(hive: &Hive, paths: &HivePaths) -> usize {
+    // No batch run outlives a restart: the members held here join new ones.
+    batch::forget_runs(&hive.id);
     let mut n = 0;
     for w in worker::list_workers(paths) {
         // A worker that already retired keeps its land only as history. One still landing whose
@@ -635,9 +664,11 @@ pub(crate) fn reconcile_in(hive: &Hive, paths: &HivePaths) -> usize {
                 REPO_ADVANCING => {
                     let tested = r.tested.clone().unwrap_or_default();
                     if !tested.is_empty() && git::branch_tip(&repo, &r.target).is_some_and(|t| git::is_ancestor(&repo, &tested, &t)) {
+                        // A batch member landed once its merge is in the target; Base went to its chain's tip.
+                        let after = r.chain_tip.clone().unwrap_or(tested);
                         r.status = REPO_LANDED.to_string();
-                        r.base_after = Some(tested.clone());
-                        r.tree_landed = git::tree_of(&repo, &tested);
+                        r.tree_landed = git::tree_of(&repo, &after);
+                        r.base_after = Some(after);
                         r.pushed.get_or_insert_with(|| "held: maiTerm restarted before its push".to_string());
                         driver::log_repo(paths, hive, &w, &land.id, &land.summary, &land.review, request.clone(), r);
                     } else {
@@ -650,6 +681,13 @@ pub(crate) fn reconcile_in(hive: &Hive, paths: &HivePaths) -> usize {
                 }
                 _ => {}
             }
+            // A batch member's merge sits on its chain's earlier members: never landed alone.
+            if r.status != REPO_LANDED && r.chain_tip.is_some() {
+                batch::detach_repo(r);
+            }
+        }
+        if land.landed().is_empty() {
+            land.batch = None;
         }
         land.state = STATE_HELD.to_string();
         land.waiting_for = None;
