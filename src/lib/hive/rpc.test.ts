@@ -72,6 +72,25 @@ describe('handleHiveRequest', () => {
     find.mockReset();
   });
 
+  it('a coordinator answer patches the row only while its question is still the one asked', async () => {
+    const blocker = { kind: 'decision', question: 'Redis or Postgres?', asked_at: 'a1', asked_by: 'agent' };
+    find.mockReturnValue({ ...task, status: 'blocked', blocker, notes: [] });
+    const args = { workspace_id: 'ws', task_id: 't1', status: 'active', note: 'Decided by your coordinator: Redis' };
+    await handleHiveRequest({ request_id: 'e1', verb: 'hive.task', args: { ...args, expect_asked_at: 'a0' } });
+    expect(update).not.toHaveBeenCalled();
+    await handleHiveRequest({ request_id: 'e2', verb: 'hive.task', args: { ...args, expect_asked_at: 'a1' } });
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update.mock.calls[0][2].status).toBe('active');
+    find.mockReturnValue({ ...task, notes: [] });
+    await handleHiveRequest({ request_id: 'e3', verb: 'hive.task', args: { ...args, expect_asked_at: 'a1' } });
+    expect(update).toHaveBeenCalledTimes(1);
+    const results = answered().map((a) => a.result as { error?: string; ok?: boolean });
+    expect(results[0].error).toMatch(/^stale/);
+    expect(results[1]).toEqual({ ok: true });
+    expect(results[2].error).toMatch(/^stale/);
+    find.mockReset();
+  });
+
   it('a task patch is refused for a row not here, a status off the lanes, or a blocker off Blocked', async () => {
     find.mockReturnValueOnce(undefined);
     await handleHiveRequest({ request_id: 'q1', verb: 'hive.task', args: { workspace_id: 'ws', task_id: 'gone', note: 'x' } });

@@ -4,6 +4,19 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.24 changelog** (2026-10-24). Additive: **a Hive worker's prompt its coordinator answers**
+> (maiTerm docs/hive.md §4.7, §7.4). While the Hive's coordinator holds a worker's permission
+> dialog or AskUserQuestion, `pendingPrompt` carries **`owner: "coordinator"`**, is
+> **`respondable:false`** with `options:[]`, and a question's `questions` are replaced by a
+> `text` naming what is asked: show it read-only ("With coordinator"), so the phone never races
+> the coordinator. `owner` is absent otherwise. Once the coordinator's time runs out (a Hive
+> setting, 5 minutes by default), or the human takes it over, the card is served as before and the
+> phone may answer too: a connected phone gets a `chat_state` and an `attention` frame whose
+> `prompt` is the now-respondable card, and the doorbell rings (`permission` / `question`, or `ask` for a worker's question blocker) when the
+> prompt becomes the human's. `POST /chats/{tabId}/respond` on a prompt the coordinator holds
+> answers **`{ok:false, reason:"coordinator", detail}`** with nothing pressed. Taking a prompt
+> over from the phone is a later change.
+>
 > **v0.23 changelog** (2026-10-10). Additive: **agent requests** (§4.4, desktop design in
 > docs/agent-requests.md). Agents may ask to change which agents can message each other (a mesh
 > on/off, a link, a move that changes a tab's mesh) or to restart maiTerm. These only happen
@@ -2451,6 +2464,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.21` | a Claude `permission` card is `respondable:false` with `options:[]` while no permission dialog is on screen (one of Claude's own dialogs); such a chat returns to `idle` once the dialog closes |
 | `0.22` | adds `pendingPrompt.delivery` (`agent` / `keys`): on `agent` the maiterm-tab mod takes the answer by meaning, a failed attempt is withdrawn whole, and `ok` means the agent has it |
 | `0.23` | adds agent requests (§4.4): `GET /requests`, `POST /requests/{id}/approve` and `/deny`, the WS `requests` frame, `Chat.requestsWaiting`, and the doorbell kind `request` |
+| `0.24` | adds `pendingPrompt.owner` (`"coordinator"`) on a Hive worker's prompt its coordinator holds, served `respondable:false` with `options:[]` (a question's `questions` become `text`) until the coordinator's timeout; `/respond` answers `reason:"coordinator"` for it |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

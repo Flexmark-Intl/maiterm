@@ -5,6 +5,7 @@ import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { StackHeldAction, StackLeaseState } from './types';
 import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
 import type { HiveMemoryFileText, HiveMemoryView } from './types';
+import type { AutonomySettings, HivePromptRoute } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
@@ -459,6 +460,13 @@ export interface TabPrompt {
   path?: string;
   options?: string[];
   note?: string;
+  /** A Hive worker's routed prompt (docs/hive.md §4.7): who answers it, "coordinator" | "human". */
+  owner?: string;
+  /** Why the human holds it: "ask", "timeout", "take_over", or the allowlist's reason. */
+  owner_why?: string;
+  /** When the coordinator's time runs out (ms); 0 when the human holds it. */
+  due_at?: number;
+  timed_out?: boolean;
 }
 
 export async function getTabPrompt(tabId: string): Promise<TabPrompt | null> {
@@ -2818,6 +2826,22 @@ export async function hiveResume(workspaceId: string): Promise<Hive> {
  *  Rust. Answers the Hive as saved; the window's mirror also follows `hive-changed`. */
 export async function hiveSetRunQueue(workspaceId: string, runQueue: RunQueueSettings): Promise<Hive> {
   return invoke('hive_set_run_queue', { workspaceId, runQueue });
+}
+
+/** The checkpoints (each "coordinator" | "ask"), the prompt timeout and the daily digest
+ *  (docs/hive.md §7.4), checked and saved in Rust; the coordinator is told what changed. */
+export async function hiveSetAutonomy(workspaceId: string, checkpoints: Record<string, string>, autonomy: AutonomySettings): Promise<Hive> {
+  return invoke('hive_set_autonomy', { workspaceId, checkpoints, autonomy });
+}
+
+/** The human takes one of a worker's prompts over from the coordinator (docs/hive.md §7.4). */
+export async function hiveTakeOver(workspaceId: string, tabId: string, key: string): Promise<void> {
+  return invoke('hive_take_over', { workspaceId, tabId, key });
+}
+
+/** Who holds each open worker prompt of a Hive in this window; it then follows `hive-prompts-changed`. */
+export async function hivePromptRoutes(workspaceId: string): Promise<HivePromptRoute[]> {
+  return invoke('hive_prompt_routes', { workspaceId });
 }
 
 /** A retired Hive worker's chat (docs/hive.md §4.2, §8.4): the sessions Rust recorded for its task,

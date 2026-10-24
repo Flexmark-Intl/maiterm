@@ -67,14 +67,19 @@ function unspawn(a: Record<string, unknown>): unknown {
 
 const STATUSES: readonly string[] = TASK_STATUSES;
 
-/** `hive.task {workspace_id, task_id, note?, status?, blocker?}`: a worker's row patched by this
- *  store, which owns the list (docs/hive.md §7.2): a report's note and `review`, a stop's note, a
- *  sandbox refusal's blocker. Rust checked what it says; the row must be here. */
+/** `hive.task {workspace_id, task_id, note?, status?, blocker?, expect_asked_at?}`: a worker's row
+ *  patched by this store, which owns the list (docs/hive.md §7.2): a report's note and `review`, a
+ *  stop's note, a sandbox refusal's blocker, the coordinator's answer to the worker's question.
+ *  Rust checked what it says; the row must be here, and with `expect_asked_at` its question must
+ *  still be that one (asked again meanwhile, the answer was for the old one). */
 function patchTask(a: Record<string, unknown>): unknown {
-  const { workspace_id: workspaceId, task_id: taskId, note, status, blocker } = a;
+  const { workspace_id: workspaceId, task_id: taskId, note, status, blocker, expect_asked_at: expectAskedAt } = a;
   if (typeof workspaceId !== 'string' || typeof taskId !== 'string') return { error: 'workspace_id and task_id are required' };
   const row = tasksStore.find(workspaceId, taskId);
   if (!row) return { error: "This window's board has no such task." };
+  if (typeof expectAskedAt === 'string' && row.blocker?.asked_at !== expectAskedAt) {
+    return { error: 'stale: the worker has asked something new since, or the question was already answered' };
+  }
   if (status != null && (typeof status !== 'string' || !STATUSES.includes(status))) return { error: `status ${String(status)} isn't a lane` };
   if (blocker != null && (!isObject(blocker) || typeof blocker.question !== 'string')) return { error: 'blocker must be a blocker' };
   if (blocker != null && status !== 'blocked') return { error: 'a blocker needs status blocked' };

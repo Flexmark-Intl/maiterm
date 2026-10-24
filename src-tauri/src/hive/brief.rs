@@ -86,7 +86,9 @@ pub fn invariant_rules(hive: &Hive, role: &str, paths: &HivePaths, worker: Optio
              full brief, the folders and your human\u{2019}s Instructions. You write only in your home ({home}). Shared \
              memory is {memory}: read MEMORY.md there at start, and write memory files rather than editing the index. \
              When you need your human to decide something, block a task with a blocker (a decision with options and the \
-             one you recommend) and keep coordinating everything else; never use AskUserQuestion. ",
+             one you recommend) and keep coordinating everything else; never use AskUserQuestion. A worker\u{2019}s \
+             question or permission prompt comes to you as ⟦HIVE PROMPT⟧ or ⟦HIVE QUESTION⟧: answer it with \
+             hiveAnswerWorker. ",
         ));
     } else {
         out.push_str(&format!("You are an agent in a maiTerm Hive. Its goal: {goal}. "));
@@ -134,6 +136,46 @@ fn queued_lines(hive: &Hive, folders: Vec<&str>, worker: bool) -> String {
             listed.join("; ")
         )
     }
+}
+
+/// What Ask me means for each checkpoint (§7.4), as the coordinator acts on it.
+fn ask_me_means(key: &str) -> &'static str {
+    match key {
+        "plan" => "show your human the plan before you start workers",
+        "questions" => "your human answers your workers\u{2019} questions; give your recommendation with hiveAnswerWorker (recorded, not sent)",
+        "permissions" => "your human answers your workers\u{2019} permission prompts; give your recommendation with hiveAnswerWorker (recorded, not sent)",
+        "landing" => "each hiveLand waits for your human\u{2019}s approval",
+        "finals" => "your human picks the finals in the gallery",
+        "interfaces" => "ask your human (a blocker) before adding a dependency or changing a public interface",
+        _ => "ask your human",
+    }
+}
+
+/// `brief.md`'s Checkpoints: who decides what, what the coordinator may answer for a worker, and
+/// what is never its to decide (§7.4).
+fn checkpoint_lines(hive: &Hive) -> String {
+    let mut b = String::from("\n## Checkpoints\n\nYour human sets who decides each of these (Hive settings \u{2192} Autonomy):\n\n");
+    for key in super::checkpoints::CHECKPOINTS {
+        let who = if super::checkpoints::asks(hive, key) { format!("**Ask me**: {}", ask_me_means(key)) } else { "**you decide**".to_string() };
+        b.push_str(&format!("- {}: {who}.\n", capitalised(super::checkpoints::label(key))));
+    }
+    let minutes = super::checkpoints::clamp_timeout(hive.settings.autonomy.prompt_timeout_secs).div_ceil(60);
+    b.push_str(&format!(
+        "\nA worker\u{2019}s permission prompt, AskUserQuestion or question blocker comes to you as ⟦HIVE PROMPT⟧ or ⟦HIVE QUESTION⟧ \
+         with its prompt_id. With hiveAnswerWorker you may answer only: a permission dialog\u{2019}s plain **Yes** or **No**; an \
+         AskUserQuestion\u{2019}s **listed options**; a question blocker\u{2019}s **option**, or free text when it lists none. \
+         Unanswered after {minutes} min, your human is told and either of you may answer; your human may take any prompt over. \
+         Every answer is logged for your human.\n\nNever yours, whatever the checkpoints: Claude\u{2019}s workspace-trust and plan \
+         dialogs; any row that saves a setting or a rule, or changes a mode; the sandbox and reads outside the working folder; \
+         an action blocker (only your human can do it); spending past the budget, and raising the cap or the budget; pushing; \
+         a land or undo whose diff changes agent or execution config. maiTerm sends those to your human and tells you.\n"
+    ));
+    b
+}
+
+fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// `brief.md`: the rest of the coordinator's brief, rewritten on every launch from the current
@@ -191,6 +233,7 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths) -> String {
         super::review::MAX_ATTEMPTS
     ));
     b.push_str(&queued_lines(hive, hive.git_folders().map(|f| f.name.as_str()).collect(), false));
+    b.push_str(&checkpoint_lines(hive));
     b.push_str(
         "\n## Roles\n\nGive each worker one of these. The worker gets the role's full text in its own brief; you see only \
          this list. Pair a builder with its checker unless you have a reason not to, and say the reason.\n\n",
@@ -511,5 +554,23 @@ mod tests {
         }
         assert!(worker_brief_md(&h, &p, &w, "", None).contains(&format!("Shared memory is `{}`", p.memory().display())));
         assert!(invariant_rules(&h, ROLE_COORDINATOR, &p, None).contains("write memory files rather than editing the index"));
+    }
+
+    /// §7.4: the coordinator's rules say how a worker's prompt reaches it, and its brief lists
+    /// each checkpoint's setting, the allowlist and what is never its to decide.
+    #[test]
+    fn the_coordinator_is_told_its_checkpoints_and_what_it_may_answer() {
+        let (mut h, p, _) = crate::hive::launch::tests::sample_worker_hive();
+        let rules = invariant_rules(&h, ROLE_COORDINATOR, &p, None);
+        assert!(rules.contains("⟦HIVE PROMPT⟧ or ⟦HIVE QUESTION⟧: answer it with hiveAnswerWorker"), "{rules}");
+        h.checkpoints.insert("permissions".into(), "ask".into());
+        h.settings.autonomy.prompt_timeout_secs = 600;
+        let b = brief_md(&h, &p);
+        assert!(b.contains("## Checkpoints"), "{b}");
+        assert!(b.contains("- Workers\u{2019} questions: **you decide**."), "{b}");
+        assert!(b.contains("- Workers\u{2019} permission prompts: **Ask me**: your human answers"), "{b}");
+        assert!(b.contains("plain **Yes** or **No**") && b.contains("**listed options**"));
+        assert!(b.contains("Unanswered after 10 min"));
+        assert!(b.contains("Never yours, whatever the checkpoints") && b.contains("workspace-trust and plan dialogs"));
     }
 }

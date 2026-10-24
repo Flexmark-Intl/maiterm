@@ -1196,6 +1196,9 @@ pub fn run() {
             hive::memory::hive_memory_kept,
             hive::memory::hive_memory_pin,
             hive::memory::hive_memory_unfiled,
+            hive::checkpoints::hive_set_autonomy,
+            hive::prompts::hive_take_over,
+            hive::prompts::hive_prompt_routes,
             #[cfg(debug_assertions)]
             share::open::share_debug_open,
         ])

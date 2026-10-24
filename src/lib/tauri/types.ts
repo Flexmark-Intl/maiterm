@@ -532,7 +532,36 @@ export interface Hive {
 export interface HiveSettings {
   run_queue?: RunQueueSettings;
   land?: LandSettings;
+  autonomy?: AutonomySettings;
   [section: string]: unknown;
+}
+
+/** hive/record.rs `AutonomySettings` (docs/hive.md §4.7, §7.6). */
+export interface AutonomySettings {
+  /** A coordinator-owned prompt unanswered this long notifies the human (60–3600, default 300). */
+  prompt_timeout_secs: number;
+  /** A daily summary of what the coordinator decided alone, in its chat. */
+  daily_digest: boolean;
+}
+
+/** hive/prompts.rs `RouteView`: who holds one of a worker's open prompts (docs/hive.md §7.4). */
+export interface HivePromptRoute {
+  tab_id: string;
+  task_id: string;
+  /** The prompt id (`p_…`, `q_…`) or the blocker's key (`b_<task>_<asked_at>`). */
+  key: string;
+  /** "permission" | "question" | "trust" | "blocker". */
+  kind: string;
+  checkpoint: string;
+  /** "coordinator" | "human". */
+  owner: string;
+  /** Why the human holds it: "ask", "timeout", "take_over", or the allowlist's reason. */
+  why: string;
+  opened_ms: number;
+  /** When the coordinator's time runs out; 0 when the human holds it. */
+  due_ms: number;
+  taken_over: boolean;
+  timed_out: boolean;
 }
 
 /** hive/record.rs `LandSettings` (docs/hive.md §8.1, §6.8). */

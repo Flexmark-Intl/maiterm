@@ -159,8 +159,33 @@ pub struct HiveSettings {
     pub run_queue: RunQueueSettings,
     /// The config rule's extra paths and batching (§8.1, §6.8).
     pub land: LandSettings,
+    /// How long the coordinator has to answer a worker's prompt, and the daily digest (§4.7, §7.6).
+    pub autonomy: AutonomySettings,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+pub const PROMPT_TIMEOUT_DEFAULT_SECS: u64 = 300;
+pub const PROMPT_TIMEOUT_MIN_SECS: u64 = 60;
+pub const PROMPT_TIMEOUT_MAX_SECS: u64 = 3600;
+
+/// The coordinator's answering window and what it reports (§4.7, §7.6). Not a top-level
+/// `settings.prompt_timeout_secs`: that key round-trips in `extra` (plan D22).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutonomySettings {
+    /// A coordinator-owned prompt unanswered this long notifies the human, who may then answer it too.
+    pub prompt_timeout_secs: u64,
+    /// A daily summary of what the coordinator decided alone, in its chat.
+    pub daily_digest: bool,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl Default for AutonomySettings {
+    fn default() -> Self {
+        Self { prompt_timeout_secs: PROMPT_TIMEOUT_DEFAULT_SECS, daily_digest: true, extra: Map::new() }
+    }
 }
 
 /// How lands behave beyond the defaults (§8.1).
@@ -292,6 +317,18 @@ mod tests {
         assert_eq!((h.settings.land.config_paths.clone(), h.settings.land.batch), (vec!["scripts/**".to_string()], false));
         assert_eq!(h.settings.land.extra.get("later"), Some(&serde_json::json!(1)));
         assert_eq!(h.settings.extra.get("other"), Some(&serde_json::json!(2)));
+        let again: Hive = serde_json::from_value(serde_json::to_value(&h).unwrap()).unwrap();
+        assert_eq!(again, h);
+    }
+
+    #[test]
+    fn the_autonomy_settings_default_and_keep_later_fields() {
+        let bare: Hive = serde_json::from_str(r#"{"id":"h1","settings":{"prompt_timeout_secs":120}}"#).unwrap();
+        assert_eq!((bare.settings.autonomy.prompt_timeout_secs, bare.settings.autonomy.daily_digest), (PROMPT_TIMEOUT_DEFAULT_SECS, true));
+        assert_eq!(bare.settings.extra.get("prompt_timeout_secs"), Some(&serde_json::json!(120)), "the old key stays where it was");
+        let h: Hive = serde_json::from_str(r#"{"id":"h1","settings":{"autonomy":{"prompt_timeout_secs":600,"daily_digest":false,"later":1}}}"#).unwrap();
+        assert_eq!((h.settings.autonomy.prompt_timeout_secs, h.settings.autonomy.daily_digest), (600, false));
+        assert_eq!(h.settings.autonomy.extra.get("later"), Some(&serde_json::json!(1)));
         let again: Hive = serde_json::from_value(serde_json::to_value(&h).unwrap()).unwrap();
         assert_eq!(again, h);
     }

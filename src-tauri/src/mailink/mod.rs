@@ -531,7 +531,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.23";
+const PROTOCOL_VERSION: &str = "0.24";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -1688,7 +1688,7 @@ struct RespondBody {
 /// One question's answer from the phone (docs §12.1). `selected` holds the chosen option labels
 /// verbatim from `questions[i].options[].label`; multiSelect ⇒ 0..n; a chosen "Other" ⇒ `other`
 /// is set (and for single-select, `selected` is empty when Other is used).
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct Answer {
     #[serde(default)]
     pub(crate) selected: Vec<String>,
@@ -1705,7 +1705,7 @@ pub(crate) struct Answer {
 /// structured questions and options (question) rather than just a state word.
 pub(crate) fn tab_prompt_view(app: &AppState, tab_id: &str) -> Option<Value> {
     let (kind, prompt_id, runtime) = open_prompt(app, tab_id)?;
-    let mut v = json!({ "kind": kind, "prompt_id": prompt_id, "runtime": runtime.as_key() });
+    let mut v = json!({ "kind": kind, "prompt_id": &prompt_id, "runtime": runtime.as_key() });
     if kind == "trust" {
         if let Some(d) = trust_dialog_for_tab(app, tab_id) {
             v["path"] = json!(d.path);
@@ -1728,21 +1728,94 @@ pub(crate) fn tab_prompt_view(app: &AppState, tab_id: &str) -> Option<Value> {
         if runtime != AgentRuntime::Codex {
             v["options"] = json!(claude_permission_options(app, tab_id));
         }
-        let sessions = app.agent_sessions.read();
-        if let Some((_, s)) = sessions
-            .iter()
-            .filter(|(_, s)| s.tab_id == tab_id)
-            .max_by_key(|(_, s)| rank(s.state))
-        {
-            if let Some(t) = &s.tool_name {
-                v["tool"] = json!(t);
-            }
-            if let Some(d) = &s.tool_detail {
-                v["detail"] = json!(d);
-            }
+        let (tool, detail) = prompt_tool(app, tab_id);
+        if let Some(t) = tool {
+            v["tool"] = json!(t);
+        }
+        if let Some(d) = detail {
+            v["detail"] = json!(d);
         }
     }
+    // A Hive worker's prompt: who answers it, and when the human is told (docs/hive.md §4.7).
+    if let Some(h) = crate::hive::prompts::holder(tab_id, &prompt_id) {
+        v["owner"] = json!(h.owner);
+        v["owner_why"] = json!(h.why);
+        v["due_at"] = json!(h.due_ms);
+        v["timed_out"] = json!(h.timed_out);
+    }
     Some(v)
+}
+
+/// The tool a tab's open permission is for, and its compact detail, off its most attention-worthy
+/// session.
+fn prompt_tool(app: &AppState, tab_id: &str) -> (Option<String>, Option<String>) {
+    let sessions = app.agent_sessions.read();
+    sessions
+        .iter()
+        .filter(|(_, s)| s.tab_id == tab_id)
+        .max_by_key(|(_, s)| rank(s.state))
+        .map(|(_, s)| (s.tool_name.clone(), s.tool_detail.clone()))
+        .unwrap_or_default()
+}
+
+/// A Hive worker's open prompt as its router reads it (docs/hive.md §7.4): the screen's dialog
+/// (rows, shape, words) or the question's options, under the same id the responder checks.
+pub(crate) fn hive_prompt_view(app: &AppState, tab_id: &str) -> Option<crate::hive::prompts::PromptView> {
+    let (kind, key, runtime) = open_prompt(app, tab_id)?;
+    let mut view = crate::hive::prompts::PromptView { key, kind: kind.to_string(), ..Default::default() };
+    match kind {
+        "question" => {
+            view.questions = pending_question_for_tab(app, tab_id).and_then(|t| t.get("questions").cloned()).unwrap_or(Value::Null);
+        }
+        "permission" => {
+            let (tool, detail) = prompt_tool(app, tab_id);
+            (view.tool, view.detail) = (tool, detail);
+            // Codex's approvals aren't Claude's dialogs: no shape, so the coordinator never gets one.
+            if let Some(d) = (runtime != AgentRuntime::Codex).then(|| permission_dialog_for_tab(app, tab_id)).flatten() {
+                view.shape = match d.shape {
+                    permission::DialogShape::Tool => "tool",
+                    permission::DialogShape::Plan => "plan",
+                    permission::DialogShape::Bare => "bare",
+                }
+                .to_string();
+                (view.options, view.text) = (d.options, d.text);
+            }
+        }
+        _ => {}
+    }
+    Some(view)
+}
+
+/// The human answering a tab's prompt, from the phone or the Loom: refused while a Hive's
+/// coordinator holds it (take it over first, plan D12), and logged and told to the coordinator
+/// once it went through (`hive::prompts::human_answered`).
+pub(crate) async fn respond_as_human(
+    app: &Arc<AppState>,
+    handle: Option<&tauri::AppHandle>,
+    tab_id: &str,
+    prompt_id: Option<&str>,
+    choice: Option<&str>,
+    answers: Option<&[Answer]>,
+) -> Value {
+    use crate::hive::prompts;
+    let routed = open_prompt(app, tab_id).map(|(_, k, _)| k).filter(|k| prompts::holder(tab_id, k).is_some());
+    let Some(key) = routed else {
+        return respond_to_prompt(app, tab_id, prompt_id, choice, answers).await;
+    };
+    if prompts::coordinator_holds(tab_id, &key) {
+        log::info!("[maiLink] refusing a human answer for tab {tab_id}: its Hive coordinator holds {key}");
+        return json!({ "ok": false, "reason": "coordinator",
+            "detail": "Your Hive's coordinator answers this prompt; take it over in the worker's column" });
+    }
+    if !prompts::begin_answer(tab_id, &key) {
+        return json!({ "ok": false, "reason": "coordinator", "detail": "Your Hive's coordinator is answering this prompt right now" });
+    }
+    let out = respond_to_prompt(app, tab_id, prompt_id, choice, answers).await;
+    prompts::end_answer(tab_id, &key);
+    if out["ok"].as_bool() == Some(true) {
+        prompts::human_answered(app, handle, tab_id, &key, &prompts::answer_summary(choice, answers)).await;
+    }
+    out
 }
 
 /// Answer a tab's currently-open prompt.
@@ -1753,7 +1826,9 @@ pub(crate) fn tab_prompt_view(app: &AppState, tab_id: &str) -> Option<Value> {
 /// did-it-actually-submit check are all hard-won, and a second copy would drift.
 ///
 /// `prompt_id` is the stale-guard — a mismatch refuses rather than injecting a keystroke
-/// into whatever prompt happens to be open NOW.
+/// into whatever prompt happens to be open NOW. A permission choice of `Esc` on a Claude tool
+/// dialog is its reject (the deny meaning to the mod), never an approval: a Hive coordinator's
+/// No where the dialog has no plain No row (`permission::permission_key_for`).
 pub(crate) async fn respond_to_prompt(
     app: &Arc<AppState>,
     tab_id: &str,
@@ -1828,45 +1903,29 @@ pub(crate) async fn respond_to_prompt(
                     "detail": "that approval is no longer open in the terminal" });
             }
             let choice = choice.unwrap_or("");
-            // The row the choice names, as the dialog on screen words it (Claude only).
+            // The row the choice names, as the dialog on screen words it (Claude only), or No
+            // for an Esc: what the mod takes by meaning.
             let mut row_label: Option<String> = None;
             let key = if runtime == AgentRuntime::Codex {
                 codex_permission_key(choice).to_string()
             } else {
                 // Claude's rows vary by request, so the choice is matched against the rows on
                 // screen NOW (mailink/permission.rs). A label the dialog doesn't show is refused,
-                // never mapped to a digit: on a two-row dialog, 2 is No.
+                // never mapped to a digit: on a two-row dialog, 2 is No. Unread rows take only
+                // Yes or No, and only while a tool dialog's footer ends the screen: the hook's
+                // permission state holds through an approved command's whole run, and an Esc
+                // then would interrupt the working agent.
                 let screen = live_screen_text(app, tab_id).unwrap_or_default();
-                match permission::parse(&screen) {
-                    Some(d) => match d.key_for(choice) {
-                        Some(k) => {
-                            row_label = k.parse::<usize>().ok()
-                                .and_then(|n| d.options.get(n.wrapping_sub(1)))
-                                .cloned();
-                            k
-                        }
-                        None => {
-                            log::info!("[maiLink] refusing permission choice {choice:?} for tab {tab_id}: the dialog shows {:?}", d.options);
-                            return json!({ "ok": false, "reason": "stale",
-                                "detail": "that isn't one of the options the dialog shows" });
-                        }
-                    },
-                    // No readable rows. The hook's permission state holds until PostToolUse, so
-                    // through an approved command's whole run: without a dialog footer on screen
-                    // this is that window, and an Esc would interrupt the working agent.
-                    None if !permission::footer_open(&screen) => {
-                        log::info!("[maiLink] refusing permission choice {choice:?} for tab {tab_id}: no dialog on screen");
-                        return json!({ "ok": false, "reason": "stale",
-                            "detail": "that dialog is no longer open in the terminal" });
+                let dialog = permission::parse(&screen);
+                match permission::permission_key_for(dialog.as_ref(), permission::footer_open(&screen), choice) {
+                    Ok(k) => {
+                        row_label = k.meaning().map(str::to_string);
+                        k.bytes()
                     }
-                    None => match permission::fallback_key(choice) {
-                        Some(k) => k.to_string(),
-                        None => {
-                            log::info!("[maiLink] refusing permission choice {choice:?} for tab {tab_id}: the dialog can't be read off the screen");
-                            return json!({ "ok": false, "reason": "stale",
-                                "detail": "the dialog can't be read off the screen, so only Yes or No can be sent" });
-                        }
-                    },
+                    Err(why) => {
+                        log::info!("[maiLink] refusing permission choice {choice:?} for tab {tab_id}: {why} ({:?})", dialog.map(|d| d.options));
+                        return json!({ "ok": false, "reason": "stale", "detail": why });
+                    }
                 }
             };
             // The maiterm-tab mod, when its hook is behind this dialog, takes Yes and No by their
@@ -2022,8 +2081,9 @@ async fn post_respond(
     // 409 for that case rather than the shared function's `{ok:false}`.
     pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
     Ok(Json(
-        respond_to_prompt(
+        respond_as_human(
             &s.app,
+            s.app_handle.as_ref(),
             &tab_id,
             body.prompt_id.as_deref(),
             body.choice.as_deref(),
@@ -3128,6 +3188,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
     // §14: the served `account` per tab. A switch flips `stale` on tabs whose state did not move,
     // and the phone has no predicate to recompute it — so a change here owes a frame on its own.
     let mut account_keys: HashMap<String, String> = HashMap::new();
+    // 0.24: the Hive worker prompts each tab's coordinator holds alone. Its timeout or a take-over
+    // makes one the human's without moving state/prompt, and the open card must learn it.
+    let mut hive_held: HashMap<String, Vec<String>> = HashMap::new();
     // Streaming state (mailink-protocol §12): per-tab last-window msg_ids + transcript mtime, so the
     // message ticker diffs cheaply and emits only newly-appended turns.
     let mut seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
@@ -3386,6 +3449,11 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
                     let ak = c["account"].to_string();
                     let account_changed = prev.is_some() && account_keys.get(&tab) != Some(&ak);
                     account_keys.insert(tab.clone(), ak);
+                    let held = crate::hive::prompts::held_keys(&tab);
+                    let (hold_changed, released) = match hive_held.insert(tab.clone(), held.clone()) {
+                        Some(before) if prev.is_some() => hive_hold_edge(&tab, &before, &held),
+                        _ => (false, false),
+                    };
                     // `chats_changed` alone is a ROSTER signal — it says "re-GET /chats", which
                     // refreshes the inbox but not an already-open thread. Registration usually
                     // flips with the attention key UNCHANGED (the live-agent fallback already
@@ -3393,7 +3461,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
                     // without the `|| reg_changed` arm an open thread got no frame at all and
                     // the "Running but not registered" banner survived the very init that fixed
                     // it, until the user backed out and re-opened the thread.
-                    if state_frame_needed(prev.as_deref(), &key, reg_changed, tool_changed || account_changed) {
+                    if state_frame_needed(prev.as_deref(), &key, reg_changed, tool_changed || account_changed || hold_changed) {
                         // Enrichment (lastActivityTs + meta) costs two transcript tail reads, and
                         // `build_chat_summaries` omits them precisely so they are paid only on real
                         // transitions. A tool change fires MANY times per turn, so paying it there
@@ -3419,7 +3487,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
                         // Same edge rule the push doorbell uses — see `rings_attention`. A tab
                         // that merely APPEARS in the roster already idle, or whose session row is
                         // being created for the first time, must not announce "finished".
-                        if rings_attention(prev.as_deref(), prev_reg, &key, c["registered"].as_bool().unwrap_or(true)) {
+                        // A held Hive prompt that became the human's too: the attention frame's
+                        // `prompt` is the card, now respondable, with no follow-up GET.
+                        if released || rings_attention(prev.as_deref(), prev_reg, &key, c["registered"].as_bool().unwrap_or(true)) {
                             let ev = attention_event(&s.app, &tab, &st, c["title"].as_str().unwrap_or_default());
                             if socket.send(Message::Text(ev.to_string().into())).await.is_err() {
                                 return;
@@ -3432,7 +3502,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
                 let removed: Vec<String> = last.keys().filter(|k| !current_ids.contains(*k)).cloned().collect();
                 if !removed.is_empty() {
                     roster_changed = true;
-                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); mesh.remove(&k); asks.remove(&k); scripts.remove(&k); registered.remove(&k); tools.remove(&k); account_keys.remove(&k); }
+                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); mesh.remove(&k); asks.remove(&k); scripts.remove(&k); registered.remove(&k); tools.remove(&k); account_keys.remove(&k); hive_held.remove(&k); }
                 }
                 if roster_changed {
                     let _ = socket.send(Message::Text(json!({ "type": "chats_changed" }).to_string().into())).await;
@@ -3475,6 +3545,13 @@ fn enriched_chat_state_event(app: &AppState, c: &Value) -> Value {
 /// counts as an attention transition and break that positional parse.
 fn state_frame_needed(prev: Option<&str>, key: &str, reg_changed: bool, tool_changed: bool) -> bool {
     prev != Some(key) || reg_changed || tool_changed
+}
+
+/// A tab's held Hive prompts since last tick (protocol 0.24): whether they changed (a frame is
+/// owed), and whether one is still open but no longer the coordinator's alone (its timeout, a
+/// take-over, Ask me), which owes the open card an `attention` frame carrying it respondable.
+fn hive_hold_edge(tab: &str, before: &[String], now: &[String]) -> (bool, bool) {
+    (before != now, crate::hive::prompts::released(tab, before, now))
 }
 
 /// A `chat_state` frame.
@@ -6333,6 +6410,23 @@ fn build_chats(app: &AppState) -> Vec<Value> {
 /// `scrollback_db` mutex behind a scrollback `save()`. The per-phase timings localize which lock.
 const SLOW_BUILD_LOG_MS: u128 = 500;
 
+/// A Hive worker's prompt its coordinator holds (protocol 0.24, docs/hive.md §4.7): served with
+/// `owner`, not respondable and with nothing to tap, so the phone can't race the coordinator. A
+/// question keeps what it asks as `text`. Past the timeout or after a take-over it is the human's.
+fn held_by_coordinator(pp: &mut Value, tab_id: &str) {
+    let Some(key) = pp["prompt_id"].as_str().map(str::to_string) else { return };
+    if !crate::hive::prompts::coordinator_holds(tab_id, &key) {
+        return;
+    }
+    pp["owner"] = json!("coordinator");
+    pp["respondable"] = json!(false);
+    pp["options"] = json!([]);
+    if let Some(qs) = pp.as_object_mut().and_then(|o| o.remove("questions")) {
+        let asked: Vec<&str> = qs.as_array().into_iter().flatten().filter_map(|q| q["question"].as_str()).collect();
+        pp["text"] = json!(if asked.is_empty() { "The agent is asking its coordinator a question.".to_string() } else { asked.join(" · ") });
+    }
+}
+
 fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     let t_total = std::time::Instant::now();
 
@@ -6519,6 +6613,7 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
                 pp["expires_at"] = json!(exp);
             }
         }
+        held_by_coordinator(&mut pp, tab_id);
         detail["pendingPrompt"] = pp;
     } else if state == "permission" {
         // The hook carries no structured options; the keystroke response path uses the compact
@@ -6577,6 +6672,7 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         if let Some(a) = approval.as_ref() {
             pp["asked_at"] = json!(a.requested_at);
         }
+        held_by_coordinator(&mut pp, tab_id);
         detail["pendingPrompt"] = pp;
     }
 
@@ -6725,7 +6821,7 @@ async fn doorbell_loop(app: Arc<AppState>) {
         // "Needs you" at time-sensitive until the relay's copy table learns the word, which is
         // the fallback direction that made adding a kind before a relay deploy safe.
         for (tab_id, title, kind) in overlord::take_pending_rings(&app) {
-            if !covered && waiting_ring_due(&mut last_waiting_ring, &tab_id, kind, tick_ms) {
+            if !covered && ring_due(&app, &mut last_waiting_ring, &tab_id, kind, tick_ms) {
                 ring_devices(&client, &app, &relay_url, &tab_id, &title, kind).await;
             }
         }
@@ -6756,10 +6852,10 @@ async fn doorbell_loop(app: Arc<AppState>) {
             let new_script = note_waits(first_sighting, &tab_scripts, &mut seen_scripts, tick_ms);
             if !covered {
                 let title = c["title"].as_str().unwrap_or_default();
-                if new_ask && waiting_ring_due(&mut last_waiting_ring, &tab, "ask", tick_ms) {
+                if new_ask && ring_due(&app, &mut last_waiting_ring, &tab, "ask", tick_ms) {
                     ring_devices(&client, &app, &relay_url, &tab, title, "ask").await;
                 }
-                if new_script && waiting_ring_due(&mut last_waiting_ring, &tab, "script", tick_ms) {
+                if new_script && ring_due(&app, &mut last_waiting_ring, &tab, "script", tick_ms) {
                     ring_devices(&client, &app, &relay_url, &tab, title, "script").await;
                 }
             }
@@ -6788,7 +6884,7 @@ async fn doorbell_loop(app: Arc<AppState>) {
                     Some(_) => "permission",
                     None => "idle_done",
                 };
-                if waiting_ring_due(&mut last_waiting_ring, &tab, kind, tick_ms) {
+                if ring_due(&app, &mut last_waiting_ring, &tab, kind, tick_ms) {
                     ring_devices(&client, &app, &relay_url, &tab, &title, kind).await;
                 }
             }
@@ -6820,6 +6916,21 @@ fn note_waits(first_sighting: bool, keys: &HashSet<String>, seen: &mut HashMap<S
 /// one question, seen up to 24 s apart. One push reaches the chat, which shows all of it.
 const WAITING_RING_COLLAPSE_MS: u64 = 30_000;
 
+/// Whether a ring for `tab` goes out: never for a Hive worker's prompt its coordinator answers
+/// (docs/hive.md §4.7), and asked BEFORE `waiting_ring_due` records the tab, or a ring nobody
+/// heard would collapse the human's own prompt right after it.
+fn ring_due(app: &AppState, last: &mut HashMap<String, u64>, tab: &str, kind: &str, now: u64) -> bool {
+    ring_due_unless(crate::hive::owns_prompt(&app.app_data.read(), tab, kind), last, tab, kind, now)
+}
+
+fn ring_due_unless(coordinator_owns: bool, last: &mut HashMap<String, u64>, tab: &str, kind: &str, now: u64) -> bool {
+    if coordinator_owns {
+        log::debug!("[maiLink] doorbell: tab {tab}'s {kind} is its Hive coordinator's, no push");
+        return false;
+    }
+    waiting_ring_due(last, tab, kind, now)
+}
+
 /// Whether a waiting ring (anything but `idle_done`) for `tab` goes out, recording it if so.
 /// `idle_done` always rings and is not recorded: "finished" is not a second ask.
 fn waiting_ring_due(last: &mut HashMap<String, u64>, tab: &str, kind: &str, now: u64) -> bool {
@@ -6850,11 +6961,6 @@ async fn ring_devices(
     // the push: the phone still sees the wait over the WS and in the chat list.
     if app.app_data.read().tab_muted(tab_id) {
         log::debug!("[maiLink] doorbell: tab {tab_id} is muted, no push ({kind})");
-        return;
-    }
-    // A Hive worker's prompt its coordinator answers rings nobody (docs/hive.md §4.7).
-    if crate::hive::owns_prompt(&app.app_data.read(), tab_id, kind) {
-        log::debug!("[maiLink] doorbell: tab {tab_id}'s {kind} is its Hive coordinator's, no push");
         return;
     }
     let targets: Vec<(String, String, Option<String>, String)> = app
@@ -7547,6 +7653,35 @@ mod tests {
         assert!(waiting_ring_due(&mut last, "t", "permission", 31_000));
     }
 
+    /// A Hive worker's blocker its coordinator holds rings nobody, and must not collapse the
+    /// worker's next prompt, which is the human's, into it.
+    #[test]
+    fn a_ring_the_hive_coordinator_owns_records_nothing() {
+        let mut last = HashMap::new();
+        assert!(!ring_due_unless(true, &mut last, "w", "ask", 1_000));
+        assert!(last.is_empty());
+        assert!(ring_due_unless(false, &mut last, "w", "permission", 2_000), "the human's own prompt still rings");
+        assert!(!ring_due_unless(false, &mut last, "w", "question", 3_000), "and collapses what follows it");
+    }
+
+    /// A held Hive prompt timing out (or taken over) moves no state or prompt, so the hold diff is
+    /// what owes the phone a frame, and the attention frame carrying the card respondable.
+    #[test]
+    fn a_held_hive_prompt_timing_out_owes_the_phone_a_frame() {
+        let tab = format!("w-{}", uuid::Uuid::new_v4());
+        let key = format!("p_{tab}_1");
+        assert_eq!(crate::hive::prompts::held_keys(&tab), Vec::<String>::new());
+        crate::hive::prompts::hold_for_test(&tab, &key, "permission");
+        let before = crate::hive::prompts::held_keys(&tab);
+        assert_eq!(before, vec![key.clone()]);
+        assert_eq!(hive_hold_edge(&tab, &before, &before), (false, false), "nothing moved");
+        crate::hive::prompts::time_out_for_test(&tab, &key);
+        let now = crate::hive::prompts::held_keys(&tab);
+        assert_eq!(hive_hold_edge(&tab, &before, &now), (true, true), "still open, now the human's too");
+        // No longer routed (answered, or closed): a frame, but no card to offer.
+        assert_eq!(hive_hold_edge("another-tab", &before, &now), (true, false));
+    }
+
     #[test]
     fn a_reload_carries_the_ledger_to_the_new_tab_id() {
         let mut ledger = vec![
@@ -7608,6 +7743,68 @@ mod tests {
         let (kind, id, _) = current_prompt(&app, "tab").expect("the ask is open");
         assert_eq!(kind, "question");
         assert_eq!(id, "q_tab_123");
+    }
+
+    /// Protocol 0.24 (docs/hive.md §4.7): a Hive worker's prompt its coordinator holds is served
+    /// with `owner`, not respondable and with nothing to tap; one that isn't routed is untouched.
+    #[test]
+    fn a_prompt_a_hive_coordinator_holds_is_served_read_only() {
+        assert_eq!(PROTOCOL_VERSION, "0.24");
+        let tab = format!("w-{}", uuid::Uuid::new_v4());
+        let key = format!("q_{tab}_1");
+        crate::hive::prompts::hold_for_test(&tab, &key, "question");
+        let card = || json!({ "prompt_id": key, "kind": "question", "respondable": true,
+            "questions": [{ "question": "Which store?", "options": [{ "label": "Redis" }] }] });
+        let mut pp = card();
+        held_by_coordinator(&mut pp, &tab);
+        assert_eq!((pp["owner"].as_str(), pp["respondable"].as_bool()), (Some("coordinator"), Some(false)));
+        assert_eq!(pp["options"], json!([]));
+        assert!(pp.get("questions").is_none(), "nothing to tap");
+        assert_eq!(pp["text"], "Which store?");
+        let mut other = card();
+        held_by_coordinator(&mut other, "another-tab");
+        assert_eq!(other, card(), "not routed: as before");
+        // Past its timeout it is the human's too.
+        crate::hive::prompts::time_out_for_test(&tab, &key);
+        let mut late = card();
+        held_by_coordinator(&mut late, &tab);
+        assert_eq!(late, card());
+    }
+
+    /// The phone's `/respond` and the Loom's answer both go through `respond_as_human`, which
+    /// refuses a prompt the coordinator holds (plan D12) and lets it through past the timeout.
+    #[tokio::test]
+    async fn the_human_answer_paths_refuse_a_prompt_the_coordinator_holds() {
+        use crate::state::app_state::AgentSessionInfo;
+        let app = Arc::new(AppState::new());
+        let tab = format!("w-{}", uuid::Uuid::new_v4());
+        app.agent_sessions.write().insert("s".into(), AgentSessionInfo {
+            runtime: AgentRuntime::Claude,
+            tab_id: tab.clone(),
+            cwd: None,
+            state: AgentSessionState::WaitingPermission,
+            tool_name: Some("AskUserQuestion".into()),
+            tool_detail: None,
+            pending_question: Some(json!({ "questions": [{ "question": "Which?", "options": [{ "label": "A" }] }] })),
+            pending_question_at: Some(123),
+            pending_approvals: Vec::new(),
+            approval_seq: 0,
+            recent_tool_calls: Vec::new(),
+            claude_gate: Default::default(),
+            model: None,
+            transcript_path: None,
+            finished_a_turn: false,
+            connection_id: None,
+        });
+        let key = format!("q_{tab}_123");
+        crate::hive::prompts::hold_for_test(&tab, &key, "question");
+        let answers = [Answer { selected: vec!["A".into()], other: None }];
+        let out = respond_as_human(&app, None, &tab, Some(&key), None, Some(&answers)).await;
+        assert_eq!((out["ok"].as_bool(), out["reason"].as_str()), (Some(false), Some("coordinator")), "{out}");
+        assert!(out["detail"].as_str().unwrap().contains("take it over"));
+        crate::hive::prompts::time_out_for_test(&tab, &key);
+        let out = respond_as_human(&app, None, &tab, Some(&key), None, Some(&answers)).await;
+        assert_eq!(out["reason"], "no_pty", "past the timeout it goes on to the responder: {out}");
     }
 
     #[test]

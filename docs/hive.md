@@ -3419,6 +3419,60 @@ several releases a day).
    and "batch land check running". **Step 6 is complete.**
 7. Shared memory: `autoMemoryDirectory`, index rebuild, Memory view; checkpoints,
    `hiveAnswerWorker`, precedents in Rust storage, the decision log and earned autonomy.
+   **7a built** (`731dbd76`): shared memory (`hive/memory/`). `MEMORY.md`'s index is Rust's: one
+   writer per Hive (a watcher on `memory/`, debounced 1.5 s, an agent's Write/Edit seen by its own
+   hook, the Memory view's commands, and every session start) rebuilds it from each top-level
+   file's frontmatter, one line per file (`- [title](file) — description · by`, every `·` in the
+   description turned to `-`, so the last segment is always Rust's provenance), newest file first,
+   the oldest folded into one `archive-<date>.md` line past Claude's 200 lines or 25 KB. An agent's
+   stray line in the index is absorbed when it links a memory file and moved verbatim to
+   `unfiled.md` otherwise, `unfiled.md` written before `MEMORY.md` (a crash repeats a line, never
+   loses one), and `MEMORY.md` only by compare-and-swap over the text it read. The human's kept block
+   is never rewritten by a rebuild: Rust keeps its own copy in `logs/memory.json`, flags drift (Keep
+   as is adopts only the block the human was shown; Restore mine), and re-creates it only when the
+   fences are gone; over 60 lines or 8 KB the index goes to `MEMORY.generated.md` instead. Who wrote
+   each file is Rust's record by content hash (`coordinator`, `#2 title`, `human`, `unknown` for any
+   change no tool event explains), never the file's own words. `HiveMemoryView` (Board · Memory in
+   the header, Cmd+Shift+Y) reads, edits, deletes and pins files and edits the kept block and the
+   unfiled lines. The spike 5 probe (`spike_5_concurrent_memory_probe`) found two real sessions
+   choosing one file name overwrite each other, so both briefs tell an agent to pick a name no file
+   has yet.
+   **7b built** (2026-10-24, uncommitted at the time of writing): checkpoints in Rust, prompt
+   routing, `hiveAnswerWorker` and the decision log's first lines. `hive/checkpoints.rs` reads a
+   checkpoint (a missing key is its default for the landing mode) and maps a prompt kind to one
+   (permission → permissions; question, blocker, compaction, completion and a finished turn →
+   questions, plan D14); `hive_set_autonomy` saves the checkpoints and `settings.autonomy`
+   (`prompt_timeout_secs` 60–3,600, default 300; `daily_digest`), keeps Landing at Ask me in the
+   integration mode, tells the coordinator, and moves each prompt it owns under a checkpoint now
+   Ask me to the human, a timed-out one too (`hiveAnswerWorker` also reads the checkpoint at call
+   time, so a change racing it records rather than sends). `hive/prompts.rs` routes a worker's permission dialog or AskUserQuestion
+   (its PermissionRequest, Notification or AskUserQuestion PreToolUse hook, the screen read 800 ms
+   later through `mailink::hive_prompt_view`) and a question blocker on its task (diffed in
+   `set_workspace_tasks`) once per key, in memory only (plan D28): to the human when it is outside
+   the allowlist (`classify`: only a tool dialog whose row 1 is exactly Yes and whose words name no
+   sandbox, rule or outside read, a question with options, a `decision` blocker; the trust and plan
+   dialogs, a bare dialog and an `action` blocker are the human's) or its checkpoint is Ask me,
+   else to the coordinator with a timeout. Each route is an `asked` line in `logs/decisions.jsonl`
+   (`hive/decisions.rs`, append-only, `D-…` ids shared by a decision's lines) and a
+   `⟦HIVE PROMPT⟧`/`⟦HIVE QUESTION⟧` to the coordinator, every worker string escaped. A prompt the
+   gate let through silently that turns out to be the human's, and a coordinator's that times out,
+   send `hive-prompt-notify` to the window and ring the phone (`PENDING_RINGS`); `hive::owns_prompt`
+   now answers from the routes (an unrouted prompt is the human's, plan D13). `hiveAnswerWorker`
+   re-reads the prompt (a different open id is stale), refuses a taken-over or undelegable one,
+   records the coordinator's answer as its recommendation under Ask me without sending anything (plan
+   D10), and otherwise answers through the shared responder: a permission's plain Yes, or No (Esc
+   when the dialog has no row exactly No; `respond_to_prompt` now takes Esc on a tool dialog as its
+   reject, through `permission::permission_key_for`), a question's listed labels, a blocker's option
+   or free text (`hive.task` with `expect_asked_at`, then the worker told). A prompt that closes
+   unanswered is a `lapsed` line. The phone's `/respond` and the Loom's answer go through
+   `mailink::respond_as_human`: refused while the coordinator holds the prompt (plan D12), logged as
+   the human's and told to the coordinator after; `hive_take_over` makes one prompt the human's
+   alone. maiLink 0.24 serves a held prompt with `owner: "coordinator"`, `respondable:false` and no
+   options; when one becomes the human's too (timeout, take-over, Ask me) the WS ticker's hold diff
+   sends the tab a `chat_state` and an `attention` frame carrying the card respondable. The doorbell
+   asks `owns_prompt` before the 30 s collapse records a tab, so a ring nobody heard never swallows
+   the human's next one. **Not yet:** the window's side (the TS gate, "With coordinator", the Autonomy modal and
+   `hive-prompt-notify`'s listener are 7c), and precedents (7d) — `precedent` is stored as given.
 8. Gallery: store and index, `galleryAdd`/`List`/`Get`/`Tag`/`Collect`, thumbnails, the grid
    and detail view; then compare, Iterate/attach, collections, deliver (plain folders only,
    §7.3). The **budget**: recorded spend per paid render, the header total and the

@@ -8,6 +8,9 @@
 //! A sandbox refusal: a failed call whose output names a host or path the sandbox refused
 //! becomes an `external` blocker on the worker's task, once per target, and the coordinator,
 //! which can't widen a worker's sandbox, is told to raise its own blocker to the human.
+//!
+//! A prompt: a dialog or question opening is routed to one asker, and one closing drops its route
+//! (`prompts`, §7.4).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,22 +41,31 @@ pub(crate) enum Action {
     DiffStat,
     /// Its model or context may have moved: the card's meta, debounced (§4.4).
     Meta,
+    /// A permission dialog or a question may be open: route it once the screen settles (§7.4).
+    PromptMaybe,
+    /// A routed prompt may have closed: drop what isn't open any more.
+    PromptGone,
 }
 
 /// The tools that change files: a shell command can as much as an edit.
 const EDITING_TOOLS: [&str; 6] = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"];
 
 /// The routing table of `observed`. A failed shell command may still have written files, so it
-/// touches the diff stat too. SessionStart covers a compaction (`source: compact`).
+/// touches the diff stat too. SessionStart covers a compaction (`source: compact`). Any tool's
+/// end, a turn's end, a new prompt and the session's end can each close a prompt.
 pub(crate) fn feed_actions(event: &str, tool: Option<&str>) -> &'static [Action] {
     let edits = tool.is_some_and(|t| EDITING_TOOLS.contains(&t));
     match event {
-        "SessionEnd" => &[Action::SessionEnded],
-        "PostToolUseFailure" if edits => &[Action::ToolFailed, Action::DiffStat],
-        "PostToolUseFailure" => &[Action::ToolFailed],
-        "PostToolUse" if edits => &[Action::DiffStat],
-        "Stop" => &[Action::DiffStat, Action::Meta],
+        "SessionEnd" => &[Action::SessionEnded, Action::PromptGone],
+        "PostToolUseFailure" if edits => &[Action::ToolFailed, Action::DiffStat, Action::PromptGone],
+        "PostToolUseFailure" => &[Action::ToolFailed, Action::PromptGone],
+        "PostToolUse" if edits => &[Action::DiffStat, Action::PromptGone],
+        "PostToolUse" => &[Action::PromptGone],
+        "Stop" => &[Action::DiffStat, Action::Meta, Action::PromptGone],
         "SessionStart" => &[Action::Meta, Action::DiffStat],
+        "UserPromptSubmit" => &[Action::PromptGone],
+        "PermissionRequest" | "Notification" => &[Action::PromptMaybe],
+        "PreToolUse" if tool == Some("AskUserQuestion") => &[Action::PromptMaybe],
         _ => &[],
     }
 }
@@ -94,6 +106,23 @@ pub fn observed(state: &Arc<AppState>, handle: &AppHandle, tab_id: &str, event_n
                 tauri::async_runtime::spawn(async move {
                     let ctx = super::tools::app_ctx(&state, &handle, &caller);
                     tool_failed(&ctx, &caller, &tab, &event).await;
+                });
+            }
+            Action::PromptMaybe => {
+                let (state, handle, caller, tab) = (state.clone(), handle.clone(), caller.clone(), tab_id.to_string());
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(super::prompts::SETTLE).await;
+                    let ctx = super::tools::app_ctx(&state, &handle, &caller);
+                    super::prompts::maybe_route(&ctx, &caller, &tab).await;
+                });
+            }
+            // Every tool's end comes here: nothing to do unless one of its prompts is routed.
+            Action::PromptGone if !super::prompts::has_screen_routes(tab_id) => {}
+            Action::PromptGone => {
+                let (state, handle, caller, tab)= (state.clone(), handle.clone(), caller.clone(), tab_id.to_string());
+                tauri::async_runtime::spawn(async move {
+                    let ctx = super::tools::app_ctx(&state, &handle, &caller);
+                    super::prompts::gone(&ctx, &caller, &tab).await;
                 });
             }
         }
@@ -311,17 +340,22 @@ mod tests {
     #[test]
     fn hooks_route_to_their_actions() {
         for tool in EDITING_TOOLS {
-            assert_eq!(feed_actions("PostToolUse", Some(tool)), &[DiffStat], "{tool}");
-            assert_eq!(feed_actions("PostToolUseFailure", Some(tool)), &[ToolFailed, DiffStat], "{tool}");
+            assert_eq!(feed_actions("PostToolUse", Some(tool)), &[DiffStat, PromptGone], "{tool}");
+            assert_eq!(feed_actions("PostToolUseFailure", Some(tool)), &[ToolFailed, DiffStat, PromptGone], "{tool}");
         }
         for tool in [Some("Read"), Some("Grep"), Some("mcp__maiterm__hiveReport"), Some("edit"), None] {
-            assert_eq!(feed_actions("PostToolUse", tool), &[] as &[Action], "{tool:?}: changes no file");
-            assert_eq!(feed_actions("PostToolUseFailure", tool), &[ToolFailed], "{tool:?}");
+            assert_eq!(feed_actions("PostToolUse", tool), &[PromptGone], "{tool:?}: changes no file");
+            assert_eq!(feed_actions("PostToolUseFailure", tool), &[ToolFailed, PromptGone], "{tool:?}");
         }
-        assert_eq!(feed_actions("Stop", None), &[DiffStat, Meta]);
+        assert_eq!(feed_actions("Stop", None), &[DiffStat, Meta, PromptGone]);
         assert_eq!(feed_actions("SessionStart", None), &[Meta, DiffStat]);
-        assert_eq!(feed_actions("SessionEnd", None), &[SessionEnded]);
-        for quiet in ["PreToolUse", "Notification", "UserPromptSubmit", "PreCompact", "SubagentStop", "StopFailure", ""] {
+        assert_eq!(feed_actions("SessionEnd", None), &[SessionEnded, PromptGone]);
+        assert_eq!(feed_actions("UserPromptSubmit", None), &[PromptGone]);
+        // A dialog opening: its permission hook, Claude's notice, or the question being asked.
+        assert_eq!(feed_actions("PermissionRequest", Some("Bash")), &[PromptMaybe]);
+        assert_eq!(feed_actions("Notification", None), &[PromptMaybe]);
+        assert_eq!(feed_actions("PreToolUse", Some("AskUserQuestion")), &[PromptMaybe]);
+        for quiet in ["PreToolUse", "PreCompact", "SubagentStop", "StopFailure", ""] {
             assert!(feed_actions(quiet, Some("Edit")).is_empty(), "{quiet}");
         }
     }

@@ -13,6 +13,8 @@ use std::time::Duration;
 use serde_json::Value;
 use tauri::AppHandle;
 
+use super::prompts::{HumanNotice, PromptView, RouteView};
+use crate::mailink::Answer;
 pub(crate) use crate::mailink::rpc::Outcome;
 use crate::state::AppState;
 
@@ -80,6 +82,24 @@ pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     fn settle_request(&self, _id: &str, _ok: bool, _outcome: String) {}
     /// Withdraws a card no longer true (its worker stopped, retired or reported again).
     fn withdraw_request(&self, _id: &str, _why: &str) {}
+    /// `tab`'s open prompt as the router reads it (`mailink::hive_prompt_view`). A test window
+    /// has none unless it says so.
+    fn prompt_view(&self, _tab: &str) -> Option<PromptView> {
+        None
+    }
+    /// Answers `tab`'s open prompt `key` through the shared responder (`mailink::respond_to_prompt`),
+    /// as the coordinator: never at the trust dialog, never into a question the human began
+    /// answering in the terminal.
+    fn answer_prompt(&self, _tab: &str, _key: &str, _choice: Option<String>, _answers: Option<Vec<Answer>>) -> impl Future<Output = Value> + Send {
+        async { serde_json::json!({ "ok": false, "reason": "no_window" }) }
+    }
+    /// The Hive's routes changed: its view and its gate follow (`hive-prompts-changed`).
+    fn emit_routes(&self, _workspace_id: &str, _routes: Vec<RouteView>) {}
+    /// A worker's prompt needs the human after all: the window's notice and the phone's doorbell.
+    fn notify_human(&self, _n: HumanNotice) {}
+    /// At `due_ms`, the coordinator's time on the prompt runs out (`prompts::on_due`). A test
+    /// calls `on_due` itself.
+    fn schedule_due(&self, _caller: &super::tools::Caller, _tab: &str, _key: &str, _due_ms: i64) {}
 }
 
 /// A Hive's card for the human, as Rust builds it: every word maiTerm's but `reason`.
@@ -206,6 +226,59 @@ impl HiveWindow for AppWindow {
 
     fn withdraw_request(&self, id: &str, why: &str) {
         crate::agent_requests::fail_request(&self.handle, id, why);
+    }
+
+    fn prompt_view(&self, tab: &str) -> Option<PromptView> {
+        crate::mailink::hive_prompt_view(&self.app, tab)
+    }
+
+    fn answer_prompt(&self, tab: &str, key: &str, choice: Option<String>, answers: Option<Vec<Answer>>) -> impl Future<Output = Value> + Send {
+        let (app, tab, key) = (self.app.clone(), tab.to_string(), key.to_string());
+        async move {
+            // The Overlord agent's refusals (`answer_tab_prompt`), for the same reasons.
+            if crate::mailink::trust_dialog_open(&app, &tab) {
+                return serde_json::json!({ "ok": false, "reason": "trust_dialog", "detail": "Claude\u{2019}s workspace-trust dialog is your human\u{2019}s" });
+            }
+            if !crate::mailink::open_question_untouched(&app, &tab) {
+                return serde_json::json!({ "ok": false, "reason": "human_answering", "detail": "your human is answering that question in the terminal right now" });
+            }
+            crate::mailink::respond_to_prompt(&app, &tab, Some(&key), choice.as_deref(), answers.as_deref()).await
+        }
+    }
+
+    fn emit_routes(&self, workspace_id: &str, routes: Vec<RouteView>) {
+        use tauri::Emitter;
+        let payload = serde_json::json!({ "workspace_id": workspace_id, "routes": routes });
+        if let Err(e) = self.handle.emit_to(self.label.as_str(), super::prompts::PROMPTS_CHANGED_EVENT, payload) {
+            log::warn!("hive: prompt routes not sent to window {}: {e}", self.label);
+        }
+    }
+
+    fn notify_human(&self, n: HumanNotice) {
+        use tauri::Emitter;
+        if let Err(e) = self.handle.emit_to(self.label.as_str(), super::prompts::PROMPT_NOTIFY_EVENT, &n) {
+            log::warn!("hive: prompt notice not sent to window {}: {e}", self.label);
+        }
+        // The phone's doorbell, drained by its loop, which asks `owns_prompt` again before it pushes.
+        // Only a tab exposed to maiLink: an excluded tab's title must not reach the relay.
+        if self.app.mailink_info.read().is_some() && crate::mailink::is_designated(&self.app, &n.tab_id) {
+            let mut q = self.app.mailink_pending_rings.lock();
+            q.push((n.tab_id.clone(), n.title.clone(), n.ring_kind()));
+            if q.len() > crate::mailink::overlord::MAX_PENDING_RINGS {
+                let excess = q.len() - crate::mailink::overlord::MAX_PENDING_RINGS;
+                q.drain(..excess);
+            }
+        }
+    }
+
+    fn schedule_due(&self, caller: &super::tools::Caller, tab: &str, key: &str, due_ms: i64) {
+        let (app, handle, caller, tab, key) = (self.app.clone(), self.handle.clone(), caller.clone(), tab.to_string(), key.to_string());
+        tauri::async_runtime::spawn(async move {
+            let wait = due_ms.saturating_sub(super::fuses::now_ms()).max(0) as u64;
+            tokio::time::sleep(Duration::from_millis(wait)).await;
+            let ctx = super::tools::app_ctx(&app, &handle, &caller);
+            super::prompts::on_due(&ctx, &caller, &tab, &key, super::fuses::now_ms()).await;
+        });
     }
 }
 

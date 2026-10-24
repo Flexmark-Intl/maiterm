@@ -307,9 +307,11 @@ pub async fn answer_tab_prompt(
 /// The human answering a tab's prompt from the Loom (docs/loom.md): the same responder as
 /// `answer_tab_prompt`, without its trust-dialog refusal, which exists to keep the Overlord
 /// AGENT from trusting folders. A separate command, never a flag on that one, so no path the
-/// agent's tool call reaches can carry the human's exemption.
+/// agent's tool call reaches can carry the human's exemption. A Hive worker's prompt its
+/// coordinator holds is refused until the human takes it over (docs/hive.md §4.7).
 #[tauri::command]
 pub async fn answer_tab_prompt_as_human(
+    app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     tab_id: String,
     prompt_id: Option<String>,
@@ -317,8 +319,9 @@ pub async fn answer_tab_prompt_as_human(
     answers: Option<Vec<crate::mailink::Answer>>,
 ) -> Result<Value, String> {
     let app = state.inner().clone();
-    Ok(crate::mailink::respond_to_prompt(
+    Ok(crate::mailink::respond_as_human(
         &app,
+        Some(&app_handle),
         &tab_id,
         prompt_id.as_deref(),
         choice.as_deref(),

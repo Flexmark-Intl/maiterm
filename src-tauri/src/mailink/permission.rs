@@ -28,6 +28,61 @@ pub(crate) struct PermissionDialog {
     /// re-wrap at another width doesn't change it. Two dialogs asking the identical thing share
     /// it, which is harmless: an answer means the same on either.
     pub digest: String,
+    /// A tool's dialog, the plan dialog, or one with no footer (WebFetch, sandbox network).
+    pub shape: DialogShape,
+    /// What the dialog asks, from its rule down to row 1, its lines trimmed and joined.
+    pub text: String,
+}
+
+/// Which key answers a Claude permission dialog with a choice (`permission_key_for`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PermissionKey {
+    /// The row whose label it is: its digit, and the label as drawn.
+    Row { key: String, label: String },
+    /// Esc on a tool dialog: a reject, never an approval.
+    Esc,
+    /// The rows can't be read but a tool dialog's footer ends the screen: Yes or No only.
+    Fallback(&'static str),
+}
+
+impl PermissionKey {
+    pub fn bytes(&self) -> String {
+        match self {
+            PermissionKey::Row { key, .. } => key.clone(),
+            PermissionKey::Esc => "\x1b".to_string(),
+            PermissionKey::Fallback(k) => k.to_string(),
+        }
+    }
+
+    /// What it means to the maiterm-tab mod, which takes Yes and No by meaning: a row's label, or
+    /// No for Esc. None for a fallback, which goes in as its key.
+    pub fn meaning(&self) -> Option<&str> {
+        match self {
+            PermissionKey::Row { label, .. } => Some(label),
+            PermissionKey::Esc => Some("No"),
+            PermissionKey::Fallback(_) => None,
+        }
+    }
+}
+
+/// The key a choice presses on the dialog read off the screen (`dialog`), or why not. `Esc` is
+/// accepted only on a tool dialog, as its reject; a label must be a row exactly; with no rows
+/// read, only Yes and No, and only while a tool dialog's footer ends the screen.
+pub(crate) fn permission_key_for(dialog: Option<&PermissionDialog>, footer_open: bool, choice: &str) -> Result<PermissionKey, &'static str> {
+    let esc = choice.trim().eq_ignore_ascii_case("esc");
+    match dialog {
+        Some(d) if esc && d.shape == DialogShape::Tool => Ok(PermissionKey::Esc),
+        Some(d) => match d.key_for(choice) {
+            Some(key) => {
+                let label = key.parse::<usize>().ok().and_then(|n| d.options.get(n.wrapping_sub(1))).cloned().unwrap_or_default();
+                Ok(PermissionKey::Row { key, label })
+            }
+            None => Err("that isn't one of the options the dialog shows"),
+        },
+        None if !footer_open => Err("that dialog is no longer open in the terminal"),
+        None if esc => Ok(PermissionKey::Esc),
+        None => fallback_key(choice).map(PermissionKey::Fallback).ok_or("the dialog can't be read off the screen, so only Yes or No can be sent"),
+    }
 }
 
 impl PermissionDialog {
@@ -56,7 +111,7 @@ pub(crate) const FALLBACK_OPTIONS: [&str; 2] = ["Yes", "No"];
 /// Only a tool dialog's footer counts: on the plan dialog row 1 changes the permission mode.
 pub(crate) fn footer_open(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().collect();
-    footer(&lines).is_some_and(|(_, kind)| kind == Footer::Tool)
+    footer(&lines).is_some_and(|(_, kind)| kind == DialogShape::Tool)
 }
 
 /// Whether any Claude permission dialog (a tool's or the plan's) ends the screen, readable
@@ -76,8 +131,9 @@ pub(crate) fn any_dialog_open(screen: &str) -> bool {
         || screen.lines().rev().find(|l| !l.trim().is_empty()).is_some_and(|l| l.contains("Esc to cancel"))
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Footer {
+/// Which kind of dialog it is, by how it ends. In memory only, never persisted or on the wire.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DialogShape {
     Tool,
     Plan,
     /// No footer at all: WebFetch's dialog (and, per the 2.1.283 bundle, sandbox-network and
@@ -93,7 +149,7 @@ const PLAN_FOOTER_MAX_LINES: usize = 6;
 /// Where the dialog's footer starts, when one ends the screen. A tool dialog's footer is the
 /// last non-blank line. The plan dialog's wraps with its path, so it may start a few lines up,
 /// provided nothing between it and the end is blank or a row.
-fn footer(lines: &[&str]) -> Option<(usize, Footer)> {
+fn footer(lines: &[&str]) -> Option<(usize, DialogShape)> {
     let last = lines.iter().rposition(|l| !l.trim().is_empty())?;
     // "Esc to cancel" is Claude's generic dialog footer. The AskUserQuestion selector
     // ("Enter to select · ↑/↓ to navigate · Esc to cancel"), the trust dialog ("Enter to
@@ -101,12 +157,12 @@ fn footer(lines: &[&str]) -> Option<(usize, Footer)> {
     // hint. A tool permission's footer has none ("Esc to cancel · Tab to amend"): read as one,
     // an ask's "No" would press Esc into the agent's question.
     if lines[last].contains("Esc to cancel") && !lines[last].contains("Enter to") {
-        return Some((last, Footer::Tool));
+        return Some((last, DialogShape::Tool));
     }
     for i in (last.saturating_sub(PLAN_FOOTER_MAX_LINES - 1)..=last).rev() {
         let l = lines[i];
         if l.contains("ctrl+g to edit in") {
-            return Some((i, Footer::Plan));
+            return Some((i, DialogShape::Plan));
         }
         if l.trim().is_empty() || row(l).is_some() {
             break;
@@ -118,7 +174,7 @@ fn footer(lines: &[&str]) -> Option<(usize, Footer)> {
 /// A dialog with no footer: the screen ends in its rows (or a row's wrapped continuation),
 /// which run unbroken up to row 1, and the line above row 1 asks "Do you want …". The question
 /// is required because numbered rows at the bottom of a screen are otherwise ordinary output.
-fn bare_dialog(lines: &[&str], last: usize) -> Option<(usize, Footer)> {
+fn bare_dialog(lines: &[&str], last: usize) -> Option<(usize, DialogShape)> {
     let mut i = last;
     loop {
         let l = lines[i];
@@ -133,7 +189,7 @@ fn bare_dialog(lines: &[&str], last: usize) -> Option<(usize, Footer)> {
                     .take(3)
                     .take_while(|l| !l.starts_with('─'))
                     .any(|l| l.contains("Do you want"));
-                return asks.then_some((last + 1, Footer::Bare));
+                return asks.then_some((last + 1, DialogShape::Bare));
             }
             Some(_) => {}
             None if l.starts_with("    ") && !l.trim().is_empty() => {}
@@ -230,7 +286,7 @@ pub(crate) fn parse(screen: &str) -> Option<PermissionDialog> {
     // dropped, so a resize or a moved highlight keeps the id.
     let rule_above = |end: usize| lines[..end].iter().rposition(|l| l.starts_with('─'));
     let mut top = rule_above(first_row).unwrap_or(0);
-    if kind == Footer::Plan {
+    if kind == DialogShape::Plan {
         top = rule_above(top).unwrap_or(0);
     }
     let drawn: String = lines[top..foot]
@@ -240,7 +296,14 @@ pub(crate) fn parse(screen: &str) -> Option<PermissionDialog> {
         .collect();
     let drawn = without_countdown(drawn);
     let digest = super::sha256_hex(drawn.as_bytes())[..12].to_string();
-    Some(PermissionDialog { options: rows.into_iter().map(|(_, l)| l).collect(), digest })
+    // What it asks, above its rows: the words a Hive's allowlist reads (hive/prompts.rs).
+    let text = lines[top..first_row]
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with(['─', '╌']))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(PermissionDialog { options: rows.into_iter().map(|(_, l)| l).collect(), digest, shape: kind, text })
 }
 
 #[cfg(test)]
@@ -425,6 +488,39 @@ mod tests {
         // An approved command running under a permission state that hasn't cleared yet.
         assert!(!footer_open("⏺ Bash(npm test)\n  ⎿  Running…\n\n✻ Working… (esc to interrupt)\n"));
         assert!(!footer_open(""));
+    }
+
+    #[test]
+    fn each_dialog_says_its_shape_and_what_it_asks() {
+        let bash = parse(BASH_100).unwrap();
+        assert_eq!(bash.shape, DialogShape::Tool);
+        assert!(bash.text.contains("Do you want to proceed?"), "{}", bash.text);
+        assert!(!bash.text.contains('─') && !bash.text.contains("1. Yes"), "the rule and the rows aren't the question: {}", bash.text);
+        assert_eq!(parse(PLAN_100).unwrap().shape, DialogShape::Plan);
+        let fetch = parse(WEBFETCH_100).unwrap();
+        assert_eq!(fetch.shape, DialogShape::Bare);
+        assert!(fetch.text.contains("Do you want to allow Claude to fetch this content?"), "{}", fetch.text);
+    }
+
+    /// Esc is a reject on a tool dialog only; a label must be a row; unread rows take Yes or No.
+    #[test]
+    fn the_key_for_a_choice_follows_the_dialog() {
+        let bash = parse(BASH_100).unwrap();
+        assert_eq!(permission_key_for(Some(&bash), true, "Esc"), Ok(PermissionKey::Esc));
+        assert_eq!(PermissionKey::Esc.bytes(), "\x1b");
+        assert_eq!(PermissionKey::Esc.meaning(), Some("No"), "the mod takes it as a deny");
+        let yes = permission_key_for(Some(&bash), true, "Yes").unwrap();
+        assert_eq!(yes, PermissionKey::Row { key: "1".into(), label: "Yes".into() });
+        assert_eq!(permission_key_for(Some(&bash), true, "No").unwrap().bytes(), "3");
+        assert!(permission_key_for(Some(&bash), true, "Yes, and don't ask again").is_err());
+        for not_tool in [PLAN_100, WEBFETCH_100] {
+            assert!(permission_key_for(Some(&parse(not_tool).unwrap()), false, "esc").is_err(), "no Esc on a plan or bare dialog");
+        }
+        assert_eq!(permission_key_for(None, true, "esc"), Ok(PermissionKey::Esc));
+        assert_eq!(permission_key_for(None, true, "No"), Ok(PermissionKey::Fallback("\x1b")));
+        assert_eq!(PermissionKey::Fallback("1").meaning(), None);
+        assert!(permission_key_for(None, false, "Esc").unwrap_err().contains("no longer open"));
+        assert!(permission_key_for(None, true, "Yes, and don't ask again").unwrap_err().contains("only Yes or No"));
     }
 
     #[test]

@@ -36,7 +36,7 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The Hive tools built so far: what `tools/list` offers each role and the handler answers.
 /// The rest of the coordinator's (settings' `COORDINATOR_MCP_TOOLS`) are refused as not yet here.
-pub const COORDINATOR_TOOLS: [&str; 10] = [
+pub const COORDINATOR_TOOLS: [&str; 11] = [
     "hiveSpawnWorker",
     "hiveListWorkers",
     "hiveMessageWorker",
@@ -47,6 +47,7 @@ pub const COORDINATOR_TOOLS: [&str; 10] = [
     "hiveResolve",
     "hiveLand",
     "hiveUndoLand",
+    "hiveAnswerWorker",
 ];
 /// Every worker is offered all three; Rust refuses `hiveReport` to a reviewer and `hiveVerdict`
 /// to a builder (`review`).
@@ -260,6 +261,7 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
         super::review::resolve_tool_definition(&tab_id),
         super::land::tool_definition(&tab_id),
         super::land::undo::tool_definition(&tab_id),
+        super::prompts::tool_definition(&tab_id),
     ]
 }
 
@@ -403,6 +405,7 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         "hiveResolve" => super::review::resolve(&ctx, &caller, args).await,
         "hiveLand" => super::land::land_tool(&ctx, &caller, args).await,
         "hiveUndoLand" => super::land::undo::undo_tool(&ctx, &caller, args).await,
+        "hiveAnswerWorker" => super::prompts::answer_worker_tool(&ctx, &caller, args).await,
         t => Err(format!("{t} isn't available in this build of maiTerm yet.")),
     };
     // A worker's phase changed: a freed slot or a failed dependency is news to the waiters.

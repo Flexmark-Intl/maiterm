@@ -34,13 +34,18 @@
 //!
 //! Step 7a: shared memory (`memory`): `MEMORY.md`'s index rebuilt from the files, each file's
 //! author in Rust's own record, the folder watched, and the Memory view's commands.
+//!
+//! Step 7b: the checkpoints (`checkpoints`), a worker's prompts and question blockers routed to
+//! one asker and answered with `hiveAnswerWorker` (`prompts`), and the decision log (`decisions`).
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
 
 pub mod brief;
+pub mod checkpoints;
 pub(crate) mod control;
 pub mod create;
+pub mod decisions;
 pub mod delete;
 pub(crate) mod deliver;
 pub mod diffstat;
@@ -57,6 +62,7 @@ pub mod layout;
 pub mod memory;
 pub mod paths;
 pub mod pressure;
+pub mod prompts;
 // Ignored probes that run a sandboxed `claude -p` through `sh`: Unix only, as the sandbox is.
 #[cfg(all(test, unix))]
 mod probe;
@@ -410,12 +416,27 @@ pub fn refuse_request(data: &AppData, kind: &str, args: &serde_json::Value) -> R
 /// coordinator's to answer, so nothing pushes, toasts or notifies the human for it (§4.7). The
 /// Rust twin of `hiveOwnsPrompt` (`src/lib/hive/model.ts`), asked by `ring_devices`.
 ///
-/// False for everything until `hiveAnswerWorker` ships (step 7): before it a coordinator can't
-/// answer a prompt, so every worker prompt reaches the human as today. Asked at the choke point
-/// now so step 7 changes this function, not its callers.
+/// Only a worker's, in a Hive that isn't done, under a checkpoint that is the coordinator's. A
+/// permission, question or question blocker needs its route: one the coordinator holds alone
+/// (not timed out, not taken over) is its own, and an unrouted one is the human's (plan D13). A
+/// compaction, a completion or a finished turn is under Workers' questions (plan D14).
 pub fn owns_prompt(data: &AppData, tab_id: &str, kind: &str) -> bool {
-    let _ = (data, tab_id, kind);
-    false
+    let Some((ws, tab)) = find_hive_tab(data, tab_id) else { return false };
+    let Some(hive) = ws.hive.as_ref() else { return false };
+    if tab.hive_role.as_deref() != Some(ROLE_WORKER) || hive.status == "done" {
+        return false;
+    }
+    let Some(cp) = checkpoints::for_prompt_kind(kind) else { return false };
+    if checkpoints::asks(hive, cp) {
+        return false;
+    }
+    match kind {
+        "permission" => prompts::coordinator_holds_kind(tab_id, prompts::KIND_PERMISSION).unwrap_or(false),
+        "question" => prompts::coordinator_holds_kind(tab_id, prompts::KIND_QUESTION).unwrap_or(false),
+        "ask" => prompts::coordinator_holds_kind(tab_id, prompts::KIND_BLOCKER).unwrap_or(false),
+        "compaction" | "completion" | "idle_done" => true,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -423,14 +444,30 @@ mod tests {
     use super::*;
     use crate::state::{AppData, Pane, WindowData};
 
+    /// Without a route (prompts/tests.rs has the routed half): only a worker's notices under a
+    /// coordinator checkpoint are the coordinator's, and an unrouted prompt is the human's.
     #[test]
-    fn no_prompt_is_the_coordinators_before_it_can_answer_one() {
-        let d = app();
-        for tab in ["coord", "w1", "plain-in-hive", "t1", "gone"] {
-            for kind in ["permission", "question", "ask", "script", "idle_done", "escalation", "request", "compaction", "completion"] {
+    fn only_a_workers_notices_are_the_coordinators_before_anything_is_routed() {
+        let mut d = app();
+        let all = ["permission", "question", "ask", "script", "idle_done", "escalation", "request", "compaction", "completion"];
+        for tab in ["coord", "plain-in-hive", "t1", "gone"] {
+            for kind in all {
                 assert!(!owns_prompt(&d, tab, kind), "{tab} {kind}");
             }
         }
+        for kind in ["permission", "question", "ask", "script", "escalation", "request"] {
+            assert!(!owns_prompt(&d, "w1", kind), "unrouted: the human's (plan D13): {kind}");
+        }
+        for kind in ["compaction", "completion", "idle_done"] {
+            assert!(owns_prompt(&d, "w1", kind), "{kind}");
+        }
+        let hive = d.windows[0].workspaces[0].hive.as_mut().unwrap();
+        hive.checkpoints.insert("questions".into(), "ask".into());
+        assert!(!owns_prompt(&d, "w1", "idle_done"), "Ask me: the human hears it");
+        let hive = d.windows[0].workspaces[0].hive.as_mut().unwrap();
+        hive.checkpoints.clear();
+        hive.status = "done".into();
+        assert!(!owns_prompt(&d, "w1", "completion"), "a done Hive");
     }
 
     fn tab(id: &str, role: Option<&str>) -> Tab {

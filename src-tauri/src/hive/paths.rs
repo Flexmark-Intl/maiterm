@@ -120,6 +120,11 @@ impl HivePaths {
         self.logs().join("lands.jsonl")
     }
 
+    /// The decision log: every prompt and question routed, recommended, answered or lapsed (§7.6).
+    pub fn decision_log(&self) -> PathBuf {
+        self.logs().join("decisions.jsonl")
+    }
+
     /// Undos while they run, wait or hold (§8.6), one file each: under `logs/`, which no Hive
     /// agent may write.
     pub fn undos(&self) -> PathBuf {

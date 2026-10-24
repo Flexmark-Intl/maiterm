@@ -59,7 +59,7 @@ pub fn set_workspace_tasks(
     // Drop workstreams nothing points at any more. They exist only to group tasks, so an
     // empty one is a label with no referent — and leaving them would let an agent's
     // throwaway names accumulate on the board forever.
-    let data_clone = {
+    let (data_clone, blockers) = {
         let mut app_data = state.app_data.write();
         let win = app_data.window_mut(&label).ok_or("Window not found")?;
         let workspace = win
@@ -67,6 +67,9 @@ pub fn set_workspace_tasks(
             .iter_mut()
             .find(|w| w.id == workspace_id)
             .ok_or("Workspace not found")?;
+        // A Hive worker's question blocker goes to one asker (docs/hive.md §7.4): what this
+        // write added or removed, diffed while the old list is still here.
+        let blockers = workspace.hive.is_some().then(|| crate::hive::prompts::blocker_diff(&workspace.tasks, &tasks));
         // A workstream is kept while ANY task still points at it — including the rows parked
         // on archived tabs, which are out of `tasks` but not gone. Without that, archiving
         // the tab that owned a workstream's only rows left the label with no referent, and
@@ -84,12 +87,12 @@ pub fn set_workspace_tasks(
         });
         workspace.tasks = tasks;
         workspace.workstreams = workstreams;
-        app_data.clone()
+        (app_data.clone(), blockers)
     };
     save_state(&data_clone)?;
     // A Hive's waiting workers launch once their dependencies' tasks are done (docs/hive.md §3.1).
-    let is_hive = data_clone.window(&label).and_then(|w| w.workspaces.iter().find(|w| w.id == workspace_id)).is_some_and(|w| w.hive.is_some());
-    if is_hive {
+    if let Some((added, removed)) = blockers {
+        crate::hive::prompts::blockers_changed(state.inner().clone(), app.clone(), workspace_id.clone(), added, removed);
         crate::hive::waiters::poll_soon(state.inner().clone(), app, workspace_id);
     }
     Ok(())
