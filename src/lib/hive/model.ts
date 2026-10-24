@@ -183,3 +183,31 @@ export function isEligible(ws: EligibleWorkspace, tasks: EligibleTask[]): boolea
     && !t.agent_bridge;
   return fresh && !tasks.some((k) => k.tab_id === t.id && k.status !== 'done' && k.status !== 'dropped');
 }
+
+type AdoptTab = { id: string };
+type AdoptPane<T extends AdoptTab> = { id: string; tabs: T[]; active_tab_id?: string | null };
+type AdoptWorkspace<T extends AdoptTab, S> = { hive?: unknown; name: string; stack?: S[]; panes: AdoptPane<T>[] };
+
+/** Patch what `hive_create` installed into the window's mirror of that workspace, in place, so
+ *  the panes and tabs still there are left alone: the Hive, its name, the stack (the Create
+ *  sheet's imports went in with the install — a mirror without them hides them, and the stack
+ *  store's next whole-list write erases them), the coordinator's hidden tab, the fresh shell
+ *  Rust took out, and each pane's active tab, which is Rust's. */
+export function adoptInstalled<T extends AdoptTab, S>(
+  mirror: AdoptWorkspace<T, S>,
+  created: AdoptWorkspace<T, S>,
+  coordinatorTabId: string,
+  replacedTabId: string | null,
+): void {
+  mirror.hive = created.hive;
+  mirror.name = created.name;
+  mirror.stack = created.stack ?? [];
+  for (const pane of created.panes) {
+    const coord = pane.tabs.find((t) => t.id === coordinatorTabId);
+    const into = mirror.panes.find((p) => p.id === pane.id);
+    if (!into) continue;
+    if (replacedTabId) into.tabs = into.tabs.filter((t) => t.id !== replacedTabId);
+    if (coord && !into.tabs.some((t) => t.id === coordinatorTabId)) into.tabs.push(coord);
+    into.active_tab_id = pane.active_tab_id ?? null;
+  }
+}

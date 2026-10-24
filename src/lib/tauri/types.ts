@@ -543,6 +543,9 @@ export interface HiveSpec {
   tools: string[];
   budget_cents: number;
   push_after_land: boolean;
+  /** The Stack step (docs/hive.md §3 step 3): definitions to import, and `shared_from`
+   *  references to infrastructure another workspace runs. Rust re-checks every row. */
+  stack: Service[];
 }
 
 export interface HiveReplaceable {

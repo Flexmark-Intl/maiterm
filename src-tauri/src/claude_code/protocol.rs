@@ -823,32 +823,34 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
     // ── Workspace stack (docs/stack.md §6.1) ──
     // Frontend-handled; all scoped to the CALLING TAB'S WORKSPACE. Agents are writers:
     // they register services they start and report the ports they observe, so maiTerm
-    // never has to sniff sockets. `service` accepts a name or an id everywhere.
+    // never has to sniff sockets. `service` accepts a name or an id everywhere, and `on`
+    // picks a copy (docs/hive.md §6.9).
+    const STACK_ON: &str = "Which copy: \"main\" (the service's own folder), a branch name, or a Hive worker (badge or name). Without it: the one copy running; the own folder when none is; refused, naming them, when several are";
     tools.extend(serde_json::json!([
         {
             "name": "listStack",
-            "description": "The services this project runs, as maiTerm manages them (the workspace this tab belongs to): name, status (stopped | starting | running | ready | crashed), uptime, port/url with `endpoint_source` ('observed' — maiTerm read the address in the service's own output; 'reported' — an agent called updateService; 'stale' — carried over from a previous run, do not trust it), cwd, command, last exit code, the tab running it, and a `note` saying why a service is held or crashed. Check this before starting a dev server or database yourself: it is probably already running, or maiTerm can start it for you.",
+            "description": "The services this project runs, as maiTerm manages them (the workspace this tab belongs to), one row per COPY: a service can run on its own folder (`on: \"main\"`) and on other branches or a Hive worker's checkout at once, each its own row with `on`, `target`, `branch` and `commit`. Each row: name, status (stopped | starting | running | ready | crashed), uptime, port/url with `endpoint_source` ('observed' — maiTerm read the address in the service's own output; 'reported' — an agent called updateService; 'stale' — carried over from a previous run, do not trust it), cwd, command, last exit code, the tab running it, `one_copy` (its port is fixed, so it runs on one checkout at a time), and a `note` saying why a service is held or crashed. A row with `shared_from` is another workspace's service used here: it is started and stopped there, never by you. Check this before starting a dev server or database yourself: it is probably already running, or maiTerm can start it for you.",
             "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" } }, "required": [] }
         },
         {
             "name": "getServiceOutput",
             "description": "Recent terminal output of a service — its log. Use it when a request fails, a build breaks, or a service reads as crashed, instead of restarting blind.",
-            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id from listStack" }, "lines": { "type": "integer", "description": "Trailing lines (default 100, max 1000)" } }, "required": ["service"] }
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id from listStack" }, "lines": { "type": "integer", "description": "Trailing lines (default 100, max 1000)" }, "on": { "type": "string", "description": STACK_ON } }, "required": ["service"] }
         },
         {
             "name": "startService",
-            "description": "Start a service in its own tab (maiTerm types the command into a shell it owns and watches the exit code). Returns the resulting status. Refused when the tab's shell is busy with something else — nothing is typed over a running program.",
-            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" } }, "required": ["service"] }
+            "description": "Start a service in its own tab (maiTerm types the command into a shell it owns and watches the exit code). Returns the resulting status. Refused when the tab's shell is busy with something else — nothing is typed over a running program. With `on` it starts a copy on that branch or worker's checkout (maiTerm makes a checkout of a branch that has none, and moves the service's folder onto it); a service whose port is fixed runs one copy at a time, so starting a second is refused — move it with restartService { on } instead.",
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" }, "on": { "type": "string", "description": STACK_ON } }, "required": ["service"] }
         },
         {
             "name": "stopService",
             "description": "Stop a running service: ^C, then a signal if it ignores that. Only the process maiTerm started is ever signalled. Returns the resulting status.",
-            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" } }, "required": ["service"] }
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" }, "on": { "type": "string", "description": STACK_ON } }, "required": ["service"] }
         },
         {
             "name": "restartService",
-            "description": "Stop then start a service in the same tab. Replies once the command is running again, which is not the same as serving — call waitForService before you hit it. Use this after changing config the service only reads at boot.",
-            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" } }, "required": ["service"] }
+            "description": "Stop then start a service in the same tab. Replies once the command is running again, which is not the same as serving — call waitForService before you hit it. Use this after changing config the service only reads at boot. With `on` naming a copy that isn't running, this MOVES a one-copy service there (stops it where it runs, starts it on `on`), or starts another copy of a service that can run several.",
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" }, "on": { "type": "string", "description": STACK_ON } }, "required": ["service"] }
         },
         {
             "name": "startStack",
@@ -863,7 +865,7 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
         {
             "name": "waitForService",
             "description": "Block until a service is READY — it has announced where it is serving — up to `timeout` seconds; returns its status and, if it is not ready, its last 20 output lines so you can see why. Use after startService/restartService before hitting the service. maiTerm reads the address out of the service's own output, so this waits for the real thing rather than for the command merely having started. A service that announces nothing a browser would recognise (a queue worker, a job runner) never reaches `ready` and will use your whole timeout before answering `running` — pass a short `timeout` when you are waiting on one of those.",
-            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" }, "timeout": { "type": "integer", "description": "Seconds (default 30, max 100)" } }, "required": ["service"] }
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" }, "timeout": { "type": "integer", "description": "Seconds (default 30, max 100)" }, "on": { "type": "string", "description": STACK_ON } }, "required": ["service"] }
         },
         {
             "name": "updateService",
@@ -871,6 +873,7 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
                 "service": { "type": "string", "description": "Service name or id" },
+                "on": { "type": "string", "description": "Which copy the port/url/ready/note report is about (\"main\", a branch, or a Hive worker); definition edits apply to the service, every copy. Without it: the one copy running, else the own folder" },
                 "port": { "type": ["integer", "null"] }, "url": { "type": ["string", "null"] },
                 "ready": { "type": "boolean" }, "note": { "type": ["string", "null"] },
                 "name": { "type": "string" }, "command": { "type": "string" }, "cwd": { "type": "string" },

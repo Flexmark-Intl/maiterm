@@ -86,16 +86,23 @@ pub struct Service {
     pub url: Option<String>,
     /// "human" | "agent" | "suggested"
     pub origin: String,
+    /// Running intent for each COPY on another checkout, by target (§14); the own folder's
+    /// copy keeps `was_running`. Cleared on duplicate, never in a share file.
+    pub running_targets: Vec<String>,
+    /// Another workspace's service used here (§14.5): never started, stopped or moved here.
+    pub shared_from: Option<ServiceRef { workspace_id, service_id }>,
     pub created_at: String,
     pub updated_at: String,
 }
 
 // On Tab — the binding lives on the TAB, not on the service
 pub service_id: Option<String>,
+pub service_target: Option<String>,   // which checkout (§14); None = the service's own folder
 ```
 
 **The binding is on the tab and only on the tab.** `Service` has no `tab_id`. "Which tab
-runs `api`" is derived: the tab in this workspace whose `service_id == api.id`. This is what
+runs `api`" is derived: the tab in this workspace whose `service_id == api.id` (and, since
+copies, whose `service_target` names the copy — §14). This is what
 makes the reload/duplicate/restore rules (§5) fall out of existing machinery instead of
 needing a `remapTab` call per lifecycle path — the tasks system stores `tab_id` on the row
 and pays for it on every reload.
@@ -254,9 +261,12 @@ workspace** via connection→tab affinity, exactly as the task tools are; a tab 
 touch another project's stack. All gated on a `stack_enabled` preference (default on) so
 the schemas can be switched off wholesale.
 
+Six tools take an optional `on` (§14.4): `getServiceOutput`, `startService`, `stopService`,
+`restartService`, `waitForService`, `updateService`.
+
 | Tool | What it does |
 |---|---|
-| `listStack` | Every service: `name`, `status`, `since`, `port`, `url`, `cwd`, `command`, `last_exit_code`, `tab_id`, and `endpoint_source: 'observed' \| 'reported' \| 'stale'` (§9) |
+| `listStack` | One row per copy (§14): `name`, `on`, `target`, `branch`, `commit`, `status`, `since`, `port`, `url`, `cwd`, `command`, `last_exit_code`, `tab_id`, `one_copy`, and `endpoint_source: 'observed' \| 'reported' \| 'stale'` (§9); a `shared_from` service is one row naming where it runs |
 | `getServiceOutput { service, lines }` | Recent stripped output of the bound tab. `getTabContext` under a name an agent will reach for |
 | `startService` / `stopService` / `restartService { service }` | The verbs. Reply carries the resulting status; `restartService` waits up to 10s for ready before replying, so an agent's next step sees a live server |
 | `startStack` / `stopStack` | All `auto_start` services / all running services |
@@ -572,3 +582,151 @@ file, socket-based port discovery if anything ever needs it.
 | Socket scanning for ports | Only needed when nothing else knows the port; with agents as writers, nothing else is the rare case. |
 | ~~Service tabs hidden from the tab strip in v1~~ | **Overturned 2026-09-15 (§7).** The reasoning was wrong about the problem: it was never clutter. A service in the strip has a close button, and the first thing Darryl did was click into one to read it and then close the tab, which killed the service. The hide mechanism turned out to be one filter plus one invariant, not a new subsystem. |
 | Human-only `removeService` | An agent may retract a service it created (`origin: 'agent'`), mirroring `dropped` for tasks; it may not remove a human's. |
+
+## 14. Copies: any service, on any branch (2026-10-24, docs/hive.md §6.9)
+
+A service can run on a checkout other than its own folder — another branch, a Hive worker's
+worktree — and a service that takes its port from `{port}` can run on several at once. It is
+the same start line with the folder moved: Rust works out the folder, the command and the env
+for the copy, and the store types them through the unchanged `startLine`. A Hive uses it; it
+is not a Hive feature.
+
+### 14.1 Identity
+
+- **A copy is `(service_id, target)`.** The target is a String (`stack/target.rs`): `""` is
+  the service's own folder, `"checkout:<abs>"` an existing worktree of the same repo,
+  `"branch:<name>"` that branch's checkout (an existing one, else a detached worktree maiTerm
+  keeps under `<app data>/stack-wt.noindex/`, brought to the branch tip before each start and
+  refused while it has tracked changes). An unknown kind still loads and is refused when used.
+- **The copy key** is the service id for the own folder and `id@target` otherwise
+  (`stack/model.ts` `copyKey`, Rust `stack::copy_key`). Every runtime map in the store —
+  status, starts and stops in flight, restart timers, scan tails, the console, the Rust mirror
+  — is keyed by it. Because the own folder's key IS the service id, a service that never runs
+  anywhere else keys, starts, stops, restarts, auto-restarts, records intent, comes back at
+  launch and publishes exactly as before; `stack/model.test.ts` holds that equality for each
+  piece (`intentPatch`, `dueCopies`, `publishRow`, `copyTargetsOf`, `startLine`).
+- **The tab carries the target** (`Tab.service_target`), beside `service_id`: carried on
+  reload, cleared on duplicate and on a move to another workspace, never in a share file. One
+  tab per copy: `set_tab_service_id` clears the same `(service, target)` from any other tab.
+- **Intent is per copy**: `was_running` for the own folder, `running_targets` for the rest.
+  Launch and activation bring each back on its own checkout (`restorePlan`): the copies left
+  running first, then the own folder for `auto_start` — which is the own folder's alone, and
+  only while the copies left running leave it room under the limits below. A copy whose shell
+  survived a window reload is still up: not started, but it takes its room. (Starting
+  `auto_start` first brought a one-copy service moved to a branch back on its own folder and
+  refused the branch.)
+- **A one-copy service's intent names one place** (`startIntent`): a start there clears the
+  rest, and answers a crash left on another copy (its armed restart would only be refused).
+- **Another copy's intent is recorded only once Rust has resolved it and it has a tab.** The
+  own folder's is recorded before the start, as always; a mistyped branch, refused by the
+  resolve, would otherwise come back at every launch.
+- **Transition listeners hear the copy key.** Follow-ups (`when_service_ready` /
+  `when_service_stopped`) match the service id, so they wait on the own folder's copy, as they
+  always did.
+
+### 14.2 Starting a copy
+
+`start(ws, sid, target = '')` first asks `stack_resolve_copy`. A service on its own folder
+with no placeholders comes back exactly as defined, without running git (Rust's shortcut), so
+the line typed is the line typed before copies existed. Otherwise:
+
+- the folder is re-rooted onto the target (Rust, never a JS prefix strip);
+- `{port}`, `{port2}`, `{port:<service>}`, `{branch}`, `{worker}` are filled from strict
+  charsets, refused otherwise, never quoted; `{checkout}` is a path and allowed in env values
+  only (`ServiceModal` and `createService`/`updateService` refuse it in a command too);
+- ports come from Rust's in-memory port book; a copy keeps its last port when it is free, and
+  the store releases them (`stack_release_copy`) when the copy stops or crashes.
+
+The copy's tab is `web@session-store`. A refused resolve leaves the copy `stopped` with the
+reason as its note, like every other refusal here.
+
+**At most 3 copies of a service** run at once (`MAX_COPIES`). A service without `{port}` runs
+**one copy at a time**: starting a second is refused (`copyRefusal`), naming where it runs.
+
+### 14.3 Moving a copy (Run on ▸)
+
+`retarget(ws, sid, from, to)`:
+
+- **One-copy service:** stop the copy that is up, then start on `to` **in the same tab**
+  (rebound to the new target and renamed), so moving back and forth leaves no trail of tabs.
+  A stop that doesn't finish refuses the move.
+- **A service that runs copies:** start `to` first, and stop `from` only once `to` is up, so a
+  failed start leaves the old copy serving. The limit counts `from` as gone.
+- An open console drawer follows the moved tab to its new copy key.
+- Afterwards maiTerm prunes its branch checkouts nothing names any more.
+
+Run on ▸ and `restartService { on }` decide through one function, `moveVerb` (the store's
+`runOn`). A copy counts as **held** when it isn't `stopped` — up, starting, or **crashed** (its
+restart may still be armed and its intent is still set) — so a crashed copy is moved like a
+live one rather than left behind to restart beside the new one.
+
+The sidebar's row menu has **Run on ▸**: the own folder, each worktree of the repo (a Hive
+worker's named with its badge) and **Other branch…**, a picker over up to 50 branches by
+commit date, which also takes a typed name (Rust checks it). From a copy that is held it moves
+that copy; a one-copy service held elsewhere moves from there; otherwise the new copy starts
+beside the others. Only a target where a copy is already up is greyed out, so the own row's
+"Own folder" is how a one-copy service running on a branch comes back — where its Start
+refusal points. A stopped copy on another checkout can be **closed** (its tab goes, with
+its row and its intent); the own folder's row is the service and stays.
+
+The sidebar shows one row per copy (`web · on session-store@3f2a91c :5174`, indented under
+the own folder's), the console drawer one pill per copy, and the rollup counts a copy
+elsewhere only while it is up (it is never "expected", so a stopped one can't make the dot
+partial).
+
+### 14.4 Agents: `on`
+
+`on` is `"main"` (the own folder), a branch name, or a worker of this workspace's Hive by
+badge or name (`stack_target_for`). Without it a tool means the one copy running; the own
+folder when none is; and with several running it is **refused with their names**, never a
+guess (`pickCopy`).
+
+- `restartService { on }` restarts the copy named if it is held; otherwise it **moves** a
+  one-copy service there (the agent's retarget, from a crashed copy too), or starts another
+  copy of one that runs several.
+- `startService { on }` on a one-copy service that is up elsewhere is refused and points at
+  `restartService { on }`.
+- `updateService { on }` picks only which copy's runtime an endpoint report goes to; a copy's
+  address lives in its runtime, never in the definition's `port`/`url` (the own folder's). A
+  definition edit needs no `on`.
+- The priming lists each copy that isn't stopped (`web on session-store (running)`).
+
+The run queue's leases (docs/hive.md §6.8) are not built yet: today nothing stops a human or
+an agent from moving a copy a job depends on.
+
+### 14.5 `shared_from`
+
+A service can be **another workspace's, used here** (the service modal's "Use the running
+service from another workspace", or the Hive sheet's Stack step for infrastructure the human
+already runs). It is a reference: start, stop, restart and Run on are refused ("shared from
+<workspace>; it's started and stopped there"), it never auto-starts, `{port:<name>}` fills
+from the source's port, and its status is read every 5 s from the Rust mirror
+(`get_stack_runtime_row`, which sees every window's stack) rather than kept in this window's
+runtime — it is not this window's to publish. A source that is itself shared is followed no
+further. It is kept on duplicate (it names the other workspace), never in a share file.
+
+### 14.6 The Hive sheet's Stack step
+
+`hive_create` takes `stack: Vec<Service>`, and Rust re-checks every row (`import_stack`):
+a reference must name a service in another workspace that isn't itself shared; a definition
+needs a command and an absolute folder, `{checkout}` only in env, valid env names. A
+definition with a fixed port that repeats a service another workspace is running (same
+command, same folder) on a known port is **refused and named**; any other fixed-port one is
+imported as one-copy and flagged in the sheet. Imported rows get fresh ids, no intent, are
+never agent-edited, and don't auto-start: a Hive's services start through its run queue.
+The created workspace comes back with the imported rows and the frontend mirror takes them
+(`adoptInstalled`): the stack store reads definitions from the mirror and writes the whole list
+back, so a mirror without them would hide them and erase them at the next stack write.
+
+In the sheet, a service another workspace runs inside a Hive folder is offered as a reference
+**ticked only when it is infrastructure** (`sharesByDefault`): one that repeats a suggestion
+from the repo's own scripts (package.json, a Procfile, a recipe file — anything but compose)
+is the repo's code, has to run per branch, and is offered unticked, pointing at adding
+`{port}` to its suggestion. A ticked reference **stands in for** the suggestion it repeats
+(same command and folder, or the same name — `sameService`): that suggestion is greyed out
+rather than imported beside it, so the sheet never blocks its own default with a name clash.
+The name-clash error is left for clashes the human made by editing.
+
+**Not yet:** a Hive's workspace opens no tabs but its agents' (`hive::refuse_tab_create`), so a
+service cannot start there until the run queue mints its hidden tabs (Hive step 5b-4); a start
+says so in the row's note.

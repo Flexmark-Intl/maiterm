@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  charCount, dispatchHiveOpenColumn, engineSkips, folderName, HIVE_PROMPT_KINDS, hiveOwnsPrompt, isEligible, MAX_INSTRUCTIONS,
+  adoptInstalled, charCount, dispatchHiveOpenColumn, engineSkips, folderName, HIVE_PROMPT_KINDS, hiveOwnsPrompt, isEligible, MAX_INSTRUCTIONS,
   openTargetFor, slugify, takePendingHiveOpen, validateSpec,
 } from './model';
 
@@ -154,5 +154,26 @@ describe('hiveOwnsPrompt', () => {
   it('owns nothing before hiveAnswerWorker (step 7): every prompt reaches the human', () => {
     const tabs = [{ id: 'c', hive_role: 'coordinator' }, { id: 'k', hive_role: 'worker' }, { id: 't', hive_role: null }, null, undefined];
     for (const tab of tabs) for (const kind of HIVE_PROMPT_KINDS) expect(hiveOwnsPrompt(tab, kind)).toBe(false);
+  });
+});
+
+describe('adoptInstalled', () => {
+  it("mirrors the Create sheet's imported stack, so the next whole-list stack write keeps it", () => {
+    const shell = { id: 'shell' };
+    const other = { id: 'other' };
+    const mirror = { name: 'Main', hive: null as unknown, stack: [] as { id: string }[], panes: [{ id: 'p', tabs: [shell, other], active_tab_id: 'shell' }] };
+    const created = {
+      name: 'Store', hive: { id: 'h' },
+      stack: [{ id: 's1' }, { id: 's2' }],
+      panes: [{ id: 'p', tabs: [other, { id: 'coord' }], active_tab_id: 'other' }],
+    };
+    adoptInstalled(mirror, created, 'coord', 'shell');
+    expect(mirror.stack.map((s) => s.id)).toEqual(['s1', 's2']);
+    expect(mirror.name).toBe('Store');
+    expect(mirror.hive).toEqual({ id: 'h' });
+    // The tabs still there are the mirror's own objects, left alone.
+    expect(mirror.panes[0].tabs[0]).toBe(other);
+    expect(mirror.panes[0].tabs.map((t) => t.id)).toEqual(['other', 'coord']);
+    expect(mirror.panes[0].active_tab_id).toBe('other');
   });
 });

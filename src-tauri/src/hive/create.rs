@@ -4,7 +4,7 @@
 //! The sheet's checks are advice; Rust re-checks everything on Create, and the workspace's
 //! eligibility again under the write lock that installs the Hive.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,8 +17,9 @@ use super::launch;
 use super::paths::{hive_root, HivePaths};
 use super::record::{Hive, HiveFolder, HiveModels, KIND_GIT, KIND_PLAIN, LANDING_BASE, LANDING_INTEGRATION, STATUS_ACTIVE};
 use super::ROLE_COORDINATOR;
+use crate::state::app_state::StackRuntimeRow;
 use crate::state::workspace::TabType;
-use crate::state::{save_state, AppData, AppState, Tab, Workspace};
+use crate::state::{save_state, AppData, AppState, Service, Tab, Workspace};
 
 /// Projects' instructions limit. Over it is refused, never cut: a truncated rule reads as a
 /// different rule (§3).
@@ -352,6 +353,9 @@ pub struct HiveSpec {
     pub tools: Vec<String>,
     pub budget_cents: u64,
     pub push_after_land: bool,
+    /// The Stack step (§3 step 3): definitions and `shared_from` references, checked again by
+    /// `import_stack`.
+    pub stack: Vec<Service>,
 }
 
 impl Default for HiveSpec {
@@ -368,8 +372,105 @@ impl Default for HiveSpec {
             tools: Vec::new(),
             budget_cents: DEFAULT_BUDGET_CENTS,
             push_after_land: false,
+            stack: Vec::new(),
         }
     }
+}
+
+/// The running service in another workspace whose command and folder this one repeats, and
+/// the port it holds: a fixed-port copy here would collide with it.
+fn port_holder<'a>(data: &'a AppData, runtime: &HashMap<String, StackRuntimeRow>, workspace_id: &str, s: &Service) -> Option<(&'a Workspace, &'a Service, u16)> {
+    data.windows.iter().flat_map(|w| w.workspaces.iter()).filter(|w| w.id != workspace_id).find_map(|w| {
+        w.stack
+            .iter()
+            .filter(|o| o.shared_from.is_none() && o.command.trim() == s.command.trim() && Service::expand_cwd(&o.cwd) == s.cwd)
+            .filter(|o| runtime.get(&o.id).is_some_and(|r| matches!(r.status.as_str(), "starting" | "running" | "ready")))
+            .find_map(|o| o.port.map(|p| (w, o, p)))
+    })
+}
+
+/// The Stack step's rows (§3 step 3), checked again here: the sheet's choices are advice.
+///
+/// - A `shared_from` row must name a service in ANOTHER workspace that is not itself shared,
+///   and it never starts here (no auto-start, no intent).
+/// - A definition needs a command and an absolute folder, `{checkout}` only in env, and env
+///   names a shell takes. One with a fixed port (no `{port}`) that repeats a service another
+///   workspace is running on a known port is refused, naming it: the Hive would fight it for
+///   the port. Any other fixed-port one is imported and runs one copy at a time.
+/// - Every row is new: a fresh id, no running intent, never agent-edited (the human chose it in
+///   the sheet). A name this workspace already has is left to the existing service; a name
+///   twice in the step is refused.
+pub fn import_stack(
+    existing: &[Service],
+    incoming: &[Service],
+    data: &AppData,
+    runtime: &HashMap<String, StackRuntimeRow>,
+    workspace_id: &str,
+) -> Result<Vec<Service>, String> {
+    let have: HashSet<String> = existing.iter().map(|s| Service::normalize_name(&s.name)).collect();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    for row in incoming {
+        let name = row.name.trim().to_string();
+        if name.is_empty() {
+            return Err("Every stack service needs a name.".to_string());
+        }
+        let key = Service::normalize_name(&name);
+        if !seen.insert(key.clone()) {
+            return Err(format!("Two stack services are called {name}."));
+        }
+        if have.contains(&key) {
+            continue;
+        }
+        let mut s = row.clone();
+        s.id = uuid::Uuid::new_v4().to_string();
+        s.name = name.clone();
+        s.normalized_name = key;
+        s.was_running = false;
+        s.running_targets.clear();
+        s.agent_edited = false;
+        if s.origin != "human" {
+            s.origin = "suggested".to_string();
+        }
+        if let Some(r) = &s.shared_from {
+            if r.workspace_id == workspace_id {
+                return Err(format!("{name}: a service can only be shared from another workspace."));
+            }
+            match crate::stack::shared_source(data, r) {
+                None => return Err(format!("{name}: the service it would be shared from is gone.")),
+                Some((ws, src)) if src.shared_from.is_some() => {
+                    return Err(format!("{name}: {} in {} is itself shared from elsewhere; share the original.", src.name, ws.name))
+                }
+                Some(_) => {}
+            }
+            s.auto_start = false;
+        } else {
+            if s.command.trim().is_empty() {
+                return Err(format!("{name} needs a command."));
+            }
+            s.cwd = Service::expand_cwd(&s.cwd);
+            if !Path::new(&s.cwd).is_absolute() {
+                return Err(format!("{name} needs a full path for its folder."));
+            }
+            let needs = crate::stack::placeholders::Needs::of(&s.command, &s.env);
+            if needs.checkout_in_command {
+                return Err(format!("{name}: {{checkout}} can only be used in env values, not in the command."));
+            }
+            if let Some((k, _)) = s.env.iter().find(|(k, _)| !crate::stack::placeholders::valid_env_key(k)) {
+                return Err(format!("{name}: env name {k:?} isn't one a shell takes."));
+            }
+            if needs.one_copy() {
+                if let Some((ws, other, port)) = port_holder(data, runtime, workspace_id, &s) {
+                    return Err(format!(
+                        "{name} has a fixed port, and {} in {} runs the same command on :{port}. Add {{port}} to its command so the Hive runs its own copies, or share the running one.",
+                        other.name, ws.name
+                    ));
+                }
+            }
+        }
+        out.push(s);
+    }
+    Ok(out)
 }
 
 /// The `hive/<slug>` branch name part: lowercase ASCII letters and digits, any other run one
@@ -529,6 +630,7 @@ pub fn install_hive(
     label: &str,
     workspace_id: &str,
     hive: Hive,
+    stack: Vec<Service>,
     name: &str,
     expected: Option<&Replaceable>,
 ) -> Result<Installed, String> {
@@ -557,6 +659,12 @@ pub fn install_hive(
     let coordinator_tab_id = tab.id.clone();
     ws.panes[0].tabs.push(tab);
     ws.hive = Some(hive);
+    // `import_stack` checked them against this workspace's names; one added since is kept.
+    for s in stack {
+        if !ws.stack.iter().any(|e| e.normalized_name == s.normalized_name || Service::normalize_name(&e.name) == s.normalized_name) {
+            ws.stack.push(s);
+        }
+    }
     let name = name.trim();
     if !name.is_empty() {
         ws.name = name.to_string();
@@ -594,10 +702,12 @@ pub async fn hive_create(
     let label = window.label().to_string();
     let ceiling = machine_ceiling();
     validate_spec(&spec, ceiling)?;
-    let (replaceable, prefs) = {
+    let (replaceable, prefs, stack) = {
         let data = state.app_data.read();
         let ws = data.window(&label).and_then(|w| w.workspaces.iter().find(|w| w.id == workspace_id)).ok_or("Workspace not found")?;
-        (structural_eligibility(ws)?, data.preferences.clone())
+        let replaceable = structural_eligibility(ws)?;
+        let stack = import_stack(&ws.stack, &spec.stack, &data, &state.stack_runtime.read(), &workspace_id)?;
+        (replaceable, data.preferences.clone(), stack)
     };
 
     let app = state.inner().clone();
@@ -638,7 +748,7 @@ pub async fn hive_create(
     let hive_id = hive.id.clone();
     let installed = recheck.and_then(|()| {
         let mut data = state.app_data.write();
-        install_hive(&mut data, &label, &workspace_id, hive.clone(), &spec.name, replaceable.as_ref()).map(|r| (r, data.clone()))
+        install_hive(&mut data, &label, &workspace_id, hive.clone(), stack, &spec.name, replaceable.as_ref()).map(|r| (r, data.clone()))
     });
     let saved = installed.and_then(|(r, snapshot)| match save_state(&snapshot) {
         Ok(()) => Ok(r),
@@ -761,7 +871,7 @@ mod tests {
     fn install_never_makes_the_coordinator_active() {
         // An empty workspace: its pane had nothing active and still has nothing active.
         let mut d = app_with(empty_ws());
-        let got = install_hive(&mut d, "main", "ws", sample(), " Ship it ", None).unwrap();
+        let got = install_hive(&mut d, "main", "ws", sample(), Vec::new(), " Ship it ", None).unwrap();
         let (ws, coord) = (got.workspace, got.coordinator_tab_id);
         assert_eq!(ws.panes[0].active_tab_id, None);
         let tab = ws.panes[0].tabs.iter().find(|t| t.id == coord).unwrap();
@@ -780,7 +890,7 @@ mod tests {
         let start = ws_with_shell();
         let shell_ref = the_shell(&start);
         let mut d = app_with(start);
-        let got = install_hive(&mut d, "main", "ws", sample(), "", Some(&shell_ref)).unwrap();
+        let got = install_hive(&mut d, "main", "ws", sample(), Vec::new(), "", Some(&shell_ref)).unwrap();
         assert_eq!(got.replaced, Some(shell_ref));
         assert_eq!(got.workspace.panes[0].active_tab_id, None);
         assert_eq!(got.workspace.panes[0].tabs.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec![got.coordinator_tab_id.as_str()]);
@@ -794,10 +904,10 @@ mod tests {
         ws.panes[0].tabs.push(shell("opened-meanwhile"));
         let mut d = app_with(ws);
         let before = serde_json::to_string(&d).unwrap();
-        assert!(install_hive(&mut d, "main", "ws", sample(), "X", None).is_err());
+        assert!(install_hive(&mut d, "main", "ws", sample(), Vec::new(), "X", None).is_err());
         assert_eq!(serde_json::to_string(&d).unwrap(), before);
-        assert!(install_hive(&mut d, "main", "gone", sample(), "X", None).is_err());
-        assert!(install_hive(&mut d, "other-window", "ws", sample(), "X", None).is_err());
+        assert!(install_hive(&mut d, "main", "gone", sample(), Vec::new(), "X", None).is_err());
+        assert!(install_hive(&mut d, "other-window", "ws", sample(), Vec::new(), "X", None).is_err());
     }
 
     #[test]
@@ -805,15 +915,15 @@ mod tests {
         // Empty when checked; a fresh shell opened during the layout (Cmd+T behind the sheet).
         let mut d = app_with(ws_with_shell());
         let before = serde_json::to_string(&d).unwrap();
-        assert_eq!(install_hive(&mut d, "main", "ws", sample(), "X", None).unwrap_err(), WORKSPACE_CHANGED);
+        assert_eq!(install_hive(&mut d, "main", "ws", sample(), Vec::new(), "X", None).unwrap_err(), WORKSPACE_CHANGED);
         // The checked shell closed and another opened in its place.
         let mut other = the_shell(&ws_with_shell());
         other.tab_id = "sh-before".into();
-        assert_eq!(install_hive(&mut d, "main", "ws", sample(), "X", Some(&other)).unwrap_err(), WORKSPACE_CHANGED);
+        assert_eq!(install_hive(&mut d, "main", "ws", sample(), Vec::new(), "X", Some(&other)).unwrap_err(), WORKSPACE_CHANGED);
         assert_eq!(serde_json::to_string(&d).unwrap(), before, "nothing installed");
         // The checked shell closed, nothing opened.
         let mut d = app_with(empty_ws());
-        assert!(install_hive(&mut d, "main", "ws", sample(), "X", Some(&other)).is_err());
+        assert!(install_hive(&mut d, "main", "ws", sample(), Vec::new(), "X", Some(&other)).is_err());
     }
 
     #[test]
@@ -822,7 +932,7 @@ mod tests {
         let shell_ref = the_shell(&start);
         let mut d = app_with(start);
         let before = serde_json::to_string(&d).unwrap();
-        let got = install_hive(&mut d, "main", "ws", sample(), "Ship it", Some(&shell_ref)).unwrap();
+        let got = install_hive(&mut d, "main", "ws", sample(), Vec::new(), "Ship it", Some(&shell_ref)).unwrap();
         undo_install(&mut d, "main", "ws", "other-hive", got.before.clone());
         assert_ne!(serde_json::to_string(&d).unwrap(), before, "only its own Hive is taken back");
         undo_install(&mut d, "main", "ws", "h1", got.before);
@@ -1000,5 +1110,90 @@ mod tests {
         assert_eq!(tools[0].host.as_deref(), Some("mcp.fal.ai"));
         assert_eq!(tools[1].host, None);
         assert!(mcp_tools(&serde_json::json!({})).is_empty());
+    }
+
+    fn svc(name: &str, command: &str, cwd: &str) -> Service {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("id-{name}"), "name": name, "command": command, "cwd": cwd,
+            "origin": "suggested", "created_at": "", "updated_at": ""
+        }))
+        .unwrap()
+    }
+
+    /// A human's workspace "Main" running `web` (`npm run dev` in /p, :5173) and `postgres`.
+    fn running_elsewhere() -> (AppData, HashMap<String, StackRuntimeRow>, Service, Service) {
+        let mut main = Workspace::new("Main".into());
+        let mut web = svc("web", "npm run dev", "/p");
+        web.port = Some(5173);
+        let pg = svc("postgres", "postgres -D data", "/p");
+        main.stack = vec![web.clone(), pg.clone()];
+        let mut data = app_with(empty_ws());
+        data.windows[0].workspaces.push(main);
+        let mut runtime = HashMap::new();
+        runtime.insert(web.id.clone(), serde_json::from_value(serde_json::json!({"service_id": web.id, "status": "ready"})).unwrap());
+        (data, runtime, web, pg)
+    }
+
+    #[test]
+    fn the_stack_step_imports_definitions_fresh_and_references_infrastructure() {
+        let (data, runtime, _web, pg) = running_elsewhere();
+        let main_id = data.windows[0].workspaces[1].id.clone();
+        let mut db = svc("db", "", "/p");
+        db.shared_from = Some(crate::state::workspace::ServiceRef { workspace_id: main_id, service_id: pg.id.clone() });
+        db.auto_start = true;
+        let mut dev = svc(" Dev ", "npm run dev -- --port {port}", "/p");
+        dev.was_running = true;
+        dev.running_targets = vec!["branch:x".into()];
+        dev.agent_edited = true;
+        dev.origin = "agent".into();
+        let api = svc("api", "cargo run", "/p/api");
+        let got = import_stack(&[], &[db, dev, api], &data, &runtime, "ws").unwrap();
+        assert_eq!(got.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["db", "Dev", "api"]);
+        assert!(got.iter().all(|s| !s.id.starts_with("id-")), "every row gets a fresh id");
+        assert!(!got[0].auto_start && got[0].shared_from.is_some(), "a reference never starts here");
+        let d = &got[1];
+        assert!(!d.was_running && d.running_targets.is_empty() && !d.agent_edited && d.origin == "suggested", "{d:?}");
+        assert_eq!(d.normalized_name, "dev");
+    }
+
+    #[test]
+    fn a_fixed_port_that_another_workspace_holds_is_refused_and_named() {
+        let (data, mut runtime, web, _) = running_elsewhere();
+        let copy = svc("web", "npm run dev", "/p");
+        let err = import_stack(&[], std::slice::from_ref(&copy), &data, &runtime, "ws").unwrap_err();
+        assert!(err.contains("web in Main") && err.contains(":5173") && err.contains("{port}"), "{err}");
+        // With {port} it runs its own copies; elsewhere stopped, the fixed port is free.
+        assert!(import_stack(&[], &[svc("web", "npm run dev -- --port {port}", "/p")], &data, &runtime, "ws").is_ok());
+        runtime.get_mut(&web.id).unwrap().status = "stopped".into();
+        assert_eq!(import_stack(&[], &[copy], &data, &runtime, "ws").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn bad_stack_rows_are_refused_and_existing_names_kept() {
+        let (data, runtime, _, pg) = running_elsewhere();
+        let refused = |s: Service| import_stack(&[], &[s], &data, &runtime, "ws").unwrap_err();
+        assert!(refused(svc("x", "ls {checkout}", "/p")).contains("{checkout}"));
+        assert!(refused(svc("x", "", "/p")).contains("needs a command"));
+        assert!(refused(svc("x", "run", "relative")).contains("full path"));
+        let mut env = svc("x", "run", "/p");
+        env.env = vec![("A-B".into(), "1".into())];
+        assert!(refused(env).contains("env name"));
+        let mut own = svc("x", "", "/p");
+        own.shared_from = Some(crate::state::workspace::ServiceRef { workspace_id: "ws".into(), service_id: pg.id.clone() });
+        assert!(refused(own).contains("another workspace"));
+        let mut gone = svc("x", "", "/p");
+        gone.shared_from = Some(crate::state::workspace::ServiceRef { workspace_id: "nope".into(), service_id: "nope".into() });
+        assert!(refused(gone).contains("gone"));
+        assert!(import_stack(&[], &[svc("a", "x", "/p"), svc("A.", "y", "/p")], &data, &runtime, "ws").unwrap_err().contains("Two"));
+        let kept = import_stack(&[svc("api", "old", "/p")], &[svc("API", "new", "/p"), svc("web2", "x", "/p")], &data, &runtime, "ws").unwrap();
+        assert_eq!(kept.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["web2"], "the workspace's own api wins");
+    }
+
+    #[test]
+    fn install_puts_the_imported_stack_in_the_same_write() {
+        let mut d = app_with(empty_ws());
+        let got = install_hive(&mut d, "main", "ws", sample(), vec![svc("web", "x", "/p")], "Ship", None).unwrap();
+        assert_eq!(got.workspace.stack.len(), 1);
+        assert!(got.before.stack.is_empty(), "undo restores the stack too");
     }
 }

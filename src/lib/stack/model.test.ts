@@ -1,5 +1,246 @@
 import { describe, expect, it } from 'vitest';
-import { detectEndpoint, exitIsCrash, isHumanDefined, launchableUrl, refusedAgentEdits, restartAllowed, restartDelay, rollupStatus, shq, startLine, RESTART_WINDOW_MS } from './model';
+import {
+  checkoutInCommand, copyKey, copyRefusal, copyTabName, copyTargetsOf, copyTitle, detectEndpoint, dueCopies, exitIsCrash, importVerdict,
+  intentPatch, isHumanDefined, launchableUrl, moveVerb, parseCopyKey, pickCopy, placeholdersIn, publishRow, refusedAgentEdits, restartAllowed, restartDelay,
+  restorePlan, rollupStatus, runsManyCopies, sameService, sharesByDefault, shq, startIntent, startLine, targetLabel, RESTART_WINDOW_MS,
+} from './model';
+
+describe('copies (docs/hive.md §6.9)', () => {
+  const sid = '2b1c6f1e-0000-4000-8000-000000000000';
+
+  it('keys the own folder by the bare service id, as before copies existed', () => {
+    expect(copyKey(sid)).toBe(sid);
+    expect(copyKey(sid, '')).toBe(sid);
+    expect(parseCopyKey(sid)).toEqual({ serviceId: sid, target: '' });
+  });
+
+  it('round-trips a copy key, including a target with @ in a path', () => {
+    for (const target of ['branch:session-store', 'checkout:/Users/d/My Proj@2/web', 'branch:a/b']) {
+      expect(parseCopyKey(copyKey(sid, target))).toEqual({ serviceId: sid, target });
+    }
+  });
+
+  it('labels a copy before Rust has, and titles its row and tab', () => {
+    expect(targetLabel('')).toBe('main');
+    expect(targetLabel('branch:feature/x')).toBe('feature/x');
+    expect(targetLabel('checkout:/hive/w/alpha/')).toBe('alpha');
+    expect(copyTitle('web', '')).toBe('web');
+    expect(copyTitle('web', 'branch:session-store', { label: 'session-store', commit: '3f2a91c' })).toBe('web · on session-store@3f2a91c');
+    expect(copyTitle('web', 'branch:session-store')).toBe('web · on session-store');
+    expect(copyTabName('web', '')).toBe('web');
+    expect(copyTabName('web', 'branch:session-store')).toBe('web@session-store');
+    expect(copyTabName('web', 'checkout:/x/alpha', 'alpha')).toBe('web@alpha');
+  });
+
+  it('reads placeholders as Rust does, leaving every other brace alone', () => {
+    expect(placeholdersIn('vite --port {port} --hmr {port2} {port:db}')).toEqual(['port', 'port2', 'port:db']);
+    expect(placeholdersIn('{{port}}')).toEqual(['port']);
+    for (const t of ['cp a.{js,map} out', 'echo ${PORT}', '{"port": 1}', '{Port}', '{ port }', '{port:}', '{branch']) {
+      expect(placeholdersIn(t)).toEqual([]);
+    }
+    expect(runsManyCopies({ command: 'npm run dev', env: [['PORT', '{port}']] })).toBe(true);
+    expect(runsManyCopies({ command: 'npm run dev -- --port 5173', env: [] })).toBe(false);
+    expect(runsManyCopies({ command: 'x {port2}', env: [] })).toBe(false);
+    expect(checkoutInCommand('ls {checkout}')).toBe(true);
+    expect(checkoutInCommand('ls')).toBe(false);
+  });
+
+  it('refuses a second copy of a fixed-port service and a fourth of any', () => {
+    const fixed = { name: 'web', command: 'npm run dev', env: [] as [string, string][] };
+    const many = { name: 'web', command: 'vite --port {port}', env: [] as [string, string][] };
+    const main = { target: '', label: 'main' };
+    const a = { target: 'branch:a', label: 'a' };
+    const b = { target: 'branch:b', label: 'b' };
+    expect(copyRefusal(fixed, [], 'branch:a')).toBeNull();
+    expect(copyRefusal(fixed, [main], '')).toBeNull();
+    expect(copyRefusal(fixed, [main], 'branch:a')).toContain('one copy at a time');
+    expect(copyRefusal(many, [main, a], 'branch:b')).toBeNull();
+    expect(copyRefusal(many, [main, a, b], 'branch:c')).toContain('3 copies');
+    expect(copyRefusal(many, [main, a, b], 'branch:a')).toBeNull();
+  });
+
+  it('picks the named copy, the only running one, else the own folder; several is refused', () => {
+    const live = [{ target: '', label: 'main' }, { target: 'branch:a', label: 'a' }];
+    expect(pickCopy([], null)).toEqual({ target: '' });
+    expect(pickCopy([live[1]], null)).toEqual({ target: 'branch:a' });
+    expect(pickCopy(live, null)).toEqual({ ambiguous: ['main', 'a'] });
+    expect(pickCopy(live, 'branch:b')).toEqual({ target: 'branch:b' });
+    expect(pickCopy(live, '')).toEqual({ target: '' });
+  });
+
+  it('gives a service that never ran elsewhere exactly one copy, its own folder', () => {
+    const tabs = [{ service_id: sid }, { service_id: 'other' }, { service_id: null }];
+    expect(copyTargetsOf(sid, [sid, 'other'], tabs, undefined)).toEqual(['']);
+    expect(copyTargetsOf(sid, [], [], [])).toEqual(['']);
+    // Rows, tabs and intent each add a copy, once, in that order.
+    expect(copyTargetsOf(
+      sid,
+      [copyKey(sid, 'branch:b'), copyKey('other', 'branch:z')],
+      [{ service_id: sid, service_target: 'checkout:/w/a' }, { service_id: sid, service_target: 'branch:b' }],
+      ['branch:c', 'branch:b'],
+    )).toEqual(['', 'branch:b', 'checkout:/w/a', 'branch:c']);
+  });
+
+  it('records intent on was_running for the own folder, exactly as before', () => {
+    expect(intentPatch({ was_running: false }, '', true)).toEqual({ was_running: true });
+    expect(intentPatch({}, '', true)).toEqual({ was_running: true });
+    expect(intentPatch({ was_running: true }, '', true)).toBeNull();
+    expect(intentPatch({}, '', false)).toBeNull();
+    expect(intentPatch({ was_running: true, running_targets: ['branch:a'] }, '', false)).toEqual({ was_running: false });
+  });
+
+  it('records a copy elsewhere in running_targets and leaves was_running alone', () => {
+    expect(intentPatch({ was_running: true }, 'branch:a', true)).toEqual({ running_targets: ['branch:a'] });
+    expect(intentPatch({ running_targets: ['branch:a'] }, 'branch:a', true)).toBeNull();
+    expect(intentPatch({ running_targets: ['branch:a', 'branch:b'] }, 'branch:a', false)).toEqual({ running_targets: ['branch:b'] });
+    expect(intentPatch({}, 'branch:a', false)).toBeNull();
+  });
+
+  it('brings back what it always did, and each copy on its own checkout', () => {
+    // Legacy: activation starts auto_start or left-running; launch starts left-running only.
+    expect(dueCopies({}, 'activation')).toEqual({ own: true, targets: [] });
+    expect(dueCopies({ auto_start: false }, 'activation')).toEqual({ own: false, targets: [] });
+    expect(dueCopies({ auto_start: false, was_running: true }, 'activation')).toEqual({ own: true, targets: [] });
+    expect(dueCopies({ auto_start: true }, 'launch')).toEqual({ own: false, targets: [] });
+    expect(dueCopies({ was_running: true }, 'launch')).toEqual({ own: true, targets: [] });
+    // Copies: `auto_start` is the own folder's alone; intent brings each back.
+    expect(dueCopies({ auto_start: false, running_targets: ['branch:a', ''] }, 'activation')).toEqual({ own: false, targets: ['branch:a'] });
+    expect(dueCopies({ running_targets: ['branch:a'] }, 'launch')).toEqual({ own: false, targets: ['branch:a'] });
+    // Shared: never started here.
+    expect(dueCopies({ was_running: true, running_targets: ['branch:a'], shared_from: { workspace_id: 'w', service_id: 's' } }, 'launch'))
+      .toEqual({ own: false, targets: [] });
+  });
+
+  it('restores exactly what dueCopies always did for a service that only ran on its own folder', () => {
+    const none = () => false;
+    const oneCopy = { command: 'npm run dev' };
+    expect(restorePlan(oneCopy, 'activation', none)).toEqual(['']);
+    expect(restorePlan({ ...oneCopy, auto_start: false }, 'activation', none)).toEqual([]);
+    expect(restorePlan({ ...oneCopy, auto_start: false, was_running: true }, 'activation', none)).toEqual(['']);
+    expect(restorePlan({ ...oneCopy, auto_start: true }, 'launch', none)).toEqual([]);
+    expect(restorePlan({ ...oneCopy, was_running: true }, 'launch', none)).toEqual(['']);
+    // A shell that survived a window reload is still running it: not started again.
+    expect(restorePlan({ ...oneCopy, was_running: true }, 'activation', (t) => t === '')).toEqual([]);
+    expect(restorePlan({ ...oneCopy, was_running: true, shared_from: { workspace_id: 'w', service_id: 's' } }, 'launch', none)).toEqual([]);
+  });
+
+  it('brings a moved one-copy service back where it was moved, not on its own folder', () => {
+    const none = () => false;
+    const moved = { command: 'npm run dev', auto_start: true, was_running: false, running_targets: ['branch:session-store'] };
+    expect(restorePlan(moved, 'activation', none)).toEqual(['branch:session-store']);
+    expect(restorePlan(moved, 'launch', none)).toEqual(['branch:session-store']);
+    // After a window reload its branch copy is still up: nothing starts, least of all a second
+    // fixed-port instance on the own folder.
+    expect(restorePlan(moved, 'activation', (t) => t === 'branch:session-store')).toEqual([]);
+    // Bad intent naming two places brings back one, never a refused second.
+    expect(restorePlan({ ...moved, was_running: true }, 'launch', none)).toHaveLength(1);
+  });
+
+  it('starts the copies left running before the auto_start own folder, within the limit', () => {
+    const none = () => false;
+    const copies = { command: 'vite --port {port}', auto_start: true, running_targets: ['branch:a', 'branch:b', 'branch:c'] };
+    expect(restorePlan(copies, 'activation', none)).toEqual(['branch:a', 'branch:b', 'branch:c']);
+    expect(restorePlan({ ...copies, running_targets: ['branch:a'] }, 'activation', none)).toEqual(['branch:a', '']);
+    expect(restorePlan({ ...copies, was_running: true, running_targets: ['branch:a'] }, 'activation', none)).toEqual(['', 'branch:a']);
+    expect(restorePlan({ ...copies, running_targets: ['branch:a', 'branch:b'] }, 'activation', (t) => t === 'branch:a')).toEqual(['branch:b', '']);
+  });
+
+  it('records a start of the own folder exactly as intentPatch did', () => {
+    expect(startIntent({ command: 'npm run dev' }, '')).toEqual({ was_running: true });
+    expect(startIntent({ command: 'npm run dev', was_running: true }, '')).toBeNull();
+    expect(startIntent({ command: 'vite --port {port}' }, '')).toEqual({ was_running: true });
+    expect(startIntent({ command: 'vite --port {port}', was_running: true, running_targets: ['branch:a'] }, 'branch:b'))
+      .toEqual({ running_targets: ['branch:a', 'branch:b'] });
+  });
+
+  it('never leaves a one-copy service with intent in two places', () => {
+    const svc = { command: 'npm run dev' };
+    expect(startIntent({ ...svc, was_running: true }, 'branch:x')).toEqual({ was_running: false, running_targets: ['branch:x'] });
+    expect(startIntent({ ...svc, running_targets: ['branch:x'] }, '')).toEqual({ was_running: true, running_targets: [] });
+    expect(startIntent({ ...svc, running_targets: ['branch:x', 'branch:y'] }, 'branch:y')).toEqual({ running_targets: ['branch:y'] });
+    expect(startIntent({ ...svc, running_targets: ['branch:y'] }, 'branch:y')).toBeNull();
+  });
+
+  it('moves a crashed copy like a live one', () => {
+    const one = { command: 'npm run dev' };
+    const many = { command: 'vite --port {port}' };
+    const crashedOwn = [{ target: '', live: false, status: 'crashed' as const }];
+    // Run on from the crashed own row, and restartService { on } with no row.
+    expect(moveVerb(one, crashedOwn, 'branch:x', '')).toEqual({ verb: 'retarget', from: '' });
+    expect(moveVerb(one, crashedOwn, 'branch:x', null)).toEqual({ verb: 'retarget', from: '' });
+    expect(moveVerb(many, crashedOwn, 'branch:x', '')).toEqual({ verb: 'retarget', from: '' });
+    // A copy on another row's menu adds beside a crashed one only for a service that runs copies.
+    expect(moveVerb(many, crashedOwn, 'branch:x', 'branch:y')).toEqual({ verb: 'start' });
+    expect(moveVerb(one, crashedOwn, 'branch:x', 'branch:y')).toEqual({ verb: 'retarget', from: '' });
+  });
+
+  it('decides Run on / restartService { on } as before for live and stopped copies', () => {
+    const one = { command: 'npm run dev' };
+    const many = { command: 'vite --port {port}' };
+    const ownUp = [{ target: '', live: true, status: 'ready' as const }];
+    expect(moveVerb(one, ownUp, '', null)).toEqual({ verb: 'restart' });
+    expect(moveVerb(one, ownUp, 'branch:x', null)).toEqual({ verb: 'retarget', from: '' });
+    expect(moveVerb(many, ownUp, 'branch:x', null)).toEqual({ verb: 'start' });
+    expect(moveVerb(one, [{ target: '', live: false, status: 'stopped' }], 'branch:x', null)).toEqual({ verb: 'start' });
+    // The own row's "Own folder" while a one-copy service runs on a branch brings it back.
+    const onBranch = [{ target: '', live: false, status: 'stopped' as const }, { target: 'branch:x', live: true, status: 'running' as const }];
+    expect(moveVerb(one, onBranch, '', '')).toEqual({ verb: 'retarget', from: 'branch:x' });
+  });
+
+  it('publishes the own folder row exactly as before, and a copy with where it runs', () => {
+    const r = { status: 'ready' as const, note: null, since: 5, copy: { cwd: '/wt/web', label: 'session-store' } };
+    expect(publishRow(sid, r)).toEqual({ service_id: sid, status: 'ready', note: null, since_ms: 5 });
+    expect(publishRow(sid, { ...r, copy: null })).toEqual({ service_id: sid, status: 'ready', note: null, since_ms: 5 });
+    expect(publishRow(copyKey(sid, 'branch:session-store'), r))
+      .toEqual({ service_id: sid, status: 'ready', note: null, since_ms: 5, target: 'branch:session-store', cwd: '/wt/web', label: 'session-store' });
+  });
+
+  it('weighs a suggested import against what other workspaces run', () => {
+    const running = [{ name: 'web', workspace: 'Main', command: 'npm run dev', cwd: '/p', port: 5173 }];
+    expect(importVerdict({ command: 'npm run dev', cwd: '/p' }, running)).toMatchObject({ kind: 'refused' });
+    expect(importVerdict({ command: 'npm run dev', cwd: '/p' }, running).detail).toContain('web in Main runs this on :5173');
+    expect(importVerdict({ command: 'npm run dev -- --port {port}', cwd: '/p' }, running).kind).toBe('copies');
+    expect(importVerdict({ command: 'npm run dev', cwd: '/other' }, running).kind).toBe('fixed');
+    expect(importVerdict({ command: 'npm run dev', cwd: '/p' }, [{ ...running[0], port: null }]).kind).toBe('fixed');
+  });
+
+  it('shares only infrastructure by default, and lets a shared one stand in for its suggestion', () => {
+    const offers = [
+      { name: 'dev', command: 'npm run dev', cwd: '/p', source: 'package.json' },
+      { name: 'worker', command: 'node worker.js', cwd: '/p', source: 'Procfile' },
+      { name: 'compose', command: 'docker compose up', cwd: '/p', source: 'compose' },
+    ];
+    // The repo's own dev server can't be a reference a branch could never run.
+    expect(sharesByDefault({ name: 'web', command: 'npm run dev', cwd: '/p' }, offers)).toBe(false);
+    expect(sharesByDefault({ name: 'worker', command: 'node worker.js --verbose', cwd: '/p' }, offers)).toBe(false);
+    // Compose, or something no suggestion names, is infrastructure.
+    expect(sharesByDefault({ name: 'db', command: 'docker compose up', cwd: '/p' }, offers)).toBe(true);
+    expect(sharesByDefault({ name: 'redis', command: 'redis-server', cwd: '/p' }, offers)).toBe(true);
+    // A portless service of the same name (importVerdict says `fixed`, not `refused`) is still
+    // the same service, so the reference covers it rather than clashing with it by name.
+    expect(importVerdict({ command: 'docker compose up', cwd: '/p' }, [{ name: 'compose', workspace: 'Main', command: 'docker compose up', cwd: '/p', port: null }]).kind).toBe('fixed');
+    expect(sameService({ name: 'compose', command: 'docker compose up', cwd: '/p' }, offers[2])).toBe(true);
+    expect(sameService({ name: 'Compose', command: 'docker compose up -d', cwd: '/q' }, offers[2])).toBe(true);
+    expect(sameService({ name: 'db', command: 'docker compose up', cwd: '/q' }, offers[2])).toBe(false);
+  });
+
+  it('counts a stopped copy elsewhere only while it is up in the rollup', () => {
+    // The store's rollup adds a copy on another checkout as a non-auto-start row while it is
+    // not stopped: a crashed copy turns the dot red, a stopped one is invisible.
+    expect(rollupStatus([{ status: 'ready', autoStart: true }, { status: 'crashed', autoStart: false }])).toBe('crashed');
+    expect(rollupStatus([{ status: 'ready', autoStart: true }])).toBe('ready');
+    expect(rollupStatus([{ status: 'ready', autoStart: true }, { status: 'running', autoStart: false }])).toBe('ready');
+  });
+
+  it('types exactly the legacy line for a service on its own folder with no placeholders', () => {
+    // `stack_resolve_copy` hands such a service back unchanged (Rust's shortcut); the store
+    // feeds that to startLine, so the line must equal what it typed before copies existed.
+    const legacy = { cwd: '/srv/app', env: [['NODE_ENV', 'development']] as [string, string][], command: 'npm run dev' };
+    const resolved = { cwd: legacy.cwd, env: legacy.env, command: legacy.command };
+    expect(startLine(resolved)).toBe(startLine(legacy));
+    expect(startLine(resolved)).toBe(`cd '/srv/app' && env NODE_ENV='development' npm run dev`);
+  });
+});
 
 describe('refusedAgentEdits', () => {
   const human = { origin: 'human' as const };

@@ -1,6 +1,6 @@
 import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskBlocker, TaskStatus, Service, ServiceRestart } from '$lib/tauri/types';
 import { stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
-import { refusedAgentEdits } from '$lib/stack/model';
+import { copyKey, pickCopy, refusedAgentEdits, runsManyCopies } from '$lib/stack/model';
 import { isMaitermOwnedVar } from '$lib/triggers/shellInterpolate';
 import { followUpsStore } from '$lib/stores/followUps.svelte';
 import { hostLabel, isScriptKind, needsApproval, triggerText, type CreateArgs } from '$lib/followUps/model';
@@ -252,19 +252,19 @@ function createClaudeCodeStore() {
           result = handleListStack(args as { tabId?: string });
           break;
         case 'getServiceOutput':
-          result = await handleGetServiceOutput(args as { tabId?: string; service?: string; lines?: number });
+          result = await handleGetServiceOutput(args as { tabId?: string; service?: string; lines?: number; on?: string });
           break;
         case 'startService':
         case 'stopService':
         case 'restartService':
-          result = await handleServiceVerb(tool as 'startService' | 'stopService' | 'restartService', args as { tabId?: string; service?: string });
+          result = await handleServiceVerb(tool as 'startService' | 'stopService' | 'restartService', args as { tabId?: string; service?: string; on?: string });
           break;
         case 'startStack':
         case 'stopStack':
           result = await handleStackVerb(tool as 'startStack' | 'stopStack', args as { tabId?: string });
           break;
         case 'waitForService':
-          result = await handleWaitForService(args as { tabId?: string; service?: string; timeout?: number });
+          result = await handleWaitForService(args as { tabId?: string; service?: string; timeout?: number; on?: string });
           break;
         case 'updateService':
           result = await handleUpdateService(args as UpdateServiceArgs);
@@ -1011,7 +1011,7 @@ function createClaudeCodeStore() {
   // additionally on the server's inferred-identity refusal list.
 
   type UpdateServiceArgs = {
-    tabId?: string; service?: string;
+    tabId?: string; service?: string; on?: string;
     port?: number | null; url?: string | null; ready?: boolean; note?: string | null;
     name?: string; command?: string; cwd?: string; env?: [string, string][];
     auto_start?: boolean; restart?: ServiceRestart; ready_pattern?: string | null;
@@ -1045,25 +1045,77 @@ function createClaudeCodeStore() {
    *  provenance of the CURRENT run, so an endpoint with none — a port persisted from a
    *  previous run — is stale no matter what the service is doing now. Previously this was
    *  inferred from `ready_pattern`, which made `observed` unreachable in practice. */
-  function endpointSource(s: Service, r: ServiceRuntime): 'observed' | 'reported' | 'stale' | null {
-    if (s.port == null && !s.url) return null;
+  function endpointSource(ep: { port: number | null; url: string | null }, r: ServiceRuntime): 'observed' | 'reported' | 'stale' | null {
+    if (ep.port == null && !ep.url) return null;
     if (!r.endpointFrom) return 'stale';
     if (r.status === 'stopped' || r.status === 'crashed') return 'stale';
     return r.endpointFrom;
   }
 
-  function serviceView(ws: Workspace, s: Service) {
-    const r = stackStore.runtime(s.id);
-    const bound = stackStore.boundTab(ws.id, s.id);
+  /** The `on` a caller would pass for a copy: `main` for the own folder. */
+  function onOf(label: string, target: string): string {
+    return target ? label : 'main';
+  }
+
+  /** Which copy a call means (docs/hive.md §6.9): the one `on` names (`main`, a branch, a worker
+   *  of this Hive), else the only copy running, else the own folder when none is. Several
+   *  running and no `on` is refused with their names — never a guess. */
+  async function resolveCopyTarget(ws: Workspace, s: Service, on: string | undefined): Promise<{ target: string } | { error: string }> {
+    let named: string | null = null;
+    if (typeof on === 'string' && on.trim()) {
+      try {
+        named = await commands.stackTargetFor(ws.id, s.id, on.trim());
+      } catch (e) {
+        return { error: String(e) };
+      }
+    }
+    const live = stackStore.liveCopies(ws.id, s.id).map((c) => ({ target: c.target, label: onOf(c.label, c.target) }));
+    const picked = pickCopy(live, named);
+    if ('ambiguous' in picked) {
+      return { error: `${s.name} runs ${picked.ambiguous.length} copies (on: ${picked.ambiguous.join(', ')}). Say which one with on.` };
+    }
+    return picked;
+  }
+
+  /** One row per copy (docs/hive.md §6.9). The own folder's row is the service as it always
+   *  was — its persisted endpoint and cwd — plus where it runs. */
+  function serviceView(ws: Workspace, s: Service, target = '') {
+    if (s.shared_from) {
+      const src = stackStore.sharedStatus(s.id);
+      const up = src?.status === 'running' || src?.status === 'ready';
+      return {
+        id: s.id,
+        name: s.name,
+        shared_from: src?.workspace_name ?? null,
+        status: src?.status ?? 'stopped',
+        port: src?.port ?? null,
+        url: src?.url ?? null,
+        // Hearsay from another workspace, live or not: never "observed" here.
+        endpoint_source: src?.port == null && !src?.url ? null : up ? 'reported' : 'stale',
+        note: src === null
+          ? 'shared from a workspace that no longer has it'
+          : `shared from ${src?.workspace_name ?? 'another workspace'}: started and stopped there, never from here`,
+        origin: s.origin,
+      };
+    }
+    const key = copyKey(s.id, target);
+    const r = stackStore.runtime(key);
+    const bound = stackStore.boundTab(ws.id, s.id, target);
+    const ep = stackStore.endpoint(ws.id, s.id, target);
+    const label = stackStore.copies(ws.id, s.id).find((c) => c.target === target)?.label ?? 'main';
     return {
       id: s.id,
       name: s.name,
+      on: onOf(label, target),
+      target,
+      branch: r.copy?.branch ?? null,
+      commit: r.copy?.commit ?? null,
       status: r.status,
       uptime_seconds: r.since ? Math.floor((Date.now() - r.since) / 1000) : null,
-      port: s.port ?? null,
-      url: s.url ?? null,
-      endpoint_source: endpointSource(s, r),
-      cwd: s.cwd,
+      port: ep.port,
+      url: ep.url,
+      endpoint_source: endpointSource(ep, r),
+      cwd: target ? (r.copy?.cwd ?? null) : s.cwd,
       command: s.command,
       auto_start: s.auto_start ?? true,
       restart: s.restart ?? 'on_crash',
@@ -1072,45 +1124,67 @@ function createClaudeCodeStore() {
       tab_id: bound?.tab.id ?? null,
       note: r.note,
       origin: s.origin,
+      // No `{port}`: one copy at a time, moved with restartService { on }.
+      one_copy: !runsManyCopies(s),
     };
   }
 
   function handleListStack(args: { tabId?: string }) {
     const scope = resolveStackScope(args.tabId);
     if ('error' in scope) return scope;
-    const services = (scope.workspace.stack ?? []).map((s) => serviceView(scope.workspace, s));
-    return { workspace: scope.workspace.name, services, count: services.length };
+    const ws = scope.workspace;
+    const services = (ws.stack ?? []).flatMap((s) =>
+      s.shared_from ? [serviceView(ws, s)] : stackStore.copies(ws.id, s.id).map((c) => serviceView(ws, s, c.target)),
+    );
+    return { workspace: ws.name, services, count: services.length };
   }
 
-  async function handleGetServiceOutput(args: { tabId?: string; service?: string; lines?: number }) {
+  async function handleGetServiceOutput(args: { tabId?: string; service?: string; lines?: number; on?: string }) {
     const scope = resolveStackScope(args.tabId);
     if ('error' in scope) return scope;
     const s = resolveService(scope.workspace, args.service);
     if ('error' in s) return s;
-    const bound = stackStore.boundTab(scope.workspace.id, s.id);
-    if (!bound) return { service: s.name, status: stackStore.status(s.id), output: null, note: 'no tab is running this service' };
+    if (s.shared_from) return { error: `${s.name} is shared from another workspace; its output is there.` };
+    const copy = await resolveCopyTarget(scope.workspace, s, args.on);
+    if ('error' in copy) return copy;
+    const key = copyKey(s.id, copy.target);
+    const bound = stackStore.boundTab(scope.workspace.id, s.id, copy.target);
+    if (!bound) return { service: s.name, status: stackStore.status(key), output: null, note: 'no tab is running this service' };
     const lines = Math.min(Math.max(1, args.lines ?? 100), 1000);
     const output = await getTerminalText(bound.tab.id, lines);
-    return { service: s.name, status: stackStore.status(s.id), tab_id: bound.tab.id, output };
+    return { service: s.name, ...(copy.target ? { on: serviceView(scope.workspace, s, copy.target).on } : {}), status: stackStore.status(key), tab_id: bound.tab.id, output };
   }
 
-  async function handleServiceVerb(verb: 'startService' | 'stopService' | 'restartService', args: { tabId?: string; service?: string }) {
+  async function handleServiceVerb(verb: 'startService' | 'stopService' | 'restartService', args: { tabId?: string; service?: string; on?: string }) {
     const scope = resolveStackScope(args.tabId);
     if ('error' in scope) return scope;
     const s = resolveService(scope.workspace, args.service);
     if ('error' in s) return s;
+    const wsId = scope.workspace.id;
+    let target = '';
     try {
-      if (verb === 'startService') await stackStore.start(scope.workspace.id, s.id);
-      else if (verb === 'stopService') await stackStore.stop(scope.workspace.id, s.id);
-      else {
-        await stackStore.restart(scope.workspace.id, s.id);
-        await stackStore.waitFor(scope.workspace.id, s.id, 10_000);
+      if (verb === 'restartService' && typeof args.on === 'string' && args.on.trim()) {
+        // `restartService { on }` is how an agent moves a service (docs/hive.md §6.8, §6.9):
+        // the copy named restarts if it is up (or crashed); a one-copy service held elsewhere
+        // is moved there; otherwise the named copy starts beside the others (`moveVerb`).
+        const named = await resolveCopyTarget(scope.workspace, s, args.on);
+        if ('error' in named) return named;
+        target = named.target;
+        await stackStore.runOn(wsId, s.id, target);
+      } else {
+        const picked = await resolveCopyTarget(scope.workspace, s, args.on);
+        if ('error' in picked) return picked;
+        target = picked.target;
+        if (verb === 'startService') await stackStore.start(wsId, s.id, target);
+        else if (verb === 'stopService') await stackStore.stop(wsId, s.id, target);
+        else await stackStore.restart(wsId, s.id, target);
       }
+      if (verb === 'restartService') await stackStore.waitFor(wsId, copyKey(s.id, target), 10_000);
     } catch (e) {
       return { error: String(e) };
     }
-    logInfo(`stack: agent ${verb} ${s.name} (tab ${scope.tab.id})`);
-    return { service: serviceView(scope.workspace, s) };
+    logInfo(`stack: agent ${verb} ${s.name}${target ? ` on ${target}` : ''} (tab ${scope.tab.id})`);
+    return { service: serviceView(scope.workspace, s, target) };
   }
 
   async function handleStackVerb(verb: 'startStack' | 'stopStack', args: { tabId?: string }) {
@@ -1122,19 +1196,22 @@ function createClaudeCodeStore() {
     return handleListStack(args);
   }
 
-  async function handleWaitForService(args: { tabId?: string; service?: string; timeout?: number }) {
+  async function handleWaitForService(args: { tabId?: string; service?: string; timeout?: number; on?: string }) {
     const scope = resolveStackScope(args.tabId);
     if ('error' in scope) return scope;
     const s = resolveService(scope.workspace, args.service);
     if ('error' in s) return s;
+    if (s.shared_from) return { service: serviceView(scope.workspace, s), up: stackStore.sharedStatus(s.id)?.status === 'ready' };
+    const copy = await resolveCopyTarget(scope.workspace, s, args.on);
+    if ('error' in copy) return copy;
     // The MCP server's own response timeout is 120s and starts before this handler runs;
     // a wait that long would answer "Tool response timeout" instead of the status.
     const timeout = Math.min(Math.max(1, args.timeout ?? 30), 100) * 1000;
-    const status = await stackStore.waitFor(scope.workspace.id, s.id, timeout);
-    const view = serviceView(scope.workspace, s);
+    const status = await stackStore.waitFor(scope.workspace.id, copyKey(s.id, copy.target), timeout);
+    const view = serviceView(scope.workspace, s, copy.target);
     const up = status === 'ready' || status === 'running';
     if (up) return { service: view, up: true };
-    const bound = stackStore.boundTab(scope.workspace.id, s.id);
+    const bound = stackStore.boundTab(scope.workspace.id, s.id, copy.target);
     const output = bound ? await getTerminalText(bound.tab.id, 20) : null;
     return { service: view, up: false, output };
   }
@@ -1144,6 +1221,12 @@ function createClaudeCodeStore() {
     if ('error' in scope) return scope;
     const s = resolveService(scope.workspace, args.service);
     if ('error' in s) return s;
+    if (s.shared_from) return { error: `${s.name} is shared from another workspace; report its endpoint there.` };
+    // `on` only picks whose runtime an endpoint report goes to; a definition edit is the
+    // service's, every copy's, so one alone never needs a copy picked.
+    const reports = args.port !== undefined || args.url !== undefined || args.ready !== undefined || args.note !== undefined;
+    const copy = reports || args.on ? await resolveCopyTarget(scope.workspace, s, args.on) : { target: '' };
+    if ('error' in copy) return copy;
     // The human's own definition is theirs to change (Hive spike 15): refused whole, so nothing
     // half-applies, and named so the agent knows what it may still report.
     const refused = refusedAgentEdits(s, args);
@@ -1162,12 +1245,12 @@ function createClaudeCodeStore() {
     if (Object.keys(patch).length) patch.agent_edited = true;
     try {
       if (Object.keys(patch).length) await stackStore.updateService(scope.workspace.id, s.id, patch);
-      await stackStore.reportEndpoint(scope.workspace.id, s.id, { port: args.port, url: args.url, ready: args.ready, note: args.note });
+      await stackStore.reportEndpoint(scope.workspace.id, s.id, { port: args.port, url: args.url, ready: args.ready, note: args.note }, 'reported', copy.target);
     } catch (e) {
       return { error: String(e) };
     }
     const fresh = resolveService(scope.workspace, s.id);
-    return { service: 'error' in fresh ? serviceView(scope.workspace, s) : serviceView(scope.workspace, fresh) };
+    return { service: 'error' in fresh ? serviceView(scope.workspace, s, copy.target) : serviceView(scope.workspace, fresh, copy.target) };
   }
 
   async function handleCreateService(args: CreateServiceArgs) {

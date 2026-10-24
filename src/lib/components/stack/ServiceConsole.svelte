@@ -24,6 +24,8 @@
   import { tick } from 'svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
+  import { toastStore } from '$lib/stores/toasts.svelte';
+  import { copyTitle, parseCopyKey } from '$lib/stack/model';
   import { error as logError } from '@tauri-apps/plugin-log';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -35,19 +37,29 @@
   let { workspaceId }: Props = $props();
 
   const services = $derived(stackStore.services(workspaceId));
+  /** One pill per copy (docs/hive.md §6.9): a service on two branches is two consoles. A
+   *  shared service runs elsewhere and has no console here. */
+  const pills = $derived(
+    services.filter((s) => !s.shared_from).flatMap((s) => stackStore.copies(workspaceId, s.id).map((c) => ({ s, c }))),
+  );
   /** Open vs. still on screen. The store holds the close back by the slide-out (see
    *  `consoleVisibleServiceId` there) so that the drawer AND `+page`'s `visible` prop for
    *  the service terminal agree on what is showing — otherwise the terminal is hidden at
-   *  t=0 and what slides out is an empty box. `closing` is the gap between the two. */
+   *  t=0 and what slides out is an empty box. `closing` is the gap between the two. Both
+   *  hold a copy key; a bare service id is its own folder's copy. */
   const openId = $derived(stackStore.consoleServiceId(workspaceId));
   const shownId = $derived(stackStore.consoleVisibleServiceId(workspaceId));
   const shownTabId = $derived(stackStore.consoleTabId(workspaceId));
   const closing = $derived(!openId && !!shownId);
 
-  const service = $derived(services.find((s) => s.id === shownId) ?? null);
-  const status = $derived(service ? stackStore.status(service.id) : 'stopped');
+  const shown = $derived(shownId ? parseCopyKey(shownId) : null);
+  const service = $derived(services.find((s) => s.id === shown?.serviceId) ?? null);
+  const target = $derived(shown?.target ?? '');
+  const status = $derived(shownId ? stackStore.status(shownId) : 'stopped');
   const live = $derived(status === 'running' || status === 'ready' || status === 'starting');
-  const note = $derived(service ? stackStore.runtime(service.id).note : null);
+  const note = $derived(shownId ? stackStore.runtime(shownId).note : null);
+  const title = $derived(service ? copyTitle(service.name, target, shownId ? stackStore.runtime(shownId).copy : null) : '');
+  const endpoint = $derived(service ? stackStore.endpoint(workspaceId, service.id, target) : { port: null, url: null });
 
   function dotColor(s: string): 'green' | 'yellow' | 'red' | 'dim' {
     switch (s) {
@@ -60,7 +72,10 @@
   }
 
   function run(label: string, p: Promise<unknown>) {
-    p.catch((e) => logError(`stack console: ${label}: ${e}`));
+    p.catch((e) => {
+      logError(`stack console: ${label}: ${e}`);
+      toastStore.addToast(`Couldn't ${label}`, String(e).replace(/^Error: /, ''), 'error');
+    });
   }
 
   // Re-home the terminal whenever the shown tab changes. Same contract as MeshStageView:
@@ -179,39 +194,39 @@
 
     <header class="console-header">
       <div class="pills">
-        {#each services as s (s.id)}
-          {@const st = stackStore.status(s.id)}
+        {#each pills as { s, c } (c.key)}
+          {@const st = c.runtime.status}
           <button
             class="pill"
-            class:on={s.id === service.id}
-            onclick={() => stackStore.viewConsole(workspaceId, s.id)}
+            class:on={c.key === shownId}
+            onclick={() => stackStore.viewConsole(workspaceId, c.key)}
           >
             <StatusDot color={dotColor(st)} pulse={st === 'starting'} />
-            <span class="pill-name">{s.name}</span>
+            <span class="pill-name">{copyTitle(s.name, c.target, c.runtime.copy)}</span>
           </button>
         {/each}
       </div>
 
       <div class="controls">
-        {#if service.port || service.url}
+        {#if endpoint.port || endpoint.url}
           <!-- Last REPORTED, not observed: nothing sniffs sockets (docs/stack.md §9), so a
                service that moved ports this run still shows the old one until an agent or
                the ready trigger says otherwise. Say "last reported" rather than implying
                this is where it is listening now. -->
           <Tooltip text="Last reported endpoint">
-            <span class="endpoint">{service.url ?? `:${service.port}`}</span>
+            <span class="endpoint">{endpoint.url ?? `:${endpoint.port}`}</span>
           </Tooltip>
         {/if}
         {#if live}
-          <Tooltip text="Restart {service.name}">
-            <button class="ctl" onclick={() => run('restart', stackStore.restart(workspaceId, service.id))}>Restart</button>
+          <Tooltip text="Restart {title}">
+            <button class="ctl" onclick={() => run('restart it', stackStore.restart(workspaceId, service.id, target))}>Restart</button>
           </Tooltip>
-          <Tooltip text="Stop {service.name}">
-            <button class="ctl" onclick={() => run('stop', stackStore.stop(workspaceId, service.id))}>Stop</button>
+          <Tooltip text="Stop {title}">
+            <button class="ctl" onclick={() => run('stop it', stackStore.stop(workspaceId, service.id, target))}>Stop</button>
           </Tooltip>
         {:else}
-          <Tooltip text="Start {service.name}">
-            <button class="ctl primary" onclick={() => run('start', stackStore.start(workspaceId, service.id))}>Start</button>
+          <Tooltip text="Start {title}">
+            <button class="ctl primary" onclick={() => run('start it', stackStore.start(workspaceId, service.id, target))}>Start</button>
           </Tooltip>
         {/if}
         <Tooltip text="Hide the console (Esc)">
@@ -225,8 +240,8 @@
       <div class="console-slot" data-terminal-slot={shownTabId}></div>
     {:else}
       <div class="console-empty">
-        <p>{service.name} is {status}{note ? ` — ${note}` : ''}.</p>
-        <button class="ctl primary" onclick={() => run('start', stackStore.start(workspaceId, service.id))}>Start it</button>
+        <p>{title} is {status}{note ? ` — ${note}` : ''}.</p>
+        <button class="ctl primary" onclick={() => run('start it', stackStore.start(workspaceId, service.id, target))}>Start it</button>
       </div>
     {/if}
   </section>

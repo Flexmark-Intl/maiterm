@@ -75,7 +75,7 @@ fn find_workspace<'a>(data: &'a AppData, id: &str) -> Option<&'a Workspace> {
 }
 
 /// The service a `shared_from` names, and the workspace it is in.
-fn shared_source<'a>(data: &'a AppData, r: &crate::state::workspace::ServiceRef) -> Option<(&'a Workspace, &'a Service)> {
+pub(crate) fn shared_source<'a>(data: &'a AppData, r: &crate::state::workspace::ServiceRef) -> Option<(&'a Workspace, &'a Service)> {
     let ws = find_workspace(data, &r.workspace_id)?;
     ws.stack.iter().find(|s| s.id == r.service_id).map(|s| (ws, s))
 }
@@ -272,6 +272,51 @@ pub fn priming_entries(data: &AppData, ws: &Workspace, runtime: &HashMap<String,
         }
     }
     parts
+}
+
+/// A `shared_from` service's source, as a window that doesn't hold it sees it (docs/hive.md
+/// §6.8): the store reads this every few seconds rather than asking the other window.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SharedRow {
+    pub workspace_name: String,
+    pub service_name: String,
+    /// The source's own folder copy, "stopped" when nothing published one.
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// The source `workspace_id`/`service_id` names, in any window; None when it is gone. A source
+/// that is itself shared is followed no further: sharing names the workspace that runs it.
+pub fn shared_row(data: &AppData, runtime: &HashMap<String, StackRuntimeRow>, workspace_id: &str, service_id: &str) -> Option<SharedRow> {
+    let r = crate::state::workspace::ServiceRef { workspace_id: workspace_id.to_string(), service_id: service_id.to_string() };
+    let (ws, src) = shared_source(data, &r)?;
+    if src.shared_from.is_some() {
+        return None;
+    }
+    let row = runtime.get(&src.id);
+    Some(SharedRow {
+        workspace_name: ws.name.clone(),
+        service_name: src.name.clone(),
+        status: row.map(|r| r.status.clone()).unwrap_or_else(|| "stopped".to_string()),
+        note: row.and_then(|r| r.note.clone()),
+        since_ms: row.and_then(|r| r.since_ms),
+        port: src.port,
+        url: src.url.clone(),
+    })
+}
+
+#[tauri::command]
+pub fn get_stack_runtime_row(state: State<'_, Arc<AppState>>, workspace_id: String, service_id: String) -> Result<Option<SharedRow>, String> {
+    let data = state.app_data.read();
+    let runtime = state.stack_runtime.read();
+    Ok(shared_row(&data, &runtime, &workspace_id, &service_id))
 }
 
 /// Remove maiTerm's branch checkouts nothing needs any more (`target::prune`). At startup and

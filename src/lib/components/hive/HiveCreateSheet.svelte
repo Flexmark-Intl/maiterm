@@ -2,7 +2,11 @@
   Make this a Hive… (docs/hive.md §3): the fields that make a workspace a Hive, checked as the
   human types (lib/hive/model.ts) and again by Rust on Create. Folders are detected as they're
   added (git or plain, Base, trust); an untrusted repo is a warning, never a refusal (§6.6).
-  The stack step only shows what a later version will import (plan decision 2).
+  The Stack step (§3 step 3) imports: infrastructure another workspace already runs as a
+  `shared_from` reference (one that is the repo's own code is offered unticked: it has to run
+  per branch), standing in for the suggestion it repeats, and the folders' suggested services as definitions — one whose fixed
+  port another workspace is using is refused and named, one with a free fixed port is imported
+  as one-copy and flagged (`importVerdict`). Rust re-checks every row (`import_stack`).
 -->
 <script lang="ts">
   import { open as dialogOpen } from '@tauri-apps/plugin-dialog';
@@ -13,8 +17,10 @@
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { navHistoryStore } from '$lib/stores/navHistory.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
+  import { importVerdict, sameService, sharesByDefault, type RunningElsewhere, type StackOffer } from '$lib/stack/model';
+  import { normalizeTitle } from '$lib/tasks/model';
   import { hiveDetectFolder, hiveDetectTools, hivePreflight, suggestStack, type StackSuggestion } from '$lib/tauri/commands';
-  import type { HiveDetectedTool, HivePreflight, HiveSpec } from '$lib/tauri/types';
+  import type { HiveDetectedTool, HivePreflight, HiveSpec, Service } from '$lib/tauri/types';
   import { charCount, folderName, MAX_INSTRUCTIONS, slugify, validateSpec } from '$lib/hive/model';
   import { createHive } from '$lib/hive/create';
 
@@ -147,17 +153,81 @@
     folders = folders.map((f) => (f.key === key ? { ...f, ...p } : f));
   }
 
-  /** Services the human already runs, in another workspace, from inside one of these folders. */
-  const runningElsewhere = $derived(
+  /** Every service up in another workspace of this window, on its own folder. */
+  const upElsewhere = $derived(
     workspacesStore.workspaces
       .filter((w) => w.id !== workspaceId)
       .flatMap((w) =>
         stackStore.services(w.id)
-          .filter((s) => ['running', 'ready', 'starting'].includes(stackStore.status(s.id)))
-          .filter((s) => folders.some((f) => s.cwd === f.path || s.cwd.startsWith(f.path + '/')))
-          .map((s) => ({ id: s.id, name: s.name, workspace: w.name })),
+          .filter((s) => !s.shared_from && ['running', 'ready', 'starting'].includes(stackStore.status(s.id)))
+          .map((s) => ({ s, ws: w })),
       ),
   );
+  /** Services the human already runs, in another workspace, from inside one of these folders:
+   *  offered as `shared_from` references, so the Hive never starts a second one. */
+  const runningElsewhere = $derived(
+    upElsewhere
+      .filter(({ s }) => folders.some((f) => s.cwd === f.path || s.cwd.startsWith(f.path + '/')))
+      .map(({ s, ws }) => ({ id: s.id, name: s.name, workspace: ws.name, workspaceId: ws.id, service: s })),
+  );
+  const clashes = $derived<RunningElsewhere[]>(
+    upElsewhere.map(({ s, ws }) => ({ name: s.name, workspace: ws.name, command: s.command, cwd: s.cwd, port: s.port ?? null })),
+  );
+
+  /** The step's choices: shared sources by service id (default on for infrastructure only,
+   *  `sharesByDefault`), suggestions by `path|name` (default on for the recommended ones), with
+   *  the command as edited. */
+  let shareChoice = $state<Record<string, boolean>>({});
+  const offers = $derived<StackOffer[]>(folders.flatMap((f) => suggestions[f.path] ?? []));
+  function shareOn(r: (typeof runningElsewhere)[number]): boolean {
+    return shareChoice[r.id] ?? sharesByDefault(r.service, offers);
+  }
+  /** The ticked reference a suggestion repeats, which stands in for it: never imported beside
+   *  it, so the sheet can't block its own default with a name clash. */
+  function coveredBy(s: StackSuggestion, command: string) {
+    return runningElsewhere.find((r) => shareOn(r) && sameService(r.service, { name: s.name, command, cwd: s.cwd }));
+  }
+  let picks = $state<Record<string, { on: boolean; command: string }>>({});
+  function pickOf(path: string, s: StackSuggestion) {
+    return picks[`${path}|${s.name}`] ?? { on: true, command: s.command };
+  }
+  function setPick(path: string, s: StackSuggestion, p: Partial<{ on: boolean; command: string }>) {
+    picks = { ...picks, [`${path}|${s.name}`]: { ...pickOf(path, s), ...p } };
+  }
+
+  /** What Create sends as `stack`. A refused suggestion is never sent. */
+  const stackRows = $derived.by(() => {
+    const now = new Date().toISOString();
+    const row = (over: Partial<Service> & Pick<Service, 'name' | 'command' | 'cwd'>): Service => ({
+      id: '', normalized_name: '', env: [], ssh_command: null, restart: 'on_crash', ready_pattern: null,
+      port: null, url: null, origin: 'suggested',
+      // A Hive's services start through its run queue, not with the workspace.
+      auto_start: false,
+      created_at: now, updated_at: now, ...over,
+    });
+    const out: Service[] = [];
+    for (const r of runningElsewhere) {
+      if (!shareOn(r)) continue;
+      out.push(row({ name: r.name, command: r.service.command, cwd: r.service.cwd, origin: 'human', shared_from: { workspace_id: r.workspaceId, service_id: r.id } }));
+    }
+    for (const f of folders) {
+      for (const s of suggestions[f.path] ?? []) {
+        const p = pickOf(f.path, s);
+        if (!p.on || coveredBy(s, p.command) || importVerdict({ command: p.command, cwd: s.cwd }, clashes).kind === 'refused') continue;
+        out.push(row({ name: s.name, command: p.command.trim(), cwd: s.cwd }));
+      }
+    }
+    return out;
+  });
+  const stackProblem = $derived.by(() => {
+    const seen = new Set<string>();
+    for (const r of stackRows) {
+      const k = normalizeTitle(r.name);
+      if (seen.has(k)) return `Two stack services are called ${r.name}: untick one.`;
+      seen.add(k);
+    }
+    return null;
+  });
 
   const slug = $derived(slugify(name));
   const instructionCount = $derived(charCount(instructions));
@@ -172,7 +242,7 @@
       : !preflight.claude_ok ? (preflight.claude_detail ?? 'Claude Code 2.1.295 or newer is needed.')
       : null,
   );
-  const canCreate = $derived(!creating && !blocked && !problem);
+  const canCreate = $derived(!creating && !blocked && !problem && !stackProblem);
 
   async function create() {
     if (!canCreate) return;
@@ -202,6 +272,7 @@
       tools: [...picked],
       budget_cents: Math.max(0, Math.round(Number(budgetDollars) * 100)),
       push_after_land: pushAfterLand,
+      stack: $state.snapshot(stackRows) as Service[],
     };
     try {
       await createHive(workspaceId, spec);
@@ -386,26 +457,56 @@
 
       <div class="field">
         <span class="label">Stack</span>
-        <p class="note">Not imported in this version: the Hive starts no services. This is what a later version will set up.</p>
+        <span class="hint">What the Hive's work runs. Something you already run in another workspace is used from there, never started twice; a service that takes <code>{'{port}'}</code> in its command runs a copy per branch.</span>
         {#if folders.length === 0}
           <p class="hint">Add a folder to see its services.</p>
         {/if}
+        {#each runningElsewhere as s (s.id)}
+          {@const on = shareOn(s)}
+          {@const code = !sharesByDefault(s.service, offers)}
+          <label class="check stack-row">
+            <input type="checkbox" checked={on}
+              onchange={() => (shareChoice = { ...shareChoice, [s.id]: !on })} />
+            <span class="mono">{s.name}</span>
+            {#if code && !on}
+              <span class="hint">running in {s.workspace}, but it's this repo's code: the Hive runs it per branch — add <code>{'{port}'}</code> to its suggestion below</span>
+            {:else if code}
+              <span class="warn">use the one running in {s.workspace}: no branch can run it</span>
+            {:else}
+              <span class="hint">use the one running in {s.workspace}</span>
+            {/if}
+          </label>
+        {/each}
         {#each folders as f (f.key)}
           {@const list = suggestions[f.path]}
-          <div class="stack-row">
-            <span class="mono">{f.name}</span>
-            {#if list === undefined || list === null}
-              <span class="hint">reading…</span>
-            {:else if list.length === 0}
-              <span class="hint">no services suggested</span>
-            {:else}
-              <span class="hint">{list.map((s) => `${s.name} (${s.source})`).join(', ')}</span>
-            {/if}
-          </div>
+          {#if list === undefined || list === null}
+            <div class="stack-row"><span class="mono">{f.name}</span><span class="hint">reading…</span></div>
+          {:else if list.length === 0}
+            <div class="stack-row"><span class="mono">{f.name}</span><span class="hint">no services suggested</span></div>
+          {:else}
+            {#each list as s (s.name)}
+              {@const p = pickOf(f.path, s)}
+              {@const v = importVerdict({ command: p.command, cwd: s.cwd }, clashes)}
+              {@const cover = coveredBy(s, p.command)}
+              <div class="stack-pick">
+                <label class="check">
+                  <input type="checkbox" checked={p.on && !cover && v.kind !== 'refused'} disabled={!!cover || v.kind === 'refused'}
+                    onchange={() => setPick(f.path, s, { on: !p.on })} />
+                  <span class="mono">{s.name}</span>
+                  <span class="hint">{f.name} · {s.source}</span>
+                </label>
+                <input class="mono cmd" aria-label="Command for {s.name}" value={p.command}
+                  oninput={(e) => setPick(f.path, s, { command: (e.currentTarget as HTMLInputElement).value })} />
+                {#if cover}
+                  <span class="hint">the {cover.name} running in {cover.workspace} is used instead; untick it above to import this</span>
+                {:else}
+                  <span class={v.kind === 'copies' ? 'hint' : v.kind === 'fixed' ? 'warn' : 'error'}>{v.detail}</span>
+                {/if}
+              </div>
+            {/each}
+          {/if}
         {/each}
-        {#each runningElsewhere as s (s.id)}
-          <div class="stack-row"><span class="mono">{s.name}</span><span class="hint">already running in {s.workspace}</span></div>
-        {/each}
+        {#if stackProblem}<span class="error">{stackProblem}</span>{/if}
       </div>
     </div>
 
@@ -488,10 +589,11 @@
   .models { display: grid; grid-template-columns: auto 1fr 1fr; gap: 6px 8px; align-items: center; font-size: 0.923rem; color: var(--fg); }
   .tools { display: flex; flex-direction: column; gap: 4px; }
   .stack-row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .stack-pick { display: flex; flex-direction: column; gap: 4px; padding: 4px 0; }
+  .cmd { width: 100%; }
   .mono { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.846rem; color: var(--fg); overflow-wrap: anywhere; }
   code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.9em; background: var(--bg-dark); padding: 1px 4px; border-radius: 3px; }
   .note-line { font-size: 0.846rem; color: var(--fg-dim); overflow-wrap: anywhere; }
-  .note { font-size: 0.923rem; color: var(--fg); background: var(--bg-dark); border-radius: 6px; padding: 8px 10px; margin: 0; }
   .warn { font-size: 0.846rem; color: var(--yellow, #e0af68); overflow-wrap: anywhere; }
   .error { color: var(--red, #f7768e); font-size: 0.923rem; overflow-wrap: anywhere; margin: 0; }
   .link { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; font-size: 0.846rem; }

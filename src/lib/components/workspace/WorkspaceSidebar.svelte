@@ -506,7 +506,8 @@
   }
   function workspaceMenuItems(workspaceId: string) {
     const services = stackStore.services(workspaceId);
-    const anyLive = services.some((s) => { const st = stackStore.status(s.id); return st === 'running' || st === 'ready' || st === 'starting'; });
+    // Any copy, on any checkout (docs/hive.md §6.9): Stop stack stops them all.
+    const anyLive = stackStore.anyLive(workspaceId);
     const run = (label: string, p: Promise<unknown>) => p.catch((e) => logError(`stack: ${label}: ${e}`));
     const muted = !!workspacesStore.workspaces.find((w) => w.id === workspaceId)?.muted;
     return [

@@ -969,6 +969,7 @@ pub fn run() {
             stack::stack_copy_targets,
             stack::stack_target_for,
             stack::stack_prune_worktrees,
+            stack::get_stack_runtime_row,
             commands::accounts::list_account_runtimes,
             commands::accounts::reconcile_account,
             commands::accounts::read_account_identity,

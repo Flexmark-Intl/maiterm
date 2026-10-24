@@ -1398,6 +1398,22 @@ export async function stackTargetFor(workspaceId: string, serviceId: string, on:
 export async function stackPruneWorktrees(): Promise<number> {
   return invoke('stack_prune_worktrees');
 }
+/** A `shared_from` service's source as the Rust mirror holds it (docs/hive.md §6.8): any
+ *  window's workspace. */
+export interface StackSharedRow {
+  workspace_name: string;
+  service_name: string;
+  /** The source's own folder copy: "stopped" when nothing published one. */
+  status: string;
+  note?: string | null;
+  since_ms?: number | null;
+  port?: number | null;
+  url?: string | null;
+}
+/** The source a `shared_from` names; null when that workspace or service is gone. */
+export async function getStackRuntimeRow(workspaceId: string, serviceId: string): Promise<StackSharedRow | null> {
+  return invoke('get_stack_runtime_row', { workspaceId, serviceId });
+}
 
 /** Add one follow-up to a tab (docs/follow-ups.md). Returns the tab's list as it now stands. */
 export async function addTabFollowUp(workspaceId: string, tabId: string, followUp: FollowUp): Promise<FollowUp[]> {

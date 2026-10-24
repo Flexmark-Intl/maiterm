@@ -3158,6 +3158,11 @@ several releases a day).
    `MAITERM_INSTANCE` and `MAITERM_VITE_PORT`. With it, spike 15's three hardenings: definition
    edits only on agent-made services (`Service.agent_edited`), all stack tools own-tab-only,
    and shell-typed trigger values must be shell-inert (`triggers/shellInterpolate.ts`).
+   **Part 2 built** (`5cbf67b6`): copies in Rust (`src-tauri/src/stack/`). A target is `""`,
+   `checkout:<abs>` or `branch:<name>` (a detached checkout under `<app data>/stack-wt.noindex/`);
+   the cwd is re-rooted onto it; placeholders are charset-checked data, never quoted; the port
+   book probes every address family. A service with no target and no placeholders resolves to
+   today's fields without running git. Pruning keeps a checkout with untracked work.
 6. Reviewers (`hiveVerdict`, three attempts, escalation). Landing: land to Base (default)
    pinned to the reviewed sha, including several repos, the config-touching land rule (§8.1),
    the approval mode (chosen at creation, §3) through agent requests; the **land log and Undo**

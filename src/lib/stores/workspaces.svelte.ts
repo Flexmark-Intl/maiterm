@@ -18,7 +18,7 @@ import { MESH_IDENTITY_VARS } from '$lib/stores/meshRouting';
 import { CLAUDE_RESUME_COMMAND } from '$lib/triggers/defaults';
 import { disableBridge } from '$lib/stores/sshMcpBridge.svelte';
 import { isServiceTab, isStripHidden } from '$lib/workspace/hiddenTabs';
-import { dispatchHiveOpenColumn, HIVE_NO_NEW_TABS, openTargetFor } from '$lib/hive/model';
+import { adoptInstalled, dispatchHiveOpenColumn, HIVE_NO_NEW_TABS, openTargetFor } from '$lib/hive/model';
 
 /** Sidebar width bounds + default. The minimum reserves room for the footer's
  *  three agent-status indicators (working / waiting / finished) alongside the
@@ -1845,23 +1845,29 @@ function createWorkspacesStore() {
       return false;
     },
 
-    /** Bind a tab to a stack service, or clear it (docs/stack.md §3). One tab per service:
-     *  Rust clears the same service from any other tab in the workspace in the same write,
-     *  and the mirror does the same here so the sidebar never shows two. */
-    async setTabServiceId(workspaceId: string, paneId: string, tabId: string, serviceId: string | null) {
+    /** Bind a tab to a copy of a stack service, or clear it (docs/stack.md §3, §14). One tab
+     *  per copy, `(service, target)`: Rust clears the same copy from any other tab in the
+     *  workspace in the same write, and the mirror does the same here so the sidebar never
+     *  shows two. No target is the service's own folder. */
+    async setTabServiceId(workspaceId: string, paneId: string, tabId: string, serviceId: string | null, serviceTarget: string | null = null) {
       const ws = workspaces.find(w => w.id === workspaceId);
       const pane = ws?.panes.find(p => p.id === paneId);
       const tab = pane?.tabs.find(t => t.id === tabId);
-      if (!ws || !tab || (tab.service_id ?? null) === serviceId) return;
+      const target = serviceId ? (serviceTarget || null) : null;
+      if (!ws || !tab || ((tab.service_id ?? null) === serviceId && (tab.service_target ?? null) === target)) return;
       if (serviceId) {
         for (const p of ws.panes) {
           for (const t of p.tabs) {
-            if (t.id !== tabId && t.service_id === serviceId) t.service_id = null;
+            if (t.id !== tabId && t.service_id === serviceId && (t.service_target ?? null) === target) {
+              t.service_id = null;
+              t.service_target = null;
+            }
           }
         }
       }
       tab.service_id = serviceId;
-      await commands.setTabServiceId(workspaceId, paneId, tabId, serviceId);
+      tab.service_target = target;
+      await commands.setTabServiceId(workspaceId, paneId, tabId, serviceId, target);
       // Binding is the moment a tab leaves the strip, so it is the moment the invariant can
       // break: `create_tab` made this tab active on the way in, and it was an ordinary tab
       // then — every earlier check passed it (docs/stack.md §7). Re-apply the rule here,
@@ -2496,23 +2502,14 @@ function createWorkspacesStore() {
     },
 
     /** Mirror a Hive `hive_create` just installed (docs/hive.md §3): the record, the name, the
-     *  coordinator's hidden tab and the fresh shell Rust took out in the same write, patched into
+     *  imported stack, the coordinator's hidden tab and the fresh shell Rust took out in the same write, patched into
      *  the workspace in place so the panes and tabs still there are left alone. Dropping the shell
      *  unmounts its terminal, which kills its PTY. The pane's active tab is Rust's: never the
      *  coordinator, and no longer the shell. */
     adoptHive(created: Workspace, coordinatorTabId: string, replacedTabId: string | null) {
       const ws = workspaces.find(w => w.id === created.id);
       if (!ws) return;
-      ws.hive = created.hive;
-      ws.name = created.name;
-      for (const pane of created.panes) {
-        const coord = pane.tabs.find(t => t.id === coordinatorTabId);
-        const mirror = ws.panes.find(p => p.id === pane.id);
-        if (!mirror) continue;
-        if (replacedTabId) mirror.tabs = mirror.tabs.filter(t => t.id !== replacedTabId);
-        if (coord && !mirror.tabs.some(t => t.id === coordinatorTabId)) mirror.tabs.push(coord);
-        mirror.active_tab_id = pane.active_tab_id ?? null;
-      }
+      adoptInstalled(ws, created, coordinatorTabId, replacedTabId);
       if (replacedTabId) import('$lib/stores/navHistory.svelte').then(m => m.navHistoryStore.removeTab(replacedTabId)).catch(() => {});
     },
 
@@ -3143,7 +3140,8 @@ export async function navigateToTab(tabId: string): Promise<void> {
         // click or an Overlord chip doing nothing at all.
         if (target.kind === 'service') {
           const { stackStore } = await import('$lib/stores/stack.svelte');
-          stackStore.viewConsole(ws.id, target.serviceId);
+          const { copyKey } = await import('$lib/stack/model');
+          stackStore.viewConsole(ws.id, copyKey(target.serviceId, tab.service_target ?? ''));
           return;
         }
         if (pane.active_tab_id !== tabId) {
