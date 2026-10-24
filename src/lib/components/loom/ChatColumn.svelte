@@ -668,18 +668,22 @@
 
     {#if !readOnly}
       <div class="dock" bind:this={dockEl}>
-        <PromptCard tabId={openId} {active} pulse={liveState?.state} />
-        {#if openAsk}
-          {@const chat = openId}
-          {#key openAsk.id}
-            <BlockerCard task={openAsk} variant="card" onnote={(text) => (outcome = { chat, text })} />
-          {/key}
-        {/if}
-        {#each openScripts as a (a.followUp.id)}
-          {@const chat = openId}
-          <ScriptApprovalCard tabId={chat} followUp={a.followUp} listChangedAt={scriptsChangedAt} onnote={(text) => (outcome = { chat, text })} />
-        {/each}
-        {#if outcome && outcome.chat === openId}<p class="hint">{outcome.text}</p>{/if}
+        <!-- Its own scroller: a multi-question prompt can be taller than the window, and the
+             composer below must stay on screen. -->
+        <div class="asks">
+          <PromptCard tabId={openId} {active} pulse={liveState?.state} />
+          {#if openAsk}
+            {@const chat = openId}
+            {#key openAsk.id}
+              <BlockerCard task={openAsk} variant="card" onnote={(text) => (outcome = { chat, text })} />
+            {/key}
+          {/if}
+          {#each openScripts as a (a.followUp.id)}
+            {@const chat = openId}
+            <ScriptApprovalCard tabId={chat} followUp={a.followUp} listChangedAt={scriptsChangedAt} onnote={(text) => (outcome = { chat, text })} />
+          {/each}
+          {#if outcome && outcome.chat === openId}<p class="hint">{outcome.text}</p>{/if}
+        </div>
         <AttachmentChips attachments={attachedHere} onremove={(i) => { unattach(openId, i); composerEl?.focus(); }} />
         <div class="composer" class:drag-over={dragOver}>
           {@render composerActions?.(openId)}
@@ -880,7 +884,9 @@
   @keyframes pulse { 50% { opacity: 0.35; } }
   @media (prefers-reduced-motion: reduce) { .working i { animation: none; } }
 
-  .dock { display: flex; flex-direction: column; gap: 8px; padding: 10px 18px 14px; border-top: 1px solid var(--bg-light); background: var(--bg-dark); }
+  .dock { display: flex; flex-direction: column; gap: 8px; min-height: 0; max-height: 80%; padding: 10px 18px 14px; border-top: 1px solid var(--bg-light); background: var(--bg-dark); }
+  .asks { display: flex; flex-direction: column; gap: 8px; flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+  .asks:empty { display: none; }
   .composer { display: flex; gap: 8px; align-items: flex-end; border-radius: 8px; }
   .composer.drag-over textarea { border-color: var(--accent); background: var(--bg-light); }
   .composer textarea {
