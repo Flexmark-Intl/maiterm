@@ -153,6 +153,9 @@ impl Rig {
             let r = base.join(n);
             fs::create_dir_all(&r).unwrap();
             git(&r, &["init", "-q", "-b", "main"]);
+            // The helper ignores system config and maiTerm's git doesn't: Windows git's system
+            // `core.autocrlf=true` would check out CRLF that the helper then commits back.
+            git(&r, &["config", "core.autocrlf", "false"]);
             commit(&r, "README.md", "r\n");
             commit(&r, "shared.txt", "one\ntwo\nthree\n");
             folders.push(HiveFolder { name: n.to_string(), path: r.to_string_lossy().into(), kind: KIND_GIT.into(), base: Some("main".into()), primary: i == 0, ..HiveFolder::default() });
