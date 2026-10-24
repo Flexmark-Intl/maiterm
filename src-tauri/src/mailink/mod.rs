@@ -1908,19 +1908,13 @@ pub(crate) async fn respond_to_prompt(
                     return json!({ "ok": false, "reason": "bad_request" });
                 }
             };
-            // THIS question must be what is on screen, as the permission and trust paths check:
-            // a question record can outlive its dialog (or belong to a dead session), and the
-            // Down/Enter keys that answer it would pick a row in whatever else is open.
-            let screen = live_screen_text(app, tab_id).unwrap_or_default();
-            if !question_on_screen(&tool_input, &screen) {
-                log::info!("[maiLink] refusing an answer for tab {tab_id}: no question selector on screen");
-                return json!({ "ok": false, "reason": "stale",
-                    "detail": "that question is no longer open in the terminal" });
-            }
             // The maiterm-tab mod, when its hook is behind this selector, takes the answers as
             // data: no keys, so no selector position to lose, and a failed delivery is withdrawn
             // whole (mod_asks::deliver) — which is why this path needs no one-attempt claim, and
-            // why it runs before the claim is taken.
+            // why it runs before the claim is taken. It runs before the screen check too: a live
+            // ask IS the open dialog, and the screen shows only the question the selector is on,
+            // so one the human began answering in the terminal (the first question ticked, the
+            // selector on the second) would read as closed.
             if let Some(ask) = mod_ask_for_prompt(app, tab_id, "question") {
                 if let crate::claude_code::mod_asks::AskKind::Question { questions } = &ask.kind {
                     let pairs: Vec<(Vec<String>, Option<String>)> =
@@ -1938,6 +1932,22 @@ pub(crate) async fn respond_to_prompt(
                     log::info!("[maiLink] AskUserQuestion answered (tab {tab_id}, {} question(s)) → the agent", answers.len());
                     return json!({ "ok": true, "delivery": "agent" });
                 }
+            }
+            // Keystrokes: THIS question must be what is on screen, as the permission and trust
+            // paths check: a question record can outlive its dialog (or belong to a dead session),
+            // and the Down/Enter keys that answer it would pick a row in whatever else is open.
+            let screen = live_screen_text(app, tab_id).unwrap_or_default();
+            if !question_on_screen(&tool_input, &screen) {
+                // A ticked question in the selector's header: it is open, but the selector has
+                // moved past the first question, and keys walk from row 0 of the first.
+                let started = screen.lines().any(|l| l.contains('☒') && l.contains("Submit"));
+                log::info!("[maiLink] refusing an answer for tab {tab_id}: no question selector on screen (started in the terminal: {started})");
+                return json!({ "ok": false, "reason": "stale",
+                    "detail": if started {
+                        "this question was partly answered in the terminal; finish it there"
+                    } else {
+                        "that question is no longer open in the terminal"
+                    } });
             }
             // A SECOND attempt at the same ask is refused, and this is the important guard.
             // Navigation is relative and assumes the highlight starts at row 0, true only for
