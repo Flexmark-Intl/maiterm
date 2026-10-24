@@ -685,6 +685,55 @@ each other. The mod could drop inbound per tab (`session.receive` → `{ consume
   permission-ledger events on a probe that can fail (an nvm-only Claude, a Finder launch) cost
   the ledger and protected nobody. Adding a brand-new event WITHOUT the gate is the bug.
 
+**Hive tabs are different: every hook is a command hook, from the launch's own `--settings`**
+(docs/hive.md §6.8, §11.1; `hive/settings.rs`, `resources/hive/maiterm-hive-hook.sh`). A Hive
+agent runs in Claude's sandbox, which breaks every localhost `type:"http"` hook (spike 9), and
+it launches with `--setting-sources project`, so none of the hooks above load there at all.
+- **One script, two modes.** It lives at `<app data>/hive/bin/maiterm-hive-hook`, is rewritten
+  with its `port` file on every server bind (`settings::install_hook`), and reads the port from
+  that file on each call (`$MAITERM_PORT` only as the fallback), so a restart on a new port
+  strands no tab. The folder is on every Hive agent's `denyWrite`. `gate` handles PreToolUse on
+  `Bash|PowerShell|Write|Edit`. `observe <Event>` forwards SessionStart, SessionEnd,
+  Notification, Stop, UserPromptSubmit, **PreToolUse (every tool, empty matcher)**, PostToolUse,
+  PermissionRequest, PostToolUseFailure, SubagentStop and PreCompact, plus PreModelSwitch and
+  StopFailure under the same every-Claude-knows-it rule (`events_every_claude_knows`).
+  PreToolUse carries two entries (`settings::hive_hooks`), so **a gated call arrives twice**:
+  once on `/hive/gate` to be decided, once on `/hooks?via=hive` to be observed, like any
+  other tool's PreToolUse. Anything keyed on PreToolUse from a Hive tab sees the observed copy.
+- **The gate fails closed, and has its own route.** `gate` posts to `/hive/gate`, which answers
+  with `hive::gate::decide_event`. The script exits 0 only on the exact body `allow`. Anything
+  else exits 2 with the reason on stderr, which Claude shows the model as `PreToolUse:Bash hook
+  error: … <reason>`: a deny, a non-2xx, a timeout, or maiTerm not listening. The entry sets
+  `onFailure:"block"` (needs Claude 2.1.295+, which `hive_launch_command` checks) with a timeout
+  of 10 s, and curl's own `--max-time 8` stays under it. **`/hive/gate` is never put through the
+  mod dedup in `hooks_handler`**: a dropped duplicate answers an empty 200, which the gate would
+  read as a decision.
+- **Observing never blocks.** `observe` posts to `/hooks?tab_id=…&via=hive` and always exits 0. It
+  prints the reply only for SessionStart (`prime=1`: the identity line plus `brief::invariant_rules`
+  first) and PreModelSwitch. A SessionStart from a `hive_role` tab also appends the session to
+  `tasks/<task>/sessions.json` (`hive::session_started`). That list is what the launch builder
+  resumes, and it sends the coordinator's one-time kickoff.
+- **Measured by the 3e probes** (`hive/probe.rs`, `#[ignore]`, `claude -p` on 2.1.310 against a
+  scratch Hive):
+  - The gate sees every matched call BEFORE Claude's permission check, including Bash that
+    dontAsk then denies.
+  - With nothing listening, an ordinary allowed `git -C <copy> diff` and a Write in the agent's
+    own home are blocked too. Write is on the matcher, so a Hive agent can't write at all while
+    maiTerm is down.
+  - The `prime=1` reply reaches the model: a coordinator declined `git push` citing the
+    invariant rules.
+  - **Git is the coordinator's only Bash, and the gate is what keeps it from running a command.**
+    A git config value runs one (`core.fsmonitor`, `diff.external`, a textconv), and the `*` in
+    `Bash(git -C * diff)` spans `-c core.fsmonitor=<cmd>`. So the gate refuses `-c` and
+    `--config-env` outright, git's config and command variables (`GIT_CONFIG_*`,
+    `GIT_EXTERNAL_DIFF`, `GIT_DIR`, pagers…), `--ext-diff`/`--textconv`/`--output`/`--no-index`,
+    and **any git whose repo isn't a read copy or Hive folder**: from home (or after a `cd`) git
+    would find a repo the agent wrote itself. The settings deny the option forms too
+    (`GIT_ESCAPE_DENIES`). The repo's placement is the gate's alone: a rule can't say which
+    folder `-C` names, and Claude ran a plain `git diff --stat` with no allow rule for it at all
+    (its own read-only check). With the gate answering `allow`, a planted `<home>/x/.git` ran its
+    fsmonitor through `git -C <home>/x diff`.
+
 **Connection tab affinity:**
 - Server stores connection_id → tab_id mapping in `ServerState.connection_tabs`
 - All subsequent tool calls on that connection auto-inject `tabId` if missing

@@ -39,7 +39,7 @@ pub fn default_checkpoints(landing_mode: &str) -> BTreeMap<String, String> {
 }
 
 /// About one worker per 16 GB above a 32 GB reserve, never more than ncpu/4, never below one
-/// (§6.8; the doc's "6 on this Mac" predates the ncpu term, which gives 5).
+/// (§6.8: 5 on a 128 GB, 20-CPU Mac, where the ncpu term is the smaller).
 pub fn cap_ceiling(ram_gb: u64, ncpu: u32) -> u32 {
     let by_ram = ram_gb.saturating_sub(32) / 16;
     let by_cpu = u64::from(ncpu / 4);

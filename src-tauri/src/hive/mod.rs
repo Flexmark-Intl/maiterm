@@ -16,6 +16,8 @@ pub mod gate;
 pub mod launch;
 pub mod layout;
 pub mod paths;
+#[cfg(test)]
+mod probe;
 pub mod record;
 pub mod settings;
 pub mod trust;

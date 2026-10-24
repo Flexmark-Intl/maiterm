@@ -960,7 +960,9 @@ MCP-server children (a median of seven) is a median 0.9 GB, p90 1.1 GB, and abou
 long session; idle, it uses about 0% CPU, so the cost is what it runs (spike 8, §13.1). So:
 
 - **The default worker cap is 4.** The sheet's ceiling scales at about **one worker per 16 GB
-  of RAM above a 32 GB reserve**, and never more than **ncpu/4**; a cap set above it says so.
+  of RAM above a 32 GB reserve**, and never more than **ncpu/4**:
+  `max(1, min((RAM−32)/16, ncpu/4))`, so 5 on a 128 GB, 20-CPU Mac and 1 at 32 GB. A cap set
+  above it needs the human's confirmation in the sheet (`create::cap_ceiling`).
 - **Workers launch with `--strict-mcp-config`** and only the MCP servers they need (maiTerm's,
   and the generators the role uses), since the MCP children are half a session's memory.
 - **Pressure** is read from `kern.memorystatus_vm_pressure_level` and the free-memory
@@ -1089,11 +1091,30 @@ allow rules, while auto mode let Write go anywhere.
   (§9; spike 1 saw it in every permission mode it tried, and step 3's acceptance test checks it
   under dontAsk).
 - **`permissions.allow`:** `Bash(git diff *)`, `Bash(git log *)`, `Bash(git show *)`; Write and
-  Edit on its home (`//` form, §6.7); and the `mcp__maiterm__*` tools it uses (hive, gallery,
-  task, notes), which dontAsk would otherwise deny. Its cwd is `home/`, not a repo, so reviews
+  Edit on its home (`//` form, §6.7); and the maiTerm tools it uses (hive, gallery, task,
+  notes), which dontAsk would otherwise deny. They're listed **by name, never as the server
+  wildcard**: MCP calls are made by Claude's own process, outside the sandbox, and
+  `createService` plus `startService` alone would type any command into an unsandboxed shell. The
+  tools that act outside the sandbox (services, browser, `driveTab`, follow-ups, `createTab`,
+  `setPreference`…) are also on `deny` as a backstop (`settings::ESCAPE_MCP_TOOLS`). Its cwd is `home/`, not a repo, so reviews
   either run with a repo as cwd or need `git -C` rules (`Bash(git -C * diff *)` and the same for
   `log` and `show`); the coordinator gets the `git -C` rules, since its home stays its cwd (§6.3).
-- **`permissions.deny`:** WebFetch and WebSearch, plus the push rules of §7.3.
+  Each also needs its bare form, `Bash(git -C * diff)`: a trailing ` *` is optional only in a
+  pattern with no other wildcard, so `git -C * diff *` refused a bare `git -C <copy> diff` while
+  `git diff *` allows a bare `git diff` (step 3's probe, §13.1).
+- **`permissions.deny`:** WebFetch and WebSearch, the push rules of §7.3, and the git options
+  that turn a review into a command (`settings::GIT_ESCAPE_DENIES`: `Bash(git * -c *)`,
+  `Bash(git -c *)`, `--config-env`, `--exec-path=`, `--git-dir`, `--work-tree`, `--ext-diff`,
+  `--textconv`, `--output`, `--no-index`). The `*` in `Bash(git -C * diff)` spans any global
+  option, and `git -C <copy> -c core.fsmonitor=<cmd> diff` ran `<cmd>` (the 3e review, §13.1).
+- **Git runs only in a repo maiTerm made.** Home is writable, so a `.git/config` (or a bare
+  repo's `config`) the coordinator wrote there would run `core.fsmonitor` on its next `git diff`.
+  The gate refuses any git whose repo is outside the read copies and Hive folders: from home, a
+  relative `-C` after a `cd`, or a `-C` into home. It also refuses `-c`/`--config-env` and git's
+  config and command variables (`GIT_CONFIG_*`, `GIT_EXTERNAL_DIFF`, `GIT_DIR`, pagers, editors
+  other than `true`). No permission rule can hold this: a rule can't say which folder `-C` names,
+  and Claude allows a plain read-only `git diff` with no rule at all. So for the coordinator the
+  gate is load-bearing here, and it fails closed.
 - The fail-closed command hook of §6.8 (carrying §7.3's push refusal) applies to it as to every
   Hive agent.
 
@@ -2146,10 +2167,27 @@ human's per-repo memory (the leak §9 exists to prevent; spike 1, §13.1). So:
   of all of them: maiTerm's state, permission-ledger and PreModelSwitch hooks, the fail-closed
   PreToolUse deny (§6.8), the WebFetch host check and the `PostToolUseFailure` block detector
   (§6.7), and the StopFailure hook (§7.8). Each is the same maiTerm-owned script, outside every
-  writable path and on `denyWrite`, that forwards to maiTerm and exits 2 on failure; the deny
-  hook also sets `onFailure: "block"`. The global http hooks still load from user settings there
-  and fail without effect (none of them blocks on failure); localhost is opened by port only, if
-  ever (§6.7), never to make them work.
+  writable path and on `denyWrite`; localhost is opened by port only, if ever (§6.7), never to
+  make http hooks work. **As built (step 3):**
+  - The script is `<app data>/hive/bin/maiterm-hive-hook`. maiTerm rewrites it and the `port`
+    file beside it on every server bind, and the script reads that file on every call, so a
+    restart on a new port can't strand a tab. `$MAITERM_PORT` is only the fallback.
+  - Only the gate blocks: `gate` mode (PreToolUse on `Bash|PowerShell|Write|Edit`, `onFailure:
+    "block"`) posts to its own route, `/hive/gate`. That route is never deduplicated against the
+    mod's copy, because a dropped duplicate answers an empty 200. The script exits 0 only on the
+    exact body `allow`.
+  - `observe` mode forwards every event the hooks list to `/hooks?via=hive`, PreToolUse for
+    every tool included, and always exits 0. So a gated call is posted twice, once to each
+    route. Its output is printed only for SessionStart (`prime=1`, the invariant rules) and
+    PreModelSwitch.
+  - The coordinator launches with `--setting-sources project`, so the user's global http hooks
+    don't load there at all. Under dontAsk the allow list must be the whole list, so the user's
+    own allow rules stay out too.
+  - The launch line `env -u`s the agent markers and the parent-session variables (a parent's
+    `ANTHROPIC_API_KEY` gave "Invalid API key"). Under a managed account it also removes every
+    variable that would answer instead of the account's login.
+  - `hive_launch_args` itself is pure. `prepare_launch` rewrites the record, the settings,
+    `mcp.json` and `brief.md` before every launch.
 - **`hive_role` tabs skip the generic paths**: `handleEnableAutoResume` and the auto-resume
   template migration never touch them, so nothing writes a generic resume command over a Hive
   tab.
@@ -2555,8 +2593,9 @@ running. Load average was 25–87, but CPU was 67% idle.
     (about 480 MB). Session plus children: median 0.9 GB, p90 1.1 GB, long sessions about 2 GB.
   - Idle sessions use about 0% CPU. The cost is what they run.
   - So, in §6.8:
-    - the default worker cap is 4 (at most 6 on this Mac), scaling at about one worker per 16 GB
-      above a 32 GB reserve and no more than ncpu/4;
+    - the default worker cap is 4, scaling at about one worker per 16 GB above a 32 GB reserve
+      and no more than ncpu/4: the ceiling is `max(1, min((RAM−32)/16, ncpu/4))`, which is 5 on
+      this Mac (128 GB gives 6, but 20 CPUs give 5; an earlier draft said 6);
     - workers launch with `--strict-mcp-config` and only the MCP servers they need;
     - start nothing new at `kern.memorystatus_vm_pressure_level` ≥ 2 or under 25% free, and drop
       heavy resources to one at level 4 or under 10% free;
@@ -2616,6 +2655,76 @@ account, with `expect`, 68–69 live sessions.
 **All 15 spikes are done.** The corrections above are folded into the sections they affect: §6.5,
 §6.6, §6.7, §6.8, §7.1, §7.3, §7.7, §9 and §11.1, and with them §3, §6.2, §6.3, §6.9, §10.5,
 §14.16 and §16.
+
+**Step 3's acceptance probes (2026-10-23, Claude Code 2.1.310, `claude-haiku-5-5`).** Automated in
+`src-tauri/src/hive/probe.rs` as `#[ignore]` tests: `cargo test --lib hive::probe -- --ignored
+--nocapture`. Each one lays out a scratch Hive with the real `create_layout` (a scratch git repo as
+the primary folder, under the real temp dir's realpath, never `/tmp/claude-<uid>` or the repo),
+writes the launch record, and runs the code's own `settings.json`, `mcp.json` and launch line
+(`write_launch_files`, `hive_launch_args`, `hive_launch_line`) as `claude -p`, one tool call per
+run. The parent session's variables are removed, `MAITERM_PORT` names a closed port, and the hook
+script's port file names either a closed port or the probe's own listener, which answers
+`/hive/gate` with the real `gate::decide_event` and a SessionStart with the real
+`hive::session_started` and invariant rules. Nothing reached the installed maiTerm (no probe tab id
+in its log). All four pass:
+
+- **Spike 13, the restricted coordinator: passes, after two fixes to the generator and one to
+  the gate.**
+  - `init` shows `permissionMode: dontAsk` and exactly the tools `Bash, Edit, Glob, Grep, Read,
+    Write`. WebFetch and WebSearch aren't offered at all, so the model can't call them.
+  - `ls /`, a `cat` of a file outside its folders and `curl https://example.com` are all denied
+    by dontAsk ("Permission to use Bash has been denied…"). One run had the model add
+    `allowed_domains` to the curl; the sandbox refused that, because `strictAllowlist` makes the
+    configured list the whole list.
+  - `git -C <read copy> diff` returns the diff, and `git -C <copy> log --oneline -1` works.
+  - **The fix:** at first the bare `git -C <copy> diff` was denied. A trailing ` *` is optional
+    only in a pattern with no other wildcard: `Bash(git diff *)` allows a bare `git diff`, but
+    `Bash(git -C * diff *)` needs an argument after `diff`. The generator now also emits
+    `Bash(git -C * diff)`, `… log)` and `… show)` (§7.1). Quoted and unquoted paths both match.
+  - A Write outside home is refused by the gate ("outside the folders this agent may write"), and
+    the file never appears. A Write in home succeeds.
+  - `git -C <copy> remote -v` and `git -C <copy> push` are refused by the gate with its own
+    reasons, and both refusals land in `logs/gate.log`. The PreToolUse gate runs before
+    Claude's permission check: it saw every Bash call, including the ones dontAsk then denied.
+    In one run the model declined to push without making a call at all, citing the invariant
+    rules from the SessionStart priming. That shows the command hook's `prime=1` reply reaches
+    its context.
+  - **Git ran a command, until the second fix** (found in review, then probed:
+    `spike_13_git_runs_no_command_of_the_agents`). "Cannot run general Bash" didn't hold
+    through git. The `*` in `Bash(git -C * diff)` spans `-c core.fsmonitor=<cmd>`, and the gate
+    refused only `-c alias.*`, so `git -C <copy> -c core.fsmonitor='touch …' diff` ran the
+    `touch` inside the sandbox; `diff.external` and a repo written in home do the same. Now:
+    - With the real gate: the `-c core.fsmonitor` call, `git -C <home>/planted diff` (a repo
+      the probe planted with an fsmonitor) and a plain `git diff --stat` from home are all
+      refused by the gate, and no marker file appears.
+    - With the gate answering `allow` to everything, so only the generated rules decide: the
+      `-c core.fsmonitor` call and `git -C <copy> diff --no-index <outside file> /dev/null` are
+      denied by the new deny rules (`settings::GIT_ESCAPE_DENIES`). But the planted repo's
+      fsmonitor **ran**, through the `Bash(git -C * diff)` rule. And with the plain rules
+      removed as an experiment, `git diff --stat` from home still ran: Claude's own read-only
+      check allowed it with no rule. Which repo git runs in is therefore held by the gate
+      alone, which fails closed (§7.1).
+  - maiTerm's MCP server shows `failed` here, which is expected with the port closed. That MCP
+    works from a sandboxed coordinator was measured separately (`listWindows` over
+    `127.0.0.1:${MAITERM_PORT}` with `${MAITERM_AUTH}` expansion), so the probe doesn't call the
+    installed app.
+- **The gate fails closed: passes.** With nothing listening, `git -C <copy> push`, the ordinary
+  `git -C <copy> diff` and a Write in the coordinator's own home were all blocked with the
+  script's "the Hive gate fails closed" message. Write is on the gate's matcher, so **with
+  maiTerm down the coordinator can't write at all, its memory included**. That is the intended
+  trade.
+- **Spike 1 under dontAsk: passes, across a resume and a `/compact`.**
+  - A memory save went to `<hive>/memory/probe-codeword.md` (Claude's frontmatter format), with
+    no prompt and nothing in the account's per-project memory folder. The Write passed the gate,
+    whose write roots include `memory/`.
+  - The real SessionStart path recorded the session in `tasks/coordinator/sessions.json`. A
+    relaunch built from `last_session` (`--resume <sid>`, same session id) ran `/compact`, and
+    the stream showed a `compact_boundary`. A second save after that still landed in the Hive's
+    `memory/`, not in the per-repo default. So the builder re-passing `--settings` on every
+    launch closes §9's compaction leak.
+- **Still by hand** (they need an interactive tab): spike 2's trust dialog under a managed account
+  and after an account switch; `/memory` after suspend and resume, a maiTerm restart and a tab
+  reload; and hook events still arriving at a real maiTerm through those relaunches.
 
 ## 14. Decisions
 
@@ -2768,11 +2877,12 @@ several releases a day).
 
 ## 16. Build order
 
-1. Extract `ChatColumn` from `FocusView`; Loom unchanged. Ship alone.
+1. Extract `ChatColumn` from `FocusView`; Loom unchanged. Ship alone. **Built** (`b7116db0`).
 2. The `isStripHidden` / `isServiceTab` predicates replace the service-only checks (Rust + TS),
    sorted by the §5 call-site table. Narrowed to the swap itself: behaviour-neutral **for service
    tabs** only, since no `hive_role` tab exists yet; the Hive-specific answers (Loom, mesh,
    browser link, account-switch reload) land with the step that first creates Hive tabs.
+   **Built** (`dc2949ca`).
 3. Hive workspace: `Workspace.hive` (§3.2, landing mode fixed at creation), the sheet (folders,
    stack step, Tools detection for the Tools row), the Hive folder on disk, coordinator read
    copies, the hidden coordinator tab, `HiveView` with the coordinator column only. This step
@@ -2787,6 +2897,20 @@ several releases a day).
      table (§11.2) for Hive tabs; the engine's `hive_role` skip in place of `overlord_exempt`
      (§7.3).
    Not done until spikes 1, 2 and 13 (§13) pass.
+   **Built 2026-10-23**, in five parts:
+   - 3a `2e95b6b7`: the record, the folder on disk, trust writes and the lifecycle refusals;
+   - 3b `d474f767`: the launch builder, the settings, the command hooks and the fail-closed gate;
+   - 3c `7988a843`: every relaunch path through the builder, and the Hive answers;
+   - 3d `6e25debb`: the Create sheet, `hive_create` and `HiveView` with the coordinator column;
+   - 3e: the acceptance probes (`hive/probe.rs`).
+
+   Spikes 1 and 13 and the fail-closed gate pass as automated probes against the real generated
+   launch (§13.1). Spike 2's trust write is unit-tested against scratch account roots. Its
+   interactive half, the dialog under a managed account and after an account switch, is still
+   checked by hand, along with `/memory` across suspend, restart and reload.
+
+   **Downgrade:** an older build drops `Workspace.hive` and `hive_role` on save. The tabs come
+   back as ordinary shells with no resume command, and the Hive folder stays on disk.
 4. Workers: worktrees per folder, `--add-dir` (the gallery's included), setup, the role
    catalogue, fuses, `hiveSpawnWorker`/`hiveListWorkers`/`hiveReport`/`hiveRestartWorker`,
    static cards, `hiveOwnsPrompt` (§4.7; until `hiveAnswerWorker` ships in step 7 the

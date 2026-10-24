@@ -3,7 +3,8 @@
 //! the hook script those hooks run.
 //!
 //! The coordinator's settings are the set that passed spike 13 plus the two additions it named
-//! (maiTerm's MCP tools, each by name, and `git -C` rules). Each layer covers another's gap: every path
+//! (maiTerm's MCP tools, each by name, and `git -C` rules), and the git option denies those
+//! rules turned out to need (`GIT_ESCAPE_DENIES`). Each layer covers another's gap: every path
 //! on the sandbox's `denyWrite` has a `Write(//…)`/`Edit(//…)` deny rule and the reverse, since
 //! the Write tool ignores the sandbox and an Edit deny alone let `python3 -c open(…)` through
 //! (spikes 10, 14).
@@ -62,6 +63,22 @@ const PUSH_DENIES: &[&str] = &[
     "Bash(git send-pack*)",
     "Bash(git remote*)",
     "Bash(gh pr merge*)",
+];
+
+/// The `*` in `git -C * diff` spans any global option, so a config value that runs a command
+/// rode a review rule: `git -C <copy> -c core.fsmonitor=<cmd> diff` ran `<cmd>` (the 3e review).
+/// The gate refuses these too (`gate::check_git`); these hold them with the gate answering allow.
+const GIT_ESCAPE_DENIES: &[&str] = &[
+    "Bash(git -c *)",
+    "Bash(git * -c *)",
+    "Bash(git *--config-env*)",
+    "Bash(git *--exec-path=*)",
+    "Bash(git *--git-dir*)",
+    "Bash(git *--work-tree*)",
+    "Bash(git *--ext-diff*)",
+    "Bash(git *--textconv*)",
+    "Bash(git *--output*)",
+    "Bash(git *--no-index*)",
 ];
 
 /// The maiTerm tools the coordinator is allowed, by name (§7.1: hive, gallery, task, notes). Never
@@ -233,16 +250,24 @@ pub fn hive_settings_json(hive: &Hive, record: &LaunchRecord, paths: &HivePaths,
     let deny = deny_write_paths(hive, paths, &hooks.bin_dir);
     let mcp = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
 
+    // Plain `git diff` from home would find only a repo the agent wrote, whose config runs a
+    // command; Claude allows its read-only git verbs with no rule at all (the 3e probe), so it's
+    // the gate that refuses git outside the read copies, not the absence of these.
     let mut allow: Vec<String> = ["Bash(git diff *)", "Bash(git log *)", "Bash(git show *)"].map(String::from).to_vec();
-    // Its cwd is home, not a repo, so a review names the copy (§7.1).
-    allow.extend(["Bash(git -C * diff *)", "Bash(git -C * log *)", "Bash(git -C * show *)"].map(String::from));
+    // Its cwd is home, not a repo, so a review names the copy (§7.1). A trailing ` *` is optional
+    // only in a pattern with no other wildcard: `git -C * diff *` refused a bare
+    // `git -C <copy> diff` (the 3e probe), so each verb also gets its bare form.
+    for verb in ["diff", "log", "show"] {
+        allow.push(format!("Bash(git -C * {verb})"));
+        allow.push(format!("Bash(git -C * {verb} *)"));
+    }
     allow.push(abs_rule("Write", &home, true));
     allow.push(abs_rule("Edit", &home, true));
     // dontAsk denies every tool not listed, maiTerm's own included.
     allow.extend(COORDINATOR_MCP_TOOLS.iter().map(|t| format!("mcp__{mcp}__{t}")));
 
     let mut deny_rules: Vec<String> = vec!["WebFetch".into(), "WebSearch".into()];
-    deny_rules.extend(PUSH_DENIES.iter().map(|s| s.to_string()));
+    deny_rules.extend(PUSH_DENIES.iter().chain(GIT_ESCAPE_DENIES).map(|s| s.to_string()));
     deny_rules.extend(ESCAPE_MCP_TOOLS.iter().map(|t| format!("mcp__{mcp}__{t}")));
     for d in &deny {
         deny_rules.push(abs_rule("Write", &d.path, d.dir));
@@ -382,10 +407,14 @@ mod tests {
         let s = settings();
         let allow = strings(&s["permissions"]["allow"]);
         let deny = strings(&s["permissions"]["deny"]);
-        for r in ["Bash(git diff *)", "Bash(git -C * show *)", "WebFetch", "WebSearch", "Bash(git * push*)", "Bash(git remote*)", "Bash(gh pr merge*)"] {
+        for r in ["Bash(git diff *)", "Bash(git -C * show *)", "Bash(git -C * diff)", "Bash(git -C * log)", "WebFetch", "WebSearch", "Bash(git * push*)", "Bash(git remote*)", "Bash(gh pr merge*)"] {
             assert!(allow.contains(&r.to_string()) || deny.contains(&r.to_string()), "{r}");
         }
         assert!(deny.contains(&"WebFetch".to_string()) && !allow.contains(&"WebFetch".to_string()));
+        // A review rule's `*` spans `-c core.fsmonitor=<cmd>`; the denies take it back.
+        for r in ["Bash(git * -c *)", "Bash(git -c *)", "Bash(git *--config-env*)", "Bash(git *--ext-diff*)", "Bash(git *--no-index*)", "Bash(git *--output*)"] {
+            assert!(deny.contains(&r.to_string()), "{r}");
+        }
         let mcp = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
         assert!(allow.contains(&format!("mcp__{mcp}__listTasks")));
         // Named tools only: a server wildcard hands it createService + startService, a command
