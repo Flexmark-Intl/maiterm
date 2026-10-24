@@ -361,6 +361,32 @@ pub fn settle(app: &AppHandle, id: &str, ok: bool, outcome: String) -> Option<Ag
     Some(r)
 }
 
+/// Every request those tabs filed that hasn't settled ends as failed, with `why` (their Hive was
+/// deleted, docs/hive.md §11.2): nothing is left on a card for an approval no one can carry out.
+pub fn fail_for_tabs(app: &AppHandle, tab_ids: &[String], why: &str) -> usize {
+    let failed = fail_open(&mut REQUESTS.lock(), tab_ids, why, now_ms());
+    for r in &failed {
+        log::info!("[requests] {} failed ({}): {why}", r.kind, r.id);
+        let _ = app.emit("agent-request-settled", r);
+    }
+    if !failed.is_empty() {
+        changed(app);
+    }
+    failed.len()
+}
+
+fn fail_open(list: &mut [AgentRequest], tab_ids: &[String], why: &str, now: u64) -> Vec<AgentRequest> {
+    list.iter_mut()
+        .filter(|r| tab_ids.contains(&r.tab_id) && (r.status == "pending" || r.status == "approved"))
+        .map(|r| {
+            r.status = "failed".into();
+            r.decided_at.get_or_insert(now);
+            r.outcome = Some(why.to_string());
+            r.clone()
+        })
+        .collect()
+}
+
 // ── Tauri commands ───────────────────────────────────────────────────────────────────────────
 // `file_agent_request` is called by the frontend's tool handler; the agent's words reach it only
 // as `reason`. `decide_agent_request` is the human's click. No MCP tool maps to either.
@@ -450,6 +476,21 @@ mod tests {
         assert_eq!(l[0].status, "approved");
         sweep(&mut l, APPROVED_TTL_MS);
         assert_eq!(l[0].status, "failed");
+    }
+
+    #[test]
+    fn a_deleted_hives_open_requests_fail_and_nothing_else_moves() {
+        let mut l = vec![
+            AgentRequest { id: "a".into(), ..req("pending", 0, None) },
+            AgentRequest { id: "b".into(), ..req("approved", 0, Some(5)) },
+            AgentRequest { id: "c".into(), ..req("denied", 0, Some(5)) },
+            AgentRequest { id: "d".into(), tab_id: "other".into(), ..req("pending", 0, None) },
+        ];
+        let failed = fail_open(&mut l, &["t".to_string()], "its Hive was deleted", 9);
+        assert_eq!(failed.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(l.iter().map(|r| r.status.as_str()).collect::<Vec<_>>(), vec!["failed", "failed", "denied", "pending"]);
+        assert_eq!((l[0].decided_at, l[1].decided_at), (Some(9), Some(5)));
+        assert_eq!(l[0].outcome.as_deref(), Some("its Hive was deleted"));
     }
 
     #[test]

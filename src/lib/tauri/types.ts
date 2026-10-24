@@ -682,8 +682,8 @@ export interface HiveWorkerCard {
   task_id: string;
   tab_id?: string | null;
   role: string;
-  /** "waiting" | "launching" | "running" | "blocked" | "reported" | "failed" | "stopped", or a
-   *  phase a newer build wrote. */
+  /** "waiting" | "launching" | "running" | "blocked" | "reported" | "failed" | "stopped" |
+   *  "landing" | "landed" | "retired", or a phase a newer build wrote. */
   phase: string;
   wait_reason?: string | null;
   /** Task ids it waits on. */
@@ -696,6 +696,48 @@ export interface HiveWorkerCard {
   last_report?: HiveWorkerReport | null;
   created_at: string;
   launched_at?: string | null;
+  /** How it left, once it has (docs/hive.md §8.4): its column reads its recorded sessions. */
+  retired?: HiveRetired | null;
+  /** A land of its was undone (§8.6). */
+  undone?: boolean;
+}
+
+/** hive/worker.rs `Retired`. */
+export interface HiveRetired {
+  reason: string;
+  at: string;
+  /** What stayed on disk, one line each, with why. */
+  kept: string[];
+  /** The commit its land left the target at. */
+  landed?: string | null;
+}
+
+/** hive/delete.rs `HiveDeletePreview`: what the delete sheet lists before anything is touched. */
+export interface HiveDeletePreview {
+  unlanded: { worker: string; folder: string; branch: string; target?: string | null; ahead: number }[];
+  /** Worktrees that would stay, each with why. */
+  dirty: string[];
+  scratch: { worker: string; path: string; files: number; reported: number }[];
+  gallery_files: number;
+  gallery_bytes: number;
+  live_agents: string[];
+  /** While any worker is landing, delete is refused. */
+  lands_in_flight: string[];
+  /** Every branch the Hive made: all kept. */
+  branches: string[];
+}
+
+/** hive/delete.rs `HiveDeleteResult`. */
+export interface HiveDeleteResult {
+  worktrees_removed: number;
+  kept: string[];
+  branches: string[];
+  gallery_kept: boolean;
+  trust_removed: number;
+  requests_failed: number;
+  folder_left?: string | null;
+  dropped_tabs: string[];
+  active_tabs: { pane_id: string; tab_id?: string | null }[];
 }
 
 export interface HiveHeadroom {

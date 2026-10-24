@@ -1587,6 +1587,7 @@ function createStackStore() {
     startJob,
     stopJob,
     cleanupJobs,
+    forgetJob,
 
     /** Every `auto_start` service's own folder, serially, in list order. */
     async startStack(workspaceId: string): Promise<void> {

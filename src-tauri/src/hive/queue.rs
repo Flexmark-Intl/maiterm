@@ -1071,6 +1071,11 @@ pub fn retire_worker(task_id: &str, why: &str) -> usize {
     n
 }
 
+/// A worker's finished job tabs, taken: its Hive is being deleted, which closes them itself.
+pub fn take_old_tabs(task_id: &str) -> Vec<OldTab> {
+    queue().take_old_tabs(task_id)
+}
+
 pub fn job(id: &str) -> Option<Job> {
     queue().job(id).cloned()
 }
@@ -1497,6 +1502,11 @@ fn cleanup(d: &'static Driver, window: &str, workspace_id: &str, what: Value) {
     });
 }
 
+/// Whether a workspace still holds this Hive.
+fn hive_held(app: &AppState, hive_id: &str) -> bool {
+    app.app_data.read().windows.iter().flat_map(|w| w.workspaces.iter()).any(|ws| ws.hive.as_ref().is_some_and(|h| h.id == hive_id))
+}
+
 fn spawn_finish(e: Ended) {
     let Some(d) = DRIVER.get() else { return };
     tauri::async_runtime::spawn(finish(d, e));
@@ -1512,11 +1522,16 @@ async fn finish(d: &'static Driver, e: Ended) {
     let tail = super::run::screen_tail(&d.app, job.pty_id.as_deref());
     set_row(&d.app, &job, None);
     crate::stack::ports::release(&job.id);
-    let logged = job.clone();
+    let (logged, app) = (job.clone(), d.app.clone());
     // A pass is checked against the worktree as it is now before it is logged as one.
     let wrote = tauri::async_runtime::spawn_blocking(move || {
         let mut logged = logged;
         let res = match super::paths::hive_root(&logged.hive_id) {
+            // A job its Hive's delete released: its line would make the deleted folder again.
+            Some(_) if !hive_held(&app, &logged.hive_id) => {
+                log::info!("hive queue: {} not logged: its Hive was deleted", logged.id);
+                Ok(())
+            }
             Some(root) => {
                 let paths = HivePaths::new(root);
                 super::run::recheck_tree(&paths, &mut logged);

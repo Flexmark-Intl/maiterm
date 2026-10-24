@@ -629,6 +629,18 @@ function createWorkspacesStore() {
       if (ws?.hive && ws.hive.id === hive.id) ws.hive = hive;
     },
 
+    /** A deleted Hive (docs/hive.md §11.2), as Rust saved it: the workspace is an ordinary one, and
+     *  each pane's active tab is the one Rust healed to. Its tabs already left with `hive.delete`. */
+    applyHiveDeleted(workspaceId: string, activeTabs: { pane_id: string; tab_id?: string | null }[]) {
+      const ws = workspaces.find(w => w.id === workspaceId);
+      if (!ws) return;
+      ws.hive = null;
+      for (const a of activeTabs) {
+        const pane = ws.panes.find(p => p.id === a.pane_id);
+        if (pane) pane.active_tab_id = a.tab_id ?? null;
+      }
+    },
+
     async suspendWorkspace(workspaceId: string) {
       const ws = workspaces.find(w => w.id === workspaceId);
       if (!ws || ws.suspended) return;
@@ -2552,6 +2564,21 @@ function createWorkspacesStore() {
         if (pane.active_tab_id === tabId) pane.active_tab_id = null;
       }
       import('$lib/stores/navHistory.svelte').then(m => m.navHistoryStore.removeTab(tabId)).catch(() => {});
+    },
+
+    /** A deleted Hive's run-queue job tab leaves the mirror, killing its PTY; Rust has already
+     *  taken it out of its state. Only a tab bound to a job id goes. Answers that job id. */
+    dropJobTab(workspaceId: string, tabId: string): string | null {
+      const ws = workspaces.find(w => w.id === workspaceId);
+      let jobId: string | null = null;
+      for (const pane of ws?.panes ?? []) {
+        const tab = pane.tabs.find(t => t.id === tabId && /^j-[0-9a-f]{8}$/.test(t.service_id ?? ''));
+        if (!tab) continue;
+        jobId = tab.service_id ?? null;
+        pane.tabs = pane.tabs.filter(t => t.id !== tabId);
+        if (pane.active_tab_id === tabId) pane.active_tab_id = null;
+      }
+      return jobId;
     },
 
     async duplicateTab(workspaceId: string, paneId: string, tabId: string, opts?: { shallow?: boolean; reload?: boolean }) {

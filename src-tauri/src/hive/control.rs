@@ -15,7 +15,7 @@ use super::worker::{self, WorkerRecord};
 use crate::state::Task;
 
 /// The worker an argument names, from the records on disk.
-async fn named_worker(caller: &Caller, args: &Value) -> Result<WorkerRecord, String> {
+pub(crate) async fn named_worker(caller: &Caller, args: &Value) -> Result<WorkerRecord, String> {
     let name = match args.get("worker") {
         Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
         Some(Value::Number(n)) => format!("#{n}"),

@@ -257,6 +257,37 @@ pub fn remove_trust(hive: &HivePaths, path: &Path) -> Result<usize, String> {
     Ok(changed)
 }
 
+/// Every recorded write still standing, as `(key, file)`.
+pub fn written_entries(hive: &HivePaths) -> Vec<(String, String)> {
+    load_record(hive).written.into_iter().map(|w| (w.key, w.file)).collect()
+}
+
+/// Every key maiTerm recorded writing for this Hive, once each.
+pub fn written_keys(hive: &HivePaths) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in load_record(hive).written {
+        if !out.contains(&w.key) {
+            out.push(w.key);
+        }
+    }
+    out
+}
+
+/// `remove_trust` for every key in the record (a deleted Hive, §11.2). Returns how many root
+/// entries changed; a key that couldn't be undone stays recorded and is logged.
+pub fn remove_all_trust(hive: &HivePaths) -> usize {
+    written_keys(hive)
+        .iter()
+        .map(|k| match remove_trust(hive, Path::new(k)) {
+            Ok(n) => n,
+            Err(e) => {
+                log::warn!("hive: trust for {k} not removed: {e}");
+                0
+            }
+        })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

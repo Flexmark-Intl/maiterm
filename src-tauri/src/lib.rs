@@ -1170,6 +1170,9 @@ pub fn run() {
             hive::fuses::hive_resume,
             hive::tools::hive_live_worker_tabs,
             hive::tools::hive_workers,
+            hive::retire::get_task_transcript,
+            hive::delete::hive_delete_preview,
+            hive::delete::hive_delete,
             hive::diffstat::hive_diff_stats,
             hive::feed::hive_worker_metas,
             #[cfg(debug_assertions)]

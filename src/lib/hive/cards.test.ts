@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cardAge, cardState, latestNote, onScreenAgent, sortCards, stateLine, STATE_ORDER, waves } from './cards';
+import { cardAge, cardState, isRetired, latestNote, onScreenAgent, retiredLine, sortCards, stateLine, STATE_ORDER, waves } from './cards';
 import type { HiveWorkerCard, TaskBlocker } from '$lib/tauri/types';
 
 const worker = (over: Partial<HiveWorkerCard> = {}): HiveWorkerCard => ({
@@ -93,7 +93,36 @@ describe('cardState', () => {
   });
 
   it('a phase from a newer build shows as itself', () => {
-    expect(cardState(worker({ phase: 'landing' }), null, idle, null)).toMatchObject({ state: 'idle', sub: 'landing' });
+    expect(cardState(worker({ phase: 'reviewing' }), null, idle, null)).toMatchObject({ state: 'idle', sub: 'reviewing' });
+  });
+
+  it('landing reads Landing even while its agent works, and still needs you for a prompt', () => {
+    expect(cardState(worker({ phase: 'landing' }), null, active, null)).toMatchObject({ state: 'landing', order: 7 });
+    expect(cardState(worker({ phase: 'landing' }), null, { state: 'permission' }, null).state).toBe('needs_you');
+  });
+
+  it('landed and retired: no agent read, the retirement reason and the undone qualifier shown', () => {
+    const retired = { reason: 'Wrong approach', at: 'now', kept: [] };
+    const r = cardState(worker({ phase: 'retired', tab_id: null, retired }), null, { state: 'permission' }, null);
+    expect([r.state, r.order, r.sub]).toEqual(['retired', 11, 'Wrong approach']);
+    const l = cardState(worker({ phase: 'landed', tab_id: null, undone: true }), null, active, null);
+    expect([l.state, l.order, stateLine(l)]).toEqual(['landed', 10, 'Landed · undone']);
+    expect(stateLine(cardState(worker({ phase: 'landed' }), null, null, null))).toBe('Landed');
+    expect(cardState(worker({ phase: 'retired' }), { status: 'blocked', blocker: blocker('action') }, null, null).state).toBe('needs_you');
+  });
+});
+
+describe('retired workers', () => {
+  it('only landed and retired read their recorded sessions', () => {
+    for (const phase of ['landed', 'retired']) expect(isRetired({ phase })).toBe(true);
+    for (const phase of ['stopped', 'failed', 'waiting', 'landing']) expect(isRetired({ phase })).toBe(false);
+  });
+
+  it('the column says how it left', () => {
+    expect(retiredLine({ phase: 'landed', retired: { reason: 'landed', at: 'now', kept: [], landed: 'a1b2c3d4e5f6' } })).toBe('Retired · landed a1b2c3d');
+    expect(retiredLine({ phase: 'landed', retired: null, undone: true })).toBe('Retired · landed · undone');
+    expect(retiredLine({ phase: 'retired', retired: { reason: 'Wrong approach', at: 'now', kept: [] } })).toBe('Retired · Wrong approach');
+    expect(retiredLine({ phase: 'retired' })).toBe('Retired');
   });
 });
 
@@ -101,8 +130,9 @@ describe('onScreenAgent', () => {
   it('only a live, unsuspended worker has an agent to read', () => {
     expect(onScreenAgent('running', active, null)).toBe(active);
     expect(onScreenAgent('reported', active, { suspended: false })).toBe(active);
+    expect(onScreenAgent('landing', active, null)).toBe(active);
     expect(onScreenAgent('running', active, { suspended: true })).toBeNull();
-    for (const phase of ['waiting', 'stopped', 'failed', 'landing']) expect(onScreenAgent(phase, active, null)).toBeNull();
+    for (const phase of ['waiting', 'stopped', 'failed', 'landed', 'retired']) expect(onScreenAgent(phase, active, null)).toBeNull();
     expect(onScreenAgent('running', undefined, null)).toBeNull();
   });
 });

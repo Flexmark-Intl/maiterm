@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { makeTask } from '$lib/tasks/model';
 import type { ChatTurn } from '$lib/tauri/commands';
 import type { Task } from '$lib/tauri/types';
-import { chatRows, decisionsQueue, injectedTurn, focusSections, focusSince, isQuiet, loomAgents, QUIET_MS, summarize, taskEventsFor, toolVerb, unexplainedBlocked } from './model';
+import { chatKey, chatRows, decisionsQueue, injectedTurn, focusSections, focusSince, isQuiet, loomAgents, QUIET_MS, summarize, taskEventsFor, toolVerb, unexplainedBlocked } from './model';
 
 const NOW = Date.parse('2026-09-27T18:00:00Z');
 const task = (over: Partial<Task> = {}): Task => ({ ...makeTask({ title: over.title ?? 't' }, '2026-09-27T17:00:00Z'), ...over });
@@ -213,5 +213,19 @@ describe('Focus', () => {
     const s = focusSections([chat('gone', { state: null })], NOW, 'gone');
     expect(s.recent.map((c) => c.tabId)).toEqual(['gone']);
     expect(focusSections([chat('gone', { state: null })], NOW).recent).toEqual([]);
+  });
+});
+
+describe('chat sources', () => {
+  it('a tab is keyed by its own id, as the Loom always was; a retired worker by its Hive and task', () => {
+    expect(chatKey({ kind: 'tab', tabId: 't1' })).toBe('t1');
+    expect(chatKey({ kind: 'retired', hiveId: 'h1', taskId: 'task-9' })).toBe('retired:h1:task-9');
+    expect(chatKey(null)).toBeNull();
+  });
+
+  it('a session divider is an ordinary turn row, never folded into a tool run', () => {
+    const turn = (msg_id: string, role: ChatTurn['role'], ts: number, kind?: ChatTurn['kind']): ChatTurn => ({ msg_id, role, text: msg_id, ts, kind });
+    const rows = chatRows([turn('a', 'tool', 1), turn('session:s2', 'system', 2, 'session_divider'), turn('b', 'tool', 3)]);
+    expect(rows.map((r) => r.kind)).toEqual(['tools', 'turn', 'tools']);
   });
 });

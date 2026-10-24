@@ -3,7 +3,7 @@ import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { StackHeldAction, StackLeaseState } from './types';
-import type { Hive, HiveBoard, HiveCreated, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HivePreflight, HiveSpec, RunQueueSettings } from './types';
+import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HivePreflight, HiveSpec, RunQueueSettings } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
@@ -525,7 +525,8 @@ export async function trustDialogOpen(tabId: string): Promise<boolean> {
 export interface ChatTurn {
   msg_id: string;
   role: 'agent' | 'user' | 'system' | 'tool';
-  kind?: 'terminal_snapshot' | 'peer_message' | 'goal_status' | 'asset';
+  /** `session_divider`: between two sessions of a retired Hive worker's chat. */
+  kind?: 'terminal_snapshot' | 'peer_message' | 'goal_status' | 'asset' | 'session_divider';
   text: string;
   /** unix ms */
   ts: number;
@@ -2816,4 +2817,21 @@ export async function hiveResume(workspaceId: string): Promise<Hive> {
  *  Rust. Answers the Hive as saved; the window's mirror also follows `hive-changed`. */
 export async function hiveSetRunQueue(workspaceId: string, runQueue: RunQueueSettings): Promise<Hive> {
   return invoke('hive_set_run_queue', { workspaceId, runQueue });
+}
+
+/** A retired Hive worker's chat (docs/hive.md §4.2, §8.4): the sessions Rust recorded for its task,
+ *  in order, a `session_divider` turn between them. Never a path from here. */
+export async function getTaskTranscript(hiveId: string, taskId: string): Promise<ChatTurn[]> {
+  return invoke('get_task_transcript', { hiveId, taskId });
+}
+
+/** What deleting the Hive would keep and stop (docs/hive.md §11.2), before anything is touched. */
+export async function hiveDeletePreview(workspaceId: string): Promise<HiveDeletePreview> {
+  return invoke('hive_delete_preview', { workspaceId });
+}
+
+/** Delete the Hive: the human's click on the delete sheet. Clean worktrees go, dirty ones and every
+ *  branch stay, the gallery stays unless `deleteGallery`. */
+export async function hiveDelete(workspaceId: string, deleteGallery: boolean): Promise<HiveDeleteResult> {
+  return invoke('hive_delete', { workspaceId, deleteGallery });
 }

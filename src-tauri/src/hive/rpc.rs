@@ -26,6 +26,10 @@ pub(crate) const VERB_UNSPAWN: &str = "hive.unspawn";
 pub(crate) const VERB_TASK: &str = "hive.task";
 /// A worker's agent relaunched in its own tab: typed at an empty prompt, or the tab mounted.
 pub(crate) const VERB_RELAUNCH: &str = "hive.relaunch";
+/// A worker retired (§8.4): its tab dropped (the PTY with it) and its row's status set, the row kept.
+pub(crate) const VERB_RETIRE: &str = "hive.retire";
+/// A Hive deleted (§11.2): every Hive tab dropped and the rows' tabs cleared, the rows kept.
+pub(crate) const VERB_DELETE: &str = "hive.delete";
 /// A queued job's hidden tab minted and its line typed through the stack's guard (§6.8),
 /// answered once the shell's own B for that line is seen.
 pub(crate) const VERB_JOB_START: &str = "stack.job.start";
@@ -52,6 +56,11 @@ pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     /// A worker's files may have changed outside its own hooks (an accepted report): its diff
     /// stat recomputes, debounced. A test window has no board to push to.
     fn diff_stat_touch(&self, _caller: &super::tools::Caller, _task_id: &str) {}
+    /// Agent requests the Hive's tabs filed and no one carried out end as failed (a deleted Hive
+    /// can't land or undo anything). How many. A test window files none.
+    fn fail_requests(&self, _tab_ids: &[String], _why: &str) -> usize {
+        0
+    }
 }
 
 pub(crate) use super::deliver::Sent;
@@ -133,6 +142,10 @@ impl HiveWindow for AppWindow {
 
     fn diff_stat_touch(&self, caller: &super::tools::Caller, task_id: &str) {
         super::diffstat::touch(&self.handle, caller, task_id);
+    }
+
+    fn fail_requests(&self, tab_ids: &[String], why: &str) -> usize {
+        crate::agent_requests::fail_for_tabs(&self.handle, tab_ids, why)
     }
 }
 

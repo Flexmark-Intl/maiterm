@@ -36,8 +36,15 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The Hive tools built so far: what `tools/list` offers each role and the handler answers.
 /// The rest of the coordinator's (settings' `COORDINATOR_MCP_TOOLS`) are refused as not yet here.
-pub const COORDINATOR_TOOLS: [&str; 6] =
-    ["hiveSpawnWorker", "hiveListWorkers", "hiveMessageWorker", "hiveStopWorker", "hiveRestartWorker", "hiveRunPriority"];
+pub const COORDINATOR_TOOLS: [&str; 7] = [
+    "hiveSpawnWorker",
+    "hiveListWorkers",
+    "hiveMessageWorker",
+    "hiveStopWorker",
+    "hiveRestartWorker",
+    "hiveRunPriority",
+    "hiveRetireWorker",
+];
 pub const WORKER_TOOLS: [&str; 2] = ["hiveReport", "hiveRun"];
 /// A worker's own Hive tools (§7.2), some built by later steps; the coordinator's are refused to it.
 const WORKER_HIVE_TOOLS: [&str; 3] = ["hiveReport", "hiveRun", "hiveVerdict"];
@@ -233,7 +240,7 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
             "required": ["worker"]
         }
     });
-    vec![spawn, list, message, stop, restart, super::run::priority_tool_definition(&tab_id)]
+    vec![spawn, list, message, stop, restart, super::run::priority_tool_definition(&tab_id), super::retire::tool_definition(&tab_id)]
 }
 
 /// The coordinator a tool call comes from, with its Hive, cloned out of the state lock.
@@ -371,10 +378,11 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         "hiveReport" => super::report::report(&ctx, &caller, args).await,
         "hiveRun" => super::run::run_tool(&ctx, &caller, args).await,
         "hiveRunPriority" => super::run::priority_tool(&caller, args).await,
+        "hiveRetireWorker" => super::retire::retire_tool(&ctx, &caller, args).await,
         t => Err(format!("{t} isn't available in this build of maiTerm yet.")),
     };
     // A worker's phase changed: a freed slot or a failed dependency is news to the waiters.
-    if res.is_ok() && matches!(tool, "hiveStopWorker" | "hiveReport" | "hiveRestartWorker") {
+    if res.is_ok() && matches!(tool, "hiveStopWorker" | "hiveReport" | "hiveRestartWorker" | "hiveRetireWorker") {
         super::waiters::poll_soon(state.clone(), handle.clone(), caller.workspace_id.clone());
     }
     res.unwrap_or_else(|e| {
@@ -632,7 +640,7 @@ struct Rows {
     new_workstream: Option<String>,
 }
 
-fn workspace_mut<'a>(data: &'a mut AppData, caller: &Caller) -> Result<&'a mut crate::state::Workspace, String> {
+pub(crate) fn workspace_mut<'a>(data: &'a mut AppData, caller: &Caller) -> Result<&'a mut crate::state::Workspace, String> {
     data.window_mut(&caller.label)
         .and_then(|w| w.workspaces.iter_mut().find(|ws| ws.id == caller.workspace_id))
         .filter(|ws| ws.hive.as_ref().is_some_and(|h| h.id == caller.hive.id))
@@ -711,7 +719,7 @@ fn restore_rows(data: &RwLock<AppData>, caller: &Caller, rows: &Rows, was: &Task
     drop_tab(ws, rows.tab_id.as_deref());
 }
 
-fn drop_tab(ws: &mut crate::state::Workspace, tab: Option<&str>) {
+pub(crate) fn drop_tab(ws: &mut crate::state::Workspace, tab: Option<&str>) {
     let Some(tab) = tab else { return };
     for p in &mut ws.panes {
         p.tabs.retain(|t| t.id != tab);
@@ -1118,6 +1126,9 @@ pub struct WorkerCard {
     pub last_report: Option<worker::WorkerReport>,
     pub created_at: String,
     pub launched_at: Option<String>,
+    /// How it left, once it has (§8.4): its column reads its recorded sessions then.
+    pub retired: Option<worker::Retired>,
+    pub undone: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -1191,6 +1202,8 @@ pub(crate) fn board_view(hive: &Hive, paths: &HivePaths, fuses: &Fuses, now: i64
             last_report: w.last_report.clone(),
             created_at: w.created_at.clone(),
             launched_at: w.launched_at.clone(),
+            retired: w.retired.clone(),
+            undone: w.undone,
         })
         .collect();
     let h = fuses.headroom(hive, &live, now);
@@ -1234,6 +1247,7 @@ pub(crate) fn list_view(hive: &Hive, paths: &HivePaths, tasks: &[Task], fuses: &
                 "model": c.model,
                 "effort": c.effort,
                 "last_report": c.last_report,
+                "retired": c.retired,
             })
         })
         .collect();
@@ -2567,5 +2581,292 @@ mod tests {
         assert!(crate::hive::events::mark_failed(&ctx, &rig.caller, &tab, "its terminal closed").await);
         assert_eq!(rig.record(&w.task_id).phase, worker::PHASE_FAILED);
         assert!(rig.delivered().iter().any(|(to, t)| to == "coord" && t.contains("its terminal closed")));
+    }
+
+    // ── Retirement and deleting a Hive (6a) ──
+
+    impl Rig {
+        /// A workspace id of the test's own: the run queue is the app's, and a delete parks it.
+        fn own_workspace(&mut self) {
+            let id = format!("ws-{}", uuid::Uuid::new_v4());
+            self.data.write().windows[0].workspaces[0].id = id.clone();
+            self.caller.workspace_id = id;
+        }
+
+        fn worktree(&self, w: &WorkerRecord, folder: &str) -> PathBuf {
+            PathBuf::from(w.folders.iter().find(|f| f.name == folder).unwrap().worktree.clone().unwrap())
+        }
+
+        fn retire(&self, worker: Value) -> impl std::future::Future<Output = Result<Value, String>> + '_ {
+            async move {
+                let ctx = self.ctx(accept, ok_save, ok_preflight);
+                crate::hive::retire::retire_tool(&ctx, &self.caller, &json!({ "worker": worker, "reason": "Wrong approach" })).await
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_retired_worker_keeps_dirty_worktrees_and_every_branch_and_its_row() {
+        let rig = Rig::new("retire", 4);
+        let w = rig.spawn(accept, args("Login API")).await.map(|_| worker::list_workers(&rig.caller.paths).pop().unwrap()).unwrap();
+        let tab = w.tab_id.clone().unwrap();
+        let (web, api) = (rig.worktree(&w, "web"), rig.worktree(&w, "api"));
+        // web: committed work and nothing else (clean); api: an untracked file.
+        git(&web, &["commit", "-q", "--allow-empty", "--no-verify", "-m", "work"]);
+        fs::write(api.join("draft.rs"), "x").unwrap();
+        fs::write(rig.caller.paths.worker_scratch(&w.slug).join("render.png"), "png").unwrap();
+        let target = rig.caller.paths.worker_cargo_target(&w.slug);
+        fs::create_dir_all(target.join("debug")).unwrap();
+
+        // Still working: refused, nothing touched.
+        rig.set_front(&tab, Front::Job);
+        let e = rig.retire(json!(1)).await.unwrap_err();
+        assert!(e.contains("hiveStopWorker"), "{e}");
+        assert!(web.is_dir() && rig.record(&w.task_id).retired.is_none());
+
+        rig.set_phase(&w.task_id, worker::PHASE_REPORTED);
+        let out = rig.retire(json!(1)).await.unwrap();
+        assert_eq!((out["phase"].as_str(), out["task"].as_str()), (Some("retired"), Some("dropped")));
+        assert_eq!(rig.agents.lock().unwrap().stopped, vec![tab.clone()], "its agent got SIGTERM first");
+        assert_eq!(out["worktrees_removed"], json!(["web"]));
+        assert!(!web.exists(), "a clean worktree goes");
+        assert!(api.join("draft.rs").is_file(), "untracked work stays");
+        assert!(!target.exists(), "its cargo target is a cache");
+        let kept = out["kept"].as_array().unwrap();
+        assert!(kept.iter().any(|k| k.as_str().unwrap().starts_with("api: ") && k.as_str().unwrap().contains("untracked")), "{kept:?}");
+        assert!(kept.iter().any(|k| k.as_str().unwrap().starts_with("scratch: ")), "{kept:?}");
+        for r in [&rig.web, &rig.api] {
+            assert_eq!(git(r, &["branch", "--list", "hive/ship--login-api"]).trim_start_matches(['*', '+', ' ']), "hive/ship--login-api", "the branch stays");
+        }
+
+        let rec = rig.record(&w.task_id);
+        assert_eq!((rec.phase.as_str(), rec.tab_id.as_ref()), (worker::PHASE_RETIRED, None));
+        assert_eq!(rec.retired.as_ref().unwrap().kept.len(), 2);
+        let ws = rig.ws();
+        assert!(!ws.panes[0].tabs.iter().any(|t| t.id == tab), "its tab is dropped");
+        let row = ws.tasks.iter().find(|t| t.id == w.task_id).expect("its row is kept as history");
+        assert_eq!(row.status, "dropped");
+        assert!(row.notes.last().unwrap().text.contains("Retired by the coordinator: Wrong approach"));
+        let sent = rig.calls_of(rpc::VERB_RETIRE).pop().unwrap();
+        assert_eq!((sent["tab_id"].as_str(), sent["status"].as_str()), (Some(tab.as_str()), Some("dropped")));
+        assert_eq!(rig.headroom().live, 0, "a retired worker holds no slot");
+        let card = board_view(&rig.caller.hive, &rig.caller.paths, rig.fuses, crate::hive::fuses::now_ms(), false).workers.pop().unwrap();
+        assert!(card.retired.is_some() && card.tab_id.is_none());
+
+        let e = rig.retire(json!(1)).await.unwrap_err();
+        assert!(e.contains("already retired"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_forged_git_file_keeps_the_worktree_and_git_never_runs_there() {
+        let rig = Rig::new("retire-forged", 4);
+        let w = rig.worker("One").await;
+        let wt = rig.worktree(&w, "web");
+        git(&rig.base, &["init", "-q", "fake"]);
+        let forged = format!("gitdir: {}\n", rig.base.join("fake/.git").display());
+        fs::write(wt.join(".git"), &forged).unwrap();
+        rig.set_phase(&w.task_id, worker::PHASE_STOPPED);
+        let out = rig.retire(json!("one")).await.unwrap();
+        assert_eq!(out["worktrees_removed"], json!([]));
+        assert!(out["kept"][0].as_str().unwrap().contains(".git file isn't the one git wrote"), "{out}");
+        assert_eq!(fs::read_to_string(wt.join(".git")).unwrap(), forged, "nothing rewrote it");
+        assert!(git(&rig.web, &["worktree", "list"]).contains(wt.to_str().unwrap()), "git still has it");
+    }
+
+    #[tokio::test]
+    async fn a_waiter_on_a_retired_worker_is_blocked_and_the_coordinator_told() {
+        let rig = Rig::new("retire-waiter", 4);
+        let ctx = rig.ctx(accept, ok_save, ok_preflight);
+        let schema = rig.worker("Schema").await;
+        rig.spawn(accept, json!({ "title": "Queries", "role": "backend", "brief": "b", "depends_on": ["schema"] })).await.unwrap();
+        rig.set_phase(&schema.task_id, worker::PHASE_FAILED);
+        rig.retire(json!("schema")).await.unwrap();
+        crate::hive::waiters::poll_once(&ctx, &rig.caller).await;
+        let q = worker::list_workers(&rig.caller.paths).into_iter().find(|w| w.slug == "queries").unwrap();
+        assert_eq!(q.wait_reason.as_deref(), Some("blocked: #1 schema was dropped"));
+        assert!(rig.delivered().iter().any(|(to, t)| to == "coord" && t.contains("can't launch")));
+        // A waiter itself retires without a tab or worktrees.
+        let out = rig.retire(json!("queries")).await.unwrap();
+        assert_eq!(out["kept"], json!([]));
+        assert_eq!(rig.record(&q.task_id).phase, worker::PHASE_RETIRED);
+    }
+
+    /// Two roots' `.claude.json`, as `Homes::real()` would list them, all scratch.
+    fn scratch_homes(base: &Path) -> crate::relocate::agents::Homes {
+        let files: Vec<PathBuf> = ["home/.claude.json", "accounts/a/.claude.json"].iter().map(|f| base.join(f)).collect();
+        for f in &files {
+            fs::create_dir_all(f.parent().unwrap()).unwrap();
+            fs::write(f, r#"{"projects":{}}"#).unwrap();
+        }
+        crate::relocate::agents::Homes {
+            claude_projects: base.join("home/.claude/projects"),
+            claude_json: files,
+            claude_history: vec![],
+            codex: base.join("codex"),
+            gemini: base.join("gemini"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_hive_keeps_dirty_worktrees_every_branch_and_the_gallery() {
+        let mut rig = Rig::new("delete", 4);
+        rig.own_workspace();
+        let p = rig.caller.paths.clone();
+        crate::hive::layout::create_layout(&p.root, &rig.caller.hive).unwrap();
+        let a = rig.worker("Clean").await;
+        let b = rig.worker("Dirty").await;
+        let (clean, dirty) = (rig.worktree(&a, "web"), rig.worktree(&b, "web"));
+        git(&clean, &["commit", "-q", "--allow-empty", "--no-verify", "-m", "unlanded"]);
+        fs::write(dirty.join("README.md"), "changed\n").unwrap();
+        fs::write(p.gallery().join("hero.png"), "png").unwrap();
+        let homes = scratch_homes(&rig.base);
+        let w = crate::hive::trust::write_trust(&homes, &p, &p.coordinator_home()).unwrap();
+        assert_eq!(w.written.len(), 2);
+        let key = crate::share::canon(&p.coordinator_home()).to_string_lossy().to_string();
+
+        let pv = crate::hive::delete::preview(&rig.caller.hive, &p, true);
+        assert_eq!(pv.unlanded.iter().map(|u| (u.branch.as_str(), u.ahead)).collect::<Vec<_>>(), vec![("hive/ship--clean", 1)]);
+        assert!(pv.dirty.iter().any(|d| d.contains(dirty.to_str().unwrap())), "{:?}", pv.dirty);
+        assert_eq!(pv.dirty.len(), 1, "the clean worktree and the read copies aren't listed: {:?}", pv.dirty);
+        assert_eq!((pv.gallery_files, pv.gallery_bytes), (1, 3));
+        assert_eq!(pv.live_agents, vec!["the coordinator", "#1 clean", "#2 dirty"]);
+        assert!(pv.branches.contains(&"web: hive/ship--clean".to_string()));
+
+        // Refused while a worker is landing.
+        rig.set_phase(&a.task_id, worker::PHASE_LANDING);
+        let ctx = rig.ctx(accept, ok_save, ok_preflight);
+        let e = crate::hive::delete::delete_hive(&ctx, &rig.caller, false).await.unwrap_err();
+        assert!(e.contains("is landing"), "{e}");
+        assert!(rig.ws().hive.is_some() && clean.is_dir());
+        rig.set_phase(&a.task_id, worker::PHASE_REPORTED);
+
+        let tabs = [a.tab_id.clone().unwrap(), b.tab_id.clone().unwrap()];
+        let out = crate::hive::delete::delete_hive(&ctx, &rig.caller, false).await.unwrap();
+        assert_eq!(out.worktrees_removed, 3, "Clean's worktree and both read copies: {out:?}");
+        assert!(!clean.exists() && !p.coordinator_worktree("web").exists());
+        assert!(dirty.join("README.md").is_file() && out.kept.iter().any(|k| k.contains(dirty.to_str().unwrap())), "{:?}", out.kept);
+        assert!(p.gallery().join("hero.png").is_file() && out.gallery_kept);
+        assert!(!p.tasks().exists() && !p.memory().exists() && !p.worker_dir("clean").exists(), "the rest of the Hive folder goes");
+        assert!(out.folder_left.is_some());
+        for b in ["hive/ship--clean", "hive/ship--dirty"] {
+            assert!(!git(&rig.web, &["branch", "--list", b]).is_empty(), "no branch is deleted: {b}");
+        }
+        assert_eq!(out.branches, vec!["web: hive/ship--clean", "web: hive/ship--dirty"]);
+        assert_eq!(out.trust_removed, 2);
+        for f in &homes.claude_json {
+            let v: Value = serde_json::from_slice(&fs::read(f).unwrap()).unwrap();
+            assert!(v["projects"].get(key.as_str()).is_none(), "trust maiTerm wrote is gone from {}", f.display());
+        }
+
+        let ws = rig.ws();
+        assert!(ws.hive.is_none(), "an ordinary workspace now");
+        assert!(ws.panes[0].tabs.is_empty(), "every Hive tab dropped, the coordinator's too");
+        assert_eq!(ws.tasks.len(), 2, "rows kept as history");
+        assert!(ws.tasks.iter().all(|t| t.tab_id.is_none()));
+        assert_eq!(out.dropped_tabs.len(), 3);
+        assert!(tabs.iter().all(|t| out.dropped_tabs.contains(t)));
+        let sent = rig.calls_of(rpc::VERB_DELETE).pop().unwrap();
+        assert_eq!(sent["tab_ids"].as_array().unwrap().len(), 3);
+        assert_eq!(out.active_tabs.len(), 1);
+        assert_eq!(out.active_tabs[0].tab_id, None);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_hive_with_the_gallery_ticked_removes_it_and_the_folder() {
+        let mut rig = Rig::new("delete-all", 4);
+        rig.own_workspace();
+        let p = rig.caller.paths.clone();
+        crate::hive::layout::create_layout(&p.root, &rig.caller.hive).unwrap();
+        fs::write(p.gallery().join("hero.png"), "png").unwrap();
+        let out = crate::hive::delete::delete_hive(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, true).await.unwrap();
+        assert!(!out.gallery_kept && out.kept.is_empty(), "{out:?}");
+        assert!(!p.root.exists(), "nothing held work, so nothing of the Hive folder is left");
+        assert!(out.folder_left.is_none());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_hive_drops_its_run_queue_job_tabs_and_nothing_else_hidden() {
+        let mut rig = Rig::new("delete-jobs", 4);
+        rig.own_workspace();
+        crate::hive::layout::create_layout(&rig.caller.paths.root, &rig.caller.hive).unwrap();
+        let tab = |id: &str, service: Option<&str>| {
+            let mut t = Tab::new(id.to_string());
+            t.id = id.to_string();
+            t.service_id = service.map(str::to_string);
+            t
+        };
+        {
+            let mut d = rig.data.write();
+            let tabs = &mut d.windows[0].workspaces[0].panes[0].tabs;
+            tabs.push(tab("job-done", Some("j-0123abcd")));
+            tabs.push(tab("svc", Some("svc-web")));
+            tabs.push(tab("plain", None));
+        }
+        let out = crate::hive::delete::delete_hive(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, true).await.unwrap();
+        let left: Vec<String> = rig.ws().panes[0].tabs.iter().map(|t| t.id.clone()).collect();
+        assert_eq!(left, vec!["svc", "plain"], "the job's tab went; a service's and an ordinary tab stay");
+        assert!(out.dropped_tabs.contains(&"job-done".to_string()), "{:?}", out.dropped_tabs);
+        let sent = rig.calls_of(rpc::VERB_DELETE).pop().unwrap();
+        assert_eq!(sent["job_tab_ids"], json!(["job-done"]));
+    }
+
+    /// A worker whose `worker.json` doesn't load is no permission: what it names stays whole.
+    #[tokio::test]
+    async fn deleting_a_hive_keeps_the_worktree_of_a_record_that_doesnt_load() {
+        let mut rig = Rig::new("delete-unread", 4);
+        rig.own_workspace();
+        let p = rig.caller.paths.clone();
+        crate::hive::layout::create_layout(&p.root, &rig.caller.hive).unwrap();
+        let w = rig.worker("Lost").await;
+        let wt = rig.worktree(&w, "web");
+        fs::write(wt.join("README.md"), "changed\n").unwrap();
+        fs::write(wt.join("new.txt"), "untracked\n").unwrap();
+        fs::write(p.worker_scratch(&w.slug).join("render.png"), "png").unwrap();
+        let task = worker::task_dir(&p, &w.task_id).unwrap();
+        fs::write(task.join(worker::WORKER_FILE), "{ not json").unwrap();
+        // And a worker folder no record names at all.
+        fs::create_dir_all(p.worktrees().join("ghost/web")).unwrap();
+        fs::write(p.worktrees().join("ghost/web/work.rs"), "fn main() {}").unwrap();
+
+        let pv = crate::hive::delete::preview(&rig.caller.hive, &p, true);
+        assert!(pv.dirty.iter().any(|d| d.contains(&p.worker_dir(&w.slug).display().to_string())), "{:?}", pv.dirty);
+        let out = crate::hive::delete::delete_hive(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, true).await.unwrap();
+        assert_eq!(fs::read_to_string(wt.join("README.md")).unwrap(), "changed\n");
+        assert!(wt.join("new.txt").is_file() && p.worker_scratch(&w.slug).join("render.png").is_file());
+        assert!(task.join(worker::WORKER_FILE).is_file(), "its record stays with what it names");
+        assert!(p.worktrees().join("ghost/web/work.rs").is_file());
+        for kept in [p.worker_dir(&w.slug), p.worktrees().join("ghost"), task.clone()] {
+            assert!(out.kept.iter().any(|k| k.contains(&kept.display().to_string())), "{kept:?} listed: {:?}", out.kept);
+        }
+        assert!(git(&rig.web, &["worktree", "list"]).contains(wt.to_str().unwrap()), "git still has it");
+        assert!(out.folder_left.is_some());
+    }
+
+    /// Trust that couldn't be undone keeps the record that says maiTerm wrote it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deleting_a_hive_keeps_the_trust_record_of_a_key_it_couldnt_undo() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut rig = Rig::new("delete-trust", 4);
+        rig.own_workspace();
+        let p = rig.caller.paths.clone();
+        crate::hive::layout::create_layout(&p.root, &rig.caller.hive).unwrap();
+        let homes = scratch_homes(&rig.base);
+        crate::hive::trust::write_trust(&homes, &p, &p.coordinator_home()).unwrap();
+        let locked = homes.claude_json[1].clone();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&locked).is_ok() {
+            // Root reads it anyway: nothing to test.
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        let out = crate::hive::delete::delete_hive(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, true).await;
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+        let out = out.unwrap();
+        assert_eq!(out.trust_removed, 1, "{out:?}");
+        assert!(p.trust_record().is_file(), "the record of the key left behind stays");
+        assert_eq!(crate::hive::trust::written_entries(&p).len(), 1);
+        assert!(out.kept.iter().any(|k| k.starts_with("trust for") && k.contains(locked.to_str().unwrap())), "{:?}", out.kept);
+        assert!(out.folder_left.is_some());
     }
 }

@@ -5,8 +5,9 @@
 import type { AgentState } from '$lib/agents/types';
 import type { HiveWorkerCard, TaskBlocker, TaskStatus } from '$lib/tauri/types';
 
-/** The states step 4 can tell apart. Landing, Landed and Retired arrive with landing (step 6). */
-export type CardStateName = 'needs_you' | 'blocked' | 'working' | 'starting' | 'idle' | 'reported' | 'failed' | 'stopped' | 'suspended';
+/** §4.3's states. */
+export type CardStateName =
+  | 'needs_you' | 'blocked' | 'working' | 'starting' | 'idle' | 'reported' | 'landing' | 'failed' | 'stopped' | 'suspended' | 'landed' | 'retired';
 
 /** §4.3's sort column. */
 export const STATE_ORDER: Record<CardStateName, number> = {
@@ -16,9 +17,12 @@ export const STATE_ORDER: Record<CardStateName, number> = {
   starting: 4,
   idle: 5,
   reported: 6,
+  landing: 7,
   failed: 8,
   stopped: 8,
   suspended: 9,
+  landed: 10,
+  retired: 11,
 };
 
 export const STATE_LABEL: Record<CardStateName, string> = {
@@ -28,9 +32,12 @@ export const STATE_LABEL: Record<CardStateName, string> = {
   starting: 'Starting',
   idle: 'Idle',
   reported: 'Reported',
+  landing: 'Landing',
   failed: 'Failed',
   stopped: 'Stopped',
   suspended: 'Suspended',
+  landed: 'Landed',
+  retired: 'Retired',
 };
 
 export interface CardState {
@@ -43,17 +50,34 @@ export interface CardState {
   urgent: boolean;
   /** What waits on the human (a task blocker, a prompt on screen); 0 unless Needs you. */
   waiting: number;
+  /** Landed's qualifier (§4.3): `undone`. */
+  qualifier?: string | null;
 }
 
-/** The state line: §4.3 has a Needs-you card carry its waiting count, one included. */
-export function stateLine(s: Pick<CardState, 'state' | 'label' | 'waiting'>): string {
-  return s.state === 'needs_you' && s.waiting > 0 ? `${s.label} · ${s.waiting} waiting` : s.label;
+/** The state line: §4.3 has a Needs-you card carry its waiting count, one included, and a Landed
+ *  card its qualifier (*undone*). */
+export function stateLine(s: Pick<CardState, 'state' | 'label' | 'waiting'> & { qualifier?: string | null }): string {
+  if (s.state === 'needs_you' && s.waiting > 0) return `${s.label} · ${s.waiting} waiting`;
+  return s.qualifier ? `${s.label} · ${s.qualifier}` : s.label;
 }
 
 /** The phases that hold a slot (hive/worker.rs `LIVE_PHASES`): only these have an agent to read. */
-const LIVE_PHASES = ['launching', 'running', 'blocked', 'reported'];
+const LIVE_PHASES = ['launching', 'running', 'blocked', 'reported', 'landing'];
 
-type WorkerFields = Pick<HiveWorkerCard, 'phase' | 'wait_reason' | 'depends_on_labels' | 'last_report'>;
+/** A worker that left for good (§8.4): no tab, its column reads its recorded sessions. */
+export const isRetired = (w: Pick<HiveWorkerCard, 'phase'>) => w.phase === 'landed' || w.phase === 'retired';
+
+/** What a retired worker's column says in place of a composer: "Retired · landed a1b2c3d". */
+export function retiredLine(w: Pick<HiveWorkerCard, 'phase' | 'retired' | 'undone'>): string {
+  if (w.phase === 'landed') {
+    const sha = w.retired?.landed?.trim();
+    return `Retired · landed${sha ? ` ${sha.slice(0, 7)}` : ''}${w.undone ? ' · undone' : ''}`;
+  }
+  const why = w.retired?.reason?.trim();
+  return why ? `Retired · ${why}` : 'Retired';
+}
+
+type WorkerFields = Pick<HiveWorkerCard, 'phase' | 'wait_reason' | 'depends_on_labels' | 'last_report'> & Partial<Pick<HiveWorkerCard, 'retired' | 'undone'>>;
 type TaskFields = { status: TaskStatus; blocker?: TaskBlocker | null } | null | undefined;
 type AgentFields = { state: AgentState; toolName?: string } | null | undefined;
 /** `suspended`: the tab's PTY was parked by a suspend, its own or its workspace's (§11.2). */
@@ -88,6 +112,10 @@ export function cardState(worker: WorkerFields, task: TaskFields, agent: AgentFi
       return make('failed', worker.last_report?.status === 'failed' ? report : null);
     case 'stopped':
       return make('stopped');
+    case 'landed':
+      return make('landed', null, { qualifier: worker.undone ? 'undone' : null });
+    case 'retired':
+      return make('retired', worker.retired?.reason?.trim() || null);
     case 'waiting': {
       const deps = worker.depends_on_labels;
       return make('starting', worker.wait_reason?.trim() || (deps.length ? `waits on ${deps.join(', ')}` : null));
@@ -95,6 +123,8 @@ export function cardState(worker: WorkerFields, task: TaskFields, agent: AgentFi
   }
   if (suspended) return make('suspended');
   if (prompt) return make('needs_you', prompt, { waiting: 1 });
+  // Merging, held or waiting on the human: what it is, whatever its agent is doing meanwhile.
+  if (worker.phase === 'landing') return make('landing');
   if (onScreen?.state === 'active') return make('working');
   switch (worker.phase) {
     case 'blocked':

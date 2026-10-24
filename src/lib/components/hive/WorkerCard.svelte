@@ -32,7 +32,7 @@
   }
   let { card, state, note, runtime, age, activity, diff, model, ctx, compact = false, focused = false, onopen }: Props = $props();
 
-  const pulse = $derived(state.state === 'working' || state.state === 'starting');
+  const pulse = $derived(state.state === 'working' || state.state === 'starting' || state.state === 'landing');
   const folders = $derived(card.folders.map((f) => f.name).join(' · '));
   // An idle agent's line is the state line with its age, and a prompt's is the sub-label already
   // shown: the card says each thing once.
@@ -55,8 +55,11 @@
   onclick={onopen}
 >
   <span class="top">
-    {#if state.state === 'reported'}
+    {#if state.state === 'reported' || state.state === 'landed'}
       <span class="check" aria-hidden="true">✓</span>
+    {:else if state.state === 'retired'}
+      <!-- §4.3: Retired is dimmed, with no dot. -->
+      <span class="nodot" aria-hidden="true"></span>
     {:else}
       <span class="dot" class:pulse aria-hidden="true"></span>
     {/if}
@@ -118,6 +121,10 @@
   .card.needs::before { content: ''; position: absolute; left: -1px; top: 7px; bottom: 7px; width: 3px; border-radius: 2px; background: var(--needs); }
   .card.needs.urgent::before { background: var(--red); }
   .card[data-state='reported'], .card[data-state='stopped'], .card[data-state='suspended'] { opacity: 0.8; }
+  .card[data-state='landed'], .card[data-state='retired'] { opacity: 0.6; }
+  [data-state='landed'] .check { color: var(--fg-dim); }
+  .nodot { flex: none; width: 8px; }
+  [data-state='landing'] .dot { background: var(--accent); }
   .card.compact { gap: 2px; padding: 6px 8px 6px 10px; border-radius: 6px; }
 
   .top { display: flex; align-items: flex-start; gap: 7px; min-width: 0; }

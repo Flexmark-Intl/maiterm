@@ -28,6 +28,7 @@ export interface HiveRequest {
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 
 /** `hive.spawn {workspace_id, task, workstream, tab?}`: the worker's row, then (a launched
  *  worker) its hidden tab, mounted so its terminal types the launch builder's line. A waiting
@@ -85,6 +86,41 @@ function patchTask(a: Record<string, unknown>): unknown {
   return { ok: true };
 }
 
+/** `hive.retire {workspace_id, task_id, tab_id?, status, note?}`: a worker left for good (docs/hive.md
+ *  §8.4). Its tab leaves the mirror, which unmounts its terminal and kills the PTY; its row moves
+ *  to `status` and stays, as history. Rust has done both in its own state. */
+function retire(a: Record<string, unknown>): unknown {
+  const { workspace_id: workspaceId, task_id: taskId, tab_id: tabId, status, note } = a;
+  if (typeof workspaceId !== 'string' || typeof taskId !== 'string') return { error: 'workspace_id and task_id are required' };
+  if (typeof status !== 'string' || !STATUSES.includes(status)) return { error: `status ${String(status)} isn't a lane` };
+  if (typeof tabId === 'string') workspacesStore.dropHiveTab(workspaceId, tabId);
+  const row = tasksStore.find(workspaceId, taskId);
+  if (!row) return { ok: true, row: 'gone' };
+  const patch: Partial<Task> = { status: status as TaskStatus };
+  if (typeof note === 'string' && note.trim()) patch.notes = appendNote(row, note, 'agent');
+  tasksStore.update(workspaceId, taskId, patch);
+  return { ok: true };
+}
+
+/** `hive.delete {workspace_id, tab_ids, job_tab_ids?}`: the Hive deleted (§11.2). Every Hive tab and
+ *  run-queue job tab leaves the mirror (each PTY with it) and the rows they owned lose their tab,
+ *  the rows kept. The Hive record and the panes' active tabs follow when the delete command
+ *  answers (`applyHiveDeleted`). */
+function deleteHive(a: Record<string, unknown>): unknown {
+  const { workspace_id: workspaceId, tab_ids: tabIds, job_tab_ids: jobTabIds } = a;
+  if (typeof workspaceId !== 'string' || !Array.isArray(tabIds)) return { error: 'workspace_id and tab_ids are required' };
+  const ids = tabIds.filter((t): t is string => typeof t === 'string');
+  for (const t of ids) workspacesStore.dropHiveTab(workspaceId, t);
+  for (const t of strings(jobTabIds)) {
+    const jobId = workspacesStore.dropJobTab(workspaceId, t);
+    if (jobId) stackStore.forgetJob(jobId);
+  }
+  for (const row of tasksStore.forWorkspace(workspaceId)) {
+    if (row.tab_id && ids.includes(row.tab_id)) tasksStore.update(workspaceId, row.id, { tab_id: null });
+  }
+  return { ok: true };
+}
+
 /** `hive.relaunch {workspace_id, tab_id}`: a worker's agent started again in its own tab. A mounted
  *  terminal gets the builder's line through the follow-ups' empty-prompt gate (docs/follow-ups.md
  *  §6.2), never typed over anything; an unmounted tab is mounted, which types it on spawn. */
@@ -127,7 +163,6 @@ async function jobStop(a: Record<string, unknown>): Promise<unknown> {
 async function jobCleanup(a: Record<string, unknown>): Promise<unknown> {
   const { workspace_id: workspaceId, tab_ids: tabIds, job_ids: jobIds, force } = a;
   if (typeof workspaceId !== 'string') return { error: 'workspace_id is required' };
-  const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
   return { ok: true, closed: await stackStore.cleanupJobs(workspaceId, strings(tabIds), strings(jobIds), force === true) };
 }
 
@@ -148,6 +183,12 @@ export async function handleHiveRequest(req: HiveRequest): Promise<void> {
         break;
       case 'hive.relaunch':
         result = await relaunch(args);
+        break;
+      case 'hive.retire':
+        result = retire(args);
+        break;
+      case 'hive.delete':
+        result = deleteHive(args);
         break;
       case 'stack.job.start':
         result = await jobStart(args);

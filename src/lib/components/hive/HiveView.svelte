@@ -42,6 +42,7 @@
   import WorkerColumn from './WorkerColumn.svelte';
   import HiveTerminal from './HiveTerminal.svelte';
   import RunQueueModal from './RunQueueModal.svelte';
+  import HiveDeleteSheet from './HiveDeleteSheet.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -71,6 +72,8 @@
   const tasks = $derived(tasksStore.forWorkspace(workspaceId));
   /** Hive settings → Run queue (docs/hive.md §6.8), from the header. */
   let queueOpen = $state(false);
+  /** Delete Hive (docs/hive.md §11.2): the sheet lists what stays before anything is touched. */
+  let deleteOpen = $state(false);
   const queuedCount = $derived(hive?.settings?.run_queue?.commands.length ?? 0);
 
   // ── The board: Rust's worker records, refetched on its event and on task changes (§4.4). ──
@@ -582,11 +585,17 @@
             Run queue: {queuedCount === 0 ? 'nothing queued' : `${queuedCount} command${queuedCount === 1 ? '' : 's'}`}
           </button>
         </Tooltip>
+        <Tooltip text="Stop its agents and remove it: clean worktrees go, unlanded work and every branch stay">
+          <button type="button" class="queue-btn danger" onclick={() => (deleteOpen = true)}>Delete Hive…</button>
+        </Tooltip>
       {/if}
     </div>
   </header>
   {#if queueOpen && hive}
     <RunQueueModal {workspaceId} {hive} onclose={() => (queueOpen = false)} />
+  {/if}
+  {#if deleteOpen && hive}
+    <HiveDeleteSheet {workspaceId} name={ws?.name ?? ''} onclose={() => (deleteOpen = false)} />
   {/if}
 
   <div class="cols" bind:this={colsEl}>
@@ -756,6 +765,7 @@
         >
           <WorkerColumn
             bind:this={workerCols[col.taskId]}
+            hiveId={hive?.id ?? ''}
             card={c.worker}
             cardState={c.state}
             diff={hiveFeed.diffStat(col.taskId)}
@@ -785,6 +795,8 @@
   .queue-btn { background: none; border: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-align: right; }
   .queue-btn:hover { text-decoration: underline; }
   .queue-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .queue-btn.danger { color: var(--fg-dim); }
+  .queue-btn.danger:hover { color: var(--red); }
   .cols { flex: 1; min-height: 0; display: flex; min-width: 0; overflow: hidden; }
   .coord { flex: none; display: flex; flex-direction: column; min-height: 0; min-width: 0; max-width: calc(100% - 264px); transition: box-shadow 0.3s; }
   .coord > :global(.convo) { flex: 1; }

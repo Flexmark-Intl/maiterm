@@ -6,20 +6,23 @@
   at the PTY's own fixed size.
 
   The header sits outside ChatColumn so a waiting worker, which has no tab and so no chat
-  header, can still be pinned and closed.
+  header, can still be pinned and closed. A retired worker (landed or retired, §8.4) has no tab
+  either: its chat is the sessions Rust recorded for its task, read-only.
 -->
 <script lang="ts">
-  import ChatColumn from '$lib/components/loom/ChatColumn.svelte';
+  import ChatColumn, { type ChatSource } from '$lib/components/loom/ChatColumn.svelte';
   import HiveTerminal from './HiveTerminal.svelte';
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import { formatDiffStat } from '$lib/hive/activity';
-  import { stateLine, type CardState } from '$lib/hive/cards';
+  import { isRetired, retiredLine, stateLine, type CardState } from '$lib/hive/cards';
   import type { HiveDiffStat, HiveWorkerCard, Task } from '$lib/tauri/types';
 
   interface Props {
+    /** The Hive's own id: a retired worker's sessions are read under it. */
+    hiveId: string;
     card: HiveWorkerCard;
     cardState: CardState;
     diff: HiveDiffStat | undefined;
@@ -35,7 +38,7 @@
     onclose: () => void;
     onterminal: (shown: boolean) => void;
   }
-  let { card, cardState, diff, workspace, tasks, active, pinned, focused, terminalShown, onpin, onclose, onterminal }: Props = $props();
+  let { hiveId, card, cardState, diff, workspace, tasks, active, pinned, focused, terminalShown, onpin, onclose, onterminal }: Props = $props();
 
   let chat = $state<ChatColumn | undefined>();
   let rootEl = $state<HTMLElement | undefined>();
@@ -45,7 +48,11 @@
     else requestAnimationFrame(() => rootEl?.focus({ preventScroll: true }));
   }
 
-  const source = $derived(card.tab_id ? { kind: 'tab' as const, tabId: card.tab_id } : null);
+  const retired = $derived(!card.tab_id && isRetired(card));
+  const source = $derived<ChatSource | null>(
+    card.tab_id ? { kind: 'tab', tabId: card.tab_id } : retired && hiveId ? { kind: 'retired', hiveId, taskId: card.task_id } : null,
+  );
+  const kept = $derived(card.retired?.kept ?? []);
   const total = $derived(formatDiffStat(diff));
   const committed = $derived(
     diff && (diff.committed.insertions || diff.committed.deletions)
@@ -94,6 +101,9 @@
     <div class="facts">
       <span class="st" data-state={cardState.state}>{stateLine(cardState)}{#if cardState.sub} · {cardState.sub}{/if}</span>
       {#each folders as f (f)}<span class="m">{f}</span>{/each}
+      {#if kept.length}
+        <Tooltip text={kept.join('\n')}><span class="m">Kept on disk: {kept.length}</span></Tooltip>
+      {/if}
       {#if total.text || committed}
         <span class="diffs">
           {#if total.text}<Tooltip text={total.tip}><span class="diff">{total.text}</span></Tooltip>{/if}
@@ -110,6 +120,8 @@
     {tasks}
     {active}
     actions={null}
+    readOnly={retired}
+    statusText={retired ? retiredLine(card) : undefined}
     emptyText={waitingText}
   />
   {#if terminalShown && card.tab_id}

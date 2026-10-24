@@ -12,10 +12,9 @@
 -->
 <script lang="ts" module>
   import type { Task } from '$lib/tauri/types';
+  import type { ChatSource } from '$lib/loom/model';
 
-  /** Where the column reads its chat from. A retired Hive worker (docs/hive.md §8.4) has no tab:
-   *  its kind comes with its Rust reader. */
-  export type ChatSource = { kind: 'tab'; tabId: string };
+  export type { ChatSource };
 
   /** The task question a tab's agent waits on the human for: the list pins the chat on it, the
    *  column answers it. */
@@ -24,13 +23,13 @@
 </script>
 
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
   import { loomStore } from '$lib/stores/loom.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { navigateToTab } from '$lib/stores/workspaces.svelte';
-  import { getTabMeta, getTabTranscript, listTabModels, sendTabMessage, type ChatTurn, type TabMeta } from '$lib/tauri/commands';
-  import { chatRows, injectedTurn, taskEventsFor } from '$lib/loom/model';
+  import { getTabMeta, getTabTranscript, getTaskTranscript, listTabModels, sendTabMessage, type ChatTurn, type TabMeta } from '$lib/tauri/commands';
+  import { chatKey, chatRows, injectedTurn, taskEventsFor } from '$lib/loom/model';
   import { renderTurnMarkdown } from '$lib/loom/markdown';
   import { chatImages } from '$lib/loom/chatImages';
   import BlockerCard from '$lib/components/tasks/BlockerCard.svelte';
@@ -67,15 +66,21 @@
     ontask?: (taskId: string) => void;
     /** Shown while there's no chat. */
     emptyText?: string;
+    /** The header's state line in place of the agent's state (a retired worker's "Retired · …"). */
+    statusText?: string;
   }
   let {
-    source, name, workspace, tasks, active, readOnly = false, header, composerActions, actions,
-    ontask = (taskId: string) => loomStore.show('weave', taskId), emptyText = 'Pick a chat on the left.',
+    source, name, workspace, tasks, active, readOnly: readOnlyProp = false, header, composerActions, actions,
+    ontask = (taskId: string) => loomStore.show('weave', taskId), emptyText = 'Pick a chat on the left.', statusText,
   }: Props = $props();
 
-  /** A string, so a caller handing a new source object for the same tab switches nothing. */
-  const openId = $derived(source?.tabId ?? null);
-  const liveState = $derived(openId ? claudeStateStore.getState(openId) : null);
+  /** A string, so a caller handing a new source object for the same chat switches nothing. */
+  const openId = $derived(chatKey(source));
+  /** The live tab behind the chat; none for a retired worker, which has no agent, prompt or meta. */
+  const tabId = $derived(source?.kind === 'tab' ? source.tabId : null);
+  const retired = $derived(source?.kind === 'retired' ? source : null);
+  const readOnly = $derived(readOnlyProp || !!retired);
+  const liveState = $derived(tabId ? claudeStateStore.getState(tabId) : null);
 
   // ── The transcript: read on open, then every 3 s while shown (the phone polls 2 s). ──
   let turns = $state<ChatTurn[]>([]);
@@ -94,9 +99,16 @@
     metaAskedAt = 0;
     turnsAskedAt = 0;
     if (!id || !active) return;
+    // Keyed on the string: a caller's new source object for the same chat reloads nothing.
+    const from = untrack(() => retired);
     let alive = true;
     const load = () => {
       const asked = Date.now();
+      if (from) {
+        return getTaskTranscript(from.hiveId, from.taskId)
+          .then((t) => { if (alive) { turns = t; loadedFor = id; turnsAskedAt = asked; } })
+          .catch(() => { if (alive) loadedFor = id; });
+      }
       getTabMeta(id).then((m) => { if (alive) { meta = m; metaAskedAt = asked; } }).catch(() => {});
       return getTabTranscript(id)
         .then((t) => { if (alive) { turns = t; loadedFor = id; turnsAskedAt = asked; } })
@@ -104,11 +116,12 @@
     };
     reload = () => void load();
     void load();
-    const timer = setInterval(load, 3000);
-    return () => { alive = false; clearInterval(timer); reload = () => {}; };
+    // A retired chat no longer grows: read once.
+    const timer = from ? null : setInterval(load, 3000);
+    return () => { alive = false; if (timer) clearInterval(timer); reload = () => {}; };
   });
 
-  const rows = $derived(openId ? chatRows(turns, taskEventsFor(openId, tasks)) : []);
+  const rows = $derived(openId ? chatRows(turns, tabId ? taskEventsFor(tabId, tasks) : []) : []);
   let expanded = $state<string[]>([]);
   // A drag that selects text and ends on a fold row is a copy, not a click on the row.
   const toggle = (key: string) => {
@@ -116,10 +129,10 @@
     expanded = expanded.includes(key) ? expanded.filter((k) => k !== key) : [...expanded, key];
   };
 
-  const openAsk = $derived(openId ? asking(tasks, openId) : undefined);
+  const openAsk = $derived(tabId ? asking(tasks, tabId) : undefined);
   /** The open chat's watch scripts waiting to be allowed (docs/follow-ups.md §5.1), answered in
    *  place like its task question. */
-  const openScripts = $derived(openId ? followUpsStore.pendingApprovals.filter((a) => !a.archived && a.tabId === openId) : []);
+  const openScripts = $derived(tabId ? followUpsStore.pendingApprovals.filter((a) => !a.archived && a.tabId === tabId) : []);
   /** Waiting on the human, as the chat list counts it: a task question or a script. */
   const asks = $derived(!!openAsk || openScripts.length > 0);
   /** When those cards last changed, for their click guard: one inserted above or answered moves
@@ -138,7 +151,7 @@
   // ── What the Fleet card showed ────────────────────────────────────────────────────────────
   // The chat's own meta first: the engine's facts are only polled while Overlord is on. (A read
   // any column may make, Loom or not, as is the checkpoint threshold in ctxTone.)
-  const ctx = $derived(openId ? (meta?.contextPct ?? overlordStore.facts.get(openId)?.context_pct ?? null) : null);
+  const ctx = $derived(tabId ? (meta?.contextPct ?? overlordStore.facts.get(tabId)?.context_pct ?? null) : null);
 
   // ── Model and effort, set the way the phone sets them: `/model X` and `/effort X` typed
   //    through the composer's path, so an open prompt refuses them the same way. ──────────────
@@ -514,7 +527,7 @@
     <header class="chat-h">
       <div class="who">
         <b>{name}</b>
-        <span>{workspace} · {liveState?.state === 'permission' ? 'waiting on a permission' : asks ? 'waiting on you' : (liveState?.state ?? 'no session')}</span>
+        <span>{workspace} · {statusText ?? (liveState?.state === 'permission' ? 'waiting on a permission' : asks ? 'waiting on you' : (liveState?.state ?? 'no session'))}</span>
       </div>
       <div class="gauges">
         {#if meta?.model}
@@ -537,9 +550,10 @@
         <span class="ctx" style="--t: {ctxTone(ctx)}"><i><s style="width: {Math.min(100, ctx ?? 0)}%"></s></i><em>{ctx ?? '—'}% context</em>{#if meta?.contextUsed != null && meta.contextLimit}<span class="tok">{fmtTok(meta.contextUsed)}/{fmtTok(meta.contextLimit)}</span>{/if}</span>
         {@render header?.(openId)}
       </div>
-      {#if actions === undefined}
+      {#if actions === undefined && tabId}
+        {@const tab = tabId}
         <div class="acts">
-          <button onclick={() => void navigateToTab(openId)}>Open the tab</button>
+          <button onclick={() => void navigateToTab(tab)}>Open the tab</button>
         </div>
       {:else if actions}
         <div class="acts">{@render actions(openId)}</div>
@@ -552,7 +566,7 @@
       {#if loadedFor !== openId}
         <p class="hint">Reading the chat…</p>
       {:else if !rows.length}
-        <p class="hint">No messages captured for this tab yet.</p>
+        <p class="hint">{retired ? 'No session was recorded for this worker.' : 'No messages captured for this tab yet.'}</p>
       {/if}
       <div class="column">
       {#each rows as r (r.kind === 'tools' || r.kind === 'task' || r.kind === 'added' ? r.key : r.turn.msg_id)}
@@ -602,6 +616,8 @@
           </div>
         {:else if r.turn.kind === 'terminal_snapshot'}
           <pre class="snap">{r.turn.text}</pre>
+        {:else if r.turn.kind === 'session_divider'}
+          <div class="divider" role="separator"><span>{r.turn.text}</span></div>
         {:else if r.turn.role === 'user' && r.turn.typedBy}
           <!-- Typed by maiTerm, not the human: an Overlord directive, or a message sent for
                them. Folded and named, so the human's own bubbles are only their words. -->
@@ -778,6 +794,9 @@
   .agent :global(th), .agent :global(td) { padding: 4px 14px 4px 0; white-space: nowrap; }
   .agent :global(tr + tr td) { border-top: 1px solid color-mix(in srgb, var(--bg-light) 45%, transparent); }
   .sys { font-size: 12px; color: var(--fg-dim); overflow-wrap: anywhere; }
+  /* Between two sessions of a retired worker's chat (docs/hive.md §4.2). */
+  .divider { display: flex; align-items: center; gap: 10px; font-size: 11px; color: var(--fg-dim); }
+  .divider::before, .divider::after { content: ''; flex: 1; border-top: 1px solid var(--bg-light); }
   .snap { margin: 0; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-medium); padding: 8px; border-radius: 6px; }
 
   /* Tool steps: one quiet line each, the command cut to one line; the full calls on demand. */

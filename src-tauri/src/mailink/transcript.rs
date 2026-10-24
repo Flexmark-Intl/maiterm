@@ -463,7 +463,9 @@ struct TurnsCache {
 
 static TURNS: std::sync::OnceLock<std::sync::Mutex<HashMap<(PathBuf, bool), TurnsCache>>> = std::sync::OnceLock::new();
 
-fn turns_from_path(path: &std::path::Path, limit: usize, tools: ToolRender) -> Option<Vec<Value>> {
+/// A Claude transcript's last `limit` turns, from a path the caller resolved (a session id's own
+/// lookup, or a retired Hive worker's recorded sessions, `hive::retire`).
+pub(crate) fn turns_from_path(path: &std::path::Path, limit: usize, tools: ToolRender) -> Option<Vec<Value>> {
     let md = std::fs::metadata(path).ok()?;
     let (len, file_id) = (md.len(), file_id(&md));
     let key = (path.to_path_buf(), tools == ToolRender::Marker);

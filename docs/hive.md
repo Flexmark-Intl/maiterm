@@ -3235,6 +3235,22 @@ several releases a day).
    the approval mode (chosen at creation, §3) through agent requests; the **land log and Undo**
    (`hiveUndoLand`, §8.6); then **batched land checks** over workers already passed to
    `hiveLand` (§6.8); retire; delete flow.
+   **6a built** (2026-10-24, uncommitted at the time of writing): retirement, retired chats and
+   deleting a Hive. `worker.json` gains the phases `landing` (live, §3.1), `landed` and
+   `retired`, and `retired {reason, at, kept, landed}` and `undone` (`hive/worker.rs`).
+   `retire::retire_worker` moves the phase first (so the exit is no crash), SIGTERMs a running
+   agent and waits up to 5 s for its prompt, releases its runs, drops its tab and moves its row
+   (`hive.retire`; the row stays), then removes each worktree only when its `.git` file names the
+   recorded admin dir and git on that dir reports nothing uncommitted or untracked (never
+   `--force`); branches and `scratch/` stay, the cargo target and claude-tmp go.
+   `hiveRetireWorker` (coordinator) takes a stopped, failed, waiting or reported worker, its task
+   to `dropped`. `get_task_transcript` reads only recorded paths that canonicalize to a `.jsonl`
+   under a Claude `projects/` folder, 200 turns per session, a `session_divider` between them;
+   `ChatColumn`'s `retired` source is read once and read-only. `hive_delete_preview` /
+   `hive_delete` (`hive/delete.rs`, `HiveDeleteSheet`): refused while a worker is landing; clean
+   worktrees go (workers', the read copies, land temp ones forced once vouched for), dirty ones,
+   scratch with work, every branch and the gallery (unless ticked) stay; the trust maiTerm wrote
+   is removed, open agent requests of the Hive's tabs fail, the rows stay with their tabs cleared.
 7. Shared memory: `autoMemoryDirectory`, index rebuild, Memory view; checkpoints,
    `hiveAnswerWorker`, precedents in Rust storage, the decision log and earned autonomy.
 8. Gallery: store and index, `galleryAdd`/`List`/`Get`/`Tag`/`Collect`, thumbnails, the grid

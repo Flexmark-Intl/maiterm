@@ -23,12 +23,18 @@ pub const PHASE_BLOCKED: &str = "blocked";
 pub const PHASE_REPORTED: &str = "reported";
 pub const PHASE_FAILED: &str = "failed";
 pub const PHASE_STOPPED: &str = "stopped";
+/// Its work is being merged into its landing target, held, or waiting on the human (§8.1).
+pub const PHASE_LANDING: &str = "landing";
+/// Merged and retired: its agent exited, its chat stays readable (§8.4).
+pub const PHASE_LANDED: &str = "landed";
+/// Retired without landing: abandoned, its branches kept (§8.4).
+pub const PHASE_RETIRED: &str = "retired";
 
 pub const CARGO_TARGET_OWN: &str = "own";
 pub const CARGO_TARGET_NONE: &str = "none";
 /// The phases that hold a slot under the cap (§3.1). Reported counts until the worker lands or
-/// is stopped; waiting holds none.
-pub const LIVE_PHASES: [&str; 4] = [PHASE_LAUNCHING, PHASE_RUNNING, PHASE_BLOCKED, PHASE_REPORTED];
+/// is stopped, and Landing until it has landed; waiting holds none.
+pub const LIVE_PHASES: [&str; 5] = [PHASE_LAUNCHING, PHASE_RUNNING, PHASE_BLOCKED, PHASE_REPORTED, PHASE_LANDING];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -43,7 +49,8 @@ pub struct WorkerRecord {
     pub role: String,
     /// Its number on the board, never reused within the Hive (§4.6).
     pub badge: u32,
-    /// `"waiting"` | `"launching"` | `"running"` | `"blocked"` | `"reported"` | `"failed"` | `"stopped"`.
+    /// `"waiting"` | `"launching"` | `"running"` | `"blocked"` | `"reported"` | `"failed"` | `"stopped"`
+    /// | `"landing"` | `"landed"` | `"retired"`.
     pub phase: String,
     pub tab_id: Option<String>,
     pub folders: Vec<WorkerFolder>,
@@ -69,6 +76,25 @@ pub struct WorkerRecord {
     pub pending_runs: Vec<PendingRun>,
     pub created_at: String,
     pub launched_at: Option<String>,
+    /// Set once it left for good, landed or not (§8.4): why, and what of its disk was kept.
+    pub retired: Option<Retired>,
+    /// A land of its was undone (§8.6): its waiters block, its card says so.
+    pub undone: bool,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// How a worker left (§8.4).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Retired {
+    pub reason: String,
+    pub at: String,
+    /// What stayed on disk, one line each: a worktree with uncommitted or untracked work, one
+    /// whose `.git` file maiTerm didn't make, its `scratch/`. Its branches always stay.
+    pub kept: Vec<String>,
+    /// The commit its land left its target at, for the column's "landed a1b2c3d".
+    pub landed: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -97,6 +123,8 @@ impl Default for WorkerRecord {
             pending_runs: Vec::new(),
             created_at: String::new(),
             launched_at: None,
+            retired: None,
+            undone: false,
             extra: Map::new(),
         }
     }
@@ -311,7 +339,7 @@ mod tests {
         let p = scratch();
         let dir = task_dir(&p, "t1").unwrap();
         let text = r#"{
-            "task_id": "t1", "slug": "api", "badge": 3, "phase": "landing",
+            "task_id": "t1", "slug": "api", "badge": 3, "phase": "reviewing",
             "future": {"x": 1},
             "folders": [{"name": "web", "kind": "git", "worktree": "/w", "branch": "b", "folder_future": true}],
             "last_report": {"status": "done", "receipts": {"commits": ["abc"], "checks_future": [1]}, "report_future": 2}
@@ -319,7 +347,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(WORKER_FILE), text).unwrap();
         let w = read_worker(&dir).unwrap();
-        assert_eq!(w.phase, "landing", "an unknown phase still loads");
+        assert_eq!(w.phase, "reviewing", "an unknown phase still loads");
         assert!(!w.is_live());
         assert_eq!(w.version, WORKER_VERSION, "a missing field takes its default");
         assert_eq!(w.extra.get("future"), Some(&serde_json::json!({"x": 1})));
@@ -396,9 +424,26 @@ mod tests {
             w.phase = p.into();
             assert!(w.is_live());
         }
-        for p in [PHASE_FAILED, PHASE_STOPPED] {
+        assert!(LIVE_PHASES.contains(&PHASE_LANDING), "§3.1 counts Landing");
+        for p in [PHASE_FAILED, PHASE_STOPPED, PHASE_LANDED, PHASE_RETIRED] {
             w.phase = p.into();
             assert!(!w.is_live());
         }
+    }
+
+    #[test]
+    fn a_record_from_before_retirement_loads_with_none_and_a_retired_one_round_trips() {
+        let p = scratch();
+        let dir = task_dir(&p, "t1").unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(WORKER_FILE), r#"{"task_id":"t1","phase":"stopped"}"#).unwrap();
+        let w = read_worker(&dir).unwrap();
+        assert!(w.retired.is_none() && !w.undone);
+        let mut r = w.clone();
+        r.phase = PHASE_RETIRED.into();
+        r.retired = Some(Retired { reason: "abandoned".into(), at: "now".into(), kept: vec!["web: dirty".into()], ..Retired::default() });
+        write_worker(&dir, &r).unwrap();
+        assert_eq!(read_worker(&dir).unwrap(), r);
+        let _ = fs::remove_dir_all(&p.root);
     }
 }

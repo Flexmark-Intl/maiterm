@@ -26,6 +26,9 @@
 //! through its window's stack store; `job_sandbox` draws the job's Seatbelt profile from the
 //! worker's own write lists and builds its line; `pressure` holds starts back when memory is short.
 //! `run` is the worker's way in (`hiveRun`, its service verbs) and the `⟦HIVE RUN⟧` it hears back.
+//!
+//! Step 6a: a worker leaving for good and its chat read back after (`retire`), and deleting a
+//! Hive without deleting work (`delete`).
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
@@ -33,6 +36,7 @@
 pub mod brief;
 pub(crate) mod control;
 pub mod create;
+pub mod delete;
 pub(crate) mod deliver;
 pub mod diffstat;
 pub mod events;
@@ -52,6 +56,7 @@ mod probe;
 pub mod queue;
 pub mod record;
 pub(crate) mod report;
+pub mod retire;
 pub mod roles;
 pub(crate) mod rpc;
 pub mod run;

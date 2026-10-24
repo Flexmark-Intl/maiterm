@@ -150,6 +150,16 @@ export function taskEventsFor(tabId: string, tasks: Task[]): TaskEvent[] {
   return out.sort((a, b) => a.ts - b.ts);
 }
 
+/** Where a chat column reads its chat from. A retired Hive worker (docs/hive.md §8.4) has no tab:
+ *  it reads the sessions Rust recorded for its task, and is always read-only. */
+export type ChatSource = { kind: 'tab'; tabId: string } | { kind: 'retired'; hiveId: string; taskId: string };
+
+/** The key a chat column keeps a chat's drafts, folds and reads under: a tab's own id, so the
+ *  Loom's chats are keyed exactly as before retired sources existed. */
+export function chatKey(s: ChatSource | null): string | null {
+  return !s ? null : s.kind === 'tab' ? s.tabId : `retired:${s.hiveId}:${s.taskId}`;
+}
+
 export type ChatRow =
   | { kind: 'turn'; turn: ChatTurn }
   | { kind: 'tools'; key: string; turns: ChatTurn[]; verbs: string[] }

@@ -6,24 +6,27 @@ const find = vi.fn();
 const remove = vi.fn();
 const adoptHiveTab = vi.fn();
 const dropHiveTab = vi.fn();
+const dropJobTab = vi.fn((_ws: string, tab: string): string | null => (tab === 'job-tab' ? 'j-0123abcd' : null));
 const logError = vi.fn();
 const update = vi.fn();
+const forWorkspace = vi.fn((): { id: string; tab_id?: string | null }[] => []);
 const terminalGet = vi.fn();
 const relaunchAgent = vi.fn();
 const workspaces: { id: string; hive?: object | null; panes?: { tabs: { id: string; hive_role?: string | null }[] }[] }[] = [];
 
 vi.mock('$lib/tauri/commands', () => ({ claudeCodeRespond }));
 vi.mock('@tauri-apps/plugin-log', () => ({ error: logError }));
-vi.mock('$lib/stores/tasks.svelte', () => ({ tasksStore: { adoptHiveTask, find, remove, update } }));
+vi.mock('$lib/stores/tasks.svelte', () => ({ tasksStore: { adoptHiveTask, find, remove, update, forWorkspace } }));
 vi.mock('$lib/stores/workspaces.svelte', () => ({
-  workspacesStore: { get workspaces() { return workspaces; }, adoptHiveTab, dropHiveTab },
+  workspacesStore: { get workspaces() { return workspaces; }, adoptHiveTab, dropHiveTab, dropJobTab },
 }));
 vi.mock('$lib/stores/terminals.svelte', () => ({ terminalsStore: { get: terminalGet } }));
 vi.mock('$lib/stores/followUps.svelte', () => ({ followUpsStore: { relaunchAgent } }));
 const startJob = vi.fn();
 const stopJob = vi.fn();
 const cleanupJobs = vi.fn();
-vi.mock('$lib/stores/stack.svelte', () => ({ stackStore: { startJob, stopJob, cleanupJobs } }));
+const forgetJob = vi.fn();
+vi.mock('$lib/stores/stack.svelte', () => ({ stackStore: { startJob, stopJob, cleanupJobs, forgetJob } }));
 
 const activated: string[] = [];
 (globalThis as unknown as { window: unknown }).window = {
@@ -214,6 +217,37 @@ describe('handleHiveRequest', () => {
     const results = answered().map((a) => a.result as { ok?: boolean; error?: string });
     expect(results.every((r) => typeof r.error === 'string' && !r.ok)).toBe(true);
     expect(stopJob).toHaveBeenCalledTimes(1);
+  });
+
+  it('a retire drops the tab and moves the row to its lane with the note, keeping the row', async () => {
+    find.mockReturnValue({ ...task, notes: [] });
+    await handleHiveRequest({ request_id: 'rt1', verb: 'hive.retire', args: { workspace_id: 'ws', task_id: 't1', tab_id: 'tab-w', status: 'dropped', note: 'Retired: wrong approach' } });
+    expect(dropHiveTab).toHaveBeenCalledWith('ws', 'tab-w');
+    expect(remove).not.toHaveBeenCalled();
+    const [ws, id, patch] = update.mock.calls[0];
+    expect([ws, id, patch.status]).toEqual(['ws', 't1', 'dropped']);
+    expect(patch.notes.map((n: { text: string }) => n.text)).toEqual(['Retired: wrong approach']);
+    // A waiter has no tab; a lane that isn't one is refused before anything is dropped.
+    await handleHiveRequest({ request_id: 'rt2', verb: 'hive.retire', args: { workspace_id: 'ws', task_id: 't1', tab_id: null, status: 'done' } });
+    await handleHiveRequest({ request_id: 'rt3', verb: 'hive.retire', args: { workspace_id: 'ws', task_id: 't1', tab_id: 'tab-w', status: 'retired' } });
+    expect(dropHiveTab).toHaveBeenCalledTimes(1);
+    expect(answered().map((a) => a.result)).toEqual([{ ok: true }, { ok: true }, { error: "status retired isn't a lane" }]);
+    find.mockReset();
+  });
+
+  it('a delete drops every Hive tab and clears the tab of the rows they owned, keeping the rows', async () => {
+    forWorkspace.mockReturnValueOnce([{ id: 't1', tab_id: 'tab-w' }, { id: 't2', tab_id: 'coord' }, { id: 't3', tab_id: 'mine' }, { id: 't4', tab_id: null }]);
+    await handleHiveRequest({ request_id: 'd1', verb: 'hive.delete', args: { workspace_id: 'ws', tab_ids: ['coord', 'tab-w', 7] } });
+    expect(dropHiveTab.mock.calls).toEqual([['ws', 'coord'], ['ws', 'tab-w']]);
+    expect(update.mock.calls).toEqual([['ws', 't1', { tab_id: null }], ['ws', 't2', { tab_id: null }]]);
+    expect(remove).not.toHaveBeenCalled();
+    expect(dropJobTab).not.toHaveBeenCalled();
+    await handleHiveRequest({ request_id: 'd2', verb: 'hive.delete', args: { workspace_id: 'ws' } });
+    // Its run-queue job tabs go too, and the stack forgets each job whose tab went.
+    await handleHiveRequest({ request_id: 'd3', verb: 'hive.delete', args: { workspace_id: 'ws', tab_ids: [], job_tab_ids: ['job-tab', 'not-a-job'] } });
+    expect(dropJobTab.mock.calls).toEqual([['ws', 'job-tab'], ['ws', 'not-a-job']]);
+    expect(forgetJob.mock.calls).toEqual([['j-0123abcd']]);
+    expect(answered().map((a) => a.result)).toEqual([{ ok: true }, { error: 'workspace_id and tab_ids are required' }, { ok: true }]);
   });
 
   it('an unknown verb is answered, never left waiting', async () => {
