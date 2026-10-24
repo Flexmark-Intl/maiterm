@@ -1110,6 +1110,10 @@ pub fn run() {
             share::commands::share_import_build,
             share::open::take_pending_share_opens,
             hive::launch::hive_launch_command,
+            hive::create::hive_preflight,
+            hive::create::hive_detect_folder,
+            hive::create::hive_detect_tools,
+            hive::create::hive_create,
             #[cfg(debug_assertions)]
             share::open::share_debug_open,
         ])

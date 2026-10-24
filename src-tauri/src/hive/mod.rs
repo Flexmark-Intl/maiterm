@@ -5,11 +5,13 @@
 //! the workspace and window commands call before they change anything (§11.2), and how a Hive
 //! agent launches (§11.1): its launch record and builder (`launch`), its settings and command
 //! hooks (`settings`), the fail-closed gate those hooks ask (`gate`) and its brief (`brief`).
+//! `create` is the Create sheet's side: preflight, detection and `hive_create` (§3).
 
-// Dormant until the Create sheet (build step 3d) lays a Hive out; nothing calls the disk side yet.
+// Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
 
 pub mod brief;
+pub mod create;
 pub mod gate;
 pub mod launch;
 pub mod layout;
@@ -127,6 +129,24 @@ pub fn refuse_tab_move(from: &Workspace, tab_id: &str, to: Option<&Workspace>) -
     }
     if to.is_some_and(|w| w.id != from.id && w.hive.is_some()) {
         return Err("A tab can't be moved into a Hive".to_string());
+    }
+    Ok(())
+}
+
+/// A new tab in a Hive would sit behind the Hive view with nothing to show it, as the pane's
+/// active tab (§5: a Hive's pane has none). The one tab made there is a reload's copy of a Hive
+/// tab (`copy_of`), which `reloadTab` turns hidden; `create_tab` never makes it active.
+pub fn refuse_tab_create(ws: &Workspace, copy_of: Option<&str>) -> Result<(), String> {
+    if ws.hive.is_some() && !copy_of.and_then(|id| live_tab(ws, id)).is_some_and(|t| t.hive_role.is_some()) {
+        return Err("A Hive's agents are started by the Hive, not as new tabs".to_string());
+    }
+    Ok(())
+}
+
+/// The restored tab would become the pane's active tab behind the Hive view.
+pub fn refuse_tab_restore(ws: &Workspace) -> Result<(), String> {
+    if ws.hive.is_some() {
+        return Err("A tab can't be restored into a Hive".to_string());
     }
     Ok(())
 }
@@ -288,6 +308,19 @@ mod tests {
         assert!(refuse_tab_move(h, "plain-in-hive", None).is_ok(), "an ordinary tab within its workspace");
         assert!(refuse_tab_move(h, "plain-in-hive", Some(p)).is_ok(), "an ordinary tab out of a Hive");
         assert!(refuse_tab_move(p, "t1", None).is_ok());
+    }
+
+    #[test]
+    fn a_hive_takes_no_new_or_restored_tabs_but_a_reload_copy() {
+        let d = app();
+        let (h, p) = (ws(&d, "hive-ws"), ws(&d, "plain-ws"));
+        assert!(refuse_tab_create(h, None).is_err(), "Cmd+T in a Hive");
+        assert!(refuse_tab_create(h, Some("plain-in-hive")).is_err(), "a copy of an ordinary tab is still a new tab");
+        assert!(refuse_tab_create(h, Some("gone")).is_err());
+        assert!(refuse_tab_create(h, Some("coord")).is_ok(), "the coordinator's reload");
+        assert!(refuse_tab_create(p, None).is_ok());
+        assert!(refuse_tab_restore(h).is_err());
+        assert!(refuse_tab_restore(p).is_ok());
     }
 
     #[test]

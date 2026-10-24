@@ -60,8 +60,18 @@
     header?: Snippet<[tabId: string]>;
     /** The caller's own actions, at the composer's left. */
     composerActions?: Snippet<[tabId: string]>;
+    /** The header's actions in place of "Open the tab"; `null` for none (a Hive agent's terminal
+     *  is reached from its column, docs/hive.md §4.5). */
+    actions?: Snippet<[tabId: string]> | null;
+    /** A task event clicked. The Loom shows the task in its Weave. */
+    ontask?: (taskId: string) => void;
+    /** Shown while there's no chat. */
+    emptyText?: string;
   }
-  let { source, name, workspace, tasks, active, readOnly = false, header, composerActions }: Props = $props();
+  let {
+    source, name, workspace, tasks, active, readOnly = false, header, composerActions, actions,
+    ontask = (taskId: string) => loomStore.show('weave', taskId), emptyText = 'Pick a chat on the left.',
+  }: Props = $props();
 
   /** A string, so a caller handing a new source object for the same tab switches nothing. */
   const openId = $derived(source?.tabId ?? null);
@@ -413,6 +423,12 @@
   let chatEl = $state<HTMLElement | null>(null);
   let pinned = true;
   const toBottom = () => { if (chatEl && pinned) chatEl.scrollTop = chatEl.scrollHeight; };
+  /** A caller sending the human here (a Hive's "open this agent"): the newest turn, and the
+   *  composer's caret. */
+  export function focusComposer() {
+    pinned = true;
+    requestAnimationFrame(() => { toBottom(); composerEl?.focus(); });
+  }
   // What's at the bottom, not `rows.length` (at the 40-turn window a new turn pushes an old one out
   // and the count doesn't move) and not `rows` itself (a new array every poll, which yanked a fold
   // the human had just opened at the bottom to its end within 3 s): the last row, how big a run it
@@ -521,9 +537,13 @@
         <span class="ctx" style="--t: {ctxTone(ctx)}"><i><s style="width: {Math.min(100, ctx ?? 0)}%"></s></i><em>{ctx ?? '—'}% context</em>{#if meta?.contextUsed != null && meta.contextLimit}<span class="tok">{fmtTok(meta.contextUsed)}/{fmtTok(meta.contextLimit)}</span>{/if}</span>
         {@render header?.(openId)}
       </div>
-      <div class="acts">
-        <button onclick={() => void navigateToTab(openId)}>Open the tab</button>
-      </div>
+      {#if actions === undefined}
+        <div class="acts">
+          <button onclick={() => void navigateToTab(openId)}>Open the tab</button>
+        </div>
+      {:else if actions}
+        <div class="acts">{@render actions(openId)}</div>
+      {/if}
     </header>
 
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -553,12 +573,12 @@
             <span class="ev-head">{r.events.length === 1 ? 'Added a task' : `Added ${r.events.length} tasks`}</span>
             <ul>
               {#each r.events as e (e.key)}
-                <li><button onclick={() => loomStore.show('weave', e.taskId)}>{e.title}</button></li>
+                <li><button onclick={() => ontask(e.taskId)}>{e.title}</button></li>
               {/each}
             </ul>
           </div>
         {:else if r.kind === 'task'}
-          <button class="event" data-kind={r.event.kind} onclick={() => loomStore.show('weave', r.event.taskId)}>
+          <button class="event" data-kind={r.event.kind} onclick={() => ontask(r.event.taskId)}>
             <span class="ev-head">{EVENT_LABEL[r.event.kind]} · {r.event.title}</span>
             <span class="ev-body">{r.event.text}</span>
           </button>
@@ -664,7 +684,7 @@
       </div>
     {/if}
   {:else}
-    <p class="hint pad">Pick a chat on the left.</p>
+    <p class="hint pad">{emptyText}</p>
   {/if}
 
   <!-- Fixed-position, so where it sits in the DOM doesn't place it; inside the root so a caller

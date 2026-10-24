@@ -347,6 +347,7 @@ pub fn create_tab(
     pane_id: String,
     name: String,
     after_tab_id: Option<String>,
+    hive_copy_of: Option<String>,
 ) -> Result<Tab, String> {
     let label = window.label().to_string();
     let tab = Tab::new(name);
@@ -354,13 +355,18 @@ pub fn create_tab(
         let mut app_data = state.app_data.write();
         let win = app_data.window_mut(&label).ok_or("Window not found")?;
         if let Some(workspace) = win.workspaces.iter_mut().find(|w| w.id == workspace_id) {
+            crate::hive::refuse_tab_create(workspace, hive_copy_of.as_deref())?;
+            // A Hive's pane has no active tab (§5); the only tab made there is a reload's copy.
+            let activate = workspace.hive.is_none();
             if let Some(pane) = workspace.panes.iter_mut().find(|p| p.id == pane_id) {
                 let insert_idx = after_tab_id
                     .and_then(|id| pane.tabs.iter().position(|t| t.id == id))
                     .map(|idx| idx + 1)
                     .unwrap_or(pane.tabs.len());
                 pane.tabs.insert(insert_idx, tab.clone());
-                pane.active_tab_id = Some(tab.id.clone());
+                if activate {
+                    pane.active_tab_id = Some(tab.id.clone());
+                }
                 app_data.clone()
             } else {
                 return Err("Pane not found".to_string());
@@ -2951,6 +2957,7 @@ pub fn restore_archived_tab(
         let workspace = win.workspaces.iter_mut()
             .find(|w| w.id == workspace_id)
             .ok_or("Workspace not found")?;
+        crate::hive::refuse_tab_restore(workspace)?;
 
         let arch_index = workspace.archived_tabs.iter().position(|t| t.id == tab_id)
             .ok_or("Archived tab not found")?;

@@ -325,6 +325,29 @@ fn roll_back(added: &[Added]) {
     }
 }
 
+/// Take back a whole `create_layout` whose Hive was never saved (the workspace went away, or the
+/// state write failed): its read copies, the integration branches while they still point where
+/// the read copy stands, then the folder, which nothing else has seen yet.
+pub fn undo_layout(root: &Path, hive: &Hive) {
+    let p = HivePaths::new(root);
+    let added: Vec<Added> = hive
+        .git_folders()
+        .filter_map(|f| {
+            let worktree = p.coordinator_worktree(&f.name);
+            fs::symlink_metadata(&worktree).ok()?;
+            let branch = hive.is_integration().then(|| {
+                let sha = run(git_in(&worktree).args(["rev-parse", "HEAD"]), QUERY_TIMEOUT).ok()?;
+                Some((hive.integration_branch(), sha))
+            });
+            Some(Added { repo: PathBuf::from(&f.path), worktree, branch: branch.flatten() })
+        })
+        .collect();
+    roll_back(&added);
+    if let Err(e) = fs::remove_dir_all(root) {
+        log::warn!("hive {}: unsaved Hive folder {} left in place: {e}", hive.id, root.display());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +467,20 @@ mod tests {
         // With the cause fixed, the same call succeeds.
         let h = hive(LANDING_INTEGRATION, vec![folder("web", &web, "main"), folder("api", &api, "main")]);
         create_layout(&root, &h).unwrap();
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_unsaved_hive_is_taken_back_whole() {
+        let base = scratch("undo");
+        let web = repo(&base, "web");
+        let root = base.join("hive/h1");
+        let h = hive(LANDING_INTEGRATION, vec![folder("web", &web, "main")]);
+        create_layout(&root, &h).unwrap();
+        undo_layout(&root, &h);
+        assert!(!root.exists());
+        assert!(!git(&web, &["worktree", "list"]).contains("wt.noindex"));
+        assert!(git(&web, &["branch", "--list", "hive/*"]).is_empty());
         let _ = fs::remove_dir_all(&base);
     }
 

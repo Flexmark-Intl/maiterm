@@ -25,6 +25,9 @@
   import ChangelogModal from '$lib/components/ChangelogModal.svelte';
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
   import ShareExportModal from '$lib/components/share/ShareExportModal.svelte';
+  import HiveCreateSheet from '$lib/components/hive/HiveCreateSheet.svelte';
+  import { isEligible as isHiveEligible } from '$lib/hive/model';
+  import { tasksStore } from '$lib/stores/tasks.svelte';
   import StackSection from '$lib/components/stack/StackSection.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
@@ -489,6 +492,18 @@
   let workspaceMenu = $state<{ x: number; y: number; workspaceId: string } | null>(null);
   /** The workspace the Share dialog is open for (docs/workspace-share.md §3). */
   let shareExportFor = $state<string | null>(null);
+  /** The workspace the Hive Create sheet is open for (docs/hive.md §3). */
+  let hiveSheetFor = $state<string | null>(null);
+  /** Rust's answer for the open menu's workspace: only it can see whether the shell a Hive
+   *  would replace is running something. */
+  let hiveOffer = $state<{ workspaceId: string; eligible: boolean } | null>(null);
+  function hiveItems(workspaceId: string): MenuItem[] {
+    if (hiveOffer?.workspaceId !== workspaceId || !hiveOffer.eligible) return [];
+    return [
+      { label: '', separator: true, action: () => {} },
+      { label: 'Make this a Hive…', action: () => { hiveSheetFor = workspaceId; } },
+    ];
+  }
   function workspaceMenuItems(workspaceId: string) {
     const services = stackStore.services(workspaceId);
     const anyLive = services.some((s) => { const st = stackStore.status(s.id); return st === 'running' || st === 'ready' || st === 'starting'; });
@@ -533,6 +548,7 @@
           dispatch("Can't move this project", why, 'error');
         }
       } },
+      ...hiveItems(workspaceId),
     ];
   }
 
@@ -576,6 +592,13 @@
     e.preventDefault();
     moveTargets = null;
     commands.listMoveTargets().then((t) => { moveTargets = t; }).catch((err) => logError(`listMoveTargets: ${err}`));
+    hiveOffer = null;
+    const ws = workspacesStore.workspaces.find((w) => w.id === workspaceId);
+    if (ws && isHiveEligible(ws, tasksStore.forWorkspace(workspaceId))) {
+      commands.hivePreflight(workspaceId, [])
+        .then((p) => { if (workspaceMenu?.workspaceId === workspaceId) hiveOffer = { workspaceId, eligible: p.eligible }; })
+        .catch((err) => logError(`hivePreflight: ${err}`));
+    }
     workspaceMenu = { x: e.clientX, y: e.clientY, workspaceId };
   }
 
@@ -858,6 +881,9 @@
   {/if}
   {#if shareExportFor}
     <ShareExportModal workspaceId={shareExportFor} onclose={() => (shareExportFor = null)} />
+  {/if}
+  {#if hiveSheetFor}
+    <HiveCreateSheet workspaceId={hiveSheetFor} onclose={() => (hiveSheetFor = null)} />
   {/if}
 
   {#if updaterStore.showBanner}

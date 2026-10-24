@@ -556,7 +556,8 @@
 
     let unlistenRestoreTab: (() => void) | undefined;
     listen<{ workspaceId: string; tabId: string }>('mailink-restore-tab', (event) => {
-      workspacesStore.restoreArchivedTab(event.payload.workspaceId, event.payload.tabId);
+      workspacesStore.restoreArchivedTab(event.payload.workspaceId, event.payload.tabId)
+        .catch((e) => logError(`mailink restore tab: ${e}`));
     }).then(unlisten => { unlistenRestoreTab = unlisten; });
 
     // Check for updates menu event
@@ -1009,7 +1010,8 @@
         e.stopPropagation();
         const ws = workspacesStore.activeWorkspace;
         const pane = workspacesStore.activePane;
-        if (ws && pane) {
+        // A Hive takes no new tab (docs/hive.md §5): it would be a shell behind the Hive view.
+        if (ws && pane && !ws.hive) {
           // Visible tabs only — hidden service/Hive tabs would make the next one "Terminal 5"
           // in a strip showing one (docs/stack.md §7).
           const count = pane.tabs.filter(t => !isStripHidden(t)).length + 1;

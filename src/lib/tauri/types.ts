@@ -509,6 +509,74 @@ export interface HiveModel {
   effort: string;
 }
 
+/** What the Create sheet sends to `hive_create` (docs/hive.md §3). Rust re-detects every
+ *  folder, so `local_remotes` and the canonical path are never taken from here. */
+export interface HiveSpec {
+  name: string;
+  goal: string;
+  instructions: string;
+  folders: HiveFolder[];
+  cap: number;
+  /** The human confirmed a cap above the machine's ceiling. */
+  cap_confirmed: boolean;
+  landing_mode: string;
+  models: HiveModels;
+  tools: string[];
+  budget_cents: number;
+  push_after_land: boolean;
+}
+
+export interface HiveReplaceable {
+  pane_id: string;
+  tab_id: string;
+}
+
+/** `hive_preflight`: what the Create sheet needs before it opens. */
+export interface HivePreflight {
+  eligible: boolean;
+  reason: string | null;
+  /** The fresh shell the Hive replaces, closed after Create. */
+  replaceable_tab: HiveReplaceable | null;
+  /** The folder of the tab the human was last looking at, when it's a folder on this disk. */
+  default_primary: string | null;
+  /** The machine's worker ceiling: min((RAM − 32 GB) / 16 GB, ncpu / 4), at least 1. */
+  ceiling: number;
+  default_cap: number;
+  platform_ok: boolean;
+  claude_ok: boolean;
+  claude_detail: string | null;
+}
+
+/** `hive_detect_folder`: what the sheet shows for a picked folder (docs/hive.md §6.1, §6.6). */
+export interface HiveFolderInfo {
+  /** Canonical, symlinks resolved. */
+  path: string;
+  /** "git" (a repo's top folder) | "plain". */
+  kind: string;
+  /** Inside a repo but not its top: the repo the sheet offers instead. */
+  repo_top: string | null;
+  /** The checked-out branch, the default Base. */
+  base: string | null;
+  /** Claude would skip the trust dialog here. False is a warning, never a refusal. */
+  trusted: boolean;
+  local_remotes: string[];
+}
+
+/** A tool the Hive can make things with (docs/hive.md §3 Tools). `id` is what `Hive.tools` holds. */
+export interface HiveDetectedTool {
+  id: string;
+  /** "mcp" | "cli" | "skill" | "comfyui". */
+  kind: string;
+  label: string;
+  host: string | null;
+}
+
+export interface HiveCreated {
+  workspace: Workspace;
+  coordinator_tab_id: string;
+  replace_tab: HiveReplaceable | null;
+}
+
 export type CursorStyle = 'block' | 'underline' | 'bar';
 
 export type TriggerActionType = 'notify' | 'send_command' | 'set_tab_state' | 'enable_auto_resume' | 'replay_auto_resume';

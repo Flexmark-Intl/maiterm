@@ -2,6 +2,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
+import type { HiveCreated, HiveDetectedTool, HiveFolderInfo, HivePreflight, HiveSpec } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
@@ -790,8 +791,10 @@ export async function renamePane(workspaceId: string, paneId: string, name: stri
   return invoke('rename_pane', { workspaceId, paneId, name });
 }
 
-export async function createTab(workspaceId: string, paneId: string, name: string, afterTabId?: string): Promise<Tab> {
-  return invoke('create_tab', { workspaceId, paneId, name, afterTabId });
+/** `hiveCopyOf`: a reload's copy of that Hive tab, the one tab a Hive workspace takes (never
+ *  made active there). */
+export async function createTab(workspaceId: string, paneId: string, name: string, afterTabId?: string, hiveCopyOf?: string): Promise<Tab> {
+  return invoke('create_tab', { workspaceId, paneId, name, afterTabId, hiveCopyOf });
 }
 
 /** `replacedBy`: the tab that replaces this one (a reload), already saved — lets the delete
@@ -2634,4 +2637,24 @@ export async function browserLinkOpenExtensionsPage(): Promise<boolean> {
  * it as is, never through trigger interpolation; on an error type nothing. */
 export async function hiveLaunchCommand(tabId: string): Promise<string> {
   return invoke('hive_launch_command', { tabId });
+}
+
+/** Can this workspace become a Hive, and what the Create sheet starts from (docs/hive.md §3).
+ *  `fromTabId` is the tab the human was last looking at: its folder becomes the default Primary. */
+/** `fromTabIds`: the tabs whose folder may become the default Primary, first match wins. */
+export async function hivePreflight(workspaceId: string, fromTabIds: string[]): Promise<HivePreflight> {
+  return invoke('hive_preflight', { workspaceId, fromTabIds });
+}
+
+export async function hiveDetectFolder(path: string): Promise<HiveFolderInfo> {
+  return invoke('hive_detect_folder', { path });
+}
+
+export async function hiveDetectTools(): Promise<HiveDetectedTool[]> {
+  return invoke('hive_detect_tools');
+}
+
+/** Lay the Hive out on disk and install it, with its hidden coordinator tab, in one write. */
+export async function hiveCreate(workspaceId: string, spec: HiveSpec): Promise<HiveCreated> {
+  return invoke('hive_create', { workspaceId, spec });
 }

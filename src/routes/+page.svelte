@@ -9,6 +9,7 @@
   import WorkspaceSidebar from '$lib/components/workspace/WorkspaceSidebar.svelte';
   import SplitContainer from '$lib/components/pane/SplitContainer.svelte';
   import MeshStageView from '$lib/components/MeshStageView.svelte';
+  import HiveView from '$lib/components/hive/HiveView.svelte';
   import ServiceConsole from '$lib/components/stack/ServiceConsole.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import TerminalPane from '$lib/components/terminal/TerminalPane.svelte';
@@ -645,7 +646,13 @@
       <main class="main-content">
         {#if workspacesStore.activeWorkspace}
           {@const workspace = workspacesStore.activeWorkspace}
-          {#if workspace.bridge_all && agentMeshStore.isStageView(workspace.id)}
+          {#if workspace.hive}
+            <!-- A Hive's columns are the whole main area (docs/hive.md §4.1): its tabs are hidden,
+                 and its terminals never show here. -->
+            {#key workspace.id}
+              <HiveView workspaceId={workspace.id} />
+            {/key}
+          {:else if workspace.bridge_all && agentMeshStore.isStageView(workspace.id)}
             <!-- Mesh stage/filmstrip layout replaces the split tree for this workspace.
                  Terminals portal into its stage/filmstrip slots (data-terminal-slot). -->
             {#key workspace.id}

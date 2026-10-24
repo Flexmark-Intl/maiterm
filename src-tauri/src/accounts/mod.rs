@@ -414,23 +414,29 @@ pub fn resolve_cli(profile: &RuntimeProfile) -> Option<PathBuf> {
 /// whichever its login shell finds, which maiTerm cannot see. So a question about "the"
 /// installed CLI that must hold for the tabs has to hold for all of these.
 pub fn cli_candidates(profile: &RuntimeProfile) -> Vec<PathBuf> {
-    if profile.cli.is_empty() {
+    find_executables(profile.cli)
+}
+
+/// Every executable named `cli` on PATH or in the usual install locations, PATH first. The
+/// GUI app's own PATH is launchd's, so the per-user and Homebrew bins are searched too.
+pub fn find_executables(cli: &str) -> Vec<PathBuf> {
+    if cli.is_empty() {
         return Vec::new();
     }
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(path) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path) {
-            candidates.push(dir.join(profile.cli));
+            candidates.push(dir.join(cli));
         }
     }
     if let Some(h) = dirs::home_dir() {
         // Claude Code's native install location, then the usual per-user bins.
         for d in [".local/bin", "bin", ".bun/bin", ".volta/bin", ".npm-global/bin"] {
-            candidates.push(h.join(d).join(profile.cli));
+            candidates.push(h.join(d).join(cli));
         }
     }
     for d in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
-        candidates.push(Path::new(d).join(profile.cli));
+        candidates.push(Path::new(d).join(cli));
     }
     let mut out: Vec<PathBuf> = Vec::new();
     for c in candidates {

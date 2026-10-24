@@ -18,7 +18,7 @@ import { MESH_IDENTITY_VARS } from '$lib/stores/meshRouting';
 import { CLAUDE_RESUME_COMMAND } from '$lib/triggers/defaults';
 import { disableBridge } from '$lib/stores/sshMcpBridge.svelte';
 import { isServiceTab, isStripHidden } from '$lib/workspace/hiddenTabs';
-import { dispatchHiveOpenColumn, openTargetFor } from '$lib/hive/model';
+import { dispatchHiveOpenColumn, HIVE_NO_NEW_TABS, openTargetFor } from '$lib/hive/model';
 
 /** Sidebar width bounds + default. The minimum reserves room for the footer's
  *  three agent-status indicators (working / waiting / finished) alongside the
@@ -1154,6 +1154,8 @@ function createWorkspacesStore() {
     },
 
     async createTab(workspaceId: string, paneId: string, name: string, options?: { append?: boolean; background?: boolean; context?: SplitContext }) {
+      // Rust refuses it too (hive::refuse_tab_create): it would be a live shell behind the Hive view.
+      if (workspaces.find(w => w.id === workspaceId)?.hive) throw new Error(HIVE_NO_NEW_TABS);
       const previousActiveTabId = workspaces.flatMap(w => w.panes).find(p => p.id === paneId)?.active_tab_id ?? undefined;
       const afterTabId = options?.append ? undefined : previousActiveTabId;
       const tab = await commands.createTab(workspaceId, paneId, name, afterTabId);
@@ -1640,6 +1642,7 @@ function createWorkspacesStore() {
     async restoreArchivedTab(workspaceId: string, tabId: string) {
       const ws = workspaces.find(w => w.id === workspaceId);
       if (!ws) return;
+      if (ws.hive) throw new Error("A tab can't be restored into a Hive.");
 
       // Find active pane
       const pane = ws.panes.find(p => p.id === ws.active_pane_id) ?? ws.panes[0];
@@ -2485,6 +2488,27 @@ function createWorkspacesStore() {
       await this.setActiveWorkspace(workspaceId);
     },
 
+    /** Mirror a Hive `hive_create` just installed (docs/hive.md §3): the record, the name, the
+     *  coordinator's hidden tab and the fresh shell Rust took out in the same write, patched into
+     *  the workspace in place so the panes and tabs still there are left alone. Dropping the shell
+     *  unmounts its terminal, which kills its PTY. The pane's active tab is Rust's: never the
+     *  coordinator, and no longer the shell. */
+    adoptHive(created: Workspace, coordinatorTabId: string, replacedTabId: string | null) {
+      const ws = workspaces.find(w => w.id === created.id);
+      if (!ws) return;
+      ws.hive = created.hive;
+      ws.name = created.name;
+      for (const pane of created.panes) {
+        const coord = pane.tabs.find(t => t.id === coordinatorTabId);
+        const mirror = ws.panes.find(p => p.id === pane.id);
+        if (!mirror) continue;
+        if (replacedTabId) mirror.tabs = mirror.tabs.filter(t => t.id !== replacedTabId);
+        if (coord && !mirror.tabs.some(t => t.id === coordinatorTabId)) mirror.tabs.push(coord);
+        mirror.active_tab_id = pane.active_tab_id ?? null;
+      }
+      if (replacedTabId) import('$lib/stores/navHistory.svelte').then(m => m.navHistoryStore.removeTab(replacedTabId)).catch(() => {});
+    },
+
     async duplicateTab(workspaceId: string, paneId: string, tabId: string, opts?: { shallow?: boolean; reload?: boolean }) {
       const ws = workspaces.find(w => w.id === workspaceId);
       const pane = ws?.panes.find(p => p.id === paneId);
@@ -2512,7 +2536,7 @@ function createWorkspacesStore() {
         : sourceTab.name;
 
       // 3. Create new tab (appended at end)
-      const newTab = await commands.createTab(workspaceId, paneId, dupName);
+      const newTab = await commands.createTab(workspaceId, paneId, dupName, undefined, hiddenReload ? tabId : undefined);
 
       // 4. Copy custom name if source had one
       if (sourceTab.custom_name) {
@@ -2826,8 +2850,8 @@ function createWorkspacesStore() {
       // Names the replacement so the delete still goes through if a shutdown began mid-reload:
       // the duplicate is already saved, and refusing would bring back both.
       await commands.deleteTab(workspaceId, paneId, tabId, newTab.id);
-      // `create_tab` made the copy the pane's active tab, and it is hidden now that it carries the
-      // record: put back what the pane showed, or nothing (a Hive pane has no active tab).
+      // A copy outside a Hive workspace was made the pane's active tab by `create_tab`, and it is
+      // hidden now that it carries the record: put back what the pane showed, or nothing.
       if (reloadingSource?.hive_role) {
         if (activeBeforeDuplicate && activeBeforeDuplicate !== tabId) {
           await commands.setActiveTab(workspaceId, paneId, activeBeforeDuplicate).catch(() => {});
