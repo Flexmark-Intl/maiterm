@@ -63,13 +63,19 @@ function make(state: CardStateName, sub: string | null = null, extra: Partial<Ca
   return { state, order: STATE_ORDER[state], label: STATE_LABEL[state], sub, urgent: false, waiting: 0, ...extra };
 }
 
+/** The agent a card may read: only a live phase has one, and a suspended tab's PTY is gone. The
+ *  state and the activity line both go through this, so they never disagree about it. */
+export function onScreenAgent<A>(phase: string, agent: A | null | undefined, tab: TabFields): A | null {
+  return LIVE_PHASES.includes(phase) && !tab?.suspended && agent ? agent : null;
+}
+
 /** Which state a worker's card shows (§4.3). A task blocker is the human's whatever the phase;
  *  a prompt counts only while an agent can be holding one. A busy agent reads Working even after
  *  a report: a coordinator's message sets it going again without changing its phase. */
 export function cardState(worker: WorkerFields, task: TaskFields, agent: AgentFields, tab: TabFields): CardState {
   const live = LIVE_PHASES.includes(worker.phase);
   const suspended = live && !!tab?.suspended;
-  const onScreen = live && !suspended && agent ? agent : null;
+  const onScreen = onScreenAgent(worker.phase, agent, tab);
   const prompt = onScreen?.state === 'permission' ? 'Waiting for permission'
     : onScreen?.state === 'active' && onScreen.toolName === 'AskUserQuestion' ? 'Asking a question'
     : null;

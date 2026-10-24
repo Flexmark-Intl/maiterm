@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cardAge, cardState, latestNote, sortCards, stateLine, STATE_ORDER, waves } from './cards';
+import { cardAge, cardState, latestNote, onScreenAgent, sortCards, stateLine, STATE_ORDER, waves } from './cards';
 import type { HiveWorkerCard, TaskBlocker } from '$lib/tauri/types';
 
 const worker = (over: Partial<HiveWorkerCard> = {}): HiveWorkerCard => ({
@@ -94,6 +94,16 @@ describe('cardState', () => {
 
   it('a phase from a newer build shows as itself', () => {
     expect(cardState(worker({ phase: 'landing' }), null, idle, null)).toMatchObject({ state: 'idle', sub: 'landing' });
+  });
+});
+
+describe('onScreenAgent', () => {
+  it('only a live, unsuspended worker has an agent to read', () => {
+    expect(onScreenAgent('running', active, null)).toBe(active);
+    expect(onScreenAgent('reported', active, { suspended: false })).toBe(active);
+    expect(onScreenAgent('running', active, { suspended: true })).toBeNull();
+    for (const phase of ['waiting', 'stopped', 'failed', 'landing']) expect(onScreenAgent(phase, active, null)).toBeNull();
+    expect(onScreenAgent('running', undefined, null)).toBeNull();
   });
 });
 

@@ -53,6 +53,11 @@ export interface AgentTabSession {
   toolName?: string;
   /** Human-readable summary of what the tool is doing */
   toolDetail?: string;
+  /** The tool the stale timer cleared, kept until the next real state change. No hook fires
+   *  mid-tool, so a 2-minute `cargo test` looks the same as a finished tool once the timer
+   *  clears `toolName`; the Hive's activity line still names it from here (docs/hive.md §4.4). */
+  staleTool?: string;
+  staleToolDetail?: string;
   /** Only meaningful while idle: false once Claude finishes (unread), true after
    *  the user has viewed the tab. Reset on each fresh transition into idle. */
   read?: boolean;
@@ -162,7 +167,9 @@ function createAgentStateStore() {
     const current = sessions.get(tabId);
     // `freshStart` (a SessionStart) never short-circuits: a relaunch that resumes the SAME
     // session id over a stale idle entry (its SessionEnd never arrived) is still a new start.
-    if (!freshStart && current?.sessionId === sessionId && current?.state === state && current?.toolName === toolName) return;
+    // A stale-cleared tool never short-circuits: the real PostToolUse that follows reads the same
+    // and must still drop `staleTool`.
+    if (!freshStart && !current?.staleTool && current?.sessionId === sessionId && current?.state === state && current?.toolName === toolName) return;
     // Entering idle fresh = unread; staying idle preserves whatever read flag we had.
     const read = state === 'idle' ? (current?.state === 'idle' ? current.read : false) : undefined;
     const updatedAt = activity ? Date.now() : (current?.updatedAt ?? 0);
@@ -191,6 +198,12 @@ function createAgentStateStore() {
         const s = sessions.get(tabId);
         if (s?.toolName === toolName) {
           setState(tabId, sessionId, state);
+          // setState writes a fresh record, so any later event drops this again.
+          const after = sessions.get(tabId);
+          if (after) {
+            sessions = new Map(sessions);
+            sessions.set(tabId, { ...after, staleTool: toolName, staleToolDetail: toolDetail });
+          }
           setVariable(tabId, 'claudeAction', '');
         }
       }, getDescriptor(runtime).toolStaleTimeoutMs));

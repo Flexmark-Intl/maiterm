@@ -6,10 +6,11 @@
   column's width touches no PTY, and a width change at a streaming Claude duplicates its
   scrollback (principle 3).
 
-  The board is static cards in waves (§4.3, §4.4). It reads no transcript: Rust's worker records
-  are fetched when this window hears `hive-workers-changed` or its tasks change, and the rest
-  (lane, blocker, note, agent state) comes live from the stores. Worker columns, the activity
-  line, Pause, Gallery and Memory arrive with later steps.
+  The board is static cards in waves (§4.3, §4.4), with dependency strings between them. It reads
+  no transcript: Rust's worker records are fetched when this window hears `hive-workers-changed`
+  or its tasks change, diff stats and meta are pushed (hiveFeed), and the rest (lane, blocker,
+  note, agent state and the activity line) comes live from the stores. Worker columns, Pause,
+  Gallery and Memory arrive with later steps.
 -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
@@ -24,8 +25,12 @@
   import { agentStateStore } from '$lib/stores/agentState.svelte';
   import ChatColumn from '$lib/components/loom/ChatColumn.svelte';
   import WorkerCard from './WorkerCard.svelte';
+  import { overlordStore } from '$lib/stores/overlord.svelte';
+  import { hiveFeed } from '$lib/stores/hiveFeed.svelte';
   import { dispatchHiveOpenColumn, HIVE_OPEN_COLUMN, takePendingHiveOpen, type HiveOpenColumnDetail } from '$lib/hive/model';
-  import { cardAge, cardState, latestNote, sortCards, STATE_LABEL, STATE_ORDER, waves, type CardStateName } from '$lib/hive/cards';
+  import { cardAge, cardState, latestNote, onScreenAgent, sortCards, STATE_LABEL, STATE_ORDER, waves, type CardStateName } from '$lib/hive/cards';
+  import { activityLine, contextGauge, formatDiffStat } from '$lib/hive/activity';
+  import { strings, type Box, type HiveString } from '$lib/hive/strings';
 
   interface Props {
     workspaceId: string;
@@ -78,25 +83,90 @@
     return () => clearTimeout(t);
   });
 
-  // Ages tick by the minute; a clock, not a poll.
-  let now = $state(Date.now());
+  // Ages tick on hiveFeed's 30 s render clock; a clock, not a poll.
+  const now = $derived(hiveFeed.now);
 
   const cards = $derived.by(() => {
     const list = board?.workers ?? [];
+    const warnAt = overlordStore.checkpointThreshold;
     return list.map((worker) => {
       const tab = worker.tab_id ? tabs.find((t) => t.id === worker.tab_id) ?? null : null;
       const task = tasks.find((t) => t.id === worker.task_id) ?? null;
       const agent = tab ? agentStateStore.getState(tab.id) ?? null : null;
-      const suspended = !!tab && (!!tab.suspended_at || !!ws?.suspended);
+      const tabFields = tab ? { suspended: !!tab.suspended_at || !!ws?.suspended } : null;
+      const meta = hiveFeed.meta(tab?.id);
+      const state = cardState(worker, task, agent, tabFields);
       return {
         worker,
-        state: cardState(worker, task, agent, tab ? { suspended } : null),
+        state,
         note: latestNote(task),
         runtime: tab?.runtime ?? 'claude',
+        activity: activityLine(onScreenAgent(worker.phase, agent, tabFields) ?? undefined, now, hiveFeed.sticky(tab?.id)),
+        diff: formatDiffStat(hiveFeed.diffStat(worker.task_id)),
+        model: meta?.model || worker.model,
+        ctx: contextGauge(meta, warnAt),
+        node: {
+          taskId: worker.task_id,
+          dependsOn: worker.depends_on,
+          active: state.state === 'working',
+          waiting: worker.phase === 'waiting',
+          done: task?.status === 'done',
+        },
       };
     });
   });
   const columns = $derived(waves(sortCards(cards)));
+  /** 'rail' while a worker column is open (§4.1): the same cards, compact and sorted, no waves.
+   *  Worker columns arrive with 5c, whose layout sets this. */
+  let boardMode = $state<'board' | 'rail'>('board');
+  const railCards = $derived(boardMode === 'rail' ? sortCards(cards) : []);
+
+  // ── Dependency strings (§4.4): drawn from the cards' boxes, in a layer that scrolls with them,
+  // so only a change of layout redraws them. ──
+  let wavesEl = $state<HTMLElement | undefined>();
+  let edges = $state<HiveString[]>([]);
+  let stringsRaf = 0;
+  function drawStrings() {
+    cancelAnimationFrame(stringsRaf);
+    stringsRaf = requestAnimationFrame(() => {
+      const host = wavesEl;
+      if (!host) {
+        edges = [];
+        return;
+      }
+      const H = host.getBoundingClientRect();
+      const boxes = new Map<string, Box>();
+      for (const el of host.querySelectorAll<HTMLElement>('[data-hive-task]')) {
+        const r = el.getBoundingClientRect();
+        boxes.set(el.dataset.hiveTask!, { l: r.left - H.left, r: r.right - H.left, t: r.top - H.top, b: r.bottom - H.top });
+      }
+      edges = strings(columns.map((w) => w.map((c) => c.node)), boxes);
+    });
+  }
+  let stringsRo: ResizeObserver | null = null;
+  $effect(() => {
+    const host = wavesEl;
+    if (!host) return;
+    stringsRo = new ResizeObserver(() => drawStrings());
+    return () => {
+      stringsRo?.disconnect();
+      stringsRo = null;
+      cancelAnimationFrame(stringsRaf);
+    };
+  });
+  // A card that grows (a longer activity line, a new note) moves the ones under it: every card is
+  // observed, re-listed whenever the board changes.
+  $effect(() => {
+    void columns;
+    const host = wavesEl;
+    untrack(() => {
+      if (!host || !stringsRo) return;
+      stringsRo.disconnect();
+      stringsRo.observe(host);
+      for (const el of host.querySelectorAll('[data-hive-task]')) stringsRo.observe(el);
+      drawStrings();
+    });
+  });
   const counts = $derived.by(() => {
     const n = new Map<CardStateName, number>();
     for (const c of cards) n.set(c.state.state, (n.get(c.state.state) ?? 0) + 1);
@@ -211,6 +281,8 @@
     dispatchHiveOpenColumn({ workspaceId, tabId: tabId ?? '', taskId });
   }
   onMount(() => {
+    const feedFor = workspaceId;
+    hiveFeed.attach(feedFor);
     const pending = takePendingHiveOpen(workspaceId);
     if (pending) requestAnimationFrame(() => open(pending));
     const onOpen = (e: Event) => {
@@ -226,11 +298,10 @@
     }, { target: getCurrentWindow().label })
       .then((u) => { if (gone) u(); else unlisten = u; })
       .catch((e) => logError(`hive: workers-changed listener: ${e}`));
-    const clock = setInterval(() => (now = Date.now()), 60_000);
     return () => {
       gone = true;
       unlisten?.();
-      clearInterval(clock);
+      hiveFeed.detach(feedFor);
       if (fetchTimer) clearTimeout(fetchTimer);
       if (flashTimer) clearTimeout(flashTimer);
       window.removeEventListener(HIVE_OPEN_COLUMN, onOpen);
@@ -293,9 +364,36 @@
       onpointerdown={startResize}
       onkeydown={onResizerKey}
     ></div>
-    <section class="board" aria-label="Board" bind:this={boardEl}>
-      {#if columns.length}
-        <div class="waves">
+    <section class="board" class:rail={boardMode === 'rail'} aria-label="Board" bind:this={boardEl}>
+      {#if boardMode === 'rail' && railCards.length}
+        <!-- §4.4: in rail mode the waves flatten into the sorted list. -->
+        <div class="rail-list" role="list">
+          {#each railCards as c (c.worker.task_id)}
+            <div role="listitem">
+              <WorkerCard
+                compact
+                card={c.worker}
+                state={c.state}
+                note={c.note}
+                runtime={c.runtime}
+                age=""
+                activity={c.activity}
+                diff={c.diff}
+                model={c.model}
+                ctx={c.ctx}
+                focused={focusedTask === c.worker.task_id}
+                onopen={() => openCard(c.worker.task_id, c.worker.tab_id)}
+              />
+            </div>
+          {/each}
+        </div>
+      {:else if columns.length}
+        <div class="waves" bind:this={wavesEl}>
+          <svg class="strings" aria-hidden="true">
+            {#each edges as e (e.key)}
+              <path d={e.d} class="edge {e.kind}" class:held={e.held} />
+            {/each}
+          </svg>
           {#each columns as wave, i (i)}
             <div class="wave" role="list" aria-label="Wave {i + 1}">
               {#if columns.length > 1}<h3>Wave {i + 1}</h3>{/if}
@@ -307,6 +405,10 @@
                     note={c.note}
                     runtime={c.runtime}
                     age={cardAge(c.worker, now)}
+                    activity={c.activity}
+                    diff={c.diff}
+                    model={c.model}
+                    ctx={c.ctx}
                     focused={focusedTask === c.worker.task_id}
                     onopen={() => openCard(c.worker.task_id, c.worker.tab_id)}
                   />
@@ -342,13 +444,28 @@
   .board { flex: 1 1 260px; min-width: 260px; min-height: 0; overflow-y: auto; display: flex; }
   /* Waves sit side by side and wrap under each other when the board is narrow: the main area
      never scrolls sideways (§4.1). */
-  .waves { flex: 1; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 16px; padding: 14px 16px; min-width: 0; }
-  .wave { flex: 1 1 220px; max-width: 340px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .waves { position: relative; flex: 1; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 16px 24px; padding: 14px 16px; min-width: 0; }
+  .wave { position: relative; z-index: 1; flex: 1 1 220px; max-width: 340px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .board.rail { flex: none; width: 220px; min-width: 200px; max-width: 240px; }
+  .rail-list { flex: 1; display: flex; flex-direction: column; gap: 6px; padding: 10px; min-width: 0; }
+  /* Strings run under the cards (they're opaque), so one that skips a wave passes behind it. The
+     Weave's vocabulary (docs/loom.md): moving dots = the upstream is active, a slow amber dash
+     running backwards = this card waits on it, faint dots = a dependency that is neither. */
+  .strings { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; overflow: visible; }
+  .edge { fill: none; stroke: var(--yellow); stroke-width: 1.2; stroke-dasharray: 1 4; opacity: 0.5; }
+  .edge.met { stroke: var(--fg-dim); opacity: 0.35; }
+  .edge.run { stroke: var(--green); stroke-width: 2.2; stroke-linecap: round; stroke-dasharray: 0.1 9.9; opacity: 0.85; animation: flow 1.1s linear infinite; }
+  .edge.run.held { stroke: var(--yellow); }
+  .edge.wait { stroke-dasharray: 6 4; opacity: 0.75; animation: flow 3.2s linear infinite reverse; }
+  @keyframes flow { to { stroke-dashoffset: -20; } }
   .wave h3 { margin: 0; font-size: 10.5px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-dim); }
   .warn { color: var(--yellow); }
   .empty { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 24px; text-align: center; max-width: 320px; }
   .empty b { font-size: 13px; color: var(--fg); }
   .empty span { font-size: 12px; color: var(--fg-dim); overflow-wrap: anywhere; }
   .role { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 3px; padding: 0 4px; }
-  @media (prefers-reduced-motion: reduce) { .coord { transition: none; } }
+  @media (prefers-reduced-motion: reduce) {
+    .coord { transition: none; }
+    .edge.run, .edge.wait { animation: none; }
+  }
 </style>
