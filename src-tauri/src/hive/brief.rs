@@ -225,6 +225,9 @@ mod tests {
         }
     }
 
+    // POSIX paths: no backslash may reach the rules, and Windows joins with one. No Hive runs
+    // there (§14.16).
+    #[cfg(unix)]
     #[test]
     fn a_workers_rules_name_its_brief_and_its_coordinator_and_are_echo_safe() {
         let (mut h, p, mut w) = crate::hive::launch::tests::sample_worker_hive();
@@ -260,6 +263,8 @@ mod tests {
         assert!(unknown.contains("isn't in maiTerm's catalogue") && unknown.contains("no brief beyond the title"));
     }
 
+    // POSIX paths, as above.
+    #[cfg(unix)]
     #[test]
     fn the_rules_are_safe_to_echo_and_point_at_the_brief() {
         let mut h = crate::hive::launch::tests::sample_hive();

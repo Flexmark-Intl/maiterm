@@ -519,7 +519,8 @@ fn check_worker_trust(claude_json: &[PathBuf], paths: &HivePaths, w: &WorkerReco
     }
     for f in w.git_folders() {
         let wt = f.worktree.as_deref().unwrap_or_default();
-        if !super::trust::trusted_in_all(&roots, Path::new(wt)) {
+        let candidates = super::trust::worktree_candidates(Path::new(wt), f.common_dir.as_deref().map(Path::new));
+        if !super::trust::keys_trusted_in_all(&roots, &candidates) {
             return Err(format!(
                 "Claude Code doesn't trust the repo behind \"{}\", so starting this worker would raise its trust dialog, which \
                  nothing may answer for you. Open that repo in Claude Code once and trust it, then restart the worker.",
@@ -1052,6 +1053,9 @@ pub(crate) mod tests {
         let err = check_worker_trust(&[root.clone()], &p, &w).unwrap_err();
         assert!(err.contains("trust dialog") && err.contains("\"web\""), "{err}");
         assert_eq!(check_worker_trust(&[base.join("missing.json")], &p, &w).unwrap_err(), NO_CLAUDE_YET, "no root a Claude ran under");
+        // The main checkouts, read from the recorded common dirs, cover the worktrees.
+        fs::write(&root, r#"{"projects":{"/r/web":{"hasTrustDialogAccepted":true},"/r/api":{"hasTrustDialogAccepted":true}}}"#).unwrap();
+        assert_eq!(check_worker_trust(&[root.clone()], &p, &w), Ok(()));
         let _ = fs::remove_dir_all(&base);
     }
 

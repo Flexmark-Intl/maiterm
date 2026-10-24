@@ -747,6 +747,8 @@ mod tests {
         assert!(hive_hooks(Path::new("/s"), &[]).get("PreModelSwitch").is_none());
     }
 
+    // The sample paths are POSIX, and absolute only there; Claude has no sandbox on Windows.
+    #[cfg(unix)]
     #[test]
     fn the_sandbox_holds_the_three_settings_spike_13_named() {
         let s = settings();
@@ -1037,6 +1039,8 @@ mod tests {
         assert!(err.contains("\"api\""), "no git dirs, no sandbox to draw: {err}");
     }
 
+    // POSIX paths, as the coordinator's.
+    #[cfg(unix)]
     #[test]
     fn the_worker_sandbox_fails_closed_and_opens_no_localhost() {
         let (s, _) = worker_settings();
@@ -1062,6 +1066,8 @@ mod tests {
         assert!(Path::new(mem).is_absolute() && mem.ends_with("/memory"));
     }
 
+    // POSIX paths, as the coordinator's.
+    #[cfg(unix)]
     #[test]
     fn the_worker_writes_its_own_corner_of_each_repo_and_no_more() {
         let (s, _) = worker_settings();

@@ -86,9 +86,25 @@ pub fn has_trust(json: &Value, path: &Path) -> bool {
 /// `has_trust` against every file in `claude_json`. False for an empty list: no root, no
 /// evidence of trust.
 pub fn trusted_in_all(claude_json: &[PathBuf], path: &Path) -> bool {
-    let candidates = trust_candidates(path);
-    !claude_json.is_empty()
-        && claude_json.iter().all(|f| read_json(f).is_some_and(|v| has_trust_in(&v, &candidates)))
+    keys_trusted_in_all(claude_json, &trust_candidates(path))
+}
+
+pub fn keys_trusted_in_all(claude_json: &[PathBuf], candidates: &[String]) -> bool {
+    !claude_json.is_empty() && claude_json.iter().all(|f| read_json(f).is_some_and(|v| has_trust_in(&v, candidates)))
+}
+
+/// `trust_candidates` for a worker's worktree, from the common dir maiTerm recorded when it made
+/// it rather than from git run there: the worktree's `.git` file is the worker's to rewrite. A
+/// worktree is its own git root, so it counts, and its main checkout.
+pub fn worktree_candidates(worktree: &Path, common_dir: Option<&Path>) -> Vec<String> {
+    let mut out = vec![crate::share::canon(worktree).to_string_lossy().to_string()];
+    let main = common_dir.filter(|c| c.file_name().is_some_and(|n| n == ".git")).and_then(Path::parent);
+    if let Some(k) = main.map(|m| crate::share::canon(m).to_string_lossy().to_string()) {
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
+    out
 }
 
 fn read_json(p: &Path) -> Option<Value> {
@@ -278,6 +294,8 @@ mod tests {
         assert!(ok, "git {args:?}");
     }
 
+    // The key is the realpath through a symlink, in POSIX form; no Hive runs on Windows (§14.16).
+    #[cfg(unix)]
     #[test]
     fn written_to_every_root_under_the_realpath_and_removed_without_touching_foreign_keys() {
         let base = scratch("write");
@@ -286,10 +304,7 @@ mod tests {
         let real = base.join("hive/coordinator/home");
         fs::create_dir_all(&real).unwrap();
         let link = base.join("link-to-hive");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(base.join("hive"), &link).unwrap();
-        #[cfg(not(unix))]
-        let link = base.join("hive");
 
         let r = write_trust(&h, &hive, &link.join("coordinator/home")).unwrap();
         assert_eq!(r.written.len(), 2, "every root: {r:?}");
@@ -389,6 +404,33 @@ mod tests {
         let plain = base.join("plain/deep");
         fs::create_dir_all(&plain).unwrap();
         assert!(has_trust(&parent, &plain));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A worker's worktree is judged by the common dir maiTerm recorded: a `.git` file the worker
+    /// rewrote to name a repo of its own changes what git answers, not what maiTerm reads.
+    #[test]
+    fn a_workers_worktree_is_judged_by_its_recorded_common_dir() {
+        let base = scratch("recorded");
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("a"), "a").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "--no-verify", "-m", "init"]);
+        let wt = base.join("wt.noindex/auth/repo");
+        git(&repo, &["worktree", "add", "-q", "-b", "hive/s--auth", wt.to_str().unwrap(), "main"]);
+        let wt = crate::share::canon(&wt);
+        let common = crate::share::canon(&repo.join(".git"));
+        let k = |p: &Path| p.to_string_lossy().to_string();
+
+        assert_eq!(worktree_candidates(&wt, Some(&common)), vec![k(&wt), k(&repo)]);
+        assert_eq!(worktree_candidates(&wt, Some(&common)), trust_candidates(&wt), "the keys git finds for an honest worktree");
+        git(&base, &["init", "-q", "fake"]);
+        fs::write(wt.join(".git"), format!("gitdir: {}\n", base.join("fake/.git").display())).unwrap();
+        assert_eq!(trust_candidates(&wt), vec![k(&wt)], "git follows the forged file");
+        assert_eq!(worktree_candidates(&wt, Some(&common)), vec![k(&wt), k(&repo)], "maiTerm doesn't");
+        assert_eq!(worktree_candidates(&wt, None), vec![k(&wt)]);
         let _ = fs::remove_dir_all(&base);
     }
 }

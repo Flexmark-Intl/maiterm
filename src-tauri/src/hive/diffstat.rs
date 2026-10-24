@@ -4,9 +4,9 @@
 //!
 //! The worktree is the worker's: it writes every file there, `.gitattributes` and the `.git` file
 //! that names its git dir included, though not the repo's config. So maiTerm's git here names the
-//! git dir it recorded at creation, runs no fsmonitor or hook (`git::git_in`), no diff driver or
-//! textconv a worker's attributes could pick, and never writes the worker's index. A filter driver
-//! its attributes name still runs: only the human's config can define one.
+//! git dir it recorded at creation (`git::git_in_worktree`), runs no fsmonitor or hook, no diff
+//! driver or textconv a worker's attributes could pick, and never writes the worker's index. A
+//! filter driver its attributes name still runs: only the human's config can define one.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -83,19 +83,10 @@ pub fn parse_shortstat(s: &str) -> Shortstat {
     out
 }
 
-/// maiTerm's read-only git in a worker's worktree, on the git dir maiTerm recorded for it: the
-/// worktree's own `.git` file is the worker's to rewrite, and would point git at a config it wrote.
+/// maiTerm's read-only git in a worker's worktree, on the git dir maiTerm recorded for it.
 fn git_at(f: &WorkerFolder) -> Result<std::process::Command, String> {
-    let wt = f.worktree.as_deref().ok_or("no worktree")?;
-    let admin = f.admin_dir.as_deref().ok_or("no recorded git dir")?;
-    // Without `commondir` git would take the admin dir, which the worker can write, as a whole repo.
-    if !Path::new(admin).join("commondir").is_file() {
-        return Err("its git dir isn't a worktree's".to_string());
-    }
-    let mut cmd = git::git_in(Path::new(wt));
-    cmd.arg(format!("--git-dir={admin}"))
-        .arg(format!("--work-tree={wt}"))
-        .args(["-c", "core.pager=cat"])
+    let mut cmd = git::git_in_worktree(f)?;
+    cmd.args(["-c", "core.pager=cat"])
         // `git diff` against the working tree writes back the stat info it refreshed, optional
         // locks or not (git 2.54): this keeps it to memory, and still skips a merely touched file.
         .args(["-c", "diff.autoRefreshIndex=false"])

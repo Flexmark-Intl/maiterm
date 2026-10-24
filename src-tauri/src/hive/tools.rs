@@ -1072,7 +1072,7 @@ async fn list_workers_tool(data: &RwLock<AppData>, fuses: &'static Fuses, caller
 }
 
 /// Commits on the worker's branch that its landing target doesn't have, or None when its
-/// worktree or branch is gone.
+/// worktree or branch is gone. Git runs on the recorded git dir, never the worker's `.git` file.
 fn commits_ahead(f: &WorkerFolder) -> Option<u64> {
     let (wt, branch) = (f.worktree.as_deref()?, f.branch.as_deref()?);
     if !Path::new(wt).is_dir() {
@@ -1084,7 +1084,8 @@ fn commits_ahead(f: &WorkerFolder) -> Option<u64> {
         (None, None) => return None,
     };
     let range = format!("{base}..refs/heads/{branch}");
-    let out = super::git::run(super::git::git_in(Path::new(wt)).args(["rev-list", "--count", &range]), super::git::QUERY_TIMEOUT);
+    let mut cmd = super::git::git_in_worktree(f).ok()?;
+    let out = super::git::run(cmd.args(["rev-list", "--count", &range]), super::git::QUERY_TIMEOUT);
     out.ok()?.trim().parse().ok()
 }
 
@@ -1988,6 +1989,20 @@ mod tests {
         assert_eq!((h["cap"].as_u64(), h["live"].as_u64(), h["spawns_left_this_hour"].as_u64()), (Some(4), Some(1), Some(PER_HOUR as u64 - 1)));
         assert_eq!(v["starts_workers"], true);
         assert!(rows[0].get("tab_id").is_none(), "the coordinator's list carries no tab ids");
+
+        // The worker points its worktree's `.git` at a repo of its own: the count still reads the
+        // git dir maiTerm recorded, where the fake repo's branch doesn't exist.
+        git(&rig.base, &["init", "-q", "-b", w.folders[0].branch.as_deref().unwrap(), "fake"]);
+        let fake = rig.base.join("fake");
+        for f in ["x", "y"] {
+            fs::write(fake.join(f), f).unwrap();
+            git(&fake, &["add", "-A"]);
+            git(&fake, &["commit", "-q", "--no-verify", "-m", f]);
+        }
+        fs::write(wt.join(".git"), format!("gitdir: {}\n", fake.join(".git").display())).unwrap();
+        assert_eq!(commits_ahead(&w.folders[0]), Some(1));
+        let not_a_worktree = WorkerFolder { admin_dir: Some(fake.join(".git").to_string_lossy().into()), ..w.folders[0].clone() };
+        assert_eq!(commits_ahead(&not_a_worktree), None, "a recorded dir that isn't a worktree's is never read");
     }
 
     #[tokio::test]

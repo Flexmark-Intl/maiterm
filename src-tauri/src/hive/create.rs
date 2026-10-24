@@ -863,6 +863,8 @@ mod tests {
         }
     }
 
+    // `/r/web` is absolute only on Unix; no Hive is made on Windows (§14.16).
+    #[cfg(unix)]
     #[test]
     fn the_spec_is_validated_like_the_sheet() {
         assert_eq!(validate_spec(&spec(), 5), Ok(()));

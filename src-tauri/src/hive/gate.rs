@@ -737,6 +737,8 @@ mod tests {
         let _ = fs::remove_dir_all(&f.base);
     }
 
+    // POSIX paths in shell words: a Windows path's backslashes are escapes to the parser.
+    #[cfg(unix)]
     #[test]
     fn reads_and_reviews_inside_the_folders_pass() {
         let f = fx();

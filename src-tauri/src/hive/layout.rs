@@ -486,6 +486,8 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    // Git for Windows names the top level with forward slashes; no Hive runs there (§14.16).
+    #[cfg(unix)]
     #[test]
     fn detect_reads_kind_base_and_local_remotes() {
         let base = scratch("detect");
@@ -517,6 +519,8 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    // POSIX paths.
+    #[cfg(unix)]
     #[test]
     fn local_remote_forms() {
         let top = Path::new("/r/web");

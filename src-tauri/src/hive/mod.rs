@@ -37,7 +37,8 @@ pub(crate) mod git;
 pub mod launch;
 pub mod layout;
 pub mod paths;
-#[cfg(test)]
+// Ignored probes that run a sandboxed `claude -p` through `sh`: Unix only, as the sandbox is.
+#[cfg(all(test, unix))]
 mod probe;
 pub mod record;
 pub(crate) mod report;

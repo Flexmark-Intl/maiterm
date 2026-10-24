@@ -1112,6 +1112,7 @@ mod tests {
     }
 
     /// Hive deliveries to a tab hold while its wait is on screen: typing there ends it (§7.8).
+    #[cfg(unix)]
     #[test]
     fn a_tab_waiting_out_a_limit_is_known_until_its_reset() {
         let (dir, f) = scratch();

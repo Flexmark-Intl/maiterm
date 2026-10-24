@@ -150,27 +150,24 @@ pub(crate) fn verify_receipts(paths: &HivePaths, w: &WorkerRecord, a: &ReportArg
 }
 
 /// A commit on the worker's branch in one of its repos, made since it started: the tip it
-/// branched from (and everything before it) was already on the landing target.
+/// branched from (and everything before it) was already on the landing target. Git runs on the
+/// recorded git dir, never the worker's `.git` file.
 fn verify_commit(w: &WorkerRecord, sha: &str) -> Result<(String, String), String> {
-    use super::git::{git_in, run, QUERY_TIMEOUT};
+    use super::git::{git_in_worktree, run, QUERY_TIMEOUT};
     if !is_sha(sha) {
         return Err(format!("\"{}\" isn't a commit sha (7 to 64 hex digits).", one_line(sha, 80)));
     }
     let mut on_base = false;
     for f in w.git_folders() {
-        let (Some(wt), Some(branch)) = (f.worktree.as_deref(), f.branch.as_deref()) else { continue };
-        let wt = Path::new(wt);
-        let Ok(full) = run(git_in(wt).args(["rev-parse", "--verify", "--quiet"]).arg(format!("{sha}^{{commit}}")), QUERY_TIMEOUT) else {
+        let Some(branch) = f.branch.as_deref() else { continue };
+        let git = |args: &[&str]| git_in_worktree(f).and_then(|mut cmd| run(cmd.args(args), QUERY_TIMEOUT));
+        let Ok(full) = git(&["rev-parse", "--verify", "--quiet", &format!("{sha}^{{commit}}")]) else {
             continue;
         };
-        let on_branch = run(git_in(wt).args(["merge-base", "--is-ancestor"]).arg(&full).arg(format!("refs/heads/{branch}")), QUERY_TIMEOUT).is_ok();
-        if !on_branch {
+        if git(&["merge-base", "--is-ancestor", &full, &format!("refs/heads/{branch}")]).is_err() {
             continue;
         }
-        let before_start = f
-            .base_sha
-            .as_deref()
-            .is_some_and(|base| run(git_in(wt).args(["merge-base", "--is-ancestor"]).arg(&full).arg(base), QUERY_TIMEOUT).is_ok());
+        let before_start = f.base_sha.as_deref().is_some_and(|base| git(&["merge-base", "--is-ancestor", &full, base]).is_ok());
         if before_start {
             on_base = true;
             continue;
@@ -368,6 +365,8 @@ mod tests {
             let wt = paths.worker_worktree("auth", "web");
             fs::create_dir_all(wt.parent().unwrap()).unwrap();
             git(&repo, &["worktree", "add", "-q", "-b", "hive/s--auth", wt.to_str().unwrap(), &base_sha]);
+            let dirs = git(&wt, &["rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir"]);
+            let dirs: Vec<String> = dirs.lines().map(|l| crate::share::canon(Path::new(l.trim())).to_string_lossy().to_string()).collect();
             fs::create_dir_all(paths.worker_scratch("auth")).unwrap();
             let w = WorkerRecord {
                 task_id: "t1".into(),
@@ -382,6 +381,8 @@ mod tests {
                     branch: Some("hive/s--auth".into()),
                     target: Some("main".into()),
                     base_sha: Some(base_sha.clone()),
+                    common_dir: Some(dirs[0].clone()),
+                    admin_dir: Some(dirs[1].clone()),
                     ..worker::WorkerFolder::default()
                 }],
                 ..WorkerRecord::default()
@@ -424,6 +425,23 @@ mod tests {
         }
         let e = r.check(done(json!({ "commits": ["0123456789abcdef"] }))).unwrap_err();
         assert!(e.contains("isn't on your branch"), "no such commit: {e}");
+    }
+
+    /// The worker rewrites its worktree's `.git` to name a repo of its own: maiTerm checks the
+    /// receipt on the git dir it recorded, so its commit still counts and the fake repo's don't.
+    #[test]
+    fn a_forged_git_file_is_not_followed_to_check_a_commit() {
+        let r = Rig::new();
+        let mine = commit(&r.wt, "login.rs");
+        let fake = r.base.join("fake");
+        fs::create_dir_all(&fake).unwrap();
+        git(&fake, &["init", "-q", "-b", "hive/s--auth"]);
+        let forged = commit(&fake, "forged.rs");
+        fs::write(r.wt.join(".git"), format!("gitdir: {}\n", fake.join(".git").display())).unwrap();
+        let c = r.check(done(json!({ "commits": [&mine] }))).unwrap();
+        assert_eq!(c.commits, vec![("web".to_string(), mine)]);
+        let e = r.check(done(json!({ "commits": [forged] }))).unwrap_err();
+        assert!(e.contains("isn't on your branch"), "a commit only the fake repo has: {e}");
     }
 
     #[test]
