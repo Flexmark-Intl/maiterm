@@ -1,6 +1,6 @@
 import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskBlocker, TaskStatus, Service, ServiceRestart } from '$lib/tauri/types';
-import { stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
-import { copyKey, pickCopy, refusedAgentEdits, runsManyCopies } from '$lib/stack/model';
+import { LeaseHeldError, stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
+import { copyKey, parseCopyKey, pickCopy, refusedAgentEdits, runsManyCopies } from '$lib/stack/model';
 import { isMaitermOwnedVar } from '$lib/triggers/shellInterpolate';
 import { followUpsStore } from '$lib/stores/followUps.svelte';
 import { hostLabel, isScriptKind, needsApproval, triggerText, type CreateArgs } from '$lib/followUps/model';
@@ -1181,6 +1181,19 @@ function createClaudeCodeStore() {
       }
       if (verb === 'restartService') await stackStore.waitFor(wsId, copyKey(s.id, target), 10_000);
     } catch (e) {
+      // A copy a queued run depends on is never stopped or moved mid-run (docs/hive.md §6.8):
+      // an agent's stop or move waits behind the job instead, and says so.
+      if (e instanceof LeaseHeldError && verb !== 'startService') {
+        const from = parseCopyKey(e.copyKey).target;
+        const move = verb === 'restartService' && typeof args.on === 'string' && args.on.trim() && target !== from;
+        try {
+          const held = await stackStore.runWhenFree(wsId, s.id, from, verb === 'stopService' ? 'stop' : move ? 'retarget' : 'restart', move ? target : null, 'agent');
+          logInfo(`stack: agent ${verb} ${s.name} waits behind job ${held.job} (tab ${scope.tab.id})`);
+          return { service: s.name, queued_behind: e.lease.job, note: `${s.name} is in use by a queued run; this ${verb === 'stopService' ? 'stop' : 'restart'} happens when that run ends.` };
+        } catch (holdErr) {
+          return { error: String(holdErr) };
+        }
+      }
       return { error: String(e) };
     }
     logInfo(`stack: agent ${verb} ${s.name}${target ? ` on ${target}` : ''} (tab ${scope.tab.id})`);

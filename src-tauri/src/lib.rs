@@ -273,6 +273,9 @@ pub fn run() {
         let mut data = app_state.app_data.write();
         *data = load_state();
         migrate_app_data(&mut data);
+        // The run queue starts empty, so no job row or job tab outlives the last run. Before the
+        // scrollback prune below, which then drops the swept tabs' rows.
+        hive::queue::sweep_jobs(&mut data);
         migrate_scrollback_to_db(&mut data, &app_state.scrollback_db);
         // One-time: clear the stale pty_id high-watermark so restore can trust
         // pty_id as "live at last shutdown" instead of inferring from timestamps.
@@ -698,6 +701,9 @@ pub fn run() {
             // every shadow file forever.
             mailink::mirror::prune_stale_shadows();
 
+            // The Hive run queue starts jobs through its windows from here on (docs/hive.md §6.8).
+            hive::queue::install(app_state.clone(), app.handle().clone());
+
             // Stack copies' branch checkouts whose branch is gone (docs/hive.md §6.9). Git, so off
             // the setup thread.
             {
@@ -970,6 +976,11 @@ pub fn run() {
             stack::stack_target_for,
             stack::stack_prune_worktrees,
             stack::get_stack_runtime_row,
+            hive::queue::stack_job_arm,
+            hive::queue::stack_lease_state,
+            hive::queue::stack_lease_hold,
+            hive::queue::stack_lease_done,
+            hive::queue::hive_lease_override,
             commands::accounts::list_account_runtimes,
             commands::accounts::reconcile_account,
             commands::accounts::read_account_identity,

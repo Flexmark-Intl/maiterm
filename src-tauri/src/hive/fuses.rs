@@ -132,14 +132,25 @@ impl FuseBook {
 pub struct Fuses {
     book: Mutex<Option<FuseBook>>,
     path: Option<PathBuf>,
+    /// Memory pressure as a reservation sees it (§6.8): the machine's for the app's book.
+    gate: fn() -> super::pressure::Gate,
 }
 
 /// `<app data>/hive/fuses.json`, loaded on first use.
-static BOOK: Fuses = Fuses { book: Mutex::new(None), path: None };
+static BOOK: Fuses = Fuses { book: Mutex::new(None), path: None, gate: super::pressure::spawn_gate };
+
+fn no_pressure() -> super::pressure::Gate {
+    super::pressure::Gate::Open
+}
 
 impl Fuses {
+    /// A book over `path` that never feels memory pressure: tests decide that themselves.
     pub fn at(path: PathBuf) -> Self {
-        Self { book: Mutex::new(None), path: Some(path) }
+        Self { book: Mutex::new(None), path: Some(path), gate: no_pressure }
+    }
+
+    pub fn with_gate(path: PathBuf, gate: fn() -> super::pressure::Gate) -> Self {
+        Self { book: Mutex::new(None), path: Some(path), gate }
     }
 
     fn lock(&self) -> Result<Guard<'_>, String> {
@@ -166,6 +177,11 @@ impl Fuses {
         live: impl FnOnce() -> Vec<String>,
         now: i64,
     ) -> Result<Reservation<'_>, String> {
+        // Read before the lock: a sample may take a moment. Under pressure the effective cap is
+        // the live count, so no new worker starts in any Hive until it eases (§6.8).
+        if let Some(why) = (self.gate)().throttled() {
+            return Err(format!("Throttled · {why}: no worker starts until the machine has memory to spare."));
+        }
         let mut g = self.lock()?;
         let b = g.book();
         b.prune(now);
@@ -820,6 +836,21 @@ mod tests {
 
     fn ids(n: usize) -> Vec<String> {
         (0..n).map(|i| format!("live-{i}")).collect()
+    }
+
+    #[test]
+    fn memory_pressure_makes_the_cap_the_live_count() {
+        let dir = std::env::temp_dir().join(format!("hive-fuses-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for gate in [|| crate::hive::pressure::Gate::Hold, || crate::hive::pressure::Gate::Critical] {
+            let f = Fuses::with_gate(dir.join(FUSES_FILE), gate);
+            let err = f.reserve(&hive("h1", 4), W, Vec::new, T0).err().unwrap();
+            assert!(err.starts_with("Throttled · memory pressure"), "{err}");
+            assert_eq!(f.headroom(&hive("h1", 4), &[], T0).pending, 0, "nothing was taken");
+        }
+        let f = Fuses::with_gate(dir.join(FUSES_FILE), || crate::hive::pressure::Gate::Open);
+        assert!(f.reserve(&hive("h1", 4), W, Vec::new, T0).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

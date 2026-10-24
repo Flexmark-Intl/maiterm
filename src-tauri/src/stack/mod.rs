@@ -92,6 +92,7 @@ pub fn request_for(data: &AppData, label: &str, workspace_id: &str, service_id: 
     let ports_of = ws
         .stack
         .iter()
+        .filter(|s| !s.is_job())
         .map(|s| {
             let port = match &s.shared_from {
                 Some(r) => shared_source(data, r).and_then(|(_, src)| src.port),
@@ -250,7 +251,8 @@ fn priming_entry(name: &str, status: &str, url: Option<&str>, port: Option<u16>)
 pub fn priming_entries(data: &AppData, ws: &Workspace, runtime: &HashMap<String, StackRuntimeRow>) -> Vec<String> {
     let status_of = |key: &str| runtime.get(key).map(|r| r.status.as_str()).unwrap_or("stopped");
     let mut parts = Vec::new();
-    for s in &ws.stack {
+    // A run-queue job is the queue's to report, never a service the priming offers (§6.8).
+    for s in ws.stack.iter().filter(|s| !s.is_job()) {
         if let Some(r) = &s.shared_from {
             parts.push(match shared_source(data, r) {
                 Some((src_ws, src)) => {

@@ -2,6 +2,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
+import type { StackHeldAction, StackLeaseState } from './types';
 import type { Hive, HiveBoard, HiveCreated, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HivePreflight, HiveSpec } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
@@ -793,8 +794,10 @@ export async function renamePane(workspaceId: string, paneId: string, name: stri
 
 /** `hiveCopyOf`: a reload's copy of that Hive tab, the one tab a Hive workspace takes (never
  *  made active there). */
-export async function createTab(workspaceId: string, paneId: string, name: string, afterTabId?: string, hiveCopyOf?: string): Promise<Tab> {
-  return invoke('create_tab', { workspaceId, paneId, name, afterTabId, hiveCopyOf });
+/** `serviceId`/`serviceTarget`: the tab is born bound to that stack row, hidden and never active
+ *  (a service copy or a run-queue job; the only new tab a Hive takes). */
+export async function createTab(workspaceId: string, paneId: string, name: string, afterTabId?: string, hiveCopyOf?: string, serviceId?: string, serviceTarget?: string): Promise<Tab> {
+  return invoke('create_tab', { workspaceId, paneId, name, afterTabId, hiveCopyOf, serviceId, serviceTarget });
 }
 
 /** `replacedBy`: the tab that replaces this one (a reload), already saved — lets the delete
@@ -1413,6 +1416,28 @@ export interface StackSharedRow {
 /** The source a `shared_from` names; null when that workspace or service is gone. */
 export async function getStackRuntimeRow(workspaceId: string, serviceId: string): Promise<StackSharedRow | null> {
   return invoke('get_stack_runtime_row', { workspaceId, serviceId });
+}
+
+/** The window has a shell at its prompt for a queued job and is about to type its line
+ *  (docs/hive.md §6.8). Refused once Rust gave the start up, so nothing is typed then. */
+export async function stackJobArm(jobId: string, tabId: string, ptyId: string): Promise<void> {
+  return invoke('stack_job_arm', { jobId, tabId, ptyId });
+}
+/** Which of these copies a running job leases now: checked before every stop and retarget. */
+export async function stackLeaseState(copyKeys: string[]): Promise<StackLeaseState[]> {
+  return invoke('stack_lease_state', { copyKeys });
+}
+/** Run when free: the stop or retarget waits in Rust until the copy's lease ends. */
+export async function stackLeaseHold(workspaceId: string, copyKey: string, action: 'stop' | 'restart' | 'retarget', to: string | null, by: 'human' | 'agent'): Promise<StackHeldAction> {
+  return invoke('stack_lease_hold', { workspaceId, copyKey, action, to, by });
+}
+/** What waited on a copy (Run when free, Stop anyway) has run: the copy may be leased again. */
+export async function stackLeaseDone(copyKey: string): Promise<void> {
+  return invoke('stack_lease_done', { copyKey });
+}
+/** Stop anyway: the jobs leasing the copy are interrupted (never a receipt). Their ids. */
+export async function hiveLeaseOverride(copyKey: string): Promise<string[]> {
+  return invoke('hive_lease_override', { copyKey });
 }
 
 /** Add one follow-up to a tab (docs/follow-ups.md). Returns the tab's list as it now stands. */

@@ -269,6 +269,7 @@ pub fn deny_write_paths(hive: &Hive, paths: &HivePaths, bin_dir: &Path) -> Vec<D
     add(paths.gallery(), true);
     add(paths.tasks(), true);
     add(paths.logs(), true);
+    add(paths.runs(), true);
     add(paths.precedents(), true);
     add(paths.coordinator_home().join(".claude"), true);
     add(paths.coordinator_home().join(".mcp.json"), false);
@@ -532,6 +533,8 @@ pub fn worker_deny_write_paths(hive: &Hive, w: &WorkerRecord, paths: &HivePaths,
     add(paths.gallery(), true);
     add(paths.tasks(), true);
     add(paths.logs(), true);
+    // Its jobs' profiles and pass marks (§6.8): a planted mark would be a forged receipt.
+    add(paths.runs(), true);
     add(paths.precedents(), true);
     add(bin_dir.to_path_buf(), true);
     // Folders that may hold a repo this worker commits into, or its own folders and caches (a
@@ -550,6 +553,53 @@ pub fn worker_deny_write_paths(hive: &Hive, w: &WorkerRecord, paths: &HivePaths,
     Ok(out)
 }
 
+/// What a worker may write, as one derivation that both its Claude sandbox and its queued jobs'
+/// Seatbelt profile are drawn from (§6.7, §6.8), so a job can never write what its worker can't.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WriteLists {
+    /// Every path it writes, its worktrees included: the job profile has no implicit working
+    /// folder, so Claude's settings drop the cwd from this list and the profile keeps it.
+    pub allow: Vec<PathBuf>,
+    /// `worker_deny_write_paths`, which wins over `allow`.
+    pub deny: Vec<DenyPath>,
+    /// Its own folders, which get Write/Edit allow rules: scratch, then each worktree.
+    pub own: Vec<PathBuf>,
+}
+
+/// A worker's write lists. Everything outside its worktrees is named (spike 10 re-run). For a
+/// linked worktree that is its own corner of the main repo's `.git`: per-file branch entries,
+/// never `refs/heads/` (it would move Base or another worker's branch) or `packed-refs`.
+pub fn worker_write_lists(hive: &Hive, w: &WorkerRecord, paths: &HivePaths, ctx: &WorkerContext, bin_dir: &Path) -> Result<WriteLists, String> {
+    let deny = worker_deny_write_paths(hive, w, paths, ctx, bin_dir)?;
+    let mut allow: Vec<PathBuf> = Vec::new();
+    let mut own: Vec<PathBuf> = vec![paths.worker_scratch(&w.slug)];
+    let mut aw = |p: PathBuf| {
+        if !allow.contains(&p) {
+            allow.push(p);
+        }
+    };
+    for f in w.git_folders() {
+        let (wt, common, admin) = git_dirs_of(w, f)?;
+        aw(wt.clone());
+        own.push(wt);
+        aw(admin);
+        aw(common.join("objects"));
+        if let Some(b) = f.branch.as_deref() {
+            let r = common.join("refs").join("heads").join(b);
+            aw(PathBuf::from(format!("{}.lock", r.to_string_lossy())));
+            aw(r);
+            aw(common.join("logs").join("refs").join("heads").join(b));
+        }
+    }
+    aw(paths.worker_scratch(&w.slug));
+    aw(paths.worker_tmp(&w.slug));
+    aw(paths.worker_cargo_target(&w.slug));
+    for c in &ctx.caches {
+        aw(c.clone());
+    }
+    Ok(WriteLists { allow, deny, own })
+}
+
 /// A worker's `--settings` file (§6.7, §14.16): the sandbox with its write lists derived from
 /// `worker.json`, the registries and nothing else on the network, the Hive's memory folder,
 /// deny rules mirroring `denyWrite` plus the human's checkouts, the push and git-option denies
@@ -558,45 +608,12 @@ pub fn worker_settings_json(hive: &Hive, record: &LaunchRecord, w: &WorkerRecord
     if record.role != ROLE_WORKER {
         return Err(format!("No worker settings for a Hive \"{}\"", record.role));
     }
-    let deny = worker_deny_write_paths(hive, w, paths, ctx, &hooks.bin_dir)?;
+    let WriteLists { allow: write, deny, own } = worker_write_lists(hive, w, paths, ctx, &hooks.bin_dir)?;
     let cwd = PathBuf::from(&record.cwd);
     let mcp = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
     let path_str = |p: &Path| p.to_string_lossy().to_string();
-
-    // The cwd is writable already; everything else it writes is named (spike 10 re-run). For a
-    // linked worktree that is its own corner of the main repo's `.git`: per-file branch entries,
-    // never `refs/heads/` (it would move Base or another worker's branch) or `packed-refs`.
-    let mut allow_write: Vec<String> = Vec::new();
-    let mut own: Vec<PathBuf> = vec![paths.worker_scratch(&w.slug)];
-    {
-        let mut aw = |p: PathBuf| {
-            let s = path_str(&p);
-            if !allow_write.contains(&s) {
-                allow_write.push(s);
-            }
-        };
-        for f in w.git_folders() {
-            let (wt, common, admin) = git_dirs_of(w, f)?;
-            if wt != cwd {
-                aw(wt.clone());
-            }
-            own.push(wt);
-            aw(admin);
-            aw(common.join("objects"));
-            if let Some(b) = f.branch.as_deref() {
-                let r = common.join("refs").join("heads").join(b);
-                aw(PathBuf::from(format!("{}.lock", r.to_string_lossy())));
-                aw(r);
-                aw(common.join("logs").join("refs").join("heads").join(b));
-            }
-        }
-        aw(paths.worker_scratch(&w.slug));
-        aw(paths.worker_tmp(&w.slug));
-        aw(paths.worker_cargo_target(&w.slug));
-        for c in &ctx.caches {
-            aw(c.clone());
-        }
-    }
+    // Claude's sandbox writes the cwd already.
+    let allow_write: Vec<String> = write.iter().filter(|p| **p != cwd).map(|p| path_str(p)).collect();
 
     let mut allow: Vec<String> = Vec::new();
     for verb in WORKER_GIT_VERBS {
@@ -1114,6 +1131,28 @@ mod tests {
             assert!(deny.contains(&sp(must.clone())), "{}", must.display());
         }
         assert!(!deny.iter().any(|d| *d == sp(p.memory())), "memory is written through Claude's own exemption");
+    }
+
+    /// The job profile is drawn from the same lists as the worker's sandbox (§6.8): the lists are
+    /// the settings' allowWrite plus the cwd, and its denyWrite exactly, the runs folder included.
+    #[test]
+    fn the_write_lists_are_the_worker_sandbox_s_own() {
+        let (s, _) = worker_settings();
+        let (h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        let r = crate::hive::launch::worker_record(&h, &p, &w);
+        let lists = worker_write_lists(&h, &w, &p, &worker_ctx(), &env().bin_dir).unwrap();
+        let sp = |x: &PathBuf| x.to_string_lossy().to_string();
+        let mut want: Vec<String> = strings(&s["sandbox"]["filesystem"]["allowWrite"]);
+        want.push(r.cwd.clone());
+        let mut got: Vec<String> = lists.allow.iter().map(sp).collect();
+        want.sort();
+        got.sort();
+        assert_eq!(got, want);
+        let deny: Vec<String> = lists.deny.iter().map(|d| sp(&d.path)).collect();
+        assert_eq!(deny, strings(&s["sandbox"]["filesystem"]["denyWrite"]));
+        assert!(deny.contains(&sp(&p.runs())), "a job's profile and pass mark are out of the worker's reach");
+        assert!(strings(&s["permissions"]["deny"]).contains(&abs_rule("Write", &p.runs(), true)));
+        assert_eq!(lists.own[0], p.worker_scratch("auth"));
     }
 
     #[test]

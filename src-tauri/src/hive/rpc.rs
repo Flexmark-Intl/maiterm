@@ -26,6 +26,16 @@ pub(crate) const VERB_UNSPAWN: &str = "hive.unspawn";
 pub(crate) const VERB_TASK: &str = "hive.task";
 /// A worker's agent relaunched in its own tab: typed at an empty prompt, or the tab mounted.
 pub(crate) const VERB_RELAUNCH: &str = "hive.relaunch";
+/// A queued job's hidden tab minted and its line typed through the stack's guard (§6.8),
+/// answered once the shell's own B for that line is seen.
+pub(crate) const VERB_JOB_START: &str = "stack.job.start";
+/// ^C to a job, under the stack's pid guard: a timeout, a release, the human's Stop anyway.
+pub(crate) const VERB_JOB_STOP: &str = "stack.job.stop";
+/// A worker's finished job tabs closed: its next job is starting, or it retired.
+pub(crate) const VERB_JOB_CLEANUP: &str = "stack.job.cleanup";
+/// A job start's window waits out the stack's own guard (mount, first prompt, settle, the B)
+/// before it answers, so it gets longer than `TIMEOUT`.
+pub(crate) const JOB_START_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// The window a Hive lives in, as the tools see it: the app's in production, a stub in tests.
 pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {

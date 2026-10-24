@@ -21,6 +21,10 @@
 //! The board's pushed feed (step 5): each worker's diff stat (`diffstat`) and model/context meta
 //! (`feed`), recomputed off its own hooks and sent to its Hive's window only. `files` names the
 //! folder the Files column shows for a Hive agent's column.
+//!
+//! The run queue (step 5b): `queue` holds the jobs, resources and leases and starts each job
+//! through its window's stack store; `job_sandbox` draws the job's Seatbelt profile from the
+//! worker's own write lists and builds its line; `pressure` holds starts back when memory is short.
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
@@ -36,12 +40,15 @@ pub mod files;
 pub mod fuses;
 pub mod gate;
 pub(crate) mod git;
+pub mod job_sandbox;
 pub mod launch;
 pub mod layout;
 pub mod paths;
+pub mod pressure;
 // Ignored probes that run a sandboxed `claude -p` through `sh`: Unix only, as the sandbox is.
 #[cfg(all(test, unix))]
 mod probe;
+pub mod queue;
 pub mod record;
 pub(crate) mod report;
 pub mod roles;
@@ -240,9 +247,17 @@ pub fn refuse_tab_move(from: &Workspace, tab_id: &str, to: Option<&Workspace>) -
 
 /// A new tab in a Hive would sit behind the Hive view with nothing to show it, as the pane's
 /// active tab (§5: a Hive's pane has none). The one tab made there is a reload's copy of a Hive
-/// tab (`copy_of`), which `reloadTab` turns hidden; `create_tab` never makes it active.
-pub fn refuse_tab_create(ws: &Workspace, copy_of: Option<&str>) -> Result<(), String> {
-    if ws.hive.is_some() && !copy_of.and_then(|id| live_tab(ws, id)).is_some_and(|t| t.hive_role.is_some()) {
+/// tab (`copy_of`), which `reloadTab` turns hidden; `create_tab` never makes it active. The other
+/// is a stack service's or a run-queue job's tab (`service`, one of this workspace's stack rows),
+/// which `create_tab` binds as it makes it, so it is hidden from birth (docs/hive.md §6.8).
+pub fn refuse_tab_create(ws: &Workspace, copy_of: Option<&str>, service: Option<&str>) -> Result<(), String> {
+    if ws.hive.is_none() {
+        return Ok(());
+    }
+    if service.is_some_and(|sid| ws.stack.iter().any(|s| s.id == sid)) {
+        return Ok(());
+    }
+    if !copy_of.and_then(|id| live_tab(ws, id)).is_some_and(|t| t.hive_role.is_some()) {
         return Err("A Hive's agents are started by the Hive, not as new tabs".to_string());
     }
     Ok(())
@@ -441,11 +456,23 @@ mod tests {
     fn a_hive_takes_no_new_or_restored_tabs_but_a_reload_copy() {
         let d = app();
         let (h, p) = (ws(&d, "hive-ws"), ws(&d, "plain-ws"));
-        assert!(refuse_tab_create(h, None).is_err(), "Cmd+T in a Hive");
-        assert!(refuse_tab_create(h, Some("plain-in-hive")).is_err(), "a copy of an ordinary tab is still a new tab");
-        assert!(refuse_tab_create(h, Some("gone")).is_err());
-        assert!(refuse_tab_create(h, Some("coord")).is_ok(), "the coordinator's reload");
-        assert!(refuse_tab_create(p, None).is_ok());
+        assert!(refuse_tab_create(h, None, None).is_err(), "Cmd+T in a Hive");
+        assert!(refuse_tab_create(h, Some("plain-in-hive"), None).is_err(), "a copy of an ordinary tab is still a new tab");
+        assert!(refuse_tab_create(h, Some("gone"), None).is_err());
+        assert!(refuse_tab_create(h, Some("coord"), None).is_ok(), "the coordinator's reload");
+        assert!(refuse_tab_create(p, None, None).is_ok());
+        // A stack service's or a job's tab, bound as it is made: only for a row of this stack.
+        let mut with_stack = h.clone();
+        let svc: crate::state::Service = serde_json::from_value(serde_json::json!({
+            "id": "svc-1", "name": "web", "command": "npm run dev", "cwd": "/p", "origin": "human", "created_at": "", "updated_at": ""
+        }))
+        .unwrap();
+        with_stack.stack.push(svc.clone());
+        with_stack.stack.push(crate::state::Service { id: "j-0000abcd".into(), kind: crate::state::workspace::JOB_KIND.into(), ..svc });
+        assert!(refuse_tab_create(&with_stack, None, Some("svc-1")).is_ok());
+        assert!(refuse_tab_create(&with_stack, None, Some("j-0000abcd")).is_ok(), "a job's tab");
+        assert!(refuse_tab_create(&with_stack, None, Some("not-in-this-stack")).is_err());
+        assert!(refuse_tab_create(h, None, Some("svc-1")).is_err(), "another workspace's service");
         assert!(refuse_tab_restore(h).is_err());
         assert!(refuse_tab_restore(p).is_ok());
     }

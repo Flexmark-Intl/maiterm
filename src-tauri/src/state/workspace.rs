@@ -671,8 +671,25 @@ pub struct Service {
     /// duplicate (it names the other workspace, not this one); never in a share file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_from: Option<ServiceRef>,
+    /// `"service"` | `"job"` (docs/hive.md §6.8). A job row is the run queue's, inserted by Rust
+    /// while one job runs and removed when it ends: never restarted, never `was_running`, kept
+    /// out of the priming, the rollup and the Overlord, and swept on load. A String, so an
+    /// older build loads it; written only when it isn't `"service"`.
+    #[serde(default = "default_service_kind", skip_serializing_if = "is_plain_service")]
+    pub kind: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+pub const SERVICE_KIND: &str = "service";
+pub const JOB_KIND: &str = "job";
+
+fn default_service_kind() -> String {
+    SERVICE_KIND.to_string()
+}
+
+fn is_plain_service(kind: &str) -> bool {
+    kind == SERVICE_KIND
 }
 
 /// Where a `shared_from` service really lives. Strings only, all defaulted: persisted.
@@ -692,6 +709,11 @@ impl Service {
     /// name in a workspace, so "Web", "web " and "web." are one service.
     pub fn normalize_name(name: &str) -> String {
         Task::normalize_title(name)
+    }
+
+    /// A run-queue job's ephemeral row, not a definition.
+    pub fn is_job(&self) -> bool {
+        self.kind == JOB_KIND
     }
 
     /// A service cwd must be absolute: the store types it as `cd '<cwd>' && …`, and a
@@ -3022,8 +3044,14 @@ mod service_tests {
         let old = r#"{"id":"s","name":"web","command":"npm run dev","cwd":"/a","origin":"human","created_at":"","updated_at":""}"#;
         let s: Service = serde_json::from_str(old).unwrap();
         assert!(s.running_targets.is_empty() && s.shared_from.is_none());
+        assert!(s.kind == super::SERVICE_KIND && !s.is_job());
         let json = serde_json::to_string(&s).unwrap();
-        assert!(!json.contains("running_targets") && !json.contains("shared_from"), "{json}");
+        assert!(!json.contains("running_targets") && !json.contains("shared_from") && !json.contains("kind"), "{json}");
+        let job = Service { kind: super::JOB_KIND.into(), ..s.clone() };
+        let back: Service = serde_json::from_str(&serde_json::to_string(&job).unwrap()).unwrap();
+        assert!(back.is_job());
+        let later: Service = serde_json::from_str(&old.replace("\"origin\"", "\"kind\":\"vm\",\"origin\"")).unwrap();
+        assert_eq!(later.kind, "vm", "a kind this build doesn't know still loads");
 
         // A kind this build doesn't know still loads: refused when used, never a lost state file.
         let newer = r#"{"id":"s","name":"web","command":"x","cwd":"/a","origin":"human","created_at":"","updated_at":"",

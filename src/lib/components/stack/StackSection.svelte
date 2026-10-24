@@ -5,7 +5,7 @@
    *  Run on ▸ among them. The rows wrap rather than clip: real service names and ports share
    *  prefixes and the dock is narrow (CLAUDE.md on `white-space: nowrap` in the side docks). */
   import type { Service, Workspace } from '$lib/tauri/types';
-  import { stackStore, type CopyView, type ServiceInput } from '$lib/stores/stack.svelte';
+  import { stackStore, leaseAskOf, type CopyView, type LeaseAsk, type ServiceInput } from '$lib/stores/stack.svelte';
   import { copyKey, copyTitle, launchableUrl } from '$lib/stack/model';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
@@ -17,6 +17,7 @@
   import ServiceModal from './ServiceModal.svelte';
   import ImportServicesModal from './ImportServicesModal.svelte';
   import RunOnPicker from './RunOnPicker.svelte';
+  import LeaseHeldChoice from './LeaseHeldChoice.svelte';
   import { stackCopyTargets, type CopyTarget, type StackSuggestion } from '$lib/tauri/commands';
   import { untrack } from 'svelte';
 
@@ -31,7 +32,11 @@
 
   let { workspace, expanded, ontoggle, onsettled }: Props = $props();
 
-  const services = $derived(workspace.stack ?? []);
+  // A queued run's row is the run queue's, never a service here (it reaches the mirror only on
+  // a window reload mid-run).
+  const services = $derived((workspace.stack ?? []).filter((s) => s.kind !== 'job'));
+  /** A stop, restart or move refused because a queued run uses the copy: the human's choice. */
+  let leaseAsk = $state<LeaseAsk | null>(null);
 
   /** `targets` is the Run on ▸ list, read from Rust (git) once the menu is open. */
   let menu = $state<{ x: number; y: number; service: Service; target: string; targets: CopyTarget[] | null } | null>(null);
@@ -78,8 +83,10 @@
   }
 
   /** A verb the human asked for: a refusal is theirs to read, not only the log's. */
-  function run(label: string, p: Promise<unknown>) {
+  function run(label: string, p: Promise<unknown>, lease?: { action: LeaseAsk['action']; to?: string }) {
     p.catch((e) => {
+      const ask = lease ? leaseAskOf(e, workspace.id, lease.action, lease.to ?? null) : null;
+      if (ask) { leaseAsk = ask; return; }
       logError(`stack: ${label}: ${e}`);
       toastStore.addToast(`Couldn't ${label}`, String(e).replace(/^Error: /, ''), 'error');
     });
@@ -121,7 +128,7 @@
    *  service held anywhere else moves from there; otherwise the new copy starts beside the
    *  others (`moveVerb`). */
   function runOn(service: Service, from: string, to: string) {
-    run(`run ${service.name} there`, stackStore.runOn(workspace.id, service.id, to, from));
+    run(`run ${service.name} there`, stackStore.runOn(workspace.id, service.id, to, from), { action: 'retarget', to });
   }
 
   function openMenu(e: MouseEvent, service: Service, target: string) {
@@ -170,8 +177,8 @@
     const url = liveUrl(service, target);
     const anyLive = stackStore.liveCopies(workspace.id, service.id).length > 0;
     return [
-      { label: live ? 'Restart' : 'Start', action: () => run(live ? 'restart it' : 'start it', live ? stackStore.restart(workspace.id, service.id, target) : stackStore.start(workspace.id, service.id, target)) },
-      { label: 'Stop', disabled: !live, action: () => run('stop it', stackStore.stop(workspace.id, service.id, target)) },
+      { label: live ? 'Restart' : 'Start', action: () => run(live ? 'restart it' : 'start it', live ? stackStore.restart(workspace.id, service.id, target) : stackStore.start(workspace.id, service.id, target), live ? { action: 'restart' } : undefined) },
+      { label: 'Stop', disabled: !live, action: () => run('stop it', stackStore.stop(workspace.id, service.id, target), { action: 'stop' }) },
       { label: stackStore.consoleServiceId(workspace.id) === key ? 'Hide console' : 'Show console', action: () => openCopy(service, target) },
       ...(url ? [{ label: `Open ${url}`, action: () => launch(service, target) }] : []),
       { label: 'Run on', action: () => {}, submenu: runOnItems(service, target, m.targets) },
@@ -237,6 +244,10 @@
     <span class="stack-title">Stack</span>
     <span class="stack-count">{services.length}</span>
   </button>
+
+  {#if leaseAsk}
+    <LeaseHeldChoice ask={leaseAsk} onclose={() => { leaseAsk = null; }} />
+  {/if}
 
   {#if expanded}
     <div class="stack-rows">

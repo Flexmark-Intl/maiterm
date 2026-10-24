@@ -981,6 +981,8 @@ pub(crate) fn clone_workspace_with_id_mapping(
         stack: ws
             .stack
             .iter()
+            // A job row is one run's, in this workspace only (docs/hive.md §6.8).
+            .filter(|s| !s.is_job())
             .map(|s| crate::state::Service {
                 id: uuid::Uuid::new_v4().to_string(),
                 // Nothing runs in the copy; starting it there would fight the source for its port.
@@ -1053,9 +1055,12 @@ mod clone_ids_tests {
             agent_edited: true,
             running_targets: vec!["branch:session-store".to_string()],
             shared_from: Some(crate::state::workspace::ServiceRef { workspace_id: "ws-db".into(), service_id: "svc-db".into() }),
+            kind: crate::state::workspace::SERVICE_KIND.to_string(),
             created_at: String::new(),
             updated_at: String::new(),
         });
+        let job = Service { id: "j-1".into(), kind: crate::state::workspace::JOB_KIND.into(), ..ws.stack[0].clone() };
+        ws.stack.push(job);
         ws.panes[0].tabs[0].service_id = Some("svc-1".to_string());
         ws.panes[0].tabs[0].service_target = Some("branch:session-store".to_string());
         ws.workspace_notes.push(WorkspaceNote {
@@ -1068,6 +1073,7 @@ mod clone_ids_tests {
 
         let (cloned, _) = clone_workspace_with_id_mapping(&ws, &[]);
 
+        assert_eq!(cloned.stack.len(), 1, "a job row stays with its run");
         assert_ne!(cloned.stack[0].id, "svc-1");
         assert_eq!(cloned.stack[0].name, "web");
         assert!(cloned.stack[0].agent_edited, "a copy keeps who wrote the definition");

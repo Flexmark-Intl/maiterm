@@ -981,6 +981,8 @@ fn build(ws: &Workspace, contexts: &[TabShareContext], opts: &ExportOptions, for
     let services = ws
         .stack
         .iter()
+        // A job row is one run's, never a definition to hand on (docs/hive.md §6.8).
+        .filter(|s| !s.is_job())
         .filter_map(|s| {
             let choice = opts.services.iter().find(|c| c.id == s.id);
             if !for_preview && choice.is_none() {
@@ -1371,6 +1373,7 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
                 // Neither is in `SharedService`: copies and other workspaces are the sender's.
                 running_targets: Vec::new(),
                 shared_from: None,
+                kind: crate::state::workspace::SERVICE_KIND.to_string(),
                 created_at: now.clone(),
                 updated_at: now.clone(),
             }

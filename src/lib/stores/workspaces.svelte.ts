@@ -312,6 +312,11 @@ function createWorkspacesStore() {
       windowId = data.id;
       windowLabel = data.label;
       windowName = data.name ?? null;
+      // A run-queue job's row is Rust's while its job runs (docs/hive.md §6.8): never a
+      // definition here, where the stack store's whole-list writes would carry it back.
+      for (const ws of data.workspaces) {
+        if (ws.stack?.some((s) => s.kind === 'job')) ws.stack = ws.stack.filter((s) => s.kind !== 'job');
+      }
       workspaces = data.workspaces;
       activeWorkspaceId = data.active_workspace_id;
       sidebarWidth = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, data.sidebar_width || SIDEBAR_DEFAULT_WIDTH));
@@ -1160,20 +1165,23 @@ function createWorkspacesStore() {
       }
     },
 
-    async createTab(workspaceId: string, paneId: string, name: string, options?: { append?: boolean; background?: boolean; context?: SplitContext }) {
+    /** `service`: the tab is born bound to that stack row (a service copy or a run-queue job),
+     *  hidden and never active — the one kind of new tab a Hive's workspace takes. */
+    async createTab(workspaceId: string, paneId: string, name: string, options?: { append?: boolean; background?: boolean; context?: SplitContext; service?: { id: string; target?: string | null } }) {
       // Rust refuses it too (hive::refuse_tab_create): it would be a live shell behind the Hive view.
-      if (workspaces.find(w => w.id === workspaceId)?.hive) throw new Error(HIVE_NO_NEW_TABS);
+      if (workspaces.find(w => w.id === workspaceId)?.hive && !options?.service) throw new Error(HIVE_NO_NEW_TABS);
       const previousActiveTabId = workspaces.flatMap(w => w.panes).find(p => p.id === paneId)?.active_tab_id ?? undefined;
       const afterTabId = options?.append ? undefined : previousActiveTabId;
-      const tab = await commands.createTab(workspaceId, paneId, name, afterTabId);
+      const tab = await commands.createTab(workspaceId, paneId, name, afterTabId, undefined, options?.service?.id, options?.service?.target || undefined);
       // `background`: the tab exists but the pane keeps showing what it showed (a stack
       // service starting behind the user's work — docs/stack.md §4). Rust's create_tab
       // made the new tab active, so put the previous one back before the mirror sees it.
       // A pane holding only service tabs has no active tab to put back — a legal state since
       // they left the strip (docs/stack.md §7). Rust's `create_tab` has made the new tab
       // active; nothing can correct that here, because the new tab is still an ordinary one.
-      // `setTabServiceId` re-applies the invariant at the moment it stops being one.
-      if (options?.background && previousActiveTabId) {
+      // `setTabServiceId` re-applies the invariant at the moment it stops being one. A tab
+      // born bound was never made active.
+      if (options?.background && previousActiveTabId && !options?.service) {
         await commands.setActiveTab(workspaceId, paneId, previousActiveTabId).catch(() => {});
       }
 
@@ -1287,7 +1295,7 @@ function createWorkspacesStore() {
           : paneForTab.tabs.length;
         paneForTab.tabs.splice(insertIdx >= 0 ? insertIdx : paneForTab.tabs.length, 0, tab);
         terminalsStore.markSpawning(tab.id);
-        if (!options?.background) {
+        if (!options?.background && !options?.service) {
           const { navHistoryStore } = await import('$lib/stores/navHistory.svelte');
           paneForTab.active_tab_id = tab.id;
           navHistoryStore.push({ workspaceId, paneId, tabId: tab.id });

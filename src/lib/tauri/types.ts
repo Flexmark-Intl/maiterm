@@ -361,6 +361,9 @@ export interface Service {
   running_targets?: string[];
   /** Another workspace's service, used here: never started, stopped or retargeted from here. */
   shared_from?: ServiceRef | null;
+  /** "service" (absent) | "job": a run-queue job's ephemeral row (docs/hive.md §6.8), Rust's
+   *  while its job runs. Never restarted, never `was_running`, never in the rollup. */
+  kind?: string;
   created_at: string;
   updated_at: string;
 }
@@ -369,6 +372,29 @@ export interface Service {
 export interface ServiceRef {
   workspace_id: string;
   service_id: string;
+}
+
+/** Which job, if any, leases a stack copy (docs/hive.md §6.8): a stop or retarget waits for it. */
+export interface StackLeaseState {
+  copy_key: string;
+  job: { id: string; entry: string; worker_slug: string; state: string } | null;
+  holders: number;
+}
+
+/** A stop or retarget waiting in Rust for a copy's lease (Run when free); `stack-lease-freed`
+ *  carries it back to the window when the copy is free. */
+export interface StackHeldAction {
+  id: string;
+  copy_key: string;
+  workspace_id: string;
+  window: string;
+  /** "stop" | "restart" | "retarget". */
+  action: string;
+  to?: string | null;
+  /** "human" | "agent". */
+  by: string;
+  /** The job it waited behind. */
+  job: string;
 }
 
 /** One line in a task's progress log. Mirrors the Rust `TaskNote`.
@@ -492,7 +518,7 @@ export interface Hive {
   checkpoints: Record<string, string>;
   budget_cents: number;
   push_after_land: boolean;
-  settings: Record<string, unknown>;
+  settings: HiveSettings;
   criteria: string[];
   /** "active" | "paused" | "done". */
   status: string;
@@ -500,6 +526,33 @@ export interface Hive {
   /** Names the `hive/<slug>` branches; stable across workspace renames. */
   slug: string;
   created_at: string;
+}
+
+/** Hive settings: the sections built so far, the rest round-tripped as they are. */
+export interface HiveSettings {
+  run_queue?: RunQueueSettings;
+  [section: string]: unknown;
+}
+
+/** Which commands a worker runs only through the queue, and the Hive's resource limits (§6.8). */
+export interface RunQueueSettings {
+  commands: QueuedCommand[];
+  /** resource → capacity: lowers this Hive's share of a machine-wide pool, or sets its own. */
+  resources: Record<string, number>;
+}
+
+export interface QueuedCommand {
+  /** The Hive folder's name. */
+  folder: string;
+  /** The leading words `hiveRun`'s command must start with (`cargo test`). */
+  prefix: string;
+  /** Resources it holds; `{worker}` expands (`migrate:{worker}`). */
+  needs: string[];
+  /** Stack services it leases while it runs, by name. */
+  services: string[];
+  env: [string, string][];
+  /** Paths beyond the worker's own its sandbox may write; placeholders and `~` expand. */
+  extra_write: string[];
 }
 
 export interface HiveFolder {

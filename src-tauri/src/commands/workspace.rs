@@ -349,29 +349,43 @@ pub fn create_tab(
     name: String,
     after_tab_id: Option<String>,
     hive_copy_of: Option<String>,
+    service_id: Option<String>,
+    service_target: Option<String>,
 ) -> Result<Tab, String> {
     let label = window.label().to_string();
-    let tab = Tab::new(name);
+    let mut tab = Tab::new(name);
     let data_clone = {
         let mut app_data = state.app_data.write();
         let win = app_data.window_mut(&label).ok_or("Window not found")?;
         if let Some(workspace) = win.workspaces.iter_mut().find(|w| w.id == workspace_id) {
-            crate::hive::refuse_tab_create(workspace, hive_copy_of.as_deref())?;
-            // A Hive's pane has no active tab (§5); the only tab made there is a reload's copy.
-            let activate = workspace.hive.is_none();
-            if let Some(pane) = workspace.panes.iter_mut().find(|p| p.id == pane_id) {
-                let insert_idx = after_tab_id
-                    .and_then(|id| pane.tabs.iter().position(|t| t.id == id))
-                    .map(|idx| idx + 1)
-                    .unwrap_or(pane.tabs.len());
-                pane.tabs.insert(insert_idx, tab.clone());
-                if activate {
-                    pane.active_tab_id = Some(tab.id.clone());
-                }
-                app_data.clone()
-            } else {
+            crate::hive::refuse_tab_create(workspace, hive_copy_of.as_deref(), service_id.as_deref())?;
+            // A Hive's pane has no active tab (§5); the only tabs made there are a reload's copy
+            // and service tabs, which are never active either (docs/stack.md §7).
+            let activate = workspace.hive.is_none() && service_id.is_none();
+            let Some(pane) = workspace.panes.iter_mut().find(|p| p.id == pane_id) else {
                 return Err("Pane not found".to_string());
+            };
+            let insert_idx = after_tab_id
+                .and_then(|id| pane.tabs.iter().position(|t| t.id == id))
+                .map(|idx| idx + 1)
+                .unwrap_or(pane.tabs.len());
+            pane.tabs.insert(insert_idx, tab.clone());
+            if activate {
+                pane.active_tab_id = Some(tab.id.clone());
             }
+            // Born bound: a service tab is never an ordinary tab, not even between two calls.
+            if service_id.is_some() {
+                if let Err(e) = bind_service_copy(workspace, &pane_id, &tab.id, service_id, service_target) {
+                    for p in workspace.panes.iter_mut() {
+                        p.tabs.retain(|t| t.id != tab.id);
+                    }
+                    return Err(e);
+                }
+                if let Some(t) = workspace.panes.iter().flat_map(|p| p.tabs.iter()).find(|t| t.id == tab.id) {
+                    tab = t.clone();
+                }
+            }
+            app_data.clone()
         } else {
             return Err("Pane not found".to_string());
         }
@@ -2835,6 +2849,9 @@ pub fn set_workspace_stack(
     mut stack: Vec<crate::state::Service>,
 ) -> Result<Vec<crate::state::Service>, String> {
     let label = window.label().to_string();
+    // Job rows are the run queue's (docs/hive.md §6.8): never written by the store's whole-list
+    // replace, and never lost to one.
+    stack.retain(|s| !s.is_job());
     for s in stack.iter_mut() {
         s.normalized_name = crate::state::Service::normalize_name(&s.name);
         s.cwd = crate::state::Service::expand_cwd(&s.cwd);
@@ -2850,7 +2867,8 @@ pub fn set_workspace_stack(
             .iter_mut()
             .find(|w| w.id == workspace_id)
             .ok_or("Workspace not found")?;
-        workspace.stack = stack;
+        let jobs = workspace.stack.iter().filter(|s| s.is_job()).cloned();
+        workspace.stack = stack.into_iter().chain(jobs).collect();
         app_data.clone()
     };
     save_state(&data_clone)?;

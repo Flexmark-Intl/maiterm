@@ -94,6 +94,21 @@ impl HivePaths {
         self.root.join("logs")
     }
 
+    /// The run log: one line per finished job and per refusal, append-only (§6.8).
+    pub fn run_log(&self) -> PathBuf {
+        self.logs().join("runs.jsonl")
+    }
+
+    /// Each job's sandbox profile and pass mark, Rust's alone: on every worker's `denyWrite`, so
+    /// neither a worker nor its job can plant a mark or rewrite a profile.
+    pub fn runs(&self) -> PathBuf {
+        self.root.join("runs")
+    }
+
+    pub fn run(&self, job_id: &str) -> PathBuf {
+        self.runs().join(job_id)
+    }
+
     /// The coordinator's working directory: never the root, whose Grep would walk every
     /// worktree and the gallery (§6.3).
     pub fn coordinator_home(&self) -> PathBuf {
@@ -139,6 +154,12 @@ impl HivePaths {
     /// The worker's `CLAUDE_CODE_TMPDIR` (§6.7).
     pub fn worker_tmp(&self, slug: &str) -> PathBuf {
         self.worker_dir(slug).join(CLAUDE_TMP)
+    }
+
+    /// A queued job's `TMPDIR`: inside the worker's own temp, which its sandbox already writes,
+    /// so a job never writes anywhere its worker can't.
+    pub fn worker_job_tmp(&self, slug: &str) -> PathBuf {
+        self.worker_tmp(slug).join("jobs")
     }
 
     /// The worker's own `CARGO_TARGET_DIR`: one shared target serializes every build on its

@@ -720,7 +720,9 @@ pub async fn hive_create(
         // A coordinator that can't start is a broken Hive: refuse here rather than at launch.
         launch::claude_new_enough()?;
         let folders = resolve_folders(&spec_for_disk.folders, &trust_roots(&prefs), app_data_dir().as_deref())?;
-        let hive = build_hive(&spec_for_disk, uuid::Uuid::new_v4().to_string(), folders);
+        let mut hive = build_hive(&spec_for_disk, uuid::Uuid::new_v4().to_string(), folders);
+        // The queued commands it starts with, read from the folders (§6.8); edited in settings.
+        hive.settings.run_queue = super::queue::detect_commands(&hive.folders);
         layout::validate(&hive)?;
         let root = hive_root(&hive.id).ok_or("Couldn't find the app data folder")?;
         layout::create_layout(&root, &hive).inspect_err(|_| {

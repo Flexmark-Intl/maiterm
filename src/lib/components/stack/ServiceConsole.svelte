@@ -22,7 +22,8 @@
    *  drawer away), so a full modal dim would be a lie about what is still live.
    */
   import { tick } from 'svelte';
-  import { stackStore } from '$lib/stores/stack.svelte';
+  import { stackStore, leaseAskOf, type LeaseAsk } from '$lib/stores/stack.svelte';
+  import LeaseHeldChoice from './LeaseHeldChoice.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
   import { copyTitle, parseCopyKey } from '$lib/stack/model';
@@ -71,8 +72,13 @@
     }
   }
 
-  function run(label: string, p: Promise<unknown>) {
+  /** A stop or restart refused because a queued run uses the copy: the human's choice. */
+  let leaseAsk = $state<LeaseAsk | null>(null);
+
+  function run(label: string, p: Promise<unknown>, lease?: LeaseAsk['action']) {
     p.catch((e) => {
+      const ask = lease ? leaseAskOf(e, workspaceId, lease) : null;
+      if (ask) { leaseAsk = ask; return; }
       logError(`stack console: ${label}: ${e}`);
       toastStore.addToast(`Couldn't ${label}`, String(e).replace(/^Error: /, ''), 'error');
     });
@@ -219,10 +225,10 @@
         {/if}
         {#if live}
           <Tooltip text="Restart {title}">
-            <button class="ctl" onclick={() => run('restart it', stackStore.restart(workspaceId, service.id, target))}>Restart</button>
+            <button class="ctl" onclick={() => run('restart it', stackStore.restart(workspaceId, service.id, target), 'restart')}>Restart</button>
           </Tooltip>
           <Tooltip text="Stop {title}">
-            <button class="ctl" onclick={() => run('stop it', stackStore.stop(workspaceId, service.id, target))}>Stop</button>
+            <button class="ctl" onclick={() => run('stop it', stackStore.stop(workspaceId, service.id, target), 'stop')}>Stop</button>
           </Tooltip>
         {:else}
           <Tooltip text="Start {title}">
@@ -234,6 +240,13 @@
         </Tooltip>
       </div>
     </header>
+
+    {#if leaseAsk}
+      <!-- Over the terminal, never above it in the flow: a height change would resize the PTY. -->
+      <div class="lease-float">
+        <LeaseHeldChoice ask={leaseAsk} onclose={() => { leaseAsk = null; }} />
+      </div>
+    {/if}
 
     {#if shownTabId}
       <!-- The portaled terminal fills this and takes its own focus on click. -->
@@ -325,6 +338,14 @@
   .resize-handle:active {
     background: var(--accent);
     opacity: 0.3;
+  }
+
+  .lease-float {
+    position: absolute;
+    top: 40px;
+    right: 8px;
+    max-width: min(420px, calc(100% - 16px));
+    z-index: 2;
   }
 
   .console-header {

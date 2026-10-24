@@ -1,0 +1,629 @@
+use super::*;
+
+const T0: i64 = 1_800_000_000_000;
+
+fn spec(hive: &str, task: &str, worker: &str, needs: &[&str]) -> JobSpec {
+    JobSpec {
+        hive_id: hive.into(),
+        workspace_id: format!("ws-{hive}"),
+        window: "main".into(),
+        task_id: task.into(),
+        worker_slug: worker.into(),
+        folder: "app".into(),
+        argv: vec!["cargo".into(), "test".into()],
+        entry: "cargo test".into(),
+        needs: needs.iter().map(|s| s.to_string()).collect(),
+        ..JobSpec::default()
+    }
+}
+
+fn ids(jobs: &[Job]) -> Vec<String> {
+    jobs.iter().map(|j| j.id.clone()).collect()
+}
+
+/// Queued, started, armed on `pty`, begun: a running job.
+fn running(q: &mut Queue, s: JobSpec, pty: &str, now: i64) -> String {
+    let id = q.enqueue(s, now).unwrap().id;
+    assert!(ids(&q.schedule(T0)).contains(&id), "{id} starts");
+    q.arm(&id, &format!("tab-{pty}"), pty).unwrap();
+    assert_eq!(q.osc(pty, 'B', None, now), Osc::Began(id.clone()));
+    id
+}
+
+#[test]
+fn ids_and_needs_are_checked_names() {
+    let id = new_id(|_| false);
+    assert!(is_job_id(&id), "{id}");
+    for bad in ["j-1234567", "j-123456789", "x-12345678", "j-1234567G", "j-ABCDEF12"] {
+        assert!(!is_job_id(bad), "{bad}");
+    }
+    assert_eq!(expand_needs(&["cargo".into(), "migrate:{worker}".into(), "cargo".into()], "auth").unwrap(), vec!["cargo", "migrate:auth"]);
+    for bad in ["migrate:{branch}", "Cargo", "a b", "x;y", "", "$(id)"] {
+        assert!(expand_needs(&[bad.into()], "auth").is_err(), "{bad:?}");
+    }
+    let mut q = Queue::default();
+    assert!(q.enqueue(JobSpec { argv: vec![], ..spec("h1", "t1", "a", &[]) }, T0).is_err(), "no command");
+    assert!(q.enqueue(JobSpec { task_id: String::new(), ..spec("h1", "t1", "a", &[]) }, T0).is_err(), "no worker");
+    let j = q.enqueue(JobSpec { timeout_s: 10 * MAX_TIMEOUT_S, ..spec("h1", "t1", "a", &[]) }, T0).unwrap();
+    assert_eq!((j.state.as_str(), j.timeout_s), (QUEUED, MAX_TIMEOUT_S));
+    assert_eq!(q.enqueue(spec("h1", "t1", "a", &[]), T0).unwrap().timeout_s, DEFAULT_TIMEOUT_S);
+}
+
+#[test]
+fn higher_priority_first_then_first_queued() {
+    let mut q = Queue::default();
+    let a = q.enqueue(spec("h1", "t1", "a", &["tauri-dev"]), T0).unwrap().id;
+    let b = q.enqueue(JobSpec { priority: 5, ..spec("h1", "t2", "b", &["tauri-dev"]) }, T0 + 1).unwrap().id;
+    let c = q.enqueue(spec("h1", "t3", "c", &["tauri-dev"]), T0 + 2).unwrap().id;
+    assert_eq!(ids(&q.schedule(T0)), vec![b.clone()], "one tauri-dev, the higher priority takes it");
+    assert!(q.schedule(T0).is_empty(), "nothing else has room");
+    q.fail_start(&b, NEEDS_INTEGRATION, T0 + 3).unwrap();
+    assert_eq!(ids(&q.schedule(T0)), vec![a.clone()]);
+    q.fail_start(&a, NEEDS_INTEGRATION, T0 + 4).unwrap();
+    assert_eq!(ids(&q.schedule(T0)), vec![c]);
+}
+
+#[test]
+fn jobs_that_dont_compete_run_in_parallel_and_pools_cap_across_hives() {
+    let mut q = Queue::default();
+    let c1 = q.enqueue(spec("h1", "t1", "a", &["cargo"]), T0).unwrap().id;
+    let e1 = q.enqueue(spec("h1", "t2", "b", &["e2e"]), T0 + 1).unwrap().id;
+    let c2 = q.enqueue(spec("h2", "t3", "c", &["cargo"]), T0 + 2).unwrap().id;
+    let c3 = q.enqueue(spec("h2", "t4", "d", &["cargo"]), T0 + 3).unwrap().id;
+    let free = q.enqueue(spec("h1", "t5", "e", &[]), T0 + 4).unwrap().id;
+    let started = ids(&q.schedule(T0));
+    assert_eq!(started, vec![c1.clone(), e1, c2, free], "cargo's two, the e2e beside them, a job with no needs");
+    assert!(!started.contains(&c3), "a third cargo waits, whichever Hive it's from");
+    q.fail_start(&c1, "x", T0).unwrap();
+    assert_eq!(ids(&q.schedule(T0)), vec![c3]);
+}
+
+#[test]
+fn a_hive_can_only_lower_its_own_share_of_a_pool() {
+    let mut q = Queue::default();
+    let shares: BTreeMap<String, u32> = [("cargo".to_string(), 1), ("e2e".to_string(), 9)].into();
+    let mine = |task: &str, needs: &[&str]| JobSpec { shares: shares.clone(), ..spec("h1", task, task, needs) };
+    let a = q.enqueue(mine("a", &["cargo"]), T0).unwrap().id;
+    let b = q.enqueue(mine("b", &["cargo"]), T0 + 1).unwrap().id;
+    let other = q.enqueue(spec("h2", "c", "c", &["cargo"]), T0 + 2).unwrap().id;
+    let e1 = q.enqueue(mine("d", &["e2e"]), T0 + 3).unwrap().id;
+    let e2 = q.enqueue(mine("e", &["e2e"]), T0 + 4).unwrap().id;
+    let started = ids(&q.schedule(T0));
+    assert_eq!(started, vec![a, other, e1], "h1 holds one cargo; h2 takes the other; 9 e2e is still the pool's one");
+    assert!(!started.contains(&b) && !started.contains(&e2));
+}
+
+#[test]
+fn a_migration_namespace_is_exclusive_and_the_hives_own() {
+    let mut q = Queue::default();
+    let shares: BTreeMap<String, u32> = [("migrate:auth".to_string(), 3), ("db".to_string(), 2)].into();
+    let job = |hive: &str, task: &str, worker: &str| JobSpec { shares: shares.clone(), ..spec(hive, task, worker, &["migrate:{worker}"]) };
+    let a1 = q.enqueue(job("h1", "t1", "auth"), T0).unwrap().id;
+    let a2 = q.enqueue(job("h1", "t2", "auth"), T0 + 1).unwrap().id;
+    let b = q.enqueue(job("h1", "t3", "billing"), T0 + 2).unwrap().id;
+    let other_hive = q.enqueue(job("h2", "t4", "auth"), T0 + 3).unwrap().id;
+    let started = ids(&q.schedule(T0));
+    assert_eq!(started, vec![a1.clone(), b, other_hive], "one migration per namespace, per Hive; settings can't widen it");
+    assert!(!started.contains(&a2));
+    assert_eq!(q.job(&a1).unwrap().needs, vec!["migrate:auth"]);
+    // The Hive's own resources take its settings; an unknown one is one at a time.
+    let d1 = q.enqueue(JobSpec { shares: shares.clone(), ..spec("h1", "t5", "x", &["db"]) }, T0 + 4).unwrap().id;
+    let d2 = q.enqueue(JobSpec { shares: shares.clone(), ..spec("h1", "t6", "y", &["db"]) }, T0 + 5).unwrap().id;
+    let d3 = q.enqueue(JobSpec { shares: shares.clone(), ..spec("h1", "t7", "z", &["db"]) }, T0 + 6).unwrap().id;
+    let u1 = q.enqueue(spec("h1", "t8", "u", &["gpu-ish"]), T0 + 7).unwrap().id;
+    let u2 = q.enqueue(spec("h1", "t9", "v", &["gpu-ish"]), T0 + 8).unwrap().id;
+    let started = ids(&q.schedule(T0));
+    assert_eq!(started, vec![d1, d2, u1]);
+    assert!(!started.contains(&d3) && !started.contains(&u2));
+}
+
+#[test]
+fn only_a_d_after_the_armed_b_is_the_exit() {
+    let mut q = Queue::default();
+    let id = q.enqueue(spec("h1", "t1", "a", &["cargo"]), T0).unwrap().id;
+    q.schedule(T0);
+    assert_eq!(q.osc("pty-1", 'D', Some(0), T0), Osc::None, "an unarmed PTY is nobody's");
+    q.arm(&id, "tab-1", "pty-1").unwrap();
+    assert_eq!(q.osc("pty-1", 'D', Some(0), T0), Osc::None, "the fresh shell's first-prompt D;0 comes before the B");
+    assert_eq!(q.osc("pty-1", 'A', None, T0), Osc::None);
+    assert_eq!(q.osc("pty-1", 'B', None, T0 + 10), Osc::Began(id.clone()));
+    let j = q.job(&id).unwrap();
+    assert_eq!((j.state.as_str(), j.began, j.started_at), (RUNNING, true, Some(T0 + 10)));
+    assert_eq!(q.osc("pty-1", 'B', None, T0 + 11), Osc::None, "only the first B begins it");
+    assert_eq!(q.osc("pty-other", 'D', Some(0), T0), Osc::None);
+    assert_eq!(q.osc("pty-1", 'D', Some(0), T0 + 20), Osc::Exit { job: id.clone(), code: Some(0) });
+    // The job printed a D of its own while its line still ran: no exit mark, so whatever it
+    // says, it isn't the exit, and the job keeps its resources.
+    for code in [Some(0), Some(1), None] {
+        assert!(q.complete(&id, code, Marks::None, T0 + 20).is_none(), "{code:?}");
+    }
+    assert_eq!(q.job(&id).unwrap().state, RUNNING);
+    assert!(q.holders.get("cargo").is_some_and(|v| v.contains(&id)), "it still holds cargo");
+    // A D;0 after a failed line (a background child printed it): no pass mark, not the exit.
+    assert!(q.complete(&id, Some(0), Marks::Exited, T0 + 20).is_none());
+    // A pass is exit 0, whatever the D beside it says.
+    let ended = q.complete(&id, Some(7), Marks::Passed, T0 + 30).unwrap();
+    assert_eq!((ended.job.state.as_str(), ended.job.exit_code, ended.job.ended_at, ended.stop), (DONE, Some(0), Some(T0 + 30), false));
+    assert_eq!(q.osc("pty-1", 'D', Some(0), T0 + 31), Osc::None, "its PTY is free again");
+    assert!(q.complete(&id, Some(1), Marks::Passed, T0 + 32).is_none(), "ended once");
+}
+
+#[test]
+fn a_job_whose_shell_dies_ends_and_frees_what_it_held() {
+    let mut q = Queue::default();
+    let a = running(&mut q, spec("h1", "t1", "a", &["tauri-dev"]), "p1", T0);
+    let b = q.enqueue(spec("h1", "t2", "b", &["tauri-dev"]), T0).unwrap().id;
+    assert!(q.schedule(T0).is_empty());
+    assert!(q.pty_closed("p-other", T0).is_none(), "a PTY that runs no job");
+    let e = q.pty_closed("p1", T0 + 5).unwrap();
+    assert_eq!((e.job.state.as_str(), e.job.stopped_by.as_deref(), e.stop), (INTERRUPTED, None, false), "never a pass, nobody's stop, nothing to ^C");
+    assert_eq!(e.job.id, a);
+    assert_eq!(ids(&q.schedule(T0)), vec![b.clone()]);
+    // Armed but never begun: a failed start.
+    q.arm(&b, "tab-p2", "p2").unwrap();
+    assert_eq!(q.pty_closed("p2", T0).unwrap().job.state, INVALID);
+    // An interrupted job waiting on its ^C'd D only drops its mapping.
+    let c = running(&mut q, spec("h1", "t3", "c", &[]), "p3", T0);
+    q.interrupt(&c, BY_TIMEOUT, "x", T0).unwrap();
+    assert!(q.pty_closed("p3", T0).is_none());
+    assert_eq!(q.osc("p3", 'D', Some(130), T0), Osc::None);
+}
+
+#[test]
+fn a_failing_exit_needs_no_mark_and_frees_its_resources() {
+    let mut q = Queue::default();
+    let a = running(&mut q, spec("h1", "t1", "a", &["tauri-dev"]), "p1", T0);
+    let b = q.enqueue(spec("h1", "t2", "b", &["tauri-dev"]), T0).unwrap().id;
+    assert!(q.schedule(T0).is_empty());
+    let ended = q.complete(&a, Some(101), Marks::Exited, T0 + 5).unwrap();
+    assert_eq!((ended.job.state.as_str(), ended.job.exit_code), (DONE, Some(101)));
+    assert_eq!(ids(&q.schedule(T0)), vec![b]);
+}
+
+#[test]
+fn a_job_with_no_shell_integration_is_invalid_never_a_pass() {
+    let mut q = Queue::default();
+    let id = q.enqueue(spec("h1", "t1", "a", &["cargo"]), T0).unwrap().id;
+    q.schedule(T0);
+    let ended = q.fail_start(&id, NEEDS_INTEGRATION, T0 + 1).unwrap();
+    assert_eq!((ended.job.state.as_str(), ended.job.error.as_deref(), ended.job.exit_code), (INVALID, Some(NEEDS_INTEGRATION), None));
+    // A window that wakes after its start was given up is refused before it types.
+    assert!(q.arm(&id, "tab", "pty").is_err());
+    assert!(!ended.stop, "never armed, so nothing was typed");
+    let r = running(&mut q, spec("h1", "t2", "b", &[]), "p2", T0);
+    assert!(q.fail_start(&r, "late", T0).is_none(), "a job that began isn't a failed start");
+    assert!(q.arm(&r, "tab", "pty-again").is_err(), "armed once");
+    // Armed and given up (the window never confirmed its B): its line may be running, so ^C it.
+    let s = q.enqueue(spec("h1", "t3", "c", &[]), T0).unwrap().id;
+    q.schedule(T0);
+    q.arm(&s, "tab-s", "ps").unwrap();
+    let e = q.fail_start(&s, "the shell never ran the job's line", T0).unwrap();
+    assert!(e.stop && e.job.state == INVALID);
+    assert!(q.pty_closed("ps", T0).is_none(), "its tab closing only drops the mapping");
+}
+
+#[test]
+fn a_job_times_out_from_its_b_and_is_interrupted() {
+    let mut q = Queue::default();
+    let id = running(&mut q, JobSpec { timeout_s: 60, ..spec("h1", "t1", "a", &["cargo"]) }, "p1", T0);
+    assert!(q.timed_out(T0 + 59_999).is_empty());
+    assert_eq!(q.timed_out(T0 + 60_000), vec![id.clone()]);
+    let ended = q.interrupt(&id, BY_TIMEOUT, "it ran past its timeout", T0 + 60_000).unwrap();
+    assert!(ended.stop, "it is still in its tab: ^C it");
+    assert_eq!((ended.job.state.as_str(), ended.job.stopped_by.as_deref()), (INTERRUPTED, Some(BY_TIMEOUT)));
+    // Its ^C'd D comes later: the code is recorded, nothing ends twice.
+    assert_eq!(q.osc("p1", 'D', Some(130), T0 + 61_000), Osc::Exit { job: id.clone(), code: Some(130) });
+    // A ^C cuts the line before its marks: an interrupted job's D needs none.
+    assert!(q.complete(&id, Some(130), Marks::None, T0 + 61_000).is_none());
+    assert_eq!(q.job(&id).unwrap().exit_code, Some(130));
+    assert_eq!(q.job(&id).unwrap().state, INTERRUPTED, "never a pass");
+    assert_eq!(q.osc("p1", 'D', Some(0), T0 + 62_000), Osc::None, "unmapped after it");
+    // A queued job is just dropped.
+    let queued = q.enqueue(spec("h1", "t2", "b", &["tauri-dev"]), T0).unwrap().id;
+    let blocker = q.enqueue(spec("h1", "t3", "c", &["tauri-dev"]), T0 - 1).unwrap().id;
+    q.schedule(T0);
+    let e = q.interrupt(&queued, BY_HUMAN, "x", T0).unwrap();
+    assert!(!e.stop);
+    assert!(q.job(&blocker).unwrap().holds());
+}
+
+#[test]
+fn leases_hold_a_stop_until_free_and_stop_anyway_interrupts() {
+    let mut q = Queue::default();
+    let key = "svc-web@checkout:/wt/auth".to_string();
+    let lease = |task: &str| JobSpec { leases: vec![key.clone()], ..spec("h1", task, task, &[]) };
+    assert_eq!(q.lease_state(&[key.clone()])[0].job, None);
+    let held = HeldAction {
+        id: String::new(),
+        copy_key: key.clone(),
+        workspace_id: "ws-h1".into(),
+        window: "main".into(),
+        action: "retarget".into(),
+        to: Some("branch:x".into()),
+        by: "agent".into(),
+        job: String::new(),
+    };
+    assert!(q.hold(held.clone()).is_err(), "free: the caller goes ahead");
+    let a = running(&mut q, lease("a"), "p1", T0);
+    let b = running(&mut q, lease("b"), "p2", T0);
+    let st = &q.lease_state(&[key.clone()])[0];
+    assert_eq!((st.job.as_ref().map(|j| j.id.clone()), st.holders), (Some(a.clone()), 2), "two e2e runs share one dev server");
+    let h = q.hold(held.clone()).unwrap();
+    assert_eq!(h.job, a, "queued behind the job holding it");
+    assert!(h.id.starts_with("h-"));
+    let again = q.hold(held.clone()).unwrap();
+    assert_ne!(again.id, h.id, "asking again replaces the wait");
+    // While a stop waits on the copy, a new run doesn't join it: Run when free goes first.
+    let late = q.enqueue(lease("late"), T0).unwrap().id;
+    assert!(q.schedule(T0).is_empty(), "a held stop isn't starved by the next run");
+    assert!(q.complete(&a, Some(1), Marks::Exited, T0).unwrap().freed.is_empty(), "b still holds it");
+    let ended = q.complete(&b, Some(0), Marks::Passed, T0).unwrap();
+    assert_eq!(ended.freed.len(), 1);
+    assert_eq!(ended.freed[0].id, again.id);
+    assert_eq!(ended.freed[0].to.as_deref(), Some("branch:x"));
+    assert_eq!(q.lease_state(&[key.clone()])[0].holders, 0);
+    // The held action is out of Rust and on its way to the window: the copy takes no lease
+    // until the window says it's done, or the handoff runs out, so the stop isn't refused.
+    assert!(q.schedule(T0 + 1).is_empty());
+    assert!(q.schedule(T0 + LEASE_HANDOFF_MS - 1).is_empty());
+    q.lease_done(&key);
+    assert_eq!(ids(&q.schedule(T0 + 2)), vec![late.clone()]);
+    let other = q.enqueue(lease("other"), T0).unwrap().id;
+    q.arm(&late, "tab-l", "pl").unwrap();
+    assert_eq!(q.osc("pl", 'B', None, T0), Osc::Began(late.clone()));
+    q.hold(held.clone()).unwrap();
+    q.complete(&late, Some(1), Marks::Exited, T0 + 3).unwrap();
+    assert!(q.schedule(T0 + 3 + LEASE_HANDOFF_MS - 1).is_empty());
+    assert_eq!(ids(&q.schedule(T0 + 3 + LEASE_HANDOFF_MS)), vec![other.clone()], "a window that never answers doesn't wedge the copy");
+    q.interrupt(&other, BY_HUMAN, "x", T0).unwrap();
+
+    let c = running(&mut q, lease("c"), "p3", T0);
+    let interrupted = q.override_lease(&key, T0 + 5);
+    assert_eq!(interrupted.len(), 1);
+    let e = &interrupted[0];
+    assert_eq!((e.job.id.as_str(), e.job.state.as_str(), e.job.stopped_by.as_deref(), e.stop), (c.as_str(), INTERRUPTED, Some(BY_HUMAN), true));
+    assert_eq!(q.lease_state(&[key.clone()])[0].job, None);
+    // Stop anyway's own stop runs before anything leases the copy again.
+    q.enqueue(lease("d"), T0).unwrap();
+    assert!(q.schedule(T0 + 6).is_empty());
+    q.lease_done(&key);
+    assert_eq!(q.schedule(T0 + 6).len(), 1);
+}
+
+#[test]
+fn releasing_a_worker_drops_its_queue_and_interrupts_its_runs() {
+    let mut q = Queue::default();
+    let r = running(&mut q, spec("h1", "t1", "a", &["tauri-dev"]), "p1", T0);
+    let w = q.enqueue(spec("h1", "t1", "a", &["tauri-dev"]), T0 + 1).unwrap().id;
+    let other = q.enqueue(spec("h1", "t2", "b", &["tauri-dev"]), T0 + 2).unwrap().id;
+    let ended = q.release_worker("t1", BY_RELEASE, "its worker stopped", T0 + 3);
+    let got: Vec<(String, bool)> = ended.iter().map(|e| (e.job.id.clone(), e.stop)).collect();
+    assert_eq!(got, vec![(r, true), (w, false)]);
+    assert!(ended.iter().all(|e| e.job.state == INTERRUPTED && e.job.stopped_by.as_deref() == Some(BY_RELEASE)));
+    assert_eq!(ids(&q.schedule(T0)), vec![other], "a suspended worker's job never holds tauri-dev");
+    assert!(q.active());
+}
+
+#[test]
+fn memory_pressure_starts_nothing_and_drops_the_heavy_pools_to_one() {
+    let mut q = Queue::default();
+    let a = q.enqueue(spec("h1", "t1", "a", &["cargo"]), T0).unwrap().id;
+    let b = q.enqueue(spec("h1", "t2", "b", &[]), T0 + 1).unwrap().id;
+    assert!(q.set_gate(Gate::Hold));
+    assert!(!q.set_gate(Gate::Hold), "no change, no event");
+    assert!(q.schedule(T0).is_empty(), "level 2 or under 25% free: nothing new, not even a job with no needs");
+    q.set_gate(Gate::Critical);
+    assert!(q.schedule(T0).is_empty());
+    assert_eq!(pool_capacity("cargo", Gate::Critical), Some(1));
+    assert_eq!(pool_capacity("cargo", Gate::Open), Some(2));
+    assert_eq!(pool_capacity("migrate:x", Gate::Critical), None);
+    q.set_gate(Gate::Open);
+    assert_eq!(ids(&q.schedule(T0)), vec![a, b]);
+}
+
+#[test]
+fn the_heavy_pools_drop_to_one_for_jobs_already_counted() {
+    // At Critical the capacity is one: a second cargo can't start beside a running one even if
+    // starts were allowed (has_room is what the gate's capacity feeds).
+    let mut q = Queue::default();
+    running(&mut q, spec("h1", "t1", "a", &["cargo"]), "p1", T0);
+    let b = q.enqueue(spec("h1", "t2", "b", &["cargo"]), T0).unwrap();
+    q.gate = Gate::Critical;
+    assert!(!q.has_room(q.job(&b.id).unwrap()));
+    q.gate = Gate::Open;
+    assert!(q.has_room(q.job(&b.id).unwrap()));
+}
+
+#[test]
+fn the_coordinator_moves_a_job_up_or_to_the_top() {
+    let mut q = Queue::default();
+    let j: Vec<String> = (0..4).map(|i| q.enqueue(spec("h1", &format!("t{i}"), "w", &["tauri-dev"]), T0 + i).unwrap().id).collect();
+    let order = |q: &Queue| q.order().into_iter().map(|i| q.jobs[i].id.clone()).collect::<Vec<_>>();
+    q.move_job(&j[3], Move::Up).unwrap();
+    assert_eq!(order(&q), vec![j[0].clone(), j[1].clone(), j[3].clone(), j[2].clone()]);
+    q.move_job(&j[2], Move::Top).unwrap();
+    assert_eq!(order(&q), vec![j[2].clone(), j[0].clone(), j[1].clone(), j[3].clone()]);
+    q.move_job(&j[2], Move::Top).unwrap();
+    assert_eq!(order(&q)[0], j[2], "already first");
+    assert!(q.move_job("j-00000000", Move::Up).is_err());
+}
+
+#[test]
+fn a_worker_s_finished_job_tabs_close_when_its_next_job_starts() {
+    let mut q = Queue::default();
+    let a = running(&mut q, spec("h1", "t1", "a", &[]), "p1", T0);
+    q.complete(&a, Some(1), Marks::Exited, T0);
+    let tabs = q.take_old_tabs("t1");
+    assert_eq!(tabs, vec![OldTab { window: "main".into(), workspace_id: "ws-h1".into(), tab_id: "tab-p1".into() }]);
+    assert!(q.take_old_tabs("t1").is_empty(), "taken once");
+}
+
+#[test]
+fn a_retiring_worker_s_job_tabs_all_close_the_running_one_s_too() {
+    let mut q = Queue::default();
+    let a = running(&mut q, spec("h1", "t1", "a", &[]), "p1", T0);
+    q.complete(&a, Some(0), Marks::Passed, T0);
+    let b = running(&mut q, spec("h1", "t1", "a", &[]), "p2", T0);
+    let queued = q.enqueue(spec("h1", "t1", "a", &["tauri-dev"]), T0).unwrap().id;
+    let other = running(&mut q, spec("h1", "t2", "o", &[]), "p3", T0);
+    let (ended, tabs) = q.retire_worker("t1", "it retired", T0 + 1);
+    let got: Vec<(String, bool)> = ended.iter().map(|e| (e.job.id.clone(), e.stop)).collect();
+    assert_eq!(got, vec![(b.clone(), true), (queued, false)]);
+    assert_eq!(tabs.iter().map(|t| t.tab_id.as_str()).collect::<Vec<_>>(), vec!["tab-p1", "tab-p2"]);
+    assert!(q.take_old_tabs("t1").is_empty(), "nothing left behind in memory");
+    assert_eq!(q.job(&other).unwrap().state, RUNNING, "another worker's job is untouched");
+}
+
+#[test]
+fn the_sweep_takes_job_rows_and_their_tabs_and_nothing_else() {
+    use crate::state::{Tab, WindowData, Workspace};
+    let svc: Service = serde_json::from_value(json!({
+        "id": "svc-1", "name": "web", "command": "npm run dev", "cwd": "/p", "origin": "human", "created_at": "", "updated_at": ""
+    }))
+    .unwrap();
+    let mut ws = Workspace::new("H".into());
+    ws.stack = vec![svc.clone(), Service { id: "j-0000abcd".into(), kind: crate::state::workspace::JOB_KIND.into(), ..svc.clone() }];
+    let bound = |id: &str, sid: Option<&str>| {
+        let mut t = Tab::new(id.into());
+        t.id = id.into();
+        t.service_id = sid.map(str::to_string);
+        t
+    };
+    ws.panes[0].tabs = vec![
+        bound("plain", None),
+        bound("web-tab", Some("svc-1")),
+        bound("job-tab", Some("j-0000abcd")),
+        bound("old-job-tab", Some("j-1111ffff")),
+        bound("odd", Some("not-a-job-id")),
+    ];
+    let mut win = WindowData::new("main".into());
+    win.workspaces = vec![ws];
+    let mut data = AppData { windows: vec![win], ..AppData::default() };
+    assert_eq!(sweep_jobs(&mut data), 3);
+    let ws = &data.windows[0].workspaces[0];
+    assert_eq!(ws.stack.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["svc-1"]);
+    assert_eq!(ws.panes[0].tabs.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["plain", "web-tab", "odd"]);
+    assert_eq!(sweep_jobs(&mut data), 0);
+}
+
+#[test]
+fn the_run_log_is_appended_and_indexed() {
+    let root = std::env::temp_dir().join(format!("hive-runlog-{}", uuid::Uuid::new_v4()));
+    let paths = HivePaths::new(&root);
+    let mut q = Queue::default();
+    let id = running(&mut q, JobSpec { branch: Some("hive/x--a".into()), commit: Some("abc1234".into()), ..spec("h1", "t1", "a", &["cargo"]) }, "p1", T0);
+    let ended = q.complete(&id, Some(0), Marks::Passed, T0 + 5).unwrap();
+    append_run(&paths, &ended.job).unwrap();
+    append_line(&paths.run_log(), &json!({"type": "deny", "command": "cargo test"})).unwrap();
+    let text = std::fs::read_to_string(paths.run_log()).unwrap();
+    assert_eq!(text.lines().count(), 2);
+    let first: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(first["type"], "run");
+    assert_eq!(first["state"], DONE);
+    assert!(first.get("env").is_none(), "the expanded env stays out of the log");
+    let found = find_run(&paths, &id).unwrap();
+    assert_eq!((found.exit_code, found.began, found.commit.as_deref()), (Some(0), true, Some("abc1234")));
+    // A second job after the index was read is found too.
+    let id2 = running(&mut q, spec("h1", "t1", "a", &[]), "p2", T0);
+    let e2 = q.complete(&id2, Some(3), Marks::Exited, T0).unwrap();
+    append_run(&paths, &e2.job).unwrap();
+    assert_eq!(find_run(&paths, &id2).unwrap().exit_code, Some(3));
+    assert!(find_run(&paths, "j-ffffffff").is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn create_detects_the_usual_queued_commands() {
+    use crate::hive::record::{HiveFolder, KIND_GIT, KIND_PLAIN};
+    let base = std::env::temp_dir().join(format!("hive-detect-{}", uuid::Uuid::new_v4()));
+    let app = base.join("app");
+    std::fs::create_dir_all(app.join("src-tauri")).unwrap();
+    std::fs::write(app.join("src-tauri/Cargo.toml"), "[package]").unwrap();
+    std::fs::write(
+        app.join("package.json"),
+        r#"{"scripts":{"tauri:dev":"tauri dev","tauri:dev:isolated":"node x"},"devDependencies":{"@playwright/test":"1"}}"#,
+    )
+    .unwrap();
+    let web = base.join("web");
+    std::fs::create_dir_all(web.join("node_modules/x")).unwrap();
+    std::fs::write(web.join("node_modules/x/Cargo.toml"), "").unwrap();
+    std::fs::write(web.join("playwright.config.ts"), "").unwrap();
+    let plain = base.join("assets");
+    std::fs::create_dir_all(&plain).unwrap();
+    std::fs::write(plain.join("Cargo.toml"), "").unwrap();
+    let folder = |name: &str, p: &Path, kind: &str| HiveFolder { name: name.into(), path: p.to_string_lossy().to_string(), kind: kind.into(), ..HiveFolder::default() };
+    let got = detect_commands(&[folder("app", &app, KIND_GIT), folder("web", &web, KIND_GIT), folder("assets", &plain, KIND_PLAIN)]);
+    let rows: Vec<(String, String, Vec<String>)> = got.commands.iter().map(|c| (c.folder.clone(), c.prefix.clone(), c.needs.clone())).collect();
+    let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        vec![
+            ("app".into(), "cargo test".into(), v(&["cargo"])),
+            ("app".into(), "cargo build".into(), v(&["cargo"])),
+            ("app".into(), "npm run tauri:dev".into(), v(&["tauri-dev", "cargo"])),
+            ("app".into(), "npm run tauri:dev:isolated".into(), v(&["tauri-dev", "cargo"])),
+            ("app".into(), "npx playwright test".into(), v(&["e2e"])),
+            ("web".into(), "npx playwright test".into(), v(&["e2e"])),
+        ],
+        "a vendored crate isn't the folder's; a plain folder runs nothing"
+    );
+    assert!(got.resources.is_empty());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The job's sandbox, for real (macOS only): a profile drawn from a worker's write lists over
+/// scratch folders, and the line typed through `zsh`. Nothing here touches maiTerm's data folder
+/// or any running maiTerm.
+///
+/// `cargo test --lib job_sandbox_probe -- --ignored --nocapture`
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn job_sandbox_probe() {
+    use crate::hive::job_sandbox::{job_line, profile, profile_path, real_path, LineSpec, ProfileSpec, EXIT_MARK, PASS_MARK, PROFILE_FILE};
+    use crate::hive::record::{Hive, HiveFolder, KIND_GIT};
+    use crate::hive::settings::{worker_write_lists, DenyPath, WorkerContext};
+    use crate::hive::worker::{WorkerFolder, WorkerRecord};
+    use std::net::TcpListener;
+    use std::process::Command;
+
+    let base = real_path(&std::env::temp_dir().join(format!("hive-job-probe-{}", uuid::Uuid::new_v4())));
+    let repo = base.join("repo");
+    let hive_root = base.join("hive");
+    let paths = HivePaths::new(&hive_root);
+    let wt = paths.worker_worktree("auth", "app");
+    for d in [repo.join(".git/worktrees/app"), repo.join(".git/objects"), repo.join(".git/refs/heads/hive"), wt.clone(), paths.runs(), paths.worker_job_tmp("auth")] {
+        std::fs::create_dir_all(&d).unwrap();
+    }
+    std::fs::write(repo.join(".git/config"), "[core]\n").unwrap();
+    let hive = Hive { id: "probe".into(), slug: "probe".into(), folders: vec![HiveFolder { name: "app".into(), path: repo.to_string_lossy().to_string(), kind: KIND_GIT.into(), primary: true, ..HiveFolder::default() }], ..Hive::default() };
+    let w = WorkerRecord {
+        task_id: "t-auth".into(),
+        slug: "auth".into(),
+        folders: vec![WorkerFolder {
+            name: "app".into(),
+            kind: KIND_GIT.into(),
+            worktree: Some(wt.to_string_lossy().to_string()),
+            branch: Some("hive/probe--auth".into()),
+            common_dir: Some(repo.join(".git").to_string_lossy().to_string()),
+            admin_dir: Some(repo.join(".git/worktrees/app").to_string_lossy().to_string()),
+            ..WorkerFolder::default()
+        }],
+        ..WorkerRecord::default()
+    };
+    let lists = worker_write_lists(&hive, &w, &paths, &WorkerContext::default(), &base.join("bin")).unwrap();
+    assert!(lists.deny.iter().any(|d| d.path == paths.runs()), "the runs folder is the worker's denyWrite");
+
+    let leased = TcpListener::bind("127.0.0.1:0").unwrap();
+    let stranger = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (leased_port, stranger_port) = (leased.local_addr().unwrap().port(), stranger.local_addr().unwrap().port());
+    let run_dir = paths.run("j-0000beef");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    // As `prepare` names them.
+    let writable: Vec<PathBuf> = lists.allow.iter().cloned().chain([paths.worker_job_tmp("auth")]).collect();
+    let spec = ProfileSpec {
+        allow: writable.iter().map(|p| profile_path(p, &writable).unwrap()).collect(),
+        deny: lists.deny.iter().map(|d| DenyPath { path: profile_path(&d.path, &writable).unwrap(), dir: d.dir }).collect(),
+        own_ports: vec![],
+        reach_ports: vec![leased_port],
+    };
+    let profile_file = run_dir.join(PROFILE_FILE);
+    std::fs::write(&profile_file, profile(&spec).unwrap()).unwrap();
+    println!("{}", std::fs::read_to_string(&profile_file).unwrap());
+
+    let sandboxed = |script: &str| -> bool {
+        let out = Command::new("/usr/bin/sandbox-exec").arg("-f").arg(&profile_file).args(["/bin/sh", "-c", script]).output().unwrap();
+        println!("{script:?} → {:?} {}", out.status.code(), String::from_utf8_lossy(&out.stderr).trim());
+        out.status.success()
+    };
+    let q = |p: &Path| crate::hive::launch::sh_quote(&p.to_string_lossy());
+    let home_probe = dirs::home_dir().unwrap().join(format!(".maiterm-job-probe-{}", uuid::Uuid::new_v4()));
+
+    assert!(sandboxed(&format!("echo ok > {}", q(&wt.join("written")))), "a write in the worktree");
+    assert!(wt.join("written").is_file());
+    assert!(sandboxed(&format!("echo ok > {}", q(&repo.join(".git/objects/probe")))), "the worker's corner of .git");
+    assert!(!sandboxed(&format!("echo x >> {}", q(&repo.join(".git/config")))), ".git/config is refused");
+    assert_eq!(std::fs::read_to_string(repo.join(".git/config")).unwrap(), "[core]\n");
+    assert!(!sandboxed(&format!("echo x > {}", q(&home_probe))), "$HOME is refused");
+    let _ = std::fs::remove_file(&home_probe);
+    assert!(!sandboxed(&format!("echo x > {}", q(&run_dir.join(PASS_MARK)))), "a job can't plant its own pass mark");
+    assert!(!run_dir.join(PASS_MARK).exists());
+    assert!(!sandboxed("/usr/bin/curl -s -m 5 -o /dev/null https://example.com"), "no network");
+    assert!(sandboxed(&format!("/usr/bin/nc -z -G 2 127.0.0.1 {leased_port}")), "a leased listener");
+    assert!(!sandboxed(&format!("/usr/bin/nc -z -G 2 127.0.0.1 {stranger_port}")), "a listener it doesn't lease");
+
+    // The whole line, typed through a shell as the job tab would: it passes and marks.
+    let line = |argv: Vec<String>| {
+        job_line(&LineSpec {
+            cwd: wt.clone(),
+            unset: vec!["CLAUDECODE".into()],
+            env: vec![("TMPDIR".into(), paths.worker_job_tmp("auth").to_string_lossy().to_string()), ("CARGO_NET_OFFLINE".into(), "true".into())],
+            profile: profile_file.clone(),
+            argv,
+            pass_mark: run_dir.join(PASS_MARK),
+            exit_mark: run_dir.join(EXIT_MARK),
+        })
+        .unwrap()
+    };
+    let typed = |l: &str| Command::new("/bin/zsh").args(["-f", "-c", l]).env("MAITERM_AUTH", "secret").status().unwrap();
+    let st = typed(&line(vec!["/bin/sh".into(), "-c".into(), "test -z \"$MAITERM_AUTH\" && echo $CARGO_NET_OFFLINE > ./env-seen".into()]));
+    assert!(st.success(), "the job ran, without maiTerm's credentials");
+    assert_eq!(std::fs::read_to_string(wt.join("env-seen")).unwrap().trim(), "true");
+    assert!(run_dir.join(PASS_MARK).is_file() && run_dir.join(EXIT_MARK).is_file(), "the shell marked the pass and the exit");
+    for m in [PASS_MARK, EXIT_MARK] {
+        std::fs::remove_file(run_dir.join(m)).unwrap();
+    }
+    let st = typed(&line(vec!["/usr/bin/touch".into(), repo.join(".git/config.lock").to_string_lossy().to_string()]));
+    assert!(st.success(), "the line itself ends with the exit mark");
+    assert!(!run_dir.join(PASS_MARK).exists(), "no pass mark for a failed job");
+    assert!(run_dir.join(EXIT_MARK).is_file(), "an exit mark whatever the job returned");
+    assert!(!sandboxed(&format!("echo x > {}", q(&run_dir.join("exited-forged")))), "a job can't plant its own exit mark");
+
+    // A link the worker planted in its job temp is refused, never resolved into a grant.
+    let jobs = paths.worker_job_tmp("auth");
+    std::fs::remove_dir_all(&jobs).unwrap();
+    std::os::unix::fs::symlink(dirs::home_dir().unwrap(), &jobs).unwrap();
+    assert!(profile_path(&jobs, &writable).is_err(), "a planted link refuses the job");
+    std::fs::remove_file(&jobs).unwrap();
+
+    // The job shares a terminal with the unsandboxed shell: it can't type into it (TIOCSTI).
+    // With the profile's deny taken out, the same injection does reach the shell, so a pass
+    // here is the deny's doing.
+    if Command::new("/usr/bin/python3").arg("-c").arg("pass").status().is_ok_and(|s| s.success()) {
+        let inj = base.join("inject.py");
+        std::fs::write(&inj, "import fcntl, sys, termios\nfor c in (sys.argv[1] + '\\n').encode():\n    fcntl.ioctl(0, termios.TIOCSTI, bytes([c]))\n").unwrap();
+        let open = run_dir.join("open.sb");
+        std::fs::write(&open, std::fs::read_to_string(&profile_file).unwrap().replace("(deny file-ioctl (ioctl-command TIOCSTI))\n", "")).unwrap();
+        let injected = |prof: &Path, tag: &str| -> bool {
+            use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+            use std::io::{Read, Write};
+            let escaped = base.join(format!("escaped-{tag}"));
+            let pair = native_pty_system().openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }).unwrap();
+            let mut cmd = CommandBuilder::new("/bin/zsh");
+            cmd.arg("-f");
+            cmd.cwd(&base);
+            let mut child = pair.slave.spawn_command(cmd).unwrap();
+            drop(pair.slave);
+            let mut reader = pair.master.try_clone_reader().unwrap();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                while reader.read(&mut buf).is_ok_and(|n| n > 0) {}
+            });
+            let mut w = pair.master.take_writer().unwrap();
+            let typed = format!("/usr/bin/sandbox-exec -f {} /usr/bin/python3 {} {}\n", q(prof), q(&inj), q(Path::new(&format!("touch {}", q(&escaped)))));
+            w.write_all(typed.as_bytes()).unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            w.write_all(b"exit\n").unwrap();
+            let _ = child.wait();
+            let hit = escaped.exists();
+            println!("TIOCSTI with {tag}: {}", if hit { "reached the shell" } else { "refused" });
+            hit
+        };
+        assert!(injected(&open, "no-deny"), "control: without the deny the injection works, so the probe can see it");
+        assert!(!injected(&profile_file, "profile"), "the job can't type into its tab's shell");
+    } else {
+        println!("TIOCSTI case skipped: no /usr/bin/python3");
+    }
+    drop((leased, stranger));
+    let _ = std::fs::remove_dir_all(&base);
+}

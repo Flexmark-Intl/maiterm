@@ -20,6 +20,10 @@ vi.mock('$lib/stores/workspaces.svelte', () => ({
 }));
 vi.mock('$lib/stores/terminals.svelte', () => ({ terminalsStore: { get: terminalGet } }));
 vi.mock('$lib/stores/followUps.svelte', () => ({ followUpsStore: { relaunchAgent } }));
+const startJob = vi.fn();
+const stopJob = vi.fn();
+const cleanupJobs = vi.fn();
+vi.mock('$lib/stores/stack.svelte', () => ({ stackStore: { startJob, stopJob, cleanupJobs } }));
 
 const activated: string[] = [];
 (globalThis as unknown as { window: unknown }).window = {
@@ -170,6 +174,46 @@ describe('handleHiveRequest', () => {
     await handleHiveRequest({ request_id: 'u2', verb: 'hive.unspawn', args: { workspace_id: 'ws', task_id: 't2', tab_id: null } });
     expect(remove).toHaveBeenCalledTimes(1);
     expect(answered().map((a) => a.result)).toEqual([{ ok: true }, { ok: true }]);
+  });
+
+  it('a job start hands the store only a job row and its line, and answers what the store says', async () => {
+    const row = { id: 'j-0000abcd', kind: 'job', name: 'cargo test · auth', cwd: '/wt' };
+    startJob.mockResolvedValueOnce({ accepted: true, confirmed: true, tab_id: 'tab-j', pty_id: 'pty-j' });
+    await handleHiveRequest({ request_id: 'j1', verb: 'stack.job.start', args: { workspace_id: 'ws', job_id: row.id, row, line: 'cd /wt && env …' } });
+    expect(startJob).toHaveBeenCalledWith('ws', row.id, row, 'cd /wt && env …');
+    for (const args of [
+      { workspace_id: 'ws', job_id: row.id, row: { ...row, kind: undefined }, line: 'x' },
+      { workspace_id: 'ws', job_id: 'j-ffffffff', row, line: 'x' },
+      { workspace_id: 'ws', job_id: row.id, row },
+    ]) {
+      await handleHiveRequest({ request_id: 'bad', verb: 'stack.job.start', args });
+    }
+    expect(startJob).toHaveBeenCalledTimes(1);
+    const results = answered().map((a) => a.result);
+    expect(results[0]).toEqual({ accepted: true, confirmed: true, tab_id: 'tab-j', pty_id: 'pty-j' });
+    expect(results.slice(1).every((r) => typeof (r as { error?: string }).error === 'string')).toBe(true);
+  });
+
+  it('a job stop and a cleanup go to the store and are answered', async () => {
+    stopJob.mockResolvedValueOnce({ status: 'stopped' });
+    cleanupJobs.mockResolvedValueOnce(2).mockResolvedValueOnce(1);
+    await handleHiveRequest({ request_id: 's1', verb: 'stack.job.stop', args: { workspace_id: 'ws', job_id: 'j-0000abcd', tab_id: 't9' } });
+    await handleHiveRequest({ request_id: 'c1', verb: 'stack.job.cleanup', args: { workspace_id: 'ws', tab_ids: ['t1', 7], job_ids: ['j-0000abcd'] } });
+    await handleHiveRequest({ request_id: 'c2', verb: 'stack.job.cleanup', args: {} });
+    await handleHiveRequest({ request_id: 'c3', verb: 'stack.job.cleanup', args: { workspace_id: 'ws', tab_ids: ['t2'], force: true } });
+    expect(stopJob).toHaveBeenCalledWith('ws', 'j-0000abcd');
+    expect(cleanupJobs).toHaveBeenNthCalledWith(1, 'ws', ['t1'], ['j-0000abcd'], false);
+    expect(cleanupJobs).toHaveBeenNthCalledWith(2, 'ws', ['t2'], [], true);
+    expect(answered().map((a) => a.result)).toEqual([{ ok: true, status: 'stopped' }, { ok: true, closed: 2 }, { error: 'workspace_id is required' }, { ok: true, closed: 1 }]);
+  });
+
+  it('a job stop that did not land is an error, never a quiet ok', async () => {
+    stopJob.mockResolvedValueOnce({ error: "job j-0000abcd's terminal isn't reachable in this window" });
+    await handleHiveRequest({ request_id: 's2', verb: 'stack.job.stop', args: { workspace_id: 'ws', job_id: 'j-0000abcd' } });
+    await handleHiveRequest({ request_id: 's3', verb: 'stack.job.stop', args: { job_id: 'j-0000abcd' } });
+    const results = answered().map((a) => a.result as { ok?: boolean; error?: string });
+    expect(results.every((r) => typeof r.error === 'string' && !r.ok)).toBe(true);
+    expect(stopJob).toHaveBeenCalledTimes(1);
   });
 
   it('an unknown verb is answered, never left waiting', async () => {

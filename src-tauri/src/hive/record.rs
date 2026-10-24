@@ -155,8 +155,47 @@ impl HiveModel {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HiveSettings {
+    /// Which commands are queued and what they need (§6.8).
+    pub run_queue: RunQueueSettings,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// The queued commands per folder and the Hive's own resource limits (§6.8).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RunQueueSettings {
+    pub commands: Vec<QueuedCommand>,
+    /// resource → capacity. On a machine-wide pool (`cargo`, `tauri-dev`, `e2e`, `gpu`) it only
+    /// lowers this Hive's share; on the Hive's own resources it is their capacity, except a
+    /// `migrate:` namespace, which is always one at a time.
+    pub resources: BTreeMap<String, u32>,
+}
+
+/// One command a worker runs only through the queue: `hiveRun`'s command must start with
+/// `prefix`, word by word, and takes everything else from here, never from the worker.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueuedCommand {
+    /// The Hive folder's name.
+    pub folder: String,
+    /// The command's leading words, as the human wrote them (`cargo test`).
+    pub prefix: String,
+    /// Resources it holds while it runs; `{worker}` expands (`migrate:{worker}`).
+    pub needs: Vec<String>,
+    /// Stack services it leases, by name, for as long as it runs.
+    pub services: Vec<String>,
+    /// Set for the job, placeholders filled per worker (`MAITERM_INSTANCE={worker}`).
+    pub env: Vec<(String, String)>,
+    /// Paths beyond the worker's own that the job's sandbox may also write, placeholders and
+    /// `~` expanded.
+    pub extra_write: Vec<String>,
+}
+
+impl QueuedCommand {
+    pub fn words(&self) -> Vec<&str> {
+        self.prefix.split_whitespace().collect()
+    }
 }
 
 #[cfg(test)]
@@ -207,6 +246,22 @@ mod tests {
         // A field on a nested struct without an `extra` map is dropped: only the record and its
         // settings promise round-trips.
         assert!(!serde_json::to_string(&again).unwrap().contains("folder_future"));
+    }
+
+    #[test]
+    fn the_run_queue_settings_load_sparse_and_keep_their_neighbours() {
+        let h: Hive = serde_json::from_str(r#"{"id":"h1","settings":{"prompt_timeout_secs":300,
+            "run_queue":{"commands":[{"folder":"app","prefix":"cargo  test","needs":["cargo"],"later":1}],"resources":{"cargo":1}}}}"#)
+        .unwrap();
+        let q = &h.settings.run_queue;
+        assert_eq!(q.commands[0].words(), vec!["cargo", "test"]);
+        assert!(q.commands[0].env.is_empty() && q.commands[0].services.is_empty());
+        assert_eq!(q.resources.get("cargo"), Some(&1));
+        assert_eq!(h.settings.extra.get("prompt_timeout_secs"), Some(&serde_json::json!(300)));
+        let again: Hive = serde_json::from_value(serde_json::to_value(&h).unwrap()).unwrap();
+        assert_eq!(again, h);
+        let bare: Hive = serde_json::from_str(r#"{"id":"h1"}"#).unwrap();
+        assert!(bare.settings.run_queue.commands.is_empty());
     }
 
     #[test]

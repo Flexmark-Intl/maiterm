@@ -22,13 +22,21 @@
  *  the console, the bound tab — is keyed by the copy key (`stack/model.ts` `copyKey`). The
  *  own folder's key is the bare service id, so a service that never runs anywhere else keys,
  *  starts and stops exactly as it did before copies existed.
+ *
+ *  A Hive's run queue (docs/hive.md §6.8) runs its JOBS through the same tabs and guard: Rust
+ *  decides when, builds the line, and reads the exit off the PTY itself; this store mints the
+ *  hidden tab, types the line (`startJob`) and ^C's it (`stopJob`). A job's row lives only in
+ *  `jobRows`, never in a workspace's stack mirror, and a job never restarts or records intent.
+ *  A copy a job depends on is LEASED: `stop` and `retarget` refuse it with a `LeaseHeldError`,
+ *  and `runWhenFree` / `stopAnyway` are the two ways past.
  */
 
 import { untrack } from 'svelte';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 import * as commands from '$lib/tauri/commands';
 import type { ResolvedCopy, StackSharedRow } from '$lib/tauri/commands';
-import type { Service, ServiceOrigin, ServiceRef, ServiceRestart, Tab, Workspace } from '$lib/tauri/types';
+import type { Service, ServiceOrigin, ServiceRef, ServiceRestart, StackHeldAction, StackLeaseState, Tab, Workspace } from '$lib/tauri/types';
 import { workspacesStore } from './workspaces.svelte';
 import { terminalsStore } from './terminals.svelte';
 import { activityStore } from './activity.svelte';
@@ -106,6 +114,48 @@ export interface ServiceInput {
   /** Another workspace's service, used here (docs/hive.md §6.8): never started from here. */
   shared_from?: ServiceRef | null;
 }
+
+/** A stop or retarget of a copy a running job depends on (docs/hive.md §6.8). Never applied
+ *  mid-run: the caller offers Run when free (`runWhenFree`) or Stop anyway (`stopAnyway`). */
+export class LeaseHeldError extends Error {
+  constructor(public readonly copyKey: string, public readonly lease: StackLeaseState, label: string) {
+    const job = lease.job!;
+    super(`${label} is in use by a queued run (${job.entry} for ${job.worker_slug}, ${job.id}); it can run when that's free, or be stopped anyway`);
+    this.name = 'LeaseHeldError';
+  }
+}
+
+/** The human's choice a `LeaseHeldError` asks for (`LeaseHeldChoice.svelte`): the copy it hit,
+ *  and the stop, restart or move to run when free or anyway. */
+export interface LeaseAsk {
+  workspaceId: string;
+  serviceId: string;
+  target: string;
+  action: 'stop' | 'restart' | 'retarget';
+  /** Where a move goes. */
+  to: string | null;
+  message: string;
+}
+
+/** The choice to offer for an error a stack verb threw, or null when it isn't a lease. */
+export function leaseAskOf(e: unknown, workspaceId: string, action: LeaseAsk['action'], to: string | null = null): LeaseAsk | null {
+  if (!(e instanceof LeaseHeldError)) return null;
+  const { serviceId, target } = parseCopyKey(e.copyKey);
+  return { workspaceId, serviceId, target, action, to, message: e.message };
+}
+
+/** What a job start answers its rpc (`stack.job.start`): `confirmed` once the shell's own B for
+ *  the typed line was seen. Rust records the exit itself. */
+export interface JobStartAnswer {
+  accepted?: boolean;
+  confirmed?: boolean;
+  tab_id?: string;
+  pty_id?: string;
+  error?: string;
+}
+
+/** Rust's word for a shell with no OSC 133 (`queue::NEEDS_INTEGRATION`): never a pass. */
+const NEEDS_INTEGRATION = 'needs shell integration';
 
 const IDLE: ServiceRuntime = { status: 'stopped', since: null, lastExitCode: null, pid: null, ptyId: null, writeAt: null, beganAt: null, noIntegration: false, stopping: false, restarts: [], note: null, endpointFrom: null, copy: null, endpoint: null };
 
@@ -195,6 +245,12 @@ function createStackStore() {
   /** A stop arrived while the start was still before its write: abort instead of typing. */
   const abortStart = new Set<string>();
   const shellFacts = new Map<string, ShellFacts>();
+  /** Run-queue jobs this window started, by job id (which is also the copy key): the row Rust
+   *  inserted, kept here and never in a workspace's stack mirror, whose whole-list writes
+   *  would carry it back. Dropped when its tab is cleaned up. */
+  const jobRows = new Map<string, { workspaceId: string; row: Service }>();
+  /** Every job id seen this session: their runtime rows are never published to the mirror. */
+  const jobKeys = new Set<string>();
   /** Tail of a service tab's output while we are still looking for its address, so a URL
    *  split across two PTY chunks is still seen whole. Dropped the moment a run announces
    *  one — this is not a log buffer and must never grow into one. */
@@ -300,13 +356,26 @@ function createStackStore() {
     return ws ? boundIn(ws, serviceId, target) : undefined;
   }
 
+  /** A job this window lost track of: a window reload keeps the job's PTY running and loads
+   *  the row Rust inserted for it, but empties `jobRows`. Taken back as a job, never a service. */
+  function adoptJob(ws: Workspace, jobId: string): { workspaceId: string; row: Service } | undefined {
+    const row = ws.stack?.find((s) => s.id === jobId && s.kind === 'job');
+    if (!row) return undefined;
+    const job = { workspaceId: ws.id, row };
+    jobRows.set(jobId, job);
+    jobKeys.add(jobId);
+    return job;
+  }
+
   /** Reverse lookup for the exit hooks: which copy of which service does this tab run? */
-  function serviceForTab(tabId: string): { workspaceId: string; service: Service; target: string; key: string } | undefined {
+  function serviceForTab(tabId: string): { workspaceId: string; service: Service; target: string; key: string; job?: true } | undefined {
     for (const ws of workspacesStore.workspaces) {
       for (const pane of ws.panes) {
         const tab = pane.tabs.find((t) => t.id === tabId);
         if (!tab) continue;
         if (!tab.service_id) return undefined;
+        const job = jobRows.get(tab.service_id) ?? adoptJob(ws, tab.service_id);
+        if (job && job.workspaceId === ws.id) return { workspaceId: ws.id, service: job.row, target: '', key: tab.service_id, job: true };
         const service = ws.stack?.find((s) => s.id === tab.service_id);
         const target = tab.service_target ?? '';
         return service ? { workspaceId: ws.id, service, target, key: copyKey(service.id, target) } : undefined;
@@ -459,6 +528,18 @@ function createStackStore() {
       // or a human's command finishing on the bound tab while we waited. Not ours.
       return;
     }
+    if (hit.job) {
+      // Rust records a job's exit from the shell's own marks (hive::queue). The job can print a
+      // D of its own, so here it reads as over only once the shell holds the terminal again;
+      // a D while the job is still in front changes nothing, and a later stop still ^C's it.
+      // Never crashed, never restarted, no intent. `beganAt` stays, so a start still waiting on
+      // its B can tell a job that already finished from one that never ran.
+      void probeForeground(ptyId).then((fg) => {
+        if (fg?.shell_at_prompt !== true || rt(key).ptyId !== ptyId || !isLive(rt(key).status)) return;
+        setRt(key, { status: 'stopped', since: null, pid: null, stopping: false, lastExitCode: exitCode, note: exitCode === null ? null : `exit ${exitCode}` });
+      });
+      return;
+    }
     // A deliberate stop is a stop whatever the code — `make dev` returns 2 when its child
     // is interrupted.
     const crashed = !r.stopping && (exitCode === null || exitIsCrash(exitCode));
@@ -514,7 +595,9 @@ function createStackStore() {
       // The binding only counts inside the workspace that owns the definition — a tab
       // moved elsewhere has its binding cleared by Rust, and searching every workspace
       // would keep a moved-away service "running" here with no tab to show for it.
-      const ws = workspacesStore.workspaces.find((w) => w.stack?.some((s) => s.id === serviceId));
+      // A job's row is in `jobRows`, never in a stack mirror.
+      const job = jobRows.get(serviceId);
+      const ws = job ? workspaceOf(job.workspaceId) : workspacesStore.workspaces.find((w) => w.stack?.some((s) => s.id === serviceId));
       const tab = ws ? boundIn(ws, serviceId, target)?.tab : undefined;
       if (r.status === 'stopped') {
         // suspendTab unregisters the instance BEFORE it stamps `suspended_at`, so the pass
@@ -529,7 +612,8 @@ function createStackStore() {
       // and "typed into it", and any reading of its half-written fields here is wrong.
       if (startsInFlight.has(key)) continue;
       if (!tab) {
-        const crashed = !r.stopping;
+        // A job is never `crashed`: Rust records how it ended.
+        const crashed = !r.stopping && !job;
         setRt(key, { status: crashed ? 'crashed' : 'stopped', since: null, pid: null, ptyId: null, stopping: false, note: crashed ? 'its tab closed' : null });
         if (crashed) logWarn(`stack: service ${key} lost its tab`);
         continue;
@@ -644,15 +728,12 @@ function createStackStore() {
     // 1. A tab to run in: the bound one, else mint one in the background.
     let bound = boundTab(workspaceId, serviceId, target);
     if (!bound) {
-      // A Hive's workspace opens no tabs but its agents' (`hive::refuse_tab_create`).
-      if (ws.hive) {
-        // Never startable here, so not wanted back at launch either.
-        markIntent(workspaceId, serviceId, target, false);
-        return notStarted(key, "not started — a Hive's workspace can't open a service tab yet");
-      }
       const paneId = ws.active_pane_id ?? ws.panes[0]?.id;
       if (!paneId) { releasePorts(key, rt(key)); throw new Error('Workspace has no pane'); }
-      const tab = await workspacesStore.createTab(workspaceId, paneId, tabName, { append: true, background: true });
+      // A Hive's workspace takes no ordinary tab (`hive::refuse_tab_create`), so there the tab is
+      // born bound to its service: hidden from its first moment, never active.
+      const born = ws.hive ? { service: { id: serviceId, target: target || null } } : {};
+      const tab = await workspacesStore.createTab(workspaceId, paneId, tabName, { append: true, background: true, ...born });
       terminalsStore.setSplitContext(tab.id, { cwd: resolved.cwd || null, sshCommand: null, remoteCwd: null });
       await workspacesStore.renameTab(workspaceId, paneId, tab.id, tabName, true);
       await workspacesStore.setTabServiceId(workspaceId, paneId, tab.id, serviceId, target || null);
@@ -801,11 +882,36 @@ function createStackStore() {
     }
   }
 
+  /** The first job leasing any of `keys`, or null. A Rust lookup; an unreachable answer is no
+   *  lease, since nothing but the queue can hold one. */
+  async function leaseOf(keys: string[]): Promise<StackLeaseState | null> {
+    try {
+      return (await commands.stackLeaseState(keys)).find((s) => s.job) ?? null;
+    } catch (e) {
+      logWarn(`stack: lease state for ${keys.join(', ')}: ${e}`);
+      return null;
+    }
+  }
+
+  /** Whether a stop or move here must ask about leases: jobs run only in a Hive, on its own
+   *  stack, so any other workspace never asks (and never waits on the asking). */
+  function mayBeLeased(workspaceId: string): boolean {
+    return !!workspaceOf(workspaceId)?.hive;
+  }
+
+  /** Refuse to stop or move a copy a job depends on (docs/hive.md §6.8). */
+  async function refuseLeased(service: Service, key: string): Promise<void> {
+    const held = await leaseOf([key]);
+    if (held) throw new LeaseHeldError(key, held, `${service.name}${parseCopyKey(key).target ? ` on ${labelOf(key)}` : ''}`);
+  }
+
   async function stop(workspaceId: string, serviceId: string, target = ''): Promise<ServiceStatus> {
     const service = serviceOf(workspaceId, serviceId);
     if (!service) throw new Error('Service not found');
     if (service.shared_from) throw new Error(sharedRefusal(service));
     const key = copyKey(serviceId, target);
+    // Before the intent is cleared: a refused stop leaves the copy wanted.
+    if (mayBeLeased(workspaceId)) await refuseLeased(service, key);
     markIntent(workspaceId, serviceId, target, false);
     const pending = stopsInFlight.get(key);
     if (pending) return pending;
@@ -899,6 +1005,8 @@ function createStackStore() {
     const service = serviceOf(workspaceId, serviceId);
     if (!service) throw new Error('Service not found');
     if (service.shared_from) throw new Error(sharedRefusal(service));
+    // Up front: a service that runs copies starts the new one before it stops this one.
+    if (mayBeLeased(workspaceId)) await refuseLeased(service, copyKey(serviceId, from));
     if (from === to) {
       await stop(workspaceId, serviceId, to);
       return start(workspaceId, serviceId, to);
@@ -979,6 +1087,171 @@ function createStackStore() {
         consoleVisible = shown;
       }, CONSOLE_CLOSE_MS),
     );
+  }
+
+  // ── Run-queue jobs (docs/hive.md §6.8) ──────────────────────────────────────────
+
+  /** `stack.job.start`: Rust has inserted the job's row and built its line; mint the hidden tab
+   *  bound to it, wait for its shell's prompt through the same guard as a service, arm the job in
+   *  Rust, type the line, and confirm once the shell's own B for it is seen. A shell with no
+   *  OSC 133 refuses the job: its exit could never be read, so it could never be a receipt. */
+  async function startJob(workspaceId: string, jobId: string, row: Service, line: string): Promise<JobStartAnswer> {
+    const ws = workspaceOf(workspaceId);
+    if (!ws?.hive) return { error: 'This window holds no such Hive.' };
+    if (ws.suspended) return { error: 'The workspace is suspended.' };
+    if (!preferencesStore.shellIntegration) return { accepted: false, error: NEEDS_INTEGRATION };
+    if (jobRows.has(jobId)) return { error: `Job ${jobId} was already started here.` };
+    const paneId = ws.active_pane_id ?? ws.panes[0]?.id;
+    if (!paneId) return { error: 'The workspace has no pane.' };
+    jobRows.set(jobId, { workspaceId, row });
+    jobKeys.add(jobId);
+    const key = jobId;
+    let tab: Tab;
+    try {
+      tab = await workspacesStore.createTab(workspaceId, paneId, row.name, { append: true, background: true, service: { id: jobId } });
+    } catch (e) {
+      forgetJob(jobId);
+      return { error: `its tab could not be made: ${e}` };
+    }
+    terminalsStore.setSplitContext(tab.id, { cwd: row.cwd || null, sshCommand: null, remoteCwd: null });
+    await workspacesStore.renameTab(workspaceId, paneId, tab.id, row.name, true);
+    window.dispatchEvent(new CustomEvent('activate-tab', { detail: tab.id }));
+    // Before the line is typed, a refused start closes the tab it made: Rust may have given the
+    // job up already (released mid-start, or its rpc timed out) and never learns this tab's id.
+    const refuse = async (error: string, ptyId?: string): Promise<JobStartAnswer> => {
+      logWarn(`stack: job ${jobId} not started: ${error}`);
+      await workspacesStore.deleteTab(workspaceId, paneId, tab.id).catch((e) => logWarn(`stack: close job tab ${tab.id}: ${e}`));
+      forgetJob(jobId);
+      return { accepted: false, error, tab_id: tab.id, pty_id: ptyId };
+    };
+    await terminalsStore.waitForRegister(tab.id, MOUNT_WAIT_MS);
+    const instance = terminalsStore.get(tab.id);
+    if (!instance) return refuse('its tab could not be mounted');
+    const ptyId = instance.ptyId;
+    setRt(key, { status: 'starting', since: Date.now(), stopping: false, note: null, lastExitCode: null, pid: null, ptyId: null, writeAt: null, beganAt: null, noIntegration: false, endpointFrom: null, endpoint: null });
+    if (!(await waitForFact(ptyId, (x) => x.lastPromptAt !== null, FIRST_PROMPT_WAIT_MS))) return refuse(NEEDS_INTEGRATION, ptyId);
+    // At its prompt and settled there, as `startInner` waits (bash's own B/D;0/A cycle).
+    const settled = (x: ShellFacts) => x.lastPromptAt !== null && (x.lastBeginAt === null || x.lastPromptAt >= x.lastBeginAt) && Date.now() - x.lastPromptAt >= PROMPT_SETTLE_MS;
+    if (!(await waitForFact(ptyId, settled, 4000))) return refuse('the shell is mid-command', ptyId);
+    // Rust refuses a job it has given up on, so a window that woke late types nothing.
+    try {
+      await commands.stackJobArm(jobId, tab.id, ptyId);
+    } catch (e) {
+      return refuse(String(e), ptyId);
+    }
+    setRt(key, { ptyId, writeAt: Date.now() });
+    await commands.writeTerminal(ptyId, Array.from(new TextEncoder().encode(line + '\n')));
+    logInfo(`stack: job ${jobId} typed in tab ${tab.id}`);
+    await waitForFact(ptyId, () => rt(key).beganAt !== null || rt(key).status === 'stopped', BEGIN_WAIT_MS);
+    const confirmed = rt(key).beganAt !== null;
+    if (!confirmed) setRt(key, { status: 'stopped', since: null, note: 'not started — the shell never ran the line; check the tab' });
+    // The job that holds the tty: the pid `stopJob`'s guard compares against.
+    for (let i = 0; confirmed && i < 4 && isLive(rt(key).status); i++) {
+      const fg = await probeForeground(ptyId);
+      if (fg?.shell_at_prompt === false && fg.pid != null) { setRt(key, { pid: fg.pid }); break; }
+      await sleep(300);
+    }
+    return { accepted: true, confirmed, tab_id: tab.id, pty_id: ptyId };
+  }
+
+  /** A job's row and runtime go: its tab is closed, or was never kept. */
+  function forgetJob(jobId: string) {
+    jobRows.delete(jobId);
+    if (runtime.has(jobId)) {
+      const next = new Map(runtime);
+      next.delete(jobId);
+      runtime = next;
+    }
+  }
+
+  /** `stack.job.stop`: ^C under the pid guard (a timeout, a release, Stop anyway). Never intent.
+   *  Nothing cached is trusted: a job can print a D of its own (its row then reads over while it
+   *  runs), and a window reload empties `jobRows` while the job's PTY lives on. Its tab is found
+   *  by its binding and the terminal says whether the job is still in front. A stop that didn't
+   *  land answers `{error}`, never a quiet success. */
+  async function stopJob(workspaceId: string, jobId: string): Promise<{ status: ServiceStatus } | { error: string }> {
+    const ws = workspaceOf(workspaceId);
+    if (!ws) return { error: 'This window holds no such workspace.' };
+    const bound = boundIn(ws, jobId, '');
+    // No tab: its PTY closed with it, and the job with that.
+    if (!bound) { forgetJob(jobId); return { status: 'stopped' }; }
+    const instance = terminalsStore.get(bound.tab.id);
+    if (!instance) return { error: `job ${jobId}'s terminal isn't reachable in this window` };
+    if (!jobRows.has(jobId)) adoptJob(ws, jobId);
+    const pending = stopsInFlight.get(jobId);
+    const status = pending ? await pending : await (async () => {
+      const fg = await probeForeground(instance.ptyId);
+      if (fg?.shell_at_prompt === true) return finishStop(jobId);
+      // A reload left no pid here. The tab is the job's own, minted for its one line and only
+      // ever stopped while Rust holds the job running, so what holds its terminal is the job.
+      if (rt(jobId).ptyId !== instance.ptyId || rt(jobId).pid === null) {
+        if (fg?.pid == null) return null;
+        setRt(jobId, { ptyId: instance.ptyId, pid: fg.pid });
+      }
+      if (!isLive(rt(jobId).status)) setRt(jobId, { status: 'running' });
+      const p = stopInner(workspaceId, jobId, rt(jobId)).finally(() => stopsInFlight.delete(jobId));
+      stopsInFlight.set(jobId, p);
+      return p;
+    })();
+    if (status === null) return { error: `cannot tell which process holds job ${jobId}'s terminal` };
+    return status === 'stopped' ? { status } : { error: `job ${jobId} not stopped: ${rt(jobId).note ?? status}` };
+  }
+
+  /** `stack.job.cleanup`: a worker's finished job tabs close, by tab or by job. One whose job
+   *  still holds its terminal is left alone, unless `force` (the worker retired, its jobs were
+   *  interrupted, and closing the tab ends what's left). */
+  async function cleanupJobs(workspaceId: string, tabIds: string[], jobIds: string[], force = false): Promise<number> {
+    const ws = workspaceOf(workspaceId);
+    if (!ws) return 0;
+    let closed = 0;
+    for (const pane of ws.panes) {
+      for (const tab of [...pane.tabs]) {
+        const sid = tab.service_id ?? '';
+        if (!(tabIds.includes(tab.id) || jobIds.includes(sid))) continue;
+        // Only a job's tab: a service's is never closed by the queue.
+        if (!jobKeys.has(sid) && !/^j-[0-9a-f]{8}$/.test(sid)) continue;
+        if (!force && isLive(rt(sid).status)) {
+          // Live here may only mean its exit wasn't confirmed: the terminal decides.
+          const instance = terminalsStore.get(tab.id);
+          if (instance && (await probeForeground(instance.ptyId))?.shell_at_prompt !== true) continue;
+        }
+        await workspacesStore.deleteTab(workspaceId, pane.id, tab.id).catch((e) => logWarn(`stack: close job tab ${tab.id}: ${e}`));
+        forgetJob(sid);
+        closed++;
+      }
+    }
+    return closed;
+  }
+
+  /** A stop, restart or move of one copy, as a held action names it. */
+  async function act(workspaceId: string, serviceId: string, target: string, action: string, to: string | null): Promise<ServiceStatus> {
+    if (action === 'stop') return stop(workspaceId, serviceId, target);
+    if (action === 'retarget' && to != null) return runOn(workspaceId, serviceId, to, target);
+    await stop(workspaceId, serviceId, target);
+    return start(workspaceId, serviceId, target);
+  }
+
+  /** Rust says a copy's lease ended: carry out what waited for it (Run when free, or an agent's
+   *  stop or move queued behind the job). Rust leases the copy to no new run until this says
+   *  done; should one have it anyway, the action waits behind that run, never dropped. */
+  async function onLeaseFreed(h: StackHeldAction) {
+    const { serviceId, target } = parseCopyKey(h.copy_key);
+    try {
+      if (!serviceOf(h.workspace_id, serviceId)) return;
+      logInfo(`stack: ${h.copy_key} is free; ${h.action}${h.to != null ? ` to ${h.to}` : ''} (${h.by}, after ${h.job})`);
+      await act(h.workspace_id, serviceId, target, h.action, h.to ?? null);
+    } catch (e) {
+      if (e instanceof LeaseHeldError && (h.action === 'stop' || h.action === 'restart' || h.action === 'retarget')) {
+        await commands
+          .stackLeaseHold(h.workspace_id, h.copy_key, h.action, h.to ?? null, h.by === 'agent' ? 'agent' : 'human')
+          .then((again) => logInfo(`stack: ${h.action} of ${h.copy_key} waits again, behind ${again.job}`))
+          .catch((err) => logError(`stack: ${h.action} of ${h.copy_key} lost behind a new run: ${err}`));
+      } else {
+        logError(`stack: ${h.action} of ${h.copy_key} after its lease: ${e}`);
+      }
+    } finally {
+      await commands.stackLeaseDone(h.copy_key).catch((e) => logWarn(`stack: lease of ${h.copy_key} not handed back: ${e}`));
+    }
   }
 
   /** Read every `shared_from` service's source from the Rust mirror, which holds every
@@ -1088,7 +1361,9 @@ function createStackStore() {
     },
 
     services(workspaceId: string): Service[] {
-      return workspaceOf(workspaceId)?.stack ?? [];
+      // A job's row never reaches the mirror; the filter only guards a state loaded mid-run.
+      const all = workspaceOf(workspaceId)?.stack ?? [];
+      return all.some((s) => s.kind === 'job') ? all.filter((s) => s.kind !== 'job') : all;
     },
 
     /** Rollup for the sidebar dot: null when the stack is empty or all stopped. Each service's
@@ -1287,6 +1562,32 @@ function createStackStore() {
     runOn,
     forgetCopy,
 
+    /** Run when free (docs/hive.md §6.8): the stop, restart or move waits in Rust until no job
+     *  leases the copy, and runs here when `stack-lease-freed` says so. */
+    runWhenFree(workspaceId: string, serviceId: string, target: string, action: 'stop' | 'restart' | 'retarget', to: string | null = null, by: 'human' | 'agent' = 'human'): Promise<StackHeldAction> {
+      return commands.stackLeaseHold(workspaceId, copyKey(serviceId, target), action, to, by);
+    },
+    /** Stop anyway: every job leasing the copy is interrupted (never a receipt), then the stop,
+     *  restart or move goes ahead. Rust leases the copy to no new run until it has. */
+    async stopAnyway(workspaceId: string, serviceId: string, target = '', action: 'stop' | 'restart' | 'retarget' = 'stop', to: string | null = null): Promise<ServiceStatus> {
+      const key = copyKey(serviceId, target);
+      await commands.hiveLeaseOverride(key);
+      try {
+        return await act(workspaceId, serviceId, target, action, to);
+      } finally {
+        await commands.stackLeaseDone(key).catch((e) => logWarn(`stack: lease of ${key} not handed back: ${e}`));
+      }
+    },
+    /** The job leasing a copy now, or null. */
+    leaseOf(workspaceId: string, serviceId: string, target = ''): Promise<StackLeaseState | null> {
+      return mayBeLeased(workspaceId) ? leaseOf([copyKey(serviceId, target)]) : Promise.resolve(null);
+    },
+
+    // The run queue's window half (`hive/rpc.ts`).
+    startJob,
+    stopJob,
+    cleanupJobs,
+
     /** Every `auto_start` service's own folder, serially, in list order. */
     async startStack(workspaceId: string): Promise<void> {
       for (const s of this.services(workspaceId)) {
@@ -1437,7 +1738,8 @@ function createStackStore() {
         // exactly what it was before copies existed; another copy's also says where it runs.
         let published = new Set<string>();
         $effect(() => {
-          const rows = [...runtime.entries()].map(([key, r]) => [key, publishRow(key, r)] as const);
+          // A job is the run queue's to report, never a service the priming offers.
+          const rows = [...runtime.entries()].filter(([key]) => !jobKeys.has(key)).map(([key, r]) => [key, publishRow(key, r)] as const);
           const keys = new Set(rows.map(([key]) => key));
           const removed = [...published].filter((key) => !keys.has(key));
           published = keys;
@@ -1448,6 +1750,12 @@ function createStackStore() {
       // is read from the Rust mirror on a slow tick rather than kept here (docs/hive.md §6.8).
       void pollShared();
       sharedTimer = setInterval(() => { void pollShared(); }, SHARED_POLL_MS);
+      // A copy a job leased is free: what waited for it runs (docs/hive.md §6.8). Sent to this
+      // window only (`emit_to`).
+      getCurrentWindow()
+        .listen<StackHeldAction>('stack-lease-freed', (e) => { void onLeaseFreed(e.payload); })
+        .then((un) => { unsubscribe.push(un); })
+        .catch((e) => logError(`stack: listen for freed leases: ${e}`));
     },
 
     destroy() {

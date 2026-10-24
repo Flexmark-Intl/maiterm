@@ -3163,6 +3163,11 @@ several releases a day).
    the cwd is re-rooted onto it; placeholders are charset-checked data, never quoted; the port
    book probes every address family. A service with no target and no placeholders resolves to
    today's fields without running git. Pruning keeps a checkout with untracked work.
+   **Part 3 built** (`f75ba5e7`): copies in the store (every runtime map keyed by copy key; a
+   service that only ever ran in its own folder behaves as before, pinned by `stack/model.ts`
+   tests), Run on ▸, `shared_from`, the agents' `on` argument, and the Create sheet's real Stack
+   step (docs/stack.md §14). Services can't yet start inside a Hive workspace: part 4 lets
+   service and job tabs exist there.
 6. Reviewers (`hiveVerdict`, three attempts, escalation). Landing: land to Base (default)
    pinned to the reviewed sha, including several repos, the config-touching land rule (§8.1),
    the approval mode (chosen at creation, §3) through agent requests; the **land log and Undo**

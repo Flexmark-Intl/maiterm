@@ -81,6 +81,11 @@ pub fn release(key: &str) -> bool {
     with_book(|b| b.release(key))
 }
 
+/// The ports `key` holds now: a job's sandbox opens exactly these on loopback (docs/hive.md §6.8).
+pub fn held(key: &str) -> Vec<u16> {
+    with_book(|b| b.booked.get(key).cloned().unwrap_or_default())
+}
+
 /// Free on 127.0.0.1 and on ::1: nothing answers a connect there, and both bind. The connect is
 /// what sees a wildcard listener (`*:P`, Node's default `::`): std binds with SO_REUSEADDR, which
 /// on macOS lets a loopback bind succeed beside one. A machine with no IPv6 loopback can't have

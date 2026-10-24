@@ -5,6 +5,9 @@
  *  Deliberately its OWN dispatcher, not a case in the `claude-code-tool` switch: `tools/call`
  *  doesn't validate tool names, so a verb there would be any agent's to call over MCP.
  *
+ *  The run queue's verbs ride the same channel (`stack.job.*`): Rust schedules, the stack store
+ *  owns the PTYs (docs/hive.md §6.8).
+ *
  *  Every branch MUST answer, a thrown error included: an unanswered spawn waits out its timeout
  *  and is rolled back, after this window may already have adopted half of it. */
 
@@ -13,8 +16,9 @@ import { tasksStore } from '$lib/stores/tasks.svelte';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { followUpsStore } from '$lib/stores/followUps.svelte';
+import { stackStore } from '$lib/stores/stack.svelte';
 import { appendNote, TASK_STATUSES } from '$lib/tasks/model';
-import type { Tab, Task, TaskBlocker, TaskStatus, Workstream } from '$lib/tauri/types';
+import type { Service, Tab, Task, TaskBlocker, TaskStatus, Workstream } from '$lib/tauri/types';
 import { error as logError } from '@tauri-apps/plugin-log';
 
 export interface HiveRequest {
@@ -98,6 +102,35 @@ async function relaunch(a: Record<string, unknown>): Promise<unknown> {
   return { ok: true };
 }
 
+/** `stack.job.start {workspace_id, job_id, row, line}`: a queued job's hidden tab, its line typed
+ *  through the stack's guard (docs/hive.md §6.8). Answers `{accepted, confirmed, tab_id, pty_id}`
+ *  once the shell's B for the line is seen, or `{error}`; Rust reads the exit itself. */
+async function jobStart(a: Record<string, unknown>): Promise<unknown> {
+  const { workspace_id: workspaceId, job_id: jobId, row, line } = a;
+  if (typeof workspaceId !== 'string' || typeof jobId !== 'string' || typeof line !== 'string' || !isObject(row) || row.id !== jobId || row.kind !== 'job') {
+    return { error: 'workspace_id, job_id, a job row and a line are required' };
+  }
+  return stackStore.startJob(workspaceId, jobId, row as unknown as Service, line);
+}
+
+/** `stack.job.stop {workspace_id, job_id}`: ^C under the pid guard. A stop that didn't land is
+ *  answered `{error}`, so Rust never reads it as done. */
+async function jobStop(a: Record<string, unknown>): Promise<unknown> {
+  const { workspace_id: workspaceId, job_id: jobId } = a;
+  if (typeof workspaceId !== 'string' || typeof jobId !== 'string') return { error: 'workspace_id and job_id are required' };
+  const out = await stackStore.stopJob(workspaceId, jobId);
+  return 'error' in out ? out : { ok: true, status: out.status };
+}
+
+/** `stack.job.cleanup {workspace_id, tab_ids?, job_ids?, force?}`: finished job tabs close;
+ *  `force` (a retired worker) closes the ones still running too. */
+async function jobCleanup(a: Record<string, unknown>): Promise<unknown> {
+  const { workspace_id: workspaceId, tab_ids: tabIds, job_ids: jobIds, force } = a;
+  if (typeof workspaceId !== 'string') return { error: 'workspace_id is required' };
+  const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+  return { ok: true, closed: await stackStore.cleanupJobs(workspaceId, strings(tabIds), strings(jobIds), force === true) };
+}
+
 export async function handleHiveRequest(req: HiveRequest): Promise<void> {
   const { request_id, verb } = req;
   const args = isObject(req.args) ? req.args : {};
@@ -115,6 +148,15 @@ export async function handleHiveRequest(req: HiveRequest): Promise<void> {
         break;
       case 'hive.relaunch':
         result = await relaunch(args);
+        break;
+      case 'stack.job.start':
+        result = await jobStart(args);
+        break;
+      case 'stack.job.stop':
+        result = await jobStop(args);
+        break;
+      case 'stack.job.cleanup':
+        result = await jobCleanup(args);
         break;
       default:
         result = { error: `Unknown Hive request: ${verb}` };
