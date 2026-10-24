@@ -555,12 +555,14 @@ repos it needs rather than all of them, since each one is a worktree and a setup
       <folder>/               the worker's worktree of each git folder it needs
       scratch/                the worker's own working space: renders, downloads, drafts
       claude-tmp/             the worker's CLAUDE_CODE_TMPDIR (§6.7)
+      cargo-target/           the worker's CARGO_TARGET_DIR, with its slim seed (§6.5)
     land/<id>/                temporary worktrees for land and post-land checks (§8.1, §8.6)
 ```
 
 It lives **outside every repo**, under `app_data_slug()` (never a hard-coded `com.aiterm.app`).
 Nested inside a repo, every watcher would scan it: Vite, tsc, cargo, eslint, the Files column,
-Claude's own Grep in the main checkout. `coordinator` is a reserved worker slug.
+Claude's own Grep in the main checkout. `coordinator` and `land` are reserved worker slugs, and
+`scratch`, `claude-tmp` and `cargo-target` can't be folder names (they sit beside a worker's worktrees).
 
 **Every worktree lives under `wt.noindex/`.** Spotlight skips a folder whose name ends in
 `.noindex`; without it, Spotlight indexed a fresh worktree at about 100% CPU (spike 4, §13.1).
@@ -596,14 +598,24 @@ Claude has one working directory plus `--add-dir` for the rest. So:
   runtime-agnostic (Codex workers later), the paths and branch names are ours, and so is
   cleanup. Claude's `--worktree` also can't branch off an arbitrary branch (`worktree.baseRef`
   is only `fresh` or `head`).
-- **Branches**: `hive/<hive-slug>/<worker-slug>` in each repo, branched off that repo's
+- **Branches**: `hive/<hive-slug>--<worker-slug>` in each repo, branched off that repo's
   **landing target's current tip** (Base by default, `hive/<hive-slug>` in the approval mode).
+  Not `hive/<hive-slug>/<worker-slug>`: in the approval mode `hive/<hive-slug>` is itself a
+  branch, and git refuses a ref under another ref's name (measured, git 2.54). A slug never
+  holds `--`, so the name splits one way (`worktree::worker_branch`).
   A wave-2 worker therefore starts with wave 1's landed work.
 - **Setup**: each repo's setup command runs in the new worktree, in the worker's own tab before
   its agent starts, so its output is in the raw terminal if it fails. It runs under the worker's
   sandbox profile (§6.7, §6.8), like every job on a worker branch. Gitignored files the work
   needs (`.env`) are copied in from a `.worktreeinclude`-style list per repo, with Claude's
-  semantics: only files that are gitignored, never tracked ones.
+  semantics: only files that are gitignored, never tracked ones. As built, a line is a path from
+  the repo's top with `*`/`?` in its last part only. Unlike gitignore, a line without a slash
+  (`.env`) names the top-level file only, never one deeper; when nothing is there the line is
+  logged, so a monorepo writes `apps/web/.env`. `**`, `!` and folders are skipped and logged, a
+  path git won't answer for (inside a submodule) is logged and not copied rather than failing
+  the spawn, and nothing is read or written through a symlink. A Hive folder's name can't be a
+  worker's own folder's (`scratch`, `claude-tmp`, `cargo-target`) or `coordinator` in any case:
+  on macOS's default volume `Scratch` is `scratch`, and git checks out into an empty folder.
 
 ### 6.5 Build caches are the hidden cost
 
@@ -1414,7 +1426,10 @@ finished asset must carry. The catalogue is data. The coordinator's brief lists 
 one-line descriptions, and the chosen role's body goes into the worker's brief only. It is
 **never** installed as Claude subagents: 282 descriptions in every worker's context, each
 inheriting every tool, is exactly the bloat to avoid. A Hive's instructions can add roles of
-its own.
+its own. **As built (step 4a)**, the shipped catalogue is thirteen roles written by us
+(`source: maiterm`, `resources/hive/roles/*.md`), none copied from agency-agents: backend,
+frontend, test, refactor, docs, api-tester, ui-reviewer, code-reviewer, image, video, audio,
+edit and art-director.
 
 **Pairings.** Each kind of task has a builder role and a checker role (agency-agents' pairing
 table, adapted): backend API → backend engineer + API tester; UI → frontend engineer + UI
@@ -1628,7 +1643,8 @@ The local stand-in for Projects' pull requests. Both modes start the same way:
 
 1. A worker reports `done`. Its card goes to **Reported**.
 2. The coordinator reviews: it reads the report, can read the worker's diff in each repo
-   (`git diff <target>...hive/<hive>/<worker>`), and can send the worker back with
+   (`git diff <target>...hive/<hive-slug>--<worker-slug>`, the §6.4 name from
+   `worktree::worker_branch`), and can send the worker back with
    `hiveMessageWorker`.
 3. When satisfied, the coordinator calls `hiveLand {worker, summary, commits: {repo: sha}}`,
    naming the commit it reviewed in each repo. The card goes to **Landing**.
@@ -1637,7 +1653,7 @@ The local stand-in for Projects' pull requests. Both modes start the same way:
 check, or after the human approves a land card, so "the worker's tip" read at landing time is a
 tree nobody looked at. Rust refuses `hiveLand`:
 
-- if a repo's `hive/<hive>/<worker>` tip isn't the sha the coordinator named ("branch moved since
+- if a repo's `hive/<hive-slug>--<worker-slug>` tip isn't the sha the coordinator named ("branch moved since
   you reviewed it": review again);
 - if the worker's worktree is dirty (`git status --porcelain` non-empty). Uncommitted files would
   count toward a check but never land;
@@ -2924,6 +2940,11 @@ several releases a day).
    - every worker launch and relaunch through the step 3 builder.
    Receipts accept **commits, files and assets only**; `checks` waits for 5b. Gated on spike 10
    (and 14); on native Windows the sheet refuses to create a Hive (§14.16).
+   Being built in six parts (4a–4f):
+   - 4a: `worker.json` (`hive/worker.rs`), a worker's worktrees, `.worktreeinclude` copy and
+     slim cargo seed (`hive/worktree.rs`, over the git helpers moved to `hive/git.rs`), and the
+     role catalogue (`hive/roles.rs`), listed in the coordinator's brief. Nothing launches a
+     worker yet.
 5. The activity feed, diff stat, worker columns, raw terminal (`fixedSize`, spike 3), keyboard.
 5b. The stack feature first: any service on any branch (§6.9: `Tab.service_target`, re-rooted
    cwd, placeholders, Run on ▸, copies per branch, `shared_from`). Then the Hive run queue:

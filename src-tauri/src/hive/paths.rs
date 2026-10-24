@@ -5,6 +5,22 @@ use std::path::{Path, PathBuf};
 
 /// `coordinator` names the coordinator's task dir and read copies; no worker may take it.
 pub const COORDINATOR_SLUG: &str = "coordinator";
+/// `wt.noindex/land/` holds the temporary land worktrees (§8.1).
+pub const LAND_SLUG: &str = "land";
+pub const RESERVED_SLUGS: [&str; 2] = [COORDINATOR_SLUG, LAND_SLUG];
+
+const SCRATCH: &str = "scratch";
+const CLAUDE_TMP: &str = "claude-tmp";
+const CARGO_TARGET: &str = "cargo-target";
+/// A worker's own folders, beside its worktrees in `wt.noindex/<slug>/`: no Hive folder may
+/// take one of these names, or its worktree would be one of them.
+pub const WORKER_OWN_DIRS: [&str; 3] = [SCRATCH, CLAUDE_TMP, CARGO_TARGET];
+
+/// A name no Hive folder may take. Ignoring case: on macOS's default volume `Scratch` IS the
+/// worker's `scratch`, and `git worktree add` happily checks out into that empty folder.
+pub fn is_reserved_folder_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case(COORDINATOR_SLUG) || WORKER_OWN_DIRS.iter().any(|d| d.eq_ignore_ascii_case(name))
+}
 
 /// `<app data>/hive`.
 pub fn hives_dir() -> Option<PathBuf> {
@@ -105,6 +121,37 @@ impl HivePaths {
         self.worktrees().join(COORDINATOR_SLUG).join(folder)
     }
 
+    /// Everything one worker has on disk but its task folder: worktrees, scratch, temp.
+    pub fn worker_dir(&self, slug: &str) -> PathBuf {
+        self.worktrees().join(slug)
+    }
+
+    /// The worker's worktree of one git folder.
+    pub fn worker_worktree(&self, slug: &str, folder: &str) -> PathBuf {
+        self.worker_dir(slug).join(folder)
+    }
+
+    /// The worker's own working space, and its cwd when no git folder is its task's (§6.3).
+    pub fn worker_scratch(&self, slug: &str) -> PathBuf {
+        self.worker_dir(slug).join(SCRATCH)
+    }
+
+    /// The worker's `CLAUDE_CODE_TMPDIR` (§6.7).
+    pub fn worker_tmp(&self, slug: &str) -> PathBuf {
+        self.worker_dir(slug).join(CLAUDE_TMP)
+    }
+
+    /// The worker's own `CARGO_TARGET_DIR`: one shared target serializes every build on its
+    /// lock (§6.5).
+    pub fn worker_cargo_target(&self, slug: &str) -> PathBuf {
+        self.worker_dir(slug).join(CARGO_TARGET)
+    }
+
+    /// The rest of a worker's brief, rewritten on every launch (§7.1).
+    pub fn worker_brief(&self, slug: &str) -> PathBuf {
+        self.worker_scratch(slug).join("brief.md")
+    }
+
     /// Which `.claude.json` trust keys maiTerm itself wrote, so removal touches only those.
     pub fn trust_record(&self) -> PathBuf {
         self.root.join("trust-written.json")
@@ -135,5 +182,10 @@ mod tests {
         assert_eq!(p.coordinator_worktree("web"), Path::new("/x/hive/h/wt.noindex/coordinator/web"));
         assert_eq!(p.coordinator_task(), Path::new("/x/hive/h/tasks/coordinator"));
         assert_eq!(p.memory_index(), Path::new("/x/hive/h/memory/MEMORY.md"));
+        assert_eq!(p.worker_worktree("api-auth", "web"), Path::new("/x/hive/h/wt.noindex/api-auth/web"));
+        assert_eq!(p.worker_scratch("api-auth"), Path::new("/x/hive/h/wt.noindex/api-auth/scratch"));
+        assert_eq!(p.worker_tmp("api-auth"), Path::new("/x/hive/h/wt.noindex/api-auth/claude-tmp"));
+        assert_eq!(p.worker_brief("api-auth"), Path::new("/x/hive/h/wt.noindex/api-auth/scratch/brief.md"));
+        assert!(p.worker_cargo_target("api-auth").starts_with(p.worker_dir("api-auth")), "under .noindex, out of Spotlight");
     }
 }

@@ -100,10 +100,15 @@ describe('validateSpec', () => {
 });
 
 describe('folderName', () => {
-  it('takes the last component, unique and never the reserved slug', () => {
+  it('takes the last component, unique and never a reserved name', () => {
     expect(folderName('/r/web/', [])).toBe('web');
     expect(folderName('/r/web', ['web'])).toBe('web-2');
     expect(folderName('/x/coordinator', [])).toBe('coordinator-2');
+    expect(folderName('/x/scratch', [])).toBe('scratch-2');
+    expect(folderName('/x/cargo-target', [])).toBe('cargo-target-2');
+    expect(folderName('/Users/x/Scratch', [])).toBe('Scratch-2');
+    expect(folderName('/x/Claude-Tmp', [])).toBe('Claude-Tmp-2');
+    expect(folderName('/r/Web', ['web'])).toBe('Web-2');
     expect(folderName('/r/.dots', [])).toBe('dots');
   });
 });

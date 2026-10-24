@@ -101,6 +101,11 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths) -> String {
         "- Your maiTerm tools are in your tool list. If one you need is missing, ask your human with a blocker; never \
          substitute or mock it.\n",
     );
+    b.push_str(
+        "\n## Roles\n\nGive each worker one of these. The worker gets the role's full text in its own brief; you see only \
+         this list. Pair a builder with its checker unless you have a reason not to, and say the reason.\n\n",
+    );
+    b.push_str(&super::roles::catalogue_lines());
     if !hive.instructions.trim().is_empty() {
         b.push_str(&format!("\n## Instructions from your human\n\n{}\n", hive.instructions.trim()));
     }
@@ -143,5 +148,7 @@ mod tests {
         assert!(b.contains(&*p.coordinator_worktree("web").to_string_lossy()));
         assert!(b.contains("**brand** (plain, read-only): `/r/brand assets`"));
         assert!(b.contains(h.instructions.trim()), "never truncated");
+        assert!(b.contains("## Roles") && b.contains(&crate::hive::roles::catalogue_lines()), "the catalogue, names and lines only");
+        assert!(b.find("## Roles") < b.find("## Instructions from your human"), "the human's words come last");
     }
 }

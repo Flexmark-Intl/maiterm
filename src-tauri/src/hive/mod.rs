@@ -6,6 +6,9 @@
 //! agent launches (§11.1): its launch record and builder (`launch`), its settings and command
 //! hooks (`settings`), the fail-closed gate those hooks ask (`gate`) and its brief (`brief`).
 //! `create` is the Create sheet's side: preflight, detection and `hive_create` (§3).
+//!
+//! Workers (step 4): their record (`worker`), their worktrees, scratch and build-cache seed
+//! (`worktree`, over the shared git helpers in `git`), and the role catalogue (`roles`).
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
@@ -13,14 +16,18 @@
 pub mod brief;
 pub mod create;
 pub mod gate;
+pub(crate) mod git;
 pub mod launch;
 pub mod layout;
 pub mod paths;
 #[cfg(test)]
 mod probe;
 pub mod record;
+pub mod roles;
 pub mod settings;
 pub mod trust;
+pub mod worker;
+pub mod worktree;
 
 pub use record::Hive;
 

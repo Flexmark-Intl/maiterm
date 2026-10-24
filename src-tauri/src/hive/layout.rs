@@ -6,34 +6,12 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde::Serialize;
 
-use super::paths::{is_component, HivePaths, COORDINATOR_SLUG};
+use super::git::{clean_failed_add, git_in, roll_back, run, Added, QUERY_TIMEOUT, WORKTREE_TIMEOUT};
+use super::paths::{is_component, is_reserved_folder_name, HivePaths, COORDINATOR_SLUG};
 use super::record::{Hive, KIND_GIT, KIND_PLAIN, LANDING_BASE, LANDING_INTEGRATION};
-use crate::util::proc;
-
-const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
-/// A checkout of a large repo takes a while; one that takes longer is a hung filesystem.
-const WORKTREE_TIMEOUT: Duration = Duration::from_secs(600);
-
-/// maiTerm's own git on a Hive repo runs no hooks and no fsmonitor daemon: a worker can write
-/// a repo's hook or config, and maiTerm must not run what it wrote (§13.1).
-fn git_in(repo: &Path) -> std::process::Command {
-    let mut cmd = proc::git();
-    cmd.arg("-C").arg(repo).args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]);
-    cmd
-}
-
-fn run(cmd: &mut std::process::Command, timeout: Duration) -> Result<String, String> {
-    let out = proc::output_timeout(cmd, timeout).map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(if err.is_empty() { format!("git exited with {}", out.status) } else { err });
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
 
 /// What the Create sheet shows for a folder the human picked (§3, §6.1, §6.6, §7.3).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -186,10 +164,12 @@ pub fn validate(hive: &Hive) -> Result<(), String> {
     }
     let mut seen: Vec<&str> = Vec::new();
     for f in &hive.folders {
-        if !is_component(&f.name) || f.name == COORDINATOR_SLUG {
+        // A worker's worktree of a folder sits beside its scratch and temp folders (§6.2).
+        if !is_component(&f.name) || is_reserved_folder_name(&f.name) {
             return Err(format!("\"{}\" can't be a folder name", f.name));
         }
-        if seen.contains(&f.name.as_str()) {
+        // `Web` and `web` are one folder on a case-insensitive volume.
+        if seen.iter().any(|s| s.eq_ignore_ascii_case(&f.name)) {
             return Err(format!("Two folders are called \"{}\"", f.name));
         }
         seen.push(&f.name);
@@ -201,14 +181,6 @@ pub fn validate(hive: &Hive) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// A read copy this call added, so a failure later in the same call can take it back.
-struct Added {
-    repo: PathBuf,
-    worktree: PathBuf,
-    /// The integration branch it created, and the commit it created it at.
-    branch: Option<(String, String)>,
 }
 
 /// Lay out a new Hive under `root`. Idempotent for the folders; never overwrites `MEMORY.md`;
@@ -282,47 +254,6 @@ fn add_read_copy(p: &HivePaths, hive: &Hive, name: &str, repo: &Path, base: Opti
     }
     log::info!("hive {}: read copy of {} at {}", hive.id, repo.display(), worktree.display());
     Ok(Added { repo: repo.to_path_buf(), worktree, branch: branch.map(|b| (b, sha)) })
-}
-
-/// Undo a `worktree add` that failed partway, so a retry isn't refused by its leftovers. The
-/// folder didn't exist before the add and sits under the Hive's own root, so removing it is safe.
-fn clean_failed_add(repo: &Path, worktree: &Path, branch: Option<(&str, &str)>) {
-    if fs::symlink_metadata(worktree).is_ok() {
-        if let Err(e) = fs::remove_dir_all(worktree) {
-            log::warn!("hive: half-made read copy {} left in place: {e}", worktree.display());
-        }
-    }
-    // With the folder gone this drops just its `.git/worktrees` entry; never `prune`, which would
-    // also drop the human's own entries for a worktree on an unmounted disk. Fails harmlessly
-    // when the add never registered it.
-    if let Err(e) = run(git_in(repo).args(["worktree", "remove", "--force"]).arg(worktree), QUERY_TIMEOUT) {
-        log::debug!("hive: no worktree entry for {} to drop: {e}", worktree.display());
-    }
-    if let Some((branch, sha)) = branch {
-        let reference = format!("refs/heads/{branch}");
-        if run(git_in(repo).args(["rev-parse", "--verify", "--quiet"]).arg(&reference), QUERY_TIMEOUT).is_ok() {
-            if let Err(e) = run(git_in(repo).args(["update-ref", "-d"]).arg(&reference).arg(sha), QUERY_TIMEOUT) {
-                log::warn!("hive: branch {branch} in {} left in place: {e}", repo.display());
-            }
-        }
-    }
-}
-
-fn roll_back(added: &[Added]) {
-    for a in added.iter().rev() {
-        let res = run(git_in(&a.repo).args(["worktree", "remove", "--force"]).arg(&a.worktree), WORKTREE_TIMEOUT);
-        if let Err(e) = res {
-            log::warn!("hive: read copy {} left in place: {e}", a.worktree.display());
-            continue;
-        }
-        if let Some((branch, sha)) = &a.branch {
-            // Compare-and-delete: only while it still points where this call created it.
-            let res = run(git_in(&a.repo).args(["update-ref", "-d"]).arg(format!("refs/heads/{branch}")).arg(sha), QUERY_TIMEOUT);
-            if let Err(e) = res {
-                log::warn!("hive: branch {branch} in {} left in place: {e}", a.repo.display());
-            }
-        }
-    }
 }
 
 /// Take back a whole `create_layout` whose Hive was never saved (the workspace went away, or the
@@ -535,10 +466,14 @@ mod tests {
         let root = base.join("hive/h1");
         let mut h = hive(LANDING_BASE, vec![folder("../escape", &base, "main")]);
         assert!(create_layout(&root, &h).is_err());
-        h.folders = vec![folder("coordinator", &base, "main")];
-        assert!(create_layout(&root, &h).is_err());
+        for reserved in ["coordinator", "scratch", "claude-tmp", "cargo-target", "Scratch", "Claude-Tmp", "CARGO-TARGET", "Coordinator"] {
+            h.folders = vec![folder(reserved, &base, "main")];
+            assert!(create_layout(&root, &h).is_err(), "{reserved}");
+        }
         h.folders = vec![folder("web", &base, "main"), folder("web", &base, "main")];
         assert!(create_layout(&root, &h).is_err());
+        h.folders = vec![folder("web", &base, "main"), folder("Web", &base, "main")];
+        assert!(create_layout(&root, &h).is_err(), "one folder on a case-insensitive volume");
         h.folders = vec![folder("web", &base, "--upload-pack=x")];
         assert!(create_layout(&root, &h).is_err());
         h.folders = vec![];

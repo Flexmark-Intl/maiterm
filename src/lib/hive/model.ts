@@ -108,11 +108,20 @@ export function validateSpec(spec: SpecFields, ceiling: number): string | null {
   return null;
 }
 
-/** A folder's default name: its last path component, made unique among `taken` with -2, -3… */
+/** Names Rust's `layout::validate` refuses: the coordinator's slug, and a worker's own folders
+ *  that sit beside its worktrees (`paths::is_reserved_folder_name`). */
+const RESERVED_FOLDER_NAMES = ['coordinator', 'scratch', 'claude-tmp', 'cargo-target'];
+
+/** A folder's default name: its last path component, made unique among `taken` with -2, -3…
+ *  Compared ignoring case, as Rust does: on macOS's default volume `Scratch` is `scratch`. */
 export function folderName(path: string, taken: string[]): string {
   const base = path.replace(/[\\/]+$/, '').split(/[\\/]/).pop()?.replace(/^\.+/, '') || 'folder';
+  const clash = (n: string) => {
+    const lower = n.toLowerCase();
+    return taken.some((t) => t.toLowerCase() === lower) || RESERVED_FOLDER_NAMES.includes(lower);
+  };
   let name = base;
-  for (let i = 2; taken.includes(name) || name === 'coordinator'; i++) name = `${base}-${i}`;
+  for (let i = 2; clash(name); i++) name = `${base}-${i}`;
   return name;
 }
 
