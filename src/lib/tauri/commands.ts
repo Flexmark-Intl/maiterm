@@ -2,7 +2,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
-import type { HiveCreated, HiveDetectedTool, HiveFolderInfo, HivePreflight, HiveSpec } from './types';
+import type { Hive, HiveCreated, HiveDetectedTool, HiveFolderInfo, HivePreflight, HiveSpec } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
@@ -2657,4 +2657,10 @@ export async function hiveDetectTools(): Promise<HiveDetectedTool[]> {
 /** Lay the Hive out on disk and install it, with its hidden coordinator tab, in one write. */
 export async function hiveCreate(workspaceId: string, spec: HiveSpec): Promise<HiveCreated> {
   return invoke('hive_create', { workspaceId, spec });
+}
+
+/** A Hive paused by a usage limit it couldn't wait out starts workers again (docs/hive.md §7.8).
+ *  The machine-wide breaker is timed and not lifted by this. */
+export async function hiveResume(workspaceId: string): Promise<Hive> {
+  return invoke('hive_resume', { workspaceId });
 }

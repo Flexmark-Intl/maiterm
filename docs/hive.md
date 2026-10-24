@@ -3012,6 +3012,23 @@ several releases a day).
      `scratch/brief.md` and the worker's invariant rules, `gate::worker_scope`, the worker branch
      of `session_started`, and `hive/sandbox_events.rs`. Nothing calls it yet but tests and the
      acceptance probe (§13.1).
+   - 4c: the fuses and the spawn reservation (`hive/fuses.rs`): cap, hour and day counts and
+     the breaker under one `std::sync::Mutex`, the counts and breaker in
+     `<app data>/hive/fuses.json` (not the state file: Rust's alone), pending reservations in
+     memory with a 120 s expiry and released on drop. The StopFailure wiring reads Claude's own
+     words ("You've hit your session limit · resets 3pm (Zone)", 2.1.310): a reset within 24 h
+     trips the breaker and tells every other coordinator (the notice and refusal show Claude's
+     own minute; the breaker holds to its end). A weekly, monthly, dated or unparseable one, a
+     third waited limit on one tab within 24 h (auto-continue read as re-arming twice, counted
+     in memory), or a retried 429 (`API Error: …`) on a tab not known to run on a plan (spawned
+     under a managed account with a plan read back) pauses that Hive (`status = "paused"`,
+     `hive-changed` to its window). **Rust files the human's blocker itself**, in the same
+     write: an `action` blocker on a "Hive paused: usage limit" row on the coordinator's tab,
+     sent to the tasks store over `mailink-tasks-changed`, because the coordinator is often the
+     agent at the limit (a weekly limit is every agent's on that plan). Its coordinator is told
+     only when another tab hit it, and told not to ask again. A plan's capacity 429 does
+     nothing. The tab that hit the limit is never typed into. `hive_resume` un-pauses and
+     closes the row (no button yet). Nothing reserves yet: `hiveSpawnWorker` (4d) does.
 5. The activity feed, diff stat, worker columns, raw terminal (`fixedSize`, spike 3), keyboard.
 5b. The stack feature first: any service on any branch (§6.9: `Tab.service_target`, re-rooted
    cwd, placeholders, Run on ▸, copies per branch, `shared_from`). Then the Hive run queue:

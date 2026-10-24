@@ -4289,6 +4289,56 @@ fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, trans
     });
 }
 
+/// A Hive agent's turn ended on a usage limit (docs/hive.md §7.8, StopFailure). A reset Claude
+/// will wait out trips the machine-wide breaker and every other coordinator is told. One nothing
+/// will continue (weekly, unparseable, auto-continue spent, no known plan) pauses that agent's
+/// Hive, and Rust files the human's blocker itself: the coordinator may be the agent at the
+/// limit. The tab that hit it is never typed into: that would end Claude's own wait, or start a
+/// turn that only fails again. Off the hook's path: the fuses and the state are written, then
+/// deliveries may wait.
+fn hive_stop_failure(srv: &ServerState, tab_id: &str, event: &Value) {
+    use crate::hive::fuses;
+    if fuses::usage_limit_text(event).is_none() {
+        return;
+    }
+    let Some((hive, _, _)) = crate::hive::hive_agent(&srv.state.app_data.read(), tab_id) else { return };
+    let on_subscription = fuses::on_subscription(&srv.state, tab_id);
+    let (app, handle, tab, event) = (srv.state.clone(), srv.app_handle.clone(), tab_id.to_string(), event.clone());
+    tauri::async_runtime::spawn(async move {
+        let t = tab.clone();
+        let assessed = tokio::task::spawn_blocking(move || fuses::assess_limit(&t, &event, fuses::now_ms(), on_subscription));
+        let Some(a) = assessed.await.ok().flatten() else { return };
+        let mut notices: Vec<(String, String)> = Vec::new();
+        if let Some(until) = a.until {
+            log::info!("hive {}: tab {tab} hit a usage limit until {until}: {}", hive.id, a.text);
+            let reason = a.text.clone();
+            if tokio::task::spawn_blocking(move || fuses::trip_breaker(until, &reason)).await.unwrap_or(false) {
+                let text = fuses::breaker_notice(until);
+                notices.extend(fuses::coordinator_tabs(&app.app_data.read()).into_iter().map(|c| (c, text.clone())));
+            }
+        }
+        if let Some(cause) = a.pause {
+            log::warn!("hive {}: tab {tab} hit a usage limit nothing will continue ({cause:?}); pausing the Hive: {}", hive.id, a.text);
+            let (app2, handle2, id, limit) = (app.clone(), handle.clone(), hive.id.clone(), a.text.clone());
+            let change = tokio::task::spawn_blocking(move || fuses::pause(&app2, &handle2, &id, &limit, cause))
+                .await
+                .ok()
+                .flatten();
+            if let Some(c) = change.and_then(|c| c.coordinator) {
+                notices.push((c, fuses::pause_notice(&a.text, cause)));
+            }
+        }
+        for (coordinator, text) in notices.into_iter().filter(|(c, _)| *c != tab) {
+            use crate::mailink::draft_hold::{deliver_or_hold, Delivery};
+            match deliver_or_hold(&app, &handle, &coordinator, &text, "Hive usage limit").await {
+                Delivery::Delivered(_) => {}
+                Delivery::Held { reason, .. } => log::info!("hive: usage-limit notice to {coordinator} held ({reason})"),
+                Delivery::Refused(why) => log::warn!("hive: usage-limit notice to {coordinator} refused ({why})"),
+            }
+        }
+    });
+}
+
 /// Recorded as delivered only once the agent has it. A refusal right at session start is mostly
 /// the agent not yet seen owning its terminal (a process snapshot from before `claude` exec'd),
 /// so it is tried again a few times; a held one waits for its outcome, which is only an event.
@@ -4584,6 +4634,13 @@ async fn hooks_handler(
     // keeps a failed call visible.
     if let Some(phase) = crate::agent_files::Phase::of(hook_event_name, &event) {
         record_agent_files(&srv, phase, &event, &session_id, runtime_key, tab_id_from_param.as_deref()).await;
+    }
+
+    // Only a Hive tab's own command hook (`via=hive`) installs StopFailure (hive/settings.rs).
+    if hook_event_name == "StopFailure" && params.get("via").map(String::as_str) == Some("hive") {
+        if let Some(tab) = tab_id_from_param.as_deref() {
+            hive_stop_failure(&srv, tab, &event);
+        }
     }
 
     match normalize_hook_event(runtime, hook_event_name, &event) {

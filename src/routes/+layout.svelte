@@ -22,7 +22,7 @@
   import { attachConsole } from '@tauri-apps/plugin-log';
   import { onAction as onNotificationAction } from '@tauri-apps/plugin-notification';
   import * as commands from '$lib/tauri/commands';
-  import type { ClaudeCodeToolRequest, Preferences, Tab, CommsBinding } from '$lib/tauri/types';
+  import type { ClaudeCodeToolRequest, Preferences, Tab, CommsBinding, Hive } from '$lib/tauri/types';
   import type { ImportPreview } from '$lib/tauri/commands';
   import { claudeCodeStore } from '$lib/stores/claudeCode.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
@@ -657,6 +657,12 @@
     listen('state-imported', () => {
       window.location.reload();
     }).then(unlisten => { unlistenStateImported = unlisten; });
+
+    // A Hive's record changed in Rust (paused on a usage limit, resumed): sent to its window only.
+    let unlistenHiveChanged: (() => void) | undefined;
+    listen<{ workspace_id: string; hive: Hive }>('hive-changed', (event) => {
+      workspacesStore.applyHiveRecord(event.payload.workspace_id, event.payload.hive);
+    }, { target: appWindow.label }).then(unlisten => { unlistenHiveChanged = unlisten; });
 
     // A workspace or tab arriving from another window with its PTYs live (windowMove.ts).
     let unlistenWindowMoves: (() => void) | undefined;
@@ -1446,6 +1452,7 @@
       unlistenShareOpened?.();
       unlistenWindowMoves?.();
       unlistenStateImported?.();
+      unlistenHiveChanged?.();
       unlistenCheckUpdates?.();
       unlistenClaudeSetup?.();
       unlistenClearNavHistory?.();

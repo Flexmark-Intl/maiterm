@@ -10,13 +10,15 @@
 //! Workers (step 4): their record (`worker`), their worktrees, scratch and build-cache seed
 //! (`worktree`, over the shared git helpers in `git`), the role catalogue (`roles`), and the
 //! sandbox refusals read off a failed call (`sandbox_events`). A worker launches through the
-//! same builder, with its own record, settings, brief and gate scope.
+//! same builder, with its own record, settings, brief and gate scope, and only once `fuses` has
+//! reserved it a slot under the cap, the machine-wide spawn counts and the quota breaker.
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
 
 pub mod brief;
 pub mod create;
+pub mod fuses;
 pub mod gate;
 pub(crate) mod git;
 pub mod launch;

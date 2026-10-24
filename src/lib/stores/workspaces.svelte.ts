@@ -1,4 +1,4 @@
-import type { SplitDirection, SplitNode, Tab, Pane, Task, Workspace, WorkspaceNote, EditorFileInfo, DiffContext, CommsMonitorChannel, CommsBinding, Service } from '$lib/tauri/types';
+import type { SplitDirection, SplitNode, Tab, Pane, Task, Workspace, WorkspaceNote, EditorFileInfo, DiffContext, CommsMonitorChannel, CommsBinding, Service, Hive } from '$lib/tauri/types';
 import type { AgentRuntime } from '$lib/agents/types';
 import { getDescriptor, launchCommand } from '$lib/agents/descriptor';
 import { getAdapter } from '$lib/agents/adapter';
@@ -615,6 +615,13 @@ function createWorkspacesStore() {
       if (!ws || (ws.muted ?? false) === muted) return;
       ws.muted = muted;
       await commands.setWorkspaceMuted(workspaceId, muted);
+    },
+
+    /** Rust alone writes `Workspace.hive` (a pause on a usage limit, a resume): the mirror
+     *  follows its `hive-changed` event, never the other way round. */
+    applyHiveRecord(workspaceId: string, hive: Hive) {
+      const ws = workspaces.find(w => w.id === workspaceId);
+      if (ws?.hive && ws.hive.id === hive.id) ws.hive = hive;
     },
 
     async suspendWorkspace(workspaceId: string) {
