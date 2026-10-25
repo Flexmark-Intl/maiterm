@@ -3228,7 +3228,7 @@ several releases a day).
    it ran, the reported tip an ancestor of the job's commit). `RunQueueModal` edits the queued
    commands. Fix-ups along the way: `587c9fe3` and `f1bb8d6f` (Unix-only tests for shell
    metacharacters in branch names), `b1abcf78` (run-queue lines swept into an unrelated commit).
-   **Part 6 built** (2026-10-24, uncommitted at the time of writing): the acceptance. Spike 15 as a
+   **Part 6 built** (2026-10-24): the acceptance. Spike 15 as a
    normal test (`hive/spike15.rs`), spike 9's queued deny as an ignored probe that was run and
    passes (`hive/probe.rs`), the pilot's queued commands for maiTerm itself
    (`queue::detect_commands`), and §6.9's details moved into `docs/stack.md` §14 (§14.7 for jobs,
@@ -3241,7 +3241,7 @@ several releases a day).
    the approval mode (chosen at creation, §3) through agent requests; the **land log and Undo**
    (`hiveUndoLand`, §8.6); then **batched land checks** over workers already passed to
    `hiveLand` (§6.8); retire; delete flow.
-   **6a built** (2026-10-24, uncommitted at the time of writing): retirement, retired chats and
+   **6a built** (2026-10-24): retirement, retired chats and
    deleting a Hive. `worker.json` gains the phases `landing` (live, §3.1), `landed` and
    `retired`, and `retired {reason, at, kept, landed}` and `undone` (`hive/worker.rs`).
    `retire::retire_worker` moves the phase first (so the exit is no crash), SIGTERMs a running
@@ -3257,7 +3257,7 @@ several releases a day).
    worktrees go (workers', the read copies, land temp ones forced once vouched for), dirty ones,
    scratch with work, every branch and the gallery (unless ticked) stay; the trust maiTerm wrote
    is removed, open agent requests of the Hive's tabs fail, the rows stay with their tabs cleared.
-   **6b built** (2026-10-24, uncommitted at the time of writing): reviewers (`hive/review.rs`).
+   **6b built** (2026-10-24): reviewers (`hive/review.rs`).
    `hiveSpawnWorker {reviews}` takes a worker that reported done, one live reviewer at a time,
    none while an escalation is open; the reviewer keeps `hive_role = "worker"` and is told apart
    by `worker.json` `reviews` (builder task id) and `reviewed` (folder → pinned sha). Its folders
@@ -3290,7 +3290,7 @@ several releases a day).
    `accept` records, `revise` delivers a brief kept in `brief_revisions` (the builder's brief.md
    carries it) and resets the attempts, `reassign`/`decompose`/`defer` retire the builder, task
    `dropped`. Cards show "Reviewing #3 x" and the builder's review line.
-   **6c built** (2026-10-24, uncommitted at the time of writing): the land engine and `hiveLand`
+   **6c built** (2026-10-24): the land engine and `hiveLand`
    (`hive/land/`), land to Base on the coordinator's checkpoint only. `hiveLand {worker, summary,
    commits, order?, accept_review?, fix_forward?}` refuses, before anything is written: a worker
    that isn't reported done (or a held land), commits that aren't exactly its repos with full shas,
@@ -3334,7 +3334,7 @@ several releases a day).
    runs (`land::in_flight`). `land::reconcile` at startup settles a land caught in step 2 from the
    repo and holds it. Cards read "Landing · held" with the reason, and a Landed card "Landed · push
    held: <reason>" (its land rides on the card once landed).
-   **6d built** (2026-10-24, uncommitted at the time of writing): the human's approval
+   **6d built** (2026-10-24): the human's approval
    (`hive/land/approval.rs`), as agent requests of kind `hive_land` (`hive_undo` is reserved for
    6e). Rust alone files them (`agent_requests::file_hive`, from the coordinator's tab; the window
    path refuses both kinds), one per land (`args.land_id`; a newer land of the task supersedes the
@@ -3364,7 +3364,7 @@ several releases a day).
    once. `approval::refile_pending` files every waiting card again at startup under its id and
    first filing time. The card shows in the Loom's Decisions, on the phone, and in the worker's
    column; the worker's card reads Landing · waiting for your approval (§4.3 row 7).
-   **6e built** (2026-10-24, uncommitted at the time of writing): the land log view, Undo and the
+   **6e built** (2026-10-24): the land log view, Undo and the
    post-land check. The log is folded, never edited (`land/log.rs` `fold`): an `undo` line marks
    the line it `undoes`; per repo, a land or undo whose land check passed on exactly the tree that
    landed (`check: passed`, `tree_landed == tree_tested`) or a passing `base_check` is a pass, and a
@@ -3394,7 +3394,7 @@ several releases a day).
    shared package caches too (cargo's registry lock, npm's cache), or no build could run in it; an
    undo that finds the lock busy past the inline wait holds rather than queueing in the background;
    a land approved after its repo turned suspect isn't re-refused.
-   **6f built** (2026-10-24, uncommitted at the time of writing): batched land checks
+   **6f built** (2026-10-24): batched land checks
    (`hive/land/batch.rs`). A one-repo land whose repo is busy at `hiveLand` (another land holds its
    lock, or a batch run is under way there) answers `queued_batch` and waits in that repo's queue,
    in `hiveLand` order (`LandState.queued_at`), when batching is on, the folder has a land check, the
@@ -3438,7 +3438,7 @@ several releases a day).
    unfiled lines. The spike 5 probe (`spike_5_concurrent_memory_probe`) found two real sessions
    choosing one file name overwrite each other, so both briefs tell an agent to pick a name no file
    has yet.
-   **7b built** (2026-10-24, uncommitted at the time of writing): checkpoints in Rust, prompt
+   **7b built** (2026-10-24): checkpoints in Rust, prompt
    routing, `hiveAnswerWorker` and the decision log's first lines. `hive/checkpoints.rs` reads a
    checkpoint (a missing key is its default for the landing mode) and maps a prompt kind to one
    (permission → permissions; question, blocker, compaction, completion and a finished turn →
@@ -3474,7 +3474,7 @@ several releases a day).
    asks `owns_prompt` before the 30 s collapse records a tab, so a ring nobody heard never swallows
    the human's next one. **Not yet:** the window's side (the TS gate, "With coordinator", the Autonomy modal and
    `hive-prompt-notify`'s listener are 7c), and precedents (7d) — `precedent` is stored as given.
-   **7c built** (2026-10-24, uncommitted at the time of writing): the window's side. The gate is
+   **7c built** (2026-10-24): the window's side. The gate is
    `hiveOwnsPromptIn` (`src/lib/hive/model.ts`), the TS twin of `owns_prompt` over the routes
    `stores/hivePrompts.svelte.ts` mirrors from `hive-prompts-changed` (read whole by
    `hive_prompt_routes` when a Hive view mounts); it differs in one way, on purpose: a prompt Rust
@@ -3509,7 +3509,7 @@ several releases a day).
    worker's question and option label on their own `The worker’s …` lines, outside maiTerm's
    sentence about the human, so a quote closed inside them can't read as the human speaking.
    Dismiss writes nothing.
-   **7d built** (2026-10-24, uncommitted at the time of writing): precedents and the decision
+   **7d built** (2026-10-24): precedents and the decision
    log's view. `hive/precedents.rs` keeps one JSON file per precedent (temp file and rename, one
    process lock), a Hive's in `<hive>/precedents/`, the global ones in `<app data>/hive/precedents/`
    (`HivePaths::global_precedents`, beside every Hive's root; `bin` and `precedents` can't be Hive
@@ -3548,7 +3548,7 @@ several releases a day).
    with a new id and fresh counts, never a tool's). **Decided here:** the tabs refetch on a new
    `hive-decisions-changed` (every route change, land outcome, override and precedent write), not on
    `hive-memory-changed`, whose list rebuilds the memory index.
-   **7e built** (2026-10-24, uncommitted at the time of writing): earned autonomy, the plan
+   **7e built** (2026-10-24): earned autonomy, the plan
    checkpoint and the daily digest. `hive/autonomy.rs` counts from the decision log alone: the
    run of the human's `answered` lines in one category whose answer is the coordinator's
    `recommended` (by label, Esc read as No), counted after the human's answer to the latest offer
@@ -3591,7 +3591,7 @@ several releases a day).
    and detail view; then compare, Iterate/attach, collections, deliver (plain folders only,
    §7.3). The **budget**: recorded spend per paid render, the header total and the
    stop-and-ask blocker (§10.3). The sandbox allowlist extends to each detected generator's host.
-   **8a built** (2026-10-24, uncommitted at the time of writing): the store, Rust only
+   **8a built** (2026-10-24): the store, Rust only
    (`hive/gallery/`). One `Gallery` per Hive (`for_hive`, a process cache by Hive id that refuses
    a Hive whose folder is gone; Hive delete calls `forget` before its disk goes): `files/<id>.<ext>`
    at 0444, `thumbs/`, `trash/`, and `index.sqlite` (WAL, additive migrations only, every
