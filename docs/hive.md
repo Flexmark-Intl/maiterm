@@ -757,12 +757,18 @@ inside its folders".
   The branch entries are **per file, never the `refs/heads` folder**, so a worker can't move
   Base or another worker's branch. `packed-refs` is left out: the commit still succeeds, with a
   harmless error. `objects/` has to be writable, so a worker writes into the shared main repo's
-  object store: a residual risk to that store, not a boundary. maiTerm
+  object store: a residual risk to that store, not a boundary. The store stays shared by decision
+  (2026-10-25); the defences (§16, "Object-store defences built") deny what redirects a lookup
+  (`objects/info`, `objects/pack`, `shallow`), have maiTerm's verifying git trust no commit-graph,
+  graft or replace ref, and check receipts against maiTerm's own land log with every commit's hash.
+  A hostile worker can still corrupt objects in the human's repo (`git fsck` shows it): accepted.
+  maiTerm
   creates the branch before launch, since a slashed name needs its parent folder. The same set
   is written for the primary worktree as for secondary ones: Claude protects the working-folder
   repo's `.git/hooks` and `config` itself, but not an `--add-dir` repo's, where Bash wrote a hook
   and the Write tool overwrote `.git/config` (spike 10).
-- `denyWrite`, explicitly, on top of those: every repo's `.git/{config,hooks,info}`, other
+- `denyWrite`, explicitly, on top of those: every repo's `.git/{config,hooks,info,shallow}` and
+  `.git/objects/{info,pack}`, other
   worktrees' admin dirs, `.claude/**` and `.mcp.json` in every worktree, the gallery (§6.3), the
   hook scripts of §6.8 and any local-path git remote (§7.3). Each also has its
   `Write(//…)`/`Edit(//…)` deny rule (above).
@@ -2634,6 +2640,9 @@ account, with `expect`, 68–69 live sessions.
   another worker's branch. Leave out `packed-refs`: the commit still succeeds, with a harmless
   error. `objects/` has to be writable, so a worker writes objects into the shared main repo.
   maiTerm creates the branch before launch, since slashed names need their parent folder.
+  **Later (the objstore review, 2026-10-25):** a commit needs neither `objects/info` nor
+  `objects/pack`, now denied (the auto-maintenance a commit starts fails there with a warning, and
+  the commit stands); the store stays shared by decision, with the defences in §16.
 - **A worker can't get its own temp.** Sandboxed Bash always sees `TMPDIR=/tmp/claude-<uid>`,
   whatever is set. Denying that folder breaks every Bash call, because Claude writes its cwd file
   there. `CLAUDE_CODE_TMPDIR` moves only Claude's own state (tasks, sockets), which is still worth
@@ -3916,3 +3925,38 @@ several releases a day).
    its model and effort pickers) never wakes a Hive, since inside maiTerm's frame it would be
    words, not a command, while a message that opens with a path does; a held direct delivery
    counts as delivered (the agent is there to take it), and a refused one leaves the Hive Done.
+   **Object-store defences built** (2026-10-25, a hardening pass, not a step): a review of 9b
+   reproduced (git 2.54) a worker making `merge-base --is-ancestor C main` say yes for a commit
+   that never landed, by a crafted `objects/info/commit-graph` or by overwriting main's tip loose
+   object with a body naming C as parent, and so getting it past `hiveFinish` as a receipt. The
+   human kept the shared store; the defences: (D1) every worker's and reviewer's `denyWrite` and
+   Write/Edit deny rules add `<common>/objects/info`, `<common>/objects/pack` and
+   `<common>/shallow` beside `config`, `hooks` and `info` (a commit writes loose objects only; the
+   auto-maintenance it starts fails on `pack` with a warning, accepted rather than setting
+   `gc.auto` in the worker's env; a `git add` of a file over `core.bigFileThreshold`, 512 MB,
+   streams into a pack and fails). (D2) maiTerm's verifying git (`git::verify_in`/`verifying`:
+   `core.commitGraph=false`, `core.multiPackIndex=false`, `GIT_NO_REPLACE_OBJECTS`, a graft file
+   that can't exist, no env alternates) for Done's receipts and unlanded counts, every land-engine
+   call (`land::git::lgit`, merges included, not only the ancestry checks), the reviewer's pins
+   (`worktree::builder_tips`), the worker report's commit checks and the delete preview's counts.
+   (D3) a `commits` receipt, and a `checks` receipt's run commit, must also be, or be an ancestor
+   of, a `base_after` the folded land log records for that folder (a land, batch member or
+   integration land, not undone, not suspect). Git only picks that landed commit; the proof is
+   maiTerm's own walk down from it (`git::verified_ancestry`): each commit is read by `cat-file
+   --batch` and hashed in Rust (SHA-1 or SHA-256 by the id's length) BEFORE the parents it names
+   are followed, until the receipt is reached (capped at 200,000 commits and the walk timeout).
+   No range git computes is hashed instead: `rev-list C..T` treats everything under C as
+   uninteresting from objects it never checks, so a forged fork point naming C as a parent (a
+   cycle) hid from it (review, reproduced in Done's tests). A mismatch refuses with "the objects
+   don't verify … run `git fsck`"; a walk that ends without the receipt is "not in anything
+   landed".
+   (D4) a `files` receipt is refused under any `.git`, anywhere in the Hive's folder but the
+   gallery's `files/` (`wt.noindex/` read copies and worktrees included: a read copy names the
+   folder path to use instead), the global precedents and the hook folder; in a git folder it must
+   be a blob at `refs/heads/<landing target>:<path>` (it needn't be on disk, so a file landed on
+   an integration branch counts), in a plain folder or the gallery a file on disk. (D5)
+   `hiveSetCriteria` takes `hiveFinish`'s per-Hive turn, so criteria never change under a finish
+   being checked. A hostile worker can still corrupt objects in the human's repo; `git fsck` shows
+   it. **Decided here:** a commit an undo reverted still proves a criterion when a later land not
+   undone contains it (the plan's rule, by ancestry); the walk takes the oldest recorded landed
+   commit that holds the receipt (the shortest path).

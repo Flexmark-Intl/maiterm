@@ -524,6 +524,13 @@ pub fn worker_deny_write_paths(hive: &Hive, w: &WorkerRecord, paths: &HivePaths,
         add(common.join("config"), false);
         add(common.join("hooks"), true);
         add(common.join("info"), true);
+        // What redirects an object lookup inside the store it writes (the objstore review): a
+        // commit-graph or alternates under `objects/info`, a pack or multi-pack index, a
+        // `shallow` list. A commit writes loose objects only; the auto-maintenance it may start
+        // fails on `objects/pack` with a warning and the commit stands (measured, git 2.54).
+        add(common.join("objects").join("info"), true);
+        add(common.join("objects").join("pack"), true);
+        add(common.join("shallow"), false);
         for file in ["commondir", "gitdir", "config.worktree"] {
             add(admin.join(file), false);
         }
@@ -1226,6 +1233,115 @@ mod tests {
             assert!(deny.contains(&sp(must.clone())), "{}", must.display());
         }
         assert!(!deny.iter().any(|d| *d == sp(p.memory())), "memory is written through Claude's own exemption");
+    }
+
+    /// The object store stays writable for commits, but nothing in it that redirects a lookup:
+    /// workers and reviewers alike, on the sandbox and in the Write/Edit rules (the objstore review).
+    #[cfg(unix)]
+    #[test]
+    fn what_redirects_an_object_lookup_is_denied_to_workers_and_reviewers() {
+        let (h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        let mut reviewer = w.clone();
+        reviewer.task_id = "t-rev".into();
+        reviewer.slug = "auth-review".into();
+        reviewer.reviews = Some("t-auth".into());
+        for f in reviewer.folders.iter_mut() {
+            f.branch = None;
+        }
+        for (role, who) in [("worker", &w), ("reviewer", &reviewer)] {
+            let s = worker_settings_json(&h, &crate::hive::launch::worker_record(&h, &p, who), who, &p, &worker_ctx(), &env()).unwrap();
+            let allow = strings(&s["sandbox"]["filesystem"]["allowWrite"]);
+            let deny = strings(&s["sandbox"]["filesystem"]["denyWrite"]);
+            let rules = strings(&s["permissions"]["deny"]);
+            for repo in ["/r/web/.git", "/r/api/.git"] {
+                assert!(allow.contains(&format!("{repo}/objects")), "{role}: a commit writes loose objects");
+                for (sub, dir) in [("objects/info", true), ("objects/pack", true), ("info", true), ("shallow", false), ("config", false), ("hooks", true)] {
+                    let path = format!("{repo}/{sub}");
+                    assert!(deny.contains(&path), "{role}: {path} in denyWrite");
+                    for tool in ["Write", "Edit"] {
+                        let rule = abs_rule(tool, Path::new(&path), dir);
+                        assert!(rules.contains(&rule), "{role}: {rule}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The denies cost a commit nothing: with `objects/info`, `objects/pack` and `info` closed to
+    /// it, a commit in a linked worktree still lands, its auto-maintenance failing on its own.
+    #[cfg(unix)]
+    #[test]
+    fn a_commit_needs_none_of_the_denied_object_store_entries() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        let base = crate::share::canon(&{
+            let t = std::env::temp_dir().join(format!("hive-objdeny-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&t).unwrap();
+            t
+        });
+        let git = |dir: &Path, args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args(["-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            (out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string(), String::from_utf8_lossy(&out.stderr).to_string())
+        };
+        let repo = base.join("web");
+        fs::create_dir_all(&repo).unwrap();
+        assert!(git(&repo, &["init", "-q", "-b", "main"]).0);
+        assert!(git(&repo, &["config", "core.autocrlf", "false"]).0);
+        fs::write(repo.join("a"), "a\n").unwrap();
+        assert!(git(&repo, &["add", "-A"]).0 && git(&repo, &["commit", "-q", "-m", "init"]).0);
+        let wt = base.join("wt");
+        assert!(git(&repo, &["worktree", "add", "-q", "-b", "hive/x--w", wt.to_str().unwrap(), "main"]).0);
+        // Loose objects over `gc.auto=1`, in the foreground. `gc --auto` samples only `objects/17`
+        // and repacks once more than one object is there, so files are added until two blobs
+        // (ids computed here, as git hashes them) fall in it.
+        let mut in_17 = 0;
+        for i in 0.. {
+            let content = format!("{i}\n");
+            fs::write(wt.join(format!("f{i}")), &content).unwrap();
+            use sha1::Digest;
+            if sha1::Sha1::digest(format!("blob {}\0{content}", content.len()).as_bytes())[0] == 0x17 {
+                in_17 += 1;
+            }
+            if in_17 == 2 {
+                break;
+            }
+        }
+        let closed = [repo.join(".git/objects/info"), repo.join(".git/objects/pack"), repo.join(".git/info")];
+        for d in &closed {
+            fs::create_dir_all(d).unwrap();
+            fs::set_permissions(d, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        assert!(git(&wt, &["add", "-A"]).0);
+        assert!(fs::read_dir(repo.join(".git/objects/17")).unwrap().count() >= 2, "enough for gc --auto to repack");
+        let out = Command::new("git")
+            .current_dir(&wt)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TRACE", "1")
+            .args(["-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false"])
+            .args(["-c", "gc.auto=1", "-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false", "commit", "-q", "-m", "work"])
+            .output()
+            .unwrap();
+        let (ok, err) = (out.status.success(), String::from_utf8_lossy(&out.stderr).to_string());
+        let tip = git(&repo, &["rev-parse", "refs/heads/hive/x--w"]).1;
+        let main = git(&repo, &["rev-parse", "main"]).1;
+        for d in &closed {
+            fs::set_permissions(d, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(ok, "the commit stands: {err}");
+        assert_ne!(tip, main, "and moved the branch");
+        // The maintenance did run, and failed writing its pack.
+        assert!(err.contains("built-in: git pack-objects"), "the auto-maintenance packed: {err}");
+        assert!(err.lines().any(|l| !l.contains("trace:") && (l.contains("Permission denied") || l.contains("failed"))), "and failed on objects/pack: {err}");
+        assert_eq!(fs::read_dir(repo.join(".git/objects/pack")).unwrap().count(), 0, "nothing was packed");
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// The job profile is drawn from the same lists as the worker's sandbox (§6.8): the lists are

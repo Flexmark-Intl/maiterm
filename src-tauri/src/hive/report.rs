@@ -223,7 +223,7 @@ pub(crate) fn verify_receipts(paths: &HivePaths, hive_id: &str, w: &WorkerRecord
 /// commit. The tip is the newest commit receipt in that folder, else the branch's head. Answers
 /// the queued command it ran. Blocks on git, on the recorded git dir.
 fn verify_check(paths: &HivePaths, w: &WorkerRecord, job: &str, commits: &[(String, String)]) -> Result<String, String> {
-    use super::git::{git_in_worktree, run, QUERY_TIMEOUT};
+    use super::git::{git_in_worktree, run, verifying, QUERY_TIMEOUT};
     use super::queue;
     let shown = one_line(job, 40);
     if !queue::is_job_id(job) {
@@ -251,7 +251,7 @@ fn verify_check(paths: &HivePaths, w: &WorkerRecord, job: &str, commits: &[(Stri
         return Err(format!("Run {shown} ran with uncommitted changes to tracked files, so it tested no commit: commit, run it again, report that one."));
     }
     let tested = r.commit.clone().ok_or_else(|| format!("Run {shown} has no commit on record."))?;
-    let git = |args: &[&str]| git_in_worktree(f).and_then(|mut cmd| run(cmd.args(args), QUERY_TIMEOUT));
+    let git = |args: &[&str]| git_in_worktree(f).and_then(|mut cmd| run(verifying(&mut cmd).args(args), QUERY_TIMEOUT));
     let mine: Vec<&str> = commits.iter().filter(|(folder, _)| *folder == f.name).map(|(_, sha)| sha.as_str()).collect();
     // The newest: the commit every other reported one is an ancestor of.
     let newest = mine.iter().find(|c| mine.iter().all(|o| o == *c || git(&["merge-base", "--is-ancestor", o, c]).is_ok())).map(|c| c.to_string());
@@ -274,16 +274,17 @@ fn verify_check(paths: &HivePaths, w: &WorkerRecord, job: &str, commits: &[(Stri
 
 /// A commit on the worker's branch in one of its repos, made since it started: the tip it
 /// branched from (and everything before it) was already on the landing target. Git runs on the
-/// recorded git dir, never the worker's `.git` file.
+/// recorded git dir, never the worker's `.git` file, and trusts no commit-graph or graft the
+/// worker could plant (`verifying`).
 fn verify_commit(w: &WorkerRecord, sha: &str) -> Result<(String, String), String> {
-    use super::git::{git_in_worktree, run, QUERY_TIMEOUT};
+    use super::git::{git_in_worktree, run, verifying, QUERY_TIMEOUT};
     if !is_sha(sha) {
         return Err(format!("\"{}\" isn't a commit sha (7 to 64 hex digits).", one_line(sha, 80)));
     }
     let mut on_base = false;
     for f in w.git_folders() {
         let Some(branch) = f.branch.as_deref() else { continue };
-        let git = |args: &[&str]| git_in_worktree(f).and_then(|mut cmd| run(cmd.args(args), QUERY_TIMEOUT));
+        let git = |args: &[&str]| git_in_worktree(f).and_then(|mut cmd| run(verifying(&mut cmd).args(args), QUERY_TIMEOUT));
         let Ok(full) = git(&["rev-parse", "--verify", "--quiet", &format!("{sha}^{{commit}}")]) else {
             continue;
         };

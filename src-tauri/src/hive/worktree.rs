@@ -125,10 +125,11 @@ pub fn create_review_worktrees(hive: &Hive, paths: &HivePaths, slug: &str, build
 }
 
 /// The builder's branch tip in one folder. Read from the repo's refs, never through the
-/// builder's worktree, whose `.git` it writes. Blocks on git.
+/// builder's worktree, whose `.git` it writes, as a verifying read: a reviewer's pins and the
+/// verdict's staleness check are both this. Blocks on git.
 fn branch_tip(f: &HiveFolder, bf: &WorkerFolder) -> Result<String, String> {
     let branch = bf.branch.as_deref().ok_or_else(|| format!("{}: the builder has no branch here to review", f.name))?;
-    run(git_in(Path::new(&f.path)).args(["rev-parse", "--verify", "--quiet"]).arg(format!("refs/heads/{branch}^{{commit}}")), QUERY_TIMEOUT)
+    run(super::git::verify_in(Path::new(&f.path)).args(["rev-parse", "--verify", "--quiet"]).arg(format!("refs/heads/{branch}^{{commit}}")), QUERY_TIMEOUT)
         .map_err(|_| format!("{}: the builder's branch \"{branch}\" is gone", f.name))
 }
 

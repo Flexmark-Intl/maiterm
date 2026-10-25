@@ -514,7 +514,7 @@ async fn each_receipt_is_verified_by_maiterm() {
     refused(&rig, crit(json!({ "commits": [format!("web:{}", &main_tip[..7])] })), "the full sha").await;
     refused(&rig, crit(json!({ "commits": [format!("api:{main_tip}")] })), "names no folder").await;
 
-    // Files: inside a Hive folder, a read copy or the gallery.
+    // Files: inside a Hive folder or the gallery (the rest is `a_file_receipt_…`).
     let outside = rig.base.join("outside.txt");
     fs::write(&outside, "x").unwrap();
     refused(&rig, crit(json!({ "files": [outside.to_string_lossy()] })), "isn't in a Hive folder").await;
@@ -532,7 +532,297 @@ async fn each_receipt_is_verified_by_maiterm() {
     assert!(lines.iter().any(|l| l.starts_with("land L-aaaa0003/web: \u{201c}Login API\u{201d} into main")), "{lines:?}");
     assert!(lines.iter().any(|l| l.starts_with("check j-0000aaa3: `cargo test` passed on")), "{lines:?}");
     assert!(lines.iter().any(|l| *l == format!("commit web:{} on main", &main_tip[..7])), "{lines:?}");
-    assert!(rec.criteria[0].receipts[0].starts_with("file ") && rec.criteria[0].receipts[0].ends_with("README.md"));
+    assert!(rec.criteria[0].receipts[0].starts_with("file ") && rec.criteria[0].receipts[0].ends_with("README.md, on main"), "{:?}", rec.criteria[0].receipts);
+}
+
+// ── The shared object store (the objstore defences) ──
+
+/// Git's answer with no config of the user's and nothing of maiTerm's: what the human's own
+/// `git` says.
+fn plain_git_ok(dir: &Path, args: &[&str]) -> bool {
+    Command::new("git").current_dir(dir).env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").args(args).output().unwrap().status.success()
+}
+
+/// A worker's commit `c` that never landed, off the first commit, and main moved on past it by
+/// `p` then `t`, which a land recorded (base_after `t`).
+fn unlanded_and_landed(rig: &Rig) -> (String, String, String) {
+    git(&rig.web, &["checkout", "-q", "-b", "hive/ship--api"]);
+    let c = commit(&rig.web, "api.txt");
+    git(&rig.web, &["checkout", "-q", "main"]);
+    let p = commit(&rig.web, "p.txt");
+    let t = commit(&rig.web, "t.txt");
+    rig.land_line("L-cccc0001/web", KIND_LAND, CHECK_PASSED);
+    assert!(!plain_git_ok(&rig.web, &["merge-base", "--is-ancestor", &c, "main"]));
+    (c, p, t)
+}
+
+fn u32_at(b: &[u8], at: usize) -> u32 {
+    u32::from_be_bytes(b[at..at + 4].try_into().unwrap())
+}
+
+/// Attack (a): a commit-graph written by git, then edited so `child`'s first parent is `fake`, as
+/// a worker with `objects/` on its allowWrite could.
+fn plant_commit_graph(repo: &Path, child: &str, fake: &str) {
+    git(repo, &["commit-graph", "write", "--reachable"]);
+    let file = repo.join(".git/objects/info/commit-graph");
+    let mut b = fs::read(&file).unwrap();
+    assert_eq!(&b[..4], b"CGPH");
+    let chunk = |id: &[u8]| (0..b[6] as usize).map(|i| 8 + i * 12).find(|at| &b[*at..*at + 4] == id).map(|at| u64::from_be_bytes(b[at + 4..at + 12].try_into().unwrap()) as usize).unwrap();
+    let (fanout, oids, data) = (chunk(b"OIDF"), chunk(b"OIDL"), chunk(b"CDAT"));
+    let n = u32_at(&b, fanout + 255 * 4) as usize;
+    let pos = |sha: &str| (0..n).find(|i| hex(&b[oids + i * 20..oids + i * 20 + 20]) == sha).unwrap() as u32;
+    let (child, fake) = (pos(child) as usize, pos(fake));
+    b[data + child * 36 + 20..data + child * 36 + 24].copy_from_slice(&fake.to_be_bytes());
+    fs::remove_file(&file).unwrap();
+    fs::write(&file, &b).unwrap();
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Attack (b): `child`'s loose object overwritten with a body naming `fake` where it named
+/// `real`: git never checks a loose object's hash on this read path.
+fn overwrite_loose_object(repo: &Path, child: &str, real: &str, fake: &str) {
+    forge_loose_object(repo, child, |body| body.replace(&format!("parent {real}\n"), &format!("parent {fake}\n")));
+}
+
+/// `id`'s loose object replaced by `edit` of its body, still stored under `id`.
+fn forge_loose_object(repo: &Path, child: &str, edit: impl Fn(&str) -> String) {
+    use std::io::Write;
+    let body = Command::new("git").current_dir(repo).args(["cat-file", "commit", child]).output().unwrap().stdout;
+    let forged = edit(&String::from_utf8(body).unwrap());
+    assert_ne!(forged.as_bytes(), Command::new("git").current_dir(repo).args(["cat-file", "commit", child]).output().unwrap().stdout, "the edit changed nothing");
+    let mut hash = Command::new("git")
+        .current_dir(repo)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args(["hash-object", "-w", "-t", "commit", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hash.stdin.take().unwrap().write_all(forged.as_bytes()).unwrap();
+    let forged_id = String::from_utf8(hash.wait_with_output().unwrap().stdout).unwrap().trim().to_string();
+    let loose = |id: &str| repo.join(".git/objects").join(&id[..2]).join(&id[2..]);
+    assert!(loose(child).is_file(), "a commit is a loose object in a fresh repo");
+    fs::remove_file(loose(child)).unwrap();
+    fs::copy(loose(&forged_id), loose(child)).unwrap();
+}
+
+#[tokio::test]
+async fn a_planted_commit_graph_lands_nothing() {
+    let rig = Rig::new("graph");
+    let (c, p, t) = unlanded_and_landed(&rig);
+    rig.run("j-0000ccc1", &c, 0);
+    let w = WorkerRecord {
+        task_id: "t-api".into(),
+        slug: "api".into(),
+        folders: vec![WorkerFolder { name: "web".into(), kind: KIND_GIT.into(), branch: Some("hive/ship--api".into()), target: Some("main".into()), ..WorkerFolder::default() }],
+        ..WorkerRecord::default()
+    };
+    plant_commit_graph(&rig.web, &t, &c);
+    // The attack, reproduced: the human's own git now says the worker's commit is on main.
+    assert!(plain_git_ok(&rig.web, &["merge-base", "--is-ancestor", &c, "main"]), "the planted graph fools plain git");
+
+    let (hive, folded) = (rig.hive(), landlog::folded(&rig.caller.paths));
+    let e = verify_commit(&hive, &folded, &format!("web:{c}")).unwrap_err();
+    assert!(e.contains("isn't on main in web"), "{e}");
+    let e = verify_check(&hive, &rig.caller.paths, &folded, "j-0000ccc1").unwrap_err();
+    assert!(e.contains("isn't on main in web"), "{e}");
+    assert_eq!(unlanded(&hive, &w).unwrap().iter().map(|u| u.ahead).collect::<Vec<_>>(), vec![1], "counted in the objects, not the graph");
+    // What landed still proves it, and the land engine's ancestry reads the objects too.
+    assert_eq!(verify_commit(&hive, &folded, &format!("web:{p}")).unwrap(), format!("commit web:{} on main", &p[..7]));
+    assert!(!crate::hive::land::git::is_ancestor(&rig.web, &c, "main"));
+    assert!(crate::hive::land::git::is_ancestor(&rig.web, &p, "main"));
+}
+
+#[tokio::test]
+async fn an_overwritten_loose_object_lands_nothing() {
+    let rig = Rig::new("loose");
+    let (c, p, t) = unlanded_and_landed(&rig);
+    rig.run("j-0000ccc2", &c, 0);
+    let (hive, folded) = (rig.hive(), landlog::folded(&rig.caller.paths));
+    assert!(verify_commit(&hive, &folded, &format!("web:{p}")).is_ok(), "landed, before the forgery");
+    overwrite_loose_object(&rig.web, &t, &p, &c);
+    assert!(plain_git_ok(&rig.web, &["-c", "core.commitGraph=false", "merge-base", "--is-ancestor", &c, "main"]), "the forged tip fools plain git, commit-graph or not");
+    for e in [verify_commit(&hive, &folded, &format!("web:{c}")).unwrap_err(), verify_check(&hive, &rig.caller.paths, &folded, "j-0000ccc2").unwrap_err()] {
+        assert!(e.contains("web's objects don't verify") && e.contains(&format!("commit {}", &t[..7])) && e.contains("git fsck"), "{e}");
+    }
+
+    // A forged commit between the receipt and what landed, which git's walk reads unchecked.
+    let rig = Rig::new("loose-mid");
+    let first = git(&rig.web, &["rev-parse", "main"]);
+    let (c, p, t) = unlanded_and_landed(&rig);
+    overwrite_loose_object(&rig.web, &p, &first, &c);
+    assert!(plain_git_ok(&rig.web, &["merge-base", "--is-ancestor", &c, "main"]), "fooled through the middle");
+    let (hive, folded) = (rig.hive(), landlog::folded(&rig.caller.paths));
+    let e = verify_commit(&hive, &folded, &format!("web:{c}")).unwrap_err();
+    assert!(e.contains("web's objects don't verify") && e.contains("git fsck"), "{e}");
+    assert!(verify_commit(&hive, &folded, &format!("web:{t}")).is_ok(), "the landed tip itself still verifies");
+}
+
+/// `git rev-list --ancestry-path C..T` with the verifying flags: what a git-chosen range would hash.
+fn ancestry_path(repo: &Path, from: &str, to: &str) -> String {
+    let mut cmd = crate::hive::git::verify_in(repo);
+    crate::hive::git::run(cmd.args(["rev-list", "--ancestry-path"]).arg(format!("{from}..{to}")), crate::hive::git::QUERY_TIMEOUT).unwrap()
+}
+
+#[tokio::test]
+async fn a_forged_edge_under_the_receipt_lands_nothing() {
+    // The fork point, shared by main and the worker, overwritten to name the worker's commit as
+    // a parent too: a cycle, so the forged commit sits under the receipt, where git's `C..T`
+    // never looks.
+    let rig = Rig::new("cycle-fork");
+    let fork = git(&rig.web, &["rev-parse", "main"]);
+    let (c, p, t) = unlanded_and_landed(&rig);
+    rig.run("j-0000ccc3", &c, 0);
+    forge_loose_object(&rig.web, &fork, |body| body.replacen("\n", &format!("\nparent {c}\n"), 1));
+    let mut verifying = crate::hive::git::verify_in(&rig.web);
+    assert!(crate::hive::git::run(verifying.args(["merge-base", "--is-ancestor", &c, &t]), crate::hive::git::QUERY_TIMEOUT).is_ok(), "the cycle fools even a verifying git");
+    assert_eq!(ancestry_path(&rig.web, &c, &t), "", "and git's range from the receipt hides the forged commit");
+    let (hive, folded) = (rig.hive(), landlog::folded(&rig.caller.paths));
+    for e in [verify_commit(&hive, &folded, &format!("web:{c}")).unwrap_err(), verify_check(&hive, &rig.caller.paths, &folded, "j-0000ccc3").unwrap_err()] {
+        assert!(e.contains("web's objects don't verify") && e.contains(&format!("commit {}", &fork[..7])) && e.contains("git fsck"), "{e}");
+    }
+    assert!(verify_commit(&hive, &folded, &format!("web:{p}")).is_ok(), "what landed above the forgery still verifies");
+
+    // Two forged objects: the worker's own C0 names main's P as its parent, and P names the
+    // receipt C. Both forged commits are under C, and C and T hash true.
+    let rig = Rig::new("cycle-two");
+    let root = git(&rig.web, &["rev-parse", "main"]);
+    git(&rig.web, &["checkout", "-q", "-b", "hive/ship--api"]);
+    let c0 = commit(&rig.web, "c0.txt");
+    let c = commit(&rig.web, "c.txt");
+    git(&rig.web, &["checkout", "-q", "main"]);
+    let p = commit(&rig.web, "p.txt");
+    let t = commit(&rig.web, "t.txt");
+    rig.land_line("L-cccc0002/web", KIND_LAND, CHECK_PASSED);
+    rig.run("j-0000ccc4", &c, 0);
+    overwrite_loose_object(&rig.web, &c0, &root, &p);
+    overwrite_loose_object(&rig.web, &p, &root, &c);
+    assert!(plain_git_ok(&rig.web, &["-c", "core.commitGraph=false", "merge-base", "--is-ancestor", &c, "main"]), "the cycle fools plain git");
+    assert_eq!(ancestry_path(&rig.web, &c, &t), "");
+    let (hive, folded) = (rig.hive(), landlog::folded(&rig.caller.paths));
+    for e in [verify_commit(&hive, &folded, &format!("web:{c}")).unwrap_err(), verify_check(&hive, &rig.caller.paths, &folded, "j-0000ccc4").unwrap_err()] {
+        assert!(e.contains("web's objects don't verify") && e.contains(&format!("commit {}", &p[..7])) && e.contains("git fsck"), "{e}");
+    }
+    assert!(verify_commit(&hive, &folded, &format!("web:{t}")).is_ok(), "the landed tip itself still verifies");
+}
+
+#[test]
+fn a_long_honest_walk_reaches_an_old_receipt() {
+    // Many commits between a receipt and what landed, merges among them: found, and every one
+    // read was hashed (an honest history verifies whole).
+    let rig = Rig::new("walk-long");
+    let first = git(&rig.web, &["rev-parse", "main"]);
+    for i in 0..40 {
+        if i % 10 == 5 {
+            git(&rig.web, &["checkout", "-q", "-b", &format!("b{i}")]);
+            commit(&rig.web, &format!("b{i}.txt"));
+            git(&rig.web, &["checkout", "-q", "main"]);
+            commit(&rig.web, &format!("m{i}.txt"));
+            git(&rig.web, &["merge", "-q", "--no-ff", "--no-edit", &format!("b{i}")]);
+        } else {
+            commit(&rig.web, &format!("m{i}.txt"));
+        }
+    }
+    rig.land_line("L-cccc0003/web", KIND_LAND, CHECK_PASSED);
+    let (hive, folded) = (rig.hive(), landlog::folded(&rig.caller.paths));
+    assert!(verify_commit(&hive, &folded, &format!("web:{first}")).is_ok());
+    let b25 = git(&rig.web, &["rev-parse", "b25"]);
+    assert!(verify_commit(&hive, &folded, &format!("web:{b25}")).is_ok(), "a merged side branch's commit");
+}
+
+#[tokio::test]
+async fn a_commit_proves_a_criterion_only_under_a_land_maiterm_recorded() {
+    let rig = Rig::new("record");
+    let first = git(&rig.web, &["rev-parse", "main"]);
+    let landed = commit(&rig.web, "landed.txt");
+    rig.land_line("L-dddd0001/web", KIND_LAND, CHECK_PASSED);
+    // The human's own commit on main since: git says it's on main, maiTerm recorded no land of it.
+    let human = commit(&rig.web, "human.txt");
+    let undone = commit(&rig.web, "undone.txt");
+    rig.land_line("L-dddd0002/web", KIND_LAND, CHECK_PASSED);
+    let mut undo = rig.land_line("U-dddd0003/web", KIND_UNDO, "");
+    undo.undoes = Some("L-dddd0002/web".into());
+    landlog::append(&rig.caller.paths, &undo).unwrap();
+    let (hive, folded) = (rig.hive(), landlog::folded(&rig.caller.paths));
+    let v = |sha: &str| verify_commit(&hive, &folded, &format!("web:{sha}"));
+    assert!(v(&landed).is_ok(), "the recorded land's own commit");
+    assert!(v(&first).is_ok(), "and what it was built on");
+    for sha in [&human, &undone] {
+        let e = v(sha).unwrap_err();
+        assert!(e.contains("isn't in anything maiTerm's land log records as landed in web"), "{e}");
+    }
+}
+
+#[test]
+fn a_file_receipt_names_landed_work_never_git_or_maiterm_internals() {
+    let rig = Rig::new("files");
+    let paths = &rig.caller.paths;
+    let touch = |p: PathBuf| {
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, "x").unwrap();
+        p.to_string_lossy().to_string()
+    };
+    let brand = rig.base.join("brand");
+    rig.edit_hive(|h| h.folders.push(HiveFolder { name: "brand".into(), path: brand.to_string_lossy().into(), kind: crate::hive::record::KIND_PLAIN.into(), ..HiveFolder::default() }));
+    let v = |f: &str| verify_file(&rig.hive(), paths, f);
+    let refused = |f: &str, says: &str| {
+        let e = v(f).unwrap_err();
+        assert!(e.contains(says), "{f}: {e}");
+    };
+
+    // A git folder's file proves a criterion once it is on the landing target, and only then.
+    assert!(v(&rig.file_in_web()).unwrap().ends_with("README.md, on main"));
+    let loose = touch(rig.web.join("notes/new.txt"));
+    refused(&loose, "isn't on main in web");
+    git(&rig.web, &["checkout", "-q", "-b", "side"]);
+    let branch_only = rig.web.join("side.txt").to_string_lossy().to_string();
+    commit(&rig.web, "side.txt");
+    git(&rig.web, &["checkout", "-q", "main"]);
+    refused(&branch_only, "doesn't exist");
+    let on_side = touch(rig.web.join("side.txt"));
+    refused(&on_side, "isn't on main in web");
+    // Landed but not in the checkout (Base checked out elsewhere, an integration branch).
+    git(&rig.web, &["checkout", "-q", "--detach", "main~0"]);
+    git(&rig.web, &["rm", "-q", "README.md"]);
+    assert!(v(&rig.file_in_web()).is_ok(), "read from the target, not the checkout");
+    git(&rig.web, &["checkout", "-q", "-f", "main"]);
+    refused(&rig.web.to_string_lossy(), "is a folder");
+
+    // Never git's own files, a worker's worktree, a read copy, or maiTerm's folders.
+    refused(&rig.web.join(".git/HEAD").to_string_lossy(), "inside a .git folder");
+    refused(&touch(rig.web.join(".git/objects/info/planted")), "inside a .git folder");
+    let copy = touch(paths.coordinator_worktree("web").join("README.md"));
+    let e = v(&copy).unwrap_err();
+    assert!(e.contains("your read copy of web") && e.contains(&*rig.file_in_web()), "{e}");
+    refused(&touch(paths.worker_worktree("api", "web").join("x.txt")), "wt.noindex");
+    refused(&touch(paths.logs().join("lands.jsonl")), "maiTerm's own folders");
+    refused(&touch(paths.tasks().join("t-api").join("worker.json")), "maiTerm's own folders");
+    refused(&touch(paths.runs().join("j-1").join("pass")), "maiTerm's own folders");
+    refused(&touch(paths.precedents().join("p.md")), "maiTerm's own folders");
+    refused(&touch(paths.gallery_thumbs().join("a-0123456789ab.png")), "maiTerm's own folders");
+    assert!(v(&touch(paths.gallery_files().join("a-0123456789ab.png"))).is_ok(), "a stored asset is a file on disk");
+
+    // A plain folder's file is one on disk.
+    assert_eq!(v(&touch(brand.join("logo.svg"))).unwrap(), format!("file {}", brand.join("logo.svg").display()));
+    refused(&brand.join("gone.svg").to_string_lossy(), "doesn't exist");
+}
+
+#[tokio::test]
+async fn criteria_wait_while_a_finish_is_checked() {
+    let rig = Rig::new("criteria-race");
+    let held = Finishing::take(&rig.caller.paths.root.to_string_lossy()).unwrap();
+    let e = set_criteria_tool(&rig.ctx(ok_save), &rig.caller, &json!({ "criteria": ["Z"] })).await.unwrap_err();
+    assert!(e.contains("being checked"), "{e}");
+    assert_eq!(rig.hive().criteria, vec!["Login works", "Docs written"], "the record the finish reads stays as it was");
+    // And the reverse: a finish isn't checked while criteria are being set.
+    let e = rig.finish(report(by_file(&rig))).await.unwrap_err();
+    assert!(e.contains("already being checked"), "{e}");
+    drop(held);
+    set_criteria_tool(&rig.ctx(ok_save), &rig.caller, &json!({ "criteria": ["Z"] })).await.unwrap();
+    assert_eq!(rig.hive().criteria, vec!["Z"]);
 }
 
 #[tokio::test]

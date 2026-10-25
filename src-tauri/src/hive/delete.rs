@@ -223,7 +223,7 @@ pub(crate) fn preview(hive: &Hive, paths: &HivePaths, has_coordinator: bool) -> 
                 (None, Some(sha)) => sha.clone(),
                 (None, None) => continue,
             };
-            let count = run(git_in(&repo).args(["rev-list", "--count"]).arg(format!("{base}..refs/heads/{b}")), QUERY_TIMEOUT);
+            let count = run(super::git::verify_in(&repo).args(["rev-list", "--count"]).arg(format!("{base}..refs/heads/{b}")), QUERY_TIMEOUT);
             if let Some(ahead) = count.ok().and_then(|c| c.trim().parse::<u64>().ok()).filter(|n| *n > 0) {
                 p.unlanded.push(UnlandedBranch { worker: worker_label(w), folder: f.name.clone(), branch: b.to_string(), target: f.target.clone(), ahead });
             }

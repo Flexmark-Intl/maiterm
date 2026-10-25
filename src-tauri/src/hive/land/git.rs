@@ -3,8 +3,10 @@
 //! neither can touch anyone's uncommitted work. maiTerm's merge commits are unsigned and use the
 //! repo's identity, or `maiTerm Hive` when it has none (plan D8).
 //!
-//! Every call goes through `git_in` (no hooks, no fsmonitor), in the C locale (its messages are
-//! read), with rerere, signing and autostash off. Everything here blocks.
+//! Every call goes through `git_in` (no hooks, no fsmonitor) as a verifying read
+//! (`hive::git::verifying`: no commit-graph, replace refs or grafts a worker could plant decide an
+//! ancestry or a merge base), in the C locale (its messages are read), with rerere, signing and
+//! autostash off. Everything here blocks.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,7 +26,8 @@ pub const INDEX_LOCK_RETRIES: u32 = 3;
 pub const INDEX_LOCK_WAIT: Duration = Duration::from_secs(2);
 
 fn harden(cmd: &mut Command) {
-    cmd.env("LC_ALL", "C")
+    crate::hive::git::verifying(cmd)
+        .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(["-c", "rerere.enabled=false", "-c", "commit.gpgsign=false", "-c", "merge.autostash=false"])
         // A human's `merge.ff=only` or signature check would refuse step 1's merge commit.

@@ -46,6 +46,8 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rcgen = "0.13"
 sha2 = "0.10"
+# Hive: hashing a commit's stored content against its id (hive/git.rs `verified_ancestry`).
+sha1 = "0.10"
 # maiLink doorbell: POST the content-free wake to the push relay (Cloudflare worker).
 reqwest = { version = "0.13", features = ["json", "multipart"] }
 rand = "0.8"

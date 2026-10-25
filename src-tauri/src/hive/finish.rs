@@ -272,6 +272,9 @@ pub fn set_criteria_tool_definition(tab_id: &Value) -> Value {
 
 /// `hiveSetCriteria` (§11.4): the list on the record, then a line in `logs/criteria.jsonl`.
 pub(crate) async fn set_criteria_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, args: &Value) -> Result<Value, String> {
+    // Never while a hiveFinish is checked: Done would be saved over criteria its report never
+    // addressed. The same turn `finish_tool` takes, by folder.
+    let _held = Finishing::take(&caller.paths.root.to_string_lossy()).ok_or("A hiveFinish of this Hive is being checked: set the criteria once it has answered.")?;
     if current_hive(ctx, caller)?.status == STATUS_DONE {
         return Err("This Hive is done: its criteria stand as it finished. A message from your human wakes it.".to_string());
     }
@@ -427,9 +430,14 @@ pub struct Unlanded {
     pub ahead: u64,
 }
 
+/// Every git read Done makes is a verifying one (`git::verifying`): no commit-graph, graft or
+/// replace ref a worker planted decides what landed or what is left.
 fn git_query(repo: &Path, args: &[&str]) -> Result<String, String> {
-    super::git::run(super::git::git_in(repo).args(args), super::git::QUERY_TIMEOUT)
+    super::git::run(super::git::verify_in(repo).args(args), super::git::QUERY_TIMEOUT)
 }
+
+/// A walk from a receipt to what landed can be long (an old commit, a busy Base).
+const WALK_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Every branch of `w` with commits not on its landing target (§11.4), counted in the Hive
 /// folder's repo, never the worktree, which may be gone. A branch the human deleted counts as
@@ -494,6 +502,54 @@ fn landing_target(hive: &Hive, f: &HiveFolder) -> Result<String, String> {
 
 fn is_ancestor(repo: &Path, sha: &str, target: &str) -> bool {
     git_query(repo, &["merge-base", "--is-ancestor", sha, &format!("refs/heads/{target}")]).is_ok()
+}
+
+/// `sha` is, or is an ancestor of, a commit maiTerm's own land log records as landed in `f` (a
+/// land, batch member or integration land, neither undone nor suspect), and every commit on the
+/// way there hashes to its id. Git's word alone is never a receipt: a worker writes the shared
+/// object store, and a loose object it overwrote reads as real on git's ancestry path (plan D3).
+/// `what` names the receipt in a refusal. Blocks on git and the land log's fold.
+fn landed_per_record(folded: &Folded, f: &HiveFolder, sha: &str, what: &str) -> Result<(), String> {
+    let repo = Path::new(&f.path);
+    let sha = sha.to_ascii_lowercase();
+    let recorded: Vec<&str> = folded
+        .entries
+        .iter()
+        .filter(|e| e.entry.folder == f.name && is_landed_kind(&e.entry.kind) && e.undone_by.is_none() && !e.suspect && !e.entry.base_after.is_empty())
+        .map(|e| e.entry.base_after.as_str())
+        .collect();
+    // Oldest first: the first landed commit that holds it is the shortest walk.
+    let held = recorded.iter().find(|b| b.eq_ignore_ascii_case(&sha) || git_query(repo, &["merge-base", "--is-ancestor", &sha, b]).is_ok());
+    let Some(landed) = held else {
+        return Err(format!("{what} isn't in anything maiTerm's land log records as landed in {}: only what landed proves a criterion.", f.name));
+    };
+    // Git only picked the candidate; the proof is maiTerm's own walk down from it, hashing each
+    // commit before following its parents (no range git computes is trusted, plan D3).
+    use super::git::Ancestry;
+    match super::git::verified_ancestry(repo, landed, &sha, WALK_TIMEOUT) {
+        Ok(Ancestry::Reached) => Ok(()),
+        Ok(Ancestry::NotReached) => {
+            log::warn!("hive: {} ({}): git says {sha} is under {landed}, the hashed objects say it isn't", f.name, f.path);
+            Err(format!("{what} isn't in anything maiTerm's land log records as landed in {}: only what landed proves a criterion.", f.name))
+        }
+        Ok(Ancestry::Unverified(b)) => {
+            log::warn!("hive: {} ({}) has a commit object that doesn't hash to its id: {b}", f.name, f.path);
+            Err(objects_refusal(what, f, &format!("commit {} doesn't hash to its id", short(&b))))
+        }
+        Ok(Ancestry::TooLong) => Err(format!(
+            "{what} is too far back from what landed in {} for maiTerm to verify (over {} commits): name a newer one.",
+            f.name,
+            super::git::WALK_CAP
+        )),
+        Err(e) => Err(format!("maiTerm couldn't walk from {what} to what landed in {}: {e}", f.name)),
+    }
+}
+
+fn objects_refusal(what: &str, f: &HiveFolder, why: &str) -> String {
+    format!(
+        "{what} can't be verified: {}'s objects don't verify ({why}), so git's history there can't be trusted. Your human should run `git fsck` in {}.",
+        f.name, f.path
+    )
 }
 
 /// Undos running or waiting on the human, as `U-… (state)`. Blocks on the disk.
@@ -611,10 +667,10 @@ pub(crate) fn check(s: &Standing, paths: &HivePaths, args: &Value) -> Result<(Fi
             lines.push(verify_land(&folded, l).map_err(fail)?);
         }
         for j in &c.receipts.checks {
-            lines.push(verify_check(hive, paths, j).map_err(fail)?);
+            lines.push(verify_check(hive, paths, &folded, j).map_err(fail)?);
         }
         for sha in &c.receipts.commits {
-            lines.push(verify_commit(hive, sha).map_err(fail)?);
+            lines.push(verify_commit(hive, &folded, sha).map_err(fail)?);
         }
         for f in &c.receipts.files {
             lines.push(verify_file(hive, paths, f).map_err(fail)?);
@@ -657,8 +713,9 @@ fn verify_land(folded: &Folded, name: &str) -> Result<String, String> {
 }
 
 /// A `hiveRun` job from maiTerm's run log that passed, whose commit has reached its folder's
-/// landing target: it checked work that landed.
-fn verify_check(hive: &Hive, paths: &HivePaths, job: &str) -> Result<String, String> {
+/// landing target and is under a land maiTerm recorded (`landed_per_record`): it checked work
+/// that landed.
+fn verify_check(hive: &Hive, paths: &HivePaths, folded: &Folded, job: &str) -> Result<String, String> {
     let shown = one_line(job, 40);
     if !super::queue::is_job_id(job) {
         return Err(format!("\"{shown}\" isn't a run (a hiveRun job id is j- and 8 hex digits)."));
@@ -680,11 +737,13 @@ fn verify_check(hive: &Hive, paths: &HivePaths, job: &str) -> Result<String, Str
     if !is_ancestor(Path::new(&f.path), &commit, &target) {
         return Err(format!("run {shown} tested {}, which isn't on {target} in {}: it checked work that didn't land.", short(&commit), f.name));
     }
+    landed_per_record(folded, f, &commit, &format!("run {shown}'s commit {}", short(&commit)))?;
     Ok(format!("check {job}: `{}` passed on {} in {}, on {target}", one_line(&r.entry, 80), short(&commit), f.name))
 }
 
-/// `folder:<40-hex sha>`, a commit on that folder's landing target.
-fn verify_commit(hive: &Hive, receipt: &str) -> Result<String, String> {
+/// `folder:<40-hex sha>`, a commit on that folder's landing target, under a land maiTerm
+/// recorded (`landed_per_record`): git and maiTerm's record both, never git alone.
+fn verify_commit(hive: &Hive, folded: &Folded, receipt: &str) -> Result<String, String> {
     let shown = one_line(receipt, 80);
     let (folder, sha) = receipt.split_once(':').ok_or_else(|| format!("commit \"{shown}\" must be folder:<40-hex sha>."))?;
     if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -699,11 +758,33 @@ fn verify_commit(hive: &Hive, receipt: &str) -> Result<String, String> {
     if !is_ancestor(repo, sha, &target) {
         return Err(format!("commit {} isn't on {target} in {}: only what landed proves a criterion.", short(sha), f.name));
     }
+    landed_per_record(folded, f, sha, &format!("commit {}", short(sha)))?;
     Ok(format!("commit {folder}:{} on {target}", short(sha)))
 }
 
-/// A file that exists inside a Hive folder, a coordinator read copy or the gallery, symlinks
-/// resolved. A relative path is read from the primary folder.
+/// `p` with its symlinks resolved as far as it exists and the rest appended as written; None when
+/// nothing of it exists or the rest climbs (`..`).
+fn resolve(p: &Path) -> Option<PathBuf> {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = p.to_path_buf();
+    loop {
+        if let Ok(r) = std::fs::canonicalize(&cur) {
+            let mut out = crate::share::canon(&r);
+            out.extend(tail.iter().rev());
+            return Some(out);
+        }
+        tail.push(cur.file_name()?.to_os_string());
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
+/// A file receipt (plan D4), symlinks resolved: never inside a `.git` or maiTerm's own folders
+/// (the Hive's, but for the gallery's stored assets), so nothing a worker wrote into git's
+/// internals or a Hive agent into its corner is a receipt. In a git folder it is a file at the
+/// landing target, so it names landed work, not whatever sits in the human's checkout; in a plain
+/// folder or the gallery, a file on disk. A relative path is read from the primary folder.
 fn verify_file(hive: &Hive, paths: &HivePaths, f: &str) -> Result<String, String> {
     let shown = one_line(f, 200);
     let p = Path::new(f);
@@ -712,22 +793,53 @@ fn verify_file(hive: &Hive, paths: &HivePaths, f: &str) -> Result<String, String
     } else {
         hive.primary().map(|h| Path::new(&h.path).join(p)).ok_or_else(|| format!("file {shown}: give an absolute path."))?
     };
-    let real = std::fs::canonicalize(&p).map(|r| crate::share::canon(&r)).map_err(|_| format!("file {shown} doesn't exist."))?;
-    let roots: Vec<PathBuf> = hive
-        .folders
-        .iter()
-        .map(|h| PathBuf::from(&h.path))
-        .chain(hive.git_folders().map(|h| paths.coordinator_worktree(&h.name)))
-        .chain([paths.gallery()])
-        .filter_map(|r| std::fs::canonicalize(&r).ok().map(|r| crate::share::canon(&r)))
-        .collect();
-    if !roots.iter().any(|r| real.starts_with(r)) {
-        return Err(format!("file {shown} isn't in a Hive folder, a read copy of one or the gallery."));
+    let real = resolve(&p).ok_or_else(|| format!("file {shown} doesn't exist."))?;
+    if real.components().any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case(".git")) {
+        return Err(format!("file {shown} is inside a .git folder: git's own files prove nothing."));
     }
-    if !real.is_file() {
+    let ours = |p: PathBuf| resolve(&p).unwrap_or(p);
+    if real.starts_with(ours(paths.worktrees())) {
+        // The read copies show the landing target, but the receipt names the folder itself.
+        if let Some((h, rel)) = hive.git_folders().find_map(|h| real.strip_prefix(ours(paths.coordinator_worktree(&h.name))).ok().map(|r| (h, r.to_path_buf()))) {
+            return Err(format!("file {shown} is in your read copy of {}: name it in the folder itself ({}), where maiTerm checks it landed.", h.name, Path::new(&h.path).join(rel).display()));
+        }
+        return Err(format!("file {shown} is in a worktree under the Hive's wt.noindex/: name the file in its Hive folder once it has landed."));
+    }
+    let in_gallery = real.starts_with(ours(paths.gallery_files()));
+    let maiterm = [paths.root.clone(), paths.global_precedents()].into_iter().chain(super::paths::hive_bin_dir()).map(ours).find(|o| real.starts_with(o));
+    if let Some(o) = maiterm.filter(|_| !in_gallery) {
+        return Err(format!("file {shown} is in maiTerm's own folders ({}): only the gallery's stored assets there are receipts.", o.display()));
+    }
+    let on_disk = || -> Result<String, String> {
+        match std::fs::metadata(&real) {
+            Err(_) => Err(format!("file {shown} doesn't exist.")),
+            Ok(m) if !m.is_file() => Err(format!("{shown} is a folder: name the files in it.")),
+            Ok(_) => Ok(format!("file {}", real.display())),
+        }
+    };
+    if in_gallery {
+        return on_disk();
+    }
+    // The innermost Hive folder holding it: a repo nested in a plain folder answers for its files.
+    let folder = hive.folders.iter().filter_map(|h| resolve(Path::new(&h.path)).filter(|r| real.starts_with(r)).map(|r| (h, r))).max_by_key(|(_, r)| r.components().count());
+    let Some((h, root)) = folder else {
+        return Err(format!("file {shown} isn't in a Hive folder or the gallery."));
+    };
+    if !h.is_git() {
+        return on_disk();
+    }
+    let target = landing_target(hive, h)?;
+    let rel: Vec<String> = real.strip_prefix(&root).unwrap_or(Path::new("")).components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
+    if rel.is_empty() {
         return Err(format!("{shown} is a folder: name the files in it."));
     }
-    Ok(format!("file {}", real.display()))
+    let spec = format!("refs/heads/{target}:{}", rel.join("/"));
+    match git_query(Path::new(&h.path), &["cat-file", "-t", &spec]).as_deref() {
+        Ok("blob") => Ok(format!("file {}, on {target}", real.display())),
+        Ok("tree") => Err(format!("{shown} is a folder: name the files in it.")),
+        _ if std::fs::symlink_metadata(&real).is_err() => Err(format!("file {shown} doesn't exist.")),
+        _ => Err(format!("file {shown} isn't on {target} in {}: only a file that landed proves a criterion, not one uncommitted or on a branch.", h.name)),
+    }
 }
 
 /// An asset in this Hive's gallery, out of the trash, not rejected.
@@ -860,8 +972,9 @@ pub fn finish_tool_definition(tab_id: &Value) -> Value {
              question open, a worker has commits not on its landing target (unless report.abandoned names it, with why), or \
              any criterion lacks a receipt maiTerm can verify. Receipts are what reached the target: lands (L-… or \
              L-…/folder, not undone or suspect), checks (a passing hiveRun job whose commit landed), commits \
-             (folder:<40-hex sha> on the folder's landing target), files (in a Hive folder, a read copy or the gallery) and \
-             gallery assets. A worker's own report is no receipt. maiTerm adds what landed, the final assets, the spend and \
+             (folder:<40-hex sha> on the folder's landing target, in a land maiTerm recorded), files (in a git folder, a \
+             file on its landing target, named by its path in the folder, not your read copy; in a plain folder or the \
+             gallery's stored assets, a file on disk; never under .git) and gallery assets. A worker's own report is no receipt. maiTerm adds what landed, the final assets, the spend and \
              what you decided alone, shows your human the report, stops the stack services this Hive started, cancels every \
              Hive tab's follow-ups and ends your session once you are idle. A message from your human wakes the Hive. \
              summary at most {MAX_SUMMARY} characters, how {MAX_HOW}, {MAX_RECEIPTS} receipts per criterion."
