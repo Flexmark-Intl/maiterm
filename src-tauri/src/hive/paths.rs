@@ -176,6 +176,17 @@ impl HivePaths {
         self.logs().join("decisions.jsonl")
     }
 
+    /// Every change of the completion criteria (§11.4), append-only.
+    pub fn criteria_log(&self) -> PathBuf {
+        self.logs().join("criteria.jsonl")
+    }
+
+    /// Done's reports and wakes (§11.4), append-only: maiTerm's record of what finished the Hive,
+    /// under `logs/`, which no Hive agent may write.
+    pub fn finishes(&self) -> PathBuf {
+        self.logs().join("finishes.jsonl")
+    }
+
     /// Undos while they run, wait or hold (§8.6), one file each: under `logs/`, which no Hive
     /// agent may write.
     pub fn undos(&self) -> PathBuf {
@@ -304,6 +315,7 @@ mod tests {
         assert!(p.plan_record().starts_with(p.tasks()), "Rust's, under a folder on every deny list");
         assert_eq!(p.memory_index(), Path::new("/x/hive/h/memory/MEMORY.md"));
         assert_eq!(p.memory_record(), Path::new("/x/hive/h/logs/memory.json"));
+        assert!(p.finishes().starts_with(p.logs()) && p.criteria_log().starts_with(p.logs()), "Rust's, under a folder no agent writes");
         assert_eq!(p.memory_generated(), Path::new("/x/hive/h/memory/MEMORY.generated.md"));
         assert_eq!(p.memory_unfiled(), Path::new("/x/hive/h/memory/unfiled.md"));
         assert_eq!(p.gallery_files(), Path::new("/x/hive/h/gallery/files"));

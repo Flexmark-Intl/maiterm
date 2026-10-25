@@ -3838,3 +3838,47 @@ several releases a day).
    `hiveRestartWorker` refuses with the same words; a resume polls the waiters. The breaker-reset
    poll (4e's "Not yet") is `waiters::poll_all_at`, scheduled once per reset (`next_poll`) when
    `hive_stop_failure` trips the breaker and at startup while one holds (`Fuses::breaker_until`).
+   **9b built** (2026-10-25): completion criteria and `hiveFinish` (`hive/finish.rs`). The
+   coordinator sets the criteria with `hiveSetCriteria` (1–20, one line of at most 500 characters
+   each, no repeats; refused once done), written to `Hive.criteria` through `finish::write_status`
+   (`fuses::set_status_with` under the state's lock, saved, a failed save putting the record back,
+   then `hive_changed`) and logged to `logs/criteria.jsonl`; `hiveListWorkers` and `brief.md`
+   number them, and the invariant rules say Done is `hiveFinish`. `hiveFinish {report}` is refused,
+   in this order: done or paused; no criteria; a report whose shape or caps are wrong; any worker
+   live or waiting, reviewers included; a job queued or running in the workspace
+   (`queue::active_in`); an undo in flight or awaiting the human (a held one doesn't bar Done: it
+   can't be withdrawn, and the coordinator may keep the land it held on); a card from the
+   coordinator's tab waiting on the human (`HiveWindow::requests_waiting`); a `decision` or
+   `action` blocker on any task of the workspace; commits on any non-reviewer worker's branch not
+   on its landing target, counted in the Hive folder's repo (`finish::unlanded`, retired workers
+   included, a deleted branch counting nothing but a repo maiTerm can't read refusing Done, never
+   read as deleted) unless `report.abandoned` names the worker (and
+   naming one with nothing unlanded is refused); and every criterion exactly once, each with a
+   receipt maiTerm verifies itself, never from agent-writable state: a land from the folded land
+   log (landed, not undone, not suspect), a passing run from the run log whose commit is on its
+   folder's landing target, a full-sha commit on that target, a file in a Hive folder, a read copy
+   or the gallery, an asset in the gallery out of the trash and not rejected. A worker's own
+   report is no receipt. On accept maiTerm appends its `FinishRecord` to `logs/finishes.jsonl`
+   (the coordinator's summary, how and reasons beside maiTerm's description of each receipt, what
+   landed, the final assets, the ledger's spend in micros and what the coordinator decided alone,
+   from the decision log), saves `done` with `done_at` without announcing it, re-reads the
+   workers, the undos and the queue (a spawn, undo or run racing the call takes Done back, and the
+   window, so the human's notice, hears Done only once it is final), and sends `hive.finish` with
+   every Hive tab: the window runs `stopStack` and cancels every follow-up and watch script on
+   those tabs, best effort, each service that didn't stop (a lease, the pid guard) reported in the
+   answer's `failed` with `stopped:false`. In a Done Hive every agent tool but the reads
+   (`tools::DONE_TOOLS`) is refused at the dispatcher, as are `galleryTag`/`Collect`/`Deliver`
+   (`galleryAdd` still records a spend), and the coordinator's undo re-reads the status once its
+   record is on disk (`undo::start`), so one that slipped past the gate is refused, not run; the
+   human's own Undo stays theirs. After the answer the
+   coordinator is SIGTERMed once idle (3 s, then up to 120 s; `should_exit`), only while still
+   done; its tab and shell stay. Every launch in a Done Hive is refused before anything is touched
+   (`launch::DONE_REFUSAL`), which `launch.ts` swallows quietly. The header shows Done with its
+   time and a Report (`FinishReportModal`, `hive_finish_report`), the Criteria (n) list, and Resume
+   while paused; the move to done rings one "Hive done" notice that opens the Hive. **Decided
+   here:** the spend is recorded in micros, the ledger's own unit, not cents; the report is
+   appended before the status flips (a line left by a failed save is harmless: the Report shows
+   only while done) and a concurrent `hiveFinish` of one Hive is refused while one is checked; an
+   asset receipt needs only the gallery (step 8's index), and a relative file receipt is read from
+   the primary folder; the coordinator withdrawing its own question (its plan row, say) lets Done
+   through, since the human's reserved rows are already refused to agents.

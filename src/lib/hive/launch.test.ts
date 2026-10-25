@@ -7,7 +7,7 @@ const tabs: Record<string, { hive_role?: string | null; runtime?: string }> = {}
 
 vi.mock('$lib/tauri/commands', () => ({ hiveLaunchCommand }));
 vi.mock('$lib/stores/notificationDispatch', () => ({ dispatch }));
-vi.mock('@tauri-apps/plugin-log', () => ({ error: vi.fn() }));
+vi.mock('@tauri-apps/plugin-log', () => ({ error: vi.fn(), info: vi.fn() }));
 vi.mock('$lib/stores/workspaces.svelte', () => ({
   workspacesStore: {
     _locateTab: (id: string) => (tabs[id] ? { workspaceId: 'w', paneId: 'p', tab: { id, ...tabs[id] } } : null),
@@ -71,6 +71,16 @@ describe('relaunchLine', () => {
     expect(dispatch).toHaveBeenCalledOnce();
     expect(dispatch.mock.calls[0][1]).toContain('launch record missing');
     expect(dispatch.mock.calls[0][3]).toEqual({ tabId: 'c' });
+  });
+
+  it('a Done Hive types nothing and raises no notice; another refusal still does', async () => {
+    tabs.c = { hive_role: 'coordinator' };
+    hiveLaunchCommand.mockRejectedValue('This Hive is done: it starts no agent until your human wakes it with a message.');
+    expect(await relaunchLine('c')).toBeNull();
+    expect(dispatch).not.toHaveBeenCalled();
+    hiveLaunchCommand.mockRejectedValue('launch record missing');
+    expect(await relaunchLine('c')).toBeNull();
+    expect(dispatch).toHaveBeenCalledOnce();
   });
 
   it('a Hive tab never yields claude --resume %claudeSessionId', async () => {

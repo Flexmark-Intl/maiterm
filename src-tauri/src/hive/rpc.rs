@@ -32,6 +32,9 @@ pub(crate) const VERB_RELAUNCH: &str = "hive.relaunch";
 pub(crate) const VERB_RETIRE: &str = "hive.retire";
 /// A Hive deleted (§11.2): every Hive tab dropped and the rows' tabs cleared, the rows kept.
 pub(crate) const VERB_DELETE: &str = "hive.delete";
+/// A Hive done (§11.4): the stack services it started stopped, every Hive tab's follow-ups and
+/// watch scripts cancelled. Best effort: Done stands whatever the window answers.
+pub(crate) const VERB_FINISH: &str = "hive.finish";
 /// A queued job's hidden tab minted and its line typed through the stack's guard (§6.8),
 /// answered once the shell's own B for that line is seen.
 pub(crate) const VERB_JOB_START: &str = "stack.job.start";
@@ -66,6 +69,10 @@ pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     /// Whether `tab`'s agent is mid-turn (its hook state, `Active`): a land waits for idle (§8).
     fn agent_busy(&self, _tab: &str) -> bool {
         false
+    }
+    /// Agent requests `tab` filed that wait for the human (a land or undo card): Done waits for them.
+    fn requests_waiting(&self, _tab: &str) -> usize {
+        0
     }
     /// A land whose lock stayed busy past `hiveLand`'s wait carries on outside the tool call
     /// (`land::driver::resume_background`). A test window runs its lands inline.
@@ -212,6 +219,10 @@ impl HiveWindow for AppWindow {
     fn agent_busy(&self, tab: &str) -> bool {
         use crate::state::app_state::AgentSessionState;
         self.app.agent_sessions.read().values().any(|s| s.tab_id == tab && s.state == AgentSessionState::Active)
+    }
+
+    fn requests_waiting(&self, tab: &str) -> usize {
+        crate::agent_requests::waiting_by_tab().get(tab).copied().unwrap_or(0) as usize
     }
 
     fn continue_land(&self, caller: &super::tools::Caller, task_id: &str) {

@@ -19,6 +19,7 @@ import { CLAUDE_RESUME_COMMAND } from '$lib/triggers/defaults';
 import { disableBridge } from '$lib/stores/sshMcpBridge.svelte';
 import { isServiceTab, isStripHidden } from '$lib/workspace/hiddenTabs';
 import { adoptInstalled, dispatchHiveOpenColumn, HIVE_NO_NEW_TABS, openTargetFor } from '$lib/hive/model';
+import { doneNotice } from '$lib/hive/finish';
 
 /** Sidebar width bounds + default. The minimum reserves room for the footer's
  *  three agent-status indicators (working / waiting / finished) alongside the
@@ -626,7 +627,17 @@ function createWorkspacesStore() {
      *  follows its `hive-changed` event, never the other way round. */
     applyHiveRecord(workspaceId: string, hive: Hive) {
       const ws = workspaces.find(w => w.id === workspaceId);
-      if (ws?.hive && ws.hive.id === hive.id) ws.hive = hive;
+      if (!ws?.hive || ws.hive.id !== hive.id) return;
+      const notice = doneNotice(ws.hive.status, hive.status, ws.name);
+      ws.hive = hive;
+      if (notice) {
+        // A click opens the Hive view on its coordinator (`navigateToTab`). Loaded late: the
+        // dispatcher reads this store.
+        const tabId = ws.panes.flatMap(p => p.tabs).find(t => t.hive_role === 'coordinator')?.id;
+        void import('$lib/stores/notificationDispatch')
+          .then(m => m.dispatch(notice.title, notice.body, 'success', tabId ? { tabId } : undefined))
+          .catch(e => logWarn(`hive: done notice not shown: ${e}`));
+      }
     },
 
     /** A deleted Hive (docs/hive.md §11.2), as Rust saved it: the workspace is an ordinary one, and

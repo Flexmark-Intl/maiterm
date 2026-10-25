@@ -59,6 +59,7 @@ pub mod diffstat;
 pub mod events;
 pub mod feed;
 pub mod files;
+pub mod finish;
 pub mod fuses;
 pub mod gallery;
 pub mod gate;

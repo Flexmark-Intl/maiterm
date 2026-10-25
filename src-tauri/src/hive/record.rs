@@ -14,6 +14,8 @@ pub const LANDING_INTEGRATION: &str = "integration";
 pub const KIND_GIT: &str = "git";
 pub const KIND_PLAIN: &str = "plain";
 pub const STATUS_ACTIVE: &str = "active";
+/// `hiveFinish` accepted (§11.4): nothing starts, until the human wakes it with a message.
+pub const STATUS_DONE: &str = "done";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

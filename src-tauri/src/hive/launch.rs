@@ -631,10 +631,19 @@ fn first_launch_setup(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> Resul
     Ok(prefix)
 }
 
+/// Every launch in a Done Hive (§11.4). `src/lib/hive/launch.ts` matches its start
+/// (`HIVE_DONE_REFUSAL`): keep the two in step.
+pub const DONE_REFUSAL: &str = "This Hive is done: it starts no agent until your human wakes it with a message.";
+
 /// The launch line for a Hive tab (§11.1), or why it can't start. `tasks` is the workspace's
 /// task list, where a worker's brief is its task's detail. Blocks: trust writes, the version
 /// probe, file writes, and before a worker's first session its cargo seed.
 pub fn prepare_launch(hive: &Hive, role: &str, tab_id: &str, tasks: &[crate::state::Task], prefs: &crate::state::Preferences) -> Result<String, String> {
+    // Before anything touches a home or probes Claude: a restart's session restore and a Hive
+    // view's remount of a Done Hive type nothing, and the frontend reads this string as quiet.
+    if hive.status == super::record::STATUS_DONE {
+        return Err(DONE_REFUSAL.to_string());
+    }
     if cfg!(windows) {
         return Err("A Hive needs Claude's sandbox, which native Windows doesn't have.".to_string());
     }
@@ -1181,6 +1190,18 @@ pub(crate) mod tests {
         fs::write(&root, r#"{"projects":{"/r/web":{"hasTrustDialogAccepted":true},"/r/api":{"hasTrustDialogAccepted":true}}}"#).unwrap();
         assert_eq!(check_worker_trust(&[root.clone()], &p, &w), Ok(()));
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_done_hive_launches_nothing_and_touches_no_folder() {
+        let id = format!("done-{}", uuid::Uuid::new_v4());
+        let h = Hive { id: id.clone(), status: crate::hive::record::STATUS_DONE.into(), ..sample_hive() };
+        let prefs = crate::state::Preferences::default();
+        for role in [ROLE_COORDINATOR, ROLE_WORKER, "visitor"] {
+            assert_eq!(prepare_launch(&h, role, "tab", &[], &prefs), Err(DONE_REFUSAL.to_string()), "{role}: before the role is even read");
+        }
+        assert!(!hive_root(&id).unwrap().exists(), "no record rewritten, no trust written, no Claude probed");
+        assert!(DONE_REFUSAL.starts_with("This Hive is done"), "launch.ts matches this start");
     }
 
     #[test]

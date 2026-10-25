@@ -1692,6 +1692,24 @@ async fn a_dirty_base_checkout_holds_the_undo_and_undoing_again_resumes_it() {
     rig.assert_no_leftovers();
 }
 
+/// A Done Hive's report proved its lands: its coordinator can't take one back, even in a call that
+/// raced the finish past the tool gate. The human's own Undo stays theirs.
+#[tokio::test]
+async fn a_done_hives_coordinator_undoes_nothing_and_the_human_still_can() {
+    let rig = Rig::new("undo-done", &["web"]);
+    let w = rig.reported("feat", &["web"], "feat.rs", "fn feat() {}\n");
+    let id = Rig::line_of(&rig.land(&w).await.unwrap(), "web");
+    let landed = rig.main_tip("web");
+    rig.data.write().windows[0].workspaces[0].hive.as_mut().unwrap().status = crate::hive::record::STATUS_DONE.into();
+    let e = rig.undo(&id).await.unwrap_err();
+    assert!(e.contains("This Hive is done") && e.contains("Nothing was written to main in web"), "{e}");
+    assert_eq!(rig.main_tip("web"), landed);
+    assert!(undo::read_all(&rig.caller.paths).iter().all(|u| u.state == undo::STATE_REFUSED), "settled, so nothing is under way");
+    rig.assert_no_leftovers();
+    let p = undo::preview(&rig.caller.hive, &rig.caller.paths, &id).unwrap();
+    assert_eq!(undo::human_undo(&rig.ctx(), &rig.caller, &id, p.config_fp.clone(), &opts()).await.unwrap()["state"], undo::STATE_DONE);
+}
+
 #[tokio::test]
 async fn the_coordinators_undo_of_config_files_a_card_and_the_humans_own_undo_goes_on_what_it_showed() {
     let rig = Rig::new("undo-config", &["web"]);

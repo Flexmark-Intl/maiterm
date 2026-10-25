@@ -36,7 +36,7 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The Hive tools built so far: what `tools/list` offers each role and the handler answers.
 /// The rest of the coordinator's (settings' `COORDINATOR_MCP_TOOLS`) are refused as not yet here.
-pub const COORDINATOR_TOOLS: [&str; 14] = [
+pub const COORDINATOR_TOOLS: [&str; 16] = [
     "hiveSpawnWorker",
     "hiveListWorkers",
     "hiveMessageWorker",
@@ -51,6 +51,8 @@ pub const COORDINATOR_TOOLS: [&str; 14] = [
     "hivePrecedents",
     "hiveRecordPrecedent",
     "hiveProposePlan",
+    "hiveSetCriteria",
+    "hiveFinish",
 ];
 /// Every worker is offered all three; Rust refuses `hiveReport` to a reviewer and `hiveVerdict`
 /// to a builder (`review`).
@@ -228,7 +230,8 @@ fn hive_tool_definitions(role: &str) -> Vec<Value> {
         "name": "hiveListWorkers",
         "description": "This Hive's workers as data: badge, name, task, phase, why a waiting one waits, folders with branches and \
             commits ahead of their landing target, model and effort, and the last report. Also your headroom: the cap, live \
-            workers, spawns left this hour and today across every Hive, and any usage-limit pause.",
+            workers, spawns left this hour and today across every Hive, and any usage-limit pause. And the completion criteria, \
+            numbered as hiveFinish addresses them.",
         "inputSchema": { "type": "object", "properties": { "tabId": tab_id }, "required": [] }
     });
     let worker = json!({ "type": ["string", "number"], "description": "The worker: badge (3 or \"#3\"), name or task id" });
@@ -295,6 +298,8 @@ fn hive_tool_definitions(role: &str) -> Vec<Value> {
         super::precedents::list_tool_definition(&tab_id),
         super::precedents::record_tool_definition(&tab_id),
         super::plan::propose_tool_definition(&tab_id),
+        super::finish::set_criteria_tool_definition(&tab_id),
+        super::finish::finish_tool_definition(&tab_id),
     ]
 }
 
@@ -424,6 +429,10 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         Err(e) => return json!({ "error": e }),
     };
     let ctx = app_ctx(state, handle, &caller);
+    if let Some(e) = done_refusal(&caller.hive, tool) {
+        log::info!("hive {}: {tool} refused: {e}", caller.hive.id);
+        return json!({ "error": e });
+    }
     let res = match tool {
         "hiveSpawnWorker" => spawn_worker(&ctx, &caller, args).await,
         "hiveListWorkers" => list_workers_tool(&state.app_data, super::fuses::book(), &caller).await,
@@ -442,7 +451,9 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         "hivePrecedents" => super::precedents::list_tool(&caller, args).await,
         "hiveRecordPrecedent" => super::precedents::record_tool(&ctx, &caller, args).await,
         "hiveProposePlan" => super::plan::propose_tool(&ctx, &caller, args).await,
-        t => Err(format!("{t} isn't available in this build of maiTerm yet.")),
+        "hiveSetCriteria" => super::finish::set_criteria_tool(&ctx, &caller, args).await,
+        "hiveFinish" => super::finish::finish_tool(&ctx, &caller, args).await,
+        t =>Err(format!("{t} isn't available in this build of maiTerm yet.")),
     };
     // A worker's phase changed: a freed slot or a failed dependency is news to the waiters.
     if res.is_ok() && matches!(tool, "hiveStopWorker" | "hiveReport" | "hiveRestartWorker" | "hiveRetireWorker" | "hiveResolve" | "hiveLand" | "hiveUndoLand") {
@@ -461,10 +472,30 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
             super::waiters::poll_soon(state.clone(), handle.clone(), caller.workspace_id.clone());
         });
     }
+    // Likewise the coordinator after Done: its last words reach it, then it is ended once idle.
+    if res.is_ok() && tool == "hiveFinish" {
+        let (state, handle, caller) = (state.clone(), handle.clone(), caller.clone());
+        tauri::async_runtime::spawn(async move {
+            let ctx = app_ctx(&state, &handle, &caller);
+            use super::finish::{EXIT_MAX_WAIT, EXIT_MIN_WAIT, EXIT_POLL};
+            super::finish::exit_coordinator(&ctx, &caller, EXIT_MIN_WAIT, EXIT_POLL, EXIT_MAX_WAIT).await;
+        });
+    }
     res.unwrap_or_else(|e| {
         log::info!("hive {}: {tool} refused: {e}", caller.hive.id);
         json!({ "error": e })
     })
+}
+
+/// What a Done Hive's agents may still call: reads, and the two that refuse a Done Hive themselves.
+/// Everything else would change what the report proved (an undo, a land, a delivery) or cost.
+pub const DONE_TOOLS: [&str; 4] = ["hiveListWorkers", "hivePrecedents", "hiveSetCriteria", "hiveFinish"];
+
+/// Why `tool` is refused in `hive` now, if it is: a Done Hive does nothing until a message from
+/// the human wakes it. The human's own commands don't come through here.
+pub fn done_refusal(hive: &Hive, tool: &str) -> Option<String> {
+    (hive.status == super::record::STATUS_DONE && !DONE_TOOLS.contains(&tool))
+        .then(|| format!("This Hive is done: {tool} changes nothing in it now. A message from your human wakes it."))
 }
 
 /// Production's state, fuses, window and checks, for a Hive in `caller.label`'s window.
@@ -1471,6 +1502,7 @@ pub(crate) fn list_view(hive: &Hive, paths: &HivePaths, tasks: &[Task], fuses: &
         "hive_status": board.hive_status,
         "starts_workers": board.starts_workers,
         "suspect_repos": board.suspect_repos,
+        "criteria": super::finish::criteria_view(hive),
         "budget": {
             "spent_usd": board.spend.spent_micros as f64 / 1_000_000.0,
             "budget_usd": board.spend.budget_micros as f64 / 1_000_000.0,

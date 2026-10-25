@@ -11,7 +11,9 @@
   no transcript: Rust's worker records are fetched when this window hears `hive-workers-changed`
   or its tasks change, diff stats and meta are pushed (hiveFeed), and the rest (lane, blocker,
   note, agent state and the activity line) comes live from the stores. A card's newest assets come
-  with its record, refetched when the gallery changes (§4.3). Pause arrives with a later step.
+  with its record, refetched when the gallery changes (§4.3). The header carries Resume while
+  paused, the completion criteria (read-only: the coordinator sets them), and while done the Done
+  time and its Report (§11.4).
 
   Gallery (§10.4, step 8d) and Memory (§9, step 7a) are the header's other views (Board · Gallery
   · Memory, Cmd+Shift+Y): GalleryView or HiveMemoryView takes the board's place and the worker
@@ -34,7 +36,9 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { hiveLiveWorkerTabs, hiveWorkers } from '$lib/tauri/commands';
+  import { hiveLiveWorkerTabs, hiveResume, hiveWorkers } from '$lib/tauri/commands';
+  import { doneLabel } from '$lib/hive/finish';
+  import FinishReportModal from './FinishReportModal.svelte';
   import type { HiveBoard } from '$lib/tauri/types';
   import { error as logError } from '@tauri-apps/plugin-log';
   import { countedListen } from '$lib/utils/listenCounter';
@@ -95,6 +99,23 @@
   let budgetOpen = $state(false);
   /** The land log (docs/hive.md §8.6), whole from the header or one worker's from its column. */
   let landLog = $state<{ taskId: string | null } | null>(null);
+  /** Done (docs/hive.md §11.4): the report, from the header while done; the criteria, read-only. */
+  let reportOpen = $state(false);
+  let criteriaOpen = $state(false);
+  let resuming = $state(false);
+  /** A Hive paused on a usage limit starts workers again (`hive_resume`, which polls the waiters). */
+  async function resume() {
+    if (resuming) return;
+    resuming = true;
+    try {
+      workspacesStore.applyHiveRecord(workspaceId, await hiveResume(workspaceId));
+    } catch (e) {
+      logError(`hive: ${workspaceId.slice(0, 8)} not resumed: ${e}`);
+      toastStore.addToast("The Hive didn't resume", String(e).replace(/^Error: /, ''), 'error');
+    } finally {
+      resuming = false;
+    }
+  }
   const queuedCount = $derived(hive?.settings?.run_queue?.commands.length ?? 0);
 
   // ── The board: Rust's worker records, refetched on its event and on task changes (§4.4). ──
@@ -651,6 +672,14 @@
     <div class="title">
       <b>{ws?.name ?? ''}</b>
       {#if hive?.goal}<span class="goal">{hive.goal}</span>{/if}
+      {#if hive?.status === 'done'}
+        <span class="done-row">
+          <span class="done">{doneLabel(hive.done_at)}</span>
+          <Tooltip text="The coordinator's report: each criterion's receipts, what landed, final assets, spend, what it decided alone">
+            <button type="button" class="queue-btn" onclick={() => (reportOpen = true)}>Report</button>
+          </Tooltip>
+        </span>
+      {/if}
       <div class="views" role="tablist" aria-label="Hive view">
         {#each VIEW_TABS as { key, label }, i (key)}
           {#if i}<span class="sep" aria-hidden="true">·</span>{/if}
@@ -677,8 +706,20 @@
       </span>
       {#if room?.usage_limit_until}
         <span class="warn">No new workers until {room.usage_limit_until}: usage limit</span>
-      {:else if board && board.hive_status !== 'active'}
-        <span class="warn">{board.hive_status === 'paused' ? 'Paused: no new workers start' : `Hive is ${board.hive_status}`}</span>
+      {:else if hive?.status === 'paused'}
+        <span class="warn">Paused: no new workers start</span>
+        <Tooltip text="Start workers again: you've dealt with the usage limit">
+          <button type="button" class="queue-btn" disabled={resuming} onclick={() => void resume()}>Resume</button>
+        </Tooltip>
+      {:else if board && board.hive_status !== 'active' && board.hive_status !== 'done'}
+        <span class="warn">Hive is {board.hive_status}</span>
+      {/if}
+      {#if hive}
+        <Tooltip text={hive.criteria.length ? 'What must be true for the goal to be met: hiveFinish proves each one' : 'The coordinator sets these with hiveSetCriteria'}>
+          <button type="button" class="queue-btn" aria-expanded={criteriaOpen} onclick={() => (criteriaOpen = !criteriaOpen)}>
+            Criteria ({hive.criteria.length})
+          </button>
+        </Tooltip>
       {/if}
       <span>{hive?.landing_mode === 'integration' ? `Lands to hive/${hive.slug}, each with your approval` : 'Lands to Base'}</span>
       {#if board?.suspect_repos?.length}
@@ -713,6 +754,20 @@
       {/if}
     </div>
   </header>
+  {#if criteriaOpen && hive}
+    <div class="criteria-panel" aria-label="Completion criteria">
+      {#if hive.criteria.length}
+        <ol>
+          {#each hive.criteria as c, i (i)}<li>{c}</li>{/each}
+        </ol>
+      {:else}
+        <span class="dim">No completion criteria yet: the coordinator sets them.</span>
+      {/if}
+    </div>
+  {/if}
+  {#if reportOpen && hive}
+    <FinishReportModal {workspaceId} onclose={() => (reportOpen = false)} />
+  {/if}
   {#if queueOpen && hive}
     <RunQueueModal {workspaceId} {hive} onclose={() => (queueOpen = false)} />
   {/if}
@@ -949,6 +1004,13 @@
   .queue-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .queue-btn.budget.amber { color: var(--yellow); }
   .queue-btn.budget.over { color: var(--red); font-weight: 600; }
+  .queue-btn:disabled { cursor: default; opacity: 0.5; text-decoration: none; }
+  .done-row { display: flex; align-items: baseline; gap: 10px; font-size: 12px; }
+  .done { color: var(--green); font-weight: 600; }
+  .criteria-panel { border-bottom: 1px solid var(--bg-light); color: var(--fg); font-size: 12px; padding: 6px 18px 8px; }
+  .criteria-panel ol { margin: 0; padding-left: 20px; }
+  .criteria-panel li { overflow-wrap: anywhere; }
+  .criteria-panel .dim { color: var(--fg-dim); }
   .queue-btn.danger { color: var(--fg-dim); }
   .queue-btn.danger:hover { color: var(--red); }
   .cols { flex: 1; min-height: 0; display: flex; min-width: 0; overflow: hidden; }

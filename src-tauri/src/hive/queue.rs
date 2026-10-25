@@ -669,6 +669,11 @@ impl Queue {
         self.parked.remove(workspace_id);
     }
 
+    /// The jobs queued, starting or running in a workspace, land checks and undos included.
+    pub fn active_in(&self, workspace_id: &str) -> Vec<Job> {
+        self.jobs.iter().filter(|j| j.is_active() && j.workspace_id == workspace_id).cloned().collect()
+    }
+
     /// The tasks with an active job in a workspace.
     pub fn tasks_in(&self, workspace_id: &str) -> Vec<String> {
         let mut tasks: Vec<String> = self.jobs.iter().filter(|j| j.is_active() && j.workspace_id == workspace_id).map(|j| j.task_id.clone()).collect();
@@ -1041,6 +1046,11 @@ pub fn release_workspace(workspace_id: &str, why: &str) -> usize {
 pub fn park_workspace(workspace_id: &str, why: &str) -> usize {
     queue().park(workspace_id);
     release_workspace(workspace_id, why)
+}
+
+/// What the machine-wide queue holds for this workspace, still to run or running: Done waits.
+pub fn active_in(workspace_id: &str) -> Vec<Job> {
+    queue().active_in(workspace_id)
 }
 
 /// The Hive was resumed: its workers' runs queue again.

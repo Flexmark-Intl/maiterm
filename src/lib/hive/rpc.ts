@@ -126,6 +126,36 @@ function deleteHive(a: Record<string, unknown>): unknown {
   return { ok: true };
 }
 
+/** `hive.finish {workspace_id, tab_ids}`: the Hive is done (docs/hive.md §11.4). The stack services
+ *  it started stop (`stopStack` skips a `shared_from` one, and a stop clears the copy's intent, so a
+ *  restart brings none back), and every Hive tab's follow-ups and watch scripts are cancelled.
+ *  Best effort: what fails is reported, and Done stands. */
+async function finish(a: Record<string, unknown>): Promise<unknown> {
+  const { workspace_id: workspaceId, tab_ids: tabIds } = a;
+  if (typeof workspaceId !== 'string' || !Array.isArray(tabIds)) return { error: 'workspace_id and tab_ids are required' };
+  if (!workspacesStore.workspaces.find((w) => w.id === workspaceId)?.hive) return { error: 'This window holds no such Hive.' };
+  const failed: string[] = [];
+  // `stopStack` answers each copy that didn't stop rather than throwing.
+  let stopped = true;
+  try {
+    for (const f of await stackStore.stopStack(workspaceId)) {
+      stopped = false;
+      failed.push(`stack: ${f}`);
+    }
+  } catch (e) {
+    stopped = false;
+    failed.push(`stack: ${e}`);
+  }
+  let cancelled = 0;
+  for (const tabId of strings(tabIds)) {
+    for (const f of followUpsStore.list(tabId)) {
+      if (await followUpsStore.cancel(tabId, f.id)) cancelled++;
+      else failed.push(`follow-up ${f.id.slice(0, 8)} on tab ${tabId.slice(0, 8)}`);
+    }
+  }
+  return failed.length ? { ok: false, stopped, cancelled, failed } : { ok: true, stopped, cancelled };
+}
+
 /** `hive.relaunch {workspace_id, tab_id}`: a worker's agent started again in its own tab. A mounted
  *  terminal gets the builder's line through the follow-ups' empty-prompt gate (docs/follow-ups.md
  *  §6.2), never typed over anything; an unmounted tab is mounted, which types it on spawn. */
@@ -194,6 +224,9 @@ export async function handleHiveRequest(req: HiveRequest): Promise<void> {
         break;
       case 'hive.delete':
         result = deleteHive(args);
+        break;
+      case 'hive.finish':
+        result = await finish(args);
         break;
       case 'stack.job.start':
         result = await jobStart(args);

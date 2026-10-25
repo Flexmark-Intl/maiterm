@@ -1597,16 +1597,26 @@ function createStackStore() {
       }
     },
 
-    /** Every copy that isn't stopped, of every service. */
-    async stopStack(workspaceId: string): Promise<void> {
+    /** Every copy that isn't stopped, of every service. Answers the copies that didn't stop: a
+     *  refusal (a lease), or a guard that wouldn't signal, which `stop` returns rather than throws. */
+    async stopStack(workspaceId: string): Promise<string[]> {
+      const failed: string[] = [];
       for (const s of this.services(workspaceId)) {
         if (s.shared_from) continue;
         for (const c of copiesOf(workspaceId, s.id)) {
           if (rt(c.key).status === 'stopped') continue;
+          const name = `${s.name}${c.target ? ` on ${labelOf(c.key)}` : ''}`;
           // Crashed ones too: a pending auto-restart must not outlive "Stop stack".
-          try { await stop(workspaceId, s.id, c.target); } catch (e) { logError(`stack: stop ${s.name}: ${e}`); }
+          try {
+            const status = await stop(workspaceId, s.id, c.target);
+            if (status !== 'stopped') failed.push(`${name}: ${rt(c.key).note ?? status}`);
+          } catch (e) {
+            logError(`stack: stop ${s.name}: ${e}`);
+            failed.push(`${name}: ${e instanceof Error ? e.message : e}`);
+          }
         }
       }
+      return failed;
     },
 
     /** A workspace is leaving for another window with its service tabs still running. Hand

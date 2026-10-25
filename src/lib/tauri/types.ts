@@ -1078,6 +1078,57 @@ export interface HiveRepoStanding {
   suspects: string[];
 }
 
+/** hive/finish.rs `FinishRecord`: what an accepted `hiveFinish` left (docs/hive.md §11.4). The
+ *  coordinator's words are `summary`, each criterion's `how` and each abandon's `reason`; the rest
+ *  is maiTerm's. */
+export interface HiveFinishRecord {
+  v: number;
+  kind: string;
+  id: string;
+  at: string;
+  at_ms: number;
+  summary: string;
+  criteria: HiveFinishCriterion[];
+  landed: HiveFinishLanded[];
+  abandoned: HiveFinishAbandoned[];
+  assets_final: HiveFinalAsset[];
+  /** The spend ledger's total, integer micro-dollars. */
+  spent_micros: number;
+  decided_alone: string[];
+  by: string;
+}
+
+export interface HiveFinishCriterion {
+  n: number;
+  text: string;
+  how: string;
+  /** maiTerm's description of each receipt it verified. */
+  receipts: string[];
+}
+
+export interface HiveFinishLanded {
+  land: string;
+  worker: string;
+  title: string;
+  folder: string;
+  target: string;
+  base_after: string;
+  undone: boolean;
+  suspect: boolean;
+}
+
+export interface HiveFinishAbandoned {
+  worker: string;
+  branches: string[];
+  reason: string;
+}
+
+export interface HiveFinalAsset {
+  id: string;
+  title: string;
+  kind: string;
+}
+
 /** hive/land/undo.rs `LandLogView`: what the land log view shows. */
 export interface HiveLandLog {
   /** Oldest first. */

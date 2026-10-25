@@ -328,6 +328,13 @@ pub(crate) async fn call<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: Caller, role: 
     if coordinator_only(tool) && role != ROLE_COORDINATOR {
         return Err(format!("{tool} is your coordinator's: ask it in your report or a blocker."));
     }
+    // A Done Hive's finals are what its report named, and it delivers nothing. Recording a spend
+    // is never refused (plan D6), so galleryAdd stays.
+    if matches!(tool, TAG | COLLECT | DELIVER) {
+        if let Some(e) = crate::hive::tools::done_refusal(&caller.hive, tool) {
+            return Err(e);
+        }
+    }
     let worker = if role == ROLE_WORKER {
         let (paths, tab) = (caller.paths.clone(), caller.tab_id.clone());
         Some(blocking(move || worker::worker_for_tab(&paths, &tab).ok_or_else(|| "No worker record names your tab.".to_string())).await?)

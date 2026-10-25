@@ -10,7 +10,11 @@ import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { interpolateShell } from '$lib/stores/triggers.svelte';
 import { resumeCommandFor } from '$lib/stores/agentState.svelte';
 import { dispatch } from '$lib/stores/notificationDispatch';
-import { error as logError } from '@tauri-apps/plugin-log';
+import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
+
+/** The start of Rust's `launch::DONE_REFUSAL`: a Done Hive starts nothing (docs/hive.md §11.4), and
+ *  a restart or remount of one is no error to raise. */
+export const HIVE_DONE_REFUSAL = 'This Hive is done';
 
 export function isHiveTab(tabId: string): boolean {
   return !!workspacesStore._locateTab(tabId)?.tab.hive_role;
@@ -22,6 +26,10 @@ export async function hiveLaunchLine(tabId: string): Promise<string | null> {
   try {
     return await hiveLaunchCommand(tabId);
   } catch (e) {
+    if (String(e).startsWith(HIVE_DONE_REFUSAL)) {
+      logInfo(`hive: tab ${tabId.slice(0, 8)} not launched: its Hive is done`);
+      return null;
+    }
     logError(`hive: launch refused for tab ${tabId.slice(0, 8)}: ${e}`);
     void dispatch("A Hive agent didn't start", String(e), 'error', { tabId });
     return null;

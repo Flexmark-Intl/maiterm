@@ -35,7 +35,7 @@ pub const WHY_RESTART: &str = "restart";
 pub const WHY_TAB_RESUME: &str = "tab_resume";
 
 /// A Done Hive's coordinator is woken by a message, never told a digest (§11.4).
-const STATUS_DONE: &str = "done";
+use super::record::STATUS_DONE;
 
 /// Worker lines in one digest; the rest are counted.
 const DIGEST_LINES: usize = 30;

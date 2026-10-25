@@ -8,6 +8,7 @@ import type { HiveMemoryFileText, HiveMemoryView } from './types';
 import type { HiveDecisionView, HivePrecedentsView } from './types';
 import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
 import type { GallerySettingsChange } from './types';
+import type { HiveFinishRecord } from './types';
 import type {
   GalleryAddResult,
   GalleryAssetDetail,
@@ -2835,6 +2836,11 @@ export async function hiveWorkerMetas(workspaceId: string): Promise<HiveWorkerMe
  *  The machine-wide breaker is timed and not lifted by this. */
 export async function hiveResume(workspaceId: string): Promise<Hive> {
   return invoke('hive_resume', { workspaceId });
+}
+
+/** The Hive's last accepted `hiveFinish` report (docs/hive.md §11.4), or null before one. */
+export async function hiveFinishReport(workspaceId: string): Promise<HiveFinishRecord | null> {
+  return invoke('hive_finish_report', { workspaceId });
 }
 
 /** The human's queued commands and resource limits (docs/hive.md §6.8), checked and saved in

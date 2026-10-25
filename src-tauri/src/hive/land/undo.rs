@@ -371,6 +371,13 @@ pub(crate) async fn start<W: HiveWindow>(
         Ok(u) => u,
         Err(e) => return (None, Outcome::Refused(e)),
     };
+    // Read after the record is on disk: a hiveFinish racing this one either finds the record in
+    // its late check and takes Done back, or saved Done before this read. The human's own undo
+    // stays theirs in a Done Hive.
+    if by == landlog::BY_COORDINATOR && crate::hive::autonomy::current_hive(ctx, caller).is_some_and(|h| h.status == crate::hive::record::STATUS_DONE) {
+        let out = refuse(ctx, caller, u.clone(), "This Hive is done: its coordinator undoes nothing. A message from your human wakes it.".to_string()).await;
+        return (Some(u), out);
+    }
     log::info!("hive {}: undo {} of {} started by the {by}", caller.hive.id, u.id, u.undoes);
     ctx.window.workers_changed(&caller.workspace_id);
     let out = drive(ctx, caller, &u.id, opts).await;

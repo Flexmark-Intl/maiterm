@@ -21,12 +21,15 @@ vi.mock('$lib/stores/workspaces.svelte', () => ({
   workspacesStore: { get workspaces() { return workspaces; }, adoptHiveTab, dropHiveTab, dropJobTab },
 }));
 vi.mock('$lib/stores/terminals.svelte', () => ({ terminalsStore: { get: terminalGet } }));
-vi.mock('$lib/stores/followUps.svelte', () => ({ followUpsStore: { relaunchAgent } }));
+const listFollowUps = vi.fn((_tab: string): { id: string }[] => []);
+const cancelFollowUp = vi.fn(async (_tab: string, _id: string) => true);
+vi.mock('$lib/stores/followUps.svelte', () => ({ followUpsStore: { relaunchAgent, list: listFollowUps, cancel: cancelFollowUp } }));
 const startJob = vi.fn();
 const stopJob = vi.fn();
 const cleanupJobs = vi.fn();
 const forgetJob = vi.fn();
-vi.mock('$lib/stores/stack.svelte', () => ({ stackStore: { startJob, stopJob, cleanupJobs, forgetJob } }));
+const stopStack = vi.fn(async (_ws: string): Promise<string[]> => []);
+vi.mock('$lib/stores/stack.svelte', () => ({ stackStore: { startJob, stopJob, cleanupJobs, forgetJob, stopStack } }));
 
 const activated: string[] = [];
 (globalThis as unknown as { window: unknown }).window = {
@@ -267,6 +270,28 @@ describe('handleHiveRequest', () => {
     expect(dropJobTab.mock.calls).toEqual([['ws', 'job-tab'], ['ws', 'not-a-job']]);
     expect(forgetJob.mock.calls).toEqual([['j-0123abcd']]);
     expect(answered().map((a) => a.result)).toEqual([{ ok: true }, { error: 'workspace_id and tab_ids are required' }, { ok: true }]);
+  });
+
+  it('a finish stops the stack and cancels every Hive tab\u2019s follow-ups, reporting what failed', async () => {
+    listFollowUps.mockImplementation((tab: string) => (tab === 'coord' ? [{ id: 'f-1' }, { id: 'f-2' }] : tab === 'tab-w' ? [{ id: 'f-3' }] : []));
+    cancelFollowUp.mockImplementation(async (_tab: string, id: string) => id !== 'f-2');
+    await handleHiveRequest({ request_id: 'f1', verb: 'hive.finish', args: { workspace_id: 'ws', tab_ids: ['coord', 'tab-w'] } });
+    expect(stopStack).toHaveBeenCalledWith('ws');
+    expect(cancelFollowUp.mock.calls).toEqual([['coord', 'f-1'], ['coord', 'f-2'], ['tab-w', 'f-3']]);
+    expect(answered()[0].result).toEqual({ ok: false, stopped: true, cancelled: 2, failed: ['follow-up f-2 on tab coord'] });
+    await handleHiveRequest({ request_id: 'f2', verb: 'hive.finish', args: { workspace_id: 'plain', tab_ids: [] } });
+    await handleHiveRequest({ request_id: 'f3', verb: 'hive.finish', args: { workspace_id: 'ws' } });
+    expect(answered().slice(1).map((a) => a.result)).toEqual([{ error: 'This window holds no such Hive.' }, { error: 'workspace_id and tab_ids are required' }]);
+    expect(stopStack).toHaveBeenCalledOnce();
+    listFollowUps.mockImplementation(() => []);
+    cancelFollowUp.mockImplementation(async () => true);
+  });
+
+  it('a finish reports a service that didn’t stop, never stopped:true', async () => {
+    // `stopStack` swallows each copy's refusal and answers it, so the verb must read the answer.
+    stopStack.mockResolvedValueOnce(['api: leased by job j-1']);
+    await handleHiveRequest({ request_id: 'f4', verb: 'hive.finish', args: { workspace_id: 'ws', tab_ids: [] } });
+    expect(answered()[0].result).toEqual({ ok: false, stopped: false, cancelled: 0, failed: ['stack: api: leased by job j-1'] });
   });
 
   it('an unknown verb is answered, never left waiting', async () => {

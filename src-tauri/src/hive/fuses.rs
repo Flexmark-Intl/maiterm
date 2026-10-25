@@ -719,6 +719,31 @@ pub fn set_status(data: &mut AppData, hive_id: &str, from: Option<&str>, to: &st
     None
 }
 
+/// Edits the Hive's record while its status is one of `from` (any when empty), moving it to `to`
+/// (kept when None): Done and its criteria (§11.4). None when the Hive is gone or elsewhere.
+pub fn set_status_with(data: &mut AppData, hive_id: &str, from: &[&str], to: Option<&str>, edit: impl FnOnce(&mut Hive)) -> Option<StatusChange> {
+    for w in &mut data.windows {
+        for ws in &mut w.workspaces {
+            let Some(h) = ws.hive.as_mut().filter(|h| h.id == hive_id) else { continue };
+            if !from.is_empty() && !from.contains(&h.status.as_str()) {
+                return None;
+            }
+            if let Some(to) = to {
+                h.status = to.to_string();
+            }
+            edit(h);
+            let coordinator = ws
+                .panes
+                .iter()
+                .flat_map(|p| p.tabs.iter())
+                .find(|t| t.hive_role.as_deref() == Some(super::ROLE_COORDINATOR))
+                .map(|t| t.id.clone());
+            return Some(StatusChange { window_label: w.label.clone(), workspace_id: ws.id.clone(), hive: h.clone(), coordinator, tasks: None });
+        }
+    }
+    None
+}
+
 fn changed_workspace<'a>(data: &'a mut AppData, c: &StatusChange) -> Option<&'a mut Workspace> {
     data.windows
         .iter_mut()

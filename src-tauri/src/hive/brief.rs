@@ -134,7 +134,8 @@ pub fn invariant_rules(hive: &Hive, role: &str, paths: &HivePaths, worker: Optio
              When you need your human to decide something, block a task with a blocker (a decision with options and the \
              one you recommend) and keep coordinating everything else; never use AskUserQuestion. A worker\u{2019}s \
              question or permission prompt comes to you as ⟦HIVE PROMPT⟧ or ⟦HIVE QUESTION⟧: answer it with \
-             hiveAnswerWorker. ",
+             hiveAnswerWorker. First set checkable completion criteria (hiveSetCriteria; change them only as your human \
+             agrees). Done is hiveFinish. ",
         ));
     } else {
         out.push_str(&format!("You are an agent in a maiTerm Hive. Its goal: {goal}. "));
@@ -279,9 +280,9 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
     let mut b = String::from("# Your Hive\n\nmaiTerm writes this file on every launch; edits to it don't last.\n\n");
     b.push_str(&format!("## Goal\n\n{}\n\n", hive.goal.trim()));
     if !hive.criteria.is_empty() {
-        b.push_str("## Completion criteria\n\n");
-        for c in &hive.criteria {
-            b.push_str(&format!("- {c}\n"));
+        b.push_str("## Completion criteria\n\nhiveFinish addresses each by its number.\n\n");
+        for (i, c) in hive.criteria.iter().enumerate() {
+            b.push_str(&format!("{}. {c}\n", i + 1));
         }
         b.push('\n');
     }
