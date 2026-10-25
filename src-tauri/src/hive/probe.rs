@@ -141,7 +141,7 @@ impl Probe {
         };
         write_launch_files(&self.hive, &self.paths, &self.record, &hooks).unwrap();
         let args = hive_launch_args(&self.record, resume);
-        let line = hive_launch_line(&self.record, &args, &unset_vars(&crate::state::Preferences::default()));
+        let line = hive_launch_line(&self.record, &args, &unset_vars(&crate::state::Preferences::default()), &probe_account());
         let full = format!("{line} -p --output-format stream-json --verbose --max-turns 4");
 
         let prompt_file = self.base.join(format!("prompt-{}.txt", uuid::Uuid::new_v4().simple()));
@@ -162,6 +162,12 @@ impl Probe {
     fn claude_project_dirs(&self) -> Vec<PathBuf> {
         claude_project_dirs(&self.id)
     }
+}
+
+/// A probe runs as whoever runs it: the launch line unsets `CLAUDE_CONFIG_DIR` without a
+/// managed account, so the runner's own root is set back explicitly.
+fn probe_account() -> Vec<(String, String)> {
+    std::env::var("CLAUDE_CONFIG_DIR").ok().map(|v| ("CLAUDE_CONFIG_DIR".to_string(), v)).into_iter().collect()
 }
 
 /// Claude's own per-project folders for a probe's scratch (its paths all hold the probe's fresh
@@ -818,7 +824,7 @@ impl WorkerProbe {
         let rec = &self.record;
         let real = super::launch::worker_record(&self.hive, &self.paths, &self.worker).setting_sources;
         assert_eq!(rec.setting_sources, real, "the probe runs the real sources (a builder's project, a reviewer's local)");
-        let line = hive_launch_line(rec, &hive_launch_args(rec, None), &unset_vars(&crate::state::Preferences::default()));
+        let line = hive_launch_line(rec, &hive_launch_args(rec, None), &unset_vars(&crate::state::Preferences::default()), &probe_account());
         let full = format!("{line} -p --output-format stream-json --verbose --max-turns 4");
 
         let prompt_file = self.base.join(format!("prompt-{}.txt", uuid::Uuid::new_v4().simple()));

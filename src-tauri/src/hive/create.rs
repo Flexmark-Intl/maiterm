@@ -203,40 +203,96 @@ pub fn login_verdict(stdout: &[u8], account: Option<&str>) -> Option<String> {
 }
 
 /// Asks Claude whether the account a Hive tab would launch under is logged in, in the
-/// environment that tab gets: the account's config root, and nothing that would answer instead.
-/// Cheap and bounded; any failure to tell is no warning. Blocks.
+/// environment the launch line gives it (`launch::unset_vars`, `launch::account_set`): the
+/// account's config root or none, and nothing that would answer instead. Cheap and bounded; any
+/// failure to tell is no warning. Blocks.
 fn login_check(prefs: &crate::state::Preferences) -> Option<String> {
     let cli = crate::accounts::resolve_cli(crate::accounts::Runtime::Claude.profile())?;
-    let mut cmd = crate::util::proc::command(&cli);
-    cmd.args(["auth", "status", "--json"]);
-    for n in launch::unset_vars(prefs) {
-        cmd.env_remove(n);
+    let status = |form: &str| {
+        let mut cmd = crate::util::proc::command(&cli);
+        cmd.args(["auth", "status", form]);
+        for n in launch::unset_vars(prefs) {
+            cmd.env_remove(n);
+        }
+        for (k, v) in launch::account_set(prefs) {
+            cmd.env(k, v);
+        }
+        // Exit 1 is the ordinary logged-out answer, with its JSON on stdout.
+        crate::util::proc::output_timeout(&mut cmd, Duration::from_secs(10)).ok()
+    };
+    let label = account_label(prefs);
+    let json = status("--json")?;
+    if let Some(w) = login_verdict(&json.stdout, label.as_deref()) {
+        return Some(w);
     }
-    for (k, v) in crate::accounts::spawn_env_for(prefs).0 {
-        cmd.env(k, v);
+    // The JSON calls an expired login logged in; only the text form says so (`expired_verdict`).
+    let claude_ai = serde_json::from_slice::<serde_json::Value>(&json.stdout).ok().is_some_and(|v| v["authMethod"] == "claude.ai");
+    if !claude_ai {
+        return None;
     }
-    // Exit 1 is the ordinary logged-out answer, with its JSON on stdout.
-    let out = crate::util::proc::output_timeout(&mut cmd, Duration::from_secs(10)).ok()?;
-    login_verdict(&out.stdout, account_label(prefs).as_deref())
+    expired_verdict(&status("--text")?.stdout, label.as_deref())
 }
 
-/// The `.claude.json` a new Hive's agents would read trust from: the active Claude account's
-/// root, or `~/.claude.json` without managed accounts (§6.6). Launch writes every root; this is
-/// only the sheet's warning.
-pub fn trust_roots(prefs: &crate::state::Preferences) -> Vec<PathBuf> {
-    let active = crate::accounts::active_accounts(prefs)
-        .into_iter()
-        .find(|(rt, _)| *rt == crate::accounts::Runtime::Claude)
-        .and_then(|(rt, id)| crate::accounts::account_root(rt, &id));
-    match active {
-        Some(root) => vec![root.join(".claude.json")],
-        None => dirs::home_dir().map(|h| vec![h.join(".claude.json")]).unwrap_or_default(),
+/// The sheet's warning from `claude auth status --text`, for a login the JSON reports as
+/// `loggedIn: true`. That flag is only "a token is stored" (2.1.310's `authStatus`); a
+/// subscription login whose refresh token Claude found dead (stored as "") stays true there,
+/// and only the text form prints `Login: Expired — log in again`, as `/status` does.
+pub fn expired_verdict(stdout: &[u8], account: Option<&str>) -> Option<String> {
+    let text = String::from_utf8_lossy(stdout);
+    let expired = text.lines().any(|l| l.trim_start().strip_prefix("Login:").is_some_and(|v| v.trim_start().starts_with("Expired")));
+    if !expired {
+        return None;
     }
+    Some(match account {
+        Some(a) => format!(
+            "Claude reports the login of the account \"{a}\" has expired, and this Hive's agents would run under it: every turn \
+             would fail. Run /login in a Claude tab of that account first."
+        ),
+        None => "Claude reports its login on this computer has expired, so every turn of this Hive's agents would fail. Run \
+                 /login in a Claude tab first."
+            .to_string(),
+    })
+}
+
+/// The `.claude.json` a new Hive's agents would read trust from: the root their launch line
+/// names (`launch::launch_claude_json`: the active Claude account's, or `~/.claude.json` without
+/// managed accounts, §6.6). Launch writes every root; this is only the sheet's warning.
+pub fn trust_roots(prefs: &crate::state::Preferences) -> Vec<PathBuf> {
+    launch::launch_claude_json(prefs).into_iter().collect()
 }
 
 fn local_dir(raw: &str) -> Option<String> {
     let p = crate::share::expand_tilde(raw.trim());
     (p.is_absolute() && p.is_dir()).then(|| crate::share::canon(&p).to_string_lossy().to_string())
+}
+
+/// A tab's folder as its terminal last reported it (the frontend's OSC 7 state), which leads
+/// Rust's `last_cwd` after a fresh `cd`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LiveCwd {
+    pub tab_id: String,
+    pub cwd: Option<String>,
+    /// The OSC 7 URL's host: another machine's folder (an ssh tab) is no Primary here.
+    pub host: Option<String>,
+}
+
+/// The default Primary's candidates, in the caller's tab order: each tab's live folder when its
+/// terminal reported one on this machine, then the folder Rust saved for it.
+pub(crate) fn primary_candidates(tab_ids: &[String], live: &[LiveCwd], last_cwd: impl Fn(&str) -> Option<String>, local_host: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in tab_ids {
+        let osc = live
+            .iter()
+            .find(|l| &l.tab_id == id)
+            .filter(|l| crate::filetree::place::osc_is_local(l.host.as_deref(), local_host))
+            .and_then(|l| l.cwd.clone());
+        for c in osc.into_iter().chain(last_cwd(id)).filter(|c| !c.trim().is_empty()) {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    out
 }
 
 #[tauri::command]
@@ -245,21 +301,29 @@ pub async fn hive_preflight(
     state: State<'_, Arc<AppState>>,
     workspace_id: String,
     from_tab_ids: Option<Vec<String>>,
+    live_cwds: Option<Vec<LiveCwd>>,
 ) -> Result<Preflight, String> {
     crate::instance::hive_refusal()?;
     let label = window.label().to_string();
-    let (structural, from_cwds) = {
+    let (structural, last_cwds) = {
         let data = state.app_data.read();
         let win = data.window(&label).ok_or("Window not found")?;
         let ws = win.workspaces.iter().find(|w| w.id == workspace_id).ok_or("Workspace not found")?;
-        // In the caller's order: the window's active tab, then the one looked at before it.
-        let from_cwds: Vec<String> = from_tab_ids
-            .unwrap_or_default()
+        let last: HashMap<String, String> = win
+            .workspaces
             .iter()
-            .filter_map(|id| win.workspaces.iter().flat_map(|w| all_tabs(w)).find(|(_, t)| &t.id == id).and_then(|(_, t)| t.last_cwd.clone()))
+            .flat_map(|w| all_tabs(w))
+            .filter_map(|(_, t)| t.last_cwd.clone().map(|c| (t.id.clone(), c)))
             .collect();
-        (structural_eligibility(ws), from_cwds)
+        (structural_eligibility(ws), last)
     };
+    // In the caller's order: the window's active tab, then the one looked at before it.
+    let from_cwds = primary_candidates(
+        &from_tab_ids.unwrap_or_default(),
+        &live_cwds.unwrap_or_default(),
+        |id| last_cwds.get(id).cloned(),
+        &crate::filetree::place::local_hostname(),
+    );
     let prefs = state.app_data.read().preferences.clone();
     let app = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -1077,6 +1141,54 @@ mod tests {
         assert!(login_verdict(br#"{"loggedIn": true, "authMethod": "oauth_token"}"#, None).is_none(), "a token: can't tell, no warning");
         assert!(login_verdict(br#"{"authMethod": "none"}"#, None).is_none(), "no answer is no claim");
         assert!(login_verdict(b"error: unknown command", None).is_none());
+    }
+
+    /// The second live test: `/status` said "Login: Expired — log in again" and the JSON said
+    /// logged in. The text form is 2.1.310's `NPn` lines, `label: value`.
+    #[test]
+    fn an_expired_login_warns_from_the_text_form() {
+        let expired = "Login: Expired \u{2014} log in again\nOrganization: Acme\nEmail: a@b\n".as_bytes();
+        let w = expired_verdict(expired, None).unwrap();
+        assert!(w.contains("expired") && w.contains("/login"), "{w}");
+        assert!(expired_verdict(expired, Some("Work")).unwrap().contains("\"Work\""));
+        assert!(expired_verdict(b"Login method: Claude Max account\nOrganization: Acme\nEmail: a@b\n", None).is_none(), "a live login");
+        assert!(expired_verdict(b"Not logged in. Run claude auth login to authenticate.\n", None).is_none(), "the JSON's case");
+        assert!(expired_verdict(b"Organization: Expired Things Ltd\n", None).is_none(), "only the Login line counts");
+        assert!(expired_verdict(b"", None).is_none());
+    }
+
+    /// The second live test: the default Primary lagged a fresh `cd`, since `last_cwd` is saved later.
+    #[test]
+    fn the_default_primary_prefers_the_live_folder_on_this_machine() {
+        let ids = vec!["active".to_string(), "before".to_string()];
+        let last = |id: &str| match id {
+            "active" => Some("/r/old".to_string()),
+            "before" => Some("/r/prev".to_string()),
+            _ => None,
+        };
+        let live = |id: &str, cwd: &str, host: Option<&str>| LiveCwd { tab_id: id.into(), cwd: Some(cwd.into()), host: host.map(String::from) };
+        assert_eq!(primary_candidates(&ids, &[], last, "mybox"), vec!["/r/old", "/r/prev"], "nothing live: Rust's");
+        assert_eq!(
+            primary_candidates(&ids, &[live("active", "/r/new", Some("mybox.local"))], last, "MyBox"),
+            vec!["/r/new", "/r/old", "/r/prev"],
+            "the live folder first, Rust's after it should the live one not be usable"
+        );
+        assert_eq!(primary_candidates(&ids, &[live("active", "/r/new", None)], last, "mybox")[0], "/r/new", "no host is this machine");
+        assert_eq!(
+            primary_candidates(&ids, &[live("active", "/home/u/app", Some("nova"))], last, "mybox"),
+            vec!["/r/old", "/r/prev"],
+            "an ssh tab's folder is another machine's"
+        );
+        assert_eq!(primary_candidates(&ids, &[live("active", "/r/old", None)], last, "mybox"), vec!["/r/old", "/r/prev"], "once each");
+    }
+
+    /// The sheet's trust read and the login check use the root the launch line names, never an
+    /// inherited `CLAUDE_CONFIG_DIR`.
+    #[test]
+    fn the_sheet_reads_the_launchs_own_root() {
+        let none = crate::state::Preferences::default();
+        assert_eq!(trust_roots(&none), dirs::home_dir().map(|h| h.join(".claude.json")).into_iter().collect::<Vec<_>>());
+        assert_eq!(trust_roots(&none), launch::launch_claude_json(&none).into_iter().collect::<Vec<_>>());
     }
 
     #[test]

@@ -3,7 +3,7 @@ import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { StackHeldAction, StackLeaseState } from './types';
-import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
+import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HiveLiveCwd, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
 import type { HiveMemoryFileText, HiveMemoryView } from './types';
 import type { HiveDecisionView, HivePrecedentsView } from './types';
 import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
@@ -2782,8 +2782,9 @@ export async function hiveLaunchCommand(tabId: string): Promise<string> {
 /** Can this workspace become a Hive, and what the Create sheet starts from (docs/hive.md §3).
  *  `fromTabId` is the tab the human was last looking at: its folder becomes the default Primary. */
 /** `fromTabIds`: the tabs whose folder may become the default Primary, first match wins. */
-export async function hivePreflight(workspaceId: string, fromTabIds: string[]): Promise<HivePreflight> {
-  return invoke('hive_preflight', { workspaceId, fromTabIds });
+/** `liveCwds`: each tab's OSC 7 folder, which leads Rust's saved `last_cwd` after a fresh `cd`. */
+export async function hivePreflight(workspaceId: string, fromTabIds: string[], liveCwds: HiveLiveCwd[] = []): Promise<HivePreflight> {
+  return invoke('hive_preflight', { workspaceId, fromTabIds, liveCwds });
 }
 
 export async function hiveDetectFolder(path: string): Promise<HiveFolderInfo> {

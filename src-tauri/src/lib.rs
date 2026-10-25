@@ -176,6 +176,8 @@ pub fn run_browser_link_host_if_requested() -> bool {
 
 /// Why this launch couldn't take the single-instance lock, for setup() to log.
 static UNGUARDED_LAUNCH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Account env removed at startup (`accounts::scrub_inherited_account_env`), for setup() to log.
+static SCRUBBED_ACCOUNT_ENV: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
 
 /// The one expansion of `generate_context!`: it embeds the whole frontend, so a second call
 /// site would ship it twice.
@@ -234,6 +236,9 @@ pub fn run() {
         let _ = writeln!(std::io::stderr(), "maiTerm not started: {why}");
         return;
     }
+    // A config root inherited from the maiTerm tab this one was started in is that tab's account,
+    // never ours (docs/login.md §6.1). Still single-threaded, which env mutation needs.
+    SCRUBBED_ACCOUNT_ENV.get_or_init(accounts::scrub_inherited_account_env);
     // One instance per data dir, before ANYTHING reads or writes it (instance_lock.rs).
     // Bound for the whole of run(); the app's own exit releases it with the process.
     let argv: Vec<String> = std::env::args().collect();
@@ -414,6 +419,9 @@ pub fn run() {
 
             if let Some(why) = UNGUARDED_LAUNCH.get() {
                 log::warn!("Single-instance lock unavailable, running unguarded: {why}");
+            }
+            if let Some(names) = SCRUBBED_ACCOUNT_ENV.get().filter(|n| !n.is_empty()) {
+                log::info!("Removed inherited account env no maiTerm chose for this one: {}", names.join(", "));
             }
             if let Some(name) = instance::name() {
                 log::info!(

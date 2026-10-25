@@ -39,11 +39,11 @@
   import { hiveLiveWorkerTabs, hivePause, hiveResume, hiveWorkers } from '$lib/tauri/commands';
   import HiveSettingsModal from './HiveSettingsModal.svelte';
   import { hiveFailureNotice } from '$lib/agents/turnFailure';
-  import { pausedLabel } from '$lib/hive/model';
+  import { boardGone, pausedLabel, throttleTip } from '$lib/hive/model';
   import { doneLabel } from '$lib/hive/finish';
   import FinishReportModal from './FinishReportModal.svelte';
   import type { HiveBoard } from '$lib/tauri/types';
-  import { error as logError } from '@tauri-apps/plugin-log';
+  import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
   import { countedListen } from '$lib/utils/listenCounter';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
@@ -149,7 +149,11 @@
       const mine = ++fetchSeq;
       hiveWorkers(id)
         .then((b) => { if (mine === fetchSeq && id === workspaceId) board = b; })
-        .catch((e) => logError(`hive: board of ${id.slice(0, 8)} not fetched: ${e}`));
+        .catch((e) => {
+          // A fetch racing the Hive's delete (or its turning back into a workspace) is no error.
+          const gone = boardGone(String(e), !!workspacesStore.workspaces.find((w) => w.id === id)?.hive);
+          (gone ? logInfo : logError)(`hive: board of ${id.slice(0, 8)} not fetched${gone ? ' (no longer a Hive)' : ''}: ${e}`);
+        });
     }, 120);
   }
   // A task's lane moving can launch a waiter (Rust polls them after every task write).
@@ -741,6 +745,11 @@
         {room?.live ?? 0} of {room?.cap ?? hive?.cap ?? 0} slots in use{#if room?.starting} · {room.starting} starting{/if}{#if room}
           · {room.spawns_left_this_hour} starts left this hour, {room.spawns_left_today} today{/if}
       </span>
+      {#if room?.throttled}
+        <Tooltip text={throttleTip(room.throttle_critical ?? false)}>
+          <span class="warn">Throttled · {room.throttled}</span>
+        </Tooltip>
+      {/if}
       {#if room?.usage_limit_until}
         <span class="warn">No new workers until {room.usage_limit_until}: usage limit</span>
       {:else if hive?.status === 'paused'}

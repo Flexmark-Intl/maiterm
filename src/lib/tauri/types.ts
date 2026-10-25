@@ -825,6 +825,14 @@ export interface HiveReplaceable {
 }
 
 /** `hive_preflight`: what the Create sheet needs before it opens. */
+/** A tab's folder as its terminal last reported it (OSC 7), for the default Primary. */
+export interface HiveLiveCwd {
+  tab_id: string;
+  cwd: string | null;
+  /** The OSC 7 URL's host: another machine's folder is never the Primary. */
+  host: string | null;
+}
+
 export interface HivePreflight {
   eligible: boolean;
   reason: string | null;
@@ -1017,6 +1025,10 @@ export interface HiveHeadroom {
   /** Claude's reset minute ("HH:MM") while the usage-limit breaker holds. */
   usage_limit_until?: string | null;
   usage_limit_reason?: string | null;
+  /** "memory pressure" while no worker or queued run may start (§6.8). */
+  throttled?: string | null;
+  /** Critical pressure: the heavy runs go one at a time too. */
+  throttle_critical?: boolean;
 }
 
 export interface HiveBoard {

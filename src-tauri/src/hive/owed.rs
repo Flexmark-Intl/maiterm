@@ -338,6 +338,9 @@ pub fn digest_text(hive: &Hive, why: &str, board: &HiveBoard, cards_waiting: usi
     if let Some(at) = &board.headroom.usage_limit_until {
         lines.push(format!("No new workers until {at} (usage limit)."));
     }
+    if let Some(t) = &board.headroom.throttled {
+        lines.push(format!("Throttled · {t}: no worker starts until it eases, and maiTerm launches the waiting ones then."));
+    }
     match why {
         WHY_RESUME => lines.push("Runs your workers had queued or running were released; each is told when it starts again.".to_string()),
         WHY_RESTART => lines.push(
@@ -406,6 +409,8 @@ mod tests {
                 spawns_left_today: 40,
                 usage_limit_until: breaker.map(str::to_string),
                 usage_limit_reason: None,
+                throttled: None,
+                throttle_critical: false,
             },
             hive_status: "active".into(),
             starts_workers: true,

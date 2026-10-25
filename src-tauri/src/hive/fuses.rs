@@ -136,6 +136,15 @@ pub struct Fuses {
     gate: fn() -> super::pressure::Gate,
 }
 
+/// How a reservation refused for memory pressure starts, and only that refusal.
+pub const THROTTLE_PREFIX: &str = "Throttled · ";
+
+/// Whether `reserve` refused for memory pressure alone: a spawn files the worker as waiting
+/// instead of failing it, and the waiters poll when the gate opens (§6.8).
+pub fn is_throttle_refusal(why: &str) -> bool {
+    why.starts_with(THROTTLE_PREFIX)
+}
+
 /// `<app data>/hive/fuses.json`, loaded on first use.
 static BOOK: Fuses = Fuses { book: Mutex::new(None), path: None, gate: super::pressure::spawn_gate };
 
@@ -178,10 +187,9 @@ impl Fuses {
         now: i64,
     ) -> Result<Reservation<'_>, String> {
         // Read before the lock: a sample may take a moment. Under pressure the effective cap is
-        // the live count, so no new worker starts in any Hive until it eases (§6.8).
-        if let Some(why) = (self.gate)().throttled() {
-            return Err(format!("Throttled · {why}: no worker starts until the machine has memory to spare."));
-        }
+        // the live count, so no new worker starts in any Hive until it eases (§6.8). Said last,
+        // so a pressure refusal means nothing else stood in the way (`is_throttle_refusal`).
+        let throttled = (self.gate)().throttled();
         let mut g = self.lock()?;
         let b = g.book();
         b.prune(now);
@@ -212,6 +220,9 @@ impl Fuses {
                 ));
             }
         }
+        if let Some(why) = throttled {
+            return Err(format!("{THROTTLE_PREFIX}{why}: no worker starts until the machine has memory to spare."));
+        }
         let id = uuid::Uuid::new_v4().to_string();
         b.pending.insert(id.clone(), Pending { hive_id: hive.id.clone(), worker: worker.to_string(), at: now });
         Ok(Reservation { fuses: self, id, done: false })
@@ -219,7 +230,7 @@ impl Fuses {
 
     /// `live` as for `reserve`.
     pub fn headroom(&self, hive: &Hive, live: &[String], now: i64) -> Headroom {
-        let mut h = Headroom { cap: hive.cap, live: live.len(), ..Headroom::default() };
+        let mut h = Headroom { cap: hive.cap, live: live.len(), gate: (self.gate)(), ..Headroom::default() };
         let Ok(mut g) = self.lock() else { return h };
         let b = g.book();
         b.prune(now);
@@ -445,6 +456,8 @@ pub struct Headroom {
     /// When this changes with no event to say so: the breaker ends, or a spawn leaves the hour's
     /// or the day's window. The board refetches then (§4.4: a clock, not a poll).
     pub changes_at: Option<i64>,
+    /// Memory pressure as a reservation would read it now (§6.8).
+    pub gate: super::pressure::Gate,
 }
 
 /// The app's book, for a caller that holds a reservation across an await (a spawn).
@@ -1039,8 +1052,15 @@ mod tests {
         for gate in [|| crate::hive::pressure::Gate::Hold, || crate::hive::pressure::Gate::Critical] {
             let f = Fuses::with_gate(dir.join(FUSES_FILE), gate);
             let err = f.reserve(&hive("h1", 4), W, Vec::new, T0).err().unwrap();
-            assert!(err.starts_with("Throttled · memory pressure"), "{err}");
+            assert!(err.starts_with("Throttled · memory pressure") && is_throttle_refusal(&err), "{err}");
             assert_eq!(f.headroom(&hive("h1", 4), &[], T0).pending, 0, "nothing was taken");
+            assert_eq!(f.headroom(&hive("h1", 4), &[], T0).gate, gate(), "the header reads the same gate");
+            // Said last: a refusal for pressure means nothing else stood in the way.
+            let err = f.reserve(&hive("h1", 1), W, || ids(1), T0).err().unwrap();
+            assert!(err.contains("cap is reached") && !is_throttle_refusal(&err), "{err}");
+            let mut paused = hive("h1", 4);
+            paused.status = STATUS_PAUSED.to_string();
+            assert!(!is_throttle_refusal(&f.reserve(&paused, W, Vec::new, T0).err().unwrap()));
         }
         let f = Fuses::with_gate(dir.join(FUSES_FILE), || crate::hive::pressure::Gate::Open);
         assert!(f.reserve(&hive("h1", 4), W, Vec::new, T0).is_ok());

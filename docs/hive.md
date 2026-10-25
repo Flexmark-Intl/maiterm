@@ -989,10 +989,12 @@ long session; idle, it uses about 0% CPU, so the cost is what it runs (spike 8, 
   above it needs the human's confirmation in the sheet (`create::cap_ceiling`).
 - **Workers launch with `--strict-mcp-config`** and only the MCP servers they need (maiTerm's,
   and the generators the role uses), since the MCP children are half a session's memory.
-- **Pressure** is read from `kern.memorystatus_vm_pressure_level` and the free-memory
-  percentage: at level 2 or more, or under 25% free, Rust starts nothing new and lowers the
-  effective worker cap; at level 4, or under 10% free, the heavy resources drop to one each. The
-  header says "Throttled · memory pressure".
+- **Pressure** is read from `kern.memorystatus_vm_pressure_level` on macOS, which is the
+  authority there: at level 2 or more Rust starts nothing new and lowers the effective worker
+  cap; at level 4 the heavy resources drop to one each. Only where no kernel level exists (Linux,
+  Windows) does the free-memory percentage gate, at 25% and 10%. The header says "Throttled ·
+  memory pressure", and a worker the coordinator spawns meanwhile waits on its card and launches
+  when it eases (§16, second live test fixes).
 - **CPU is read as idle %, never load average.** With 69 sessions running, load average was 80
   while the CPU was 67% idle. `cargo`'s capacity of 2 stands.
 
@@ -4040,3 +4042,45 @@ several releases a day).
    the mod dedup, and a reload moves a tab's failed-turn notice to its new id. *Phone:*
    "Keep this Hive's agents off the phone" on the Create sheet (`HiveSettings.keep_off_phone`) makes
    every Hive tab `mailink_excluded` as it is made, the coordinator before its launch.
+   **Second live test fixes** (2026-10-25; the coordinator ran, no worker could start). *Memory
+   pressure:* every spawn was refused "Throttled · memory pressure" on a 128 GB Mac at kernel
+   level 1 with `memory_pressure` reporting 68% free, because the free % came from sysinfo 0.33's
+   `available_memory`, which on macOS subtracts the compressor from free + inactive + purgeable (a
+   steady 11%). On macOS the kernel's `kern.memorystatus_vm_pressure_level` alone now gates (2
+   holds, 4 is critical); macOS's free % is `kern.memorystatus_level`, the figure `memory_pressure`
+   prints, recorded only; free % gates (25%, 10%) only where no level exists (`pressure::gate_of`).
+   The run queue reads the same `gate_of`. *The throttle on the board:* the board's headroom carries
+   `throttled`/`throttle_critical`, the header says "Throttled · memory pressure" with a Tooltip,
+   and the digest says it too. A spawn refused for pressure alone (`reserve` now names pressure
+   last, so `fuses::is_throttle_refusal` means nothing else stood in the way) takes nothing back:
+   the worker is filed as **waiting** with the refusal as its reason, the same machinery as a
+   waiter refused at reserve (`Refusal { at_reserve, throttled }`: no backoff, untold), and the
+   tool answers `state: "waiting", throttled` and tells the coordinator not to spawn it again. One
+   watch (`waiters::poll_when_memory_frees`, deduplicated by `pressure::Watch`) samples every 5 s
+   only while something was refused (or a board showed the throttle) and, on the gate opening,
+   refetches every Hive's board, polls every Hive's waiters and tells the coordinator of each Hive
+   whose worker was refused; a restart refused for pressure joins it and says so. The watch is in
+   memory, so after a maiTerm restart the coordinator's session start polls its Hive
+   (`waiters::on_coordinator_start`; not app setup, when no window can take a launch yet): still
+   held, the refusal re-arms the watch; eased, the held waiter launches and the coordinator is told. *Inherited
+   account env:* a dev maiTerm started from a prod tab inherited `CLAUDE_CONFIG_DIR=<prod>/accounts/
+   claude/<id>`, so the coordinator ran under a root holding none of the trust maiTerm wrote and
+   sat at the trust dialog, and a `/login` in a plain dev tab went into the prod root. At startup
+   maiTerm removes a config-root variable it sets per tab (`CLAUDE_CONFIG_DIR`) when it came from
+   a maiTerm tab (`MAITERM_TAB_ID`/`MAITERM_AUTH` set) or names any maiTerm's managed root
+   (`accounts::scrub_inherited_account_env`); a root the user exported themselves stays, since
+   unset means "leave Claude Code alone" (docs/login.md §5) and managed tabs set their own. Every
+   Hive launch line now sets `CLAUDE_CONFIG_DIR` to the root a plain tab's `claude` gets (the
+   managed account's, else the one the user exported and the scrub kept,
+   `accounts::user_claude_root`) (`launch::account_set`) or unsets it (`unset_vars`), so a Hive
+   never bills another account than the human's tabs, from `launch::launch_config_root`, the one resolution the trust write
+   and check (which now require the launch's own `.claude.json` to hold the entry), the Create
+   sheet's trust read and its login check use. `Ctx.preflight` takes the preferences for that.
+   *An expired login:* `claude auth status --json` reports `loggedIn: true` whenever a token is
+   stored (2.1.310's `authStatus`); a subscription login whose refresh token Claude found dead
+   (stored as "") shows only in the text form, `Login: Expired — log in again`, so the sheet's
+   check asks `--text` too for a `claude.ai` login (`create::expired_verdict`). *Minor:* the
+   sheet shows "Measuring this computer…" and "Finding the folder you were working in…" until the
+   preflight answers; the default Primary prefers each tab's live OSC 7 folder on this machine
+   (the frontend sends `live_cwds`) over Rust's lagging `last_cwd`; a board fetch racing a delete
+   logs at info.

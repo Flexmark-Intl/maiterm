@@ -80,6 +80,9 @@ pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     /// A land joined a repo's batch queue that has no run yet: one starts outside the tool call
     /// (`land::batch::run_background`). A test runs `land::batch::run` itself.
     fn continue_batch(&self, _caller: &super::tools::Caller, _folder: &str) {}
+    /// A worker of the caller's Hive was refused for memory pressure: the waiters poll and its
+    /// coordinator is told once the gate opens (`waiters::poll_when_memory_frees`).
+    fn watch_pressure(&self, _caller: &super::tools::Caller) {}
     /// Files a card only the human approves (`agent_requests::file_hive`, docs/hive.md §8.1,
     /// §8.3) in this window, from the coordinator's tab. Its id.
     fn file_request(&self, _req: HiveRequest) -> Result<String, String> {
@@ -233,6 +236,10 @@ impl HiveWindow for AppWindow {
 
     fn continue_batch(&self, caller: &super::tools::Caller, folder: &str) {
         super::land::batch::run_background(self.app.clone(), self.handle.clone(), caller.clone(), folder.to_string());
+    }
+
+    fn watch_pressure(&self, caller: &super::tools::Caller) {
+        super::waiters::poll_when_memory_frees(self.app.clone(), self.handle.clone(), Some(caller.workspace_id.clone()));
     }
 
     fn file_request(&self, req: HiveRequest) -> Result<String, String> {

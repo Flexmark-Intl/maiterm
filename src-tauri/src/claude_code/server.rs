@@ -4432,6 +4432,7 @@ fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, trans
     tauri::async_runtime::spawn(async move {
         let tab_id = tab.clone();
         let is_worker = role == crate::hive::ROLE_WORKER;
+        let is_coordinator = role == crate::hive::ROLE_COORDINATOR;
         let started = tokio::task::spawn_blocking(move || {
             crate::hive::session_started(&hive, &role, &paths, &tab_id, &sid, transcript_path, crate::hive::fuses::book(), cards)
         })
@@ -4443,6 +4444,12 @@ fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, trans
         }
         if let (true, Some((label, ws))) = (started.memory_changed, &board) {
             crate::hive::memory::emit_changed(&handle, label, ws);
+        }
+        // Its waiters poll, now that its window is up: what held them (memory pressure, whose
+        // watch a restart ended) may have lifted while nothing watched. Its own task, so a held
+        // digest below doesn't hold the poll.
+        if let (true, Some((_, ws))) = (is_coordinator, &board) {
+            crate::hive::waiters::on_coordinator_start(app.clone(), handle.clone(), ws.clone());
         }
         // One after another, and none past one that didn't go: a digest never lands before the
         // kickoff it follows. What's left stays owed for the next session start.

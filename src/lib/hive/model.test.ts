@@ -1,8 +1,26 @@
 import { describe, expect, it } from 'vitest';
 import {
   adoptInstalled, charCount, checkpointAsks, checkpointFor, coordinatorHolds, dispatchHiveOpenColumn, engineSkips, folderName, HIVE_HUMAN_KIND,
-  HIVE_PROMPT_KINDS, hiveOwnsPromptIn, isEligible, MAX_INSTRUCTIONS, openTargetFor, pausedLabel, slugify, takePendingHiveOpen, validateSpec, withCoordinatorText,
+  HIVE_PROMPT_KINDS, hiveOwnsPromptIn, isEligible, MAX_INSTRUCTIONS, openTargetFor, pausedLabel, slugify, throttleTip, boardGone, takePendingHiveOpen, validateSpec, withCoordinatorText,
 } from './model';
+
+describe('boardGone', () => {
+  it('a fetch racing the delete is not an error; anything else on a live Hive is', () => {
+    expect(boardGone("Error: That workspace isn't a Hive", true)).toBe(true);
+    expect(boardGone('Workspace not found', true)).toBe(true);
+    expect(boardGone('No Hive folder', false)).toBe(true);
+    expect(boardGone('No Hive folder', true)).toBe(false);
+  });
+});
+
+describe('throttleTip', () => {
+  it('says what the throttle holds back, and that a held worker launches on its own', () => {
+    expect(throttleTip(false)).toMatch(/no worker or queued run starts until it eases/);
+    expect(throttleTip(true)).toMatch(/one at a time/);
+    expect(throttleTip(false)).not.toMatch(/one at a time/);
+    for (const c of [false, true]) expect(throttleTip(c)).toMatch(/launches on its own/);
+  });
+});
 
 describe('pausedLabel', () => {
   it('says who or what paused the Hive, an unrecorded pause being a usage limit', () => {

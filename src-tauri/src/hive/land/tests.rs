@@ -93,7 +93,7 @@ impl HiveWindow for Stub {
 fn ok_save(_: &AppData) -> Result<(), String> {
     Ok(())
 }
-fn ok_preflight(_: &HivePaths, _: &WorkerRecord) -> Result<(), String> {
+fn ok_preflight(_: &HivePaths, _: &WorkerRecord, _: &crate::state::Preferences) -> Result<(), String> {
     Ok(())
 }
 

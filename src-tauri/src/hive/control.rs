@@ -235,14 +235,22 @@ pub(crate) async fn restart_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
         }
     }
     let dir = worker::task_dir(&caller.paths, &w.task_id)?;
-    let (paths, record, preflight) = (caller.paths.clone(), w.clone(), ctx.preflight);
-    blocking(move || preflight(&paths, &record)).await?;
+    let (paths, record, preflight, prefs) = (caller.paths.clone(), w.clone(), ctx.preflight, ctx.data.read().preferences.clone());
+    blocking(move || preflight(&paths, &record, &prefs)).await?;
 
     // Counted as a spawn. Its own slot is the one it takes: a live worker doesn't count twice.
     let (hive, paths, fuses, task_id) = (caller.hive.clone(), caller.paths.clone(), ctx.fuses, w.task_id.clone());
     let me = task_id.clone();
     let live = move || super::tools::live_task_ids(&paths).into_iter().filter(|t| *t != me).collect::<Vec<_>>();
-    let reservation = blocking(move || fuses.reserve(&hive, &task_id, live, super::fuses::now_ms())).await?;
+    let reservation = match blocking(move || fuses.reserve(&hive, &task_id, live, super::fuses::now_ms())).await {
+        Ok(r) => r,
+        Err(e) if super::fuses::is_throttle_refusal(&e) => {
+            // The coordinator hears when memory frees up, rather than retrying into the gate.
+            ctx.window.watch_pressure(caller);
+            return Err(format!("{e} maiTerm tells you when it eases: restart it then."));
+        }
+        Err(e) => return Err(e),
+    };
 
     // `launching` before the relaunch: the builder starts only a live worker, and the slot moves
     // from pending to live with no gap, as for a spawn.

@@ -280,3 +280,18 @@ export function pausedLabel(pausedBy: string | undefined | null): string {
       return 'Paused: usage limit. No new workers start';
   }
 }
+
+/** Whether a board fetch failed because the workspace stopped being a Hive (deleted, or turned
+ *  back into a workspace) while it was in flight: `hive_workers`' own refusals, or the store
+ *  already without the Hive. Logged at info, not as an error. */
+export function boardGone(error: string, stillHive: boolean): boolean {
+  return !stillHive || /isn't a Hive|Workspace not found/.test(error);
+}
+
+/** What the header's "Throttled · memory pressure" means (§6.8). */
+export function throttleTip(critical: boolean): string {
+  const held = critical
+    ? 'The computer is critically short of memory: no worker or queued run starts, and the heavy runs go one at a time.'
+    : 'The computer is short of memory: no worker or queued run starts until it eases.';
+  return `${held} A worker the coordinator starts meanwhile waits on its card and launches on its own once memory frees up.`;
+}

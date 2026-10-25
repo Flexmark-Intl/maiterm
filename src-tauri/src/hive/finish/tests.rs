@@ -122,7 +122,7 @@ fn ok_save(_: &AppData) -> Result<(), String> {
 fn bad_save(_: &AppData) -> Result<(), String> {
     Err("disk full".into())
 }
-fn ok_preflight(_: &HivePaths, _: &WorkerRecord) -> Result<(), String> {
+fn ok_preflight(_: &HivePaths, _: &WorkerRecord, _: &crate::state::Preferences) -> Result<(), String> {
     Ok(())
 }
 

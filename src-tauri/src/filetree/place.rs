@@ -83,7 +83,7 @@ fn single_agent_cwd(i: &PlaceInputs) -> Option<&str> {
 }
 
 /// Does OSC 7 name this machine? An absent host is a local shell that didn't say.
-fn osc_is_local(host: Option<&str>, local_host: &str) -> bool {
+pub(crate) fn osc_is_local(host: Option<&str>, local_host: &str) -> bool {
     match host.map(str::trim).filter(|h| !h.is_empty()) {
         None => true,
         Some(h) => {
@@ -436,7 +436,7 @@ fn gather(state: &Arc<AppState>, tab_id: &str, fresh: bool) -> Result<PlaceInput
     Ok(i)
 }
 
-fn local_hostname() -> String {
+pub(crate) fn local_hostname() -> String {
     sysinfo::System::host_name().unwrap_or_default()
 }
 

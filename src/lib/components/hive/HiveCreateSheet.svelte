@@ -15,6 +15,7 @@
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
+  import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { navHistoryStore } from '$lib/stores/navHistory.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { importVerdict, sameService, sharesByDefault, type RunningElsewhere, type StackOffer } from '$lib/stack/model';
@@ -51,6 +52,9 @@
 
   const ws = $derived(workspacesStore.workspaces.find((w) => w.id === workspaceId));
   let preflight = $state<HivePreflight | null>(null);
+  /** Until the preflight (and its default Primary's detection) answers: the ceiling and the
+   *  folder list show a loading line, never a ceiling of 1 or an empty list. */
+  let primaryPending = $state(true);
   let loadError = $state<string | null>(null);
   let tools = $state<HiveDetectedTool[] | null>(null);
 
@@ -90,14 +94,22 @@
     // that has a local folder a Hive may use.
     const active = workspacesStore.activeTab?.id ?? null;
     const before = navHistoryStore.peekMostRecent((e) => e.tabId !== active)?.tabId ?? null;
+    const ids = [active, before].filter((id): id is string => !!id);
+    // Each terminal's OSC 7 folder: Rust's saved one lags a `cd` made just before opening this.
+    const live = ids.map((id) => {
+      const osc = terminalsStore.getOsc(id);
+      return { tab_id: id, cwd: osc?.cwd ?? null, host: osc?.cwdHost ?? null };
+    });
     try {
-      const p = await hivePreflight(workspaceId, [active, before].filter((id): id is string => !!id));
+      const p = await hivePreflight(workspaceId, ids, live);
       preflight = p;
       cap = Math.min(p.default_cap, Math.max(p.ceiling, 1));
       if (p.default_primary && folders.length === 0) await addFolder(p.default_primary);
     } catch (e) {
       loadError = String(e);
       logError(`hive: preflight failed: ${e}`);
+    } finally {
+      primaryPending = false;
     }
   })();
   hiveDetectTools().then((t) => (tools = t)).catch((e) => { tools = []; logError(`hive: tool detection failed: ${e}`); });
@@ -331,7 +343,9 @@
 
       <div class="field">
         <span class="label">Folders</span>
-        {#if folders.length === 0}
+        {#if folders.length === 0 && primaryPending}
+          <p class="hint">Finding the folder you were working in…</p>
+        {:else if folders.length === 0}
           <p class="hint">Add the Primary folder: where workers work unless a task says otherwise.</p>
         {/if}
         <div class="list">
@@ -400,11 +414,15 @@
         <span class="label">Workers at once</span>
         <div class="inline">
           <input class="num" type="number" min="1" bind:value={cap} onchange={() => (capConfirmed = false)} />
-          <Tooltip text="About one worker per 16 GB of memory above 32 GB, and no more than a quarter of the CPU cores. Each worker is a Claude session plus its tools.">
-            <span class="hint">This computer's ceiling: {ceiling}</span>
-          </Tooltip>
+          {#if preflight}
+            <Tooltip text="About one worker per 16 GB of memory above 32 GB, and no more than a quarter of the CPU cores. Each worker is a Claude session plus its tools.">
+              <span class="hint">This computer's ceiling: {ceiling}</span>
+            </Tooltip>
+          {:else if !loadError}
+            <span class="hint">Measuring this computer…</span>
+          {/if}
         </div>
-        {#if Number(cap) > ceiling}
+        {#if preflight && Number(cap) > ceiling}
           <label class="check warn">
             <input type="checkbox" bind:checked={capConfirmed} />
             Use {cap} anyway: more than this computer is sized for

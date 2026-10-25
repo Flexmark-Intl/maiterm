@@ -786,6 +786,70 @@ pub fn spawn_env_for(prefs: &crate::state::Preferences) -> (Vec<(String, String)
     (set, unset)
 }
 
+/// What a maiTerm tab's shell carries to say it is one (`pty/manager.rs` sets both).
+const MAITERM_TAB_MARKERS: &[&str] = &["MAITERM_TAB_ID", "MAITERM_AUTH"];
+
+/// The config-root variables this process inherited that no maiTerm chose for it: each runtime
+/// `spawn_env` sets per tab, when maiTerm was started from inside a maiTerm tab (the value is
+/// the PARENT's per-tab account) or when it names a maiTerm managed root
+/// (`<OS data dir>/<any maiTerm>/accounts/<runtime>/<id>`). Inherited, it reaches every tab with
+/// managed accounts off, every Hive launch and every probe, and the tab comes up as that account
+/// (§6.1's fall-through): a dev maiTerm started from a prod tab ran its coordinator under the prod
+/// root, which held none of the trust maiTerm wrote, and a `/login` in a plain dev tab went into
+/// it. A root the user exported themselves stays: unset means "leave Claude Code alone" (§5), and
+/// with managed accounts on, every tab's spawn sets its own anyway.
+pub fn inherited_account_env(get: impl Fn(&str) -> Option<String>, os_data: Option<&Path>) -> Vec<&'static str> {
+    let from_maiterm = MAITERM_TAB_MARKERS.iter().any(|m| get(m).is_some_and(|v| !v.is_empty()));
+    let managed_root = |rt: Runtime, v: &str| {
+        let p = Path::new(v);
+        let accounts = p.parent().filter(|d| d.file_name().is_some_and(|n| n == rt.slug())).and_then(Path::parent);
+        let app = accounts.filter(|d| d.file_name().is_some_and(|n| n == "accounts")).and_then(Path::parent);
+        app.and_then(Path::parent).zip(os_data).is_some_and(|(parent, data)| parent == data)
+    };
+    ALL_RUNTIMES
+        .iter()
+        .map(|rt| (*rt, rt.profile()))
+        .filter(|(_, p)| p.supported && !p.config_env.is_empty())
+        .filter(|(rt, p)| get(p.config_env).is_some_and(|v| from_maiterm || managed_root(*rt, &v)))
+        .map(|(_, p)| p.config_env)
+        .collect()
+}
+
+/// Removes `inherited_account_env` from this process's environment, so no child (a tab, a Hive
+/// launch, an auth probe) inherits it. Call only while the process is single-threaded: at
+/// startup, before anything else runs. Returns the names removed, for the log.
+pub fn scrub_inherited_account_env() -> Vec<&'static str> {
+    let os_data = crate::state::persistence::os_data_dir();
+    let removed = scrub_with(|k| std::env::var(k).ok(), |k| std::env::remove_var(k), os_data.as_deref());
+    let own = CLAUDE.supported.then(|| std::env::var(CLAUDE.config_env).ok()).flatten();
+    USER_CLAUDE_ROOT.get_or_init(|| users_own_root(own));
+    removed
+}
+
+/// The `CLAUDE_CONFIG_DIR` the user exported themselves, as the startup scrub left it. Every
+/// plain tab's `claude` runs under it when no managed Claude account sets one, so a Hive launch
+/// does too (`hive::launch::launch_config_root`), or the two would bill different accounts.
+/// Unset in tests, which never scrub.
+static USER_CLAUDE_ROOT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+pub fn user_claude_root() -> Option<&'static Path> {
+    USER_CLAUDE_ROOT.get().and_then(|p| p.as_deref())
+}
+
+/// Only an absolute root: a relative one resolves against each tab's cwd, which a Hive agent's
+/// isn't, so no one root could be named for it.
+fn users_own_root(value: Option<String>) -> Option<PathBuf> {
+    value.map(PathBuf::from).filter(|p| p.is_absolute())
+}
+
+fn scrub_with(get: impl Fn(&str) -> Option<String>, mut remove: impl FnMut(&str), os_data: Option<&Path>) -> Vec<&'static str> {
+    let names = inherited_account_env(get, os_data);
+    for n in &names {
+        remove(n);
+    }
+    names
+}
+
 /// The account a new tab gets for each runtime — the ONE resolution both the spawn env and the
 /// per-tab record (`tab_record::for_spawn`) read, so what a tab is recorded as cannot drift from
 /// what its shell was handed. Only runtimes `spawn_env` would actually inject for.
@@ -925,6 +989,7 @@ fn symlink(source: &Path, link: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::fs;
 
     /// A home directory with the entries a real Claude user would have.
@@ -1511,6 +1576,54 @@ mod tests {
         let mut p = prefs_with_remotes(&[("a", &[], true, true)], Some("a"));
         p.managed_accounts.clear();
         assert!(remote_account_for_host(&p, "nova").is_none());
+    }
+
+    /// A dev maiTerm started from a prod tab: the coordinator ran under the prod root (second
+    /// Hive live test).
+    #[test]
+    fn an_account_root_no_maiterm_chose_is_scrubbed_and_the_users_own_stays() {
+        if !CLAUDE.supported {
+            return;
+        }
+        let data = Path::new("/Users/u/Library/Application Support");
+        let prod_root = "/Users/u/Library/Application Support/com.aiterm.app/accounts/claude/41a5";
+        let run = |pairs: &[(&str, &str)]| {
+            let env: HashMap<String, String> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            inherited_account_env(|k| env.get(k).cloned(), Some(data))
+        };
+        assert_eq!(run(&[("CLAUDE_CONFIG_DIR", prod_root), ("MAITERM_TAB_ID", "t1")]), vec!["CLAUDE_CONFIG_DIR"], "the parent tab's account");
+        assert_eq!(run(&[("CLAUDE_CONFIG_DIR", prod_root)]), vec!["CLAUDE_CONFIG_DIR"], "another maiTerm's managed root, however it got here");
+        assert_eq!(run(&[("CLAUDE_CONFIG_DIR", "/Users/u/.claude-work"), ("MAITERM_AUTH", "x")]), vec!["CLAUDE_CONFIG_DIR"], "whatever a maiTerm tab had");
+        assert!(run(&[("CLAUDE_CONFIG_DIR", "/Users/u/.claude-work")]).is_empty(), "the user's own, from Finder or another terminal");
+        assert!(run(&[("CLAUDE_CONFIG_DIR", "/tmp/x/accounts/claude/41a5")]).is_empty(), "only the shape under the OS data dir");
+        assert!(run(&[("MAITERM_TAB_ID", "t1"), ("MAITERM_AUTH", "x")]).is_empty(), "nothing inherited, nothing to remove");
+        assert!(run(&[("CLAUDE_CONFIG_DIR", "/Users/u/.claude-work"), ("MAITERM_TAB_ID", "")]).is_empty(), "an empty marker isn't a tab");
+    }
+
+    #[test]
+    fn the_startup_scrub_removes_the_inherited_value() {
+        if !CLAUDE.supported {
+            return;
+        }
+        let env = std::cell::RefCell::new(HashMap::from([
+            ("CLAUDE_CONFIG_DIR".to_string(), "/elsewhere/claude".to_string()),
+            ("MAITERM_TAB_ID".to_string(), "t1".to_string()),
+            ("CODEX_HOME".to_string(), "/u/.codex".to_string()),
+        ]));
+        let removed = scrub_with(|k| env.borrow().get(k).cloned(), |k| { env.borrow_mut().remove(k); }, None);
+        assert_eq!(removed, vec!["CLAUDE_CONFIG_DIR"]);
+        let env = env.into_inner();
+        assert!(!env.contains_key("CLAUDE_CONFIG_DIR"));
+        assert!(env.contains_key("CODEX_HOME"), "a runtime maiTerm doesn't set per tab is the user's");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_an_absolute_root_is_the_users_own() {
+        assert_eq!(users_own_root(Some("/Users/u/.claude-work".into())), Some(PathBuf::from("/Users/u/.claude-work")));
+        assert_eq!(users_own_root(Some(".claude-work".into())), None);
+        assert_eq!(users_own_root(Some(String::new())), None);
+        assert_eq!(users_own_root(None), None);
     }
 
     #[test]

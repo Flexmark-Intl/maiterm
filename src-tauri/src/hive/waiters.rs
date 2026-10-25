@@ -78,13 +78,79 @@ pub fn poll_all_at(state: Arc<AppState>, handle: AppHandle, at_ms: i64) {
     });
 }
 
-pub(crate) async fn poll<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller) {
+/// The one memory watch (§6.8), and the Hives whose workers it refused, by workspace id.
+static PRESSURE_WATCH: super::pressure::Watch = super::pressure::Watch::new();
+static PRESSURE_REFUSED: Mutex<Option<std::collections::BTreeSet<String>>> = Mutex::new(None);
+
+/// What a coordinator hears when memory frees up after one of its workers was refused for it.
+pub(crate) const MEMORY_FREED_NOTICE: &str = "[maiTerm] Memory pressure has eased, so workers can start again. Waiting workers it held \
+     launch now on their own; restart one it refused (hiveRestartWorker) if you still want it.";
+
+/// Once memory pressure lets starts through again, every Hive's board refetches (its header
+/// says "Throttled" while it holds) and its waiters poll, and the coordinator of each Hive in
+/// `refused` (the workspace id of one whose worker was just refused) is told. One watch runs at a
+/// time, sampling every `SAMPLE_EVERY` only until the gate opens; a refusal meanwhile joins it.
+pub fn poll_when_memory_frees(state: Arc<AppState>, handle: AppHandle, refused: Option<String>) {
+    if let Some(ws) = refused {
+        PRESSURE_REFUSED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(ws);
+    }
+    if !PRESSURE_WATCH.begin() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        super::pressure::until_open(super::pressure::spawn_gate, super::pressure::SAMPLE_EVERY).await;
+        PRESSURE_WATCH.end();
+        // Taken after the watch ends: a refusal later starts its own watch, which ends at once.
+        let told = PRESSURE_REFUSED.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
+        let callers = super::tools::hive_callers(&state.app_data.read());
+        log::info!("hive: memory pressure has eased; polling {} Hive(s)' waiters", callers.len());
+        for caller in callers {
+            super::rpc::emit_workers_changed(&handle, &caller.label, &caller.workspace_id);
+            let ctx = super::tools::app_ctx(&state, &handle, &caller);
+            if told.contains(&caller.workspace_id) {
+                tell_coordinator(&ctx, &caller, MEMORY_FREED_NOTICE.to_string()).await;
+            }
+            poll(&ctx, &caller).await;
+        }
+    });
+}
+
+/// A coordinator's session started (`claude_code::server`), so its window is up and a launch can
+/// reach it. The memory watch is in memory, and a restart ended it: a worker memory pressure held
+/// stays `waiting` until some unrelated event polls, and its coordinator was told not to spawn it
+/// again. So the Hive polls here. Still held, the poll's refusal puts it back on the watch
+/// (`HiveWindow::watch_pressure`); eased, it launches and the coordinator is told. Not at app
+/// setup: no window has loaded then, so a launch would time out, back off and tell no one.
+pub fn on_coordinator_start(state: Arc<AppState>, handle: AppHandle, workspace_id: String) {
+    tauri::async_runtime::spawn(async move {
+        let Some(caller) = super::tools::caller_for_workspace(&state.app_data.read(), &workspace_id) else { return };
+        let ctx = super::tools::app_ctx(&state, &handle, &caller);
+        coordinator_started(&ctx, &caller).await;
+    });
+}
+
+pub(crate) async fn coordinator_started<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller) {
+    let paths = caller.paths.clone();
+    let workers = blocking(move || Ok(worker::list_workers(&paths))).await.unwrap_or_default();
+    let held: Vec<String> = workers
+        .into_iter()
+        .filter(|w| w.phase == worker::PHASE_WAITING && w.wait_reason.as_deref().is_some_and(super::fuses::is_throttle_refusal))
+        .map(|w| w.slug)
+        .collect();
+    let launched = poll(ctx, caller).await;
+    if launched.iter().any(|s| held.contains(s)) {
+        tell_coordinator(ctx, caller, MEMORY_FREED_NOTICE.to_string()).await;
+    }
+}
+
+/// Returns the slugs it launched; none when it only asked a poll already running to go again.
+pub(crate) async fn poll<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller) -> Vec<String> {
     {
         let mut g = POLLING.lock().unwrap_or_else(|e| e.into_inner());
         let running = g.get_or_insert_with(HashMap::new);
         if let Some(again) = running.get_mut(&caller.hive.id) {
             *again = true;
-            return;
+            return Vec::new();
         }
         running.insert(caller.hive.id.clone(), false);
     }
@@ -100,8 +166,9 @@ pub(crate) async fn poll<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller) {
         }
     }
     let mut guard = Running(&caller.hive.id, false);
+    let mut launched = Vec::new();
     loop {
-        poll_once(ctx, caller).await;
+        launched.extend(poll_once(ctx, caller).await);
         let mut g = POLLING.lock().unwrap_or_else(|e| e.into_inner());
         let running = g.get_or_insert_with(HashMap::new);
         if running.get(&caller.hive.id).copied().unwrap_or(false) {
@@ -113,6 +180,7 @@ pub(crate) async fn poll<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller) {
         guard.1 = true;
         break;
     }
+    launched
 }
 
 /// Where a waiter stands against its dependencies.

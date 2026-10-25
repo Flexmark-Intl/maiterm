@@ -200,7 +200,9 @@ fn hive_tool_definitions(role: &str) -> Vec<Value> {
              detail), makes a worktree of each folder on the worker's own branch off its landing target, and starts a \
              sandboxed agent in a hidden tab that reads your brief first. Pick its role from the catalogue in your brief. \
              Refused above the Hive's cap, past the spawn fuses (shared by every Hive on this machine), or while a usage \
-             limit or a pause holds; the answer says which. With depends_on, the worker waits as a task and a card, and \
+             limit or a pause holds; the answer says which. While the machine is short of memory it isn't refused: it \
+             waits as a task and a card (state \"waiting\", \"throttled\") and launches on its own when memory frees up, and \
+             you're told then, so don't spawn it again. With depends_on, the worker waits as a task and a card, and \
              launches only once every dependency's task is done, branching from what has landed by then. A title whose \
              worker or branch already exists is refused: it names the branch. With reviews, it is a reviewer of a worker that \
              reported done: it gets that worker's folders as copies pinned at its branch tip (no branch of its own), reads \
@@ -413,9 +415,12 @@ pub(crate) struct Ctx<'a, W: HiveWindow> {
     pub fuses: &'static Fuses,
     pub window: W,
     pub save: fn(&AppData) -> Result<(), String>,
-    /// Checks the launch would make (Claude's version, repo trust), before the tab exists.
-    pub preflight: fn(&HivePaths, &WorkerRecord) -> Result<(), String>,
+    /// Checks the launch would make (Claude's version, repo trust under the account the
+    /// preferences launch it as), before the tab exists.
+    pub preflight: Preflight,
 }
+
+pub(crate) type Preflight = fn(&HivePaths, &WorkerRecord, &crate::state::Preferences) -> Result<(), String>;
 
 pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &tauri::AppHandle) -> Value {
     let caller_tab = args.get("tabId").and_then(Value::as_str).unwrap_or_default();
@@ -1048,11 +1053,25 @@ pub(crate) async fn spawn_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Calle
     if reg.unmet.is_empty() {
         launch_new_worker(ctx, caller, reg).await
     } else {
-        file_waiting(ctx, caller, reg).await
+        file_waiting(ctx, caller, reg, None).await
     }
 }
 
-async fn file_waiting<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: Registered) -> Result<Value, String> {
+/// Files a registered worker as waiting: on unmet dependencies, or (`throttled`, the refusal) on
+/// memory pressure alone, when it launches from the waiters poll once the gate opens (§6.8).
+async fn file_waiting<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, mut reg: Registered, throttled: Option<String>) -> Result<Value, String> {
+    if let Some(why) = &throttled {
+        let (dir, why2) = (reg.task_dir.clone(), why.clone());
+        let res = blocking(move || worker::update_worker(&dir, |cur| {
+            cur.wait_reason = Some(why2.clone());
+            true
+        }))
+        .await;
+        match res {
+            Ok(w) => reg.worker = w,
+            Err(e) => return Err(Undo::new(&reg).run(ctx, caller, format!("{why} (and maiTerm couldn't file it as waiting: {e})")).await),
+        }
+    }
     let mut undo = Undo::new(&reg);
     let now = crate::commands::workspace::iso_now();
     let (rows, task, stream) = match insert_rows(ctx.data, caller, worker_task(&reg.worker, &reg.brief, None, &now), None) {
@@ -1070,6 +1089,18 @@ async fn file_waiting<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: Reg
     }
     ctx.window.workers_changed(&caller.workspace_id);
     let w = &reg.worker;
+    if let Some(why) = throttled {
+        log::info!("hive {}: worker {} waits on memory: {why}", caller.hive.id, worker_label(w));
+        return Ok(json!({
+            "worker": w.slug,
+            "badge": w.badge,
+            "task_id": w.task_id,
+            "state": "waiting",
+            "throttled": why,
+            "note": "The machine is short of memory, so it waits as a task and a card instead of starting. maiTerm launches it \
+                     on its own when memory frees up and tells you then: don't spawn it again.",
+        }));
+    }
     log::info!("hive {}: worker {} waits on {}", caller.hive.id, worker_label(w), reg.unmet.join(", "));
     Ok(json!({
         "worker": w.slug,
@@ -1082,24 +1113,39 @@ async fn file_waiting<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: Reg
 }
 
 async fn launch_new_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: Registered) -> Result<Value, String> {
-    launch_worker(ctx, caller, reg, None).await.map_err(|r| r.why)
+    match launch_worker(ctx, caller, &reg, None).await {
+        Ok(v) => Ok(v),
+        // Refused for memory pressure alone, before anything was made: it waits, never fails.
+        Err(r) if r.throttled => file_waiting(ctx, caller, reg, Some(r.why)).await,
+        Err(r) => Err(r.why),
+    }
 }
 
 /// Why a launch didn't happen, and whether it was the reservation (the cap, a fuse, the breaker,
-/// a pause): a waiter tries that again on its next poll at no cost, and backs off the rest.
+/// a pause, memory pressure): a waiter tries that again on its next poll at no cost, and backs
+/// off the rest.
 #[derive(Debug, Clone)]
 pub(crate) struct Refusal {
     pub why: String,
     pub at_reserve: bool,
+    /// Memory pressure alone (`fuses::is_throttle_refusal`). A new worker's launch took nothing
+    /// back for it: the spawn files the worker as waiting.
+    pub throttled: bool,
+}
+
+impl Refusal {
+    fn failed(why: String) -> Self {
+        Self { why, at_reserve: false, throttled: false }
+    }
 }
 
 /// A waiting worker whose dependencies are done launches (§3.1): what a spawn does, from its
 /// record and task row. A failure keeps it waiting, `why` its wait reason.
 pub(crate) async fn launch_waiting<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: WorkerRecord, row: Task) -> Result<Value, Refusal> {
-    let task_dir = worker::task_dir(&caller.paths, &w.task_id).map_err(|why| Refusal { why, at_reserve: false })?;
+    let task_dir = worker::task_dir(&caller.paths, &w.task_id).map_err(Refusal::failed)?;
     let brief = row.detail.clone().unwrap_or_default();
     let reg = Registered { worker: w, task_dir, brief, unmet: Vec::new(), plan_claim: None };
-    launch_worker(ctx, caller, reg, Some(row)).await
+    launch_worker(ctx, caller, &reg, Some(row)).await
 }
 
 /// What a launch or restart in a suspended Hive answers (§11.2): its workers start on resume.
@@ -1114,18 +1160,18 @@ pub(crate) fn hive_suspended(data: &RwLock<AppData>, caller: &Caller) -> bool {
 /// A registered worker's first launch: reserve, worktrees, records, the hidden tab, the window,
 /// then save and commit. Any failure takes all of it back (`Undo`), short of a waiting worker
 /// itself (`waiting_row`), which stays as it was.
-async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: Registered, waiting_row: Option<Task>) -> Result<Value, Refusal> {
-    let mut undo = Undo::new(&reg);
+async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: &Registered, waiting_row: Option<Task>) -> Result<Value, Refusal> {
+    let mut undo = Undo::new(reg);
     if waiting_row.is_some() {
         undo.waiting = Some(Waiting { record: reg.worker.clone(), row: waiting_row.clone() });
     }
-    let fail = |why: String| Refusal { why, at_reserve: false };
+    let fail = Refusal::failed;
     let mut w = reg.worker.clone();
 
     // Like the reservation's refusals, this only waits: the waiter keeps its reason, untold and
     // without backoff, and the resume's poll launches it.
     if hive_suspended(ctx.data, caller) {
-        return Err(Refusal { why: undo.run(ctx, caller, SUSPENDED_REFUSAL.to_string()).await, at_reserve: true });
+        return Err(Refusal { why: undo.run(ctx, caller, SUSPENDED_REFUSAL.to_string()).await, at_reserve: true, throttled: false });
     }
 
     let (hive, paths, fuses, task_id) = (caller.hive.clone(), caller.paths.clone(), ctx.fuses, w.task_id.clone());
@@ -1133,7 +1179,17 @@ async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: Re
     .await;
     match reserved {
         Ok(r) => undo.reservation = Some(r),
-        Err(e) => return Err(Refusal { why: undo.run(ctx, caller, e).await, at_reserve: true }),
+        Err(e) => {
+            let throttled = super::fuses::is_throttle_refusal(&e);
+            if throttled {
+                ctx.window.watch_pressure(caller);
+                // Nothing is made before the reservation, so a new worker has nothing to take back.
+                if undo.waiting.is_none() {
+                    return Err(Refusal { why: e, at_reserve: true, throttled });
+                }
+            }
+            return Err(Refusal { why: undo.run(ctx, caller, e).await, at_reserve: true, throttled });
+        }
     }
 
     // `create_worker_worktrees` takes back its own half-made folders when it fails. A reviewer's
@@ -1170,8 +1226,9 @@ async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: Re
     // Written `launching` before the commit, so the slot moves from pending to live with no gap.
     // The reservation is keyed by the task id, so meanwhile the worker counts once.
     let (hive, paths, task_dir, record, preflight) = (caller.hive.clone(), caller.paths.clone(), reg.task_dir.clone(), w.clone(), ctx.preflight);
+    let prefs = ctx.data.read().preferences.clone();
     let written = blocking(move || {
-        preflight(&paths, &record)?;
+        preflight(&paths, &record, &prefs)?;
         // Only over the waiting record this launch read: a stop meanwhile (the worktrees take
         // seconds) is the coordinator's word, and the launch is taken back instead.
         let mut ours = false;
@@ -1377,6 +1434,11 @@ pub struct HeadroomView {
     /// Claude's reset minute, `HH:MM`, while the usage-limit breaker holds.
     pub usage_limit_until: Option<String>,
     pub usage_limit_reason: Option<String>,
+    /// "memory pressure" while no worker or queued run may start (§6.8): the header's
+    /// "Throttled · …".
+    pub throttled: Option<String>,
+    /// The pressure is critical: the heavy runs go one at a time too.
+    pub throttle_critical: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -1464,6 +1526,8 @@ pub(crate) fn board_view(hive: &Hive, paths: &HivePaths, fuses: &Fuses, now: i64
             spawns_left_today: h.day_left,
             usage_limit_until: h.breaker_until.map(super::fuses::reset_hhmm),
             usage_limit_reason: h.breaker_reason,
+            throttled: h.gate.throttled().map(str::to_string),
+            throttle_critical: h.gate == super::pressure::Gate::Critical,
         },
         hive_status: hive.status.clone(),
         turn_failures: super::turn_failure::current(paths),
@@ -1535,12 +1599,18 @@ pub async fn hive_workers(
     };
     let root = super::paths::hive_root(&hive.id).ok_or("No Hive folder")?;
     let fuses = super::fuses::book();
-    blocking(move || {
+    let board = blocking(move || {
         let mut board = board_view(&hive, &HivePaths::new(root), fuses, super::fuses::now_ms(), false);
         board.spend.all_hives_micros = super::gallery::budget::all_hives_spent(&hive_ids).max(board.spend.spent_micros);
         Ok(board)
     })
-    .await
+    .await?;
+    // The header says "Throttled" now: the watch refetches every board when it lifts (§6.8).
+    if board.headroom.throttled.is_some() {
+        use tauri::Manager;
+        super::waiters::poll_when_memory_frees(state.inner().clone(), window.app_handle().clone(), None);
+    }
+    Ok(board)
 }
 
 // ── The Hive view's mount ──
@@ -1856,6 +1926,8 @@ mod tests {
         deliver_as: Option<Sent>,
         /// The job in front isn't the agent (a first launch's setup): a stop signals nothing.
         not_the_agent: bool,
+        /// Memory watches asked for, by workspace id.
+        pressure_watches: Vec<String>,
     }
 
     #[derive(Clone)]
@@ -1872,6 +1944,9 @@ mod tests {
             async move { o }
         }
         fn workers_changed(&self, _workspace_id: &str) {}
+        fn watch_pressure(&self, caller: &Caller) {
+            self.agents.lock().unwrap().pressure_watches.push(caller.workspace_id.clone());
+        }
         fn deliver(&self, tab: &str, text: String, _what: &'static str) -> impl std::future::Future<Output = Sent> + Send {
             let mut a = self.agents.lock().unwrap();
             let sent = a.deliver_as.clone().unwrap_or(Sent::Delivered);
@@ -1915,10 +1990,10 @@ mod tests {
     fn bad_save(_: &AppData) -> Result<(), String> {
         Err("disk full".into())
     }
-    fn ok_preflight(_: &HivePaths, _: &WorkerRecord) -> Result<(), String> {
+    fn ok_preflight(_: &HivePaths, _: &WorkerRecord, _: &crate::state::Preferences) -> Result<(), String> {
         Ok(())
     }
-    fn untrusted(_: &HivePaths, _: &WorkerRecord) -> Result<(), String> {
+    fn untrusted(_: &HivePaths, _: &WorkerRecord, _: &crate::state::Preferences) -> Result<(), String> {
         Err("Claude Code doesn't trust the repo behind \"web\"".into())
     }
 
@@ -1977,7 +2052,7 @@ mod tests {
             }
         }
 
-        fn ctx(&self, answer: Answer, save: fn(&AppData) -> Result<(), String>, preflight: fn(&HivePaths, &WorkerRecord) -> Result<(), String>) -> Ctx<'_, Stub> {
+        fn ctx(&self, answer: Answer, save: fn(&AppData) -> Result<(), String>, preflight: Preflight) -> Ctx<'_, Stub> {
             let window = Stub { answer, calls: self.calls.clone(), agents: self.agents.clone() };
             Ctx { data: &self.data, fuses: self.fuses, window, save, preflight }
         }
@@ -2883,8 +2958,91 @@ mod tests {
         assert_eq!(q(&rig).phase, worker::PHASE_LAUNCHING);
     }
 
+    /// The memory gate of `memory_pressure_files_a_spawn_as_waiting`'s book alone.
+    static MEMORY_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    fn memory_gate() -> crate::hive::pressure::Gate {
+        if MEMORY_HELD.load(std::sync::atomic::Ordering::SeqCst) { crate::hive::pressure::Gate::Hold } else { crate::hive::pressure::Gate::Open }
+    }
+
+    /// The second live test: three spawns refused in 7 s, and nothing said when the gate opened.
+    #[tokio::test]
+    async fn memory_pressure_files_a_spawn_as_waiting_and_the_poll_launches_it_once_it_eases() {
+        let mut rig = Rig::new("pressure", 4);
+        rig.fuses = Box::leak(Box::new(Fuses::with_gate(rig.base.join(FUSES_FILE), memory_gate)));
+        let ctx = rig.ctx(accept, ok_save, ok_preflight);
+        let q = |rig: &Rig| worker::list_workers(&rig.caller.paths).into_iter().find(|w| w.slug == "schema").unwrap();
+
+        let out = rig.spawn(accept, json!({ "title": "Schema", "role": "backend", "brief": "b", "folders": ["web"] })).await.unwrap();
+        assert_eq!(out["state"], "waiting");
+        assert!(out["throttled"].as_str().is_some_and(|t| t.starts_with("Throttled · memory pressure")), "{out}");
+        assert!(out["note"].as_str().unwrap().contains("don't spawn it again"), "{out}");
+        let w = q(&rig);
+        assert_eq!((w.phase.as_str(), w.tab_id.as_ref()), (worker::PHASE_WAITING, None));
+        assert!(w.wait_reason.as_deref().is_some_and(|r| r.starts_with("Throttled")), "the card says why: {:?}", w.wait_reason);
+        assert!(!rig.caller.paths.worker_dir("schema").exists(), "no worktree made");
+        let row = rig.ws().tasks.into_iter().find(|t| t.id == w.task_id).expect("its row is on the board");
+        assert_eq!((row.status.as_str(), row.tab_id.as_ref()), ("todo", None));
+        assert_eq!(rig.headroom().pending, 0, "no slot held");
+        assert_eq!(rig.agents.lock().unwrap().pressure_watches, vec!["ws".to_string()], "the watch that polls when it eases");
+        let board = board_view(&rig.caller.hive, &rig.caller.paths, rig.fuses, crate::hive::fuses::now_ms(), false);
+        assert_eq!((board.headroom.throttled.as_deref(), board.headroom.throttle_critical), (Some("memory pressure"), false), "the header");
+
+        // Still held: the poll keeps it waiting, untold and without backoff.
+        let told = rig.delivered().len();
+        assert!(crate::hive::waiters::poll_once(&ctx, &rig.caller).await.is_empty());
+        assert_eq!((q(&rig).phase.as_str(), rig.delivered().len()), (worker::PHASE_WAITING, told));
+
+        // Eased: the poll the watch runs launches it.
+        MEMORY_HELD.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(crate::hive::waiters::poll_once(&ctx, &rig.caller).await, vec!["schema".to_string()]);
+        let w = q(&rig);
+        assert_eq!((w.phase.as_str(), w.wait_reason.as_ref()), (worker::PHASE_LAUNCHING, None));
+        assert!(PathBuf::from(w.folders[0].worktree.as_ref().unwrap()).is_dir());
+        let board = board_view(&rig.caller.hive, &rig.caller.paths, rig.fuses, crate::hive::fuses::now_ms(), false);
+        assert_eq!(board.headroom.throttled, None);
+    }
+
+    /// The memory gate of `a_waiter_memory_held_before_a_restart_launches_at_the_coordinators_start`.
+    static RESTART_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    fn restart_gate() -> crate::hive::pressure::Gate {
+        if RESTART_HELD.load(std::sync::atomic::Ordering::SeqCst) { crate::hive::pressure::Gate::Hold } else { crate::hive::pressure::Gate::Open }
+    }
+
+    /// The watch that would launch a memory-held waiter is in memory: after a restart with the
+    /// gate open, only the coordinator's session start polls it, and the coordinator, told not to
+    /// spawn it again, hears it launched. Still held, the poll puts it back on the watch.
+    #[tokio::test]
+    async fn a_waiter_memory_held_before_a_restart_launches_at_the_coordinators_start() {
+        let mut rig = Rig::new("pressure-restart", 4);
+        rig.fuses = Box::leak(Box::new(Fuses::with_gate(rig.base.join(FUSES_FILE), restart_gate)));
+        let ctx = rig.ctx(accept, ok_save, ok_preflight);
+        let q = |rig: &Rig| worker::list_workers(&rig.caller.paths).into_iter().find(|w| w.slug == "schema").unwrap();
+        let out = rig.spawn(accept, json!({ "title": "Schema", "role": "backend", "brief": "b", "folders": ["web"] })).await.unwrap();
+        assert_eq!(out["state"], "waiting");
+        rig.agents.lock().unwrap().pressure_watches.clear();
+
+        // Still held at the coordinator's start: it waits, back on the watch, and no one is told.
+        let told = rig.delivered().len();
+        crate::hive::waiters::coordinator_started(&ctx, &rig.caller).await;
+        assert_eq!(q(&rig).phase, worker::PHASE_WAITING);
+        assert_eq!(rig.agents.lock().unwrap().pressure_watches, vec!["ws".to_string()], "the watch again");
+        assert_eq!(rig.delivered().len(), told);
+
+        // Eased while maiTerm was down: the coordinator's start launches it and says so.
+        RESTART_HELD.store(false, std::sync::atomic::Ordering::SeqCst);
+        crate::hive::waiters::coordinator_started(&ctx, &rig.caller).await;
+        assert_eq!(q(&rig).phase, worker::PHASE_LAUNCHING);
+        let (to, text) = rig.delivered().pop().unwrap();
+        assert_eq!((to.as_str(), text.as_str()), ("coord", crate::hive::waiters::MEMORY_FREED_NOTICE));
+
+        // A later start with nothing held tells nothing.
+        let told = rig.delivered().len();
+        crate::hive::waiters::coordinator_started(&ctx, &rig.caller).await;
+        assert_eq!(rig.delivered().len(), told);
+    }
+
     /// The coordinator's stop, landing while a waiter's worktrees are made.
-    fn stopped_meanwhile(paths: &HivePaths, w: &WorkerRecord) -> Result<(), String> {
+    fn stopped_meanwhile(paths: &HivePaths, w: &WorkerRecord, _: &crate::state::Preferences) -> Result<(), String> {
         worker::update_worker(&paths.task(&w.task_id), |c| {
             c.phase = worker::PHASE_STOPPED.into();
             true
