@@ -1200,6 +1200,12 @@ pub fn run() {
             hive::prompts::hive_take_over,
             hive::prompts::hive_prompt_routes,
             hive::decisions::hive_blocker_answered,
+            hive::decisions::hive_decision_log,
+            hive::decisions::hive_override_decision,
+            hive::precedents::hive_precedents,
+            hive::precedents::hive_precedent_edit,
+            hive::precedents::hive_precedent_delete,
+            hive::precedents::hive_precedent_promote,
             #[cfg(debug_assertions)]
             share::open::share_debug_open,
         ])

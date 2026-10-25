@@ -3,7 +3,9 @@
 //! 2,000 characters of a longer one), and everything else in `brief.md`, which those rules tell
 //! the agent to read.
 
+use super::deliver::one_line;
 use super::paths::HivePaths;
+use super::precedents::PrecedentCounts;
 use super::record::Hive;
 use super::worker::WorkerRecord;
 use super::{ROLE_COORDINATOR, ROLE_WORKER};
@@ -173,15 +175,38 @@ fn checkpoint_lines(hive: &Hive) -> String {
     b
 }
 
+/// The categories with counts, never the precedents themselves: they reach the coordinator when
+/// it decides, through `hivePrecedents` (§7.5).
+fn counts_line(counts: &std::collections::BTreeMap<String, u32>) -> String {
+    if counts.is_empty() {
+        return "none yet".to_string();
+    }
+    counts.iter().map(|(c, n)| format!("{} {n}", one_line(c, 40))).collect::<Vec<_>>().join(", ")
+}
+
+/// `brief.md`'s Precedents: how many there are, and how to check, cite and record them (§7.5).
+fn precedent_lines(counts: &PrecedentCounts) -> String {
+    format!(
+        "\n## Precedents\n\nYour human\u{2019}s past answers, kept by maiTerm. This Hive\u{2019}s: {}. Global (carried from other Hives by \
+         your human): {}.\n\n- Before you raise a blocker or answer a worker, call hivePrecedents {{category}}. If one settles it, \
+         decide, pass its id as `precedent`, and cite it in one line in your chat (\u{201c}per your precedent of <date>: <rule>\u{201d}).\n\
+         - After your human answers a blocker of yours, record what it teaches with hiveRecordPrecedent {{blocker_id: <task id>, \
+         rule: \"When X, choose Y, because Z\"}}.\n- You may suggest that one go global; only your human promotes it. A precedent \
+         your human overrides twice is retired.\n",
+        counts_line(&counts.hive),
+        counts_line(&counts.global)
+    )
+}
+
 fn capitalised(s: &str) -> String {
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// `brief.md`: the rest of the coordinator's brief, rewritten on every launch from the current
-/// Hive (§7.1). The Instructions go in whole: the sheet refuses one that's too long rather than
-/// cutting it.
-pub fn brief_md(hive: &Hive, paths: &HivePaths) -> String {
+/// Hive (§7.1) and its precedents' counts. The Instructions go in whole: the sheet refuses one
+/// that's too long rather than cutting it.
+pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> String {
     let mut b = String::from("# Your Hive\n\nmaiTerm writes this file on every launch; edits to it don't last.\n\n");
     b.push_str(&format!("## Goal\n\n{}\n\n", hive.goal.trim()));
     if !hive.criteria.is_empty() {
@@ -234,6 +259,7 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths) -> String {
     ));
     b.push_str(&queued_lines(hive, hive.git_folders().map(|f| f.name.as_str()).collect(), false));
     b.push_str(&checkpoint_lines(hive));
+    b.push_str(&precedent_lines(counts));
     b.push_str(
         "\n## Roles\n\nGive each worker one of these. The worker gets the role's full text in its own brief; you see only \
          this list. Pair a builder with its checker unless you have a reason not to, and say the reason.\n\n",
@@ -535,7 +561,7 @@ mod tests {
         let mut h = crate::hive::launch::tests::sample_hive();
         h.instructions = "Use the house style.\n".repeat(800);
         let p = crate::hive::launch::tests::sample_paths();
-        let b = brief_md(&h, &p);
+        let b = brief_md(&h, &p, &PrecedentCounts::default());
         assert!(b.contains("**web** (primary, git"));
         assert!(b.contains(&*p.coordinator_worktree("web").to_string_lossy()));
         assert!(b.contains("**brand** (plain, read-only): `/r/brand assets`"));
@@ -549,7 +575,7 @@ mod tests {
     #[test]
     fn both_briefs_say_how_shared_memory_works() {
         let (h, p, w) = crate::hive::launch::tests::sample_worker_hive();
-        for b in [brief_md(&h, &p), worker_brief_md(&h, &p, &w, "", None)] {
+        for b in [brief_md(&h, &p, &PrecedentCounts::default()), worker_brief_md(&h, &p, &w, "", None)] {
             assert!(b.contains(MEMORY_RULE), "{b}");
         }
         assert!(worker_brief_md(&h, &p, &w, "", None).contains(&format!("Shared memory is `{}`", p.memory().display())));
@@ -565,12 +591,39 @@ mod tests {
         assert!(rules.contains("⟦HIVE PROMPT⟧ or ⟦HIVE QUESTION⟧: answer it with hiveAnswerWorker"), "{rules}");
         h.checkpoints.insert("permissions".into(), "ask".into());
         h.settings.autonomy.prompt_timeout_secs = 600;
-        let b = brief_md(&h, &p);
+        let b = brief_md(&h, &p, &PrecedentCounts::default());
         assert!(b.contains("## Checkpoints"), "{b}");
         assert!(b.contains("- Workers\u{2019} questions: **you decide**."), "{b}");
         assert!(b.contains("- Workers\u{2019} permission prompts: **Ask me**: your human answers"), "{b}");
         assert!(b.contains("plain **Yes** or **No**") && b.contains("**listed options**"));
         assert!(b.contains("Unanswered after 10 min"));
         assert!(b.contains("Never yours, whatever the checkpoints") && b.contains("workspace-trust and plan dialogs"));
+    }
+
+    /// §7.5: the brief carries counts by category and how to check, cite and record, never the
+    /// precedents themselves, so it stays small however many there are.
+    #[test]
+    fn the_brief_lists_precedent_counts_and_how_to_use_them() {
+        let (h, p, _) = crate::hive::launch::tests::sample_worker_hive();
+        let none = brief_md(&h, &p, &PrecedentCounts::default());
+        assert!(none.contains("## Precedents") && none.contains("This Hive\u{2019}s: none yet. Global (carried from other Hives by your human): none yet."), "{none}");
+        let mut counts = PrecedentCounts::default();
+        counts.hive.insert("questions".into(), 3);
+        counts.hive.insert("landing".into(), 1);
+        counts.global.insert("other".into(), 2);
+        let b = brief_md(&h, &p, &counts);
+        assert!(b.contains("This Hive\u{2019}s: landing 1, questions 3. Global (carried from other Hives by your human): other 2."), "{b}");
+        for must in ["call hivePrecedents {category}", "pass its id as `precedent`", "per your precedent of <date>: <rule>", "hiveRecordPrecedent {blocker_id: <task id>", "only your human promotes it"] {
+            assert!(b.contains(must), "{must}: {b}");
+        }
+        assert!(b.find("## Checkpoints") < b.find("## Precedents") && b.find("## Precedents") < b.find("## Roles"));
+        // Every category maiTerm can assign, each with a huge count: still a few lines.
+        let mut many = PrecedentCounts::default();
+        for c in ["plan", "questions", "permissions", "landing", "finals", "interfaces", "config", "integration", "other", "never"] {
+            many.hive.insert(c.into(), 99_999);
+            many.global.insert(c.into(), 99_999);
+        }
+        let section = precedent_lines(&many);
+        assert!(section.chars().count() < 1_500, "{} chars", section.chars().count());
     }
 }

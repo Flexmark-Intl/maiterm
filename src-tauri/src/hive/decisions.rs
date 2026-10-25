@@ -1,24 +1,35 @@
 //! The decision log, `logs/decisions.jsonl` (docs/hive.md §7.6): one line per event on a decision
-//! (asked, recommended, answered, lapsed…), append-only, every kind a string. Lines of one
-//! decision share its `D-…` id; reading them as decisions (the fold, the view) is step 7d's.
+//! (asked, recommended, answered, lapsed, overridden…), append-only, every kind a string. Lines
+//! of one decision share its `D-…` id, and `fold` reads them back as decisions: the latest line of
+//! each event wins, and an `answered` line carrying only an `outcome` updates just that (a land's
+//! result arrives after its decision).
 //!
-//! The human's blocker answers reach it through `hive_blocker_answered`, which only the webview
-//! calls (`overlordStore.answerBlocker`, shared by the desktop card, the Loom and the phone): no
-//! MCP call reaches a Tauri command, so an agent can't log an answer as the human's (plan D16).
+//! The human's blocker answers reach it through `hive_blocker_answered`, and their overrides
+//! through `hive_override_decision`, which only the webview calls: no MCP call reaches a Tauri
+//! command, so an agent can't log an answer or an override as the human's (plan D16, D17).
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use tauri::AppHandle;
 
 use super::deliver::one_line;
+use super::land::LandState;
 use super::paths::HivePaths;
 use super::record::Hive;
+use super::rpc::HiveWindow;
+use super::tools::{blocking, Caller, Ctx};
 use super::worker::WorkerRecord;
 use crate::state::workspace::TaskBlocker;
 use crate::state::AppState;
 
 pub const LOG_VERSION: u32 = 1;
+
+/// To the Hive's window when its decisions or precedents change: Memory's Decisions and
+/// Precedents tabs refetch. Not `hive-memory-changed`, whose listener rebuilds the memory index.
+pub const DECISIONS_CHANGED_EVENT: &str = "hive-decisions-changed";
 
 pub const EVENT_ASKED: &str = "asked";
 /// The coordinator's answer under Ask me: recorded, never sent (plan D10).
@@ -26,15 +37,31 @@ pub const EVENT_RECOMMENDED: &str = "recommended";
 pub const EVENT_ANSWERED: &str = "answered";
 /// The prompt closed with no answer through maiTerm.
 pub const EVENT_LAPSED: &str = "lapsed";
+/// The human overrode the coordinator's decision (plan D17).
+pub const EVENT_OVERRIDDEN: &str = "overridden";
+/// maiTerm offering a checkpoint (step 7e): asked like any decision.
+pub const EVENT_OFFER: &str = "offer";
+/// The daily digest (step 7e): no decision.
+pub const EVENT_DIGEST: &str = "digest";
 
 /// What no checkpoint can hand to the coordinator (§7.4).
 pub const CATEGORY_NEVER: &str = "never";
 /// The coordinator's own blockers: they can become precedents, never a streak (plan D15).
 pub const CATEGORY_OTHER: &str = "other";
+/// Land cards the config rule and the integration mode file: the human's, never earned.
+pub const CATEGORY_CONFIG: &str = "config";
+pub const CATEGORY_INTEGRATION: &str = "integration";
+/// maiTerm's own offers: never a precedent, never a streak.
+pub const CATEGORY_OFFER: &str = "offer";
 
 pub const SOURCE_PROMPT: &str = "prompt";
 pub const SOURCE_QUESTION: &str = "question";
 pub const SOURCE_BLOCKER: &str = "blocker";
+pub const SOURCE_LAND: &str = "land";
+pub const SOURCE_RESOLVE: &str = "resolve";
+
+pub const ANSWER_LAND: &str = "Land";
+pub const ANSWER_DONT_LAND: &str = "Don\u{2019}t land";
 
 pub const BY_COORDINATOR: &str = "coordinator";
 pub const BY_HUMAN: &str = "human";
@@ -76,7 +103,7 @@ pub struct DecisionLine {
     pub by: String,
     /// Answered after the coordinator's time ran out (§4.7).
     pub after_timeout: bool,
-    /// The precedent the coordinator cited, as given (checked from step 7d).
+    /// The precedent the coordinator cited: an active one when it was cited (`precedents`).
     pub precedent: Option<String>,
     pub outcome: Option<String>,
     pub at: String,
@@ -142,6 +169,483 @@ pub fn read(paths: &HivePaths) -> Vec<DecisionLine> {
 /// The latest line logged under a prompt id or blocker key.
 pub fn by_key<'a>(lines: &'a [DecisionLine], key: &str) -> Option<&'a DecisionLine> {
     lines.iter().rev().find(|l| l.key.as_deref() == Some(key))
+}
+
+/// To the Hive's window: its Decisions and Precedents tabs refetch.
+pub(crate) fn emit_changed(handle: &AppHandle, label: &str, workspace_id: &str) {
+    use tauri::Emitter;
+    let payload = serde_json::json!({ "workspace_id": workspace_id });
+    if let Err(e) = handle.emit_to(label, DECISIONS_CHANGED_EVENT, payload) {
+        log::warn!("hive: decisions-changed not sent to window {label}: {e}");
+    }
+}
+
+// ── The fold (step 7d) ──
+
+/// A land's result, after its decision: it updates the outcome and nothing else.
+fn outcome_only(l: &DecisionLine) -> bool {
+    l.event == EVENT_ANSWERED && l.answer.is_none() && l.outcome.is_some()
+}
+
+/// One decision, its lines folded: the latest line of each event.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Decision {
+    pub id: String,
+    /// Its `asked` line, or maiTerm's `offer`.
+    pub asked: Option<DecisionLine>,
+    pub recommended: Option<DecisionLine>,
+    pub answered: Option<DecisionLine>,
+    pub lapsed: Option<DecisionLine>,
+    pub overridden: Option<DecisionLine>,
+    /// The latest outcome any of its lines carried.
+    pub outcome: Option<String>,
+    /// Where its latest line, outcome updates aside, sits in the log: the view's order.
+    pub last: usize,
+}
+
+impl Decision {
+    /// What was asked, else the earliest kind of line it has.
+    pub fn first(&self) -> Option<&DecisionLine> {
+        self.asked.as_ref().or(self.answered.as_ref()).or(self.recommended.as_ref()).or(self.lapsed.as_ref())
+    }
+
+    pub fn category(&self) -> &str {
+        self.first().map_or("", |l| l.category.as_str())
+    }
+
+    pub fn question(&self) -> &str {
+        self.first().map_or("", |l| l.question.as_str())
+    }
+
+    pub fn answered_by(&self) -> Option<&str> {
+        self.answered.as_ref().map(|l| l.by.as_str())
+    }
+
+    /// Only the coordinator's own decisions are overridden, once each (plan D17).
+    pub fn can_override(&self) -> bool {
+        self.answered_by() == Some(BY_COORDINATOR) && self.overridden.is_none() && self.category() != CATEGORY_OFFER
+    }
+
+    /// The precedent its answer, or the recommendation the human answered, cited.
+    pub fn precedent(&self) -> Option<&str> {
+        self.answered.as_ref().and_then(|l| l.precedent.as_deref()).or_else(|| self.recommended.as_ref().and_then(|l| l.precedent.as_deref()))
+    }
+}
+
+/// Every decision in the log, newest first (by its latest line, outcome updates aside). A
+/// digest is no decision.
+pub fn fold(lines: &[DecisionLine]) -> Vec<Decision> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_id: HashMap<String, Decision> = HashMap::new();
+    for (i, l) in lines.iter().enumerate() {
+        if l.id.is_empty() || l.event == EVENT_DIGEST {
+            continue;
+        }
+        let d = by_id.entry(l.id.clone()).or_insert_with(|| {
+            order.push(l.id.clone());
+            Decision { id: l.id.clone(), last: i, ..Decision::default() }
+        });
+        if let Some(o) = &l.outcome {
+            d.outcome = Some(o.clone());
+        }
+        if outcome_only(l) {
+            continue;
+        }
+        let slot = match l.event.as_str() {
+            EVENT_ASKED | EVENT_OFFER => &mut d.asked,
+            EVENT_RECOMMENDED => &mut d.recommended,
+            EVENT_ANSWERED => &mut d.answered,
+            EVENT_LAPSED => &mut d.lapsed,
+            EVENT_OVERRIDDEN => &mut d.overridden,
+            _ => continue,
+        };
+        *slot = Some(l.clone());
+        d.last = i;
+    }
+    let mut out: Vec<Decision> = order.into_iter().filter_map(|id| by_id.remove(&id)).collect();
+    out.sort_by_key(|d| std::cmp::Reverse(d.last));
+    out
+}
+
+pub fn find(lines: &[DecisionLine], id: &str) -> Option<Decision> {
+    fold(lines).into_iter().find(|d| d.id == id)
+}
+
+/// The precedent a decision cited, as the view shows it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PrecedentRef {
+    pub id: String,
+    /// None when it is gone (the human deleted it).
+    pub rule: Option<String>,
+    pub status: Option<String>,
+}
+
+/// A decision as Memory → Decisions shows it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DecisionView {
+    pub id: String,
+    pub at: String,
+    pub category: String,
+    pub source: String,
+    pub task_id: Option<String>,
+    pub worker: Option<String>,
+    pub question: String,
+    pub context: Option<String>,
+    pub options: Vec<DecisionOption>,
+    /// The coordinator's recommendation, when it gave one.
+    pub recommended: Option<String>,
+    pub answer: Option<String>,
+    pub reason: Option<String>,
+    /// `open` | `recommended` | `answered` | `lapsed`.
+    pub status: String,
+    /// `coordinator` | `human` | `maiterm`, once answered.
+    pub by: String,
+    pub by_label: String,
+    pub after_timeout: bool,
+    pub precedent: Option<PrecedentRef>,
+    pub outcome: Option<String>,
+    pub overridden: bool,
+    pub override_note: Option<String>,
+    pub can_override: bool,
+}
+
+/// Who decided, in the view's words.
+pub fn by_label(d: &Decision) -> String {
+    let Some(a) = &d.answered else { return String::new() };
+    match a.by.as_str() {
+        BY_COORDINATOR if a.precedent.is_some() => "coordinator \u{b7} by precedent".to_string(),
+        BY_COORDINATOR => "coordinator".to_string(),
+        BY_HUMAN if a.after_timeout => "human, after the coordinator\u{2019}s timeout".to_string(),
+        BY_HUMAN => "human".to_string(),
+        _ => "maiTerm".to_string(),
+    }
+}
+
+/// `precedent` looks a cited precedent up: its rule and status.
+pub fn view_of(d: &Decision, mut precedent: impl FnMut(&str) -> Option<(String, String)>) -> DecisionView {
+    let first = d.first().cloned().unwrap_or_default();
+    let latest = d.answered.as_ref().or(d.lapsed.as_ref()).or(d.recommended.as_ref()).unwrap_or(&first);
+    // A worker's blocker carries the worker's own recommended option: only the coordinator's is
+    // a recommendation here.
+    let recommended = d
+        .answered
+        .as_ref()
+        .and_then(|l| l.recommended.clone())
+        .or_else(|| d.recommended.as_ref().and_then(|l| l.recommended.clone().or_else(|| l.answer.clone())))
+        .or_else(|| d.asked.as_ref().filter(|l| l.worker.is_none()).and_then(|l| l.recommended.clone()));
+    let status = if d.answered.is_some() {
+        "answered"
+    } else if d.lapsed.is_some() {
+        "lapsed"
+    } else if d.recommended.is_some() {
+        "recommended"
+    } else {
+        "open"
+    };
+    DecisionView {
+        id: d.id.clone(),
+        at: latest.at.clone(),
+        category: d.category().to_string(),
+        source: first.source.clone(),
+        task_id: first.task_id.clone(),
+        worker: first.worker.clone(),
+        question: d.question().to_string(),
+        context: d.asked.as_ref().and_then(|l| l.context.clone()),
+        options: if first.options.is_empty() { latest.options.clone() } else { first.options.clone() },
+        recommended,
+        answer: d.answered.as_ref().and_then(|l| l.answer.clone()),
+        reason: d.answered.as_ref().or(d.lapsed.as_ref()).and_then(|l| l.reason.clone()),
+        status: status.to_string(),
+        by: d.answered_by().unwrap_or_default().to_string(),
+        by_label: by_label(d),
+        after_timeout: d.answered.as_ref().is_some_and(|l| l.after_timeout),
+        precedent: d.precedent().map(|id| {
+            let found = precedent(id);
+            PrecedentRef { id: id.to_string(), rule: found.as_ref().map(|(r, _)| r.clone()), status: found.map(|(_, s)| s) }
+        }),
+        outcome: d.outcome.clone(),
+        overridden: d.overridden.is_some(),
+        override_note: d.overridden.as_ref().and_then(|l| l.reason.clone()),
+        can_override: d.can_override(),
+    }
+}
+
+/// The decision log as the view shows it, newest first.
+pub fn view(paths: &HivePaths) -> Vec<DecisionView> {
+    let mut rules: HashMap<String, Option<(String, String)>> = HashMap::new();
+    fold(&read(paths))
+        .iter()
+        .map(|d| view_of(d, |id| rules.entry(id.to_string()).or_insert_with(|| super::precedents::live(paths, id).map(|p| (p.rule, p.status))).clone()))
+        .collect()
+}
+
+/// The human-answered decision `blocker_id` names (`hiveRecordPrecedent`, plan D26): a decision id,
+/// or a task id, whose latest answer by the human it takes. Only an answer the human gave.
+pub fn human_answer(lines: &[DecisionLine], blocker_id: &str) -> Result<Decision, String> {
+    let all = fold(lines);
+    let only_human = "only an answer your human gave can become a precedent";
+    if blocker_id.starts_with("D-") {
+        let d = all.into_iter().find(|d| d.id == blocker_id).ok_or_else(|| format!("There\u{2019}s no decision {} in this Hive\u{2019}s log.", one_line(blocker_id, 40)))?;
+        return match d.answered_by() {
+            Some(BY_HUMAN) => Ok(d),
+            Some(BY_COORDINATOR) => Err(format!("{} was your own answer: {only_human}.", d.id)),
+            Some(_) => Err(format!("{} was answered by maiTerm: {only_human}.", d.id)),
+            None => Err(format!("{} isn\u{2019}t answered: {only_human}.", d.id)),
+        };
+    }
+    all.into_iter()
+        .filter(|d| d.answered_by() == Some(BY_HUMAN) && d.first().is_some_and(|l| l.task_id.as_deref() == Some(blocker_id)))
+        .max_by_key(|d| d.last)
+        .ok_or_else(|| format!("No answer your human gave is logged for task {}: {only_human}.", one_line(blocker_id, 60)))
+}
+
+// ── Overrides (plan D17) ──
+
+/// An override written: the decision as it was, and the precedent it retired.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Overridden {
+    pub decision: Decision,
+    pub note: String,
+    pub precedent: Option<String>,
+    pub retired: bool,
+}
+
+/// The human's override of the coordinator's decision: an `overridden` line with their note, and
+/// the precedent it cited counted against (retired at its second). Refused for anything but the
+/// coordinator's own answer, and twice.
+pub(crate) fn override_decision(paths: &HivePaths, decision_id: &str, note: &str, now: &str) -> Result<Overridden, String> {
+    let note = one_line(note, super::prompts::MAX_REASON);
+    if note.is_empty() {
+        return Err("Say what should have happened: your note goes to the coordinator.".to_string());
+    }
+    let _held = RECORD.lock().unwrap_or_else(|e| e.into_inner());
+    let d = find(&read(paths), decision_id).ok_or("That decision isn\u{2019}t in this Hive\u{2019}s log.")?;
+    if d.overridden.is_some() {
+        return Err("That decision is already overridden.".to_string());
+    }
+    if !d.can_override() {
+        return Err(match d.answered_by() {
+            Some(BY_HUMAN) => "That was your own answer: only the coordinator\u{2019}s decisions are overridden.".to_string(),
+            None => "That decision isn\u{2019}t answered yet.".to_string(),
+            _ => "Only a decision the coordinator made can be overridden.".to_string(),
+        });
+    }
+    let a = d.answered.clone().expect("can_override has an answer");
+    let line = DecisionLine {
+        id: d.id.clone(),
+        event: EVENT_OVERRIDDEN.to_string(),
+        hive_id: a.hive_id.clone(),
+        category: d.category().to_string(),
+        source: a.source.clone(),
+        task_id: a.task_id.clone(),
+        worker: a.worker.clone(),
+        key: a.key.clone(),
+        question: d.question().to_string(),
+        answer: a.answer.clone(),
+        reason: Some(note.clone()),
+        by: BY_HUMAN.to_string(),
+        precedent: a.precedent.clone(),
+        at: now.to_string(),
+        ..DecisionLine::default()
+    };
+    append(paths, &line)?;
+    let mut retired = false;
+    if let Some(p) = &a.precedent {
+        match super::precedents::override_(paths, p) {
+            Ok(r) => retired = r,
+            Err(e) => log::warn!("hive {}: override of {} not counted against precedent {p}: {e}", a.hive_id, d.id),
+        }
+    }
+    Ok(Overridden { decision: d, note, precedent: a.precedent, retired })
+}
+
+/// The coordinator's word of an override. The decision's own words (which may quote a worker)
+/// sit on labelled lines, outside the sentence about the human.
+fn override_notice(o: &Overridden) -> String {
+    let mut s = format!("[maiTerm] Your human overrode your decision {}: {}", o.decision.id, o.note);
+    if let (Some(p), true) = (&o.precedent, o.retired) {
+        s.push_str(&format!(" (precedent {p} is retired)"));
+    }
+    s.push_str(&format!("\nThe decision: {}", one_line(o.decision.question(), 300)));
+    if let Some(a) = o.decision.answered.as_ref().and_then(|l| l.answer.as_deref()) {
+        s.push_str(&format!("\nYou answered: {}", one_line(a, 200)));
+    }
+    if o.precedent.is_some() && !o.retired {
+        s.push_str("\nThe precedent you cited is counted as overridden; a second override retires it.");
+    }
+    s.push_str("\nRecord what your human wants instead with hiveRecordPrecedent once they answer a blocker on it.");
+    s
+}
+
+/// An override carried out: written, counted, and told to the coordinator.
+pub(crate) async fn override_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, decision_id: &str, note: &str) -> Result<DecisionView, String> {
+    let (paths, id, n) = (caller.paths.clone(), decision_id.to_string(), note.to_string());
+    let o = blocking(move || override_decision(&paths, &id, &n, &crate::commands::workspace::iso_now())).await?;
+    log::info!("hive {}: the human overrode decision {}{}", caller.hive.id, o.decision.id, if o.retired { ", retiring its precedent" } else { "" });
+    if let Some(c) = super::tools::coordinator_tab(ctx.data, caller) {
+        let sent = ctx.window.deliver(&c, override_notice(&o), "Hive override").await;
+        log::info!("hive {}: override notice to the coordinator: {}", caller.hive.id, sent.describe());
+    }
+    ctx.window.decisions_changed(&caller.workspace_id);
+    let paths = caller.paths.clone();
+    let id = o.decision.id.clone();
+    blocking(move || view(&paths).into_iter().find(|v| v.id == id).ok_or_else(|| "The decision log couldn\u{2019}t be read back.".to_string())).await
+}
+
+/// The human undid a land (§8.6) whose decision was the coordinator's: that decision overridden.
+/// `decision` is the one its land log line names, the decision that landed that repo: a land
+/// resumed on a new pin keeps its id under a new decision, so the land id alone can't tell.
+pub(crate) async fn land_undone_by_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, land_id: &str, decision: Option<&str>) {
+    let Some(want) = decision.map(str::to_string) else { return };
+    let paths = caller.paths.clone();
+    let found = blocking(move || Ok(fold(&read(&paths)).into_iter().find(|d| d.id == want && d.can_override()).map(|d| d.id))).await;
+    if let Ok(Some(id)) = found {
+        if let Err(e) = override_in(ctx, caller, &id, "Undone by your human").await {
+            log::warn!("hive {}: undo of land {land_id} not logged as an override: {e}", caller.hive.id);
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn hive_decision_log(window: tauri::Window, state: tauri::State<'_, Arc<AppState>>, workspace_id: String) -> Result<Vec<DecisionView>, String> {
+    let caller = super::land::caller_in(state.inner(), window.label(), &workspace_id)?;
+    blocking(move || Ok(view(&caller.paths))).await
+}
+
+/// The human's Override… on one of the coordinator's decisions (plan D17), with their note.
+#[tauri::command]
+pub async fn hive_override_decision(
+    window: tauri::Window,
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+    workspace_id: String,
+    decision_id: String,
+    note: String,
+) -> Result<DecisionView, String> {
+    let caller = super::land::caller_in(state.inner(), window.label(), &workspace_id)?;
+    let ctx = super::tools::app_ctx(state.inner(), &app, &caller);
+    override_in(&ctx, &caller, &decision_id, &note).await
+}
+
+// ── Lands and resolutions (step 7d) ──
+
+/// "Land “Title” (web, api)": what a land decides, in maiTerm's words.
+fn land_question(w: &WorkerRecord, land: &LandState) -> String {
+    let folders: Vec<&str> = land.repos.iter().map(|r| r.folder.as_str()).collect();
+    format!("Land \u{201c}{}\u{201d} ({})", one_line(&w.title, 120), folders.join(", "))
+}
+
+fn land_line(hive_id: &str, w: &WorkerRecord, land: &LandState, id: &str, event: &str, category: &str, by: &str) -> DecisionLine {
+    DecisionLine {
+        id: id.to_string(),
+        event: event.to_string(),
+        hive_id: hive_id.to_string(),
+        category: category.to_string(),
+        source: SOURCE_LAND.to_string(),
+        task_id: Some(w.task_id.clone()),
+        worker: Some(w.slug.clone()),
+        key: Some(land.id.clone()),
+        question: land_question(w, land),
+        options: vec![DecisionOption { label: ANSWER_LAND.to_string(), recommended: true }, DecisionOption { label: ANSWER_DONT_LAND.to_string(), recommended: false }],
+        precedent: land.precedent.clone(),
+        by: by.to_string(),
+        at: crate::commands::workspace::iso_now(),
+        ..DecisionLine::default()
+    }
+}
+
+/// The coordinator's own call to land under its Landing checkpoint (`land.decision`).
+pub(crate) fn land_decided(paths: &HivePaths, hive_id: &str, w: &WorkerRecord, land: &LandState) {
+    let Some(id) = land.decision.as_deref() else { return };
+    let mut l = land_line(hive_id, w, land, id, EVENT_ANSWERED, super::checkpoints::LANDING, BY_COORDINATOR);
+    l.answer = Some(ANSWER_LAND.to_string());
+    l.outcome = Some("running".to_string());
+    record(paths, &l);
+}
+
+/// The category of a land card by why it asks: Landing = Ask me is `landing`, which can be
+/// earned; the config rule and the integration mode are never the coordinator's.
+pub fn card_category(why: &str) -> &'static str {
+    match why {
+        super::land::approval::WHY_ASK => super::checkpoints::LANDING,
+        super::land::approval::WHY_INTEGRATION => CATEGORY_INTEGRATION,
+        _ => CATEGORY_CONFIG,
+    }
+}
+
+/// A land card filed (`land.card_decision`): asked, the coordinator recommending the land.
+pub(crate) fn land_card_asked(paths: &HivePaths, hive_id: &str, w: &WorkerRecord, land: &LandState, why: &str, summary: &str, effects: &[String]) {
+    let Some(id) = land.card_decision.as_deref() else { return };
+    let mut l = land_line(hive_id, w, land, id, EVENT_ASKED, card_category(why), BY_MAITERM);
+    l.question = one_line(summary, 400);
+    l.context = Some(one_line(&effects.join(" "), 1000)).filter(|c| !c.is_empty());
+    l.recommended = Some(ANSWER_LAND.to_string());
+    record(paths, &l);
+}
+
+/// A land card's end: the human's approval or denial, or a lapse (`expired`, or withdrawn with
+/// `why`).
+pub(crate) fn land_card_closed(paths: &HivePaths, hive_id: &str, w: &WorkerRecord, land: &LandState, status: &str, why: &str) {
+    let Some(id) = land.card_decision.as_deref() else { return };
+    let category = card_category(land.approval.as_deref().unwrap_or_default());
+    let mut l = match status {
+        "approved" | "denied" => {
+            let mut l = land_line(hive_id, w, land, id, EVENT_ANSWERED, category, BY_HUMAN);
+            l.answer = Some(if status == "approved" { ANSWER_LAND } else { ANSWER_DONT_LAND }.to_string());
+            l
+        }
+        _ => {
+            let mut l = land_line(hive_id, w, land, id, EVENT_LAPSED, category, BY_MAITERM);
+            l.reason = Some(one_line(why, 300));
+            l
+        }
+    };
+    l.recommended = Some(ANSWER_LAND.to_string());
+    record(paths, &l);
+}
+
+/// An outcome-only line on one decision: a land's result, after its decision.
+pub(crate) fn outcome(paths: &HivePaths, hive_id: &str, id: &str, source: &str, key: Option<&str>, outcome: &str) {
+    let l = DecisionLine {
+        id: id.to_string(),
+        event: EVENT_ANSWERED.to_string(),
+        hive_id: hive_id.to_string(),
+        source: source.to_string(),
+        key: key.map(str::to_string),
+        outcome: Some(one_line(outcome, 300)),
+        at: crate::commands::workspace::iso_now(),
+        ..DecisionLine::default()
+    };
+    record(paths, &l);
+}
+
+/// A land's result on each decision that is about it: the coordinator's and its card's.
+pub(crate) fn land_outcome(paths: &HivePaths, hive_id: &str, land: &LandState, text: &str) {
+    for id in [&land.decision, &land.card_decision].into_iter().flatten() {
+        outcome(paths, hive_id, id, SOURCE_LAND, Some(&land.id), text);
+    }
+}
+
+/// The coordinator's `hiveResolve` of an escalated review: its own decision, `other`.
+pub(crate) fn resolution_decided(paths: &HivePaths, hive_id: &str, w: &WorkerRecord, kind: &str, reason: &str, precedent: Option<&str>) {
+    let l = DecisionLine {
+        id: new_id(),
+        event: EVENT_ANSWERED.to_string(),
+        hive_id: hive_id.to_string(),
+        category: CATEGORY_OTHER.to_string(),
+        source: SOURCE_RESOLVE.to_string(),
+        task_id: Some(w.task_id.clone()),
+        worker: Some(w.slug.clone()),
+        question: format!("Worker #{} \u{201c}{}\u{201d} failed {} reviews: how is it settled?", w.badge, one_line(&w.title, 120), super::review::MAX_ATTEMPTS),
+        options: super::review::RESOLUTIONS.iter().map(|r| DecisionOption { label: r.to_string(), recommended: false }).collect(),
+        answer: Some(kind.to_string()),
+        reason: Some(one_line(reason, super::prompts::MAX_REASON)).filter(|r| !r.is_empty()),
+        by: BY_COORDINATOR.to_string(),
+        precedent: precedent.map(str::to_string),
+        at: crate::commands::workspace::iso_now(),
+        ..DecisionLine::default()
+    };
+    record(paths, &l);
 }
 
 // ── The human's blocker answers (step 7c) ──
@@ -408,5 +912,87 @@ mod tests {
         assert!(e.contains("needs an option or words"), "{e}");
         assert_eq!(read(&paths).len(), 4, "a refused answer writes nothing");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn line(id: &str, event: &str, by: &str) -> DecisionLine {
+        DecisionLine { id: id.into(), event: event.into(), by: by.into(), hive_id: "h1".into(), category: "questions".into(), question: format!("Q {id}"), ..DecisionLine::default() }
+    }
+
+    #[test]
+    fn the_fold_is_newest_first_and_an_outcome_only_line_changes_only_the_outcome() {
+        let lines = vec![
+            DecisionLine { recommended: Some("Redis".into()), worker: Some("w".into()), ..line("D-a", EVENT_ASKED, BY_MAITERM) },
+            DecisionLine { category: "landing".into(), source: SOURCE_LAND.into(), answer: Some("Land".into()), outcome: Some("running".into()), precedent: Some("P-1".into()), ..line("D-land", EVENT_ANSWERED, BY_COORDINATOR) },
+            DecisionLine { recommended: Some("Postgres".into()), answer: Some("Postgres".into()), ..line("D-a", EVENT_RECOMMENDED, BY_COORDINATOR) },
+            line("D-b", EVENT_ASKED, BY_MAITERM),
+            DecisionLine { answer: Some("Postgres".into()), recommended: Some("Postgres".into()), after_timeout: true, ..line("D-a", EVENT_ANSWERED, BY_HUMAN) },
+            // The land's result, later: the outcome, nothing else.
+            DecisionLine { source: SOURCE_LAND.into(), outcome: Some("landed".into()), ..line("D-land", EVENT_ANSWERED, BY_MAITERM) },
+            DecisionLine { reason: Some("closed".into()), ..line("D-b", EVENT_LAPSED, BY_MAITERM) },
+            DecisionLine { event: EVENT_DIGEST.into(), ..line("D-dig", EVENT_DIGEST, BY_MAITERM) },
+        ];
+        let folded = fold(&lines);
+        assert_eq!(folded.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), vec!["D-b", "D-a", "D-land"], "by its latest line; outcome updates and digests aside");
+        let land = folded.iter().find(|d| d.id == "D-land").unwrap();
+        assert_eq!((land.outcome.as_deref(), land.answered_by(), land.answered.as_ref().unwrap().answer.as_deref()), (Some("landed"), Some(BY_COORDINATOR), Some("Land")));
+        assert!(land.can_override());
+
+        let views: Vec<DecisionView> = folded.iter().map(|d| view_of(d, |id| (id == "P-1").then(|| ("When green, land".to_string(), "active".to_string())))).collect();
+        let (b, a, l) = (&views[0], &views[1], &views[2]);
+        assert_eq!((b.status.as_str(), b.by_label.as_str(), b.reason.as_deref(), b.can_override), ("lapsed", "", Some("closed"), false));
+        assert_eq!((a.status.as_str(), a.by_label.as_str(), a.answer.as_deref()), ("answered", "human, after the coordinator\u{2019}s timeout", Some("Postgres")));
+        assert_eq!(a.recommended.as_deref(), Some("Postgres"), "the coordinator's, never the worker's");
+        assert!(!a.can_override, "the human's own answer");
+        assert_eq!((l.by_label.as_str(), l.outcome.as_deref(), l.source.as_str()), ("coordinator \u{b7} by precedent", Some("landed"), "land"));
+        assert_eq!(l.precedent.as_ref().map(|p| (p.id.as_str(), p.rule.as_deref())), Some(("P-1", Some("When green, land"))));
+        // Open, and recommended under Ask me, before anyone answers.
+        let open = fold(&lines[..3]);
+        let a = view_of(open.iter().find(|d| d.id == "D-a").unwrap(), |_| None);
+        assert_eq!((a.status.as_str(), a.recommended.as_deref()), ("recommended", Some("Postgres")));
+        assert_eq!(view_of(&fold(&lines[..1])[0], |_| None).recommended, None, "a worker's own recommended option isn't the coordinator's");
+    }
+
+    #[test]
+    fn an_override_is_the_humans_on_the_coordinators_decision_once_and_counts_against_its_precedent() {
+        let (base, paths) = scratch();
+        let p = crate::hive::precedents::Precedent { id: "P-0000aaaa".into(), category: "questions".into(), ..Default::default() };
+        crate::hive::precedents::save_in(&paths.precedents(), &p).unwrap();
+        for (id, by) in [("D-c1", BY_COORDINATOR), ("D-c2", BY_COORDINATOR), ("D-h", BY_HUMAN)] {
+            append(&paths, &DecisionLine { answer: Some("Yes".into()), precedent: (by == BY_COORDINATOR).then(|| "P-0000aaaa".into()), ..line(id, EVENT_ANSWERED, by) }).unwrap();
+        }
+        assert!(override_decision(&paths, "D-c1", "  ", "now").unwrap_err().contains("Say what should have happened"));
+        let o = override_decision(&paths, "D-c1", "No:\nnot on prod", "now").unwrap();
+        assert_eq!((o.note.as_str(), o.precedent.as_deref(), o.retired), ("No: not on prod", Some("P-0000aaaa"), false));
+        let l = read(&paths).pop().unwrap();
+        assert_eq!((l.event.as_str(), l.by.as_str(), l.reason.as_deref(), l.answer.as_deref()), (EVENT_OVERRIDDEN, BY_HUMAN, Some("No: not on prod"), Some("Yes")));
+        assert!(override_decision(&paths, "D-c1", "again", "now").unwrap_err().contains("already overridden"));
+        assert!(override_decision(&paths, "D-h", "x", "now").unwrap_err().contains("your own answer"));
+        assert!(override_decision(&paths, "D-zz", "x", "now").unwrap_err().contains("isn\u{2019}t in this Hive"));
+        let o = override_decision(&paths, "D-c2", "Ask me first", "now").unwrap();
+        assert!(o.retired, "the second override of its precedent retires it");
+        assert_eq!(crate::hive::precedents::get(&paths, "P-0000aaaa").unwrap().status, crate::hive::precedents::STATUS_RETIRED);
+        let notice = override_notice(&o);
+        assert!(notice.starts_with("[maiTerm] Your human overrode your decision D-c2: Ask me first (precedent P-0000aaaa is retired)"), "{notice}");
+        assert!(notice.contains("\nThe decision: Q D-c2") && notice.contains("\nYou answered: Yes"), "{notice}");
+        let v = view(&paths);
+        let c1 = v.iter().find(|d| d.id == "D-c1").unwrap();
+        assert!(c1.overridden && !c1.can_override && c1.override_note.as_deref() == Some("No: not on prod"));
+        assert_eq!(c1.precedent.as_ref().and_then(|p| p.status.as_deref()), Some("retired"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_task_id_names_its_latest_human_answer() {
+        let lines = vec![
+            DecisionLine { task_id: Some("t-1".into()), answer: Some("A".into()), ..line("D-1", EVENT_ANSWERED, BY_HUMAN) },
+            DecisionLine { task_id: Some("t-1".into()), answer: Some("Yes".into()), ..line("D-2", EVENT_ANSWERED, BY_COORDINATOR) },
+            DecisionLine { task_id: Some("t-1".into()), ..line("D-3", EVENT_ASKED, BY_MAITERM) },
+            DecisionLine { task_id: Some("t-1".into()), answer: Some("B".into()), ..line("D-3", EVENT_ANSWERED, BY_HUMAN) },
+            DecisionLine { task_id: Some("t-2".into()), answer: Some("C".into()), ..line("D-4", EVENT_ANSWERED, BY_HUMAN) },
+        ];
+        assert_eq!(human_answer(&lines, "t-1").unwrap().id, "D-3");
+        assert_eq!(human_answer(&lines, "D-1").unwrap().id, "D-1");
+        assert!(human_answer(&lines, "D-2").is_err());
+        assert!(human_answer(&lines, "t-9").is_err());
     }
 }

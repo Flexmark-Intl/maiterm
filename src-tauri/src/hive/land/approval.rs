@@ -24,6 +24,7 @@ use serde_json::{json, Map, Value};
 use super::driver::{self, Outcome};
 use super::git as lg;
 use super::{config_rule, LandRepo, LandState, REPO_LANDED, REPO_TESTED, STATE_AWAITING_HUMAN, STATE_HELD, STATE_LOCKING};
+use crate::hive::decisions;
 use crate::hive::deliver::{frame_escape, one_line};
 use crate::hive::record::Hive;
 use crate::hive::rpc::{HiveRequest, HiveWindow};
@@ -198,10 +199,30 @@ pub(crate) async fn await_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         reason: Some(land.summary.clone()),
         keep: None,
     };
+    let (summary, effects) = (req.summary.clone(), req.effects.clone());
     let id = match ctx.window.file_request(req) {
         Ok(id) => id,
         Err(e) => return driver::fail(ctx, caller, w, land, format!("maiTerm couldn't put this land to the human: {e}")).await,
     };
+    // The decisions so far hear where it went. Only a card the log shows approved was outlived by
+    // its config change; one denied or lapsed (its land held, then resumed) was just replaced.
+    // `approved_by` can't tell: it outlives a later card's denial.
+    let before = LandState { card_decision: land.card_decision.take(), ..land.clone() };
+    if let Some(old) = before.card_decision.clone() {
+        let (paths, hive_id, key) = (caller.paths.clone(), caller.hive.id.clone(), land.id.clone());
+        let _ = blocking(move || {
+            let approved = decisions::find(&decisions::read(&paths), &old)
+                .is_some_and(|d| d.answered_by() == Some(decisions::BY_HUMAN) && d.answered.as_ref().and_then(|l| l.answer.as_deref()) == Some(decisions::ANSWER_LAND));
+            let text = if approved { "asked again on a new card: the config change was no longer the one approved" } else { "superseded by a new card when the land resumed" };
+            decisions::outcome(&paths, &hive_id, &old, decisions::SOURCE_LAND, Some(&key), text);
+            Ok(())
+        })
+        .await;
+    }
+    if before.decision.is_some() {
+        driver::log_outcome(ctx, caller, &LandState { card_decision: None, ..before }, format!("waiting for the human's approval ({why})")).await;
+    }
+    land.card_decision = Some(decisions::new_id());
     land.request = Some(id.clone());
     land.request_at = now_ms();
     let saved = match worker::task_dir(&caller.paths, &w.task_id) {
@@ -213,6 +234,13 @@ pub(crate) async fn await_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         return driver::fail(ctx, caller, w, land, format!("maiTerm couldn't record the land it asks the human about: {e}")).await;
     }
     driver::end_hold(w);
+    let (paths, hive_id, rec, l) = (caller.paths.clone(), caller.hive.id.clone(), w.clone(), land.clone());
+    let _ = blocking(move || {
+        decisions::land_card_asked(&paths, &hive_id, &rec, &l, why, &summary, &effects);
+        Ok(())
+    })
+    .await;
+    ctx.window.decisions_changed(&caller.workspace_id);
     let what = match why {
         WHY_INTEGRATION => "every land in this Hive's integration mode is theirs".to_string(),
         WHY_ASK => "the Landing checkpoint is Ask me".to_string(),
@@ -343,6 +371,7 @@ pub(crate) async fn approved<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, d
     let label = worker_label(&w);
     let land_id = w.land.as_ref().map(|l| l.id.clone()).unwrap_or_default();
     log::info!("hive {}: land {land_id} of {label} approved by the human ({})", caller.hive.id, d.by);
+    card_closed(ctx, caller, &w, "approved", "").await;
     if let Some(t) = &w.tab_id {
         crate::hive::deliver::hold_for_land(t);
     }
@@ -382,6 +411,7 @@ pub(crate) async fn closed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, d: 
         other => format!("Its card ended without an approval ({other})."),
     };
     log::info!("hive {}: land {} of {} {status} by the human", caller.hive.id, land.id, worker_label(&w));
+    card_closed(ctx, caller, &w, status, &why).await;
     let out = driver::fail(ctx, caller, &w, land, why).await;
     if let Some(text) = out.message(&w) {
         driver::tell_text(ctx, caller, &w, text).await;
@@ -406,12 +436,30 @@ pub(crate) fn hold_if_partial(cur: &mut WorkerRecord, why: &str) {
     l.updated_at = crate::commands::workspace::iso_now();
 }
 
+/// The card's decision closed in the log (§7.6): `approved`, `denied`, or a lapse. Blocks briefly.
+async fn card_closed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, status: &str, why: &str) {
+    let Some(land) = w.land.clone().filter(|l| l.card_decision.is_some()) else { return };
+    let (paths, hive_id, rec, status, why) = (caller.paths.clone(), caller.hive.id.clone(), w.clone(), status.to_string(), why.to_string());
+    let _ = blocking(move || {
+        decisions::land_card_closed(&paths, &hive_id, &rec, &land, &status, &why);
+        Ok(())
+    })
+    .await;
+    ctx.window.decisions_changed(&caller.workspace_id);
+}
+
 /// Withdraws the card of a land that no longer waits on it: its worker was stopped, retired or
-/// reported again (`w` as it was before).
-pub(crate) fn withdraw<W: HiveWindow>(window: &W, w: &WorkerRecord, why: &str) {
-    let card = w.land.as_ref().filter(|l| w.phase == worker::PHASE_LANDING && l.awaits_human()).and_then(|l| l.request.as_deref());
-    if let Some(id) = card {
+/// reported again (`w` as it was before). Its decisions hear why.
+pub(crate) fn withdraw<W: HiveWindow>(window: &W, caller: &Caller, w: &WorkerRecord, why: &str) {
+    let Some(land) = w.land.as_ref().filter(|l| w.phase == worker::PHASE_LANDING && l.awaits_human()) else { return };
+    if let Some(id) = land.request.as_deref() {
         window.withdraw_request(id, why);
+    }
+    if land.decision.is_some() || land.card_decision.is_some() {
+        let words = format!("withdrawn: {why}");
+        decisions::land_card_closed(&caller.paths, &caller.hive.id, w, land, "withdrawn", &words);
+        decisions::land_outcome(&caller.paths, &caller.hive.id, land, &words);
+        window.decisions_changed(&caller.workspace_id);
     }
 }
 

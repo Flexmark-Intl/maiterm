@@ -3508,6 +3508,45 @@ several releases a day).
    worker's question and option label on their own `The worker’s …` lines, outside maiTerm's
    sentence about the human, so a quote closed inside them can't read as the human speaking.
    Dismiss writes nothing.
+   **7d built** (2026-10-24, uncommitted at the time of writing): precedents and the decision
+   log's view. `hive/precedents.rs` keeps one JSON file per precedent (temp file and rename, one
+   process lock), a Hive's in `<hive>/precedents/`, the global ones in `<app data>/hive/precedents/`
+   (`HivePaths::global_precedents`, beside every Hive's root; `bin` and `precedents` can't be Hive
+   ids, and the folder is on every agent's denyWrite and Write/Edit denies, plan D25).
+   `hiveRecordPrecedent {blocker_id, rule, label?}` takes a decision id or a task id (its latest
+   answer by the human), refuses anything the human didn't answer, an `offer`, a second record of one
+   decision, a rule that isn't one line of at most 400 characters and any `scope` but `hive`, and
+   copies everything but the rule and label from the log. `hivePrecedents {category?, query?}`
+   answers the active ones, this Hive's first, at most 20, with `cite_as`, whose wording the rule is,
+   the source Hive of a global one, and counts by category; a Hive precedent the human made global
+   is offered as its global copy, which from then on is the only live one while it exists (retired
+   or not): a citation or override of the Hive's id counts against the copy, the brief counts it
+   once, the human's Edit of the Hive's own rewords the copy too, and a second record of the decision
+   is refused while the copy exists, even with the Hive's own deleted. `precedent` on `hiveAnswerWorker`, `hiveLand` and `hiveResolve`
+   must name an active precedent or the call is refused before anything happens, and `cited` counts
+   only what the coordinator decided (a recommendation under Ask me decides nothing). The log folds
+   by id (`decisions::fold`): the latest line of each event wins, an `answered` line carrying only
+   an `outcome` updates just that, newest first by a decision's latest line. Lands are decisions: the
+   coordinator's `hiveLand` under its Landing checkpoint is `answered` (`landing`, key `L-…`, one per
+   land, kept while a held land resumes on its pins, new on new pins; `LandState.decision`), each
+   card is its own (`card_decision`; category `landing` for Ask me, `config`, `integration`), the
+   human's approval `Land`, a denial `Don't land`, a lapse or a withdrawal `lapsed`, and the land's
+   refusal, hold (a restart's included, written by `reconcile`) or landing is the outcome on both; a
+   card replaced when its land resumes says "asked again" only if the log shows it approved.
+   `hiveResolve` is the coordinator's `other`.
+   `hive_override_decision` (the human's Override…, a note required) appends `overridden` on the
+   coordinator's own answered decision, once, counts it against the cited precedent (retired at its
+   second), and tells the coordinator with the decision's words on their own lines; the human's own
+   Undo of the coordinator's land does the same when the revert lands ("Undone by your human"), on
+   the decision its land log line names (`LandLogEntry.decision`: a land resumed on a new pin keeps
+   its id under a new decision, so the land id can't say which one landed that repo).
+   `brief.md` gains "## Precedents": counts by category and how to check, cite and record, never
+   the precedents themselves. Memory gains Decisions and Precedents tabs (`src/lib/hive/decisions.ts`):
+   who decided, the precedent and its rule, the outcome, Override… with its note; each precedent
+   beside its question and the human's answer, its counters, Edit, Delete and Make global (a copy
+   with a new id and fresh counts, never a tool's). **Decided here:** the tabs refetch on a new
+   `hive-decisions-changed` (every route change, land outcome, override and precedent write), not on
+   `hive-memory-changed`, whose list rebuilds the memory index.
 8. Gallery: store and index, `galleryAdd`/`List`/`Get`/`Tag`/`Collect`, thumbnails, the grid
    and detail view; then compare, Iterate/attach, collections, deliver (plain folders only,
    §7.3). The **budget**: recorded spend per paid render, the header total and the

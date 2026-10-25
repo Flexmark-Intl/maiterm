@@ -33,10 +33,21 @@ pub fn hive_bin_dir() -> Option<PathBuf> {
     hives_dir().map(|d| d.join("bin"))
 }
 
-/// `<app data>/hive/<id>`, or None for an id that isn't one safe path component. Ids are
-/// uuids maiTerm mints, but the state file is hand-editable, and this path gets removed from.
+/// The global precedents' folder name, beside every Hive's root (§7.5).
+pub const GLOBAL_PRECEDENTS: &str = "precedents";
+/// Folders under `<app data>/hive/` that are maiTerm's, not a Hive's (plan D23).
+pub const RESERVED_IDS: [&str; 2] = ["bin", GLOBAL_PRECEDENTS];
+
+/// `<app data>/hive/precedents`: precedents the human made global (§7.5), read by every Hive.
+pub fn global_precedents_dir() -> Option<PathBuf> {
+    hives_dir().map(|d| d.join(GLOBAL_PRECEDENTS))
+}
+
+/// `<app data>/hive/<id>`, or None for an id that isn't one safe path component or names one of
+/// maiTerm's own folders there. Ids are uuids maiTerm mints, but the state file is hand-editable,
+/// and this path gets removed from.
 pub fn hive_root(id: &str) -> Option<PathBuf> {
-    is_component(id).then(|| hives_dir().map(|d| d.join(id))).flatten()
+    (is_component(id) && !RESERVED_IDS.iter().any(|r| r.eq_ignore_ascii_case(id))).then(|| hives_dir().map(|d| d.join(id))).flatten()
 }
 
 /// One path component a name can safely become: no separator, no `..`, no leading dot (a
@@ -104,6 +115,12 @@ impl HivePaths {
 
     pub fn precedents(&self) -> PathBuf {
         self.root.join("precedents")
+    }
+
+    /// The global precedents' folder: beside this Hive's root, as `global_precedents_dir()` is
+    /// beside every Hive's. A test's scratch Hive gets its own.
+    pub fn global_precedents(&self) -> PathBuf {
+        self.root.parent().unwrap_or(&self.root).join(GLOBAL_PRECEDENTS)
     }
 
     pub fn logs(&self) -> PathBuf {
@@ -238,9 +255,10 @@ mod tests {
     fn the_root_is_under_the_app_data_slug_and_refuses_unsafe_ids() {
         let root = hive_root("0b6f-1").unwrap();
         assert!(root.ends_with(Path::new(crate::state::persistence::app_data_slug()).join("hive").join("0b6f-1")));
-        for bad in ["", "..", ".hidden", "a/b", "a\\b", "c:x"] {
+        for bad in ["", "..", ".hidden", "a/b", "a\\b", "c:x", "bin", "precedents", "Precedents"] {
             assert!(hive_root(bad).is_none(), "{bad:?} must not name a Hive folder");
         }
+        assert_eq!(HivePaths::new(root).global_precedents(), global_precedents_dir().unwrap(), "every Hive reads the one global folder");
     }
 
     #[test]

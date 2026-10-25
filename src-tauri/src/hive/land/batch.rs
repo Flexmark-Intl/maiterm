@@ -857,7 +857,7 @@ async fn land_members<W: HiveWindow>(
             let dir = worker::task_dir(&p, &t)?;
             let cur = worker::read_worker(&dir)?;
             let Some(mut land) = cur.land.clone().filter(|_| cur.phase == worker::PHASE_LANDING) else { return Ok(None) };
-            let (lid, summary, review) = (land.id.clone(), land.summary.clone(), land.review.clone());
+            let (lid, summary, review, decision) = (land.id.clone(), land.summary.clone(), land.review.clone(), land.decision.clone());
             if let Some(r) = land.repos.first_mut() {
                 r.status = REPO_LANDED.to_string();
                 r.held_reason = None;
@@ -867,7 +867,7 @@ async fn land_members<W: HiveWindow>(
                 r.tree_landed = tl;
                 r.pushed = Some(ps);
                 r.checked = checked;
-                driver::log_repo(&p, &h, &cur, &lid, &summary, &review, None, r);
+                driver::log_repo(&p, &h, &cur, &lid, &summary, &review, None, decision, r);
             }
             Ok(Some((cur, land)))
         })

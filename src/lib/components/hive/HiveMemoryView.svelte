@@ -5,18 +5,25 @@
 
   Every write goes through Rust's one writer, which the agents' rebuilds also go through, so an
   edit here never races one. The human's own edits are `human`. It refetches when its window hears
-  `hive-memory-changed` (`emit_to`, never a broadcast) and never polls. Tab Files; Decisions and
-  Precedents arrive with step 7d.
+  `hive-memory-changed` (`emit_to`, never a broadcast) and never polls.
+
+  Decisions (§7.6) is Rust's folded decision log: who decided, the precedent cited, the outcome,
+  and Override… on the coordinator's own decisions. Precedents (§7.5) shows each beside the
+  question and the human's answer, with whose wording its rule is; the human edits, deletes and
+  makes one global, which no tool can. Both refetch on `hive-decisions-changed`, never on
+  `hive-memory-changed`, whose list rebuilds the memory index.
 -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { error as logError } from '@tauri-apps/plugin-log';
   import { hiveMemoryDelete, hiveMemoryKept, hiveMemoryList, hiveMemoryPin, hiveMemoryRead, hiveMemoryUnfiled, hiveMemoryWrite } from '$lib/tauri/commands';
-  import type { HiveMemoryFile, HiveMemoryView } from '$lib/tauri/types';
+  import { hiveDecisionLog, hiveOverrideDecision, hivePrecedentDelete, hivePrecedentEdit, hivePrecedentPromote, hivePrecedents } from '$lib/tauri/commands';
+  import type { HiveDecisionView, HiveMemoryFile, HiveMemoryView, HivePrecedent, HivePrecedentsView } from '$lib/tauri/types';
   import { countedListen } from '$lib/utils/listenCounter';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import { budgetText, fileTags, keptError, keptLines, newFileName, provenance, TAG_TIP } from '$lib/hive/memory';
+  import { canOverride, canPromote, categoryLabel, countsText, noteError, outcomeText, precedentTags, ruleError, ruleWording, whoText, whoTone } from '$lib/hive/decisions';
 
   interface Props {
     workspaceId: string;
@@ -44,13 +51,13 @@
     untrack(load);
   });
 
-  /** Runs one command; its answer is the new view. */
-  async function act(what: string, run: () => Promise<HiveMemoryView>): Promise<boolean> {
+  /** Runs one command, one at a time; a refusal shows where the human acted. */
+  async function attempt(what: string, run: () => Promise<void>): Promise<boolean> {
     if (busy) return false;
     busy = true;
     actionError = null;
     try {
-      mem = await run();
+      await run();
       return true;
     } catch (e) {
       actionError = clean(e);
@@ -60,6 +67,95 @@
       busy = false;
     }
   }
+
+  /** A memory command; its answer is the new view. */
+  function act(what: string, run: () => Promise<HiveMemoryView>): Promise<boolean> {
+    return attempt(what, async () => { mem = await run(); });
+  }
+
+  // ── Tabs: Files, Decisions, Precedents ──
+  type MemoryTab = 'files' | 'decisions' | 'precedents';
+  const TABS: { id: MemoryTab; label: string }[] = [
+    { id: 'files', label: 'Files' },
+    { id: 'decisions', label: 'Decisions' },
+    { id: 'precedents', label: 'Precedents' },
+  ];
+  let tab = $state<MemoryTab>('files');
+  let decisions = $state<HiveDecisionView[] | null>(null);
+  let precedents = $state<HivePrecedentsView | null>(null);
+  let listError = $state<string | null>(null);
+
+  let dseq = 0;
+  function loadDecisions() {
+    const id = workspaceId;
+    const mine = ++dseq;
+    hiveDecisionLog(id)
+      .then((v) => { if (mine === dseq && id === workspaceId) { decisions = v; listError = null; } })
+      .catch((e) => { if (mine === dseq) listError = clean(e); });
+  }
+  let pseq = 0;
+  function loadPrecedents() {
+    const id = workspaceId;
+    const mine = ++pseq;
+    hivePrecedents(id)
+      .then((v) => { if (mine === pseq && id === workspaceId) { precedents = v; listError = null; } })
+      .catch((e) => { if (mine === pseq) listError = clean(e); });
+  }
+  /** The shown tab's data, fetched when it shows; the other's is dropped, so it refetches then. */
+  function refreshShown() {
+    if (tab === 'decisions') loadDecisions();
+    else decisions = null;
+    if (tab === 'precedents') loadPrecedents();
+    else precedents = null;
+  }
+  $effect(() => {
+    void workspaceId;
+    void tab;
+    untrack(() => {
+      actionError = null;
+      listError = null;
+      refreshShown();
+    });
+  });
+
+  // ── Decisions ──
+  /** The decision whose Override… is open, and the human's note. */
+  let overriding = $state<{ id: string; note: string } | null>(null);
+  const overrideErr = $derived(overriding ? noteError(overriding.note) : null);
+
+  async function sendOverride() {
+    if (!overriding || overrideErr) return;
+    const { id, note } = overriding;
+    if (await attempt('override', async () => { await hiveOverrideDecision(workspaceId, id, note); })) {
+      overriding = null;
+      loadDecisions();
+    }
+  }
+
+  // ── Precedents ──
+  let editing = $state<{ id: string; draft: string } | null>(null);
+  let confirmDrop = $state<string | null>(null);
+  const editErr = $derived(editing ? ruleError(editing.draft) : null);
+  const globalIds = $derived(precedents?.global.map((p) => p.id) ?? []);
+
+  function precedentAct(what: string, run: () => Promise<HivePrecedentsView>): Promise<boolean> {
+    return attempt(what, async () => { precedents = await run(); });
+  }
+
+  async function saveRule() {
+    if (!editing || editErr) return;
+    const { id, draft } = editing;
+    if (await precedentAct('edit', () => hivePrecedentEdit(workspaceId, id, draft))) editing = null;
+  }
+
+  async function dropPrecedent(id: string) {
+    if (await precedentAct('delete', () => hivePrecedentDelete(workspaceId, id))) confirmDrop = null;
+  }
+
+  const whenAt = (at: string) => {
+    const d = new Date(at);
+    return Number.isNaN(d.getTime()) ? at : d.toLocaleString();
+  };
 
   // ── The open file ──
   /** `sha` null: a new file not written yet. */
@@ -164,16 +260,23 @@
   }
 
   onMount(() => {
-    let unlisten: (() => void) | undefined;
+    const unlisten: (() => void)[] = [];
     let gone = false;
+    const target = getCurrentWindow().label;
+    const keep = (u: () => void) => { if (gone) u(); else unlisten.push(u); };
     countedListen<{ workspace_id: string }>('hive-memory-changed', (e) => {
       if (e.payload.workspace_id === workspaceId) load();
-    }, { target: getCurrentWindow().label })
-      .then((u) => { if (gone) u(); else unlisten = u; })
+    }, { target })
+      .then(keep)
       .catch((e) => logError(`hive: memory-changed listener: ${e}`));
+    countedListen<{ workspace_id: string }>('hive-decisions-changed', (e) => {
+      if (e.payload.workspace_id === workspaceId) refreshShown();
+    }, { target })
+      .then(keep)
+      .catch((e) => logError(`hive: decisions-changed listener: ${e}`));
     return () => {
       gone = true;
-      unlisten?.();
+      for (const u of unlisten) u();
     };
   });
 
@@ -184,10 +287,16 @@
 
 <section class="memory" aria-label="Memory">
   <div class="tabs" role="tablist" aria-label="Memory">
-    <button type="button" role="tab" class="tab active" aria-selected="true">Files</button>
+    {#each TABS as t (t.id)}
+      <button type="button" role="tab" class="tab" class:active={tab === t.id} aria-selected={tab === t.id} onclick={() => (tab = t.id)}>{t.label}</button>
+    {/each}
   </div>
 
-  {#if readError}
+  {#if tab === 'decisions'}
+    {@render decisionsTab()}
+  {:else if tab === 'precedents'}
+    {@render precedentsTab()}
+  {:else if readError}
     <p class="error" role="alert">Couldn't read the memory folder: {readError}</p>
   {:else if !mem}
     <p class="note">Reading the memory folder…</p>
@@ -348,6 +457,150 @@
   {/if}
 </section>
 
+{#snippet decisionsTab()}
+  <div class="pane-scroll">
+    {#if listError}
+      <p class="error" role="alert">Couldn't read the decision log: {listError}</p>
+    {:else if !decisions}
+      <p class="note pad">Reading the decision log…</p>
+    {:else if !decisions.length}
+      <p class="note pad">No decisions yet. Every prompt, question and land the coordinator or you decide is logged here.</p>
+    {:else}
+      {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
+      <ul role="list" class="cards">
+        {#each decisions as d (d.id)}
+          <li class="card" class:dimmed={d.overridden}>
+            <div class="card-h">
+              <span class="tag">{categoryLabel(d.category)}</span>
+              <span class="badge {whoTone(d)}">{whoText(d)}</span>
+              {#if d.overridden}<span class="badge overridden">Overridden</span>{/if}
+              {#if d.worker}<span class="dim">{d.worker}</span>{/if}
+              <span class="dim">{whenAt(d.at)}</span>
+            </div>
+            <p class="q">{d.question}</p>
+            {#if d.context}<p class="dim ctx">{d.context}</p>{/if}
+            {#if d.options.length}
+              <p class="dim">Options: {#each d.options as o, i (`${i}:${o.label}`)}{i ? ' · ' : ''}{o.label}{/each}</p>
+            {/if}
+            {#if d.answer}
+              <p><span class="dim">Answer:</span> {d.answer}{#if d.reason}<span class="dim"> — {d.reason}</span>{/if}</p>
+            {:else if d.status === 'lapsed' && d.reason}
+              <p class="dim">{d.reason}</p>
+            {/if}
+            {#if d.recommended && d.status === 'answered' && d.by === 'human'}
+              <p class="dim">The coordinator recommended: {d.recommended}</p>
+            {/if}
+            {#if d.precedent}
+              <p class="dim">
+                By precedent {d.precedent.id}{#if d.precedent.rule}: “{d.precedent.rule}”{:else} (since deleted){/if}{#if d.precedent.status === 'retired'} · retired{/if}
+              </p>
+            {/if}
+            {#if d.outcome}<p class="dim">Outcome: {outcomeText(d.outcome)}</p>{/if}
+            {#if d.override_note}<p class="warn-inline">You overrode it: {d.override_note}</p>{/if}
+            {#if canOverride(d)}
+              {#if overriding?.id === d.id}
+                <form class="inline" onsubmit={(e) => { e.preventDefault(); sendOverride(); }}>
+                  <textarea
+                    class="editor note-editor"
+                    bind:value={overriding.note}
+                    placeholder="What should have happened? The coordinator is told."
+                    aria-label="Override note"
+                  ></textarea>
+                  {#if overriding.note && overrideErr}<p class="error">{overrideErr}</p>{/if}
+                  <div class="actions">
+                    <button type="submit" class="btn danger" disabled={busy || !!overrideErr}>Override</button>
+                    <button type="button" class="link" onclick={() => (overriding = null)}>Cancel</button>
+                    {#if d.precedent}<span class="dim">Counts against precedent {d.precedent.id}; a second override retires it.</span>{/if}
+                  </div>
+                </form>
+              {:else}
+                <div class="actions">
+                  <Tooltip text="Mark the coordinator's decision wrong, with a note it reads">
+                    <button type="button" class="link" disabled={busy} onclick={() => { actionError = null; overriding = { id: d.id, note: '' }; }}>Override…</button>
+                  </Tooltip>
+                </div>
+              {/if}
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet precedentCard(p: HivePrecedent)}
+  <li class="card" class:dimmed={p.status === 'retired'}>
+    <div class="card-h">
+      <span class="tag">{categoryLabel(p.category)}</span>
+      {#if p.label}<span class="dim">{p.label}</span>{/if}
+      {#each precedentTags(p, globalIds) as t (t)}<span class="badge">{t}</span>{/each}
+      <span class="dim">{countsText(p)}</span>
+    </div>
+    <p class="q">{p.question}</p>
+    {#if p.options.length}
+      <p class="dim">Options: {#each p.options as o, i (`${i}:${o.label}`)}{i ? ' · ' : ''}{o.label}{/each}</p>
+    {/if}
+    <p><span class="dim">Your answer:</span> {p.answer}{#if p.reason}<span class="dim"> — {p.reason}</span>{/if}</p>
+    {#if editing?.id === p.id}
+      <form class="inline" onsubmit={(e) => { e.preventDefault(); saveRule(); }}>
+        <input type="text" class="rule-input" bind:value={editing.draft} aria-label="Rule" />
+        {#if editErr}<p class="error">{editErr}</p>{/if}
+        <div class="actions">
+          <button type="submit" class="btn primary" disabled={busy || !!editErr}>Save rule</button>
+          <button type="button" class="link" onclick={() => (editing = null)}>Cancel</button>
+        </div>
+      </form>
+    {:else}
+      <p><span class="dim">Rule ({ruleWording(p)}):</span> {p.rule}</p>
+    {/if}
+    <div class="actions">
+      {#if editing?.id !== p.id}
+        <button type="button" class="link" disabled={busy} onclick={() => { actionError = null; editing = { id: p.id, draft: p.rule }; }}>Edit</button>
+      {/if}
+      {#if canPromote(p, globalIds)}
+        <Tooltip text="Copy it to every Hive's precedents: their coordinators may cite it">
+          <button type="button" class="link" disabled={busy} onclick={() => precedentAct('promote', () => hivePrecedentPromote(workspaceId, p.id))}>Make global</button>
+        </Tooltip>
+      {/if}
+      {#if confirmDrop === p.id}
+        <span class="confirm">Delete it?{#if p.scope === 'global'} Every Hive loses it.{/if}</span>
+        <button type="button" class="btn danger" disabled={busy} onclick={() => dropPrecedent(p.id)}>Delete</button>
+        <button type="button" class="link" onclick={() => (confirmDrop = null)}>Cancel</button>
+      {:else}
+        <button type="button" class="link danger" disabled={busy} onclick={() => (confirmDrop = p.id)}>Delete…</button>
+      {/if}
+    </div>
+  </li>
+{/snippet}
+
+{#snippet precedentsTab()}
+  <div class="pane-scroll">
+    {#if listError}
+      <p class="error" role="alert">Couldn't read the precedents: {listError}</p>
+    {:else if !precedents}
+      <p class="note pad">Reading the precedents…</p>
+    {:else}
+      {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
+      <div class="detail-h pad"><b>This Hive</b><span class="dim">Recorded by the coordinator from your answers. The rule is its wording until you edit it.</span></div>
+      {#if precedents.hive.length}
+        <ul role="list" class="cards">
+          {#each precedents.hive as p (p.id)}{@render precedentCard(p)}{/each}
+        </ul>
+      {:else}
+        <p class="note pad">None yet. After you answer a blocker, the coordinator records what it teaches.</p>
+      {/if}
+      <div class="detail-h pad"><b>Global</b><span class="dim">Made global by you; every Hive's coordinator may cite them.</span></div>
+      {#if precedents.global.length}
+        <ul role="list" class="cards">
+          {#each precedents.global as p (p.id)}{@render precedentCard(p)}{/each}
+        </ul>
+      {:else}
+        <p class="note pad">None. Make a precedent global from this Hive's list.</p>
+      {/if}
+    {/if}
+  </div>
+{/snippet}
+
 <style>
   .memory { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
   .tabs { display: flex; gap: 4px; padding: 8px 14px 0; border-bottom: 1px solid var(--bg-light); }
@@ -397,5 +650,21 @@
   .warn { color: var(--yellow); font-size: 12px; margin: 6px 14px 0; overflow-wrap: anywhere; }
   .banner { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
   .error { color: var(--red); font-size: 12px; margin: 6px 14px 0; overflow-wrap: anywhere; }
-  .detail .error { margin: 0; }
+  .detail .error, .card .error { margin: 0; }
+  .pane-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 12px; }
+  .pad { padding: 10px 14px 0; }
+  .cards { list-style: none; margin: 0; padding: 10px 14px 0; display: flex; flex-direction: column; gap: 8px; }
+  .card { background: var(--bg-medium); border: 1px solid var(--bg-light); border-radius: 4px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+  .card p { margin: 0; overflow-wrap: anywhere; }
+  .card.dimmed { opacity: 0.75; }
+  .card-h { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 10.5px; }
+  .q { color: var(--fg); font-size: 12.5px; }
+  .ctx { font-size: 11px; }
+  .badge.open { color: var(--fg-dim); }
+  .badge.maiterm { color: var(--fg-dim); }
+  .badge.overridden { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 45%, transparent); }
+  .warn-inline { color: var(--yellow); }
+  .inline { display: flex; flex-direction: column; gap: 6px; }
+  .note-editor { min-height: 60px; }
+  .rule-input { width: 100%; box-sizing: border-box; background: var(--bg-dark); color: var(--fg); border: 1px solid var(--bg-light); border-radius: 4px; padding: 4px 6px; font: inherit; font-size: 12px; }
 </style>

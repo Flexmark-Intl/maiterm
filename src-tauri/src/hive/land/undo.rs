@@ -640,6 +640,10 @@ async fn finish<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, mut u: UndoSta
         }
     };
     let who = if u.by_human() { "the human" } else { "the coordinator" };
+    // The human's own Undo of the coordinator's land overrides that decision (plan D17).
+    if u.by_human() {
+        crate::hive::decisions::land_undone_by_human(ctx, caller, &u.land, e.decision.as_deref()).await;
+    }
     let note = format!("Land {} undone by {who}: {}", u.undoes, one_line(&u.reason, 300));
     if let Err(err) = crate::hive::control::task_note(ctx, caller, &u.task_id, &note, None).await {
         log::info!("hive {}: undo note for {} not written: {err}", caller.hive.id, u.task_id);

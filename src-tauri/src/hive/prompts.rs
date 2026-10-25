@@ -583,8 +583,10 @@ fn notice(r: &Routed, why: &str) -> HumanNotice {
     }
 }
 
+/// The routes went out; every route change here also wrote the decision log.
 fn emit<W: HiveWindow>(ctx: &Ctx<'_, W>, workspace_id: &str) {
     ctx.window.emit_routes(workspace_id, views_for(workspace_id));
+    ctx.window.decisions_changed(workspace_id);
 }
 
 pub(crate) async fn route<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, view: PromptView) -> Option<Routed> {
@@ -797,7 +799,7 @@ pub(crate) fn tool_definition(tab_id: &Value) -> Value {
                     "items": { "type": "object", "properties": { "selected": { "type": "array", "items": { "type": "string" } } }, "required": ["selected"] },
                     "description": "An AskUserQuestion's answers: one per question, in order"
                 },
-                "precedent": { "type": "string", "description": "The precedent (P-…) that settles it, if one does" },
+                "precedent": { "type": "string", "description": "The precedent (P-…, from hivePrecedents) that settles it, if one does: an active one, or the call is refused" },
                 "reason": { "type": "string", "description": "Why, in a sentence (shown to your human)" }
             },
             "required": ["worker", "prompt_id"]
@@ -927,7 +929,7 @@ fn blocker_view(data: &parking_lot::RwLock<crate::state::AppData>, caller: &Call
 
 pub(crate) async fn answer_worker_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, args: &Value) -> Result<Value, String> {
     let prompt_id = args.get("prompt_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).ok_or("prompt_id is required: the one maiTerm gave")?.to_string();
-    let precedent = args.get("precedent").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(|p| one_line(p, 64));
+    let precedent = super::precedents::cited(&caller.paths, args).await?;
     let reason = args.get("reason").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(|r| one_line(r, MAX_REASON));
     let w = super::control::named_worker(caller, args).await?;
     let tab = w
@@ -983,8 +985,17 @@ pub(crate) async fn answer_worker_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: 
 
     let r = remove(&tab, &prompt_id).unwrap_or(r);
     let mut l = base_line(&r, decisions::EVENT_ANSWERED, decisions::BY_COORDINATOR);
-    (l.answer, l.precedent, l.reason) = (Some(checked.said()), precedent, reason);
+    (l.answer, l.precedent, l.reason) = (Some(checked.said()), precedent.clone(), reason);
     log_line(&caller.paths, l).await;
+    // Counted for what it decided; a recommendation under Ask me decides nothing.
+    if precedent.is_some() {
+        let p = caller.paths.clone();
+        let _ = blocking(move || {
+            super::precedents::count_citation(&p, precedent.as_deref());
+            Ok(())
+        })
+        .await;
+    }
     log::info!("hive {}: the coordinator answered {}\u{2019}s {} {}: {}", r.hive_id, r.worker_name, r.kind, r.key, checked.said());
     emit(ctx, &caller.workspace_id);
     Ok(json!({ "answered": true, "prompt_id": prompt_id, "choice": choice }))
@@ -1095,6 +1106,7 @@ pub(crate) async fn blocker_answered_in<W: HiveWindow>(
         emit(ctx, &caller.workspace_id);
     }
     let Some(line) = line else { return Ok(None) };
+    ctx.window.decisions_changed(&caller.workspace_id);
     log::info!("hive {}: the human answered {} on task {task_id} ({})", caller.hive.id, line.key.as_deref().unwrap_or_default(), line.category);
     if let Some(w) = workers.iter().find(|w| w.task_id == task_id) {
         tell_coordinator(ctx, caller, blocker_answer_notice(&worker_name(w), &blocker, &answer)).await;

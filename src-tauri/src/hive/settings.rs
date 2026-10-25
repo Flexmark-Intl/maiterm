@@ -275,6 +275,8 @@ pub fn deny_write_paths(hive: &Hive, paths: &HivePaths, bin_dir: &Path) -> Vec<D
     add(paths.logs(), true);
     add(paths.runs(), true);
     add(paths.precedents(), true);
+    // A precedent planted there would steer every Hive as the human's (plan D25).
+    add(paths.global_precedents(), true);
     add(paths.coordinator_home().join(".claude"), true);
     add(paths.coordinator_home().join(".mcp.json"), false);
     out
@@ -540,6 +542,7 @@ pub fn worker_deny_write_paths(hive: &Hive, w: &WorkerRecord, paths: &HivePaths,
     // Its jobs' profiles and pass marks (§6.8): a planted mark would be a forged receipt.
     add(paths.runs(), true);
     add(paths.precedents(), true);
+    add(paths.global_precedents(), true);
     add(bin_dir.to_path_buf(), true);
     // Folders that may hold a repo this worker commits into, or its own folders and caches (a
     // plain folder of `~`): split around them rather than denied over them.
@@ -853,7 +856,7 @@ mod tests {
         for must in ["/r/web", "/r/brand assets", "/srv/web.git"] {
             assert!(deny_write.contains(&must.to_string()), "{must}");
         }
-        for must in [p.coordinator_worktree("web"), p.gallery(), env().bin_dir, p.coordinator_home().join(".claude")] {
+        for must in [p.coordinator_worktree("web"), p.gallery(), env().bin_dir, p.coordinator_home().join(".claude"), p.precedents(), p.global_precedents()] {
             assert!(deny_write.contains(&must.to_string_lossy().to_string()), "{}", must.display());
         }
         assert!(!deny_write.iter().any(|d| *d == p.coordinator_home().to_string_lossy()), "home stays writable");
@@ -1156,7 +1159,7 @@ mod tests {
         for must in [wt.join(".git"), wt.join(".claude"), wt.join(".mcp.json"), p.worker_scratch("auth").join(".claude"), p.worker_scratch("auth").join(".git")] {
             assert!(deny.contains(&sp(must.clone())), "{}", must.display());
         }
-        for must in [p.coordinator_worktree("web").parent().unwrap().to_path_buf(), p.worktrees().join("billing"), p.gallery(), p.tasks(), p.logs(), p.precedents(), env().bin_dir] {
+        for must in [p.coordinator_worktree("web").parent().unwrap().to_path_buf(), p.worktrees().join("billing"), p.gallery(), p.tasks(), p.logs(), p.precedents(), p.global_precedents(), env().bin_dir] {
             assert!(deny.contains(&sp(must.clone())), "{}", must.display());
         }
         assert!(!deny.iter().any(|d| *d == sp(p.memory())), "memory is written through Claude's own exemption");

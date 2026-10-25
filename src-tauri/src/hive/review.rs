@@ -568,7 +568,8 @@ pub fn resolve_tool_definition(tab_id: &Value) -> Value {
                 "worker": { "type": ["string", "number"], "description": "The worker: badge (3 or \"#3\"), name or task id" },
                 "resolution": { "type": "string", "enum": RESOLUTIONS },
                 "reason": { "type": "string", "description": "Why, in a sentence: it goes on the task and in the land log" },
-                "brief": { "type": "string", "description": "The revised brief (revise only)" }
+                "brief": { "type": "string", "description": "The revised brief (revise only)" },
+                "precedent": { "type": "string", "description": "The precedent (P-…, from hivePrecedents) that settles it, if one does" }
             },
             "required": ["worker", "resolution", "reason"]
         }
@@ -594,6 +595,7 @@ pub(crate) async fn resolve<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, ar
         ("revise", false) | (_, true) => {}
         (_, false) => return Err("brief goes only with revise.".to_string()),
     }
+    let precedent = super::precedents::cited(&caller.paths, args).await?;
     let w = named_worker(caller, args).await?;
     let label = worker_label(&w);
     if !w.review.as_ref().is_some_and(Review::unresolved) {
@@ -621,6 +623,7 @@ pub(crate) async fn resolve<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, ar
         };
         let out = retire_worker(ctx, caller, &w, spec).await?;
         record_resolution(caller, &w, resolution, None).await;
+        log_resolution(ctx, caller, &w, &kind, &reason, precedent).await;
         log::info!("hive {}: worker {label}'s escalation resolved: {kind}", caller.hive.id);
         let branches: Vec<String> = w.git_folders().filter_map(|f| f.branch.as_ref().map(|b| format!("{}: {b}", f.name))).collect();
         return Ok(json!({
@@ -636,6 +639,7 @@ pub(crate) async fn resolve<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, ar
 
     if kind == "accept" {
         record_resolution(caller, &w, resolution, None).await;
+        log_resolution(ctx, caller, &w, &kind, &reason, precedent).await;
         if let Err(e) = task_note(ctx, caller, &w.task_id, &note, None).await {
             log::warn!("hive {}: worker {label} accept note not written: {e}", caller.hive.id);
         }
@@ -651,6 +655,7 @@ pub(crate) async fn resolve<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, ar
     // revise: recorded before it is sent, so a relaunch reads the new brief whatever the delivery.
     let revision = BriefRevision { brief: brief.clone(), reason: reason.clone(), at: now, ..BriefRevision::default() };
     record_resolution(caller, &w, resolution, Some(revision)).await;
+    log_resolution(ctx, caller, &w, &kind, &reason, precedent).await;
     let text = format!(
         "[maiTerm] Your coordinator revised your brief after {MAX_ATTEMPTS} failed reviews. Work to this now (it is in {} from your next \
          launch too), then report done again with hiveReport:\n{}",
@@ -668,6 +673,18 @@ pub(crate) async fn resolve<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, ar
         "note": "Its attempts start again. When it reports done, spawn a reviewer with reviews: its name. Not delivered means no agent \
                  is running: hiveStopWorker then hiveRestartWorker, and it reads the revised brief at launch.",
     }))
+}
+
+/// The resolution in the decision log, the coordinator's own call (§7.6), its citation counted.
+async fn log_resolution<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, kind: &str, reason: &str, precedent: Option<String>) {
+    let (paths, hive_id, rec, kind, reason) = (caller.paths.clone(), caller.hive.id.clone(), w.clone(), kind.to_string(), reason.to_string());
+    let _ = blocking(move || {
+        super::decisions::resolution_decided(&paths, &hive_id, &rec, &kind, &reason, precedent.as_deref());
+        super::precedents::count_citation(&paths, precedent.as_deref());
+        Ok(())
+    })
+    .await;
+    ctx.window.decisions_changed(&caller.workspace_id);
 }
 
 /// The resolution on the builder's review; a revision also starts its attempts again. Logged,

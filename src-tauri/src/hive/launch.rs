@@ -482,7 +482,8 @@ pub fn write_launch_files(hive: &Hive, paths: &HivePaths, record: &LaunchRecord,
     write_json(Path::new(&record.settings_path), &settings)?;
     write_json(Path::new(&record.mcp_config_path), &super::settings::hive_mcp_config())?;
     if record.role == ROLE_COORDINATOR {
-        write_bytes(&paths.coordinator_brief(), super::brief::brief_md(hive, paths).as_bytes())?;
+        let counts = super::precedents::counts(paths);
+        write_bytes(&paths.coordinator_brief(), super::brief::brief_md(hive, paths, &counts).as_bytes())?;
     }
     Ok(())
 }

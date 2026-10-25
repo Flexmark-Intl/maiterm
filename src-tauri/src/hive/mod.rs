@@ -61,6 +61,7 @@ pub mod launch;
 pub mod layout;
 pub mod memory;
 pub mod paths;
+pub mod precedents;
 pub mod pressure;
 pub mod prompts;
 // Ignored probes that run a sandboxed `claude -p` through `sh`: Unix only, as the sandbox is.

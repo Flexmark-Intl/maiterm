@@ -260,7 +260,7 @@ pub(crate) async fn retire_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Call
         if moved { Ok(r) } else { Err(format!("Worker {label} is {} now: look again with hiveListWorkers.", r.phase)) }
     })
     .await?;
-    super::land::approval::withdraw(&ctx.window, w, "the worker was retired, so nothing would land");
+    super::land::approval::withdraw(&ctx.window, caller, w, "the worker was retired, so nothing would land");
 
     let tab = record.tab_id.clone().filter(|t| super::tools::has_tab(ctx.data, caller, t));
     let mut agent_stopped = false;

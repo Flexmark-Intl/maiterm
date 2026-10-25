@@ -100,6 +100,8 @@ pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     /// At `due_ms`, the coordinator's time on the prompt runs out (`prompts::on_due`). A test
     /// calls `on_due` itself.
     fn schedule_due(&self, _caller: &super::tools::Caller, _tab: &str, _key: &str, _due_ms: i64) {}
+    /// The decision log or the precedents changed: Memory's Decisions and Precedents refetch.
+    fn decisions_changed(&self, _workspace_id: &str) {}
 }
 
 /// A Hive's card for the human, as Rust builds it: every word maiTerm's but `reason`.
@@ -279,6 +281,10 @@ impl HiveWindow for AppWindow {
             let ctx = super::tools::app_ctx(&app, &handle, &caller);
             super::prompts::on_due(&ctx, &caller, &tab, &key, super::fuses::now_ms()).await;
         });
+    }
+
+    fn decisions_changed(&self, workspace_id: &str) {
+        super::decisions::emit_changed(&self.handle, &self.label, workspace_id);
     }
 }
 

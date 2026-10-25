@@ -177,6 +177,12 @@ impl Rig {
         self.win.st().delivered.iter().filter(|(t, _)| *t == self.coord).map(|(_, m)| m.clone()).collect()
     }
 
+    /// A precedent of this Hive's, written as maiTerm would (a citation's target).
+    fn precedent(&self, id: &str, status: &str) {
+        let p = crate::hive::precedents::Precedent { id: id.into(), hive_id: "h1".into(), category: "permissions".into(), status: status.into(), ..Default::default() };
+        crate::hive::precedents::save_in(&self.caller.paths.precedents(), &p).unwrap();
+    }
+
     fn set_blocker(&self, b: Option<TaskBlocker>) {
         let mut d = self.data.write();
         let row = &mut d.windows[0].workspaces[0].tasks[0];
@@ -436,6 +442,14 @@ async fn yes_and_no_go_in_as_rows_or_esc_and_nothing_else_does() {
         let e = rig.answer(json!({ "prompt_id": view.key, "answer": bad })).await.unwrap_err();
         assert!(e.contains("only Yes or No"), "{bad}: {e}");
     }
+    // A citation must name an active precedent: unknown and retired ones are refused, nothing sent.
+    let e = rig.answer(json!({ "prompt_id": view.key, "answer": "Yes", "precedent": "P-1234abcd" })).await.unwrap_err();
+    assert!(e.contains("no precedent P-1234abcd"), "{e}");
+    rig.precedent("P-1234abcd", crate::hive::precedents::STATUS_RETIRED);
+    let e = rig.answer(json!({ "prompt_id": view.key, "answer": "Yes", "precedent": "P-1234abcd" })).await.unwrap_err();
+    assert!(e.contains("is retired"), "{e}");
+    assert!(rig.win.st().answered.is_empty());
+    rig.precedent("P-1234abcd", crate::hive::precedents::STATUS_ACTIVE);
     let out = rig.answer(json!({ "prompt_id": view.key, "answer": "Yes", "reason": "tests are safe", "precedent": "P-1234abcd" })).await.unwrap();
     assert_eq!((out["answered"].as_bool(), out["choice"].as_str()), (Some(true), Some("Yes")));
     assert_eq!(rig.win.st().answered[0].2.as_deref(), Some("Yes"));
@@ -443,6 +457,7 @@ async fn yes_and_no_go_in_as_rows_or_esc_and_nothing_else_does() {
     let l = rig.lines().pop().unwrap();
     assert_eq!((l.event.as_str(), l.by.as_str(), l.answer.as_deref(), l.precedent.as_deref()), ("answered", "coordinator", Some("Yes"), Some("P-1234abcd")));
     assert_eq!(l.id, rig.lines()[0].id, "one decision, one id");
+    assert_eq!(crate::hive::precedents::get(&rig.caller.paths, "P-1234abcd").unwrap().cited, 1, "the citation is counted");
 
     // A two-row "Yes / Yes, and…" dialog with no plain No: No is Esc.
     let mut no_row = bash(&rig.wtab);

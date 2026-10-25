@@ -17,6 +17,7 @@ pub const ASK: &str = "ask";
 
 pub const PERMISSIONS: &str = "permissions";
 pub const QUESTIONS: &str = "questions";
+pub const LANDING: &str = "landing";
 
 /// Whether `key` is set to Ask me.
 pub fn asks(hive: &Hive, key: &str) -> bool {

@@ -979,9 +979,11 @@ async fn reconcile_settles_a_land_caught_in_step_2() {
         state: STATE_ADVANCING.into(),
         summary: "s".into(),
         repos: vec![repo("web", &web0), repo("api", &api0)],
+        decision: Some("D-c4a5e000".into()),
         ..LandState::default()
     });
     worker::write_worker(&rig.caller.paths.task(&w.task_id), &rec).unwrap();
+    crate::hive::decisions::land_decided(&rig.caller.paths, &rig.caller.hive.id, &rec, rec.land.as_ref().unwrap());
     let common = git::common_dir(rig.repo("web")).unwrap();
     let stale = lock::LockInfo { pid: 2_147_483_000, build: "dev".into(), hive_id: rig.caller.hive.id.clone(), land_id: "L-crash000".into(), at: "then".into() };
     fs::write(lock::lock_path(&common), serde_json::to_vec(&stale).unwrap()).unwrap();
@@ -993,6 +995,10 @@ async fn reconcile_settles_a_land_caught_in_step_2() {
     assert!(land.held_reason.unwrap().contains("landed web; interrupted by a maiTerm restart"));
     let log = rig.log();
     assert_eq!((log.len(), log[0].folder.as_str(), log[0].base_after.as_str()), (1, "web", tips["web"].as_str()));
+    assert_eq!(log[0].decision.as_deref(), Some("D-c4a5e000"), "the decision that landed it");
+    // The coordinator's decision hears the hold, rather than reading "running" for good.
+    let d = crate::hive::decisions::find(&crate::hive::decisions::read(&rig.caller.paths), "D-c4a5e000").unwrap();
+    assert!(d.outcome.as_deref().is_some_and(|o| o.starts_with("held: landed web; interrupted by a maiTerm restart")), "{:?}", d.outcome);
     assert!(!lock::lock_path(&common).exists(), "its own lock is released");
     assert_eq!(reconcile_in(&rig.caller.hive, &rig.caller.paths), 0, "a held land is settled");
 
@@ -2388,4 +2394,218 @@ async fn a_member_that_left_its_batch_lands_alone_once_however_often_the_batch_i
     assert!(Path::new(&tmp).exists());
     let told = rig.told().join("\n");
     assert_eq!(told.matches("⟦HIVE LAND · Title b⟧").count(), 0, "a running check says nothing yet: {told}");
+}
+
+// ── The decision log (step 7d) ──
+
+fn decisions_of(rig: &Rig) -> Vec<crate::hive::decisions::Decision> {
+    crate::hive::decisions::fold(&crate::hive::decisions::read(&rig.caller.paths))
+}
+
+fn precedent(rig: &Rig, id: &str) {
+    let p = crate::hive::precedents::Precedent { id: id.into(), category: "landing".into(), ..Default::default() };
+    crate::hive::precedents::save_in(&rig.caller.paths.precedents(), &p).unwrap();
+}
+
+#[tokio::test]
+async fn the_coordinators_land_is_its_decision_with_the_outcome_and_the_citation_counted() {
+    let rig = Rig::new("decided", &["web"]);
+    let w = rig.reported("touch", &["web"], "shared.txt", "one\nTWO\nthree\n");
+    // An unknown precedent is refused before anything is written.
+    let e = rig.land_with(&w, json!({ "precedent": "P-00000bad" }), opts()).await.unwrap_err();
+    assert!(e.contains("no precedent P-00000bad"), "{e}");
+    assert_eq!(rig.record(&w.task_id).phase, worker::PHASE_REPORTED);
+    assert!(decisions_of(&rig).is_empty());
+
+    precedent(&rig, "P-0000c001");
+    fs::write(rig.repo("web").join("shared.txt"), "the human's\n").unwrap();
+    let out = rig.land_with(&w, json!({ "precedent": "P-0000c001" }), opts()).await.unwrap();
+    assert_eq!(out["state"], STATE_HELD, "{out}");
+    let land = rig.record(&w.task_id).land.unwrap();
+    let ds = decisions_of(&rig);
+    assert_eq!(ds.len(), 1);
+    let a = ds[0].answered.clone().unwrap();
+    assert_eq!((a.by.as_str(), a.category.as_str(), a.source.as_str(), a.key.as_deref()), ("coordinator", "landing", "land", Some(land.id.as_str())));
+    assert_eq!((a.answer.as_deref(), a.precedent.as_deref(), a.task_id.as_deref()), (Some("Land"), Some("P-0000c001"), Some(w.task_id.as_str())));
+    assert!(a.question.contains("Title touch") && a.question.contains("(web)"), "{}", a.question);
+    assert_eq!(land.decision.as_deref(), Some(ds[0].id.as_str()));
+    assert!(ds[0].outcome.as_deref().is_some_and(|o| o.starts_with("held: ") && o.contains("shared.txt")), "{:?}", ds[0].outcome);
+    assert_eq!(crate::hive::precedents::get(&rig.caller.paths, "P-0000c001").unwrap().cited, 1);
+
+    // Resumed with the same commits: the same decision, its outcome now landed, cited once.
+    fs::write(rig.repo("web").join("shared.txt"), "one\ntwo\nthree\n").unwrap();
+    assert_eq!(rig.land_with(&w, json!({ "precedent": "P-0000c001" }), opts()).await.unwrap()["state"], STATE_LANDED);
+    let ds = decisions_of(&rig);
+    assert_eq!(ds.len(), 1, "one decision per land");
+    assert_eq!(ds[0].outcome.as_deref(), Some("landed"));
+    assert_eq!(crate::hive::precedents::get(&rig.caller.paths, "P-0000c001").unwrap().cited, 1);
+    let v = crate::hive::decisions::view(&rig.caller.paths);
+    assert_eq!((v[0].by_label.as_str(), v[0].can_override), ("coordinator \u{b7} by precedent", true));
+}
+
+#[tokio::test]
+async fn land_cards_are_decisions_categorized_by_why_and_a_lapse_isnt_a_denial() {
+    // Landing = Ask me: the human's decision, the coordinator recommending the land.
+    let rig = Rig::with("card-ask", &["web"], |h| {
+        h.checkpoints.insert("landing".into(), "ask".into());
+    });
+    let w = rig.reported("asked", &["web"], "a.rs", "a\n");
+    rig.land(&w).await.unwrap();
+    let ds = decisions_of(&rig);
+    assert_eq!(ds.len(), 1, "no decision of the coordinator's own");
+    let asked = ds[0].asked.clone().unwrap();
+    assert_eq!((asked.category.as_str(), asked.recommended.as_deref(), asked.question.as_str()), ("landing", Some("Land"), "Land \u{201c}Title asked\u{201d} into main in web"));
+    assert!(asked.context.as_deref().is_some_and(|c| c.contains("Ask me")), "{:?}", asked.context);
+    let (_, d) = rig.last_card();
+    approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await.answer().unwrap();
+    let ds = decisions_of(&rig);
+    let a = ds[0].answered.clone().unwrap();
+    assert_eq!((a.by.as_str(), a.answer.as_deref(), a.recommended.as_deref(), a.category.as_str()), ("human", Some("Land"), Some("Land"), "landing"));
+    assert_eq!(ds[0].outcome.as_deref(), Some("landed"));
+    assert!(!ds[0].can_override(), "the human's own");
+
+    // The config rule on the coordinator's own land: its decision waits, the card is `config`.
+    let rig = Rig::new("card-config", &["web"]);
+    let w = rig.reported("hook", &["web"], ".claude/settings.json", "{}\n");
+    rig.land(&w).await.unwrap();
+    let land = rig.record(&w.task_id).land.unwrap();
+    let ds = decisions_of(&rig);
+    assert_eq!(ds.len(), 2);
+    let coord = ds.iter().find(|d| Some(&d.id) == land.decision.as_ref()).unwrap();
+    let card = ds.iter().find(|d| Some(&d.id) == land.card_decision.as_ref()).unwrap();
+    assert_eq!((coord.category(), coord.outcome.as_deref()), ("landing", Some("waiting for the human's approval (config)")));
+    assert_eq!(card.category(), "config");
+    let (_, d) = rig.last_card();
+    approval::closed(&rig.ctx(), &rig.caller, &d, "denied").await.unwrap();
+    let ds = decisions_of(&rig);
+    let card = ds.iter().find(|x| Some(&x.id) == land.card_decision.as_ref()).unwrap();
+    let coord = ds.iter().find(|x| Some(&x.id) == land.decision.as_ref()).unwrap();
+    assert_eq!((card.answered_by(), card.answered.as_ref().unwrap().answer.as_deref()), (Some("human"), Some("Don\u{2019}t land")));
+    for x in [card, coord] {
+        assert!(x.outcome.as_deref().is_some_and(|o| o.starts_with("refused: The human denied it")), "{:?}", x.outcome);
+    }
+
+    // A card nobody answered lapses: no answer is logged.
+    let w2 = rig.reported("late", &["web"], "AGENTS.md", "x\n");
+    rig.land(&w2).await.unwrap();
+    let card_id = rig.record(&w2.task_id).land.unwrap().card_decision.unwrap();
+    let (_, d2) = rig.last_card();
+    approval::closed(&rig.ctx(), &rig.caller, &d2, "expired").await.unwrap();
+    let card = decisions_of(&rig).into_iter().find(|x| x.id == card_id).unwrap();
+    assert!(card.answered.is_none() && card.lapsed.as_ref().is_some_and(|l| l.by == "maiterm"), "{card:?}");
+
+    // The integration mode's cards are `integration`, never earned.
+    let rig = Rig::with("card-integration", &["web"], |h| h.landing_mode = LANDING_INTEGRATION.into());
+    let rc = rig.caller.paths.coordinator_worktree("web");
+    fs::create_dir_all(rc.parent().unwrap()).unwrap();
+    git(rig.repo("web"), &["worktree", "add", "-q", "-b", "hive/ship", rc.to_str().unwrap(), "main"]);
+    let w = rig.reported("feat", &["web"], "feat.rs", "f\n");
+    rig.land(&w).await.unwrap();
+    assert_eq!(decisions_of(&rig)[0].category(), "integration");
+}
+
+#[tokio::test]
+async fn the_humans_undo_of_the_coordinators_land_overrides_it_and_the_coordinator_hears() {
+    let rig = Rig::new("undo-override", &["web"]);
+    let w = rig.reported("feat", &["web"], "feat.rs", "fn feat() {}\n");
+    precedent(&rig, "P-0000d001");
+    let id = Rig::line_of(&rig.land_with(&w, json!({ "precedent": "P-0000d001" }), opts()).await.unwrap(), "web");
+    let p = undo::preview(&rig.caller.hive, &rig.caller.paths, &id).unwrap();
+    assert_eq!(undo::human_undo(&rig.ctx(), &rig.caller, &id, p.config_fp.clone(), &opts()).await.unwrap()["state"], undo::STATE_DONE);
+    let d = decisions_of(&rig).into_iter().next().unwrap();
+    let o = d.overridden.clone().expect("overridden");
+    assert_eq!((o.by.as_str(), o.reason.as_deref()), ("human", Some("Undone by your human")));
+    assert_eq!(crate::hive::precedents::get(&rig.caller.paths, "P-0000d001").unwrap().overridden, 1);
+    assert!(rig.told().iter().any(|t| t.starts_with(&format!("[maiTerm] Your human overrode your decision {}: Undone by your human", d.id))), "{:?}", rig.told());
+
+    // The coordinator's own undo is no override.
+    let w2 = rig.reported("again", &["web"], "again.rs", "a\n");
+    let id2 = Rig::line_of(&rig.land(&w2).await.unwrap(), "web");
+    rig.undo(&id2).await.unwrap();
+    let key = rig.record(&w2.task_id).land.unwrap().decision.unwrap();
+    assert!(decisions_of(&rig).into_iter().find(|x| x.id == key).unwrap().overridden.is_none());
+}
+
+#[tokio::test]
+async fn the_humans_undo_overrides_the_decision_that_landed_that_repo_when_a_resume_made_a_second() {
+    let rig = Rig::new("undo-two-decisions", &["web", "api"]);
+    let w = rig.reported("split", &["web", "api"], "shared.txt", "one\nworker\nthree\n");
+    precedent(&rig, "P-0000e001");
+    precedent(&rig, "P-0000e002");
+    // The human's edit in api's checkout is in the way: web lands under D1, api holds.
+    fs::write(rig.repo("api").join("shared.txt"), "one\nhuman\nthree\n").unwrap();
+    let out = rig.land_with(&w, json!({ "precedent": "P-0000e001" }), opts()).await.unwrap();
+    assert_eq!((out["state"].as_str(), out["landed"].clone()), (Some(STATE_HELD), json!(["web"])), "{out}");
+    let land = out["land"].as_str().unwrap().to_string();
+    let d1 = rig.record(&w.task_id).land.unwrap().decision.unwrap();
+
+    // The worker commits more in api: resumed on its new pin, the same land under a new decision D2.
+    git(rig.repo("api"), &["checkout", "-q", "--", "shared.txt"]);
+    let api_wt = PathBuf::from(w.folders.iter().find(|f| f.name == "api").unwrap().worktree.clone().unwrap());
+    let new_api = commit(&api_wt, "more.rs", "m\n");
+    let mut rec = rig.record(&w.task_id);
+    rec.tab_id = Some("wtab".into());
+    worker::write_worker(&rig.caller.paths.task(&w.task_id), &rec).unwrap();
+    let mut as_worker = rig.caller.clone();
+    as_worker.tab_id = "wtab".into();
+    crate::hive::report::report(&rig.ctx(), &as_worker, &json!({ "status": "done", "summary": "more", "receipts": { "commits": [new_api] } }))
+        .await
+        .unwrap();
+    let out = rig.land_with(&w, json!({ "precedent": "P-0000e002" }), opts()).await.unwrap();
+    assert_eq!((out["state"].as_str(), out["land"].as_str()), (Some(STATE_LANDED), Some(land.as_str())), "{out}");
+    let d2 = rig.record(&w.task_id).land.unwrap().decision.unwrap();
+    assert_ne!(d1, d2);
+    let log = rig.log();
+    let named: Vec<(&str, Option<&str>)> = log.iter().map(|e| (e.folder.as_str(), e.decision.as_deref())).collect();
+    assert_eq!(named, vec![("web", Some(d1.as_str())), ("api", Some(d2.as_str()))]);
+
+    // Undoing web overrides D1, the decision that landed web, and counts against its precedent.
+    let undo_of = |folder: &str| format!("{land}/{folder}");
+    let p = undo::preview(&rig.caller.hive, &rig.caller.paths, &undo_of("web")).unwrap();
+    assert_eq!(undo::human_undo(&rig.ctx(), &rig.caller, &undo_of("web"), p.config_fp.clone(), &opts()).await.unwrap()["state"], undo::STATE_DONE);
+    let overridden = |id: &str| decisions_of(&rig).into_iter().find(|d| d.id == id).unwrap().overridden.is_some();
+    assert!(overridden(&d1) && !overridden(&d2));
+    let counted = |id: &str| crate::hive::precedents::get(&rig.caller.paths, id).unwrap().overridden;
+    assert_eq!((counted("P-0000e001"), counted("P-0000e002")), (1, 0));
+    assert!(rig.told().iter().any(|t| t.starts_with(&format!("[maiTerm] Your human overrode your decision {d1}:"))), "{:?}", rig.told());
+
+    // And undoing api overrides D2.
+    let p = undo::preview(&rig.caller.hive, &rig.caller.paths, &undo_of("api")).unwrap();
+    assert_eq!(undo::human_undo(&rig.ctx(), &rig.caller, &undo_of("api"), p.config_fp.clone(), &opts()).await.unwrap()["state"], undo::STATE_DONE);
+    assert!(overridden(&d2));
+    assert_eq!((counted("P-0000e001"), counted("P-0000e002")), (1, 1));
+}
+
+#[tokio::test]
+async fn a_denied_card_replaced_when_its_held_land_resumes_isnt_said_to_have_been_approved() {
+    let rig = Rig::new("card-denied-resumed", &["web", "api"]);
+    commit(rig.repo("api"), ".envrc", "export A=1\n\n\n\nexport END=1\n");
+    let w = rig.reported("split", &["web", "api"], ".envrc", "export A=2\n\n\n\nexport END=1\n");
+    assert_eq!(rig.land(&w).await.unwrap()["state"], STATE_AWAITING_HUMAN);
+    let c1 = rig.record(&w.task_id).land.unwrap().card_decision.unwrap();
+    let (_, d) = rig.last_card();
+    // Approved; web lands, then Base changes api's config file under its step 2: a second card.
+    let api = rig.repo("api").to_path_buf();
+    let mut o = opts();
+    o.before_advance = Some(Arc::new(move |f: &str| {
+        if f == "api" {
+            commit(&api, ".envrc", "export A=1\n\n\n\nexport END=2\n");
+        }
+    }));
+    assert!(matches!(approval::approved(&rig.ctx(), &rig.caller, &d, &o).await, driver::Outcome::Awaiting(_)));
+    let c2 = rig.record(&w.task_id).land.unwrap().card_decision.unwrap();
+    assert_ne!(c1, c2);
+    let outcome = |id: &str| decisions_of(&rig).into_iter().find(|x| x.id == id).unwrap().outcome;
+    assert_eq!(outcome(&c1).as_deref(), Some("asked again on a new card: the config change was no longer the one approved"));
+
+    // The human denies the second card: web landed, so the land holds, and is resumed on the same pins.
+    let (_, d2) = rig.last_card();
+    approval::closed(&rig.ctx(), &rig.caller, &d2, "denied").await.unwrap();
+    assert!(rig.record(&w.task_id).land.unwrap().is_held());
+    assert_eq!(rig.land(&w).await.unwrap()["state"], STATE_AWAITING_HUMAN);
+    let c3 = rig.record(&w.task_id).land.unwrap().card_decision.unwrap();
+    assert!(c3 != c2 && c3 != c1);
+    let denied = decisions_of(&rig).into_iter().find(|x| x.id == c2).unwrap();
+    assert_eq!(denied.answered.as_ref().and_then(|l| l.answer.as_deref()), Some("Don\u{2019}t land"));
+    assert_eq!(denied.outcome.as_deref(), Some("superseded by a new card when the land resumed"));
 }

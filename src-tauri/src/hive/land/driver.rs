@@ -562,6 +562,7 @@ async fn advance_inner<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &Wor
                 Ok(Step2::Advanced) => {
                     let (hive, paths, rec, id, summary, review, request) =
                         (caller.hive.clone(), caller.paths.clone(), w.clone(), land.id.clone(), land.summary.clone(), land.review.clone(), approved_request(&land));
+                    let decision = land.decision.clone();
                     let mut done = r.clone();
                     let done = blocking(move || {
                         done.status = REPO_LANDED.to_string();
@@ -569,7 +570,7 @@ async fn advance_inner<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &Wor
                         done.base_after = done.tested.clone();
                         done.tree_landed = lg::tree_of(&repo, &format!("refs/heads/{}", done.target));
                         done.pushed = Some(if hive.push_after_land && !hive.is_integration() { lg::push(&repo, &done.target) } else { landlog::PUSHED_OFF.to_string() });
-                        log_repo(&paths, &hive, &rec, &id, &summary, &review, request, &mut done);
+                        log_repo(&paths, &hive, &rec, &id, &summary, &review, request, decision, &mut done);
                         Ok(done)
                     })
                     .await;
@@ -635,9 +636,19 @@ pub(crate) fn approved_request(land: &LandState) -> Option<String> {
 
 /// One repo's line in the land log, unless it has one: an integration-mode land and a batch
 /// member name their own merge commit (a member's check ran on its chain's tip), and a land the
-/// human approved names the request. Blocks.
+/// human approved names the request, and the coordinator's call the decision. Blocks.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn log_repo(paths: &HivePaths, hive: &Hive, w: &WorkerRecord, land_id: &str, summary: &str, review: &str, request: Option<String>, r: &mut LandRepo) {
+pub(crate) fn log_repo(
+    paths: &HivePaths,
+    hive: &Hive,
+    w: &WorkerRecord,
+    land_id: &str,
+    summary: &str,
+    review: &str,
+    request: Option<String>,
+    decision: Option<String>,
+    r: &mut LandRepo,
+) {
     if r.logged {
         return;
     }
@@ -662,6 +673,7 @@ pub(crate) fn log_repo(paths: &HivePaths, hive: &Hive, w: &WorkerRecord, land_id
         merge_commit: r.tested.clone().filter(|_| member || (integration && r.merged)),
         by: if request.is_some() { landlog::BY_HUMAN } else { landlog::BY_COORDINATOR }.to_string(),
         request,
+        decision,
         hive_id: hive.id.clone(),
         task_id: w.task_id.clone(),
         worker: w.slug.clone(),
@@ -687,6 +699,20 @@ pub(crate) fn log_repo(paths: &HivePaths, hive: &Hive, w: &WorkerRecord, land_id
     }
 }
 
+/// The land's result on the decisions about it (§7.6): the coordinator's call, and its card.
+pub(super) async fn log_outcome<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, land: &LandState, outcome: String) {
+    if land.decision.is_none() && land.card_decision.is_none() {
+        return;
+    }
+    let (paths, hive_id, l) = (caller.paths.clone(), caller.hive.id.clone(), land.clone());
+    let _ = blocking(move || {
+        crate::hive::decisions::land_outcome(&paths, &hive_id, &l, &outcome);
+        Ok(())
+    })
+    .await;
+    ctx.window.decisions_changed(&caller.workspace_id);
+}
+
 /// A failure before anything landed refuses the land; after, it holds what's left.
 pub(super) async fn fail<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, mut land: LandState, why: String) -> Outcome {
     if land.landed().is_empty() {
@@ -703,7 +729,7 @@ pub(super) async fn fail<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &W
 }
 
 /// Nothing landed: the land is off, the worker back in Reported with its branch as it was.
-pub(super) async fn refuse<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, mut land: LandState, why: String) -> Outcome {
+pub(super) async fn refuse<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, land: LandState, why: String) -> Outcome {
     let label = worker_label(w);
     if let Ok(dir) = worker::task_dir(&caller.paths, &w.task_id) {
         let id = land.id.clone();
@@ -722,15 +748,16 @@ pub(super) async fn refuse<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: 
             log::warn!("hive {}: worker {label} not put back after its land was refused: {e}", caller.hive.id);
         }
     }
-    let (hive, paths) = (caller.hive.clone(), caller.paths.clone());
+    let (hive, paths, mut l) = (caller.hive.clone(), caller.paths.clone(), land.clone());
     let _ = blocking(move || {
-        cleanup(&hive, &paths, &mut land);
+        cleanup(&hive, &paths, &mut l);
         Ok(())
     })
     .await;
     end_hold(w);
     // Git's words can carry the worker's file names: quoted like any of its text.
     let why = frame_escape(&why);
+    log_outcome(ctx, caller, &land, format!("refused: {}", one_line(&why, 200))).await;
     let note = format!("Land refused: {}", one_line(&why, 300));
     if let Err(e) = crate::hive::control::task_note(ctx, caller, &w.task_id, &note, None).await {
         log::info!("hive {}: land refusal note for {label} not written: {e}", caller.hive.id);
@@ -768,6 +795,7 @@ pub(super) async fn hold<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &W
         warn_save(caller, save(&dir, &l).await);
     }
     end_hold(w);
+    log_outcome(ctx, caller, &l, format!("held: {line}")).await;
     if let Err(e) = crate::hive::control::task_note(ctx, caller, &w.task_id, &format!("Landing held: {}", one_line(&line, 300)), None).await {
         log::info!("hive {}: land hold note for {label} not written: {e}", caller.hive.id);
     }
@@ -863,6 +891,7 @@ pub(super) async fn finish<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: 
         result.push_str(&format!(" {n}"));
     }
     log::info!("hive {}: land {} of {label} finished", caller.hive.id, land.id);
+    log_outcome(ctx, caller, &land, "landed".to_string()).await;
     Outcome::Landed(json!({
         "land": land.id,
         "state": STATE_LANDED,
@@ -885,6 +914,7 @@ async fn unretired<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerR
     if let Ok(dir) = worker::task_dir(&caller.paths, &w.task_id) {
         warn_save(caller, save(&dir, &land).await);
     }
+    log_outcome(ctx, caller, &land, format!("held: {line}")).await;
     if let Err(e) = crate::hive::control::task_note(ctx, caller, &w.task_id, &format!("Landing held: {}", one_line(&line, 300)), None).await {
         log::info!("hive {}: land hold note for {label} not written: {e}", caller.hive.id);
     }
@@ -944,6 +974,7 @@ async fn landed_unretired<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &
     }
     ctx.window.workers_changed(&caller.workspace_id);
     log::info!("hive {}: land {} of {label} landed its pin; the branch moved since, so the worker stays", caller.hive.id, land.id);
+    log_outcome(ctx, caller, &land, format!("landed the approved commits; its branch moved on since, in {}", moved.join(", "))).await;
     let mut result = format!(
         "Worker {label} landed the commits the human approved: {}. Its branch has moved since you named them, in {}: those newer \
          commits didn't land and need a land of their own (review them, then hiveLand). It is back in Reported, not retired.",
@@ -1016,7 +1047,9 @@ pub(super) fn end_hold(w: &WorkerRecord) {
 }
 
 /// A worker with no git folders has nothing to land (§8): it retires as landed, its task done.
-pub(crate) async fn land_without_repos<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, a: &LandArgs) -> Result<Value, String> {
+pub(crate) async fn land_without_repos<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, a: &LandArgs, precedent: Option<String>) -> Result<Value, String> {
+    // Still the coordinator's call, logged as one (§7.6), with nothing to merge.
+    let land = LandState { id: super::new_land_id(), decision: Some(crate::hive::decisions::new_id()), precedent, ..LandState::default() };
     let spec = RetireSpec {
         phase: worker::PHASE_LANDED,
         from: vec![worker::PHASE_REPORTED],
@@ -1027,6 +1060,15 @@ pub(crate) async fn land_without_repos<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: 
         held_land: false,
     };
     let out = retire_worker(ctx, caller, w, spec).await?;
+    let (paths, hive_id, rec) = (caller.paths.clone(), caller.hive.id.clone(), w.clone());
+    let _ = blocking(move || {
+        crate::hive::decisions::land_decided(&paths, &hive_id, &rec, &land);
+        crate::hive::decisions::land_outcome(&paths, &hive_id, &land, "landed: no repos, nothing merged");
+        crate::hive::precedents::count_citation(&paths, land.precedent.as_deref());
+        Ok(())
+    })
+    .await;
+    ctx.window.decisions_changed(&caller.workspace_id);
     Ok(json!({
         "worker": w.slug,
         "state": STATE_LANDED,

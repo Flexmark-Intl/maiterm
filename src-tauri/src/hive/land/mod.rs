@@ -108,6 +108,12 @@ pub struct LandState {
     pub batch: Option<String>,
     /// Its place in its repo's batch queue: batches merge their members in `hiveLand` order.
     pub queued_at: u64,
+    /// The decision log's line for it (§7.6): the coordinator's own call to land, under its Landing
+    /// checkpoint, and its latest card's. Each hears the land's outcome.
+    pub decision: Option<String>,
+    pub card_decision: Option<String>,
+    /// The precedent `hiveLand` cited (§7.5).
+    pub precedent: Option<String>,
     pub started_at: String,
     pub updated_at: String,
     #[serde(flatten)]
@@ -285,7 +291,8 @@ pub fn tool_definition(tab_id: &Value) -> Value {
                 "commits": { "type": "object", "additionalProperties": { "type": "string" }, "description": "folder → the full sha you reviewed there, for every repo of the worker" },
                 "order": { "type": "array", "items": { "type": "string" }, "description": "Which repos land first (default: the Hive's folder order)" },
                 "accept_review": { "type": "boolean", "description": "Land on hiveResolve accept, past a review that didn't pass" },
-                "fix_forward": { "type": "boolean", "description": "Land into a repo marked suspect (its Base fails its land check alone), as the fix" }
+                "fix_forward": { "type": "boolean", "description": "Land into a repo marked suspect (its Base fails its land check alone), as the fix" },
+                "precedent": { "type": "string", "description": "The precedent (P-…, from hivePrecedents) that settles landing it, if one does" }
             },
             "required": ["worker", "summary", "commits"]
         }
@@ -502,6 +509,7 @@ pub(crate) async fn land_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, 
 
 pub(crate) async fn land_tool_with<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, args: &Value, opts: driver::Opts) -> Result<Value, String> {
     let a = LandArgs::parse(args)?;
+    let precedent = super::precedents::cited(&caller.paths, args).await?;
     let w = named_worker(caller, args).await?;
     let (hive, paths, rec) = (caller.hive.clone(), caller.paths.clone(), w.clone());
     let (tips, dirty, workers, suspect) = blocking(move || {
@@ -513,9 +521,17 @@ pub(crate) async fn land_tool_with<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
     let review = refusal(&caller.hive, &w, &a, &tips, &dirty, busy, &workers, &suspect)?;
 
     if w.git_folders().next().is_none() {
-        return driver::land_without_repos(ctx, caller, &w, &a).await;
+        return driver::land_without_repos(ctx, caller, &w, &a, precedent).await;
     }
-    let land = start_state(&caller.hive, &w, &a, review);
+    let mut land = start_state(&caller.hive, &w, &a, review);
+    // Integration mode and Landing = Ask me put it to the human; otherwise it is the coordinator's
+    // own decision (§7.6), one per land however often a held one resumes.
+    let asks = approval::asks_first(&caller.hive).filter(|_| land.approved_by.is_none());
+    let decided = asks.is_none() && land.approved_by.is_none() && land.decision.is_none();
+    if decided {
+        land.decision = Some(super::decisions::new_id());
+    }
+    land.precedent = precedent;
     let id = land.id.clone();
     let dir = worker::task_dir(&caller.paths, &w.task_id)?;
     let (d, l, label) = (dir.clone(), land.clone(), worker_label(&w));
@@ -538,8 +554,18 @@ pub(crate) async fn land_tool_with<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
     }
     ctx.window.workers_changed(&caller.workspace_id);
     ::log::info!("hive {}: land {id} of worker {} started ({} repos)", caller.hive.id, worker_label(&w), a.commits.len());
+    if decided {
+        let (paths, hive_id, rec, l) = (caller.paths.clone(), caller.hive.id.clone(), w.clone(), land.clone());
+        let _ = blocking(move || {
+            super::decisions::land_decided(&paths, &hive_id, &rec, &l);
+            super::precedents::count_citation(&paths, l.precedent.as_deref());
+            Ok(())
+        })
+        .await;
+        ctx.window.decisions_changed(&caller.workspace_id);
+    }
     // Integration mode and Landing = Ask me: the card comes first, before step 1 (§8.3), pinned.
-    if let Some(why) = approval::asks_first(&caller.hive).filter(|_| land.approved_by.is_none()) {
+    if let Some(why) = asks {
         return approval::await_human(ctx, caller, &w, land, why).await.answer();
     }
     // A busy repo: it waits in that repo's batch queue rather than for the lock alone (§6.8).
@@ -583,11 +609,14 @@ fn start_state(hive: &Hive, w: &WorkerRecord, a: &LandArgs, review: &str) -> Lan
         repos.push(r);
     }
     land.repos = repos;
-    // The human approved these pins: a held land resumed on them keeps that, a new pin doesn't.
+    // The human approved these pins: a held land resumed on them keeps that, a new pin doesn't,
+    // and new pins are a new decision.
     if repinned {
         land.approved_by = None;
         land.request = None;
         land.approval = None;
+        land.decision = None;
+        land.card_decision = None;
     }
     land.state = STATE_LOCKING.to_string();
     land.summary = a.summary.clone();
@@ -650,7 +679,7 @@ pub(crate) fn reconcile_in(hive: &Hive, paths: &HivePaths) -> usize {
         let Some(land) = w.land.clone().filter(|l| l.in_progress() || l.state == STATE_LANDED) else { continue };
         let Ok(dir) = worker::task_dir(paths, &w.task_id) else { continue };
         let mut land = land;
-        let request = driver::approved_request(&land);
+        let (request, decision) = (driver::approved_request(&land), land.decision.clone());
         for r in land.repos.iter_mut() {
             let Some(repo) = hive.folders.iter().find(|f| f.name == r.folder).map(|f| std::path::PathBuf::from(&f.path)) else { continue };
             if let Some(tmp) = r.tmp.take() {
@@ -670,7 +699,7 @@ pub(crate) fn reconcile_in(hive: &Hive, paths: &HivePaths) -> usize {
                         r.tree_landed = git::tree_of(&repo, &after);
                         r.base_after = Some(after);
                         r.pushed.get_or_insert_with(|| "held: maiTerm restarted before its push".to_string());
-                        driver::log_repo(paths, hive, &w, &land.id, &land.summary, &land.review, request.clone(), r);
+                        driver::log_repo(paths, hive, &w, &land.id, &land.summary, &land.review, request.clone(), decision.clone(), r);
                     } else {
                         r.status = REPO_TESTED.to_string();
                     }
@@ -700,7 +729,7 @@ pub(crate) fn reconcile_in(hive: &Hive, paths: &HivePaths) -> usize {
             }
         });
         land.updated_at = crate::commands::workspace::iso_now();
-        let id = land.id.clone();
+        let (id, held) = (land.id.clone(), land.clone());
         let res = worker::update_worker(&dir, |cur| {
             let ours = cur.land.as_ref().is_some_and(|l| l.id == id);
             if ours {
@@ -709,7 +738,13 @@ pub(crate) fn reconcile_in(hive: &Hive, paths: &HivePaths) -> usize {
             ours
         });
         match res {
-            Ok(_) => n += 1,
+            Ok(cur) => {
+                n += 1;
+                // Its decisions hear the hold, or keep reading "running" until it moves again.
+                if cur.land.as_ref().is_some_and(|l| l.id == id) {
+                    crate::hive::decisions::land_outcome(paths, &hive.id, &held, &format!("held: {}", held.held_reason.as_deref().unwrap_or_default()));
+                }
+            }
             Err(e) => ::log::warn!("hive {}: land {id} of worker {} not reconciled: {e}", hive.id, worker_label(&w)),
         }
     }

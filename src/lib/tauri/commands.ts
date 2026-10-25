@@ -5,6 +5,7 @@ import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { StackHeldAction, StackLeaseState } from './types';
 import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
 import type { HiveMemoryFileText, HiveMemoryView } from './types';
+import type { HiveDecisionView, HivePrecedentsView } from './types';
 import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
@@ -2907,6 +2908,37 @@ export async function hiveMemoryPin(workspaceId: string, name: string): Promise<
 
 export async function hiveMemoryUnfiled(workspaceId: string, line: string, action: 'keep' | 'pin' | 'delete'): Promise<HiveMemoryView> {
   return invoke('hive_memory_unfiled', { workspaceId, line, action });
+}
+
+/** Memory → Decisions (docs/hive.md §7.6): every decision, newest first. It follows
+ *  `hive-decisions-changed`. */
+export async function hiveDecisionLog(workspaceId: string): Promise<HiveDecisionView[]> {
+  return invoke('hive_decision_log', { workspaceId });
+}
+
+/** The human's Override… on one of the coordinator's decisions: logged, counted against the
+ *  precedent it cited, and told to the coordinator with `note`. */
+export async function hiveOverrideDecision(workspaceId: string, decisionId: string, note: string): Promise<HiveDecisionView> {
+  return invoke('hive_override_decision', { workspaceId, decisionId, note });
+}
+
+/** Memory → Precedents (docs/hive.md §7.5): this Hive's and the global ones. */
+export async function hivePrecedents(workspaceId: string): Promise<HivePrecedentsView> {
+  return invoke('hive_precedents', { workspaceId });
+}
+
+/** The human's rewording of a precedent's rule (theirs from then on), this Hive's or a global one. */
+export async function hivePrecedentEdit(workspaceId: string, id: string, rule: string): Promise<HivePrecedentsView> {
+  return invoke('hive_precedent_edit', { workspaceId, id, rule });
+}
+
+export async function hivePrecedentDelete(workspaceId: string, id: string): Promise<HivePrecedentsView> {
+  return invoke('hive_precedent_delete', { workspaceId, id });
+}
+
+/** Make global: only ever the human's click, never a tool. */
+export async function hivePrecedentPromote(workspaceId: string, id: string): Promise<HivePrecedentsView> {
+  return invoke('hive_precedent_promote', { workspaceId, id });
 }
 
 /** What undoing land log line `id` would write, for the inline confirmation. */

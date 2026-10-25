@@ -61,6 +61,9 @@ pub struct LandLogEntry {
     pub by: String,
     /// The agent request a human approved it through.
     pub request: Option<String>,
+    /// The coordinator's decision-log decision that landed it (§7.6): what the human's Undo
+    /// overrides. A land resumed on a new pin keeps its id under a new decision.
+    pub decision: Option<String>,
     /// `pass` | `accepted` | `none`.
     pub review: String,
     pub undoes: Option<String>,
@@ -110,6 +113,7 @@ impl Default for LandLogEntry {
             summary: String::new(),
             by: BY_COORDINATOR.to_string(),
             request: None,
+            decision: None,
             review: REVIEW_NONE.to_string(),
             undoes: None,
             pushed: PUSHED_OFF.to_string(),

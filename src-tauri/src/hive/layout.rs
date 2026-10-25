@@ -195,6 +195,8 @@ pub fn create_layout(root: &Path, hive: &Hive) -> Result<(), String> {
         p.gallery(),
         p.coordinator_task(),
         p.precedents(),
+        // Shared by every Hive, on every agent's denyWrite: made here so the deny names a folder.
+        p.global_precedents(),
         p.logs(),
         p.coordinator_home(),
         p.coordinator_tmp(),

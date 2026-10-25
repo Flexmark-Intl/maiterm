@@ -881,6 +881,8 @@ export interface HiveLandLogEntry {
   /** "coordinator" | "human". */
   by: string;
   request?: string | null;
+  /** The coordinator's decision (`D-…`) that landed it: what the human's Undo overrides. */
+  decision?: string | null;
   /** "pass" | "accepted" | "none". */
   review: string;
   undoes?: string | null;
@@ -966,6 +968,86 @@ export interface HiveMemoryView {
 export interface HiveMemoryFileText {
   text: string;
   sha256: string;
+}
+
+/** hive/decisions `DecisionOption`. */
+export interface HiveDecisionOption {
+  label: string;
+  recommended: boolean;
+}
+
+/** hive/decisions `PrecedentRef`: the precedent a decision cited; `rule` null once it's deleted. */
+export interface HivePrecedentRef {
+  id: string;
+  rule: string | null;
+  status: string | null;
+}
+
+/** hive/decisions `DecisionView`: one decision in Memory → Decisions (docs/hive.md §7.6). */
+export interface HiveDecisionView {
+  id: string;
+  at: string;
+  /** Rust's: a checkpoint, `never`, `config`, `integration`, `other`, `offer`. */
+  category: string;
+  /** `prompt` | `question` | `blocker` | `land` | `resolve` | `plan` | `offer`. */
+  source: string;
+  task_id: string | null;
+  worker: string | null;
+  question: string;
+  context: string | null;
+  options: HiveDecisionOption[];
+  /** The coordinator's recommendation, when it gave one. */
+  recommended: string | null;
+  answer: string | null;
+  reason: string | null;
+  /** `open` | `recommended` | `answered` | `lapsed`. */
+  status: string;
+  /** `coordinator` | `human` | `maiterm`, once answered. */
+  by: string;
+  by_label: string;
+  after_timeout: boolean;
+  precedent: HivePrecedentRef | null;
+  outcome: string | null;
+  overridden: boolean;
+  override_note: string | null;
+  can_override: boolean;
+}
+
+/** hive/precedents `Precedent` (docs/hive.md §7.5). */
+export interface HivePrecedent {
+  v: number;
+  id: string;
+  hive_id: string;
+  hive_name: string;
+  decision_id: string;
+  blocker_key: string | null;
+  asked_at: string;
+  answered_at: string;
+  category: string;
+  label: string | null;
+  question: string;
+  context: string | null;
+  options: HiveDecisionOption[];
+  recommended: string | null;
+  answer: string;
+  reason: string | null;
+  rule: string;
+  /** `coordinator` | `human`: whose wording the rule is. */
+  rule_by: string;
+  /** `hive` | `global`. */
+  scope: string;
+  /** `active` | `retired`. */
+  status: string;
+  cited: number;
+  overridden: number;
+  promoted_to: string | null;
+  created_at: string;
+}
+
+/** hive/precedents `PrecedentsView`: this Hive's and the global ones, retired included. */
+export interface HivePrecedentsView {
+  hive: HivePrecedent[];
+  global: HivePrecedent[];
 }
 
 /** hive/land/undo.rs `UndoPreview`: what the human's Undo would do, before anything is written. */
