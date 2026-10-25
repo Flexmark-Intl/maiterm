@@ -41,6 +41,11 @@ pub fn authorize(path: &Path, base: &Path, roots: &[PathBuf], gallery: &Path) ->
     let roots: Vec<PathBuf> = roots.iter().map(|r| crate::share::canon(r)).collect();
     let gallery = crate::share::canon(gallery);
     contained(&canonical, &roots, &gallery)?;
+    // Windows refuses to open a folder ("access denied"); say what it is. The descriptor's own
+    // metadata below still decides.
+    if fs::metadata(&canonical).is_ok_and(|m| m.is_dir()) {
+        return Err(format!("{} isn't a file.", canonical.display()));
+    }
     let file = open_no_follow(&canonical)?;
     let real = match fd_path(&file)? {
         Some(p) => p,
