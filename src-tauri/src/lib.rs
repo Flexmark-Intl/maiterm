@@ -1205,6 +1205,8 @@ pub fn run() {
             hive::gallery::commands::gallery_export,
             hive::gallery::commands::gallery_paths,
             hive::gallery::commands::gallery_recommendations,
+            hive::gallery::budget::hive_set_gallery_settings,
+            hive::create::hive_detect_generator_hosts,
             hive::delete::hive_delete_preview,
             hive::delete::hive_delete,
             hive::land::undo::hive_land_log,

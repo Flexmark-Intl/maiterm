@@ -125,7 +125,7 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
              folder your human listed. Filing the same bytes again for the same task answers the asset already there. \
              Every paid render is recorded with recipe.cost_usd, kept or not: a discarded or failed one is a galleryAdd \
              with no path. The answer gives each asset's id and its stored path, to use as an input, and the Hive's spend \
-             against its budget. {collection_rule}"
+             against its budget: over means stop paid generation now (maiTerm has asked your human). {collection_rule}"
         ),
         "inputSchema": { "type": "object", "properties": add_props, "required": [] }
     });
@@ -619,12 +619,14 @@ fn usd(micros: i64) -> f64 {
 /// The Hive's spend against its budget (§10.3). Self-reported: a rule agents follow and a total
 /// the human watches.
 pub(crate) fn budget_view(g: &Gallery, hive: &Hive) -> Result<Value, String> {
-    let spent = g.spent_micros()?;
-    let budget = i64::try_from(hive.budget_cents).unwrap_or(i64::MAX / 10_000).saturating_mul(10_000);
-    let over = spent > 0 && spent >= budget;
-    let mut v = json!({ "spent_usd": usd(spent), "budget_usd": usd(budget), "remaining_usd": usd((budget - spent).max(0)), "over": over });
-    if over {
-        v["rule"] = json!("This Hive's budget for paid generation is spent: start no paid render until your human raises it.");
+    let s = super::budget::view(g.spent_micros()?, hive, 0);
+    let (spent, budget) = (s.spent_micros, s.budget_micros);
+    let mut v = json!({ "spent_usd": usd(spent), "budget_usd": usd(budget), "remaining_usd": usd((budget - spent).max(0)), "over": s.over });
+    if s.over {
+        v["rule"] = json!(
+            "This Hive's budget for paid generation is spent: stop paid generation now, and start no paid render until your \
+             human raises it. maiTerm has asked them; record any render already under way when it finishes."
+        );
     }
     Ok(v)
 }
@@ -670,16 +672,20 @@ async fn add<W: HiveWindow>(ctx: &Ctx<'_, W>, gc: &GalleryCaller, g: Arc<Gallery
         }).collect();
         let recorded = results.iter().filter(|r| r.is_ok()).count();
         let errors: Vec<String> = results.iter().filter_map(|r| r.as_ref().err().cloned()).collect();
-        Ok(((assets, ids, recorded, errors), budget_view(&g, &hive)?))
+        let spent = results.iter().any(|r| matches!(r, Ok(Filed::Spend(_)) | Ok(Filed::Asset { spend: Some(_), .. }))).then(|| g.spent_micros()).transpose()?;
+        Ok(((assets, ids, recorded, errors, spent), budget_view(&g, &hive)?))
     })
     .await?;
-    let (answers, ids, recorded, errors) = results;
+    let (answers, ids, recorded, errors, spent) = results;
     if recorded == 0 {
         return Err(if errors.len() == 1 { errors[0].clone() } else { format!("Nothing was filed: {}", errors.join(" ")) });
     }
     // One event per call, whatever it filed: a spend moves the header's total too.
     ctx.window.gallery_changed(&gc.caller, &ids);
     super::thumbs::enqueue(&gc.caller.hive.id, ids.clone());
+    if let Some(spent) = spent {
+        super::budget::after_spend(ctx, &gc.caller, gc.role == ROLE_COORDINATOR, spent).await;
+    }
     log::info!("hive {}: {} filed {} asset(s), {} item(s) recorded, {} refused", gc.caller.hive.id, gc.label(), ids.len(), recorded, errors.len());
     let (filed, spends): (Vec<Value>, Vec<Value>) = answers.into_iter().partition(|v| v.get("id").is_some() || v.get("error").is_some());
     let mut out = json!({ "assets": filed, "budget": budget });

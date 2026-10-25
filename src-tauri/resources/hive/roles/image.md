@@ -3,6 +3,7 @@ name: image
 description: Makes still images with the Hive's image tools: illustrations, photos, icons, mockups.
 pairs_with: art-director
 web: false
+generators: true
 source: maiterm
 ---
 ## Mission

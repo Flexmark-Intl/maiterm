@@ -20,6 +20,7 @@ use tauri::AppHandle;
 use super::checkpoints::{self, PERMISSIONS};
 use super::decisions::{self, DecisionLine, DecisionOption};
 use super::deliver::{frame_escape, one_line, Sent};
+use super::gallery::budget::{is_budget_blocker, is_budget_question};
 use super::record::Hive;
 use super::rpc::{self, HiveWindow};
 use super::tools::{blocking, Caller, Ctx};
@@ -359,6 +360,9 @@ fn take_after_timeout(key: &str) -> bool {
 
 // ── The allowlist ──
 
+/// Money is never delegable (§7.4): a spend past the budget is always the human's to allow.
+const SPEND_IS_HUMANS: &str = "a spend past the budget is always your human\u{2019}s to allow";
+
 /// Whether `hiveAnswerWorker` may answer this prompt at all (§7.4, plan D8), or why it is the
 /// human's.
 pub(crate) fn classify(view: &PromptView) -> Result<(), String> {
@@ -385,6 +389,9 @@ pub(crate) fn classify(view: &PromptView) -> Result<(), String> {
         }
         KIND_QUESTION => {
             let qs = view.questions.as_array().filter(|q| !q.is_empty()).ok_or("maiTerm can\u{2019}t read the question\u{2019}s options")?;
+            if qs.iter().any(|q| q["question"].as_str().is_some_and(is_budget_question)) {
+                return Err(SPEND_IS_HUMANS.to_string());
+            }
             let all_listed = qs.iter().all(|q| q["options"].as_array().is_some_and(|o| !o.is_empty()));
             if !all_listed {
                 return Err("a question without options needs free text, which only your human gives".to_string());
@@ -392,6 +399,8 @@ pub(crate) fn classify(view: &PromptView) -> Result<(), String> {
             Ok(())
         }
         KIND_BLOCKER => match view.blocker.as_ref().map(|b| b.kind.as_str()) {
+            // Before its kind: a `Budget:` question of any kind is the human's (plan D4).
+            _ if view.blocker.as_ref().is_some_and(is_budget_blocker) => Err(SPEND_IS_HUMANS.to_string()),
             Some("decision") => Ok(()),
             Some("action") => Err("only your human can do it".to_string()),
             _ => Err("it waits on something outside the Hive".to_string()),

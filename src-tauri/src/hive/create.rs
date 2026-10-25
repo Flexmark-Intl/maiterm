@@ -140,7 +140,7 @@ fn shell_check(state: &Arc<AppState>, tab_id: &str) -> Result<(), String> {
 /// `<app data>`: a folder that is it, holds it or sits in it would put the state file, other
 /// Hives' Rust-owned folders and secrets on an agent's reach list, and its `denyWrite` would
 /// cover the coordinator's own home (§6.2).
-fn app_data_dir() -> Option<PathBuf> {
+pub(crate) fn app_data_dir() -> Option<PathBuf> {
     let d = crate::state::persistence::app_data_dir()?;
     Some(std::fs::canonicalize(&d).unwrap_or(d))
 }
@@ -307,6 +307,92 @@ fn skill_tools(skills_dir: &Path) -> Vec<DetectedTool> {
         .collect();
     names.sort();
     names.into_iter().map(|n| DetectedTool { id: format!("skill:{n}"), kind: "skill".to_string(), label: n, host: None }).collect()
+}
+
+/// Hosted generators' API and media hosts, a starting point the human edits (plan D2): `key` is
+/// matched against a server's or skill's name, word by word, and `suffixes` against an MCP
+/// server's url host. Exact hosts only, so nothing depends on whether `*.` entries work.
+pub struct KnownGenerator {
+    pub key: &'static str,
+    pub suffixes: &'static [&'static str],
+    pub hosts: &'static [&'static str],
+}
+
+pub const KNOWN_GENERATOR_HOSTS: &[KnownGenerator] = &[
+    KnownGenerator { key: "fal", suffixes: &["fal.ai", "fal.run", "fal.media"], hosts: &["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"] },
+    KnownGenerator { key: "kie", suffixes: &["kie.ai"], hosts: &["api.kie.ai"] },
+    KnownGenerator { key: "higgsfield", suffixes: &["higgsfield.ai"], hosts: &["platform.higgsfield.ai"] },
+    KnownGenerator { key: "kling", suffixes: &["klingai.com"], hosts: &["api.klingai.com"] },
+    KnownGenerator { key: "wavespeed", suffixes: &["wavespeed.ai"], hosts: &["api.wavespeed.ai"] },
+];
+
+/// The `/generate` skill picks its models on Kie.ai (§10.3).
+const SKILL_GENERATORS: &[(&str, &str)] = &[("generate", "kie")];
+
+fn name_words(name: &str) -> impl Iterator<Item = String> + '_ {
+    name.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(|w| w.to_ascii_lowercase())
+}
+
+fn suffix_of(host: &str, suffix: &str) -> bool {
+    host == suffix || host.ends_with(&format!(".{suffix}"))
+}
+
+/// The hosts a worker's sandbox needs for the generators the human chose (§14.16, plan D2): each
+/// chosen MCP server's url host, plus the table's hosts for a server or skill it recognises.
+/// Lowercased, deduplicated, anything that isn't a public host name dropped (a proxy entry's
+/// 127.0.0.1, a port), and so is a repo's remote host, which stays denied (§7.3).
+pub fn generator_hosts(detected: &[DetectedTool], chosen: &[String], remote_hosts: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |h: &str| {
+        let bare = h.rsplit_once(':').filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit())).map_or(h, |(host, _)| host);
+        if let Ok(n) = super::gallery::budget::normalize_host(bare) {
+            let remote = remote_hosts.iter().any(|r| super::gallery::budget::host_covers(&n, &r.to_ascii_lowercase()));
+            if !remote && !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    };
+    for t in detected.iter().filter(|t| chosen.contains(&t.id)) {
+        let host = t.host.as_deref().map(str::to_ascii_lowercase);
+        let known: Vec<&KnownGenerator> = match t.kind.as_str() {
+            "mcp" => {
+                if let Some(h) = &host {
+                    push(h);
+                }
+                KNOWN_GENERATOR_HOSTS
+                    .iter()
+                    .filter(|k| host.as_deref().is_some_and(|h| k.suffixes.iter().any(|s| suffix_of(h, s))) || name_words(&t.label).any(|w| w == k.key))
+                    .collect()
+            }
+            "skill" => {
+                let key = SKILL_GENERATORS.iter().find(|(skill, _)| *skill == t.label).map(|(_, k)| *k);
+                KNOWN_GENERATOR_HOSTS.iter().filter(|k| key == Some(k.key) || name_words(&t.label).any(|w| w == k.key)).collect()
+            }
+            _ => Vec::new(),
+        };
+        for k in known {
+            k.hosts.iter().for_each(|h| push(h));
+        }
+    }
+    out
+}
+
+/// Every chosen generator's hosts, from a fresh detection, minus the Hive's repo remotes. Blocks:
+/// tool detection and git.
+pub fn detect_generator_hosts(hive: &Hive, prefs: &crate::state::Preferences) -> Vec<String> {
+    generator_hosts(&detect_tools(prefs), &hive.tools, &super::settings::hive_remote_hosts(hive))
+}
+
+/// Gallery settings → Re-detect: what the Hive's chosen generators need now, for the human to
+/// tick in. An older Hive made before step 8 has no hosts until then. Nothing is saved here.
+#[tauri::command]
+pub async fn hive_detect_generator_hosts(window: tauri::Window, state: State<'_, Arc<AppState>>, workspace_id: String) -> Result<Vec<String>, String> {
+    let (hive, prefs) = {
+        let data = state.app_data.read();
+        let ws = data.window(window.label()).and_then(|w| w.workspaces.iter().find(|w| w.id == workspace_id)).ok_or("Workspace not found")?;
+        (ws.hive.clone().ok_or("That workspace isn't a Hive")?, data.preferences.clone())
+    };
+    tauri::async_runtime::spawn_blocking(move || detect_generator_hosts(&hive, &prefs)).await.map_err(|e| e.to_string())
 }
 
 fn detect_tools(prefs: &crate::state::Preferences) -> Vec<DetectedTool> {
@@ -724,6 +810,9 @@ pub async fn hive_create(
         let mut hive = build_hive(&spec_for_disk, uuid::Uuid::new_v4().to_string(), folders);
         // The queued commands it starts with, read from the folders (§6.8); edited in settings.
         hive.settings.run_queue = super::queue::detect_commands(&hive.folders);
+        // Its generators' hosts, fixed here and edited by the human, never re-derived at launch: a
+        // server added to a config file later must not widen a sandbox on its own (plan D2).
+        hive.settings.gallery.generator_hosts = detect_generator_hosts(&hive, &prefs);
         layout::validate(&hive)?;
         let root = hive_root(&hive.id).ok_or("Couldn't find the app data folder")?;
         layout::create_layout(&root, &hive).inspect_err(|_| {
@@ -1116,6 +1205,41 @@ mod tests {
         assert_eq!(tools[0].host.as_deref(), Some("mcp.fal.ai"));
         assert_eq!(tools[1].host, None);
         assert!(mcp_tools(&serde_json::json!({})).is_empty());
+    }
+
+    /// Plan D2: a chosen server's url host plus the table's hosts for what it recognises; an
+    /// unchosen server, a local one, a proxy's loopback and a repo remote add nothing.
+    #[test]
+    fn generator_hosts_come_from_the_chosen_tools_and_the_table() {
+        let home = std::env::temp_dir().join(format!("hive-gen-hosts-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(".claude.json"),
+            r#"{ "mcpServers": {
+                "fal": { "type": "http", "url": "https://mcp.fal.ai/mcp" },
+                "local": { "command": "npx", "args": ["x"] },
+                "higgs": { "type": "http", "url": "https://mcp.higgsfield.ai/mcp" },
+                "proxied": { "type": "http", "url": "http://127.0.0.1:8765/mcp/x/abc" },
+                "kling-video": { "command": "kling-mcp" }
+            } }"#,
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(home.join(".claude.json")).unwrap()).unwrap();
+        let mut detected = mcp_tools(&v);
+        detected.push(DetectedTool { id: "skill:generate".into(), kind: "skill".into(), label: "generate".into(), host: None });
+        detected.push(DetectedTool { id: "cli:ffmpeg".into(), kind: "cli".into(), label: "ffmpeg".into(), host: None });
+        let chosen = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        let hosts = generator_hosts(&detected, &chosen(&["mcp:fal", "mcp:local", "cli:ffmpeg"]), &[]);
+        assert_eq!(hosts, vec!["mcp.fal.ai", "fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
+        // A remote host is never a generator host, however it was found.
+        let hosts = generator_hosts(&detected, &chosen(&["mcp:fal"]), &["queue.fal.run".to_string()]);
+        assert!(!hosts.contains(&"queue.fal.run".to_string()) && hosts.contains(&"fal.run".to_string()), "{hosts:?}");
+        // By url suffix, by name word, the skill's table entry; a loopback proxy adds nothing.
+        let hosts = generator_hosts(&detected, &chosen(&["mcp:higgs", "mcp:kling-video", "skill:generate", "mcp:proxied"]), &[]);
+        assert_eq!(hosts, vec!["mcp.higgsfield.ai", "platform.higgsfield.ai", "api.klingai.com", "api.kie.ai"]);
+        assert!(generator_hosts(&detected, &[], &[]).is_empty(), "nothing chosen, nothing reached");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     fn svc(name: &str, command: &str, cwd: &str) -> Service {

@@ -1343,6 +1343,8 @@ pub struct HiveBoard {
     pub refresh_at: Option<i64>,
     /// Folders whose target fails its land check alone: lands there need `fix_forward` (§8.6).
     pub suspect_repos: Vec<String>,
+    /// Paid generation against the budget (§10.3), and every Hive's total (§7.8).
+    pub spend: super::gallery::budget::SpendView,
 }
 
 /// The Hive's workers by badge, with its headroom. `ahead` counts commits per worktree (one git
@@ -1395,7 +1397,10 @@ pub(crate) fn board_view(hive: &Hive, paths: &HivePaths, fuses: &Fuses, now: i64
         })
         .collect();
     let h = fuses.headroom(hive, &live, now);
+    // Every Hive's total is the window command's to add (`hive_workers`): it needs the state.
+    let spend = super::gallery::budget::view(super::gallery::budget::spent_in(gallery.as_deref(), &hive.id), hive, 0);
     HiveBoard {
+        spend,
         workers: cards,
         starts_workers: hive.status == STATUS_ACTIVE && h.breaker_until.is_none(),
         refresh_at: h.changes_at,
@@ -1451,6 +1456,11 @@ pub(crate) fn list_view(hive: &Hive, paths: &HivePaths, tasks: &[Task], fuses: &
         "hive_status": board.hive_status,
         "starts_workers": board.starts_workers,
         "suspect_repos": board.suspect_repos,
+        "budget": {
+            "spent_usd": board.spend.spent_micros as f64 / 1_000_000.0,
+            "budget_usd": board.spend.budget_micros as f64 / 1_000_000.0,
+            "over": board.spend.over,
+        },
     })
 }
 
@@ -1462,17 +1472,22 @@ pub async fn hive_workers(
     state: tauri::State<'_, Arc<AppState>>,
     workspace_id: String,
 ) -> Result<HiveBoard, String> {
-    let hive = {
+    let (hive, hive_ids) = {
         let data = state.app_data.read();
         let ws = data
             .window(window.label())
             .and_then(|w| w.workspaces.iter().find(|w| w.id == workspace_id))
             .ok_or("Workspace not found")?;
-        ws.hive.clone().ok_or("That workspace isn't a Hive")?
+        (ws.hive.clone().ok_or("That workspace isn't a Hive")?, super::gallery::budget::hive_ids(&data))
     };
     let root = super::paths::hive_root(&hive.id).ok_or("No Hive folder")?;
     let fuses = super::fuses::book();
-    blocking(move || Ok(board_view(&hive, &HivePaths::new(root), fuses, super::fuses::now_ms(), false))).await
+    blocking(move || {
+        let mut board = board_view(&hive, &HivePaths::new(root), fuses, super::fuses::now_ms(), false);
+        board.spend.all_hives_micros = super::gallery::budget::all_hives_spent(&hive_ids).max(board.spend.spent_micros);
+        Ok(board)
+    })
+    .await
 }
 
 // ── The Hive view's mount ──

@@ -1013,6 +1013,23 @@ export interface HiveBoard {
   refresh_at?: number | null;
   /** Folders whose target fails its land check alone: lands there need fix_forward (§8.6). */
   suspect_repos?: string[];
+  /** Paid generation against the budget (§10.3), and every Hive's total (§7.8). */
+  spend?: HiveSpend;
+}
+
+/** hive/gallery/budget.rs `SpendView`: integer micro-dollars, the ledger's own unit. */
+export interface HiveSpend {
+  spent_micros: number;
+  budget_micros: number;
+  all_hives_micros: number;
+  over: boolean;
+}
+
+/** What the gallery settings sheet saves (`hive_set_gallery_settings`). */
+export interface GallerySettingsChange {
+  budget_cents: number;
+  output_folders: string[];
+  generator_hosts: string[];
 }
 
 /** hive/land/log.rs `LandLogEntry` folded (`FoldedEntry`): one line of the land log (§8.6). */

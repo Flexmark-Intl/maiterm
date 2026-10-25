@@ -1282,7 +1282,7 @@ the answer path, and an agent's answer is checked against the `prompt_id` instea
 |---|---|---|
 | An answer to a question | The coordinator; the human if Workers' questions is Ask me | A **blocker** on its task (the worker's priming and `blocker` field say "your coordinator"). Rust routes it by the checkpoint. Answered back by `hiveMessageWorker` or, from the human, as a blocker answer |
 | A permission prompt answered | The coordinator; the human if Workers' permission prompts is Ask me | `hiveAnswerWorker`, within the allowlist |
-| Money: a spend past the budget (§10.3) | **The human**, always | A blocker the worker marks `budget`. Mislabelling only ever sends a question to the human, the safe direction |
+| Money: a spend past the budget (§10.3) | **The human**, always | A `decision` blocker whose question starts `Budget:` (no new blocker kind, which an older build would drop; `gallery::budget::is_budget_question`, step 8f). Mislabelling only ever sends a question to the human, the safe direction |
 | A sandbox block (a host or path refused, §6.7) | The coordinator, which can't widen it | The coordinator raises its **own** blocker to the human, naming the host or path (§14.16) |
 | To say it can't go on | The coordinator | `hiveReport {status: "blocked"}`: a status, not a question; the card reads **Blocked** (§4.3) |
 
@@ -3765,6 +3765,46 @@ several releases a day).
    refused); a run that stops partway logs what it wrote; setting the status an asset already has
    answers an open recommendation (the detail's and compare's "Keep …"); and Empty the trash
    confirms the whole trash's count (`gallery_trash_count`), whatever the filters show.
+   **8f built** (2026-10-24): the budget and the sandbox for generators (`hive/gallery/budget.rs`,
+   `components/hive/GallerySettingsModal.svelte`, `src/lib/hive/budget.ts`). The ledger's integer
+   micros are the only total; a `galleryAdd` that records a spend and leaves the total at or past
+   the budget files the human's own `action` blocker on a "Hive budget reached" row of the
+   coordinator's (`fuses::file_row_blocker`, under the state's lock, so two crossings at once file
+   one), once while that row stands, sends the tasks store the rows and tells the coordinator
+   (`[maiTerm] Budget reached: …; don't ask again`), unless the coordinator made the spend, whose
+   answer says so; the spender's answer carries `over` and "stop paid generation now". Recording is
+   never refused. A worker's "may I spend?" is a `decision` blocker whose question starts `Budget:`:
+   `prompts::classify` keeps it, and an AskUserQuestion whose question starts so, with the human
+   whatever the checkpoints (plan D4). `hive_set_gallery_settings` (the asking window's Hive only)
+   checks the budget ($0–$100,000), the output folders (existing, canonical, at most 20, neither
+   holding nor inside the Hive or maiTerm's data folder) and the hosts (lowercase DNS names with a
+   dot, an optional `*.`, no scheme, port, path, IP literal or localhost, none reaching a repo
+   remote, at most 50); a raise that takes the spend from over the budget to under it closes the
+   row if it isn't done ("Budget raised by the human to $Z": the card's generic "I've done it" may
+   have moved it to Active without a raise) and tells the coordinator what's left, whether or not a
+   row was still standing. The header's "Budget: $3.20 of $10.00" (amber at 80%, red
+   once reached) opens the sheet, with "· all Hives $X" only when another Hive has spent (plan D26);
+   it is the board's `spend` (`HiveBoard.spend`, every Hive's total added by `hive_workers`), which
+   refetches on every gallery event and on a budget change. `hiveListWorkers` reports the budget
+   too. Both briefs carry the budget, the spend at launch and the `Budget:` rule. Generator hosts
+   (plan D2) are filled at `hive_create` from a fresh detection (`create::generator_hosts`: each
+   chosen MCP server's url host plus `KNOWN_GENERATOR_HOSTS` matched by url suffix or name word, the
+   `/generate` skill as Kie.ai, repo remotes and anything not a public host name dropped), edited
+   by the human, offered again by Re-detect (`hive_detect_generator_hosts`), never re-derived at
+   launch; a worker's `allowedDomains` is the registries plus them (`settings::worker_domains`,
+   checked again since the state file is plain JSON, a remote's host still left out and denied),
+   the coordinator's stays `[]` (plan D20). A role with `generators: true` (image, video, audio,
+   edit; never a reviewer) gets each chosen `mcp:<name>` copied verbatim from the launching
+   account's `.claude.json` into its `mcp.json` (`settings::worker_mcp_config`, fresh at every
+   launch, a server the file lacks left out and logged); every `mcp.json` is written 0600 from its
+   first byte (`launch::write_private_json`). **Decided here:** no `HiveWindow::budget_crossed`: the
+   window's `tasks_changed` and `deliver` already carry it, and the test window counts both; the
+   pause's row writer was already lifted out (7e's `file_row_blocker`); no `gallery_spend` command
+   or `spend` in `hive-gallery-changed`, since the board refetches on both; lowering the budget
+   below the spend files nothing until the next spend; a raise that still leaves it over keeps the
+   row. **Not run:** `hive/probe.rs` `generator_host_probe` (ignored: a listed host is reached, an
+   unlisted one refused, and whether a `*.` entry reaches a subdomain is printed). **Step 8 is
+   complete.**
 9. Done and lifecycle: `hiveFinish` and waking a Done Hive (§11.4), queue state across
    suspend/resume/restart (§6.8), phone polish (Hive tabs already appear as chats; the gallery
    feed later).

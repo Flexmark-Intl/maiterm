@@ -253,6 +253,20 @@ fn precedent_lines(counts: &PrecedentCounts) -> String {
     )
 }
 
+/// The budget and its rule (§10.3), the same words for the coordinator and its workers: money is
+/// never delegable (§7.4), so the question goes to the human, whom maiTerm keeps it with
+/// (`budget::is_budget_question`). `spent` is the ledger's total at this launch.
+pub fn budget_line(hive: &Hive, spent: i64) -> String {
+    use super::gallery::budget::{budget_micros, usd};
+    format!(
+        "Budget {} for paid generation, {} spent at launch. Before a spend that would cross it, stop and ask your human with \
+         a decision blocker whose question starts `Budget:`. Never decide it yourself. Record every paid render, kept or not, \
+         with `recipe.cost_usd`; a discarded or failed one as a `galleryAdd` with no path.",
+        usd(budget_micros(hive)),
+        usd(spent)
+    )
+}
+
 fn capitalised(s: &str) -> String {
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
@@ -318,13 +332,18 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
          in its brief) or hiveMessageWorker `assets`. Curating is your job: galleryTag sets picked; final and rejected {}; \
          galleryCollect builds ordered collections; galleryDeliver copies chosen assets or a collection into a plain folder \
          as new files (never a git folder: a worker puts those in its worktree and they land). What you file yourself comes \
-         from your home. Every paid render is recorded with recipe.cost_usd, kept or not.\n",
+         from your home.\n",
         if super::checkpoints::asks(hive, super::checkpoints::FINALS) {
             "are your human\u{2019}s while picking finals is Ask me: setting one records your recommendation, which your human \
              sees on the asset and answers by picking; ask with a decision blocker when you need the answer to go on"
         } else {
             "are yours to set, each a decision logged for your human"
         }
+    ));
+    b.push_str(&format!(
+        "- {} When maiTerm tells you the budget is reached, have every worker stop paid generation (hiveMessageWorker); \
+         your human has been asked already.\n",
+        budget_line(hive, super::gallery::budget::spent_of(&hive.id, paths))
     ));
     b.push_str(&queued_lines(hive, hive.git_folders().map(|f| f.name.as_str()).collect(), false));
     b.push_str(&checkpoint_lines(hive));
@@ -415,13 +434,16 @@ pub fn worker_brief_md(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, task_br
          goes in the gallery with `galleryAdd`, **with the recipe that made it** (tool, model, prompt, seed, settings): a \
          result without its recipe can't be iterated on. Render into your scratch folder first; a generator that answers \
          with a URL is downloaded there first, then filed. A variant, an edit or an upscale names what it came from in \
-         `parents`. Record every paid render with `recipe.cost_usd`, kept or not: a discarded or failed one is a \
-         `galleryAdd` with no path. `galleryList` and `galleryGet` give an asset's stored path to use as an input; the \
-         stored file is read-only. You may tag, star and mark assets picked; final and rejected aren't yours.\n\
+         `parents`. `galleryList` and `galleryGet` give an asset's stored path to use as an input; the stored file is \
+         read-only. You may tag, star and mark assets picked; final and rejected aren't yours.\n\
          - Report with `hiveReport`: `status` done, blocked or failed, a `summary`, and for done the `receipts` maiTerm \
          checks: `commits` (shas on your branch), `files` (paths in your folders), `assets` (gallery ids `galleryAdd` gave \
          you) and `checks` (`hiveRun` jobs that passed on your committed tip). A done report without receipts is refused.\n",
     );
+    b.push_str(&format!(
+        "- {} If a `galleryAdd` answer says the budget is over, stop paid generation at once.\n",
+        budget_line(hive, super::gallery::budget::spent_of(&hive.id, paths))
+    ));
     b.push_str(&format!("- Shared memory is `{}`. {MEMORY_RULE}\n", paths.memory().display()));
     b.push_str(&queued_lines(hive, w.folders.iter().filter(|f| f.worktree.is_some()).map(|f| f.name.as_str()).collect(), true));
     if !hive.tools.is_empty() {
@@ -690,7 +712,7 @@ mod tests {
     fn both_briefs_say_how_the_gallery_works() {
         let (mut h, p, w) = crate::hive::launch::tests::sample_worker_hive();
         let b = worker_brief_md(&h, &p, &w, "Make the hero.", None, &[]);
-        for must in ["`galleryAdd`, **with the recipe that made it**", "downloaded there first", "`recipe.cost_usd`, kept or not", "`assets` (gallery ids", "use as an input"] {
+        for must in ["`galleryAdd`, **with the recipe that made it**", "downloaded there first", "kept or not, with `recipe.cost_usd`", "`assets` (gallery ids", "use as an input"] {
             assert!(b.contains(must), "{must}: {b}");
         }
         assert!(!b.contains("Inputs from the gallery"), "no inputs, no section");
@@ -700,6 +722,20 @@ mod tests {
         h.checkpoints.insert("finals".into(), "ask".into());
         let c = brief_md(&h, &p, &PrecedentCounts::default());
         assert!(c.contains("final and rejected are your human\u{2019}s while picking finals is Ask me: setting one records your recommendation"), "{c}");
+    }
+
+    /// §10.3, §7.4: both briefs carry the budget, what's spent, and that a spend past it is asked
+    /// of the human with a `Budget:` decision, never decided.
+    #[test]
+    fn both_briefs_carry_the_budget_and_its_rule() {
+        let (mut h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        h.budget_cents = 2_500;
+        let rule = "Budget $25.00 for paid generation, $0.00 spent at launch. Before a spend that would cross it, stop and ask your human with a decision blocker whose question starts `Budget:`. Never decide it yourself.";
+        let b = worker_brief_md(&h, &p, &w, "Make the hero.", None, &[]);
+        assert!(b.contains(rule) && b.contains("budget is over, stop paid generation"), "{b}");
+        let c = brief_md(&h, &p, &PrecedentCounts::default());
+        assert!(c.contains(rule) && c.contains("have every worker stop paid generation"), "{c}");
+        assert!(budget_line(&h, 3_000).contains("$0.003 spent at launch"));
     }
 
     /// §7.2: a worker's inputs are listed with their stored paths, agent text escaped, and one

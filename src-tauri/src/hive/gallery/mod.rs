@@ -4,8 +4,10 @@
 //! a caller may file from and makes the copy; `model` holds the records; `tools` is what agents
 //! call (step 8b); `thumbs` makes the pictures and `serve` answers the webview's `gallery://`
 //! requests, by asset id only (8c); `view` is the human's gallery view, cards and chats (8d);
-//! `commands` is the human's curation and `deliver` writes assets out into folders (8e).
+//! `commands` is the human's curation and `deliver` writes assets out into folders (8e);
+//! `budget` is the spend against the Hive's budget and the human's gallery settings (8f).
 
+pub mod budget;
 pub mod commands;
 pub mod deliver;
 pub mod ingest;

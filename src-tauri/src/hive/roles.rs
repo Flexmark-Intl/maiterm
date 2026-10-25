@@ -15,6 +15,8 @@ pub struct Role {
     pub pairs_with: Vec<String>,
     /// WebSearch stays in its tools (WebFetch never does, §6.7).
     pub web: bool,
+    /// Its worker gets the Hive's generator MCP servers (`settings::worker_mcp_config`, plan D1).
+    pub generators: bool,
     /// Who wrote it: `maiterm` for every shipped role.
     pub source: String,
     pub body: String,
@@ -85,7 +87,7 @@ fn parse(text: &str) -> Result<Role, String> {
     let text = text.replace("\r\n", "\n");
     let rest = text.strip_prefix("---\n").ok_or("no frontmatter")?;
     let (front, body) = rest.split_once("\n---\n").ok_or("unterminated frontmatter")?;
-    let mut role = Role { name: String::new(), description: String::new(), pairs_with: Vec::new(), web: false, source: String::new(), body: body.trim().to_string() };
+    let mut role = Role { name: String::new(), description: String::new(), pairs_with: Vec::new(), web: false, generators: false, source: String::new(), body: body.trim().to_string() };
     for line in front.lines().filter(|l| !l.trim().is_empty()) {
         let (k, v) = line.split_once(':').ok_or_else(|| format!("\"{line}\" isn't key: value"))?;
         let v = v.trim();
@@ -94,6 +96,7 @@ fn parse(text: &str) -> Result<Role, String> {
             "description" => role.description = v.to_string(),
             "pairs_with" => role.pairs_with = v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect(),
             "web" => role.web = v.parse().map_err(|_| format!("web: \"{v}\" isn't true or false"))?,
+            "generators" => role.generators = v.parse().map_err(|_| format!("generators: \"{v}\" isn't true or false"))?,
             "source" => role.source = v.to_string(),
             other => return Err(format!("unknown key \"{other}\"")),
         }
@@ -153,6 +156,14 @@ mod tests {
         assert!(parse("---\nname: x\ndescription: d\nsource: s\ncolour: red\n---\nbody").is_err());
         assert!(parse("---\nname: x\ndescription: d\n---\nbody").is_err(), "source is required");
         let r = parse("---\nname: x\ndescription: d\nsource: s\n---\n\nbody\n").unwrap();
-        assert_eq!((r.body.as_str(), r.web, r.pairs_with.len()), ("body", false, 0));
+        assert_eq!((r.body.as_str(), r.web, r.generators, r.pairs_with.len()), ("body", false, false, 0));
+        assert!(parse("---\nname: x\ndescription: d\nsource: s\ngenerators: true\n---\nbody").unwrap().generators);
+        assert!(parse("---\nname: x\ndescription: d\nsource: s\ngenerators: often\n---\nbody").is_err());
+    }
+
+    #[test]
+    fn only_the_media_roles_get_the_generators() {
+        let with: Vec<&str> = catalogue().iter().filter(|r| r.generators).map(|r| r.name.as_str()).collect();
+        assert_eq!(with, vec!["image", "video", "audio", "edit"]);
     }
 }

@@ -284,6 +284,22 @@ fn the_allowlist_takes_plain_tool_dialogs_listed_questions_and_decisions_only() 
     refused(&PromptView::from_blocker("t1", &action), "only your human can do it");
     let external = TaskBlocker { kind: "external".into(), ..decision("a", &[]) };
     assert!(classify(&PromptView::from_blocker("t1", &external)).is_err());
+
+    // Money is never delegable (§7.4, plan D4): a `Budget:` decision or question is the human's.
+    let spend = TaskBlocker { question: "budget: render 40 more frames at $0.05 each?".into(), ..decision("a", &[("Yes", true), ("No", false)]) };
+    refused(&PromptView::from_blocker("t1", &spend), "spend past the budget");
+    let mut ask = question("t");
+    ask.questions[0]["question"] = json!("Budget: approve this $0.40 render?");
+    refused(&ask, "spend past the budget");
+}
+
+#[tokio::test]
+async fn a_budget_question_goes_to_the_human_under_a_coordinator_checkpoint() {
+    let rig = Rig::new();
+    let spend = TaskBlocker { question: "Budget: 20 more renders would cross it; go on?".into(), ..decision("2026-10-24T10:00:00Z", &[("Go on", false), ("Stop", true)]) };
+    let r = rig.route(PromptView::from_blocker(&rig.worker.task_id, &spend), 1).await.unwrap();
+    assert_eq!((r.owner.as_str(), r.category.as_str(), r.due_ms), (OWNER_HUMAN, "never", 0));
+    assert!(rig.to_coordinator()[0].contains("· your human\u{2019}s⟧"), "{:?}", rig.to_coordinator());
 }
 
 // ── Routing ──

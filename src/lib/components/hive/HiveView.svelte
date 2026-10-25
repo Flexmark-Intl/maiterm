@@ -50,7 +50,9 @@
   import HiveDeleteSheet from './HiveDeleteSheet.svelte';
   import LandLogModal from './LandLogModal.svelte';
   import HiveAutonomyModal from './HiveAutonomyModal.svelte';
+  import GallerySettingsModal from './GallerySettingsModal.svelte';
   import { autonomyLabel } from '$lib/hive/autonomy';
+  import { allHivesLabel, budgetLabel, budgetLevel } from '$lib/hive/budget';
   import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
   import HiveMemoryView from './HiveMemoryView.svelte';
   import GalleryView from './gallery/GalleryView.svelte';
@@ -89,6 +91,8 @@
   let deleteOpen = $state(false);
   /** Hive settings → Autonomy (docs/hive.md §7.4), from the header. */
   let autonomyOpen = $state(false);
+  /** Hive header → Budget (docs/hive.md §10.3): the budget, output folders, generator hosts. */
+  let budgetOpen = $state(false);
   /** The land log (docs/hive.md §8.6), whole from the header or one worker's from its column. */
   let landLog = $state<{ taskId: string | null } | null>(null);
   const queuedCount = $derived(hive?.settings?.run_queue?.commands.length ?? 0);
@@ -119,6 +123,8 @@
     void taskSig;
     void workerTabSig;
     void hive?.status;
+    // The budget line is the board's (`spend`): a raise moves it with no gallery event.
+    void hive?.budget_cents;
     untrack(refetch);
   });
   // The headroom changes with no event when the breaker ends or a spawn ages out of the hour or
@@ -678,6 +684,17 @@
       {#if board?.suspect_repos?.length}
         <span class="warn">Suspect: {board.suspect_repos.join(', ')} fails its land check alone</span>
       {/if}
+      {#if hive && board?.spend}
+        {@const spend = board.spend}
+        {@const level = budgetLevel(spend)}
+        {@const all = allHivesLabel(spend)}
+        <Tooltip text={level === 'over' ? 'Reached: no paid render until you raise it. The budget, output folders and generator hosts' : 'Paid generation, as agents record it. The budget, output folders and generator hosts'}>
+          <button type="button" class="queue-btn budget" class:amber={level === 'amber'} class:over={level === 'over'} onclick={() => (budgetOpen = true)}>
+            {budgetLabel(spend)}
+          </button>
+        </Tooltip>
+        {#if all}<span>· {all}</span>{/if}
+      {/if}
       {#if hive}
         <Tooltip text="Every land, undo and post-land check, and Undo">
           <button type="button" class="queue-btn" onclick={() => (landLog = { taskId: null })}>Land log</button>
@@ -701,6 +718,9 @@
   {/if}
   {#if autonomyOpen && hive}
     <HiveAutonomyModal {workspaceId} {hive} onclose={() => (autonomyOpen = false)} />
+  {/if}
+  {#if budgetOpen && hive}
+    <GallerySettingsModal {workspaceId} {hive} spend={board?.spend ?? null} onclose={() => (budgetOpen = false)} />
   {/if}
   {#if deleteOpen && hive}
     <HiveDeleteSheet {workspaceId} name={ws?.name ?? ''} onclose={() => (deleteOpen = false)} />
@@ -927,6 +947,8 @@
   .queue-btn { background: none; border: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-align: right; }
   .queue-btn:hover { text-decoration: underline; }
   .queue-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .queue-btn.budget.amber { color: var(--yellow); }
+  .queue-btn.budget.over { color: var(--red); font-weight: 600; }
   .queue-btn.danger { color: var(--fg-dim); }
   .queue-btn.danger:hover { color: var(--red); }
   .cols { flex: 1; min-height: 0; display: flex; min-width: 0; overflow: hidden; }

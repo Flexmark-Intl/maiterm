@@ -813,7 +813,7 @@ impl WorkerProbe {
             known_newer: crate::claude_code::lockfile::events_every_claude_knows(HIVE_NEWER_EVENTS),
         };
         let ctx = WorkerContext::gather(&self.hive, &self.paths, &self.worker);
-        super::launch::write_worker_launch_files(&self.hive, &self.paths, &self.record, &self.worker, &ctx, "Probe the sandbox.", &hooks).unwrap();
+        super::launch::write_worker_launch_files(&self.hive, &self.paths, &self.record, &self.worker, &ctx, "Probe the sandbox.", &hooks, None).unwrap();
         let rec = &self.record;
         let real = super::launch::worker_record(&self.hive, &self.paths, &self.worker).setting_sources;
         assert_eq!(rec.setting_sources, real, "the probe runs the real sources (a builder's project, a reviewer's local)");
@@ -1130,4 +1130,47 @@ fn spike_9_queued_deny_probe() {
 
     let leaked = appended_since(&logs);
     assert!(!leaked.contains(TAB) && !leaked.contains(&p.id), "the installed maiTerm heard from the probe:\n{}", leaked.lines().filter(|l| l.contains(TAB) || l.contains(&p.id)).collect::<Vec<_>>().join("\n"));
+}
+
+/// Step 8f's probe (§14.16, plan D2): a worker whose Hive lists a generator host reaches it from
+/// its sandbox, an unlisted host still gets the sandbox's refusal, and a `*.` entry's subdomain
+/// is tried and recorded either way (the built-in table uses exact hosts, so nothing depends on
+/// it). Assertions are on the calls' output, never the model's words.
+///
+/// `cargo test --lib generator_host_probe -- --ignored --nocapture`
+#[cfg(unix)]
+#[test]
+#[ignore = "runs claude -p against the logged-in account"]
+fn generator_host_probe() {
+    let mut p = WorkerProbe::new();
+    p.hive.settings.gallery.generator_hosts = vec!["www.iana.org".into(), "*.wikipedia.org".into()];
+    let maiterm = FakeMaiterm::serving(&p.hive, &p.paths, ROLE_WORKER, false);
+    let curl = |url: &str| exact(&format!("Run this Bash command: curl -sS -I -m 15 {url}"));
+    let asks: Vec<(&'static str, String)> = vec![
+        ("listed", curl("https://www.iana.org/")),
+        ("wildcard", curl("https://en.wikipedia.org/")),
+        ("unlisted", curl("https://example.com/")),
+    ];
+    let runs: Vec<(&str, Run)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = asks.iter().map(|(k, prompt)| (*k, sc.spawn(|| p.ask(maiterm.port, prompt)))).collect();
+        hs.into_iter().map(|(k, h)| (k, h.join().unwrap())).collect()
+    });
+    report(&runs);
+    let written: Value = serde_json::from_slice(&fs::read(&p.record.settings_path).unwrap()).unwrap();
+    println!("network: {}", serde_json::to_string_pretty(&written["sandbox"]["network"]).unwrap());
+    let allowed: Vec<&str> = written["sandbox"]["network"]["allowedDomains"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(allowed.contains(&"www.iana.org") && allowed.contains(&"*.wikipedia.org"), "{allowed:?}");
+
+    let bash = |k: &str| get(&runs, k).calls.iter().find(|c| c.name == "Bash").cloned();
+    let refused = |c: &Call| c.is_error || c.output.contains(" 403") || c.output.contains("blocked");
+    let listed = bash("listed").unwrap_or_else(|| panic!("no call:\n{}", get(&runs, "listed").summary()));
+    assert!(listed.output.contains("HTTP/") && !refused(&listed), "a listed host is reached:\n{}", get(&runs, "listed").summary());
+    if let Some(c) = bash("unlisted") {
+        assert!(refused(&c), "an unlisted host still refused:\n{}", get(&runs, "unlisted").summary());
+    }
+    match bash("wildcard") {
+        Some(c) if c.output.contains("HTTP/") && !refused(&c) => println!("RESULT: a `*.` entry reaches its subdomains (2.1.310)"),
+        Some(c) => println!("RESULT: a `*.` entry does NOT reach its subdomains: {}", c.output.chars().take(300).collect::<String>()),
+        None => println!("RESULT: the wildcard run made no call, so nothing was learned"),
+    }
 }

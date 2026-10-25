@@ -237,9 +237,26 @@ pub(crate) fn write_json(path: &Path, v: &serde_json::Value) -> Result<(), Strin
 /// be written through. So the destination is replaced, never followed, and the temp file is a
 /// fresh random name opened O_EXCL, which refuses anything already there, a symlink included.
 pub(crate) fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_bytes_as(path, bytes, false)
+}
+
+/// `write_json` readable by its owner only (0600 on Unix), from the first byte: an MCP config
+/// carrying a generator's entry carries its key.
+pub(crate) fn write_private_json(path: &Path, v: &serde_json::Value) -> Result<(), String> {
+    let mut bytes = serde_json::to_vec_pretty(v).map_err(|e| e.to_string())?;
+    bytes.push(b'\n');
+    write_bytes_as(path, &bytes, true)
+}
+
+fn write_bytes_as(path: &Path, bytes: &[u8], private: bool) -> Result<(), String> {
     use std::io::Write as _;
-    let is_link = fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
-    if !is_link && fs::read(path).is_ok_and(|old| old == bytes) {
+    let meta = fs::symlink_metadata(path).ok();
+    let is_link = meta.as_ref().is_some_and(|m| m.file_type().is_symlink());
+    #[cfg(unix)]
+    let mode_ok = !private || meta.as_ref().is_some_and(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o777 == 0o600);
+    #[cfg(not(unix))]
+    let mode_ok = true;
+    if !is_link && mode_ok && fs::read(path).is_ok_and(|old| old == bytes) {
         return Ok(());
     }
     if let Some(dir) = path.parent() {
@@ -247,7 +264,15 @@ pub(crate) fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
     }
     let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4().simple()));
     let err = |e: std::io::Error| format!("{}: {e}", path.display());
-    let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&tmp).map_err(err)?;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    if private {
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let mut f = opts.open(&tmp).map_err(err)?;
     let written = f.write_all(bytes).and_then(|_| f.sync_all());
     drop(f);
     written.and_then(|_| fs::rename(&tmp, path)).map_err(|e| {
@@ -480,7 +505,7 @@ pub fn claude_new_enough() -> Result<(), String> {
 pub fn write_launch_files(hive: &Hive, paths: &HivePaths, record: &LaunchRecord, hooks: &super::settings::HookEnv) -> Result<(), String> {
     let settings = super::settings::hive_settings_json(hive, record, paths, hooks)?;
     write_json(Path::new(&record.settings_path), &settings)?;
-    write_json(Path::new(&record.mcp_config_path), &super::settings::hive_mcp_config())?;
+    write_private_json(Path::new(&record.mcp_config_path), &super::settings::hive_mcp_config())?;
     if record.role == ROLE_COORDINATOR {
         let counts = super::precedents::counts(paths);
         write_bytes(&paths.coordinator_brief(), super::brief::brief_md(hive, paths, &counts).as_bytes())?;
@@ -488,7 +513,10 @@ pub fn write_launch_files(hive: &Hive, paths: &HivePaths, record: &LaunchRecord,
     Ok(())
 }
 
-/// A worker's launch files: its settings (§6.7), the MCP config, and `scratch/brief.md` (§7.1).
+/// A worker's launch files: its settings (§6.7), the MCP config (with the Hive's generators for a
+/// media role, from `claude_json`, the launching account's `.claude.json`), and
+/// `scratch/brief.md` (§7.1).
+#[allow(clippy::too_many_arguments)]
 pub fn write_worker_launch_files(
     hive: &Hive,
     paths: &HivePaths,
@@ -497,10 +525,11 @@ pub fn write_worker_launch_files(
     ctx: &super::settings::WorkerContext,
     task_brief: &str,
     hooks: &super::settings::HookEnv,
+    claude_json: Option<&serde_json::Value>,
 ) -> Result<(), String> {
     let settings = super::settings::worker_settings_json(hive, record, w, paths, ctx, hooks)?;
     write_json(Path::new(&record.settings_path), &settings)?;
-    write_json(Path::new(&record.mcp_config_path), &super::settings::hive_mcp_config())?;
+    write_private_json(Path::new(&record.mcp_config_path), &super::settings::worker_mcp_config(hive, w, claude_json))?;
     let builder = w.reviews.as_deref().and_then(|id| super::worker::task_dir(paths, id).ok()).and_then(|d| super::worker::read_worker(&d).ok());
     let inputs = super::gallery::tools::brief_inputs(&hive.id, paths, &w.inputs);
     write_bytes(&paths.worker_brief(&w.slug), super::brief::worker_brief_md(hive, paths, w, task_brief, builder.as_ref(), &inputs).as_bytes())
@@ -666,7 +695,12 @@ fn prepare_worker(hive: &Hive, paths: &HivePaths, tab_id: &str, tasks: &[crate::
     let hooks = super::settings::HookEnv::current()?;
     let ctx = super::settings::WorkerContext::gather(hive, paths, &w);
     let brief = tasks.iter().find(|t| t.id == w.task_id).and_then(|t| t.detail.clone()).unwrap_or_default();
-    write_worker_launch_files(hive, paths, &record, &w, &ctx, &brief, &hooks)?;
+    // The account the tab starts under: its generator entries, keys and all, go in mcp.json.
+    let claude_json = super::create::trust_roots(prefs)
+        .first()
+        .and_then(|f| fs::read(f).ok())
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    write_worker_launch_files(hive, paths, &record, &w, &ctx, &brief, &hooks, claude_json.as_ref())?;
     // A fresh start (`hiveRestartWorker` fresh) is a new session, told its kickoff again; the
     // flag clears when that session starts.
     let resume = if w.fresh_next {

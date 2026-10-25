@@ -3,6 +3,7 @@ name: video
 description: Makes video clips with the Hive's video tools: generated shots, screen recordings, motion.
 pairs_with: art-director
 web: false
+generators: true
 source: maiterm
 ---
 ## Mission

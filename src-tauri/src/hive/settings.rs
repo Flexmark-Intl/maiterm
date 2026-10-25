@@ -206,8 +206,8 @@ pub fn coordinator_denied_mcp_tools() -> Vec<&'static str> {
     out
 }
 
-/// The package registries a worker's sandbox reaches (§14.16). Generator hosts join with the
-/// gallery (step 8).
+/// The package registries a worker's sandbox reaches (§14.16), beside the Hive's generator hosts
+/// (`settings.gallery.generator_hosts`, `worker_domains`).
 pub const PACKAGE_REGISTRIES: &[&str] =
     &["registry.npmjs.org", "crates.io", "index.crates.io", "static.crates.io", "pypi.org", "files.pythonhosted.org"];
 
@@ -439,16 +439,21 @@ impl WorkerContext {
             .filter(|o| o.task_id != w.task_id && o.slug != w.slug && is_component(&o.slug) && !RESERVED_SLUGS.contains(&o.slug.as_str()))
             .map(|o| paths.worker_dir(&o.slug))
             .collect();
-        let mut remote_hosts: Vec<String> = Vec::new();
-        for f in hive.git_folders() {
-            for host in remote_urls(Path::new(&f.path)).iter().filter_map(|u| url_host(u)) {
-                if !remote_hosts.contains(&host) {
-                    remote_hosts.push(host);
-                }
+        Self { other_workers, remote_hosts: hive_remote_hosts(hive), caches: shared_caches(), checkout_denies: checkout_denies(hive, w) }
+    }
+}
+
+/// The host of every fetch and push url of the Hive's repos, lowercased, once each. Blocks: git.
+pub fn hive_remote_hosts(hive: &Hive) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for f in hive.git_folders() {
+        for host in remote_urls(Path::new(&f.path)).iter().filter_map(|u| url_host(u)) {
+            if !out.contains(&host) {
+                out.push(host);
             }
         }
-        Self { other_workers, remote_hosts, caches: shared_caches(), checkout_denies: checkout_denies(hive, w) }
     }
+    out
 }
 
 /// Every fetch and push url of a repo's remotes. None at all is git's exit 1.
@@ -646,7 +651,7 @@ pub fn worker_settings_json(hive: &Hive, record: &LaunchRecord, w: &WorkerRecord
         deny_rules.push(abs_rule("Edit", &d.path, d.dir));
     }
 
-    let domains: Vec<&str> = PACKAGE_REGISTRIES.iter().copied().filter(|d| !ctx.remote_hosts.iter().any(|h| h.eq_ignore_ascii_case(d))).collect();
+    let domains = worker_domains(hive, &ctx.remote_hosts);
     Ok(json!({
         "sandbox": {
             "enabled": true,
@@ -683,6 +688,25 @@ pub fn worker_settings_json(hive: &Hive, record: &LaunchRecord, w: &WorkerRecord
     }))
 }
 
+/// A worker's network allowlist (§14.16): the package registries and the Hive's generator hosts,
+/// minus anything that reaches a repo's remote, which `deniedDomains` also lists. The hosts were
+/// checked when the human saved them; checked again here, since the state file is plain JSON, and
+/// a remote added since is taken out all the same.
+pub fn worker_domains(hive: &Hive, remote_hosts: &[String]) -> Vec<String> {
+    use super::gallery::budget::{host_covers, normalize_host};
+    let remotes: Vec<String> = remote_hosts.iter().map(|h| h.to_ascii_lowercase()).collect();
+    let generators = hive.settings.gallery.generator_hosts.iter().filter_map(|h| {
+        normalize_host(h).map_err(|e| log::warn!("hive {}: generator host left out: {e}", hive.id)).ok()
+    });
+    let mut out: Vec<String> = Vec::new();
+    for d in PACKAGE_REGISTRIES.iter().map(|d| d.to_string()).chain(generators) {
+        if !remotes.iter().any(|r| host_covers(&d, r)) && !out.contains(&d) {
+            out.push(d);
+        }
+    }
+    out
+}
+
 /// The `--mcp-config` file: maiTerm's server only, under `--strict-mcp-config`. Nothing baked:
 /// the port, token and tab expand from the tab's environment in the url and headers (the
 /// expansion table in claude_code/CLAUDE.md), and a sandboxed Claude reached it this way.
@@ -700,6 +724,34 @@ pub fn hive_mcp_config() -> Value {
             }
         }
     })
+}
+
+/// A worker's `--mcp-config` (plan D1, §6.8 "only the servers it needs"): maiTerm's server, and
+/// for a role that generates (`generators: true`; never a reviewer) each MCP server the human
+/// chose for the Hive, its entry copied verbatim from the launching account's `.claude.json`.
+/// Copied fresh at every launch, so a rotated key reaches the next one. A chosen server that file
+/// no longer has is left out, logged. Generator calls run in Claude's process, outside the
+/// sandbox, bounded by the budget (§6.7).
+pub fn worker_mcp_config(hive: &Hive, w: &WorkerRecord, claude_json: Option<&Value>) -> Value {
+    let mut v = hive_mcp_config();
+    let generates = !w.is_reviewer() && super::roles::role(&w.role).is_some_and(|r| r.generators);
+    if !generates {
+        return v;
+    }
+    let ours = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
+    let theirs = claude_json.and_then(|c| c.get("mcpServers")).and_then(Value::as_object);
+    for name in hive.tools.iter().filter_map(|t| t.strip_prefix("mcp:")) {
+        if name == ours {
+            continue;
+        }
+        match theirs.and_then(|s| s.get(name)) {
+            Some(entry) => {
+                v["mcpServers"][name] = entry.clone();
+            }
+            None => log::warn!("hive {}: worker {}: MCP server \"{name}\" isn't in the account's .claude.json; left out", hive.id, w.slug),
+        }
+    }
+    v
 }
 
 /// Write the hook script (only when it changed) and the port it reads, on every server bind.
@@ -1362,5 +1414,80 @@ mod tests {
         ] {
             assert_eq!(url_host(url).as_deref(), host, "{url}");
         }
+    }
+
+    /// §14.16, plan D2, D20: the Hive's generator hosts join a worker's allowlist, never one that
+    /// reaches a git remote (that stays denied), and the coordinator's list stays empty.
+    #[cfg(unix)]
+    #[test]
+    fn generator_hosts_join_the_worker_allowlist_but_never_a_remote_or_the_coordinator() {
+        let (mut h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        h.settings.gallery.generator_hosts = vec!["fal.run".into(), "v3.fal.media".into(), "crates.io".into(), "*.github.com".into(), "localhost".into(), "FAL.run".into()];
+        let mut ctx = worker_ctx();
+        ctx.remote_hosts.push("gist.github.com".into());
+        let s = worker_settings_json(&h, &crate::hive::launch::worker_record(&h, &p, &w), &w, &p, &ctx, &env()).unwrap();
+        let allowed = strings(&s["sandbox"]["network"]["allowedDomains"]);
+        for host in ["registry.npmjs.org", "pypi.org", "fal.run", "v3.fal.media"] {
+            assert!(allowed.contains(&host.to_string()), "{host}: {allowed:?}");
+        }
+        assert_eq!(allowed.iter().filter(|d| *d == "fal.run").count(), 1, "once");
+        assert!(!allowed.contains(&"crates.io".to_string()), "a remote's host, though the human listed it: {allowed:?}");
+        assert!(!allowed.contains(&"*.github.com".to_string()), "a wildcard over a remote: {allowed:?}");
+        assert!(!allowed.contains(&"localhost".to_string()), "never localhost, whatever the state file says");
+        let denied = strings(&s["sandbox"]["network"]["deniedDomains"]);
+        assert!(denied.contains(&"crates.io".to_string()) && denied.contains(&"gist.github.com".to_string()), "{denied:?}");
+
+        let coord = hive_settings_json(&h, &coordinator_record(&h, &p), &p, &env()).unwrap();
+        assert_eq!(coord["sandbox"]["network"]["allowedDomains"], json!([]), "the coordinator reaches generators only as MCP servers");
+    }
+
+    /// Plan D1: a media worker gets the Hive's chosen generator servers, copied verbatim from the
+    /// account's `.claude.json`; every other worker, a reviewer, and the coordinator get maiTerm's.
+    #[test]
+    fn only_media_workers_get_the_chosen_generator_servers() {
+        let (mut h, _, w) = crate::hive::launch::tests::sample_worker_hive();
+        h.tools = vec!["mcp:fal".into(), "mcp:gone".into(), "cli:ffmpeg".into(), "skill:generate".into()];
+        let fal = json!({ "type": "http", "url": "https://mcp.fal.ai/mcp", "headers": { "Authorization": "Key fal-secret" }, "x": [1, 2] });
+        let claude_json = json!({ "mcpServers": { "fal": fal, "local": { "command": "npx", "args": ["x"] }, "maiterm": { "url": "http://127.0.0.1:1/mcp" } } });
+        let ours = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
+        let names = |v: &Value| {
+            let mut n: Vec<String> = v["mcpServers"].as_object().unwrap().keys().cloned().collect();
+            n.sort();
+            n
+        };
+
+        let image = WorkerRecord { role: "image".into(), ..w.clone() };
+        let v = worker_mcp_config(&h, &image, Some(&claude_json));
+        let mut want = vec!["fal".to_string(), ours.to_string()];
+        want.sort();
+        assert_eq!(names(&v), want, "a chosen server the file lacks is left out, an unchosen one never added");
+        assert_eq!(v["mcpServers"]["fal"], fal, "copied as it is");
+        assert_eq!(v["mcpServers"][ours], hive_mcp_config()["mcpServers"][ours], "maiTerm's own entry, not the account's");
+
+        let reviewer = WorkerRecord { role: "image".into(), reviews: Some("t-other".into()), ..w.clone() };
+        for (who, rec) in [("backend", &w), ("reviewer", &reviewer)] {
+            assert_eq!(worker_mcp_config(&h, rec, Some(&claude_json)), hive_mcp_config(), "{who}");
+        }
+        assert_eq!(worker_mcp_config(&h, &image, None), hive_mcp_config(), "no account file, maiTerm's only");
+    }
+
+    /// The MCP config may carry a generator's key: owner-only from its first byte, and a file left
+    /// readable by an older build is rewritten even when its text is the same.
+    #[cfg(unix)]
+    #[test]
+    fn the_mcp_config_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hive-mcp-mode-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mcp.json");
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        crate::hive::launch::write_json(&f, &hive_mcp_config()).unwrap();
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o644)).unwrap();
+        crate::hive::launch::write_private_json(&f, &hive_mcp_config()).unwrap();
+        assert_eq!(mode(&f), 0o600);
+        let v = json!({ "mcpServers": { "fal": { "headers": { "Authorization": "Key k" } } } });
+        crate::hive::launch::write_private_json(&f, &v).unwrap();
+        assert_eq!((mode(&f), serde_json::from_slice::<Value>(&fs::read(&f).unwrap()).unwrap()), (0o600, v));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

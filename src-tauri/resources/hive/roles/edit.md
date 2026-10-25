@@ -3,6 +3,7 @@ name: edit
 description: Assembles finished media from parts: cuts, sequences, captions, mixes and exports.
 pairs_with: art-director
 web: false
+generators: true
 source: maiterm
 ---
 ## Mission

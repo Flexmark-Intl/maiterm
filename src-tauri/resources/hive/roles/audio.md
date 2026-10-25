@@ -3,6 +3,7 @@ name: audio
 description: Makes audio with the Hive's audio tools: voice-over, music, sound effects.
 pairs_with: art-director
 web: false
+generators: true
 source: maiterm
 ---
 ## Mission
