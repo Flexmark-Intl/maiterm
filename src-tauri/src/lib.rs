@@ -359,6 +359,10 @@ pub fn run() {
         .manage(app_state.clone())
         // Files (docs/file-tree.md §13): root hubs and their webview subscriptions.
         .manage(filetree::FileTreeState::new())
+        // A Hive's gallery files, read by asset id only (docs/hive.md §10.5).
+        .register_asynchronous_uri_scheme_protocol(hive::gallery::serve::SCHEME, |ctx, req, responder| {
+            hive::gallery::serve::handle(ctx.app_handle().clone(), ctx.webview_label().to_string(), req, responder)
+        })
         // A Channel to a page that reloaded still "sends" without an error, so a reload is the
         // only signal that the window's Files subscriptions are gone.
         .on_page_load(|webview, payload| {
@@ -719,6 +723,8 @@ pub fn run() {
             // Each Hive's daily digest of what its coordinator decided alone, checked hourly
             // (docs/hive.md §7.6).
             hive::autonomy::start_digest_timer(app_state.clone(), app.handle().clone());
+            // Gallery thumbnails are made from here on, each gallery's waiting ones as it opens.
+            hive::gallery::thumbs::install(app.handle().clone());
 
             // Stack copies' branch checkouts whose branch is gone (docs/hive.md §6.9). Git, so off
             // the setup thread.

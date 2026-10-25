@@ -655,6 +655,7 @@ async fn add<W: HiveWindow>(ctx: &Ctx<'_, W>, gc: &GalleryCaller, g: Arc<Gallery
     }
     // One event per call, whatever it filed: a spend moves the header's total too.
     ctx.window.gallery_changed(&gc.caller, &ids);
+    super::thumbs::enqueue(&gc.caller.hive.id, ids.clone());
     log::info!("hive {}: {} filed {} asset(s), {} item(s) recorded, {} refused", gc.caller.hive.id, gc.label(), ids.len(), recorded, errors.len());
     let (filed, spends): (Vec<Value>, Vec<Value>) = answers.into_iter().partition(|v| v.get("id").is_some() || v.get("error").is_some());
     let mut out = json!({ "assets": filed, "budget": budget });

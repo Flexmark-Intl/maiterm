@@ -3647,6 +3647,34 @@ several releases a day).
    error, a partly refused one answers each item; `open_cached` reopens a cached handle whose folder
    differs (test Hives reuse ids). Thumbnails (8c) aren't queued yet: assets stay `thumb: pending`
    until 8c's `resume` picks them up.
+   **8c built** (2026-10-24): thumbnails, metadata and the `gallery://` scheme
+   (`hive/gallery/{thumbs,serve}.rs`, `src/lib/hive/gallery.ts`). A filed asset is queued
+   (`thumbs::enqueue`, at most two workers in the process, each asset once); a gallery's first
+   open in a process re-queues its `pending` ones, and nothing is queued before setup's `install`
+   (tests never thumbnail). `thumbs::plan(kind, tools)` picks the steps: `sips` for an image's
+   dimensions where it exists, ffprobe for the rest (turned by the stream's rotation, never an
+   audio file's cover art) and duration, QuickLook for images, video, documents and 3D, an ffmpeg
+   poster only when QuickLook gave none, a video's strip and an audio file's waveform (white on
+   transparent, so the view tints it). sips comes first for images because ffprobe 7.x lists a
+   HEIC/HEIF/AVIF's 512x512 tiles as `dependent` streams of their own: where ffprobe has to read an
+   image (Linux), a tiled one is probed again with `-show_stream_groups` (only then, since an
+   ffprobe before 7.0 refuses it) and its tile grid gives the size, and the ffmpeg poster
+   `xstack`s the tiles and crops them, since ffmpeg 7.1 decodes the first tile alone. Outputs land in `.tmp/<id>/` and are renamed into `thumbs/`; a tool that exits 0
+   having written nothing is a failure. ffmpeg, ffprobe and sips run under a `job_sandbox::profile`
+   (network closed, writes only to that temp folder), with an empty environment and
+   `-protocol_whitelist file` on every input; qlmanage runs as it is. `thumb` is the run
+   (`ready` when any picture was made, `failed`, `none` when no tool could make one) and `extras`
+   says which: `poster`, `strip`, `wave`. The scheme answers
+   `gallery://localhost/<hive>/<asset>[/thumb|/strip|/wave]` (Windows: `http://gallery.localhost`)
+   only for a Hive **the asking window** holds, by asset id, never a trashed or purged one, with
+   `Range` (206/416), `nosniff`, `CSP: sandbox`, an immutable cache on files and `no-store` on
+   errors; both CSPs add it to `img-src` and `media-src`. **Decided here:** a video up to 60 s gets
+   its strip from ten seeks, not keyframes (a short generated clip is often a single keyframe, so a
+   keyframe strip would be one frame and nine black ones); longer ones use keyframes only. Every
+   range is capped at 4 MiB, closed or open, and a request with no range gets a whole file only up
+   to 256 MiB (else a 416 asking for ranges). A stored type is checked again when served: any
+   `text/`, HTML or XML type but SVG goes out as `application/octet-stream`. On Linux there's no
+   profile, so the decoders run with the file-only protocol list alone.
 9. Done and lifecycle: `hiveFinish` and waking a Done Hive (§11.4), queue state across
    suspend/resume/restart (§6.8), phone polish (Hive tabs already appear as chats; the gallery
    feed later).

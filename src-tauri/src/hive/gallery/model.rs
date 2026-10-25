@@ -293,7 +293,8 @@ pub struct CollectChange {
     pub cover: Option<String>,
 }
 
-/// What the thumbnailer learned about one file.
+/// What the thumbnailer learned about one file. `thumb` is the run's outcome; the three flags,
+/// kept in `extras`, say which pictures exist: `<id>.png`, `<id>.strip.jpg`, `<id>.wave.png`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MediaMeta {
@@ -301,6 +302,7 @@ pub struct MediaMeta {
     pub height: Option<u32>,
     pub duration_ms: Option<u64>,
     pub thumb: String,
+    pub poster: bool,
     pub strip: bool,
     pub wave: bool,
 }

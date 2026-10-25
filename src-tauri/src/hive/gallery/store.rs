@@ -594,6 +594,7 @@ impl Gallery {
         let extras: Option<String> = conn.query_row("SELECT extras FROM assets WHERE id = ?1", [id], |r| r.get(0)).optional().map_err(err)?;
         let Some(extras) = extras else { return Err(format!("No asset {id}.")) };
         let mut extras: Map<String, Value> = serde_json::from_str(&extras).unwrap_or_default();
+        extras.insert("poster".into(), Value::Bool(m.poster));
         extras.insert("strip".into(), Value::Bool(m.strip));
         extras.insert("wave".into(), Value::Bool(m.wave));
         conn.execute(
@@ -1074,12 +1075,12 @@ mod tests {
         let s = scratch();
         let (a, b, c) = (add(&s, "a", Some("t1")), add(&s, "b", Some("t1")), add(&s, "c", Some("t1")));
         assert_eq!(s.g.pending_thumbs().unwrap(), vec![a.id.clone(), b.id.clone(), c.id.clone()]);
-        s.g.set_meta(&a.id, &MediaMeta { width: Some(640), height: Some(360), duration_ms: Some(3_000), thumb: THUMB_READY.into(), strip: true, wave: false }).unwrap();
+        s.g.set_meta(&a.id, &MediaMeta { width: Some(640), height: Some(360), duration_ms: Some(3_000), thumb: THUMB_READY.into(), poster: true, strip: true, wave: false }).unwrap();
         s.g.trash(std::slice::from_ref(&c.id)).unwrap();
         assert_eq!(s.g.pending_thumbs().unwrap(), vec![b.id.clone()]);
         let got = s.g.get(&a.id).unwrap().unwrap();
         assert_eq!((got.width, got.height, got.duration_ms, got.thumb.as_str()), (Some(640), Some(360), Some(3_000), THUMB_READY));
-        assert_eq!((got.extras.get("strip"), got.extras.get("wave")), (Some(&Value::Bool(true)), Some(&Value::Bool(false))));
+        assert_eq!((got.extras.get("poster"), got.extras.get("strip"), got.extras.get("wave")), (Some(&Value::Bool(true)), Some(&Value::Bool(true)), Some(&Value::Bool(false))));
         s.g.set_meta(&a.id, &MediaMeta::default()).unwrap();
         let got = s.g.get(&a.id).unwrap().unwrap();
         assert_eq!((got.width, got.thumb.as_str()), (Some(640), THUMB_READY), "what a run couldn't read stays");

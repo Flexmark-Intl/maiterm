@@ -2,11 +2,14 @@
 //! store per Hive under `<hive>/gallery/`: immutable files (`files/<id>.<ext>`, read-only),
 //! thumbnails, a SQLite index (`store`) and the spend ledger in it. `ingest` decides which paths
 //! a caller may file from and makes the copy; `model` holds the records; `tools` is what agents
-//! call (step 8b).
+//! call (step 8b); `thumbs` makes the pictures and `serve` answers the webview's `gallery://`
+//! requests, by asset id only (8c).
 
 pub mod ingest;
 pub mod model;
+pub mod serve;
 pub mod store;
+pub mod thumbs;
 pub mod tools;
 
 use std::collections::HashMap;
@@ -57,13 +60,28 @@ pub(crate) fn for_paths(hive_id: &str, paths: &HivePaths) -> Result<Arc<Gallery>
 /// `for_hive` over an explicit folder: a caller that already holds the Hive's paths, and tests'
 /// scratch Hives. A cached handle on another folder (a test reusing a Hive id) is replaced.
 pub(crate) fn open_cached(hive_id: &str, gallery_dir: &Path) -> Result<Arc<Gallery>, String> {
-    let mut open = OPEN.lock();
-    if let Some(g) = open.get(hive_id).filter(|g| g.root() == gallery_dir) {
-        return Ok(g.clone());
-    }
-    let g = Arc::new(Gallery::open(gallery_dir)?);
-    open.insert(hive_id.to_string(), g.clone());
+    let g = {
+        let mut open = OPEN.lock();
+        if let Some(g) = open.get(hive_id).filter(|g| g.root() == gallery_dir) {
+            return Ok(g.clone());
+        }
+        let g = Arc::new(Gallery::open(gallery_dir)?);
+        open.insert(hive_id.to_string(), g.clone());
+        g
+    };
+    // First open in this process: whatever a quit left waiting for thumbnails is queued again.
+    thumbs::resume(hive_id, &g);
     Ok(g)
+}
+
+/// The Hive's gallery only if it is open already: the thumbnailer never reopens one a Hive
+/// delete just forgot.
+pub(crate) fn cached(hive_id: &str) -> Option<Arc<Gallery>> {
+    OPEN.lock().get(hive_id).cloned()
+}
+
+pub(crate) fn open_galleries() -> Vec<(String, Arc<Gallery>)> {
+    OPEN.lock().iter().map(|(k, g)| (k.clone(), g.clone())).collect()
 }
 
 /// Drops the process's handle, so once in-flight calls finish no connection holds the index or
