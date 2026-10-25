@@ -987,9 +987,9 @@ export interface HivePrecedentRef {
 export interface HiveDecisionView {
   id: string;
   at: string;
-  /** Rust's: a checkpoint, `never`, `config`, `integration`, `other`, `offer`. */
+  /** Rust's: a checkpoint, `never`, `config`, `integration`, `other`, `offer`, `digest`. */
   category: string;
-  /** `prompt` | `question` | `blocker` | `land` | `resolve` | `plan` | `offer`. */
+  /** `prompt` | `question` | `blocker` | `land` | `resolve` | `plan` | `offer` | `digest`. */
   source: string;
   task_id: string | null;
   worker: string | null;
@@ -1000,7 +1000,7 @@ export interface HiveDecisionView {
   recommended: string | null;
   answer: string | null;
   reason: string | null;
-  /** `open` | `recommended` | `answered` | `lapsed`. */
+  /** `open` | `recommended` | `answered` | `lapsed`, or `digest` for a daily digest (no decision). */
   status: string;
   /** `coordinator` | `human` | `maiterm`, once answered. */
   by: string;

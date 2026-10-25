@@ -608,14 +608,23 @@ pub fn file_pause_blocker(ws: &mut Workspace, coordinator: Option<&str>, limit: 
         asked_at: now.into(),
         asked_by: "agent".into(),
     };
-    let note = TaskNote { at: now.into(), text: format!("Needs you: {}", blocker.question), by: "agent".into() };
-    let t = match ws.tasks.iter().position(|t| is_pause_task(t, coordinator)) {
+    let note = format!("Needs you: {}", blocker.question);
+    file_row_blocker(ws, coordinator, PAUSE_TASK_TITLE, blocker, &note, now);
+}
+
+/// A question maiTerm asks the human itself (a pause, an autonomy offer, the plan): a blocker on
+/// the coordinator's row titled `title`, found or made, so it waits where every question does.
+/// The caller saves and sends the tasks store the list (`mailink-tasks-changed`). Answers the row's
+/// id and the blocker's `asked_at`.
+pub fn file_row_blocker(ws: &mut Workspace, coordinator: Option<&str>, title: &str, blocker: TaskBlocker, note: &str, now: &str) -> (String, String) {
+    let normalized = Task::normalize_title(title);
+    let t = match ws.tasks.iter().position(|t| t.tab_id.as_deref() == coordinator && t.normalized_title == normalized) {
         Some(i) => &mut ws.tasks[i],
         None => {
             ws.tasks.push(Task {
                 id: uuid::Uuid::new_v4().to_string(),
-                title: PAUSE_TASK_TITLE.into(),
-                normalized_title: Task::normalize_title(PAUSE_TASK_TITLE),
+                title: title.into(),
+                normalized_title: normalized,
                 detail: None,
                 status: "blocked".into(),
                 tab_id: coordinator.map(str::to_string),
@@ -630,12 +639,14 @@ pub fn file_pause_blocker(ws: &mut Workspace, coordinator: Option<&str>, limit: 
             ws.tasks.last_mut().expect("just pushed")
         }
     };
+    let asked_at = blocker.asked_at.clone();
     t.status = "blocked".into();
     t.blocker = Some(blocker);
-    t.notes.push(note);
+    t.notes.push(TaskNote { at: now.into(), text: note.to_string(), by: "agent".into() });
     let over = t.notes.len().saturating_sub(TASK_NOTE_CAP);
     t.notes.drain(..over);
     t.updated_at = now.into();
+    (t.id.clone(), asked_at)
 }
 
 /// A resume answers the pause: its row leaves Blocked, which clears the question everywhere.

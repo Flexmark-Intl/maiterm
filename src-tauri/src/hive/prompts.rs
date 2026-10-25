@@ -1078,6 +1078,7 @@ pub(crate) async fn human_answered_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &
         tell_coordinator(ctx, caller, format!("[maiTerm] Your human answered {}\u{2019}s {what}: {}.", r.worker_name, one_line(answer, 300))).await;
     }
     emit(ctx, &caller.workspace_id);
+    super::autonomy::review(ctx, caller).await;
 }
 
 /// A blocker the human answered through the window (`hive_blocker_answered`): logged by
@@ -1111,6 +1112,8 @@ pub(crate) async fn blocker_answered_in<W: HiveWindow>(
     if let Some(w) = workers.iter().find(|w| w.task_id == task_id) {
         tell_coordinator(ctx, caller, blocker_answer_notice(&worker_name(w), &blocker, &answer)).await;
     }
+    // An offer's or the plan's answer carried out (step 7e), and any offer it makes due.
+    super::autonomy::after_blocker_answer(ctx, caller, &line).await;
     Ok(Some(line.id))
 }
 
@@ -1169,6 +1172,23 @@ pub(crate) async fn checkpoints_changed(state: &Arc<AppState>, handle: &AppHandl
 }
 
 pub(crate) async fn checkpoints_changed_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, changes: Vec<String>) -> Vec<Routed> {
+    let flipped = flip_to_human(ctx, caller);
+    let mut text = format!("[maiTerm] Your human changed this Hive\u{2019}s checkpoints: {}.", changes.join("; "));
+    if !flipped.is_empty() {
+        text.push_str(&format!(" Now your human\u{2019}s to answer: {}.", flipped_names(&flipped)));
+    }
+    tell_coordinator(ctx, caller, text).await;
+    flipped
+}
+
+/// "#2 Session store’s p_…, …": the prompts a checkpoint change moved to the human.
+pub(crate) fn flipped_names(flipped: &[Routed]) -> String {
+    flipped.iter().map(|r| format!("{}\u{2019}s {}", r.worker_name, r.key)).collect::<Vec<_>>().join(", ")
+}
+
+/// Each prompt the coordinator holds under a checkpoint `caller.hive` now has at Ask me becomes
+/// the human's, timed out or not; the human is told of each they hadn't been, and the routes go out.
+pub(crate) fn flip_to_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller) -> Vec<Routed> {
     let flipped: Vec<Routed> = {
         let mut all = routes();
         all.values_mut()
@@ -1194,12 +1214,6 @@ pub(crate) async fn checkpoints_changed_in<W: HiveWindow>(ctx: &Ctx<'_, W>, call
     for r in flipped.iter().filter(|r| !r.timed_out) {
         ctx.window.notify_human(notice(r, WHY_ASK));
     }
-    let mut text = format!("[maiTerm] Your human changed this Hive\u{2019}s checkpoints: {}.", changes.join("; "));
-    if !flipped.is_empty() {
-        let names: Vec<String> = flipped.iter().map(|r| format!("{}\u{2019}s {}", r.worker_name, r.key)).collect();
-        text.push_str(&format!(" Now your human\u{2019}s to answer: {}.", names.join(", ")));
-    }
-    tell_coordinator(ctx, caller, text).await;
     if !flipped.is_empty() {
         emit(ctx, &caller.workspace_id);
     }

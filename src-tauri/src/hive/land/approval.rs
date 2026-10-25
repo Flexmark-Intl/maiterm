@@ -439,6 +439,8 @@ pub(crate) fn hold_if_partial(cur: &mut WorkerRecord, why: &str) {
 /// The card's decision closed in the log (§7.6): `approved`, `denied`, or a lapse. Blocks briefly.
 async fn card_closed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, status: &str, why: &str) {
     let Some(land) = w.land.clone().filter(|l| l.card_decision.is_some()) else { return };
+    // A lapse answers nothing.
+    let answered = matches!(status, "approved" | "denied");
     let (paths, hive_id, rec, status, why) = (caller.paths.clone(), caller.hive.id.clone(), w.clone(), status.to_string(), why.to_string());
     let _ = blocking(move || {
         decisions::land_card_closed(&paths, &hive_id, &rec, &land, &status, &why);
@@ -446,6 +448,10 @@ async fn card_closed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &Worke
     })
     .await;
     ctx.window.decisions_changed(&caller.workspace_id);
+    // The human's answer may make an autonomy offer due (§7.6).
+    if answered {
+        crate::hive::autonomy::review(ctx, caller).await;
+    }
 }
 
 /// Withdraws the card of a land that no longer waits on it: its worker was stopped, retired or

@@ -172,6 +172,17 @@ fn checkpoint_lines(hive: &Hive) -> String {
          an action blocker (only your human can do it); spending past the budget, and raising the cap or the budget; pushing; \
          a land or undo whose diff changes agent or execution config. maiTerm sends those to your human and tells you.\n"
     ));
+    if super::checkpoints::asks(hive, super::checkpoints::PLAN) {
+        b.push_str(
+            "\nThe plan is Ask me: before you start workers, propose them with hiveProposePlan {summary, workers: [{title, role}]}. \
+             Your human answers on your plan row; once they approve, hiveSpawnWorker starts each listed title once, exactly as \
+             written, and refuses any other. A changed plan is a new proposal. Reviewers and restarts need no plan.\n",
+        );
+    }
+    b.push_str(
+        "\nmaiTerm, not you, offers a checkpoint to you after five of your recommendations in a row are what your human chose \
+         there, and offers it back to them after two overrides in a day: give a recommendation on everything your human answers.\n",
+    );
     b
 }
 
@@ -598,6 +609,11 @@ mod tests {
         assert!(b.contains("plain **Yes** or **No**") && b.contains("**listed options**"));
         assert!(b.contains("Unanswered after 10 min"));
         assert!(b.contains("Never yours, whatever the checkpoints") && b.contains("workspace-trust and plan dialogs"));
+        // §7.6: offers are maiTerm's; the plan rule only while the plan is Ask me.
+        assert!(b.contains("maiTerm, not you, offers a checkpoint") && !b.contains("hiveProposePlan"), "{b}");
+        h.checkpoints.insert("plan".into(), "ask".into());
+        let b = brief_md(&h, &p, &PrecedentCounts::default());
+        assert!(b.contains("propose them with hiveProposePlan") && b.contains("starts each listed title once"), "{b}");
     }
 
     /// §7.5: the brief carries counts by category and how to check, cite and record, never the

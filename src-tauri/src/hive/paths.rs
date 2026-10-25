@@ -113,6 +113,12 @@ impl HivePaths {
         self.task(COORDINATOR_SLUG)
     }
 
+    /// The plan the human sees first (§7.4 "Show me the plan first"), Rust's: under `tasks/`, on
+    /// every agent's deny lists, so no agent can approve its own plan.
+    pub fn plan_record(&self) -> PathBuf {
+        self.coordinator_task().join("plan.json")
+    }
+
     pub fn precedents(&self) -> PathBuf {
         self.root.join("precedents")
     }
@@ -267,6 +273,7 @@ mod tests {
         assert_eq!(p.coordinator_home(), Path::new("/x/hive/h/coordinator/home"));
         assert_eq!(p.coordinator_worktree("web"), Path::new("/x/hive/h/wt.noindex/coordinator/web"));
         assert_eq!(p.coordinator_task(), Path::new("/x/hive/h/tasks/coordinator"));
+        assert!(p.plan_record().starts_with(p.tasks()), "Rust's, under a folder on every deny list");
         assert_eq!(p.memory_index(), Path::new("/x/hive/h/memory/MEMORY.md"));
         assert_eq!(p.memory_record(), Path::new("/x/hive/h/logs/memory.json"));
         assert_eq!(p.memory_generated(), Path::new("/x/hive/h/memory/MEMORY.generated.md"));

@@ -9,12 +9,13 @@ use serde_json::json;
 use tauri::AppHandle;
 
 use super::record::{AutonomySettings, Hive, PROMPT_TIMEOUT_MAX_SECS, PROMPT_TIMEOUT_MIN_SECS};
-use crate::state::AppState;
+use crate::state::{AppData, AppState};
 
 pub const CHECKPOINTS: [&str; 6] = ["plan", "questions", "permissions", "landing", "finals", "interfaces"];
 pub const COORDINATOR: &str = "coordinator";
 pub const ASK: &str = "ask";
 
+pub const PLAN: &str = "plan";
 pub const PERMISSIONS: &str = "permissions";
 pub const QUESTIONS: &str = "questions";
 pub const LANDING: &str = "landing";
@@ -76,6 +77,23 @@ pub fn describe_changes(before: &BTreeMap<String, String>, after: &BTreeMap<Stri
         .filter(|k| before.get(**k) != after.get(**k))
         .map(|k| format!("{}: {}", label(k), if after.get(*k).map(String::as_str) == Some(ASK) { "Ask me" } else { "you decide" }))
         .collect()
+}
+
+/// One checkpoint set in the state, as the human's Yes to an autonomy offer does (§7.6), through
+/// `validate`'s checks. Unsaved: the new record when it changed, None when it was already so.
+pub fn apply(data: &mut AppData, label: &str, workspace_id: &str, key: &str, value: &str) -> Result<Option<Hive>, String> {
+    let hive = data
+        .window_mut(label)
+        .and_then(|w| w.workspaces.iter_mut().find(|w| w.id == workspace_id))
+        .and_then(|ws| ws.hive.as_mut())
+        .ok_or("That Hive is gone")?;
+    let before = validate(hive, &BTreeMap::new())?;
+    let after = validate(hive, &[(key.to_string(), value.to_string())].into())?;
+    if before == after {
+        return Ok(None);
+    }
+    hive.checkpoints = after;
+    Ok(Some(hive.clone()))
 }
 
 pub fn clamp_timeout(secs: u64) -> u64 {
@@ -176,5 +194,20 @@ mod tests {
         assert!(e.contains("Landing stays Ask me"), "{e}");
         assert_eq!(describe_changes(&validate(&h, &BTreeMap::new()).unwrap(), &out), vec!["workers\u{2019} permission prompts: Ask me"]);
         assert_eq!((clamp_timeout(5), clamp_timeout(300), clamp_timeout(99_999)), (60, 300, 3600));
+    }
+
+    #[test]
+    fn apply_sets_one_checkpoint_through_the_same_checks() {
+        let mut ws = crate::state::Workspace::new("H".into());
+        ws.hive = Some(hive(LANDING_INTEGRATION));
+        let id = ws.id.clone();
+        let mut win = crate::state::WindowData::new("main".into());
+        win.workspaces = vec![ws];
+        let mut data = AppData { windows: vec![win], ..AppData::default() };
+        let h = apply(&mut data, "main", &id, "questions", ASK).unwrap().unwrap();
+        assert!(asks(&h, "questions") && asks(data.windows[0].workspaces[0].hive.as_ref().unwrap(), "questions"));
+        assert!(apply(&mut data, "main", &id, "questions", ASK).unwrap().is_none(), "already so");
+        assert!(apply(&mut data, "main", &id, "landing", COORDINATOR).unwrap_err().contains("Landing stays Ask me"));
+        assert!(apply(&mut data, "other", &id, "plan", ASK).is_err());
     }
 }

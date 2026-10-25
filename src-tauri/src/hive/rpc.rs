@@ -102,6 +102,11 @@ pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     fn schedule_due(&self, _caller: &super::tools::Caller, _tab: &str, _key: &str, _due_ms: i64) {}
     /// The decision log or the precedents changed: Memory's Decisions and Precedents refetch.
     fn decisions_changed(&self, _workspace_id: &str) {}
+    /// Rust wrote the workspace's task list itself (a row maiTerm asks the human on): the tasks
+    /// store adopts it (`mailink-tasks-changed`), or its next whole-list persist drops the row.
+    fn tasks_changed(&self, _workspace_id: &str, _tasks: &[crate::state::Task], _workstreams: &[crate::state::Workstream]) {}
+    /// Rust changed the Hive's record (a checkpoint handed over or back): the window's mirror follows.
+    fn hive_changed(&self, _workspace_id: &str, _hive: &super::record::Hive) {}
 }
 
 /// A Hive's card for the human, as Rust builds it: every word maiTerm's but `reason`.
@@ -285,6 +290,23 @@ impl HiveWindow for AppWindow {
 
     fn decisions_changed(&self, workspace_id: &str) {
         super::decisions::emit_changed(&self.handle, &self.label, workspace_id);
+    }
+
+    fn tasks_changed(&self, workspace_id: &str, tasks: &[crate::state::Task], workstreams: &[crate::state::Workstream]) {
+        use tauri::Emitter;
+        // The tasks store's channel for a write Rust made, as the pause's (`fuses::announce`).
+        let payload = serde_json::json!({ "workspaceId": workspace_id, "tasks": tasks, "workstreams": workstreams });
+        if let Err(e) = self.handle.emit("mailink-tasks-changed", payload) {
+            log::warn!("hive: task rows not sent to the tasks store: {e}");
+        }
+    }
+
+    fn hive_changed(&self, workspace_id: &str, hive: &super::record::Hive) {
+        use tauri::Emitter;
+        let payload = serde_json::json!({ "workspace_id": workspace_id, "hive": hive });
+        if let Err(e) = self.handle.emit_to(self.label.as_str(), super::fuses::HIVE_CHANGED_EVENT, payload) {
+            log::warn!("hive {}: change not sent to window {}: {e}", hive.id, self.label);
+        }
     }
 }
 

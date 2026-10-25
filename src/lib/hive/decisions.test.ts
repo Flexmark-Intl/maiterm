@@ -17,9 +17,12 @@ describe('decision log view', () => {
     expect(whoText({ status: 'recommended', by_label: '', recommended: 'Yes' })).toBe('waiting for you · the coordinator recommends “Yes”');
     expect(whoText({ status: 'lapsed', by_label: '', recommended: null })).toBe('closed unanswered');
     expect(whoText({ status: 'open', by_label: '', recommended: null })).toBe('waiting');
+    expect(whoText({ status: 'digest', by_label: 'maiTerm', recommended: null })).toBe('sent to the coordinator’s chat');
+    expect(categoryLabel('digest')).toBe('Daily digest');
     expect(whoTone({ status: 'answered', by: 'human' })).toBe('human');
     expect(whoTone({ status: 'answered', by: 'maiterm' })).toBe('maiterm');
     expect(whoTone({ status: 'open', by: '' })).toBe('open');
+    expect(whoTone({ status: 'digest', by: 'maiterm' })).toBe('maiterm');
   });
 
   it('offers Override… only on the coordinator’s own answered decisions, once', () => {
@@ -45,6 +48,9 @@ describe('decision log view', () => {
     expect(outcomeText('landed')).toBe('Landed');
     expect(outcomeText('held: main keeps moving')).toBe('Held: main keeps moving');
     expect(outcomeText(null)).toBe('');
+    expect(outcomeText('hand_over')).toBe('Offers to let the coordinator decide this');
+    expect(outcomeText('hand_back')).toBe('Offers to hand this back to you');
+    expect(outcomeText('handed to the coordinator')).toBe('Handed to the coordinator');
   });
 });
 

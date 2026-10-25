@@ -370,13 +370,45 @@ pub fn view_of(d: &Decision, mut precedent: impl FnMut(&str) -> Option<(String, 
     }
 }
 
-/// The decision log as the view shows it, newest first.
+/// A daily digest as the view lists it among the decisions (status `digest`): what the
+/// coordinator was told it decided alone.
+pub fn digest_view(l: &DecisionLine) -> DecisionView {
+    DecisionView {
+        id: l.id.clone(),
+        at: l.at.clone(),
+        category: l.category.clone(),
+        source: l.source.clone(),
+        task_id: None,
+        worker: None,
+        question: l.question.clone(),
+        context: None,
+        options: Vec::new(),
+        recommended: None,
+        answer: None,
+        reason: None,
+        status: EVENT_DIGEST.to_string(),
+        by: BY_MAITERM.to_string(),
+        by_label: "maiTerm".to_string(),
+        after_timeout: false,
+        precedent: None,
+        outcome: None,
+        overridden: false,
+        override_note: None,
+        can_override: false,
+    }
+}
+
+/// The decision log as the view shows it, newest first, the daily digests among them.
 pub fn view(paths: &HivePaths) -> Vec<DecisionView> {
     let mut rules: HashMap<String, Option<(String, String)>> = HashMap::new();
-    fold(&read(paths))
+    let lines = read(paths);
+    let mut out: Vec<(usize, DecisionView)> = fold(&lines)
         .iter()
-        .map(|d| view_of(d, |id| rules.entry(id.to_string()).or_insert_with(|| super::precedents::live(paths, id).map(|p| (p.rule, p.status))).clone()))
-        .collect()
+        .map(|d| (d.last, view_of(d, |id| rules.entry(id.to_string()).or_insert_with(|| super::precedents::live(paths, id).map(|p| (p.rule, p.status))).clone())))
+        .collect();
+    out.extend(lines.iter().enumerate().filter(|(_, l)| l.event == EVENT_DIGEST && !l.id.is_empty()).map(|(i, l)| (i, digest_view(l))));
+    out.sort_by_key(|(i, _)| std::cmp::Reverse(*i));
+    out.into_iter().map(|(_, v)| v).collect()
 }
 
 /// The human-answered decision `blocker_id` names (`hiveRecordPrecedent`, plan D26): a decision id,
@@ -487,6 +519,8 @@ pub(crate) async fn override_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         log::info!("hive {}: override notice to the coordinator: {}", caller.hive.id, sent.describe());
     }
     ctx.window.decisions_changed(&caller.workspace_id);
+    // Two in a day may make an offer to hand the category back due (§7.6).
+    super::autonomy::review(ctx, caller).await;
     let paths = caller.paths.clone();
     let id = o.decision.id.clone();
     blocking(move || view(&paths).into_iter().find(|v| v.id == id).ok_or_else(|| "The decision log couldn\u{2019}t be read back.".to_string())).await

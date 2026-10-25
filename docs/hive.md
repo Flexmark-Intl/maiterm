@@ -1130,10 +1130,11 @@ call whose window isn't loaded is refused, never half-done. Every Hive task writ
 | `hiveStopWorker {worker, reason}` | coordinator | Rust, then window rpc | Stops the agent; keeps worktrees and branches |
 | `hiveRestartWorker {worker, fresh?}` | coordinator | Rust (launch builder), then window rpc | Relaunches a crashed or stopped worker in its own tab and worktrees (§11.3) |
 | `hiveFinish {report}` | coordinator | Rust | Declares the goal met and stops the Hive; refused while anything is live, queued, held or unlanded (§11.4) |
-| `hiveAnswerWorker {worker, prompt_id, answer}` | coordinator | Rust | Answers a worker's on-screen question or permission prompt, within the allowlist of §7.4. Refused while that checkpoint is Ask me |
+| `hiveAnswerWorker {worker, prompt_id, answer}` | coordinator | Rust | Answers a worker's on-screen question or permission prompt, within the allowlist of §7.4. While that checkpoint is Ask me, the answer is recorded as the coordinator's recommendation on the human's card instead |
 | `hiveRunPriority {job}` | coordinator | Rust (the queue) | Moves a queued job forward (§6.8). Priority only, never timing or resources |
 | `hivePrecedents {category?, query?}` | coordinator | Rust | Reads the precedents that bear on a decision (§7.5) |
 | `hiveRecordPrecedent {blocker_id, rule}` | coordinator | Rust | Records a precedent from a blocker **the human answered**; Rust copies the question, options and answer (§7.5) |
+| `hiveProposePlan {summary, workers: [{title, role?}]}` | coordinator | Rust | While the Plan checkpoint is Ask me, asks the human on the coordinator's "Plan for this Hive" row; once they approve, `hiveSpawnWorker` starts each listed title once (§7.4). With the checkpoint at Coordinator it answers `needed: false` |
 | `hiveRun {command, folder, timeout?}` | worker | Rust (the queue), window rpc to start the job | Queues a heavy command on the worker's branch (§6.8): it must match a human-set queued command, and runs under the worker's sandbox profile. Answers with the job id |
 | `hiveReport {status: done\|blocked\|failed, summary, receipts?, notes?}` | worker | Rust checks receipts, task store writes | Records the report on the task (status + note), and delivers it to the coordinator as a framed `⟦HIVE REPORT⟧` message (§7.4: worker text is quoted, never a frame). `done` is refused without receipts (§7.7). `blocked` puts the card in **Blocked** (§4.3) |
 | `hiveVerdict {worker, verdict: pass\|fail, issues?}` | reviewer worker | Rust, task store writes | A review's result in the fail-report shape (§7.7), delivered to the coordinator and recorded on the reviewed task |
@@ -3547,6 +3548,45 @@ several releases a day).
    with a new id and fresh counts, never a tool's). **Decided here:** the tabs refetch on a new
    `hive-decisions-changed` (every route change, land outcome, override and precedent write), not on
    `hive-memory-changed`, whose list rebuilds the memory index.
+   **7e built** (2026-10-24, uncommitted at the time of writing): earned autonomy, the plan
+   checkpoint and the daily digest. `hive/autonomy.rs` counts from the decision log alone: the
+   run of the human's `answered` lines in one category whose answer is the coordinator's
+   `recommended` (by label, Esc read as No), counted after the human's answer to the latest offer
+   for that checkpoint, whatever the answer (not after its filing: answers given while it stood
+   would make a No come straight back); a human answer with no recommendation or one not taken ends it, and so does
+   an override of a decision citing a precedent of that category. After every human answer (a
+   blocker, a routed prompt, a land card's approval or denial) and every override, `review` files
+   what is due: at Ask me, five in a row offer the checkpoint to the coordinator; at Coordinator,
+   two overrides in a day (after the human answered the last hand-back offer, none answered in
+   that day) offer it back. Only `plan`, `questions`, `permissions` and base-mode `landing` are ever offered.
+   An offer is maiTerm's own `decision` blocker on the coordinator's "Hive autonomy: <label>" row
+   (`fuses::file_row_blocker`, lifted out of the pause's, the tasks store told over
+   `mailink-tasks-changed` through the new `HiveWindow::tasks_changed`), one per row while its
+   question stands, and an `offer` line (category `offer`, its checkpoint in `extra`, `hand_over`
+   or `hand_back` as the outcome until answered). The human's answer reaches it through
+   `hive_blocker_answered`: Yes sets the checkpoint (`checkpoints::apply`, through `validate`),
+   saves, sends `hive-changed` (`HiveWindow::hive_changed`) and tells the coordinator; a hand-back
+   also moves the prompts the coordinator held there to the human (`prompts::flip_to_human`, split
+   out of `checkpoints_changed_in`); No changes nothing; either way an outcome line follows.
+   `hive/plan.rs`: `hiveProposePlan {summary, workers}` writes `tasks/coordinator/plan.json`
+   (Rust's), files "Start these N workers for “goal”?" (Go ahead recommended, or Change it) on the
+   "Plan for this Hive" row and logs it under `plan`; a new proposal replaces one waiting (its line
+   `lapsed`). Go ahead approves it, anything else declines it. While Plan is Ask me, `register`
+   takes the spawn's title from the approved plan under the spawn lock, once each, and the spawn's
+   rollback gives it back; reviewers, restarts and waiting launches are exempt. The daily digest
+   (`autonomy::digest_due`, an hourly tick started in `lib.rs`) goes into the coordinator's chat
+   when the setting is on, a day has passed since the last digest (or the Hive's creation), the
+   coordinator decided something alone since, and an agent is in front of its terminal; a `digest`
+   line is written only when it was delivered or held. Memory → Decisions lists offers (an open
+   one reads as its kind) and digests. The brief says how offers work and, while Plan is Ask me,
+   the plan rule. **Decided here:** an offer is "open" while the log has no answer for it AND its
+   row still carries that offer's own blocker key, never the row alone: the row is on the
+   coordinator's tab, which `updateTasks` can write, so a row it cleared is no answer and a row it
+   blocked itself is no offer. An offer whose question left its row unanswered is logged `lapsed`
+   (outcome "withdrawn…"), starts no count, holds back no hand-back, and is filed again on the
+   NEXT review (not the one that found it: the window clears a row before the human's answer
+   reaches Rust). Reviews run one at a time in the process, since an offer's row is written
+   before its line. **Step 7 is complete.**
 8. Gallery: store and index, `galleryAdd`/`List`/`Get`/`Tag`/`Collect`, thumbnails, the grid
    and detail view; then compare, Iterate/attach, collections, deliver (plain folders only,
    §7.3). The **budget**: recorded spend per paid render, the header total and the

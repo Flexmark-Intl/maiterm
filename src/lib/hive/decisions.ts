@@ -20,6 +20,13 @@ const CATEGORY: Record<string, string> = {
   integration: 'Integration land',
   other: 'Other',
   offer: 'Autonomy offer',
+  digest: 'Daily digest',
+};
+
+/** An open offer's outcome is its kind until the human answers (Rust's `autonomy.rs`). */
+const OFFER_KIND: Record<string, string> = {
+  hand_over: 'Offers to let the coordinator decide this',
+  hand_back: 'Offers to hand this back to you',
 };
 
 /** A Rust-assigned category in words; an unknown one (a later build's) as it is. */
@@ -34,6 +41,8 @@ export function whoText(d: Pick<HiveDecisionView, 'status' | 'by_label' | 'recom
       return d.by_label || 'answered';
     case 'lapsed':
       return 'closed unanswered';
+    case 'digest':
+      return 'sent to the coordinator’s chat';
     case 'recommended':
       return d.recommended ? `waiting for you · the coordinator recommends “${d.recommended}”` : 'waiting for you';
     default:
@@ -43,6 +52,7 @@ export function whoText(d: Pick<HiveDecisionView, 'status' | 'by_label' | 'recom
 
 /** The badge tone for who decided. */
 export function whoTone(d: Pick<HiveDecisionView, 'status' | 'by'>): 'human' | 'coordinator' | 'maiterm' | 'open' {
+  if (d.status === 'digest') return 'maiterm';
   if (d.status !== 'answered') return 'open';
   if (d.by === 'human') return 'human';
   if (d.by === 'coordinator') return 'coordinator';
@@ -57,6 +67,7 @@ export function canOverride(d: Pick<HiveDecisionView, 'can_override' | 'overridd
 /** A land's or a decision's outcome, as a sentence start. */
 export function outcomeText(outcome: string | null | undefined): string {
   const o = (outcome ?? '').trim();
+  if (OFFER_KIND[o]) return OFFER_KIND[o];
   return o ? o.charAt(0).toUpperCase() + o.slice(1) : '';
 }
 

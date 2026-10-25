@@ -36,7 +36,7 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The Hive tools built so far: what `tools/list` offers each role and the handler answers.
 /// The rest of the coordinator's (settings' `COORDINATOR_MCP_TOOLS`) are refused as not yet here.
-pub const COORDINATOR_TOOLS: [&str; 13] = [
+pub const COORDINATOR_TOOLS: [&str; 14] = [
     "hiveSpawnWorker",
     "hiveListWorkers",
     "hiveMessageWorker",
@@ -50,6 +50,7 @@ pub const COORDINATOR_TOOLS: [&str; 13] = [
     "hiveAnswerWorker",
     "hivePrecedents",
     "hiveRecordPrecedent",
+    "hiveProposePlan",
 ];
 /// Every worker is offered all three; Rust refuses `hiveReport` to a reviewer and `hiveVerdict`
 /// to a builder (`review`).
@@ -266,6 +267,7 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
         super::prompts::tool_definition(&tab_id),
         super::precedents::list_tool_definition(&tab_id),
         super::precedents::record_tool_definition(&tab_id),
+        super::plan::propose_tool_definition(&tab_id),
     ]
 }
 
@@ -412,6 +414,7 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         "hiveAnswerWorker" => super::prompts::answer_worker_tool(&ctx, &caller, args).await,
         "hivePrecedents" => super::precedents::list_tool(&caller, args).await,
         "hiveRecordPrecedent" => super::precedents::record_tool(&ctx, &caller, args).await,
+        "hiveProposePlan" => super::plan::propose_tool(&ctx, &caller, args).await,
         t => Err(format!("{t} isn't available in this build of maiTerm yet.")),
     };
     // A worker's phase changed: a freed slot or a failed dependency is news to the waiters.
@@ -631,6 +634,8 @@ pub(crate) struct Registered {
     pub brief: String,
     /// The dependencies not yet done, as the coordinator names them.
     pub unmet: Vec<String>,
+    /// The approved plan's title this spawn took (plan id, normalized title): freed if it rolls back.
+    pub plan_claim: Option<(String, String)>,
 }
 
 pub(crate) fn worker_label(w: &WorkerRecord) -> String {
@@ -644,6 +649,17 @@ pub(crate) fn register(hive: &Hive, paths: &HivePaths, a: SpawnArgs, tasks: &[Ta
     if std::fs::symlink_metadata(paths.worker_dir(&plan.slug)).is_ok() {
         return Err(format!("A worker called \"{}\" already has folders here. Give this one another title.", plan.slug));
     }
+    // "Show me the plan first" (§7.4, plan D20): only a title the human approved, once. A
+    // reviewer is the plan's review cycle, not new work.
+    let plan_claim = match plan.reviews {
+        None if super::checkpoints::asks(hive, super::checkpoints::PLAN) => Some(super::plan::claim(paths, &plan.title)?),
+        _ => None,
+    };
+    let release = |c: &Option<(String, String)>| {
+        if let Some((id, t)) = c {
+            super::plan::release(paths, id, t);
+        }
+    };
     // "Met" is the dependency's task being done: landing sets that (step 6), and so can the human.
     let unmet: Vec<String> = plan
         .depends_on
@@ -652,7 +668,7 @@ pub(crate) fn register(hive: &Hive, paths: &HivePaths, a: SpawnArgs, tasks: &[Ta
         .filter_map(|id| workers.iter().find(|w| &w.task_id == id).map(worker_label))
         .collect();
     let task_id = uuid::Uuid::new_v4().to_string();
-    let task_dir = worker::task_dir(paths, &task_id)?;
+    let task_dir = worker::task_dir(paths, &task_id).inspect_err(|_| release(&plan_claim))?;
     let folders = plan
         .folders
         .iter()
@@ -679,8 +695,9 @@ pub(crate) fn register(hive: &Hive, paths: &HivePaths, a: SpawnArgs, tasks: &[Ta
     };
     worker::write_worker(&task_dir, &w).inspect_err(|_| {
         let _ = std::fs::remove_dir_all(&task_dir);
+        release(&plan_claim);
     })?;
-    Ok(Registered { worker: w, task_dir, brief: plan.brief, unmet })
+    Ok(Registered { worker: w, task_dir, brief: plan.brief, unmet, plan_claim })
 }
 
 /// The worker's row on the board: assigned to its tab once it has one.
@@ -840,6 +857,8 @@ struct Undo {
     reservation: Option<Reservation<'static>>,
     /// A waiting worker's launch: what is put back instead of removed, so it stays waiting.
     waiting: Option<Waiting>,
+    /// The approved plan's title the spawn took, given back with it.
+    plan_claim: Option<(String, String)>,
 }
 
 /// A waiting worker as it was before its launch: its record and its task row.
@@ -859,6 +878,7 @@ impl Undo {
             sent: None,
             reservation: None,
             waiting: None,
+            plan_claim: r.plan_claim.clone(),
         }
     }
 
@@ -932,6 +952,15 @@ impl Undo {
             }
         }
         drop(self.reservation);
+        // A worker taken back whole frees its plan title; a waiter's launch keeps the worker.
+        if let (Some((id, t)), None) = (&self.plan_claim, &self.waiting) {
+            let (paths, id, t) = (caller.paths.clone(), id.clone(), t.clone());
+            let _ = blocking(move || {
+                super::plan::release(&paths, &id, &t);
+                Ok(())
+            })
+            .await;
+        }
         super::diffstat::forget(&caller.hive.id, &self.task_id);
         if let Some(tab) = self.rows.as_ref().and_then(|r| r.tab_id.as_deref()) {
             super::feed::forget_meta(tab);
@@ -1006,7 +1035,7 @@ pub(crate) struct Refusal {
 pub(crate) async fn launch_waiting<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: WorkerRecord, row: Task) -> Result<Value, Refusal> {
     let task_dir = worker::task_dir(&caller.paths, &w.task_id).map_err(|why| Refusal { why, at_reserve: false })?;
     let brief = row.detail.clone().unwrap_or_default();
-    let reg = Registered { worker: w, task_dir, brief, unmet: Vec::new() };
+    let reg = Registered { worker: w, task_dir, brief, unmet: Vec::new(), plan_claim: None };
     launch_worker(ctx, caller, reg, Some(row)).await
 }
 
@@ -3261,5 +3290,42 @@ mod tests {
         assert_eq!(rec.review.unwrap().resolution.map(|x| x.kind), Some("reassign".to_string()));
         assert!(!git(&rig.web, &["branch", "--list", "hive/ship--login"]).is_empty(), "its branch stays");
         assert_eq!(rig.ws().tasks.into_iter().find(|t| t.id == b.task_id).unwrap().status, "dropped");
+    }
+
+    // ── The plan checkpoint (7e) ──
+
+    /// Plan = Ask me: only a title the human approved starts, once each; a rolled-back spawn frees
+    /// its title; reviewers and restarts need no plan (plan D20).
+    #[tokio::test]
+    async fn under_ask_me_only_approved_titles_spawn_once() {
+        use crate::hive::plan;
+        let mut rig = Rig::new("plan", 4);
+        rig.caller.hive.checkpoints.insert("plan".into(), "ask".into());
+        let p = rig.caller.paths.clone();
+        let e = rig.spawn(accept, args("Login API")).await.unwrap_err();
+        assert!(e.contains("Your human sees the plan first") && e.contains("hiveProposePlan"), "{e}");
+        assert!(worker::list_workers(&p).is_empty() && rig.verbs().is_empty(), "refused before anything was made");
+
+        let approved = plan::PlanRecord { id: plan::new_id(), status: plan::STATUS_APPROVED.into(), titles: vec!["Login API".into(), "Login UI".into()], ..Default::default() };
+        plan::write(&p, &approved).unwrap();
+        let e = rig.spawn(refuse_spawn, args("Login API")).await.unwrap_err();
+        assert!(e.contains("refused it"), "{e}");
+        assert!(plan::read(&p).unwrap().used.is_empty(), "a rolled-back spawn frees its title");
+        rig.spawn(accept, args("Login API")).await.unwrap();
+        assert_eq!(plan::read(&p).unwrap().used, vec!["login api".to_string()]);
+        let e = rig.spawn(accept, args("Billing")).await.unwrap_err();
+        assert!(e.contains("isn\u{2019}t in the plan your human approved"), "{e}");
+        assert!(rig.spawn(accept, args("Login API")).await.is_err(), "once");
+
+        // A reviewer of an approved worker needs no plan of its own.
+        let b = rig.reported("Login UI").await;
+        rig.reviewer("Review the login UI", json!(b.badge)).await.unwrap();
+        assert_eq!(plan::read(&p).unwrap().used.len(), 2, "the reviewer took no title");
+
+        // A restart relaunches what was planned.
+        let w = worker::list_workers(&p).into_iter().find(|w| w.title == "Login API").unwrap();
+        rig.set_phase(&w.task_id, worker::PHASE_FAILED);
+        rig.set_front(w.tab_id.as_deref().unwrap(), Front::Shell);
+        super::super::control::restart_worker(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, &json!({ "worker": w.badge })).await.unwrap();
     }
 }

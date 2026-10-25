@@ -41,6 +41,7 @@
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
 
+pub mod autonomy;
 pub mod brief;
 pub mod checkpoints;
 pub(crate) mod control;
@@ -61,6 +62,7 @@ pub mod launch;
 pub mod layout;
 pub mod memory;
 pub mod paths;
+pub mod plan;
 pub mod precedents;
 pub mod pressure;
 pub mod prompts;

@@ -8,7 +8,9 @@
   `hive-memory-changed` (`emit_to`, never a broadcast) and never polls.
 
   Decisions (§7.6) is Rust's folded decision log: who decided, the precedent cited, the outcome,
-  and Override… on the coordinator's own decisions. Precedents (§7.5) shows each beside the
+  and Override… on the coordinator's own decisions; maiTerm's autonomy offers and the daily digests
+  are among them (step 7e: an offer's open outcome is its kind, a digest's status `digest`).
+  Precedents (§7.5) shows each beside the
   question and the human's answer, with whose wording its rule is; the human edits, deletes and
   makes one global, which no tool can. Both refetch on `hive-decisions-changed`, never on
   `hive-memory-changed`, whose list rebuilds the memory index.

@@ -716,6 +716,9 @@ pub fn run() {
             // Each Hive's MEMORY.md rebuilt once (agents may have written while maiTerm was down),
             // then its memory folder watched (docs/hive.md §9). Off the setup thread.
             hive::memory::watch_all(&app_state, app.handle());
+            // Each Hive's daily digest of what its coordinator decided alone, checked hourly
+            // (docs/hive.md §7.6).
+            hive::autonomy::start_digest_timer(app_state.clone(), app.handle().clone());
 
             // Stack copies' branch checkouts whose branch is gone (docs/hive.md §6.9). Git, so off
             // the setup thread.
