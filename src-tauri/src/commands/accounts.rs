@@ -1486,13 +1486,13 @@ fn verify_token_identity(profile: &accounts::RuntimeProfile, token: &accounts::v
     // and a truncated one is the §6.1 nightmare: it passes every shape check, and on a remote
     // host it does not error, it silently resolves as whoever else is logged in there.
     // `--max-turns 1` on a two-word prompt keeps the cost to about nothing.
-    let live = probe(&["-p", "ok", "--max-turns", "1"]);
+    let live = probe(&["-p", "ok", "--max-turns", "1", "--output-format", "json"]);
 
     // Before anything can return: the probe root is a directory the runtime just wrote into.
     let _ = std::fs::remove_dir_all(&probe_root);
 
     let live = live.map_err(|e| format!("checking the token: {e}"))?;
-    if !live.status.success() {
+    if !probe_authenticated(live.status.success(), &live.stdout) {
         // `Failed to authenticate. API Error: 401 OAuth access token is invalid.` is what a bad
         // one says, and it says it in about a second. Redacted, because the runtime is perfectly
         // capable of echoing what it was given back at us.
@@ -1531,6 +1531,42 @@ fn verify_token_identity(profile: &accounts::RuntimeProfile, token: &accounts::v
         org_name: None,
         plan: None,
     })
+}
+
+/// Whether the one-request probe got past authentication, read from its JSON result.
+///
+/// The exit status alone lies both ways: Claude Code 2.1.310 exits non-zero with
+/// `Error: Reached max turns (1)` when the reply wants a second turn — which only happens after
+/// the token authenticated, and threw away good tokens — while a rejected credential can exit 0
+/// with `is_error: true`, `terminal_reason: "api_error"` ("Invalid API key"). So: a result that
+/// isn't an error, or one that stopped at the turn limit, proves the token; anything else doesn't.
+fn probe_authenticated(exit_ok: bool, stdout: &[u8]) -> bool {
+    match serde_json::from_slice::<serde_json::Value>(stdout) {
+        Ok(v) => {
+            let is_error = v.get("is_error").and_then(|x| x.as_bool()).unwrap_or(true);
+            let max_turns = v.get("subtype").and_then(|x| x.as_str()) == Some("error_max_turns");
+            !is_error || max_turns
+        }
+        // An older runtime without JSON output: fall back to what the exit said.
+        Err(_) => exit_ok,
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::probe_authenticated;
+
+    #[test]
+    fn a_token_stopped_at_the_turn_limit_authenticated_and_a_rejected_one_did_not() {
+        let max = br#"{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":2}"#;
+        assert!(probe_authenticated(false, max), "the turn limit is reached only after auth");
+        let ok = br#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#;
+        assert!(probe_authenticated(true, ok));
+        let bad = br#"{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","result":"Invalid API key"}"#;
+        assert!(!probe_authenticated(true, bad), "a rejected credential can exit 0");
+        assert!(!probe_authenticated(false, b"Failed to authenticate. API Error: 401"));
+        assert!(probe_authenticated(true, b"plain text from an old runtime"));
+    }
 }
 
 /// The variable a minted token is consumed through, here and on every remote (§6 step 2).
