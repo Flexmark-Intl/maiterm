@@ -11,7 +11,12 @@
 //!
 //! On accept the Hive goes `done`, its window stops the stack services it started and cancels its
 //! tabs' follow-ups (`hive.finish`), and the coordinator is ended once its answer has reached it
-//! (`exit_coordinator`). Every launch in a Done Hive is refused (`launch::DONE_REFUSAL`).
+//! (`exit_coordinator`). Every launch in a Done Hive is refused (`launch::DONE_REFUSAL`) until a
+//! message from the human wakes it (`wake`).
+
+mod wake;
+pub use wake::{wake_text, WakeOutcome, BY_DESKTOP, NOT_DONE};
+pub(crate) use wake::{route_send, wake, Route};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -49,6 +54,8 @@ pub const BY_COORDINATOR: &str = "coordinator";
 pub const EXIT_MIN_WAIT: Duration = Duration::from_secs(3);
 pub const EXIT_POLL: Duration = Duration::from_secs(1);
 pub const EXIT_MAX_WAIT: Duration = Duration::from_secs(120);
+/// How long the exit keeps a wake waiting for the signalled agent to give its terminal back.
+const EXIT_END_GRACE: Duration = Duration::from_secs(10);
 
 // ── The record ──
 
@@ -990,7 +997,14 @@ pub fn should_exit(status: &str, busy: bool, waited_out: bool) -> bool {
 pub(crate) async fn exit_coordinator<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, min_wait: Duration, poll: Duration, max_wait: Duration) -> bool {
     tokio::time::sleep(min_wait).await;
     let start = std::time::Instant::now();
+    let key = caller.paths.root.to_string_lossy().to_string();
     loop {
+        // Each read and the signal under the Hive's turn: a wake holds it from its status flip
+        // through its delivery (or its rollback), so neither half of one is ever seen alone.
+        let Some(_turn) = wake::Waking::take(&key) else {
+            tokio::time::sleep(poll).await;
+            continue;
+        };
         let status = super::autonomy::current_hive(ctx, caller).map(|h| h.status).unwrap_or_default();
         if status != STATUS_DONE {
             log::info!("hive {}: the coordinator stays: the Hive is {status} again", caller.hive.id);
@@ -1001,6 +1015,10 @@ pub(crate) async fn exit_coordinator<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &C
             return match ctx.window.stop_agent(&tab).await {
                 Ok(sent) => {
                     log::info!("hive {}: coordinator {}", caller.hive.id, if sent { "ended after Done" } else { "had already exited" });
+                    if sent {
+                        // A wake waiting on the turn then finds the shell, not a dying agent.
+                        wake::hold_until_ended(ctx, caller, &tab, EXIT_END_GRACE.min(max_wait)).await;
+                    }
                     sent
                 }
                 Err(e) => {
@@ -1009,6 +1027,7 @@ pub(crate) async fn exit_coordinator<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &C
                 }
             };
         }
+        drop(_turn);
         tokio::time::sleep(poll).await;
     }
 }

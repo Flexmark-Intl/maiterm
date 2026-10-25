@@ -29,7 +29,7 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { navigateToTab } from '$lib/stores/workspaces.svelte';
   import { getTabMeta, getTabTranscript, getTaskTranscript, listTabModels, sendTabMessage, type ChatTurn, type TabMeta } from '$lib/tauri/commands';
-  import { chatKey, chatRows, injectedTurn, taskEventsFor } from '$lib/loom/model';
+  import { chatKey, chatRows, injectedTurn, sentNote, taskEventsFor } from '$lib/loom/model';
   import { renderTurnMarkdown } from '$lib/loom/markdown';
   import { chatImages } from '$lib/loom/chatImages';
   import BlockerCard from '$lib/components/tasks/BlockerCard.svelte';
@@ -73,11 +73,14 @@
     /** A Hive agent's chat: its `galleryAdd` steps show what they filed, a click opening it in
      *  that Hive's gallery (docs/hive.md §4.2). */
     gallery?: { hiveId: string; workspaceId: string } | null;
+    /** The composer's placeholder in place of "Message <name>…" (a Done Hive's "Send a message to
+     *  wake it", docs/hive.md §11.4). */
+    composerPlaceholder?: string;
   }
   let {
     source, name, workspace, tasks, active, readOnly: readOnlyProp = false, header, composerActions, actions,
     ontask = (taskId: string) => loomStore.show('weave', taskId), emptyText = 'Pick a chat on the left.', statusText,
-    gallery = null,
+    gallery = null, composerPlaceholder,
   }: Props = $props();
 
   /** A string, so a caller handing a new source object for the same chat switches nothing. */
@@ -423,9 +426,8 @@
         const at = Date.now();
         outgoing = outgoing.map((o) => (o.id === id ? { ...o, sentAt: at } : o));
         const sentFiles = files.length ? `Sent ${files.length === 1 ? files[0].name : `${files.length} files`}.` : '';
-        sendNote = r.woke
-          ? { chat, text: `Woke the agent (${r.woke === 'init' ? 're-registered it' : 'resumed it'}) and sent.` }
-          : sentFiles && !bubble ? { chat, text: sentFiles } : null;
+        const note = sentNote(r, sentFiles && !bubble ? sentFiles : null);
+        sendNote = note ? { chat, text: note } : null;
         reload();
       } else {
         fail(r.detail ?? `Not sent (${r.reason ?? r.status}).`);
@@ -737,7 +739,7 @@
           <textarea
             bind:this={composerEl}
             rows="2"
-            placeholder={`Message ${name}… (paste or drop files to attach)`}
+            placeholder={composerPlaceholder ?? `Message ${name}… (paste or drop files to attach)`}
             value={draft}
             oninput={(e) => (drafts = { ...drafts, [openId]: (e.currentTarget as HTMLTextAreaElement).value })}
             onkeydown={onComposerKey}

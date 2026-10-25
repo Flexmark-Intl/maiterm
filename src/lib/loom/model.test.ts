@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { makeTask } from '$lib/tasks/model';
 import type { ChatTurn } from '$lib/tauri/commands';
 import type { Task } from '$lib/tauri/types';
-import { chatKey, chatRows, decisionsQueue, injectedTurn, focusSections, focusSince, isQuiet, loomAgents, QUIET_MS, summarize, taskEventsFor, toolVerb, unexplainedBlocked } from './model';
+import { chatKey, chatRows, decisionsQueue, injectedTurn, focusSections, focusSince, isQuiet, loomAgents, QUIET_MS, sentNote, summarize, taskEventsFor, toolVerb, unexplainedBlocked } from './model';
 
 const NOW = Date.parse('2026-09-27T18:00:00Z');
 const task = (over: Partial<Task> = {}): Task => ({ ...makeTask({ title: over.title ?? 't' }, '2026-09-27T17:00:00Z'), ...over });
@@ -227,5 +227,16 @@ describe('chat sources', () => {
     const turn = (msg_id: string, role: ChatTurn['role'], ts: number, kind?: ChatTurn['kind']): ChatTurn => ({ msg_id, role, text: msg_id, ts, kind });
     const rows = chatRows([turn('a', 'tool', 1), turn('session:s2', 'system', 2, 'session_divider'), turn('b', 'tool', 3)]);
     expect(rows.map((r) => r.kind)).toEqual(['tools', 'turn', 'tools']);
+  });
+});
+
+describe('sentNote', () => {
+  it('says which wake a send took, and a woken Hive in its own words', () => {
+    expect(sentNote({ woke: 'hive' })).toBe("Woke the Hive: its coordinator resumes and gets your message once it's up.");
+    expect(sentNote({ woke: 'hive', detail: 'Its window didn’t confirm.' })).toBe('Its window didn’t confirm.');
+    expect(sentNote({ woke: 'init' }, 'Sent a.png.')).toBe('Woke the agent (re-registered it) and sent.');
+    expect(sentNote({ woke: 'resume' })).toBe('Woke the agent (resumed it) and sent.');
+    expect(sentNote({ woke: null }, 'Sent a.png.')).toBe('Sent a.png.');
+    expect(sentNote({})).toBeNull();
   });
 });

@@ -3882,3 +3882,37 @@ several releases a day).
    asset receipt needs only the gallery (step 8's index), and a relative file receipt is read from
    the primary folder; the coordinator withdrawing its own question (its plan row, say) lets Done
    through, since the human's reserved rows are already refused to agents.
+   **9c built** (2026-10-25): waking a Done Hive (`hive/finish/wake.rs`). A message from the
+   human's composer to a Done Hive's coordinator (`mailink::send_tab_message`, through
+   `finish::route_send`) wakes it; nothing an agent, the mesh, the Overlord or a follow-up sends
+   goes that way, and attachments are refused until the coordinator is back. `finish::wake` reads
+   the coordinator's terminal first: a coordinator still up inside `exit_coordinator`'s wait
+   (front `Job`) goes `active`, which keeps it from being ended, and gets the message typed now
+   through the delivery gate; a front it can't read refuses. Otherwise the message is owed on
+   disk (`owed.wake`, after any earlier one still waiting, joined by a blank line, the two refused
+   together over 16,000 characters), the status is saved `active` with `done_at` cleared, a `wake`
+   line goes to `logs/finishes.jsonl`, and `hive.relaunch` (now taking the coordinator tab) types
+   the builder's line at the empty prompt or mounts the tab. The window hears `active` only once the
+   relaunch is accepted: a refusal saves `done` back with its old `done_at`, puts the owed message
+   back as it was and logs `wake_failed`, so no second "Hive done" notice rings. A window that was
+   asked and never answered (a timeout, a dropped request) may still have typed the line, so that
+   leaves the Hive `active` with the message owed and says the relaunch is unconfirmed. A wake and
+   `exit_coordinator` take turns per Hive (`wake::Waking`): the exit reads the status and signals
+   under the turn, and after a signal keeps it until the agent has left its terminal (10 s at
+   most, after which a wake that finds the agent still there refuses for a moment), so a wake never
+   types into a dying agent, and the exit never reads the `active` of a wake whose delivery is then
+   refused and rolled back (it ends the agent as before). While a wake's relaunch hasn't reached
+   its session start (an in-memory mark, three minutes at most, ended as `coordinator_claims` reads
+   `owed.json` under its lock), a further message joins `owed.wake` instead of taking the ordinary
+   path, which would type it, or `/maiterm init`, ahead of the first; while that start is typing
+   the wake, a message is refused for a moment. The
+   coordinator's session start claims the wake after its kickoff and digest:
+   `[maiTerm] Your human has woken this Hive, which was Done since <local time>. Their message:`,
+   then the human's words `frame_escape`d with their line breaks kept. The composer reads "This
+   Hive is done. Send a message to wake it." while done, and the send's note says the coordinator
+   resumes and gets it once it's up (`loom/model.ts` `sentNote`). **Decided here:** one wake of a
+   Hive at a time (a second, from the phone, waits for the first and then joins it rather than
+   relaunching twice); a slash command (`/name` then a space or the end, as the column reads one:
+   its model and effort pickers) never wakes a Hive, since inside maiTerm's frame it would be
+   words, not a command, while a message that opens with a path does; a held direct delivery
+   counts as delivered (the agent is there to take it), and a refused one leaves the Hive Done.

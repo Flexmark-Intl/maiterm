@@ -502,7 +502,7 @@ fn plural(n: u32, one: &str, many: &str) -> String {
 }
 
 /// `Oct 23, 14:20`, local.
-fn local_when(ms: i64) -> String {
+pub(crate) fn local_when(ms: i64) -> String {
     #[cfg(unix)]
     {
         const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];

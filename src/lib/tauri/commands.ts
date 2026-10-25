@@ -644,8 +644,10 @@ export interface SendResult {
   status: 'delivered' | 'unreachable' | 'prompt_open' | 'draft' | 'failed' | 'empty';
   reason?: string;
   detail?: string;
-  /** The wake it took ('init' | 'resume'), when the tab's agent had to be brought back first. */
-  woke?: string | null;
+  /** The wake it took ('init' | 'resume'), when the tab's agent had to be brought back first;
+   *  'hive' when the message woke a Done Hive (docs/hive.md §11.4), whose coordinator gets it
+   *  once it's back. */
+  woke?: 'init' | 'resume' | 'hive' | null;
 }
 
 /** Type a message into a tab's agent, under the phone's rules: an unregistered tab is woken

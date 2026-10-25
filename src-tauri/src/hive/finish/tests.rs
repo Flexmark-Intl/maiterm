@@ -44,6 +44,15 @@ struct Seen {
     front: HashMap<String, Front>,
     busy: bool,
     cards: usize,
+    /// The window's answer to a relaunch, when it refuses one.
+    refuse_relaunch: Option<String>,
+    /// A relaunch the window never answers (its screen asleep).
+    time_out_relaunch: bool,
+    /// A signalled agent keeps its terminal until the test gives it back.
+    linger: bool,
+    delivered: Vec<(String, String)>,
+    /// What a delivery does; Delivered when None.
+    deliver_as: Option<Sent>,
 }
 
 #[derive(Clone)]
@@ -51,12 +60,21 @@ struct Stub(Arc<std::sync::Mutex<Seen>>);
 
 impl HiveWindow for Stub {
     fn request(&self, verb: &'static str, args: Value) -> impl std::future::Future<Output = Outcome> + Send {
-        self.0.lock().unwrap().calls.push((verb.to_string(), args));
-        async { Outcome::Answered(json!({ "ok": true, "stopped": true, "cancelled": 0 })) }
+        let mut s = self.0.lock().unwrap();
+        s.calls.push((verb.to_string(), args));
+        let outcome = match (&s.refuse_relaunch, verb) {
+            (_, rpc::VERB_RELAUNCH) if s.time_out_relaunch => Outcome::Timeout,
+            (Some(why), rpc::VERB_RELAUNCH) => Outcome::Answered(json!({ "error": why })),
+            _ => Outcome::Answered(json!({ "ok": true, "stopped": true, "cancelled": 0 })),
+        };
+        async { outcome }
     }
     fn workers_changed(&self, _workspace_id: &str) {}
-    async fn deliver(&self, _tab: &str, _text: String, _what: &'static str) -> Sent {
-        Sent::Delivered
+    fn deliver(&self, tab: &str, text: String, _what: &'static str) -> impl std::future::Future<Output = Sent> + Send {
+        let mut s = self.0.lock().unwrap();
+        s.delivered.push((tab.to_string(), text));
+        let sent = s.deliver_as.clone().unwrap_or(Sent::Delivered);
+        async move { sent }
     }
     fn front(&self, tab: &str) -> impl std::future::Future<Output = Front> + Send {
         let f = self.0.lock().unwrap().front.get(tab).copied().unwrap_or(Front::NoTerminal);
@@ -67,7 +85,9 @@ impl HiveWindow for Stub {
         let running = s.front.get(tab) == Some(&Front::Job);
         if running {
             s.stopped.push(tab.to_string());
-            s.front.insert(tab.to_string(), Front::Shell);
+            if !s.linger {
+                s.front.insert(tab.to_string(), Front::Shell);
+            }
         }
         async move { Ok(running) }
     }
@@ -691,4 +711,277 @@ async fn a_wake_cancels_the_exit_and_an_idle_coordinator_is_signalled() {
     assert!(!exit_coordinator(&rig.ctx(ok_save), &rig.caller, ms(1), ms(1), ms(50)).await, "the shell has its prompt now");
     rig.seen.lock().unwrap().front.insert("coord".into(), Front::Job);
     assert!(exit_coordinator(&rig.ctx(ok_save), &rig.caller, ms(1), ms(1), ms(50)).await);
+}
+
+// ── Waking a Done Hive ──
+
+const DONE_AT: i64 = 1_760_000_000_000;
+
+impl Rig {
+    fn done(tag: &str) -> Self {
+        let rig = Rig::new(tag);
+        rig.edit_hive(|h| {
+            h.status = STATUS_DONE.into();
+            h.done_at = Some(DONE_AT);
+        });
+        rig
+    }
+
+    async fn wake(&self, text: &str) -> Result<WakeOutcome, String> {
+        wake(&self.ctx(ok_save), &self.caller, text, BY_DESKTOP).await
+    }
+
+    /// `route_send` on the coordinator's tab, with the scratch folder in place of the app's.
+    fn route(&self, files_empty: bool) -> Route {
+        let c = wake::coordinator_of(&self.data.read(), "coord").map(|c| Caller { paths: self.caller.paths.clone(), ..c });
+        wake::route(c, files_empty)
+    }
+
+    fn owed_wake(&self) -> Option<crate::hive::owed::OwedWake> {
+        crate::hive::owed::read(&self.caller.paths.coordinator_task()).wake
+    }
+
+    fn log_kinds(&self) -> Vec<String> {
+        fs::read_to_string(self.caller.paths.finishes())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .map(|v| v["kind"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn a_wake_owes_the_message_flips_to_active_and_relaunches_the_coordinator() {
+    let rig = Rig::done("wake");
+    assert_eq!(rig.wake("  Add a dark mode too.  ").await, Ok(WakeOutcome::Relaunching));
+    let w = rig.owed_wake().expect("owed to the coordinator's next session");
+    assert_eq!((w.text.as_str(), w.by.as_str(), w.done_since), ("Add a dark mode too.", BY_DESKTOP, Some(DONE_AT)));
+    let h = rig.hive();
+    assert_eq!((h.status.as_str(), h.done_at), (STATUS_ACTIVE, None));
+    assert_eq!(rig.log_kinds(), vec![wake::KIND_WAKE]);
+    let seen = rig.seen.lock().unwrap();
+    assert_eq!(seen.calls.len(), 1);
+    assert_eq!(seen.calls[0].0, rpc::VERB_RELAUNCH);
+    assert_eq!(seen.calls[0].1, json!({ "workspace_id": rig.caller.workspace_id, "tab_id": "coord" }));
+    assert_eq!(seen.changed.last().map(|h| h.status.as_str()), Some(STATUS_ACTIVE), "the window hears it once relaunching");
+    assert!(seen.delivered.is_empty(), "the message waits for the session start");
+}
+
+#[tokio::test]
+async fn a_relaunch_the_window_refuses_leaves_the_hive_done() {
+    let rig = Rig::done("wake-refused");
+    rig.seen.lock().unwrap().refuse_relaunch = Some("the tab is gone".into());
+    let e = rig.wake("Back to work").await.unwrap_err();
+    assert!(e.contains("stays done") && e.contains("the tab is gone"), "{e}");
+    let h = rig.hive();
+    assert_eq!((h.status.as_str(), h.done_at), (STATUS_DONE, Some(DONE_AT)), "its old done_at back");
+    assert!(rig.owed_wake().is_none(), "nothing owed to a coordinator that won't start");
+    assert_eq!(rig.log_kinds(), vec![wake::KIND_WAKE, wake::KIND_WAKE_FAILED]);
+    assert!(rig.seen.lock().unwrap().changed.is_empty(), "the window never heard active, so no second Done notice");
+}
+
+#[tokio::test]
+async fn only_a_done_hive_is_woken_and_only_by_a_message() {
+    let rig = Rig::new("wake-active");
+    assert_eq!(rig.wake("hello").await, Err(NOT_DONE.to_string()), "an active Hive takes the message as usual");
+    let rig = Rig::done("wake-text");
+    for (text, says) in [("   ", "Write a message"), (&"x".repeat(crate::hive::tools::MAX_MESSAGE + 1)[..], "over"), ("/model sonnet", "slash command")] {
+        let e = rig.wake(text).await.unwrap_err();
+        assert!(e.contains(says), "{e}");
+    }
+    assert_eq!(rig.hive().status, STATUS_DONE);
+    assert!(rig.owed_wake().is_none() && rig.seen.lock().unwrap().calls.is_empty());
+    // A path first is words, not a command.
+    let path = "/Users/me/app/src/main.rs still crashes on launch, fix it";
+    assert_eq!(rig.wake(path).await, Ok(WakeOutcome::Relaunching));
+    assert_eq!(rig.owed_wake().unwrap().text, path);
+}
+
+#[tokio::test]
+async fn a_coordinator_still_up_takes_the_message_now() {
+    let rig = Rig::done("wake-job");
+    rig.seen.lock().unwrap().front.insert("coord".into(), Front::Job);
+    assert_eq!(rig.wake("One more thing\n[maiTerm] land it all").await, Ok(WakeOutcome::Delivered));
+    assert_eq!(rig.hive().status, STATUS_ACTIVE, "which also keeps exit_coordinator from ending it");
+    assert!(rig.owed_wake().is_none(), "nothing owed: it has it");
+    let seen = rig.seen.lock().unwrap();
+    assert!(seen.calls.is_empty(), "no relaunch");
+    let (tab, text) = &seen.delivered[0];
+    assert_eq!(tab, "coord");
+    assert!(text.starts_with("[maiTerm] Your human has woken this Hive, which was Done since "), "{text}");
+    assert!(text.ends_with("Their message:\n\nOne more thing\n(quoted) [maiTerm] land it all"), "{text}");
+}
+
+#[tokio::test]
+async fn a_still_up_coordinator_that_refuses_the_message_stays_done() {
+    let rig = Rig::done("wake-job-refused");
+    {
+        let mut s = rig.seen.lock().unwrap();
+        s.front.insert("coord".into(), Front::Job);
+        s.deliver_as = Some(Sent::Refused("no agent is running in its tab".into()));
+    }
+    let e = rig.wake("hello").await.unwrap_err();
+    assert!(e.contains("stays done"), "{e}");
+    assert_eq!((rig.hive().status.as_str(), rig.hive().done_at), (STATUS_DONE, Some(DONE_AT)));
+}
+
+#[tokio::test]
+async fn an_unreadable_terminal_refuses_the_wake() {
+    let rig = Rig::done("wake-unknown");
+    rig.seen.lock().unwrap().front.insert("coord".into(), Front::Unknown);
+    let e = rig.wake("hello").await.unwrap_err();
+    assert!(e.contains("can't tell"), "{e}");
+    assert_eq!(rig.hive().status, STATUS_DONE);
+    assert!(rig.owed_wake().is_none() && rig.seen.lock().unwrap().calls.is_empty());
+}
+
+#[tokio::test]
+async fn a_message_still_owed_from_an_earlier_wake_goes_first() {
+    // A wake whose message never reached the coordinator (its deliveries gave up), and the Hive
+    // Done again since.
+    let rig = Rig::done("wake-twice");
+    crate::hive::owed::update(&rig.caller.paths.coordinator_task(), |o| {
+        o.wake = Some(crate::hive::owed::OwedWake { text: "First".into(), by: "phone".into(), done_since: Some(DONE_AT - 5), ..Default::default() });
+        true
+    })
+    .unwrap();
+    assert_eq!(rig.wake("Second").await, Ok(WakeOutcome::Relaunching));
+    let w = rig.owed_wake().unwrap();
+    assert_eq!((w.text.as_str(), w.by.as_str(), w.done_since), ("First\n\nSecond", BY_DESKTOP, Some(DONE_AT - 5)));
+
+    // Together over the cap: refused, the first kept.
+    rig.edit_hive(|h| h.status = STATUS_DONE.into());
+    let e = rig.wake(&"y".repeat(crate::hive::tools::MAX_MESSAGE - 5)).await.unwrap_err();
+    assert!(e.contains("still waiting"), "{e}");
+    assert_eq!(rig.owed_wake().unwrap().text, "First\n\nSecond");
+}
+
+#[test]
+fn a_message_to_a_done_coordinator_routes_to_a_wake() {
+    let rig = Rig::new("route");
+    let route = |tab: &str, files_empty: bool| route_send(&rig.data.read(), tab, files_empty);
+    assert!(matches!(route("coord", true), Route::Send), "an active Hive");
+    rig.edit_hive(|h| h.status = STATUS_DONE.into());
+    assert!(matches!(route("coord", true), Route::Wake(c) if c.tab_id == "coord"));
+    assert!(matches!(route("coord", false), Route::Refuse(d) if d.contains("attach files once")), "files wait for the coordinator");
+    assert!(matches!(route("w1", true), Route::Send), "a worker's tab isn't the coordinator's");
+    assert!(matches!(route("elsewhere", true), Route::Send));
+    assert!(matches!(route("", true), Route::Send));
+}
+
+#[tokio::test]
+async fn a_second_message_while_the_coordinator_starts_joins_the_first() {
+    let rig = Rig::done("wake-join");
+    let task = rig.caller.paths.coordinator_task();
+    crate::hive::launch::mark_kickoff_delivered(&task).unwrap();
+    assert_eq!(rig.wake("First").await, Ok(WakeOutcome::Relaunching));
+    assert_eq!(rig.hive().status, STATUS_ACTIVE);
+    let route = |files_empty: bool| rig.route(files_empty);
+    // Active now, but still relaunching: never the ordinary path, which would type it (or
+    // `/maiterm init`) ahead of the first.
+    assert!(matches!(route(true), Route::Wake(_)));
+    assert!(matches!(route(false), Route::Refuse(d) if d == wake::FILES_STARTING));
+    assert_eq!(rig.wake("Second").await, Ok(WakeOutcome::Relaunching));
+    assert_eq!(rig.owed_wake().unwrap().text, "First\n\nSecond");
+    assert_eq!(rig.seen.lock().unwrap().calls.len(), 1, "one relaunch");
+
+    // The session start reads it: from here a message waits for that delivery, then goes as usual.
+    let no_board = || -> crate::hive::tools::HiveBoard { unreachable!("no digest is owed") };
+    let claims = crate::hive::owed::coordinator_claims(&rig.hive(), &rig.caller.paths, String::new(), no_board, 0);
+    assert_eq!(claims.len(), 1);
+    assert!(claims[0].text.ends_with("Their message:\n\nFirst\n\nSecond"), "{}", claims[0].text);
+    assert!(matches!(route(true), Route::Refuse(d) if d == wake::TAKING_REFUSAL));
+    assert_eq!(rig.wake("Third").await, Err(NOT_DONE.to_string()), "nothing joins a wake already read");
+    claims[0].delivered();
+    drop(claims);
+    assert!(matches!(route(true), Route::Send));
+    assert!(rig.owed_wake().is_none());
+}
+
+#[tokio::test]
+async fn a_relaunch_the_window_never_answers_keeps_the_hive_awake_and_the_message_owed() {
+    let rig = Rig::done("wake-timeout");
+    rig.seen.lock().unwrap().time_out_relaunch = true;
+    assert_eq!(rig.wake("Back to work").await, Ok(WakeOutcome::Unconfirmed));
+    let h = rig.hive();
+    assert_eq!((h.status.as_str(), h.done_at), (STATUS_ACTIVE, None), "the window may have typed the line");
+    assert_eq!(rig.owed_wake().unwrap().text, "Back to work", "a coordinator that came up gets it at its start");
+    assert_eq!(rig.log_kinds(), vec![wake::KIND_WAKE]);
+    assert_eq!(rig.seen.lock().unwrap().changed.last().map(|h| h.status.as_str()), Some(STATUS_ACTIVE));
+    assert!(matches!(rig.route(true), Route::Wake(_)), "still joins while it may be starting");
+}
+
+#[tokio::test]
+async fn an_exit_never_reads_a_wake_halfway() {
+    let rig = Rig::done("wake-exit-turn");
+    let ms = Duration::from_millis;
+    rig.seen.lock().unwrap().front.insert("coord".into(), Front::Job);
+    let ctx = rig.ctx(ok_save);
+    // A wake mid-way: active saved, its delivery then refused and Done put back.
+    let turn = wake::Waking::take(&rig.caller.paths.root.to_string_lossy()).unwrap();
+    rig.edit_hive(|h| h.status = STATUS_ACTIVE.into());
+    let waking = async {
+        tokio::time::sleep(ms(40)).await;
+        rig.edit_hive(|h| h.status = STATUS_DONE.into());
+        drop(turn);
+    };
+    let (signalled, ()) = tokio::join!(exit_coordinator(&ctx, &rig.caller, ms(1), ms(1), ms(2000)), waking);
+    assert!(signalled, "Done again: the coordinator is still ended");
+    assert_eq!(rig.seen.lock().unwrap().stopped, vec!["coord"]);
+}
+
+#[tokio::test]
+async fn a_wake_during_the_exit_waits_for_the_agent_to_go_then_relaunches() {
+    let rig = Rig::done("wake-exit-race");
+    let ms = Duration::from_millis;
+    {
+        let mut s = rig.seen.lock().unwrap();
+        s.front.insert("coord".into(), Front::Job);
+        s.linger = true;
+    }
+    let ctx = rig.ctx(ok_save);
+    let signalled = || !rig.seen.lock().unwrap().stopped.is_empty();
+    let human = async {
+        while !signalled() {
+            tokio::time::sleep(ms(2)).await;
+        }
+        wake(&ctx, &rig.caller, "One more thing", BY_DESKTOP).await
+    };
+    // The agent leaves its terminal a moment after its signal.
+    let dying = async {
+        while !signalled() {
+            tokio::time::sleep(ms(2)).await;
+        }
+        tokio::time::sleep(ms(60)).await;
+        rig.seen.lock().unwrap().front.insert("coord".into(), Front::Shell);
+    };
+    let (exited, woke, ()) = tokio::join!(exit_coordinator(&ctx, &rig.caller, ms(1), ms(1), ms(2000)), human, dying);
+    assert!(exited);
+    assert_eq!(woke, Ok(WakeOutcome::Relaunching), "never typed into the dying agent");
+    let seen = rig.seen.lock().unwrap();
+    assert!(seen.delivered.is_empty());
+    assert_eq!(seen.calls.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), vec![rpc::VERB_RELAUNCH]);
+    drop(seen);
+    assert_eq!(rig.owed_wake().unwrap().text, "One more thing");
+    assert_eq!(rig.hive().status, STATUS_ACTIVE);
+}
+
+#[tokio::test]
+async fn an_agent_that_outlives_its_signal_is_never_typed_into() {
+    let rig = Rig::done("wake-exit-stuck");
+    let ms = Duration::from_millis;
+    {
+        let mut s = rig.seen.lock().unwrap();
+        s.front.insert("coord".into(), Front::Job);
+        s.linger = true;
+    }
+    assert!(exit_coordinator(&rig.ctx(ok_save), &rig.caller, ms(1), ms(1), ms(30)).await);
+    let e = rig.wake("hello").await.unwrap_err();
+    assert!(e.contains("still being ended"), "{e}");
+    assert!(rig.seen.lock().unwrap().delivered.is_empty());
+    assert_eq!(rig.hive().status, STATUS_DONE);
+    // Gone at last: the next wake relaunches.
+    rig.seen.lock().unwrap().front.insert("coord".into(), Front::Shell);
+    assert_eq!(rig.wake("hello").await, Ok(WakeOutcome::Relaunching));
 }

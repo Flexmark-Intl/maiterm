@@ -2,7 +2,7 @@
  *  No runes and no stores here, so every rule is unit-testable. */
 
 import type { AgentState } from '$lib/agents/types';
-import type { ChatTurn } from '$lib/tauri/commands';
+import type { ChatTurn, SendResult } from '$lib/tauri/commands';
 import type { Task, TaskStatus } from '$lib/tauri/types';
 import { effectiveStatus, hasUnmetDeps, isRetired } from '$lib/tasks/model';
 
@@ -158,6 +158,22 @@ export type ChatSource = { kind: 'tab'; tabId: string } | { kind: 'retired'; hiv
  *  Loom's chats are keyed exactly as before retired sources existed. */
 export function chatKey(s: ChatSource | null): string | null {
   return !s ? null : s.kind === 'tab' ? s.tabId : `retired:${s.hiveId}:${s.taskId}`;
+}
+
+/** The note under the composer after a delivered send: the wake it took, else `plain` (what was
+ *  attached, when no bubble shows it), else none. A Hive wake's own `detail` says which one it
+ *  was (relaunching, unconfirmed, or taken by a coordinator still up). */
+export function sentNote(r: Pick<SendResult, 'woke' | 'detail'>, plain: string | null = null): string | null {
+  switch (r.woke) {
+    case 'hive':
+      return r.detail || "Woke the Hive: its coordinator resumes and gets your message once it's up.";
+    case 'init':
+      return 'Woke the agent (re-registered it) and sent.';
+    case 'resume':
+      return 'Woke the agent (resumed it) and sent.';
+    default:
+      return plain;
+  }
 }
 
 export type ChatRow =

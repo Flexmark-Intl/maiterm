@@ -156,15 +156,16 @@ async function finish(a: Record<string, unknown>): Promise<unknown> {
   return failed.length ? { ok: false, stopped, cancelled, failed } : { ok: true, stopped, cancelled };
 }
 
-/** `hive.relaunch {workspace_id, tab_id}`: a worker's agent started again in its own tab. A mounted
- *  terminal gets the builder's line through the follow-ups' empty-prompt gate (docs/follow-ups.md
- *  §6.2), never typed over anything; an unmounted tab is mounted, which types it on spawn. */
+/** `hive.relaunch {workspace_id, tab_id}`: a worker's agent started again in its own tab, or a Done
+ *  Hive's coordinator woken by its human (docs/hive.md §11.4). A mounted terminal gets the builder's
+ *  line through the follow-ups' empty-prompt gate (docs/follow-ups.md §6.2), never typed over
+ *  anything; an unmounted tab is mounted, which types it on spawn. */
 async function relaunch(a: Record<string, unknown>): Promise<unknown> {
   const { workspace_id: workspaceId, tab_id: tabId } = a;
   if (typeof workspaceId !== 'string' || typeof tabId !== 'string') return { error: 'workspace_id and tab_id are required' };
   const ws = workspacesStore.workspaces.find((w) => w.id === workspaceId);
   const tab = ws?.panes.flatMap((p) => p.tabs).find((t) => t.id === tabId);
-  if (!ws?.hive || tab?.hive_role !== 'worker') return { error: 'This window holds no such worker tab.' };
+  if (!ws?.hive || (tab?.hive_role !== 'worker' && tab?.hive_role !== 'coordinator')) return { error: 'This window holds no such Hive agent tab.' };
   if (terminalsStore.get(tabId)) {
     const held = await followUpsStore.relaunchAgent(tabId);
     return held ? { error: held } : { ok: true };

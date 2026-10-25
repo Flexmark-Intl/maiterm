@@ -1412,6 +1412,35 @@ pub(crate) async fn send_tab_message(
     if text.trim().is_empty() && files.is_empty() {
         return json!({ "status": "empty" });
     }
+    // A Done Hive's coordinator has no agent: the human's message wakes the Hive (docs/hive.md
+    // §11.4). Only this human path routes there; nothing an agent sends reaches it.
+    let route = crate::hive::finish::route_send(&app.app_data.read(), tab_id, files.is_empty());
+    match route {
+        crate::hive::finish::Route::Send => {}
+        crate::hive::finish::Route::Refuse(detail) => return json!({ "status": "failed", "detail": detail }),
+        crate::hive::finish::Route::Wake(caller) => {
+            let Some(h) = handle else {
+                return json!({ "status": "failed", "detail": "No maiTerm window to relaunch the Hive's coordinator in." });
+            };
+            let ctx = crate::hive::tools::app_ctx(app, h, &caller);
+            match crate::hive::finish::wake(&ctx, &caller, text, crate::hive::finish::BY_DESKTOP).await {
+                Ok(crate::hive::finish::WakeOutcome::Relaunching) => {
+                    return json!({ "status": "delivered", "woke": "hive",
+                        "detail": "This Hive was done; its coordinator is resuming and gets your message once it's up." });
+                }
+                Ok(crate::hive::finish::WakeOutcome::Unconfirmed) => {
+                    return json!({ "status": "delivered", "woke": "hive",
+                        "detail": "This Hive was done. Its window didn't confirm the coordinator's relaunch (its screen may be asleep); your message waits for the coordinator's next start." });
+                }
+                Ok(crate::hive::finish::WakeOutcome::Delivered) => {
+                    return json!({ "status": "delivered", "woke": "hive", "detail": "Woke the Hive: its coordinator was still up and has your message." });
+                }
+                // Woken meanwhile (the phone): an ordinary message now.
+                Err(e) if e == crate::hive::finish::NOT_DONE => {}
+                Err(e) => return json!({ "status": "failed", "detail": e }),
+            }
+        }
+    }
     // Any dialog at all, not only a prompt the hooks reported: a picker or a question the hooks
     // missed takes the text and its CR just the same.
     let prompt_up = || {

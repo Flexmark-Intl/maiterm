@@ -817,6 +817,7 @@
         actions={null}
         emptyText="This Hive has no coordinator tab."
         gallery={hive ? { hiveId: hive.id, workspaceId } : null}
+        composerPlaceholder={hive?.status === 'done' ? 'This Hive is done. Send a message to wake it.' : undefined}
       >
         {#snippet header()}
           <span class="role">coordinator</span>

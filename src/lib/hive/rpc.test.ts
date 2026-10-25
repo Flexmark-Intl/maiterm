@@ -116,18 +116,31 @@ describe('handleHiveRequest', () => {
     terminalGet.mockReturnValue(undefined);
     await handleHiveRequest({ request_id: 'l3', verb: 'hive.relaunch', args: { workspace_id: 'ws', tab_id: 'tab-w' } });
     expect(activated).toEqual(['tab-w']);
-    for (const tab_id of ['coord', 't1', 'nope']) {
+    for (const tab_id of ['t1', 'nope']) {
       await handleHiveRequest({ request_id: tab_id, verb: 'hive.relaunch', args: { workspace_id: 'ws', tab_id } });
     }
+    await handleHiveRequest({ request_id: 'plain', verb: 'hive.relaunch', args: { workspace_id: 'plain', tab_id: 't1' } });
     expect(answered().map((a) => a.result)).toEqual([
       { ok: true },
       { error: 'someone is typing in the tab' },
       { ok: true },
-      { error: 'This window holds no such worker tab.' },
-      { error: 'This window holds no such worker tab.' },
-      { error: 'This window holds no such worker tab.' },
+      { error: 'This window holds no such Hive agent tab.' },
+      { error: 'This window holds no such Hive agent tab.' },
+      { error: 'This window holds no such Hive agent tab.' },
     ]);
     expect(relaunchAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('a woken coordinator relaunches the way a worker does', async () => {
+    terminalGet.mockReturnValue({ ptyId: 'p' });
+    relaunchAgent.mockResolvedValueOnce(null);
+    await handleHiveRequest({ request_id: 'c1', verb: 'hive.relaunch', args: { workspace_id: 'ws', tab_id: 'coord' } });
+    expect(relaunchAgent).toHaveBeenCalledWith('coord');
+    terminalGet.mockReturnValue(undefined);
+    await handleHiveRequest({ request_id: 'c2', verb: 'hive.relaunch', args: { workspace_id: 'ws', tab_id: 'coord' } });
+    expect(activated).toEqual(['coord']);
+    expect(answered().map((a) => a.result)).toEqual([{ ok: true }, { ok: true }]);
+    terminalGet.mockReset();
   });
 
   it('a relaunch that throws is still answered', async () => {
