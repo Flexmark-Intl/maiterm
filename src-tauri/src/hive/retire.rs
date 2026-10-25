@@ -3,8 +3,8 @@
 //! Retirement never deletes work: its branches always stay, a worktree goes only when git says it
 //! holds nothing uncommitted or untracked, and never one whose `.git` file maiTerm can't vouch for
 //! (a worker can rewrite it, and maiTerm's own `git worktree remove` would then follow it into a
-//! repo whose config the worker wrote). Its `scratch/` stays until the gallery can take what's in
-//! it (step 8). The tab goes, the task row stays, and the session list it leaves behind is what
+//! repo whose config the worker wrote). Its `scratch/` goes only once every file in it is one of
+//! its task's gallery assets, byte for byte. The tab goes, the task row stays, and the session list it leaves behind is what
 //! `get_task_transcript` reads.
 
 use std::collections::HashSet;
@@ -169,6 +169,49 @@ pub(crate) fn scratch_has_work(scratch: &Path) -> bool {
     fs::read_dir(scratch).into_iter().flatten().flatten().any(|e| e.file_name() != "brief.md")
 }
 
+/// Past these a scratch folder is kept without hashing it all (plan D15).
+const COVER_MAX_FILES: usize = 10_000;
+const COVER_MAX_BYTES: u64 = 20 << 30;
+
+/// Whether everything in a worker's `scratch/` is in the gallery (§8.4, plan D15): every regular
+/// file's SHA-256 equals one of this task's assets out of the trash. maiTerm's `brief.md` aside,
+/// empty folders count as nothing; a link, anything but a file or folder, an unreadable entry,
+/// or more than 10,000 files or 20 GB counts as not covered. Blocks.
+pub(crate) fn scratch_covered(scratch: &Path, gallery: &super::gallery::Gallery, task_id: &str) -> bool {
+    let Ok(assets) = gallery.task_assets(task_id) else { return false };
+    let shas: HashSet<String> = assets.into_iter().filter(|a| !a.in_trash()).map(|a| a.sha256).collect();
+    let (mut files, mut bytes) = (0usize, 0u64);
+    let mut stack = vec![scratch.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { return false };
+        for e in entries {
+            let Ok(e) = e else { return false };
+            let p = e.path();
+            if dir == scratch && e.file_name() == "brief.md" {
+                continue;
+            }
+            let Ok(m) = fs::symlink_metadata(&p) else { return false };
+            if m.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !m.is_file() {
+                return false;
+            }
+            files += 1;
+            bytes += m.len();
+            if files > COVER_MAX_FILES || bytes > COVER_MAX_BYTES {
+                return false;
+            }
+            match super::gallery::ingest::hash_file(&p) {
+                Ok((sha, _)) if shas.contains(&sha) => {}
+                _ => return false,
+            }
+        }
+    }
+    true
+}
+
 /// What retirement did on disk.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Disk {
@@ -179,7 +222,8 @@ pub(crate) struct Disk {
 
 /// A retiring worker's disk (§8.4): each clean worktree goes (a reviewer's detached copies
 /// whatever they hold), maiTerm's own caches go (a warm cargo target is gigabytes, and no work
-/// lives in either), its scratch and branches stay. Blocks.
+/// lives in either), its branches stay, and its scratch stays unless the gallery holds everything
+/// in it (`scratch_covered`). Blocks.
 pub(crate) fn retire_disk(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> Disk {
     let mut out = Disk::default();
     for f in w.git_folders() {
@@ -202,7 +246,15 @@ pub(crate) fn retire_disk(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> D
         }
         let scratch = paths.worker_scratch(&w.slug);
         if scratch_has_work(&scratch) {
-            out.kept.push(format!("scratch: {}", scratch.display()));
+            let covered = super::gallery::for_paths(&hive.id, paths).is_ok_and(|g| scratch_covered(&scratch, &g, &w.task_id));
+            match covered.then(|| remove_path(&scratch)) {
+                Some(Ok(())) => log::info!("hive {}: {}'s scratch removed: the gallery holds everything in it", hive.id, worker_label(w)),
+                Some(Err(e)) => {
+                    log::warn!("hive {}: {} left in place: {e}", hive.id, scratch.display());
+                    out.kept.push(format!("scratch: {}", scratch.display()));
+                }
+                None => out.kept.push(format!("scratch: {}", scratch.display())),
+            }
         }
     }
     out
@@ -364,7 +416,7 @@ pub(crate) fn tool_definition(tab_id: &Value) -> Value {
         "description": "Retire a worker for good, abandoning its task: its task goes to dropped (workers that depend on it are \
             blocked, and you're told), its agent ends and its tab goes, its run-queue jobs are released. Its branches are \
             always kept; each worktree is removed only if it holds nothing uncommitted or untracked (the answer lists what \
-            was kept); its scratch folder is kept. Its chat stays readable in its column. For a stopped, failed, waiting or \
+            was kept); its scratch folder is kept unless every file in it is one of its gallery assets. Its chat stays readable in its column. For a stopped, failed, waiting or \
             reported worker; one still working (starting, running, blocked) is refused: hiveStopWorker it first. A landing \
             worker is retired only while its land is held, abandoning the rest of it (what landed stays landed). The reason \
             goes on its task.",
@@ -585,6 +637,67 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &link).unwrap();
         let roots = vec![crate::share::canon(&base.join("projects"))];
         assert!(readable_transcript(&link.to_string_lossy(), &roots).is_none());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Files `rel` from `sc` into the gallery for `task`, as galleryAdd stores it.
+    fn file_into(g: &crate::hive::gallery::Gallery, sc: &Path, rel: &str, task: &str) -> String {
+        use crate::hive::gallery::{ingest, model};
+        let src = ingest::authorize(Path::new(rel), sc, &[sc.to_path_buf()], g.root()).unwrap();
+        let id = model::mint(model::ASSET_PREFIX);
+        let stored = ingest::store_file(&src, &g.files_dir(), &id).unwrap();
+        g.insert_asset(model::NewAsset { id: id.clone(), file: stored.file, sha256: stored.sha256, bytes: stored.bytes, title: rel.into(), task_id: Some(task.into()), ..Default::default() })
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn a_scratch_goes_only_when_the_gallery_holds_every_file_in_it() {
+        let base = scratch("cover");
+        let paths = HivePaths::new(base.join("hive"));
+        let hive = Hive { id: format!("h-{}", uuid::Uuid::new_v4()), ..Hive::default() };
+        let w = WorkerRecord { task_id: "t1".into(), slug: "auth".into(), badge: 1, ..WorkerRecord::default() };
+        let sc = paths.worker_scratch("auth");
+        fs::create_dir_all(sc.join("renders/empty")).unwrap();
+        fs::write(sc.join("brief.md"), "maiTerm's").unwrap();
+        fs::write(sc.join("renders/hero.png"), "png").unwrap();
+        let g = crate::hive::gallery::for_paths(&hive.id, &paths).unwrap();
+        assert!(!scratch_covered(&sc, &g, "t1"), "nothing filed yet");
+        let hero = file_into(&g, &sc, "renders/hero.png", "t1");
+        assert!(scratch_covered(&sc, &g, "t1"), "the brief and an empty folder count as nothing");
+        assert!(!scratch_covered(&sc, &g, "t2"), "another task's assets cover nothing");
+
+        fs::write(sc.join("notes.txt"), "x").unwrap();
+        assert!(!scratch_covered(&sc, &g, "t1"), "an extra file");
+        fs::remove_file(sc.join("notes.txt")).unwrap();
+        fs::write(sc.join("renders/hero.png"), "png, edited").unwrap();
+        assert!(!scratch_covered(&sc, &g, "t1"), "a file changed after it was filed");
+        fs::write(sc.join("renders/hero.png"), "png").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(sc.join("renders/hero.png"), sc.join("link.png")).unwrap();
+            assert!(!scratch_covered(&sc, &g, "t1"), "a link");
+            fs::remove_file(sc.join("link.png")).unwrap();
+        }
+        g.trash(std::slice::from_ref(&hero)).unwrap();
+        assert!(!scratch_covered(&sc, &g, "t1"), "an asset in the trash isn't in the gallery for this");
+        g.restore(std::slice::from_ref(&hero)).unwrap();
+
+        // Another worker's scratch with one file unfiled stays, listed.
+        let other = WorkerRecord { task_id: "t2".into(), slug: "db".into(), badge: 2, ..WorkerRecord::default() };
+        let osc = paths.worker_scratch("db");
+        fs::create_dir_all(&osc).unwrap();
+        fs::write(osc.join("a.wav"), "wav").unwrap();
+        fs::write(osc.join("b.wav"), "wav two").unwrap();
+        file_into(&g, &osc, "a.wav", "t2");
+        let kept = retire_disk(&hive, &paths, &other);
+        assert!(osc.join("b.wav").is_file() && kept.kept.iter().any(|k| k.starts_with("scratch: ")), "{:?}", kept.kept);
+
+        let disk = retire_disk(&hive, &paths, &w);
+        assert!(!sc.exists(), "covered: removed");
+        assert!(disk.kept.is_empty(), "{:?}", disk.kept);
+        assert!(g.get(&hero).unwrap().is_some_and(|a| g.file_path(&a).is_file()), "the gallery's copy outlives it");
+        crate::hive::gallery::forget(&hive.id);
         let _ = fs::remove_dir_all(&base);
     }
 

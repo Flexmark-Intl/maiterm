@@ -304,16 +304,24 @@ fn answers_given_while_an_offer_stood_count_for_nothing_after_it_is_answered() {
 }
 
 #[test]
-fn interfaces_finals_and_integration_landing_are_never_offered() {
-    let lines: Vec<DecisionLine> = ["interfaces", "finals", "landing"].iter().flat_map(|c| (0..6).map(|_| taken(c))).collect();
+fn interfaces_and_integration_landing_are_never_offered() {
+    let lines: Vec<DecisionLine> = ["interfaces", "landing"].iter().flat_map(|c| (0..6).map(|_| taken(c))).collect();
     let integ = asks_all(LANDING_INTEGRATION_MODE);
     assert!(evaluate(&lines, &integ, &[], now(), |_| None).is_empty());
     let base = asks_all("base");
     assert_eq!(evaluate(&lines, &base, &[], now(), |_| None).iter().map(|o| o.checkpoint.as_str()).collect::<Vec<_>>(), vec!["landing"]);
     assert!(!earnable(&integ, "landing") && earnable(&base, "landing"));
-    for k in ["interfaces", "finals"] {
-        assert!(!earnable(&base, k));
-    }
+    assert!(!earnable(&base, "interfaces"));
+}
+
+/// The coordinator's `galleryTag` final/rejected decisions (step 8b) are the finals signal: two
+/// overrides of them in a day offer the checkpoint back.
+#[test]
+fn finals_is_handed_back_after_two_overrides_of_the_coordinators_picks() {
+    let h = base_hive("base");
+    assert!(earnable(&h, "finals"));
+    let lines = vec![overridden("finals", None, "2026-10-24T10:00:00Z"), overridden("finals", None, "2026-10-24T11:00:00Z")];
+    assert_eq!(evaluate(&lines, &h, &[], now(), |_| None), vec![Offer { checkpoint: "finals".into(), kind: HAND_BACK.into(), count: 2 }]);
 }
 
 const LANDING_INTEGRATION_MODE: &str = crate::hive::record::LANDING_INTEGRATION;

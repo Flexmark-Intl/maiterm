@@ -50,6 +50,7 @@ pub struct HiveDeletePreview {
     /// Worktrees that would stay, each with why.
     pub dirty: Vec<String>,
     pub scratch: Vec<ScratchFolder>,
+    /// The gallery's assets that still have their file (the trash's included), from its index.
     pub gallery_files: u64,
     pub gallery_bytes: u64,
     /// Agents that would be stopped: `#badge slug`, and the coordinator.
@@ -194,6 +195,21 @@ fn unaccounted(hive: &Hive, paths: &HivePaths, workers: &[WorkerRecord]) -> Vec<
     out
 }
 
+/// The gallery's assets and their bytes, from its index: the folder also holds the index, its WAL
+/// files and the thumbnails. No index means nothing was ever filed.
+fn gallery_totals(hive: &Hive, paths: &HivePaths) -> (u64, u64) {
+    if !paths.gallery_index().is_file() {
+        return (0, 0);
+    }
+    match super::gallery::for_paths(&hive.id, paths).and_then(|g| g.totals()) {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("hive {}: the gallery's size couldn't be read: {e}", hive.id);
+            (0, 0)
+        }
+    }
+}
+
 /// The sheet's list (§11.2). Reads only: git runs in the human's repos, and in a worktree only on
 /// the git dir maiTerm recorded, after its `.git` file checks out. Blocks.
 pub(crate) fn preview(hive: &Hive, paths: &HivePaths, has_coordinator: bool) -> HiveDeletePreview {
@@ -240,7 +256,7 @@ pub(crate) fn preview(hive: &Hive, paths: &HivePaths, has_coordinator: bool) -> 
     if has_coordinator {
         p.live_agents.insert(0, "the coordinator".to_string());
     }
-    (p.gallery_files, p.gallery_bytes) = tree_size(&paths.gallery());
+    (p.gallery_files, p.gallery_bytes) = gallery_totals(hive, paths);
     p.branches = hive_branches(hive, &workers);
     p
 }

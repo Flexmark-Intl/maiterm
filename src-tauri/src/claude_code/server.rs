@@ -1194,6 +1194,8 @@ async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<App
         t if crate::browser_link::is_browser_tool(t) => Some(crate::browser_link::handle_tool(t, arguments, state, app_handle).await),
         // Every `hive*` name, built or not, so none falls through to the frontend's switch.
         t if t.starts_with("hive") => Some(crate::hive::tools::handle(t, arguments, state, app_handle).await),
+        // The Hive's gallery (docs/hive.md §10.3), likewise every `gallery*` name.
+        t if t.starts_with("gallery") => Some(crate::hive::gallery::tools::handle(t, arguments, state, app_handle).await),
         "postCommsReply" => Some(handle_post_comms_reply(arguments, state, app_handle).await),
         "startCommsThread" => Some(handle_start_comms_thread(arguments, state, app_handle).await),
         "unbindCommsThread" => {
@@ -2901,7 +2903,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 81] = [
+const PEER_ADDRESSING_TOOLS: [&str; 87] = [
     // A tab's auto-resume command and its trigger variables (interpolated unescaped into that
     // command, e.g. `%claudeSessionId`) run in that tab's shell at its next spawn or recover:
     // set on another tab, they plant a command there.
@@ -3014,6 +3016,13 @@ const PEER_ADDRESSING_TOOLS: [&str; 81] = [
     "hiveRun",
     "hiveReport",
     "hiveVerdict",
+    // The gallery files as the caller's worker and task (docs/hive.md §10.3).
+    "galleryAdd",
+    "galleryList",
+    "galleryGet",
+    "galleryTag",
+    "galleryCollect",
+    "galleryDeliver",
 ];
 
 /// Tools that may only ever address the CALLING tab (docs/follow-ups.md §2). Elsewhere an
@@ -3024,7 +3033,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 81] = [
 /// The agent-request tools (agent_requests.rs) are here for the same reason from the other side:
 /// a request is shown to the human as "the agent in <tab> asks…", so the tab named must be the
 /// caller, and a request's status is only its own tab's to read.
-const OWN_TAB_ONLY_TOOLS: [&str; 59] = [
+const OWN_TAB_ONLY_TOOLS: [&str; 65] = [
     // What a tab's shell runs on its next spawn is that tab's own business: with any `tabId`,
     // one agent could set the command another tab replays (found by the Hive spike 15 audit,
     // 2026-10-23). The only in-repo use is an agent fixing its OWN auto-resume.
@@ -3081,6 +3090,13 @@ const OWN_TAB_ONLY_TOOLS: [&str; 59] = [
     "hiveRun",
     "hiveReport",
     "hiveVerdict",
+    // A gallery tool files and tags as the caller's worker and task (docs/hive.md §10.3).
+    "galleryAdd",
+    "galleryList",
+    "galleryGet",
+    "galleryTag",
+    "galleryCollect",
+    "galleryDeliver",
     // The stack tools resolve their workspace from `tabId` (docs/stack.md §6.1): another tab's
     // is another project's database to stop or shell to type into. Reads too, which name the
     // commands and output of a project that isn't the caller's (Hive spike 15, 2026-10-23).

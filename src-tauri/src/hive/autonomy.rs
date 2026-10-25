@@ -5,13 +5,15 @@
 //! own decision blocker on the coordinator's "Hive autonomy: …" row, so it waits where every
 //! question does, and only the human's answer (`hive_blocker_answered`) changes the checkpoint.
 //!
-//! Offers are category `offer`: never a precedent, never a streak. `interfaces` has no Rust signal
-//! and `finals` no source until the gallery, so neither is ever offered (plan D15); Landing in the
-//! integration mode is always the human's.
+//! Offers are category `offer`: never a precedent, never a streak. `interfaces` has no Rust signal,
+//! so it is never offered (plan D15); Landing in the integration mode is always the human's.
+//! `finals` is counted from the coordinator's own `galleryTag` final/rejected decisions (step 8b),
+//! which the human can override, so it can be handed back; a hand-over needs the human's finals
+//! answers against a recommendation, which nothing logs yet.
 
 use serde_json::{json, Value};
 
-use super::checkpoints::{self, ASK, CHECKPOINTS, COORDINATOR, LANDING, PERMISSIONS, PLAN, QUESTIONS};
+use super::checkpoints::{self, ASK, CHECKPOINTS, COORDINATOR, FINALS, LANDING, PERMISSIONS, PLAN, QUESTIONS};
 use super::decisions::{self, DecisionLine, DecisionOption, BY_COORDINATOR, BY_HUMAN, EVENT_ANSWERED, EVENT_DIGEST, EVENT_LAPSED, EVENT_OFFER, EVENT_OVERRIDDEN};
 use super::deliver::one_line;
 use super::record::Hive;
@@ -50,7 +52,7 @@ pub fn ms(at: &str) -> Option<i64> {
 
 /// Checkpoints maiTerm may offer (§7.6): only what Rust sees decided.
 pub fn earnable(hive: &Hive, key: &str) -> bool {
-    matches!(key, PLAN | QUESTIONS | PERMISSIONS) || (key == LANDING && !hive.is_integration())
+    matches!(key, PLAN | QUESTIONS | PERMISSIONS | FINALS) || (key == LANDING && !hive.is_integration())
 }
 
 /// The checkpoint an `offer` line is about.

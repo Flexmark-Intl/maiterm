@@ -123,7 +123,7 @@
         </section>
         <label class="check">
           <input type="checkbox" bind:checked={deleteGallery} disabled={deleting} />
-          <span>Also delete the gallery ({preview.gallery_files} file{preview.gallery_files === 1 ? '' : 's'}, {formatBytes(preview.gallery_bytes)})</span>
+          <span>Also delete the gallery ({preview.gallery_files} asset{preview.gallery_files === 1 ? '' : 's'}, {formatBytes(preview.gallery_bytes)})</span>
         </label>
         {#if blocked}<p class="error" role="alert">{blocked}</p>{/if}
       {/if}

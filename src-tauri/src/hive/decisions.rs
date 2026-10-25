@@ -59,6 +59,8 @@ pub const SOURCE_QUESTION: &str = "question";
 pub const SOURCE_BLOCKER: &str = "blocker";
 pub const SOURCE_LAND: &str = "land";
 pub const SOURCE_RESOLVE: &str = "resolve";
+/// The coordinator setting an asset final or rejected under the Finals checkpoint (step 8b).
+pub const SOURCE_GALLERY: &str = "gallery";
 
 pub const ANSWER_LAND: &str = "Land";
 pub const ANSWER_DONT_LAND: &str = "Don\u{2019}t land";
@@ -85,7 +87,7 @@ pub struct DecisionLine {
     pub hive_id: String,
     /// The checkpoint it fell under, `never`, or later steps' own (`config`, `other`, `offer`…).
     pub category: String,
-    /// `prompt` | `question` | `blocker` | `land` | `resolve` | `plan` | `offer`.
+    /// `prompt` | `question` | `blocker` | `land` | `resolve` | `plan` | `offer` | `gallery`.
     pub source: String,
     pub task_id: Option<String>,
     /// The worker's slug.

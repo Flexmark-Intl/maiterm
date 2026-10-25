@@ -68,7 +68,8 @@ pub fn invariant_rules(hive: &Hive, role: &str, paths: &HivePaths, worker: Optio
              your own worktrees and your scratch folder ({}); commit your work on your branch as you go. When you need a \
              decision or something you can\u{2019}t do, block your task with a blocker: it goes to your coordinator, not to \
              your human; never use AskUserQuestion. Run queued commands with hiveRun, never in your shell. Report with \
-             hiveReport: done is refused without receipts (commits on your branch, files in your folders, or hiveRun jobs). \
+             hiveReport: done is refused without receipts (commits on your branch, files in your folders, gallery assets or \
+             hiveRun jobs). \
              Temp is shared with every other sandboxed session: make files with \
              mktemp -p \"$TMPDIR\" and keep nothing there that matters. No agent in a Hive pushes, changes git remotes or \
              merges pull requests: maiTerm refuses those, and only maiTerm pushes landed work. A tool you need that is \
@@ -268,6 +269,17 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
          the worker on its own. After {} failed reviews the worker is escalated to you: settle it with `hiveResolve`.\n",
         super::review::MAX_ATTEMPTS
     ));
+    b.push_str(&format!(
+        "- The gallery: workers file what they make with galleryAdd, each with its recipe; tell them to. You read it with \
+         galleryList and galleryGet (an asset's stored path is what a worker opens: name it in your message). Curating is \
+         your job: galleryTag sets picked; final and rejected {}; galleryCollect builds ordered collections. What you file \
+         yourself comes from your home. Every paid render is recorded with recipe.cost_usd, kept or not.\n",
+        if super::checkpoints::asks(hive, super::checkpoints::FINALS) {
+            "are your human\u{2019}s while picking finals is Ask me: ask with a decision blocker"
+        } else {
+            "are yours to set, each a decision logged for your human"
+        }
+    ));
     b.push_str(&queued_lines(hive, hive.git_folders().map(|f| f.name.as_str()).collect(), false));
     b.push_str(&checkpoint_lines(hive));
     b.push_str(&precedent_lines(counts));
@@ -351,9 +363,16 @@ pub fn worker_brief_md(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, task_br
          who answers or asks your human. Never substitute or mock a missing tool, file or service.\n\
          - The sandbox refuses network hosts and folders outside your own. A refusal is a blocker to report, never \
          something to work around.\n\
+         - Anything you produce that a person would look at (renders, video, audio, documents, screenshots, recordings) \
+         goes in the gallery with `galleryAdd`, **with the recipe that made it** (tool, model, prompt, seed, settings): a \
+         result without its recipe can't be iterated on. Render into your scratch folder first; a generator that answers \
+         with a URL is downloaded there first, then filed. A variant, an edit or an upscale names what it came from in \
+         `parents`. Record every paid render with `recipe.cost_usd`, kept or not: a discarded or failed one is a \
+         `galleryAdd` with no path. `galleryList` and `galleryGet` give an asset's stored path to use as an input; the \
+         stored file is read-only. You may tag, star and mark assets picked; final and rejected aren't yours.\n\
          - Report with `hiveReport`: `status` done, blocked or failed, a `summary`, and for done the `receipts` maiTerm \
-         checks: `commits` (shas on your branch), `files` (paths in your folders) and `checks` (`hiveRun` jobs that passed on \
-         your committed tip). A done report without receipts is refused.\n",
+         checks: `commits` (shas on your branch), `files` (paths in your folders), `assets` (gallery ids `galleryAdd` gave \
+         you) and `checks` (`hiveRun` jobs that passed on your committed tip). A done report without receipts is refused.\n",
     );
     b.push_str(&format!("- Shared memory is `{}`. {MEMORY_RULE}\n", paths.memory().display()));
     b.push_str(&queued_lines(hive, w.folders.iter().filter(|f| f.worktree.is_some()).map(|f| f.name.as_str()).collect(), true));
@@ -614,6 +633,22 @@ mod tests {
         h.checkpoints.insert("plan".into(), "ask".into());
         let b = brief_md(&h, &p, &PrecedentCounts::default());
         assert!(b.contains("propose them with hiveProposePlan") && b.contains("starts each listed title once"), "{b}");
+    }
+
+    /// §10.3: workers file with the recipe and report assets; the coordinator curates, with final
+    /// and rejected following the Finals checkpoint.
+    #[test]
+    fn both_briefs_say_how_the_gallery_works() {
+        let (mut h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        let b = worker_brief_md(&h, &p, &w, "Make the hero.", None);
+        for must in ["`galleryAdd`, **with the recipe that made it**", "downloaded there first", "`recipe.cost_usd`, kept or not", "`assets` (gallery ids", "use as an input"] {
+            assert!(b.contains(must), "{must}: {b}");
+        }
+        let c = brief_md(&h, &p, &PrecedentCounts::default());
+        assert!(c.contains("galleryCollect builds ordered collections") && c.contains("final and rejected are yours to set"), "{c}");
+        h.checkpoints.insert("finals".into(), "ask".into());
+        let c = brief_md(&h, &p, &PrecedentCounts::default());
+        assert!(c.contains("final and rejected are your human\u{2019}s while picking finals is Ask me"), "{c}");
     }
 
     /// §7.5: the brief carries counts by category and how to check, cite and record, never the

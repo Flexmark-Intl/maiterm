@@ -730,6 +730,42 @@ impl Gallery {
         self.conn.lock().query_row("SELECT COALESCE(SUM(cost_micros), 0) FROM spends", [], |r| r.get(0)).map_err(err)
     }
 
+    /// An asset's children out of the trash, oldest first: `(id, title)`.
+    pub fn children_of(&self, id: &str) -> Result<Vec<(String, String)>, String> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id, c.title FROM asset_parents p JOIN assets c ON c.id = p.asset_id
+                 WHERE p.parent_id = ?1 AND c.deleted_at IS NULL AND c.purged = 0 ORDER BY c.created_ms, c.rowid",
+            )
+            .map_err(err)?;
+        let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?;
+        rows.collect::<Result<_, _>>().map_err(err)
+    }
+
+    /// Assets that still have their file (the trash's included) and their bytes: what deleting
+    /// the gallery would remove, counted from the index rather than the folder, which also holds
+    /// the index, its WAL files and the thumbnails.
+    pub fn totals(&self) -> Result<(u64, u64), String> {
+        self.conn
+            .lock()
+            .query_row("SELECT count(*), COALESCE(SUM(bytes), 0) FROM assets WHERE purged = 0", [], |r| {
+                Ok((r.get::<_, i64>(0)?.max(0) as u64, r.get::<_, i64>(1)?.max(0) as u64))
+            })
+            .map_err(err)
+    }
+
+    /// Removes a stored file no row records: a store whose filing then failed or turned out a
+    /// duplicate.
+    pub fn discard_file(&self, file: &str) {
+        if file.is_empty() || file.contains(['/', '\\']) {
+            return;
+        }
+        if let Err(e) = remove_stored(&self.files_dir().join(file)) {
+            log::warn!("gallery {}: unfiled {file} left in files/: {e}", self.root.display());
+        }
+    }
+
     /// Every asset a task filed that still has its file, the trash's included, oldest first.
     pub fn task_assets(&self, task_id: &str) -> Result<Vec<Asset>, String> {
         let conn = self.conn.lock();

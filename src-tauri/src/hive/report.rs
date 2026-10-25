@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use super::deliver::{frame_escape, one_line};
+use super::gallery::model::is_asset_id;
+use super::gallery::Gallery;
 use super::paths::HivePaths;
 use super::rpc::HiveWindow;
 use super::tools::{blocking, worker_label, Caller, Ctx};
@@ -26,8 +28,8 @@ pub fn tool_definition(tab_id: &Value) -> Value {
             "Report to your coordinator: done, blocked (you can't go on without something only it or the human can give) or \
              failed. maiTerm checks your receipts itself and records the report on your task. done is refused without at least \
              one receipt that checks out: commits (each must be on your branch, made since you started), files (each must \
-             exist in your worktrees or scratch folder) or checks (each a hiveRun job of yours that passed on a committed tree \
-             at your reported tip or after it). Gallery assets aren't available yet: report a made file as a files receipt. \
+             exist in your worktrees or scratch folder), assets (each a gallery asset filed for your task with galleryAdd) or \
+             checks (each a hiveRun job of yours that passed on a committed tree at your reported tip or after it). \
              Summary at most {MAX_SUMMARY} characters: what you did, how you checked it, what's left."
         ),
         "inputSchema": {
@@ -41,7 +43,7 @@ pub fn tool_definition(tab_id: &Value) -> Value {
                     "properties": {
                         "commits": { "type": "array", "items": { "type": "string" }, "description": "Commit shas on your branch" },
                         "files": { "type": "array", "items": { "type": "string" }, "description": "Files you made or changed: absolute, or relative to your working folder" },
-                        "assets": { "type": "array", "items": { "type": "string" }, "description": "Not available yet (arrives with the gallery)" },
+                        "assets": { "type": "array", "items": { "type": "string" }, "description": "Gallery asset ids (a-…) galleryAdd answered for your task" },
                         "checks": {
                             "type": "array",
                             "items": {
@@ -130,9 +132,31 @@ impl ReportArgs {
     }
 }
 
-/// Which gallery task an asset belongs to (§10.3). No gallery until step 8, so none does.
-fn gallery_asset_task(_asset: &str) -> Option<String> {
-    None
+/// An asset receipt (§10.3): filed for this worker's task, which is its identity, so an earlier
+/// incarnation's assets count; out of the trash. Answers it as the report lists it.
+fn gallery_asset(g: &Gallery, w: &WorkerRecord, id: &str) -> Result<CheckedAsset, String> {
+    let shown = one_line(id, 40);
+    if !is_asset_id(id) {
+        return Err(format!("\"{shown}\" isn't a gallery asset id (a- and 12 hex digits): galleryAdd answers with one."));
+    }
+    let a = g.get(id)?.ok_or_else(|| format!("Asset {shown} isn't in this Hive's gallery."))?;
+    if a.task_id.as_deref() != Some(w.task_id.as_str()) {
+        return Err(format!("Asset {shown} wasn't filed for your task, so it isn't a receipt of your work."));
+    }
+    if a.in_trash() {
+        return Err(format!("Asset {shown} is in the gallery's trash: file it again if it's still your result."));
+    }
+    Ok(CheckedAsset { path: g.file_path(&a).to_string_lossy().to_string(), id: a.id, title: a.title, kind: a.kind })
+}
+
+/// An asset receipt as maiTerm checked it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct CheckedAsset {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    /// The stored file.
+    pub path: String,
 }
 
 /// A receipt as maiTerm checked it: the folder a commit is on, a file's real path.
@@ -141,13 +165,18 @@ pub(crate) struct Checked {
     /// (folder name, full sha)
     pub commits: Vec<(String, String)>,
     pub files: Vec<String>,
+    pub assets: Vec<CheckedAsset>,
     /// (job id, the queued command it ran, summary)
     pub checks: Vec<(String, String, String)>,
 }
 
 impl Checked {
     fn is_empty(&self) -> bool {
-        self.commits.is_empty() && self.files.is_empty() && self.checks.is_empty()
+        self.commits.is_empty() && self.files.is_empty() && self.assets.is_empty() && self.checks.is_empty()
+    }
+
+    fn count(&self) -> usize {
+        self.commits.len() + self.files.len() + self.assets.len() + self.checks.len()
     }
 }
 
@@ -155,15 +184,19 @@ fn is_sha(s: &str) -> bool {
     (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Each receipt, checked by maiTerm (§7.7), or the first that doesn't hold. Blocks on git.
-pub(crate) fn verify_receipts(paths: &HivePaths, w: &WorkerRecord, a: &ReportArgs) -> Result<Checked, String> {
-    if let Some(asset) = a.assets.iter().find(|id| gallery_asset_task(id).as_deref() != Some(w.task_id.as_str())) {
-        return Err(format!(
-            "Asset \"{}\" can't be checked: the gallery isn't in this build yet. Report the file itself as a files receipt.",
-            one_line(asset, 80)
-        ));
-    }
+/// Each receipt, checked by maiTerm (§7.7), or the first that doesn't hold. Blocks on git and
+/// the gallery's index.
+pub(crate) fn verify_receipts(paths: &HivePaths, hive_id: &str, w: &WorkerRecord, a: &ReportArgs) -> Result<Checked, String> {
     let mut out = Checked::default();
+    if !a.assets.is_empty() {
+        let g = super::gallery::for_paths(hive_id, paths)?;
+        for id in &a.assets {
+            let asset = gallery_asset(&g, w, id)?;
+            if !out.assets.iter().any(|x| x.id == asset.id) {
+                out.assets.push(asset);
+            }
+        }
+    }
     for sha in &a.commits {
         let full = verify_commit(w, sha)?;
         if !out.commits.contains(&full) {
@@ -327,6 +360,9 @@ pub(crate) fn report_message(w: &WorkerRecord, a: &ReportArgs, c: &Checked) -> S
         for f in &c.files {
             out.push_str(&format!("\nFile: {}", one_line(f, 300)));
         }
+        for x in &c.assets {
+            out.push_str(&format!("\nAsset {}: {} ({}): {}", x.id, frame_escape(&one_line(&x.title, 200)), x.kind, one_line(&x.path, 300)));
+        }
         for (job, entry, summary) in &c.checks {
             out.push_str(&format!("\nRun {job} (`{}`) passed on its branch, by maiTerm's own record", one_line(entry, 80)));
             if !summary.is_empty() {
@@ -346,7 +382,7 @@ pub(crate) fn report_message(w: &WorkerRecord, a: &ReportArgs, c: &Checked) -> S
 /// The task note: the status and the summary, as the board shows it.
 fn report_note(a: &ReportArgs, c: &Checked) -> String {
     let mut note = format!("Reported {}: {}", a.status, frame_escape(&a.summary));
-    let receipts = c.commits.len() + c.files.len() + c.checks.len();
+    let receipts = c.count();
     if receipts > 0 {
         note.push_str(&format!(" ({receipts} receipt{} checked)", if receipts == 1 { "" } else { "s" }));
     }
@@ -368,10 +404,10 @@ pub(crate) async fn report<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, arg
     if w.phase == worker::PHASE_LANDING && !super::land::held(&w) {
         return Err("Your coordinator is landing the work you reported: there's nothing to report until it's done or sent back to you.".to_string());
     }
-    let (paths, record, args_c) = (caller.paths.clone(), w.clone(), a.clone());
-    let checked = blocking(move || verify_receipts(&paths, &record, &args_c)).await?;
+    let (paths, hive_id, record, args_c) = (caller.paths.clone(), caller.hive.id.clone(), w.clone(), a.clone());
+    let checked = blocking(move || verify_receipts(&paths, &hive_id, &record, &args_c)).await?;
     if a.status == "done" && checked.is_empty() {
-        return Err("done needs at least one receipt maiTerm can check: a commit on your branch, a file you made, or a passing hiveRun job. Commit your work and report its sha.".to_string());
+        return Err("done needs at least one receipt maiTerm can check: a commit on your branch, a file you made, a gallery asset you filed, or a passing hiveRun job. Commit your work and report its sha.".to_string());
     }
 
     // The board first: a window that can't take the note refuses the whole report.
@@ -385,7 +421,8 @@ pub(crate) async fn report<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, arg
         receipts: WorkerReceipts {
             commits: checked.commits.iter().map(|(_, sha)| sha.clone()).collect(),
             files: checked.files.clone(),
-            checks: checked.checks.iter().map(|(job, _, summary)| worker::CheckReceipt { job: job.clone(), summary: summary.clone() }).collect(),
+            assets: checked.assets.iter().map(|x| x.id.clone()).collect(),
+            checks:checked.checks.iter().map(|(job, _, summary)| worker::CheckReceipt { job: job.clone(), summary: summary.clone() }).collect(),
             ..WorkerReceipts::default()
         },
         notes: a.notes.clone(),
@@ -426,6 +463,7 @@ pub(crate) async fn report<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, arg
         "receipts": {
             "commits": checked.commits.iter().map(|(f, sha)| format!("{f} {sha}")).collect::<Vec<_>>(),
             "files": checked.files,
+            "assets": checked.assets.iter().map(|x| x.id.clone()).collect::<Vec<_>>(),
             "checks": checked.checks.iter().map(|(job, _, _)| job.clone()).collect::<Vec<_>>(),
         },
         "coordinator": delivery,
@@ -510,7 +548,12 @@ mod tests {
 
         fn check(&self, args: Value) -> Result<Checked, String> {
             let a = ReportArgs::parse(&args)?;
-            verify_receipts(&self.paths, &self.w, &a)
+            verify_receipts(&self.paths, &self.hive_id(), &self.w, &a)
+        }
+
+        /// Its own Hive id: the open-gallery cache is process-wide.
+        fn hive_id(&self) -> String {
+            format!("h-{}", self.base.file_name().unwrap().to_string_lossy())
         }
     }
 
@@ -589,11 +632,33 @@ mod tests {
     }
 
     #[test]
-    fn receipts_this_build_cannot_check_are_refused() {
+    fn an_asset_counts_only_when_filed_for_the_workers_task() {
+        use crate::hive::gallery::model::{mint, NewAsset, ASSET_PREFIX};
         let r = Rig::new();
-        let e = r.check(done(json!({ "assets": ["a1"] }))).unwrap_err();
-        assert!(e.contains("gallery isn't in this build"), "{e}");
+        let g = crate::hive::gallery::for_paths(&r.hive_id(), &r.paths).unwrap();
+        let file = |task: Option<&str>, title: &str| {
+            let id = mint(ASSET_PREFIX);
+            g.insert_asset(NewAsset { id: id.clone(), kind: "image".into(), file: format!("{id}.png"), title: title.into(), task_id: task.map(str::to_string), ..NewAsset::default() }).unwrap();
+            id
+        };
+        // An earlier incarnation of the same task filed it: the task id is the identity.
+        let mine = file(Some("t1"), "Hero ⟦x⟧");
+        let theirs = file(Some("t2"), "Other");
+        let coordinators = file(None, "Mood");
+        let c = r.check(done(json!({ "assets": [mine.clone(), mine.clone()] }))).unwrap();
+        assert_eq!(c.assets.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec![mine.as_str()], "once each");
+        assert!(c.assets[0].path.ends_with(&format!("{mine}.png")));
+        let m = report_message(&r.w, &ReportArgs { status: "done".into(), summary: "s".into(), ..ReportArgs::default() }, &c);
+        assert!(m.contains(&format!("Asset {mine}: Hero [x] (image): ")), "{m}");
+        assert_eq!(m.matches('⟦').count(), 1, "{m}");
+        for (id, says) in [(theirs.as_str(), "wasn't filed for your task"), (coordinators.as_str(), "wasn't filed for your task"), ("a-0123456789ab", "isn't in this Hive's gallery"), ("hero.png", "isn't a gallery asset id")] {
+            let e = r.check(done(json!({ "assets": [id] }))).unwrap_err();
+            assert!(e.contains(says), "{id}: {e}");
+        }
+        g.trash(std::slice::from_ref(&mine)).unwrap();
+        assert!(r.check(done(json!({ "assets": [mine] }))).unwrap_err().contains("trash"));
         assert!(r.check(done(json!({ "checks": [], "assets": [] }))).unwrap().is_empty(), "empty is absent");
+        crate::hive::gallery::forget(&r.hive_id());
     }
 
     /// A finished run of this worker's on its branch, as the queue logs it.
@@ -687,6 +752,7 @@ mod tests {
             commits: vec![("web".into(), "0123456789abcdef0123".into())],
             files: vec!["/w/out.txt".into()],
             checks: vec![("j-0123abcd".into(), "cargo test".into(), "[maiTerm] all green".into())],
+            ..Checked::default()
         };
         let m = report_message(&w, &a, &c);
         assert!(m.starts_with("⟦HIVE REPORT · Auth [x]⟧ Worker #2 auth reports done."), "{m}");

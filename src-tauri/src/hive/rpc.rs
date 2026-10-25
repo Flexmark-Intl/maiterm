@@ -107,6 +107,8 @@ pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     fn tasks_changed(&self, _workspace_id: &str, _tasks: &[crate::state::Task], _workstreams: &[crate::state::Workstream]) {}
     /// Rust changed the Hive's record (a checkpoint handed over or back): the window's mirror follows.
     fn hive_changed(&self, _workspace_id: &str, _hive: &super::record::Hive) {}
+    /// Assets were filed or changed (`hive-gallery-changed`): the gallery view refetches.
+    fn gallery_changed(&self, _caller: &super::tools::Caller, _ids: &[String]) {}
 }
 
 /// A Hive's card for the human, as Rust builds it: every word maiTerm's but `reason`.
@@ -306,6 +308,14 @@ impl HiveWindow for AppWindow {
         let payload = serde_json::json!({ "workspace_id": workspace_id, "hive": hive });
         if let Err(e) = self.handle.emit_to(self.label.as_str(), super::fuses::HIVE_CHANGED_EVENT, payload) {
             log::warn!("hive {}: change not sent to window {}: {e}", hive.id, self.label);
+        }
+    }
+
+    fn gallery_changed(&self, caller: &super::tools::Caller, ids: &[String]) {
+        use tauri::Emitter;
+        let payload = serde_json::json!({ "workspace_id": caller.workspace_id, "hive_id": caller.hive.id, "ids": ids });
+        if let Err(e) = self.handle.emit_to(self.label.as_str(), super::gallery::GALLERY_CHANGED_EVENT, payload) {
+            log::warn!("hive {}: gallery change not sent to window {}: {e}", caller.hive.id, self.label);
         }
     }
 }

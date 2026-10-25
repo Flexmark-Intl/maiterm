@@ -177,7 +177,7 @@ const WORKER_EXTRA_DENIED_MCP_TOOLS: &[&str] = &[
 
 /// The hive and gallery tools only a coordinator holds.
 pub fn coordinator_only_mcp_tools() -> impl Iterator<Item = &'static str> {
-    COORDINATOR_MCP_TOOLS.iter().copied().filter(|t| t.starts_with("hive") || *t == "galleryDeliver")
+    COORDINATOR_MCP_TOOLS.iter().copied().filter(|t| t.starts_with("hive") || super::gallery::tools::coordinator_only(t))
 }
 
 /// A worker's denies. Its stack verbs (`run::SERVICE_VERBS`) aren't among them: Rust routes a

@@ -3612,6 +3612,41 @@ several releases a day).
    with no task means the coordinator's own asset, never a human's. An `order` in `collect` names
    the members out of the trash; trashed members keep their places after them. A collection name
    can't pass for a collection id. `purge_trash` takes no folders (the store knows its own).
+   **8b built** (2026-10-24): the agent tools, receipts and
+   retirement's scratch rule (`hive/gallery/tools.rs`). `galleryAdd`/`List`/`Get`/`Tag` are every
+   Hive agent's, `galleryCollect` the coordinator's (also on a worker's settings denies);
+   `galleryDeliver` is refused as not yet built. Rust refuses every `gallery*` name to a non-Hive
+   tab and to identities that disagree (`refuse_agent_tool`), and they are on both own-tab lists.
+   Who files and for which task come from the tab (the worker's `worker.json`, or the
+   coordinator), never the arguments. A path is filed only from the caller's own folders: a
+   worker's scratch, its `claude-tmp` and its worktrees, or the coordinator's home and
+   `claude-tmp`, plus the system temp folders and the human's output folders, a shared root that
+   holds the Hive's own folder dropped. Up to 20 items a call; every argument is checked before
+   the copy; a store whose row then fails, or that turns out a duplicate of the same task's asset
+   (`duplicate: true`, its cost still recorded), is removed. A worker joins an existing collection
+   only; the coordinator's `galleryAdd`/`galleryCollect` make one by name. A cost with no path is a
+   spend only, and the answer carries the spend against the budget (`over` with the rule; the
+   crossing blocker is 8f). Agents never see the trash. `galleryTag`: a worker tags, stars and
+   picks, never over a final or rejected; final and rejected are the coordinator's while Finals is
+   its checkpoint and the human's under Ask me (setting one or moving one). **Each final or
+   rejected the coordinator sets, and each it moves an asset out of, is an `answered` decision (category `finals`, source `gallery`),
+   which the human can override, so Finals is now earnable (`autonomy::earnable`) and two
+   overrides in a day offer it back**; a hand-over needs the human's finals answers against a
+   recommendation, which nothing logs until the human's own tagging (8e). `hive-gallery-changed`
+   (`HiveWindow::gallery_changed`) goes once per call. `hiveReport` takes `assets`: an asset filed
+   for the worker's task (an earlier incarnation's counts), out of the trash, listed to the
+   coordinator as `title (kind): path`. A retiring worker's `scratch/` is removed only when every
+   regular file in it hashes to one of its task's assets out of the trash (`retire::scratch_covered`;
+   `brief.md` aside, empty folders nothing, a link or unreadable entry or more than 10,000 files or
+   20 GB keeps it). Both briefs say how filing, receipts and curating work. The delete sheet counts
+   assets and bytes from the index (`Gallery::totals`), no longer the folder. **Decided here:** the
+   caller's own `claude-tmp` is a root beside the system temp folders (its own folder, and its
+   hiveRun jobs' `TMPDIR`, `claude-tmp/jobs`; the agent's Bash `TMPDIR` is the shared
+   `/tmp/claude-<uid>`, §6.7, which the system temp roots cover);
+   `recipe.tool` is required whenever a recipe is given; a call whose every item is refused is an
+   error, a partly refused one answers each item; `open_cached` reopens a cached handle whose folder
+   differs (test Hives reuse ids). Thumbnails (8c) aren't queued yet: assets stay `thumb: pending`
+   until 8c's `resume` picks them up.
 9. Done and lifecycle: `hiveFinish` and waking a Done Hive (§11.4), queue state across
    suspend/resume/restart (§6.8), phone polish (Hive tabs already appear as chats; the gallery
    feed later).

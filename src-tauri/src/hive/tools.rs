@@ -118,6 +118,21 @@ pub fn refuse_agent_tool(data: &AppData, callers: &[&str], tool: &str) -> Option
         }
         return None;
     }
+    // The gallery's tools (§10.3): every Hive agent's, none of anyone else's; collect and deliver
+    // the coordinator's. One role across every identity, as for a Hive tool.
+    if tool.starts_with("gallery") {
+        if !super::gallery::tools::GALLERY_TOOLS.contains(&tool) {
+            return Some(format!("{tool} isn't a maiTerm tool."));
+        }
+        let held = roles.first().copied().flatten().filter(|r| *r == ROLE_COORDINATOR || *r == ROLE_WORKER);
+        let Some(held) = held.filter(|h| roles.iter().all(|r| *r == Some(*h))) else {
+            return Some(format!("{tool} is a Hive agent's tool: only a Hive's coordinator or its workers can call it."));
+        };
+        if super::gallery::tools::coordinator_only(tool) && held != ROLE_COORDINATOR {
+            return Some(format!("{tool} is a Hive coordinator's tool: only a Hive's coordinator can call it."));
+        }
+        return None;
+    }
     // The Overlord is never a Hive agent: a Hive role among the callers of its tools (close,
     // archive, recover or resume the human's tabs) is one impersonating it.
     if roles.iter().any(Option::is_some) && crate::claude_code::server::OVERLORD_CALLER_TOOLS.contains(&tool) {
@@ -160,8 +175,14 @@ pub fn listed_role(data: &AppData, tab_id: &str) -> Option<&'static str> {
     }
 }
 
-/// The Hive tools `tools/list` carries for `role`. Built tools only.
+/// The Hive and gallery tools `tools/list` carries for `role`. Built tools only.
 pub fn tool_definitions(role: &str) -> Vec<Value> {
+    let mut defs = hive_tool_definitions(role);
+    defs.extend(super::gallery::tools::tool_definitions(role));
+    defs
+}
+
+fn hive_tool_definitions(role: &str) -> Vec<Value> {
     let tab_id = json!({ "type": "string", "description": "Your own tab (auto-injected)" });
     if role == ROLE_WORKER {
         return vec![super::report::tool_definition(&tab_id), super::run::tool_definition(&tab_id), super::review::verdict_tool_definition(&tab_id)];
@@ -1632,11 +1653,13 @@ mod tests {
         assert_eq!(listed_role(&d, "coord"), None, "a role without its Hive lists nothing");
         let defs = tool_definitions(ROLE_COORDINATOR);
         let names: Vec<&str> = defs.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, COORDINATOR_TOOLS.to_vec());
+        let gallery = crate::hive::gallery::tools::COORDINATOR_GALLERY_TOOLS;
+        assert_eq!(names, COORDINATOR_TOOLS.iter().chain(&gallery).copied().collect::<Vec<_>>());
         let roles = defs[0]["inputSchema"]["properties"]["role"]["enum"].as_array().unwrap();
         assert!(roles.iter().any(|r| r == "backend"));
         let worker: Vec<String> = tool_definitions(ROLE_WORKER).iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(worker, WORKER_TOOLS.to_vec());
+        let gallery = crate::hive::gallery::tools::WORKER_GALLERY_TOOLS;
+        assert_eq!(worker, WORKER_TOOLS.iter().chain(&gallery).copied().collect::<Vec<_>>());
         assert!(tool_definitions("visitor").is_empty());
         for t in COORDINATOR_TOOLS {
             assert_eq!(hive_tool_role(t), Some(ROLE_COORDINATOR), "{t}");
@@ -2880,6 +2903,20 @@ mod tests {
         git(&clean, &["commit", "-q", "--allow-empty", "--no-verify", "-m", "unlanded"]);
         fs::write(dirty.join("README.md"), "changed\n").unwrap();
         fs::write(p.gallery().join("hero.png"), "png").unwrap();
+        // The sheet counts the index's assets, never the folder (the index, its WAL files and
+        // thumbnails are in it too).
+        rig.caller.hive.id = format!("h-{}", uuid::Uuid::new_v4());
+        rig.data.write().windows[0].workspaces[0].hive.as_mut().unwrap().id = rig.caller.hive.id.clone();
+        let g = crate::hive::gallery::open_cached(&rig.caller.hive.id, &p.gallery()).unwrap();
+        g.insert_asset(crate::hive::gallery::model::NewAsset {
+            id: crate::hive::gallery::model::mint(crate::hive::gallery::model::ASSET_PREFIX),
+            file: "a.png".into(),
+            bytes: 3,
+            title: "Hero".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        drop(g);
         let homes = scratch_homes(&rig.base);
         let w = crate::hive::trust::write_trust(&homes, &p, &p.coordinator_home()).unwrap();
         assert_eq!(w.written.len(), 2);
@@ -3158,7 +3195,7 @@ mod tests {
         assert!(e.contains("hiveVerdict is a reviewer's"), "{e}");
         let e = rig.verdict(&r, json!({ "verdict": "pass", "summary": "x", "worker": "#9" })).await.unwrap_err();
         assert!(e.contains("You review worker #1 login"), "{e}");
-        let tools: Vec<String> = tool_definitions(ROLE_WORKER).iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        let tools: Vec<String> = tool_definitions(ROLE_WORKER).iter().map(|t| t["name"].as_str().unwrap().to_string()).filter(|t| t.starts_with("hive")).collect();
         assert_eq!(tools, vec!["hiveReport", "hiveRun", "hiveVerdict"], "every worker is offered all three");
 
         let out = rig.verdict(&r, json!({ "verdict": "pass", "summary": "Tests pass.", "worker": 1 })).await.unwrap();

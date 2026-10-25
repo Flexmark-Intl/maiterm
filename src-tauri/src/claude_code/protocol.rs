@@ -1692,5 +1692,10 @@ mod tests {
         assert_eq!(hive_names(listed(Some("worker"))), crate::hive::tools::WORKER_TOOLS.to_vec(), "a worker reports, and holds nothing else");
         assert_eq!(hive_names(listed(Some("coordinator"))), crate::hive::tools::COORDINATOR_TOOLS.to_vec());
         assert!(hive_names(listed(Some("reviewer"))).is_empty());
+        // The gallery's (docs/hive.md §10.3): every Hive role's, collect the coordinator's only.
+        let gallery = |v: Vec<String>| v.into_iter().filter(|n| n.starts_with("gallery")).collect::<Vec<_>>();
+        assert!(gallery(listed(None)).is_empty(), "an ordinary agent carries no gallery schema");
+        assert_eq!(gallery(listed(Some("worker"))), crate::hive::gallery::tools::WORKER_GALLERY_TOOLS.to_vec());
+        assert_eq!(gallery(listed(Some("coordinator"))), crate::hive::gallery::tools::COORDINATOR_GALLERY_TOOLS.to_vec());
     }
 }
