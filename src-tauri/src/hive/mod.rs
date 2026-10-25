@@ -37,6 +37,9 @@
 //!
 //! Step 7b: the checkpoints (`checkpoints`), a worker's prompts and question blockers routed to
 //! one asker and answered with `hiveAnswerWorker` (`prompts`), and the decision log (`decisions`).
+//!
+//! Step 8a: the gallery's store (`gallery`): immutable files, their SQLite index and the spend
+//! ledger, one per Hive.
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
@@ -54,6 +57,7 @@ pub mod events;
 pub mod feed;
 pub mod files;
 pub mod fuses;
+pub mod gallery;
 pub mod gate;
 pub(crate) mod git;
 pub mod job_sandbox;

@@ -3591,6 +3591,27 @@ several releases a day).
    and detail view; then compare, Iterate/attach, collections, deliver (plain folders only,
    §7.3). The **budget**: recorded spend per paid render, the header total and the
    stop-and-ask blocker (§10.3). The sandbox allowlist extends to each detected generator's host.
+   **8a built** (2026-10-24, uncommitted at the time of writing): the store, Rust only
+   (`hive/gallery/`). One `Gallery` per Hive (`for_hive`, a process cache by Hive id that refuses
+   a Hive whose folder is gone; Hive delete calls `forget` before its disk goes): `files/<id>.<ext>`
+   at 0444, `thumbs/`, `trash/`, and `index.sqlite` (WAL, additive migrations only, every
+   statement naming its columns, so an index a newer build stamped and widened still opens; a
+   newer stamp is never lowered). Assets, parents, tags, collections and the spend ledger
+   (integer micro-dollars, `spent_micros` its only total) are tables; ids are `a-`/`c-`/`s-` plus
+   12 hex. `ingest::authorize` joins a relative path to the caller's cwd, canonicalizes, checks
+   containment by component, opens `O_NOFOLLOW|O_NONBLOCK` (a FIFO can't hang it), re-checks the
+   open descriptor's real path (`F_GETPATH`, `/proc/self/fd`; a failure there refuses), and
+   refuses the gallery itself, a folder and anything over 8 GiB; `store_file` clones from that
+   descriptor with `fclonefileat` (an exclusive create), else `O_EXCL` and a streamed copy, and
+   hashes the stored bytes. A clone carries the source's BSD flags, so a flagged source takes the
+   copy path and a clone has its flags cleared (a `uchg` file in `files/` could never be deleted). `HiveSettings.gallery` (`output_folders`, `generator_hosts`) round-trips
+   with its own `extra`. **Decided here:** emptying the trash moves each file into `trash/`, then
+   commits the tombstones (the asset leaves its collections and stops being a cover) and deletes
+   the moved files and thumbnails; the next `open` puts back a file whose purge never committed and
+   deletes anything else in `trash/`. `children` counts only children out of the trash. `by_sha`
+   with no task means the coordinator's own asset, never a human's. An `order` in `collect` names
+   the members out of the trash; trashed members keep their places after them. A collection name
+   can't pass for a collection id. `purge_trash` takes no folders (the store knows its own).
 9. Done and lifecycle: `hiveFinish` and waking a Done Hive (§11.4), queue state across
    suspend/resume/restart (§6.8), phone polish (Hive tabs already appear as chats; the gallery
    feed later).

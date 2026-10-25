@@ -192,7 +192,9 @@ pub fn create_layout(root: &Path, hive: &Hive) -> Result<(), String> {
     let p = HivePaths::new(root);
     for d in [
         p.memory(),
-        p.gallery(),
+        p.gallery_files(),
+        p.gallery_thumbs(),
+        p.gallery_trash(),
         p.coordinator_task(),
         p.precedents(),
         // Shared by every Hive, on every agent's denyWrite: made here so the deny names a folder.
@@ -349,7 +351,7 @@ mod tests {
         create_layout(&root, &hive(LANDING_BASE, vec![folder("web", &web, "main"), brand])).unwrap();
 
         let p = HivePaths::new(&root);
-        for d in [p.memory(), p.gallery(), p.coordinator_task(), p.precedents(), p.logs(), p.coordinator_home(), p.coordinator_tmp()] {
+        for d in [p.memory(), p.gallery_files(), p.gallery_thumbs(), p.gallery_trash(), p.coordinator_task(), p.precedents(), p.logs(), p.coordinator_home(), p.coordinator_tmp()] {
             assert!(d.is_dir(), "{}", d.display());
         }
         let wt = p.coordinator_worktree("web");

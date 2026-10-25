@@ -161,6 +161,20 @@ pub struct HiveSettings {
     pub land: LandSettings,
     /// How long the coordinator has to answer a worker's prompt, and the daily digest (§4.7, §7.6).
     pub autonomy: AutonomySettings,
+    /// Where `galleryAdd` may also file from, and the generators' hosts (§10.3, §14.16).
+    pub gallery: GallerySettings,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// The gallery's human-set paths and hosts (§10.3).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GallerySettings {
+    /// Canonical folders a tool writes only to its own place: `galleryAdd` takes a path in one.
+    pub output_folders: Vec<String>,
+    /// Hosts a worker's sandbox may reach for paid generation (filled in step 8f).
+    pub generator_hosts: Vec<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -329,6 +343,24 @@ mod tests {
         let h: Hive = serde_json::from_str(r#"{"id":"h1","settings":{"autonomy":{"prompt_timeout_secs":600,"daily_digest":false,"later":1}}}"#).unwrap();
         assert_eq!((h.settings.autonomy.prompt_timeout_secs, h.settings.autonomy.daily_digest), (600, false));
         assert_eq!(h.settings.autonomy.extra.get("later"), Some(&serde_json::json!(1)));
+        let again: Hive = serde_json::from_value(serde_json::to_value(&h).unwrap()).unwrap();
+        assert_eq!(again, h);
+    }
+
+    #[test]
+    fn the_gallery_settings_load_sparse_and_keep_their_neighbours() {
+        let bare: Hive = serde_json::from_str(r#"{"id":"h1"}"#).unwrap();
+        assert_eq!(bare.settings.gallery, GallerySettings::default());
+        let h: Hive = serde_json::from_str(
+            r#"{"id":"h1","settings":{"gallery":{"output_folders":["/Users/x/ComfyUI/output"],"later":1},
+                "autonomy":{"daily_digest":false},"other":2}}"#,
+        )
+        .unwrap();
+        assert_eq!(h.settings.gallery.output_folders, vec!["/Users/x/ComfyUI/output".to_string()]);
+        assert!(h.settings.gallery.generator_hosts.is_empty());
+        assert_eq!(h.settings.gallery.extra.get("later"), Some(&serde_json::json!(1)));
+        assert!(!h.settings.autonomy.daily_digest, "a neighbour section is read as it was");
+        assert_eq!(h.settings.extra.get("other"), Some(&serde_json::json!(2)));
         let again: Hive = serde_json::from_value(serde_json::to_value(&h).unwrap()).unwrap();
         assert_eq!(again, h);
     }

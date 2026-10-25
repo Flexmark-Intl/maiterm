@@ -99,6 +99,29 @@ impl HivePaths {
         self.root.join("gallery")
     }
 
+    /// Stored assets, `<id>.<ext>`, read-only (§10.2).
+    pub fn gallery_files(&self) -> PathBuf {
+        self.gallery().join(super::gallery::FILES)
+    }
+
+    pub fn gallery_thumbs(&self) -> PathBuf {
+        self.gallery().join(super::gallery::THUMBS)
+    }
+
+    pub fn gallery_trash(&self) -> PathBuf {
+        self.gallery().join(super::gallery::TRASH)
+    }
+
+    /// The gallery's SQLite index, Rust's alone.
+    pub fn gallery_index(&self) -> PathBuf {
+        self.gallery().join(super::gallery::INDEX)
+    }
+
+    /// The thumbnailer's output before it moves into `thumbs/`.
+    pub fn gallery_tmp(&self) -> PathBuf {
+        self.gallery().join(super::gallery::TMP)
+    }
+
     pub fn tasks(&self) -> PathBuf {
         self.root.join("tasks")
     }
@@ -278,6 +301,11 @@ mod tests {
         assert_eq!(p.memory_record(), Path::new("/x/hive/h/logs/memory.json"));
         assert_eq!(p.memory_generated(), Path::new("/x/hive/h/memory/MEMORY.generated.md"));
         assert_eq!(p.memory_unfiled(), Path::new("/x/hive/h/memory/unfiled.md"));
+        assert_eq!(p.gallery_files(), Path::new("/x/hive/h/gallery/files"));
+        assert_eq!(p.gallery_thumbs(), Path::new("/x/hive/h/gallery/thumbs"));
+        assert_eq!(p.gallery_trash(), Path::new("/x/hive/h/gallery/trash"));
+        assert_eq!(p.gallery_index(), Path::new("/x/hive/h/gallery/index.sqlite"));
+        assert_eq!(p.gallery_tmp(), Path::new("/x/hive/h/gallery/.tmp"));
         assert_eq!(p.worker_worktree("api-auth", "web"), Path::new("/x/hive/h/wt.noindex/api-auth/web"));
         assert_eq!(p.worker_scratch("api-auth"), Path::new("/x/hive/h/wt.noindex/api-auth/scratch"));
         assert_eq!(p.worker_tmp("api-auth"), Path::new("/x/hive/h/wt.noindex/api-auth/claude-tmp"));

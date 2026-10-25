@@ -533,7 +533,16 @@ export interface HiveSettings {
   run_queue?: RunQueueSettings;
   land?: LandSettings;
   autonomy?: AutonomySettings;
+  gallery?: GallerySettings;
   [section: string]: unknown;
+}
+
+/** hive/record.rs `GallerySettings` (docs/hive.md §10.3). */
+export interface GallerySettings {
+  /** Canonical folders a tool writes only to its own place: `galleryAdd` takes a path in one. */
+  output_folders: string[];
+  /** Hosts a worker's sandbox may reach for paid generation. */
+  generator_hosts: string[];
 }
 
 /** hive/record.rs `AutonomySettings` (docs/hive.md §4.7, §7.6). */

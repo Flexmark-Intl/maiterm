@@ -1,0 +1,64 @@
+//! The gallery (docs/hive.md §10): everything a Hive makes that isn't a commit, one Rust-owned
+//! store per Hive under `<hive>/gallery/`: immutable files (`files/<id>.<ext>`, read-only),
+//! thumbnails, a SQLite index (`store`) and the spend ledger in it. `ingest` decides which paths
+//! a caller may file from and makes the copy; `model` holds the records.
+//!
+//! Step 8a: the store alone. Nothing calls it yet but tests and Hive delete.
+
+pub mod ingest;
+pub mod model;
+pub mod store;
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, LazyLock};
+
+use parking_lot::Mutex;
+
+pub use store::Gallery;
+
+use super::paths::{self, HivePaths};
+
+/// The stored files, by asset id.
+pub const FILES: &str = "files";
+/// Thumbnails, posters, strips and waveforms: `<id>.png`, `<id>.strip.jpg`, `<id>.wave.png`.
+pub const THUMBS: &str = "thumbs";
+/// Where a purge moves files before it deletes them (`Gallery::purge_trash`).
+pub const TRASH: &str = "trash";
+/// The thumbnailer's per-asset output: a dot name, so no folder name can be it.
+pub const TMP: &str = ".tmp";
+pub const INDEX: &str = "index.sqlite";
+
+/// One open gallery per Hive in the process: the index has one writer.
+static OPEN: LazyLock<Mutex<HashMap<String, Arc<Gallery>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The Hive's gallery, opened once per process. Refused while the Hive's folder doesn't exist,
+/// so a stale id never re-creates a deleted Hive's tree.
+pub fn for_hive(hive_id: &str) -> Result<Arc<Gallery>, String> {
+    let root = paths::hive_root(hive_id).ok_or_else(|| format!("\"{hive_id}\" isn't a Hive id"))?;
+    if !root.is_dir() {
+        return Err(format!("This Hive's folder is gone: {}", root.display()));
+    }
+    open_cached(hive_id, &HivePaths::new(root).gallery())
+}
+
+/// `for_hive` over an explicit folder: tests' scratch Hives.
+pub(crate) fn open_cached(hive_id: &str, gallery_dir: &Path) -> Result<Arc<Gallery>, String> {
+    let mut open = OPEN.lock();
+    if let Some(g) = open.get(hive_id) {
+        return Ok(g.clone());
+    }
+    let g = Arc::new(Gallery::open(gallery_dir)?);
+    open.insert(hive_id.to_string(), g.clone());
+    Ok(g)
+}
+
+/// Drops the process's handle, so once in-flight calls finish no connection holds the index or
+/// its WAL files (Hive delete, before its disk goes).
+pub fn forget(hive_id: &str) {
+    OPEN.lock().remove(hive_id);
+}
+
+pub(crate) fn is_open(hive_id: &str) -> bool {
+    OPEN.lock().contains_key(hive_id)
+}

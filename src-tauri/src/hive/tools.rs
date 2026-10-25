@@ -2939,7 +2939,15 @@ mod tests {
         let p = rig.caller.paths.clone();
         crate::hive::layout::create_layout(&p.root, &rig.caller.hive).unwrap();
         fs::write(p.gallery().join("hero.png"), "png").unwrap();
+        // Its own id: the open-gallery cache is process-wide and other tests' Hives are all `h1`.
+        rig.caller.hive.id = format!("h-{}", uuid::Uuid::new_v4());
+        rig.data.write().windows[0].workspaces[0].hive.as_mut().unwrap().id = rig.caller.hive.id.clone();
+        let g = crate::hive::gallery::open_cached(&rig.caller.hive.id, &p.gallery()).unwrap();
+        g.record_spend(crate::hive::gallery::model::NewSpend { cost_micros: 3_000, ..Default::default() }).unwrap();
+        drop(g);
+        assert!(p.gallery_index().is_file());
         let out = crate::hive::delete::delete_hive(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, true).await.unwrap();
+        assert!(!crate::hive::gallery::is_open(&rig.caller.hive.id), "the delete forgot its gallery before removing it");
         assert!(!out.gallery_kept && out.kept.is_empty(), "{out:?}");
         assert!(!p.root.exists(), "nothing held work, so nothing of the Hive folder is left");
         assert!(out.folder_left.is_none());
