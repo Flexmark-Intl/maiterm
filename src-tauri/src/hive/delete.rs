@@ -2,8 +2,9 @@
 //! gone and its task rows kept as history (plan D13), and nothing that holds work is deleted.
 //!
 //! The rule is Claude's own worktree cleanup's: clean worktrees go, dirty ones stay and are listed,
-//! no branch is ever deleted (`hive/<slug>` included), the gallery stays unless the human ticks it,
-//! and a scratch folder with anything in it stays. A worktree whose `.git` file maiTerm can't vouch
+//! no branch is ever deleted (`hive/<slug>` included), the gallery and the memory folder stay
+//! unless the human ticks them, and a scratch folder with anything in it stays. What goes is
+//! listed too (`going`): nothing disappears without the sheet having said so. A worktree whose `.git` file maiTerm can't vouch
 //! for stays untouched (`retire::keep_reason`). Refused while a worker is landing.
 
 use std::fs;
@@ -59,6 +60,20 @@ pub struct HiveDeletePreview {
     pub lands_in_flight: Vec<String>,
     /// Every branch the Hive made, all kept: `folder: branch`.
     pub branches: Vec<String>,
+    /// The shared memory folder, kept unless the human ticks it (§9: memory is work, the human's
+    /// own files in it included). None when there's none.
+    pub memory: Option<KeptFolder>,
+    /// What goes with the Hive, one line each with its path: logs, the decision log, this Hive's
+    /// precedents, run history, task records. Nothing disappears unlisted.
+    pub removed: Vec<String>,
+}
+
+/// A folder the sheet offers to keep, with its size.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct KeptFolder {
+    pub path: String,
+    pub files: u64,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -74,6 +89,8 @@ pub struct HiveDeleteResult {
     pub kept: Vec<String>,
     pub branches: Vec<String>,
     pub gallery_kept: bool,
+    /// Where the memory folder stayed, when it did.
+    pub memory_kept: Option<String>,
     pub trust_removed: usize,
     pub requests_failed: usize,
     /// The Hive's folder, when anything stayed in it.
@@ -258,7 +275,70 @@ pub(crate) fn preview(hive: &Hive, paths: &HivePaths, has_coordinator: bool) -> 
     }
     (p.gallery_files, p.gallery_bytes) = gallery_totals(hive, paths);
     p.branches = hive_branches(hive, &workers);
+    p.memory = memory_folder(paths);
+    p.removed = going(paths);
     p
+}
+
+fn memory_folder(paths: &HivePaths) -> Option<KeptFolder> {
+    let dir = paths.memory();
+    fs::symlink_metadata(&dir).ok().filter(|m| m.is_dir())?;
+    let (files, bytes) = tree_size(&dir);
+    Some(KeptFolder { path: dir.to_string_lossy().to_string(), files, bytes })
+}
+
+fn lines_in(p: &Path) -> usize {
+    fs::read_to_string(p).map(|s| s.lines().filter(|l| !l.trim().is_empty()).count()).unwrap_or(0)
+}
+
+fn entries_in(p: &Path) -> usize {
+    fs::read_dir(p).map(|d| d.flatten().count()).unwrap_or(0)
+}
+
+/// What the delete removes that isn't work, as the sheet lists it: only what is there. The
+/// gallery and memory have their own boxes; worktrees and scratch are listed as kept or not.
+pub(crate) fn going(paths: &HivePaths) -> Vec<String> {
+    let mut out = Vec::new();
+    let decisions = lines_in(&paths.decision_log());
+    if decisions > 0 {
+        out.push(format!("The decision log: {decisions} entr{} ({})", if decisions == 1 { "y" } else { "ies" }, paths.decision_log().display()));
+    }
+    let (runs, job_dirs) = (lines_in(&paths.run_log()), entries_in(&paths.runs()));
+    if runs > 0 || job_dirs > 0 {
+        out.push(format!("Run history: the run log ({runs} line{}) and {job_dirs} job folder{} ({})", if runs == 1 { "" } else { "s" }, if job_dirs == 1 { "" } else { "s" }, paths.runs().display()));
+    }
+    let precedents = tree_size(&paths.precedents()).0;
+    if precedents > 0 {
+        out.push(format!(
+            "This Hive's precedents: {precedents} file{} ({}). Precedents promoted to every Hive stay.",
+            if precedents == 1 { "" } else { "s" },
+            paths.precedents().display()
+        ));
+    }
+    let skip = [paths.decision_log(), paths.run_log()];
+    let mut other: Vec<String> = fs::read_dir(paths.logs())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| !skip.contains(&e.path()))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    other.sort();
+    if !other.is_empty() {
+        out.push(format!("Its other logs: {} ({})", other.join(", "), paths.logs().display()));
+    }
+    let tasks = entries_in(&paths.tasks());
+    if tasks > 0 {
+        out.push(format!(
+            "Launch records, settings and session lists of {tasks} agent{} ({})",
+            if tasks == 1 { "" } else { "s" },
+            paths.tasks().display()
+        ));
+    }
+    if fs::symlink_metadata(paths.coordinator_home()).is_ok() {
+        out.push(format!("The coordinator's home and brief ({})", paths.root.join("coordinator").display()));
+    }
+    out
 }
 
 /// What the delete did on disk.
@@ -270,8 +350,10 @@ pub(crate) struct Disk {
     pub folder_left: bool,
 }
 
-/// The Hive's disk, gone but for what holds work (§11.2). Blocks.
-pub(crate) fn remove_disk(hive: &Hive, paths: &HivePaths, workers: &[WorkerRecord], delete_gallery: bool) -> Disk {
+/// The Hive's disk, gone but for what holds work (§11.2): memory is work, so it stays in place
+/// under the Hive's folder, as when a Hive turns back into a workspace (§3.3), unless ticked.
+/// Blocks.
+pub(crate) fn remove_disk(hive: &Hive, paths: &HivePaths, workers: &[WorkerRecord], delete_gallery: bool, delete_memory: bool) -> Disk {
     let mut out = Disk::default();
     let mut keep: Vec<PathBuf> = Vec::new();
     let mut kept = |why: String, path: PathBuf, out: &mut Disk| {
@@ -354,6 +436,9 @@ pub(crate) fn remove_disk(hive: &Hive, paths: &HivePaths, workers: &[WorkerRecor
     if !delete_gallery && fs::symlink_metadata(paths.gallery()).is_ok() {
         keep.push(paths.gallery());
     }
+    if !delete_memory && fs::symlink_metadata(paths.memory()).is_ok() {
+        keep.push(paths.memory());
+    }
     for e in remove_except(&paths.root, &keep) {
         out.kept.push(e);
     }
@@ -395,7 +480,7 @@ fn heal(pane: &mut crate::state::Pane) -> PaneActive {
 
 /// Delete the Hive (§11.2): every agent stopped, the Hive's tabs (its job tabs too) dropped and its record cleared
 /// (rows kept, their tabs cleared), its queue released, its open requests failed, then its disk.
-pub(crate) async fn delete_hive<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, delete_gallery: bool) -> Result<HiveDeleteResult, String> {
+pub(crate) async fn delete_hive<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, delete_gallery: bool, delete_memory: bool) -> Result<HiveDeleteResult, String> {
     let paths = caller.paths.clone();
     let (workers, undos) = blocking(move || Ok((worker::list_workers(&paths), super::land::undo::in_flight(&paths)))).await?;
     if let Some(w) = workers.iter().find(|w| super::land::in_flight(w)) {
@@ -480,7 +565,7 @@ pub(crate) async fn delete_hive<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
 
     let (hive, paths, recs) = (caller.hive.clone(), caller.paths.clone(), workers.clone());
     let (disk, branches) = blocking(move || {
-        let disk = remove_disk(&hive, &paths, &recs, delete_gallery);
+        let disk = remove_disk(&hive, &paths, &recs, delete_gallery, delete_memory);
         Ok((disk, hive_branches(&hive, &recs)))
     })
     .await?;
@@ -504,6 +589,7 @@ pub(crate) async fn delete_hive<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         kept: disk.kept,
         branches,
         gallery_kept: !delete_gallery && fs::symlink_metadata(caller.paths.gallery()).is_ok(),
+        memory_kept: (!delete_memory && fs::symlink_metadata(caller.paths.memory()).is_ok()).then(|| caller.paths.memory().to_string_lossy().to_string()),
         trust_removed: disk.trust_removed,
         requests_failed,
         folder_left: disk.folder_left.then(|| caller.paths.root.to_string_lossy().to_string()),
@@ -538,8 +624,10 @@ pub async fn hive_delete(
     state: tauri::State<'_, Arc<AppState>>,
     workspace_id: String,
     delete_gallery: bool,
+    delete_memory: Option<bool>,
 ) -> Result<HiveDeleteResult, String> {
     let caller = caller_in(&state, window.label(), &workspace_id)?;
     let ctx = super::tools::app_ctx(state.inner(), &app, &caller);
-    delete_hive(&ctx, &caller, delete_gallery).await
+    // Memory is kept unless the human ticked it: a window that doesn't send it keeps it.
+    delete_hive(&ctx, &caller, delete_gallery, delete_memory.unwrap_or(false)).await
 }

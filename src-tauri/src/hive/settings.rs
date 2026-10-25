@@ -5,9 +5,9 @@
 //! The coordinator's settings are the set that passed spike 13 plus the two additions it named
 //! (maiTerm's MCP tools, each by name, and `git -C` rules), and the git option denies those
 //! rules turned out to need (`GIT_ESCAPE_DENIES`). Each layer covers another's gap: every path
-//! on the sandbox's `denyWrite` has a `Write(//…)`/`Edit(//…)` deny rule and the reverse, since
-//! the Write tool ignores the sandbox and an Edit deny alone let `python3 -c open(…)` through
-//! (spikes 10, 14).
+//! on the sandbox's `denyWrite` has an `Edit(//…)` deny rule and the reverse, since the Write
+//! tool ignores the sandbox and an Edit deny alone let `python3 -c open(…)` through (spikes 10,
+//! 14). Edit rules are the ones Claude matches for the Write tool too (`FILE_RULE_TOOL`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -80,6 +80,9 @@ const GIT_ESCAPE_DENIES: &[&str] = &[
     "Bash(git *--textconv*)",
     "Bash(git *--output*)",
     "Bash(git *--no-index*)",
+    "Bash(git *--open-files-in-pager*)",
+    // git takes an abbreviated long option (`grep --op=<cmd>`); the gate refuses every prefix.
+    "Bash(git * grep *--op*)",
 ];
 
 /// The maiTerm tools the coordinator is allowed, by name (§7.1: hive, gallery, task, notes). Never
@@ -243,7 +246,14 @@ pub struct DenyPath {
     pub dir: bool,
 }
 
-/// `Write(//abs/**)`: an absolute path needs the `//` form, `Edit(/abs/**)` matches nothing
+/// The tool every file rule names. Claude matches only `Edit(path)` rules in its file permission
+/// checks, for every tool that edits a file (Write, MultiEdit, NotebookEdit too): read out of
+/// 2.1.308–2.1.310, where a `Write(path)` rule is "not matched by file permission checks", and
+/// 2.1.310 warns "Deny rule Write(//…) never matches" at every launch. Spike 10's Write deny
+/// sat beside its Edit twin, which is the one that blocked the Write tool.
+pub const FILE_RULE_TOOL: &str = "Edit";
+
+/// `Edit(//abs/**)`: an absolute path needs the `//` form, `Edit(/abs/**)` matches nothing
 /// (spike 14).
 pub fn abs_rule(tool: &str, p: &Path, dir: bool) -> String {
     let s = p.to_string_lossy();
@@ -333,8 +343,7 @@ pub fn hive_settings_json(hive: &Hive, record: &LaunchRecord, paths: &HivePaths,
         allow.push(format!("Bash(git -C * {verb})"));
         allow.push(format!("Bash(git -C * {verb} *)"));
     }
-    allow.push(abs_rule("Write", &home, true));
-    allow.push(abs_rule("Edit", &home, true));
+    allow.push(abs_rule(FILE_RULE_TOOL, &home, true));
     // dontAsk denies every tool not listed, maiTerm's own included.
     allow.extend(COORDINATOR_MCP_TOOLS.iter().map(|t| format!("mcp__{mcp}__{t}")));
 
@@ -342,8 +351,7 @@ pub fn hive_settings_json(hive: &Hive, record: &LaunchRecord, paths: &HivePaths,
     deny_rules.extend(PUSH_DENIES.iter().chain(GIT_ESCAPE_DENIES).map(|s| s.to_string()));
     deny_rules.extend(coordinator_denied_mcp_tools().iter().map(|t| format!("mcp__{mcp}__{t}")));
     for d in &deny {
-        deny_rules.push(abs_rule("Write", &d.path, d.dir));
-        deny_rules.push(abs_rule("Edit", &d.path, d.dir));
+        deny_rules.push(abs_rule(FILE_RULE_TOOL, &d.path, d.dir));
     }
 
     let path_str = |p: &Path| p.to_string_lossy().to_string();
@@ -643,20 +651,14 @@ pub fn worker_settings_json(hive: &Hive, record: &LaunchRecord, w: &WorkerRecord
         allow.push(format!("Bash(git -C * {verb} *)"));
     }
     for d in &own {
-        allow.push(abs_rule("Write", d, true));
-        allow.push(abs_rule("Edit", d, true));
+        allow.push(abs_rule(FILE_RULE_TOOL, d, true));
     }
 
     let mut deny_rules: Vec<String> = record.disallowed_tools.clone();
     deny_rules.extend(PUSH_DENIES.iter().chain(GIT_ESCAPE_DENIES).map(|s| s.to_string()));
     deny_rules.extend(worker_denied_mcp_tools().iter().map(|t| format!("mcp__{mcp}__{t}")));
-    for d in &deny {
-        deny_rules.push(abs_rule("Write", &d.path, d.dir));
-        deny_rules.push(abs_rule("Edit", &d.path, d.dir));
-    }
-    for d in &ctx.checkout_denies {
-        deny_rules.push(abs_rule("Write", &d.path, d.dir));
-        deny_rules.push(abs_rule("Edit", &d.path, d.dir));
+    for d in deny.iter().chain(&ctx.checkout_denies) {
+        deny_rules.push(abs_rule(FILE_RULE_TOOL, &d.path, d.dir));
     }
 
     // Generator hosts only for a worker whose role generates (the predicate `worker_mcp_config`
@@ -914,12 +916,13 @@ mod tests {
         assert_eq!(listed.len(), deny_write.len());
         for d in &listed {
             assert!(deny_write.contains(&d.path.to_string_lossy().to_string()));
-            for tool in ["Write", "Edit"] {
-                assert!(deny.contains(&abs_rule(tool, &d.path, d.dir)), "{tool} rule for {}", d.path.display());
-            }
+            assert!(deny.contains(&abs_rule("Edit", &d.path, d.dir)), "Edit rule for {}", d.path.display());
         }
-        // The reverse: every Write/Edit deny rule names a denyWrite path.
-        for r in deny.iter().filter(|r| r.starts_with("Write(") || r.starts_with("Edit(")) {
+        // No `Write(path)` rule: Claude never matches one, and 2.1.310 warns about each at launch.
+        let all = strings(&s["permissions"]["allow"]).into_iter().chain(deny.iter().cloned()).collect::<Vec<_>>();
+        assert!(!all.iter().any(|r| r.starts_with("Write(")), "{all:?}");
+        // The reverse: every Edit deny rule names a denyWrite path.
+        for r in deny.iter().filter(|r| r.starts_with("Edit(")) {
             let inner = r.split_once("(/").unwrap().1.trim_end_matches(')').trim_end_matches("/**");
             assert!(deny_write.iter().any(|d| d == inner), "{r} has no denyWrite twin");
         }
@@ -1258,10 +1261,8 @@ mod tests {
                 for (sub, dir) in [("objects/info", true), ("objects/pack", true), ("info", true), ("shallow", false), ("config", false), ("hooks", true)] {
                     let path = format!("{repo}/{sub}");
                     assert!(deny.contains(&path), "{role}: {path} in denyWrite");
-                    for tool in ["Write", "Edit"] {
-                        let rule = abs_rule(tool, Path::new(&path), dir);
-                        assert!(rules.contains(&rule), "{role}: {rule}");
-                    }
+                    let rule = abs_rule(FILE_RULE_TOOL, Path::new(&path), dir);
+                    assert!(rules.contains(&rule), "{role}: {rule}");
                 }
             }
         }
@@ -1362,7 +1363,7 @@ mod tests {
         let deny: Vec<String> = lists.deny.iter().map(|d| sp(&d.path)).collect();
         assert_eq!(deny, strings(&s["sandbox"]["filesystem"]["denyWrite"]));
         assert!(deny.contains(&sp(&p.runs())), "a job's profile and pass mark are out of the worker's reach");
-        assert!(strings(&s["permissions"]["deny"]).contains(&abs_rule("Write", &p.runs(), true)));
+        assert!(strings(&s["permissions"]["deny"]).contains(&abs_rule("Edit", &p.runs(), true)));
         assert_eq!(lists.own[0], p.worker_scratch("auth"));
     }
 
@@ -1375,15 +1376,15 @@ mod tests {
         let listed = worker_deny_write_paths(&h, &w, &p, &worker_ctx(), &env().bin_dir).unwrap();
         assert_eq!(listed.len(), deny_write.len());
         for d in &listed {
-            for tool in ["Write", "Edit"] {
-                assert!(deny.contains(&abs_rule(tool, &d.path, d.dir)), "{tool} rule for {}", d.path.display());
-            }
+            assert!(deny.contains(&abs_rule("Edit", &d.path, d.dir)), "Edit rule for {}", d.path.display());
         }
-        // The human's checkouts: Write/Edit rules, never on denyWrite, and never over the whole
-        // tree, which Claude folds into the sandbox and so takes the `.git` entries a commit needs.
-        for r in ["Write(//r/web/src/**)", "Edit(//r/web/src/**)", "Write(//r/web/README.md)", "Edit(//r/api/src/**)"] {
+        // The human's checkouts: Edit rules, never on denyWrite, and never over the whole tree,
+        // which Claude folds into the sandbox and so takes the `.git` entries a commit needs.
+        for r in ["Edit(//r/web/src/**)", "Edit(//r/web/README.md)", "Edit(//r/api/src/**)"] {
             assert!(deny.contains(&r.to_string()), "{r}");
         }
+        let allow = strings(&s["permissions"]["allow"]);
+        assert!(!deny.iter().chain(&allow).any(|r| r.starts_with("Write(")), "no Write(path) rule: Claude never matches one");
         for checkout in ["/r/web", "/r/api"] {
             assert!(!deny.iter().any(|r| r.ends_with(&format!("(/{checkout}/**)"))), "no whole-tree rule on {checkout}");
             assert!(!deny_write.iter().any(|d| d == checkout || d.starts_with(&format!("{checkout}/src"))), "{checkout} is not on denyWrite");
@@ -1435,7 +1436,7 @@ mod tests {
             assert!(allow.contains(&r.to_string()), "{r}");
         }
         let p = crate::hive::launch::tests::sample_paths();
-        assert!(allow.contains(&abs_rule("Write", &p.worker_worktree("auth", "api"), true)));
+        assert!(allow.contains(&abs_rule("Edit", &p.worker_worktree("auth", "api"), true)));
         let web_rules: Vec<_> = s["hooks"]["PreToolUse"].as_array().unwrap().iter().filter(|e| e["matcher"] == GATE_MATCHER).collect();
         assert_eq!(web_rules.len(), 1, "the same fail-closed gate as the coordinator");
     }

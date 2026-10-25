@@ -11,8 +11,8 @@
   no transcript: Rust's worker records are fetched when this window hears `hive-workers-changed`
   or its tasks change, diff stats and meta are pushed (hiveFeed), and the rest (lane, blocker,
   note, agent state and the activity line) comes live from the stores. A card's newest assets come
-  with its record, refetched when the gallery changes (§4.3). The header carries Resume while
-  paused, the completion criteria (read-only: the coordinator sets them), and while done the Done
+  with its record, refetched when the gallery changes (§4.3). The header carries Pause (Resume
+  while paused, whoever paused it), Settings, the completion criteria (read-only: the coordinator sets them), and while done the Done
   time and its Report (§11.4).
 
   Gallery (§10.4, step 8d) and Memory (§9, step 7a) are the header's other views (Board · Gallery
@@ -36,7 +36,10 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { hiveLiveWorkerTabs, hiveResume, hiveWorkers } from '$lib/tauri/commands';
+  import { hiveLiveWorkerTabs, hivePause, hiveResume, hiveWorkers } from '$lib/tauri/commands';
+  import HiveSettingsModal from './HiveSettingsModal.svelte';
+  import { hiveFailureNotice } from '$lib/agents/turnFailure';
+  import { pausedLabel } from '$lib/hive/model';
   import { doneLabel } from '$lib/hive/finish';
   import FinishReportModal from './FinishReportModal.svelte';
   import type { HiveBoard } from '$lib/tauri/types';
@@ -103,7 +106,22 @@
   let reportOpen = $state(false);
   let criteriaOpen = $state(false);
   let resuming = $state(false);
-  /** A Hive paused on a usage limit starts workers again (`hive_resume`, which polls the waiters). */
+  /** Hive settings (§4.1): the editable sheets, and what was fixed at Create. */
+  let settingsOpen = $state(false);
+  /** The header's Pause (§11.2): no worker starts or relaunches; running agents finish. */
+  async function pause() {
+    if (resuming) return;
+    resuming = true;
+    try {
+      workspacesStore.applyHiveRecord(workspaceId, await hivePause(workspaceId));
+    } catch (e) {
+      logError(`hive: ${workspaceId.slice(0, 8)} not paused: ${e}`);
+      toastStore.addToast("The Hive didn't pause", String(e).replace(/^Error: /, ''), 'error');
+    } finally {
+      resuming = false;
+    }
+  }
+  /** A paused Hive starts workers again (`hive_resume`, which polls the waiters). */
   async function resume() {
     if (resuming) return;
     resuming = true;
@@ -352,6 +370,9 @@
   });
   const workers = $derived(board?.workers.length ?? 0);
   const room = $derived(board?.headroom ?? null);
+  /** A failed turn's notice (hive/turn_failure.rs), by tab: until a turn of that agent ends well. */
+  const failureOf = (tabId: string | null | undefined) => (tabId ? board?.turn_failures?.[tabId] ?? null : null);
+  const coordFailure = $derived(failureOf(coordId));
 
   // ── Dragging the coordinator's and the rail's borders. ──
   let dragging = $state<'coord' | 'rail' | null>(null);
@@ -695,6 +716,22 @@
           </Tooltip>
         {/each}
       </div>
+      {#if hive && hive.status !== 'done'}
+        <div class="hive-actions">
+          {#if hive.status === 'paused'}
+            <Tooltip text={hive.paused_by === 'human' ? 'Start workers again' : "Start workers again: you've dealt with what paused it"}>
+              <button type="button" class="act-btn" disabled={resuming} onclick={() => void resume()}><Icon name="resume" size={11} />Resume</button>
+            </Tooltip>
+          {:else}
+            <Tooltip text="No worker starts or relaunches until you resume it; running agents finish their turns">
+              <button type="button" class="act-btn" disabled={resuming} onclick={() => void pause()}><Icon name="pause" size={11} />Pause</button>
+            </Tooltip>
+          {/if}
+          <Tooltip text="Autonomy, run queue and budget, and what was fixed when the Hive was made">
+            <button type="button" class="act-btn" onclick={() => (settingsOpen = true)}><Icon name="settings" size={11} />Settings</button>
+          </Tooltip>
+        </div>
+      {/if}
     </div>
     <div class="facts">
       <span>
@@ -707,10 +744,7 @@
       {#if room?.usage_limit_until}
         <span class="warn">No new workers until {room.usage_limit_until}: usage limit</span>
       {:else if hive?.status === 'paused'}
-        <span class="warn">Paused: no new workers start</span>
-        <Tooltip text="Start workers again: you've dealt with the usage limit">
-          <button type="button" class="queue-btn" disabled={resuming} onclick={() => void resume()}>Resume</button>
-        </Tooltip>
+        <span class="warn">{pausedLabel(hive.paused_by)}</span>
       {:else if board && board.hive_status !== 'active' && board.hive_status !== 'done'}
         <span class="warn">Hive is {board.hive_status}</span>
       {/if}
@@ -748,7 +782,7 @@
             Run queue: {queuedCount === 0 ? 'nothing queued' : `${queuedCount} command${queuedCount === 1 ? '' : 's'}`}
           </button>
         </Tooltip>
-        <Tooltip text="Stop its agents and remove it: clean worktrees go, unlanded work and every branch stay">
+        <Tooltip text="Stop its agents and remove it: clean worktrees go, unlanded work, the memory and every branch stay">
           <button type="button" class="queue-btn danger" onclick={() => (deleteOpen = true)}>Delete Hive…</button>
         </Tooltip>
       {/if}
@@ -764,6 +798,16 @@
         <span class="dim">No completion criteria yet: the coordinator sets them.</span>
       {/if}
     </div>
+  {/if}
+  {#if settingsOpen && hive}
+    <HiveSettingsModal
+      {hive}
+      name={ws?.name ?? ''}
+      onclose={() => (settingsOpen = false)}
+      onautonomy={() => (autonomyOpen = true)}
+      onqueue={() => (queueOpen = true)}
+      onbudget={() => (budgetOpen = true)}
+    />
   {/if}
   {#if reportOpen && hive}
     <FinishReportModal {workspaceId} onclose={() => (reportOpen = false)} />
@@ -807,6 +851,9 @@
       onfocusin={focusTo('coordinator')}
       onpointerdown={focusTo('coordinator')}
     >
+      {#if coordFailure}
+        <p class="coord-failed" role="status">{hiveFailureNotice(coordFailure)}</p>
+      {/if}
       <ChatColumn
         bind:this={column}
         {source}
@@ -881,6 +928,7 @@
                 diff={c.diff}
                 model={c.model}
                 ctx={c.ctx}
+                failure={failureOf(c.worker.tab_id)}
                 focused={fit.shown.includes(c.worker.task_id) && focusedKey === c.worker.task_id}
                 onopen={() => openCard(c.worker.task_id, c.worker.tab_id)}
               />
@@ -910,6 +958,7 @@
                     diff={c.diff}
                     model={c.model}
                     ctx={c.ctx}
+                    failure={failureOf(c.worker.tab_id)}
                     focused={fit.shown.includes(c.worker.task_id) && focusedKey === c.worker.task_id}
                     onopen={() => openCard(c.worker.task_id, c.worker.tab_id)}
                   />
@@ -986,6 +1035,7 @@
             onterminal={(shown) => hiveView.setTerminalShown(workspaceId, col.taskId, shown)}
             {workspaceId}
             onlandlog={() => (landLog = { taskId: col.taskId })}
+            failure={failureOf(c.worker.tab_id)}
           />
         </div>
       {/if}
@@ -999,7 +1049,7 @@
   .title { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 260px; }
   .title b { font-size: 14px; overflow-wrap: anywhere; }
   .goal { font-size: 12px; color: var(--fg-dim); overflow-wrap: anywhere; }
-  .facts { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--fg-dim); align-items: flex-end; text-align: right; }
+  .facts { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--fg-dim); align-items: flex-end; text-align: right; min-width: 0; overflow-wrap: anywhere; }
   .queue-btn { background: none; border: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-align: right; }
   .queue-btn:hover { text-decoration: underline; }
   .queue-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -1022,6 +1072,13 @@
   .coord.dragging { user-select: none; }
   .coord.gone, .wslot.gone, .board.gone { display: none; }
   .views { display: flex; align-items: baseline; gap: 6px; margin-top: 4px; font-size: 12px; }
+  /* Pause and Settings (§4.1): wrap under the views on a narrow header, never widen it. */
+  .hive-actions { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 4px; }
+  .act-btn { display: inline-flex; align-items: center; gap: 4px; background: none; border: 1px solid var(--bg-light); border-radius: 4px; padding: 1px 7px; color: var(--fg-dim); font: inherit; font-size: 11px; cursor: pointer; }
+  .act-btn:hover:not(:disabled) { color: var(--fg); border-color: var(--fg-dim); }
+  .act-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .act-btn:disabled { cursor: default; opacity: 0.5; }
+  .coord-failed { margin: 0; padding: 6px 14px; border-bottom: 1px solid var(--bg-light); font-size: 11.5px; color: var(--yellow); overflow-wrap: anywhere; }
   .views .sep { color: var(--fg-dim); }
   .view-btn { background: none; border: none; padding: 0 0 1px; color: var(--fg-dim); font: inherit; cursor: pointer; border-bottom: 1px solid transparent; }
   .view-btn:hover { color: var(--fg); }

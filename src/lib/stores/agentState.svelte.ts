@@ -39,7 +39,8 @@ export function resumeCommandFor(runtime: AgentRuntime): string {
  *   UserPromptSubmit → active (thinking)
  *   PreToolUse → active (tool_name set)
  *   PostToolUse → active (tool_name cleared)
- *   Stop → idle (waiting for user input)
+ *   Stop → idle (waiting for user input); StopFailure arrives as Stop, with `error`
+ *     (the turn is over, idle, with `failure` noted)
  *   Notification(idle_prompt) → idle
  *   Notification(permission_prompt) → permission
  *   SessionEnd → (removed)
@@ -80,6 +81,9 @@ export interface AgentTabSession {
    *  IPC call per tab (docs/file-tree.md §4.3). Absent when the start event carried none (the
    *  initSession re-emit) and no earlier start of the same session did. */
   cwd?: string;
+  /** Only while idle: the turn that ended was a StopFailure, of this kind (`authentication_failed`,
+   *  `overloaded`, …). The next state change drops it. */
+  failure?: string;
 }
 
 /** Validate a hook payload's runtime field, defaulting to Claude. */
@@ -441,8 +445,8 @@ function createAgentStateStore() {
       });
       unlisteners.push(u2);
 
-      const u3 = await listen<{ session_id: string; tab_id: string | null; runtime?: string; gate_held?: boolean }>('agent-hook-stop', (e) => {
-        const { session_id, tab_id, gate_held } = e.payload;
+      const u3 = await listen<{ session_id: string; tab_id: string | null; runtime?: string; gate_held?: boolean; error?: string | null }>('agent-hook-stop', (e) => {
+        const { session_id, tab_id, gate_held, error: failure } = e.payload;
         if (!tab_id) return;
         closeMainTurn(tab_id);
         // A background subagent's permission prompt outlives the parent's turn ending
@@ -450,6 +454,12 @@ function createAgentStateStore() {
         if (!gate_held) {
           clearAsks(tab_id);
           setState(tab_id, session_id, 'idle', undefined, undefined, runtimeOf(e.payload));
+          // setState writes a fresh record, so the next state change drops it again.
+          const after = sessions.get(tab_id);
+          if (after && (after.failure ?? null) !== (failure ?? null)) {
+            sessions = new Map(sessions);
+            sessions.set(tab_id, { ...after, failure: failure ?? undefined });
+          }
         }
         setVariable(tab_id, 'claudeAction', '');
       });

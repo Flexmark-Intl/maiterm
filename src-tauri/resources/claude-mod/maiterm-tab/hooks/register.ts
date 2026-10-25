@@ -257,6 +257,9 @@ export const register: Register = on => {
   on('classic.SessionEnd', relay)
   on('classic.Notification', relay)
   on('classic.Stop', relay)
+  // A turn that ends in an API error (an expired login) sends this instead of Stop. A Claude
+  // without the event never fires it; its settings hook is gated the same way (lockfile.rs).
+  on('classic.StopFailure', relay)
   on('classic.UserPromptSubmit', relay)
   on('classic.PostToolUse', relay)
   on('classic.PostToolUseFailure', relay)

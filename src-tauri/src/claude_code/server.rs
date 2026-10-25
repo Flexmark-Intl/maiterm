@@ -4072,6 +4072,10 @@ fn normalize_hook_event(runtime: crate::state::AgentRuntime, name: &str, event: 
         "SessionStart" => HookPhase::SessionStart,
         "SessionEnd" => HookPhase::SessionEnd,
         "Stop" => HookPhase::Stop,
+        // Claude's Stop for a turn an API error ended (a login that expired, an overloaded API, a
+        // usage limit): sent instead of Stop, never with it. The turn is over all the same, and a
+        // tab left Active on it showed "Working…" for good (the Hive's first live test).
+        "StopFailure" => HookPhase::Stop,
         "UserPromptSubmit" => HookPhase::Prompt,
         "PreToolUse" => HookPhase::ToolPre,
         "PostToolUse" => HookPhase::ToolPost,
@@ -4454,7 +4458,8 @@ fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, trans
     });
 }
 
-/// A Hive agent's turn ended on a usage limit (docs/hive.md §7.8, StopFailure). A reset Claude
+/// A Hive agent's turn ended on an API error (docs/hive.md §7.8, StopFailure). Any kind but a
+/// usage limit goes to `hive::turn_failure`. For a usage limit: a reset Claude
 /// will wait out trips the machine-wide breaker and every other coordinator is told. One nothing
 /// will continue (weekly, unparseable, auto-continue spent, no known plan) pauses that agent's
 /// Hive, and Rust files the human's blocker itself: the coordinator may be the agent at the
@@ -4464,6 +4469,8 @@ fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, trans
 fn hive_stop_failure(srv: &ServerState, tab_id: &str, event: &Value) {
     use crate::hive::fuses;
     if fuses::usage_limit_text(event).is_none() {
+        // A login, an account or the API: the human and the coordinator are told (`turn_failure`).
+        crate::hive::turn_failure::on_stop_failure(&srv.state, &srv.app_handle, tab_id, event);
         return;
     }
     let Some((hive, _, _)) = crate::hive::hive_agent(&srv.state.app_data.read(), tab_id) else { return };
@@ -4674,6 +4681,12 @@ async fn hooks_handler(
     if params.get("via").map(String::as_str) == Some("hive") {
         if let Some(tab) = params.get("tab_id").filter(|t| !t.is_empty()) {
             crate::hive::events::observed(&srv.state, &srv.app_handle, tab, hook_event_name, &event);
+            // Only a Hive tab's own hook acts on a failed turn (hive/settings.rs installs it); the
+            // mod relays StopFailure too, so this copy would be dropped below. `hive_agent`
+            // checks the tab.
+            if hook_event_name == "StopFailure" {
+                hive_stop_failure(&srv, tab, &event);
+            }
         }
     }
 
@@ -4770,7 +4783,7 @@ async fn hooks_handler(
                 event.get("tool_name").and_then(|v| v.as_str()).unwrap_or(""),
                 &tool_input_fingerprint(event.get("tool_input")),
             ),
-            "Stop" | "UserPromptSubmit" => asks.settle_agent(&session_id, ""),
+            "Stop" | "StopFailure" | "UserPromptSubmit" => asks.settle_agent(&session_id, ""),
             "SubagentStop" => asks.settle_agent(&session_id, &agent),
             "Notification"
                 if event.get("notification_type").and_then(|v| v.as_str()) == Some("idle_prompt") =>
@@ -4824,13 +4837,6 @@ async fn hooks_handler(
     // keeps a failed call visible.
     if let Some(phase) = crate::agent_files::Phase::of(hook_event_name, &event) {
         record_agent_files(&srv, phase, &event, &session_id, runtime_key, tab_id_from_param.as_deref()).await;
-    }
-
-    // Only a Hive tab's own command hook (`via=hive`) installs StopFailure (hive/settings.rs).
-    if hook_event_name == "StopFailure" && params.get("via").map(String::as_str) == Some("hive") {
-        if let Some(tab) = tab_id_from_param.as_deref() {
-            hive_stop_failure(&srv, tab, &event);
-        }
     }
 
     match normalize_hook_event(runtime, hook_event_name, &event) {
@@ -5205,7 +5211,14 @@ async fn hooks_handler(
                 }
             }
 
-            log::debug!("Claude hook: Stop for session {} (tab {:?})", &session_id[..session_id.len().min(8)], tab_id);
+            // A StopFailure's kind (`authentication_failed`, `overloaded`, …): the turn ended, and
+            // the tab says it failed rather than showing a result.
+            let failed = (hook_event_name == "StopFailure")
+                .then(|| event.get("error").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("unknown").to_string());
+            match &failed {
+                Some(kind) => log::info!("Claude hook: StopFailure ({kind}) for session {} (tab {:?})", &session_id[..session_id.len().min(8)], tab_id),
+                None => log::debug!("Claude hook: Stop for session {} (tab {:?})", &session_id[..session_id.len().min(8)], tab_id),
+            }
             emit_dual(&srv.app_handle, "agent-hook-stop", "claude-hook-stop", serde_json::json!({
                 "runtime": runtime_key,
                 "session_id": session_id,
@@ -5213,6 +5226,7 @@ async fn hooks_handler(
                 // A background subagent's prompt survives the parent's turn ending; the
                 // frontend mirror has to keep showing it, as Rust does.
                 "gate_held": subagent_gate,
+                "error": failed,
             }));
         }
 
@@ -6162,6 +6176,8 @@ mod tests {
         assert_eq!(norm("SessionStart", nil.clone()), HookPhase::SessionStart);
         assert_eq!(norm("SessionEnd", nil.clone()), HookPhase::SessionEnd);
         assert_eq!(norm("Stop", nil.clone()), HookPhase::Stop);
+        // A turn an API error ended (an expired login) is over too: never left "Working…".
+        assert_eq!(norm("StopFailure", serde_json::json!({ "error": "authentication_failed" })), HookPhase::Stop);
         assert_eq!(norm("UserPromptSubmit", nil.clone()), HookPhase::Prompt);
         assert_eq!(norm("PreToolUse", nil.clone()), HookPhase::ToolPre);
         assert_eq!(norm("PostToolUse", nil.clone()), HookPhase::ToolPost);

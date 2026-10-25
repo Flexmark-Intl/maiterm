@@ -1196,6 +1196,7 @@ pub fn run() {
             hive::create::hive_detect_tools,
             hive::create::hive_create,
             hive::fuses::hive_resume,
+            hive::fuses::hive_pause,
             hive::finish::hive_finish_report,
             hive::tools::hive_live_worker_tabs,
             hive::tools::hive_workers,

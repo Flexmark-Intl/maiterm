@@ -246,7 +246,7 @@ pub(crate) async fn restart_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
 
     // `launching` before the relaunch: the builder starts only a live worker, and the slot moves
     // from pending to live with no gap, as for a spawn.
-    let new_tab = tab.is_none().then(|| super::tools::worker_tab(&w));
+    let new_tab = tab.is_none().then(|| super::tools::worker_tab(&w, &caller.hive));
     let (d, before, new_tab_id) = (dir.clone(), w.clone(), new_tab.as_ref().map(|t| t.id.clone()));
     let now = crate::commands::workspace::iso_now();
     blocking(move || {

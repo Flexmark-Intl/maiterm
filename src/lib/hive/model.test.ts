@@ -1,8 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
   adoptInstalled, charCount, checkpointAsks, checkpointFor, coordinatorHolds, dispatchHiveOpenColumn, engineSkips, folderName, HIVE_HUMAN_KIND,
-  HIVE_PROMPT_KINDS, hiveOwnsPromptIn, isEligible, MAX_INSTRUCTIONS, openTargetFor, slugify, takePendingHiveOpen, validateSpec, withCoordinatorText,
+  HIVE_PROMPT_KINDS, hiveOwnsPromptIn, isEligible, MAX_INSTRUCTIONS, openTargetFor, pausedLabel, slugify, takePendingHiveOpen, validateSpec, withCoordinatorText,
 } from './model';
+
+describe('pausedLabel', () => {
+  it('says who or what paused the Hive, an unrecorded pause being a usage limit', () => {
+    expect(pausedLabel('human')).toBe('Paused by you: no new workers start');
+    expect(pausedLabel('account')).toMatch(/Claude account/);
+    expect(pausedLabel('usage_limit')).toMatch(/usage limit/);
+    expect(pausedLabel(undefined)).toBe(pausedLabel('usage_limit'));
+  });
+});
 
 const ws = { id: 'w' };
 

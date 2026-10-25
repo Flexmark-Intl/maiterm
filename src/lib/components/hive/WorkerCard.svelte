@@ -16,7 +16,8 @@
   import { reviewLine, stateLine, type CardState } from '$lib/hive/cards';
   import { cardTopRow, galleryUrl } from '$lib/hive/gallery';
   import type { Activity, contextGauge } from '$lib/hive/activity';
-  import type { HiveWorkerCard } from '$lib/tauri/types';
+  import type { HiveTurnFailure, HiveWorkerCard } from '$lib/tauri/types';
+  import { hiveFailureNotice } from '$lib/agents/turnFailure';
 
   interface Props {
     card: HiveWorkerCard;
@@ -33,9 +34,11 @@
     focused?: boolean;
     /** The Hive's id: its asset thumbnails are `gallery://` URLs under it. */
     hiveId?: string;
+    /** Its last turn failed, not on a usage limit (the board's `turn_failures`). */
+    failure?: HiveTurnFailure | null;
     onopen: () => void;
   }
-  let { card, state, note, runtime, age, activity, diff, model, ctx, compact = false, focused = false, hiveId = '', onopen }: Props = $props();
+  let { card, state, note, runtime, age, activity, diff, model, ctx, compact = false, focused = false, hiveId = '', failure = null, onopen }: Props = $props();
 
   const top = $derived(hiveId ? cardTopRow(card, diff.text) : diff.text ? 'diff' : null);
 
@@ -101,6 +104,8 @@
       {#if state.sub}<span class="sub">{state.sub}</span>{/if}
     </span>
     {#if review}<span class="rev" class:urgent-rev={review.urgent}>{review.text}</span>{/if}
+    <!-- Its turn failed (hive/turn_failure.rs): until a turn of it ends well. -->
+    {#if failure}<span class="failed">{hiveFailureNotice(failure)}</span>{/if}
     {#if showActivity}<span class="act" data-tone={activity.tone}>{activity.text}</span>{/if}
     <!-- A note can run to paragraphs: three lines here, the whole of it on hover. -->
     {#if note}<Tooltip text={note} block><span class="note">“{note}”</span></Tooltip>{/if}
@@ -185,6 +190,7 @@
   .compact .act { font-size: 11px; padding-left: 15px; }
   .rev { font-size: 11px; color: var(--fg-dim); overflow-wrap: anywhere; }
   .rev.urgent-rev { color: var(--needs); }
+  .failed { font-size: 11.5px; line-height: 1.35; color: var(--yellow); overflow-wrap: anywhere; }
   .note { font-size: 11.5px; line-height: 1.35; color: var(--fg); opacity: 0.8; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   /* §4.3: the newest assets across the card's top, at a fixed height so the card doesn't jump. */
   .assets { order: -1; display: flex; gap: 4px; margin: -2px -4px 3px; height: 56px; }

@@ -701,6 +701,7 @@ describe("maiTerm's own rows and a standing Budget: question are the human's", (
     expect(isReservedTaskTitle('Hive budget reached')).toBe(true);
     expect(isReservedTaskTitle('  hive BUDGET reached. ')).toBe(true);
     expect(isReservedTaskTitle('Hive paused: usage limit')).toBe(true);
+    expect(isReservedTaskTitle('Hive paused: Claude account')).toBe(true);
     expect(isReservedTaskTitle('Hive budget review')).toBe(false);
     expect(isBudgetQuestion('  budget: may I spend $4?')).toBe(true);
     expect(isBudgetQuestion('Budgeting the sprint')).toBe(false);

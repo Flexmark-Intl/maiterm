@@ -267,3 +267,16 @@ export function adoptInstalled<T extends AdoptTab, S>(
     into.active_tab_id = pane.active_tab_id ?? null;
   }
 }
+
+/** The header's line while paused (§7.8, §11.2), by `Hive.paused_by`: an older pause recorded no
+ *  cause, and only a usage limit paused one then. */
+export function pausedLabel(pausedBy: string | undefined | null): string {
+  switch (pausedBy) {
+    case 'human':
+      return 'Paused by you: no new workers start';
+    case 'account':
+      return "Paused: an agent's Claude account failed. Fix it, then resume";
+    default:
+      return 'Paused: usage limit. No new workers start';
+  }
+}

@@ -601,6 +601,8 @@ function buildSetupScript(
       PreModelSwitch: [commandHook(replyCmd)],
       SubagentStop: [eventHook],
       PreCompact: [eventHook],
+      // A turn that ends in an API error (an expired login) sends this instead of Stop.
+      StopFailure: [eventHook],
     },
   });
   const escapedHooksData = hooksData.replace(/'/g, "'\\''");
@@ -635,7 +637,7 @@ function buildSetupScript(
     // opens a "Settings Warning" dialog on every launch. Ones not known are also taken OUT, so
     // a host an earlier build wrote them to is repaired. No Claude found means none of them.
     'import shutil\n' +
-    'NEWER=["PreModelSwitch"]\n' +
+    'NEWER=["PreModelSwitch","StopFailure"]\n' +
     'def claude_bins():\n' +
     ' c=[shutil.which("claude")]+[os.path.expanduser(x) for x in ["~/.local/bin/claude","~/bin/claude","~/.bun/bin/claude","~/.volta/bin/claude","~/.npm-global/bin/claude"]]+["/opt/homebrew/bin/claude","/usr/local/bin/claude","/usr/bin/claude"]\n' +
     ' return sorted(set(os.path.realpath(x) for x in c if x and os.path.isfile(x)))\n' +

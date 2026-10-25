@@ -46,6 +46,10 @@
 //!
 //! Step 9d: what the phone sees of a Hive (`phone`): each Hive tab's `Chat.hive`, and the revision
 //! that tells a connected phone to re-read the roster.
+//!
+//! The first live test: a turn that failed on something other than a usage limit
+//! (`turn_failure`): the human told on the agent's card, the coordinator told, and a failed
+//! account pausing the Hive.
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
@@ -97,6 +101,7 @@ pub mod settings;
 mod spike15;
 pub mod tools;
 pub mod trust;
+pub mod turn_failure;
 pub mod waiters;
 pub mod worker;
 pub mod worktree;

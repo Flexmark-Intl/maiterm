@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deleteRefusal, deleteSummary, formatBytes } from './delete';
+import { deleteRefusal, deleteSummary, formatBytes, keptLines, removedLines } from './delete';
 import type { HiveDeletePreview, HiveDeleteResult } from '$lib/tauri/types';
 
 const preview = (over: Partial<HiveDeletePreview> = {}): HiveDeletePreview => ({
@@ -21,6 +21,27 @@ describe('delete sheet', () => {
     expect(deleteRefusal(null)).toBeNull();
     expect(deleteRefusal(preview({ dirty: ['web: /x (2 uncommitted)'] }))).toBeNull();
     expect(deleteRefusal(preview({ lands_in_flight: ['#2 api'] }))).toBe('#2 api is landing: wait for it to finish or be held.');
+  });
+
+  it('keeps the memory by default, names it, and moves it to Removed when ticked', () => {
+    const p = preview({
+      dirty: ['web: /wt (1 untracked file)'],
+      memory: { path: '/h/memory', files: 2, bytes: 2048 },
+      removed: ['The decision log: 3 entries (/h/logs/decisions.jsonl)'],
+      gallery_files: 1,
+      gallery_bytes: 512,
+    });
+    expect(keptLines(p, false)).toEqual(['web: /wt (1 untracked file)', 'Shared memory: /h/memory (2 files, 2.0 KB)']);
+    expect(removedLines(p, false, false)).toEqual(['The decision log: 3 entries (/h/logs/decisions.jsonl)']);
+    expect(keptLines(p, true)).toEqual(['web: /wt (1 untracked file)']);
+    expect(removedLines(p, true, true)).toEqual([
+      'The gallery: 1 asset, 512 B',
+      'Shared memory: /h/memory (2 files)',
+      'The decision log: 3 entries (/h/logs/decisions.jsonl)',
+    ]);
+    expect(keptLines(preview(), false)).toEqual([]);
+    expect(deleteSummary(result({ worktrees_removed: 1, memory_kept: '/h/memory', folder_left: '/h' })))
+      .toBe('1 clean worktree removed, no gallery kept, the memory kept. What stayed is in /h.');
   });
 
   it('says what went and what stayed', () => {

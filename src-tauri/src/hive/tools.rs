@@ -1161,7 +1161,7 @@ async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: Re
         Err(e) => return Err(fail(undo.run(ctx, caller, e).await)),
     };
 
-    let tab = worker_tab(&w);
+    let tab = worker_tab(&w, &caller.hive);
     let now = crate::commands::workspace::iso_now();
     w.phase = worker::PHASE_LAUNCHING.to_string();
     w.tab_id = Some(tab.id.clone());
@@ -1246,11 +1246,13 @@ async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: Re
     }))
 }
 
-/// A worker's hidden tab, new: never a pane's active tab (§5).
-pub(crate) fn worker_tab(w: &WorkerRecord) -> Tab {
+/// A worker's hidden tab, new: never a pane's active tab (§5), and off the phone when its Hive
+/// was made that way.
+pub(crate) fn worker_tab(w: &WorkerRecord, hive: &Hive) -> Tab {
     let mut tab = Tab::new(w.title.clone());
     tab.custom_name = true;
     tab.hive_role = Some(ROLE_WORKER.to_string());
+    tab.mailink_excluded = hive.settings.keep_off_phone;
     tab
 }
 
@@ -1391,6 +1393,9 @@ pub struct HiveBoard {
     pub suspect_repos: Vec<String>,
     /// Paid generation against the budget (§10.3), and every Hive's total (§7.8).
     pub spend: super::gallery::budget::SpendView,
+    /// Each Hive tab's turn that failed (not on a usage limit), by tab id, until one of its turns
+    /// ends well: the card's and the column's notice, the coordinator's included (`turn_failure`).
+    pub turn_failures: std::collections::BTreeMap<String, super::turn_failure::TurnFailure>,
 }
 
 /// The Hive's workers by badge, with its headroom. `ahead` counts commits per worktree (one git
@@ -1461,6 +1466,7 @@ pub(crate) fn board_view(hive: &Hive, paths: &HivePaths, fuses: &Fuses, now: i64
             usage_limit_reason: h.breaker_reason,
         },
         hive_status: hive.status.clone(),
+        turn_failures: super::turn_failure::current(paths),
     }
 }
 
@@ -2936,6 +2942,53 @@ mod tests {
         assert!(rig.delivered().iter().any(|(to, t)| to == "coord" && t.contains("its terminal closed")));
     }
 
+    /// The first live test: a worker whose turn fails on its login goes failed, the Hive pauses
+    /// with the human's question (so nothing burns spawns on the dead account), the coordinator is
+    /// told once, and the card shows it. Another kind is told once and pauses nothing.
+    #[tokio::test]
+    async fn a_turn_that_fails_on_the_account_fails_the_worker_and_pauses_the_hive() {
+        use crate::hive::turn_failure::{current, on_failure};
+        let rig = Rig::new("turn-failed", 4);
+        let ctx = rig.ctx(accept, ok_save, ok_preflight);
+        let a = rig.worker("One").await;
+        let tab = a.tab_id.clone().unwrap();
+        rig.set_phase(&a.task_id, worker::PHASE_RUNNING);
+        let before = rig.delivered().len();
+
+        let c = on_failure(&ctx, &rig.caller, &tab, ROLE_WORKER, "authentication_failed", "Login expired").await.expect("paused");
+        assert_eq!((c.hive.status.as_str(), c.hive.paused_by.as_str()), ("paused", crate::hive::fuses::PAUSED_BY_ACCOUNT));
+        let (tasks, _) = c.tasks.expect("the human's question");
+        assert!(tasks.iter().any(|t| t.title == crate::hive::fuses::ACCOUNT_PAUSE_TASK_TITLE && t.status == "blocked"));
+        assert_eq!(rig.ws().hive.as_ref().unwrap().status, "paused");
+        assert_eq!(rig.record(&a.task_id).phase, worker::PHASE_FAILED, "no relaunch loop on a dead login");
+        let told: Vec<_> = rig.delivered()[before..].to_vec();
+        assert_eq!(told.len(), 1, "one notice, not a crash notice and a pause notice: {told:?}");
+        assert!(told[0].0 == "coord" && told[0].1.contains("run /login") && told[0].1.contains("marked failed"), "{told:?}");
+        assert_eq!(current(&rig.caller.paths)[&tab].kind, "authentication_failed", "the card's notice");
+        // A restart is refused while paused: the fuses read the status.
+        let e = rig.ctx(accept, ok_save, ok_preflight).fuses.reserve(rig.ws().hive.as_ref().unwrap(), "x", Vec::new, crate::hive::fuses::now_ms());
+        assert!(e.err().unwrap().contains("paused"));
+
+        // The same failure again: nobody is told twice, nothing is filed twice.
+        assert!(on_failure(&ctx, &rig.caller, &tab, ROLE_WORKER, "authentication_failed", "Login expired").await.is_none());
+        assert_eq!(rig.delivered().len(), before + 1);
+
+        // Another worker, another kind: told once, the Hive left as it is.
+        let b = rig.worker("Two").await;
+        let tb = b.tab_id.clone().unwrap();
+        rig.set_phase(&b.task_id, worker::PHASE_RUNNING);
+        assert!(on_failure(&ctx, &rig.caller, &tb, ROLE_WORKER, "overloaded", "529").await.is_none());
+        assert_eq!(rig.record(&b.task_id).phase, worker::PHASE_RUNNING, "an overloaded API fails nothing");
+        let (to, text) = rig.delivered().pop().unwrap();
+        assert!(to == "coord" && text.contains("Worker #2 two's turn failed") && text.contains("hiveMessageWorker"), "{text}");
+        on_failure(&ctx, &rig.caller, &tb, ROLE_WORKER, "overloaded", "529").await;
+        assert_eq!(rig.delivered().len(), before + 2, "told once per kind");
+        // The coordinator's own failure: shown on its column, nobody typed into.
+        on_failure(&ctx, &rig.caller, "coord", ROLE_COORDINATOR, "server_error", "API unavailable").await;
+        assert_eq!(rig.delivered().len(), before + 2);
+        assert_eq!(current(&rig.caller.paths)["coord"].kind, "server_error");
+    }
+
     // ── Retirement and deleting a Hive (6a) ──
 
     impl Rig {
@@ -3098,22 +3151,34 @@ mod tests {
         assert_eq!((pv.gallery_files, pv.gallery_bytes), (1, 3));
         assert_eq!(pv.live_agents, vec!["the coordinator", "#1 clean", "#2 dirty"]);
         assert!(pv.branches.contains(&"web: hive/ship--clean".to_string()));
+        // The memory folder, a file the human wrote in it included, is listed as kept.
+        fs::write(p.memory().join("test-conventions.md"), "# Tests\nUse the fixtures.\n").unwrap();
+        fs::create_dir_all(p.logs()).unwrap();
+        fs::write(p.decision_log(), "{}\n{}\n").unwrap();
+        let pv = crate::hive::delete::preview(&rig.caller.hive, &p, true);
+        let mem = pv.memory.as_ref().expect("memory listed");
+        assert_eq!(mem.path, p.memory().to_string_lossy());
+        assert!(mem.files >= 1 && mem.bytes > 0, "{mem:?}");
+        assert!(pv.removed.iter().any(|r| r.starts_with("The decision log: 2 entries")), "{:?}", pv.removed);
+        assert!(pv.removed.iter().any(|r| r.contains(&p.tasks().display().to_string())), "{:?}", pv.removed);
 
         // Refused while a worker is landing.
         rig.set_phase(&a.task_id, worker::PHASE_LANDING);
         let ctx = rig.ctx(accept, ok_save, ok_preflight);
-        let e = crate::hive::delete::delete_hive(&ctx, &rig.caller, false).await.unwrap_err();
+        let e = crate::hive::delete::delete_hive(&ctx, &rig.caller, false, false).await.unwrap_err();
         assert!(e.contains("is landing"), "{e}");
         assert!(rig.ws().hive.is_some() && clean.is_dir());
         rig.set_phase(&a.task_id, worker::PHASE_REPORTED);
 
         let tabs = [a.tab_id.clone().unwrap(), b.tab_id.clone().unwrap()];
-        let out = crate::hive::delete::delete_hive(&ctx, &rig.caller, false).await.unwrap();
+        let out = crate::hive::delete::delete_hive(&ctx, &rig.caller, false, false).await.unwrap();
         assert_eq!(out.worktrees_removed, 3, "Clean's worktree and both read copies: {out:?}");
         assert!(!clean.exists() && !p.coordinator_worktree("web").exists());
         assert!(dirty.join("README.md").is_file() && out.kept.iter().any(|k| k.contains(dirty.to_str().unwrap())), "{:?}", out.kept);
         assert!(p.gallery().join("hero.png").is_file() && out.gallery_kept);
-        assert!(!p.tasks().exists() && !p.memory().exists() && !p.worker_dir("clean").exists(), "the rest of the Hive folder goes");
+        assert_eq!(fs::read_to_string(p.memory().join("test-conventions.md")).unwrap(), "# Tests\nUse the fixtures.\n", "memory is work");
+        assert_eq!(out.memory_kept.as_deref(), Some(&*p.memory().to_string_lossy()));
+        assert!(!p.tasks().exists() && !p.logs().exists() && !p.worker_dir("clean").exists(), "the rest of the Hive folder goes");
         assert!(out.folder_left.is_some());
         for b in ["hive/ship--clean", "hive/ship--dirty"] {
             assert!(!git(&rig.web, &["branch", "--list", b]).is_empty(), "no branch is deleted: {b}");
@@ -3152,9 +3217,11 @@ mod tests {
         g.record_spend(crate::hive::gallery::model::NewSpend { cost_micros: 3_000, ..Default::default() }).unwrap();
         drop(g);
         assert!(p.gallery_index().is_file());
-        let out = crate::hive::delete::delete_hive(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, true).await.unwrap();
+        fs::write(p.memory().join("notes.md"), "mine").unwrap();
+        // The memory box ticked too: it goes, and nothing of the folder is left.
+        let out = crate::hive::delete::delete_hive(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, true, true).await.unwrap();
         assert!(!crate::hive::gallery::is_open(&rig.caller.hive.id), "the delete forgot its gallery before removing it");
-        assert!(!out.gallery_kept && out.kept.is_empty(), "{out:?}");
+        assert!(!out.gallery_kept && out.kept.is_empty() && out.memory_kept.is_none(), "{out:?}");
         assert!(!p.root.exists(), "nothing held work, so nothing of the Hive folder is left");
         assert!(out.folder_left.is_none());
     }
@@ -3177,7 +3244,7 @@ mod tests {
             tabs.push(tab("svc", Some("svc-web")));
             tabs.push(tab("plain", None));
         }
-        let out = crate::hive::delete::delete_hive(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, true).await.unwrap();
+        let out = crate::hive::delete::delete_hive(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, true, false).await.unwrap();
         let left: Vec<String> = rig.ws().panes[0].tabs.iter().map(|t| t.id.clone()).collect();
         assert_eq!(left, vec!["svc", "plain"], "the job's tab went; a service's and an ordinary tab stay");
         assert!(out.dropped_tabs.contains(&"job-done".to_string()), "{:?}", out.dropped_tabs);
@@ -3205,7 +3272,7 @@ mod tests {
 
         let pv = crate::hive::delete::preview(&rig.caller.hive, &p, true);
         assert!(pv.dirty.iter().any(|d| d.contains(&p.worker_dir(&w.slug).display().to_string())), "{:?}", pv.dirty);
-        let out = crate::hive::delete::delete_hive(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, true).await.unwrap();
+        let out = crate::hive::delete::delete_hive(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, true, false).await.unwrap();
         assert_eq!(fs::read_to_string(wt.join("README.md")).unwrap(), "changed\n");
         assert!(wt.join("new.txt").is_file() && p.worker_scratch(&w.slug).join("render.png").is_file());
         assert!(task.join(worker::WORKER_FILE).is_file(), "its record stays with what it names");
@@ -3235,7 +3302,7 @@ mod tests {
             fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
             return;
         }
-        let out = crate::hive::delete::delete_hive(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, true).await;
+        let out = crate::hive::delete::delete_hive(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, true, false).await;
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
         let out = out.unwrap();
         assert_eq!(out.trust_removed, 1, "{out:?}");

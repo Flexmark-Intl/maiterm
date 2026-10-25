@@ -74,7 +74,58 @@ async fn wait_for_land(tab: &str) {
     }
 }
 
+/// Hives the human paused that have a delivery waiting, woken by their Resume (§11.2: Pause
+/// "holds deliveries"). Memory only, like the land hold: a restart drops what waits.
+static PAUSE_HOLDS: LazyLock<Mutex<HashMap<String, Arc<Notify>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The Hive `tab` belongs to, while its human has paused it. Not a usage-limit or account pause:
+/// those stop starts only, and their notices must reach the coordinator.
+fn paused_by_human(app: &AppState, tab: &str) -> Option<String> {
+    let data = app.app_data.read();
+    let (ws, _) = super::find_hive_tab(&data, tab)?;
+    let h = ws.hive.as_ref()?;
+    (h.status == super::fuses::STATUS_PAUSED && h.paused_by == super::fuses::PAUSED_BY_HUMAN).then(|| h.id.clone())
+}
+
+/// The human resumed `hive_id`: what its Pause held goes out (each through `deliver` again).
+pub(crate) fn end_pause_hold(hive_id: &str) {
+    if let Some(n) = PAUSE_HOLDS.lock().unwrap_or_else(|e| e.into_inner()).remove(hive_id) {
+        n.notify_waiters();
+    }
+}
+
+/// Until `tab`'s Hive isn't paused by its human. The status is read after the wakeup is armed,
+/// so a Resume between the caller's check and here is never missed.
+async fn wait_for_resume(app: &AppState, hive_id: &str, tab: &str) {
+    loop {
+        let n = PAUSE_HOLDS.lock().unwrap_or_else(|e| e.into_inner()).entry(hive_id.to_string()).or_insert_with(|| Arc::new(Notify::new())).clone();
+        let notified = n.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if paused_by_human(app, tab).is_none() {
+            return;
+        }
+        notified.await;
+    }
+}
+
 pub(crate) async fn deliver(app: &Arc<AppState>, handle: &AppHandle, tab: &str, text: &str, what: &'static str) -> Sent {
+    if let Some(hive_id) = paused_by_human(app, tab) {
+        let (app, handle, tab, text) = (app.clone(), handle.clone(), tab.to_string(), text.to_string());
+        log::info!("hive {hive_id}: {what} for tab {tab} held while the human has the Hive paused");
+        tauri::async_runtime::spawn(async move {
+            wait_for_resume(&app, &hive_id, &tab).await;
+            // Through every other hold: a land may have started meanwhile.
+            let sent = deliver_through_pause(&app, &handle, &tab, &text, what).await;
+            log::info!("hive {hive_id}: {what} for tab {tab}, held for the human's pause: {}", sent.describe());
+        });
+        return Sent::Held("your human has paused this Hive; it goes out when they resume it".to_string());
+    }
+    deliver_through_pause(app, handle, tab, text, what).await
+}
+
+/// `deliver` past the human's Pause: only the notice that tells the coordinator of it.
+pub(crate) async fn deliver_through_pause(app: &Arc<AppState>, handle: &AppHandle, tab: &str, text: &str, what: &'static str) -> Sent {
     if land_hold(tab).is_some() {
         let (app, handle, tab, text) = (app.clone(), handle.clone(), tab.to_string(), text.to_string());
         log::info!("hive: {what} for tab {tab} held while its land runs");
@@ -251,6 +302,51 @@ mod tests {
         end_land_hold(&tab);
         tokio::time::timeout(Duration::from_secs(2), waiter).await.expect("released when it ends").unwrap();
         assert!(land_hold(&tab).is_none());
+    }
+
+    /// §11.2: the human's Pause holds deliveries to its agents until Resume; a limit's or an
+    /// account's pause holds none, or its own notices would never reach the coordinator.
+    #[tokio::test]
+    async fn the_humans_pause_holds_deliveries_until_resume() {
+        use crate::hive::fuses::{PAUSED_BY_ACCOUNT, PAUSED_BY_HUMAN, STATUS_PAUSED};
+        use crate::hive::record::{Hive, STATUS_ACTIVE};
+        use crate::state::{Tab, WindowData, Workspace};
+        let app = Arc::new(AppState::new());
+        let hive_id = format!("h-{}", uuid::Uuid::new_v4());
+        {
+            let mut ws = Workspace::new("Hive".into());
+            ws.hive = Some(Hive { id: hive_id.clone(), status: STATUS_PAUSED.into(), paused_by: PAUSED_BY_HUMAN.into(), ..Hive::default() });
+            let mut coord = Tab::new("c".into());
+            coord.id = "coord".into();
+            coord.hive_role = Some(crate::hive::ROLE_COORDINATOR.into());
+            let plain = Tab::new("p".into());
+            let plain_id = plain.id.clone();
+            ws.panes[0].tabs = vec![coord, plain];
+            let mut win = WindowData::new("main".into());
+            win.workspaces = vec![ws];
+            app.app_data.write().windows = vec![win];
+            assert!(paused_by_human(&app, &plain_id).is_none(), "not a Hive agent");
+        }
+        let set = |status: &str, by: &str| {
+            let mut d = app.app_data.write();
+            let h = d.windows[0].workspaces[0].hive.as_mut().unwrap();
+            (h.status, h.paused_by) = (status.into(), by.into());
+        };
+        assert_eq!(paused_by_human(&app, "coord").as_deref(), Some(hive_id.as_str()));
+        set(STATUS_PAUSED, PAUSED_BY_ACCOUNT);
+        assert!(paused_by_human(&app, "coord").is_none(), "an account pause holds nothing");
+        set(STATUS_PAUSED, PAUSED_BY_HUMAN);
+
+        let (a, h) = (app.clone(), hive_id.clone());
+        let waiter = tokio::spawn(async move { wait_for_resume(&a, &h, "coord").await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "held while paused");
+        set(STATUS_ACTIVE, "");
+        end_pause_hold(&hive_id);
+        tokio::time::timeout(Duration::from_secs(2), waiter).await.expect("released by the resume").unwrap();
+        // Resumed before the waiter armed: it sees the status and doesn't wait for the next one.
+        tokio::time::timeout(Duration::from_secs(2), wait_for_resume(&app, &hive_id, "coord")).await.expect("not paused");
+        end_pause_hold(&hive_id);
     }
 
     #[test]

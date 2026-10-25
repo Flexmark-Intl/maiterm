@@ -568,7 +568,7 @@ pub(crate) fn check(s: &Standing, paths: &HivePaths, args: &Value) -> Result<(Fi
     let hive = &s.hive;
     match hive.status.as_str() {
         STATUS_DONE => return Err("This Hive is already done.".to_string()),
-        STATUS_PAUSED => return Err("Resume first: this Hive is paused while your human is asked about a usage limit.".to_string()),
+        STATUS_PAUSED => return Err(format!("Resume first: this Hive is paused ({}).", super::fuses::paused_why(hive))),
         _ => {}
     }
     if hive.criteria.is_empty() {

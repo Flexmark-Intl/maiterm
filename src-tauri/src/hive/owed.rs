@@ -333,10 +333,7 @@ pub fn digest_text(hive: &Hive, why: &str, board: &HiveBoard, cards_waiting: usi
         n => lines.push(format!("{n} land cards wait for your human.")),
     }
     if hive.status == super::fuses::STATUS_PAUSED {
-        lines.push(
-            "Paused: your human is asked about a usage limit. No worker starts and deliveries hold until they resume the Hive."
-                .to_string(),
-        );
+        lines.push(format!("Paused: {}. No worker starts until they resume the Hive.", super::fuses::paused_why(hive)));
     }
     if let Some(at) = &board.headroom.usage_limit_until {
         lines.push(format!("No new workers until {at} (usage limit)."));
@@ -415,6 +412,7 @@ mod tests {
             refresh_at: None,
             suspect_repos: Vec::new(),
             spend: crate::hive::gallery::budget::view(0, &Hive::default(), 0),
+            turn_failures: Default::default(),
         }
     }
 

@@ -15,7 +15,7 @@ use tauri::State;
 use super::layout::{self, FolderInfo};
 use super::launch;
 use super::paths::{hive_root, HivePaths};
-use super::record::{Hive, HiveFolder, HiveModels, KIND_GIT, KIND_PLAIN, LANDING_BASE, LANDING_INTEGRATION, STATUS_ACTIVE};
+use super::record::{Hive, HiveFolder, HiveModels, HiveSettings, KIND_GIT, KIND_PLAIN, LANDING_BASE, LANDING_INTEGRATION, STATUS_ACTIVE};
 use super::ROLE_COORDINATOR;
 use crate::state::app_state::StackRuntimeRow;
 use crate::state::workspace::TabType;
@@ -170,6 +170,54 @@ pub struct Preflight {
     pub platform_ok: bool,
     pub claude_ok: bool,
     pub claude_detail: Option<String>,
+    /// Claude reports no login for the account the Hive's agents would run under: a warning,
+    /// never a refusal. None when it is logged in or can't tell (a token can't be identified).
+    pub login_warning: Option<String>,
+}
+
+/// The account a new Hive's agents run under, as the human knows it: the active managed Claude
+/// account's label, or None for Claude's own login on this computer.
+fn account_label(prefs: &crate::state::Preferences) -> Option<String> {
+    let (_, id) = crate::accounts::active_accounts(prefs).into_iter().find(|(rt, _)| *rt == crate::accounts::Runtime::Claude)?;
+    let a = prefs.managed_accounts.iter().find(|a| a.id == id)?;
+    Some(if a.label.is_empty() { a.email.clone().unwrap_or_else(|| id.clone()) } else { a.label.clone() })
+}
+
+/// The sheet's warning from `claude auth status --json`'s output. Only an explicit
+/// `loggedIn: false` warns: unreadable output, or a login it can't vouch for (a token, a key),
+/// says nothing (docs/login.md §2.3, §6.1).
+pub fn login_verdict(stdout: &[u8], account: Option<&str>) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    if v.get("loggedIn").and_then(serde_json::Value::as_bool) != Some(false) {
+        return None;
+    }
+    Some(match account {
+        Some(a) => format!(
+            "Claude reports the account \"{a}\" isn't logged in, and this Hive's agents would run under it: every turn would fail. \
+             Run /login in a Claude tab of that account first."
+        ),
+        None => "Claude reports it isn't logged in on this computer, so every turn of this Hive's agents would fail. Run /login in \
+                 a Claude tab first."
+            .to_string(),
+    })
+}
+
+/// Asks Claude whether the account a Hive tab would launch under is logged in, in the
+/// environment that tab gets: the account's config root, and nothing that would answer instead.
+/// Cheap and bounded; any failure to tell is no warning. Blocks.
+fn login_check(prefs: &crate::state::Preferences) -> Option<String> {
+    let cli = crate::accounts::resolve_cli(crate::accounts::Runtime::Claude.profile())?;
+    let mut cmd = crate::util::proc::command(&cli);
+    cmd.args(["auth", "status", "--json"]);
+    for n in launch::unset_vars(prefs) {
+        cmd.env_remove(n);
+    }
+    for (k, v) in crate::accounts::spawn_env_for(prefs).0 {
+        cmd.env(k, v);
+    }
+    // Exit 1 is the ordinary logged-out answer, with its JSON on stdout.
+    let out = crate::util::proc::output_timeout(&mut cmd, Duration::from_secs(10)).ok()?;
+    login_verdict(&out.stdout, account_label(prefs).as_deref())
 }
 
 /// The `.claude.json` a new Hive's agents would read trust from: the active Claude account's
@@ -212,6 +260,7 @@ pub async fn hive_preflight(
             .collect();
         (structural_eligibility(ws), from_cwds)
     };
+    let prefs = state.app_data.read().preferences.clone();
     let app = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let (eligible, reason, replaceable_tab) = match structural {
@@ -239,6 +288,7 @@ pub async fn hive_preflight(
             platform_ok: platform_refusal(cfg!(windows)).is_ok(),
             claude_ok: claude.is_ok(),
             claude_detail: claude.err(),
+            login_warning: login_check(&prefs),
         }
     })
     .await
@@ -464,6 +514,8 @@ pub struct HiveSpec {
     /// The Stack step (§3 step 3): definitions and `shared_from` references, checked again by
     /// `import_stack`.
     pub stack: Vec<Service>,
+    /// "Keep this Hive's agents off the phone": every Hive tab is made `mailink_excluded`.
+    pub keep_off_phone: bool,
 }
 
 impl Default for HiveSpec {
@@ -481,6 +533,7 @@ impl Default for HiveSpec {
             budget_cents: DEFAULT_BUDGET_CENTS,
             push_after_land: false,
             stack: Vec::new(),
+            keep_off_phone: false,
         }
     }
 }
@@ -714,6 +767,7 @@ pub fn build_hive(spec: &HiveSpec, id: String, folders: Vec<HiveFolder>) -> Hive
         done_at: None,
         slug: slugify(&spec.name),
         created_at: crate::commands::workspace::iso_now(),
+        settings: HiveSettings { keep_off_phone: spec.keep_off_phone, ..HiveSettings::default() },
         ..Hive::default()
     }
 }
@@ -764,6 +818,8 @@ pub fn install_hive(
     let mut tab = Tab::new(COORDINATOR_TAB_NAME.to_string());
     tab.custom_name = true;
     tab.hive_role = Some(ROLE_COORDINATOR.to_string());
+    // Before its launch: the coordinator's first turn is never a chat on the phone either.
+    tab.mailink_excluded = hive.settings.keep_off_phone;
     let coordinator_tab_id = tab.id.clone();
     ws.panes[0].tabs.push(tab);
     ws.hive = Some(hive);
@@ -982,6 +1038,45 @@ mod tests {
 
     fn the_shell(ws: &Workspace) -> Replaceable {
         Replaceable { pane_id: ws.panes[0].id.clone(), tab_id: "sh".into() }
+    }
+
+    /// "Keep this Hive's agents off the phone": the coordinator is excluded before its launch,
+    /// and a worker's tab is made excluded too. Off by default.
+    #[test]
+    fn keep_off_phone_excludes_every_hive_tab_as_it_is_made() {
+        let spec = HiveSpec { name: "Ship".into(), keep_off_phone: true, ..HiveSpec::default() };
+        let hive = build_hive(&spec, "h1".into(), Vec::new());
+        assert!(hive.settings.keep_off_phone);
+        let mut d = app_with(empty_ws());
+        let got = install_hive(&mut d, "main", "ws", hive.clone(), Vec::new(), "Ship", None).unwrap();
+        let coord = got.workspace.panes[0].tabs.iter().find(|t| t.id == got.coordinator_tab_id).unwrap();
+        assert!(coord.mailink_excluded, "excluded in the same write that made it");
+        let w = super::super::worker::WorkerRecord { title: "API".into(), ..Default::default() };
+        assert!(super::super::tools::worker_tab(&w, &hive).mailink_excluded);
+
+        let plain = build_hive(&HiveSpec::default(), "h2".into(), Vec::new());
+        assert!(!plain.settings.keep_off_phone);
+        let mut d = app_with(empty_ws());
+        let got = install_hive(&mut d, "main", "ws", plain.clone(), Vec::new(), "", None).unwrap();
+        assert!(!got.workspace.panes[0].tabs.iter().any(|t| t.mailink_excluded));
+        assert!(!super::super::tools::worker_tab(&w, &plain).mailink_excluded);
+        // A Create sheet from before the option sends no field: off.
+        let old: HiveSpec = serde_json::from_value(serde_json::json!({ "name": "x" })).unwrap();
+        assert!(!old.keep_off_phone);
+    }
+
+    /// Only Claude's explicit "not logged in" warns; a login it can't vouch for, or output that
+    /// isn't its JSON, says nothing.
+    #[test]
+    fn the_login_check_warns_only_on_an_explicit_logged_out() {
+        let out = br#"{"loggedIn": false, "authMethod": "none", "apiProvider": "firstParty"}"#;
+        let w = login_verdict(out, None).unwrap();
+        assert!(w.contains("isn't logged in") && w.contains("/login"), "{w}");
+        assert!(login_verdict(out, Some("Work")).unwrap().contains("\"Work\""));
+        assert!(login_verdict(br#"{"loggedIn": true, "authMethod": "claude.ai", "email": "a@b"}"#, None).is_none());
+        assert!(login_verdict(br#"{"loggedIn": true, "authMethod": "oauth_token"}"#, None).is_none(), "a token: can't tell, no warning");
+        assert!(login_verdict(br#"{"authMethod": "none"}"#, None).is_none(), "no answer is no claim");
+        assert!(login_verdict(b"error: unknown command", None).is_none());
     }
 
     #[test]

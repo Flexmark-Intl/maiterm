@@ -292,10 +292,10 @@ export interface BlockerInput {
 }
 
 /** Rows maiTerm files the human's own questions on, on a Hive coordinator's tab
- *  (`BUDGET_TASK_TITLE` in src-tauri/src/hive/gallery/budget.rs, `PAUSE_TASK_TITLE` in
- *  hive/fuses.rs). An agent may not make, rename to, or change one: a pre-made or emptied row
+ *  (`BUDGET_TASK_TITLE` in src-tauri/src/hive/gallery/budget.rs, `PAUSE_TASK_TITLE` and
+ *  `ACCOUNT_PAUSE_TASK_TITLE` in hive/fuses.rs). An agent may not make, rename to, or change one: a pre-made or emptied row
  *  would stand where the human's question belongs. */
-export const RESERVED_TASK_TITLES = ['Hive budget reached', 'Hive paused: usage limit'] as const;
+export const RESERVED_TASK_TITLES = ['Hive budget reached', 'Hive paused: usage limit', 'Hive paused: Claude account'] as const;
 
 export function isReservedTaskTitle(title: string): boolean {
   const n = normalizeTitle(title);

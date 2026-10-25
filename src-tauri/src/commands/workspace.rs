@@ -2806,6 +2806,7 @@ pub fn carry_tab_state_on_reload(
         .iter_mut()
         .find(|t| t.id == to_tab_id)
         .ok_or("Replacement tab not found")?;
+    let hive_tab = hive.clone().filter(|_| src.hive_role.is_some());
     let worker_hive = hive.filter(|_| src.hive_role.as_deref() == Some(crate::hive::ROLE_WORKER));
     *tab = carry_tab_record(src, tab);
 
@@ -2823,6 +2824,12 @@ pub fn carry_tab_state_on_reload(
     if let Some(h) = &worker_hive {
         // Its card names the old tab, and a reload changes neither the task's lane nor the Hive.
         if crate::hive::tools::remap_worker_tab(h, &from_tab_id, &to_tab_id) {
+            crate::hive::rpc::emit_workers_changed(tauri::Manager::app_handle(&window), &label, &workspace_id);
+        }
+    }
+    // Any Hive agent's failed-turn notice (the coordinator's too) is keyed by its tab.
+    if let Some(h) = &hive_tab {
+        if crate::hive::turn_failure::remap_tab(&h.id, &from_tab_id, &to_tab_id) {
             crate::hive::rpc::emit_workers_changed(tauri::Manager::app_handle(&window), &label, &workspace_id);
         }
     }

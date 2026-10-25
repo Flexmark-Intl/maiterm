@@ -4000,3 +4000,43 @@ several releases a day).
    test's commits, ids and date order are the same on every run. The one recorded failure of
    `a_forged_edge_under_the_receipt_lands_nothing` didn't reproduce, and its assertions now carry
    the error they saw.
+   **First live test fixes** (2026-10-25; the dev app's Claude account was logged out, so no agent
+   ran). *A failed turn:* Claude sends `StopFailure` instead of `Stop` (`error` from a fixed list,
+   `authentication_failed`, `billing_error`, `overloaded`, …, Claude's words in
+   `last_assistant_message`; read out of 2.1.310), and `normalize_hook_event` had no arm for it, so
+   the tab stayed Active and its column said "Working…" for good. It is now the end of the turn for
+   every tab: the session goes Stopped, `agent-hook-stop` carries `error`, the store notes
+   `failure` and ChatColumn says the turn failed. Local tabs get it from the global http hooks too
+   (`NEWER_HOOK_EVENTS`, gated like PreModelSwitch). For a Hive tab a kind other than `rate_limit`
+   goes to `hive/turn_failure.rs`: the human sees it on the agent's card or column (the board's
+   `turn_failures`, from `logs/turn_failures.json`), once per kind per agent until a turn of that
+   agent ends well, and the coordinator is told of a worker's. An account failure (logged out,
+   billing, on hold, verification, org, cloud credentials) fails every agent on that account, so it
+   **pauses the Hive** with the human's own question on a reserved "Hive paused: Claude account" row
+   (`PauseCause::Account`), and a running worker goes `failed` with that reason: nothing can burn a
+   spawn on the dead account until the human resumes. The Create sheet warns, without blocking,
+   when `claude auth status --json` for the account the agents will run under answers
+   `loggedIn: false` (a token or key it can't vouch for warns nothing). *Delete:* the memory folder
+   is work and stays in place under the Hive's folder unless its own box is ticked, and the sheet
+   lists what goes (the decision log, run history, this Hive's precedents, the other logs, launch
+   records, the coordinator's home). *Header:* Pause (`hive_pause`, `Hive.paused_by = "human"`; no
+   worker starts or relaunches, running agents finish, the coordinator is told; every Hive delivery
+   to its agents is held in memory until Resume (`deliver::end_pause_hold`), all but the pause notice
+   itself, and the resume notice goes first; a usage-limit or account pause holds nothing, so its
+   notices still reach the coordinator. A second pause cause doesn't relabel an open account pause)
+   beside Resume, and Settings: the autonomy, run queue and
+   budget sheets, and read-only what was fixed at Create. `Hive.paused_by` (String) words the
+   header, the digest and Done's refusal by cause. *Claude 2.1.310's startup notices:* a
+   `Write(path)` rule is never matched by Claude's file checks, only `Edit(path)` is, for every
+   editing tool (in 2.1.308–310 alike), so the Write duplicates are gone and every file rule is an
+   Edit rule (`settings::FILE_RULE_TOOL`); spike 10's blocking Write deny sat beside its Edit twin.
+   The `*` in `Bash(git -C * diff)` spans a verb as well as an option, and
+   `git -C <copy> grep -O<cmd> -e diff` matched it and ran `<cmd>`; the gate now lets the
+   coordinator's git run only reading verbs, refuses `grep -O`/`--open-files-in-pager` for every
+   agent and `--bare` where roots are repos (it read a worker's worktree as a git dir). git takes
+   any unambiguous prefix of a long option (`grep --op=<cmd>` ran `<cmd>`), so every refused option
+   is refused by any `--` prefix of it too (`gate::is_refused_long_opt`). StopFailure reaches maiTerm
+   from ssh tabs' hooks and the maiterm-tab mod as well; a Hive tab's own copy is acted on ahead of
+   the mod dedup, and a reload moves a tab's failed-turn notice to its new id. *Phone:*
+   "Keep this Hive's agents off the phone" on the Create sheet (`HiveSettings.keep_off_phone`) makes
+   every Hive tab `mailink_excluded` as it is made, the coordinator before its launch.

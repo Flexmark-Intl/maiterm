@@ -1,14 +1,14 @@
 <script lang="ts">
   /** Delete Hive (docs/hive.md §11.2): before anything is touched, every branch not landed, every
-   *  worktree that would stay, the scratch folders with work in them, the gallery's size and the
-   *  agents that would stop. Clean worktrees go; dirty ones, every branch and (unless ticked) the
-   *  gallery stay. The click is the human's authority; Rust re-checks (a land in flight refuses).
+   *  worktree that would stay, the scratch folders with work in them, the shared memory, the
+   *  gallery's size, the agents that would stop and what goes. Clean worktrees go; dirty ones,
+   *  every branch and (unless ticked) the gallery and the memory stay. The click is the human's authority; Rust re-checks (a land in flight refuses).
    *  Same backdrop/panel vocabulary as RunQueueModal, and the same explicit rAF focus. */
   import { hiveDelete, hiveDeletePreview } from '$lib/tauri/commands';
   import type { HiveDeletePreview } from '$lib/tauri/types';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
-  import { deleteRefusal, deleteSummary, formatBytes } from '$lib/hive/delete';
+  import { deleteRefusal, deleteSummary, formatBytes, keptLines, removedLines } from '$lib/hive/delete';
   import { error as logError } from '@tauri-apps/plugin-log';
 
   interface Props {
@@ -22,6 +22,7 @@
   let preview = $state<HiveDeletePreview | null>(null);
   let readError = $state<string | null>(null);
   let deleteGallery = $state(false);
+  let deleteMemory = $state(false);
   let deleting = $state(false);
   let refusal = $state<string | null>(null);
   let panelEl = $state<HTMLDivElement | null>(null);
@@ -39,6 +40,8 @@
   });
 
   const blocked = $derived(deleteRefusal(preview));
+  const kept = $derived(preview ? keptLines(preview, deleteMemory) : []);
+  const removed = $derived(preview ? removedLines(preview, deleteGallery, deleteMemory) : []);
   const canDelete = $derived(!!preview && !blocked && !deleting);
 
   async function confirm() {
@@ -46,7 +49,7 @@
     deleting = true;
     refusal = null;
     try {
-      const r = await hiveDelete(workspaceId, deleteGallery);
+      const r = await hiveDelete(workspaceId, deleteGallery, deleteMemory);
       toastStore.addToast(`${name || 'Hive'} deleted`, deleteSummary(r), 'info');
       onclose();
       // Last: the Hive view this sheet sits in unmounts with the record.
@@ -77,7 +80,8 @@
       <div class="title">Delete {name || 'this Hive'}?</div>
       <div class="subtitle">
         Its agents stop and its tabs close. The workspace stays, with its tasks as history. Clean worktrees are removed;
-        anything holding work stays on disk and is listed below. No branch is ever deleted.
+        anything holding work, the shared memory included, stays on disk and is listed below, and so is everything that
+        goes. No branch is ever deleted.
       </div>
     </div>
 
@@ -110,13 +114,8 @@
         </section>
         <section>
           <h4>Kept on disk</h4>
-          {#if preview.dirty.length || preview.scratch.length}
-            <ul>
-              {#each preview.dirty as d (d)}<li>{d}</li>{/each}
-              {#each preview.scratch as s (s.path)}
-                <li>Scratch of {s.worker}: {s.path} ({s.files} file{s.files === 1 ? '' : 's'}{s.reported ? `, ${s.reported} reported` : ''})</li>
-              {/each}
-            </ul>
+          {#if kept.length}
+            <ul>{#each kept as k (k)}<li>{k}</li>{/each}</ul>
           {:else}
             <p class="quiet">Nothing: no worktree holds uncommitted or untracked work.</p>
           {/if}
@@ -125,6 +124,18 @@
           <input type="checkbox" bind:checked={deleteGallery} disabled={deleting} />
           <span>Also delete the gallery ({preview.gallery_files} asset{preview.gallery_files === 1 ? '' : 's'}, {formatBytes(preview.gallery_bytes)})</span>
         </label>
+        {#if preview.memory}
+          <label class="check">
+            <input type="checkbox" bind:checked={deleteMemory} disabled={deleting} />
+            <span>Also delete the shared memory ({preview.memory.files} file{preview.memory.files === 1 ? '' : 's'}, files you wrote there included)</span>
+          </label>
+        {/if}
+        {#if removed.length}
+          <section>
+            <h4>Removed</h4>
+            <ul>{#each removed as r (r)}<li>{r}</li>{/each}</ul>
+          </section>
+        {/if}
         {#if blocked}<p class="error" role="alert">{blocked}</p>{/if}
       {/if}
       {#if refusal}<p class="error" role="alert">{refusal}</p>{/if}

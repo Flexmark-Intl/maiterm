@@ -70,6 +70,9 @@
   let picked = $state(new Set<string>());
   let budgetDollars = $state(10);
   let pushAfterLand = $state(false);
+  /** Every Hive tab made off the phone: Create launches the coordinator at once, so there's no
+   *  later moment to exclude it before its first turn. */
+  let keepOffPhone = $state(false);
   let creating = $state(false);
   let createError = $state<string | null>(null);
   let suggestions = $state<Record<string, StackSuggestion[] | null>>({});
@@ -273,6 +276,7 @@
       budget_cents: Math.max(0, Math.round(Number(budgetDollars) * 100)),
       push_after_land: pushAfterLand,
       stack: $state.snapshot(stackRows) as Service[],
+      keep_off_phone: keepOffPhone,
     };
     try {
       await createHive(workspaceId, spec);
@@ -313,6 +317,10 @@
         <p class="error">{loadError}</p>
       {:else if blocked && preflight}
         <p class="error">{blocked}</p>
+      {/if}
+      {#if preflight?.login_warning}
+        <!-- A warning, never a block: a login Claude can't vouch for (a token) isn't reported. -->
+        <p class="warn login" role="status">{preflight.login_warning}</p>
       {/if}
 
       <label class="field">
@@ -453,6 +461,11 @@
       <label class="check field">
         <input type="checkbox" bind:checked={pushAfterLand} />
         Push after land <span class="hint">each land to Base also pushes that repo's Base</span>
+      </label>
+
+      <label class="check field">
+        <input type="checkbox" bind:checked={keepOffPhone} />
+        Keep this Hive's agents off the phone <span class="hint">no agent of this Hive, the coordinator included, is a chat in maiLink</span>
       </label>
 
       <div class="field">

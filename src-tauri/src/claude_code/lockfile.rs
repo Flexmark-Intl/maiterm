@@ -352,7 +352,7 @@ fn hook_url_marker(port: u16) -> String {
 /// PostToolUseFailure and SubagentStop are about a year old, and gating them on a probe that
 /// can fail (maiTerm can't find an nvm-only Claude from a Finder launch) cost the
 /// permission-prompt ledger while protecting nobody.
-const NEWER_HOOK_EVENTS: &[&str] = &["PreModelSwitch"];
+const NEWER_HOOK_EVENTS: &[&str] = &["PreModelSwitch", "StopFailure"];
 
 /// Which of `NEWER_HOOK_EVENTS` EVERY Claude maiTerm can find knows.
 ///
@@ -577,7 +577,10 @@ maiTerm already knows this tab and session; you do NOT need to initialize. Only 
         // maiTerm tab. See the PreModelSwitch branch at the top of `hooks_handler`.
         "PreModelSwitch": http_hook(&hooks_url),
         "SubagentStop": http_hook(&hooks_url),
-        "PreCompact": http_hook(&hooks_url)
+        "PreCompact": http_hook(&hooks_url),
+        // Sent instead of Stop when an API error ends the turn (an expired login): without it the
+        // tab stayed Active after the turn was over.
+        "StopFailure": http_hook(&hooks_url)
     });
     // Only events the installed Claude knows — see NEWER_HOOK_EVENTS for why one it doesn't
     // costs a dialog on every launch.
@@ -655,7 +658,7 @@ fn command_hook_is_ours_to_sweep(
 /// Registers:
 /// - SessionStart (command) — reads $MAITERM_TAB_ID, POSTs to our server, injects tab ID context
 /// - SessionEnd, Notification, Stop, UserPromptSubmit, PreToolUse, PostToolUse,
-///   PermissionRequest, PostToolUseFailure, PreModelSwitch, SubagentStop, PreCompact (http)
+///   PermissionRequest, PostToolUseFailure, PreModelSwitch, SubagentStop, PreCompact, StopFailure (http)
 ///
 /// We identify our entries by matching the hook URL, so we don't clobber user hooks.
 fn write_hook_settings(port: u16, auth: &str) -> Result<(), String> {
@@ -1578,8 +1581,8 @@ mod newer_hook_event_tests {
     /// The year-old permission-ledger events are registered whether or not a Claude can be found:
     /// gating them cost the ledger wherever the probe failed, and protected nobody.
     #[test]
-    fn only_the_new_event_is_gated() {
-        assert_eq!(NEWER_HOOK_EVENTS, &["PreModelSwitch"]);
+    fn only_the_new_events_are_gated() {
+        assert_eq!(NEWER_HOOK_EVENTS, &["PreModelSwitch", "StopFailure"]);
         let hooks = build_our_hooks(51234, "AUTH");
         for e in ["PermissionRequest", "PostToolUseFailure", "SubagentStop"] {
             assert!(hooks.get(e).is_some(), "{e} is registered unconditionally");

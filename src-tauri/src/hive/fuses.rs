@@ -305,12 +305,19 @@ pub enum PauseCause {
     Rearmed,
     /// A 429 Claude retried and gave up on, on a tab maiTerm can't show runs on a Claude plan.
     NoSubscription,
+    /// A turn failed on its Claude account (logged out, billing, on hold): every agent on that
+    /// account fails the same way, so a start would only burn a spawn (`turn_failure`).
+    Account,
 }
 
 impl PauseCause {
     /// maiTerm's words for it, which the human's blocker and the coordinator's notice carry.
     fn explain(self) -> &'static str {
         match self {
+            PauseCause::Account => {
+                "Every agent on that Claude account fails the same way until it's fixed: run /login in a Claude tab of that \
+                 account (or sort out its plan or billing), then resume the Hive."
+            }
             PauseCause::NoWait => "Claude doesn't wait out a limit like this one, so nothing will continue it.",
             PauseCause::Rearmed => {
                 "Claude has already waited out a usage limit on that agent's tab twice today and won't wait again."
@@ -320,6 +327,37 @@ impl PauseCause {
                  continue it."
             }
         }
+    }
+
+    /// The row maiTerm asks on, and how its question starts.
+    fn row(self) -> (&'static str, &'static str) {
+        match self {
+            PauseCause::Account => (ACCOUNT_PAUSE_TASK_TITLE, ACCOUNT_PAUSE_PREFIX),
+            _ => (PAUSE_TASK_TITLE, PAUSE_PREFIX),
+        }
+    }
+
+    fn paused_by(self) -> &'static str {
+        match self {
+            PauseCause::Account => PAUSED_BY_ACCOUNT,
+            _ => PAUSED_BY_LIMIT,
+        }
+    }
+}
+
+/// `Hive.paused_by`: who or what paused it. Empty on a Hive paused before it was recorded, which
+/// only a usage limit could do.
+pub const PAUSED_BY_LIMIT: &str = "usage_limit";
+pub const PAUSED_BY_ACCOUNT: &str = "account";
+/// The Hive header's Pause (§11.2): nothing is asked, the human resumes it when they choose.
+pub const PAUSED_BY_HUMAN: &str = "human";
+
+/// Why the Hive is paused, as the coordinator is told (its digest, a refused Done).
+pub fn paused_why(hive: &Hive) -> &'static str {
+    match hive.paused_by.as_str() {
+        PAUSED_BY_HUMAN => "your human paused it",
+        PAUSED_BY_ACCOUNT => "your human is asked to fix the Hive's Claude account",
+        _ => "your human is asked about a usage limit",
     }
 }
 
@@ -582,37 +620,53 @@ pub fn breaker_notice(until: i64) -> String {
 /// To the paused Hive's coordinator when another of its agents hit the limit. maiTerm has
 /// already asked the human (`file_pause_blocker`), so the coordinator mustn't ask again.
 pub fn pause_notice(limit: &str, cause: PauseCause) -> String {
+    let what = match cause {
+        PauseCause::Account => "One of its agents' turns failed on its Claude account",
+        _ => "One of its agents hit a usage limit",
+    };
     format!(
-        "[maiTerm] This Hive is paused. One of its agents hit a usage limit (Claude said: \"{}\"). {} No worker starts \
-         until your human resumes the Hive. maiTerm has asked them to, on your task \"{PAUSE_TASK_TITLE}\": don't ask \
-         them again. Leave running workers as they are.",
+        "[maiTerm] This Hive is paused. {what} (Claude said: \"{}\"). {} No worker starts until your human resumes the \
+         Hive. maiTerm has asked them to, on your task \"{}\": don't ask them again. Leave running workers as they are.",
         quote_limit(limit),
-        cause.explain()
+        cause.explain(),
+        cause.row().0
     )
 }
 
 /// The row the human's pause blocker sits on, on the coordinator's tab.
 pub const PAUSE_TASK_TITLE: &str = "Hive paused: usage limit";
+/// The row a pause on a failed account asks on (`PauseCause::Account`).
+pub const ACCOUNT_PAUSE_TASK_TITLE: &str = "Hive paused: Claude account";
 
-fn is_pause_task(t: &Task, coordinator: Option<&str>) -> bool {
-    t.tab_id.as_deref() == coordinator && t.normalized_title == Task::normalize_title(PAUSE_TASK_TITLE)
+fn is_row_of(t: &Task, coordinator: Option<&str>, title: &str) -> bool {
+    t.tab_id.as_deref() == coordinator && t.normalized_title == Task::normalize_title(title)
 }
 
-/// How maiTerm's pause question starts (`file_pause_blocker`), and its kind.
+fn is_pause_task(t: &Task, coordinator: Option<&str>) -> bool {
+    [PAUSE_TASK_TITLE, ACCOUNT_PAUSE_TASK_TITLE].iter().any(|title| is_row_of(t, coordinator, title))
+}
+
+/// How maiTerm's pause questions start (`file_pause_blocker`), and their kind.
 const PAUSE_PREFIX: &str = "Resume this Hive once Claude's usage limit allows";
+const ACCOUNT_PAUSE_PREFIX: &str = "Fix this Hive's Claude account, then resume the Hive";
 const PAUSE_KIND: &str = "action";
 
 /// A pause row maiTerm itself has open: Blocked, on maiTerm's own question. An agent can give any
 /// row that title or re-block it on its own words (an older build let it), so the title alone
 /// says nothing; such a row gets maiTerm's question filed over it (`pause_in`).
-fn is_open_pause(t: &Task) -> bool {
-    t.status == "blocked" && t.blocker.as_ref().is_some_and(|b| b.kind == PAUSE_KIND && b.question.starts_with(PAUSE_PREFIX))
+fn is_open_pause(t: &Task, prefix: &str) -> bool {
+    t.status == "blocked" && t.blocker.as_ref().is_some_and(|b| b.kind == PAUSE_KIND && b.question.starts_with(prefix))
 }
 
-/// Whether maiTerm's pause question waits on the coordinator's row. Whether the Hive IS paused
-/// is its status, never this: the row only says whether the human has been asked.
+fn question_open(ws: &Workspace, coordinator: Option<&str>, cause: PauseCause) -> bool {
+    let (title, prefix) = cause.row();
+    ws.tasks.iter().any(|t| is_row_of(t, coordinator, title) && is_open_pause(t, prefix))
+}
+
+/// Whether maiTerm's usage-limit question waits on the coordinator's row. Whether the Hive IS
+/// paused is its status, never this: the row only says whether the human has been asked.
 pub fn pause_question_open(ws: &Workspace, coordinator: Option<&str>) -> bool {
-    ws.tasks.iter().any(|t| is_pause_task(t, coordinator) && is_open_pause(t))
+    question_open(ws, coordinator, PauseCause::NoWait)
 }
 
 /// Rust asks the human itself (§7.8 "files a blocker for the human"): the coordinator is often
@@ -620,9 +674,10 @@ pub fn pause_question_open(ws: &Workspace, coordinator: Option<&str>) -> bool {
 /// An `action` blocker on the coordinator's row, reused across pauses, so it waits where every
 /// question does (the Loom's Decisions, the phone). Whatever that row carried is replaced.
 pub fn file_pause_blocker(ws: &mut Workspace, coordinator: Option<&str>, limit: &str, cause: PauseCause, now: &str) {
+    let (title, prefix) = cause.row();
     let blocker = TaskBlocker {
         kind: PAUSE_KIND.into(),
-        question: format!("{PAUSE_PREFIX}: it is paused and starts no workers until you do."),
+        question: format!("{prefix}: it is paused and starts no workers until you do."),
         context: Some(format!("Claude said: \"{}\". {}", quote_limit(limit), cause.explain())),
         options: Vec::new(),
         command: None,
@@ -630,7 +685,7 @@ pub fn file_pause_blocker(ws: &mut Workspace, coordinator: Option<&str>, limit: 
         asked_by: "agent".into(),
     };
     let note = format!("Needs you: {}", blocker.question);
-    file_row_blocker(ws, coordinator, PAUSE_TASK_TITLE, blocker, &note, now);
+    file_row_blocker(ws, coordinator, title, blocker, &note, now);
 }
 
 /// A question maiTerm asks the human itself (a pause, an autonomy offer, the plan): a blocker on
@@ -774,14 +829,26 @@ fn changed_workspace<'a>(data: &'a mut AppData, c: &StatusChange) -> Option<&'a 
 /// already paused asks nothing more while maiTerm's question stands, so nobody is asked twice;
 /// if the row no longer carries it (an agent re-blocked or settled it), it is filed again.
 pub fn pause_in(data: &mut AppData, hive_id: &str, limit: &str, cause: PauseCause, now: &str) -> Option<StatusChange> {
-    let mut c = match set_status(data, hive_id, Some(STATUS_ACTIVE), STATUS_PAUSED) {
+    let by = cause.paused_by();
+    let mut c = match set_status_with(data, hive_id, &[STATUS_ACTIVE], Some(STATUS_PAUSED), |h| h.paused_by = by.to_string()) {
         Some(c) => c,
         None => {
             let c = set_status_with(data, hive_id, &[STATUS_PAUSED], None, |_| {})?;
-            if pause_question_open(changed_workspace(data, &c)?, c.coordinator.as_deref()) {
+            let ws = changed_workspace(data, &c)?;
+            if question_open(ws, c.coordinator.as_deref(), cause) {
                 return None;
             }
-            c
+            // A dead account stops everything, a limit only some: while its question stands the
+            // Hive stays paused BY it, so the header and the digest name the cause that blocks.
+            let keep_account = cause != PauseCause::Account
+                && c.hive.paused_by == PAUSED_BY_ACCOUNT
+                && question_open(ws, c.coordinator.as_deref(), PauseCause::Account);
+            // Paused already (by the human, or for the other cause): this question is asked too.
+            set_status_with(data, hive_id, &[STATUS_PAUSED], None, |h| {
+                if !keep_account {
+                    h.paused_by = by.to_string();
+                }
+            })?
         }
     };
     if let Some(ws) = changed_workspace(data, &c) {
@@ -791,9 +858,15 @@ pub fn pause_in(data: &mut AppData, hive_id: &str, limit: &str, cause: PauseCaus
     Some(c)
 }
 
+/// The human's Pause in the Hive header (§11.2): no worker starts or relaunches until they
+/// resume it, and running agents finish their turns. Nothing is asked: the human chose it.
+pub fn human_pause_in(data: &mut AppData, hive_id: &str) -> Option<StatusChange> {
+    set_status_with(data, hive_id, &[STATUS_ACTIVE], Some(STATUS_PAUSED), |h| h.paused_by = PAUSED_BY_HUMAN.to_string())
+}
+
 /// A paused Hive is active again, and the question that asked for it is closed.
 pub fn resume_in(data: &mut AppData, hive_id: &str, now: &str) -> Option<StatusChange> {
-    let mut c = set_status(data, hive_id, Some(STATUS_PAUSED), STATUS_ACTIVE)?;
+    let mut c = set_status_with(data, hive_id, &[STATUS_PAUSED], Some(STATUS_ACTIVE), |h| h.paused_by.clear())?;
     if let Some(ws) = changed_workspace(data, &c) {
         if close_pause_blocker(ws, c.coordinator.as_deref(), now) {
             c.tasks = Some((ws.tasks.clone(), ws.workstreams.clone()));
@@ -805,7 +878,7 @@ pub fn resume_in(data: &mut AppData, hive_id: &str, now: &str) -> Option<StatusC
 /// The frontend's mirror of `Workspace.hive`, which Rust alone writes, follows its window's event.
 pub const HIVE_CHANGED_EVENT: &str = "hive-changed";
 
-fn announce(handle: &tauri::AppHandle, c: &StatusChange) {
+pub(crate) fn announce(handle: &tauri::AppHandle, c: &StatusChange) {
     use tauri::Emitter;
     super::phone::bump();
     let payload = serde_json::json!({ "workspace_id": c.workspace_id, "hive": c.hive });
@@ -875,14 +948,64 @@ pub async fn hive_resume(
         }
         hive.id.clone()
     };
+    let by_human = state.app_data.read().window(window.label()).and_then(|w| w.workspaces.iter().find(|w| w.id == workspace_id)).and_then(|ws| ws.hive.as_ref()).is_some_and(|h| h.paused_by == PAUSED_BY_HUMAN);
     let now = crate::mailink::board::iso_now();
-    let hive = commit_change(&state, &app, &hive_id, |data| resume_in(data, &hive_id, &now))
-        .map(|c| c.hive)
+    let change = commit_change(&state, &app, &hive_id, |data| resume_in(data, &hive_id, &now))
         .ok_or_else(|| "This Hive isn't paused any more".to_string())?;
+    // The coordinator heard of the human's pause, so it hears of its end, ahead of what the
+    // pause held (`deliver::end_pause_hold`).
+    let (st, handle, coordinator) = (state.inner().clone(), app.clone(), change.coordinator.clone().filter(|_| by_human));
+    tauri::async_runtime::spawn(async move {
+        if let Some(c) = coordinator {
+            let sent = super::deliver::deliver(&st, &handle, &c, HUMAN_RESUME_NOTICE, "Hive notice").await;
+            log::info!("hive: resume notice to {c}: {}", sent.describe());
+        }
+        super::deliver::end_pause_hold(&hive_id);
+    });
     // Workers that waited out the pause launch now, where their dependencies allow.
     super::waiters::poll_soon(state.inner().clone(), app, workspace_id);
-    Ok(hive)
+    Ok(change.hive)
 }
+
+/// Pause button's command (§11.2): an active Hive starts and relaunches no worker until the
+/// human resumes it; running agents finish their turns, and its coordinator is told.
+#[tauri::command]
+pub async fn hive_pause(
+    window: tauri::Window,
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+    app: tauri::AppHandle,
+    workspace_id: String,
+) -> Result<Hive, String> {
+    let hive_id = {
+        let data = state.app_data.read();
+        let ws = data
+            .window(window.label())
+            .and_then(|w| w.workspaces.iter().find(|w| w.id == workspace_id))
+            .ok_or("Workspace not found")?;
+        let hive = ws.hive.as_ref().ok_or("This workspace isn't a Hive")?;
+        if hive.status != STATUS_ACTIVE {
+            return Err(format!("Only an active Hive can be paused (this one is {})", hive.status));
+        }
+        hive.id.clone()
+    };
+    let change = commit_change(&state, &app, &hive_id, |data| human_pause_in(data, &hive_id))
+        .ok_or_else(|| "This Hive isn't active any more".to_string())?;
+    // The one delivery the pause lets through: everything else to or from its agents waits.
+    if let Some(c) = change.coordinator.clone() {
+        let st = state.inner().clone();
+        tauri::async_runtime::spawn(async move {
+            let sent = super::deliver::deliver_through_pause(&st, &app, &c, HUMAN_PAUSE_NOTICE, "Hive notice").await;
+            log::info!("hive: pause notice to {c}: {}", sent.describe());
+        });
+    }
+    Ok(change.hive)
+}
+
+pub const HUMAN_PAUSE_NOTICE: &str = "[maiTerm] Your human paused this Hive: no worker starts or relaunches until they resume it, \
+    and messages to and from its agents (yours to workers, their reports, maiTerm's notices) wait until then. Workers already \
+    running carry on with their turns. Don't ask them to resume it.";
+
+pub const HUMAN_RESUME_NOTICE: &str = "[maiTerm] Your human resumed this Hive: workers can start again, and the messages the pause held follow.";
 
 #[cfg(test)]
 mod tests {
@@ -1346,6 +1469,32 @@ mod tests {
         let (tasks, _) = c.tasks.expect("the closed row goes to the tasks store");
         assert_eq!((tasks[0].status.as_str(), tasks[0].blocker.is_none()), ("done", true));
         assert!(pause_in(&mut data, "h1", limit, PauseCause::NoWait, "t6").unwrap().tasks.is_some(), "a new pause asks on the same row");
+    }
+
+    /// A limit on a Hive paused for its account asks its own question but doesn't relabel the
+    /// pause: the login is still dead, and the header and the digest must say so.
+    #[test]
+    fn a_limit_does_not_hide_an_open_account_pause() {
+        let mut data = hive_state(true);
+        let c = pause_in(&mut data, "h1", "Login expired", PauseCause::Account, "t1").unwrap();
+        assert_eq!(c.hive.paused_by, PAUSED_BY_ACCOUNT);
+        let limit = "You've hit your weekly limit \u{b7} resets Oct 25, 3pm (UTC)";
+        let c = pause_in(&mut data, "h1", limit, PauseCause::NoWait, "t2").expect("the limit is asked too");
+        assert_eq!(c.hive.paused_by, PAUSED_BY_ACCOUNT, "the account still blocks everything");
+        let ws = &data.windows[0].workspaces[0];
+        assert!(question_open(ws, Some("coord"), PauseCause::Account) && pause_question_open(ws, Some("coord")));
+
+        // The other way round the account takes over, and once its question is gone a limit may.
+        let mut data = hive_state(true);
+        pause_in(&mut data, "h1", limit, PauseCause::NoWait, "t1").unwrap();
+        let c = pause_in(&mut data, "h1", "Login expired", PauseCause::Account, "t2").unwrap();
+        assert_eq!(c.hive.paused_by, PAUSED_BY_ACCOUNT);
+        let mut data = hive_state(true);
+        pause_in(&mut data, "h1", "Login expired", PauseCause::Account, "t1").unwrap();
+        let t = data.windows[0].workspaces[0].tasks.iter_mut().find(|t| t.title == ACCOUNT_PAUSE_TASK_TITLE).unwrap();
+        t.status = "done".into();
+        t.settle_blocker();
+        assert_eq!(pause_in(&mut data, "h1", limit, PauseCause::NoWait, "t2").unwrap().hive.paused_by, PAUSED_BY_LIMIT);
     }
 
     #[test]

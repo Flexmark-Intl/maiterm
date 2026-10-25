@@ -523,6 +523,9 @@ export interface Hive {
   /** "active" | "paused" | "done". */
   status: string;
   done_at?: number | null;
+  /** While paused: "usage_limit" | "account" | "human" (hive/fuses.rs `PAUSED_BY_*`). Absent
+   *  otherwise, and on a pause from before it was recorded (a usage limit). */
+  paused_by?: string;
   /** Names the `hive/<slug>` branches; stable across workspace renames. */
   slug: string;
   created_at: string;
@@ -534,6 +537,8 @@ export interface HiveSettings {
   land?: LandSettings;
   autonomy?: AutonomySettings;
   gallery?: GallerySettings;
+  /** Chosen at Create: every Hive tab is made `mailink_excluded`. */
+  keep_off_phone?: boolean;
   [section: string]: unknown;
 }
 
@@ -810,6 +815,8 @@ export interface HiveSpec {
   /** The Stack step (docs/hive.md §3 step 3): definitions to import, and `shared_from`
    *  references to infrastructure another workspace runs. Rust re-checks every row. */
   stack: Service[];
+  /** "Keep this Hive's agents off the phone": every Hive tab is made `mailink_excluded`. */
+  keep_off_phone: boolean;
 }
 
 export interface HiveReplaceable {
@@ -831,6 +838,9 @@ export interface HivePreflight {
   platform_ok: boolean;
   claude_ok: boolean;
   claude_detail: string | null;
+  /** Claude reports no login for the account the agents would run under: a warning, never a
+   *  refusal. Null when logged in or when it can't tell. */
+  login_warning?: string | null;
 }
 
 /** `hive_detect_folder`: what the sheet shows for a picked folder (docs/hive.md §6.1, §6.6). */
@@ -977,6 +987,10 @@ export interface HiveDeletePreview {
   lands_in_flight: string[];
   /** Every branch the Hive made: all kept. */
   branches: string[];
+  /** The shared memory folder: kept unless ticked. Null when there's none. */
+  memory?: { path: string; files: number; bytes: number } | null;
+  /** What goes with the Hive, one line each with its path. */
+  removed?: string[];
 }
 
 /** hive/delete.rs `HiveDeleteResult`. */
@@ -985,6 +999,8 @@ export interface HiveDeleteResult {
   kept: string[];
   branches: string[];
   gallery_kept: boolean;
+  /** Where the memory folder stayed, when it did. */
+  memory_kept?: string | null;
   trust_removed: number;
   requests_failed: number;
   folder_left?: string | null;
@@ -1015,6 +1031,17 @@ export interface HiveBoard {
   suspect_repos?: string[];
   /** Paid generation against the budget (§10.3), and every Hive's total (§7.8). */
   spend?: HiveSpend;
+  /** Each Hive tab's failed turn (not a usage limit), by tab id, until one of its turns ends
+   *  well: the card's and the column's notice, the coordinator's included. */
+  turn_failures?: Record<string, HiveTurnFailure>;
+}
+
+/** hive/turn_failure.rs `TurnFailure`: Claude's StopFailure kind, its words, maiTerm's advice. */
+export interface HiveTurnFailure {
+  kind: string;
+  text: string;
+  advice: string;
+  at: string;
 }
 
 /** hive/gallery/budget.rs `SpendView`: integer micro-dollars, the ledger's own unit. */

@@ -530,7 +530,37 @@ fn shell_command_string(args: &[String]) -> Option<&str> {
 
 /// Options after the verb that run a configured command, write a file, or read one from
 /// anywhere (`--no-index` takes any two paths).
-const GIT_VERB_OPTS_REFUSED: &[&str] = &["--ext-diff", "--textconv", "--output", "--no-index", "--upload-pack", "--receive-pack", "--exec"];
+const GIT_VERB_OPTS_REFUSED: &[&str] =
+    &["--ext-diff", "--textconv", "--output", "--no-index", "--upload-pack", "--receive-pack", "--exec", "--open-files-in-pager"];
+
+/// The coordinator's git verbs: reading only. The `*` in `Bash(git -C * diff)` spans any verb
+/// too, so `git -C <copy> grep -O<cmd> -e diff` matched that rule and ran `<cmd>` (the first live
+/// test's review); a verb outside this list is refused whatever the rules allow. Writes would
+/// meet the sandbox anyway.
+const COORDINATOR_GIT_VERBS: &[&str] = &[
+    "diff", "log", "show", "status", "blame", "grep", "rev-parse", "rev-list", "ls-files", "ls-tree", "cat-file", "merge-base",
+    "branch", "tag", "describe", "shortlog", "reflog", "for-each-ref", "show-ref", "name-rev", "range-diff", "diff-tree",
+    "diff-files", "diff-index", "whatchanged", "check-ignore", "check-attr", "count-objects", "help", "version",
+];
+
+/// Real options that are prefixes of a refused one: an exact name wins over an abbreviation.
+const GIT_VERB_OPTS_PREFIX_OK: &[&str] = &["--text"];
+
+/// Whether `o` names a refused option. parse-options takes any unambiguous prefix of a long
+/// option, so `git grep --op=<cmd>` is `--open-files-in-pager=<cmd>` (the first live test's
+/// review): every `--<prefix>[=…]` of a refused name is refused.
+fn is_refused_long_opt(o: &str) -> bool {
+    let name = o.split('=').next().unwrap_or(o);
+    name.len() > 2
+        && name.starts_with("--")
+        && !GIT_VERB_OPTS_PREFIX_OK.contains(&name)
+        && GIT_VERB_OPTS_REFUSED.iter().any(|r| r.starts_with(name))
+}
+
+/// `git grep -O[<cmd>]` runs a pager command on the matches, attached or in a short-flag cluster.
+fn is_grep_pager_flag(a: &str) -> bool {
+    a.strip_prefix('-').is_some_and(|f| !f.starts_with('-') && f.contains('O'))
+}
 
 fn check_git(args: &[String], cwd: Option<&Path>, scope: &GateScope) -> Result<(), String> {
     let mut base: Option<PathBuf> = cwd.and_then(real_path);
@@ -582,6 +612,11 @@ fn check_git(args: &[String], cwd: Option<&Path>, scope: &GateScope) -> Result<(
                 git_dir_check(a)?;
                 j += 2;
             }
+            // The folder `-C` names, read as a git dir itself: a worker's worktree holding its own
+            // `config` and `HEAD` would be the repo, and its config's commands would run here.
+            "--bare" if scope.roots_are_repos => {
+                return Err("git --bare is refused here: it reads the folder itself as a repo.".to_string());
+            }
             "--namespace" | "--super-prefix" => j += 2,
             _ if a.starts_with("--git-dir=") || a.starts_with("--work-tree=") => {
                 let (flag, p) = a.split_once('=').unwrap_or((a, ""));
@@ -601,9 +636,10 @@ fn check_git(args: &[String], cwd: Option<&Path>, scope: &GateScope) -> Result<(
             }
             _ => {
                 repo_check(base.as_deref())?;
-                let refused = args[j + 1..]
-                    .iter()
-                    .find(|o| GIT_VERB_OPTS_REFUSED.iter().any(|r| o.as_str() == *r || o.strip_prefix(r).is_some_and(|rest| rest.starts_with('='))));
+                if scope.role != super::ROLE_WORKER && !COORDINATOR_GIT_VERBS.contains(&a) {
+                    return Err(format!("git {a} is refused for the coordinator: its git only reads (diff, log, show, status, grep…)."));
+                }
+                let refused = args[j + 1..].iter().find(|o| is_refused_long_opt(o) || (a == "grep" && is_grep_pager_flag(o)));
                 return match refused {
                     Some(o) => Err(format!("git {a} {o} is refused in a Hive: it runs a configured command, writes a file or reads one from anywhere.")),
                     None => Ok(()),
@@ -842,6 +878,64 @@ mod tests {
         ] {
             assert!(matches!(bash(&f, &cmd), GateDecision::Deny(_)), "should refuse: {cmd}");
         }
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// The first live test's review of `Bash(git -C * diff|log|show[ *])`: the `*` spans a verb as
+    /// readily as an option, so every git the coordinator's rules let through must be refused here
+    /// when it can run a command, write a file, read anywhere or leave the folders.
+    #[cfg(unix)]
+    #[test]
+    fn what_the_git_c_allow_rules_let_through_the_gate_refuses() {
+        let f = fx();
+        let wt = f.paths.coordinator_worktree("web");
+        let c = format!("git -C '{}'", wt.display());
+        for cmd in [
+            // Each matches `Bash(git -C * diff)` or `Bash(git -C * diff *)` as written.
+            format!("{c} -c core.fsmonitor=x diff"),
+            format!("{c} diff --output=/tmp/x"),
+            format!("{c} diff --ext-diff"),
+            format!("{c} fetch --upload-pack='sh -c x' . diff"),
+            format!("{c} grep -O'sh -c x' -e diff"),
+            format!("{c} grep --open-files-in-pager='sh -c x' -e diff"),
+            // parse-options takes any unambiguous prefix of a long option.
+            format!("{c} grep --open='sh -c x' -e diff"),
+            format!("{c} grep --op='sh -c x' -e diff"),
+            format!("{c} grep --open-files='sh -c x' -e diff"),
+            format!("{c} grep --open-files-in-pa='sh -c x' -e diff"),
+            format!("{c} grep --open-files-in-pager -e diff"),
+            format!("{c} diff --out=/tmp/x"),
+            format!("{c} diff --ext"),
+            format!("{c} diff --textc"),
+            format!("{c} diff --no-ind /etc/passwd x"),
+            format!("{c} grep -nOx -e diff"),
+            format!("{c} config core.fsmonitor x diff"),
+            format!("{c} difftool -x x diff"),
+            format!("{c} submodule foreach x diff"),
+            format!("{c} --bare log -p diff"),
+            format!("git -C '{}' diff", f.base.join("outside").display()),
+            format!("git -C '{}' -C .. diff", wt.display()),
+        ] {
+            assert!(matches!(bash(&f, &cmd), GateDecision::Deny(_)), "should refuse: {cmd}");
+        }
+        // What a review needs still reads.
+        for cmd in [format!("{c} grep -n -e diff"), format!("{c} status"), format!("{c} log -p --stat"), format!("{c} diff -O{}/order", wt.display()), format!("{c} diff --text --no-ext-diff"), format!("{c} grep --only-matching -e diff")] {
+            assert_eq!(bash(&f, &cmd), GateDecision::Allow, "should allow: {cmd}");
+        }
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// A worker's git is its own, in its sandbox: verbs beyond reading pass, `--bare` too.
+    #[cfg(unix)]
+    #[test]
+    fn the_coordinators_verb_list_is_not_a_workers() {
+        let f = fx();
+        let wt = f.paths.coordinator_worktree("web");
+        let scope = GateScope { role: crate::hive::ROLE_WORKER.to_string(), write_roots: vec![wt.clone()], git_roots: vec![wt.clone()], roots_are_repos: false, queued: Vec::new() };
+        for cmd in ["git commit -m x", "git add -A", "git --bare log"] {
+            assert_eq!(gate_decision("Bash", &json!({ "command": cmd }), Some(&wt), &scope), GateDecision::Allow, "{cmd}");
+        }
+        assert!(matches!(gate_decision("Bash", &json!({ "command": "git grep -Ox -e a" }), Some(&wt), &scope), GateDecision::Deny(_)));
         let _ = fs::remove_dir_all(&f.base);
     }
 

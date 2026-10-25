@@ -23,7 +23,8 @@
   import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
   import { hiveRetryLand } from '$lib/tauri/commands';
   import { error as logError } from '@tauri-apps/plugin-log';
-  import type { HiveDiffStat, HiveWorkerCard, Task } from '$lib/tauri/types';
+  import type { HiveDiffStat, HiveTurnFailure, HiveWorkerCard, Task } from '$lib/tauri/types';
+  import { hiveFailureNotice } from '$lib/agents/turnFailure';
 
   interface Props {
     /** The Hive's own id: a retired worker's sessions are read under it. */
@@ -46,8 +47,10 @@
     workspaceId: string;
     /** Opens the land log on this worker's lines, where its Undo is (§8.6). */
     onlandlog: () => void;
+    /** Its last turn failed, not on a usage limit (the board's `turn_failures`). */
+    failure?: HiveTurnFailure | null;
   }
-  let { hiveId, card, cardState, diff, workspace, tasks, active, pinned, focused, terminalShown, onpin, onclose, onterminal, workspaceId, onlandlog }: Props = $props();
+  let { hiveId, card, cardState, diff, workspace, tasks, active, pinned, focused, terminalShown, onpin, onclose, onterminal, workspaceId, onlandlog, failure = null }: Props = $props();
 
   let chat = $state<ChatColumn | undefined>();
   let rootEl = $state<HTMLElement | undefined>();
@@ -155,6 +158,9 @@
   {#if landNote}
     <p class="note land-note" role="status">{landNote}</p>
   {/if}
+  {#if failure}
+    <p class="note land-note failed" role="status">{hiveFailureNotice(failure)}</p>
+  {/if}
   {#if approval}
     <div class="approval">
       <AgentRequestCard request={approval} onnote={(t) => (approvalNote = t)} />
@@ -201,6 +207,7 @@
   .approval { padding: 8px 12px 8px 18px; border-bottom: 1px solid var(--bg-light); max-height: 45%; overflow-y: auto; }
   .note { margin: 6px 0 0; font-size: 11.5px; color: var(--fg-dim); overflow-wrap: anywhere; }
   .land-note { margin: 0; padding: 6px 12px 6px 18px; border-bottom: 1px solid var(--bg-light); white-space: pre-wrap; }
+  .land-note.failed { color: var(--yellow); }
   @media (prefers-reduced-motion: reduce) {
     .wcol { transition: none; }
   }

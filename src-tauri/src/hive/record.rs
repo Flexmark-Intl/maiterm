@@ -43,6 +43,10 @@ pub struct Hive {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub done_at: Option<i64>,
+    /// While paused, who or what paused it: `"usage_limit"` | `"account"` | `"human"`
+    /// (`fuses::PAUSED_BY_*`). Empty otherwise, and on a pause from before it was recorded.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub paused_by: String,
     /// Names the `hive/<slug>` branches (§6.4). Kept on the record so renaming the workspace
     /// never renames a branch out from under its worktrees.
     pub slug: String,
@@ -69,6 +73,7 @@ impl Default for Hive {
             criteria: Vec::new(),
             status: STATUS_ACTIVE.to_string(),
             done_at: None,
+            paused_by: String::new(),
             slug: String::new(),
             created_at: String::new(),
             extra: Map::new(),
@@ -165,6 +170,9 @@ pub struct HiveSettings {
     pub autonomy: AutonomySettings,
     /// Where `galleryAdd` may also file from, and the generators' hosts (§10.3, §14.16).
     pub gallery: GallerySettings,
+    /// Chosen on the Create sheet: every Hive tab is made with `Tab.mailink_excluded`, so no
+    /// agent of this Hive is ever a chat on the phone, the coordinator's first turn included.
+    pub keep_off_phone: bool,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

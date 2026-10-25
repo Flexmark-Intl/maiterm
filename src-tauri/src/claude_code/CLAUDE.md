@@ -674,7 +674,8 @@ each other. The mod could drop inbound per tab (`session.receive` → `{ consume
   only for a session this maiTerm knows, because `~/.claude/settings.json` is shared by every
   Claude on the machine.
 - **A recent event goes in only where EVERY installed Claude knows it** (`NEWER_HOOK_EVENTS`,
-  today just `PreModelSwitch`). Claude ignores an unknown hook event, but opens a "Settings
+  today `PreModelSwitch` and `StopFailure`, which Claude sends instead of `Stop` when an API
+  error ends a turn and `normalize_hook_event` reads as the turn's end). Claude ignores an unknown hook event, but opens a "Settings
   Warning" dialog at startup to say so, and that dialog holds every launch. Verified on 2.1.283;
   the SessionStart hook never ran behind it. The evidence is the event's name in the Claude
   executable, checked in every copy maiTerm can find (`accounts::cli_candidates`), because a tab

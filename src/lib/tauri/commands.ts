@@ -2840,6 +2840,12 @@ export async function hiveResume(workspaceId: string): Promise<Hive> {
   return invoke('hive_resume', { workspaceId });
 }
 
+/** The Hive header's Pause (docs/hive.md §11.2): no worker starts or relaunches until Resume;
+ *  running agents finish their turns, and the coordinator is told. */
+export async function hivePause(workspaceId: string): Promise<Hive> {
+  return invoke('hive_pause', { workspaceId });
+}
+
 /** The Hive's last accepted `hiveFinish` report (docs/hive.md §11.4), or null before one. */
 export async function hiveFinishReport(workspaceId: string): Promise<HiveFinishRecord | null> {
   return invoke('hive_finish_report', { workspaceId });
@@ -2972,9 +2978,9 @@ export async function hiveDeletePreview(workspaceId: string): Promise<HiveDelete
 }
 
 /** Delete the Hive: the human's click on the delete sheet. Clean worktrees go, dirty ones and every
- *  branch stay, the gallery stays unless `deleteGallery`. */
-export async function hiveDelete(workspaceId: string, deleteGallery: boolean): Promise<HiveDeleteResult> {
-  return invoke('hive_delete', { workspaceId, deleteGallery });
+ *  branch stay, the gallery and the memory folder stay unless ticked. */
+export async function hiveDelete(workspaceId: string, deleteGallery: boolean, deleteMemory: boolean): Promise<HiveDeleteResult> {
+  return invoke('hive_delete', { workspaceId, deleteGallery, deleteMemory });
 }
 
 /** The Hive's land log, folded: undone and suspect lines, each repo's standing, open undos

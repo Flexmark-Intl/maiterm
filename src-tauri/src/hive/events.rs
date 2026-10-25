@@ -62,6 +62,8 @@ pub(crate) fn feed_actions(event: &str, tool: Option<&str>) -> &'static [Action]
         "PostToolUse" if edits => &[Action::DiffStat, Action::PromptGone],
         "PostToolUse" => &[Action::PromptGone],
         "Stop" => &[Action::DiffStat, Action::Meta, Action::PromptGone],
+        // A turn that failed has ended as one that finished has, its edits so far included.
+        "StopFailure" => &[Action::DiffStat, Action::PromptGone],
         "SessionStart" => &[Action::Meta, Action::DiffStat],
         "UserPromptSubmit" => &[Action::PromptGone],
         "PermissionRequest" | "Notification" => &[Action::PromptMaybe],
@@ -77,6 +79,10 @@ pub fn observed(state: &Arc<AppState>, handle: &AppHandle, tab_id: &str, event_n
     // Any Hive tab's write into the memory folder, the coordinator's too (§9 provenance).
     if let Some(path) = super::memory::tool_write_target(event_name, event) {
         super::memory::attribute_tool_write(state, handle, tab_id, path);
+    }
+    // Any Hive tab's turn that ended well puts a failed one behind it (`turn_failure`).
+    if event_name == "Stop" {
+        super::turn_failure::turn_completed(state, handle, tab_id);
     }
     let actions = feed_actions(event_name, event.get("tool_name").and_then(Value::as_str));
     if actions.is_empty() {
@@ -185,8 +191,30 @@ pub(crate) async fn session_ended<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Call
     mark_failed(ctx, caller, tab, "its agent exited").await
 }
 
-/// `failed`, when the worker is still running with no report since its launch. True when it moved.
+/// `failed`, when the worker is still running with no report since its launch, and the
+/// coordinator told. True when it moved.
 pub(crate) async fn mark_failed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, tab: &str, how: &str) -> bool {
+    let Some((w, given)) = move_to_failed(ctx, caller, tab, how).await else { return false };
+    if given {
+        return true;
+    }
+    notify(
+        ctx,
+        caller,
+        format!(
+            "[maiTerm] Worker {} stopped without reporting: {how}. Its worktrees and branch are kept. hiveRestartWorker resumes \
+             it (fresh: true starts a new session that reads its brief again); hiveStopWorker retires it.",
+            worker_label(&w)
+        ),
+    )
+    .await;
+    true
+}
+
+/// `mark_failed` but for telling the coordinator, which the caller does in its own words (a
+/// failed turn, `turn_failure`). The record as it now is, and whether it was a reviewer that had
+/// given its verdict (nothing to tell). None when it didn't move.
+pub(crate) async fn move_to_failed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, tab: &str, how: &str) -> Option<(WorkerRecord, bool)> {
     let (paths, tab_id) = (caller.paths.clone(), tab.to_string());
     let moved = blocking(move || {
         let Some(w) = worker::worker_for_tab(&paths, &tab_id) else { return Ok(None) };
@@ -207,10 +235,10 @@ pub(crate) async fn mark_failed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     .await;
     let (w, given) = match moved {
         Ok(Some(w)) => w,
-        Ok(None) => return false,
+        Ok(None) => return None,
         Err(e) => {
             log::warn!("hive {}: tab {tab}: crash not recorded: {e}", caller.hive.id);
-            return false;
+            return None;
         }
     };
     if given {
@@ -218,7 +246,7 @@ pub(crate) async fn mark_failed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         log::info!("hive {}: reviewer {} ended after its verdict: {how}", caller.hive.id, worker_label(&w));
         super::queue::release_worker(&w.task_id, "your review is done");
         ctx.window.workers_changed(&caller.workspace_id);
-        return true;
+        return Some((w, true));
     }
     log::warn!("hive {}: worker {} failed: {how} without a report", caller.hive.id, worker_label(&w));
     super::queue::release_worker(&w.task_id, &format!("you stopped without reporting ({how})"));
@@ -227,17 +255,7 @@ pub(crate) async fn mark_failed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     if let Err(e) = super::control::task_note(ctx, caller, &w.task_id, &note, None).await {
         log::info!("hive {}: worker {} failure note not written: {e}", caller.hive.id, worker_label(&w));
     }
-    notify(
-        ctx,
-        caller,
-        format!(
-            "[maiTerm] Worker {} stopped without reporting: {how}. Its worktrees and branch are kept. hiveRestartWorker resumes \
-             it (fresh: true starts a new session that reads its brief again); hiveStopWorker retires it.",
-            worker_label(&w)
-        ),
-    )
-    .await;
-    true
+    Some((w, false))
 }
 
 /// A worker's failed call: each target the sandbox refused that it hasn't been told about yet.
@@ -326,7 +344,7 @@ async fn file_sandbox_blocker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, 
     .await;
 }
 
-async fn notify<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text: String) {
+pub(crate) async fn notify<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text: String) {
     let Some(c) = super::tools::coordinator_tab(ctx.data, caller) else { return };
     let sent = ctx.window.deliver(&c, text, "Hive notice").await;
     log::info!("hive {}: notice to the coordinator: {}", caller.hive.id, sent.describe());
@@ -348,6 +366,7 @@ mod tests {
             assert_eq!(feed_actions("PostToolUseFailure", tool), &[ToolFailed, PromptGone], "{tool:?}");
         }
         assert_eq!(feed_actions("Stop", None), &[DiffStat, Meta, PromptGone]);
+        assert_eq!(feed_actions("StopFailure", None), &[DiffStat, PromptGone], "a failed turn ended too");
         assert_eq!(feed_actions("SessionStart", None), &[Meta, DiffStat]);
         assert_eq!(feed_actions("SessionEnd", None), &[SessionEnded, PromptGone]);
         assert_eq!(feed_actions("UserPromptSubmit", None), &[PromptGone]);
@@ -355,7 +374,7 @@ mod tests {
         assert_eq!(feed_actions("PermissionRequest", Some("Bash")), &[PromptMaybe]);
         assert_eq!(feed_actions("Notification", None), &[PromptMaybe]);
         assert_eq!(feed_actions("PreToolUse", Some("AskUserQuestion")), &[PromptMaybe]);
-        for quiet in ["PreToolUse", "PreCompact", "SubagentStop", "StopFailure", ""] {
+        for quiet in ["PreToolUse", "PreCompact", "SubagentStop", ""] {
             assert!(feed_actions(quiet, Some("Edit")).is_empty(), "{quiet}");
         }
     }

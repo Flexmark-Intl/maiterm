@@ -26,6 +26,7 @@
   import { untrack, type Snippet } from 'svelte';
   import { loomStore } from '$lib/stores/loom.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
+  import { turnFailureText } from '$lib/agents/turnFailure';
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { navigateToTab } from '$lib/stores/workspaces.svelte';
   import { getTabMeta, getTabTranscript, getTaskTranscript, listTabModels, sendTabMessage, type ChatTurn, type TabMeta } from '$lib/tauri/commands';
@@ -711,6 +712,9 @@
       {/each}
       {#if liveState?.state === 'active'}
         <p class="working"><i></i>{liveState.toolDetail ?? liveState.toolName ?? 'Working…'}</p>
+      {:else if liveState?.failure}
+        <!-- A StopFailure: the turn is over, and it says so rather than reading as a result. -->
+        <p class="failed">{turnFailureText(liveState.failure)}</p>
       {/if}
       </div>
     </div>
@@ -939,6 +943,7 @@
   /* Keyframes are scoped per component: FocusView's list dots have their own copy. */
   @keyframes pulse { 50% { opacity: 0.35; } }
   @media (prefers-reduced-motion: reduce) { .working i { animation: none; } }
+  .failed { margin: 0; font-size: 11.5px; color: var(--yellow); overflow-wrap: anywhere; }
 
   .dock { display: flex; flex-direction: column; gap: 8px; min-height: 0; max-height: 80%; padding: 10px 18px 14px; border-top: 1px solid var(--bg-light); background: var(--bg-dark); }
   .asks { display: flex; flex-direction: column; gap: 8px; flex: 0 1 auto; min-height: 0; overflow-y: auto; }
