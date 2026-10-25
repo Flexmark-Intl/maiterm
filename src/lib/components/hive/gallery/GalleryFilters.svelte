@@ -12,9 +12,20 @@
     workers: HiveWorkerCard[];
     rows: GalleryAssetRow[];
     collections: GalleryCollection[];
+    /** The whole trash, whatever the filters: emptying it takes all of it. */
+    trashed: number;
     onchange: (patch: Partial<GalleryQuery>) => void;
+    /** Opens the collections panel. */
+    onmanage: () => void;
+    /** Empties the trash, once the human confirmed here. */
+    onemptytrash: () => void;
   }
-  let { query, workers, rows, collections, onchange }: Props = $props();
+  let { query, workers, rows, collections, trashed, onchange, onmanage, onemptytrash }: Props = $props();
+
+  let confirmEmpty = $state(false);
+  $effect(() => {
+    if (!query.trash) confirmEmpty = false;
+  });
 
   const STATUSES = [
     { key: '', label: 'Any' },
@@ -90,11 +101,23 @@
         {/each}
       </div>
     {:else}
-      <p class="none">None yet: the coordinator makes them.</p>
+      <p class="none">None yet: you or the coordinator make them.</p>
     {/if}
+    <button type="button" class="manage" onclick={onmanage}>Manage collections…</button>
   </section>
   <section>
     <label class="check"><input type="checkbox" checked={query.trash} onchange={(e) => onchange({ trash: (e.currentTarget as HTMLInputElement).checked })} /> Show the trash</label>
+    {#if query.trash && trashed}
+      {#if confirmEmpty}
+        <p class="none">Delete all {trashed} file{trashed === 1 ? '' : 's'} in the trash for good, whatever the filters show? Their records stay, so lineage holds.</p>
+        <div class="chips">
+          <button type="button" class="danger" onclick={() => { confirmEmpty = false; onemptytrash(); }}>Empty the trash</button>
+          <button type="button" onclick={() => (confirmEmpty = false)}>Keep</button>
+        </div>
+      {:else}
+        <button type="button" class="manage" onclick={() => (confirmEmpty = true)}>Empty the trash ({trashed})…</button>
+      {/if}
+    {/if}
   </section>
 </aside>
 
@@ -111,5 +134,7 @@
   em { font-style: normal; opacity: 0.6; margin-left: 4px; font-variant-numeric: tabular-nums; }
   .check { display: flex; align-items: center; gap: 6px; color: var(--fg); cursor: pointer; }
   .none { margin: 0; color: var(--fg-dim); font-size: 11px; }
+  .manage { margin-top: 6px; background: none; border: none; padding: 0; color: var(--accent); font: inherit; font-size: 11px; cursor: pointer; text-align: left; }
+  .chips button.danger { color: var(--red); border-color: var(--red); }
   button:focus-visible, select:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 </style>

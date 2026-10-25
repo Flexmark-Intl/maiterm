@@ -23,10 +23,12 @@
     row: GalleryAssetRow;
     selected: boolean;
     flashing: boolean;
+    /** The coordinator's finals recommendation waiting on the human ("" no status). */
+    recommended?: string;
     onselect: (e: MouseEvent) => void;
     onopen: () => void;
   }
-  let { hiveId, row, selected, flashing, onselect, onopen }: Props = $props();
+  let { hiveId, row, selected, flashing, recommended, onselect, onopen }: Props = $props();
 
   const pic = $derived(picture(row));
   /** A picture that 404s (a thumbnail swept, an asset trashed meanwhile) falls back to the icon. */
@@ -40,7 +42,9 @@
   const duration = $derived(fmtDuration(row.duration_ms));
   const trashed = $derived(!!row.deleted_at);
   const tip = $derived(
-    `${row.title} · ${madeByLabel(row.made_by)}${row.prompt_head ? `\n${row.prompt_head}` : ''}${trashed ? '\nIn the trash' : ''}`,
+    `${row.title} · ${madeByLabel(row.made_by)}${row.prompt_head ? `\n${row.prompt_head}` : ''}${trashed ? '\nIn the trash' : ''}${
+      recommended !== undefined ? `\nThe coordinator recommends: ${recommended || 'no status'}` : ''
+    }`,
   );
 
   // ── Video: scrub on hover, play muted after resting 400 ms ──
@@ -115,6 +119,7 @@
     class:trashed
     class:stacked={row.children > 0}
     data-kind={row.kind}
+    data-asset-id={row.id}
     role="option"
     tabindex="-1"
     aria-selected={selected}
@@ -160,6 +165,7 @@
       {#if row.status === 'final'}<span class="b final">final ✓</span>{/if}
       {#if row.status === 'picked'}<span class="b picked">picked</span>{/if}
       {#if row.status === 'rejected'}<span class="b rej">rejected</span>{/if}
+      {#if recommended !== undefined}<span class="b rec">→ {recommended || 'no status'}?</span>{/if}
     </span>
     <span class="corner">
       {#if (row.kind === 'video' || row.kind === 'audio') && duration}<span class="b dur">{row.kind === 'video' ? '▶ ' : ''}{duration}</span>{/if}
@@ -182,6 +188,9 @@
     cursor: pointer;
     box-sizing: border-box;
     outline: none;
+    /* Shift-click extends the selection, never a text selection; a press may become a drag. */
+    -webkit-user-select: none;
+    user-select: none;
   }
   .tile.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .tile.flash { animation: flash 1.2s ease-out; }
@@ -205,6 +214,7 @@
   .final { color: var(--green); }
   .picked { color: var(--accent); }
   .rej { color: var(--red); }
+  .rec { color: var(--yellow); }
   .type { letter-spacing: 0.04em; }
   .trash-b { position: absolute; bottom: 5px; left: 5px; color: var(--fg-dim); }
   .variants { position: absolute; bottom: 5px; left: 5px; font-size: 10px; line-height: 15px; padding: 0 5px; border-radius: 4px; background: color-mix(in srgb, var(--bg-dark) 78%, transparent); color: var(--fg-dim); }

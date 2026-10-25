@@ -101,7 +101,7 @@ fn open_no_follow(p: &Path) -> Result<File, String> {
 
 /// The open file's own path, as the kernel has it. `None` where the platform can't say.
 #[cfg(target_os = "macos")]
-fn fd_path(f: &File) -> Result<Option<PathBuf>, String> {
+pub(crate) fn fd_path(f: &File) -> Result<Option<PathBuf>, String> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::io::AsRawFd;
     let mut buf = vec![0u8; libc::PATH_MAX as usize];
@@ -115,13 +115,13 @@ fn fd_path(f: &File) -> Result<Option<PathBuf>, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn fd_path(f: &File) -> Result<Option<PathBuf>, String> {
+pub(crate) fn fd_path(f: &File) -> Result<Option<PathBuf>, String> {
     use std::os::unix::io::AsRawFd;
     fs::read_link(format!("/proc/self/fd/{}", f.as_raw_fd())).map(Some).map_err(|e| format!("the opened file's path couldn't be read: {e}"))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn fd_path(_f: &File) -> Result<Option<PathBuf>, String> {
+pub(crate) fn fd_path(_f: &File) -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 

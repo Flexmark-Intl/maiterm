@@ -1,5 +1,7 @@
 //! The gallery's agent tools (docs/hive.md §10.3): `galleryAdd`, `galleryList`, `galleryGet`,
-//! `galleryTag` and the coordinator's `galleryCollect`. `galleryDeliver` is step 8e's.
+//! `galleryTag`, and the coordinator's `galleryCollect` and `galleryDeliver` (§10.6, step 8e).
+//! Under the Finals checkpoint at Ask me, the coordinator's finals are recommendations the
+//! human answers by picking in the gallery (`commands::human_tag`), which is how Finals is earned.
 //!
 //! Who files, for which task and from where comes from the calling tab, never from a tool's
 //! arguments: a worker is its `worker.json`, the coordinator its Hive. A path is filed only from
@@ -18,7 +20,7 @@ use super::ingest;
 use super::model::*;
 use super::Gallery;
 use crate::hive::checkpoints;
-use crate::hive::decisions::{self, DecisionLine, BY_COORDINATOR as DECIDED_BY_COORDINATOR, EVENT_ANSWERED, SOURCE_GALLERY};
+use crate::hive::decisions::{self, DecisionLine, BY_COORDINATOR as DECIDED_BY_COORDINATOR, EVENT_ANSWERED, EVENT_LAPSED, EVENT_RECOMMENDED, SOURCE_GALLERY};
 use crate::hive::deliver::one_line;
 use crate::hive::paths::HivePaths;
 use crate::hive::record::Hive;
@@ -35,10 +37,10 @@ pub const TAG: &str = "galleryTag";
 pub const COLLECT: &str = "galleryCollect";
 pub const DELIVER: &str = "galleryDeliver";
 
-/// What `tools/list` offers a worker, and a coordinator: built tools only.
+/// What `tools/list` offers a worker, and a coordinator.
 pub const WORKER_GALLERY_TOOLS: [&str; 4] = [ADD, LIST, GET, TAG];
-pub const COORDINATOR_GALLERY_TOOLS: [&str; 5] = [ADD, LIST, GET, TAG, COLLECT];
-/// Every gallery name, built or not, so none falls through to the frontend.
+pub const COORDINATOR_GALLERY_TOOLS: [&str; 6] = [ADD, LIST, GET, TAG, COLLECT, DELIVER];
+/// Every gallery name, so none falls through to the frontend.
 pub const GALLERY_TOOLS: [&str; 6] = [ADD, LIST, GET, TAG, COLLECT, DELIVER];
 
 pub const MAX_ITEMS: usize = 20;
@@ -59,6 +61,8 @@ pub const LIST_MAX: u32 = 200;
 /// Assets one `galleryTag` changes, and one `galleryCollect` list names.
 pub const MAX_IDS: usize = 100;
 pub const MAX_MEMBERS: usize = 500;
+/// A spawn's `inputs` and a message's `assets` (plan D23).
+pub const MAX_INPUTS: usize = 20;
 
 /// Collect and deliver are the coordinator's (§10.3, plan D13); the rest every Hive agent's.
 pub fn coordinator_only(tool: &str) -> bool {
@@ -157,8 +161,10 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
         "inputSchema": { "type": "object", "properties": { "tabId": tab_id, "id": { "type": "string" } }, "required": ["id"] }
     });
     let status_rule = if role == ROLE_COORDINATOR {
-        "status final and rejected are yours to set while your human leaves picking finals to you; under Ask me they are \
-         your human's, and you ask with a decision blocker."
+        "status final and rejected are yours to set while your human leaves picking finals to you. Under Ask me they are \
+         your human's: a final or rejected you set (or one you move an asset out of) is recorded as your recommendation, \
+         shown to your human on that asset in the gallery, and the asset keeps its status until they pick; ask with a \
+         decision blocker when you need the answer to go on."
     } else {
         "You may set status picked (or \"\") on an asset that isn't final or rejected; final and rejected are your \
          coordinator's and your human's."
@@ -201,7 +207,27 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
             "required": ["collection"]
         }
     });
-    vec![add, list, get, tag, collect]
+    let deliver = json!({
+        "name": DELIVER,
+        "description": "Copy assets into one of this Hive's plain folders as new files: the assets you name, or a collection in its \
+            order (named 01-…, 02-… unless you give names). folder is a plain folder's name, with an existing subfolder if you \
+            like (brand/icons), or an absolute path inside one; maiTerm makes no folders. A name already there gets \" (2)\": \
+            nothing is ever overwritten (replacing files is your human's, with Export…). Names default to the titles. A git \
+            folder is never written: have a worker put the files in its worktree (hiveSpawnWorker inputs, hiveMessageWorker \
+            assets) and land them, so the change is reviewed. Trashed assets aren't delivered. Answers the names written.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tabId": tab_id,
+                "assets": { "type": "array", "items": { "type": "string" }, "description": "Asset ids, in the order to write them" },
+                "collection": { "type": "string", "description": "A collection (name or id), in place of assets: its members out of the trash, in order" },
+                "folder": { "type": "string", "description": "A plain folder's name, optionally with a subfolder (brand/icons), or an absolute path inside one" },
+                "names": { "type": "array", "items": { "type": "string" }, "description": "One file name per asset delivered, in order: one component each, no leading dot. A name with no extension takes the file's" }
+            },
+            "required": ["folder"]
+        }
+    });
+    vec![add, list, get, tag, collect, deliver]
 }
 
 // ── The caller ──
@@ -302,9 +328,6 @@ pub(crate) async fn call<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: Caller, role: 
     if coordinator_only(tool) && role != ROLE_COORDINATOR {
         return Err(format!("{tool} is your coordinator's: ask it in your report or a blocker."));
     }
-    if !COORDINATOR_GALLERY_TOOLS.contains(&tool) {
-        return Err(format!("{tool} isn't available in this build of maiTerm yet."));
-    }
     let worker = if role == ROLE_WORKER {
         let (paths, tab) = (caller.paths.clone(), caller.tab_id.clone());
         Some(blocking(move || worker::worker_for_tab(&paths, &tab).ok_or_else(|| "No worker record names your tab.".to_string())).await?)
@@ -320,7 +343,8 @@ pub(crate) async fn call<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: Caller, role: 
         GET => get(g, args).await,
         TAG => tag(ctx, &gc, g, args).await,
         COLLECT => collect(ctx, &gc, g, args).await,
-        t => Err(format!("{t} isn't available in this build of maiTerm yet.")),
+        DELIVER => deliver(&gc, g, args).await,
+        t => Err(format!("{t} isn't a maiTerm tool.")),
     }
 }
 
@@ -824,51 +848,122 @@ async fn get(g: Arc<Gallery>, args: &Value) -> Result<Value, String> {
 
 // ── galleryTag ──
 
-fn is_finals_status(s: &str) -> bool {
+pub(crate) fn is_finals_status(s: &str) -> bool {
     s == STATUS_FINAL || s == STATUS_REJECTED
 }
 
-/// Who may set what (plan D12): a worker tags, stars and picks, never over a final or rejected; the
-/// coordinator sets anything, except that final and rejected (setting them or changing one) are
-/// the human's while the Finals checkpoint is Ask me.
-pub(crate) fn tag_refusal(role: &str, hive: &Hive, targets: &[Asset], status: Option<&str>) -> Option<String> {
-    let status = status?;
-    let fixed = targets.iter().find(|a| is_finals_status(&a.status) && a.status != status);
-    if role == ROLE_WORKER {
-        if is_finals_status(status) {
-            return Some(format!("Status {status} is your coordinator's and your human's to set; you may set picked."));
-        }
-        return fixed.map(|a| format!("{} is {}: only your coordinator or your human changes that.", a.id, a.status));
-    }
-    if checkpoints::asks(hive, checkpoints::FINALS) && (is_finals_status(status) || fixed.is_some()) {
-        return Some("Picking finals is your human's in this Hive: ask with a decision blocker.".to_string());
-    }
-    None
+/// Into final or rejected, or out of one: a finals call. Picked to none isn't.
+pub(crate) fn is_finals_move(from: &str, to: &str) -> bool {
+    from != to && (is_finals_status(to) || is_finals_status(from))
 }
 
-/// The coordinator's finals move under its Finals checkpoint, into final/rejected or out of one:
-/// its own decision, one per asset whose status it changed, which the human can override (and so
-/// hand Finals back, §7.6). Un-finalizing is as much a finals call as finalizing.
-fn finals_line(hive_id: &str, a: &Asset, status: &str) -> DecisionLine {
+/// Who may set what (plan D12): a worker tags, stars and picks, never over a final or rejected.
+/// The coordinator sets anything; under the Finals checkpoint at Ask me its finals moves become
+/// recommendations (`tag`), so nothing here refuses it.
+pub(crate) fn tag_refusal(role: &str, targets: &[Asset], status: Option<&str>) -> Option<String> {
+    let status = status?;
+    if role != ROLE_WORKER {
+        return None;
+    }
+    if is_finals_status(status) {
+        return Some(format!("Status {status} is your coordinator's and your human's to set; you may set picked."));
+    }
+    targets
+        .iter()
+        .find(|a| is_finals_status(&a.status) && a.status != status)
+        .map(|a| format!("{} is {}: only your coordinator or your human changes that.", a.id, a.status))
+}
+
+/// A status as an answer reads: `no status` for none.
+pub(crate) fn status_label(s: &str) -> String {
+    if s.is_empty() { "no status".to_string() } else { s.to_string() }
+}
+
+/// A finals call on one asset in maiTerm's words: the question, its options and the answer `to`
+/// gives it. Un-finalizing is as much a finals call as finalizing.
+pub(crate) fn finals_question(a: &Asset, to: &str) -> (String, Vec<String>, String) {
     let title = one_line(&a.title, 120);
-    let (question, options, answer) = if is_finals_status(status) {
-        (format!("Is \u{201c}{title}\u{201d} ({}, {}) a final?", a.kind, a.id), vec![STATUS_FINAL.to_string(), STATUS_REJECTED.to_string()], status.to_string())
+    if is_finals_status(to) {
+        (format!("Is \u{201c}{title}\u{201d} ({}, {}) a final?", a.kind, a.id), vec![STATUS_FINAL.to_string(), STATUS_REJECTED.to_string()], to.to_string())
     } else {
-        let to = if status.is_empty() { "no status".to_string() } else { status.to_string() };
+        let to = status_label(to);
         (format!("Is \u{201c}{title}\u{201d} ({}, {}) still {}?", a.kind, a.id, a.status), vec![a.status.clone(), to.clone()], to)
-    };
+    }
+}
+
+/// A coordinator's finals line: a decision carries its answer, a recommendation carries it as
+/// `recommended`.
+fn finals_base(hive_id: &str, a: &Asset, to: &str, id: String, event: &str) -> DecisionLine {
+    let (question, options, answer) = finals_question(a, to);
+    let recommends = event == EVENT_RECOMMENDED;
     DecisionLine {
-        id: decisions::new_id(),
-        event: EVENT_ANSWERED.to_string(),
+        id,
+        event: event.to_string(),
         hive_id: hive_id.to_string(),
         category: checkpoints::FINALS.to_string(),
         source: SOURCE_GALLERY.to_string(),
         task_id: a.task_id.clone(),
         key: Some(a.id.clone()),
         question,
-        options: options.into_iter().map(|label| decisions::DecisionOption { label, recommended: false }).collect(),
-        answer: Some(answer),
+        options: options.into_iter().map(|label| decisions::DecisionOption { recommended: recommends && label == answer, label }).collect(),
+        recommended: recommends.then(|| answer.clone()),
+        answer: (!recommends).then_some(answer),
         by: DECIDED_BY_COORDINATOR.to_string(),
+        at: crate::commands::workspace::iso_now(),
+        ..DecisionLine::default()
+    }
+}
+
+/// The coordinator's finals move under its Finals checkpoint: its own decision, one per asset
+/// whose status it changed, which the human can override (and so hand Finals back, §7.6).
+fn finals_line(hive_id: &str, a: &Asset, status: &str) -> DecisionLine {
+    finals_base(hive_id, a, status, decisions::new_id(), EVENT_ANSWERED)
+}
+
+/// The asset's finals recommendation still waiting on the human: the coordinator's, under Ask
+/// me, with no answer and not withdrawn.
+pub(crate) fn open_recommendation(lines: &[DecisionLine], asset_id: &str) -> Option<decisions::Decision> {
+    let mine: Vec<DecisionLine> =
+        lines.iter().filter(|l| l.key.as_deref() == Some(asset_id) && l.source == SOURCE_GALLERY && l.category == checkpoints::FINALS).cloned().collect();
+    decisions::fold(&mine).into_iter().find(|d| d.recommended.is_some() && d.answered.is_none() && d.lapsed.is_none())
+}
+
+/// Every open finals recommendation in the log: asset id → the recommended status (`""` none).
+pub(crate) fn open_recommendations(lines: &[DecisionLine]) -> std::collections::BTreeMap<String, String> {
+    let mine: Vec<DecisionLine> = lines.iter().filter(|l| l.source == SOURCE_GALLERY && l.category == checkpoints::FINALS).cloned().collect();
+    decisions::fold(&mine)
+        .into_iter()
+        .filter(|d| d.answered.is_none() && d.lapsed.is_none())
+        .filter_map(|d| {
+            let r = d.recommended?;
+            let status = r.recommended.filter(|s| s != "no status").unwrap_or_default();
+            Some((r.key?, status))
+        })
+        .collect()
+}
+
+/// The coordinator's finals move under Ask me (§7.4): recorded as its recommendation for the
+/// human, under the asset's open recommendation when it has one (the newest wins).
+fn recommendation_line(lines: &[DecisionLine], hive_id: &str, a: &Asset, status: &str) -> DecisionLine {
+    let id = open_recommendation(lines, &a.id).map_or_else(decisions::new_id, |d| d.id);
+    finals_base(hive_id, a, status, id, EVENT_RECOMMENDED)
+}
+
+/// A recommendation the coordinator then decided itself, once Finals was its: withdrawn, so the
+/// human's next move on the asset is an override, not an answer.
+fn withdrawn_line(hive_id: &str, d: &decisions::Decision) -> DecisionLine {
+    let r = d.recommended.clone().unwrap_or_default();
+    DecisionLine {
+        id: d.id.clone(),
+        event: EVENT_LAPSED.to_string(),
+        hive_id: hive_id.to_string(),
+        category: checkpoints::FINALS.to_string(),
+        source: SOURCE_GALLERY.to_string(),
+        task_id: r.task_id,
+        key: r.key,
+        question: r.question,
+        outcome: Some("withdrawn: the coordinator decided it once Finals was its".to_string()),
+        by: decisions::BY_MAITERM.to_string(),
         at: crate::commands::workspace::iso_now(),
         ..DecisionLine::default()
     }
@@ -902,30 +997,67 @@ async fn tag<W: HiveWindow>(ctx: &Ctx<'_, W>, gc: &GalleryCaller, g: Arc<Gallery
         return Err("Nothing to change: give tags, untag, status or starred.".to_string());
     }
     let (role, hive, paths) = (gc.role, gc.caller.hive.clone(), gc.caller.paths.clone());
-    let (after, decided) = blocking(move || {
+    let (after, decided, recommended) = blocking(move || {
         let before = ids.iter().map(|id| live_asset(&g, id)).collect::<Result<Vec<_>, _>>()?;
-        if let Some(e) = tag_refusal(role, &hive, &before, change.status.as_deref()) {
+        if let Some(e) = tag_refusal(role, &before, change.status.as_deref()) {
             return Err(e);
         }
-        let after = g.tag(&ids, &change)?;
+        let coordinator = role == ROLE_COORDINATOR;
+        let asks = checkpoints::asks(&hive, checkpoints::FINALS);
+        let status = change.status.clone();
+        let finals: Vec<&Asset> = match status.as_deref() {
+            Some(s) if coordinator => before.iter().filter(|a| is_finals_move(&a.status, s)).collect(),
+            _ => Vec::new(),
+        };
+        let lines = if finals.is_empty() { Vec::new() } else { decisions::read(&paths) };
+        let mut recommended: Vec<(String, String)> = Vec::new();
         let mut decided = 0;
-        if let (ROLE_COORDINATOR, Some(s)) = (role, change.status.as_deref()) {
-            for a in before.iter().filter(|a| a.status != s && (is_finals_status(s) || is_finals_status(&a.status))) {
-                decisions::record(&paths, &finals_line(&hive.id, a, s));
-                decided += 1;
+        if asks && !finals.is_empty() {
+            // Under Ask me a finals move is the coordinator's recommendation: the asset keeps its
+            // status until the human picks. Everything else in the change still applies.
+            let s = status.clone().unwrap_or_default();
+            let direct: Vec<String> = before.iter().filter(|a| !is_finals_move(&a.status, &s)).map(|a| a.id.clone()).collect();
+            g.tag(&ids, &TagChange { status: None, ..change.clone() })?;
+            if !direct.is_empty() {
+                g.tag(&direct, &TagChange { status: Some(s.clone()), ..TagChange::default() })?;
+            }
+            for a in &finals {
+                decisions::append(&paths, &recommendation_line(&lines, &hive.id, a, &s))?;
+                recommended.push((a.id.clone(), s.clone()));
+            }
+        } else {
+            g.tag(&ids, &change)?;
+            if let Some(s) = status.as_deref() {
+                for a in &finals {
+                    if let Some(open) = open_recommendation(&lines, &a.id) {
+                        decisions::record(&paths, &withdrawn_line(&hive.id, &open));
+                    }
+                    decisions::record(&paths, &finals_line(&hive.id, a, s));
+                    decided += 1;
+                }
             }
         }
-        Ok((after, decided))
+        let after = ids.iter().map(|id| g.get(id)?.ok_or_else(|| format!("{id} is gone from the gallery."))).collect::<Result<Vec<_>, _>>()?;
+        Ok((after, decided, recommended))
     })
     .await?;
     let ids: Vec<String> = after.iter().map(|a| a.id.clone()).collect();
     ctx.window.gallery_changed(&gc.caller, &ids);
-    if decided > 0 {
+    if decided > 0 || !recommended.is_empty() {
         ctx.window.decisions_changed(&gc.caller.workspace_id);
     }
-    Ok(json!({
+    let mut out = json!({
         "assets": after.iter().map(|a| json!({ "id": a.id, "title": a.title, "status": a.status, "starred": a.starred, "tags": a.tags })).collect::<Vec<_>>()
-    }))
+    });
+    if !recommended.is_empty() {
+        out["recommended"] = json!(recommended.iter().map(|(id, s)| json!({ "id": id, "status": s })).collect::<Vec<_>>());
+        out["note"] = json!(
+            "Picking finals is your human's in this Hive: maiTerm recorded these as your recommendation, which your human sees on \
+             each asset in the gallery; the assets keep their status until they pick. Ask with a decision blocker when you need \
+             the answer to go on."
+        );
+    }
+    Ok(out)
 }
 
 // ── galleryCollect ──
@@ -958,5 +1090,135 @@ async fn collect<W: HiveWindow>(ctx: &Ctx<'_, W>, gc: &GalleryCaller, g: Arc<Gal
     Ok(json!({ "collection": c }))
 }
 
+// ── galleryDeliver (§10.6) ──
+
+/// `names` as given: a list of strings, none dropped, so a count that doesn't match is said.
+fn names_arg(args: &Value) -> Result<Option<Vec<String>>, String> {
+    match args.get("names") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(a)) if a.len() > super::deliver::MAX_DELIVER => Err(format!("At most {} names.", super::deliver::MAX_DELIVER)),
+        Some(Value::Array(a)) => a.iter().map(|v| v.as_str().map(|s| s.trim().to_string()).ok_or_else(|| "names must be a list of file names".to_string())).collect::<Result<_, _>>().map(Some),
+        Some(_) => Err("names must be a list of file names".to_string()),
+    }
+}
+
+/// What a delivery or an export writes: the assets named (each out of the trash), or a
+/// collection's members out of the trash in order (the trashed ones counted, not written).
+/// Answers the assets, how many of a collection were skipped, and whether names are numbered.
+pub(crate) fn delivery_assets(g: &Gallery, ids: &[String], collection: Option<&str>) -> Result<(Vec<Asset>, usize, bool), String> {
+    match (ids.is_empty(), collection) {
+        (false, Some(_)) => Err("Give assets or a collection, not both.".to_string()),
+        (true, None) => Err("Name what to deliver: assets (ids) or a collection.".to_string()),
+        (false, None) => Ok((ids.iter().map(|id| live_asset(g, id)).collect::<Result<Vec<_>, _>>()?, 0, false)),
+        (true, Some(key)) => {
+            let c = g
+                .collections()?
+                .into_iter()
+                .find(|c| c.id == key || c.name.eq_ignore_ascii_case(key))
+                .ok_or_else(|| format!("No collection called \"{}\".", one_line(key, 100)))?;
+            let mut live = Vec::new();
+            let mut skipped = 0;
+            for id in &c.asset_ids {
+                match g.get(id)? {
+                    Some(a) if !a.in_trash() => live.push(a),
+                    _ => skipped += 1,
+                }
+            }
+            if live.is_empty() {
+                return Err(format!("\u{201c}{}\u{201d} has nothing out of the trash to deliver.", one_line(&c.name, 100)));
+            }
+            Ok((live, skipped, true))
+        }
+    }
+}
+
+async fn deliver(gc: &GalleryCaller, g: Arc<Gallery>, args: &Value) -> Result<Value, String> {
+    let folder = opt_str(args, "folder")?.ok_or("folder is required: a plain folder's name (with a subfolder: brand/icons), or a path inside one.")?;
+    let ids = asset_ids(args, "assets", super::deliver::MAX_DELIVER)?;
+    let collection = opt_str(args, "collection")?;
+    let names = names_arg(args)?;
+    let (hive, paths) = (gc.caller.hive.clone(), gc.caller.paths.clone());
+    let out = blocking(move || {
+        // Every check before the first byte (§7.3).
+        let (dir, plain) = super::deliver::resolve_target(&hive, &folder)?;
+        let (assets, skipped, numbered) = delivery_assets(&g, &ids, collection.as_deref())?;
+        let names = match names {
+            Some(n) => super::deliver::given_names(&assets, &n)?,
+            None => super::deliver::derived_names(&assets, numbered),
+        };
+        super::deliver::check_config_names(&hive, &dir, &names)?;
+        let items: Vec<(PathBuf, String)> = assets.iter().zip(&names).map(|(a, n)| (g.file_path(a), n.clone())).collect();
+        let written = super::deliver::log_run(&paths, BY_COORDINATOR, &dir, &assets, super::deliver::deliver_files(&dir, &items))?;
+        let mut v = json!({
+            "folder": dir,
+            "plain_folder": plain,
+            "delivered": assets.iter().zip(&written).map(|(a, n)| json!({ "asset": a.id, "title": a.title, "name": n })).collect::<Vec<_>>(),
+        });
+        if skipped > 0 {
+            v["skipped_in_trash"] = json!(skipped);
+        }
+        Ok(v)
+    })
+    .await?;
+    log::info!("hive {}: the coordinator delivered {} file(s) into {}", gc.caller.hive.id, out["delivered"].as_array().map_or(0, Vec::len), out["folder"]);
+    Ok(out)
+}
+
+// ── Assets handed to a worker: spawn `inputs`, message `assets` (§7.2, plan D23) ──
+
+/// Asset ids under `k`: at most 20, each an id, repeats dropped.
+pub(crate) fn input_ids(args: &Value, k: &str) -> Result<Vec<String>, String> {
+    asset_ids(args, k, MAX_INPUTS)
+}
+
+/// Each asset filed in this Hive's gallery and out of the trash, with its stored path.
+pub(crate) fn live_inputs(hive_id: &str, paths: &HivePaths, ids: &[String]) -> Result<Vec<(Asset, PathBuf)>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let g = super::for_paths(hive_id, paths)?;
+    ids.iter()
+        .map(|id| {
+            let a = live_asset(&g, id)?;
+            let p = g.file_path(&a);
+            Ok((a, p))
+        })
+        .collect()
+}
+
+/// maiTerm's own lines naming attached assets as paths, the titles escaped.
+pub(crate) fn attached_lines(items: &[(Asset, PathBuf)]) -> String {
+    let mut s = "[maiTerm] Attached from the gallery:".to_string();
+    for (a, p) in items {
+        s.push_str(&format!("\n- {} ({}): {}", one_line(&a.title, 200), one_line(&a.kind, 20), one_line(&p.to_string_lossy(), 1000)));
+    }
+    s
+}
+
+/// A worker's inputs as its brief lists them, read at each launch: one that has since gone to
+/// the trash or out of the gallery says so.
+pub(crate) fn brief_inputs(hive_id: &str, paths: &HivePaths, ids: &[String]) -> Vec<crate::hive::brief::GalleryInput> {
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    let g = super::view::existing(hive_id, paths);
+    ids.iter()
+        .map(|id| {
+            let a = g.as_deref().and_then(|g| g.get(id).ok().flatten());
+            let mut input = crate::hive::brief::GalleryInput { id: id.clone(), ..Default::default() };
+            let Some(a) = a else {
+                input.note = Some("no longer in the gallery".to_string());
+                return input;
+            };
+            input.path = (!a.purged).then(|| g.as_deref().map(|g| g.file_path(&a).to_string_lossy().to_string())).flatten();
+            input.note = if a.purged { Some("emptied from the trash: only its record is left".to_string()) } else { a.deleted_at.as_ref().map(|_| "in the trash now".to_string()) };
+            input.prompt = a.recipe.as_ref().and_then(|r| r.prompt.as_deref()).and_then(|p| p.lines().find(|l| !l.trim().is_empty())).map(str::to_string);
+            input.title = a.title;
+            input.kind = a.kind;
+            input
+        })
+        .collect()
+}
+
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

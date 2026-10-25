@@ -652,6 +652,36 @@ export interface GalleryAddResult {
   refused: { path: string; error: string }[];
 }
 
+/** hive/gallery/model.rs `TagChange`: tags added and removed, never replaced; status and star set. */
+export interface GalleryTagChange {
+  tags?: string[];
+  untag?: string[];
+  /** "" | "picked" | "final" | "rejected". */
+  status?: string | null;
+  starred?: boolean | null;
+}
+
+/** hive/gallery/model.rs `CollectChange`: one collection built, by id or name. */
+export interface GalleryCollectChange {
+  collection: string;
+  /** Made by name when no collection has it. */
+  create?: boolean;
+  add?: string[];
+  remove?: string[];
+  /** Every member out of the trash, once each, in the new order. */
+  order?: string[] | null;
+  /** A member; "" clears it. */
+  cover?: string | null;
+}
+
+/** hive/gallery/commands.rs `Exported`: what an Export… wrote. */
+export interface GalleryExported {
+  folder: string;
+  names: string[];
+  /** A collection's members in the trash, not written. */
+  skipped: number;
+}
+
 /** `hive-gallery-changed`, sent to the Hive's window only. */
 export interface GalleryChangedEvent {
   workspace_id: string;

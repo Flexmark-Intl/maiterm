@@ -92,6 +92,9 @@ pub struct WorkerRecord {
     /// Its land while one is under way, held or waiting (§8.1): persisted before every
     /// irreversible step, so a restart knows how far it got (`land::reconcile`).
     pub land: Option<super::land::LandState>,
+    /// Gallery asset ids the coordinator gave it to start from (§7.2): their paths go in its
+    /// brief at every launch.
+    pub inputs: Vec<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -220,6 +223,7 @@ impl Default for WorkerRecord {
             reviewed: BTreeMap::new(),
             review: None,
             land: None,
+            inputs: Vec::new(),
             extra: Map::new(),
         }
     }

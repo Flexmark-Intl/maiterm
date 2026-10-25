@@ -592,6 +592,39 @@ impl Gallery {
         collections_in(&self.conn.lock())
     }
 
+    /// A collection (by id or name) under a new name: one line of at most 100 characters, not an
+    /// id, and no other collection's, in any case.
+    pub fn rename_collection(&self, key: &str, name: &str) -> Result<Collection, String> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) || is_collection_id(name) {
+            return Err(format!("\"{name}\" can't name a collection: at most 100 characters, one line, not an id."));
+        }
+        let conn = self.conn.lock();
+        let id: String = conn
+            .query_row("SELECT id FROM collections WHERE id = ?1 OR name = ?1 COLLATE NOCASE", [key.trim()], |r| r.get(0))
+            .optional()
+            .map_err(err)?
+            .ok_or_else(|| format!("No collection called \"{}\".", key.trim()))?;
+        let taken: Option<String> = conn.query_row("SELECT id FROM collections WHERE name = ?1 COLLATE NOCASE AND id <> ?2", params![name, id], |r| r.get(0)).optional().map_err(err)?;
+        if taken.is_some() {
+            return Err(format!("Another collection is already called \"{name}\"."));
+        }
+        conn.execute("UPDATE collections SET name = ?2 WHERE id = ?1", params![id, name]).map_err(err)?;
+        collections_in(&conn)?.into_iter().find(|c| c.id == id).ok_or_else(|| err("the collection just renamed is missing"))
+    }
+
+    /// Removes a collection, the grouping only: its assets stay in the gallery.
+    pub fn delete_collection(&self, key: &str) -> Result<Collection, String> {
+        let mut conn = self.conn.lock();
+        let found = collections_in(&conn)?.into_iter().find(|c| c.id == key.trim() || c.name.eq_ignore_ascii_case(key.trim()));
+        let c = found.ok_or_else(|| format!("No collection called \"{}\".", key.trim()))?;
+        let tx = conn.transaction().map_err(err)?;
+        tx.execute("DELETE FROM collection_items WHERE collection_id = ?1", [&c.id]).map_err(err)?;
+        tx.execute("DELETE FROM collections WHERE id = ?1", [&c.id]).map_err(err)?;
+        tx.commit().map_err(err)?;
+        Ok(c)
+    }
+
     /// The thumbnailer's findings. Dimensions it couldn't read stay as they were.
     pub fn set_meta(&self, id: &str, m: &MediaMeta) -> Result<(), String> {
         let conn = self.conn.lock();
@@ -644,6 +677,13 @@ impl Gallery {
         }
         tx.commit().map_err(err)?;
         Ok(n)
+    }
+
+    /// How many assets the trash holds, whatever a view's filters: what emptying it deletes.
+    pub fn trash_count(&self) -> Result<usize, String> {
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM assets WHERE deleted_at IS NOT NULL AND purged = 0", [], |r| r.get(0)).map_err(err)?;
+        Ok(n as usize)
     }
 
     /// Empties the trash (plan D11): each file moves to `trash/`, the rows become tombstones and
@@ -1040,6 +1080,28 @@ mod tests {
         assert_eq!(col.asset_ids, vec![b.id.clone(), a.id.clone(), c.id.clone()], "an order names the live members; the trashed keep their place after");
         assert!(change(CollectChange { collection: "c-0123456789ab".into(), create: true, ..Default::default() }).is_err(), "a name can't pass for an id");
         assert_eq!(s.g.collections().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_collection_renames_uniquely_and_deleting_it_keeps_its_assets() {
+        let s = scratch();
+        let [a, b] = ["a", "b"].map(|t| add(&s, t, Some("t1")));
+        let col = s.g.collect(&CollectChange { collection: "Shortlist".into(), create: true, add: vec![a.id.clone(), b.id.clone()], ..Default::default() }).unwrap();
+        s.g.collect(&CollectChange { collection: "Storyboard".into(), create: true, ..Default::default() }).unwrap();
+        assert!(s.g.rename_collection("shortlist", "STORYBOARD").unwrap_err().contains("already called"));
+        assert!(s.g.rename_collection(&col.id, "c-0123456789ab").is_err(), "a name can't pass for an id");
+        assert!(s.g.rename_collection(&col.id, "two\nlines").is_err());
+        assert!(s.g.rename_collection("nope", "x").unwrap_err().contains("No collection"));
+        let renamed = s.g.rename_collection(&col.id, "Finals").unwrap();
+        assert_eq!((renamed.id.as_str(), renamed.name.as_str(), renamed.asset_ids.len()), (col.id.as_str(), "Finals", 2));
+        assert_eq!(s.g.rename_collection("finals", "finals").unwrap().name, "finals", "its own name in another case");
+
+        let gone = s.g.delete_collection("Finals").unwrap();
+        assert_eq!(gone.id, col.id);
+        assert_eq!(s.g.collections().unwrap().len(), 1);
+        let a = s.g.get(&a.id).unwrap().unwrap();
+        assert!(a.collections.is_empty() && !a.in_trash(), "the grouping goes, the asset stays");
+        assert!(s.g.delete_collection(&col.id).unwrap_err().contains("No collection"));
     }
 
     #[test]

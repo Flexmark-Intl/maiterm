@@ -44,6 +44,7 @@
   import { dropPointToCss } from '$lib/utils/dropPoint';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import { dispatchHiveOpenAsset, galleryUrl } from '$lib/hive/gallery';
+  import { appendToDraft, attachFor, GALLERY_ATTACH, type GalleryAttachDetail } from '$lib/hive/galleryCurate';
 
   interface Props {
     /** The chat shown; none draws the hint. Changing it switches chats in place. */
@@ -361,6 +362,27 @@
       } else dragOver = false;
     }).then((u) => { if (gone) u(); else unlisten = u; });
     return () => { gone = true; unlisten?.(); dragOver = false; };
+  });
+
+  /** Files onto the open chat's composer, from a caller (the gallery's Iterate and Send to
+   *  worker, docs/hive.md §10.4), with `text` into an empty draft or on a new line after one. */
+  export function attachFiles(paths: string[], text = '') {
+    const chat = openId;
+    if (!chat || readOnly) return;
+    if (paths.length) attach(chat, fromPaths(paths));
+    if (text) drafts = { ...drafts, [chat]: appendToDraft(drafts[chat] ?? '', text) };
+    focusComposer();
+  }
+  // Assets dragged from the gallery onto this composer (pointer events: no HTML5 drop reaches
+  // a Tauri webview, OverlordBoardView). Only a drop on this chat's own composer counts.
+  $effect(() => {
+    if (readOnly) return;
+    const onAttach = (e: Event) => {
+      const paths = attachFor((e as CustomEvent<GalleryAttachDetail>).detail, openId);
+      if (paths) attachFiles(paths);
+    };
+    window.addEventListener(GALLERY_ATTACH, onAttach);
+    return () => window.removeEventListener(GALLERY_ATTACH, onAttach);
   });
 
   async function send() {
@@ -710,7 +732,7 @@
           {#if outcome && outcome.chat === openId}<p class="hint">{outcome.text}</p>{/if}
         </div>
         <AttachmentChips attachments={attachedHere} onremove={(i) => { unattach(openId, i); composerEl?.focus(); }} />
-        <div class="composer" class:drag-over={dragOver}>
+        <div class="composer" class:drag-over={dragOver} data-composer-drop={openId}>
           {@render composerActions?.(openId)}
           <textarea
             bind:this={composerEl}

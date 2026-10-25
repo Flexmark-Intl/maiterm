@@ -13,16 +13,20 @@ use crate::hive::worker::WorkerFolder;
 use crate::state::{Tab, WindowData, Workspace};
 
 #[derive(Default)]
-struct WinState {
-    gallery_changed: Vec<Vec<String>>,
-    decisions_changed: usize,
+pub(crate) struct WinState {
+    pub gallery_changed: Vec<Vec<String>>,
+    pub decisions_changed: usize,
+    /// What reached an agent: (tab, text).
+    pub delivered: Vec<(String, String)>,
+    /// Task rows maiTerm wrote (an autonomy offer's).
+    pub tasks: Vec<crate::state::Task>,
 }
 
 #[derive(Clone, Default)]
-struct Win(StdArc<Mutex<WinState>>);
+pub(crate) struct Win(StdArc<Mutex<WinState>>);
 
 impl Win {
-    fn st(&self) -> MutexGuard<'_, WinState> {
+    pub(crate) fn st(&self) -> MutexGuard<'_, WinState> {
         self.0.lock().unwrap()
     }
 }
@@ -32,8 +36,12 @@ impl HiveWindow for Win {
         async { Outcome::Answered(json!({ "ok": true })) }
     }
     fn workers_changed(&self, _workspace_id: &str) {}
-    fn deliver(&self, _tab: &str, _text: String, _what: &'static str) -> impl std::future::Future<Output = Sent> + Send {
+    fn deliver(&self, tab: &str, text: String, _what: &'static str) -> impl std::future::Future<Output = Sent> + Send {
+        self.st().delivered.push((tab.to_string(), text));
         async { Sent::Delivered }
+    }
+    fn tasks_changed(&self, _workspace_id: &str, tasks: &[crate::state::Task], _workstreams: &[crate::state::Workstream]) {
+        self.st().tasks = tasks.to_vec();
     }
     fn front(&self, _tab: &str) -> impl std::future::Future<Output = Front> + Send {
         async { Front::Job }
@@ -64,33 +72,35 @@ fn tab(id: &str, role: Option<&str>) -> Tab {
 }
 
 /// A Hive with a coordinator, two workers (#1 hero, #2 logo, each a scratch and a worktree
-/// folder), a human checkout beside it, a temp folder and one output folder the human listed.
-struct Rig {
-    base: PathBuf,
-    data: RwLock<AppData>,
+/// folder), a human checkout beside it, a temp folder, one output folder the human listed, and a
+/// plain folder (`brand`, with `icons/`) to deliver into.
+pub(crate) struct Rig {
+    pub base: PathBuf,
+    pub data: RwLock<AppData>,
     fuses: &'static Fuses,
-    win: Win,
-    paths: HivePaths,
-    hive_id: String,
-    coord: String,
-    w1: String,
-    w2: String,
-    plain: String,
-    temp: PathBuf,
-    output: PathBuf,
-    checkout: PathBuf,
+    pub win: Win,
+    pub paths: HivePaths,
+    pub hive_id: String,
+    pub coord: String,
+    pub w1: String,
+    pub w2: String,
+    pub plain: String,
+    pub temp: PathBuf,
+    pub output: PathBuf,
+    pub checkout: PathBuf,
+    pub brand: PathBuf,
 }
 
 impl Rig {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let id = uuid::Uuid::new_v4().simple().to_string();
         let base = std::env::temp_dir().join(format!("hive-gallery-tools-{id}"));
         fs::create_dir_all(&base).unwrap();
         let base = crate::share::canon(&base);
         let hive_id = format!("h-{id}");
         let paths = HivePaths::new(base.join("hive").join(&hive_id));
-        let (temp, output, checkout) = (base.join("tmp"), base.join("comfy-out"), base.join("web"));
-        for d in [paths.coordinator_home(), paths.coordinator_tmp(), paths.tasks(), temp.clone(), output.clone(), checkout.clone()] {
+        let (temp, output, checkout, brand) = (base.join("tmp"), base.join("comfy-out"), base.join("web"), base.join("brand"));
+        for d in [paths.coordinator_home(), paths.coordinator_tmp(), paths.tasks(), temp.clone(), output.clone(), checkout.clone(), brand.join("icons")] {
             fs::create_dir_all(&d).unwrap();
         }
         let (coord, w1, w2, plain) = (format!("coord-{id}"), format!("w1-{id}"), format!("w2-{id}"), format!("plain-{id}"));
@@ -116,6 +126,12 @@ impl Rig {
         let mut hive = Hive { id: hive_id.clone(), slug: "s".into(), goal: "Make the launch art".into(), budget_cents: 100, ..Hive::default() };
         hive.checkpoints = crate::hive::create::default_checkpoints(&hive.landing_mode);
         hive.settings.gallery.output_folders = vec![output.to_string_lossy().to_string()];
+        hive.folders = vec![crate::hive::record::HiveFolder {
+            name: "brand".into(),
+            path: brand.to_string_lossy().into(),
+            kind: crate::hive::record::KIND_PLAIN.into(),
+            ..crate::hive::record::HiveFolder::default()
+        }];
         let mut ws = Workspace::new("Launch art".into());
         ws.hive = Some(hive);
         ws.panes[0].tabs = vec![tab(&coord, Some(ROLE_COORDINATOR)), tab(&w1, Some(ROLE_WORKER)), tab(&w2, Some(ROLE_WORKER))];
@@ -137,41 +153,55 @@ impl Rig {
             temp,
             output,
             checkout,
+            brand,
         }
     }
 
-    fn ctx(&self) -> Ctx<'_, Win> {
+    pub(crate) fn ctx(&self) -> Ctx<'_, Win> {
         Ctx { data: &self.data, fuses: self.fuses, window: self.win.clone(), save: ok_save, preflight: ok_preflight }
     }
 
-    async fn call(&self, tab: &str, tool: &str, args: Value) -> Result<Value, String> {
+    /// The coordinator's Hive as the window's commands see it, on the scratch folder.
+    pub(crate) fn caller(&self) -> Caller {
+        let (mut caller, _) = resolve(&self.data.read(), &self.coord).unwrap();
+        caller.paths = self.paths.clone();
+        caller
+    }
+
+    pub(crate) async fn call(&self, tab: &str, tool: &str, args: Value) -> Result<Value, String> {
         let (mut caller, role) = resolve(&self.data.read(), tab)?;
         // The state names the Hive's folder under app data; this one is scratch.
         caller.paths = self.paths.clone();
         super::call(&self.ctx(), caller, role, tool, &args, vec![self.temp.clone()]).await
     }
 
-    fn set_checkpoint(&self, key: &str, value: &str) {
+    pub(crate) fn set_checkpoint(&self, key: &str, value: &str) {
         self.data.write().windows[0].workspaces[0].hive.as_mut().unwrap().checkpoints.insert(key.into(), value.into());
     }
 
-    fn gallery(&self) -> Arc<Gallery> {
+    pub(crate) fn gallery(&self) -> Arc<Gallery> {
         crate::hive::gallery::for_paths(&self.hive_id, &self.paths).unwrap()
     }
 
-    fn scratch(&self, slug: &str) -> PathBuf {
+    pub(crate) fn scratch(&self, slug: &str) -> PathBuf {
         self.paths.worker_scratch(slug)
     }
 
     /// A file with these bytes, made at `dir/name`.
-    fn make(&self, dir: &Path, name: &str, bytes: &str) -> PathBuf {
+    pub(crate) fn make(&self, dir: &Path, name: &str, bytes: &str) -> PathBuf {
         let p = dir.join(name);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(&p, bytes).unwrap();
         p
     }
 
-    fn changed(&self) -> usize {
+    /// Worker #1 files `name` from its scratch with these bytes; answers the asset id.
+    pub(crate) async fn filed(&self, name: &str, title: &str, bytes: &str) -> String {
+        self.make(&self.scratch("hero"), name, bytes);
+        first_id(&self.call(&self.w1, ADD, json!({ "path": self.scratch("hero").join(name), "title": title })).await.unwrap())
+    }
+
+    pub(crate) fn changed(&self) -> usize {
         self.win.st().gallery_changed.len()
     }
 }
@@ -183,7 +213,7 @@ impl Drop for Rig {
     }
 }
 
-fn first_id(v: &Value) -> String {
+pub(crate) fn first_id(v: &Value) -> String {
     v["assets"][0]["id"].as_str().unwrap_or_else(|| panic!("no asset in {v}")).to_string()
 }
 
@@ -209,8 +239,7 @@ async fn only_hive_agents_reach_the_gallery_and_only_the_coordinator_collects() 
     assert!(crate::hive::settings::worker_denied_mcp_tools().contains(&COLLECT), "a worker's settings deny it too");
     assert!(!crate::hive::settings::worker_denied_mcp_tools().contains(&ADD));
 
-    // tools/list: the gallery only for Hive roles, collect for the coordinator only, deliver not
-    // yet for anyone (step 8e).
+    // tools/list: the gallery only for Hive roles, collect and deliver for the coordinator only.
     let names = |role: &str| tool_definitions(role).iter().map(|t| t["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
     assert_eq!(names(ROLE_WORKER), WORKER_GALLERY_TOOLS.to_vec());
     assert_eq!(names(ROLE_COORDINATOR), COORDINATOR_GALLERY_TOOLS.to_vec());
@@ -219,7 +248,8 @@ async fn only_hive_agents_reach_the_gallery_and_only_the_coordinator_collects() 
     // Rust refuses on its own, past the server's check.
     assert!(r.call(&r.plain, LIST, json!({})).await.unwrap_err().contains("coordinator or its workers"));
     assert!(r.call(&r.w1, COLLECT, json!({ "collection": "x" })).await.unwrap_err().contains("coordinator's"));
-    assert!(r.call(&r.coord, DELIVER, json!({})).await.unwrap_err().contains("isn't available"));
+    assert!(r.call(&r.w1, DELIVER, json!({ "folder": "brand", "assets": [] })).await.unwrap_err().contains("coordinator's"));
+    assert!(r.call(&r.coord, DELIVER, json!({})).await.unwrap_err().contains("folder is required"));
 }
 
 #[tokio::test]
@@ -419,11 +449,25 @@ async fn who_may_set_what_status() {
     assert_eq!(lines.last().unwrap().answer.as_deref(), Some("no status"));
     assert!(decisions::fold(&lines).iter().all(|d| d.can_override()));
 
-    // Under Ask me, finals are the human's: the coordinator neither sets nor moves one.
+    // Under Ask me, finals are the human's: the coordinator's move is a recommendation, and the
+    // asset keeps its status; what else the call changes still applies.
     r.set_checkpoint("finals", "ask");
-    let e = r.call(&r.coord, TAG, json!({ "id": b, "status": "rejected" })).await.unwrap_err();
-    assert!(e.contains("Picking finals is your human's in this Hive: ask with a decision blocker"), "{e}");
-    assert!(r.call(&r.coord, TAG, json!({ "id": a, "status": "picked" })).await.is_err());
+    let v = r.call(&r.coord, TAG, json!({ "id": b, "status": "rejected", "tags": ["dark"] })).await.unwrap();
+    assert_eq!(v["recommended"], json!([{ "id": b, "status": "rejected" }]));
+    assert!(v["note"].as_str().unwrap().contains("Picking finals is your human's in this Hive"), "{v}");
+    let now = r.gallery().get(&b).unwrap().unwrap();
+    assert_eq!((now.status.as_str(), now.tags.clone()), ("", vec!["dark".to_string()]), "status kept, tag added");
+    let rec = decisions::read(&r.paths).pop().unwrap();
+    assert_eq!((rec.event.as_str(), rec.by.as_str(), rec.recommended.as_deref(), rec.answer.clone()), ("recommended", "coordinator", Some("rejected"), None));
+    // A second recommendation on the same asset replaces the first, under its decision.
+    r.call(&r.coord, TAG, json!({ "id": b, "status": "final" })).await.unwrap();
+    let again = decisions::read(&r.paths).pop().unwrap();
+    assert_eq!((again.id.as_str(), again.recommended.as_deref()), (rec.id.as_str(), Some("final")));
+    assert_eq!(open_recommendations(&decisions::read(&r.paths)).get(&b).map(String::as_str), Some("final"));
+    // Moving a final out is a recommendation too; picking an asset with no status isn't one.
+    let v = r.call(&r.coord, TAG, json!({ "id": a, "status": "picked" })).await.unwrap();
+    assert_eq!(v["recommended"][0]["status"], json!("picked"));
+    assert_eq!(r.gallery().get(&a).unwrap().unwrap().status, "final");
     r.call(&r.coord, TAG, json!({ "id": a, "starred": false })).await.unwrap();
 
     // Unknown and trashed assets refuse the whole change.
@@ -486,4 +530,69 @@ fn roots_are_the_callers_own_and_never_a_folder_holding_the_hive() {
     assert!(!roots.contains(&c(r.scratch("logo"))));
     let coord = agent_roots(&hive, &r.paths, None, &[]);
     assert!(coord.contains(&c(r.paths.coordinator_home())) && !coord.contains(&c(r.scratch("hero"))));
+}
+
+/// §10.6, §7.3: the coordinator delivers new files into a plain folder only, a collection in its
+/// order, never over a file, never a trashed asset, and each delivery is logged.
+#[tokio::test]
+async fn deliver_writes_new_files_into_a_plain_folder_and_logs_each() {
+    let r = Rig::new();
+    let a = r.filed("a.png", "Hero Shot!", "aaa").await;
+    let b = r.filed("b.png", "Logo", "bbb").await;
+    let names = |v: &Value| v["delivered"].as_array().unwrap().iter().map(|d| d["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+
+    fs::write(r.brand.join("hero-shot.png"), "the human's").unwrap();
+    let v = r.call(&r.coord, DELIVER, json!({ "assets": [a.clone(), b.clone()], "folder": "brand" })).await.unwrap();
+    assert_eq!(names(&v), vec!["hero-shot (2).png", "logo.png"]);
+    assert_eq!(fs::read_to_string(r.brand.join("hero-shot.png")).unwrap(), "the human's", "never overwritten");
+    assert_eq!(fs::read_to_string(r.brand.join("hero-shot (2).png")).unwrap(), "aaa");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(r.brand.join("logo.png")).unwrap().permissions().mode() & 0o777, 0o644, "a delivered file is the human's to edit");
+    }
+
+    // A collection keeps its order, numbered, into an existing subfolder (also by absolute path).
+    r.call(&r.coord, COLLECT, json!({ "collection": "Finals", "add": [b.clone(), a.clone()] })).await.unwrap();
+    let v = r.call(&r.coord, DELIVER, json!({ "collection": "finals", "folder": "brand/icons" })).await.unwrap();
+    assert_eq!(names(&v), vec!["01-logo.png", "02-hero-shot.png"]);
+    let v = r.call(&r.coord, DELIVER, json!({ "assets": [a.clone()], "folder": r.brand.join("icons"), "names": ["icon"] })).await.unwrap();
+    assert_eq!(names(&v), vec!["icon.png"], "a name without an extension takes the file's");
+
+    for (args, says) in [
+        (json!({ "assets": [a.clone()], "folder": "brand", "names": ["a.png", "b.png"] }), "2 names for 1 assets"),
+        (json!({ "assets": [a.clone()], "folder": "brand", "names": [".env"] }), "starts with a dot"),
+        (json!({ "assets": [a.clone()], "folder": "brand", "names": ["../x.png"] }), "no folders in a name"),
+        (json!({ "assets": [a.clone()], "folder": "brand", "names": ["claude.md"] }), "agent or build config"),
+        (json!({ "assets": [a.clone()], "collection": "Finals", "folder": "brand" }), "not both"),
+        (json!({ "folder": "brand" }), "Name what to deliver"),
+        (json!({ "assets": [a.clone()], "folder": "brand/new" }), "doesn't make folders"),
+        (json!({ "assets": [a.clone()], "folder": "web" }), "No plain folder called \"web\""),
+        (json!({ "assets": [a.clone()], "folder": r.checkout }), "isn't in one of this Hive's plain folders"),
+        (json!({ "assets": [a.clone()], "folder": "brand/../web" }), "no \"..\""),
+    ] {
+        let e = r.call(&r.coord, DELIVER, args.clone()).await.unwrap_err();
+        assert!(e.contains(says), "{args}: {e}");
+    }
+
+    // A trashed asset is refused; a collection's trashed member is skipped and counted.
+    r.gallery().trash(std::slice::from_ref(&b)).unwrap();
+    assert!(r.call(&r.coord, DELIVER, json!({ "assets": [b.clone()], "folder": "brand" })).await.unwrap_err().contains("in the trash"));
+    let v = r.call(&r.coord, DELIVER, json!({ "collection": "Finals", "folder": "brand" })).await.unwrap();
+    assert_eq!((names(&v), v["skipped_in_trash"].clone()), (vec!["01-hero-shot.png".to_string()], json!(1)));
+
+    let log: Vec<Value> = fs::read_to_string(r.paths.delivery_log()).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(log.len(), 4, "one line per delivery, none for a refusal");
+    assert_eq!((log[0]["by"].clone(), log[0]["items"][0]["asset"].clone(), log[0]["items"][0]["name"].clone()), (json!("coordinator"), json!(a), json!("hero-shot (2).png")));
+}
+
+/// A plain folder inside a git work tree is never written: a worker lands those files (§10.6).
+#[tokio::test]
+async fn deliver_refuses_a_plain_folder_inside_a_git_work_tree() {
+    let r = Rig::new();
+    let a = r.filed("a.png", "Hero", "aaa").await;
+    fs::create_dir_all(r.base.join(".git")).unwrap();
+    let e = r.call(&r.coord, DELIVER, json!({ "assets": [a], "folder": "brand" })).await.unwrap_err();
+    assert!(e.contains("inside a git work tree") && e.contains("land them"), "{e}");
+    assert_eq!(fs::read_dir(&r.brand).unwrap().count(), 1, "nothing written (only icons/)");
 }

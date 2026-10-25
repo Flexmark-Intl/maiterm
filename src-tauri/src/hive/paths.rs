@@ -166,6 +166,11 @@ impl HivePaths {
         self.logs().join("lands.jsonl")
     }
 
+    /// The delivery log: one line per `galleryDeliver` and per Export… (§10.6), append-only.
+    pub fn delivery_log(&self) -> PathBuf {
+        self.logs().join("deliveries.jsonl")
+    }
+
     /// The decision log: every prompt and question routed, recommended, answered or lapsed (§7.6).
     pub fn decision_log(&self) -> PathBuf {
         self.logs().join("decisions.jsonl")

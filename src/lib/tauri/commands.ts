@@ -7,7 +7,17 @@ import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult,
 import type { HiveMemoryFileText, HiveMemoryView } from './types';
 import type { HiveDecisionView, HivePrecedentsView } from './types';
 import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
-import type { GalleryAddResult, GalleryAssetDetail, GalleryAssetRow, GalleryChip, GalleryCollection, GalleryListFilter } from './types';
+import type {
+  GalleryAddResult,
+  GalleryAssetDetail,
+  GalleryAssetRow,
+  GalleryChip,
+  GalleryCollectChange,
+  GalleryCollection,
+  GalleryExported,
+  GalleryListFilter,
+  GalleryTagChange,
+} from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
@@ -2879,6 +2889,60 @@ export async function galleryCollections(workspaceId: string): Promise<GalleryCo
 /** Files dropped on the gallery, filed as the human's (docs/hive.md §10.3). */
 export async function galleryAddFiles(workspaceId: string, paths: string[]): Promise<GalleryAddResult> {
   return invoke('gallery_add_files', { workspaceId, paths });
+}
+
+/** The human's tags, star and any status (docs/hive.md §10.4). A pick on an asset the coordinator
+ *  recommended answers it; one that changes the coordinator's own finals call overrides it. */
+export async function galleryTag(workspaceId: string, ids: string[], change: GalleryTagChange): Promise<Omit<GalleryAssetDetail, 'path' | 'parent_chips' | 'child_chips'>[]> {
+  return invoke('gallery_tag', { workspaceId, ids, change });
+}
+
+export async function galleryCollect(workspaceId: string, change: GalleryCollectChange): Promise<GalleryCollection> {
+  return invoke('gallery_collect', { workspaceId, change });
+}
+
+export async function galleryRenameCollection(workspaceId: string, collection: string, name: string): Promise<GalleryCollection> {
+  return invoke('gallery_rename_collection', { workspaceId, collection, name });
+}
+
+/** The grouping goes; its assets stay. */
+export async function galleryDeleteCollection(workspaceId: string, collection: string): Promise<GalleryCollection> {
+  return invoke('gallery_delete_collection', { workspaceId, collection });
+}
+
+/** Into the gallery's trash (docs/hive.md §10.7): hidden, the file kept until the trash is emptied. */
+export async function galleryTrash(workspaceId: string, ids: string[]): Promise<number> {
+  return invoke('gallery_trash', { workspaceId, ids });
+}
+
+export async function galleryRestore(workspaceId: string, ids: string[]): Promise<number> {
+  return invoke('gallery_restore', { workspaceId, ids });
+}
+
+/** Files and thumbnails go; each record stays, so lineage and the ledger hold. */
+export async function galleryEmptyTrash(workspaceId: string): Promise<number> {
+  return invoke('gallery_empty_trash', { workspaceId });
+}
+
+/** The whole trash's count, whatever the view's filters: what emptying it deletes. */
+export async function galleryTrashCount(workspaceId: string): Promise<number> {
+  return invoke('gallery_trash_count', { workspaceId });
+}
+
+/** The human's Export… (docs/hive.md §10.6): assets, or a collection in order, into any folder;
+ *  new files with suffixes, or with `replace` over files of the same name. */
+export async function galleryExport(workspaceId: string, ids: string[], collection: string | null, folder: string, replace: boolean): Promise<GalleryExported> {
+  return invoke('gallery_export', { workspaceId, ids, collection, folder, replace });
+}
+
+/** Stored paths of assets out of the trash: what a composer attaches. */
+export async function galleryPaths(workspaceId: string, ids: string[]): Promise<string[]> {
+  return invoke('gallery_paths', { workspaceId, ids });
+}
+
+/** The coordinator's finals recommendations waiting on the human: asset id → status. */
+export async function galleryRecommendations(workspaceId: string): Promise<Record<string, string>> {
+  return invoke('gallery_recommendations', { workspaceId });
 }
 
 /** What deleting the Hive would keep and stop (docs/hive.md §11.2), before anything is touched. */

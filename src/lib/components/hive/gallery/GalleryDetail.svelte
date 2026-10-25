@@ -4,8 +4,10 @@
   wheel zoom and drag to pan, a document's first page with Reveal (paging is deferred, plan D9;
   nothing here launches a stored file, whose extension an agent chose).
   Then the recipe, who made it and for which task (each a link to that agent's column: every
-  result is one click from the agent that made it), and its lineage. Star and Pick / Final /
-  Reject arrive with curation (step 8e) and show disabled until then.
+  result is one click from the agent that made it), and its lineage. Curation (step 8e): Star,
+  Pick / Final / Reject (the coordinator's recommendation shown beside them under Ask me), Add to
+  collection, Iterate (onto the coordinator's composer, recipe quoted), Send to worker…,
+  Export…, and the trash.
 -->
 <script lang="ts">
   import { writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
@@ -15,6 +17,7 @@
   import { galleryGet, revealInFileManager } from '$lib/tauri/commands';
   import type { GalleryAssetDetail, GalleryChip, HiveWorkerCard } from '$lib/tauri/types';
   import { fmtBytes, fmtDuration, galleryUrl, madeByLabel, picture } from '$lib/hive/gallery';
+  import type { CurateActions } from '$lib/hive/galleryCurate';
   import { isMac, isWindows } from '$lib/utils/platform';
 
   const revealLabel = isMac() ? 'Reveal in Finder' : isWindows() ? 'Show in File Explorer' : 'Open Containing Folder';
@@ -33,8 +36,11 @@
     onstep: (dir: -1 | 1) => void;
     onopenworker: (taskId: string) => void;
     onopencoordinator: () => void;
+    /** The coordinator's finals recommendation on it, waiting on the human ("" no status). */
+    recommendation?: string;
+    actions: CurateActions;
   }
-  let { workspaceId, hiveId, id, version, workers, hasPrev, hasNext, onback, onnavigate, onstep, onopenworker, onopencoordinator }: Props = $props();
+  let { workspaceId, hiveId, id, version, workers, hasPrev, hasNext, onback, onnavigate, onstep, onopenworker, onopencoordinator, recommendation, actions }: Props = $props();
 
   let asset = $state<GalleryAssetDetail | null>(null);
   let failed = $state('');
@@ -160,7 +166,9 @@
   }
 
   const chipPic = (c: GalleryChip) => (c.picture ? galleryUrl(hiveId, c.id, c.picture) : null);
-  const LATER = 'Picking, finals and stars from the gallery come with curation, the next build step.';
+  const STATUSES: [string, string][] = [['picked', 'Pick'], ['final', 'Final'], ['rejected', 'Reject']];
+  let collectBtn = $state<HTMLElement | null>(null);
+  let sendBtn = $state<HTMLElement | null>(null);
 </script>
 
 <div class="detail">
@@ -210,11 +218,38 @@
 
       <div class="side">
         <div class="acts">
-          {#each [['Star', '★'], ['Pick', '1'], ['Final', '2'], ['Reject', '3']] as [label, key] (label)}
-            <Tooltip text={LATER}><button type="button" class="act" disabled aria-label="{label} ({key})">{label}</button></Tooltip>
+          <Tooltip text={shown.starred ? 'Unstar (F)' : 'Star (F)'}>
+            <button type="button" class="act" class:on={shown.starred} aria-pressed={shown.starred} disabled={shown.purged} onclick={() => actions.tag([shown.id], { starred: !shown.starred })}>★ Star</button>
+          </Tooltip>
+          {#each STATUSES as [s, label], k (s)}
+            <Tooltip text="{label} ({k + 1}){shown.status === s ? ': again clears it' : ''}">
+              <button type="button" class="act" class:on={shown.status === s} aria-pressed={shown.status === s} disabled={shown.purged} onclick={() => actions.tag([shown.id], { status: shown.status === s ? '' : s })}>{label}</button>
+            </Tooltip>
           {/each}
+        </div>
+        {#if recommendation !== undefined && !gone}
+          <p class="rec">The coordinator recommends <b>{recommendation || 'no status'}</b>: picking finals is yours in this Hive, and your pick answers it.</p>
+          <!-- The buttons above toggle, so keeping the status it has needs its own answer. -->
+          <Tooltip text="Answers the recommendation with the status it has now">
+            <button type="button" class="act small" onclick={() => actions.tag([shown.id], { status: shown.status })}>Keep {shown.status || 'no status'}</button>
+          </Tooltip>
+        {/if}
+        <div class="acts">
+          {#if !gone}
+            <Tooltip text="Onto the coordinator’s composer with its recipe quoted, for “three more like this”">
+              <button type="button" class="act" onclick={() => actions.iterate(shown.id)}>Iterate</button>
+            </Tooltip>
+            <button type="button" class="act" bind:this={sendBtn} onclick={() => sendBtn && actions.pickWorker([shown.id], sendBtn)}>Send to worker…</button>
+            <button type="button" class="act" bind:this={collectBtn} onclick={() => collectBtn && actions.pickCollection([shown.id], collectBtn)}>Add to collection…</button>
+            <button type="button" class="act" onclick={() => actions.exportAssets([shown.id])}>Export…</button>
+          {/if}
           <button type="button" class="act" onclick={reveal} disabled={gone}>{revealLabel}</button>
           <button type="button" class="act" onclick={() => shown && copy(shown.path, 'Path')} disabled={gone}>Copy path</button>
+          {#if shown.deleted_at && !shown.purged}
+            <button type="button" class="act" onclick={() => actions.restore([shown.id])}>Restore</button>
+          {:else if !gone}
+            <button type="button" class="act" onclick={() => actions.trash([shown.id])}>Move to trash</button>
+          {/if}
         </div>
         {#if note}<p class="hint">{note}</p>{/if}
 
@@ -307,6 +342,8 @@
   .acts { display: flex; flex-wrap: wrap; gap: 5px; }
   .act { background: var(--bg-medium); border: 1px solid var(--bg-light); color: var(--fg); border-radius: 6px; padding: 3px 9px; font: inherit; font-size: 11.5px; cursor: pointer; }
   .act:disabled { opacity: 0.45; cursor: default; }
+  .act.on { border-color: var(--accent); color: var(--accent); }
+  .rec { margin: 0; font-size: 11.5px; color: var(--yellow); }
   .act.primary { background: var(--accent); color: var(--bg-dark); border-color: var(--accent); font-weight: 600; }
   .act.small { padding: 1px 7px; font-size: 11px; align-self: flex-start; }
   .facts, .kv { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px; }

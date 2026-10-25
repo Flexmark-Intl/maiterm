@@ -3,8 +3,11 @@
 //! thumbnails, a SQLite index (`store`) and the spend ledger in it. `ingest` decides which paths
 //! a caller may file from and makes the copy; `model` holds the records; `tools` is what agents
 //! call (step 8b); `thumbs` makes the pictures and `serve` answers the webview's `gallery://`
-//! requests, by asset id only (8c); `view` is the human's gallery view, cards and chats (8d).
+//! requests, by asset id only (8c); `view` is the human's gallery view, cards and chats (8d);
+//! `commands` is the human's curation and `deliver` writes assets out into folders (8e).
 
+pub mod commands;
+pub mod deliver;
 pub mod ingest;
 pub mod model;
 pub mod serve;

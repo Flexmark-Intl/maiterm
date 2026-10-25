@@ -294,7 +294,7 @@ pub(crate) fn hive_in_window(data: &AppData, label: &str, workspace_id: &str) ->
     caller_for_workspace(data, workspace_id).filter(|c| c.label == label).ok_or_else(|| "That workspace isn't a Hive in this window.".to_string())
 }
 
-async fn gallery_of(state: &Arc<AppState>, label: &str, workspace_id: &str) -> Result<(Caller, Arc<Gallery>), String> {
+pub(crate) async fn gallery_of(state: &Arc<AppState>, label: &str, workspace_id: &str) -> Result<(Caller, Arc<Gallery>), String> {
     let caller = hive_in_window(&state.app_data.read(), label, workspace_id)?;
     let (id, paths) = (caller.hive.id.clone(), caller.paths.clone());
     let g = blocking(move || super::for_paths(&id, &paths)).await?;

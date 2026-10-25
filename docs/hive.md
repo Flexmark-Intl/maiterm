@@ -3717,6 +3717,54 @@ several releases a day).
    picture}`, `picture` the poster or the waveform) on cards and turns rather than bare ids, so
    neither draws a picture that 404s; a video plays muted after the pointer rests 400 ms on it
    (hover dwell, not a press, which 8e's pointer drag will want).
+   **8e built** (2026-10-24): curation (`hive/gallery/{commands,deliver}.rs`,
+   `components/hive/gallery/{GalleryCompare,CollectionsPanel}.svelte`, `src/lib/hive/galleryCurate.ts`).
+   The window's commands, each checked against the asking window: `gallery_tag` (any status,
+   whatever the checkpoint), `gallery_collect`, `gallery_rename_collection`,
+   `gallery_delete_collection` (the grouping only), `gallery_trash`/`gallery_restore`/
+   `gallery_empty_trash` (agents have no trash), `gallery_export` (any folder; new files with
+   suffixes, or Replace through a hidden temp renamed over the target), `gallery_paths` and
+   `gallery_recommendations`. `galleryDeliver` is built: a plain folder's name with an existing
+   subpath or an absolute path inside one, canonical, refused when it or any ancestor holds a
+   `.git`; the folder is opened `O_DIRECTORY|O_NOFOLLOW` and its descriptor's real path checked
+   again, and each file is an exclusive create in it (`fclonefileat`, else `openat O_EXCL`), a
+   taken name getting ` (2)` up to 99, at 0644; trashed assets refused (a collection's trashed
+   members skipped and counted); a collection without names numbered `01-…`; every delivery and
+   export a line in `logs/deliveries.jsonl`. `hiveSpawnWorker {inputs}` (at most 20 asset ids out
+   of the trash) lands on `worker.json.inputs`, and each launch's brief lists them under
+   "## Inputs from the gallery" with their stored paths (one trashed or gone since says so);
+   `hiveMessageWorker {assets}` appends maiTerm's own `[maiTerm] Attached from the gallery:` lines.
+   **Finals wired (§7.6):** under Ask me the coordinator's `galleryTag` final/rejected (or a move
+   out of one) is no longer refused: it is a `recommended` line on the asset (the newest replaces
+   an open one under its decision), the asset keeps its status, tiles and the detail show it, and
+   the human's next status change on that asset is the `answered` line against it, so five taken
+   in a row offer Finals to the coordinator; at Coordinator, a human change to the coordinator's
+   own finals call is an `overridden` line (once per decision), so two in a day offer it back.
+   The coordinator is told what its calls came to, in one message per change. The view:
+   Cmd/Shift-click selection (`selectWith`), a bulk bar (star, status, tag with `-tag` removing,
+   add to collection or a new one, compare, send, export, trash or restore), F and 1/2/3 toggling
+   on the selection (or the open or focused asset), C comparing two to four side by side (videos
+   synced from the pane last touched, drift past 0.1 s corrected, the first one's sound only;
+   audio A/B on X), Iterate (`iterateText`, onto the coordinator's composer, into an empty draft
+   or on a new line), Send to worker… (live workers; Board, its column, its composer), tiles
+   dragged onto a composer by pointer (`data-composer-drop`, `GALLERY_ATTACH`), the collections
+   panel (rename, delete, reorder by pointer drag or Alt+arrows, cover, remove, export, show in
+   grid) and Empty the trash with an inline confirmation. **Decided here:** a human pick with no
+   recommendation and no coordinator call behind it is the human curating and logs nothing; a
+   recommendation the coordinator then decides itself (Finals handed over) is withdrawn
+   (`lapsed`), so the human's later change overrides the decision instead of answering it;
+   `hiveMessageWorker` still needs text with its assets; a given name without an extension takes
+   the stored file's; given names may not repeat in any case. **Fixed in review:** names derived
+   from titles are unique within one batch (` (2)`), so Export… with Replace never writes one of
+   its own files over another; a delivery refuses a hidden folder below the plain folder, a name on
+   §8.1's list at its path under the plain folder (plus `package.json`, `CLAUDE.local.md` and the
+   human's `config_paths`, any case: Claude loads a plain folder's `CLAUDE.md` in every Hive
+   agent), and Unicode format characters (a bidi override disguises an extension); a git folder of
+   the Hive, named or pathed into, gets the worktree-and-land refusal; the descriptor's path is
+   held to the target as checked, never re-canonicalized (a folder above it swapped for a link is
+   refused); a run that stops partway logs what it wrote; setting the status an asset already has
+   answers an open recommendation (the detail's and compare's "Keep …"); and Empty the trash
+   confirms the whole trash's count (`gallery_trash_count`), whatever the filters show.
 9. Done and lifecycle: `hiveFinish` and waking a Done Hive (§11.4), queue state across
    suspend/resume/restart (§6.8), phone polish (Hive tabs already appear as chats; the gallery
    feed later).

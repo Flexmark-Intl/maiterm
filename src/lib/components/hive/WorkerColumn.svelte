@@ -56,6 +56,13 @@
     if (card.tab_id && chat) chat.focusComposer();
     else requestAnimationFrame(() => rootEl?.focus({ preventScroll: true }));
   }
+  /** The gallery's Send to worker… (docs/hive.md §10.4): files onto its composer. False when it
+   *  has no live chat to take them. */
+  export function attachFiles(paths: string[], text = ''): boolean {
+    if (!card.tab_id || !chat) return false;
+    chat.attachFiles(paths, text);
+    return true;
+  }
 
   const retired = $derived(!card.tab_id && isRetired(card));
   const source = $derived<ChatSource | null>(

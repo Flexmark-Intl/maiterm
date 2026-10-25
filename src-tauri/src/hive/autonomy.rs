@@ -8,8 +8,9 @@
 //! Offers are category `offer`: never a precedent, never a streak. `interfaces` has no Rust signal,
 //! so it is never offered (plan D15); Landing in the integration mode is always the human's.
 //! `finals` is counted from the coordinator's own `galleryTag` final/rejected decisions (step 8b),
-//! which the human can override, so it can be handed back; a hand-over needs the human's finals
-//! answers against a recommendation, which nothing logs yet.
+//! which the human can override (a gallery pick that changes one is an override), so it can be
+//! handed back; under Ask me the coordinator's finals are recommendations and the human's picks
+//! answer them (`gallery::commands`, step 8e), so it can be handed over.
 
 use serde_json::{json, Value};
 

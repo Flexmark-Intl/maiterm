@@ -8,7 +8,7 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { error as logError } from '@tauri-apps/plugin-log';
 import { countedListen } from '$lib/utils/listenCounter';
-import { galleryCollections, galleryList } from '$lib/tauri/commands';
+import { galleryCollections, galleryList, galleryRecommendations, galleryTrashCount } from '$lib/tauri/commands';
 import type { GalleryAssetRow, GalleryChangedEvent, GalleryCollection } from '$lib/tauri/types';
 import { defaultQuery, filterToQuery, type GalleryQuery, type GroupBy } from '$lib/hive/gallery';
 import { GalleryFeed, realTimers } from '$lib/hive/galleryFeed';
@@ -22,9 +22,13 @@ export interface GalleryUi {
   /** Following the newest; null until the human chooses, which reads as "while agents work". */
   following: boolean | null;
   detail: string | null;
+  /** Two to four assets side by side (step 8e), in the gallery's area. */
+  compare: string[] | null;
+  /** The collections panel is open in the gallery's area. */
+  collections: boolean;
 }
 
-const defaultUi = (): GalleryUi => ({ query: defaultQuery(), group: 'none', showVariants: false, selection: [], following: null, detail: null });
+const defaultUi = (): GalleryUi => ({ query: defaultQuery(), group: 'none', showVariants: false, selection: [], following: null, detail: null, compare: null, collections: false });
 
 const SIZE_KEY = 'hive.gallery.size';
 export const SIZE_MIN = 120;
@@ -49,6 +53,10 @@ function createHiveGalleryStore() {
   let rows = $state<GalleryAssetRow[]>([]);
   let loaded = $state(false);
   let collections = $state<GalleryCollection[]>([]);
+  /** The coordinator's finals recommendations waiting on the human: asset id → status. */
+  let recommendations = $state<Record<string, string>>({});
+  /** The whole trash, whatever the filters: what "Empty the trash" deletes. */
+  let trashCount = $state(0);
   let version = $state(0);
   /** Moves when the flash set does, so tiles re-read `flashing`. */
   let flashTick = $state(0);
@@ -70,6 +78,12 @@ function createHiveGalleryStore() {
       galleryCollections(wsId)
         .then((c) => { if (attached === wsId) collections = c; })
         .catch((e) => logError(`hive: gallery collections of ${wsId.slice(0, 8)} not read: ${e}`));
+      galleryRecommendations(wsId)
+        .then((r) => { if (attached === wsId) recommendations = r; })
+        .catch((e) => logError(`hive: finals recommendations of ${wsId.slice(0, 8)} not read: ${e}`));
+      galleryTrashCount(wsId)
+        .then((n) => { if (attached === wsId) trashCount = n; })
+        .catch((e) => logError(`hive: gallery trash of ${wsId.slice(0, 8)} not counted: ${e}`));
     }, soon ? 0 : COLLECTIONS_MS);
   }
 
@@ -85,6 +99,8 @@ function createHiveGalleryStore() {
     rows = [];
     loaded = false;
     collections = [];
+    recommendations = {};
+    trashCount = 0;
     active = false;
     const f = new GalleryFeed(wsId, {
       list: galleryList,
@@ -143,6 +159,17 @@ function createHiveGalleryStore() {
     get collections() {
       return collections;
     },
+    get recommendations() {
+      return recommendations;
+    },
+    get trashCount() {
+      return trashCount;
+    },
+    /** Collections, recommendations and the trash count again now: after the human's own change, which the
+     *  window's event also reports, without waiting for its debounce. */
+    refreshSide(wsId: string) {
+      if (attached === wsId) refetchCollections(wsId, true);
+    },
     /** Every gallery change this window heard for the attached Hive. */
     get version() {
       return version;
@@ -181,7 +208,13 @@ function createHiveGalleryStore() {
       if (ui(wsId).following !== on) setUi(wsId, { following: on });
     },
     openDetail(wsId: string, id: string | null) {
-      setUi(wsId, { detail: id, ...(id ? { selection: [id] } : {}) });
+      setUi(wsId, { detail: id, ...(id ? { selection: [id], compare: null, collections: false } : {}) });
+    },
+    openCompare(wsId: string, ids: string[] | null) {
+      setUi(wsId, { compare: ids, ...(ids ? { detail: null, collections: false } : {}) });
+    },
+    openCollections(wsId: string, on: boolean) {
+      setUi(wsId, { collections: on, ...(on ? { detail: null, compare: null } : {}) });
     },
   };
 }

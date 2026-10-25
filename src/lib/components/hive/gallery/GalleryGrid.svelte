@@ -24,11 +24,13 @@
     /** The human's stored choice; null while the default (on while agents work) holds. */
     followChosen: boolean | null;
     isFlashing: (id: string) => boolean;
+    /** The coordinator's finals recommendations waiting on the human: asset id → status. */
+    recommendations: Record<string, string>;
     onfollowing: (on: boolean) => void;
     onselect: (id: string, e: MouseEvent) => void;
     onopen: (id: string) => void;
   }
-  let { hiveId, entries, size, selection, following, followChosen, isFlashing, onfollowing, onselect, onopen }: Props = $props();
+  let { hiveId, entries, size, selection, following, followChosen, isFlashing, recommendations, onfollowing, onselect, onopen }: Props = $props();
 
   const GAP = 8;
   const PAD = 12;
@@ -105,7 +107,7 @@
   }
 </script>
 
-<div class="scroller" bind:this={scroller} onscroll={onScroll} role="listbox" aria-label="Assets" aria-multiselectable="false">
+<div class="scroller" bind:this={scroller} onscroll={onScroll} role="listbox" aria-label="Assets" aria-multiselectable="true">
   <div class="canvas" style="height: {layout.height + PAD * 2}px">
     {#each shown as id (id)}
       {@const r = layout.pos.get(id)}
@@ -123,6 +125,7 @@
               row={e.row}
               selected={selected.has(id)}
               flashing={isFlashing(id)}
+              recommended={recommendations[id]}
               onselect={(ev) => onselect(id, ev)}
               onopen={() => onopen(id)}
             />

@@ -502,7 +502,8 @@ pub fn write_worker_launch_files(
     write_json(Path::new(&record.settings_path), &settings)?;
     write_json(Path::new(&record.mcp_config_path), &super::settings::hive_mcp_config())?;
     let builder = w.reviews.as_deref().and_then(|id| super::worker::task_dir(paths, id).ok()).and_then(|d| super::worker::read_worker(&d).ok());
-    write_bytes(&paths.worker_brief(&w.slug), super::brief::worker_brief_md(hive, paths, w, task_brief, builder.as_ref()).as_bytes())
+    let inputs = super::gallery::tools::brief_inputs(&hive.id, paths, &w.inputs);
+    write_bytes(&paths.worker_brief(&w.slug), super::brief::worker_brief_md(hive, paths, w, task_brief, builder.as_ref(), &inputs).as_bytes())
 }
 
 const NO_CLAUDE_YET: &str =

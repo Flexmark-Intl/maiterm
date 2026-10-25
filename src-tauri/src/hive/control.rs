@@ -47,10 +47,17 @@ pub(crate) async fn message_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
     if text.chars().count() > MAX_MESSAGE {
         return Err(format!("The message is over {MAX_MESSAGE} characters: put the detail in a file in the worker's folder and point to it."));
     }
+    let ids = super::gallery::tools::input_ids(args, "assets").map_err(|e| format!("assets: {e}"))?;
     let w = named_worker(caller, args).await?;
     let tab = live_tab(ctx, caller, &w).ok_or_else(|| format!("Worker {} has no tab ({}): there's no agent to tell.", worker_label(&w), w.phase))?;
+    let (hive_id, paths) = (caller.hive.id.clone(), caller.paths.clone());
+    let attached = blocking(move || super::gallery::tools::live_inputs(&hive_id, &paths, &ids)).await.map_err(|e| format!("assets: {e}"))?;
     // The coordinator's words are escaped too: only maiTerm opens a line with `[maiTerm]`.
-    let framed = format!("[maiTerm] From your coordinator:\n{}", frame_escape(text));
+    let mut framed = format!("[maiTerm] From your coordinator:\n{}", frame_escape(text));
+    if !attached.is_empty() {
+        framed.push('\n');
+        framed.push_str(&super::gallery::tools::attached_lines(&attached));
+    }
     let sent = ctx.window.deliver(&tab, framed, "Hive message").await;
     log::info!("hive {}: message to worker {}: {}", caller.hive.id, worker_label(&w), sent.describe());
     match sent {
@@ -58,7 +65,13 @@ pub(crate) async fn message_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
             "Not delivered to worker {}: {why}. If its agent has exited, hiveRestartWorker brings it back.",
             worker_label(&w)
         )),
-        s => Ok(json!({ "worker": w.slug, "badge": w.badge, "delivery": s.describe() })),
+        s => {
+            let mut v = json!({ "worker": w.slug, "badge": w.badge, "delivery": s.describe() });
+            if !attached.is_empty() {
+                v["attached"] = json!(attached.iter().map(|(a, _)| a.id.clone()).collect::<Vec<_>>());
+            }
+            Ok(v)
+        }
     }
 }
 

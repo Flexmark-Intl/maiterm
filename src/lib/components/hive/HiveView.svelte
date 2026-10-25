@@ -465,6 +465,30 @@
     dispatchHiveOpenColumn({ workspaceId, tabId: tabId ?? '', taskId });
   }
 
+  // ── The gallery's Iterate and Send to worker… (§10.4): files onto a composer ──
+  /** Iterate switches nothing: the coordinator's column is beside the gallery already (shown
+   *  again if it was a strip). */
+  function iterateOnCoordinator(paths: string[], text: string) {
+    if (!coordId || !column) return;
+    if (view.coordCollapsed) hiveView.setCoordCollapsed(workspaceId, false);
+    hiveView.focus(workspaceId, 'coordinator');
+    column.attachFiles(paths, text);
+  }
+  /** Send to worker…: Board, that worker's column, then its composer once the column mounts. */
+  function sendToWorker(taskId: string, paths: string[]) {
+    const c = cardByTask.get(taskId);
+    if (!c?.worker.tab_id) return;
+    open({ workspaceId, tabId: c.worker.tab_id, taskId });
+    if (!hiveView.view(workspaceId).open.some((o) => o.taskId === taskId)) return;
+    let tries = 0;
+    const attach = () => {
+      if (workerCols[taskId]?.attachFiles(paths)) return;
+      if (++tries < 10) requestAnimationFrame(attach);
+      else toastStore.addToast(`Not attached to #${c.worker.badge}`, `${c.worker.title} has no chat to attach to right now.`, 'info');
+    };
+    requestAnimationFrame(attach);
+  }
+
   // ── The keyboard (§4.6). The Cmd keys come from `+layout` as `hive-key`, ahead of its tab
   // handlers; Escape is read here. ──
   let boardEl = $state<HTMLElement | undefined>();
@@ -837,6 +861,8 @@
         active={showGallery}
         onopenworker={(taskId) => openCard(taskId, cardByTask.get(taskId)?.worker.tab_id)}
         onopencoordinator={() => { if (coordId) open({ workspaceId, tabId: coordId }); }}
+        oniterate={iterateOnCoordinator}
+        onsend={sendToWorker}
       />
     {/if}
     {#if boardMode === 'rail'}
