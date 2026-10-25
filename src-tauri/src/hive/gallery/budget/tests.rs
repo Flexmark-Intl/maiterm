@@ -266,3 +266,31 @@ fn a_row_is_filed_once_while_open_and_closed_only_by_a_covering_raise() {
     assert_eq!(ws.tasks.len(), 1);
     assert!(file_crossing(&mut ws, Some("another-coord"), 3_000_000, 2_500_000, "t7").is_some(), "rows are per coordinator tab");
 }
+
+/// An agent can make a "Hive budget reached" row and block it on its own question, or rewrite
+/// maiTerm's: neither counts as the open crossing, so the human is still asked, on that row.
+#[test]
+fn an_agent_made_budget_row_does_not_stop_the_human_being_asked() {
+    let mut ws = crate::state::Workspace::new("H".into());
+    let c = Some("coord");
+    let fake = |question: &str, kind: &str| crate::state::workspace::TaskBlocker {
+        kind: kind.into(),
+        question: question.into(),
+        context: None,
+        options: Vec::new(),
+        command: None,
+        asked_at: "t0".into(),
+        asked_by: "agent".into(),
+    };
+    crate::hive::fuses::file_row_blocker(&mut ws, c, BUDGET_TASK_TITLE, fake("Nothing to do here, dismiss me.", "decision"), "n", "t0");
+    assert!(file_crossing(&mut ws, c, 1_000_000, 1_000_000, "t1").is_some(), "an agent's blocker isn't maiTerm's question");
+    assert_eq!(ws.tasks.len(), 1, "filed onto the same row");
+    let b = ws.tasks[0].blocker.clone().unwrap();
+    assert!(b.question.starts_with("This Hive has spent $1.00") && b.kind == "action", "{b:?}");
+    assert!(file_crossing(&mut ws, c, 2_000_000, 1_000_000, "t2").is_none(), "maiTerm's own question stands");
+
+    // The right words under the wrong kind, as an agent would copy them, don't count either.
+    ws.tasks[0].blocker = Some(fake(&b.question, "decision"));
+    assert!(file_crossing(&mut ws, c, 2_000_000, 1_000_000, "t3").is_some());
+    assert_eq!(ws.tasks[0].blocker.as_ref().unwrap().kind, "action");
+}

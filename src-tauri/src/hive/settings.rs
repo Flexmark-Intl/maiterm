@@ -651,7 +651,10 @@ pub fn worker_settings_json(hive: &Hive, record: &LaunchRecord, w: &WorkerRecord
         deny_rules.push(abs_rule("Edit", &d.path, d.dir));
     }
 
-    let domains = worker_domains(hive, &ctx.remote_hosts);
+    // Generator hosts only for a worker whose role generates (the predicate `worker_mcp_config`
+    // uses): a code worker or a reviewer gets the registries alone.
+    let generates = !w.is_reviewer() && super::roles::role(&w.role).is_some_and(|r| r.generators);
+    let domains = worker_domains(hive, &ctx.remote_hosts, generates);
     Ok(json!({
         "sandbox": {
             "enabled": true,
@@ -688,14 +691,16 @@ pub fn worker_settings_json(hive: &Hive, record: &LaunchRecord, w: &WorkerRecord
     }))
 }
 
-/// A worker's network allowlist (§14.16): the package registries and the Hive's generator hosts,
+/// A worker's network allowlist (§14.16): the package registries and, for a media worker
+/// (`generates`), the Hive's generator hosts,
 /// minus anything that reaches a repo's remote, which `deniedDomains` also lists. The hosts were
 /// checked when the human saved them; checked again here, since the state file is plain JSON, and
 /// a remote added since is taken out all the same.
-pub fn worker_domains(hive: &Hive, remote_hosts: &[String]) -> Vec<String> {
+pub fn worker_domains(hive: &Hive, remote_hosts: &[String], generates: bool) -> Vec<String> {
     use super::gallery::budget::{host_covers, normalize_host};
     let remotes: Vec<String> = remote_hosts.iter().map(|h| h.to_ascii_lowercase()).collect();
-    let generators = hive.settings.gallery.generator_hosts.iter().filter_map(|h| {
+    let chosen: &[String] = if generates { &hive.settings.gallery.generator_hosts } else { &[] };
+    let generators = chosen.iter().filter_map(|h| {
         normalize_host(h).map_err(|e| log::warn!("hive {}: generator host left out: {e}", hive.id)).ok()
     });
     let mut out: Vec<String> = Vec::new();
@@ -728,7 +733,10 @@ pub fn hive_mcp_config() -> Value {
 
 /// A worker's `--mcp-config` (plan D1, §6.8 "only the servers it needs"): maiTerm's server, and
 /// for a role that generates (`generators: true`; never a reviewer) each MCP server the human
-/// chose for the Hive, its entry copied verbatim from the launching account's `.claude.json`.
+/// chose for the Hive that is a recognised generator (`create::is_generator_server`: its url host
+/// or name in `KNOWN_GENERATOR_HOSTS`), its entry copied verbatim from the launching account's
+/// `.claude.json`. Any other ticked server (a github, a filesystem) is never copied: it would run
+/// outside the sandbox and the gate with that server's whole authority.
 /// Copied fresh at every launch, so a rotated key reaches the next one. A chosen server that file
 /// no longer has is left out, logged. Generator calls run in Claude's process, outside the
 /// sandbox, bounded by the budget (§6.7).
@@ -745,9 +753,10 @@ pub fn worker_mcp_config(hive: &Hive, w: &WorkerRecord, claude_json: Option<&Val
             continue;
         }
         match theirs.and_then(|s| s.get(name)) {
-            Some(entry) => {
+            Some(entry) if super::create::is_generator_server(name, entry) => {
                 v["mcpServers"][name] = entry.clone();
             }
+            Some(_) => log::warn!("hive {}: worker {}: MCP server \"{name}\" isn't a generator maiTerm recognises; left out (it would run outside the sandbox)", hive.id, w.slug),
             None => log::warn!("hive {}: worker {}: MCP server \"{name}\" isn't in the account's .claude.json; left out", hive.id, w.slug),
         }
     }
@@ -1416,12 +1425,13 @@ mod tests {
         }
     }
 
-    /// §14.16, plan D2, D20: the Hive's generator hosts join a worker's allowlist, never one that
-    /// reaches a git remote (that stays denied), and the coordinator's list stays empty.
+    /// §14.16, plan D2, D20: the Hive's generator hosts join a media worker's allowlist, never one
+    /// that reaches a git remote (that stays denied), and the coordinator's list stays empty.
     #[cfg(unix)]
     #[test]
-    fn generator_hosts_join_the_worker_allowlist_but_never_a_remote_or_the_coordinator() {
+    fn generator_hosts_join_a_media_worker_allowlist_but_never_a_remote_or_the_coordinator() {
         let (mut h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        let w = WorkerRecord { role: "image".into(), ..w };
         h.settings.gallery.generator_hosts = vec!["fal.run".into(), "v3.fal.media".into(), "crates.io".into(), "*.github.com".into(), "localhost".into(), "FAL.run".into()];
         let mut ctx = worker_ctx();
         ctx.remote_hosts.push("gist.github.com".into());
@@ -1439,6 +1449,22 @@ mod tests {
 
         let coord = hive_settings_json(&h, &coordinator_record(&h, &p), &p, &env()).unwrap();
         assert_eq!(coord["sandbox"]["network"]["allowedDomains"], json!([]), "the coordinator reaches generators only as MCP servers");
+    }
+
+    /// A code worker and a reviewer (even of a media role) reach the package registries only: the
+    /// generator hosts are a media worker's alone.
+    #[cfg(unix)]
+    #[test]
+    fn code_workers_and_reviewers_get_the_registries_only() {
+        let (mut h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        h.settings.gallery.generator_hosts = vec!["fal.run".into(), "api.kie.ai".into()];
+        let reviewer = WorkerRecord { role: "image".into(), reviews: Some("t-other".into()), ..w.clone() };
+        assert_eq!(w.role, "backend");
+        for (who, rec) in [("backend", &w), ("reviewer", &reviewer)] {
+            let s = worker_settings_json(&h, &crate::hive::launch::worker_record(&h, &p, rec), rec, &p, &worker_ctx(), &env()).unwrap();
+            let allowed = strings(&s["sandbox"]["network"]["allowedDomains"]);
+            assert!(!allowed.is_empty() && allowed.iter().all(|d| PACKAGE_REGISTRIES.contains(&d.as_str())), "{who}: {allowed:?}");
+        }
     }
 
     /// Plan D1: a media worker gets the Hive's chosen generator servers, copied verbatim from the
@@ -1469,6 +1495,32 @@ mod tests {
             assert_eq!(worker_mcp_config(&h, rec, Some(&claude_json)), hive_mcp_config(), "{who}");
         }
         assert_eq!(worker_mcp_config(&h, &image, None), hive_mcp_config(), "no account file, maiTerm's only");
+    }
+
+    /// A ticked server that isn't a recognised generator runs outside the sandbox and the gate
+    /// with its own authority: a media worker never gets it. A generator is recognised by its url
+    /// host or its name; a stdio entry only by its name.
+    #[test]
+    fn a_media_worker_gets_only_recognised_generator_servers() {
+        let (mut h, _, w) = crate::hive::launch::tests::sample_worker_hive();
+        h.tools = ["github", "filesystem", "fal", "media", "kie-local", "proxied"].iter().map(|n| format!("mcp:{n}")).collect();
+        let claude_json = json!({ "mcpServers": {
+            "github": { "type": "http", "url": "https://api.githubcopilot.com/mcp/", "headers": { "Authorization": "Bearer ghp" } },
+            "filesystem": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/"] },
+            "fal": { "type": "http", "url": "https://mcp.fal.ai/mcp" },
+            "media": { "type": "http", "url": "https://MCP.Fal.AI:443/mcp" },
+            "kie-local": { "command": "npx", "args": ["kie-mcp"] },
+            "proxied": { "command": "npx", "args": ["fal-mcp"] },
+        }});
+        let image = WorkerRecord { role: "image".into(), ..w };
+        let v = worker_mcp_config(&h, &image, Some(&claude_json));
+        let got: Vec<&String> = v["mcpServers"].as_object().unwrap().keys().collect();
+        for name in ["fal", "media", "kie-local"] {
+            assert!(got.iter().any(|g| *g == name), "{name}: {got:?}");
+        }
+        for name in ["github", "filesystem", "proxied"] {
+            assert!(!got.iter().any(|g| *g == name), "{name} must not reach a worker: {got:?}");
+        }
     }
 
     /// The MCP config may carry a generator's key: owner-only from its first byte, and a file left

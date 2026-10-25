@@ -124,15 +124,23 @@ fn is_budget_row(t: &Task, coordinator: Option<&str>) -> bool {
     t.tab_id.as_deref() == coordinator && t.normalized_title == Task::normalize_title(BUDGET_TASK_TITLE)
 }
 
-fn is_open(t: &Task) -> bool {
-    t.status == "blocked" && t.blocker.is_some()
+/// How maiTerm's crossing question starts (`crossing_blocker`).
+const CROSSING_PREFIX: &str = "This Hive has spent ";
+const CROSSING_KIND: &str = "action";
+
+/// A budget row maiTerm itself has open: Blocked, on maiTerm's own crossing question. An agent
+/// can make a row of that title (createTasks) and block it on anything, or rewrite its blocker
+/// (updateTasks); such a row doesn't count, or a pre-made one would stop the human ever being
+/// asked. `file_crossing` re-files maiTerm's question onto it instead.
+fn is_open_crossing(t: &Task) -> bool {
+    t.status == "blocked" && t.blocker.as_ref().is_some_and(|b| b.kind == CROSSING_KIND && b.question.starts_with(CROSSING_PREFIX))
 }
 
 pub fn crossing_blocker(spent: i64, budget: i64, now: &str) -> TaskBlocker {
     TaskBlocker {
-        kind: "action".into(),
+        kind: CROSSING_KIND.into(),
         question: format!(
-            "This Hive has spent {} of its {} budget for paid generation. Raise the budget (Hive header \u{2192} Budget) or tell the \
+            "{CROSSING_PREFIX}{} of its {} budget for paid generation. Raise the budget (Hive header \u{2192} Budget) or tell the \
              coordinator to stop paid generation.",
             usd(spent),
             usd(budget)
@@ -149,10 +157,12 @@ pub fn crossing_blocker(spent: i64, budget: i64, now: &str) -> TaskBlocker {
     }
 }
 
-/// Files the crossing on the coordinator's row when no budget row is open already: one question
-/// however many spends cross. The tasks to send the store, or None when nothing was written.
+/// Files the crossing on the coordinator's row when maiTerm's question isn't open on it already:
+/// one question however many spends cross. A row of that title blocked on anything else (an
+/// agent's) gets maiTerm's question filed over it. The tasks to send the store, or None when
+/// nothing was written.
 pub fn file_crossing(ws: &mut Workspace, coordinator: Option<&str>, spent: i64, budget: i64, now: &str) -> Option<(Vec<Task>, Vec<Workstream>)> {
-    if !is_over(spent, budget) || ws.tasks.iter().any(|t| is_budget_row(t, coordinator) && is_open(t)) {
+    if !is_over(spent, budget) || ws.tasks.iter().any(|t| is_budget_row(t, coordinator) && is_open_crossing(t)) {
         return None;
     }
     let b = crossing_blocker(spent, budget, now);

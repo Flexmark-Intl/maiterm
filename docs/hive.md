@@ -3791,12 +3791,21 @@ several releases a day).
    chosen MCP server's url host plus `KNOWN_GENERATOR_HOSTS` matched by url suffix or name word, the
    `/generate` skill as Kie.ai, repo remotes and anything not a public host name dropped), edited
    by the human, offered again by Re-detect (`hive_detect_generator_hosts`), never re-derived at
-   launch; a worker's `allowedDomains` is the registries plus them (`settings::worker_domains`,
-   checked again since the state file is plain JSON, a remote's host still left out and denied),
-   the coordinator's stays `[]` (plan D20). A role with `generators: true` (image, video, audio,
-   edit; never a reviewer) gets each chosen `mcp:<name>` copied verbatim from the launching
+   launch; a media worker's `allowedDomains` (a role with `generators: true`, never a reviewer)
+   is the registries plus them (`settings::worker_domains`, checked again since the state file is
+   plain JSON, a remote's host still left out and denied), a code worker's and a reviewer's the
+   registries alone, the coordinator's `[]` (plan D20). A role with `generators: true` (image,
+   video, audio, edit; never a reviewer) gets each chosen `mcp:<name>` that is a recognised
+   generator (`create::is_generator_server`: its url host or a word of its name in
+   `KNOWN_GENERATOR_HOSTS`; a stdio entry only by name) copied verbatim from the launching
    account's `.claude.json` into its `mcp.json` (`settings::worker_mcp_config`, fresh at every
-   launch, a server the file lacks left out and logged); every `mcp.json` is written 0600 from its
+   launch, a server the file lacks left out and logged). Any other ticked server (a github, a
+   filesystem) is never copied: an MCP server runs in Claude's process, outside the sandbox and
+   the gate, with its own whole authority. The crossing counts as open only while the row carries
+   maiTerm's own `action` question (a row an agent made or re-blocked gets it filed over), and
+   `updateTasks`/`createTasks` refuse an agent's change to the reserved rows ("Hive budget
+   reached", "Hive paused: usage limit") or to a standing `Budget:` blocker
+   (`tasks/model.ts` `agentTaskWriteRefusal`); every `mcp.json` is written 0600 from its
    first byte (`launch::write_private_json`). **Decided here:** no `HiveWindow::budget_crossed`: the
    window's `tasks_changed` and `deliver` already carry it, and the test window counts both; the
    pause's row writer was already lifted out (7e's `file_row_blocker`); no `gallery_spend` command

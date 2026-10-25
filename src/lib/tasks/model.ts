@@ -291,6 +291,43 @@ export interface BlockerInput {
   command?: string | null;
 }
 
+/** Rows maiTerm files the human's own questions on, on a Hive coordinator's tab
+ *  (`BUDGET_TASK_TITLE` in src-tauri/src/hive/gallery/budget.rs, `PAUSE_TASK_TITLE` in
+ *  hive/fuses.rs). An agent may not make, rename to, or change one: a pre-made or emptied row
+ *  would stand where the human's question belongs. */
+export const RESERVED_TASK_TITLES = ['Hive budget reached', 'Hive paused: usage limit'] as const;
+
+export function isReservedTaskTitle(title: string): boolean {
+  const n = normalizeTitle(title);
+  return RESERVED_TASK_TITLES.some((r) => normalizeTitle(r) === n);
+}
+
+/** A question about money: it starts `Budget:`, in any case (`is_budget_question`, budget.rs).
+ *  It stays with the human whatever the checkpoints say (docs/hive.md §10.3). */
+export function isBudgetQuestion(text: string): boolean {
+  return text.trimStart().slice(0, 7).toLowerCase() === 'budget:';
+}
+
+/** Why an agent's update to `row` is refused, or null. An agent may ASK a `Budget:` question
+ *  (set one on its row) but not change or withdraw one that stands, nor touch maiTerm's
+ *  reserved rows, nor rename a row to one. `changesBlocker`: the update sets or clears the
+ *  blocker, or moves the status (anything but Blocked settles it). */
+export function agentTaskWriteRefusal(
+  row: Pick<Task, 'title' | 'blocker'>,
+  u: { title?: string; changesBlocker: boolean },
+): string | null {
+  if (isReservedTaskTitle(row.title)) {
+    return `"${row.title}" is maiTerm's own row for a question to your human; agents can't change it. Nothing in this update was applied.`;
+  }
+  if (u.title?.trim() && isReservedTaskTitle(u.title)) {
+    return `"${u.title.trim()}" is a title maiTerm keeps for its own questions to your human. Nothing in this update was applied.`;
+  }
+  if (u.changesBlocker && row.blocker && isBudgetQuestion(row.blocker.question)) {
+    return 'This row carries a Budget: question for your human; only their answer settles it. Nothing in this update was applied.';
+  }
+  return null;
+}
+
 export type BlockerParse = { ok: true; blocker: TaskBlocker } | { ok: false; detail: string };
 
 /**

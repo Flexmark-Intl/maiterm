@@ -337,6 +337,28 @@ fn suffix_of(host: &str, suffix: &str) -> bool {
     host == suffix || host.ends_with(&format!(".{suffix}"))
 }
 
+/// The table's generators an MCP server is recognised as: by a word of its name, or by its url
+/// host (lowercase, any port dropped) under one of a generator's suffixes.
+fn known_mcp_generators(name: &str, host: Option<&str>) -> Vec<&'static KnownGenerator> {
+    let host = host.map(|h| {
+        let h = h.to_ascii_lowercase();
+        h.rsplit_once(':').filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit())).map_or(h.clone(), |(host, _)| host.to_string())
+    });
+    KNOWN_GENERATOR_HOSTS
+        .iter()
+        .filter(|k| host.as_deref().is_some_and(|h| k.suffixes.iter().any(|s| suffix_of(h, s))) || name_words(name).any(|w| w == k.key))
+        .collect()
+}
+
+/// Whether an `.claude.json` MCP server entry is a generator a media worker may be handed (plan
+/// D1): recognised by its url host or its name, as `generator_hosts` recognises one. Anything
+/// else (a github, a filesystem server) runs outside the sandbox and the gate, so a worker never
+/// gets it, whatever the human ticked. A stdio entry has no url: only its name can vouch for it.
+pub fn is_generator_server(name: &str, entry: &serde_json::Value) -> bool {
+    let host = entry.get("url").and_then(|u| u.as_str()).and_then(url_host);
+    !known_mcp_generators(name, host.as_deref()).is_empty()
+}
+
 /// The hosts a worker's sandbox needs for the generators the human chose (§14.16, plan D2): each
 /// chosen MCP server's url host, plus the table's hosts for a server or skill it recognises.
 /// Lowercased, deduplicated, anything that isn't a public host name dropped (a proxy entry's
@@ -359,10 +381,7 @@ pub fn generator_hosts(detected: &[DetectedTool], chosen: &[String], remote_host
                 if let Some(h) = &host {
                     push(h);
                 }
-                KNOWN_GENERATOR_HOSTS
-                    .iter()
-                    .filter(|k| host.as_deref().is_some_and(|h| k.suffixes.iter().any(|s| suffix_of(h, s))) || name_words(&t.label).any(|w| w == k.key))
-                    .collect()
+                known_mcp_generators(&t.label, host.as_deref())
             }
             "skill" => {
                 let key = SKILL_GENERATORS.iter().find(|(skill, _)| *skill == t.label).map(|(_, k)| *k);

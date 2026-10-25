@@ -19,7 +19,7 @@ import { overlordStore } from '$lib/stores/overlord.svelte';
 import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
 import { normalizeTabBatch } from '$lib/stores/tabBatch';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { appendNote, blockerNote, blocking, coerceStatus, effectiveStatus, findWorkstream, hasUnmetDeps, isDelegation, isInFlight, isRetired, normalizeTitle, parseBlocker, resolveBlockers, resolveEdges, TASK_NOTE_CAP, type BlockerInput } from '$lib/tasks/model';
+import { agentTaskWriteRefusal, appendNote, blockerNote, blocking, coerceStatus, effectiveStatus, findWorkstream, hasUnmetDeps, isDelegation, isInFlight, isReservedTaskTitle, isRetired, normalizeTitle, parseBlocker, resolveBlockers, resolveEdges, TASK_NOTE_CAP, type BlockerInput } from '$lib/tasks/model';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -2071,6 +2071,10 @@ function createClaudeCodeStore() {
     if ('error' in loc) return loc;
     const inputs = (args.tasks ?? []).filter((t) => t?.title?.trim());
     if (!inputs.length) return { error: 'tasks must be a non-empty array of { title }.' };
+    const reserved = inputs.find((t) => isReservedTaskTitle(t.title!));
+    if (reserved) {
+      return { error: `"${reserved.title!.trim()}" is a title maiTerm keeps for its own questions to your human. Nothing was created.` };
+    }
     // Validated before anything is written, so a bad blocker on the third item doesn't leave
     // the first two created and the agent unsure which of its list landed.
     const blockers = new Map<number, TaskBlocker>();
@@ -2177,6 +2181,15 @@ function createClaudeCodeStore() {
         // here, not an invitation to reach across.
         if (idx < 0) {
           missing.push(u.id!);
+          continue;
+        }
+        // maiTerm's reserved rows and a standing Budget: question are the human's (§10.3).
+        const guard = agentTaskWriteRefusal(list[idx], {
+          title: u.title,
+          changesBlocker: u.blocker !== undefined || !!u.status,
+        });
+        if (guard) {
+          refused.push({ id: u.id!, reason: 'reserved', detail: guard });
           continue;
         }
         // Resolve the assignee BEFORE touching anything, so a refused hand-off doesn't half

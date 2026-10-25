@@ -29,6 +29,9 @@ import {
   parseBlocker,
   taskTextParts,
   settleBlocker,
+  agentTaskWriteRefusal,
+  isBudgetQuestion,
+  isReservedTaskTitle,
 } from './model';
 import type { Task } from '$lib/tauri/types';
 
@@ -687,5 +690,32 @@ describe('explainBlocked', () => {
     const a = task({ title: 'A', blocked_by: ['vanished'] });
     expect(hasUnmetDeps(a, [a])).toBe(false);
     expect(explainBlocked(a, [a])).toBeNull();
+  });
+});
+
+describe("maiTerm's own rows and a standing Budget: question are the human's", () => {
+  const blocker = (question: string) => ({ kind: 'decision', question, options: [], asked_at: 't', asked_by: 'agent' }) as unknown as Task['blocker'];
+
+  it('knows the reserved titles however they are spelled', () => {
+    expect(isReservedTaskTitle('Hive budget reached')).toBe(true);
+    expect(isReservedTaskTitle('  hive BUDGET reached. ')).toBe(true);
+    expect(isReservedTaskTitle('Hive paused: usage limit')).toBe(true);
+    expect(isReservedTaskTitle('Hive budget review')).toBe(false);
+    expect(isBudgetQuestion('  budget: may I spend $4?')).toBe(true);
+    expect(isBudgetQuestion('Budgeting the sprint')).toBe(false);
+  });
+
+  it('refuses any change to a reserved row and a rename onto one', () => {
+    expect(agentTaskWriteRefusal({ title: 'Hive budget reached', blocker: null }, { changesBlocker: false })).toMatch(/maiTerm's own row/);
+    expect(agentTaskWriteRefusal({ title: 'Render the hero', blocker: null }, { title: 'Hive paused: usage limit', changesBlocker: false })).toMatch(/keeps for its own/);
+  });
+
+  it('lets an agent ask a Budget: question but not withdraw or rewrite one', () => {
+    const plain = { title: 'Render the hero', blocker: null };
+    expect(agentTaskWriteRefusal(plain, { changesBlocker: true })).toBeNull();
+    const asking = { title: 'Render the hero', blocker: blocker('Budget: may I spend $4 on 8 frames?') };
+    expect(agentTaskWriteRefusal(asking, { changesBlocker: true })).toMatch(/Budget: question/);
+    expect(agentTaskWriteRefusal(asking, { changesBlocker: false })).toBeNull();
+    expect(agentTaskWriteRefusal({ title: 'x', blocker: blocker('Which palette?') }, { changesBlocker: true })).toBeNull();
   });
 });
