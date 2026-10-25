@@ -4405,8 +4405,9 @@ async fn record_agent_files(
 }
 
 /// A Hive agent's session started (docs/hive.md §11.1): it joins its task's session list, which
-/// is what a relaunch resumes, and the coordinator gets the kickoff until it has reached it. Off
-/// the hook's path: file I/O, then a delivery that may wait for the agent's input box.
+/// is what a relaunch resumes, and what it is owed goes out in order: the kickoff until it has
+/// reached it, and the coordinator's status digest after a resume or restart (§11.2). Off the
+/// hook's path: file I/O, then deliveries that may wait for the agent's input box.
 fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, transcript_path: Option<String>) {
     let (agent, board) = {
         let data = srv.state.app_data.read();
@@ -4415,13 +4416,21 @@ fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, trans
     let Some((hive, role, paths)) = agent else {
         return;
     };
+    // Land cards wait on the coordinator's tab (docs/hive.md §8.1): its digest counts them.
+    let cards = if role == crate::hive::ROLE_COORDINATOR {
+        crate::agent_requests::waiting_by_tab().get(tab_id).copied().unwrap_or(0) as usize
+    } else {
+        0
+    };
     let (app, handle, tab, sid) = (srv.state.clone(), srv.app_handle.clone(), tab_id.to_string(), session_id.to_string());
     tauri::async_runtime::spawn(async move {
         let tab_id = tab.clone();
         let is_worker = role == crate::hive::ROLE_WORKER;
-        let started = tokio::task::spawn_blocking(move || crate::hive::session_started(&hive, &role, &paths, &tab_id, &sid, transcript_path))
-            .await
-            .unwrap_or_default();
+        let started = tokio::task::spawn_blocking(move || {
+            crate::hive::session_started(&hive, &role, &paths, &tab_id, &sid, transcript_path, crate::hive::fuses::book(), cards)
+        })
+        .await
+        .unwrap_or_default();
         // A worker's card still reads the `launching` its spawn or restart sent.
         if let (true, Some((label, ws))) = (started.phase_changed, &board) {
             crate::hive::rpc::emit_workers_changed(&handle, label, ws);
@@ -4429,8 +4438,12 @@ fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, trans
         if let (true, Some((label, ws))) = (started.memory_changed, &board) {
             crate::hive::memory::emit_changed(&handle, label, ws);
         }
-        if let Some(claim) = started.kickoff {
-            deliver_hive_kickoff(&app, &handle, &tab, claim).await;
+        // One after another, and none past one that didn't go: a digest never lands before the
+        // kickoff it follows. What's left stays owed for the next session start.
+        for claim in started.owed {
+            if !deliver_hive_owed(&app, &handle, &tab, claim).await {
+                break;
+            }
         }
         // Run results a crash or a restart kept from it (docs/hive.md §6.8).
         if is_worker {
@@ -4463,6 +4476,8 @@ fn hive_stop_failure(srv: &ServerState, tab_id: &str, event: &Value) {
             log::info!("hive {}: tab {tab} hit a usage limit until {until}: {}", hive.id, a.text);
             let reason = a.text.clone();
             if tokio::task::spawn_blocking(move || fuses::trip_breaker(until, &reason)).await.unwrap_or(false) {
+                // Waiters the breaker holds launch at its reset, not at the next unrelated write.
+                crate::hive::waiters::poll_all_at(app.clone(), handle.clone(), until);
                 let text = fuses::breaker_notice(until);
                 let boards = {
                     let data = app.app_data.read();
@@ -4500,10 +4515,15 @@ fn hive_stop_failure(srv: &ServerState, tab_id: &str, event: &Value) {
 /// Recorded as delivered only once the agent has it. A refusal right at session start is mostly
 /// the agent not yet seen owning its terminal (a process snapshot from before `claude` exec'd),
 /// so it is tried again a few times; a held one waits for its outcome, which is only an event.
-/// Whatever is still pending goes out on the agent's next session start.
-async fn deliver_hive_kickoff(app: &Arc<AppState>, handle: &AppHandle, tab: &str, claim: crate::hive::KickoffClaim) {
+/// Whatever is still pending goes out on the agent's next session start. True once delivered.
+async fn deliver_hive_owed(app: &Arc<AppState>, handle: &AppHandle, tab: &str, claim: crate::hive::owed::OwedClaim) -> bool {
     use crate::mailink::draft_hold::{deliver_or_hold, Delivery};
     use tauri::Listener;
+    let (kind, what) = match claim.kind {
+        crate::hive::owed::KIND_DIGEST => ("status digest", "Hive status digest"),
+        crate::hive::owed::KIND_WAKE => ("wake message", "Hive wake"),
+        _ => ("kickoff", "Hive kickoff"),
+    };
     for wait in [0u64, 2, 5, 10, 20] {
         tokio::time::sleep(Duration::from_secs(wait)).await;
         // Listening before the send, so no outcome can come before the listener.
@@ -4516,10 +4536,10 @@ async fn deliver_hive_kickoff(app: &Arc<AppState>, handle: &AppHandle, tab: &str
                 let _ = tx.send((field("msg_id"), field("outcome")));
             }
         });
-        let typed = match deliver_or_hold(app, handle, tab, &claim.text, "Hive kickoff").await {
+        let typed = match deliver_or_hold(app, handle, tab, &claim.text, what).await {
             Delivery::Delivered(_) => Some(true),
             Delivery::Held { msg_id, reason } => {
-                log::info!("hive: kickoff for Hive tab {tab} held ({reason})");
+                log::info!("hive: {kind} for Hive tab {tab} held ({reason})");
                 let outcome = async {
                     while let Some((id, outcome)) = rx.recv().await {
                         if id == msg_id {
@@ -4532,25 +4552,26 @@ async fn deliver_hive_kickoff(app: &Arc<AppState>, handle: &AppHandle, tab: &str
                 Some(tokio::time::timeout(Duration::from_secs(31 * 60), outcome).await.unwrap_or(false))
             }
             Delivery::Refused(why) => {
-                log::warn!("hive: kickoff for Hive tab {tab} refused ({why})");
+                log::warn!("hive: {kind} for Hive tab {tab} refused ({why})");
                 None
             }
         };
         handle.unlisten(listener);
         match typed {
             Some(true) => {
-                log::info!("hive: kickoff delivered to Hive tab {tab}");
+                log::info!("hive: {kind} delivered to Hive tab {tab}");
                 claim.delivered();
-                return;
+                return true;
             }
             Some(false) => {
-                log::warn!("hive: held kickoff for Hive tab {tab} was dropped; it goes out on the next session start");
-                return;
+                log::warn!("hive: held {kind} for Hive tab {tab} was dropped; it goes out on the next session start");
+                return false;
             }
             None => {}
         }
     }
-    log::warn!("hive: kickoff for Hive tab {tab} still pending; it goes out on the next session start");
+    log::warn!("hive: {kind} for Hive tab {tab} still pending; it goes out on the next session start");
+    false
 }
 
 /// The gate decides on the tool, command, path and cwd, but Claude sends it the whole event, and

@@ -375,8 +375,9 @@ fn serve(mut s: TcpStream, hive: &Hive, paths: &HivePaths, role: &str, seen: &Mu
         let event: Value = serde_json::from_str(&body).unwrap_or_default();
         if event["hook_event_name"] == "SessionStart" {
             let sid = event["session_id"].as_str().unwrap_or_default();
-            // The kickoff claim is dropped undelivered: the probe only checks the session list.
-            let _ = super::session_started(hive, role, paths, TAB, sid, event["transcript_path"].as_str().map(String::from));
+            // The owed claims are dropped undelivered: the probe only checks the session list.
+            let fuses = super::fuses::Fuses::at(paths.root.join("probe-fuses.json"));
+            let _ = super::session_started(hive, role, paths, TAB, sid, event["transcript_path"].as_str().map(String::from), &fuses, 0);
         }
         let prime = if target.contains("prime=1") { super::priming_rules(hive, role, paths, TAB) } else { String::new() };
         ("200 OK", prime)

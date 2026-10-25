@@ -1071,6 +1071,15 @@ pub(crate) async fn launch_waiting<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
     launch_worker(ctx, caller, reg, Some(row)).await
 }
 
+/// What a launch or restart in a suspended Hive answers (§11.2): its workers start on resume.
+pub(crate) const SUSPENDED_REFUSAL: &str = "Your Hive is suspended: this worker launches once your human resumes it.";
+
+/// Whether the caller's Hive workspace is suspended now: nothing launches into it.
+pub(crate) fn hive_suspended(data: &RwLock<AppData>, caller: &Caller) -> bool {
+    let d = data.read();
+    d.window(&caller.label).and_then(|w| w.workspaces.iter().find(|ws| ws.id == caller.workspace_id)).is_some_and(|ws| ws.suspended)
+}
+
 /// A registered worker's first launch: reserve, worktrees, records, the hidden tab, the window,
 /// then save and commit. Any failure takes all of it back (`Undo`), short of a waiting worker
 /// itself (`waiting_row`), which stays as it was.
@@ -1081,6 +1090,12 @@ async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: Re
     }
     let fail = |why: String| Refusal { why, at_reserve: false };
     let mut w = reg.worker.clone();
+
+    // Like the reservation's refusals, this only waits: the waiter keeps its reason, untold and
+    // without backoff, and the resume's poll launches it.
+    if hive_suspended(ctx.data, caller) {
+        return Err(Refusal { why: undo.run(ctx, caller, SUSPENDED_REFUSAL.to_string()).await, at_reserve: true });
+    }
 
     let (hive, paths, fuses, task_id) = (caller.hive.clone(), caller.paths.clone(), ctx.fuses, w.task_id.clone());
     let reserved = blocking(move || fuses.reserve(&hive, &task_id, || live_task_ids(&paths), super::fuses::now_ms()))
@@ -2800,6 +2815,34 @@ mod tests {
         rig.set_task_status(&schema.task_id, "done");
         assert_eq!(crate::hive::waiters::poll_once(&ctx, &rig.caller).await, vec!["queries".to_string()]);
         assert!(PathBuf::from(q(&rig).folders[0].worktree.as_ref().unwrap()).is_dir(), "launched as a spawn, worktrees and all");
+    }
+
+    #[tokio::test]
+    async fn nothing_launches_into_a_suspended_hive_until_it_is_resumed() {
+        let rig = Rig::new("waiters-suspended", 4);
+        let ctx = rig.ctx(accept, ok_save, ok_preflight);
+        let schema = rig.worker("Schema").await;
+        rig.spawn(accept, json!({ "title": "Queries", "role": "backend", "brief": "b", "folders": ["web"], "depends_on": ["schema"] })).await.unwrap();
+        rig.set_task_status(&schema.task_id, "done");
+        rig.data.write().windows[0].workspaces[0].suspended = true;
+        let (spawns, told) = (rig.calls_of(rpc::VERB_SPAWN).len(), rig.delivered().len());
+        let q = |rig: &Rig| worker::list_workers(&rig.caller.paths).into_iter().find(|w| w.slug == "queries").unwrap();
+
+        // Ready, but suspended: it keeps waiting with the reason, takes no slot and sends nothing.
+        assert!(crate::hive::waiters::poll_once(&ctx, &rig.caller).await.is_empty());
+        let w = q(&rig);
+        assert_eq!((w.phase.as_str(), w.wait_reason.as_deref(), w.tab_id.as_ref()), (worker::PHASE_WAITING, Some(SUSPENDED_REFUSAL), None));
+        assert_eq!(rig.headroom().pending, 0, "no reservation taken");
+        assert_eq!(rig.calls_of(rpc::VERB_SPAWN).len(), spawns, "no hive.spawn");
+        assert!(!rig.caller.paths.worker_dir("queries").exists(), "no worktree made");
+        assert_eq!(rig.delivered().len(), told, "no notice: the coordinator is suspended too");
+        let e = super::super::control::restart_worker(&ctx, &rig.caller, &json!({ "worker": "schema" })).await.unwrap_err();
+        assert_eq!(e, SUSPENDED_REFUSAL);
+
+        // Resumed: the next poll launches it, with no backoff from the refusal.
+        rig.data.write().windows[0].workspaces[0].suspended = false;
+        assert_eq!(crate::hive::waiters::poll_once(&ctx, &rig.caller).await, vec!["queries".to_string()]);
+        assert_eq!(q(&rig).phase, worker::PHASE_LAUNCHING);
     }
 
     /// The coordinator's stop, landing while a waiter's worktrees are made.

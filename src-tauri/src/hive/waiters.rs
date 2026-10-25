@@ -39,6 +39,45 @@ pub fn poll_soon(state: Arc<AppState>, handle: AppHandle, workspace_id: String) 
     });
 }
 
+/// The breaker-reset poll waiting to run, by when it is for (ms).
+static SCHEDULED: Mutex<Option<i64>> = Mutex::new(None);
+
+/// When to poll for a breaker ending at `until`, or None when a poll at or after it is already
+/// scheduled. Breakers only move later (`trip_breaker`), so a later one covers an earlier.
+pub(crate) fn next_poll(scheduled: Option<i64>, until: i64) -> Option<i64> {
+    match scheduled {
+        Some(s) if s >= until => None,
+        _ => Some(until),
+    }
+}
+
+/// Polls every Hive just after `at_ms`, when the usage-limit breaker ends: waiters it held launch
+/// then rather than at the next unrelated task write (docs/hive.md §7.8).
+pub fn poll_all_at(state: Arc<AppState>, handle: AppHandle, at_ms: i64) {
+    {
+        let mut g = SCHEDULED.lock().unwrap_or_else(|e| e.into_inner());
+        match next_poll(*g, at_ms) {
+            Some(t) => *g = Some(t),
+            None => return,
+        }
+    }
+    tauri::async_runtime::spawn(async move {
+        let wait = (at_ms + 1000 - super::fuses::now_ms()).max(0) as u64;
+        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+        {
+            let mut g = SCHEDULED.lock().unwrap_or_else(|e| e.into_inner());
+            if *g == Some(at_ms) {
+                *g = None;
+            }
+        }
+        let ids: Vec<String> = super::tools::hive_callers(&state.app_data.read()).into_iter().map(|c| c.workspace_id).collect();
+        log::info!("hive: the usage-limit breaker has ended; polling {} Hive(s)' waiters", ids.len());
+        for id in ids {
+            poll_soon(state.clone(), handle.clone(), id);
+        }
+    });
+}
+
 pub(crate) async fn poll<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller) {
     {
         let mut g = POLLING.lock().unwrap_or_else(|e| e.into_inner());
@@ -263,6 +302,14 @@ mod tests {
             "id": id, "title": "t", "status": status, "origin": "agent", "created_at": "", "updated_at": ""
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_breaker_poll_is_scheduled_once_per_reset() {
+        assert_eq!(next_poll(None, 100), Some(100), "nothing scheduled");
+        assert_eq!(next_poll(Some(100), 100), None, "already at that reset");
+        assert_eq!(next_poll(Some(200), 100), None, "a later poll covers it");
+        assert_eq!(next_poll(Some(100), 200), Some(200), "the breaker moved later: poll then too");
     }
 
     /// A dropped task's runs leave the queue (the app's own, so the ids are this test's alone).

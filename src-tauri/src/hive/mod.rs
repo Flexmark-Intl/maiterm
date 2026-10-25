@@ -40,6 +40,9 @@
 //!
 //! Step 8a: the gallery's store (`gallery`): immutable files, their SQLite index and the spend
 //! ledger, one per Hive.
+//!
+//! Step 9a: what an agent's next session is owed (`owed`): the kickoff, and the coordinator's
+//! status digest after a resume or a restart.
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
@@ -65,6 +68,7 @@ pub mod land;
 pub mod launch;
 pub mod layout;
 pub mod memory;
+pub mod owed;
 pub mod paths;
 pub mod plan;
 pub mod precedents;
@@ -135,19 +139,23 @@ pub fn hive_agent(data: &AppData, tab_id: &str) -> Option<(Hive, String, paths::
     Some((hive, tab.hive_role.clone()?, paths::HivePaths::new(root)))
 }
 
-/// What a session start did: the kickoff try it claimed, and whether a worker's phase moved
-/// (`launching` → `running`), which its board must hear: nothing else refetches it.
+/// What a session start did: the owed tries it claimed, in the order they go out, and whether a
+/// worker's phase moved (`launching` → `running`), which its board must hear: nothing else
+/// refetches it.
 #[derive(Default)]
 pub struct SessionStart {
-    pub kickoff: Option<KickoffClaim>,
+    pub owed: Vec<owed::OwedClaim>,
     pub phase_changed: bool,
     /// The start's memory rebuild changed the folder: the Memory view refetches.
     pub memory_changed: bool,
 }
 
-/// A Hive agent's session started (its SessionStart hook): list it on the task, and while the
-/// agent's kickoff hasn't reached it, claim the next try. A worker is found by its tab; its
-/// first start also marks its setup done and its phase running. Blocks on file I/O.
+/// A Hive agent's session started (its SessionStart hook): list it on the task, and claim the
+/// next try at what it is owed: its kickoff until that reached it, and for the coordinator a
+/// status digest after a resume or restart (`owed`), built from `fuses` and the land cards
+/// waiting on its tab (`cards_waiting`). A worker is found by its tab; its first start also marks
+/// its setup done and its phase running. Blocks on file I/O.
+#[allow(clippy::too_many_arguments)]
 pub fn session_started(
     hive: &Hive,
     role: &str,
@@ -155,6 +163,8 @@ pub fn session_started(
     tab_id: &str,
     session_id: &str,
     transcript_path: Option<String>,
+    fuses: &fuses::Fuses,
+    cards_waiting: usize,
 ) -> SessionStart {
     // An agent reads MEMORY.md at start: a current index even if the watcher missed an event.
     let memory_changed = memory::rebuild_now(&hive.id, paths).unwrap_or_else(|e| {
@@ -197,8 +207,13 @@ pub fn session_started(
     if let Err(e) = launch::append_session(&task, entry) {
         log::warn!("hive {}: session {session_id} not recorded: {e}", hive.id);
     }
-    let kickoff = launch::kickoff_pending(&task).then(|| KickoffClaim::take(task, text)).flatten();
-    SessionStart { kickoff, phase_changed, memory_changed }
+    let owed = if role == ROLE_COORDINATOR {
+        let board = || tools::board_view(hive, paths, fuses, fuses::now_ms(), false);
+        owed::coordinator_claims(hive, paths, text, board, cards_waiting)
+    } else {
+        launch::kickoff_pending(&task).then(|| owed::OwedClaim::take(task, owed::KIND_KICKOFF, text, None)).flatten().into_iter().collect()
+    };
+    SessionStart { owed, phase_changed, memory_changed }
 }
 
 /// The invariant rules a Hive agent is primed with at every session start (§7.1). Blocks on a
@@ -206,42 +221,6 @@ pub fn session_started(
 pub fn priming_rules(hive: &Hive, role: &str, paths: &paths::HivePaths, tab_id: &str) -> String {
     let w = (role == ROLE_WORKER).then(|| worker::worker_for_tab(paths, tab_id)).flatten();
     brief::invariant_rules(hive, role, paths, w.as_ref())
-}
-
-/// Kickoffs being delivered now, by task folder: two hooks report one start, and a held kickoff
-/// can wait half an hour, so a second start must not send it again meanwhile.
-static KICKOFFS_IN_FLIGHT: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
-
-/// One try at the coordinator's kickoff. It stays pending on disk unless `delivered` is called,
-/// so a try that was refused, held then dropped, or cut short by a restart is made again on the
-/// coordinator's next session start.
-pub struct KickoffClaim {
-    pub text: String,
-    task_dir: std::path::PathBuf,
-}
-
-impl KickoffClaim {
-    fn take(task_dir: std::path::PathBuf, text: String) -> Option<Self> {
-        let mut busy = KICKOFFS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-        if busy.contains(&task_dir) {
-            return None;
-        }
-        busy.push(task_dir.clone());
-        Some(Self { text, task_dir })
-    }
-
-    /// The agent has it: typed, or taken by its mod.
-    pub fn delivered(&self) {
-        if let Err(e) = launch::mark_kickoff_delivered(&self.task_dir) {
-            log::warn!("hive: kickoff delivered but not recorded, so it may be sent again: {e}");
-        }
-    }
-}
-
-impl Drop for KickoffClaim {
-    fn drop(&mut self) {
-        KICKOFFS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| *p != self.task_dir);
-    }
 }
 
 /// The first thing the coordinator is told, once: maiTerm's words, never a human's.
@@ -610,10 +589,12 @@ mod tests {
         let root = std::env::temp_dir().join(format!("hive-kickoff-{}", uuid::Uuid::new_v4()));
         let paths = paths::HivePaths::new(&root);
         let hive = Hive { id: "h1".into(), goal: "Ship it".into(), ..Hive::default() };
+        let fuses = fuses::Fuses::at(root.join("fuses.json"));
         let start = |sid: &str| {
-            let s = session_started(&hive, ROLE_COORDINATOR, &paths, "coord", sid, None);
+            let s = session_started(&hive, ROLE_COORDINATOR, &paths, "coord", sid, None, &fuses, 0);
             assert!(!s.phase_changed, "a coordinator has no worker phase");
-            s.kickoff
+            assert!(s.owed.iter().all(|c| c.kind == owed::KIND_KICKOFF), "no digest is owed here");
+            s.owed.into_iter().next()
         };
 
         let first = start("s1").expect("a kickoff on the first session");
@@ -627,8 +608,38 @@ mod tests {
         assert!(start("s2").is_none() && start("s3").is_none(), "delivered once, never again");
         assert!(!launch::kickoff_pending(&paths.coordinator_task()), "recorded on disk, so a restart keeps it");
         assert_eq!(launch::last_session(&paths.coordinator_task()).as_deref(), Some("s3"));
-        let orphan = session_started(&hive, ROLE_WORKER, &paths, "no-such-tab", "w1", None);
-        assert!(orphan.kickoff.is_none() && !orphan.phase_changed, "no worker.json names the tab");
+        let orphan = session_started(&hive, ROLE_WORKER, &paths, "no-such-tab", "w1", None, &fuses, 0);
+        assert!(orphan.owed.is_empty() && !orphan.phase_changed, "no worker.json names the tab");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_coordinator_gets_its_kickoff_then_its_digest_each_until_delivered() {
+        let root = std::env::temp_dir().join(format!("hive-owed-start-{}", uuid::Uuid::new_v4()));
+        let paths = paths::HivePaths::new(&root);
+        let fuses = fuses::Fuses::at(root.join("fuses.json"));
+        let hive = Hive { id: "h1".into(), goal: "Ship it".into(), ..Hive::default() };
+        let start = |sid: &str| session_started(&hive, ROLE_COORDINATOR, &paths, "coord", sid, None, &fuses, 1).owed;
+        let kinds = |c: &[owed::OwedClaim]| c.iter().map(|c| c.kind).collect::<Vec<_>>();
+
+        // The first start holds its kickoff while a resume owes a digest: the kickoff goes first.
+        let first = start("s1");
+        assert_eq!(kinds(&first), vec![owed::KIND_KICKOFF]);
+        assert!(owed::owe_digest(&paths, owed::WHY_RESUME).unwrap());
+        assert!(start("s2").is_empty(), "the kickoff is still out: nothing goes ahead of it");
+        drop(first);
+        let both = start("s2");
+        assert_eq!(kinds(&both), vec![owed::KIND_KICKOFF, owed::KIND_DIGEST]);
+        assert!(both[1].text.starts_with("[maiTerm] Your Hive was suspended and is back") && both[1].text.contains("1 land card waits"), "{}", both[1].text);
+        assert!(start("s2").is_empty(), "the same start reported twice, while both tries are out");
+        both[0].delivered();
+        drop(both);
+        // The digest went without `delivered`: it is still owed, alone now.
+        let again = start("s3");
+        assert_eq!(kinds(&again), vec![owed::KIND_DIGEST]);
+        again[0].delivered();
+        drop(again);
+        assert!(start("s4").is_empty(), "nothing owed");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -641,13 +652,14 @@ mod tests {
         w.fresh_next = true;
         let task = worker::task_dir(&paths, &w.task_id).unwrap();
         worker::write_worker(&task, &w).unwrap();
-        let started = |sid: &str| session_started(&hive, ROLE_WORKER, &paths, "tab-w", sid, None);
-        let start = |sid: &str| started(sid).kickoff;
+        let fuses = fuses::Fuses::at(root.join("fuses.json"));
+        let started = |sid: &str| session_started(&hive, ROLE_WORKER, &paths, "tab-w", sid, None, &fuses, 0);
+        let start = |sid: &str| started(sid).owed.into_iter().next();
 
         let first = started("s1");
         // The board fetched `launching` at the spawn: only this tells it the phase moved.
         assert!(first.phase_changed, "launching → running is news to the board");
-        let claim = first.kickoff.expect("the worker's kickoff");
+        let claim = first.owed.into_iter().next().expect("the worker's kickoff");
         assert_eq!(claim.text, format!("[maiTerm] Read {}, then start.", paths.worker_brief("auth").display()));
         let now = worker::read_worker(&task).unwrap();
         assert!(now.setup_done && !now.fresh_next, "setup never runs again; the next launch resumes");
@@ -656,7 +668,7 @@ mod tests {
         drop(claim);
         assert!(start("s1").is_none(), "a resume is not told again");
         let resumed = started("s2");
-        assert!(resumed.kickoff.is_none() && !resumed.phase_changed, "already running: nothing for the board");
+        assert!(resumed.owed.is_empty() && !resumed.phase_changed, "already running: nothing for the board");
         assert_eq!(launch::last_session(&task).as_deref(), Some("s2"));
 
         // A worker that reported keeps that phase when it resumes.

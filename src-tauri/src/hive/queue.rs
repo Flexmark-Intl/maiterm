@@ -1048,6 +1048,24 @@ pub fn unpark_workspace(workspace_id: &str) {
     queue().unpark(workspace_id);
 }
 
+/// The Hive workspaces that are suspended.
+pub fn suspended_hive_workspaces(data: &AppData) -> Vec<String> {
+    data.windows.iter().flat_map(|w| w.workspaces.iter()).filter(|ws| ws.hive.is_some() && ws.suspended).map(|ws| ws.id.clone()).collect()
+}
+
+/// At startup, before anything queues: the parked set is memory, so a Hive suspended when maiTerm
+/// stopped is parked again and stays inert until `resume_workspace` unparks it (docs/hive.md §6.8).
+pub fn park_suspended(data: &parking_lot::RwLock<AppData>) -> usize {
+    let ids = suspended_hive_workspaces(&data.read());
+    for id in &ids {
+        park_workspace(id, "your Hive was suspended");
+    }
+    if !ids.is_empty() {
+        log::info!("hive queue: {} suspended Hive(s) parked after the restart", ids.len());
+    }
+    ids.len()
+}
+
 fn tell_released(ended: &[Ended], why: &str, tell_now: bool) {
     // A land check isn't the worker's run: its end goes to its land, which tells the coordinator.
     let jobs: Vec<Job> = ended.iter().map(|e| e.job.clone()).filter(|j| j.land.is_none()).collect();

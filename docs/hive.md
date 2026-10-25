@@ -3817,3 +3817,24 @@ several releases a day).
 9. Done and lifecycle: `hiveFinish` and waking a Done Hive (§11.4), queue state across
    suspend/resume/restart (§6.8), phone polish (Hive tabs already appear as chats; the gallery
    feed later).
+   **9a built** (2026-10-24): queue and lifecycle state across suspend, resume and restart, and
+   the status digest. What an agent's next session is owed is `hive/owed.rs`: `OwedClaim`
+   replaces `KickoffClaim` (same semantics: in flight per task folder and kind, owed on disk until
+   typed), and the coordinator's claims go out in order, kickoff then digest, none past one that
+   didn't go and none while another start still delivers the kickoff (`server.rs`
+   `deliver_hive_owed`, the kickoff's loop unchanged). The kickoff keeps its own `kickoff.json`;
+   the digest is `tasks/coordinator/owed.json` (`Owed {digest, wake}`, String reasons, `extra`
+   kept), owed by `resume_workspace` (`resume`), `suspend_tab` on the coordinator (`tab_resume`)
+   and startup (`owe_after_restart`, `restart`), never to a Done Hive or a coordinator with no
+   session yet, and never by a reload or `/compact`. It is built when claimed
+   (`owed::digest_text`, from `board_view` without git and the land cards waiting on the
+   coordinator's tab): counts by phase, one escaped line per worker not retired (30, then "and N
+   more"), the cards, Paused and the breaker, what happened to runs, and that notices sent while it
+   was down may not have reached it. `delivered` clears an entry only if it is still the one
+   claimed, so a digest owed again (or 9c's wake text appended) during a delivery isn't lost. A
+   Hive suspended when maiTerm stopped is parked again at startup (`queue::park_suspended`, before
+   `restart_notices`). Nothing launches into a suspended Hive: `launch_worker` refuses before the
+   reservation as `at_reserve` (the waiter keeps waiting with the reason, untold, no backoff) and
+   `hiveRestartWorker` refuses with the same words; a resume polls the waiters. The breaker-reset
+   poll (4e's "Not yet") is `waiters::poll_all_at`, scheduled once per reset (`next_poll`) when
+   `hive_stop_failure` trips the breaker and at startup while one holds (`Fuses::breaker_until`).

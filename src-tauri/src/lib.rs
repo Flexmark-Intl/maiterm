@@ -707,9 +707,18 @@ pub fn run() {
 
             // The Hive run queue starts jobs through its windows from here on (docs/hive.md §6.8).
             hive::queue::install(app_state.clone(), app.handle().clone());
+            // A Hive suspended when maiTerm stopped stays parked until its resume (docs/hive.md §6.8).
+            hive::queue::park_suspended(&app_state.app_data);
             // Runs open when maiTerm stopped are interrupted, and each worker hears so at its next
             // session start. Before any tab is up, so no session start can come first.
             hive::run::restart_notices(&app_state.app_data);
+            // Each coordinator learns where its Hive stands at its next session start, since
+            // notices sent while maiTerm was down reached nobody (docs/hive.md §11.2).
+            hive::owed::owe_after_restart(&app_state.app_data);
+            // Waiters a usage-limit breaker holds launch at its reset (docs/hive.md §7.8).
+            if let Some(until) = hive::fuses::book().breaker_until(hive::fuses::now_ms()) {
+                hive::waiters::poll_all_at(app_state.clone(), app.handle().clone(), until);
+            }
             // Lands a stopped maiTerm left running are settled from the repos and held, so the
             // coordinator's next hiveLand resumes each (docs/hive.md §8.1). Git, before any tab.
             hive::land::reconcile(&app_state.app_data);

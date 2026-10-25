@@ -800,3 +800,32 @@ fn job_sandbox_probe() {
     drop((leased, stranger));
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// A Hive suspended when maiTerm stopped is parked again at startup: nothing of it queues until
+/// its resume unparks it (docs/hive.md §6.8, plan 9a).
+#[test]
+fn a_suspended_hive_is_parked_again_after_a_restart() {
+    use crate::hive::Hive;
+    use crate::state::{WindowData, Workspace};
+    let tag = uuid::Uuid::new_v4().simple().to_string();
+    let ws = |name: &str, hive: bool, suspended: bool| {
+        let mut w = Workspace::new(name.into());
+        w.id = format!("{name}-{tag}");
+        w.hive = hive.then(|| Hive { id: format!("h-{name}-{tag}"), ..Hive::default() });
+        w.suspended = suspended;
+        w
+    };
+    let mut win = WindowData::new("main".into());
+    win.workspaces = vec![ws("asleep", true, true), ws("awake", true, false), ws("plain", false, true)];
+    let data = parking_lot::RwLock::new(AppData { windows: vec![win], ..AppData::default() });
+    assert_eq!(suspended_hive_workspaces(&data.read()), vec![format!("asleep-{tag}")], "a suspended plain workspace isn't a Hive's");
+
+    assert_eq!(park_suspended(&data), 1);
+    let job = |name: &str| JobSpec { workspace_id: format!("{name}-{tag}"), ..spec(&format!("h-{name}-{tag}"), &format!("t-{name}-{tag}"), "w", &[]) };
+    assert!(enqueue(job("asleep")).unwrap_err().contains("being suspended"));
+    let awake = enqueue(job("awake")).expect("an awake Hive queues");
+    unpark_workspace(&format!("asleep-{tag}"));
+    let resumed = enqueue(job("asleep")).expect("queues once resumed");
+    release_worker(&awake.task_id, "test over");
+    release_worker(&resumed.task_id, "test over");
+}

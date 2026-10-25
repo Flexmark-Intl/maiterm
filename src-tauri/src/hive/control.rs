@@ -181,6 +181,9 @@ pub(crate) async fn stop_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
 // ── hiveRestartWorker ──
 
 pub(crate) async fn restart_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, args: &Value) -> Result<Value, String> {
+    if super::tools::hive_suspended(ctx.data, caller) {
+        return Err(super::tools::SUSPENDED_REFUSAL.to_string());
+    }
     let fresh = args.get("fresh").and_then(Value::as_bool).unwrap_or(false);
     let w = named_worker(caller, args).await?;
     let label = worker_label(&w);

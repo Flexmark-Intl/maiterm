@@ -233,6 +233,11 @@ impl Fuses {
         h
     }
 
+    /// When the breaker ends, while it holds: at startup a poll is scheduled for then.
+    pub fn breaker_until(&self, now: i64) -> Option<i64> {
+        self.lock().ok().and_then(|mut g| g.book().breaker(now))
+    }
+
     /// Stops every Hive starting workers until `until`. True when that's news: the breaker was
     /// off or ended sooner. Kept in memory when the write fails, the conservative side.
     pub fn trip_breaker(&self, until: i64, reason: &str) -> bool {
@@ -1031,6 +1036,8 @@ mod tests {
         assert_eq!((hr.hour_left, hr.breaker_until), (PER_HOUR - 1, Some(T0 + HOUR_MS)));
         assert_eq!(hr.breaker_reason.as_deref(), Some("session limit"));
         assert!(reloaded.reserve(&h, W, Vec::new, T0 + 1).is_err(), "a restart doesn't lift a pause");
+        assert_eq!(reloaded.breaker_until(T0 + 1), Some(T0 + HOUR_MS), "startup schedules its poll from this");
+        assert_eq!(reloaded.breaker_until(T0 + HOUR_MS), None, "ended");
         reloaded.reserve(&h, W, Vec::new, T0 + HOUR_MS).unwrap().commit(T0 + HOUR_MS).unwrap();
         let back: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(back["future"], json!({ "kept": true }));

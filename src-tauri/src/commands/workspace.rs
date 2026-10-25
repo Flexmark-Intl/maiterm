@@ -821,11 +821,20 @@ pub fn suspend_workspace(window: tauri::Window, state: State<'_, Arc<AppState>>,
 }
 
 #[tauri::command]
-pub fn resume_workspace(window: tauri::Window, state: State<'_, Arc<AppState>>, workspace_id: String) -> Result<Vec<String>, String> {
+pub fn resume_workspace(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+) -> Result<Vec<String>, String> {
     let label = window.label().to_string();
     let mut app_data = state.app_data.write();
     let win = app_data.window_mut(&label).ok_or("Window not found")?;
     let ws = win.workspaces.iter_mut().find(|w| w.id == workspace_id).ok_or("Workspace not found")?;
+    // A resumed Hive's coordinator is owed a status digest (docs/hive.md §11.2); a Done one is
+    // woken by a message instead.
+    let digest_for = ws.hive.as_ref().filter(|h| ws.suspended && h.status != "done").map(|h| h.id.clone());
+    let hive = ws.hive.is_some();
     ws.suspended = false;
     crate::hive::queue::unpark_workspace(&workspace_id);
     // Hand back the tabs that were live when this workspace was suspended so the
@@ -840,6 +849,17 @@ pub fn resume_workspace(window: tauri::Window, state: State<'_, Arc<AppState>>, 
         }
     }
     save_state(&app_data)?;
+    drop(app_data);
+    // Before the window respawns the tabs, so the coordinator's session start finds it owed.
+    if let Some(root) = digest_for.as_deref().and_then(crate::hive::paths::hive_root) {
+        if let Err(e) = crate::hive::owed::owe_digest(&crate::hive::paths::HivePaths::new(root), crate::hive::owed::WHY_RESUME) {
+            log::warn!("hive in workspace {workspace_id}: resume digest not owed: {e}");
+        }
+    }
+    // Waiters held while it was suspended launch now (docs/hive.md §6.8).
+    if hive {
+        crate::hive::waiters::poll_soon(state.inner().clone(), app, workspace_id);
+    }
     Ok(wake_tab_ids)
 }
 
@@ -943,11 +963,20 @@ pub fn suspend_tab(
     // Explicitly suspended — don't auto-wake it on workspace resume.
     tab.wake_on_resume = false;
     let worker = tab.hive_role.as_deref() == Some(crate::hive::ROLE_WORKER);
+    let coordinator = tab.hive_role.as_deref() == Some(crate::hive::ROLE_COORDINATOR);
+    // Its next mount tells it where the Hive stands (docs/hive.md §11.2): notices sent meanwhile
+    // reach no agent.
+    let digest_for = workspace.hive.as_ref().filter(|h| coordinator && h.status != "done").map(|h| h.id.clone());
 
     let data_clone = app_data.clone();
     drop(app_data);
     if worker {
-        crate::hive::run::release_for_tab(state.inner().clone(), tab_id, "your tab was suspended");
+        crate::hive::run::release_for_tab(state.inner().clone(), tab_id.clone(), "your tab was suspended");
+    }
+    if let Some(root) = digest_for.as_deref().and_then(crate::hive::paths::hive_root) {
+        if let Err(e) = crate::hive::owed::owe_digest(&crate::hive::paths::HivePaths::new(root), crate::hive::owed::WHY_TAB_RESUME) {
+            log::warn!("hive: coordinator tab {tab_id}'s resume digest not owed: {e}");
+        }
     }
     save_state(&data_clone)
 }
