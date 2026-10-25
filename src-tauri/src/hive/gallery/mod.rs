@@ -3,7 +3,7 @@
 //! thumbnails, a SQLite index (`store`) and the spend ledger in it. `ingest` decides which paths
 //! a caller may file from and makes the copy; `model` holds the records; `tools` is what agents
 //! call (step 8b); `thumbs` makes the pictures and `serve` answers the webview's `gallery://`
-//! requests, by asset id only (8c).
+//! requests, by asset id only (8c); `view` is the human's gallery view, cards and chats (8d).
 
 pub mod ingest;
 pub mod model;
@@ -11,6 +11,7 @@ pub mod serve;
 pub mod store;
 pub mod thumbs;
 pub mod tools;
+pub mod view;
 
 use std::collections::HashMap;
 use std::path::Path;

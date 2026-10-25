@@ -43,6 +43,7 @@
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { dropPointToCss } from '$lib/utils/dropPoint';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
+  import { dispatchHiveOpenAsset, galleryUrl } from '$lib/hive/gallery';
 
   interface Props {
     /** The chat shown; none draws the hint. Changing it switches chats in place. */
@@ -68,10 +69,14 @@
     emptyText?: string;
     /** The header's state line in place of the agent's state (a retired worker's "Retired · …"). */
     statusText?: string;
+    /** A Hive agent's chat: its `galleryAdd` steps show what they filed, a click opening it in
+     *  that Hive's gallery (docs/hive.md §4.2). */
+    gallery?: { hiveId: string; workspaceId: string } | null;
   }
   let {
     source, name, workspace, tasks, active, readOnly: readOnlyProp = false, header, composerActions, actions,
     ontask = (taskId: string) => loomStore.show('weave', taskId), emptyText = 'Pick a chat on the left.', statusText,
+    gallery = null,
   }: Props = $props();
 
   /** A string, so a caller handing a new source object for the same chat switches nothing. */
@@ -581,6 +586,26 @@
             {#if shown}
               <div class="calls">{#each r.turns as t (t.msg_id)}<code>{t.text}</code>{/each}</div>
             {/if}
+            {#if gallery}
+              {@const g = gallery}
+              {@const filed = r.turns.flatMap((t) => t.gallery_assets ?? [])}
+              {#if filed.length}
+                <!-- What its galleryAdd steps filed, folded or not (§4.2): one click to the gallery. -->
+                <div class="filed">
+                  {#each filed as a (a.id)}
+                    <button class="filed-a" aria-label="Open {a.title} in the gallery" onclick={() => dispatchHiveOpenAsset({ workspaceId: g.workspaceId, assetId: a.id })}>
+                      {#if a.picture === 'thumb'}
+                        <img src={galleryUrl(g.hiveId, a.id, 'thumb')} alt="" draggable="false" loading="lazy" />
+                      {:else if a.picture === 'wave'}
+                        <span class="filed-wave" style="--wave: url('{galleryUrl(g.hiveId, a.id, 'wave')}')"></span>
+                      {:else}
+                        <span class="filed-t">{a.title}</span>
+                      {/if}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            {/if}
           </div>
         {:else if r.kind === 'added'}
           <div class="event" data-kind="added">
@@ -829,6 +854,13 @@
   .typed { margin: 6px 0 4px 12px; padding-left: 10px; border-left: 2px solid var(--bg-light); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg-dim); }
   .report { margin: 6px 0 4px 12px; padding-left: 10px; border-left: 2px solid var(--bg-light); font-size: 12.5px; }
   .calls { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 2px 12px; }
+  /* A galleryAdd step's assets (docs/hive.md §4.2): a small strip under the step. */
+  .filed { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 4px 12px; }
+  .filed-a { width: 72px; height: 72px; padding: 0; border-radius: 6px; overflow: hidden; border: 1px solid var(--bg-light); background: var(--bg-medium); cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  .filed-a:hover, .filed-a:focus-visible { border-color: var(--accent); outline: none; }
+  .filed-a img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .filed-wave { width: 88%; height: 60%; background: var(--accent); -webkit-mask: var(--wave) center / 100% 100% no-repeat; mask: var(--wave) center / 100% 100% no-repeat; }
+  .filed-t { font-size: 10px; color: var(--fg-dim); padding: 4px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
   .calls code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--fg-dim); white-space: pre-wrap; overflow-wrap: anywhere; }
 
   /* Task events: a short colored rule on the left, what happened, then to which task. */

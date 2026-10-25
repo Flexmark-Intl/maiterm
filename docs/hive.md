@@ -3675,6 +3675,48 @@ several releases a day).
    to 256 MiB (else a 416 asking for ranges). A stored type is checked again when served: any
    `text/`, HTML or XML type but SVG goes out as `application/octet-stream`. On Linux there's no
    profile, so the decoders run with the file-only protocol list alone.
+   **8d built** (2026-10-24): the gallery view (`hive/gallery/view.rs`,
+   `components/hive/gallery/`, `stores/hiveGallery.svelte.ts`, `src/lib/hive/{gallery,galleryFeed}.ts`).
+   Board · Gallery · Memory in the header, Cmd+Shift+Y cycling them in that order (the view is a
+   String in `hive.view.<workspace>`, so a newer one reads as Board); the gallery takes the board's
+   place and the worker columns stay mounted, hidden, as for Memory, and opening a worker column
+   goes back to Board (plan D10). The window's commands (`gallery_list` up to 5,000 light rows, the
+   trash only when asked; `gallery_get` with the stored path and lineage chips; `gallery_collections`;
+   `gallery_add_files`) answer only for a Hive the asking window holds. A drop files as `human` from
+   any path, a link as what it points at, never merged as a duplicate, and answers `{assets, refused}`.
+   The grid is a virtualized masonry (`masonry`, `visible`) at each asset's aspect ratio, with group
+   bands (None, Task, Worker, Day, Collection; an asset in several collections under its first) and
+   children folded under a listed parent unless Show variants (`foldVariants`); the filter rail,
+   kind tabs and search become Rust's `ListFilter` (`filterToQuery`). `GalleryFeed` fetches only while
+   the gallery shows, refetches 150 ms after a burst of `hive-gallery-changed` and flashes what
+   arrived for 1.2 s; every event also moves `version`, which refetches the board, whose cards now
+   carry their task's newest two assets out of the trash (`WorkerCard.assets`, read only when the
+   index exists, so a board read never makes a gallery) in place of the diff line. Following is on
+   while a worker works or starts, off once scrolled away from the top, on again at the top or by
+   its button. The detail view has `<video>` with ±1/30 s steps, `<audio>` over the waveform, image
+   zoom (click, wheel about the pointer, drag to pan), a document's first page with Reveal (paging
+   deferred, D9), the recipe as rows with the prompt's Copy, Made by and For linking to the
+   worker's column (or the coordinator's), lineage chips, Reveal and Copy path; Star and Pick /
+   Final / Reject show disabled until 8e. **Nothing in the gallery launches a stored file**: an
+   agent picks its extension (`.bat`, `.vbs`, a macOS `.terminal`), and the default app would run
+   it outside the sandbox as the human. Keys act only in `[data-gallery]`, never in a field
+   (`galleryKey`), Enter and Space never on a focused button, link or player (theirs), and Space in
+   the grid plays the cursor's audio or video; `+layout` passes only app shortcuts on from there.
+   A scroll away from the top is stored as the human's choice even when it matches the default,
+   so a worker starting later doesn't pull the grid back (`followOnScroll`). Inline assets:
+   `get_tab_transcript` (a Hive tab) and `get_task_transcript` give each `galleryAdd` tool turn
+   `gallery_assets`, the chips of what that worker's task (or the coordinator, by role) filed from
+   2 s before the turn to the next galleryAdd or user turn, at most 120 s on, each claimed once
+   (desktop only: the phone's wire is untouched); `ChatColumn` draws them under the step, a click
+   opening the gallery at it. Other tool turns don't close a window: Claude Code writes each
+   tool_use of a message as its own line, seconds apart, and runs the calls after the last, so the
+   asset lands after them (checked on real transcripts). Calls sent together are a batch (a call
+   whose window ends at the next galleryAdd with nothing filed yet), its assets shared in order, a
+   single-path call taking one (`split_batch`); a single-path call that failed inside a batch can
+   shift its neighbour's asset onto it, display only. **Decided here:** chips (`{id, kind, title,
+   picture}`, `picture` the poster or the waveform) on cards and turns rather than bare ids, so
+   neither draws a picture that 404s; a video plays muted after the pointer rests 400 ms on it
+   (hover dwell, not a press, which 8e's pointer drag will want).
 9. Done and lifecycle: `hiveFinish` and waking a Done Hive (§11.4), queue state across
    suspend/resume/restart (§6.8), phone polish (Hive tabs already appear as chats; the gallery
    feed later).

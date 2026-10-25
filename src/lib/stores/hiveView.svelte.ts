@@ -133,7 +133,7 @@ function createHiveViewStore() {
       write(wsId, { ...v, terminalShown: shown ? [...v.terminalShown, which] : v.terminalShown.filter((k) => k !== which) });
     },
 
-    /** Board or Memory beside the coordinator (§4.1). */
+    /** Board, Gallery or Memory beside the coordinator (§4.1). */
     setView(wsId: string, next: HiveViewName) {
       const v = read(wsId);
       if (v.view !== next) write(wsId, { ...v, view: next });

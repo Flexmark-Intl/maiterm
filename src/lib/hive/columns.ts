@@ -167,12 +167,14 @@ export interface HiveViewState {
   coordCollapsed: boolean;
   /** 'coordinator' or task ids whose raw terminal is shown (§4.5, build step 5d). */
   terminalShown: string[];
-  /** What the main area shows beside the coordinator (§4.1); the gallery arrives in step 8. */
+  /** What the main area shows beside the coordinator (§4.1). */
   view: HiveViewName;
 }
 
-export type HiveViewName = 'board' | 'memory';
-export const HIVE_VIEWS: readonly HiveViewName[] = ['board', 'memory'];
+/** A string kept in localStorage: one a later build adds reads as the board here (`parseView`). */
+export type HiveViewName = 'board' | 'gallery' | 'memory';
+/** §4.6's order, which Cmd+Shift+Y cycles (plan D24). */
+export const HIVE_VIEWS: readonly HiveViewName[] = ['board', 'gallery', 'memory'];
 
 export const defaultView = (): HiveViewState => ({ open: [], focused: 'coordinator', coordFocusedAt: 0, coordCollapsed: false, terminalShown: [], view: 'board' });
 

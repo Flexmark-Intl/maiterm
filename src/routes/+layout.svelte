@@ -972,10 +972,11 @@
       const activeTabIsEditor = workspacesStore.activeTab?.tab_type === 'editor';
       const activeTabIsDiff = workspacesStore.activeTab?.tab_type === 'diff';
 
-      // Focus in the Files column: only app shortcuts are the app's. Everything else goes on
-      // to the tree's own keydown (which stops what it handles) — without this, Cmd+D in the
-      // tree would split the pane (docs/file-tree.md §11.1).
-      const treeFocused = !!(document.activeElement as Element | null)?.closest('[data-filetree]');
+      // Focus in the Files column or a Hive's gallery: only app shortcuts are the app's.
+      // Everything else goes on to the tree's or the gallery's own keydown (which stops what it
+      // handles) — without this, Cmd+D in the tree would split the pane (docs/file-tree.md
+      // §11.1; the gallery, docs/hive.md §4.6).
+      const treeFocused = !!(document.activeElement as Element | null)?.closest('[data-filetree], [data-gallery]');
       if (treeFocused && !isAppShortcut(e)) return;
 
       // When the active tab is an editor or diff tab, let CodeMirror handle all keyboard

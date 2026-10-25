@@ -545,6 +545,120 @@ export interface GallerySettings {
   generator_hosts: string[];
 }
 
+/** hive/gallery/model.rs `MadeBy`: from the filer's identity, never a tool's arguments. */
+export interface GalleryMadeBy {
+  /** "worker" | "coordinator" | "human", or a kind a newer build writes. */
+  kind: string;
+  tab_id: string;
+  role: string;
+  worker_title: string;
+  /** The worker's board number; 0 for anyone else. */
+  badge: number;
+}
+
+/** hive/gallery/model.rs `Recipe` (docs/hive.md §10.2). */
+export interface GalleryRecipe {
+  tool: string;
+  model?: string;
+  prompt?: string;
+  negative?: string;
+  seed?: number;
+  params?: unknown;
+  source_url?: string;
+  cost_usd?: number;
+}
+
+/** hive/gallery/model.rs `AssetRow`: the light row the gallery view lists. */
+export interface GalleryAssetRow {
+  id: string;
+  /** "image" | "video" | "audio" | "document" | "model3d" | "other", or a newer one. */
+  kind: string;
+  file: string;
+  mime: string;
+  bytes: number;
+  width?: number | null;
+  height?: number | null;
+  duration_ms?: number | null;
+  title: string;
+  made_by: GalleryMadeBy;
+  task_id?: string | null;
+  prompt_head?: string | null;
+  model?: string | null;
+  cost_micros: number;
+  parents: string[];
+  /** Children out of the trash: the "⧉ n variants" count. */
+  children: number;
+  /** "" | "picked" | "final" | "rejected". */
+  status: string;
+  starred: boolean;
+  tags: string[];
+  collections: string[];
+  /** "pending" | "ready" | "none" | "failed". */
+  thumb: string;
+  /** `poster`, `strip`, `wave`: which pictures the thumbnailer made. */
+  extras: Record<string, unknown>;
+  created_at: string;
+  created_ms: number;
+  deleted_at?: string | null;
+}
+
+/** hive/gallery/view.rs `AssetDetail`: one asset whole, its stored path and its lineage. */
+export interface GalleryAssetDetail extends Omit<GalleryAssetRow, 'prompt_head' | 'model' | 'cost_micros'> {
+  sha256: string;
+  caption?: string | null;
+  source_path: string;
+  recipe?: GalleryRecipe | null;
+  purged: boolean;
+  path: string;
+  parent_chips: GalleryChip[];
+  child_chips: GalleryChip[];
+}
+
+/** hive/gallery/view.rs `AssetChip`: an asset drawn elsewhere (a card, a chat). */
+export interface GalleryChip {
+  id: string;
+  kind: string;
+  title: string;
+  /** The `gallery://` part to draw ("thumb" or "wave"); none means the kind's icon. */
+  picture?: 'thumb' | 'wave' | null;
+}
+
+export interface GalleryCollection {
+  id: string;
+  name: string;
+  asset_ids: string[];
+  cover?: string | null;
+  created_at: string;
+}
+
+/** hive/gallery/model.rs `ListFilter`: every field narrows; absent narrows nothing. */
+export interface GalleryListFilter {
+  kind?: string | null;
+  /** "worker" | "coordinator" | "human", or a tab id. */
+  made_by?: string | null;
+  task_id?: string | null;
+  collection?: string | null;
+  status?: string | null;
+  tag?: string | null;
+  starred?: boolean | null;
+  query?: string | null;
+  include_trash?: boolean;
+  limit?: number | null;
+}
+
+/** hive/gallery/view.rs `AddResult`: the human's drop. */
+export interface GalleryAddResult {
+  assets: GalleryAssetDetail[];
+  refused: { path: string; error: string }[];
+}
+
+/** `hive-gallery-changed`, sent to the Hive's window only. */
+export interface GalleryChangedEvent {
+  workspace_id: string;
+  hive_id: string;
+  ids: string[];
+}
+
 /** hive/record.rs `AutonomySettings` (docs/hive.md §4.7, §7.6). */
 export interface AutonomySettings {
   /** A coordinator-owned prompt unanswered this long notifies the human (60–3600, default 300). */
@@ -775,6 +889,8 @@ export interface HiveWorkerCard {
   review?: HiveReviewView | null;
   /** Its land while one runs or holds (docs/hive.md §8.1), and once landed. */
   land?: HiveLandView | null;
+  /** Its task's newest assets out of the trash: shown across the card's top in place of the diff (§4.3). */
+  assets?: GalleryChip[];
 }
 
 /** hive/land/mod.rs `LandView`: a land as its card shows it. */

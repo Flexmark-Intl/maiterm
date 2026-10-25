@@ -6,15 +6,17 @@ const file = { indexed: true, folded: false, pinned: false, in_subfolder: false,
 const budget = { lines: 7, bytes: 512, kept_lines: 1, kept_bytes: 20, max_lines: 200, max_bytes: 25000, kept_max_lines: 60, kept_max_bytes: 8000 };
 
 describe('memory view', () => {
-  it('cycles Board and Memory', () => {
-    expect(nextView('board')).toBe('memory');
+  it('cycles Board, Gallery and Memory (Cmd+Shift+Y)', () => {
+    expect(nextView('board')).toBe('gallery');
+    expect(nextView('gallery')).toBe('memory');
     expect(nextView('memory')).toBe('board');
   });
 
   it('keeps the view per workspace across a reload, and reads a bad value as the board', () => {
     const v = { ...defaultView(), view: 'memory' as const };
     expect(parseView(serializeView(v)).view).toBe('memory');
-    expect(parseView(JSON.stringify({ view: 'gallery' })).view).toBe('board');
+    expect(parseView(serializeView({ ...defaultView(), view: 'gallery' })).view).toBe('gallery');
+    expect(parseView(JSON.stringify({ view: 'timeline' })).view).toBe('board');
     expect(parseView(null).view).toBe('board');
   });
 

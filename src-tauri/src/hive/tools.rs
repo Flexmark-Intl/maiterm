@@ -1293,6 +1293,8 @@ pub struct WorkerCard {
     /// Its land while one runs or holds (§8.1), the card's Landing line; once landed, what its
     /// pushes came to.
     pub land: Option<super::land::LandView>,
+    /// Its task's newest assets out of the trash: the card's top row in place of the diff (§4.3).
+    pub assets: Vec<super::gallery::view::AssetChip>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -1341,6 +1343,7 @@ pub(crate) fn board_view(hive: &Hive, paths: &HivePaths, fuses: &Fuses, now: i64
     let live: Vec<String> = workers.iter().filter(|w| w.is_live()).map(|w| w.task_id.clone()).collect();
     let by_task: HashMap<&str, &WorkerRecord> = workers.iter().map(|w| (w.task_id.as_str(), w)).collect();
     let or = |mine: &str, hive: &str| if mine.is_empty() { hive.to_string() } else { mine.to_string() };
+    let gallery = super::gallery::view::existing(&hive.id, paths);
     let cards = workers
         .iter()
         .map(|w| WorkerCard {
@@ -1377,6 +1380,7 @@ pub(crate) fn board_view(hive: &Hive, paths: &HivePaths, fuses: &Fuses, now: i64
             review: w.review.as_ref().map(super::review::ReviewView::of),
             // Landed too: its card says a push that was held (§8.5).
             land: w.land.as_ref().filter(|_| matches!(w.phase.as_str(), worker::PHASE_LANDING | worker::PHASE_LANDED)).map(super::land::LandView::of),
+            assets: gallery.as_deref().map(|g| super::gallery::view::card_assets(g, &w.task_id)).unwrap_or_default(),
         })
         .collect();
     let h = fuses.headroom(hive, &live, now);

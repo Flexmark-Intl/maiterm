@@ -7,11 +7,14 @@
   `compact` is the rail's row (§4.1): badge, state dot, title (two lines, the rest on the
   tooltip) and the activity line.
 
-  Asset thumbnails arrive with the gallery.
+  A worker that files assets shows its newest one or two across the card's top in place of the
+  diff stat line (§4.3): in a media Hive that's how work arriving shows without opening anything.
 -->
 <script lang="ts">
   import Tooltip from '$lib/components/Tooltip.svelte';
+  import Icon from '$lib/components/Icon.svelte';
   import { reviewLine, stateLine, type CardState } from '$lib/hive/cards';
+  import { cardTopRow, galleryUrl } from '$lib/hive/gallery';
   import type { Activity, contextGauge } from '$lib/hive/activity';
   import type { HiveWorkerCard } from '$lib/tauri/types';
 
@@ -28,9 +31,13 @@
     ctx: ReturnType<typeof contextGauge>;
     compact?: boolean;
     focused?: boolean;
+    /** The Hive's id: its asset thumbnails are `gallery://` URLs under it. */
+    hiveId?: string;
     onopen: () => void;
   }
-  let { card, state, note, runtime, age, activity, diff, model, ctx, compact = false, focused = false, onopen }: Props = $props();
+  let { card, state, note, runtime, age, activity, diff, model, ctx, compact = false, focused = false, hiveId = '', onopen }: Props = $props();
+
+  const top = $derived(hiveId ? cardTopRow(card, diff.text) : diff.text ? 'diff' : null);
 
   const pulse = $derived(state.state === 'working' || state.state === 'starting' || state.state === 'landing');
   const folders = $derived(card.folders.map((f) => f.name).join(' · '));
@@ -74,6 +81,21 @@
   {#if compact}
     <span class="act" data-tone={activity.tone === 'none' ? 'state' : activity.tone}>{railLine}</span>
   {:else}
+    {#if top === 'assets'}
+      <span class="assets" aria-label="Newest assets">
+        {#each card.assets ?? [] as a (a.id + (a.picture ?? ''))}
+          <span class="thumb" data-kind={a.kind}>
+            {#if a.picture === 'thumb'}
+              <img src={galleryUrl(hiveId, a.id, 'thumb')} alt={a.title} draggable="false" loading="lazy" />
+            {:else if a.picture === 'wave'}
+              <span class="wave" style="--wave: url('{galleryUrl(hiveId, a.id, 'wave')}')" aria-label={a.title}></span>
+            {:else}
+              <Icon name={a.kind === 'image' ? 'image' : 'file'} size={14} />
+            {/if}
+          </span>
+        {/each}
+      </span>
+    {/if}
     <span class="st">
       <span class="lbl">{label}</span>
       {#if state.sub}<span class="sub">{state.sub}</span>{/if}
@@ -82,10 +104,10 @@
     {#if showActivity}<span class="act" data-tone={activity.tone}>{activity.text}</span>{/if}
     <!-- A note can run to paragraphs: three lines here, the whole of it on hover. -->
     {#if note}<Tooltip text={note} block><span class="note">“{note}”</span></Tooltip>{/if}
-    {#if folders || diff.text}
+    {#if folders || top === 'diff'}
       <span class="row">
         <span class="m">{folders}</span>
-        {#if diff.text}<Tooltip text={diff.tip}><span class="diff">{diff.text}</span></Tooltip>{/if}
+        {#if top === 'diff'}<Tooltip text={diff.tip}><span class="diff">{diff.text}</span></Tooltip>{/if}
       </span>
     {/if}
     <span class="row">
@@ -164,6 +186,11 @@
   .rev { font-size: 11px; color: var(--fg-dim); overflow-wrap: anywhere; }
   .rev.urgent-rev { color: var(--needs); }
   .note { font-size: 11.5px; line-height: 1.35; color: var(--fg); opacity: 0.8; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  /* §4.3: the newest assets across the card's top, at a fixed height so the card doesn't jump. */
+  .assets { order: -1; display: flex; gap: 4px; margin: -2px -4px 3px; height: 56px; }
+  .thumb { flex: 1 1 0; min-width: 0; border-radius: 5px; overflow: hidden; background: var(--bg-dark); display: flex; align-items: center; justify-content: center; color: var(--fg-dim); }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb .wave { width: 90%; height: 70%; background: var(--accent); -webkit-mask: var(--wave) center / 100% 100% no-repeat; mask: var(--wave) center / 100% 100% no-repeat; }
   .row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; min-width: 0; }
   .m { font-size: 10.5px; color: var(--fg-dim); overflow-wrap: anywhere; min-width: 0; }
   .diff { font-size: 10.5px; color: var(--fg-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }

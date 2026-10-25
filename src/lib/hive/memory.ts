@@ -5,7 +5,7 @@
 import type { HiveMemoryBudget, HiveMemoryFile } from '$lib/tauri/types';
 import { HIVE_VIEWS, type HiveViewName } from './columns';
 
-/** Cmd+Shift+Y (§4.6): Board → Memory → Board; the gallery joins in step 8. */
+/** Cmd+Shift+Y (§4.6): Board → Gallery → Memory → Board. */
 export function nextView(v: HiveViewName): HiveViewName {
   const i = HIVE_VIEWS.indexOf(v);
   return HIVE_VIEWS[(i + 1) % HIVE_VIEWS.length] ?? 'board';

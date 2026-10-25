@@ -10,12 +10,13 @@
   The board is static cards in waves (§4.3, §4.4), with dependency strings between them. It reads
   no transcript: Rust's worker records are fetched when this window hears `hive-workers-changed`
   or its tasks change, diff stats and meta are pushed (hiveFeed), and the rest (lane, blocker,
-  note, agent state and the activity line) comes live from the stores. Pause and Gallery arrive
-  with later steps.
+  note, agent state and the activity line) comes live from the stores. A card's newest assets come
+  with its record, refetched when the gallery changes (§4.3). Pause arrives with a later step.
 
-  Memory (§9, step 7a) is the header's other view (Board · Memory, Cmd+Shift+Y): HiveMemoryView
-  takes the board's place and the worker columns', which stay mounted, hidden, so their drafts
-  survive. The coordinator column stays put.
+  Gallery (§10.4, step 8d) and Memory (§9, step 7a) are the header's other views (Board · Gallery
+  · Memory, Cmd+Shift+Y): GalleryView or HiveMemoryView takes the board's place and the worker
+  columns', which stay mounted, hidden, so their drafts survive (plan D10). The coordinator column
+  stays put. An inline asset in a chat (`HIVE_OPEN_ASSET`) opens the gallery at it.
 
   Worker columns (§4.1): opening one turns the board into a rail; at most two show, and on a
   narrow window one gives way, then the coordinator goes to its strip (`hive/columns.ts`). Which
@@ -52,6 +53,9 @@
   import { autonomyLabel } from '$lib/hive/autonomy';
   import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
   import HiveMemoryView from './HiveMemoryView.svelte';
+  import GalleryView from './gallery/GalleryView.svelte';
+  import { hiveGallery } from '$lib/stores/hiveGallery.svelte';
+  import { HIVE_OPEN_ASSET, type HiveOpenAssetDetail } from '$lib/hive/gallery';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -127,6 +131,13 @@
     return () => clearTimeout(t);
   });
 
+  // The gallery's feed for this Hive, attached before the gallery view mounts: its event moves
+  // `version` whichever view shows, and a card's newest assets come with the board (§4.3).
+  const galleryToken = hiveGallery.attach(untrack(() => workspaceId));
+  $effect(() => {
+    if (hiveGallery.version) untrack(refetch);
+  });
+
   // Ages tick on hiveFeed's 30 s render clock; a clock, not a poll.
   const now = $derived(hiveFeed.now);
 
@@ -195,11 +206,13 @@
   });
   // A column opened before the board arrived (a restart's saved view) waits for its card.
   const openCols = $derived(board ? view.open.filter((c) => cardByTask.has(c.taskId)) : []);
-  /** Memory (§9) takes the board's place and the worker columns' (kept mounted, hidden), so the
-   *  layout fits as if none were open: no rail, no worker terminal on screen. */
+  /** Memory (§9) and the gallery (§10.4) take the board's place and the worker columns' (kept
+   *  mounted, hidden, plan D10), so the layout fits as if none were open: no rail, no worker
+   *  terminal on screen. Opening a worker column goes back to the board (`open`). */
   const showMemory = $derived(view.view === 'memory');
-  const VIEW_TABS = [{ key: 'board', label: 'Board' }, { key: 'memory', label: 'Memory' }] as const;
-  const layoutCols = $derived(showMemory ? [] : openCols);
+  const showGallery = $derived(view.view === 'gallery');
+  const VIEW_TABS = [{ key: 'board', label: 'Board' }, { key: 'gallery', label: 'Gallery' }, { key: 'memory', label: 'Memory' }] as const;
+  const layoutCols = $derived(showMemory || showGallery ? [] : openCols);
   const fit = $derived(fitColumns({
     main: mainW > 0 ? mainW : Number.POSITIVE_INFINITY,
     coordW: width,
@@ -520,7 +533,7 @@
         cycle(a.dir);
         return;
       case 'cycle-view':
-        // Board → Memory; the gallery joins in step 8.
+        // Board → Gallery → Memory (plan D24).
         hiveView.cycleView(workspaceId);
         return;
       case 'close-focused':
@@ -570,6 +583,14 @@
       if (d?.workspaceId === workspaceId) onHiveKey(d.action);
     };
     window.addEventListener(HIVE_KEY, onKey);
+    // A chat's inline asset (§4.2): the gallery, at that asset.
+    const onAsset = (e: Event) => {
+      const d = (e as CustomEvent<HiveOpenAssetDetail>).detail;
+      if (d?.workspaceId !== workspaceId) return;
+      hiveView.setView(workspaceId, 'gallery');
+      hiveGallery.openDetail(workspaceId, d.assetId);
+    };
+    window.addEventListener(HIVE_OPEN_ASSET, onAsset);
     // Sent to this window only (`emit_to`), so another window's Hive never refetches here.
     let unlisten: (() => void) | undefined;
     let gone = false;
@@ -586,6 +607,8 @@
       if (flashTimer) clearTimeout(flashTimer);
       window.removeEventListener(HIVE_OPEN_COLUMN, onOpen);
       window.removeEventListener(HIVE_KEY, onKey);
+      window.removeEventListener(HIVE_OPEN_ASSET, onAsset);
+      hiveGallery.detach(feedFor, galleryToken);
       disarmClose();
     };
   });
@@ -694,6 +717,7 @@
         active={fit.coord === 'full'}
         actions={null}
         emptyText="This Hive has no coordinator tab."
+        gallery={hive ? { hiveId: hive.id, workspaceId } : null}
       >
         {#snippet header()}
           <span class="role">coordinator</span>
@@ -732,7 +756,7 @@
     <section
       bind:this={boardEl}
       class="board"
-      class:gone={showMemory}
+      class:gone={showMemory || showGallery}
       class:rail={boardMode === 'rail'}
       class:focused={focusedKey === 'board' && boardMode === 'rail'}
       style={boardMode === 'rail' ? `width: ${railW}px` : undefined}
@@ -781,6 +805,7 @@
                     note={c.note}
                     runtime={c.runtime}
                     age={cardAge(c.worker, now)}
+                    hiveId={hive?.id ?? ''}
                     activity={c.activity}
                     diff={c.diff}
                     model={c.model}
@@ -802,6 +827,17 @@
     </section>
     {#if showMemory}
       <HiveMemoryView {workspaceId} />
+    {/if}
+    {#if showGallery && hive}
+      <GalleryView
+        {workspaceId}
+        hiveId={hive.id}
+        workers={board?.workers ?? []}
+        anyLive={cards.some((c) => c.state.state === 'working' || c.state.state === 'starting')}
+        active={showGallery}
+        onopenworker={(taskId) => openCard(taskId, cardByTask.get(taskId)?.worker.tab_id)}
+        onopencoordinator={() => { if (coordId) open({ workspaceId, tabId: coordId }); }}
+      />
     {/if}
     {#if boardMode === 'rail'}
       <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->

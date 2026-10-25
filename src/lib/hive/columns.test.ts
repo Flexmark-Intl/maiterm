@@ -194,7 +194,7 @@ describe('the stored view', () => {
       focused: 'zzz',
       coord_collapsed: 1,
       terminal_shown: ['a', 'a', 3],
-      view: 'gallery',
+      view: 'timeline',
     }));
     // Two columns at most, deduplicated; a focus naming nothing open is the coordinator.
     expect(odd.open).toEqual([col('a', 0), col('b', 0)]);

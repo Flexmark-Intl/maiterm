@@ -564,8 +564,22 @@ pub(crate) fn task_transcript(task_dir: &Path, roots: &[PathBuf]) -> Vec<Value> 
 #[tauri::command]
 pub async fn get_task_transcript(hive_id: String, task_id: String) -> Result<Vec<Value>, String> {
     let root = super::paths::hive_root(&hive_id).ok_or("That isn't a Hive")?;
-    let dir = worker::task_dir(&HivePaths::new(root), &task_id)?;
-    blocking(move || Ok(task_transcript(&dir, &transcript_roots()))).await
+    let paths = HivePaths::new(root);
+    let dir = worker::task_dir(&paths, &task_id)?;
+    blocking(move || {
+        let mut turns = task_transcript(&dir, &transcript_roots());
+        // Its galleryAdd steps show what they filed (§4.2), matched by its task.
+        if turns.iter().any(super::gallery::view::is_gallery_add) {
+            if let Some(g) = super::gallery::view::existing(&hive_id, &paths) {
+                let by = super::gallery::view::TurnsBy::Task(task_id.clone());
+                if let Err(e) = super::gallery::view::annotate_turns(&g, &by, &mut turns) {
+                    log::warn!("hive {hive_id}: inline assets of task {task_id} not read: {e}");
+                }
+            }
+        }
+        Ok(turns)
+    })
+    .await
 }
 
 #[cfg(test)]

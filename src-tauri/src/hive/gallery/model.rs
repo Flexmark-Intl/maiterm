@@ -264,6 +264,8 @@ pub struct ListFilter {
     pub starred: Option<bool>,
     /// Matched as a substring of the title, the recipe's prompt and the tags (plan D17).
     pub query: Option<String>,
+    /// Filed at or after this epoch ms (a chat's inline assets, plan D16).
+    pub since_ms: Option<i64>,
     pub include_trash: bool,
     pub limit: Option<u32>,
 }

@@ -104,9 +104,15 @@ pub async fn get_tab_transcript(
     tab_id: String,
 ) -> Result<Vec<Value>, String> {
     let app_state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || crate::mailink::tab_transcript(&app_state, &tab_id))
-        .await
-        .map_err(|e| format!("transcript read failed to run: {}", e))
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut turns = crate::mailink::tab_transcript(&app_state, &tab_id);
+        // A Hive agent's galleryAdd steps carry what they filed (docs/hive.md §4.2): this view's
+        // only, never the phone's.
+        crate::hive::gallery::view::annotate_tab(&app_state, &tab_id, &mut turns);
+        turns
+    })
+    .await
+    .map_err(|e| format!("transcript read failed to run: {}", e))
 }
 
 /// A tab's model, effort and context, plus its runtime (the phone's chat `meta`). `None` before

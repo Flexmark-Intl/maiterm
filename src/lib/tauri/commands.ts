@@ -7,6 +7,7 @@ import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult,
 import type { HiveMemoryFileText, HiveMemoryView } from './types';
 import type { HiveDecisionView, HivePrecedentsView } from './types';
 import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
+import type { GalleryAddResult, GalleryAssetDetail, GalleryAssetRow, GalleryChip, GalleryCollection, GalleryListFilter } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
@@ -545,6 +546,8 @@ export interface ChatTurn {
   /** A user turn maiTerm typed rather than the human (protocol 0.14): an Overlord directive,
    *  or a message sent for the human. */
   typedBy?: { by: 'overlord' | 'maiterm'; rule?: string };
+  /** A Hive agent's `galleryAdd` step: what it filed (docs/hive.md §4.2), desktop only. */
+  gallery_assets?: GalleryChip[];
 }
 
 /** A tab's chat as the phone sees it, for the Workstream Loom's Focus view. */
@@ -2857,6 +2860,25 @@ export async function hiveBlockerAnswered(workspaceId: string, taskId: string, b
  *  in order, a `session_divider` turn between them. Never a path from here. */
 export async function getTaskTranscript(hiveId: string, taskId: string): Promise<ChatTurn[]> {
   return invoke('get_task_transcript', { hiveId, taskId });
+}
+
+/** The gallery view's rows (docs/hive.md §10.4), newest first; the trash only with `include_trash`. */
+export async function galleryList(workspaceId: string, filter: GalleryListFilter): Promise<GalleryAssetRow[]> {
+  return invoke('gallery_list', { workspaceId, filter });
+}
+
+/** One asset whole: recipe, lineage and its stored path. */
+export async function galleryGet(workspaceId: string, id: string): Promise<GalleryAssetDetail> {
+  return invoke('gallery_get', { workspaceId, id });
+}
+
+export async function galleryCollections(workspaceId: string): Promise<GalleryCollection[]> {
+  return invoke('gallery_collections', { workspaceId });
+}
+
+/** Files dropped on the gallery, filed as the human's (docs/hive.md §10.3). */
+export async function galleryAddFiles(workspaceId: string, paths: string[]): Promise<GalleryAddResult> {
+  return invoke('gallery_add_files', { workspaceId, paths });
 }
 
 /** What deleting the Hive would keep and stop (docs/hive.md §11.2), before anything is touched. */

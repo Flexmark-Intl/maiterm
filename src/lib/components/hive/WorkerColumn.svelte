@@ -165,6 +165,7 @@
     readOnly={retired}
     statusText={retired ? retiredLine(card) : undefined}
     emptyText={waitingText}
+    gallery={hiveId ? { hiveId, workspaceId } : null}
   />
   {#if terminalShown && card.tab_id}
     <HiveTerminal tabId={card.tab_id} onhide={() => onterminal(false)} />

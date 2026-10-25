@@ -439,6 +439,10 @@ impl Gallery {
             wh.push("a.starred = ?");
             args.push((s as i64).into());
         }
+        if let Some(ms) = f.since_ms {
+            wh.push("a.created_ms >= ?");
+            args.push(ms.into());
+        }
         if let Some(q) = some(&f.query) {
             wh.push(
                 "(a.title LIKE ? ESCAPE '\\'
