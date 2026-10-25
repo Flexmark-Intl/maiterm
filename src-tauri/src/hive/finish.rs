@@ -15,8 +15,8 @@
 //! message from the human wakes it (`wake`).
 
 mod wake;
-pub use wake::{wake_text, WakeOutcome, BY_DESKTOP, NOT_DONE};
-pub(crate) use wake::{route_send, wake, Route};
+pub use wake::{wake_text, WakeOutcome, BY_DESKTOP, BY_PHONE, NOT_DONE};
+pub(crate) use wake::{done_coordinator, route_send, wake, Route};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

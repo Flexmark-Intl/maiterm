@@ -4,6 +4,33 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.25 changelog** (2026-10-25). Additive: **Hive tabs as a Hive** (maiTerm docs/hive.md
+> §11.4, §16 step 9d).
+> - **`Chat.hive` / `ChatDetail.hive`** (§4.3 `ChatHive`): on a Hive agent's tab, which Hive it
+>   belongs to (`id`, `workspaceId`, `name`), its `role` (`coordinator` | `worker`) and the
+>   Hive's `status` (`active` | `paused` | `done`). A coordinator adds the `goal`, and while done
+>   `doneAt` and the finish report's summary as `report`; a worker adds its `badge`, `worker`
+>   (its slug), `title` and `phase`. **Always present, `null`** on every other tab. A change
+>   (a worker's phase, the Hive going done or waking) fires `chats_changed`; no `chat_state`
+>   carries it.
+> - **Waking a Done Hive from the phone.** `POST /chats/{tabId}/message` to a Done Hive's
+>   coordinator wakes the Hive: maiTerm relaunches the coordinator in its old session and types
+>   the message once it is up. It answers **`{status:"held", reason:"hive_wake", msg_id:"hw-…",
+>   woke:"hive", detail}`**. That `msg_id` is in neither `held` nor `heldOutcomes`: the message
+>   shows in the thread when the coordinator takes it. A coordinator still up when the message
+>   came answers `{status:"delivered", woke:"hive", detail}`. A wake maiTerm refuses answers
+>   `{status:"unreachable", reason:"hive", detail}` (show `detail` verbatim), and so does a message
+>   with images: send text first, then the images once the coordinator is back. Only a paired
+>   phone wakes a Hive: **the dev token gets `403`** on this route for a Done coordinator.
+>   `woke` on `POST /message` gains the value `"hive"`.
+> - **No generic resume for a Hive agent.** `POST /chats/{tabId}/wake`, and the auto-wake of
+>   `POST /message`, on a Hive agent's tab whose agent has exited answer `reason:"hive_done"` for
+>   a Done Hive's coordinator ("This Hive is done. Send a message to wake it.") and `reason:"hive"`
+>   for any other Hive agent: it starts only through its Hive (a worker by its coordinator, a
+>   coordinator when the Hive is resumed). Never offer Initialize or Resume for them.
+> - A Hive's finish rings the existing `idle_done` push (its coordinator's last turn): no new
+>   doorbell or attention kind.
+>
 > **v0.24 changelog** (2026-10-24). Additive: **a Hive worker's prompt its coordinator answers**
 > (maiTerm docs/hive.md §4.7, §7.4). While the Hive's coordinator holds a worker's permission
 > dialog or AskUserQuestion, `pendingPrompt` carries **`owner: "coordinator"`**, is
@@ -536,7 +563,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `GET  /assets/{assetId}` | The bytes | → the file. `Accept-Ranges: bytes`; honours `Range` with `206` + `Content-Range`, `416` for a start past the end. `Content-Type` from the name, `Content-Disposition: attachment` with both `filename=` and `filename*=`. `404` when unknown OR evicted — but the descriptor's `available` already said so, so never discover it here |
 | `GET  /chats/{tabId}?before={msg_id}&limit=N` | One chat + transcript (paging params reserved) | → `ChatDetail` |
 | `GET  /chats/{tabId}/context?lines=N` | Distilled plain-text context | → `{text, truncated}` |
-| `POST /chats/{tabId}/message` | Send a message / proactive command (auto-wakes an unregistered tab first — §5) | `{text, submit?:true}` → `{status:"delivered", msg_id, woke:null\|"init"\|"resume"}` \| `{status:"held", reason:"draft", msg_id, woke, detail}` (v0.19: typed once the human's draft in the agent's box is sent or cleared) \| `{status:"unreachable", reason, detail}` |
+| `POST /chats/{tabId}/message` | Send a message / proactive command (auto-wakes an unregistered tab first — §5) | `{text, submit?:true}` → `{status:"delivered", msg_id, woke:null\|"init"\|"resume"\|"hive"}` \| `{status:"held", reason:"draft", msg_id, woke, detail}` (v0.19: typed once the human's draft in the agent's box is sent or cleared) \| `{status:"held", reason:"hive_wake", msg_id, woke:"hive", detail}` (v0.25: a Done Hive's coordinator, woken and relaunching; typed once it is up; `403` for the dev token) \| `{status:"unreachable", reason, detail}` (v0.25 reasons `hive`, `hive_done`) |
 | `POST /chats/{tabId}/respond` | Answer a pending permission/question | `{choice, prompt_id}` (see §5) → `{ok}` \| `{ok:false, reason:"stale"}`; `403` for the dev token (v0.23) |
 | `POST /chats/{tabId}/activate` | Activate/focus/resume a designated tab | `{}` → `{state}` |
 | `POST /chats/{tabId}/keys` | Press named keys in the tab's terminal (v0.12): the escape hatch for a screen nobody has taught maiTerm to read. Real key sequences, never a paste; arrows follow the terminal's cursor-key mode; keys go in ~40 ms apart so a lone `esc` can't merge with the next key into an Alt chord. Works on an unregistered tab | `{keys: string[]}` from `up down left right enter esc tab space backspace` (1–16) → `{ok:true}`. `400` for an unknown name, an empty list or more than 16, with NOTHING sent; `404` not designated; `409` no terminal |
@@ -545,7 +572,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/new` | Start a NEW conversation from this one (light clone: SSH host + cwd, fresh agent session) | `{}` → `{ok:true, tabId}`; `{ok:false, reason:"timeout"}` if the tab didn't appear in time |
 | `POST /chats/{tabId}/rename` | Set the tab title | `{title}` → `{ok, title}` (normalized) |
 | `POST /chats/{tabId}/resume-workspace` | Wake the suspended workspace that owns this tab | `{}` → `{ok, resumed, workspaceId?}` |
-| `POST /chats/{tabId}/wake` | Per-tab Initialize — re-register or restart this tab's agent | `{}` → `{ok:true, woke:"init"\|"resume"}` \| `{ok:true, woke:null, reason, detail?}` |
+| `POST /chats/{tabId}/wake` | Per-tab Initialize — re-register or restart this tab's agent | `{}` → `{ok:true, woke:"init"\|"resume"}` \| `{ok:true, woke:null, reason, detail?}` (v0.25: `reason` `hive` / `hive_done` for a Hive agent whose agent is gone, never resumed here) |
 | `POST /chats/{tabId}/image` | An image the agent showed by its path (`![icon](/Users/…/icon.png)`), fetched for the phone to draw (v0.18). Then `GET /assets/{asset_id}` as for any file. Rules: the path must EQUAL a path the agent wrote in one of its own messages in this chat's transcript (not tool output, not the human's turns) — a Markdown link/image target, a backtick span, or a bare ABSOLUTE word (`/…`, `~/…`, `file:…`); a relative path counts only in a Markdown target or backticks, and nothing with a control character counts; png, jpeg, gif, webp or heic only, checked by extension AND content (no svg); at most 25 MB; `~/` and relative paths resolve against the agent session's folder; a `file:` URL is its path (`file:///p`, `file://localhost/p`, `file:/p`; one naming another host is refused). Each path the agent wrote matches as written OR percent-decoded, so send the decoded src. Which computer the path is on is decided by where the agent's session is, not what the tab's terminal runs now: a remote agent's path is read from the host its transcript was mirrored from, and only while the tab's bridge is to that same host — never from a same-named file on the Mac or on another host. The same image asked for again answers the same `asset_id`. Every refusal is a 200 | `{path}` (exactly as the agent wrote it) → `{ok:true, asset: FileAsset}` (`inline: true`) \| `{ok:false, reason}` (not in the agent's messages, not an image, missing, too big, the remote unreachable), shown verbatim. `404` not designated |
 | `POST /chats/{tabId}/scripts/{id}/approve` | Approve a watch script the human read on its card (v0.15, `ScriptApproval`). It starts running on maiTerm's next pass (≤5 s) — unless follow-ups are off, or the workspace is suspended or Overlord-exempt (or the tab is exempt), when it waits for that to change — and an agent re-arming the same script in the same folder isn't asked again | `{scriptHash}` → `{ok:true, scriptApprovals}` (the chat's waiting scripts now) \| `{ok:false, reason}` when the card is stale: no longer waiting (approved or rejected elsewhere, expired, delivered, cancelled), or `scriptHash` doesn't match the stored follow-up. Show `reason` verbatim and re-read the chat. `404` not designated |
 | `POST /chats/{tabId}/scripts/{id}/reject` | Reject it: the script will not run (again — one that ran under the desktop's unattended waiver can be declined once the waiver is off), and its agent is told — it leaves the waiting list and is delivered to the agent as declined, as the desktop's Don't allow does. Say "The agent will be told" on the receipt | `{scriptHash}` → same as approve |
@@ -770,6 +797,23 @@ interface Chat {
                             // action is addressed POST /overlord/{windowLabel}/…, so this is
                             // what lets an ordinary thread — no escalation naming it, no tasks —
                             // still offer `recover` and `fireRule`. Also on ChatDetail.
+  hive: ChatHive | null;    // 0.25: the Hive this tab's agent belongs to; null on every other tab.
+                            //   Also on ChatDetail. A change fires `chats_changed`.
+}
+interface ChatHive {        // 0.25 (maiTerm docs/hive.md). Group a Hive's chats by `id`.
+  id: string;               // the Hive's own id (stable across a workspace re-mint)
+  workspaceId: string;
+  name: string;             // the Hive's workspace name
+  role: 'coordinator' | 'worker';
+  status: 'active' | 'paused' | 'done';  // the Hive's, on every one of its tabs
+  goal?: string;            // coordinator only, one line (≤200)
+  doneAt?: number;          // coordinator, while done
+  report?: string;          // coordinator, while done: the finish report's summary (≤2,000)
+  badge?: number;           // worker: its number on the board, never reused in the Hive
+  worker?: string;          // worker: its slug
+  title?: string;           // worker, one line (≤120)
+  phase?: string;           // worker: waiting | launching | running | blocked | reported |
+                            //   failed | stopped | landing | landed | retired (treat others as text)
 }
 interface ChatDetail extends Chat {
   transcript: Message[];    // distilled turns, newest last
@@ -1410,6 +1454,12 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
   - `no-agent` — the agent exited and there is no auto-resume to restart it. On `/message` this
     means the text was NOT delivered, which is the fix: it would have gone to bash.
   - `wake-timeout` — the remedy was applied but nothing came up in time. Also not delivered.
+  - `hive_done` (v0.25) — a Done Hive's coordinator. A message wakes it (`POST /message` answers
+    `held` / `hive_wake` for that, never this reason); `/wake` never does.
+  - `hive` (v0.25) — any other Hive agent whose agent is gone. It starts only through its Hive,
+    whose launch builder carries its sandbox: a worker by its coordinator, a coordinator when the
+    Hive is resumed. A generic resume is never offered, even when the tab stores one. Also the
+    reason for a wake of a Done Hive maiTerm refused (with its `detail`).
   - `already-registered` — `/wake` only; nothing needed doing.
 
   If registration hasn't landed by the end of the budget but the agent process *is* up, a
@@ -2465,6 +2515,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.22` | adds `pendingPrompt.delivery` (`agent` / `keys`): on `agent` the maiterm-tab mod takes the answer by meaning, a failed attempt is withdrawn whole, and `ok` means the agent has it |
 | `0.23` | adds agent requests (§4.4): `GET /requests`, `POST /requests/{id}/approve` and `/deny`, the WS `requests` frame, `Chat.requestsWaiting`, and the doorbell kind `request` |
 | `0.24` | adds `pendingPrompt.owner` (`"coordinator"`) on a Hive worker's prompt its coordinator holds, served `respondable:false` with `options:[]` (a question's `questions` become `text`) until the coordinator's timeout; `/respond` answers `reason:"coordinator"` for it |
+| `0.25` | adds `Chat.hive` / `ChatDetail.hive` (`ChatHive`, `null` off a Hive); `POST /message` to a Done Hive's coordinator wakes it (`status:"held"`, `reason:"hive_wake"`, `woke:"hive"`; `403` for the dev token); `unreachable` reasons `hive` and `hive_done` from `/message` and `/wake` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

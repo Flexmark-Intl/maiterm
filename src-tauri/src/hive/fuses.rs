@@ -778,6 +778,7 @@ pub const HIVE_CHANGED_EVENT: &str = "hive-changed";
 
 fn announce(handle: &tauri::AppHandle, c: &StatusChange) {
     use tauri::Emitter;
+    super::phone::bump();
     let payload = serde_json::json!({ "workspace_id": c.workspace_id, "hive": c.hive });
     if let Err(e) = handle.emit_to(c.window_label.as_str(), HIVE_CHANGED_EVENT, payload) {
         log::warn!("hive {}: status change not sent to window {}: {e}", c.hive.id, c.window_label);

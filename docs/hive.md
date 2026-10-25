@@ -1,6 +1,6 @@
 # Hive: a coordinator that spawns agents on a goal
 
-> Status: DESIGN, 2026-10-23. Nothing built. Research behind it: `docs/claude-projects-research.md`
+> Status: BUILT (§16 steps 1–9, 2026-10-23 to 2026-10-25), not yet tried live in the app. Research behind it: `docs/claude-projects-research.md`
 > (what Anthropic's cloud Projects do). Hive is the local version: the same coordinator,
 > workers and shared memory, running in maiTerm on this machine, plus a gallery for results
 > that aren't code.
@@ -3825,7 +3825,7 @@ several releases a day).
    complete.**
 9. Done and lifecycle: `hiveFinish` and waking a Done Hive (§11.4), queue state across
    suspend/resume/restart (§6.8), phone polish (Hive tabs already appear as chats; the gallery
-   feed later).
+   feed later). **Built** (9a–9d, below).
    **9a built** (2026-10-24): queue and lifecycle state across suspend, resume and restart, and
    the status digest. What an agent's next session is owed is `hive/owed.rs`: `OwedClaim`
    replaces `KickoffClaim` (same semantics: in flight per task folder and kind, owed on disk until
@@ -3960,3 +3960,25 @@ several releases a day).
    it. **Decided here:** a commit an undo reverted still proves a criterion when a later land not
    undone contains it (the plan's rule, by ancestry); the walk takes the oldest recorded landed
    commit that holds the receipt (the shortest path).
+   **9d built** (2026-10-25): phone polish, maiLink **0.25** (`docs/mailink-protocol.md`). Every
+   `Chat` and `ChatDetail` carries `hive` (`hive/phone.rs`, `null` off a Hive): the Hive's id,
+   workspace and name, the tab's role, the Hive's status, the coordinator's goal and, while done,
+   `doneAt` and the last finish's summary as `report`, and a worker's badge, slug, title and phase,
+   every agent-written string `one_line`d. It is read under the state's lock and then off the disk
+   with the lock let go, one `list_workers` per Hive per build (the doorbell's summaries are
+   untouched); `phone::revision` moves on `emit_workers_changed`, `AppWindow::hive_changed` and
+   `fuses::announce`, and the WS ticker turns a move into `chats_changed`. A paired phone's
+   `POST /message` to a Done coordinator takes the desktop's route (`finish::route_send`, before
+   the terminal check) into `finish::wake(.., BY_PHONE)`: `held` / `hive_wake` with an `hw-` id
+   while it relaunches, `delivered` / `woke:"hive"` to a coordinator still up, `unreachable` /
+   `hive` with the refusal's words (images included). `/wake` and the send's auto-wake on a Hive
+   agent whose agent is gone answer `hive_done` (a Done coordinator) or `hive`, never a generic
+   resume, even with a resume command stored; a live unregistered one still gets `init`. The
+   coordinator-held prompt (`owner`, `respondable:false`) was step 7b's (0.24). A Hive's finish
+   rings the existing `idle_done`. **Decided here:** only a paired phone wakes a Hive: the dev
+   token, which any local agent can read, gets `403` on `/message` to a Done coordinator, as on
+   the other routes that stand for the human; a phone message joins a wake still relaunching (the
+   desktop's rule); `hive_tabs` takes the state's `RwLock`, not `&AppData`, so the disk is never
+   read under the lock; a worker tab no record names still says it is a Hive's (role and status,
+   no badge); retired workers' transcripts and the gallery feed stay off the phone (§10.7).
+   **Step 9 is complete, and with it the §16 build.**

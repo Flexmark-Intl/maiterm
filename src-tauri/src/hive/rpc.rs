@@ -151,6 +151,8 @@ pub(crate) enum Front {
 /// the breaker).
 pub(crate) fn emit_workers_changed(handle: &AppHandle, label: &str, workspace_id: &str) {
     use tauri::Emitter;
+    // A phone's roster carries each worker's phase (`Chat.hive`).
+    super::phone::bump();
     // To the Hive's window only: `emit` would reach every window's board.
     let payload = serde_json::json!({ "workspace_id": workspace_id });
     if let Err(e) = handle.emit_to(label, super::tools::WORKERS_CHANGED_EVENT, payload) {
@@ -316,6 +318,7 @@ impl HiveWindow for AppWindow {
 
     fn hive_changed(&self, workspace_id: &str, hive: &super::record::Hive) {
         use tauri::Emitter;
+        super::phone::bump();
         let payload = serde_json::json!({ "workspace_id": workspace_id, "hive": hive });
         if let Err(e) = self.handle.emit_to(self.label.as_str(), super::fuses::HIVE_CHANGED_EVENT, payload) {
             log::warn!("hive {}: change not sent to window {}: {e}", hive.id, self.label);

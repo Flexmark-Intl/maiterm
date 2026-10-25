@@ -43,6 +43,9 @@
 //!
 //! Step 9a: what an agent's next session is owed (`owed`): the kickoff, and the coordinator's
 //! status digest after a resume or a restart.
+//!
+//! Step 9d: what the phone sees of a Hive (`phone`): each Hive tab's `Chat.hive`, and the revision
+//! that tells a connected phone to re-read the roster.
 
 // Parts of the disk side (trust removal, worker paths) wait for the steps that own them.
 #![allow(dead_code)]
@@ -71,6 +74,7 @@ pub mod layout;
 pub mod memory;
 pub mod owed;
 pub mod paths;
+pub mod phone;
 pub mod plan;
 pub mod precedents;
 pub mod pressure;

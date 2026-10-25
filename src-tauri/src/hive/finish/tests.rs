@@ -1147,6 +1147,17 @@ async fn a_message_still_owed_from_an_earlier_wake_goes_first() {
     assert_eq!(rig.owed_wake().unwrap().text, "First\n\nSecond");
 }
 
+#[tokio::test]
+async fn a_wake_from_the_phone_tells_the_coordinator_where_it_came_from() {
+    let rig = Rig::done("wake-phone");
+    assert_eq!(wake(&rig.ctx(ok_save), &rig.caller, "Add a dark mode too.", BY_PHONE).await, Ok(WakeOutcome::Relaunching));
+    let w = rig.owed_wake().unwrap();
+    assert_eq!(w.by, BY_PHONE);
+    let text = wake_text(w.done_since, &w.by, &w.text);
+    assert!(text.contains("Their message (from their phone):\n\nAdd a dark mode too."), "{text}");
+    assert!(done_coordinator(&rig.data.read(), "coord").is_none(), "active again");
+}
+
 #[test]
 fn a_message_to_a_done_coordinator_routes_to_a_wake() {
     let rig = Rig::new("route");

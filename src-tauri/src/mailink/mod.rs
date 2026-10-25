@@ -531,7 +531,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.24";
+const PROTOCOL_VERSION: &str = "0.25";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -1267,6 +1267,11 @@ async fn post_message(
     if !is_designated(&s.app, &tab_id) {
         return Err(StatusCode::NOT_FOUND);
     }
+    // v0.25: a Done Hive's coordinator has no agent, and the human's message wakes the Hive
+    // (docs/hive.md §11.4). Before the terminal check: the wake relaunches it either way.
+    if let Some(reply) = phone_hive_send(&s, &headers, &tab_id, &body).await? {
+        return Ok(Json(reply));
+    }
     let pty = pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
     let woke = match ready_to_type(&s.app, s.app_handle.as_ref(), &tab_id).await {
         Ok(woke) => woke,
@@ -1365,6 +1370,54 @@ async fn post_message(
 fn held_reply(msg_id: String, woke: Option<&'static str>) -> Value {
     json!({ "status": "held", "reason": "draft", "msg_id": msg_id, "woke": woke,
         "detail": "Waiting until your draft on the computer is sent or cleared." })
+}
+
+/// `POST /message` to a Hive's coordinator that a wake is for (v0.25): a Done one, or one a wake
+/// is still relaunching, which joins the first message. None: send as usual. The same route the
+/// desktop composer takes (`finish::route_send`); only a paired phone wakes a Hive, never the dev
+/// token any local agent can read.
+async fn phone_hive_send(s: &ApiState, headers: &HeaderMap, tab_id: &str, body: &MessageBody) -> Result<Option<Value>, StatusCode> {
+    use crate::hive::finish::{self, Route};
+    let route = finish::route_send(&s.app.app_data.read(), tab_id, body.images.is_empty());
+    let caller = match route {
+        Route::Send => return Ok(None),
+        Route::Refuse(detail) => return Ok(Some(hive_unreachable("hive", detail))),
+        Route::Wake(caller) => caller,
+    };
+    authorize_human(s, headers)?;
+    let Some(h) = s.app_handle.as_ref() else {
+        return Ok(Some(hive_unreachable("hive", "No maiTerm window is open to relaunch this Hive's coordinator in.")));
+    };
+    let ctx = crate::hive::tools::app_ctx(&s.app, h, &caller);
+    Ok(phone_wake_reply(finish::wake(&ctx, &caller, &body.text, finish::BY_PHONE).await))
+}
+
+/// What the phone is answered for a wake. None when the Hive wasn't done after all (woken from the
+/// desktop meanwhile): the message goes the ordinary way. A relaunch is `held`: the message is
+/// typed at the coordinator's session start, and shows in the thread when it takes it; it has no
+/// `held` / `heldOutcomes` entry.
+fn phone_wake_reply(outcome: Result<crate::hive::finish::WakeOutcome, String>) -> Option<Value> {
+    use crate::hive::finish::{WakeOutcome, NOT_DONE};
+    let held = |detail: &str| json!({ "status": "held", "reason": "hive_wake", "msg_id": format!("hw-{}", uuid::Uuid::new_v4()), "woke": "hive", "detail": detail });
+    Some(match outcome {
+        Ok(WakeOutcome::Relaunching) => held("This Hive was done; its coordinator is resuming and gets your message once it's up."),
+        Ok(WakeOutcome::Unconfirmed) => held("This Hive was done. Its window didn't confirm the coordinator's relaunch (its screen may be asleep); your message waits for the coordinator's next start."),
+        Ok(WakeOutcome::Delivered) => json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()), "woke": "hive",
+            "detail": "Woke the Hive: its coordinator was still up and has your message." }),
+        Err(e) if e == NOT_DONE => return None,
+        Err(e) => hive_unreachable("hive", &e),
+    })
+}
+
+fn hive_unreachable(reason: &str, detail: &str) -> Value {
+    json!({ "status": "unreachable", "reason": reason, "detail": detail })
+}
+
+/// A Hive agent's tab whose agent is gone has no generic resume (v0.25): it starts only through
+/// its Hive's launch builder (docs/hive.md §11.1), and a Done coordinator by a message.
+fn hive_wake_refusal(data: &crate::state::AppData, tab_id: &str) -> Option<&'static str> {
+    crate::hive::find_hive_tab(data, tab_id)?;
+    Some(if crate::hive::finish::done_coordinator(data, tab_id).is_some() { "hive_done" } else { "hive" })
 }
 
 /// Bring a tab to where typing a message into it is safe, or say why it can't be. `Ok` carries
@@ -1535,6 +1588,8 @@ fn wake_detail(reason: &str) -> &'static str {
         "no-pty" => "This tab has no live terminal — resume its workspace first.",
         "no-agent" => "This tab's agent has exited and it has no resume command to restart it.",
         "trust_dialog" => "Claude is asking whether to trust this folder. Answer that first.",
+        "hive_done" => "This Hive is done. Send a message to wake it.",
+        "hive" => "A Hive agent starts through its Hive: its coordinator restarts a worker, and a coordinator comes back when its Hive is resumed.",
         _ => "The agent is still starting up — try again in a moment.",
     }
 }
@@ -1543,10 +1598,13 @@ fn wake_detail(reason: &str) -> &'static str {
 ///
 /// A live agent ALWAYS takes `init`, even when the tab also has a resume command — replaying
 /// ssh+resume into a running agent injects junk and nests ssh, and no amount of "it also has a
-/// resume stored" makes that the right move. Only a tab whose agent is gone gets `resume`.
-fn wake_remedy(agent_up: bool, has_resume: bool) -> Result<&'static str, &'static str> {
+/// resume stored" makes that the right move. Only a tab whose agent is gone gets `resume`, and
+/// never a Hive agent's (`hive`: its `hive_wake_refusal`).
+fn wake_remedy(agent_up: bool, has_resume: bool, hive: Option<&'static str>) -> Result<&'static str, &'static str> {
     if agent_up {
         Ok("init")
+    } else if let Some(reason) = hive {
+        Err(reason)
     } else if has_resume {
         Ok("resume")
     } else {
@@ -1567,9 +1625,10 @@ fn wake_remedy(agent_up: bool, has_resume: bool) -> Result<&'static str, &'stati
 ///     the one thing guaranteed to corrupt it. This is exactly the `registered:false` condition
 ///     the phone already renders.
 ///  2. No live PTY ⇒ unreachable. A suspended workspace has to be resumed first; there is no
-///     terminal to type into.
+///     terminal to type into. A Hive tab says `hive` / `hive_done` instead (rule 3's reasons).
 ///  3. Agent gone with no auto-resume ⇒ unreachable. There is nothing to restart, and typing
-///     into the shell is the bug we're here to prevent.
+///     into the shell is the bug we're here to prevent. A Hive agent's too (`hive` / `hive_done`):
+///     a generic resume would drop its sandbox and add-dirs.
 ///  4. Past the budget, fall back to the process probe. Registration is the goal, but delivery
 ///     only needs a live agent — and for a runtime that never registers, that's the only signal
 ///     there is. A live agent is safe to type into whether or not it registered.
@@ -1577,8 +1636,11 @@ async fn wake_tab(app: &Arc<AppState>, handle: Option<&tauri::AppHandle>, tab_id
     if tab_registered(app, tab_id) {
         return Wake::AlreadyRegistered;
     }
+    // Before the PTY: a hidden Hive tab often has no terminal at all (nothing mounts it after a
+    // restart), and "resume its workspace" is no remedy for a Hive agent.
+    let hive = hive_wake_refusal(&app.app_data.read(), tab_id);
     let Some(pty) = pty_for_tab(app, tab_id) else {
-        return Wake::Unreachable("no-pty");
+        return Wake::Unreachable(hive.unwrap_or("no-pty"));
     };
     // Claude's trust dialog is the one pre-session screen where any wake is destructive: both
     // remedies end in an Enter, which confirms "No, exit", and the next resume stops at the same
@@ -1589,6 +1651,7 @@ async fn wake_tab(app: &Arc<AppState>, handle: Option<&tauri::AppHandle>, tab_id
     let action = match wake_remedy(
         agent_is_up(app, &pty).await,
         tab_has_resume(app, tab_id),
+        hive,
     ) {
         Ok(action) => action,
         Err(reason) => return Wake::Unreachable(reason),
@@ -3207,6 +3270,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
     // v0.23: the agent-request revision this socket was last sent (0 = never, so the first tick
     // sends the baseline).
     let mut requests_rev: u64 = 0;
+    // v0.25 `Chat.hive`: a worker's phase or a Hive's status moves no tab's state. Read before
+    // the snapshot below, which already carries what this revision stands for.
+    let mut hive_rev = crate::hive::phone::revision();
     // Per-tab last-seen registration flag. A tab registering (or losing its registration) changes
     // the re-initialize affordance without moving state/prompt, so it needs its own diff.
     let mut registered: HashMap<String, bool> = HashMap::new();
@@ -3390,6 +3456,13 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
                     if socket.send(Message::Text(frame.to_string().into())).await.is_err() {
                         return;
                     }
+                    if socket.send(Message::Text(json!({ "type": "chats_changed" }).to_string().into())).await.is_err() {
+                        return;
+                    }
+                }
+                let rev = crate::hive::phone::revision();
+                if rev != hive_rev {
+                    hive_rev = rev;
                     if socket.send(Message::Text(json!({ "type": "chats_changed" }).to_string().into())).await.is_err() {
                         return;
                     }
@@ -6352,6 +6425,8 @@ fn build_chats(app: &AppState) -> Vec<Value> {
     let asks = board::asks_by_tab(app);
     let scripts = follow_ups::waiting_by_tab(app);
     let requests = crate::agent_requests::waiting_by_tab();
+    // v0.25: one worker listing per Hive for the whole roster.
+    let hives = crate::hive::phone::hive_tabs(&app.app_data);
     let ph = std::time::Instant::now();
     let chats: Vec<Value> = tabs
         .into_iter()
@@ -6393,6 +6468,8 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 "scriptsWaiting": scripts.get(&t.tab_id).copied().unwrap_or(0),
                 // v0.23: agent requests from this tab waiting for the human (GET /requests).
                 "requestsWaiting": requests.get(&t.tab_id).copied().unwrap_or(0),
+                // v0.25: the Hive this tab's agent belongs to, its role and phase; null otherwise.
+                "hive": hives.get(&t.tab_id),
                 // ask_open guards the case where a build leaves an open AskUserQuestion at
                 // state=="active" — it still needs to surface as unread in the inbox.
                 // NOT plain `state == "idle"`. Since a starting session registers as idle, that
@@ -6513,6 +6590,8 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         // inbox row it came from can't disagree about what the agent is doing.
         "tool": v.tool,
         "detail": v.detail,
+        // v0.25, as on Chat.
+        "hive": crate::hive::phone::hive_tab(&app.app_data, tab_id),
     });
 
     // Per-agent telemetry strip (model + context gauge). See build_meta.
@@ -7778,7 +7857,6 @@ mod tests {
     /// with `owner`, not respondable and with nothing to tap; one that isn't routed is untouched.
     #[test]
     fn a_prompt_a_hive_coordinator_holds_is_served_read_only() {
-        assert_eq!(PROTOCOL_VERSION, "0.24");
         let tab = format!("w-{}", uuid::Uuid::new_v4());
         let key = format!("q_{tab}_1");
         crate::hive::prompts::hold_for_test(&tab, &key, "question");
@@ -8260,18 +8338,157 @@ mod tests {
     fn wake_never_replays_a_resume_into_a_running_agent() {
         // Agent alive → re-register it. Never a resume replay, even with one stored: that would
         // type an ssh+resume line into the running agent's composer and nest ssh.
-        assert_eq!(wake_remedy(true, true), Ok("init"));
-        assert_eq!(wake_remedy(true, false), Ok("init"));
+        assert_eq!(wake_remedy(true, true, None), Ok("init"));
+        assert_eq!(wake_remedy(true, false, None), Ok("init"));
         // Agent gone → restart it. `/maiterm init` here would just be run by the shell.
-        assert_eq!(wake_remedy(false, true), Ok("resume"));
+        assert_eq!(wake_remedy(false, true, None), Ok("resume"));
         // Agent gone with nothing to restart → refuse. This is the case that used to type the
         // user's message straight into bash, which then executed it.
-        assert_eq!(wake_remedy(false, false), Err("no-agent"));
+        assert_eq!(wake_remedy(false, false, None), Err("no-agent"));
+        // A Hive agent: re-registered while it runs, never resumed generically (v0.25).
+        assert_eq!(wake_remedy(true, false, Some("hive")), Ok("init"));
+        assert_eq!(wake_remedy(false, true, Some("hive")), Err("hive"), "even with a resume stored");
+        assert_eq!(wake_remedy(false, false, Some("hive_done")), Err("hive_done"));
+    }
+
+    // ── v0.25: Hive tabs on the phone ──
+
+    /// A Hive workspace (coordinator `coord`, worker `w1`) beside an ordinary tab `plain`, all
+    /// designated. The Hive's id is fresh, so its folder under the app's data doesn't exist and
+    /// nothing reads or writes there.
+    fn hive_app(status: &str) -> Arc<AppState> {
+        use crate::state::workspace::{Tab, WindowData, Workspace};
+        let app = Arc::new(AppState::new());
+        {
+            let mut data = app.app_data.write();
+            data.preferences.mailink_expose_all = true;
+            let tab = |id: &str, role: Option<&str>| {
+                let mut t = Tab::new(id.into());
+                t.id = id.into();
+                t.runtime = Some(AgentRuntime::Claude);
+                t.hive_role = role.map(str::to_string);
+                t
+            };
+            let mut ws = Workspace::new("Ship it".into());
+            ws.hive = Some(crate::hive::Hive { id: uuid::Uuid::new_v4().to_string(), status: status.into(), done_at: Some(1_760_000_000_000), ..Default::default() });
+            ws.panes[0].tabs = vec![tab("coord", Some(crate::hive::ROLE_COORDINATOR)), tab("w1", Some(crate::hive::ROLE_WORKER))];
+            let mut plain = Workspace::new("Plain".into());
+            plain.panes[0].tabs = vec![tab("plain", None)];
+            let mut win = WindowData::new("main".into());
+            win.workspaces = vec![ws, plain];
+            data.windows.push(win);
+        }
+        app
+    }
+
+    #[test]
+    fn the_roster_says_which_hive_a_tab_s_agent_belongs_to() {
+        let app = hive_app(crate::hive::record::STATUS_DONE);
+        let chats = build_chats(&app);
+        let chat = |tab: &str| chats.iter().find(|c| c["tabId"] == tab).unwrap_or_else(|| panic!("{tab} listed")).clone();
+        let plain = chat("plain");
+        assert!(plain.as_object().unwrap().contains_key("hive") && plain["hive"].is_null(), "present and null on an ordinary tab");
+        let c = chat("coord");
+        assert_eq!((c["hive"]["role"].as_str(), c["hive"]["status"].as_str(), c["hive"]["doneAt"].as_i64()), (Some("coordinator"), Some("done"), Some(1_760_000_000_000)));
+        assert_eq!(chat("w1")["hive"]["role"], "worker");
+        let detail = build_chat_detail(&app, "coord").expect("designated");
+        assert_eq!(detail["hive"], c["hive"]);
+        assert!(build_chat_detail(&app, "plain").unwrap()["hive"].is_null());
+    }
+
+    #[test]
+    fn a_hive_agent_whose_agent_is_gone_is_never_offered_a_generic_resume() {
+        let done = hive_app(crate::hive::record::STATUS_DONE);
+        let data = done.app_data.read();
+        assert_eq!(hive_wake_refusal(&data, "coord"), Some("hive_done"));
+        assert_eq!(hive_wake_refusal(&data, "w1"), Some("hive"), "a worker of a Done Hive is no way to wake it");
+        assert_eq!(hive_wake_refusal(&data, "plain"), None);
+        let active = hive_app(crate::hive::record::STATUS_ACTIVE);
+        assert_eq!(hive_wake_refusal(&active.app_data.read(), "coord"), Some("hive"));
+    }
+
+    /// A hidden Hive tab often has no terminal (nothing mounts it after a restart): its wake says
+    /// what the Hive needs, never "resume its workspace".
+    #[tokio::test]
+    async fn a_hive_tab_with_no_terminal_is_told_how_its_hive_wakes() {
+        let reason = |w: Wake| match w {
+            Wake::Unreachable(r) => r,
+            _ => panic!("expected unreachable"),
+        };
+        let done = hive_app(crate::hive::record::STATUS_DONE);
+        assert!(pty_for_tab(&done, "coord").is_none());
+        assert_eq!(reason(wake_tab(&done, None, "coord").await), "hive_done");
+        assert_eq!(reason(wake_tab(&done, None, "w1").await), "hive");
+        assert_eq!(reason(wake_tab(&done, None, "plain").await), "no-pty");
+        let active = hive_app(crate::hive::record::STATUS_ACTIVE);
+        assert_eq!(reason(wake_tab(&active, None, "w1").await), "hive");
+    }
+
+    #[test]
+    fn a_phone_wake_is_held_until_the_coordinator_takes_it() {
+        use crate::hive::finish::{WakeOutcome, NOT_DONE};
+        let r = phone_wake_reply(Ok(WakeOutcome::Relaunching)).unwrap();
+        assert_eq!((r["status"].as_str(), r["reason"].as_str(), r["woke"].as_str()), (Some("held"), Some("hive_wake"), Some("hive")));
+        assert!(r["msg_id"].as_str().unwrap().starts_with("hw-"));
+        assert_eq!(phone_wake_reply(Ok(WakeOutcome::Unconfirmed)).unwrap()["reason"], "hive_wake");
+        let r = phone_wake_reply(Ok(WakeOutcome::Delivered)).unwrap();
+        assert_eq!((r["status"].as_str(), r["woke"].as_str()), (Some("delivered"), Some("hive")));
+        let r = phone_wake_reply(Err("This Hive stays done: its coordinator couldn't be relaunched.".into())).unwrap();
+        assert_eq!((r["status"].as_str(), r["reason"].as_str()), (Some("unreachable"), Some("hive")));
+        assert!(r["detail"].as_str().unwrap().contains("stays done"));
+        assert!(phone_wake_reply(Err(NOT_DONE.into())).is_none(), "woken meanwhile: sent as usual");
+    }
+
+    /// Only the human wakes a Hive: the dev token any local agent can read is refused, a paired
+    /// phone is let through (and with no window to relaunch in, told so), and attachments wait.
+    #[tokio::test]
+    async fn only_a_paired_phone_wakes_a_done_hive_from_the_phone() {
+        use tower::ServiceExt as _;
+        let app = hive_app(crate::hive::record::STATUS_DONE);
+        app.app_data.write().preferences.mailink_devices.push(
+            serde_json::from_value(json!({ "id": "d1", "name": "phone", "token_hash": sha256_hex(b"phone-token"),
+                "created_at": 0, "last_seen_at": now_ms() as i64 })).unwrap(),
+        );
+        let api = ApiState { app: app.clone(), app_handle: None, server_name: "maiTerm".into(), fingerprint: "sha256/test".into(), dev_token: "dev-token".into() };
+        let send = |token: &'static str, body: Value| {
+            let api = api.clone();
+            async move {
+                let req = axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/mailink/v1/chats/coord/message")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap();
+                let res = build_router(api).oneshot(req).await.unwrap();
+                let status = res.status();
+                let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+                (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+            }
+        };
+        let text = json!({ "text": "Add a dark mode too.", "submit": true });
+        assert_eq!(send("dev-token", text.clone()).await.0, StatusCode::FORBIDDEN);
+        let (status, reply) = send("phone-token", text).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!((reply["status"].as_str(), reply["reason"].as_str()), (Some("unreachable"), Some("hive")), "{reply}");
+        let image = json!({ "text": "", "submit": true, "images": [{ "data": "AAAA", "mime": "image/png" }] });
+        let (_, reply) = send("phone-token", image).await;
+        assert_eq!(reply["status"], "unreachable");
+        assert!(reply["detail"].as_str().unwrap().contains("attach files once"), "{reply}");
+        assert_eq!(app.app_data.read().windows[0].workspaces[0].hive.as_ref().unwrap().status, crate::hive::record::STATUS_DONE, "nothing woke it");
+    }
+
+    #[test]
+    fn the_protocol_version_is_the_doc_s_last_row() {
+        let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/mailink-protocol.md")).unwrap();
+        let last = doc.lines().rfind(|l| l.starts_with("| `0.")).expect("§13.5's table");
+        assert!(last.starts_with(&format!("| `{PROTOCOL_VERSION}` |")), "PROTOCOL_VERSION {PROTOCOL_VERSION} vs {last}");
+        assert!(doc.contains(&format!("**v{PROTOCOL_VERSION} changelog**")), "a changelog block at the top");
     }
 
     #[test]
     fn every_unreachable_reason_explains_itself_without_deferring_to_the_desktop() {
-        let details: Vec<&str> = ["no-pty", "no-agent", "wake-timeout"]
+        let details: Vec<&str> = ["no-pty", "no-agent", "wake-timeout", "hive", "hive_done"]
             .iter()
             .map(|r| wake_detail(r))
             .collect();
