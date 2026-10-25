@@ -3796,8 +3796,9 @@ several releases a day).
    it is the board's `spend` (`HiveBoard.spend`, every Hive's total added by `hive_workers`), which
    refetches on every gallery event and on a budget change. `hiveListWorkers` reports the budget
    too. Both briefs carry the budget, the spend at launch and the `Budget:` rule. Generator hosts
-   (plan D2) are filled at `hive_create` from a fresh detection (`create::generator_hosts`: each
-   chosen MCP server's url host plus `KNOWN_GENERATOR_HOSTS` matched by url suffix or name word, the
+   (plan D2) are filled at `hive_create` from a fresh detection (`create::generator_hosts`:
+   `KNOWN_GENERATOR_HOSTS` for each chosen server it matches by url suffix or name word, plus that
+   server's own url host only when it is under a generator's suffix (follow-ups, below), the
    `/generate` skill as Kie.ai, repo remotes and anything not a public host name dropped), edited
    by the human, offered again by Re-detect (`hive_detect_generator_hosts`), never re-derived at
    launch; a media worker's `allowedDomains` (a role with `generators: true`, never a reviewer)
@@ -3982,3 +3983,20 @@ several releases a day).
    read under the lock; a worker tab no record names still says it is a Hive's (role and status,
    no badge); retired workers' transcripts and the gallery feed stay off the phone (§10.7).
    **Step 9 is complete, and with it the §16 build.**
+   **Follow-ups after the build** (2026-10-25, from the 8f review): the usage-limit pause row is
+   now treated like the budget row. Its open question is recognised only by maiTerm's own `action`
+   blocker (`fuses::pause_question_open`, the question's prefix held as a constant and used when
+   filing), never by the title. A pause files over whatever an agent left on that row, a limit on
+   a Hive already paused files again if the row no longer carries maiTerm's question (otherwise
+   nothing is asked twice), and a resume closes any Blocked row of that title. Resume, the digest,
+   `hiveFinish`'s refusal and the header read the Hive's status, never the row. An agent's
+   `deleteTasks` (handled only in the window's store; the MCP call has no Rust write path) refuses
+   the reserved rows and a row standing on a `Budget:` question (`tasks/model.ts`
+   `agentTaskDeleteRefusal`); the human's deletes are untouched. A ticked MCP server that isn't a
+   recognised generator (a github, a filesystem) adds no generator host. One recognised by name
+   alone adds the table's hosts but not its own url host, since a name doesn't vouch for the host
+   it points at and the MCP traffic itself runs in Claude's process, outside the sandbox. Done's
+   tests now commit on a per-test clock (`finish/tests.rs` `CLOCK`), not the wall clock, so a
+   test's commits, ids and date order are the same on every run. The one recorded failure of
+   `a_forged_edge_under_the_receipt_lands_nothing` didn't reproduce, and its assertions now carry
+   the error they saw.

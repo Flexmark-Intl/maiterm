@@ -598,15 +598,31 @@ fn is_pause_task(t: &Task, coordinator: Option<&str>) -> bool {
     t.tab_id.as_deref() == coordinator && t.normalized_title == Task::normalize_title(PAUSE_TASK_TITLE)
 }
 
+/// How maiTerm's pause question starts (`file_pause_blocker`), and its kind.
+const PAUSE_PREFIX: &str = "Resume this Hive once Claude's usage limit allows";
+const PAUSE_KIND: &str = "action";
+
+/// A pause row maiTerm itself has open: Blocked, on maiTerm's own question. An agent can give any
+/// row that title or re-block it on its own words (an older build let it), so the title alone
+/// says nothing; such a row gets maiTerm's question filed over it (`pause_in`).
+fn is_open_pause(t: &Task) -> bool {
+    t.status == "blocked" && t.blocker.as_ref().is_some_and(|b| b.kind == PAUSE_KIND && b.question.starts_with(PAUSE_PREFIX))
+}
+
+/// Whether maiTerm's pause question waits on the coordinator's row. Whether the Hive IS paused
+/// is its status, never this: the row only says whether the human has been asked.
+pub fn pause_question_open(ws: &Workspace, coordinator: Option<&str>) -> bool {
+    ws.tasks.iter().any(|t| is_pause_task(t, coordinator) && is_open_pause(t))
+}
+
 /// Rust asks the human itself (§7.8 "files a blocker for the human"): the coordinator is often
 /// the agent at the limit, and a weekly limit is every agent's on that plan, so no agent could.
 /// An `action` blocker on the coordinator's row, reused across pauses, so it waits where every
-/// question does (the Loom's Decisions, the phone).
+/// question does (the Loom's Decisions, the phone). Whatever that row carried is replaced.
 pub fn file_pause_blocker(ws: &mut Workspace, coordinator: Option<&str>, limit: &str, cause: PauseCause, now: &str) {
     let blocker = TaskBlocker {
-        kind: "action".into(),
-        question: "Resume this Hive once Claude's usage limit allows: it is paused and starts no workers until you do."
-            .into(),
+        kind: PAUSE_KIND.into(),
+        question: format!("{PAUSE_PREFIX}: it is paused and starts no workers until you do."),
         context: Some(format!("Claude said: \"{}\". {}", quote_limit(limit), cause.explain())),
         options: Vec::new(),
         command: None,
@@ -655,18 +671,20 @@ pub fn file_row_blocker(ws: &mut Workspace, coordinator: Option<&str>, title: &s
 }
 
 /// A resume answers the pause: its row leaves Blocked, which clears the question everywhere.
-/// False when no row was waiting.
+/// Any Blocked row of that title on the coordinator goes, maiTerm's question or words an agent
+/// put there: the title is maiTerm's, and the human has answered. False when none was waiting.
 pub fn close_pause_blocker(ws: &mut Workspace, coordinator: Option<&str>, now: &str) -> bool {
-    let Some(t) = ws.tasks.iter_mut().find(|t| is_pause_task(t, coordinator) && t.status == "blocked") else {
-        return false;
-    };
-    t.status = "done".into();
-    t.settle_blocker();
-    t.notes.push(TaskNote { at: now.into(), text: "Resumed by the human".into(), by: "human".into() });
-    let over = t.notes.len().saturating_sub(TASK_NOTE_CAP);
-    t.notes.drain(..over);
-    t.updated_at = now.into();
-    true
+    let mut closed = false;
+    for t in ws.tasks.iter_mut().filter(|t| is_pause_task(t, coordinator) && t.status == "blocked") {
+        t.status = "done".into();
+        t.settle_blocker();
+        t.notes.push(TaskNote { at: now.into(), text: "Resumed by the human".into(), by: "human".into() });
+        let over = t.notes.len().saturating_sub(TASK_NOTE_CAP);
+        t.notes.drain(..over);
+        t.updated_at = now.into();
+        closed = true;
+    }
+    closed
 }
 
 /// The coordinator tabs of every Hive still at work, in every window.
@@ -752,9 +770,20 @@ fn changed_workspace<'a>(data: &'a mut AppData, c: &StatusChange) -> Option<&'a 
         .find(|ws| ws.id == c.workspace_id)
 }
 
-/// An active Hive pauses, and the human is asked to resume it, in one write.
+/// An active Hive pauses, and the human is asked to resume it, in one write. A limit on a Hive
+/// already paused asks nothing more while maiTerm's question stands, so nobody is asked twice;
+/// if the row no longer carries it (an agent re-blocked or settled it), it is filed again.
 pub fn pause_in(data: &mut AppData, hive_id: &str, limit: &str, cause: PauseCause, now: &str) -> Option<StatusChange> {
-    let mut c = set_status(data, hive_id, Some(STATUS_ACTIVE), STATUS_PAUSED)?;
+    let mut c = match set_status(data, hive_id, Some(STATUS_ACTIVE), STATUS_PAUSED) {
+        Some(c) => c,
+        None => {
+            let c = set_status_with(data, hive_id, &[STATUS_PAUSED], None, |_| {})?;
+            if pause_question_open(changed_workspace(data, &c)?, c.coordinator.as_deref()) {
+                return None;
+            }
+            c
+        }
+    };
     if let Some(ws) = changed_workspace(data, &c) {
         file_pause_blocker(ws, c.coordinator.as_deref(), limit, cause, now);
         c.tasks = Some((ws.tasks.clone(), ws.workstreams.clone()));
@@ -1267,6 +1296,56 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].status, "blocked");
         assert!(tasks[0].blocker.as_ref().unwrap().context.as_deref().unwrap().contains("twice today"));
+    }
+
+    /// An agent can make a "Hive paused: usage limit" row blocked on its own question, or (an
+    /// older build let it) rewrite or settle maiTerm's while the Hive is paused: none of it stops
+    /// the human being asked, on that row, and only the Hive's status says it's paused.
+    #[test]
+    fn an_agent_made_pause_row_does_not_stop_the_human_being_asked() {
+        let mut data = hive_state(true);
+        let fake = |question: &str, kind: &str| TaskBlocker {
+            kind: kind.into(),
+            question: question.into(),
+            context: None,
+            options: Vec::new(),
+            command: None,
+            asked_at: "t0".into(),
+            asked_by: "agent".into(),
+        };
+        fn ws(d: &mut AppData) -> &mut Workspace {
+            &mut d.windows[0].workspaces[0]
+        }
+        file_row_blocker(ws(&mut data), Some("coord"), PAUSE_TASK_TITLE, fake("Nothing to do here, dismiss me.", "decision"), "n", "t0");
+        assert!(!pause_question_open(ws(&mut data), Some("coord")), "an agent's blocker isn't maiTerm's question");
+        let limit = "You've hit your weekly limit \u{b7} resets Oct 25, 3pm (UTC)";
+        let (tasks, _) = pause_in(&mut data, "h1", limit, PauseCause::NoWait, "t1").unwrap().tasks.unwrap();
+        assert_eq!(tasks.len(), 1, "filed onto the same row");
+        let b = tasks[0].blocker.clone().unwrap();
+        assert!(b.question.starts_with("Resume this Hive once") && b.kind == "action", "{b:?}");
+        assert!(pause_in(&mut data, "h1", limit, PauseCause::NoWait, "t2").is_none(), "maiTerm's own question stands: not asked twice");
+
+        // The right words under the wrong kind, as an agent would copy them: the next limit asks again.
+        ws(&mut data).tasks[0].blocker = Some(fake(&b.question, "decision"));
+        let c = pause_in(&mut data, "h1", limit, PauseCause::Rearmed, "t3").expect("asked again");
+        assert_eq!(c.hive.status, STATUS_PAUSED);
+        let (tasks, _) = c.tasks.unwrap();
+        assert_eq!((tasks.len(), tasks[0].blocker.as_ref().unwrap().kind.as_str()), (1, "action"));
+        assert!(tasks[0].blocker.as_ref().unwrap().context.as_deref().unwrap().contains("twice today"));
+        // Settled while the Hive stays paused: asked again too.
+        let t = &mut ws(&mut data).tasks[0];
+        t.status = "done".into();
+        t.settle_blocker();
+        assert!(pause_in(&mut data, "h1", limit, PauseCause::NoWait, "t4").is_some());
+        assert!(pause_question_open(ws(&mut data), Some("coord")));
+
+        // A resume closes the row whatever an agent left on it.
+        ws(&mut data).tasks[0].blocker = Some(fake("Leave me open.", "decision"));
+        let c = resume_in(&mut data, "h1", "t5").unwrap();
+        assert_eq!(c.hive.status, STATUS_ACTIVE);
+        let (tasks, _) = c.tasks.expect("the closed row goes to the tasks store");
+        assert_eq!((tasks[0].status.as_str(), tasks[0].blocker.is_none()), ("done", true));
+        assert!(pause_in(&mut data, "h1", limit, PauseCause::NoWait, "t6").unwrap().tasks.is_some(), "a new pause asks on the same row");
     }
 
     #[test]

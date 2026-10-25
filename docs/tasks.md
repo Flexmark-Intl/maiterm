@@ -679,7 +679,10 @@ says plainly when a retraction means this will not resolve itself. `listTasks` h
   - **a prerequisite something unfinished still waits on** (`has_dependents`), including a
     dependent parked on an archived tab. `removeMany` strips the edge, which would release
     the dependent as met — the very back door `dropped` closes. Delete both together, or
-    `unblock_from` first.
+    `unblock_from` first;
+  - **maiTerm's reserved rows and a standing `Budget:` question** (`reserved`, 2026-10-25,
+    `agentTaskDeleteRefusal`): deleting one would withdraw the human's question
+    (docs/hive.md §10.3).
 
   A workstream that rows parked on an archived tab still point at survives the delete
   (`workstreams_kept`), matching Rust's prune — dropping it from the frontend copy alone

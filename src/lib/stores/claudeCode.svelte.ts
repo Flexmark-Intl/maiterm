@@ -19,7 +19,7 @@ import { overlordStore } from '$lib/stores/overlord.svelte';
 import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
 import { normalizeTabBatch } from '$lib/stores/tabBatch';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { agentTaskWriteRefusal, appendNote, blockerNote, blocking, coerceStatus, effectiveStatus, findWorkstream, hasUnmetDeps, isDelegation, isInFlight, isReservedTaskTitle, isRetired, normalizeTitle, parseBlocker, resolveBlockers, resolveEdges, TASK_NOTE_CAP, type BlockerInput } from '$lib/tasks/model';
+import { agentTaskDeleteRefusal, agentTaskWriteRefusal, appendNote, blockerNote, blocking, coerceStatus, effectiveStatus, findWorkstream, hasUnmetDeps, isDelegation, isInFlight, isReservedTaskTitle, isRetired, normalizeTitle, parseBlocker, resolveBlockers, resolveEdges, TASK_NOTE_CAP, type BlockerInput } from '$lib/tasks/model';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -2326,7 +2326,9 @@ function createClaudeCodeStore() {
    *  - **Another tab's in-flight work** is refused. That tab would re-add it on its next list
    *    re-send, and nothing types into a tab on an agent's say-so to tell it not to.
    *  - **A prerequisite something live still waits on** is refused. Deleting it strips the
-   *    edge, which frees the dependent — the back door `dropped` exists to close. */
+   *    edge, which frees the dependent — the back door `dropped` exists to close.
+   *  - **maiTerm's reserved rows and a standing `Budget:` question** are refused: deleting
+   *    one would withdraw the human's question (`agentTaskDeleteRefusal`). */
   function handleDeleteTasks(args: { tabId?: string; ids?: string[]; workstreams?: string[] }) {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
@@ -2364,6 +2366,12 @@ function createClaudeCodeStore() {
     const refused: { id: string; title: string; reason: string; detail: string }[] = [];
     for (const id of target) {
       const t = byId.get(id)!;
+      // maiTerm's reserved rows and a standing Budget: question are the human's (§10.3).
+      const guard = agentTaskDeleteRefusal(t);
+      if (guard) {
+        refused.push({ id, title: t.title, reason: 'reserved', detail: guard });
+        continue;
+      }
       if (t.tab_id && t.tab_id !== loc.tab.id && isInFlight(t)) {
         refused.push({
           id,

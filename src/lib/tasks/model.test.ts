@@ -30,6 +30,7 @@ import {
   taskTextParts,
   settleBlocker,
   agentTaskWriteRefusal,
+  agentTaskDeleteRefusal,
   isBudgetQuestion,
   isReservedTaskTitle,
 } from './model';
@@ -717,5 +718,13 @@ describe("maiTerm's own rows and a standing Budget: question are the human's", (
     expect(agentTaskWriteRefusal(asking, { changesBlocker: true })).toMatch(/Budget: question/);
     expect(agentTaskWriteRefusal(asking, { changesBlocker: false })).toBeNull();
     expect(agentTaskWriteRefusal({ title: 'x', blocker: blocker('Which palette?') }, { changesBlocker: true })).toBeNull();
+  });
+
+  it("refuses an agent's delete of a reserved row or a standing Budget: question", () => {
+    expect(agentTaskDeleteRefusal({ title: 'Hive budget reached', blocker: null })).toMatch(/can't delete it/);
+    expect(agentTaskDeleteRefusal({ title: ' hive paused: USAGE limit', blocker: null })).toMatch(/maiTerm's own row/);
+    expect(agentTaskDeleteRefusal({ title: 'Render the hero', blocker: blocker('budget: may I spend $4?') })).toMatch(/Budget: question/);
+    expect(agentTaskDeleteRefusal({ title: 'Render the hero', blocker: blocker('Which palette?') })).toBeNull();
+    expect(agentTaskDeleteRefusal({ title: 'Hive budget review', blocker: null })).toBeNull();
   });
 });

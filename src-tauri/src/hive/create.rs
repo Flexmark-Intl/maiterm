@@ -359,10 +359,13 @@ pub fn is_generator_server(name: &str, entry: &serde_json::Value) -> bool {
     !known_mcp_generators(name, host.as_deref()).is_empty()
 }
 
-/// The hosts a worker's sandbox needs for the generators the human chose (§14.16, plan D2): each
-/// chosen MCP server's url host, plus the table's hosts for a server or skill it recognises.
-/// Lowercased, deduplicated, anything that isn't a public host name dropped (a proxy entry's
-/// 127.0.0.1, a port), and so is a repo's remote host, which stays denied (§7.3).
+/// The hosts a worker's sandbox needs for the generators the human chose (§14.16, plan D2): the
+/// table's hosts for each chosen server or skill it recognises, plus a recognised server's own
+/// url host when that host is under a generator's suffix. Any other ticked server (a github, a
+/// filesystem) adds nothing: its host would become a media worker's way out, and a name alone
+/// doesn't vouch for the host it points at. Lowercased, deduplicated, anything that isn't a
+/// public host name dropped (a proxy entry's 127.0.0.1, a port), and so is a repo's remote
+/// host, which stays denied (§7.3).
 pub fn generator_hosts(detected: &[DetectedTool], chosen: &[String], remote_hosts: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |h: &str| {
@@ -378,7 +381,7 @@ pub fn generator_hosts(detected: &[DetectedTool], chosen: &[String], remote_host
         let host = t.host.as_deref().map(str::to_ascii_lowercase);
         let known: Vec<&KnownGenerator> = match t.kind.as_str() {
             "mcp" => {
-                if let Some(h) = &host {
+                if let Some(h) = host.as_deref().filter(|h| !known_mcp_generators("", Some(h)).is_empty()) {
                     push(h);
                 }
                 known_mcp_generators(&t.label, host.as_deref())
@@ -1239,7 +1242,9 @@ mod tests {
                 "local": { "command": "npx", "args": ["x"] },
                 "higgs": { "type": "http", "url": "https://mcp.higgsfield.ai/mcp" },
                 "proxied": { "type": "http", "url": "http://127.0.0.1:8765/mcp/x/abc" },
-                "kling-video": { "command": "kling-mcp" }
+                "kling-video": { "command": "kling-mcp" },
+                "github": { "type": "http", "url": "https://api.githubcopilot.com/mcp/" },
+                "fal-mirror": { "type": "http", "url": "https://mcp.example.com/fal" }
             } }"#,
         )
         .unwrap();
@@ -1258,6 +1263,10 @@ mod tests {
         let hosts = generator_hosts(&detected, &chosen(&["mcp:higgs", "mcp:kling-video", "skill:generate", "mcp:proxied"]), &[]);
         assert_eq!(hosts, vec!["mcp.higgsfield.ai", "platform.higgsfield.ai", "api.klingai.com", "api.kie.ai"]);
         assert!(generator_hosts(&detected, &[], &[]).is_empty(), "nothing chosen, nothing reached");
+        // A ticked server that is no generator adds nothing: a github one's host would be a
+        // media worker's way out. One recognised by name alone adds the table's hosts, never its own.
+        assert!(generator_hosts(&detected, &chosen(&["mcp:github", "mcp:local", "mcp:proxied"]), &[]).is_empty());
+        assert_eq!(generator_hosts(&detected, &chosen(&["mcp:fal-mirror"]), &[]), vec!["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
         let _ = std::fs::remove_dir_all(&home);
     }
 

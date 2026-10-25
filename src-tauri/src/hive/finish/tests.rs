@@ -16,11 +16,25 @@ use std::fs;
 use std::process::Command;
 use std::sync::Arc;
 
+thread_local! {
+    /// Each test's own commit clock (libtest runs a test on a thread of its own). With the wall
+    /// clock a test's commits were other bytes, other ids and other date ties on every run, some
+    /// in one second and some across a boundary depending on load; this way a test makes the same
+    /// commits every time, so what it proves never rests on when it ran.
+    static CLOCK: std::cell::Cell<i64> = const { std::cell::Cell::new(1_700_000_000) };
+}
+
 fn git(dir: &Path, args: &[&str]) -> String {
+    let at = CLOCK.with(|c| {
+        c.set(c.get() + 1);
+        format!("@{} +0000", c.get())
+    });
     let out = Command::new("git")
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_DATE", &at)
+        .env("GIT_COMMITTER_DATE", &at)
         .args(["-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false"])
         .args(args)
         .output()
@@ -678,13 +692,15 @@ async fn a_forged_edge_under_the_receipt_lands_nothing() {
     rig.run("j-0000ccc3", &c, 0);
     forge_loose_object(&rig.web, &fork, |body| body.replacen("\n", &format!("\nparent {c}\n"), 1));
     let mut verifying = crate::hive::git::verify_in(&rig.web);
-    assert!(crate::hive::git::run(verifying.args(["merge-base", "--is-ancestor", &c, &t]), crate::hive::git::QUERY_TIMEOUT).is_ok(), "the cycle fools even a verifying git");
+    let fooled = crate::hive::git::run(verifying.args(["merge-base", "--is-ancestor", &c, &t]), crate::hive::git::QUERY_TIMEOUT);
+    assert!(fooled.is_ok(), "the cycle fools even a verifying git: {fooled:?}");
     assert_eq!(ancestry_path(&rig.web, &c, &t), "", "and git's range from the receipt hides the forged commit");
     let (hive, folded) = (rig.hive(), landlog::folded(&rig.caller.paths));
     for e in [verify_commit(&hive, &folded, &format!("web:{c}")).unwrap_err(), verify_check(&hive, &rig.caller.paths, &folded, "j-0000ccc3").unwrap_err()] {
         assert!(e.contains("web's objects don't verify") && e.contains(&format!("commit {}", &fork[..7])) && e.contains("git fsck"), "{e}");
     }
-    assert!(verify_commit(&hive, &folded, &format!("web:{p}")).is_ok(), "what landed above the forgery still verifies");
+    let above = verify_commit(&hive, &folded, &format!("web:{p}"));
+    assert!(above.is_ok(), "what landed above the forgery still verifies: {above:?}");
 
     // Two forged objects: the worker's own C0 names main's P as its parent, and P names the
     // receipt C. Both forged commits are under C, and C and T hash true.
@@ -706,7 +722,8 @@ async fn a_forged_edge_under_the_receipt_lands_nothing() {
     for e in [verify_commit(&hive, &folded, &format!("web:{c}")).unwrap_err(), verify_check(&hive, &rig.caller.paths, &folded, "j-0000ccc4").unwrap_err()] {
         assert!(e.contains("web's objects don't verify") && e.contains(&format!("commit {}", &p[..7])) && e.contains("git fsck"), "{e}");
     }
-    assert!(verify_commit(&hive, &folded, &format!("web:{t}")).is_ok(), "the landed tip itself still verifies");
+    let tip = verify_commit(&hive, &folded, &format!("web:{t}"));
+    assert!(tip.is_ok(), "the landed tip itself still verifies: {tip:?}");
 }
 
 #[test]

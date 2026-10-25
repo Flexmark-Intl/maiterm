@@ -328,6 +328,19 @@ export function agentTaskWriteRefusal(
   return null;
 }
 
+/** Why an agent's `deleteTasks` may not take `row`, or null: deleting a reserved row or a
+ *  standing `Budget:` question withdraws it as surely as an update would. The human's own
+ *  deletes (panel, phone) never ask. */
+export function agentTaskDeleteRefusal(row: Pick<Task, 'title' | 'blocker'>): string | null {
+  if (isReservedTaskTitle(row.title)) {
+    return `"${row.title}" is maiTerm's own row for a question to your human; agents can't delete it.`;
+  }
+  if (row.blocker && isBudgetQuestion(row.blocker.question)) {
+    return 'This row carries a Budget: question for your human; only their answer settles it, so agents can\'t delete it.';
+  }
+  return null;
+}
+
 export type BlockerParse = { ok: true; blocker: TaskBlocker } | { ok: false; detail: string };
 
 /**
