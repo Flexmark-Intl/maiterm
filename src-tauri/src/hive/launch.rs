@@ -400,22 +400,24 @@ fn account_set_for(root: Option<&Path>) -> Vec<(String, String)> {
 }
 
 /// What the launch line removes: the agent markers the PTY spawn scrubs, the parent-session
-/// vars above, `CLAUDE_CONFIG_DIR` unless the launch root sets it, and, under a managed account,
-/// every variable that would answer instead of the account's login (docs/login.md §6.1). Names
-/// only, never values.
+/// vars above, and, under a managed account, every variable that would answer instead of the
+/// account's login (docs/login.md §6.1). Names only, never values. Never `CLAUDE_CONFIG_DIR`:
+/// with a launch root the line sets it, and without one a value in the tab's shell is one
+/// maiTerm can't see (a shell rc's export, when maiTerm was opened from the Dock), which plain
+/// tabs run under. Removing it would run the Hive as `~/.claude`'s account instead, silently, so
+/// `config_guard` refuses the launch then.
 pub fn unset_vars(prefs: &crate::state::Preferences) -> Vec<String> {
-    unset_vars_for(prefs, launch_config_root(prefs).as_deref())
+    unset_vars_for(prefs)
 }
 
-fn unset_vars_for(prefs: &crate::state::Preferences, root: Option<&Path>) -> Vec<String> {
+fn unset_vars_for(prefs: &crate::state::Preferences) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let config = root.is_none().then(|| CONFIG_ENV.to_string());
     let names = crate::state::agent_runtime::AGENT_ENV_MARKERS
         .iter()
         .chain(HIVE_EXTRA_UNSET)
         .map(|s| s.to_string())
-        .chain(config)
-        .chain(crate::accounts::spawn_env_for(prefs).1);
+        .chain(crate::accounts::spawn_env_for(prefs).1)
+        .filter(|n| n != CONFIG_ENV);
     for n in names {
         let is_name = !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
         if is_name && !out.contains(&n) {
@@ -423,6 +425,50 @@ fn unset_vars_for(prefs: &crate::state::Preferences, root: Option<&Path>) -> Vec
         }
     }
     out
+}
+
+/// What the line says, around the shell's value, when `config_guard` refuses. No `\`, no `%`:
+/// they go through `sh_quote` (fish reads `\\` inside single quotes) and `printf`'s `%s`.
+const GUARD_BEFORE: &str = "maiTerm: this shell sets CLAUDE_CONFIG_DIR=";
+const GUARD_AFTER: &str = ", a Claude config root maiTerm can't verify, so this Hive agent was not started: it could run, and \
+     bill, as a different Claude account. Turn on managed accounts (Preferences > Accounts), or start maiTerm with \
+     CLAUDE_CONFIG_DIR set so it knows that root, then restart the agent.";
+
+/// What runs ahead of the launch line when maiTerm names no config root (`launch_config_root`
+/// is None, so the agent should run under Claude's default, `~/.claude`, where the trust went):
+/// a check that the tab's shell exports no `CLAUDE_CONFIG_DIR` either. One it does came from
+/// somewhere maiTerm can't read (a shell rc), and plain tabs run under it; the line neither
+/// removes it (another account, silently) nor runs under it (a root maiTerm never verified or
+/// wrote trust into), and says so instead. Its own `sh -c`, so it reads exactly what `claude`
+/// would inherit and parses the same in bash, zsh and fish, whose `&&` the line already uses.
+/// Empty with a root: the line sets it then (`account_set`). Windows never gets here
+/// (`prepare_launch` refuses it).
+pub(crate) fn config_guard(root: Option<&Path>) -> String {
+    if root.is_some() {
+        return String::new();
+    }
+    let script = format!("[ -z \"${{{CONFIG_ENV}+x}}\" ] || {{ printf '%s%s%s\\n' \"$1\" \"${CONFIG_ENV}\" \"$2\" >&2; exit 1; }}");
+    format!("sh -c {} maiterm {} {} && ", sh_quote(&script), sh_quote(GUARD_BEFORE), sh_quote(GUARD_AFTER))
+}
+
+/// The environment a check run from maiTerm itself (the Create sheet's login check) gives Claude
+/// to match a launch under `root` that gets past `config_guard`: the line's removals and its
+/// `CLAUDE_CONFIG_DIR` (None removes). Without a root that is removed: the guard runs a launch
+/// only when the shell has none, and maiTerm's own env could still hold a relative one
+/// (`accounts::users_own_root` drops those).
+pub fn check_env(prefs: &crate::state::Preferences, root: Option<&Path>) -> Vec<(String, Option<String>)> {
+    let mut out: Vec<(String, Option<String>)> = unset_vars_for(prefs).into_iter().map(|n| (n, None)).collect();
+    match root {
+        Some(_) => out.extend(account_set_for(root).into_iter().map(|(k, v)| (k, Some(v)))),
+        None => out.push((CONFIG_ENV.to_string(), None)),
+    }
+    out
+}
+
+/// The whole typed line for a launch under `root`: the guard, the worker's first-launch setup,
+/// then `hive_launch_line` with what that root removes and sets. One root, read once, for all three.
+fn launch_text(prefs: &crate::state::Preferences, root: Option<&Path>, setup: &str, record: &LaunchRecord, args: &[String]) -> String {
+    format!("{}{setup}{}", config_guard(root), hive_launch_line(record, args, &unset_vars_for(prefs), &account_set_for(root)))
 }
 
 static SESSIONS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -766,7 +812,8 @@ fn prepare_worker(hive: &Hive, paths: &HivePaths, tab_id: &str, tasks: &[crate::
     if record != existing {
         write_record(&task, &record)?;
     }
-    let launch_json = launch_claude_json(prefs).ok_or("Couldn't find the home folder")?;
+    let root = launch_config_root(prefs);
+    let launch_json = claude_json_for(root.as_deref()).ok_or("Couldn't find the home folder")?;
     check_worker_trust(&trust_homes(&launch_json)?, &launch_json, paths, &w)?;
 
     let hooks = super::settings::HookEnv::current()?;
@@ -786,7 +833,7 @@ fn prepare_worker(hive: &Hive, paths: &HivePaths, tab_id: &str, tasks: &[crate::
     let setup = if w.setup_done { String::new() } else { first_launch_setup(hive, paths, &w)? };
     let args = hive_launch_args(&record, resume.as_deref());
     log::info!("hive {}: launching worker {} ({})", hive.id, w.slug, if resume.is_some() { "resume" } else { "new session" });
-    Ok(format!("{setup}{}", hive_launch_line(&record, &args, &unset_vars(prefs), &account_set(prefs))))
+    Ok(launch_text(prefs, root.as_deref(), &setup, &record, &args))
 }
 
 fn prepare_coordinator(hive: &Hive, paths: &HivePaths, prefs: &crate::state::Preferences) -> Result<String, String> {
@@ -805,7 +852,8 @@ fn prepare_coordinator(hive: &Hive, paths: &HivePaths, prefs: &crate::state::Pre
         write_record(&task, &record)?;
     }
 
-    let launch_json = launch_claude_json(prefs).ok_or("Couldn't find the home folder")?;
+    let root = launch_config_root(prefs);
+    let launch_json = claude_json_for(root.as_deref()).ok_or("Couldn't find the home folder")?;
     ensure_trust(&launch_json, paths, &paths.coordinator_home())?;
 
     let hooks = super::settings::HookEnv::current()?;
@@ -813,7 +861,7 @@ fn prepare_coordinator(hive: &Hive, paths: &HivePaths, prefs: &crate::state::Pre
     let resume = last_session(&task);
     let args = hive_launch_args(&record, resume.as_deref());
     log::info!("hive {}: launching the coordinator ({})", hive.id, if resume.is_some() { "resume" } else { "first launch" });
-    Ok(hive_launch_line(&record, &args, &unset_vars(prefs), &account_set(prefs)))
+    Ok(launch_text(prefs, root.as_deref(), "", &record, &args))
 }
 
 /// The line a Hive tab's shell runs to start (or resume) its agent. The frontend types it as
@@ -964,36 +1012,80 @@ pub(crate) mod tests {
         p
     }
 
+    /// Runs a whole typed launch line (`launch_text`) through a real `sh`, with a stand-in
+    /// `claude` first on PATH that prints the root it got, the tab's shell exporting
+    /// `CLAUDE_CONFIG_DIR=shell` or not. Returns (stdout, stderr, success).
+    #[cfg(unix)]
+    fn run_launch(prefs: &crate::state::Preferences, root: Option<&Path>, setup: &str, shell: Option<&str>) -> (String, String, bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("guard");
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("claude");
+        fs::write(&fake, "#!/bin/sh\nprintf 'RAN:%s' \"${CLAUDE_CONFIG_DIR-unset}\"\n").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = coordinator_record(&sample_hive(), &sample_paths());
+        r.cwd = dir.to_string_lossy().into_owned();
+        let line = launch_text(prefs, root, setup, &r, &[]);
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(&line).env("PATH", path);
+        match shell {
+            Some(v) => cmd.env(CONFIG_ENV, v),
+            None => cmd.env_remove(CONFIG_ENV),
+        };
+        let out = cmd.output().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned(), out.status.success())
+    }
+
     /// The second live test: a dev maiTerm started from a prod tab carried the prod root, and the
-    /// coordinator ran under it, at a trust dialog. The line names exactly the root maiTerm chose,
-    /// whatever the shell inherited: `env` applies `-u` and the assignment to what the shell has.
+    /// coordinator ran under it, at a trust dialog. With a root maiTerm chose, the line names
+    /// exactly it, whatever the shell has: `env` applies the assignment over it.
     #[cfg(unix)]
     #[test]
-    fn the_launch_line_names_exactly_the_managed_root_or_none() {
-        let r = coordinator_record(&sample_hive(), &sample_paths());
-        let run = |line: &str| {
-            let echo = line.replacen(" claude", " sh -c 'printf %s \"${CLAUDE_CONFIG_DIR-unset}\"'", 1).replacen("cd ", ": ", 1);
-            let out = std::process::Command::new("sh").arg("-c").arg(&echo).env("CLAUDE_CONFIG_DIR", "/prod/accounts/claude/x").output().unwrap();
-            String::from_utf8_lossy(&out.stdout).to_string()
-        };
-
-        // No managed account: unset, so Claude reads ~/.claude.json, where the trust went.
-        let none = crate::state::Preferences::default();
-        assert!(account_set(&none).is_empty());
-        let line = hive_launch_line(&r, &[], &unset_vars(&none), &account_set(&none));
-        assert!(line.contains(" -u CLAUDE_CONFIG_DIR ") && !line.contains("CLAUDE_CONFIG_DIR="), "{line}");
-        assert_eq!(run(&line), "unset", "the inherited root never reaches the agent");
-        assert_eq!(launch_claude_json(&none), dirs::home_dir().map(|h| h.join(".claude.json")));
-
-        // A managed account: set to its root, never also unset.
+    fn a_managed_root_is_named_exactly_whatever_the_shell_has() {
         let work = managed("acct-1");
         let root = crate::accounts::account_root(crate::accounts::Runtime::Claude, "acct-1").unwrap();
-        assert_eq!(account_set(&work), vec![("CLAUDE_CONFIG_DIR".to_string(), root.to_string_lossy().into_owned())]);
-        assert!(!unset_vars(&work).iter().any(|u| u == "CLAUDE_CONFIG_DIR"));
-        let line = hive_launch_line(&r, &[], &unset_vars(&work), &account_set(&work));
-        assert!(!line.contains("-u CLAUDE_CONFIG_DIR"), "{line}");
-        assert_eq!(run(&line), root.to_string_lossy(), "exactly the root the trust went into");
+        assert_eq!(config_root_for(&work, None).as_deref(), Some(root.as_path()));
+        assert_eq!(account_set(&work), vec![(CONFIG_ENV.to_string(), root.to_string_lossy().into_owned())]);
+        assert!(!unset_vars(&work).iter().any(|u| u == CONFIG_ENV));
+        assert!(config_guard(Some(&root)).is_empty(), "nothing to check: the line sets it");
+        let want = format!("RAN:{}", root.display());
+        for shell in [None, Some("/prod/accounts/claude/x")] {
+            let (out, err, ok) = run_launch(&work, Some(&root), "", shell);
+            assert!(ok && out == want, "shell {shell:?}: {out} {err}");
+        }
         assert_eq!(launch_claude_json(&work), Some(root.join(".claude.json")));
+        let env = check_env(&work, Some(&root));
+        assert!(env.contains(&(CONFIG_ENV.to_string(), Some(root.to_string_lossy().into_owned()))), "the sheet's check names it too");
+    }
+
+    /// No root maiTerm knows (managed accounts off, maiTerm opened from the Dock while the shell rc
+    /// exports `CLAUDE_CONFIG_DIR`): plain tabs run under the rc's root, so removing it would run
+    /// the Hive as `~/.claude`'s account, silently. The line never removes it: with none in the
+    /// shell Claude starts under its default, where the trust went; with one it refuses, says
+    /// why, and `claude` never runs, nor a worker's setup ahead of it.
+    #[cfg(unix)]
+    #[test]
+    fn without_a_root_the_line_refuses_a_shell_config_dir_it_cant_verify() {
+        let none = crate::state::Preferences::default();
+        assert_eq!(config_root_for(&none, None), None);
+        assert!(!unset_vars(&none).iter().any(|u| u == CONFIG_ENV), "never removed");
+        assert!(account_set_for(None).is_empty());
+        assert_eq!(claude_json_for(None), dirs::home_dir().map(|h| h.join(".claude.json")));
+        assert!(check_env(&none, None).contains(&(CONFIG_ENV.to_string(), None)), "the sheet checks the default root");
+
+        let (out, err, ok) = run_launch(&none, None, "echo SETUP-RAN && ", None);
+        assert!(ok && out == "SETUP-RAN\nRAN:unset", "unset in the shell: claude runs under its default: {out} {err}");
+
+        for v in ["/Users/u/.claude-work", "/Users/o'brien/my claude", ""] {
+            let (out, err, ok) = run_launch(&none, None, "echo SETUP-RAN && ", Some(v));
+            assert!(!ok, "{v:?}: {out}");
+            assert!(!out.contains("RAN"), "neither setup nor claude ran: {out}");
+            assert_eq!(err, format!("{GUARD_BEFORE}{v}{GUARD_AFTER}\n"), "one clear line, the value exactly");
+        }
+        assert!(!GUARD_BEFORE.contains(['\\', '%']) && !GUARD_AFTER.contains(['\\', '%']));
     }
 
     /// Managed accounts off and maiTerm started with the user's own `CLAUDE_CONFIG_DIR` (from
@@ -1011,14 +1103,12 @@ pub(crate) mod tests {
         let root = config_root_for(&none, Some(own));
         assert_eq!(root.as_deref(), Some(own));
         assert_eq!(account_set_for(root.as_deref()), vec![(CONFIG_ENV.to_string(), own.to_string_lossy().into_owned())]);
-        assert!(!unset_vars_for(&none, root.as_deref()).iter().any(|u| u == CONFIG_ENV));
+        assert!(!unset_vars_for(&none).iter().any(|u| u == CONFIG_ENV));
         assert_eq!(claude_json_for(root.as_deref()), Some(own.join(".claude.json")), "trust and the sheet read it");
 
-        let r = coordinator_record(&sample_hive(), &sample_paths());
-        let line = hive_launch_line(&r, &[], &unset_vars_for(&none, root.as_deref()), &account_set_for(root.as_deref()));
-        let echo = line.replacen(" claude", " sh -c 'printf %s \"${CLAUDE_CONFIG_DIR-unset}\"'", 1).replacen("cd ", ": ", 1);
-        let out = std::process::Command::new("sh").arg("-c").arg(&echo).env(CONFIG_ENV, own).output().unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout), own.to_string_lossy());
+        assert!(config_guard(root.as_deref()).is_empty());
+        let (out, err, ok) = run_launch(&none, root.as_deref(), "", Some(&own.to_string_lossy()));
+        assert!(ok && out == format!("RAN:{}", own.display()), "{out} {err}");
 
         // A managed account still wins: every tab's spawn sets its own then.
         let work = managed("acct-2");

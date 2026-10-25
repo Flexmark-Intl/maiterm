@@ -203,19 +203,21 @@ pub fn login_verdict(stdout: &[u8], account: Option<&str>) -> Option<String> {
 }
 
 /// Asks Claude whether the account a Hive tab would launch under is logged in, in the
-/// environment the launch line gives it (`launch::unset_vars`, `launch::account_set`): the
-/// account's config root or none, and nothing that would answer instead. Cheap and bounded; any
+/// environment the launch line gives it when it starts Claude (`launch::check_env`): the
+/// account's config root, or, with none, Claude's default, the only root the line's guard lets a
+/// launch run under, and nothing that would answer instead. Cheap and bounded; any
 /// failure to tell is no warning. Blocks.
 fn login_check(prefs: &crate::state::Preferences) -> Option<String> {
     let cli = crate::accounts::resolve_cli(crate::accounts::Runtime::Claude.profile())?;
+    let root = launch::launch_config_root(prefs);
     let status = |form: &str| {
         let mut cmd = crate::util::proc::command(&cli);
         cmd.args(["auth", "status", form]);
-        for n in launch::unset_vars(prefs) {
-            cmd.env_remove(n);
-        }
-        for (k, v) in launch::account_set(prefs) {
-            cmd.env(k, v);
+        for (k, v) in launch::check_env(prefs, root.as_deref()) {
+            match v {
+                Some(v) => cmd.env(k, v),
+                None => cmd.env_remove(k),
+            };
         }
         // Exit 1 is the ordinary logged-out answer, with its JSON on stdout.
         crate::util::proc::output_timeout(&mut cmd, Duration::from_secs(10)).ok()

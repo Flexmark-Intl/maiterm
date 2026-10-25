@@ -4072,10 +4072,20 @@ several releases a day).
    unset means "leave Claude Code alone" (docs/login.md §5) and managed tabs set their own. Every
    Hive launch line now sets `CLAUDE_CONFIG_DIR` to the root a plain tab's `claude` gets (the
    managed account's, else the one the user exported and the scrub kept,
-   `accounts::user_claude_root`) (`launch::account_set`) or unsets it (`unset_vars`), so a Hive
+   `accounts::user_claude_root`) (`launch::account_set`), so a Hive
    never bills another account than the human's tabs, from `launch::launch_config_root`, the one resolution the trust write
    and check (which now require the launch's own `.claude.json` to hold the entry), the Create
    sheet's trust read and its login check use. `Ctx.preflight` takes the preferences for that.
+   With no such root the line never unsets the variable (a first cut did): maiTerm only knows a
+   `CLAUDE_CONFIG_DIR` that was in its own env at startup, so with maiTerm opened from the Dock
+   and the shell rc exporting one, plain tabs run under the rc's root while an unset Hive ran as
+   `~/.claude`'s account. Instead `launch::config_guard` prefixes the line with an `sh -c` check:
+   a `CLAUDE_CONFIG_DIR` in the tab's shell, set at all, prints one maiTerm line naming it and how
+   to fix it (managed accounts, or start maiTerm with it) and nothing after it runs, setup
+   included. The login check removes it then (`launch::check_env`), matching the only root such a
+   launch runs under. A throttled spawn asks for the memory watch only after `file_waiting` filed
+   its row: asked at the refusal, a running watch could see the gate open and poll in between,
+   skip the rowless waiter, and end.
    *An expired login:* `claude auth status --json` reports `loggedIn: true` whenever a token is
    stored (2.1.310's `authStatus`); a subscription login whose refresh token Claude found dead
    (stored as "") shows only in the text form, `Login: Expired — log in again`, so the sheet's

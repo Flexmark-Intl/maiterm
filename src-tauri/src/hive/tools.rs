@@ -1090,6 +1090,10 @@ async fn file_waiting<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, mut reg:
     ctx.window.workers_changed(&caller.workspace_id);
     let w = &reg.worker;
     if let Some(why) = throttled {
+        // Only now that its record and row are filed: a watch that is still running polls after
+        // this (it ends before its poll), and one that already ended is started again, which
+        // polls at once if the gate opened meanwhile (`waiters::poll_when_memory_frees`).
+        ctx.window.watch_pressure(caller);
         log::info!("hive {}: worker {} waits on memory: {why}", caller.hive.id, worker_label(w));
         return Ok(json!({
             "worker": w.slug,
@@ -1182,11 +1186,14 @@ async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: &R
         Err(e) => {
             let throttled = super::fuses::is_throttle_refusal(&e);
             if throttled {
-                ctx.window.watch_pressure(caller);
                 // Nothing is made before the reservation, so a new worker has nothing to take back.
+                // Nor is it on the watch yet: it has no row for the watch's poll to find until
+                // `file_waiting` files one, which asks for the watch then. Asked here, a watch
+                // already running could see the gate open and poll in between, skip it, and end.
                 if undo.waiting.is_none() {
                     return Err(Refusal { why: e, at_reserve: true, throttled });
                 }
+                ctx.window.watch_pressure(caller);
             }
             return Err(Refusal { why: undo.run(ctx, caller, e).await, at_reserve: true, throttled });
         }
@@ -1928,6 +1935,8 @@ mod tests {
         not_the_agent: bool,
         /// Memory watches asked for, by workspace id.
         pressure_watches: Vec<String>,
+        /// How many `hive.spawn` requests (each carrying a filed row) had gone out at each watch.
+        spawns_at_watch: Vec<usize>,
     }
 
     #[derive(Clone)]
@@ -1945,7 +1954,10 @@ mod tests {
         }
         fn workers_changed(&self, _workspace_id: &str) {}
         fn watch_pressure(&self, caller: &Caller) {
-            self.agents.lock().unwrap().pressure_watches.push(caller.workspace_id.clone());
+            let spawns = self.calls.lock().unwrap().iter().filter(|(v, _)| v == rpc::VERB_SPAWN).count();
+            let mut a = self.agents.lock().unwrap();
+            a.pressure_watches.push(caller.workspace_id.clone());
+            a.spawns_at_watch.push(spawns);
         }
         fn deliver(&self, tab: &str, text: String, _what: &'static str) -> impl std::future::Future<Output = Sent> + Send {
             let mut a = self.agents.lock().unwrap();
@@ -3000,6 +3012,41 @@ mod tests {
         assert!(PathBuf::from(w.folders[0].worktree.as_ref().unwrap()).is_dir());
         let board = board_view(&rig.caller.hive, &rig.caller.paths, rig.fuses, crate::hive::fuses::now_ms(), false);
         assert_eq!(board.headroom.throttled, None);
+    }
+
+    /// The memory gate of `a_throttled_spawn_asks_for_the_watch_only_once_its_row_is_filed`.
+    static RACE_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    fn race_gate() -> crate::hive::pressure::Gate {
+        if RACE_HELD.load(std::sync::atomic::Ordering::SeqCst) { crate::hive::pressure::Gate::Hold } else { crate::hive::pressure::Gate::Open }
+    }
+
+    /// A review's race: a watch already running sees the gate open and polls between a throttled
+    /// spawn's record write and its row, so its poll finds nothing to launch and the watch ends.
+    /// The spawn asks for the watch only once its row is filed: a running watch polls after that,
+    /// and an ended one starts again and polls with the gate open, which launches it.
+    #[tokio::test]
+    async fn a_throttled_spawn_asks_for_the_watch_only_once_its_row_is_filed() {
+        let mut rig = Rig::new("pressure-race", 4);
+        rig.fuses = Box::leak(Box::new(Fuses::with_gate(rig.base.join(FUSES_FILE), race_gate)));
+        let ctx = rig.ctx(accept, ok_save, ok_preflight);
+        let q = |rig: &Rig| worker::list_workers(&rig.caller.paths).into_iter().find(|w| w.slug == "schema").unwrap();
+
+        let out = rig.spawn(accept, json!({ "title": "Schema", "role": "backend", "brief": "b", "folders": ["web"] })).await.unwrap();
+        assert_eq!(out["state"], "waiting");
+        let w = q(&rig);
+        assert!(rig.ws().tasks.iter().any(|t| t.id == w.task_id), "its row is filed");
+        {
+            let a = rig.agents.lock().unwrap();
+            assert_eq!(a.pressure_watches, vec!["ws".to_string()], "one watch asked");
+            assert_eq!(a.spawns_at_watch, vec![1], "asked after its row went out, never between the record and the row");
+        }
+
+        // The racing watch's poll had seen no row, launched nothing and ended. The gate is open
+        // now; the watch the spawn asked for (started anew) polls, and the waiter launches.
+        // `poll_once`: `poll`'s one-per-Hive guard is keyed by Hive id, which every rig shares.
+        RACE_HELD.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(crate::hive::waiters::poll_once(&ctx, &rig.caller).await, vec!["schema".to_string()]);
+        assert_eq!(q(&rig).phase, worker::PHASE_LAUNCHING);
     }
 
     /// The memory gate of `a_waiter_memory_held_before_a_restart_launches_at_the_coordinators_start`.
