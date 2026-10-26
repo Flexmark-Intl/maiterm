@@ -230,13 +230,14 @@ async function waitForLoad(tabId) {
 const QUIET_MS = 400;
 /** A request open this long is a long poll or a stream, not the page still loading. */
 const LONG_LIVED_MS = 4000;
-const SETTLE_AFTER_ACTION_MS = 5000;
-const SETTLE_AFTER_NAVIGATE_MS = 8000;
+/** How long past the action (a navigation's load included) settling may take. */
+const SETTLE_MAX_MS = 5000;
 
 /** Wait until the page has settled after an action begun at `since`, as Chrome reports it (the tab's
- *  load, and the requests in flight), up to `max` ms. A page that keeps polling never settles; then
- *  it says so, and the agent looks for itself. */
-async function settle(tabId, since, max) {
+ *  load, and the requests in flight), for up to `max` ms after `from` (when the action itself
+ *  returned). A page that keeps polling never settles; then it says so, and the agent looks for
+ *  itself. */
+async function settle(tabId, since, max, from = since) {
   for (;;) {
     const now = Date.now();
     const t = await chrome.tabs.get(tabId).catch(() => null);
@@ -246,21 +247,22 @@ async function settle(tabId, since, max) {
     if (!t || (t.status === 'complete' && busy === 0 && quietFor >= QUIET_MS)) {
       return { navigated, settled: true, waited_ms: now - since };
     }
-    if (now - since >= max) {
+    if (now - from >= max) {
       return {
         navigated,
         settled: false,
         waited_ms: now - since,
         note: t.status === 'loading'
           ? 'The page was still loading when maiTerm stopped waiting: take a snapshot, or browserWaitFor what you expect.'
-          : `The page still had ${busy} request${busy === 1 ? '' : 's'} going when maiTerm stopped waiting (it may poll constantly): take a snapshot, or browserWaitFor what you expect.`,
+          : "The page kept making requests and never went quiet (it may poll constantly), so maiTerm stopped waiting: take a snapshot, or browserWaitFor what you expect.",
       };
     }
     await sleep(50);
   }
 }
 
-const WAIT_MAX_S = 25; // under maiTerm's 30 s relay timeout
+// Under maiTerm's 30 s relay timeout, with room for a re-attach held up by another extension's frame.
+const WAIT_MAX_S = 20;
 
 /** In the page: resolve true once its text has (or, with gone, no longer has) `text`, watching DOM
  *  changes rather than polling; false after `ms`. Checks at most every 100 ms, since innerText
@@ -277,7 +279,8 @@ const WAIT_FOR_TEXT = `function (text, gone, ms) {
     });
     const timer = setTimeout(() => { done(); resolve(ok()); }, ms);
     const done = () => { obs.disconnect(); clearTimeout(timer); };
-    obs.observe(document, { subtree: true, childList: true, characterData: true });
+    // Attributes too: text is often shown or hidden by a class or style change.
+    obs.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
   });
 }`;
 
@@ -296,6 +299,9 @@ async function waitFor(tabId, args) {
     let textOk = text == null;
     if (urlOk && text != null) {
       try {
+        // Chrome may have cut maiTerm off meanwhile (a password manager's frame while the human
+        // signs in, which is often what is being waited for): come back in once it lets us.
+        await ensureAttached(tabId);
         // Give the page a slice at a time: a navigation ends this context, and the next slice runs in the new page.
         const { result: doc } = await send(tabId, 'Runtime.evaluate', { expression: 'document' });
         const { result } = await send(tabId, 'Runtime.callFunctionOn', {
@@ -306,9 +312,10 @@ async function waitFor(tabId, args) {
           returnByValue: true,
         });
         textOk = result.value === true;
-      } catch {
-        // The page navigated mid-wait; look again in the new one.
-        await sleep(100);
+      } catch (e) {
+        // The page navigated mid-wait (look again in the new one), or Chrome detached maiTerm.
+        if (/not attached|detached/i.test(String(e?.message ?? e))) attached.delete(tabId);
+        await sleep(e?.message === BLOCKED ? 400 : 100);
       }
     }
     if (urlOk && textOk) return { met: true, waited_ms: Date.now() - start, ...(await tabInfo(tabId)) };
@@ -697,25 +704,28 @@ const READS = new Set(['snapshot', 'screenshot', 'console', 'network', 'wait']);
 
 /** An action that can change the page, then the wait for it to settle (navigated, settled,
  *  waited_ms), then where the tab is now. This is what spares the agent sleeping between steps. */
-async function settled(tabId, max, act) {
+async function settled(tabId, act) {
   const since = Date.now();
   const r = await act();
-  return { ...r, ...(await settle(tabId, since, max)), ...(await tabInfo(tabId)) };
+  const s = await settle(tabId, since, SETTLE_MAX_MS, Date.now());
+  // Both may have something to say (type: nothing was cleared; settle: the page never went quiet).
+  const note = [r.note, s.note].filter(Boolean).join(' ') || undefined;
+  return { ...r, ...s, ...(note ? { note } : {}), ...(await tabInfo(tabId)) };
 }
 
 async function perform(tabId, action, args) {
   await ensureAttached(tabId);
   switch (action) {
     case 'navigate':
-      return settled(tabId, SETTLE_AFTER_NAVIGATE_MS + LOAD_TIMEOUT_MS, () => navigate(tabId, args));
+      return settled(tabId, () => navigate(tabId, args));
     case 'snapshot':
       return snapshot(tabId, args);
     case 'click':
-      return settled(tabId, SETTLE_AFTER_ACTION_MS, () => click(tabId, args));
+      return settled(tabId, () => click(tabId, args));
     case 'type':
-      return settled(tabId, SETTLE_AFTER_ACTION_MS, () => type(tabId, args));
+      return settled(tabId, () => type(tabId, args));
     case 'press':
-      return settled(tabId, SETTLE_AFTER_ACTION_MS, async () => {
+      return settled(tabId, async () => {
         await press(tabId, String(args.key ?? ''));
         return { pressed: true };
       });

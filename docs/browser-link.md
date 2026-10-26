@@ -55,8 +55,9 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    `webNavigation.onCreatedNavigationTarget`'s `sourceTabId` — NOT `tabs.onCreated`'s
    `openerTabId`, which names the tab in FRONT when a background tab opens one, i.e. exactly when
    an agent works in a tab the human isn't looking at): when it is a popup window (a sign-in window), or an action that can
-   open a tab (click, type, press, navigate, eval — never a read) is running on the opener or
-   finished under 2 s ago (a running one counts for at most 30 s: an eval may never settle). A tab the HUMAN opens from a linked page (a middle-click) stays theirs,
+   open a tab (click, type, press, navigate, eval — never a read) STARTED on the opener under 5 s
+   ago, running or done: Chrome lets a page open a tab only within 5 s of a user action, and an
+   action now runs on while the page settles, long enough to sweep up a tab the human opens. A tab the HUMAN opens from a linked page (a middle-click) stays theirs,
    even while the agent reads that page. maiTerm refuses an opener that isn't the same agent's link.
    An extension older than 0.2.0 (still running in a Chrome that hasn't reloaded it) keeps one tab
    per agent: maiTerm drops that agent's other links when it links one, as that extension does.
@@ -164,7 +165,7 @@ from (`tab`, or a `Tab: bN` line on the snapshot and screenshot).
 | `browserClick` | `click` | `ref`; real mouse events at the element's centre, `this.click()` fallback |
 | `browserType` | `type` | `ref` (optional: else the focused element), `text`, `clear` (default true), `submit` |
 | `browserPressKey` | `press` | `key` (Enter, Tab, Escape, arrows, … or one character), optionally with modifiers: `Shift+Tab`, `Mod+A` (Cmd on a Mac, Ctrl elsewhere; Mod+A/Z/X/C/V and Mod+Shift+Z run the editing command) |
-| `browserWaitFor` | `wait` | `text` (appears, or `gone`), `url` (contains), or both; a MutationObserver in the page, re-armed across navigations; `timeout` 0.5–25 s (default 10); `met: false` with a note at the timeout |
+| `browserWaitFor` | `wait` | `text` (appears, or `gone`), `url` (contains), or both; a MutationObserver in the page, re-armed across navigations; `timeout` 0.5–20 s (default 10); `met: false` with a note at the timeout |
 | `browserScreenshot` | `screenshot` | returned as MCP image content (works for ssh agents too) |
 | `browserEval` | `eval` | JS expression in the page, `returnByValue` |
 | `browserConsole` | `console` | console messages, uncaught exceptions (`source` = file:line:col) and the browser's own `Log` entries (CSP, failed loads) since attach, last 200; `errors_only` |
@@ -178,8 +179,8 @@ the tools tell the agent to `reload` when the log is empty.
 **Actions wait for the page to settle, so agents don't sleep** (`settle` in driver.js). Click, type,
 key press and navigate return only once the tab isn't loading and no content request (document,
 XHR, fetch, script) has been in flight for 400 ms; a request open over 4 s is a long poll or stream
-and doesn't count, and images, fonts and beacons never do. The cap is 5 s after an action (8 s
-after a navigation's load), past which the result says `settled: false` with a note. Every such
+and doesn't count, and images, fonts and beacons never do. The cap is 5 s after the action returns (for a
+navigation, after its load), past which the result says `settled: false` with a note. Every such
 result carries `navigated`, `settled` and `waited_ms`. An action that changes nothing costs the
 400 ms quiet window. What settling can't judge (text drawn by a timer, a redirect a second later)
 is `browserWaitFor`'s.

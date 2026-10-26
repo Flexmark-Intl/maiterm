@@ -222,7 +222,7 @@ async function onFrame(host, raw) {
         const left = (agentActing.get(chromeTabId) ?? []).filter((t) => t !== started);
         if (left.length) agentActing.set(chromeTabId, left);
         else agentActing.delete(chromeTabId);
-        agentActed.set(chromeTabId, Date.now());
+        agentActed.set(chromeTabId, Math.max(agentActed.get(chromeTabId) ?? 0, started.at));
       }
     }
   } else if (msg.method === 'unlinked') {
@@ -343,15 +343,17 @@ async function link(host, maitermTab, chromeTab, openerChromeTabId) {
  *  can't, so it never counts: an agent polling the console must not sweep up the tabs the human
  *  opens from that page. */
 const OPENING_ACTIONS = new Set(['click', 'type', 'press', 'navigate', 'eval']);
-/** chromeTabId → the opening actions running on it now ({at: start time}). One counts for at most
- *  ACTING_MAX_MS: an eval awaiting a promise that never settles must not keep every tab the human
- *  opens from that page joining the agent (maiTerm gave up on it after 30 s anyway). */
+/** chromeTabId → the opening actions running on it now ({at: start time}). An action counts for
+ *  OPENING_WINDOW_MS from its START, running or done: Chrome lets a page open a tab only within
+ *  5 s of a user action (transient activation), and actions now run on while the page settles (up
+ *  to ~20 s), long enough to sweep up a tab the human opens meanwhile. An eval awaiting a promise
+ *  that never settles is bounded the same way. */
 const agentActing = new Map();
-const ACTING_MAX_MS = 30000;
-/** chromeTabId → when an opening action on it last finished. A page opens its tab while the
- *  click is handled or just after; 2 s covers that without reaching a human's later middle-click. */
+const OPENING_WINDOW_MS = 5000;
+const ACTING_MAX_MS = OPENING_WINDOW_MS;
+/** chromeTabId → when the last opening action on it STARTED, kept once it has finished. */
 const agentActed = new Map();
-const AGENT_OPENED_MS = 2000;
+const AGENT_OPENED_MS = OPENING_WINDOW_MS;
 
 // The tab that really opened it. `tabs.onCreated`'s openerTabId can't be used: when a BACKGROUND
 // tab opens one (the usual case, an agent working in a tab the human isn't looking at), Chrome
