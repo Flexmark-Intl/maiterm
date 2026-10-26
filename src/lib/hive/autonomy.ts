@@ -86,8 +86,8 @@ export function askCount(hive: Pick<Hive, 'landing_mode' | 'checkpoints'>): numb
   return CHECKPOINT_ROWS.filter((r) => checkpointAsks(hive, r.key)).length;
 }
 
-/** The header button: "Autonomy: 2 ask you". */
+/** The header's Autonomy readout: "Coordinator decides", or "You decide 2 of 5". */
 export function autonomyLabel(hive: Pick<Hive, 'landing_mode' | 'checkpoints'>): string {
   const n = askCount(hive);
-  return n === 0 ? 'Autonomy: the coordinator decides' : `Autonomy: ${n} ask${n === 1 ? 's' : ''} you`;
+  return n === 0 ? 'Coordinator decides' : `You decide ${n} of ${CHECKPOINT_ROWS.length}`;
 }

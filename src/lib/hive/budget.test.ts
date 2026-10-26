@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { allHivesLabel, budgetLabel, budgetLevel, centsOf, formFor, newHosts, normalizeHost, toSave, usd, validateForm } from './budget';
+import { allHivesLabel, budgetFill, budgetLabel, budgetLevel, centsOf, formFor, newHosts, normalizeHost, toSave, usd, validateForm } from './budget';
 import type { Hive, HiveSpend } from '$lib/tauri/types';
 
 const spend = (spent: number, budget: number, all = spent, over = spent > 0 && spent >= budget): HiveSpend => ({
@@ -30,7 +30,14 @@ describe('the header', () => {
     expect(budgetLevel(spend(8_000_000, 10_000_000))).toBe('amber');
     expect(budgetLevel(spend(10_000_000, 10_000_000))).toBe('over');
     expect(budgetLevel(spend(0, 0))).toBe('ok');
-    expect(budgetLabel(spend(3_200_000, 10_000_000))).toBe('Budget: $3.20 of $10.00');
+    expect(budgetLabel(spend(3_200_000, 10_000_000))).toBe('$3.20 of $10.00');
+  });
+
+  it('fills the meter by the share spent, capped, and an unset budget empty unless over', () => {
+    expect(budgetFill(spend(2_500_000, 10_000_000))).toBe(0.25);
+    expect(budgetFill(spend(12_000_000, 10_000_000))).toBe(1);
+    expect(budgetFill(spend(0, 0))).toBe(0);
+    expect(budgetFill(spend(1, 0, 1, true))).toBe(1);
   });
 
   it('shows every Hive only when another Hive has spent', () => {

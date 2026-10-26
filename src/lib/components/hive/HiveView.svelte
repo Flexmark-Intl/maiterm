@@ -11,12 +11,16 @@
   no transcript: Rust's worker records are fetched when this window hears `hive-workers-changed`
   or its tasks change, diff stats and meta are pushed (hiveFeed), and the rest (lane, blocker,
   note, agent state and the activity line) comes live from the stores. A card's newest assets come
-  with its record, refetched when the gallery changes (§4.3). The header carries Pause (Resume
-  while paused, whoever paused it; none while done), Settings, the completion criteria (read-only: the coordinator sets them), and while done the Done
-  time, whether a land it relied on was undone since, and its Report (§11.4).
+  with its record, refetched when the gallery changes (§4.3). The header's top row is the name and goal,
+  the crew strip (one segment per worker in its card's colour), the status (Running, Paused, or
+  while done its Done time and Report, §11.4), Pause or Resume, Settings, and a ⋯ menu with the
+  land log and Delete. Notices (throttled, usage limit, a land undone since Done, a suspect repo)
+  get a line of their own. The bar under them holds the views and the readouts: slots, budget,
+  the completion criteria (read-only: the coordinator sets them), where lands go, autonomy and
+  the run queue.
 
-  Gallery (§10.4, step 8d) and Memory (§9, step 7a) are the header's other views (Board · Gallery
-  · Memory, Cmd+Shift+Y): GalleryView or HiveMemoryView takes the board's place and the worker
+  Gallery (§10.4, step 8d) and Memory (§9, step 7a) are the header's other views (Board, Gallery,
+  Memory, Cmd+Shift+Y): GalleryView or HiveMemoryView takes the board's place and the worker
   columns', which stay mounted, hidden, so their drafts survive (plan D10). The coordinator column
   stays put. An inline asset in a chat (`HIVE_OPEN_ASSET`) opens the gallery at it.
 
@@ -59,7 +63,8 @@
   import HiveAutonomyModal from './HiveAutonomyModal.svelte';
   import GallerySettingsModal from './GallerySettingsModal.svelte';
   import { autonomyLabel } from '$lib/hive/autonomy';
-  import { allHivesLabel, budgetLabel, budgetLevel } from '$lib/hive/budget';
+  import { allHivesLabel, budgetFill, budgetLabel, budgetLevel } from '$lib/hive/budget';
+  import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
   import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
   import HiveMemoryView from './HiveMemoryView.svelte';
   import GalleryView from './gallery/GalleryView.svelte';
@@ -373,7 +378,27 @@
     return [...n].sort((a, b) => STATE_ORDER[a[0]] - STATE_ORDER[b[0]]).map(([s, k]) => `${k} ${STATE_LABEL[s].toLowerCase()}`);
   });
   const workers = $derived(board?.workers.length ?? 0);
+  /** The header's crew strip: one segment per worker, in the board's state order. */
+  const crew = $derived(cards.map((c) => c.state.state).sort((a, b) => STATE_ORDER[a] - STATE_ORDER[b]));
   const room = $derived(board?.headroom ?? null);
+  /** Slot pips only while they fit at a glance; past that the numbers say it. */
+  const PIP_MAX = 10;
+  /** The header's ⋯ menu: the land log, and Delete kept off the always-visible row. */
+  let moreBtn = $state<HTMLElement | null>(null);
+  let moreMenu = $state<{ x: number; y: number } | null>(null);
+  function openMore() {
+    if (moreMenu) {
+      moreMenu = null;
+      return;
+    }
+    const r = moreBtn?.getBoundingClientRect();
+    if (r) moreMenu = { x: r.right - 180, y: r.bottom + 4 };
+  }
+  const moreItems: MenuItem[] = [
+    { label: 'Land log', action: () => (landLog = { taskId: null }) },
+    { label: '', action: () => {}, separator: true },
+    { label: 'Delete Hive…', action: () => (deleteOpen = true) },
+  ];
   /** A failed turn's notice (hive/turn_failure.rs), by tab: until a turn of that agent ends well. */
   const failureOf = (tabId: string | null | undefined) => (tabId ? board?.turn_failures?.[tabId] ?? null : null);
   const coordFailure = $derived(failureOf(coordId));
@@ -694,25 +719,75 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="hive" onkeydown={onKeydown}>
   <header class="hive-h">
-    <div class="title">
-      <b>{ws?.name ?? ''}</b>
-      {#if hive?.goal}<span class="goal">{hive.goal}</span>{/if}
-      {#if hive?.status === 'done'}
-        <span class="done-row">
-          <span class="done">{doneLabel(hive.done_at)}</span>
-          {#if hive.done_stale}
-            <Tooltip text={doneStaleTip(hive.done_stale)}>
-              <span class="warn">· a land it relied on was undone</span>
+    <div class="top">
+      <div class="title">
+        <h2>{ws?.name ?? ''}</h2>
+        {#if hive?.goal}<p class="goal">{hive.goal}</p>{/if}
+      </div>
+      <div class="controls">
+        {#if workers}
+          <Tooltip text={counts.join(', ')}>
+            <div class="crew" role="img" aria-label="{workers} worker{workers === 1 ? '' : 's'}: {counts.join(', ')}">
+              <span class="segs" aria-hidden="true">
+                {#each crew as s, i (i)}<span class="seg" data-state={s}></span>{/each}
+              </span>
+              <span class="crew-n">{workers} worker{workers === 1 ? '' : 's'}</span>
+            </div>
+          </Tooltip>
+        {:else if board}
+          <span class="crew-n">No workers yet</span>
+        {/if}
+        {#if hive}
+          {#if hive.status === 'done'}
+            <span class="status done"><Icon name="check" size={11} />{doneLabel(hive.done_at)}</span>
+            <Tooltip text="The coordinator's report: each criterion's receipts, what landed, final assets, spend, what it decided alone">
+              <button type="button" class="btn primary" onclick={() => (reportOpen = true)}>Report</button>
+            </Tooltip>
+          {:else if hive.status === 'paused'}
+            <Tooltip text={pausedLabel(hive.paused_by)}>
+              <span class="status paused"><span class="pulse" aria-hidden="true"></span>{hive.paused_by === 'human' ? 'Paused by you' : 'Paused'}</span>
+            </Tooltip>
+            <Tooltip text={hive.paused_by === 'human' ? 'Start workers again' : "Start workers again: you've dealt with what paused it"}>
+              <button type="button" class="btn primary" disabled={resuming} onclick={() => void resume()}><Icon name="resume" size={11} />Resume</button>
+            </Tooltip>
+          {:else}
+            <span class="status running"><span class="pulse" aria-hidden="true"></span>Running</span>
+            <Tooltip text="No worker starts or relaunches until you resume it; running agents finish their turns">
+              <button type="button" class="btn" disabled={resuming} onclick={() => void pause()}><Icon name="pause" size={11} />Pause</button>
             </Tooltip>
           {/if}
-          <Tooltip text="The coordinator's report: each criterion's receipts, what landed, final assets, spend, what it decided alone">
-            <button type="button" class="queue-btn" onclick={() => (reportOpen = true)}>Report</button>
-          </Tooltip>
-        </span>
-      {/if}
+          <IconButton tooltip="Hive settings: autonomy, run queue, budget, and what was fixed when it was made" onclick={() => (settingsOpen = true)}>
+            <Icon name="settings" size={13} />
+          </IconButton>
+          <span bind:this={moreBtn}>
+            <IconButton tooltip="Land log, Delete Hive" aria-haspopup="menu" onclick={openMore}><Icon name="more" size={13} /></IconButton>
+          </span>
+        {/if}
+      </div>
+    </div>
+    {#if hive?.done_stale || room?.throttled || room?.usage_limit_until || (hive?.status === 'paused' && hive.paused_by !== 'human') || (board && board.hive_status !== 'active' && board.hive_status !== 'done' && board.hive_status !== hive?.status) || board?.suspect_repos?.length}
+      <div class="notices" role="status">
+        {#if hive?.done_stale}
+          <Tooltip text={doneStaleTip(hive.done_stale)}><span class="notice"><Icon name="warning" size={11} />A land it relied on was undone</span></Tooltip>
+        {/if}
+        {#if room?.throttled}
+          <Tooltip text={throttleTip(room.throttle_critical ?? false)}><span class="notice"><Icon name="warning" size={11} />Throttled: {room.throttled}</span></Tooltip>
+        {/if}
+        {#if room?.usage_limit_until}
+          <span class="notice"><Icon name="clock" size={11} />No new workers until {room.usage_limit_until}: usage limit</span>
+        {:else if hive?.status === 'paused' && hive.paused_by !== 'human'}
+          <span class="notice"><Icon name="warning" size={11} />{pausedLabel(hive.paused_by)}</span>
+        {:else if board && board.hive_status !== 'active' && board.hive_status !== 'done' && board.hive_status !== hive?.status}
+          <span class="notice"><Icon name="warning" size={11} />Hive is {board.hive_status}</span>
+        {/if}
+        {#if board?.suspect_repos?.length}
+          <span class="notice"><Icon name="warning" size={11} />{board.suspect_repos.join(', ')} fails its land check alone</span>
+        {/if}
+      </div>
+    {/if}
+    <div class="bar">
       <div class="views" role="tablist" aria-label="Hive view">
-        {#each VIEW_TABS as { key, label }, i (key)}
-          {#if i}<span class="sep" aria-hidden="true">·</span>{/if}
+        {#each VIEW_TABS as { key, label } (key)}
           <Tooltip text="{label} ({modSymbol}⇧Y switches)">
             <button
               type="button"
@@ -726,84 +801,75 @@
         {/each}
       </div>
       {#if hive}
-        <div class="hive-actions">
-          <!-- Done: Settings only; there is nothing to pause. -->
-          {#if hive.status === 'done'}
-          {:else if hive.status === 'paused'}
-            <Tooltip text={hive.paused_by === 'human' ? 'Start workers again' : "Start workers again: you've dealt with what paused it"}>
-              <button type="button" class="act-btn" disabled={resuming} onclick={() => void resume()}><Icon name="resume" size={11} />Resume</button>
+        <div class="readouts" aria-label="Hive facts">
+          <div class="ro">
+            <span class="k">Slots</span>
+            <Tooltip text={room ? `${room.spawns_left_this_hour} starts left this hour, ${room.spawns_left_today} today` : "Workers running at once, of the Hive's cap"}>
+              <span class="v">
+                {#if (room?.cap ?? hive.cap) <= PIP_MAX}
+                  <span class="pips" aria-hidden="true">
+                    {#each { length: room?.cap ?? hive.cap } as _, i (i)}<span class="pip" class:on={i < (room?.live ?? 0)} class:starting={i >= (room?.live ?? 0) && i < (room?.live ?? 0) + (room?.starting ?? 0)}></span>{/each}
+                  </span>
+                {/if}
+                {room?.live ?? 0} of {room?.cap ?? hive.cap}{#if room?.starting}<span class="sub">+{room.starting} starting</span>{/if}
+              </span>
             </Tooltip>
-          {:else}
-            <Tooltip text="No worker starts or relaunches until you resume it; running agents finish their turns">
-              <button type="button" class="act-btn" disabled={resuming} onclick={() => void pause()}><Icon name="pause" size={11} />Pause</button>
-            </Tooltip>
+          </div>
+          {#if board?.spend}
+            {@const spend = board.spend}
+            {@const level = budgetLevel(spend)}
+            {@const all = allHivesLabel(spend)}
+            <div class="ro">
+              <span class="k">Budget</span>
+              <Tooltip text="{level === 'over' ? 'Reached: no paid render until you raise it.' : 'Paid generation, as agents record it.'}{all ? ` Across every Hive: ${all.replace(/^all Hives /, '')}.` : ''} Opens the budget, output folders and generator hosts">
+                <span class="v">
+                  <button type="button" class="ro-btn budget" data-level={level} onclick={() => (budgetOpen = true)}>
+                    <span class="meter" aria-hidden="true"><span style="width: {budgetFill(spend) * 100}%"></span></span>
+                    {budgetLabel(spend)}
+                  </button>
+                </span>
+              </Tooltip>
+            </div>
           {/if}
-          <Tooltip text="Autonomy, run queue and budget, and what was fixed when the Hive was made">
-            <button type="button" class="act-btn" onclick={() => (settingsOpen = true)}><Icon name="settings" size={11} />Settings</button>
-          </Tooltip>
+          <div class="ro">
+            <span class="k">Criteria</span>
+            <Tooltip text={hive.criteria.length ? 'What must be true for the goal to be met: hiveFinish proves each one' : 'The coordinator sets these with hiveSetCriteria'}>
+              <span class="v">
+                <button type="button" class="ro-btn" aria-expanded={criteriaOpen} onclick={() => (criteriaOpen = !criteriaOpen)}>
+                  {hive.criteria.length ? hive.criteria.length : 'None yet'}<span class="chev" class:open={criteriaOpen}><Icon name="chevron" size={9} /></span>
+                </button>
+              </span>
+            </Tooltip>
+          </div>
+          <div class="ro">
+            <span class="k">Lands to</span>
+            <Tooltip text={hive.landing_mode === 'integration' ? `Each land goes to hive/${hive.slug}, with your approval` : 'Each land goes straight to the base branch'}>
+              <span class="v">{hive.landing_mode === 'integration' ? `hive/${hive.slug}` : 'Base'}</span>
+            </Tooltip>
+          </div>
+          <div class="ro">
+            <span class="k">Autonomy</span>
+            <Tooltip text="Which decisions the coordinator makes and which come to you, the prompt timeout and the daily digest">
+              <span class="v"><button type="button" class="ro-btn" onclick={() => (autonomyOpen = true)}>{autonomyLabel(hive)}</button></span>
+            </Tooltip>
+          </div>
+          <div class="ro">
+            <span class="k">Run queue</span>
+            <Tooltip text="The heavy commands workers run only through the run queue (hiveRun), and what each needs">
+              <span class="v">
+                <button type="button" class="ro-btn" onclick={() => (queueOpen = true)}>
+                  {queuedCount === 0 ? 'No commands' : `${queuedCount} command${queuedCount === 1 ? '' : 's'}`}
+                </button>
+              </span>
+            </Tooltip>
+          </div>
         </div>
       {/if}
     </div>
-    <div class="facts">
-      <span>
-        {workers === 0 ? '0 workers' : `${workers} worker${workers === 1 ? '' : 's'}`}{#if counts.length}: {counts.join(' · ')}{/if}
-      </span>
-      <span>
-        {room?.live ?? 0} of {room?.cap ?? hive?.cap ?? 0} slots in use{#if room?.starting} · {room.starting} starting{/if}{#if room}
-          · {room.spawns_left_this_hour} starts left this hour, {room.spawns_left_today} today{/if}
-      </span>
-      {#if room?.throttled}
-        <Tooltip text={throttleTip(room.throttle_critical ?? false)}>
-          <span class="warn">Throttled · {room.throttled}</span>
-        </Tooltip>
-      {/if}
-      {#if room?.usage_limit_until}
-        <span class="warn">No new workers until {room.usage_limit_until}: usage limit</span>
-      {:else if hive?.status === 'paused'}
-        <span class="warn">{pausedLabel(hive.paused_by)}</span>
-      {:else if board && board.hive_status !== 'active' && board.hive_status !== 'done'}
-        <span class="warn">Hive is {board.hive_status}</span>
-      {/if}
-      {#if hive}
-        <Tooltip text={hive.criteria.length ? 'What must be true for the goal to be met: hiveFinish proves each one' : 'The coordinator sets these with hiveSetCriteria'}>
-          <button type="button" class="queue-btn" aria-expanded={criteriaOpen} onclick={() => (criteriaOpen = !criteriaOpen)}>
-            Criteria ({hive.criteria.length})
-          </button>
-        </Tooltip>
-      {/if}
-      <span>{hive?.landing_mode === 'integration' ? `Lands to hive/${hive.slug}, each with your approval` : 'Lands to Base'}</span>
-      {#if board?.suspect_repos?.length}
-        <span class="warn">Suspect: {board.suspect_repos.join(', ')} fails its land check alone</span>
-      {/if}
-      {#if hive && board?.spend}
-        {@const spend = board.spend}
-        {@const level = budgetLevel(spend)}
-        {@const all = allHivesLabel(spend)}
-        <Tooltip text={level === 'over' ? 'Reached: no paid render until you raise it. The budget, output folders and generator hosts' : 'Paid generation, as agents record it. The budget, output folders and generator hosts'}>
-          <button type="button" class="queue-btn budget" class:amber={level === 'amber'} class:over={level === 'over'} onclick={() => (budgetOpen = true)}>
-            {budgetLabel(spend)}
-          </button>
-        </Tooltip>
-        {#if all}<span>· {all}</span>{/if}
-      {/if}
-      {#if hive}
-        <Tooltip text="Every land, undo and post-land check, and Undo">
-          <button type="button" class="queue-btn" onclick={() => (landLog = { taskId: null })}>Land log</button>
-        </Tooltip>
-        <Tooltip text="Which decisions the coordinator makes and which come to you, the prompt timeout and the daily digest">
-          <button type="button" class="queue-btn" onclick={() => (autonomyOpen = true)}>{autonomyLabel(hive)}</button>
-        </Tooltip>
-        <Tooltip text="The heavy commands workers run only through the run queue (hiveRun), and what each needs">
-          <button type="button" class="queue-btn" onclick={() => (queueOpen = true)}>
-            Run queue: {queuedCount === 0 ? 'nothing queued' : `${queuedCount} command${queuedCount === 1 ? '' : 's'}`}
-          </button>
-        </Tooltip>
-        <Tooltip text="Stop its agents and remove it: clean worktrees go, unlanded work, the memory and every branch stay">
-          <button type="button" class="queue-btn danger" onclick={() => (deleteOpen = true)}>Delete Hive…</button>
-        </Tooltip>
-      {/if}
-    </div>
   </header>
+  {#if moreMenu}
+    <ContextMenu items={moreItems} x={moreMenu.x} y={moreMenu.y} anchor={moreBtn} onclose={() => (moreMenu = null)} />
+  {/if}
   {#if criteriaOpen && hive}
     <div class="criteria-panel" aria-label="Completion criteria">
       {#if hive.criteria.length}
@@ -1061,25 +1127,88 @@
 
 <style>
   .hive { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg-dark); }
-  .hive-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 18px; padding: 10px 18px; border-bottom: 1px solid var(--bg-light); }
-  .title { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 260px; }
-  .title b { font-size: 14px; overflow-wrap: anywhere; }
-  .goal { font-size: 12px; color: var(--fg-dim); overflow-wrap: anywhere; }
-  .facts { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--fg-dim); align-items: flex-end; text-align: right; min-width: 0; overflow-wrap: anywhere; }
-  .queue-btn { background: none; border: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-align: right; }
-  .queue-btn:hover { text-decoration: underline; }
-  .queue-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .queue-btn.budget.amber { color: var(--yellow); }
-  .queue-btn.budget.over { color: var(--red); font-weight: 600; }
-  .queue-btn:disabled { cursor: default; opacity: 0.5; text-decoration: none; }
-  .done-row { display: flex; align-items: baseline; gap: 10px; font-size: 12px; }
-  .done { color: var(--green); font-weight: 600; }
+  /* The header (§4.1): who it is and what it's doing on top, the views and the Hive's standing
+     facts on a bar whose tabs sit on the bottom rule. Wraps, never widens. */
+  .hive-h { container-type: inline-size; flex: none; display: flex; flex-direction: column; gap: 10px; padding: 12px 18px 0; border-bottom: 1px solid var(--bg-light); background: color-mix(in srgb, var(--bg-medium) 45%, var(--bg-dark)); }
+  .top { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 24px; }
+  .title { min-width: 0; flex: 1 1 260px; }
+  .title h2 { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.25; letter-spacing: -0.005em; color: var(--fg); overflow-wrap: anywhere; }
+  .goal { margin: 3px 0 0; font-size: 12.5px; line-height: 1.4; color: var(--fg-dim); max-width: 72ch; overflow-wrap: anywhere; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px 10px; min-width: 0; }
+
+  /* The crew strip: one segment per worker in its card's colour, the Hive at a glance. */
+  .crew { display: inline-flex; align-items: center; gap: 8px; padding-right: 4px; cursor: default; }
+  .segs { display: inline-flex; gap: 2px; max-width: 220px; flex-wrap: wrap; }
+  .seg { width: 9px; height: 14px; border-radius: 2px; background: color-mix(in srgb, var(--fg-dim) 45%, transparent); }
+  .seg[data-state='working'] { background: var(--green); }
+  .seg[data-state='starting'], .seg[data-state='landing'] { background: color-mix(in srgb, var(--accent) 75%, transparent); }
+  .seg[data-state='needs_you'] { background: var(--orange, #ff9e64); }
+  .seg[data-state='blocked'] { background: var(--yellow); }
+  .seg[data-state='failed'] { background: var(--red); }
+  .seg[data-state='reported'] { background: color-mix(in srgb, var(--accent) 35%, transparent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .seg[data-state='idle'], .seg[data-state='suspended'], .seg[data-state='stopped'] { background: transparent; box-shadow: inset 0 0 0 1px var(--fg-dim); }
+  .seg[data-state='landed'], .seg[data-state='retired'] { background: color-mix(in srgb, var(--fg-dim) 25%, transparent); }
+  .crew-n { font-size: 12px; color: var(--fg-dim); white-space: nowrap; }
+
+  .status { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 11px; font-size: 11.5px; font-weight: 500; white-space: nowrap; }
+  .status .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .status.running { color: var(--green); background: color-mix(in srgb, var(--green) 12%, transparent); }
+  .status.running .pulse { animation: breathe 2.4s ease-in-out infinite; }
+  .status.paused { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 13%, transparent); }
+  .status.done { color: var(--green); background: color-mix(in srgb, var(--green) 12%, transparent); }
+  @keyframes breathe { 50% { opacity: 0.35; } }
+
+  .btn { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 10px; border: 1px solid var(--bg-light); border-radius: 5px; background: var(--bg-medium); color: var(--fg); font: inherit; font-size: 12px; cursor: pointer; }
+  .btn:hover:not(:disabled) { border-color: var(--fg-dim); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg-dark); font-weight: 500; }
+  .btn.primary:hover:not(:disabled) { filter: brightness(1.08); border-color: var(--accent); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .btn:disabled { cursor: default; opacity: 0.5; }
+
+  .notices { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: -4px; }
+  .notice { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--yellow); overflow-wrap: anywhere; }
+
+  /* The bar: tabs left on the bottom rule, readouts right. */
+  .bar { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 4px 24px; }
+  .views { display: flex; gap: 18px; font-size: 12.5px; }
+  .view-btn { background: none; border: none; padding: 4px 0 8px; margin-bottom: -1px; color: var(--fg-dim); font: inherit; cursor: pointer; border-bottom: 2px solid transparent; }
+  .view-btn:hover { color: var(--fg); }
+  .view-btn.active { color: var(--fg); font-weight: 500; border-bottom-color: var(--accent); }
+  .view-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 2px; }
+
+  .readouts { display: flex; flex-wrap: wrap; align-items: stretch; row-gap: 6px; padding-bottom: 8px; min-width: 0; }
+  .ro { display: flex; flex-direction: column; gap: 2px; padding: 0 14px; border-left: 1px solid color-mix(in srgb, var(--bg-light) 70%, transparent); min-width: 0; }
+  .ro:first-child { border-left: none; }
+  .ro:last-child { padding-right: 0; }
+  .ro .k { font-size: 10.5px; color: var(--fg-dim); }
+  .ro .v { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .ro .sub { margin-left: 4px; color: var(--accent); font-size: 11px; }
+  .ro-btn { display: inline-flex; align-items: center; gap: 6px; background: none; border: none; padding: 0; color: var(--fg); font: inherit; cursor: pointer; border-radius: 2px; }
+  .ro-btn:hover { color: var(--accent); }
+  .ro-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .ro-btn.budget[data-level='amber'] { color: var(--yellow); }
+  .ro-btn.budget[data-level='over'] { color: var(--red); font-weight: 600; }
+  .chev { display: inline-flex; color: var(--fg-dim); transform: rotate(90deg); transition: transform 0.15s; }
+  .chev.open { transform: rotate(-90deg); }
+  .pips { display: inline-flex; gap: 3px; }
+  .pip { width: 6px; height: 6px; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--fg-dim); }
+  .pip.on { background: var(--green); box-shadow: none; }
+  .pip.starting { box-shadow: inset 0 0 0 1px var(--accent); background: color-mix(in srgb, var(--accent) 35%, transparent); }
+  .meter { width: 40px; height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--fg-dim) 30%, transparent); overflow: hidden; }
+  .meter > span { display: block; height: 100%; background: var(--green); }
+  .budget[data-level='amber'] .meter > span { background: var(--yellow); }
+  .budget[data-level='over'] .meter > span { background: var(--red); }
+  /* Narrow: the readouts leave the tabs' line for a grid of their own, with no dividers to strand
+     at a line's start. */
+  @container (max-width: 820px) {
+    .bar { flex-direction: column-reverse; flex-wrap: nowrap; align-items: stretch; gap: 10px; }
+    .readouts { display: grid; align-content: start; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px 16px; padding-bottom: 0; }
+    .ro, .ro:last-child { padding: 0; border-left: none; }
+  }
   .criteria-panel { border-bottom: 1px solid var(--bg-light); color: var(--fg); font-size: 12px; padding: 6px 18px 8px; }
   .criteria-panel ol { margin: 0; padding-left: 20px; }
   .criteria-panel li { overflow-wrap: anywhere; }
   .criteria-panel .dim { color: var(--fg-dim); }
-  .queue-btn.danger { color: var(--fg-dim); }
-  .queue-btn.danger:hover { color: var(--red); }
   .cols { flex: 1; min-height: 0; display: flex; min-width: 0; overflow: hidden; }
   .coord { flex: none; display: flex; flex-direction: column; min-height: 0; min-width: 0; max-width: calc(100% - 264px); transition: box-shadow 0.3s; }
   .coord > :global(.convo) { flex: 1; }
@@ -1087,19 +1216,7 @@
   .coord.focused { box-shadow: inset 0 2px 0 var(--accent); }
   .coord.dragging { user-select: none; }
   .coord.gone, .wslot.gone, .board.gone { display: none; }
-  .views { display: flex; align-items: baseline; gap: 6px; margin-top: 4px; font-size: 12px; }
-  /* Pause and Settings (§4.1): wrap under the views on a narrow header, never widen it. */
-  .hive-actions { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 4px; }
-  .act-btn { display: inline-flex; align-items: center; gap: 4px; background: none; border: 1px solid var(--bg-light); border-radius: 4px; padding: 1px 7px; color: var(--fg-dim); font: inherit; font-size: 11px; cursor: pointer; }
-  .act-btn:hover:not(:disabled) { color: var(--fg); border-color: var(--fg-dim); }
-  .act-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .act-btn:disabled { cursor: default; opacity: 0.5; }
   .coord-failed { margin: 0; padding: 6px 14px; border-bottom: 1px solid var(--bg-light); font-size: 11.5px; color: var(--yellow); overflow-wrap: anywhere; }
-  .views .sep { color: var(--fg-dim); }
-  .view-btn { background: none; border: none; padding: 0 0 1px; color: var(--fg-dim); font: inherit; cursor: pointer; border-bottom: 1px solid transparent; }
-  .view-btn:hover { color: var(--fg); }
-  .view-btn.active { color: var(--fg); border-bottom-color: var(--accent); }
-  .view-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   /* §4.1: the coordinator collapsed to 44 px, with a dot when it has news. */
   .cols > :global(.tooltip-wrapper) { flex: none; display: flex; }
   .strip { width: 44px; flex: none; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 12px 0; background: var(--bg-medium); border: none; border-right: 1px solid var(--bg-light); color: var(--fg-dim); font: inherit; cursor: pointer; }
@@ -1137,6 +1254,7 @@
   .role { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 3px; padding: 0 4px; }
   @media (prefers-reduced-motion: reduce) {
     .coord { transition: none; }
-    .edge.run, .edge.wait { animation: none; }
+    .edge.run, .edge.wait, .status.running .pulse { animation: none; }
+    .chev { transition: none; }
   }
 </style>

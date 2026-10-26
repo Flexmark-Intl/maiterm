@@ -32,9 +32,15 @@ export function budgetLevel(s: HiveSpend): BudgetLevel {
   return 'ok';
 }
 
-/** "Budget: $3.20 of $10.00". */
+/** The header's Budget readout: "$3.20 of $10.00". */
 export function budgetLabel(s: HiveSpend): string {
-  return `Budget: ${usd(s.spent_micros)} of ${usd(s.budget_micros)}`;
+  return `${usd(s.spent_micros)} of ${usd(s.budget_micros)}`;
+}
+
+/** How full the budget meter is, 0–1 (an unset budget reads empty). */
+export function budgetFill(s: HiveSpend): number {
+  if (s.budget_micros <= 0) return s.over ? 1 : 0;
+  return Math.min(1, s.spent_micros / s.budget_micros);
 }
 
 /** The total across Hives shows only when another Hive has spent (§7.8, plan D26). */

@@ -46,8 +46,9 @@ describe('the Autonomy form', () => {
 
   it('labels the header button by how many ask the human', () => {
     expect(askCount(hive())).toBe(0);
-    expect(autonomyLabel(hive())).toBe('Autonomy: the coordinator decides');
-    expect(autonomyLabel(hive({ landing_mode: 'integration' }))).toBe('Autonomy: 1 asks you');
-    expect(autonomyLabel(hive({ checkpoints: { plan: 'ask', questions: 'ask' } }))).toBe('Autonomy: 2 ask you');
+    const of = CHECKPOINT_ROWS.length;
+    expect(autonomyLabel(hive())).toBe('Coordinator decides');
+    expect(autonomyLabel(hive({ landing_mode: 'integration' }))).toBe(`You decide 1 of ${of}`);
+    expect(autonomyLabel(hive({ checkpoints: { plan: 'ask', questions: 'ask' } }))).toBe(`You decide 2 of ${of}`);
   });
 });
