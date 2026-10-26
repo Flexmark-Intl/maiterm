@@ -209,6 +209,8 @@
 <style>
   .blocker {
     --kind: var(--orange, #ff9e64);
+    -webkit-user-select: text;
+    user-select: text;
     display: flex;
     flex-direction: column;
     gap: 3px;

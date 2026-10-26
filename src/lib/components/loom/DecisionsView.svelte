@@ -219,6 +219,8 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+    -webkit-user-select: text;
+    user-select: text;
     background: var(--bg-medium);
     border: 1px solid var(--bg-light);
     border-radius: 10px;

@@ -220,6 +220,8 @@
 
 <style>
   .rules {
+    -webkit-user-select: text;
+    user-select: text;
     display: flex;
     flex-direction: column;
     gap: 8px;

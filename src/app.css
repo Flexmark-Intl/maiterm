@@ -83,6 +83,8 @@ html, body {
 
 button {
   font-family: inherit;
+  -webkit-user-select: none;
+  user-select: none;
   font-size: inherit;
   border: none;
   background: none;

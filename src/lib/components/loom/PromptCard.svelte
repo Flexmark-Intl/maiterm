@@ -278,6 +278,8 @@
 <style>
   .prompt {
     --c: var(--red);
+    -webkit-user-select: text;
+    user-select: text;
     display: flex;
     flex-direction: column;
     gap: 8px;
