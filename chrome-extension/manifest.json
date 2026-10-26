@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "maiTerm",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Let a maiTerm agent diagnose and drive one browser tab you link to it: console, network, page, clicks and typing.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA04AcYQq1V9keoTq7cLzBe7tQV5KmPPzFd0TH+07V5XSIBiukPWKrgUCPEbIq4Ar84KL2e5BEloilZTEOt3E/UOnJx/a6E9qAud1Y29P7jFimXST36OJDuS5y1NZT5eLQGMnGdM7l2soRIn5hT3MVk40ltyyzjou2TikTpDv2l38SrXmRPG2NEHdIM3lhJef5SxX/1+meE4FXD/6YryCamSKgT0XLLJNQ7QJfZCd3nmIMlcAlx8Y4YAbxLwqdonWx5RXwoKOtG3RMqZKi+ojU0DTaKK6lCph9KxrEfY4710150vaZ/qDXeWhqPQPwcrLNgLi4yYR5WO5Z98H37jAGZwIDAQAB",
   "minimum_chrome_version": "116",
