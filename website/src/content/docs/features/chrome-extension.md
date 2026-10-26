@@ -101,10 +101,13 @@ Agents in an agent tab get these while the feature is on. Every one acts on the 
 | `browserSnapshot` | The page as an accessibility tree, each element it can act on numbered for the tools below |
 | `browserClick` | Click an element from the snapshot, with real mouse events |
 | `browserType` | Type into an element, or the focused one |
-| `browserPressKey` | Press one key: Enter, Tab, Escape, arrows and so on |
+| `browserPressKey` | Press a key or a combination: Enter, Tab, Escape, arrows, Shift+Tab, Cmd/Ctrl+A and so on |
+| `browserWaitFor` | Wait until text appears or disappears, or the address changes, and return the moment it does |
 | `browserNavigate` | Go to an address, or back, forward or reload, and wait for the page |
 | `browserScreenshot` | What the tab shows, as an image |
 | `browserEval` | Run a JavaScript expression in the page and return its value |
+
+Clicks, typing, key presses and navigation wait for the page to settle (a page load finished and its requests quiet, up to a few seconds), so an agent can take its next step straight away instead of guessing how long to sleep. Settling needs extension 0.2.2, and `browserWaitFor` a maiTerm release after 3.12.0.
 
 Console and network records start when the agent first uses the tab, so for a bug that happens on load, the agent reloads the page first. The extension keeps the last 200 console messages and 300 requests per linked tab, in memory, and drops them when the link ends.
 
