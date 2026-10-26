@@ -30,9 +30,11 @@ export function keptLines(p: HiveDeletePreview, deleteMemory: boolean, deleteGal
     ...p.scratch.map((s) => `Scratch of ${s.worker}: ${s.path} (${plural(s.files, 'file')}${s.reported ? `, ${s.reported} reported` : ''})`),
   ];
   if (p.memory && !deleteMemory) out.push(`Shared memory: ${p.memory.path} (${plural(p.memory.files, 'file')}, ${formatBytes(p.memory.bytes)})`);
-  if (p.gallery_files && !deleteGallery) {
+  // An empty gallery stays on disk too (its index and folders), so it is named either way.
+  if ((p.gallery_files || p.gallery_path) && !deleteGallery) {
     const where = p.gallery_path ? `: ${p.gallery_path}` : '';
-    out.push(`The gallery${where} (${plural(p.gallery_files, 'asset')}, ${formatBytes(p.gallery_bytes)})`);
+    const what = p.gallery_files ? `${plural(p.gallery_files, 'asset')}, ${formatBytes(p.gallery_bytes)}` : 'empty';
+    out.push(`The gallery${where} (${what})`);
   }
   return out;
 }
@@ -46,7 +48,9 @@ export function stoppingLines(p: HiveDeletePreview): string[] {
 export function removedLines(p: HiveDeletePreview, deleteGallery: boolean, deleteMemory: boolean): string[] {
   const out = [...(p.removed ?? [])];
   if (deleteMemory && p.memory) out.unshift(`Shared memory: ${p.memory.path} (${plural(p.memory.files, 'file')})`);
-  if (deleteGallery && p.gallery_files) out.unshift(`The gallery: ${plural(p.gallery_files, 'asset')}, ${formatBytes(p.gallery_bytes)}`);
+  if (deleteGallery && (p.gallery_files || p.gallery_path)) {
+    out.unshift(`The gallery: ${p.gallery_files ? `${plural(p.gallery_files, 'asset')}, ${formatBytes(p.gallery_bytes)}` : 'empty'}`);
+  }
   return out;
 }
 

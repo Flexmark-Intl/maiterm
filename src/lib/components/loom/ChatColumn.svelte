@@ -262,7 +262,14 @@
   let drafts = $state<Record<string, string>>({});
   const draft = $derived(openId ? (drafts[openId] ?? '') : '');
   let sending = $state(false);
-  let sendNote = $state<{ chat: string; text: string } | null>(null);
+  /** `turns`: the chat's length when a wake note went up; the note is about a coordinator still
+   *  coming back, so the agent's first reply after that retires it. */
+  let sendNote = $state<{ chat: string; text: string; turns?: number } | null>(null);
+  $effect(() => {
+    const n = sendNote;
+    if (n?.turns === undefined || n.chat !== openId) return;
+    if (turns.slice(n.turns).some((m) => m.role === 'agent')) sendNote = null;
+  });
 
   /** Messages sent from here that the transcript hasn't echoed yet, shown as bubbles at the end
    *  of their chat (the phone's `pending`). Without them a message typed while the agent was busy
@@ -428,7 +435,7 @@
         outgoing = outgoing.map((o) => (o.id === id ? { ...o, sentAt: at } : o));
         const sentFiles = files.length ? `Sent ${files.length === 1 ? files[0].name : `${files.length} files`}.` : '';
         const note = sentNote(r, sentFiles && !bubble ? sentFiles : null);
-        sendNote = note ? { chat, text: note } : null;
+        sendNote = note ? { chat, text: note, turns: r.woke === 'hive' ? turns.length : undefined } : null;
         reload();
       } else {
         fail(r.detail ?? `Not sent (${r.reason ?? r.status}).`);
