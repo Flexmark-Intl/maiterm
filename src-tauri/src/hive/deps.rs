@@ -159,6 +159,36 @@ pub fn cache_env(dir: &Path) -> Vec<(String, String)> {
     .collect()
 }
 
+/// Corepack's own: the package managers a repo pins (`"packageManager": "pnpm@9…"`) stay where
+/// the human's corepack keeps them, since moving `XDG_CACHE_HOME` would move them too, and an
+/// empty corepack cache stops at a "download? [Y/n]" no one sees in a worker's hidden terminal.
+/// A job may only read it (its profile writes nowhere but the cache folder), so a version the
+/// human never fetched fails without a prompt rather than downloading.
+pub const COREPACK_NO_PROMPT: (&str, &str) = ("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0");
+
+/// Where the human's corepack keeps its package managers: `COREPACK_HOME`, else
+/// `$XDG_CACHE_HOME/node/corepack`, else `~/.cache/node/corepack`, as corepack reads them.
+pub fn human_corepack_home() -> Option<String> {
+    let set = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    set("COREPACK_HOME")
+        .or_else(|| set("XDG_CACHE_HOME").map(|x| format!("{x}/node/corepack")))
+        .or_else(|| dirs::home_dir().map(|h| h.join(".cache/node/corepack").to_string_lossy().to_string()))
+}
+
+/// The shell text that names the human's corepack home in a typed line, read in the human's own
+/// shell before the cache exports move `XDG_CACHE_HOME` (an `export`'s words expand first).
+pub const COREPACK_HOME_SHELL: &str = "COREPACK_HOME=\"${COREPACK_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/node/corepack}\"";
+
+/// What a worker's first-launch setup exports, after `COREPACK_HOME_SHELL`: its caches in the
+/// worker's folder, no corepack prompt, and a Poetry venv in the worktree, where the worker's
+/// own shell looks (in the cache folder it would be found only with that folder's variable).
+pub fn setup_env(cache: &Path) -> Vec<(String, String)> {
+    let mut out = cache_env(cache);
+    out.push((COREPACK_NO_PROMPT.0.to_string(), COREPACK_NO_PROMPT.1.to_string()));
+    out.push(("POETRY_VIRTUALENVS_IN_PROJECT".to_string(), "true".to_string()));
+    out
+}
+
 /// The folders an install of `words` writes beyond the worktree: the worker's cache folder.
 pub fn install_writes(words: &[&str], cache: &Path) -> Vec<String> {
     if is_install(words) { vec![cache.to_string_lossy().to_string()] } else { Vec::new() }
@@ -167,7 +197,12 @@ pub fn install_writes(words: &[&str], cache: &Path) -> Vec<String> {
 /// The env an install of `words` sets on its job's line: its caches in `cache`, then its
 /// installers' own, in order.
 pub fn install_env(words: &[&str], cache: &Path) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = if is_install(words) { cache_env(cache) } else { Vec::new() };
+    let mut out: Vec<(String, String)> = Vec::new();
+    if is_install(words) {
+        out = cache_env(cache);
+        out.extend(human_corepack_home().map(|h| ("COREPACK_HOME".to_string(), h)));
+        out.push((COREPACK_NO_PROMPT.0.to_string(), COREPACK_NO_PROMPT.1.to_string()));
+    }
     for i in JS.iter().chain(PYTHON).filter(|i| runs(i, words)) {
         for (k, v) in i.env {
             out.retain(|(o, _)| o != k);
@@ -271,7 +306,7 @@ mod tests {
         assert!(install_writes(&["npm", "run", "x"], cache).is_empty());
         let poetry = install_env(&["poetry", "install"], cache);
         assert_eq!(poetry.last(), Some(&("POETRY_VIRTUALENVS_IN_PROJECT".to_string(), "true".to_string())));
-        assert!(poetry.contains(&("POETRY_CACHE_DIR".to_string(), "/h/wt.noindex/w1/deps-cache/poetry".to_string())));
+        assert!(poetry.contains(&("POETRY_CACHE_DIR".to_string(), cache.join("poetry").to_string_lossy().to_string())));
         assert!(install_env(&["npm", "run", "x"], cache).is_empty());
     }
 
@@ -285,9 +320,11 @@ mod tests {
             for w in install_writes(&words, cache) {
                 assert!(Path::new(&w).starts_with(cache), "{}: {w}", i.name);
             }
-            for (k, v) in install_env(&words, cache) {
+            // Every path it is pointed at is the worker's, but corepack's, which a job only reads.
+            for (k, v) in install_env(&words, cache).into_iter().filter(|(k, _)| k != "COREPACK_HOME") {
                 assert!(!v.starts_with('/') || Path::new(&v).starts_with(cache), "{}: {k}={v}", i.name);
             }
+            assert!(install_env(&words, cache).contains(&("COREPACK_ENABLE_DOWNLOAD_PROMPT".to_string(), "0".to_string())));
         }
     }
 

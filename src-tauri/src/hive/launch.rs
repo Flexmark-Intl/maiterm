@@ -782,9 +782,11 @@ fn first_launch_setup(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> Resul
     }
     // Setup's package caches are the worker's own, as its later install jobs' are: one store, so
     // a reinstall finds what setup put there. Emptied first: setup runs unsandboxed, so it must
-    // never read a cache a worker's job could have written (`deps::cache_env`).
+    // never read a cache a worker's job could have written (`deps::cache_env`). Corepack's stays
+    // the human's (`deps::COREPACK_HOME_SHELL`).
     let cache = paths.worker_deps_cache(&w.slug);
-    let exports: String = super::deps::cache_env(&cache).iter().map(|(k, v)| format!(" {k}={}", sh_quote(v))).collect();
+    let exports: String = super::deps::setup_env(&cache).iter().map(|(k, v)| format!(" {k}={}", sh_quote(v))).collect();
+    let exports = format!(" {}{exports}", super::deps::COREPACK_HOME_SHELL);
     let mut emptied = false;
     for f in w.git_folders() {
         let setup = hive.folders.iter().find(|h| h.name == f.name).and_then(|h| h.setup.as_deref()).map(str::trim).filter(|s| !s.is_empty());
@@ -1458,6 +1460,11 @@ pub(crate) mod tests {
         h.folders[0].setup = Some("npm ci".into());
         assert_eq!(first_launch_setup(&h, &p, &r).unwrap(), "", "no setup over the builder's code, unsandboxed");
         assert!(first_launch_setup(&h, &p, &builder).unwrap().contains("npm ci"), "the builder's own launch runs it");
+        // Corepack's home is read before the caches move it, and a Poetry venv lands in the worktree.
+        let line = first_launch_setup(&h, &p, &builder).unwrap();
+        let (corepack, xdg) = (line.find("COREPACK_HOME=\"${COREPACK_HOME:-").unwrap(), line.find("XDG_CACHE_HOME=").unwrap());
+        assert!(corepack < xdg, "{line}");
+        assert!(line.contains("COREPACK_ENABLE_DOWNLOAD_PROMPT='0'") && line.contains("POETRY_VIRTUALENVS_IN_PROJECT='true'"), "{line}");
 
         // A reviewer whose verdict is in never launches again (a restore, a mount): it is owed its retirement.
         r.tab_id = Some("tab-rev".into());
