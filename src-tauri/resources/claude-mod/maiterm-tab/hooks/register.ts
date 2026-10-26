@@ -266,7 +266,10 @@ export const register: Register = on => {
   on('classic.UserPromptSubmit', async ($, e, next) => {
     const to = await linkOf($)
     if (!to) return next(e)
-    const context = await send($, to, e, '&context=1')
+    // Only the tab's own interactive session: a `claude -p` an agent runs in the tab inherits
+    // this mod and the tab id, and would be told (and use up) what its parent should hear.
+    const [mine, session] = await Promise.all([$.env.get('MAITERM_MOD_SESSION'), $.session.id()])
+    const context = await send($, to, e, mine && mine === session ? '&context=1' : '')
     await ensureInbox($, to)
     const result = await next(e)
     if (!context) return result

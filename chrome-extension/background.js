@@ -214,7 +214,8 @@ async function onFrame(host, raw) {
     const started = { at: Date.now() };
     if (acts) agentActing.set(chromeTabId, [...(agentActing.get(chromeTabId) ?? []), started]);
     try {
-      reply({ result: await runAction(chromeTabId, action, args ?? {}) });
+      // Counted from when the action really starts: attaching can take seconds (another extension's frame).
+      reply({ result: await runAction(chromeTabId, action, args ?? {}, () => (started.at = Date.now())) });
     } catch (e) {
       reply({ error: String(e?.message ?? e) });
     } finally {

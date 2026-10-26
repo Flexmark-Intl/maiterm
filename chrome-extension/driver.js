@@ -24,6 +24,9 @@ const inflight = new Map();
 const lastActivity = new Map();
 /** tabId → when the top frame last navigated (ms). */
 const lastNav = new Map();
+/** Tabs whose link ended (unlinked, or the human cancelled Chrome's debugging bar) since the last
+ *  command for them: a wait still running must not attach to them again. */
+const released = new Set();
 
 const send = (tabId, method, params = {}) => chrome.debugger.sendCommand({ tabId }, method, params);
 
@@ -81,6 +84,7 @@ export async function ensureAttached(tabId) {
 }
 
 export async function detach(tabId) {
+  released.add(tabId);
   attached.delete(tabId);
   consoleBuf.delete(tabId);
   netLog.delete(tabId);
@@ -99,6 +103,7 @@ export function forget(tabId, { keepLogs = false } = {}) {
   attached.delete(tabId);
   forgetActivity(tabId);
   if (keepLogs) return;
+  released.add(tabId);
   consoleBuf.delete(tabId);
   netLog.delete(tabId);
   consoleLast.delete(tabId);
@@ -262,7 +267,7 @@ async function settle(tabId, since, max, from = since) {
 }
 
 // Under maiTerm's 30 s relay timeout, with room for a re-attach held up by another extension's frame.
-const WAIT_MAX_S = 20;
+const WAIT_MAX_S = 18;
 
 /** In the page: resolve true once its text has (or, with gone, no longer has) `text`, watching DOM
  *  changes rather than polling; false after `ms`. Checks at most every 100 ms, since innerText
@@ -293,7 +298,9 @@ async function waitFor(tabId, args) {
   const timeoutMs = Math.min(Math.max(Number(args.timeout ?? 10), 0.5), WAIT_MAX_S) * 1000;
   const start = Date.now();
   for (;;) {
-    const remaining = timeoutMs - (Date.now() - start);
+    if (released.has(tabId)) {
+      return { met: false, waited_ms: Date.now() - start, note: 'The tab was unlinked while waiting.' };
+    }
     const info = await tabInfo(tabId);
     const urlOk = url == null || info.url.includes(url);
     let textOk = text == null;
@@ -302,6 +309,8 @@ async function waitFor(tabId, args) {
         // Chrome may have cut maiTerm off meanwhile (a password manager's frame while the human
         // signs in, which is often what is being waited for): come back in once it lets us.
         await ensureAttached(tabId);
+        // Taken after the attach, which can itself take seconds, so the slice stays inside the timeout.
+        const remaining = timeoutMs - (Date.now() - start);
         // Give the page a slice at a time: a navigation ends this context, and the next slice runs in the new page.
         const { result: doc } = await send(tabId, 'Runtime.evaluate', { expression: 'document' });
         const { result } = await send(tabId, 'Runtime.callFunctionOn', {
@@ -673,7 +682,11 @@ function strip(r) {
 }
 
 /** Run one action on a linked tab. Pages Chrome won't let an extension debug fail clearly. */
-export async function runAction(tabId, action, args = {}) {
+/** `onStart`: called once the debugger is attached, just before the action itself, which is when
+ *  Chrome's 5 s window for a page to open a tab begins (background.js counts joins from it). */
+export async function runAction(tabId, action, args = {}, onStart = () => {}) {
+  // maiTerm sent a command for it, so it is linked (again).
+  released.delete(tabId);
   const { url } = await tabInfo(tabId);
   if (/^(chrome|edge|brave|about|devtools|chrome-extension):/i.test(url) || /chromewebstore\.google\.com|chrome\.google\.com\/webstore/.test(url)) {
     if (action !== 'navigate') {
@@ -683,7 +696,7 @@ export async function runAction(tabId, action, args = {}) {
     return { ...(await navigate(tabId, args)), ...(await tabInfo(tabId)) };
   }
   try {
-    return await perform(tabId, action, args);
+    return await perform(tabId, action, args, onStart);
   } catch (e) {
     // Mid-command ("Detached while handling command") or between two commands ("Debugger is not
     // attached to the tab"): the same thing to the agent.
@@ -691,7 +704,7 @@ export async function runAction(tabId, action, args = {}) {
     // Pushed out mid-command (another extension's frame appeared). A read is safe to repeat; an
     // action may or may not have happened, so the agent is told to look before repeating it.
     attached.delete(tabId);
-    if (READS.has(action)) return perform(tabId, action, args);
+    if (READS.has(action)) return perform(tabId, action, args, onStart);
     throw new Error(
       `Chrome detached maiTerm from the tab during that ${action} (another extension's frame, usually a password manager's popup, appeared). ` +
         'It may or may not have happened: take a snapshot before repeating it.',
@@ -713,8 +726,9 @@ async function settled(tabId, act) {
   return { ...r, ...s, ...(note ? { note } : {}), ...(await tabInfo(tabId)) };
 }
 
-async function perform(tabId, action, args) {
+async function perform(tabId, action, args, onStart = () => {}) {
   await ensureAttached(tabId);
+  onStart();
   switch (action) {
     case 'navigate':
       return settled(tabId, () => navigate(tabId, args));

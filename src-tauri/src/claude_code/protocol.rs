@@ -1561,7 +1561,7 @@ fn browser_tools() -> Vec<Value> {
                     "text": { "type": "string", "description": "Text to wait for on the page (case-sensitive)" },
                     "gone": { "type": "boolean", "description": "Wait for the text to disappear instead (default false)" },
                     "url": { "type": "string", "description": "Wait until the URL contains this" },
-                    "timeout": { "type": "number", "description": "Seconds, 0.5 to 20 (default 10)" }
+                    "timeout": { "type": "number", "description": "Seconds, 0.5 to 18 (default 10)" }
                 }
             }
         }

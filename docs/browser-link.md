@@ -165,7 +165,7 @@ from (`tab`, or a `Tab: bN` line on the snapshot and screenshot).
 | `browserClick` | `click` | `ref`; real mouse events at the element's centre, `this.click()` fallback |
 | `browserType` | `type` | `ref` (optional: else the focused element), `text`, `clear` (default true), `submit` |
 | `browserPressKey` | `press` | `key` (Enter, Tab, Escape, arrows, … or one character), optionally with modifiers: `Shift+Tab`, `Mod+A` (Cmd on a Mac, Ctrl elsewhere; Mod+A/Z/X/C/V and Mod+Shift+Z run the editing command) |
-| `browserWaitFor` | `wait` | `text` (appears, or `gone`), `url` (contains), or both; a MutationObserver in the page, re-armed across navigations; `timeout` 0.5–20 s (default 10); `met: false` with a note at the timeout |
+| `browserWaitFor` | `wait` | `text` (appears, or `gone`), `url` (contains), or both; a MutationObserver in the page, re-armed across navigations; `timeout` 0.5–18 s (default 10); `met: false` with a note at the timeout |
 | `browserScreenshot` | `screenshot` | returned as MCP image content (works for ssh agents too) |
 | `browserEval` | `eval` | JS expression in the page, `returnByValue` |
 | `browserConsole` | `console` | console messages, uncaught exceptions (`source` = file:line:col) and the browser's own `Log` entries (CSP, failed loads) since attach, last 200; `errors_only` |
@@ -237,8 +237,10 @@ or a reconnect would ring for nothing.
 agent whose human said "check the page" used to reach for a browser tool of its own (a skill
 that opens a different browser, without the human's session) unless told where its tab was. The
 `maiterm-tab` mod's UserPromptSubmit asks `/hooks?…&context=1`, and the reply goes into the
-model's context as `additionalContext`: the linked tabs by handle, title and URL, and that the
+model's context as `additionalContext`: the linked tabs by handle and site (host and port only:
+the text arrives unasked in maiTerm's voice, so no title or path the page chose goes in), and that the
 maiTerm browser tools reach them. Only when the set of handles changed since it was last told
 (`Registry.told`), so it costs nothing on an ordinary message; a session start (new, resume,
-`/clear`, compaction: every `prime=1`) clears it, so a fresh context is told again. Claude
+`/clear`, compaction: every `prime=1`) clears it, so a fresh context is told again. Only the tab's interactive session asks (a `claude -p` an agent
+runs there inherits the mod). Claude
 through the mod only; an older Claude, Codex and Gemini get the tool descriptions alone.
