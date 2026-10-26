@@ -75,9 +75,9 @@
   let picked = $state(new Set<string>());
   let budgetDollars = $state(10);
   let pushAfterLand = $state(false);
-  /** Every Hive tab made off the phone: Create launches the coordinator at once, so there's no
-   *  later moment to exclude it before its first turn. */
-  let keepOffPhone = $state(false);
+  /** Who is a chat on the phone. "none" makes every Hive tab off it: Create launches the
+   *  coordinator at once, so there's no later moment to exclude it before its first turn. */
+  let phone = $state<'coordinator' | 'all' | 'none'>('coordinator');
   let creating = $state(false);
   let createError = $state<string | null>(null);
   let suggestions = $state<Record<string, StackSuggestion[] | null>>({});
@@ -312,7 +312,8 @@
       budget_cents: Math.max(0, Math.round(Number(budgetDollars) * 100)),
       push_after_land: pushAfterLand,
       stack: $state.snapshot(stackRows) as Service[],
-      keep_off_phone: keepOffPhone,
+      keep_off_phone: phone === 'none',
+      workers_on_phone: phone === 'all',
     };
     try {
       await createHive(workspaceId, spec);
@@ -513,10 +514,12 @@
         Push after land <span class="hint">each land to Base also pushes that repo's Base</span>
       </label>
 
-      <label class="check field">
-        <input type="checkbox" bind:checked={keepOffPhone} />
-        Keep this Hive's agents off the phone <span class="hint">no agent of this Hive, the coordinator included, is a chat in maiLink</span>
-      </label>
+      <div class="field" role="radiogroup" aria-label="On the phone">
+        <span class="label">On the phone</span>
+        <label class="check"><input type="radio" name="hive-phone" value="coordinator" bind:group={phone} /> The coordinator only <span class="hint">it speaks for its workers</span></label>
+        <label class="check"><input type="radio" name="hive-phone" value="all" bind:group={phone} /> The coordinator and its workers</label>
+        <label class="check"><input type="radio" name="hive-phone" value="none" bind:group={phone} /> Nobody <span class="hint">no agent of this Hive is a chat in maiLink; fixed once the Hive is made</span></label>
+      </div>
 
       <div class="field">
         <span class="label">Stack</span>

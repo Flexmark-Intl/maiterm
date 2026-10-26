@@ -192,6 +192,40 @@ and the workspace would look empty. `Workspace.hive` is cleared; worktrees, memo
 stay on disk, and nothing is deleted. The other lifecycle paths (duplicate, move, archive,
 close, share) are in §11.2.
 
+### 3.4 Changing settings after Create (Darryl's direction, 2026-10-26)
+
+Using a Hive for real showed the settings that matter most can't wait for a new Hive: how many
+workers run, which model they use, and what their sandbox may reach. So these change after
+Create (`hive/change.rs`, Hive settings → **Workers and access**, also opened from the header's
+Slots readout):
+
+| Setting | Who may change it | Takes effect |
+|---|---|---|
+| Workers at once (`cap`, 1–32) | The human; the coordinator up to this computer's ceiling (§6.8) | At once. Lowering it stops nobody: no new worker starts while more are running |
+| Coordinator and worker model and effort | Both | Each agent's next launch (the launch builder rewrites its settings, §11.1). A worker spawned with its own model keeps it |
+| Hosts every builder may reach (`settings.worker_hosts`) | Both | Each worker's next launch. Added to `allowedDomains` after the registries (`settings::worker_domains`); never a repo remote's host; never given to reviewers |
+| Push after land | The human only | The next land |
+| Workers on the phone (`settings.workers_on_phone`) | The human only | Workers started from now on |
+
+**The coordinator asks with `hiveChangeSettings`.** Under the **Settings** checkpoint (§7.4), whose
+default is **Ask me** (the only checkpoint that starts there), that files a `hive_settings` agent
+request: a card only the human approves (`docs/agent-requests.md`), naming each change in maiTerm's
+words and the coordinator's reason as its own. On approval Rust applies the stored change,
+checked again against the record as it is then, and tells the coordinator; a denial or a lapse is
+told too. A newer card supersedes an older pending one. Cards live in memory: one pending across a
+maiTerm restart is gone, and the coordinator asks again. With the checkpoint handed to the
+coordinator, the change applies at once, the human gets a notice (`hive-settings-changed`), and it
+is never earnable (§7.6): only the human hands it over. Every change, by anyone, is a line in
+`logs/settings.jsonl`, and the human's own changes are told to the coordinator.
+
+**On the phone, by default only the coordinator is a chat** (Darryl, 2026-10-26): it speaks for
+its workers. The Create sheet offers the coordinator only (default), the coordinator and its
+workers, or nobody (`keep_off_phone`, fixed at Create since the coordinator launches at once).
+A worker's tab is made `mailink_excluded` unless its Hive shows workers; tabs made before a
+change keep theirs. The trade: a worker's prompt that falls to the human (a timeout, a take-over)
+can't be answered from the phone while workers are off it; the human tells the coordinator
+from its chat, or answers in the Hive view.
+
 ## 4. The view
 
 ### 4.1 Layout: Miller columns
@@ -1315,7 +1349,8 @@ and no agent pushes (§7.3).
 What never moves to the coordinator, whatever the settings (Rust refusals by tab identity, not
 words in a brief):
 
-- creating a Hive, raising the cap or the budget, and **spending past the budget**;
+- creating a Hive, raising the budget or the cap past this computer's ceiling (§3.4), and
+  **spending past the budget**;
 - Claude's workspace-trust dialog (`trust_dialog_open`) and the plan dialog, whose rows are mode
   changes;
 - any prompt option that persists a setting or a rule, or changes a mode (below);

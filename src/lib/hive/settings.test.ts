@@ -18,11 +18,10 @@ describe('Hive settings, read-only half', () => {
     const rows = fixedRows(hive(), 'Ship');
     const get = (l: string) => rows.find((r) => r.label === l)!;
     expect(get('Name').value).toBe('Ship');
-    expect(get('Workers at once').value).toBe('4');
+    expect(rows.find((r) => r.label === 'Workers at once'), 'editable now: Workers and access').toBeUndefined();
     expect(get('Landing').value).toBe('Land to Base');
     expect(get('Landing').note).toMatch(/new Hive/);
-    expect(get('Coordinator').value).toBe('Claude opus, medium effort');
-    expect(get('On the phone').value).toBe('Shown like any agent');
+    expect(rows.find((r) => r.label === 'On the phone'), 'chosen in Workers and access').toBeUndefined();
     const integ = fixedRows(hive({ landing_mode: 'integration', settings: { keep_off_phone: true } }), 'Ship');
     expect(integ.find((r) => r.label === 'Landing')!.value).toBe('Integration branch hive/ship, you approve each land');
     expect(integ.find((r) => r.label === 'On the phone')!.value).toMatch(/^Kept off/);

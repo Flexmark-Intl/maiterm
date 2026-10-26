@@ -181,6 +181,11 @@ impl HivePaths {
         self.logs().join("criteria.jsonl")
     }
 
+    /// Every change of the Hive's settings after Create (§3.4), and who made it, append-only.
+    pub fn settings_log(&self) -> PathBuf {
+        self.logs().join("settings.jsonl")
+    }
+
     /// Done's reports and wakes (§11.4), append-only: maiTerm's record of what finished the Hive,
     /// under `logs/`, which no Hive agent may write.
     pub fn finishes(&self) -> PathBuf {

@@ -7,7 +7,7 @@ import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult,
 import type { HiveMemoryFileText, HiveMemoryView } from './types';
 import type { HiveDecisionView, HivePrecedentsView } from './types';
 import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
-import type { GallerySettingsChange } from './types';
+import type { GallerySettingsChange, HiveSettingsChange } from './types';
 import type { HiveFinishRecord } from './types';
 import type {
   GalleryAddResult,
@@ -2873,6 +2873,11 @@ export async function hiveSetAutonomy(workspaceId: string, checkpoints: Record<s
 /** Hive header → Budget (docs/hive.md §10.3, §14.16): the budget, output folders and generator
  *  hosts, checked and saved in Rust. A raise past the spend closes the budget row. Answers the Hive
  *  as saved; the window's mirror also follows `hive-changed`. */
+/** Hive settings → Workers and access (docs/hive.md §3.4): the human's change; the coordinator is told. */
+export async function hiveSetSettings(workspaceId: string, change: HiveSettingsChange): Promise<Hive> {
+  return invoke('hive_set_settings', { workspaceId, change });
+}
+
 export async function hiveSetGallerySettings(workspaceId: string, settings: GallerySettingsChange): Promise<Hive> {
   return invoke('hive_set_gallery_settings', { workspaceId, settings });
 }

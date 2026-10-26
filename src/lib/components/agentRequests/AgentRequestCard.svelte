@@ -56,6 +56,7 @@
           : r.kind === 'window_reload' ? 'Reload this window?'
           : r.kind === 'hive_land' ? 'Allow this land?'
           : r.kind === 'hive_undo' ? 'Allow this undo?'
+          : r.kind === 'hive_settings' ? 'Change these Hive settings?'
           : r.kind.startsWith('bridge') ? 'Allow this bridge change?'
             : r.kind.startsWith('mesh') ? 'Allow this mesh change?' : 'Allow this move?',
   );
@@ -75,6 +76,7 @@
           : approve
             ? r.kind === 'restart' ? 'Approved. maiTerm is restarting.'
               : r.kind === 'hive_land' ? 'Approved. maiTerm lands it now, and the coordinator will be told.'
+              : r.kind === 'hive_settings' ? 'Approved. The settings are changed, and the coordinator will be told.'
               : 'Approved. It is being carried out, and the agent will be told.'
             : 'Denied. The agent will be told.',
       );

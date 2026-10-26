@@ -1,6 +1,6 @@
 <script lang="ts">
   /** Hive settings from the header (docs/hive.md §4.1, §3.2): what can change opens its own sheet
-   *  (autonomy, run queue, budget and generation), and what was fixed at Create is shown
+   *  (workers and access, autonomy, run queue, budget and generation), and what was fixed at Create is shown
    *  read-only, with why where it isn't obvious. Same backdrop/panel vocabulary as RunQueueModal,
    *  and the same explicit rAF focus (Svelte's `autofocus` is not focus). */
   import type { Hive } from '$lib/tauri/types';
@@ -10,12 +10,13 @@
     hive: Hive;
     name: string;
     onclose: () => void;
+    onworkers: () => void;
     onautonomy: () => void;
     onqueue: () => void;
     onbudget: () => void;
   }
 
-  let { hive, name, onclose, onautonomy, onqueue, onbudget }: Props = $props();
+  let { hive, name, onclose, onworkers, onautonomy, onqueue, onbudget }: Props = $props();
   let panelEl = $state<HTMLDivElement | null>(null);
 
   $effect(() => {
@@ -56,6 +57,7 @@
       <section>
         <h4>Can change</h4>
         <div class="links">
+          <button type="button" class="btn" onclick={() => go(onworkers)}>Workers and access…</button>
           <button type="button" class="btn" onclick={() => go(onautonomy)}>Autonomy…</button>
           <button type="button" class="btn" onclick={() => go(onqueue)}>Run queue…</button>
           <button type="button" class="btn" onclick={() => go(onbudget)}>Budget and generation…</button>

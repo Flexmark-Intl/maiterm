@@ -542,6 +542,10 @@ export interface HiveSettings {
   gallery?: GallerySettings;
   /** Chosen at Create: every Hive tab is made `mailink_excluded`. */
   keep_off_phone?: boolean;
+  /** Workers are chats on the phone too; by default only the coordinator is. */
+  workers_on_phone?: boolean;
+  /** Hosts every builder's sandbox may reach beyond the package registries (docs/hive.md §3.4). */
+  worker_hosts?: string[];
   [section: string]: unknown;
 }
 
@@ -820,6 +824,21 @@ export interface HiveSpec {
   stack: Service[];
   /** "Keep this Hive's agents off the phone": every Hive tab is made `mailink_excluded`. */
   keep_off_phone: boolean;
+  /** Workers are chats on the phone as well as the coordinator. */
+  workers_on_phone: boolean;
+}
+
+/** hive/change.rs `SettingsChange` (docs/hive.md §3.4): only what changes is named. */
+export interface HiveSettingsChange {
+  cap?: number;
+  coordinator_model?: string;
+  coordinator_effort?: string;
+  worker_model?: string;
+  worker_effort?: string;
+  add_hosts?: string[];
+  remove_hosts?: string[];
+  push_after_land?: boolean;
+  workers_on_phone?: boolean;
 }
 
 export interface HiveReplaceable {
@@ -1717,8 +1736,9 @@ export interface AgentRequest {
   window_label: string;
   kind: 'mesh_enable' | 'mesh_disable' | 'mesh_link' | 'mesh_unlink' | 'tab_move' | 'workspace_move' | 'tab_create' | 'restart'
     | 'tab_reload' | 'window_reload' | 'bridge_connect' | 'bridge_fork' | 'bridge_disconnect' | 'mcp_add'
-    // A Hive's land or undo (docs/hive.md §8.1, §8.3): filed and carried out by Rust, never a window.
-    | 'hive_land' | 'hive_undo';
+    // A Hive's land or undo (docs/hive.md §8.1, §8.3), and its coordinator's settings change
+    // (§3.4): filed and carried out by Rust, never a window.
+    | 'hive_land' | 'hive_undo' | 'hive_settings';
   /** Exactly what runs on approval, built by maiTerm. */
   args: Record<string, unknown>;
   /** What the card says will happen, written by maiTerm. */

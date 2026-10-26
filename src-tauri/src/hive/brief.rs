@@ -281,6 +281,7 @@ fn ask_me_means(key: &str) -> &'static str {
         "landing" => "each hiveLand waits for your human\u{2019}s approval",
         "finals" => "your human picks the finals in the gallery",
         "interfaces" => "ask your human (a blocker) before adding a dependency or changing a public interface",
+        "settings" => "hiveChangeSettings files a card your human approves; maiTerm tells you the answer",
         _ => "ask your human",
     }
 }
@@ -290,7 +291,11 @@ fn ask_me_means(key: &str) -> &'static str {
 fn checkpoint_lines(hive: &Hive) -> String {
     let mut b = String::from("\n## Checkpoints\n\nYour human sets who decides each of these (Hive settings \u{2192} Autonomy):\n\n");
     for key in super::checkpoints::CHECKPOINTS {
-        let who = if super::checkpoints::asks(hive, key) { format!("**Ask me**: {}", ask_me_means(key)) } else { "**you decide**".to_string() };
+        let who = match (super::checkpoints::asks(hive, key), key) {
+            (true, _) => format!("**Ask me**: {}", ask_me_means(key)),
+            (false, super::checkpoints::SETTINGS) => "**you decide**: hiveChangeSettings applies at once, and your human is told".to_string(),
+            (false, _) => "**you decide**".to_string(),
+        };
         b.push_str(&format!("- {}: {who}.\n", capitalised(super::checkpoints::label(key))));
     }
     let minutes = super::checkpoints::clamp_timeout(hive.settings.autonomy.prompt_timeout_secs).div_ceil(60);
@@ -301,7 +306,7 @@ fn checkpoint_lines(hive: &Hive) -> String {
          Unanswered after {minutes} min, your human is told and either of you may answer; your human may take any prompt over. \
          Every answer is logged for your human.\n\nNever yours, whatever the checkpoints: Claude\u{2019}s workspace-trust and plan \
          dialogs; any row that saves a setting or a rule, or changes a mode; the sandbox and reads outside the working folder; \
-         an action blocker (only your human can do it); spending past the budget, and raising the cap or the budget; pushing; \
+         an action blocker (only your human can do it); spending past the budget, and raising the budget, or the cap past this computer\u{2019}s ceiling; pushing; \
          a land or undo whose diff changes agent or execution config. maiTerm sends those to your human and tells you.\n"
     ));
     if super::checkpoints::asks(hive, super::checkpoints::PLAN) {

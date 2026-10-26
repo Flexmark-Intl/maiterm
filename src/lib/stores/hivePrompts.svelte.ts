@@ -3,7 +3,8 @@
  *  mounts). The gate (`hiveOwnsPrompt`), "With coordinator" on the cards and Take over read it.
  *
  *  It also hears `hive-prompt-notify`, Rust's word that a prompt is the human's after all, and
- *  dispatches it as `hive-human`, which the gate never holds back. Init'd once per window by
+ *  dispatches it as `hive-human`, which the gate never holds back; and `hive-settings-changed`,
+ *  a settings change the coordinator made on its own (§3.4). Init'd once per window by
  *  `+layout`: a notice must reach the human wherever they are, not only in the Hive view. */
 
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -80,6 +81,14 @@ function createHivePromptsStore() {
             const n = e.payload;
             // Imported here, not at the top: notificationDispatch asks this store's gate.
             void import('./notificationDispatch').then(({ dispatch }) => handleNotice(n, timeoutFor(n.workspace_id), dispatch));
+          }, { target }),
+          // The coordinator changed the Hive's settings on its own (docs/hive.md §3.4).
+          await countedListen<{ workspace_id: string; text: string }>('hive-settings-changed', (e) => {
+            const ws = workspacesStore.workspaces.find((w) => w.id === e.payload.workspace_id);
+            const coord = ws?.panes.flatMap((p) => p.tabs).find((t) => t.hive_role === 'coordinator');
+            void import('./notificationDispatch').then(({ dispatch }) =>
+              dispatch(`Hive settings changed: ${ws?.name ?? 'a Hive'}`, e.payload.text, 'info', coord ? { tabId: coord.id } : undefined),
+            );
           }, { target }),
         );
       } catch (e) {

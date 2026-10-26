@@ -5,7 +5,7 @@
 
 import type { AgentRequest, HiveWorkerCard } from '$lib/tauri/types';
 
-export const isHiveRequest = (r: Pick<AgentRequest, 'kind'>): boolean => r.kind === 'hive_land' || r.kind === 'hive_undo';
+export const isHiveRequest = (r: Pick<AgentRequest, 'kind'>): boolean => r.kind === 'hive_land' || r.kind === 'hive_undo' || r.kind === 'hive_settings';
 
 /** Whether this window carries out an approved request: only one it filed, never a Hive's. */
 export function windowCarriesOut(r: Pick<AgentRequest, 'kind' | 'window_label'>, me: string): boolean {

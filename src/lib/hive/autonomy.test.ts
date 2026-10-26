@@ -7,13 +7,14 @@ const hive = (over: Partial<Hive> = {}) => ({ landing_mode: 'base', checkpoints:
 describe('the Autonomy form', () => {
   it('starts from the record, a missing key at its default', () => {
     const f = formFor(hive({ checkpoints: { permissions: 'ask' }, settings: { autonomy: { prompt_timeout_secs: 600, daily_digest: false } } }));
-    expect(f.values).toEqual({ plan: 'coordinator', questions: 'coordinator', permissions: 'ask', landing: 'coordinator', finals: 'coordinator', interfaces: 'coordinator' });
+    expect(f.values).toEqual({ plan: 'coordinator', questions: 'coordinator', permissions: 'ask', landing: 'coordinator', finals: 'coordinator', interfaces: 'coordinator', settings: 'ask' });
     expect(f.digest).toBe(false);
     expect(f.minutes).toBe(10);
     expect(formFor(hive()).minutes).toBe(5);
     expect(formFor(hive({ settings: { autonomy: { prompt_timeout_secs: 20, daily_digest: true } } })).minutes).toBe(1);
     expect(formFor(hive({ landing_mode: 'integration' })).values.landing).toBe('ask');
-    expect(CHECKPOINT_ROWS.map((r) => r.key)).toEqual(['plan', 'questions', 'permissions', 'landing', 'finals', 'interfaces']);
+    expect(CHECKPOINT_ROWS.map((r) => r.key)).toEqual(['plan', 'questions', 'permissions', 'landing', 'finals', 'interfaces', 'settings']);
+    expect(formFor(hive({ checkpoints: { settings: 'coordinator' } })).values.settings, 'handed over').toBe('coordinator');
   });
 
   it('keeps Landing at Ask me in the integration mode', () => {
@@ -40,15 +41,18 @@ describe('the Autonomy form', () => {
     f.values.questions = 'ask';
     const out = toSave(h, f);
     expect(out.checkpoints.questions).toBe('ask');
-    expect(Object.keys(out.checkpoints)).toHaveLength(6);
+    expect(Object.keys(out.checkpoints)).toHaveLength(7);
     expect(out.autonomy).toEqual({ prompt_timeout_secs: 900, daily_digest: false, later: 7 });
   });
 
   it('labels the header button by how many ask the human', () => {
-    expect(askCount(hive())).toBe(0);
+    // Settings asks by default (docs/hive.md §3.4).
+    expect(askCount(hive())).toBe(1);
     const of = CHECKPOINT_ROWS.length;
-    expect(autonomyLabel(hive())).toBe('Coordinator decides');
-    expect(autonomyLabel(hive({ landing_mode: 'integration' }))).toBe(`You decide 1 of ${of}`);
-    expect(autonomyLabel(hive({ checkpoints: { plan: 'ask', questions: 'ask' } }))).toBe(`You decide 2 of ${of}`);
+    const handed = { settings: 'coordinator' };
+    expect(autonomyLabel(hive({ checkpoints: handed }))).toBe('Coordinator decides');
+    expect(autonomyLabel(hive())).toBe(`You decide 1 of ${of}`);
+    expect(autonomyLabel(hive({ landing_mode: 'integration', checkpoints: handed }))).toBe(`You decide 1 of ${of}`);
+    expect(autonomyLabel(hive({ checkpoints: { plan: 'ask', questions: 'ask' } }))).toBe(`You decide 3 of ${of}`);
   });
 });

@@ -185,6 +185,10 @@ an inferred identity. The ones that file requests, and `getRequestStatus`, are a
    busy Claude tab's empty box, never over a draft.
    - A restart is not reported this way: the agent is restarted instead.
 
+**A Hive's settings change** (`hive_settings`, docs/hive.md §3.4) is Rust-filed the same way from
+the coordinator's `hiveChangeSettings` and carried out by `hive::change` on approval; a newer one
+supersedes an older pending card of the same Hive.
+
 **A Hive's land** (`hive_land`; `hive_undo` reserved) takes a different path (docs/hive.md §8.1,
 §8.3, `hive/land/approval.rs`). Rust files it itself (`file_hive`) from the coordinator's tab, and
 `file_agent_request` refuses both kinds, so no window or agent tool files one. One card per land,

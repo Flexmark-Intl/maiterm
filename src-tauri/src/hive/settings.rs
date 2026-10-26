@@ -116,6 +116,7 @@ pub const COORDINATOR_MCP_TOOLS: &[&str] = &[
     "hiveResolve",
     "hiveFinish",
     "hiveSetCriteria",
+    "hiveChangeSettings",
     "hiveAnswerWorker",
     "hiveRunPriority",
     "hivePrecedents",
@@ -655,7 +656,7 @@ pub fn worker_settings_json(hive: &Hive, record: &LaunchRecord, w: &WorkerRecord
     // Generator hosts only for a worker whose role generates (the predicate `worker_mcp_config`
     // uses): a code worker or a reviewer gets the registries alone.
     let generates = !w.is_reviewer() && super::roles::role(&w.role).is_some_and(|r| r.generators);
-    let domains = worker_domains(hive, &ctx.remote_hosts, generates);
+    let domains = worker_domains(hive, &ctx.remote_hosts, !w.is_reviewer(), generates);
     Ok(json!({
         "sandbox": {
             "enabled": true,
@@ -692,20 +693,24 @@ pub fn worker_settings_json(hive: &Hive, record: &LaunchRecord, w: &WorkerRecord
     }))
 }
 
-/// A worker's network allowlist (§14.16): the package registries and, for a media worker
-/// (`generates`), the Hive's generator hosts,
-/// minus anything that reaches a repo's remote, which `deniedDomains` also lists. The hosts were
-/// checked when the human saved them; checked again here, since the state file is plain JSON, and
+/// A worker's network allowlist (§14.16): the package registries, for a builder (not a
+/// reviewer) the Hive's worker hosts (§3.4) and, for a media worker (`generates`), its generator
+/// hosts, minus anything that reaches a repo's remote, which `deniedDomains` also lists. The hosts
+/// were checked when they were saved; checked again here, since the state file is plain JSON, and
 /// a remote added since is taken out all the same.
-pub fn worker_domains(hive: &Hive, remote_hosts: &[String], generates: bool) -> Vec<String> {
+pub fn worker_domains(hive: &Hive, remote_hosts: &[String], builder: bool, generates: bool) -> Vec<String> {
     use super::gallery::budget::{host_covers, normalize_host};
     let remotes: Vec<String> = remote_hosts.iter().map(|h| h.to_ascii_lowercase()).collect();
     let chosen: &[String] = if generates { &hive.settings.gallery.generator_hosts } else { &[] };
     let generators = chosen.iter().filter_map(|h| {
         normalize_host(h).map_err(|e| log::warn!("hive {}: generator host left out: {e}", hive.id)).ok()
     });
+    let granted: &[String] = if builder { &hive.settings.worker_hosts } else { &[] };
+    let granted = granted.iter().filter_map(|h| {
+        normalize_host(h).map_err(|e| log::warn!("hive {}: worker host left out: {e}", hive.id)).ok()
+    });
     let mut out: Vec<String> = Vec::new();
-    for d in PACKAGE_REGISTRIES.iter().map(|d| d.to_string()).chain(generators) {
+    for d in PACKAGE_REGISTRIES.iter().map(|d| d.to_string()).chain(granted).chain(generators) {
         if !remotes.iter().any(|r| host_covers(&d, r)) && !out.contains(&d) {
             out.push(d);
         }

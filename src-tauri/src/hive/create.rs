@@ -28,11 +28,12 @@ pub const DEFAULT_CAP: u32 = 4;
 pub const DEFAULT_BUDGET_CENTS: u64 = 1000;
 pub const COORDINATOR_TAB_NAME: &str = "Coordinator";
 
-/// The §7.4 checkpoints, all Coordinator by default. In integration mode a land is always the
-/// human's (§8.3).
+/// The §7.4 checkpoints, Coordinator by default but Settings (§3.4), whose changes the human
+/// approves until they hand them over. In integration mode a land is always the human's (§8.3).
 pub fn default_checkpoints(landing_mode: &str) -> BTreeMap<String, String> {
     let mut out: BTreeMap<String, String> =
         ["plan", "questions", "permissions", "landing", "finals", "interfaces"].iter().map(|k| (k.to_string(), "coordinator".to_string())).collect();
+    out.insert("settings".to_string(), "ask".to_string());
     if landing_mode == LANDING_INTEGRATION {
         out.insert("landing".to_string(), "ask".to_string());
     }
@@ -624,6 +625,8 @@ pub struct HiveSpec {
     pub stack: Vec<Service>,
     /// "Keep this Hive's agents off the phone": every Hive tab is made `mailink_excluded`.
     pub keep_off_phone: bool,
+    /// Workers are chats on the phone as well as the coordinator.
+    pub workers_on_phone: bool,
 }
 
 impl Default for HiveSpec {
@@ -642,6 +645,7 @@ impl Default for HiveSpec {
             push_after_land: false,
             stack: Vec::new(),
             keep_off_phone: false,
+            workers_on_phone: false,
         }
     }
 }
@@ -875,7 +879,7 @@ pub fn build_hive(spec: &HiveSpec, id: String, folders: Vec<HiveFolder>) -> Hive
         done_at: None,
         slug: slugify(&spec.name),
         created_at: crate::commands::workspace::iso_now(),
-        settings: HiveSettings { keep_off_phone: spec.keep_off_phone, ..HiveSettings::default() },
+        settings: HiveSettings { keep_off_phone: spec.keep_off_phone, workers_on_phone: spec.workers_on_phone, ..HiveSettings::default() },
         ..Hive::default()
     }
 }
@@ -1166,11 +1170,15 @@ mod tests {
         assert!(!plain.settings.keep_off_phone);
         let mut d = app_with(empty_ws());
         let got = install_hive(&mut d, "main", "ws", plain.clone(), Vec::new(), "", None).unwrap();
-        assert!(!got.workspace.panes[0].tabs.iter().any(|t| t.mailink_excluded));
-        assert!(!super::super::tools::worker_tab(&w, &plain).mailink_excluded);
-        // A Create sheet from before the option sends no field: off.
+        assert!(!got.workspace.panes[0].tabs.iter().any(|t| t.mailink_excluded), "the coordinator is a chat on the phone");
+        assert!(super::super::tools::worker_tab(&w, &plain).mailink_excluded, "by default a worker isn't");
+        let shown = build_hive(&HiveSpec { workers_on_phone: true, ..HiveSpec::default() }, "h3".into(), Vec::new());
+        assert!(!super::super::tools::worker_tab(&w, &shown).mailink_excluded, "workers shown when the human chose it");
+        let both = build_hive(&HiveSpec { workers_on_phone: true, keep_off_phone: true, ..HiveSpec::default() }, "h4".into(), Vec::new());
+        assert!(super::super::tools::worker_tab(&w, &both).mailink_excluded, "keep off the phone wins");
+        // A Create sheet from before the options sends no field: both off.
         let old: HiveSpec = serde_json::from_value(serde_json::json!({ "name": "x" })).unwrap();
-        assert!(!old.keep_off_phone);
+        assert!(!old.keep_off_phone && !old.workers_on_phone);
     }
 
     /// Only Claude's explicit "not logged in" warns; a login it can't vouch for, or output that
@@ -1393,7 +1401,8 @@ mod tests {
         assert_eq!((h.models.coordinator.runtime.as_str(), h.models.coordinator.model.as_str(), h.models.coordinator.effort.as_str()), ("claude", "opus", "medium"));
         assert_eq!((h.models.worker.model.as_str(), h.models.worker.effort.as_str()), ("sonnet", "high"));
         assert_eq!((h.cap, h.budget_cents, h.status.as_str()), (DEFAULT_CAP, 1000, STATUS_ACTIVE));
-        assert!(h.checkpoints.values().all(|v| v == "coordinator") && h.checkpoints.len() == 6);
+        assert_eq!(h.checkpoints.len(), 7);
+        assert!(h.checkpoints.iter().all(|(k, v)| v == if k == "settings" { "ask" } else { "coordinator" }), "the human approves settings changes");
         assert_eq!(default_checkpoints(LANDING_INTEGRATION).get("landing").map(String::as_str), Some("ask"), "integration mode always asks");
     }
 

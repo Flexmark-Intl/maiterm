@@ -64,6 +64,7 @@
   import LandLogModal from './LandLogModal.svelte';
   import HiveAutonomyModal from './HiveAutonomyModal.svelte';
   import GallerySettingsModal from './GallerySettingsModal.svelte';
+  import HiveWorkersModal from './HiveWorkersModal.svelte';
   import { autonomyLabel } from '$lib/hive/autonomy';
   import { allHivesLabel, budgetFill, budgetLabel, budgetLevel } from '$lib/hive/budget';
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
@@ -105,6 +106,8 @@
   let deleteOpen = $state(false);
   /** Hive settings → Autonomy (docs/hive.md §7.4), from the header. */
   let autonomyOpen = $state(false);
+  /** Hive settings → Workers and access (docs/hive.md §3.4), also from the header's Slots. */
+  let workersOpen = $state(false);
   /** Hive header → Budget (docs/hive.md §10.3): the budget, output folders, generator hosts. */
   let budgetOpen = $state(false);
   /** The land log (docs/hive.md §8.6), whole from the header or one worker's from its column. */
@@ -828,15 +831,15 @@
         <div class="readouts" aria-label="Hive facts">
           <div class="ro">
             <span class="k">Slots</span>
-            <Tooltip text={room ? `${room.spawns_left_this_hour} starts left this hour, ${room.spawns_left_today} today` : "Workers running at once, of the Hive's cap"}>
-              <span class="v">
+            <Tooltip text={`${room ? `${room.spawns_left_this_hour} starts left this hour, ${room.spawns_left_today} today. ` : ''}Change workers at once, models and network access`}>
+              <button type="button" class="ro-btn" onclick={() => (workersOpen = true)}>
                 {#if (room?.cap ?? hive.cap) <= PIP_MAX}
                   <span class="pips" aria-hidden="true">
                     {#each { length: room?.cap ?? hive.cap } as _, i (i)}<span class="pip" class:on={i < (room?.live ?? 0)} class:starting={i >= (room?.live ?? 0) && i < (room?.live ?? 0) + (room?.starting ?? 0)}></span>{/each}
                   </span>
                 {/if}
                 {room?.live ?? 0} of {room?.cap ?? hive.cap}{#if room?.starting}<span class="sub">+{room.starting} starting</span>{/if}
-              </span>
+              </button>
             </Tooltip>
           </div>
           {#if board?.spend}
@@ -910,6 +913,7 @@
       {hive}
       name={ws?.name ?? ''}
       onclose={() => (settingsOpen = false)}
+      onworkers={() => (workersOpen = true)}
       onautonomy={() => (autonomyOpen = true)}
       onqueue={() => (queueOpen = true)}
       onbudget={() => (budgetOpen = true)}
@@ -923,6 +927,9 @@
   {/if}
   {#if autonomyOpen && hive}
     <HiveAutonomyModal {workspaceId} {hive} onclose={() => (autonomyOpen = false)} />
+  {/if}
+  {#if workersOpen && hive}
+    <HiveWorkersModal {workspaceId} {hive} onclose={() => (workersOpen = false)} />
   {/if}
   {#if budgetOpen && hive}
     <GallerySettingsModal {workspaceId} {hive} spend={board?.spend ?? null} onclose={() => (budgetOpen = false)} />

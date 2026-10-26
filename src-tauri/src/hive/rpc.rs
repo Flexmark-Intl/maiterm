@@ -119,6 +119,11 @@ pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     fn hive_changed(&self, _workspace_id: &str, _hive: &super::record::Hive) {}
     /// Assets were filed or changed (`hive-gallery-changed`): the gallery view refetches.
     fn gallery_changed(&self, _caller: &super::tools::Caller, _ids: &[String]) {}
+    /// The coordinator changed the Hive's settings on its own (§3.4): the human is told.
+    fn settings_changed(&self, _workspace_id: &str, _text: &str) {}
+    /// Something that frees or adds a slot happened outside a tool call's own poll (a raised
+    /// cap): the waiting workers are looked at again. A test polls itself.
+    fn poll_waiters(&self, _workspace_id: &str) {}
 }
 
 /// A Hive's card for the human, as Rust builds it: every word maiTerm's but `reason`.
@@ -338,6 +343,18 @@ impl HiveWindow for AppWindow {
         if let Err(e) = self.handle.emit_to(self.label.as_str(), super::gallery::GALLERY_CHANGED_EVENT, payload) {
             log::warn!("hive {}: gallery change not sent to window {}: {e}", caller.hive.id, self.label);
         }
+    }
+
+    fn settings_changed(&self, workspace_id: &str, text: &str) {
+        use tauri::Emitter;
+        let payload = serde_json::json!({ "workspace_id": workspace_id, "text": text });
+        if let Err(e) = self.handle.emit_to(self.label.as_str(), super::change::SETTINGS_CHANGED_EVENT, payload) {
+            log::warn!("hive: settings notice not sent to window {}: {e}", self.label);
+        }
+    }
+
+    fn poll_waiters(&self, workspace_id: &str) {
+        super::waiters::poll_soon(self.app.clone(), self.handle.clone(), workspace_id.to_string());
     }
 }
 

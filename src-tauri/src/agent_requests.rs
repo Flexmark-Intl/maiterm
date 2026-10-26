@@ -38,7 +38,7 @@ const HIVE_APPROVED_TTL_MS: u64 = 30 * 60 * 1000;
 
 /// What a request asks for. A string on the wire (never a serde enum: an unknown variant in
 /// stored state wipes it on a downgrade), checked against this list when filed.
-pub const KINDS: [&str; 16] = [
+pub const KINDS: [&str; 17] = [
     "mesh_enable",
     "mesh_disable",
     "mesh_link",
@@ -65,12 +65,33 @@ pub const KINDS: [&str; 16] = [
     // alone (`hive::land::approval`), never by a window.
     "hive_land",
     "hive_undo",
+    // The coordinator's change of its Hive's settings (docs/hive.md §3.4): workers at once,
+    // models, the hosts workers reach. Filed and carried out by Rust (`hive::change`).
+    "hive_settings",
 ];
 
 /// The kinds Rust files and carries out itself: no window files one, and an approval runs in
 /// Rust (`hive::land::approval::on_approved`) instead of being handed to a window.
 pub fn is_hive_kind(kind: &str) -> bool {
-    matches!(kind, "hive_land" | "hive_undo")
+    matches!(kind, "hive_land" | "hive_undo" | "hive_settings")
+}
+
+/// An approved Hive request, carried out in Rust by the module that filed it.
+fn hive_approved(app: &AppHandle, r: &AgentRequest) {
+    if r.kind == crate::hive::change::KIND {
+        crate::hive::change::on_approved(app, r);
+    } else {
+        crate::hive::land::approval::on_approved(app, r);
+    }
+}
+
+/// A Hive request denied or lapsed: the module that filed it tells the coordinator.
+fn hive_closed(app: &AppHandle, r: &AgentRequest) {
+    if r.kind == crate::hive::change::KIND {
+        crate::hive::change::on_closed(app, r);
+    } else {
+        crate::hive::land::approval::on_closed(app, r);
+    }
 }
 
 fn pending_ttl(kind: &str) -> u64 {
@@ -135,7 +156,7 @@ fn flush_lapsed() {
             let _ = app.emit("agent-request-settled", r);
             // A Hive's land that lapsed puts its worker back; Rust tells the coordinator.
             if is_hive_kind(&r.kind) {
-                crate::hive::land::approval::on_closed(app, r);
+                hive_closed(app, r);
             }
         }
         let _ = app.emit("agent-requests-changed", ());
@@ -284,6 +305,18 @@ pub fn file_hive(
 fn supersede(list: &mut [AgentRequest], kind: &str, args: &Value, now: u64) -> Vec<AgentRequest> {
     let key = |a: &Value, k: &str| a.get(k).and_then(Value::as_str).map(str::to_string);
     let (hive, task, land) = (key(args, "hive_id"), key(args, "task_id"), key(args, "land_id"));
+    if kind == crate::hive::change::KIND {
+        return list
+            .iter_mut()
+            .filter(|r| r.status == "pending" && r.kind == kind && key(&r.args, "hive_id") == hive)
+            .map(|r| {
+                r.status = "failed".into();
+                r.decided_at = Some(now);
+                r.outcome = Some("superseded by a newer settings change".to_string());
+                r.clone()
+            })
+            .collect();
+    }
     if task.is_none() {
         return Vec::new();
     }
@@ -449,13 +482,13 @@ pub fn decide(app: &AppHandle, id: &str, approve: bool, by: &str) -> Option<Agen
     log::info!("[requests] {} {} ({}) by {by}", r.kind, r.status, &r.id);
     if approve && is_hive_kind(&r.kind) {
         // Carried out in Rust from the stored arguments; it settles the request itself.
-        crate::hive::land::approval::on_approved(app, &r);
+        hive_approved(app, &r);
     } else if approve {
         let _ = app.emit_to(r.window_label.as_str(), "agent-request-approved", &r);
     } else {
         let _ = app.emit("agent-request-settled", &r);
         if is_hive_kind(&r.kind) {
-            crate::hive::land::approval::on_closed(app, &r);
+            hive_closed(app, &r);
         }
     }
     changed(app);

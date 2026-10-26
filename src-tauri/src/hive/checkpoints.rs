@@ -11,7 +11,7 @@ use tauri::AppHandle;
 use super::record::{AutonomySettings, Hive, PROMPT_TIMEOUT_MAX_SECS, PROMPT_TIMEOUT_MIN_SECS};
 use crate::state::{AppData, AppState};
 
-pub const CHECKPOINTS: [&str; 6] = ["plan", "questions", "permissions", "landing", "finals", "interfaces"];
+pub const CHECKPOINTS: [&str; 7] = ["plan", "questions", "permissions", "landing", "finals", "interfaces", "settings"];
 pub const COORDINATOR: &str = "coordinator";
 pub const ASK: &str = "ask";
 
@@ -20,6 +20,8 @@ pub const PERMISSIONS: &str = "permissions";
 pub const QUESTIONS: &str = "questions";
 pub const LANDING: &str = "landing";
 pub const FINALS: &str = "finals";
+/// The coordinator's `hiveChangeSettings` (§3.4): Ask me files a card the human approves.
+pub const SETTINGS: &str = "settings";
 
 /// Whether `key` is set to Ask me.
 pub fn asks(hive: &Hive, key: &str) -> bool {
@@ -38,7 +40,7 @@ pub fn for_prompt_kind(kind: &str) -> Option<&'static str> {
     }
 }
 
-/// The checkpoints as the human sets them: the six keys, each `coordinator` or `ask`; Landing
+/// The checkpoints as the human sets them: the seven keys, each `coordinator` or `ask`; Landing
 /// stays Ask me in the integration mode. A key left out keeps its setting, and keys a later build
 /// added are kept as they were.
 pub fn validate(hive: &Hive, next: &BTreeMap<String, String>) -> Result<BTreeMap<String, String>, String> {
@@ -67,6 +69,7 @@ pub fn label(key: &str) -> &'static str {
         "landing" => "landing",
         "finals" => "picking finals in the gallery",
         "interfaces" => "adding a dependency or changing a public interface",
+        "settings" => "changing workers at once, models and workers\u{2019} network access",
         _ => "this checkpoint",
     }
 }

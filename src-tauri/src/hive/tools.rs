@@ -36,7 +36,7 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The Hive tools built so far: what `tools/list` offers each role and the handler answers.
 /// The rest of the coordinator's (settings' `COORDINATOR_MCP_TOOLS`) are refused as not yet here.
-pub const COORDINATOR_TOOLS: [&str; 16] = [
+pub const COORDINATOR_TOOLS: [&str; 17] = [
     "hiveSpawnWorker",
     "hiveListWorkers",
     "hiveMessageWorker",
@@ -53,6 +53,7 @@ pub const COORDINATOR_TOOLS: [&str; 16] = [
     "hiveProposePlan",
     "hiveSetCriteria",
     "hiveFinish",
+    "hiveChangeSettings",
 ];
 /// Every worker is offered all three; Rust refuses `hiveReport` to a reviewer and `hiveVerdict`
 /// to a builder (`review`).
@@ -299,6 +300,7 @@ fn hive_tool_definitions(role: &str) -> Vec<Value> {
         super::plan::propose_tool_definition(&tab_id),
         super::finish::set_criteria_tool_definition(&tab_id),
         super::finish::finish_tool_definition(&tab_id),
+        super::change::tool_definition(&tab_id),
     ]
 }
 
@@ -455,6 +457,7 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         "hiveProposePlan" => super::plan::propose_tool(&ctx, &caller, args).await,
         "hiveSetCriteria" => super::finish::set_criteria_tool(&ctx, &caller, args).await,
         "hiveFinish" => super::finish::finish_tool(&ctx, &caller, args).await,
+        "hiveChangeSettings" => super::change::change_tool(&ctx, &caller, args).await,
         t =>Err(format!("{t} isn't available in this build of maiTerm yet.")),
     };
     // A worker's phase changed: a freed slot or a failed dependency is news to the waiters.
@@ -1307,13 +1310,13 @@ async fn launch_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, reg: &R
     }))
 }
 
-/// A worker's hidden tab, new: never a pane's active tab (§5), and off the phone when its Hive
-/// was made that way.
+/// A worker's hidden tab, new: never a pane's active tab (§5), and off the phone unless its Hive
+/// shows workers there (by default only the coordinator is a chat on the phone).
 pub(crate) fn worker_tab(w: &WorkerRecord, hive: &Hive) -> Tab {
     let mut tab = Tab::new(w.title.clone());
     tab.custom_name = true;
     tab.hive_role = Some(ROLE_WORKER.to_string());
-    tab.mailink_excluded = hive.settings.keep_off_phone;
+    tab.mailink_excluded = hive.settings.keep_off_phone || !hive.settings.workers_on_phone;
     tab
 }
 

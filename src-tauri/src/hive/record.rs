@@ -178,6 +178,12 @@ pub struct HiveSettings {
     /// Chosen on the Create sheet: every Hive tab is made with `Tab.mailink_excluded`, so no
     /// agent of this Hive is ever a chat on the phone, the coordinator's first turn included.
     pub keep_off_phone: bool,
+    /// Workers are chats on the phone too (unless `keep_off_phone`). Off by default: the phone
+    /// shows the coordinator, which speaks for them.
+    pub workers_on_phone: bool,
+    /// Hosts every builder's sandbox may reach beyond the package registries (§3.4): an API's
+    /// docs, a service the work talks to. Reviewers never get them.
+    pub worker_hosts: Vec<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
