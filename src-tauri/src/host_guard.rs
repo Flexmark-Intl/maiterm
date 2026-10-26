@@ -86,6 +86,17 @@ fn own_address(ip: &IpAddr) -> bool {
     c.as_ref().is_some_and(|(_, mine)| mine.contains(ip))
 }
 
+/// An address that is this computer or its network: what the servers answer by IP, plus the
+/// unspecified and broadcast addresses, which reach this computer when dialled. A Hive worker
+/// may reach none of them (`hive::change`).
+pub fn is_home(ip: &IpAddr) -> bool {
+    let odd = match ip {
+        IpAddr::V4(v) => v.is_unspecified() || v.is_broadcast(),
+        IpAddr::V6(v) => v.is_unspecified(),
+    };
+    odd || ip_is_local(ip) || own_address(ip)
+}
+
 /// The axum layer every maiTerm server puts in front of its routes. A request naming no host at
 /// all is refused too: every HTTP/1.1 client sends one, and HTTP/2 carries it as the authority.
 pub async fn require_local_host(req: Request, next: Next) -> Response {

@@ -247,15 +247,10 @@ fn bulleted(lines: &[String]) -> String {
     lines.iter().map(|l| format!("\n- {l}")).collect()
 }
 
+/// "Home", as maiTerm's servers count it (`host_guard::is_home`): what they answer is exactly
+/// what no worker may reach.
 fn is_private_ip(ip: &std::net::IpAddr) -> bool {
-    use std::net::IpAddr;
-    match ip {
-        IpAddr::V4(v) => v.is_loopback() || v.is_private() || v.is_link_local() || v.is_unspecified() || v.is_broadcast(),
-        IpAddr::V6(v) => {
-            let s = v.segments()[0];
-            v.is_loopback() || v.is_unspecified() || (s & 0xfe00) == 0xfc00 || (s & 0xffc0) == 0xfe80 || v.to_ipv4_mapped().is_some_and(|m| is_private_ip(&IpAddr::V4(m)))
-        }
-    }
+    crate::host_guard::is_home(ip)
 }
 
 /// A host added now must not answer this computer or its network (§6.7): a public name for
@@ -538,7 +533,7 @@ mod tests {
 
     #[test]
     fn a_private_address_is_this_computer_or_its_network() {
-        for ip in ["127.0.0.1", "10.1.2.3", "192.168.1.5", "172.16.0.1", "169.254.1.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1"] {
+        for ip in ["127.0.0.1", "10.1.2.3", "192.168.1.5", "172.16.0.1", "169.254.1.1", "0.0.0.0", "100.101.1.2", "::1", "::", "fd00::1", "fe80::1", "::ffff:127.0.0.1"] {
             assert!(is_private_ip(&ip.parse().unwrap()), "{ip}");
         }
         for ip in ["8.8.8.8", "142.250.1.1", "2606:4700::1111"] {
