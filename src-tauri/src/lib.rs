@@ -6,6 +6,7 @@ mod claude_code;
 mod commands;
 mod comms;
 mod filetree;
+mod host_guard;
 mod hive;
 mod instance;
 mod instance_lock;

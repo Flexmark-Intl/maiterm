@@ -21,6 +21,7 @@ fn action_for(tool: &str) -> Option<&'static str> {
         "browserEval" => "eval",
         "browserConsole" => "console",
         "browserNetwork" => "network",
+        "browserWaitFor" => "wait",
         _ => return None,
     })
 }

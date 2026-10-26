@@ -512,6 +512,9 @@ pub async fn serve_server(app_handle: AppHandle, state: Arc<AppState>, setup: Se
         // The maiTerm Chrome extension (docs/browser-link.md §3). Authenticated by its Origin and
         // the token it got over native messaging, not by the MCP auth header.
         .route("/browser-link", get(browser_link_handler))
+        // Only requests addressed to this computer (host_guard.rs): a public name pointed at
+        // 127.0.0.1 reaches nothing here.
+        .layer(axum::middleware::from_fn(crate::host_guard::require_local_host))
         .with_state(server_state);
 
     log::info!("Claude Code IDE server listening on http://127.0.0.1:{}", setup.port);
@@ -2905,7 +2908,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 89] = [
+const PEER_ADDRESSING_TOOLS: [&str; 90] = [
     // A tab's auto-resume command and its trigger variables (interpolated unescaped into that
     // command, e.g. `%claudeSessionId`) run in that tab's shell at its next spawn or recover:
     // set on another tab, they plant a command there.
@@ -2998,6 +3001,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 89] = [
     "browserEval",
     "browserConsole",
     "browserNetwork",
+    "browserWaitFor",
     // Hive tools (docs/hive.md §7.2) are authorized by the CALLER's `hive_role`: on a guessed
     // identity they would spawn, land or report as another Hive's agent.
     "hiveSpawnWorker",
@@ -3037,7 +3041,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 89] = [
 /// The agent-request tools (agent_requests.rs) are here for the same reason from the other side:
 /// a request is shown to the human as "the agent in <tab> asks…", so the tab named must be the
 /// caller, and a request's status is only its own tab's to read.
-const OWN_TAB_ONLY_TOOLS: [&str; 67] = [
+const OWN_TAB_ONLY_TOOLS: [&str; 68] = [
     // What a tab's shell runs on its next spawn is that tab's own business: with any `tabId`,
     // one agent could set the command another tab replays (found by the Hive spike 15 audit,
     // 2026-10-23). The only in-repo use is an agent fixing its OWN auto-resume.
@@ -3074,6 +3078,7 @@ const OWN_TAB_ONLY_TOOLS: [&str; 67] = [
     "browserEval",
     "browserConsole",
     "browserNetwork",
+    "browserWaitFor",
     // A Hive tool acts as the caller's role in the caller's Hive (docs/hive.md §7.2): a named
     // tab must be the caller, never a coordinator a worker names.
     "hiveSpawnWorker",

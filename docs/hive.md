@@ -222,8 +222,11 @@ is never earnable (§7.6): only the human hands it over. Every change, by anyone
 literals, `localhost`, `.local`), well-known public names for 127.0.0.1 (`lvh.me`, `*.nip.io`,
 `localtest.me`…, `budget::LOOPBACK_DOMAINS`) are refused, and a host added by any path is looked
 up and refused when it answers a loopback, private or link-local address (`change::refuse_private_hosts`;
-a `*.` entry by a name under it). A name that doesn't resolve yet still passes: whoever owns it
-could point it home later, which is one reason the default keeps hosts the human's decision.
+a `*.` entry by a name under it). A name that doesn't resolve yet still passes, and whoever owns
+it could point it home later: so maiTerm's own servers (the MCP server, maiLink) answer only a
+request whose Host is `localhost`, a `.local` name, or a loopback, private, link-local or VPN
+address (`host_guard.rs`, Darryl's call: localhost, loopback and LAN), and a name pointed home
+reaches nothing of maiTerm's.
 
 **On the phone, by default only the coordinator is a chat** (Darryl, 2026-10-26): it speaks for
 its workers. The Create sheet offers the coordinator only (default), the coordinator and its

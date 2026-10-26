@@ -1419,6 +1419,7 @@ fn file_tree_tools() -> Vec<Value> {
 /// human linked to the caller's tab, in the human's own browser and logins.
 fn browser_tools() -> Vec<Value> {
     const LINKED: &str = "Acts on a Chrome tab your human linked to your maiTerm tab (in their own browser, signed in as them): the one you name with tab, else your current one (the last you named, or your first link). With several and none current (after a restart, or when it closed), name one. Call browserStatus first if you don't know what you have. Only your human can link a tab.";
+    const SETTLES: &str = "It then waits for the page to settle (a page load it started finishes and the page's requests go quiet, up to 5 s) and says whether it navigated and settled, so don't sleep after it; browserWaitFor waits for something specific.";
     let tab_id = serde_json::json!({ "type": "string", "description": "Your own tab (auto-injected)" });
     let tab = serde_json::json!({ "type": "string", "description": "Which of your linked Chrome tabs, by handle from browserStatus (b1, b2…); it becomes your current one. Default: your current one" });
     serde_json::json!([
@@ -1429,7 +1430,7 @@ fn browser_tools() -> Vec<Value> {
         },
         {
             "name": "browserNavigate",
-            "description": format!("Load a URL in your linked Chrome tab, or go back, forward or reload. Waits for the page to load (up to 15 s). {LINKED}"),
+            "description": format!("Load a URL in your linked Chrome tab, or go back, forward or reload. Waits for the page to load (up to 15 s) and settle (its requests go quiet), and says whether it settled, so don't sleep after it; browserWaitFor waits for something specific. {LINKED}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1454,7 +1455,7 @@ fn browser_tools() -> Vec<Value> {
         },
         {
             "name": "browserClick",
-            "description": format!("Click an element of your linked Chrome tab by its ref from browserSnapshot: it is scrolled into view and clicked with real mouse events. {LINKED}"),
+            "description": format!("Click an element of your linked Chrome tab by its ref from browserSnapshot: it is scrolled into view and clicked with real mouse events. {SETTLES} {LINKED}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1468,7 +1469,7 @@ fn browser_tools() -> Vec<Value> {
         },
         {
             "name": "browserType",
-            "description": format!("Type text into an element of your linked Chrome tab (by ref from browserSnapshot), or into the focused element when no ref is given. Clears the field first unless clear is false. Never fill in a sign-in form or type a password, one-time code or other credential: ask your human to sign in themselves. A typed secret stays in your transcript, and focusing those fields opens password managers' in-page popups, which lock you out of the tab. {LINKED}"),
+            "description": format!("Type text into an element of your linked Chrome tab (by ref from browserSnapshot), or into the focused element when no ref is given. Clears the field first unless clear is false. Never fill in a sign-in form or type a password, one-time code or other credential: ask your human to sign in themselves. A typed secret stays in your transcript, and focusing those fields opens password managers' in-page popups, which lock you out of the tab. {SETTLES} {LINKED}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1484,7 +1485,7 @@ fn browser_tools() -> Vec<Value> {
         },
         {
             "name": "browserPressKey",
-            "description": format!("Press a key in your linked Chrome tab, in whatever has focus (inside an iframe too): Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space, or a single character, optionally with modifiers joined by +: Shift+Tab, Mod+A (Mod is Cmd on a Mac, Ctrl elsewhere; Mod+A/Z/X/C/V run select all, undo, cut, copy, paste), Alt, Ctrl, Meta. {LINKED}"),
+            "description": format!("Press a key in your linked Chrome tab, in whatever has focus (inside an iframe too): Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space, or a single character, optionally with modifiers joined by +: Shift+Tab, Mod+A (Mod is Cmd on a Mac, Ctrl elsewhere; Mod+A/Z/X/C/V run select all, undo, cut, copy, paste), Alt, Ctrl, Meta. {SETTLES} {LINKED}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1546,6 +1547,21 @@ fn browser_tools() -> Vec<Value> {
                     "include_static": { "type": "boolean", "description": "Include images, fonts, stylesheets and media (default false)" },
                     "request_id": { "type": "string", "description": "Return this request with its response body (up to 20000 characters)" },
                     "clear": { "type": "boolean", "description": "Empty the log after reading (default false)" }
+                }
+            }
+        },
+        {
+            "name": "browserWaitFor",
+            "description": format!("Wait in your linked Chrome tab until text appears on the page (or, with gone, disappears), or the URL contains something, or both; it returns the moment that holds, across page loads, or met: false at the timeout. Use it instead of sleeping for anything the page shows when it is ready: a result, a confirmation, a spinner going away. Your actions already wait for the page to settle (see browserClick); this is for what settling can't judge. Text is matched exactly, against the page's visible text (not inside iframes or shadow roots). {LINKED}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": tab_id,
+                    "tab": tab,
+                    "text": { "type": "string", "description": "Text to wait for on the page (case-sensitive)" },
+                    "gone": { "type": "boolean", "description": "Wait for the text to disappear instead (default false)" },
+                    "url": { "type": "string", "description": "Wait until the URL contains this" },
+                    "timeout": { "type": "number", "description": "Seconds, 0.5 to 25 (default 10)" }
                 }
             }
         }

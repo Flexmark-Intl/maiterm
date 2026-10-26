@@ -18,6 +18,13 @@ const consoleLast = new Map();
  *  that kept the buffer: enabling Runtime and Log makes Chrome replay the page's stored messages. */
 const consoleFloor = new Map();
 
+/** tabId → requestId → {at, type}: requests in flight, for knowing when the page has settled. */
+const inflight = new Map();
+/** tabId → when the page last started or finished a request, or navigated (ms). */
+const lastActivity = new Map();
+/** tabId → when the top frame last navigated (ms). */
+const lastNav = new Map();
+
 const send = (tabId, method, params = {}) => chrome.debugger.sendCommand({ tabId }, method, params);
 
 /** Chrome refuses to debug a tab holding another extension's frame, and detaches a session the
@@ -47,6 +54,8 @@ export async function ensureAttached(tabId) {
     }
   }
   attached.add(tabId);
+  // Whatever was in flight before this session will never report its end to it.
+  inflight.set(tabId, new Map());
   if (consoleBuf.has(tabId)) {
     // Re-attached with the record kept (§4): skip the replay, and mark requests that were in
     // flight while detached, whose ends this session will never report.
@@ -75,6 +84,7 @@ export async function detach(tabId) {
   attached.delete(tabId);
   consoleBuf.delete(tabId);
   netLog.delete(tabId);
+  forgetActivity(tabId);
   try {
     await chrome.debugger.detach({ tabId });
   } catch {
@@ -87,6 +97,7 @@ export async function detach(tabId) {
  *  action re-attaches and carries on adding to it. */
 export function forget(tabId, { keepLogs = false } = {}) {
   attached.delete(tabId);
+  forgetActivity(tabId);
   if (keepLogs) return;
   consoleBuf.delete(tabId);
   netLog.delete(tabId);
@@ -117,6 +128,31 @@ function where(stack, url, line, col) {
   const l = f ? f.lineNumber : line;
   const c = f ? f.columnNumber : col;
   return l == null ? u : `${u}:${l + 1}:${(c ?? 0) + 1}`;
+}
+
+function forgetActivity(tabId) {
+  inflight.delete(tabId);
+  lastActivity.delete(tabId);
+  lastNav.delete(tabId);
+}
+
+/** Requests that can change what the page shows. Images, fonts, beacons and the like are left out:
+ *  a page that lazy-loads images or pings analytics as it scrolls would otherwise never settle. */
+const CONTENT_REQUESTS = new Set(['Document', 'XHR', 'Fetch', 'Script']);
+
+function onActivity(tabId, method, p) {
+  const live = inflight.get(tabId);
+  if (!live) return;
+  if (method === 'Network.requestWillBeSent') {
+    if (!CONTENT_REQUESTS.has(p.type)) return;
+    live.set(p.requestId, { at: Date.now() });
+  } else if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') {
+    if (!live.delete(p.requestId)) return;
+  } else if (method === 'Page.frameNavigated') {
+    if (p.frame?.parentId) return;
+    lastNav.set(tabId, Date.now());
+  } else return;
+  lastActivity.set(tabId, Date.now());
 }
 
 function onNetwork(tabId, method, p) {
@@ -153,6 +189,7 @@ function onNetwork(tabId, method, p) {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const tabId = source.tabId;
   if (tabId == null) return;
+  onActivity(tabId, method, params);
   if (method.startsWith('Network.')) {
     onNetwork(tabId, method, params);
   } else if (method === 'Runtime.consoleAPICalled') {
@@ -187,6 +224,100 @@ async function waitForLoad(tabId) {
     await sleep(150);
   }
   return false;
+}
+
+/** No content request for this long after the last one ended, nothing loading: the page has settled. */
+const QUIET_MS = 400;
+/** A request open this long is a long poll or a stream, not the page still loading. */
+const LONG_LIVED_MS = 4000;
+const SETTLE_AFTER_ACTION_MS = 5000;
+const SETTLE_AFTER_NAVIGATE_MS = 8000;
+
+/** Wait until the page has settled after an action begun at `since`, as Chrome reports it (the tab's
+ *  load, and the requests in flight), up to `max` ms. A page that keeps polling never settles; then
+ *  it says so, and the agent looks for itself. */
+async function settle(tabId, since, max) {
+  for (;;) {
+    const now = Date.now();
+    const t = await chrome.tabs.get(tabId).catch(() => null);
+    const busy = [...(inflight.get(tabId)?.values() ?? [])].filter((r) => now - r.at < LONG_LIVED_MS).length;
+    const quietFor = now - Math.max(lastActivity.get(tabId) ?? 0, since);
+    const navigated = (lastNav.get(tabId) ?? 0) >= since;
+    if (!t || (t.status === 'complete' && busy === 0 && quietFor >= QUIET_MS)) {
+      return { navigated, settled: true, waited_ms: now - since };
+    }
+    if (now - since >= max) {
+      return {
+        navigated,
+        settled: false,
+        waited_ms: now - since,
+        note: t.status === 'loading'
+          ? 'The page was still loading when maiTerm stopped waiting: take a snapshot, or browserWaitFor what you expect.'
+          : `The page still had ${busy} request${busy === 1 ? '' : 's'} going when maiTerm stopped waiting (it may poll constantly): take a snapshot, or browserWaitFor what you expect.`,
+      };
+    }
+    await sleep(50);
+  }
+}
+
+const WAIT_MAX_S = 25; // under maiTerm's 30 s relay timeout
+
+/** In the page: resolve true once its text has (or, with gone, no longer has) `text`, watching DOM
+ *  changes rather than polling; false after `ms`. Checks at most every 100 ms, since innerText
+ *  lays the page out. */
+const WAIT_FOR_TEXT = `function (text, gone, ms) {
+  return new Promise((resolve) => {
+    const ok = () => (document.body ? document.body.innerText : '').includes(text) !== gone;
+    if (ok()) return resolve(true);
+    let pending = false;
+    const obs = new MutationObserver(() => {
+      if (pending) return;
+      pending = true;
+      setTimeout(() => { pending = false; if (ok()) { done(); resolve(true); } }, 100);
+    });
+    const timer = setTimeout(() => { done(); resolve(ok()); }, ms);
+    const done = () => { obs.disconnect(); clearTimeout(timer); };
+    obs.observe(document, { subtree: true, childList: true, characterData: true });
+  });
+}`;
+
+/** Wait for text to appear or go, or the URL to contain something, across navigations. */
+async function waitFor(tabId, args) {
+  const text = args.text != null && String(args.text) !== '' ? String(args.text) : null;
+  const url = args.url != null && String(args.url) !== '' ? String(args.url) : null;
+  if (text == null && url == null) throw new Error('Say what to wait for: text (with gone: true to wait for it to disappear), url, or both.');
+  const gone = args.gone === true;
+  const timeoutMs = Math.min(Math.max(Number(args.timeout ?? 10), 0.5), WAIT_MAX_S) * 1000;
+  const start = Date.now();
+  for (;;) {
+    const remaining = timeoutMs - (Date.now() - start);
+    const info = await tabInfo(tabId);
+    const urlOk = url == null || info.url.includes(url);
+    let textOk = text == null;
+    if (urlOk && text != null) {
+      try {
+        // Give the page a slice at a time: a navigation ends this context, and the next slice runs in the new page.
+        const { result: doc } = await send(tabId, 'Runtime.evaluate', { expression: 'document' });
+        const { result } = await send(tabId, 'Runtime.callFunctionOn', {
+          objectId: doc.objectId,
+          functionDeclaration: WAIT_FOR_TEXT,
+          arguments: [{ value: text }, { value: gone }, { value: Math.max(0, Math.min(remaining, 2000)) }],
+          awaitPromise: true,
+          returnByValue: true,
+        });
+        textOk = result.value === true;
+      } catch {
+        // The page navigated mid-wait; look again in the new one.
+        await sleep(100);
+      }
+    }
+    if (urlOk && textOk) return { met: true, waited_ms: Date.now() - start, ...(await tabInfo(tabId)) };
+    if (Date.now() - start >= timeoutMs) {
+      const what = [text != null ? `${gone ? 'no' : ''} "${text}" on the page`.trim() : null, url != null ? `a URL containing "${url}"` : null].filter(Boolean).join(' and ');
+      return { met: false, waited_ms: Date.now() - start, note: `Gave up after ${Math.round(timeoutMs / 1000)} s waiting for ${what}.`, ...(await tabInfo(tabId)) };
+    }
+    if (!urlOk) await sleep(100);
+  }
 }
 
 function refToNodeId(ref) {
@@ -312,8 +443,7 @@ async function click(tabId, args) {
   } catch (e) {
     throw staleRef(e);
   }
-  await sleep(300);
-  return { clicked: true, ...(await tabInfo(tabId)) };
+  return { clicked: true };
 }
 
 const KEYS = {
@@ -443,10 +573,7 @@ async function type(tabId, args) {
     else if (!text) await press(tabId, 'Delete');
   }
   if (text) await send(tabId, 'Input.insertText', { text });
-  if (args.submit) {
-    await press(tabId, 'Enter');
-    await sleep(300);
-  }
+  if (args.submit) await press(tabId, 'Enter');
   return {
     typed: true,
     ...(notCleared ? { note: "What has focus isn't a text field, so nothing was cleared, and the text may have gone nowhere: take a snapshot to check." } : {}),
@@ -466,8 +593,7 @@ async function navigate(tabId, args) {
     const url = /^[a-z][a-z0-9+.-]*:/i.test(target) ? target : `https://${target}`;
     await chrome.tabs.update(tabId, { url });
   }
-  const loaded = await waitForLoad(tabId);
-  return { loaded, ...(await tabInfo(tabId)) };
+  return { loaded: await waitForLoad(tabId) };
 }
 
 async function screenshot(tabId, args) {
@@ -547,7 +673,7 @@ export async function runAction(tabId, action, args = {}) {
       throw new Error(`The browser doesn't let extensions work on ${url.split('/').slice(0, 3).join('/')} pages. Navigate somewhere else first.`);
     }
     // Navigating away is done through chrome.tabs, which needs no debugger.
-    return navigate(tabId, args);
+    return { ...(await navigate(tabId, args)), ...(await tabInfo(tabId)) };
   }
   try {
     return await perform(tabId, action, args);
@@ -567,23 +693,34 @@ export async function runAction(tabId, action, args = {}) {
 }
 
 /** Actions that change nothing, so repeating one after a detach is harmless. */
-const READS = new Set(['snapshot', 'screenshot', 'console', 'network']);
+const READS = new Set(['snapshot', 'screenshot', 'console', 'network', 'wait']);
+
+/** An action that can change the page, then the wait for it to settle (navigated, settled,
+ *  waited_ms), then where the tab is now. This is what spares the agent sleeping between steps. */
+async function settled(tabId, max, act) {
+  const since = Date.now();
+  const r = await act();
+  return { ...r, ...(await settle(tabId, since, max)), ...(await tabInfo(tabId)) };
+}
 
 async function perform(tabId, action, args) {
   await ensureAttached(tabId);
   switch (action) {
     case 'navigate':
-      return navigate(tabId, args);
+      return settled(tabId, SETTLE_AFTER_NAVIGATE_MS + LOAD_TIMEOUT_MS, () => navigate(tabId, args));
     case 'snapshot':
       return snapshot(tabId, args);
     case 'click':
-      return click(tabId, args);
+      return settled(tabId, SETTLE_AFTER_ACTION_MS, () => click(tabId, args));
     case 'type':
-      return type(tabId, args);
+      return settled(tabId, SETTLE_AFTER_ACTION_MS, () => type(tabId, args));
     case 'press':
-      await press(tabId, String(args.key ?? ''));
-      await sleep(150);
-      return { pressed: true, ...(await tabInfo(tabId)) };
+      return settled(tabId, SETTLE_AFTER_ACTION_MS, async () => {
+        await press(tabId, String(args.key ?? ''));
+        return { pressed: true };
+      });
+    case 'wait':
+      return waitFor(tabId, args);
     case 'screenshot':
       return screenshot(tabId, args);
     case 'eval':

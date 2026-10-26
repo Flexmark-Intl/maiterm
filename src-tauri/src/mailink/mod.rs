@@ -485,7 +485,9 @@ pub async fn serve(app_state: Arc<AppState>, cfg: MailinkConfig, app_handle: tau
         fingerprint: cfg.fingerprint.clone(),
         dev_token: cfg.dev_token.clone(),
     };
-    let router = build_router(api);
+    // Only requests addressed to this computer or its network (host_guard.rs): the phone dials
+    // the IP its QR carried. Outside `build_router`, whose tests send no Host.
+    let router = build_router(api).layer(axum::middleware::from_fn(crate::host_guard::require_local_host));
 
     let tls = match RustlsConfig::from_pem(cfg.cert_pem.into_bytes(), cfg.key_pem.into_bytes()).await
     {

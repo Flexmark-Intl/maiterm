@@ -540,6 +540,12 @@ bearer token never transits a QR or a screen after step 2.
 > their WireGuard tunnel (any client) and the QR/host simply carries the WG peer IP instead
 > of the LAN IP. From maiLink's perspective it's the same TLS endpoint. We *document* a
 > recommended WG setup; we don't ship a VPN.
+>
+> **Host check (2026-10-26):** the listener answers only a request whose Host is `localhost`,
+> a `.local` name, or a loopback, private (RFC 1918), link-local, CGNAT (100.64/10, Tailscale)
+> or IPv6 unique-local address, and `421` otherwise (`src-tauri/src/host_guard.rs`), so a public
+> DNS name pointed at the desktop reaches nothing. Dial the IP the QR carries, or a `.local`
+> name; a public name or address is refused. No wire change.
 
 ---
 
