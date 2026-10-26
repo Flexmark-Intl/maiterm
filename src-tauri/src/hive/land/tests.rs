@@ -826,6 +826,7 @@ fn seeding_never_writes_through_a_link_the_merged_tree_tracks() {
 
 /// The third live test logged `seeded web from worker …'s worktree: .claude`. Agent config the
 /// config rule lists, the human's extra paths included, never reaches a check's tree.
+#[cfg(unix)] // seeding copies with /bin/cp
 #[test]
 fn seeding_skips_agent_config() {
     let rig = Rig::new("seedconfig", &["web"]);
