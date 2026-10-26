@@ -4,9 +4,11 @@
 //!
 //! The servers bind loopback (the MCP server) or every interface (maiLink, for the phone over the
 //! LAN or a WireGuard tunnel). A public DNS name pointed at 127.0.0.1 or a LAN address, by its
-//! owner and whenever they like (DNS rebinding), would otherwise reach them from anything that may
-//! reach that name: a browser page, or a Hive worker whose sandbox allows the host (docs/hive.md
-//! §3.4, §6.7). Every legitimate client already names an address: agents and hooks
+//! owner and whenever they like (DNS rebinding), would otherwise reach them from a browser page,
+//! which can't choose the Host it sends. A client that can (a Hive worker's shell, through a host
+//! its sandbox allows) is not stopped here: for workers the hosts are looked up when added and at
+//! every launch instead (docs/hive.md §3.4), and the routes' own auth still applies. Every
+//! legitimate client already names an address: agents and hooks
 //! `127.0.0.1`/`localhost`, the OAuth redirect `127.0.0.1`, the phone the IP its pairing QR
 //! carried (docs/mailink-protocol.md §3). So the name is the check, before any route runs.
 
@@ -63,12 +65,33 @@ pub fn host_allowed(raw: &str) -> bool {
     host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local")
 }
 
+/// This computer's own primary address, as maiLink's pairing QR names it (`mailink::local_ip`):
+/// on a network that hands out public addresses (a campus, some offices) it is a public one, and
+/// still this computer. A name pointed at it is still refused: only the address itself counts.
+/// Read through the routing table (no packet sent), at most once every 30 s.
+fn own_address(ip: &IpAddr) -> bool {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, Vec<IpAddr>)>> = Mutex::new(None);
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if c.as_ref().is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(30)) {
+        let route = |bind: &str, to: &str| {
+            let s = std::net::UdpSocket::bind(bind).ok()?;
+            s.connect(to).ok()?;
+            s.local_addr().ok().map(|a| a.ip())
+        };
+        let mine: Vec<IpAddr> = [route("0.0.0.0:0", "8.8.8.8:80"), route("[::]:0", "[2001:4860:4860::8888]:80")].into_iter().flatten().collect();
+        *c = Some((Instant::now(), mine));
+    }
+    c.as_ref().is_some_and(|(_, mine)| mine.contains(ip))
+}
+
 /// The axum layer every maiTerm server puts in front of its routes. A request naming no host at
 /// all is refused too: every HTTP/1.1 client sends one, and HTTP/2 carries it as the authority.
 pub async fn require_local_host(req: Request, next: Next) -> Response {
     let named = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().authority().map(|a| a.to_string()));
     match named {
-        Some(h) if host_allowed(&h) => next.run(req).await,
+        Some(h) if host_allowed(&h) || host_part(&h).parse::<IpAddr>().is_ok_and(|ip| own_address(&ip)) => next.run(req).await,
         other => {
             log::warn!("refused a request to {} naming host {:?}: not this computer or its network", req.uri().path(), other.as_deref().map(|h| crate::hive::deliver::one_line(h, 80)));
             (StatusCode::MISDIRECTED_REQUEST, "maiTerm answers only requests addressed to this computer or its network").into_response()

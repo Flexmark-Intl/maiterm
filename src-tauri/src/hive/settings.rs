@@ -657,6 +657,18 @@ pub fn worker_settings_json(hive: &Hive, record: &LaunchRecord, w: &WorkerRecord
     // uses): a code worker or a reviewer gets the registries alone.
     let generates = !w.is_reviewer() && super::roles::role(&w.role).is_some_and(|r| r.generators);
     let domains = worker_domains(hive, &ctx.remote_hosts, !w.is_reviewer(), generates);
+    // Looked up again at every launch: a host its owner has pointed at this computer or its
+    // network since it was added is left out (docs/hive.md §3.4). The registries are ours.
+    let domains: Vec<String> = domains
+        .into_iter()
+        .filter(|d| {
+            let home = !PACKAGE_REGISTRIES.contains(&d.as_str()) && super::change::points_home_blocking(d);
+            if home {
+                log::warn!("hive {}: {d} now answers this computer or its network; left out of {}'s sandbox", hive.id, w.slug);
+            }
+            !home
+        })
+        .collect();
     Ok(json!({
         "sandbox": {
             "enabled": true,

@@ -223,10 +223,16 @@ literals, `localhost`, `.local`), well-known public names for 127.0.0.1 (`lvh.me
 `localtest.me`…, `budget::LOOPBACK_DOMAINS`) are refused, and a host added by any path is looked
 up and refused when it answers a loopback, private or link-local address (`change::refuse_private_hosts`;
 a `*.` entry by a name under it). A name that doesn't resolve yet still passes, and whoever owns
-it could point it home later: so maiTerm's own servers (the MCP server, maiLink) answer only a
-request whose Host is `localhost`, a `.local` name, or a loopback, private, link-local or VPN
-address (`host_guard.rs`, Darryl's call: localhost, loopback and LAN), and a name pointed home
-reaches nothing of maiTerm's.
+it could point it home later, so each worker's hosts are **looked up again at every launch** and
+one that now answers home is left out of its sandbox (`change::points_home_blocking`, 2 s each).
+maiTerm's own servers (the MCP server, maiLink) also answer only a request whose Host is
+`localhost`, a `.local` name, a loopback, private, link-local or VPN address, or this computer's
+own address (`host_guard.rs`, Darryl's call: localhost, loopback and LAN). That stops a browser
+page, which can't choose its Host; **it doesn't stop a worker's shell**, which can send
+`Host: 127.0.0.1` through a host that was public when looked up and pointed home since, while
+that worker runs (found by review, 2026-10-26). Closing that needs the sandbox proxy to refuse a
+connection that resolves home, which is Claude Code's, not ours; until then the default keeps
+hosts the human's decision, and the routes' own auth still applies.
 
 **On the phone, by default only the coordinator is a chat** (Darryl, 2026-10-26): it speaks for
 its workers. The Create sheet offers the coordinator only (default), the coordinator and its

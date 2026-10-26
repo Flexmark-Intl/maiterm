@@ -279,6 +279,23 @@ pub(crate) async fn refuse_private_hosts(hosts: &[String]) -> Result<(), String>
     Ok(())
 }
 
+/// `refuse_private_hosts` for one host, from a blocking caller (a worker's launch): whether it
+/// answers this computer or its network now. At most 2 s; a lookup that fails or runs out passes,
+/// as when it is added.
+pub fn points_home_blocking(host: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let Ok(h) = normalize_host(host) else { return false };
+    let name = match h.strip_prefix("*.") {
+        Some(base) => format!("maiterm-probe.{base}:443"),
+        None => format!("{h}:443"),
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(name.to_socket_addrs().map(|a| a.map(|s| s.ip()).any(|ip| is_private_ip(&ip))).unwrap_or(false));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or(false)
+}
+
 /// The tool's arguments: the change, and the coordinator's reason.
 pub fn parse_args(args: &Value) -> Result<(SettingsChange, Option<String>), String> {
     let mut change: SettingsChange = serde_json::from_value(args.clone()).map_err(|e| format!("The settings don\u{2019}t read: {e}"))?;
