@@ -8,7 +8,7 @@
   import type { HiveDeletePreview } from '$lib/tauri/types';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
-  import { deleteRefusal, deleteSummary, formatBytes, keptLines, removedLines } from '$lib/hive/delete';
+  import { deleteRefusal, deleteSummary, formatBytes, keptLines, removedLines, stoppingLines } from '$lib/hive/delete';
   import { error as logError } from '@tauri-apps/plugin-log';
 
   interface Props {
@@ -40,7 +40,7 @@
   });
 
   const blocked = $derived(deleteRefusal(preview));
-  const kept = $derived(preview ? keptLines(preview, deleteMemory) : []);
+  const kept = $derived(preview ? keptLines(preview, deleteMemory, deleteGallery) : []);
   const removed = $derived(preview ? removedLines(preview, deleteGallery, deleteMemory) : []);
   const canDelete = $derived(!!preview && !blocked && !deleting);
 
@@ -91,12 +91,14 @@
       {:else if !preview}
         <p class="note">Reading what the Hive holds…</p>
       {:else}
-        {#if preview.live_agents.length}
-          <section>
-            <h4>Agents that stop</h4>
-            <ul>{#each preview.live_agents as a (a)}<li>{a}</li>{/each}</ul>
-          </section>
-        {/if}
+        <section>
+          <h4>Agents that stop</h4>
+          {#if preview.live_agents.length}
+            <ul>{#each stoppingLines(preview) as a (a)}<li>{a}</li>{/each}</ul>
+          {:else}
+            <p class="quiet">{stoppingLines(preview)[0]}.</p>
+          {/if}
+        </section>
         <section>
           <h4>Branches not landed</h4>
           {#if preview.unlanded.length}

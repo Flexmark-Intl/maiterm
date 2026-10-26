@@ -164,7 +164,34 @@ fn queued_list(hive: &Hive, folders: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// The land checks `hiveRun` also takes (`run::land_check_commands`): a pass is the receipt
+/// that its land will pass, and a worker may still run one in its own shell.
+fn land_check_line(hive: &Hive, folders: &[&str], worker: bool) -> String {
+    let listed: Vec<String> = super::run::land_check_commands(hive)
+        .iter()
+        .filter(|c| folders.contains(&c.folder.as_str()))
+        .map(|c| format!("`{}` in {}", c.words().join(" "), c.folder))
+        .collect();
+    if listed.is_empty() {
+        return String::new();
+    }
+    if worker {
+        format!(
+            "- Land checks: {}. Run one through `hiveRun` on your committed tip and its pass is a `checks` receipt for your \
+             report; it runs freely in your shell too, but only a `hiveRun` pass counts.\n",
+            listed.join("; ")
+        )
+    } else {
+        format!("- Each folder's land check also runs through `hiveRun` for a worker's `checks` receipt: {}.\n", listed.join("; "))
+    }
+}
+
 fn queued_lines(hive: &Hive, folders: Vec<&str>, worker: bool) -> String {
+    let checks = land_check_line(hive, &folders, worker);
+    queued_lines_of(hive, folders, worker) + &checks
+}
+
+fn queued_lines_of(hive: &Hive, folders: Vec<&str>, worker: bool) -> String {
     let listed = queued_list(hive, &folders);
     if listed.is_empty() {
         return if worker { "- Nothing is queued in your folders: run tests and builds in your own shell.\n".to_string() } else { String::new() };
@@ -320,6 +347,11 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
     b.push_str(
         "- Your maiTerm tools are in your tool list. If one you need is missing, ask your human with a blocker; never \
          substitute or mock it.\n",
+    );
+    b.push_str(
+        "- A spawn refused because Claude Code doesn't trust a repo is your human's to fix: put maiTerm's refusal to them \
+         in an action blocker, as it says (which account, which folder of theirs). Never run claude anywhere to trust it \
+         yourself: a read copy or worktree takes its trust from your human's repo, under the account the Hive runs as.\n",
     );
     b.push_str(&format!(
         "- Reviews: when the work matters, spawn its checker role with `reviews: <worker>` once that worker reports done. \
@@ -670,6 +702,23 @@ mod tests {
         assert!(b.contains(h.instructions.trim()), "never truncated");
         assert!(b.contains("## Roles") && b.contains(&crate::hive::roles::catalogue_lines()), "the catalogue, names and lines only");
         assert!(b.find("## Roles") < b.find("## Instructions from your human"), "the human's words come last");
+    }
+
+    /// The third live test: a worker couldn't cite the land check, and the coordinator had no
+    /// word on whose an untrusted repo is. Both briefs list the land check as runnable; only the
+    /// human's queued commands are refused in a shell.
+    #[test]
+    fn both_briefs_list_the_land_checks_and_the_coordinator_whose_trust_is() {
+        let (mut h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        h.folders[0].land_check = Some("python3 test_calc.py".into());
+        let c = brief_md(&h, &p, &PrecedentCounts::default());
+        assert!(c.contains("land check also runs through `hiveRun`") && c.contains("`python3 test_calc.py` in web"), "{c}");
+        assert!(c.contains("doesn't trust a repo is your human's to fix") && c.contains("Never run claude anywhere"), "{c}");
+        let b = worker_brief_md(&h, &p, &w, "", None, &[]);
+        assert!(b.contains("- Land checks: `python3 test_calc.py` in web.") && b.contains("only a `hiveRun` pass counts"), "{b}");
+        assert!(b.contains("Nothing is queued in your folders"), "no queued command of the human's: {b}");
+        h.folders[0].land_check = None;
+        assert!(!worker_brief_md(&h, &p, &w, "", None, &[]).contains("Land checks:"));
     }
 
     /// §9: both briefs say the index is maiTerm's and memory is read at start; the coordinator's

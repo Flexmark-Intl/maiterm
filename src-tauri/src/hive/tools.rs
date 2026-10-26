@@ -3349,18 +3349,25 @@ mod tests {
         assert_eq!(w.written.len(), 2);
         let key = crate::share::canon(&p.coordinator_home()).to_string_lossy().to_string();
 
-        let pv = crate::hive::delete::preview(&rig.caller.hive, &p, true);
+        let pv = crate::hive::delete::preview(&rig.caller.hive, &p, &rig.caller.tab_id, &|_| true);
         assert_eq!(pv.unlanded.iter().map(|u| (u.branch.as_str(), u.ahead)).collect::<Vec<_>>(), vec![("hive/ship--clean", 1)]);
         assert!(pv.dirty.iter().any(|d| d.contains(dirty.to_str().unwrap())), "{:?}", pv.dirty);
         assert_eq!(pv.dirty.len(), 1, "the clean worktree and the read copies aren't listed: {:?}", pv.dirty);
         assert_eq!((pv.gallery_files, pv.gallery_bytes), (1, 3));
+        assert_eq!(pv.gallery_path, p.gallery().to_string_lossy());
         assert_eq!(pv.live_agents, vec!["the coordinator", "#1 clean", "#2 dirty"]);
+        // Only agents in front of their terminals stop (the third live test listed an exited
+        // Done coordinator).
+        let coord = rig.caller.tab_id.clone();
+        let only_coord = crate::hive::delete::preview(&rig.caller.hive, &p, &coord, &|t| t == coord);
+        assert_eq!(only_coord.live_agents, vec!["the coordinator"]);
+        assert!(crate::hive::delete::preview(&rig.caller.hive, &p, &coord, &|_| false).live_agents.is_empty());
         assert!(pv.branches.contains(&"web: hive/ship--clean".to_string()));
         // The memory folder, a file the human wrote in it included, is listed as kept.
         fs::write(p.memory().join("test-conventions.md"), "# Tests\nUse the fixtures.\n").unwrap();
         fs::create_dir_all(p.logs()).unwrap();
         fs::write(p.decision_log(), "{}\n{}\n").unwrap();
-        let pv = crate::hive::delete::preview(&rig.caller.hive, &p, true);
+        let pv = crate::hive::delete::preview(&rig.caller.hive, &p, &rig.caller.tab_id, &|_| true);
         let mem = pv.memory.as_ref().expect("memory listed");
         assert_eq!(mem.path, p.memory().to_string_lossy());
         assert!(mem.files >= 1 && mem.bytes > 0, "{mem:?}");
@@ -3475,7 +3482,7 @@ mod tests {
         fs::create_dir_all(p.worktrees().join("ghost/web")).unwrap();
         fs::write(p.worktrees().join("ghost/web/work.rs"), "fn main() {}").unwrap();
 
-        let pv = crate::hive::delete::preview(&rig.caller.hive, &p, true);
+        let pv = crate::hive::delete::preview(&rig.caller.hive, &p, &rig.caller.tab_id, &|_| true);
         assert!(pv.dirty.iter().any(|d| d.contains(&p.worker_dir(&w.slug).display().to_string())), "{:?}", pv.dirty);
         let out = crate::hive::delete::delete_hive(&rig.ctx(accept, ok_save, ok_preflight), &rig.caller, true, false).await.unwrap();
         assert_eq!(fs::read_to_string(wt.join("README.md")).unwrap(), "changed\n");

@@ -398,7 +398,7 @@ async fn start_checks(caller: &Caller, w: &WorkerRecord, land: &mut LandState, o
             // The check's network is closed (§13.1), so the folder's setup (`npm ci`) can't run
             // there: what the worker's setup and work left in its worktree stands in.
             if let Some(f) = own {
-                let seeded = lg::seed_ignored(&f, &req.tmp.path);
+                let seeded = lg::seed_ignored(&f, &req.tmp.path, &req.caller.hive.settings.land.config_paths);
                 if !seeded.is_empty() {
                     log::info!("hive {}: land {}: seeded {} from worker {}'s worktree: {}", req.caller.hive.id, req.land_id, req.folder, req.worker.slug, seeded.join(", "));
                 }
@@ -1166,8 +1166,9 @@ pub(super) async fn tell<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &W
 pub(super) async fn tell_text<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, text: String) {
     match coordinator_tab(ctx.data, caller) {
         Some(c) => {
-            let sent = ctx.window.deliver(&c, text, "Hive land").await;
+            let sent = ctx.window.deliver(&c, text.clone(), "Hive land").await;
             log::info!("hive {}: land result for {}: {}", caller.hive.id, worker_label(w), sent.describe());
+            crate::hive::owed::owe_if_refused(caller, &sent, "Hive land", text).await;
         }
         None => log::info!("hive {}: land result for {} not delivered: no coordinator tab", caller.hive.id, worker_label(w)),
     }

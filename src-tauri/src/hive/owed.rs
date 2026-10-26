@@ -1,7 +1,8 @@
 //! What maiTerm owes a Hive agent's next session (docs/hive.md §11.2): the coordinator's kickoff,
-//! a status digest after a resume or a restart, and (step 9c) a human's wake message. Each is
-//! claimed at a session start and stays owed on disk until it is typed, so a try that was refused,
-//! held and dropped, or cut short by a restart goes out on the next start.
+//! a status digest after a resume or a restart, notices its tab refused while no agent ran there
+//! (an Undo's result, an override), and (step 9c) a human's wake message. Each is claimed at a
+//! session start and stays owed on disk until it is typed, so a try that was refused, held and
+//! dropped, or cut short by a restart goes out on the next start.
 //!
 //! The kickoff keeps its own `kickoff.json` (`launch::kickoff_pending`); the rest live in
 //! `tasks/coordinator/owed.json`. A digest is built when it is claimed, never stored: what it
@@ -15,10 +16,10 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::deliver::one_line;
+use super::deliver::{one_line, Sent};
 use super::paths::HivePaths;
 use super::record::Hive;
-use super::tools::{HiveBoard, WorkerCard};
+use super::tools::{blocking, Caller, HiveBoard, WorkerCard};
 use super::worker;
 use crate::state::AppData;
 
@@ -26,7 +27,11 @@ pub const OWED_FILE: &str = "owed.json";
 
 pub const KIND_KICKOFF: &str = "kickoff";
 pub const KIND_DIGEST: &str = "digest";
+pub const KIND_NOTICES: &str = "notices";
 pub const KIND_WAKE: &str = "wake";
+
+/// Notices kept for one session start; past it the oldest go (the digest says the rest).
+const MAX_NOTICES: usize = 40;
 
 /// Why a digest is owed: the workspace was resumed, maiTerm restarted, or the coordinator's own
 /// tab was suspended and comes back.
@@ -47,6 +52,22 @@ pub struct Owed {
     pub digest: Option<OwedDigest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wake: Option<OwedWake>,
+    /// In the order they were refused.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<OwedNotice>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// A notice the coordinator's tab refused, as maiTerm worded it (already escaped where it quotes
+/// an agent): typed whole at the next session start.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OwedNotice {
+    /// What it was (`Hive undo`, `Hive override`), for the log.
+    pub what: String,
+    pub text: String,
+    pub at: String,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -118,6 +139,41 @@ pub fn owe_digest(paths: &HivePaths, why: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Owes `text` to the coordinator's next session start, after any notice still owed. Unlike a
+/// digest, owed to a Done Hive too: its coordinator has exited, and the human's Undo or override
+/// still has to reach it once they wake it (the third live test). Blocks on the disk.
+pub fn owe_notice(paths: &HivePaths, what: &str, text: String) -> Result<(), String> {
+    let at = crate::commands::workspace::iso_now();
+    update(&paths.coordinator_task(), |o| {
+        o.notices.push(OwedNotice { what: what.to_string(), text, at, extra: Map::new() });
+        let over = o.notices.len().saturating_sub(MAX_NOTICES);
+        o.notices.drain(..over);
+        true
+    })
+    .map(|_| ())
+}
+
+/// A notice the coordinator's tab refused (no agent in it, no terminal) is owed instead of lost.
+/// A held one is the gate's to type, and a delivered one is there.
+pub(crate) async fn owe_if_refused(caller: &Caller, sent: &Sent, what: &'static str, text: String) {
+    let Sent::Refused(why) = sent else { return };
+    let paths = caller.paths.clone();
+    match blocking(move || owe_notice(&paths, what, text)).await {
+        Ok(()) => log::info!("hive {}: {what} not delivered ({why}); owed to the coordinator's next session", caller.hive.id),
+        Err(e) => log::warn!("hive {}: {what} not delivered ({why}) and not owed either: {e}", caller.hive.id),
+    }
+}
+
+/// The owed notices as one message, oldest first.
+fn notices_text(notices: &[OwedNotice]) -> String {
+    let mut out = String::from("[maiTerm] While no agent was running in your tab, maiTerm had these for you, oldest first:");
+    for n in notices {
+        out.push_str("\n\n");
+        out.push_str(&n.text);
+    }
+    out
+}
+
 /// At startup: every Hive that isn't Done owes its coordinator a digest, since notices sent while
 /// maiTerm was down never reached it. Answers how many were owed. Blocks on the disk.
 pub fn owe_after_restart(data: &RwLock<AppData>) -> usize {
@@ -170,6 +226,14 @@ impl OwedClaim {
     pub fn delivered(&self) {
         let res = match self.kind {
             KIND_KICKOFF => super::launch::mark_kickoff_delivered(&self.task_dir),
+            // Only the notices it carried: one refused during the delivery stays owed.
+            KIND_NOTICES => update(&self.task_dir, |o| {
+                let seen: Vec<OwedNotice> = self.seen.clone().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+                let before = o.notices.len();
+                o.notices.retain(|n| !seen.contains(n));
+                o.notices.len() != before
+            })
+            .map(|_| ()),
             kind => update(&self.task_dir, |o| {
                 let slot = if kind == KIND_DIGEST { as_value(&o.digest) } else { as_value(&o.wake) };
                 let same = slot.is_some() && slot == self.seen;
@@ -227,7 +291,8 @@ fn as_value<T: Serialize>(v: &Option<T>) -> Option<Value> {
 }
 
 /// The coordinator's claims at a session start, in the order they go out: its kickoff while it is
-/// pending, then a digest if one is owed (built now), then the human's wake message (step 9c).
+/// pending, then a digest if one is owed (built now), then the notices its tab refused, then the
+/// human's wake message (step 9c), last so their words are what it reads before it acts.
 /// Blocks on the disk.
 pub(crate) fn coordinator_claims(
     hive: &Hive,
@@ -259,6 +324,10 @@ pub(crate) fn coordinator_claims(
             claim.text = digest_text(hive, &d.why, &board(), cards_waiting);
             out.push(claim);
         }
+    }
+    if !owed.notices.is_empty() {
+        let seen = serde_json::to_value(&owed.notices).ok();
+        out.extend(OwedClaim::take(task.clone(), KIND_NOTICES, notices_text(&owed.notices), seen));
     }
     if let Some(w) = &owed.wake {
         let text = super::finish::wake_text(w.done_since, &w.by, &w.text);
@@ -555,6 +624,43 @@ mod tests {
         assert!(read(&task).wake.is_none());
         let after = coordinator_claims(&Hive::default(), &paths, "kick".into(), || board(Vec::new(), None), 0);
         assert_eq!(after.iter().map(|c| c.kind).collect::<Vec<_>>(), vec![KIND_DIGEST], "the digest wasn't delivered; the wake was");
+        let _ = std::fs::remove_dir_all(&paths.root);
+    }
+
+    /// The third live test: after the human's Undo the result and the override notice reached no
+    /// agent and were lost. Owed, they go out at the next start, after the digest and before the
+    /// wake message, and a notice refused during that delivery stays owed.
+    #[test]
+    fn refused_notices_go_out_at_the_next_start_before_the_wake() {
+        let paths = scratch("notices");
+        started(&paths, "s1");
+        launch::mark_kickoff_delivered(&paths.coordinator_task()).unwrap();
+        owe_notice(&paths, "Hive undo", "⟦HIVE UNDO · Login⟧ Land L-1/web is undone".into()).unwrap();
+        owe_notice(&paths, "Hive override", "[maiTerm] Your human overrode your decision D-1: Undone by your human".into()).unwrap();
+        let task = paths.coordinator_task();
+        update(&task, |o| {
+            o.wake = Some(OwedWake { text: "Fix the login again".into(), by: "desktop".into(), ..OwedWake::default() });
+            true
+        })
+        .unwrap();
+        let claims = coordinator_claims(&Hive::default(), &paths, "kick".into(), || board(Vec::new(), None), 0);
+        assert_eq!(claims.iter().map(|c| c.kind).collect::<Vec<_>>(), vec![KIND_NOTICES, KIND_WAKE]);
+        let text = &claims[0].text;
+        assert!(text.starts_with("[maiTerm] While no agent was running in your tab"), "{text}");
+        let (undo, over) = (text.find("HIVE UNDO").unwrap(), text.find("overrode").unwrap());
+        assert!(undo < over, "oldest first: {text}");
+        // Refused again while this one was being typed: it stays for the start after.
+        owe_notice(&paths, "Hive land", "⟦HIVE LAND⟧ later".into()).unwrap();
+        claims[0].delivered();
+        let left = read(&task).notices;
+        assert_eq!(left.iter().map(|n| n.what.as_str()).collect::<Vec<_>>(), vec!["Hive land"]);
+        drop(claims);
+        for i in 0..MAX_NOTICES + 5 {
+            owe_notice(&paths, "Hive land", format!("n{i}")).unwrap();
+        }
+        let kept = read(&task).notices;
+        assert_eq!(kept.len(), MAX_NOTICES);
+        assert_eq!(kept.last().unwrap().text, format!("n{}", MAX_NOTICES + 4), "the newest kept");
         let _ = std::fs::remove_dir_all(&paths.root);
     }
 

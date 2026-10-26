@@ -43,6 +43,10 @@ pub struct Hive {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub done_at: Option<i64>,
+    /// While done: the land log line (`L-…/<folder>`) the report relied on that was undone since,
+    /// so the header says Done is stale (§11.4). Read only while done; a new finish clears it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub done_stale: String,
     /// While paused, who or what paused it: `"usage_limit"` | `"account"` | `"human"`
     /// (`fuses::PAUSED_BY_*`). Empty otherwise, and on a pause from before it was recorded.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -73,6 +77,7 @@ impl Default for Hive {
             criteria: Vec::new(),
             status: STATUS_ACTIVE.to_string(),
             done_at: None,
+            done_stale: String::new(),
             paused_by: String::new(),
             slug: String::new(),
             created_at: String::new(),

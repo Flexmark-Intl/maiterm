@@ -523,6 +523,9 @@ export interface Hive {
   /** "active" | "paused" | "done". */
   status: string;
   done_at?: number | null;
+  /** While done: the land (`L-…/<folder>`) the report relied on that was undone since. Absent
+   *  when none; ignored unless done. */
+  done_stale?: string;
   /** While paused: "usage_limit" | "account" | "human" (hive/fuses.rs `PAUSED_BY_*`). Absent
    *  otherwise, and on a pause from before it was recorded (a usage limit). */
   paused_by?: string;
@@ -849,6 +852,10 @@ export interface HivePreflight {
   /** Claude reports no login for the account the agents would run under: a warning, never a
    *  refusal. Null when logged in or when it can't tell. */
   login_warning?: string | null;
+  /** The managed account whose root the agents read trust from; null for Claude's default. */
+  trust_account?: string | null;
+  /** With no managed account, the user's own CLAUDE_CONFIG_DIR the agents read trust from. */
+  trust_root_dir?: string | null;
 }
 
 /** `hive_detect_folder`: what the sheet shows for a picked folder (docs/hive.md §6.1, §6.6). */
@@ -990,6 +997,9 @@ export interface HiveDeletePreview {
   scratch: { worker: string; path: string; files: number; reported: number }[];
   gallery_files: number;
   gallery_bytes: number;
+  /** The gallery's folder: kept unless ticked. */
+  gallery_path?: string;
+  /** Agents running now, which stop: only those in front of their terminals. */
   live_agents: string[];
   /** While any worker is landing, delete is refused. */
   lands_in_flight: string[];

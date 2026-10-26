@@ -173,11 +173,17 @@ pub struct Preflight {
     /// Claude reports no login for the account the Hive's agents would run under: a warning,
     /// never a refusal. None when it is logged in or can't tell (a token can't be identified).
     pub login_warning: Option<String>,
+    /// The managed account whose root the Hive's agents read trust from, for the sheet's trust
+    /// warning; None for Claude's default (`~/.claude`).
+    pub trust_account: Option<String>,
+    /// With no managed account, the user's own `CLAUDE_CONFIG_DIR` the agents read trust from
+    /// instead of `~/.claude` (`launch::TrustRoot::Dir`).
+    pub trust_root_dir: Option<String>,
 }
 
 /// The account a new Hive's agents run under, as the human knows it: the active managed Claude
 /// account's label, or None for Claude's own login on this computer.
-fn account_label(prefs: &crate::state::Preferences) -> Option<String> {
+pub(crate) fn account_label(prefs: &crate::state::Preferences) -> Option<String> {
     let (_, id) = crate::accounts::active_accounts(prefs).into_iter().find(|(rt, _)| *rt == crate::accounts::Runtime::Claude)?;
     let a = prefs.managed_accounts.iter().find(|a| a.id == id)?;
     Some(if a.label.is_empty() { a.email.clone().unwrap_or_else(|| id.clone()) } else { a.label.clone() })
@@ -344,6 +350,11 @@ pub async fn hive_preflight(
             .iter()
             .filter_map(|c| local_dir(c))
             .find(|d| app_data.as_deref().is_none_or(|a| app_data_refusal(Path::new(d), a).is_none()));
+        let (trust_account, trust_root_dir) = match launch::trust_root(&prefs) {
+            launch::TrustRoot::Account(a) => (Some(a), None),
+            launch::TrustRoot::Dir(d) => (None, Some(d.display().to_string())),
+            launch::TrustRoot::Default => (None, None),
+        };
         Preflight {
             eligible,
             reason,
@@ -355,6 +366,8 @@ pub async fn hive_preflight(
             claude_ok: claude.is_ok(),
             claude_detail: claude.err(),
             login_warning: login_check(&prefs),
+            trust_account,
+            trust_root_dir,
         }
     })
     .await
@@ -369,6 +382,35 @@ pub async fn hive_detect_folder(state: State<'_, Arc<AppState>>, path: String) -
         return Err(format!("No folder at {path}"));
     }
     tauri::async_runtime::spawn_blocking(move || layout::detect_folder(&p, &roots)).await.map_err(|e| e.to_string())
+}
+
+/// The sheet's Trust it (§6.6): the human's click trusts the repo they picked, in the one root
+/// the Hive's agents launch under (`trust_roots`), as Claude's own dialog would. The sheet's
+/// other remedy, running `claude` in the workspace's own shell, would use up the shell the Hive
+/// replaces. Never reachable from an agent: a window command only. Answers the folder detected
+/// again, its trust re-read from that root.
+#[tauri::command]
+pub async fn hive_trust_repo(state: State<'_, Arc<AppState>>, path: String) -> Result<FolderInfo, String> {
+    crate::instance::hive_refusal()?;
+    let roots = trust_roots(&state.app_data.read().preferences);
+    let p = crate::share::expand_tilde(path.trim());
+    if !p.is_absolute() || !p.is_dir() {
+        return Err(format!("No folder at {path}"));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let launch_json = roots.first().ok_or("Couldn't find the home folder")?;
+        let info = layout::detect_folder(&p, &roots);
+        if info.kind != KIND_GIT {
+            return Err(format!("{} isn't the top folder of a git repository, so there's no repo to trust", info.path));
+        }
+        if let Some(why) = app_data_dir().and_then(|a| app_data_refusal(Path::new(&info.path), &a)) {
+            return Err(format!("{} {why}", info.path));
+        }
+        super::trust::trust_repo(launch_json, Path::new(&info.path))?;
+        Ok(layout::detect_folder(&p, &roots))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Something a Hive can make things with (§3 Tools, §10.3). `id` is what `Hive.tools` stores.

@@ -42,6 +42,7 @@ import {
   resolveCreate, isDue, isExpired, dueAt, envelope, statusOf, serviceOutcome, taskOutcome, isWaitingOnEvent, triggerText, clockText,
   needsApproval,
   hostLabel,
+  promptEvidence,
   type CreateArgs, type EventKind, type Resolved, type ResolvedEvent, type ResolvedScriptHome, type FollowUpStatus,
 } from '$lib/followUps/model';
 
@@ -491,7 +492,7 @@ function createFollowUpsStore() {
    * since that prompt — a half-typed command would get the resume glued onto it. Never the tab's
    * stored `auto_resume_command`: that is free text a user or an imported workspace file set.
    */
-  async function resumeAgent(tab: Tab, byHand: boolean, untouched: () => boolean): Promise<string | null> {
+  async function resumeAgent(tab: Tab, byHand: boolean, untouched: () => boolean, markless = false): Promise<string | null> {
     if (!byHand && !preferencesStore.followUpsResumeAgent) return `${NO_AGENT} (restarting it for follow-ups is off)`;
     // A session entry can outlive its process (no SessionEnd when it is killed), so "no agent"
     // here may come from the liveness probe with a stale entry still present. Snapshot it, so a
@@ -524,11 +525,17 @@ function createFollowUpsStore() {
     if (live.ssh_foreground) return "ssh is running in the tab, and maiTerm can't see whether the agent on the far side is up";
     const fg = await commands.getPtyForegroundJob(inst.ptyId);
     if (fg.shell_at_prompt !== true) return `${NO_AGENT}, and the tab isn't at a shell prompt${fg.executable ? ` (${fg.executable} is running)` : ''}`;
-    const promptAt = shellPromptAt.get(inst.ptyId);
-    if (promptAt === undefined) return `${NO_AGENT}, and maiTerm can't see the shell's prompt (no shell integration) — start it yourself`;
-    if ((shellBeginAt.get(inst.ptyId) ?? 0) > promptAt) return 'a command is running in the tab';
-    const typed = terminalsStore.getLastTakeoverInputAt(tab.id);
-    if (typed !== undefined && typed > promptAt) return `${NO_AGENT}, and something is typed at the shell prompt — maiTerm won't add to it`;
+    // A Hive relaunch (`markless`) also takes a shell whose prompt this webview never heard (a
+    // webview reload empties the marks; an idle prompt sends none): the probe below decides.
+    const evidence = promptEvidence({
+      promptAt: shellPromptAt.get(inst.ptyId),
+      beginAt: shellBeginAt.get(inst.ptyId),
+      typedAt: terminalsStore.getLastTakeoverInputAt(tab.id),
+      markless: markless && !!tab.hive_role,
+    });
+    if (evidence === 'no_mark') return `${NO_AGENT}, and maiTerm can't see the shell's prompt (no shell integration) — start it yourself`;
+    if (evidence === 'running') return 'a command is running in the tab';
+    if (evidence === 'typed') return `${NO_AGENT}, and something is typed at the shell prompt — maiTerm won't add to it`;
     if (Date.now() - (terminalsStore.getLastOutputAt(tab.id) ?? 0) < 1500) return 'output still arriving';
     const runtime = workspacesStore.getTabRuntime(tab.id);
     let text: string;
@@ -849,13 +856,15 @@ function createFollowUpsStore() {
     },
 
     /** Relaunch the exited agent in `tabId` through §6.2's gate (an empty shell prompt of its own,
-     *  nothing typed since): a Hive's `hiveRestartWorker`, whose decision stands in for the human's
-     *  click, so the preference doesn't hold it. Null when typed; otherwise why not. */
+     *  nothing typed since): a Hive's `hiveRestartWorker` or a wake, whose decision stands in for
+     *  the human's click, so the preference doesn't hold it. A Hive tab's shell needn't have
+     *  shown a prompt since this webview loaded (`promptEvidence`'s `markless`): the shell's own
+     *  line probe still has to answer empty. Null when typed; otherwise why not. */
     async relaunchAgent(tabId: string): Promise<string | null> {
       const tab = locate(tabId)?.tab;
       if (!tab) return 'the tab is gone';
       const keys = terminalsStore.getLastTakeoverInputAt(tabId);
-      return resumeAgent(tab, true, () => terminalsStore.getLastTakeoverInputAt(tabId) === keys);
+      return resumeAgent(tab, true, () => terminalsStore.getLastTakeoverInputAt(tabId) === keys, true);
     },
 
     /** Run the tick now (tests). */

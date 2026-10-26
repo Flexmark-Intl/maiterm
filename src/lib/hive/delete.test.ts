@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deleteRefusal, deleteSummary, formatBytes, keptLines, removedLines } from './delete';
+import { deleteRefusal, deleteSummary, formatBytes, keptLines, removedLines, stoppingLines } from './delete';
 import type { HiveDeletePreview, HiveDeleteResult } from '$lib/tauri/types';
 
 const preview = (over: Partial<HiveDeletePreview> = {}): HiveDeletePreview => ({
@@ -31,9 +31,11 @@ describe('delete sheet', () => {
       gallery_files: 1,
       gallery_bytes: 512,
     });
-    expect(keptLines(p, false)).toEqual(['web: /wt (1 untracked file)', 'Shared memory: /h/memory (2 files, 2.0 KB)']);
+    expect(keptLines(p, false)).toEqual(['web: /wt (1 untracked file)', 'Shared memory: /h/memory (2 files, 2.0 KB)', 'The gallery (1 asset, 512 B)']);
     expect(removedLines(p, false, false)).toEqual(['The decision log: 3 entries (/h/logs/decisions.jsonl)']);
-    expect(keptLines(p, true)).toEqual(['web: /wt (1 untracked file)']);
+    expect(keptLines(p, true, true)).toEqual(['web: /wt (1 untracked file)']);
+    // The gallery's folder is listed under Kept while its box isn't ticked.
+    expect(keptLines({ ...p, gallery_path: '/h/gallery' }, true)).toEqual(['web: /wt (1 untracked file)', 'The gallery: /h/gallery (1 asset, 512 B)']);
     expect(removedLines(p, true, true)).toEqual([
       'The gallery: 1 asset, 512 B',
       'Shared memory: /h/memory (2 files)',
@@ -42,6 +44,11 @@ describe('delete sheet', () => {
     expect(keptLines(preview(), false)).toEqual([]);
     expect(deleteSummary(result({ worktrees_removed: 1, memory_kept: '/h/memory', folder_left: '/h' })))
       .toBe('1 clean worktree removed, no gallery kept, the memory kept. What stayed is in /h.');
+  });
+
+  it('lists only running agents as stopping, or says none is', () => {
+    expect(stoppingLines(preview())).toEqual(['None running']);
+    expect(stoppingLines(preview({ live_agents: ['the coordinator', '#1 api'] }))).toEqual(['the coordinator', '#1 api']);
   });
 
   it('says what went and what stayed', () => {

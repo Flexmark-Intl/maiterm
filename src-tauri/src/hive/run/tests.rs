@@ -173,6 +173,32 @@ fn a_command_matches_a_queued_entry_word_by_word() {
     assert!(listed(&q, "api").contains("`go test`") && listed(&q, "docs").contains("nothing is queued"));
 }
 
+/// The third live test: `hiveRun python3 test_calc.py` was "nothing is queued" though it was
+/// the folder's land check. A plain-words land check is runnable through `hiveRun`, with nothing
+/// the human didn't set, and stays off the gate's list.
+#[test]
+fn a_folders_land_check_runs_through_hive_run() {
+    let mut r = Rig::new();
+    r.hive.folders[0].land_check = Some(" python3  test_calc.py ".into());
+    let s = build_spec(&r.caller(), &r.w, &args("python3 test_calc.py -v"), &[]).unwrap();
+    assert_eq!((s.entry.as_str(), s.needs.len(), s.env.len(), s.leases.len()), ("python3 test_calc.py", 0, 0, 0));
+    assert_eq!(s.argv, vec!["python3", "test_calc.py", "-v"]);
+    assert!(!queued_prefixes(&r.hive).contains(&vec!["python3".to_string(), "test_calc.py".to_string()]), "a shell run stays free");
+    let refused = build_spec(&r.caller(), &r.w, &args("python3 other.py"), &[]).unwrap_err();
+    assert!(refused.contains("`python3 test_calc.py`"), "the refusal lists it: {refused}");
+
+    // One the human's entries already match takes their entry, needs and all; one with shell
+    // syntax a land runs through `sh` is no queued command.
+    r.hive.folders[0].land_check = Some("cargo test --workspace".into());
+    assert!(land_check_commands(&r.hive).is_empty());
+    let s = build_spec(&r.caller(), &r.w, &args("cargo test --workspace"), &[]).unwrap();
+    assert_eq!((s.entry.as_str(), s.needs.clone()), ("cargo test", vec!["cargo".to_string()]));
+    r.hive.folders[0].land_check = Some("npm ci && npm test".into());
+    assert!(land_check_commands(&r.hive).is_empty());
+    r.hive.folders[1].land_check = Some("make".into());
+    assert!(land_check_commands(&r.hive).is_empty(), "a plain folder has no land");
+}
+
 #[test]
 fn run_arguments_are_checked() {
     let a = RunArgs::parse(&json!({ "command": "cargo test", "folder": " web ", "timeout": 600 })).unwrap();

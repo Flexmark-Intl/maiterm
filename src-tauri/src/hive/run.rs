@@ -138,7 +138,32 @@ fn listed(q: &RunQueueSettings, folder: &str) -> String {
     }
 }
 
+/// Each git folder's land check as a queued command of its own, when it is plain words (a land
+/// runs it through `sh`, `hiveRun` never) and none of the human's entries already matches it
+/// (§6.8; the third live test: a worker couldn't run the check it would be landed on and cite the
+/// pass). No needs, leases or env: the human set none for it.
+pub fn land_check_commands(hive: &Hive) -> Vec<QueuedCommand> {
+    let q = &hive.settings.run_queue;
+    hive.git_folders()
+        .filter_map(|f| {
+            let check = f.land_check.as_deref().map(str::trim).filter(|c| !c.is_empty())?;
+            let argv = parse_command(check).ok()?;
+            match_entry(q, &f.name, &argv).is_none().then(|| QueuedCommand { folder: f.name.clone(), prefix: argv.join(" "), ..QueuedCommand::default() })
+        })
+        .collect()
+}
+
+/// What `hiveRun` matches: the human's queued commands and the land checks
+/// (`land_check_commands`).
+pub fn runnable_commands(hive: &Hive) -> RunQueueSettings {
+    let mut q = hive.settings.run_queue.clone();
+    q.commands.extend(land_check_commands(hive));
+    q
+}
+
 /// Every queued command's words, once each: what a worker's gate denies run directly (§6.8).
+/// Only the human's entries: a land check runs through `hiveRun` for a receipt, and still freely
+/// in the worker's own shell, as it did before it was runnable there.
 pub fn queued_prefixes(hive: &Hive) -> Vec<Vec<String>> {
     let mut out: Vec<Vec<String>> = Vec::new();
     for c in &hive.settings.run_queue.commands {
@@ -222,7 +247,8 @@ fn run_folder<'a>(hive: &Hive, w: &'a WorkerRecord, name: Option<&str>) -> Resul
 pub(crate) fn build_spec(caller: &Caller, w: &WorkerRecord, a: &RunArgs, stack: &[Service]) -> Result<JobSpec, String> {
     let hive = &caller.hive;
     let f = run_folder(hive, w, a.folder.as_deref())?;
-    let q = &hive.settings.run_queue;
+    let runnable = runnable_commands(hive);
+    let q = &runnable;
     let entry = match_entry(q, &f.name, &a.argv).ok_or_else(|| {
         format!(
             "`{}` isn't a queued command ({}). hiveRun runs only those; run anything else straight in your own shell.",

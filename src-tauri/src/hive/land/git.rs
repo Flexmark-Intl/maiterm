@@ -146,8 +146,11 @@ const SEED_TIMEOUT: Duration = Duration::from_secs(300);
 /// setup can't run in it; the worker's own installed state, made under its sandbox and run here
 /// under the same one, stands in. Nothing is written through a link: an entry whose place in the
 /// temporary worktree is taken, or lies under anything but a real folder, is skipped, and links
-/// inside an entry are copied as links. Answers what was copied; anything else is logged.
-pub fn seed_ignored(f: &WorkerFolder, tmp: &Path) -> Vec<String> {
+/// inside an entry are copied as links. Agent and execution config the config rule lists
+/// (`config_rule::listed` with the human's `extra`, and a `package.json`) is never seeded: a
+/// worker's ignored `.claude/` or `.mcp.json` would load in the check's tree without ever having
+/// been in a diff the rule saw. Answers what was copied; anything else is logged.
+pub fn seed_ignored(f: &WorkerFolder, tmp: &Path, extra: &[String]) -> Vec<String> {
     let Some(wt) = f.worktree.as_deref().map(Path::new).filter(|p| p.is_dir()) else { return Vec::new() };
     let listed = lgit_wt(f).and_then(|mut c| {
         let out = crate::util::proc::output_timeout(c.args(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"]), QUERY_TIMEOUT)
@@ -166,6 +169,10 @@ pub fn seed_ignored(f: &WorkerFolder, tmp: &Path) -> Vec<String> {
         let rel = String::from_utf8_lossy(rel).trim_end_matches('/').to_string();
         let parts: Vec<&str> = rel.split('/').collect();
         if rel.is_empty() || parts.iter().any(|p| p.is_empty() || *p == "." || *p == ".." || p.eq_ignore_ascii_case(".git")) {
+            continue;
+        }
+        if super::config_rule::listed(&rel, extra) || super::config_rule::is_package_json(&rel) {
+            log::info!("hive land: {rel} not seeded into {}: agent config stays out of a check", tmp.display());
             continue;
         }
         let dest = tmp.join(&rel);

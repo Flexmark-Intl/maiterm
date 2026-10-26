@@ -4537,6 +4537,7 @@ async fn deliver_hive_owed(app: &Arc<AppState>, handle: &AppHandle, tab: &str, c
     use tauri::Listener;
     let (kind, what) = match claim.kind {
         crate::hive::owed::KIND_DIGEST => ("status digest", "Hive status digest"),
+        crate::hive::owed::KIND_NOTICES => ("owed notices", "Hive owed notices"),
         crate::hive::owed::KIND_WAKE => ("wake message", "Hive wake"),
         _ => ("kickoff", "Hive kickoff"),
     };

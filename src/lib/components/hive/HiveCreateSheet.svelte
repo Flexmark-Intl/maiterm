@@ -1,7 +1,8 @@
 <!--
   Make this a Hive… (docs/hive.md §3): the fields that make a workspace a Hive, checked as the
   human types (lib/hive/model.ts) and again by Rust on Create. Folders are detected as they're
-  added (git or plain, Base, trust); an untrusted repo is a warning, never a refusal (§6.6).
+  added (git or plain, Base, trust); an untrusted repo is a warning, never a refusal, with the
+  human's own Trust it beside it (§6.6), read from the root the agents launch under.
   The Stack step (§3 step 3) imports: infrastructure another workspace already runs as a
   `shared_from` reference (one that is the repo's own code is offered unticked: it has to run
   per branch), standing in for the suggestion it repeats, and the folders' suggested services as definitions — one whose fixed
@@ -20,7 +21,7 @@
   import { stackStore } from '$lib/stores/stack.svelte';
   import { importVerdict, sameService, sharesByDefault, type RunningElsewhere, type StackOffer } from '$lib/stack/model';
   import { normalizeTitle } from '$lib/tasks/model';
-  import { hiveDetectFolder, hiveDetectTools, hivePreflight, suggestStack, type StackSuggestion } from '$lib/tauri/commands';
+  import { hiveDetectFolder, hiveDetectTools, hivePreflight, hiveTrustRepo, suggestStack, type StackSuggestion } from '$lib/tauri/commands';
   import type { HiveDetectedTool, HivePreflight, HiveSpec, Service } from '$lib/tauri/types';
   import { charCount, folderName, MAX_INSTRUCTIONS, slugify, validateSpec } from '$lib/hive/model';
   import { createHive } from '$lib/hive/create';
@@ -146,6 +147,27 @@
       }
     } catch (e) {
       folderNote = String(e);
+    }
+  }
+
+  /** Trust it (§6.6): the human's click is the human trusting their repo, written by Rust into
+   *  the root the Hive's agents launch under. The other remedy, `claude` in this workspace's own
+   *  shell, would use up the fresh shell the Hive replaces. */
+  let trusting = $state<number | null>(null);
+  let trustError = $state<{ key: number; text: string } | null>(null);
+  async function trustRepo(f: Folder) {
+    if (trusting !== null) return;
+    trusting = f.key;
+    trustError = null;
+    try {
+      const info = await hiveTrustRepo(f.path);
+      patch(f.key, { trusted: info.trusted });
+      if (!info.trusted) trustError = { key: f.key, text: 'Written, but Claude still reads it as untrusted.' };
+    } catch (e) {
+      trustError = { key: f.key, text: String(e).replace(/^Error: /, '') };
+      logError(`hive: trusting ${f.path} failed: ${e}`);
+    } finally {
+      trusting = null;
     }
   }
 
@@ -382,10 +404,18 @@
                 </div>
                 {#if !f.trusted}
                   <div class="warn">
-                    <Tooltip text="Claude asks whether to trust a folder the first time it runs there, and nothing in maiTerm may answer that for you. Trusting the repo also covers every copy the Hive makes of it.">
-                      <span>Claude hasn't been told to trust this repo.</span>
+                    <Tooltip text="Claude asks whether to trust a folder the first time it runs there, and nothing in maiTerm may answer that for you. A trusted repo's project settings, hooks and MCP servers run without asking. Trusting the repo also covers every copy the Hive makes of it.">
+                      <span>Claude hasn't been told to trust this repo{preflight?.trust_account
+                        ? ` under "${preflight.trust_account}", the account this Hive's agents run as`
+                        : preflight?.trust_root_dir
+                          ? ` under the Claude config at ${preflight.trust_root_dir} (your CLAUDE_CONFIG_DIR), the one this Hive's agents run as`
+                          : ''}.</span>
                     </Tooltip>
-                    Run <code>claude</code> in it once and accept the question.
+                    <Tooltip text="Records your trust of this repo where those agents read it, as Claude's own question would">
+                      <button class="link" disabled={trusting === f.key} onclick={() => void trustRepo(f)}>{trusting === f.key ? 'Trusting…' : 'Trust it'}</button>
+                    </Tooltip>
+                    or run <code>claude</code> once in it in another tab under that account (not this workspace's shell: the Hive replaces it).
+                    {#if trustError?.key === f.key}<span class="err">{trustError.text}</span>{/if}
                   </div>
                 {/if}
               {/if}
@@ -628,6 +658,8 @@
   .warn { font-size: 0.846rem; color: var(--yellow, #e0af68); overflow-wrap: anywhere; }
   .error { color: var(--red, #f7768e); font-size: 0.923rem; overflow-wrap: anywhere; margin: 0; }
   .link { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; font-size: 0.846rem; }
+  .link:disabled { color: var(--fg-dim); cursor: default; }
+  .warn .err { display: block; color: var(--red, #f7768e); }
   .footer { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--bg-light); flex-wrap: wrap; }
   .foot { margin-right: auto; flex: 1 1 200px; }
 </style>

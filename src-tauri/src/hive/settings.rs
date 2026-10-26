@@ -519,7 +519,7 @@ fn git_dirs_of(w: &WorkerRecord, f: &WorkerFolder) -> Result<(PathBuf, PathBuf, 
 /// settings Claude would load unseen, the other agents' folders and the Hive's Rust-owned ones,
 /// the hook script's folder, every local-path remote, and the plain folders (read-only inputs,
 /// §6.1). The human's checkouts are not here: whole, they'd take the `.git` entries a commit
-/// needs; they get Write/Edit rules only.
+/// needs; they get Write/Edit rules only, but for their `.claude/` and `.mcp.json`, named here.
 pub fn worker_deny_write_paths(hive: &Hive, w: &WorkerRecord, paths: &HivePaths, ctx: &WorkerContext, bin_dir: &Path) -> Result<Vec<DenyPath>, String> {
     let mut out: Vec<DenyPath> = Vec::new();
     let mut add = |path: PathBuf, dir: bool| {
@@ -577,6 +577,23 @@ pub fn worker_deny_write_paths(hive: &Hive, w: &WorkerRecord, paths: &HivePaths,
         }
         if !f.is_git() {
             deny_around(Path::new(&f.path), true, &keep, &mut out);
+        } else {
+            // The human's checkout's agent config by name, whether or not it exists yet:
+            // `checkout_denies` names only the entries there at launch, and Claude maps a worktree
+            // to its main repo, whose `.claude/` it reads and (2.1.310's atomic-write staging
+            // folder, `.claude/.cc-writes`) makes. Claude's own process isn't held by these; the
+            // worker's tools and Bash are (the third live test).
+            deny_around(&Path::new(&f.path).join(".claude"), true, &keep, &mut out);
+            deny_around(&Path::new(&f.path).join(".mcp.json"), false, &keep, &mut out);
+        }
+    }
+    // A Hive folder that is itself a linked worktree: its worker's worktree maps to the main
+    // checkout behind it (the recorded common dir's parent, as trust reads it), not to the folder.
+    for f in w.git_folders() {
+        let main = f.common_dir.as_deref().map(Path::new).filter(|c| c.file_name().is_some_and(|n| n == ".git")).and_then(Path::parent);
+        if let Some(main) = main {
+            deny_around(&main.join(".claude"), true, &keep, &mut out);
+            deny_around(&main.join(".mcp.json"), false, &keep, &mut out);
         }
     }
     Ok(out)
@@ -1236,6 +1253,42 @@ mod tests {
             assert!(deny.contains(&sp(must.clone())), "{}", must.display());
         }
         assert!(!deny.iter().any(|d| *d == sp(p.memory())), "memory is written through Claude's own exemption");
+    }
+
+    /// The third live test: Claude mapped a worker's worktree to the human's checkout and a
+    /// `.claude/` appeared there. Each Hive checkout's agent config is denied by name, existing or
+    /// not, on the sandbox and in the Edit rules, for workers and reviewers alike.
+    #[cfg(unix)]
+    #[test]
+    fn the_human_checkouts_agent_config_is_denied_by_name() {
+        let (h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        let mut reviewer = w.clone();
+        reviewer.reviews = Some("t-builder".into());
+        for (role, w) in [("worker", &w), ("reviewer", &reviewer)] {
+            let record = crate::hive::launch::worker_record(&h, &p, w);
+            let s = worker_settings_json(&h, &record, w, &p, &worker_ctx(), &env()).unwrap();
+            let deny = strings(&s["sandbox"]["filesystem"]["denyWrite"]);
+            let rules = strings(&s["permissions"]["deny"]);
+            for (path, dir) in [("/r/web/.claude", true), ("/r/web/.mcp.json", false), ("/r/api/.claude", true), ("/r/api/.mcp.json", false)] {
+                assert!(deny.contains(&path.to_string()), "{role}: {path} in denyWrite");
+                let rule = abs_rule(FILE_RULE_TOOL, Path::new(path), dir);
+                assert!(rules.contains(&rule), "{role}: {rule}");
+            }
+            assert!(!deny.contains(&"/r/web".to_string()), "{role}: the checkout itself stays off denyWrite");
+        }
+        // The Hive folder is a linked worktree of /r/web: the main checkout's config is denied too.
+        let mut h = h;
+        h.folders.iter_mut().find(|f| f.name == "web").unwrap().path = "/r/web-feature".into();
+        for (role, w) in [("worker", &w), ("reviewer", &reviewer)] {
+            let record = crate::hive::launch::worker_record(&h, &p, w);
+            let s = worker_settings_json(&h, &record, w, &p, &worker_ctx(), &env()).unwrap();
+            let deny = strings(&s["sandbox"]["filesystem"]["denyWrite"]);
+            let rules = strings(&s["permissions"]["deny"]);
+            for (path, dir) in [("/r/web-feature/.claude", true), ("/r/web/.claude", true), ("/r/web/.mcp.json", false)] {
+                assert!(deny.contains(&path.to_string()), "{role}: {path} in denyWrite");
+                assert!(rules.contains(&abs_rule(FILE_RULE_TOOL, Path::new(path), dir)), "{role}: {path} rule");
+            }
+        }
     }
 
     /// The object store stays writable for commits, but nothing in it that redirects a lookup:

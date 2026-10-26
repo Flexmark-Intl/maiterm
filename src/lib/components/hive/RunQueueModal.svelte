@@ -87,6 +87,7 @@
       <div class="subtitle">
         Heavy commands a worker runs only through <code>hiveRun</code>: maiTerm queues each behind the machine's other runs, runs it on the
         worker's branch under its sandbox, and its exit code becomes a receipt. Its shell refuses them. Anything not listed runs freely.
+        Each folder's land check also runs through <code>hiveRun</code> for a receipt, holding no resources unless an entry here matches it.
       </div>
     </div>
 

@@ -756,7 +756,7 @@ async fn check(caller: &Caller, folder: &str, id: &str, chain: &Chain, inchain: 
     let checker = opts.checker.clone();
     let started = blocking(move || {
         if let Some(f) = own {
-            let seeded = lg::seed_ignored(&f, &req.tmp.path);
+            let seeded = lg::seed_ignored(&f, &req.tmp.path, &req.caller.hive.settings.land.config_paths);
             if !seeded.is_empty() {
                 log::info!("hive {}: batch {}: seeded {} from worker {}'s worktree: {}", req.caller.hive.id, req.land_id, req.folder, req.worker.slug, seeded.join(", "));
             }

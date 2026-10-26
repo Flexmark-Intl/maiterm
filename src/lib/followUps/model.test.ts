@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { FollowUp } from '$lib/tauri/types';
 import {
   resolveCreate, isDue, isExpired, statusOf, envelope, durationText, clockText, whenText, badgeSummary, hostLabel,
-  isConditionKind,
+  isConditionKind, promptEvidence,
   serviceOutcome, taskOutcome, needsApproval, MAX_PENDING, MAX_CREATED_PER_HOUR, type CreateContext,
 } from './model';
 
@@ -389,5 +389,22 @@ describe('watch scripts (§5.1)', () => {
     const broke = envelope({ ...base, due: { ...base.due, outcome: 'it BROKE instead — exit 127', report: null } }, NOW);
     expect(broke).toContain('passes — it BROKE instead — exit 127');
     expect(broke).not.toContain('printed');
+  });
+});
+
+describe('promptEvidence (§6.2, ahead of the shell line probe)', () => {
+  it('a heard prompt with nothing since it is ok; a command or a key since it is not', () => {
+    expect(promptEvidence({ promptAt: 100, markless: false })).toBe('ok');
+    expect(promptEvidence({ promptAt: 100, beginAt: 150, markless: false })).toBe('running');
+    expect(promptEvidence({ promptAt: 100, beginAt: 50, typedAt: 90, markless: false })).toBe('ok');
+    expect(promptEvidence({ promptAt: 100, typedAt: 120, markless: true })).toBe('typed');
+  });
+  it('after a webview reload the map is empty: only a Hive relaunch goes on to the probe', () => {
+    expect(promptEvidence({ markless: false })).toBe('no_mark');
+    expect(promptEvidence({ markless: true })).toBe('ok');
+    // Still never over a command begun or a key pressed since the reload: the line it would
+    // join is one this webview never saw.
+    expect(promptEvidence({ beginAt: 10, markless: true })).toBe('running');
+    expect(promptEvidence({ typedAt: 10, markless: true })).toBe('typed');
   });
 });

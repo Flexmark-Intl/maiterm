@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { doneLabel, doneNotice, landedLine, receiptLine } from './finish';
+import { doneLabel, doneNotice, doneStaleTip, landedLine, receiptLine } from './finish';
 
 describe('receiptLine', () => {
   it('splits the kind off maiTerm’s description', () => {
@@ -45,5 +45,13 @@ describe('doneNotice', () => {
     expect(doneNotice('done', 'active', 'Ship it')).toBeNull();
     expect(doneNotice('active', 'paused', 'Ship it')).toBeNull();
     expect(doneNotice(null, 'done', 'Ship it')).toBeNull();
+  });
+});
+
+describe('doneStaleTip', () => {
+  it('names the land and says nothing wakes the coordinator', () => {
+    const t = doneStaleTip('L-1a2b/web');
+    expect(t).toContain('Land L-1a2b/web');
+    expect(t).toContain('when you wake the Hive');
   });
 });

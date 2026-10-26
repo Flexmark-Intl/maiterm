@@ -651,6 +651,7 @@ async fn finish<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, mut u: UndoSta
     if u.by_human() {
         crate::hive::decisions::land_undone_by_human(ctx, caller, &u.land, e.decision.as_deref()).await;
     }
+    crate::hive::finish::undone_after_done(ctx, caller, &u.undoes).await;
     let note = format!("Land {} undone by {who}: {}", u.undoes, one_line(&u.reason, 300));
     if let Err(err) = crate::hive::control::task_note(ctx, caller, &u.task_id, &note, None).await {
         log::info!("hive {}: undo note for {} not written: {err}", caller.hive.id, u.task_id);
@@ -924,8 +925,10 @@ async fn tell<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, u: &UndoState, s
     let text = format!("⟦HIVE UNDO · {}⟧ {says}", one_line(&frame_escape(&u.title), 120));
     match coordinator_tab(ctx.data, caller) {
         Some(c) => {
-            let sent = ctx.window.deliver(&c, text, "Hive undo").await;
+            let sent = ctx.window.deliver(&c, text.clone(), "Hive undo").await;
             log::info!("hive {}: undo result for {}: {}", caller.hive.id, u.undoes, sent.describe());
+            // The human's Undo in a Done Hive finds no agent there: it hears once it is woken.
+            crate::hive::owed::owe_if_refused(caller, &sent, "Hive undo", text).await;
         }
         None => log::info!("hive {}: undo result for {} not delivered: no coordinator tab", caller.hive.id, u.undoes),
     }

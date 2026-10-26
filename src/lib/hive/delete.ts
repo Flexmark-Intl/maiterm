@@ -22,15 +22,24 @@ export function deleteRefusal(p: HiveDeletePreview | null): string | null {
   return p.lands_in_flight.length ? `${p.lands_in_flight.join(', ')} ${p.lands_in_flight.length === 1 ? 'is' : 'are'} landing: wait for it to finish or be held.` : null;
 }
 
-/** The sheet's "Kept on disk": worktrees and scratch holding work, and the memory folder unless
- *  its box is ticked (memory is work, the human's own files in it included). */
-export function keptLines(p: HiveDeletePreview, deleteMemory: boolean): string[] {
+/** The sheet's "Kept on disk": worktrees and scratch holding work, and the memory folder and the
+ *  gallery unless their boxes are ticked (memory is work, the human's own files in it included). */
+export function keptLines(p: HiveDeletePreview, deleteMemory: boolean, deleteGallery = false): string[] {
   const out = [
     ...p.dirty,
     ...p.scratch.map((s) => `Scratch of ${s.worker}: ${s.path} (${plural(s.files, 'file')}${s.reported ? `, ${s.reported} reported` : ''})`),
   ];
   if (p.memory && !deleteMemory) out.push(`Shared memory: ${p.memory.path} (${plural(p.memory.files, 'file')}, ${formatBytes(p.memory.bytes)})`);
+  if (p.gallery_files && !deleteGallery) {
+    const where = p.gallery_path ? `: ${p.gallery_path}` : '';
+    out.push(`The gallery${where} (${plural(p.gallery_files, 'asset')}, ${formatBytes(p.gallery_bytes)})`);
+  }
   return out;
+}
+
+/** The sheet's "Agents that stop": only agents running now, or a line saying none is. */
+export function stoppingLines(p: HiveDeletePreview): string[] {
+  return p.live_agents.length ? p.live_agents : ['None running'];
 }
 
 /** The sheet's "Removed": what goes that isn't work, and the gallery and memory when ticked. */

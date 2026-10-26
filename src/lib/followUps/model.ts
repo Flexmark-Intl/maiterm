@@ -450,6 +450,28 @@ export function statusOf(f: FollowUp, now: number): FollowUpStatus {
   return isDue(f, now) ? 'due' : 'pending';
 }
 
+/** What this webview's own OSC 133 marks say about a shell before a resume (§6.2), ahead of the
+ *  shell's own answer that its line is empty (`probe_shell_line`), which stays decisive either
+ *  way. `promptAt`/`beginAt` are the PTY's last prompt (A) and command start (B/C) as this
+ *  webview heard them, `typedAt` the tab's last keystroke. Every one is in memory, so a webview
+ *  reload empties them, and a shell idle at its prompt never sends A again. `markless` lets a
+ *  shell with no mark through on the rest of the evidence (no command begun, no key pressed
+ *  since this webview loaded) — a Hive relaunch only, whose shell maiTerm made and Rust has
+ *  just read at its prompt; anything else still waits for a prompt it heard. */
+export type PromptEvidence = 'ok' | 'no_mark' | 'running' | 'typed';
+
+export function promptEvidence(m: { promptAt?: number; beginAt?: number; typedAt?: number; markless: boolean }): PromptEvidence {
+  if (m.promptAt === undefined) {
+    if (!m.markless) return 'no_mark';
+    // No prompt heard since the reload: a command begun, or a key pressed, since then is on
+    // that unseen line.
+    if (m.beginAt !== undefined) return 'running';
+    return m.typedAt !== undefined ? 'typed' : 'ok';
+  }
+  if ((m.beginAt ?? 0) > m.promptAt) return 'running';
+  return m.typedAt !== undefined && m.typedAt > m.promptAt ? 'typed' : 'ok';
+}
+
 /** "3h 12m", "45m", "2d 3h" — the largest two units, never "0m". */
 export function durationText(ms: number): string {
   const totalMin = Math.max(1, Math.round(ms / 60_000));

@@ -376,6 +376,28 @@ pub(crate) fn config_root_for(prefs: &crate::state::Preferences, users_own: Opti
         .or_else(|| users_own.map(Path::to_path_buf))
 }
 
+/// Whose trust the launch root holds, as the human knows it (`config_root_for`'s three cases),
+/// for the untrusted refusal and the Create sheet: naming `~/.claude` for a user's own
+/// `CLAUDE_CONFIG_DIR` sends the human to trust a root this launch never reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TrustRoot {
+    Account(String),
+    Dir(PathBuf),
+    Default,
+}
+
+pub(crate) fn trust_root(prefs: &crate::state::Preferences) -> TrustRoot {
+    trust_root_for(prefs, crate::accounts::user_claude_root())
+}
+
+pub(crate) fn trust_root_for(prefs: &crate::state::Preferences, users_own: Option<&Path>) -> TrustRoot {
+    // Without the user's own root, a root is a managed account's.
+    if let Some(dir) = config_root_for(prefs, None) {
+        return super::create::account_label(prefs).map_or(TrustRoot::Dir(dir), TrustRoot::Account);
+    }
+    users_own.map_or(TrustRoot::Default, |d| TrustRoot::Dir(d.to_path_buf()))
+}
+
 /// The `.claude.json` that launch root reads trust from.
 pub fn launch_claude_json(prefs: &crate::state::Preferences) -> Option<PathBuf> {
     claude_json_for(launch_config_root(prefs).as_deref())
@@ -669,8 +691,11 @@ fn ensure_trust(launch_json: &Path, paths: &HivePaths, dir: &Path) -> Result<(),
 
 /// A worktree inherits its main repo's trust (§6.6), so maiTerm writes none for a worker's: a
 /// repo the human hasn't trusted is theirs to trust, and the launch is refused instead of
-/// raising the dialog. Checked in every root a Claude has run under, the launch's own included.
-fn check_worker_trust(homes: &crate::relocate::agents::Homes, launch_json: &Path, paths: &HivePaths, w: &WorkerRecord) -> Result<(), String> {
+/// raising the dialog. Checked in the one root the launch reads (`launch_json`), the root the
+/// Create sheet reads too: an entry in another root (`~/.claude.json` under a managed account)
+/// is no trust this launch gets, and a missing one there refuses nothing. `under` names that
+/// root for the refusal.
+fn check_worker_trust(homes: &crate::relocate::agents::Homes, launch_json: &Path, under: &TrustRoot, paths: &HivePaths, w: &WorkerRecord) -> Result<(), String> {
     // A reviewer's cwd is its scratch, a folder maiTerm made: trusted like a scratch-only worker's.
     if w.git_folders().next().is_none() || w.is_reviewer() {
         return ensure_trust_in(homes, launch_json, paths, &paths.worker_scratch(&w.slug));
@@ -678,19 +703,35 @@ fn check_worker_trust(homes: &crate::relocate::agents::Homes, launch_json: &Path
     if !launch_json.is_file() {
         return Err(NO_CLAUDE_YET.to_string());
     }
-    let roots: Vec<PathBuf> = homes.claude_json.iter().filter(|f| f.is_file()).cloned().collect();
+    let root = [launch_json.to_path_buf()];
     for f in w.git_folders() {
         let wt = f.worktree.as_deref().unwrap_or_default();
-        let candidates = super::trust::worktree_candidates(Path::new(wt), f.common_dir.as_deref().map(Path::new));
-        if !super::trust::keys_trusted_in_all(&roots, &candidates) {
-            return Err(format!(
-                "Claude Code doesn't trust the repo behind \"{}\", so starting this worker would raise its trust dialog, which \
-                 nothing may answer for you. Open that repo in Claude Code once and trust it, then restart the worker.",
-                f.name
-            ));
+        let common = f.common_dir.as_deref().map(Path::new);
+        let candidates = super::trust::worktree_candidates(Path::new(wt), common);
+        if !super::trust::keys_trusted_in_all(&root, &candidates) {
+            let repo = common.filter(|c| c.file_name().is_some_and(|n| n == ".git")).and_then(Path::parent).map(|p| p.display().to_string());
+            return Err(untrusted_refusal(&f.name, repo.as_deref(), under));
         }
     }
     Ok(())
+}
+
+/// Why a worker in an untrusted repo doesn't start, and exactly how its human trusts it: under
+/// the account the launch uses, in the human's own checkout, never a copy maiTerm made.
+pub(crate) fn untrusted_refusal(folder: &str, repo: Option<&str>, under: &TrustRoot) -> String {
+    let under = match under {
+        TrustRoot::Account(a) => format!("the Claude account \"{a}\""),
+        TrustRoot::Dir(d) => format!("the Claude config at {} (CLAUDE_CONFIG_DIR)", d.display()),
+        TrustRoot::Default => "Claude's default account (~/.claude)".to_string(),
+    };
+    let place = repo.map_or_else(|| format!("the \"{folder}\" folder"), |r| format!("{r} (the \"{folder}\" folder)"));
+    format!(
+        "Claude Code doesn't trust the repo at {place} under {under}, the account this Hive's agents run as, so starting this \
+         worker would raise Claude's trust dialog, which nothing may answer for you. Only your human can trust it: in a \
+         maiTerm tab running under that account, run `claude` once in {} and accept its question. A worktree or read copy \
+         doesn't count: its trust comes from that repo. Then restart the worker.",
+        repo.unwrap_or("that repo")
+    )
 }
 
 /// What a spawn checks once its worktrees exist and before its tab does: a launch the builder
@@ -704,7 +745,7 @@ pub fn worker_preflight(paths: &HivePaths, w: &WorkerRecord, prefs: &crate::stat
     crate::instance::hive_refusal()?;
     claude_new_enough()?;
     let launch_json = launch_claude_json(prefs).ok_or("Couldn't find the home folder")?;
-    check_worker_trust(&trust_homes(&launch_json)?, &launch_json, paths, w)
+    check_worker_trust(&trust_homes(&launch_json)?, &launch_json, &trust_root(prefs), paths, w)
 }
 
 /// What runs before a worker's first session (§6.4, §6.5): the slim cargo seed, then each git
@@ -814,7 +855,7 @@ fn prepare_worker(hive: &Hive, paths: &HivePaths, tab_id: &str, tasks: &[crate::
     }
     let root = launch_config_root(prefs);
     let launch_json = claude_json_for(root.as_deref()).ok_or("Couldn't find the home folder")?;
-    check_worker_trust(&trust_homes(&launch_json)?, &launch_json, paths, &w)?;
+    check_worker_trust(&trust_homes(&launch_json)?, &launch_json, &trust_root(prefs), paths, &w)?;
 
     let hooks = super::settings::HookEnv::current()?;
     let ctx = super::settings::WorkerContext::gather(hive, paths, &w);
@@ -1105,6 +1146,8 @@ pub(crate) mod tests {
         assert_eq!(account_set_for(root.as_deref()), vec![(CONFIG_ENV.to_string(), own.to_string_lossy().into_owned())]);
         assert!(!unset_vars_for(&none).iter().any(|u| u == CONFIG_ENV));
         assert_eq!(claude_json_for(root.as_deref()), Some(own.join(".claude.json")), "trust and the sheet read it");
+        assert_eq!(trust_root_for(&none, Some(own)), TrustRoot::Dir(own.to_path_buf()), "and the refusal names it");
+        assert_eq!(trust_root_for(&none, None), TrustRoot::Default);
 
         assert!(config_guard(root.as_deref()).is_empty());
         let (out, err, ok) = run_launch(&none, root.as_deref(), "", Some(&own.to_string_lossy()));
@@ -1114,6 +1157,7 @@ pub(crate) mod tests {
         let work = managed("acct-2");
         let acct = crate::accounts::account_root(crate::accounts::Runtime::Claude, "acct-2").unwrap();
         assert_eq!(config_root_for(&work, Some(own)), Some(acct));
+        assert_eq!(trust_root_for(&work, Some(own)), TrustRoot::Account("Work".into()));
     }
 
     /// Trust goes into the root the launch reads, and a launch whose root holds none is refused
@@ -1461,15 +1505,31 @@ pub(crate) mod tests {
             codex: base.join("codex"),
             gemini: base.join("gemini"),
         };
-        let err = check_worker_trust(&homes(vec![root.clone()]), &root, &p, &w).unwrap_err();
+        let work = TrustRoot::Account("Work".into());
+        let err = check_worker_trust(&homes(vec![root.clone()]), &root, &work, &p, &w).unwrap_err();
         assert!(err.contains("trust dialog") && err.contains("\"web\""), "{err}");
+        // How to trust it: the account, the human's repo, a maiTerm tab; never a copy.
+        assert!(err.contains("the Claude account \"Work\"") && err.contains("run `claude` once in /r/web") && err.contains("maiTerm tab"), "{err}");
+        assert!(err.contains("A worktree or read copy doesn't count"), "{err}");
         let missing = base.join("missing.json");
-        assert_eq!(check_worker_trust(&homes(vec![missing.clone()]), &missing, &p, &w).unwrap_err(), NO_CLAUDE_YET, "no root a Claude ran under");
+        assert_eq!(check_worker_trust(&homes(vec![missing.clone()]), &missing, &TrustRoot::Default, &p, &w).unwrap_err(), NO_CLAUDE_YET, "no root a Claude ran under");
         // The main checkouts, read from the recorded common dirs, cover the worktrees.
         fs::write(&root, r#"{"projects":{"/r/web":{"hasTrustDialogAccepted":true},"/r/api":{"hasTrustDialogAccepted":true}}}"#).unwrap();
-        assert_eq!(check_worker_trust(&homes(vec![root.clone()]), &root, &p, &w), Ok(()));
+        assert_eq!(check_worker_trust(&homes(vec![root.clone()]), &root, &TrustRoot::Default, &p, &w), Ok(()));
         // Trusted elsewhere, but the launch's own root has never run a Claude: refused.
-        assert_eq!(check_worker_trust(&homes(vec![root.clone(), missing.clone()]), &missing, &p, &w).unwrap_err(), NO_CLAUDE_YET);
+        assert_eq!(check_worker_trust(&homes(vec![root.clone(), missing.clone()]), &missing, &TrustRoot::Default, &p, &w).unwrap_err(), NO_CLAUDE_YET);
+        // The live test's case: trusted in the launch's root only, untrusted in `~/.claude.json`,
+        // which a managed account's launch never reads. It starts.
+        let plain_home = base.join("home.claude.json");
+        fs::write(&plain_home, r#"{"projects":{}}"#).unwrap();
+        assert_eq!(check_worker_trust(&homes(vec![plain_home.clone(), root.clone()]), &root, &work, &p, &w), Ok(()));
+        // And the reverse: trusted only in `~/.claude.json` is no trust for this launch.
+        let err = check_worker_trust(&homes(vec![root.clone(), plain_home.clone()]), &plain_home, &TrustRoot::Default, &p, &w).unwrap_err();
+        assert!(err.contains("Claude's default account (~/.claude)"), "{err}");
+        // The user's own `CLAUDE_CONFIG_DIR` is the root: the refusal names it, never `~/.claude`.
+        let own = TrustRoot::Dir(PathBuf::from("/Users/u/.claude-work"));
+        let err = check_worker_trust(&homes(vec![plain_home.clone()]), &plain_home, &own, &p, &w).unwrap_err();
+        assert!(err.contains("the Claude config at /Users/u/.claude-work") && !err.contains("~/.claude)"), "{err}");
         let _ = fs::remove_dir_all(&base);
     }
 

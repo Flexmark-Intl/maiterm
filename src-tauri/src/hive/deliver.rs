@@ -87,6 +87,39 @@ fn paused_by_human(app: &AppState, tab: &str) -> Option<String> {
     (h.status == super::fuses::STATUS_PAUSED && h.paused_by == super::fuses::PAUSED_BY_HUMAN).then(|| h.id.clone())
 }
 
+/// Per Hive, the turn the resume notice and every delivery its Pause held take one at a time:
+/// woken together, they typed into one agent at the same instant (the third live test: a held
+/// verdict landed as keys inside the resume notice). Memory only, like the holds.
+static RELEASE_TURNS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// After each in its turn, before the next: the agent takes one paste as its own message first.
+const RELEASE_GAP: Duration = Duration::from_millis(1500);
+
+fn release_turn(hive_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    RELEASE_TURNS.lock().unwrap_or_else(|e| e.into_inner()).entry(hive_id.to_string()).or_default().clone()
+}
+
+/// `f` in `hive_id`'s release turn, the gap kept after it.
+async fn in_release_turn<T>(hive_id: &str, gap: Duration, f: impl std::future::Future<Output = T>) -> T {
+    let turn = release_turn(hive_id);
+    let _held = turn.lock().await;
+    let out = f.await;
+    tokio::time::sleep(gap).await;
+    out
+}
+
+/// The human's Resume of `hive_id`: the resume notice (`notice`, the coordinator's delivery)
+/// goes in its turn first, and only then is the Pause's hold lifted, so what it held follows it
+/// one at a time (`in_release_turn`), never alongside it.
+pub(crate) async fn resume_then_release<T>(hive_id: &str, notice: impl std::future::Future<Output = T>) -> T {
+    let turn = release_turn(hive_id);
+    let _held = turn.lock().await;
+    let out = notice.await;
+    end_pause_hold(hive_id);
+    tokio::time::sleep(RELEASE_GAP).await;
+    out
+}
+
 /// The human resumed `hive_id`: what its Pause held goes out (each through `deliver` again).
 pub(crate) fn end_pause_hold(hive_id: &str) {
     if let Some(n) = PAUSE_HOLDS.lock().unwrap_or_else(|e| e.into_inner()).remove(hive_id) {
@@ -115,8 +148,9 @@ pub(crate) async fn deliver(app: &Arc<AppState>, handle: &AppHandle, tab: &str, 
         log::info!("hive {hive_id}: {what} for tab {tab} held while the human has the Hive paused");
         tauri::async_runtime::spawn(async move {
             wait_for_resume(&app, &hive_id, &tab).await;
-            // Through every other hold: a land may have started meanwhile.
-            let sent = deliver_through_pause(&app, &handle, &tab, &text, what).await;
+            // Through every other hold: a land may have started meanwhile. One at a time, after
+            // the resume notice.
+            let sent = in_release_turn(&hive_id, RELEASE_GAP, deliver_through_pause(&app, &handle, &tab, &text, what)).await;
             log::info!("hive {hive_id}: {what} for tab {tab}, held for the human's pause: {}", sent.describe());
         });
         return Sent::Held("your human has paused this Hive; it goes out when they resume it".to_string());
@@ -347,6 +381,60 @@ mod tests {
         // Resumed before the waiter armed: it sees the status and doesn't wait for the next one.
         tokio::time::timeout(Duration::from_secs(2), wait_for_resume(&app, &hive_id, "coord")).await.expect("not paused");
         end_pause_hold(&hive_id);
+    }
+
+    /// The third live test: a held verdict was typed at the instant of the resume notice. The
+    /// notice goes first, and what the Pause held follows one at a time, never overlapping.
+    #[tokio::test]
+    async fn released_deliveries_follow_the_resume_notice_one_at_a_time() {
+        let hive = format!("h-{}", uuid::Uuid::new_v4());
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let step = |log: Arc<Mutex<Vec<String>>>, name: &'static str| async move {
+            log.lock().unwrap().push(format!("{name} start"));
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            log.lock().unwrap().push(format!("{name} end"));
+        };
+        let turn = release_turn(&hive);
+        let notice_holds = turn.lock().await;
+        // Woken together, as `end_pause_hold` wakes them.
+        let held: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|n| {
+                let (h, l) = (hive.clone(), log.clone());
+                tokio::spawn(async move { in_release_turn(&h, Duration::from_millis(5), step(l, n)).await })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(log.lock().unwrap().is_empty(), "nothing goes in while the notice holds the turn");
+        drop(notice_holds);
+        for h in held {
+            h.await.unwrap();
+        }
+        let got = log.lock().unwrap().clone();
+        assert_eq!(got.len(), 4);
+        for pair in got.chunks(2) {
+            assert!(pair[0].ends_with("start") && pair[1].ends_with("end") && pair[0][..1] == pair[1][..1], "overlapped: {got:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_resume_notice_lifts_the_hold_only_once_it_went_in() {
+        let hive = format!("h-{}", uuid::Uuid::new_v4());
+        let order: Arc<Mutex<Vec<&str>>> = Arc::new(Mutex::new(Vec::new()));
+        let (h, o) = (hive.clone(), order.clone());
+        let waiter = tokio::spawn(async move {
+            // A held delivery's turn, asked for while the notice is being typed.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            in_release_turn(&h, Duration::ZERO, async { o.lock().unwrap().push("held") }).await;
+        });
+        let o = order.clone();
+        resume_then_release(&hive, async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            o.lock().unwrap().push("notice");
+        })
+        .await;
+        waiter.await.unwrap();
+        assert_eq!(*order.lock().unwrap(), vec!["notice", "held"]);
     }
 
     #[test]

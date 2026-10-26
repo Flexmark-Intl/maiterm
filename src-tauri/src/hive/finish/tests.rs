@@ -1303,3 +1303,34 @@ async fn an_agent_that_outlives_its_signal_is_never_typed_into() {
     rig.seen.lock().unwrap().front.insert("coord".into(), Front::Shell);
     assert_eq!(rig.wake("hello").await, Ok(WakeOutcome::Relaunching));
 }
+
+/// The third live test: Done survived an Undo of the land its report relied on. The header now
+/// says it is stale; nothing wakes the coordinator, and an unrelated undo or a Hive no longer
+/// done marks nothing. A new finish clears it (`finish_tool`'s save).
+#[tokio::test]
+async fn undoing_a_land_the_report_relied_on_marks_done_stale() {
+    let rig = Rig::done("stale");
+    let landed = FinishLanded { land: "L-1/web".into(), folder: "web".into(), ..FinishLanded::default() };
+    let gone = FinishLanded { land: "L-0/web".into(), undone: true, ..FinishLanded::default() };
+    let rec = FinishRecord { id: "F-1".into(), landed: vec![landed, gone], ..FinishRecord::default() };
+    queue::append_line(&rig.caller.paths.finishes(), &serde_json::to_value(&rec).unwrap()).unwrap();
+    let ctx = rig.ctx(ok_save);
+
+    undone_after_done(&ctx, &rig.caller, "L-9/web").await;
+    undone_after_done(&ctx, &rig.caller, "L-0/web").await;
+    assert!(rig.hive().done_stale.is_empty(), "a land the report didn't rely on");
+    undone_after_done(&ctx, &rig.caller, "L-1/web").await;
+    let h = rig.hive();
+    assert_eq!((h.status.as_str(), h.done_stale.as_str(), h.done_at), (STATUS_DONE, "L-1/web", Some(DONE_AT)));
+    let seen = rig.seen.lock().unwrap();
+    assert_eq!(seen.changed.last().map(|h| h.done_stale.as_str()), Some("L-1/web"), "the header hears it");
+    assert!(seen.calls.is_empty() && seen.delivered.is_empty(), "nothing wakes the coordinator");
+    drop(seen);
+
+    rig.edit_hive(|h| {
+        h.status = STATUS_ACTIVE.into();
+        h.done_stale.clear();
+    });
+    undone_after_done(&ctx, &rig.caller, "L-1/web").await;
+    assert!(rig.hive().done_stale.is_empty(), "only a Done Hive's report goes stale");
+}

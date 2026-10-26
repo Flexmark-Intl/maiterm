@@ -517,8 +517,10 @@ pub(crate) async fn override_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     let o = blocking(move || override_decision(&paths, &id, &n, &crate::commands::workspace::iso_now())).await?;
     log::info!("hive {}: the human overrode decision {}{}", caller.hive.id, o.decision.id, if o.retired { ", retiring its precedent" } else { "" });
     if let Some(c) = super::tools::coordinator_tab(ctx.data, caller) {
-        let sent = ctx.window.deliver(&c, override_notice(&o), "Hive override").await;
+        let notice = override_notice(&o);
+        let sent = ctx.window.deliver(&c, notice.clone(), "Hive override").await;
         log::info!("hive {}: override notice to the coordinator: {}", caller.hive.id, sent.describe());
+        super::owed::owe_if_refused(caller, &sent, "Hive override", notice).await;
     }
     ctx.window.decisions_changed(&caller.workspace_id);
     // Two in a day may make an offer to hand the category back due (§7.6).

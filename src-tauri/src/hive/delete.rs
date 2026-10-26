@@ -54,7 +54,9 @@ pub struct HiveDeletePreview {
     /// The gallery's assets that still have their file (the trash's included), from its index.
     pub gallery_files: u64,
     pub gallery_bytes: u64,
-    /// Agents that would be stopped: `#badge slug`, and the coordinator.
+    /// The gallery's folder, listed as kept while its box isn't ticked.
+    pub gallery_path: String,
+    /// Agents running now that would be stopped: `#badge slug`, and the coordinator.
     pub live_agents: Vec<String>,
     /// Workers landing now: while any is, delete is refused.
     pub lands_in_flight: Vec<String>,
@@ -228,8 +230,10 @@ fn gallery_totals(hive: &Hive, paths: &HivePaths) -> (u64, u64) {
 }
 
 /// The sheet's list (§11.2). Reads only: git runs in the human's repos, and in a worktree only on
-/// the git dir maiTerm recorded, after its `.git` file checks out. Blocks.
-pub(crate) fn preview(hive: &Hive, paths: &HivePaths, has_coordinator: bool) -> HiveDeletePreview {
+/// the git dir maiTerm recorded, after its `.git` file checks out. `coordinator` is its tab id
+/// (empty for none), and `running` says whether a tab's agent is in front of its terminal: only
+/// those are agents that stop. Blocks.
+pub(crate) fn preview(hive: &Hive, paths: &HivePaths, coordinator: &str, running: &dyn Fn(&str) -> bool) -> HiveDeletePreview {
     let workers = worker::list_workers(paths);
     let mut p = HiveDeletePreview::default();
     for w in &workers {
@@ -249,7 +253,7 @@ pub(crate) fn preview(hive: &Hive, paths: &HivePaths, has_coordinator: bool) -> 
             }
         }
         p.scratch.extend(scratch_folder(paths, w));
-        if w.is_live() {
+        if w.is_live() && w.tab_id.as_deref().is_some_and(running) {
             p.live_agents.push(worker_label(w));
         }
         if super::land::in_flight(w) {
@@ -270,10 +274,11 @@ pub(crate) fn preview(hive: &Hive, paths: &HivePaths, has_coordinator: bool) -> 
         }
     }
     p.dirty.extend(unaccounted(hive, paths, &workers).into_iter().map(|(why, _)| why));
-    if has_coordinator {
+    if !coordinator.is_empty() && running(coordinator) {
         p.live_agents.insert(0, "the coordinator".to_string());
     }
     (p.gallery_files, p.gallery_bytes) = gallery_totals(hive, paths);
+    p.gallery_path = paths.gallery().to_string_lossy().to_string();
     p.branches = hive_branches(hive, &workers);
     p.memory = memory_folder(paths);
     p.removed = going(paths);
@@ -608,12 +613,28 @@ fn caller_in(state: &AppState, label: &str, workspace_id: &str) -> Result<Caller
 #[tauri::command]
 pub async fn hive_delete_preview(
     window: tauri::Window,
+    app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
     workspace_id: String,
 ) -> Result<HiveDeletePreview, String> {
     let caller = caller_in(&state, window.label(), &workspace_id)?;
-    let has_coordinator = !caller.tab_id.is_empty();
-    blocking(move || Ok(preview(&caller.hive, &caller.paths, has_coordinator))).await
+    // Only agents in front of their terminals stop: a Done coordinator has exited, and a worker's
+    // phase alone (`is_live`) says nothing of whether its agent runs. Unreadable counts as running.
+    let tabs: Vec<String> = {
+        let data = state.app_data.read();
+        data.window(window.label())
+            .and_then(|w| w.workspaces.iter().find(|w| w.id == workspace_id))
+            .map(|ws| ws.panes.iter().flat_map(|p| &p.tabs).filter(|t| t.hive_role.is_some()).map(|t| t.id.clone()).collect())
+            .unwrap_or_default()
+    };
+    let ctx = super::tools::app_ctx(state.inner(), &app, &caller);
+    let mut running: Vec<String> = Vec::new();
+    for t in tabs {
+        if matches!(ctx.window.front(&t).await, Front::Job | Front::Unknown) {
+            running.push(t);
+        }
+    }
+    blocking(move || Ok(preview(&caller.hive, &caller.paths, &caller.tab_id, &|t: &str| running.iter().any(|r| r == t)))).await
 }
 
 /// Delete the Hive (§11.2): the human's click on the delete sheet, the only way in.

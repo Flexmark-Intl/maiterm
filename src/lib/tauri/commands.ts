@@ -2791,6 +2791,12 @@ export async function hiveDetectFolder(path: string): Promise<HiveFolderInfo> {
   return invoke('hive_detect_folder', { path });
 }
 
+/** The Create sheet's Trust it: the human trusts their repo in the root the Hive's agents
+ *  launch under (docs/hive.md §6.6). Answers the folder detected again. */
+export async function hiveTrustRepo(path: string): Promise<HiveFolderInfo> {
+  return invoke('hive_trust_repo', { path });
+}
+
 export async function hiveDetectTools(): Promise<HiveDetectedTool[]> {
   return invoke('hive_detect_tools');
 }

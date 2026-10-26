@@ -12,8 +12,8 @@
   or its tasks change, diff stats and meta are pushed (hiveFeed), and the rest (lane, blocker,
   note, agent state and the activity line) comes live from the stores. A card's newest assets come
   with its record, refetched when the gallery changes (§4.3). The header carries Pause (Resume
-  while paused, whoever paused it), Settings, the completion criteria (read-only: the coordinator sets them), and while done the Done
-  time and its Report (§11.4).
+  while paused, whoever paused it; none while done), Settings, the completion criteria (read-only: the coordinator sets them), and while done the Done
+  time, whether a land it relied on was undone since, and its Report (§11.4).
 
   Gallery (§10.4, step 8d) and Memory (§9, step 7a) are the header's other views (Board · Gallery
   · Memory, Cmd+Shift+Y): GalleryView or HiveMemoryView takes the board's place and the worker
@@ -40,7 +40,7 @@
   import HiveSettingsModal from './HiveSettingsModal.svelte';
   import { hiveFailureNotice } from '$lib/agents/turnFailure';
   import { boardGone, pausedLabel, throttleTip } from '$lib/hive/model';
-  import { doneLabel } from '$lib/hive/finish';
+  import { doneLabel, doneStaleTip } from '$lib/hive/finish';
   import FinishReportModal from './FinishReportModal.svelte';
   import type { HiveBoard } from '$lib/tauri/types';
   import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
@@ -700,6 +700,11 @@
       {#if hive?.status === 'done'}
         <span class="done-row">
           <span class="done">{doneLabel(hive.done_at)}</span>
+          {#if hive.done_stale}
+            <Tooltip text={doneStaleTip(hive.done_stale)}>
+              <span class="warn">· a land it relied on was undone</span>
+            </Tooltip>
+          {/if}
           <Tooltip text="The coordinator's report: each criterion's receipts, what landed, final assets, spend, what it decided alone">
             <button type="button" class="queue-btn" onclick={() => (reportOpen = true)}>Report</button>
           </Tooltip>
@@ -720,9 +725,11 @@
           </Tooltip>
         {/each}
       </div>
-      {#if hive && hive.status !== 'done'}
+      {#if hive}
         <div class="hive-actions">
-          {#if hive.status === 'paused'}
+          <!-- Done: Settings only; there is nothing to pause. -->
+          {#if hive.status === 'done'}
+          {:else if hive.status === 'paused'}
             <Tooltip text={hive.paused_by === 'human' ? 'Start workers again' : "Start workers again: you've dealt with what paused it"}>
               <button type="button" class="act-btn" disabled={resuming} onclick={() => void resume()}><Icon name="resume" size={11} />Resume</button>
             </Tooltip>

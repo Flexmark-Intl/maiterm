@@ -713,7 +713,10 @@ seven review rounds; each one found a way a resume could be glued onto a human's
   foreground (`getAgentLiveness`); the shell in the foreground (`get_pty_foreground_job`); the
   shell's own OSC 133 prompt (A) as the last thing it did, with no command begun (B/C) since; no
   keystroke since that prompt; and, last and decisive, **the shell's own answer that its command
-  line is empty** (`probe_shell_line`).
+  line is empty** (`probe_shell_line`). The marks and keystrokes are the webview's, gone after a
+  webview reload, and an idle prompt sends no new mark, so a Hive relaunch alone
+  (`relaunchAgent`, docs/hive.md §16 third live test fixes) goes on without a mark when no
+  command began and no key was pressed since the reload (`promptEvidence`); the probe still decides.
 
   **Why ask the shell (review of 0a090e0).** Every outside signal had a hole that would have
   glued the resume onto a command and run it. A paste (Cmd+V) or a dropped file writes to the

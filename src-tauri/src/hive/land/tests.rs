@@ -818,10 +818,33 @@ fn seeding_never_writes_through_a_link_the_merged_tree_tracks() {
     fs::create_dir_all(&tmp).unwrap();
     fs::create_dir_all(&elsewhere).unwrap();
     std::os::unix::fs::symlink(&elsewhere, tmp.join("out")).unwrap();
-    let seeded = git::seed_ignored(&w.folders[0], &tmp);
+    let seeded = git::seed_ignored(&w.folders[0], &tmp, &[]);
     assert_eq!(seeded, vec!["cache".to_string()], "{seeded:?}");
     assert_eq!(fs::read_to_string(tmp.join("cache/a")).unwrap(), "a");
     assert!(fs::read_dir(&elsewhere).unwrap().next().is_none(), "nothing went through the link");
+}
+
+/// The third live test logged `seeded web from worker …'s worktree: .claude`. Agent config the
+/// config rule lists, the human's extra paths included, never reaches a check's tree.
+#[test]
+fn seeding_skips_agent_config() {
+    let rig = Rig::new("seedconfig", &["web"]);
+    let w = rig.reported("seedcfg", &["web"], "s.rs", "s\n");
+    let wt = PathBuf::from(w.folders[0].worktree.clone().unwrap());
+    fs::write(wt.join(".gitignore"), "node_modules/\n.claude/\n.mcp.json\n.envrc\nscripts-local/\n").unwrap();
+    for d in ["node_modules", ".claude", "scripts-local"] {
+        fs::create_dir_all(wt.join(d)).unwrap();
+        fs::write(wt.join(d).join("f"), "x").unwrap();
+    }
+    fs::write(wt.join(".mcp.json"), "{}").unwrap();
+    fs::write(wt.join(".envrc"), "export X=1").unwrap();
+    let tmp = rig.base.join("tmpcfg");
+    fs::create_dir_all(&tmp).unwrap();
+    let seeded = git::seed_ignored(&w.folders[0], &tmp, &["scripts-local/**".to_string()]);
+    assert_eq!(seeded, vec!["node_modules".to_string()], "{seeded:?}");
+    for gone in [".claude", ".mcp.json", ".envrc", "scripts-local"] {
+        assert!(fs::symlink_metadata(tmp.join(gone)).is_err(), "{gone} seeded");
+    }
 }
 
 #[tokio::test]

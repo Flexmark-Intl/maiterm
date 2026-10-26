@@ -969,11 +969,13 @@ pub async fn hive_resume(
     // pause held (`deliver::end_pause_hold`).
     let (st, handle, coordinator) = (state.inner().clone(), app.clone(), change.coordinator.clone().filter(|_| by_human));
     tauri::async_runtime::spawn(async move {
-        if let Some(c) = coordinator {
-            let sent = super::deliver::deliver(&st, &handle, &c, HUMAN_RESUME_NOTICE, "Hive notice").await;
-            log::info!("hive: resume notice to {c}: {}", sent.describe());
-        }
-        super::deliver::end_pause_hold(&hive_id);
+        let notice = async {
+            if let Some(c) = coordinator {
+                let sent = super::deliver::deliver(&st, &handle, &c, HUMAN_RESUME_NOTICE, "Hive notice").await;
+                log::info!("hive: resume notice to {c}: {}", sent.describe());
+            }
+        };
+        super::deliver::resume_then_release(&hive_id, notice).await;
     });
     // Workers that waited out the pause launch now, where their dependencies allow.
     super::waiters::poll_soon(state.inner().clone(), app, workspace_id);

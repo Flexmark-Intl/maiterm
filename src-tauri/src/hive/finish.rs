@@ -175,6 +175,32 @@ pub fn last_finish(paths: &HivePaths) -> Option<FinishRecord> {
         .and_then(|v| serde_json::from_value(v).ok())
 }
 
+/// Whether the newest report relied on land log line `land` (its `landed` names it, not already
+/// undone then).
+pub fn report_relies_on(rec: &FinishRecord, land: &str) -> bool {
+    rec.landed.iter().any(|l| l.land == land && !l.undone)
+}
+
+/// A land a Done Hive's report relied on was undone (the human's Undo; a Done coordinator's own
+/// is refused): Done stands, but the header says it is stale. Nothing wakes the coordinator: the
+/// undo's result waits for its next session (`owed::owe_if_refused`), when the human wakes it.
+pub(crate) async fn undone_after_done<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, land: &str) {
+    let done = hive_in(&ctx.data.read(), &caller.hive.id).is_some_and(|h| h.status == STATUS_DONE);
+    if !done {
+        return;
+    }
+    let (paths, line) = (caller.paths.clone(), land.to_string());
+    let relied = blocking(move || Ok(last_finish(&paths).is_some_and(|r| report_relies_on(&r, &line)))).await.unwrap_or(false);
+    if !relied {
+        return;
+    }
+    let line = land.to_string();
+    match write_status(ctx, caller, &[STATUS_DONE], None, move |h| h.done_stale = line) {
+        Ok(_) => log::info!("hive {}: Done is stale: land {land}, which its report relied on, was undone", caller.hive.id),
+        Err(e) => log::info!("hive {}: Done not marked stale after undoing {land}: {e}", caller.hive.id),
+    }
+}
+
 // ── Writing the record ──
 
 /// The Hive's record edited under the state's lock while its status is one of `from`, moved to
@@ -1051,7 +1077,10 @@ pub(crate) async fn finish_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     .await?;
     // The line stays if this fails: the report shows only while the status is done. Saved, not yet
     // announced: the window hears Done (and the human its notice) only once it is final.
-    let done = save_status(ctx, caller, &[STATUS_ACTIVE], Some(STATUS_DONE), |h| h.done_at = Some(now))?;
+    let done = save_status(ctx, caller, &[STATUS_ACTIVE], Some(STATUS_DONE), |h| {
+        h.done_at = Some(now);
+        h.done_stale.clear();
+    })?;
     // Work a tool call racing this one started after `check` read, and the status gate let in
     // because it ran first: a spawn registers before it reserves, an undo writes its record
     // before it reads the status again (land/undo.rs `start`), a job queues. Any of it takes Done

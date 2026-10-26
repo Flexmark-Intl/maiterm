@@ -657,7 +657,10 @@ the usual case: the coordinator's read copies, every worker worktree and every t
 worktree come up without the dialog. For a repo the human hasn't trusted, the entry that would
 count is the main repo's, which also trusts the human's own checkout; the Create sheet says the
 repo isn't trusted, and trusting it is the human's act, not maiTerm's (not measured beyond the
-mapping above; the conservative choice).
+mapping above; the conservative choice). The act can be a click: the sheet's **Trust it** writes
+the main checkout's entry into the one root the agents launch under (`trust::trust_repo`), as
+Claude's own dialog would, recorded nowhere, so deleting the Hive never takes it back. A worker's
+launch checks that same root alone (third live test fixes, §16).
 
 **maiTerm writes trust only for Hive folders that aren't worktrees**: the coordinator's `home/`
 and a scratch-only worker's `scratch/`, which it creates itself. The human chose the Hive by
@@ -4094,3 +4097,38 @@ several releases a day).
    preflight answers; the default Primary prefers each tab's live OSC 7 folder on this machine
    (the frontend sends `live_cwds`) over Rust's lagging `last_cwd`; a board fetch racing a delete
    logs at info.
+   **Third live test fixes** (2026-10-25; the whole Hive ran end to end with real agents but
+   needed two workarounds). *Trust:* a worker's launch checked repo trust in every root
+   `Homes::real()` lists, `~/.claude.json` included, while the sheet and the launch read only the
+   managed account's, so a spawn was refused for a repo the sheet called trusted. The check now
+   reads the launch's own root alone (`launch::check_worker_trust`), and its refusal says which
+   account and that the human runs `claude` once in their own repo folder in a maiTerm tab under
+   it, never in a copy; the coordinator's brief says such a refusal is the human's, as an action
+   blocker. Running `claude` in the workspace's shell, the sheet's old remedy, used up the fresh
+   shell a Hive replaces, so the sheet offers **Trust it** (`hive_trust_repo`, §6.6) and says to
+   use another tab otherwise. maiTerm's own folders (home, scratch) are still trusted in every
+   root. *Wake after a webview reload:* the follow-ups' prompt marks are the webview's, gone after
+   a reload, and an idle prompt never marks again, so a Hive relaunch (`relaunchAgent`) now goes
+   on without one when no command began and no key was pressed since the reload
+   (`followUps/model.ts` `promptEvidence`); the shell's own line probe still decides, as
+   docs/follow-ups.md §6.2 requires. *The human's checkout:* Claude 2.1.310 makes a
+   `.claude/.cc-writes` staging folder (its atomic writes) in the project root, which for a
+   worktree is the main repo, from its own process when the Bash sandbox starts; no sandbox or
+   permission rule holds Claude's own process, and the folder is empty and harmless, so it is
+   accepted. What a worker's tools and Bash could do there is closed: each Hive checkout's
+   `.claude/` and `.mcp.json` are on every worker's and reviewer's `denyWrite` and Edit denies by
+   name, existing or not. A land or batch check no longer seeds an ignored entry the config rule
+   lists (the defaults, the human's `config_paths`, a `package.json`). *Land checks as receipts:*
+   a folder's land check that is plain words, and that none of the human's queued commands
+   already matches, is runnable through `hiveRun` (`run::land_check_commands`, no needs), listed
+   in both briefs; it stays off the gate's list, so a shell run is still free, and only the
+   `hiveRun` pass is a `checks` receipt. *Blocker answers:* `BlockerCard` read `task.id` after the
+   answer's await, when the answered card had unmounted; it reads it first. *Minor:* a land, undo
+   or override notice the coordinator's tab refuses (no agent there) is owed
+   (`owed::owe_notice`, `owed.json` `notices`, at most 40) and goes out at its next session start
+   after the digest and before a wake message; an Undo of a land a Done Hive's report counted
+   marks Done stale (`Hive.done_stale`, a String, cleared by the next finish), shown as "Done · a
+   land it relied on was undone" and waking nothing; Settings shows while Done (Pause doesn't);
+   the delete sheet lists only agents in front of their terminals ("None running") and the
+   gallery's folder under Kept while it stays; the resume notice and every delivery the Pause held
+   go in one at a time (`deliver::resume_then_release`, `in_release_turn`, 1.5 s apart).

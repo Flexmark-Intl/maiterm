@@ -3,9 +3,10 @@
 //! What Claude does, measured on 2.1.309: trust is read only from the launching root's
 //! `.claude.json`, keyed by realpath, and a folder is trusted when it or an ancestor up to its
 //! git root (to `/` outside a repo) is — with a linked worktree mapped to its main checkout.
-//! So a worktree of a repo the human trusts needs nothing, and maiTerm writes trust only for
-//! folders it made itself (the coordinator's `home/`). Nothing automated may answer the dialog
-//! instead (`trust_dialog_open`), so a missing entry is written before launch, in every root.
+//! So a worktree of a repo the human trusts needs nothing, and maiTerm writes trust on its own
+//! only for folders it made itself (the coordinator's `home/`); a repo is trusted only on the
+//! human's click (`trust_repo`). Nothing automated may answer the dialog instead
+//! (`trust_dialog_open`), so a missing entry is written before launch, in every root.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -221,6 +222,64 @@ pub fn write_trust(homes: &Homes, hive: &HivePaths, path: &Path) -> Result<Trust
         log::warn!("hive: trust for {key} not written: {f}");
     }
     Ok(report)
+}
+
+/// The human's own trust of a repo they picked on the Create sheet (§6.6, the sheet's Trust it):
+/// written for the repo's main checkout, keyed by realpath, into the one root the Hive's agents
+/// launch under (`launch_json`). Recorded nowhere: it is the human's, as a trust given at
+/// Claude's own dialog is, so deleting the Hive never takes it back. Refuses anything but a
+/// repo's top folder, and a root no Claude has run under yet (it would make its own file on
+/// first run). Answers whether anything was written. Blocks on git.
+pub fn trust_repo(launch_json: &Path, repo: &Path) -> Result<bool, String> {
+    if let Some(why) = crate::instance::global_write_refusal() {
+        return Err(why);
+    }
+    let real = crate::share::canon(&fs::canonicalize(repo).map_err(|e| format!("{}: {e}", repo.display()))?);
+    let g = git_dirs(&real).filter(|g| g.top == real).ok_or_else(|| format!("{} isn't the top folder of a git repository", real.display()))?;
+    // A linked worktree's trust is its main checkout's, which also covers every copy the Hive makes.
+    let main = g.main_checkout.unwrap_or(g.top);
+    let key = main.to_string_lossy().to_string();
+    let candidates = trust_candidates(&main);
+    if !launch_json.is_file() {
+        return Err(format!(
+            "Claude Code hasn't run under the account this Hive's agents use, so there's no {} to record trust in yet. Run \
+             claude once in a tab of that account, then try again.",
+            launch_json.display()
+        ));
+    }
+    let (mut reached, mut malformed) = (false, false);
+    let res = update_json(launch_json, |v| {
+        (reached, malformed) = (true, false);
+        if has_trust_in(v, &candidates) {
+            return false;
+        }
+        let entry = v
+            .as_object_mut()
+            .map(|root| root.entry("projects").or_insert_with(|| Value::Object(Map::new())))
+            .and_then(Value::as_object_mut)
+            .map(|projects| projects.entry(key.clone()).or_insert_with(|| Value::Object(Map::new())))
+            .and_then(Value::as_object_mut);
+        match entry {
+            Some(e) => {
+                e.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
+                true
+            }
+            None => {
+                malformed = true;
+                false
+            }
+        }
+    });
+    match res {
+        Ok(true) => {
+            log::info!("hive: the human trusted {key} in {}", launch_json.display());
+            Ok(true)
+        }
+        Ok(false) if malformed => Err(format!("{} isn't a config Claude could read", launch_json.display())),
+        Ok(false) if !reached => Err(format!("{} isn't valid JSON", launch_json.display())),
+        Ok(false) => Ok(false),
+        Err(e) => Err(format!("{}: {e}", launch_json.display())),
+    }
 }
 
 /// Undo what `write_trust` recorded for `path`, and nothing else: Claude's own entries (a
@@ -440,6 +499,38 @@ mod tests {
         let plain = base.join("plain/deep");
         fs::create_dir_all(&plain).unwrap();
         assert!(has_trust(&parent, &plain));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The sheet's Trust it: the main checkout's key, in the one root given, nothing recorded for
+    /// removal; a folder below the top, and a root no Claude ran under, refused.
+    #[test]
+    fn the_humans_trust_goes_to_the_main_checkout_in_the_launch_root_only() {
+        let base = scratch("human");
+        let h = homes(&base);
+        let repo = base.join("repo");
+        fs::create_dir_all(repo.join("src")).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("a"), "a").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "--no-verify", "-m", "init"]);
+        let wt = base.join("linked");
+        git(&repo, &["worktree", "add", "-q", "--detach", wt.to_str().unwrap(), "main"]);
+        let launch = &h.claude_json[1];
+
+        assert!(trust_repo(launch, &wt).unwrap(), "written");
+        let v = read_json(launch).unwrap();
+        let key = repo.to_string_lossy().to_string();
+        assert_eq!(v["projects"][key.as_str()]["hasTrustDialogAccepted"], true, "the main checkout's key: {v}");
+        assert_eq!(v["oauthAccount"]["x"], 1, "the rest of the file is kept");
+        assert!(read_json(&h.claude_json[0]).unwrap()["projects"].get(key.as_str()).is_none(), "no other root");
+        assert!(!trust_repo(launch, &repo).unwrap(), "already trusted: nothing written");
+        assert!(written_keys(&HivePaths::new(base.join("hive"))).is_empty(), "nothing recorded for a Hive to take back");
+
+        assert!(trust_repo(launch, &repo.join("src")).unwrap_err().contains("isn't the top folder"));
+        let never = base.join("accounts/claude/never/.claude.json");
+        assert!(trust_repo(&never, &repo).unwrap_err().contains("hasn't run under"));
+        assert!(!never.exists());
         let _ = fs::remove_dir_all(&base);
     }
 

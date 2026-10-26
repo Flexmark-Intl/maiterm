@@ -108,15 +108,18 @@
     sending = true;
     // The asked_at the visible text was typed against; for a click, the question on screen.
     const askedAt = draftText ? draft.askedAt : b.asked_at;
+    // Read now: an answer usually unblocks the task, which unmounts this card during the await,
+    // and its props are gone after it.
+    const taskId = task.id;
     try {
-      const r = await overlordStore.answerBlocker(task.id, { asked_at: askedAt, option, text: draftText });
+      const r = await overlordStore.answerBlocker(taskId, { asked_at: askedAt, option, text: draftText });
       if (!r.answered) {
         onnote?.(r.detail ?? 'Could not answer.');
         return;
       }
       // Only the draft that was sent. Delivery can wait on the agent long enough for it to ask
       // again and the human to start typing under the new question, in the same shared slot.
-      if (blockerDrafts.get(task.id)?.askedAt === askedAt) setDraft({ askedAt: '', text: '' });
+      if (blockerDrafts.get(taskId)?.askedAt === askedAt) blockerDrafts.set(taskId, { askedAt: '', text: '' });
       onnote?.(
         r.told === 'tab'
           ? 'Answer sent to the agent.'

@@ -38,6 +38,12 @@ export function doneLabel(doneAt: number | null | undefined, now: number = Date.
   return sameDay ? `Done · ${hm}` : `Done · ${MONTHS[d.getMonth()]} ${d.getDate()}, ${hm}`;
 }
 
+/** The header's word on a stale Done (`Hive.done_stale`): which land was undone, and that the
+ *  coordinator hears of it only once woken. */
+export function doneStaleTip(land: string): string {
+  return `Land ${land}, which the report counted as landed, was undone after the Hive was done. The coordinator hears of it when you wake the Hive with a message.`;
+}
+
 /** The notice when a Hive moves to done, or null for any other move. */
 export function doneNotice(before: string | null | undefined, after: string, name: string): { title: string; body: string } | null {
   if (after !== 'done' || before === 'done' || before == null) return null;
