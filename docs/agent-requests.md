@@ -187,7 +187,7 @@ an inferred identity. The ones that file requests, and `getRequestStatus`, are a
 
 **A Hive's settings change** (`hive_settings`, docs/hive.md §3.4) is Rust-filed the same way from
 the coordinator's `hiveChangeSettings` and carried out by `hive::change` on approval; a newer one
-supersedes an older pending card of the same Hive.
+stands alone, limited to five waiting like any tab's.
 
 **A Hive's land** (`hive_land`; `hive_undo` reserved) takes a different path (docs/hive.md §8.1,
 §8.3, `hive/land/approval.rs`). Rust files it itself (`file_hive`) from the coordinator's tab, and

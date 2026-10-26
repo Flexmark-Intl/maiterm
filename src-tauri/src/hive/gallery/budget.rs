@@ -275,8 +275,16 @@ pub fn normalize_host(raw: &str) -> Result<String, String> {
     if labels.last() == Some(&"localhost") || labels.last() == Some(&"local") {
         return refuse("is this computer or its network: a worker's localhost stays closed.");
     }
+    if LOOPBACK_DOMAINS.iter().any(|d| name == *d || name.ends_with(&format!(".{d}"))) {
+        return refuse("is a public name for this computer (it answers 127.0.0.1): a worker's localhost stays closed.");
+    }
     Ok(h)
 }
+
+/// Public domains whose names answer a loopback or private address by design (wildcard DNS for
+/// local development). Allowing one would open every local port, maiTerm's own included (§6.7).
+/// A name outside the list is resolved when an agent's change adds it (`hive::change`).
+pub const LOOPBACK_DOMAINS: [&str; 9] = ["localtest.me", "lvh.me", "localhost.direct", "nip.io", "sslip.io", "xip.io", "traefik.me", "vcap.me", "lacolhost.com"];
 
 /// Whether an allowlist entry reaches `host`: itself, or under a `*.` entry.
 pub fn host_covers(entry: &str, host: &str) -> bool {

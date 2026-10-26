@@ -62,8 +62,14 @@ export function normalizeHost(raw: string): { host: string } | { error: string }
   const tld = labels[labels.length - 1];
   if (/^\d+$/.test(tld)) return { error: `“${shown}” is an IP address: list host names only.` };
   if (tld === 'localhost' || tld === 'local') return { error: `“${shown}” is this computer or its network: a worker's localhost stays closed.` };
+  if (LOOPBACK_DOMAINS.some((d) => name === d || name.endsWith(`.${d}`))) {
+    return { error: `“${shown}” is a public name for this computer (it answers 127.0.0.1): a worker's localhost stays closed.` };
+  }
   return { host: h };
 }
+
+/** `budget::LOOPBACK_DOMAINS`: public names that answer 127.0.0.1 by design. */
+export const LOOPBACK_DOMAINS = ['localtest.me', 'lvh.me', 'localhost.direct', 'nip.io', 'sslip.io', 'xip.io', 'traefik.me', 'vcap.me', 'lacolhost.com'];
 
 /** The sheet's fields, as typed. */
 export interface GalleryForm {

@@ -33,6 +33,7 @@ describe('Workers and access', () => {
     expect(addHost([], ' API.Example.com. ')).toEqual({ hosts: ['api.example.com'] });
     expect(addHost(['api.example.com'], 'api.example.com')).toHaveProperty('error');
     expect(addHost([], 'https://x.com/a')).toHaveProperty('error');
+    for (const home of ['lvh.me', '*.nip.io', 'app.localtest.me']) expect(addHost([], home), home).toHaveProperty('error');
   });
 
   it('bounds the cap', () => {

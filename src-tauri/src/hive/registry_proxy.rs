@@ -46,7 +46,7 @@ pub fn env(url: &str) -> Vec<(String, String)> {
 /// The hosts an install job of a Hive reaches: the worker's registries (never a generator's) and
 /// yarn's, minus every git remote's host, which `settings::worker_domains` takes out.
 pub fn install_hosts(hive: &super::record::Hive, remote_hosts: &[String]) -> Vec<String> {
-    let mut out = super::settings::worker_domains(hive, remote_hosts, false);
+    let mut out = super::settings::worker_domains(hive, remote_hosts, false, false);
     for h in INSTALL_EXTRA_HOSTS {
         let covered = remote_hosts.iter().any(|r| super::gallery::budget::host_covers(h, &r.to_ascii_lowercase()));
         if !covered && !out.iter().any(|o| o == h) {

@@ -212,11 +212,18 @@ default is **Ask me** (the only checkpoint that starts there), that files a `hiv
 request: a card only the human approves (`docs/agent-requests.md`), naming each change in maiTerm's
 words and the coordinator's reason as its own. On approval Rust applies the stored change,
 checked again against the record as it is then, and tells the coordinator; a denial or a lapse is
-told too. A newer card supersedes an older pending one. Cards live in memory: one pending across a
+told too. Each card stands alone (at most five waiting, like any tab's). Cards live in memory: one pending across a
 maiTerm restart is gone, and the coordinator asks again. With the checkpoint handed to the
 coordinator, the change applies at once, the human gets a notice (`hive-settings-changed`), and it
 is never earnable (§7.6): only the human hands it over. Every change, by anyone, is a line in
 `logs/settings.jsonl`, and the human's own changes are told to the coordinator.
+
+**No host may answer this computer or its network.** Besides `normalize_host`'s refusals (IP
+literals, `localhost`, `.local`), well-known public names for 127.0.0.1 (`lvh.me`, `*.nip.io`,
+`localtest.me`…, `budget::LOOPBACK_DOMAINS`) are refused, and a host added by any path is looked
+up and refused when it answers a loopback, private or link-local address (`change::refuse_private_hosts`;
+a `*.` entry by a name under it). A name that doesn't resolve yet still passes: whoever owns it
+could point it home later, which is one reason the default keeps hosts the human's decision.
 
 **On the phone, by default only the coordinator is a chat** (Darryl, 2026-10-26): it speaks for
 its workers. The Create sheet offers the coordinator only (default), the coordinator and its

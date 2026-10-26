@@ -305,18 +305,6 @@ pub fn file_hive(
 fn supersede(list: &mut [AgentRequest], kind: &str, args: &Value, now: u64) -> Vec<AgentRequest> {
     let key = |a: &Value, k: &str| a.get(k).and_then(Value::as_str).map(str::to_string);
     let (hive, task, land) = (key(args, "hive_id"), key(args, "task_id"), key(args, "land_id"));
-    if kind == crate::hive::change::KIND {
-        return list
-            .iter_mut()
-            .filter(|r| r.status == "pending" && r.kind == kind && key(&r.args, "hive_id") == hive)
-            .map(|r| {
-                r.status = "failed".into();
-                r.decided_at = Some(now);
-                r.outcome = Some("superseded by a newer settings change".to_string());
-                r.clone()
-            })
-            .collect();
-    }
     if task.is_none() {
         return Vec::new();
     }
@@ -363,8 +351,9 @@ fn file_inner(
     if let Some(same) = keep.as_ref().and_then(|(id, _)| list.iter().find(|r| &r.id == id)).or_else(|| same_pending(&list, tab_id, kind, &args)) {
         return Ok(same.clone());
     }
-    // A Hive's lands are one per worker, each already through its coordinator: not a flood.
-    if !is_hive_kind(kind) && list.iter().filter(|r| r.status == "pending" && r.tab_id == tab_id).count() >= MAX_PENDING_PER_TAB {
+    // A Hive's lands are one per worker, each already through its coordinator: not a flood. Its
+    // settings changes are the coordinator's own asks, each its own card: limited like any tab's.
+    if (!is_hive_kind(kind) || kind == crate::hive::change::KIND) && list.iter().filter(|r| r.status == "pending" && r.tab_id == tab_id).count() >= MAX_PENDING_PER_TAB {
         return Err(format!(
             "this tab already has {MAX_PENDING_PER_TAB} requests waiting for the human; wait for those to be answered"
         ));

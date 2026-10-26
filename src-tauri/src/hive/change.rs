@@ -247,6 +247,38 @@ fn bulleted(lines: &[String]) -> String {
     lines.iter().map(|l| format!("\n- {l}")).collect()
 }
 
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v) => v.is_loopback() || v.is_private() || v.is_link_local() || v.is_unspecified() || v.is_broadcast(),
+        IpAddr::V6(v) => {
+            let s = v.segments()[0];
+            v.is_loopback() || v.is_unspecified() || (s & 0xfe00) == 0xfc00 || (s & 0xffc0) == 0xfe80 || v.to_ipv4_mapped().is_some_and(|m| is_private_ip(&IpAddr::V4(m)))
+        }
+    }
+}
+
+/// A host added now must not answer this computer or its network (§6.7): a public name for
+/// 127.0.0.1 in a worker's allowlist opens every local port, maiTerm's own included. Names on
+/// `LOOPBACK_DOMAINS` are refused by `normalize_host`; the rest are looked up here, a `*.` entry
+/// by a name under it. A name that doesn't resolve passes: its owner could point it home later,
+/// which is why a host is a decision the human makes by default (the Settings checkpoint).
+pub(crate) async fn refuse_private_hosts(hosts: &[String]) -> Result<(), String> {
+    for h in hosts {
+        let Ok(h) = normalize_host(h) else { continue };
+        let name = match h.strip_prefix("*.") {
+            Some(base) => format!("maiterm-probe.{base}"),
+            None => h.clone(),
+        };
+        let lookup = tokio::time::timeout(std::time::Duration::from_secs(3), tokio::net::lookup_host(format!("{name}:443"))).await;
+        let Ok(Ok(addrs)) = lookup else { continue };
+        if let Some(ip) = addrs.map(|a| a.ip()).find(is_private_ip) {
+            return Err(format!("{h} answers {ip}, this computer or its network: a worker\u{2019}s localhost and LAN stay closed."));
+        }
+    }
+    Ok(())
+}
+
 /// The tool's arguments: the change, and the coordinator's reason.
 pub fn parse_args(args: &Value) -> Result<(SettingsChange, Option<String>), String> {
     let mut change: SettingsChange = serde_json::from_value(args.clone()).map_err(|e| format!("The settings don\u{2019}t read: {e}"))?;
@@ -294,6 +326,7 @@ pub fn tool_definition(tab_id: &Value) -> Value {
 /// `hiveChangeSettings` (§3.4).
 pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, args: &Value) -> Result<Value, String> {
     let (change, reason) = parse_args(args)?;
+    refuse_private_hosts(&change.add_hosts).await?;
     let hive = super::autonomy::current_hive(ctx, caller).ok_or("This Hive is gone.")?;
     let ceiling = super::create::machine_ceiling();
     if !checkpoints::asks(&hive, SETTINGS) {
@@ -333,6 +366,7 @@ pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
 
 /// Hive settings: the human's own change. The coordinator is told.
 pub(crate) async fn set_by_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, change: &SettingsChange) -> Result<Hive, String> {
+    refuse_private_hosts(&change.add_hosts).await?;
     let (hive, lines) = write(ctx, caller, change, By::Human, super::create::machine_ceiling())?;
     log_line(caller,"human", &lines, None);
     tell_coordinator(ctx, caller, format!("[maiTerm] Your human changed this Hive\u{2019}s settings:{}", bulleted(&lines))).await;
@@ -345,7 +379,13 @@ pub(crate) async fn set_by_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Calle
 pub(crate) async fn approved_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, request_id: &str, args: &Value) {
     let change: Result<SettingsChange, String> =
         args.get("change").cloned().ok_or_else(|| "it had no change".to_string()).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()));
-    let res = change.and_then(|c| write(ctx, caller, &c, By::Approved, super::create::machine_ceiling()));
+    let res = match change {
+        Ok(c) => match refuse_private_hosts(&c.add_hosts).await {
+            Ok(()) => write(ctx, caller, &c, By::Approved, super::create::machine_ceiling()),
+            Err(e) => Err(e),
+        },
+        Err(e) => Err(e),
+    };
     match res {
         Ok((_, lines)) => {
             log_line(caller,"coordinator, approved by the human", &lines, None);
@@ -473,6 +513,20 @@ mod tests {
         assert!(check(&hive(), &remote, By::Human, 5, &["github.com".into()]).unwrap_err().contains("push"));
         let bad = SettingsChange { add_hosts: vec!["https://x.com/path".into()], ..Default::default() };
         assert!(check(&hive(), &bad, By::Human, 5, &[]).is_err());
+        for home in ["lvh.me", "*.nip.io", "127.0.0.1.nip.io", "app.localtest.me"] {
+            let c = SettingsChange { add_hosts: vec![home.into()], ..Default::default() };
+            assert!(check(&hive(), &c, By::Human, 5, &[]).unwrap_err().contains("127.0.0.1"), "{home}");
+        }
+    }
+
+    #[test]
+    fn a_private_address_is_this_computer_or_its_network() {
+        for ip in ["127.0.0.1", "10.1.2.3", "192.168.1.5", "172.16.0.1", "169.254.1.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1"] {
+            assert!(is_private_ip(&ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["8.8.8.8", "142.250.1.1", "2606:4700::1111"] {
+            assert!(!is_private_ip(&ip.parse().unwrap()), "{ip}");
+        }
     }
 
     #[test]
