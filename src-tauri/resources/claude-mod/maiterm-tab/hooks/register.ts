@@ -260,7 +260,18 @@ export const register: Register = on => {
   // A turn that ends in an API error (an expired login) sends this instead of Stop. A Claude
   // without the event never fires it; its settings hook is gated the same way (lockfile.rs).
   on('classic.StopFailure', relay)
-  on('classic.UserPromptSubmit', relay)
+  // The reply is what this agent should know with its human's message: today, the Chrome tabs
+  // its human linked or unlinked since it was last told (browser_link::prompt_context), so it
+  // reaches for maiTerm's browser tools without being told where its tab is.
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    const to = await linkOf($)
+    if (!to) return next(e)
+    const context = await send($, to, e, '&context=1')
+    await ensureInbox($, to)
+    const result = await next(e)
+    if (!context) return result
+    return { ...result, additionalContext: [...(result.additionalContext ?? []), context] }
+  })
   on('classic.PostToolUse', relay)
   on('classic.PostToolUseFailure', relay)
   // Runs while the dialog is on screen (Claude draws it and raises this together). The decision

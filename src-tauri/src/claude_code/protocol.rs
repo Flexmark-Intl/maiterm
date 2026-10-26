@@ -1425,7 +1425,7 @@ fn browser_tools() -> Vec<Value> {
     serde_json::json!([
         {
             "name": "browserStatus",
-            "description": "The Chrome tabs linked to your maiTerm tab, each with its handle (b1, b2…), title and URL, and which is current (the one tools use when you don't pass tab; only naming a tab changes it). A tab a linked page opens (a sign-in popup, say) joins you as a new handle, and tool results tell you when one does. A linked tab is yours to diagnose and drive: read its console errors (browserConsole) and requests (browserNetwork), read the page (browserSnapshot), and act in it (browserClick, browserType, browserPressKey, browserNavigate) — for example to reproduce a bug in the human's own session, check a fix in the real app, or walk a flow. When it isn't linked, the answer says what to ask your human: only they can link one, from the maiTerm Chrome extension.",
+            "description": "The Chrome tabs your human linked to your maiTerm tab: their own browser, signed in as them. When they mention their browser, a tab or the page, these tools are how you reach it, not another browser tool or skill (that would open a different browser without their session). Each with its handle (b1, b2…), title and URL, and which is current (the one tools use when you don't pass tab; only naming a tab changes it). A tab a linked page opens (a sign-in popup, say) joins you as a new handle, and tool results tell you when one does. A linked tab is yours to diagnose and drive: read its console errors (browserConsole) and requests (browserNetwork), read the page (browserSnapshot), and act in it (browserClick, browserType, browserPressKey, browserNavigate) — for example to reproduce a bug in the human's own session, check a fix in the real app, or walk a flow. When it isn't linked, the answer says what to ask your human: only they can link one, from the maiTerm Chrome extension.",
             "inputSchema": { "type": "object", "properties": { "tabId": tab_id } }
         },
         {
@@ -1561,7 +1561,7 @@ fn browser_tools() -> Vec<Value> {
                     "text": { "type": "string", "description": "Text to wait for on the page (case-sensitive)" },
                     "gone": { "type": "boolean", "description": "Wait for the text to disappear instead (default false)" },
                     "url": { "type": "string", "description": "Wait until the URL contains this" },
-                    "timeout": { "type": "number", "description": "Seconds, 0.5 to 25 (default 10)" }
+                    "timeout": { "type": "number", "description": "Seconds, 0.5 to 20 (default 10)" }
                 }
             }
         }

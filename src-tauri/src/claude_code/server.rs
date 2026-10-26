@@ -4857,6 +4857,14 @@ async fn hooks_handler(
     } else {
         None
     };
+    // `context=1`: the mod's UserPromptSubmit, which hands the reply to the model with the
+    // human's message (browser_link::prompt_context). Only the mod asks, for the same reason
+    // only our curl asks for `prime`.
+    let context_tab = if via_mod && params.contains_key("context") {
+        tab_id_from_param.clone()
+    } else {
+        None
+    };
 
     // Files (docs/file-tree.md §9.1): what each agent reads and changes. Read off the RAW event
     // name, before the normalization below folds PostToolUseFailure into PostToolUse: the ledger
@@ -5742,7 +5750,14 @@ async fn hooks_handler(
     // body must never reach it, while our curl captures this one and echoes it into the
     // agent's context. It's how the standing instructions reach an agent that never calls
     // initSession — including a resumed one, which takes no turn until its human types.
+    if let Some(tab) = context_tab.as_deref() {
+        if let Some(text) = crate::browser_link::prompt_context(&srv.state, tab) {
+            return text.into_response();
+        }
+    }
     if let Some(tab) = prime_tab.as_deref() {
+        // A new context: it is told its linked tabs again with its next message.
+        crate::browser_link::session_started(tab);
         let text = session_priming_text(&srv.state, tab);
         // The mod adds this reply to the session's context as it stands, so it carries the
         // identity line the command hook would have echoed ahead of it (lockfile.rs) — the

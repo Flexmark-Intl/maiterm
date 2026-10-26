@@ -232,3 +232,13 @@ handle), from `browserLinkStore`, which mirrors `browser_link_links` on every
 `browser-link-linked`, and the window holding that tab dispatches a notification ("Linked to
 Chrome", deep-linked, so mute applies). A joined popup or a re-announce doesn't: a sign-in flow
 or a reconnect would ring for nothing.
+
+**The agent is told too, with its human's next message** (`browser_link::prompt_context`). An
+agent whose human said "check the page" used to reach for a browser tool of its own (a skill
+that opens a different browser, without the human's session) unless told where its tab was. The
+`maiterm-tab` mod's UserPromptSubmit asks `/hooks?…&context=1`, and the reply goes into the
+model's context as `additionalContext`: the linked tabs by handle, title and URL, and that the
+maiTerm browser tools reach them. Only when the set of handles changed since it was last told
+(`Registry.told`), so it costs nothing on an ordinary message; a session start (new, resume,
+`/clear`, compaction: every `prime=1`) clears it, so a fresh context is told again. Claude
+through the mod only; an older Claude, Codex and Gemini get the tool descriptions alone.

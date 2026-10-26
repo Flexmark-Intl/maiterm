@@ -177,6 +177,9 @@ struct Registry {
     /// links beside it, must not silently become where an untargeted click lands. Kept across a
     /// reconnect (the links are re-announced under the same handles).
     current: HashMap<String, String>,
+    /// The handles each agent was last told it holds, with its human's message
+    /// (`prompt_context`). Cleared when a session starts, so a new context is told again.
+    told: HashMap<String, String>,
 }
 
 impl Registry {
@@ -341,11 +344,13 @@ fn prune(state: &Arc<AppState>, app: &AppHandle) {
     reg.links = kept;
     // A gone tab's notices and current tab go with it. Its handle counter stays (a few bytes): an
     // ARCHIVED tab leaves the tree and comes back under the same id, and must not reuse a handle.
-    let gone: Vec<String> = reg.news.keys().chain(reg.current.keys()).filter(|id| !tab_exists(state, id)).cloned().collect();
+    let gone: Vec<String> =
+        reg.news.keys().chain(reg.current.keys()).chain(reg.told.keys()).filter(|id| !tab_exists(state, id)).cloned().collect();
     for id in gone {
         if current_id(state, &reg, &id).is_none() {
             reg.news.remove(&id);
             reg.current.remove(&id);
+            reg.told.remove(&id);
         }
     }
     drop(reg);
@@ -435,6 +440,56 @@ fn tell(maiterm_tab_id: &str, msg: String) {
 /// What changed since the agent's last browser tool call; reading it clears it.
 fn take_news(maiterm_tab_id: &str) -> Vec<String> {
     REG.lock().news.remove(maiterm_tab_id).unwrap_or_default()
+}
+
+/// A session started in this tab (a new one, a resume, a /clear, after a compaction): what it
+/// was told about its linked tabs is no longer in its context, so its next message tells it again.
+pub fn session_started(maiterm_tab_id: &str) {
+    REG.lock().told.remove(maiterm_tab_id);
+}
+
+/// What an agent should know with its human's message: the Chrome tabs linked to it, when they
+/// changed since it was last told. Without this an agent whose human says "check the page" has
+/// no idea its tab is reachable, and reaches for a browser tool of its own, which opens a
+/// browser without the human's session. None when nothing changed, or the feature is off.
+pub fn prompt_context(state: &Arc<AppState>, maiterm_tab_id: &str) -> Option<String> {
+    if !enabled(state) {
+        return None;
+    }
+    untold_links(maiterm_tab_id).map(|mine| prompt_context_text(&mine))
+}
+
+/// The agent's linked tabs, if their handles changed since it was last told (and now it has been).
+fn untold_links(maiterm_tab_id: &str) -> Option<Vec<Link>> {
+    let mine = links_of(maiterm_tab_id);
+    let now = mine.iter().map(|l| l.handle.as_str()).collect::<Vec<_>>().join(",");
+    let mut reg = REG.lock();
+    if reg.told.get(maiterm_tab_id).map(String::as_str).unwrap_or("") == now {
+        return None;
+    }
+    reg.told.insert(maiterm_tab_id.to_string(), now);
+    Some(mine)
+}
+
+fn prompt_context_text(mine: &[Link]) -> String {
+    if mine.is_empty() {
+        return "maiTerm: no Chrome tab is linked to you any more, so the maiTerm browser tools have \
+                nothing to act on until your human links one again."
+            .into();
+    }
+    let list = mine
+        .iter()
+        .map(|l| if l.title.is_empty() { format!("{} at {}", l.handle, l.url) } else { format!("{} \u{201C}{}\u{201D} at {}", l.handle, l.title, l.url) })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let (tabs, them) = if mine.len() == 1 { ("tab", "It is") } else { ("tabs", "They are") };
+    format!(
+        "maiTerm: your human has linked Chrome {tabs} to you: {list}. {them} in their own browser, \
+         signed in as them. When they mention their browser, a tab or the page, they mean this: \
+         use the maiTerm browser tools (browserSnapshot, browserClick, browserType, \
+         browserConsole, browserNetwork, browserWaitFor…; browserStatus lists your tabs), not \
+         another browser tool or skill, which would open a different browser without their session."
+    )
 }
 
 /// The extension dropped a link (the human unlinked it, closed the tab, cancelled the debugging
@@ -706,6 +761,28 @@ mod tests {
         reg.handles.clear();
         reg.news.clear();
         reg.current.clear();
+        reg.told.clear();
+    }
+
+    /// An agent is told its linked tabs with its human's next message only when they changed, and
+    /// again after a new session starts (its context no longer holds what it was told).
+    #[test]
+    fn an_agent_is_told_its_tabs_once_per_change_and_per_session() {
+        let _serial = SERIAL.lock();
+        reset();
+        assert!(untold_links("tab-t").is_none(), "nothing linked, nothing to say");
+        set_link(link("tab-t", "c1", 1), true).unwrap();
+        assert_eq!(untold_links("tab-t").unwrap().len(), 1);
+        assert!(untold_links("tab-t").is_none(), "told already");
+        set_link(link("tab-t", "c1", 2), true).unwrap();
+        assert_eq!(untold_links("tab-t").unwrap().len(), 2, "a second tab is news");
+        session_started("tab-t");
+        assert_eq!(untold_links("tab-t").unwrap().len(), 2, "a new session is told again");
+        remove_link_by_chrome("c1", 1, "was unlinked");
+        remove_link_by_chrome("c1", 2, "was unlinked");
+        assert!(untold_links("tab-t").unwrap().is_empty(), "the last one going is news too");
+        assert!(untold_links("tab-t").is_none());
+        assert!(prompt_context_text(&[]).contains("no Chrome tab is linked"));
     }
 
     /// §1.3: an agent tab holds several Chrome tabs; a Chrome tab belongs to one agent, and
