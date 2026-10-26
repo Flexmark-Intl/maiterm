@@ -622,7 +622,8 @@ pub(crate) async fn route_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w
         workspace_id: caller.workspace_id.clone(),
         label: caller.label.clone(),
         tab_id: tab.clone(),
-        task_id: w.task_id.clone(),
+        // A blocker's own row (a sub-task the worker made), else the worker's task.
+        task_id: if view.task_id.is_empty() { w.task_id.clone() } else { view.task_id.clone() },
         badge: w.badge,
         worker_name: worker_name(w),
         worker_slug: w.slug.clone(),
@@ -772,7 +773,7 @@ pub(crate) async fn blockers_changed_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller:
         let workers = blocking(move || Ok(worker::list_workers(&paths))).await.unwrap_or_default();
         for row in added {
             // A coordinator's own row is no worker's: its blocker is the human's, as ever.
-            let Some(w) = workers.iter().find(|w| w.task_id == row.id) else { continue };
+            let Some(w) = worker::worker_for_row(&workers, &row.id, row.tab_id.as_deref()) else { continue };
             let Some(b) = &row.blocker else { continue };
             route(ctx, caller, w, PromptView::from_blocker(&row.id, b)).await;
         }
@@ -928,12 +929,15 @@ pub(crate) fn check_answer(view: &PromptView, args: &Value) -> Result<Checked, S
     }
 }
 
-/// The blocker on a worker's task row now, as a view, when its key is `key`.
-fn blocker_view(data: &parking_lot::RwLock<crate::state::AppData>, caller: &Caller, task_id: &str, key: &str) -> Option<PromptView> {
+/// The blocker on one of the worker's rows now (its task, or a sub-task on its tab), as a view,
+/// when its key is `key`.
+fn blocker_view(data: &parking_lot::RwLock<crate::state::AppData>, caller: &Caller, w: &WorkerRecord, key: &str) -> Option<PromptView> {
     let tasks = super::tools::workspace_tasks(data, caller).ok()?;
-    let row = tasks.into_iter().find(|t| t.id == task_id)?;
-    let b = row.blocker.as_ref().filter(|_| row.status == "blocked")?;
-    Some(PromptView::from_blocker(task_id, b)).filter(|v| v.key == key)
+    let mine = |t: &Task| t.id == w.task_id || (w.tab_id.is_some() && t.tab_id == w.tab_id);
+    tasks.iter().filter(|t| mine(t) && t.status == "blocked").find_map(|row| {
+        let b = row.blocker.as_ref()?;
+        Some(PromptView::from_blocker(&row.id, b)).filter(|v| v.key == key)
+    })
 }
 
 pub(crate) async fn answer_worker_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, args: &Value) -> Result<Value, String> {
@@ -949,8 +953,8 @@ pub(crate) async fn answer_worker_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: 
 
     // The prompt as it stands now: a blocker on the worker's row, or what its screen shows.
     let view = if prompt_id.starts_with("b_") {
-        blocker_view(ctx.data, caller, &w.task_id, &prompt_id).ok_or_else(|| {
-            "stale: that question is no longer on the worker\u{2019}s task (answered, or asked again: use the newest prompt_id)".to_string()
+        blocker_view(ctx.data, caller, &w, &prompt_id).ok_or_else(|| {
+            "stale: that question is no longer on the worker\u{2019}s tasks (answered, or asked again: use the newest prompt_id)".to_string()
         })?
     } else {
         match ctx.window.prompt_view(&tab) {
@@ -1028,22 +1032,22 @@ async fn carry_out<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerR
 /// answer as a note (refused if it was asked again meanwhile), then the worker told.
 async fn answer_blocker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, tab: &str, view: &PromptView, answer: &str) -> Result<(), String> {
     let b = view.blocker.as_ref().ok_or("no question to answer")?;
+    // The blocked row: the worker's task, or a sub-task it made.
+    let task_id = if view.task_id.is_empty() { w.task_id.as_str() } else { view.task_id.as_str() };
     let args = json!({
         "workspace_id": caller.workspace_id,
-        "task_id": w.task_id,
+        "task_id": task_id,
         "status": "active",
         "note": format!("Decided by your coordinator: {}", one_line(answer, 300)),
         "expect_asked_at": b.asked_at,
     });
     rpc::applied(ctx.window.request(rpc::VERB_TASK, args).await)?;
+    let which = if task_id == w.task_id { format!("task \u{201c}{}\u{201d} (id {task_id})", one_line(&w.title, 120)) } else { format!("task id {task_id}") };
     let text = format!(
-        "[maiTerm] Your coordinator answered your question on task \u{201c}{}\u{201d} (id {}).\nQuestion: {}\nAnswer: {}\n\nThe task is back in \
-         Active. Carry on from here, and close it with updateTasks (task id {}) when it is done.",
-        one_line(&w.title, 120),
-        w.task_id,
+        "[maiTerm] Your coordinator answered your question on {which}.\nQuestion: {}\nAnswer: {}\n\nThe task is back in \
+         Active. Carry on from here, and close it with updateTasks (task id {task_id}) when it is done.",
         one_line(&b.question, 400),
         frame_escape(answer),
-        w.task_id
     );
     let sent = ctx.window.deliver(tab, text, "Hive answer").await;
     log::info!("hive {}: coordinator's answer to {}: {}", caller.hive.id, worker_name(w), sent.describe());
@@ -1103,12 +1107,13 @@ pub(crate) async fn blocker_answered_in<W: HiveWindow>(
 ) -> Result<Option<String>, String> {
     let row = super::tools::workspace_tasks(ctx.data, caller)?.into_iter().find(|t| t.id == task_id).ok_or("That task isn\u{2019}t in this Hive.")?;
     let blocker = row.blocker.filter(|b| b.asked_at == blocker.asked_at).unwrap_or(blocker);
+    let row_tab = row.tab_id;
     let key = blocker_key(task_id, &blocker.asked_at);
     let after_timeout = take_after_timeout(&key);
-    let (paths, hive, task, b, a) = (caller.paths.clone(), caller.hive.clone(), task_id.to_string(), blocker.clone(), answer.clone());
+    let (paths, hive, task, b, a, tab) = (caller.paths.clone(), caller.hive.clone(), task_id.to_string(), blocker.clone(), answer.clone(), row_tab.clone());
     let (line, workers) = blocking(move || {
         let workers = worker::list_workers(&paths);
-        let line = decisions::record_blocker_answer(&paths, &hive, &workers, &task, &b, &a, after_timeout, &crate::commands::workspace::iso_now())?;
+        let line = decisions::record_blocker_answer(&paths, &hive, &workers, &task, tab.as_deref(), &b, &a, after_timeout, &crate::commands::workspace::iso_now())?;
         Ok((line, workers))
     })
     .await?;
@@ -1118,7 +1123,7 @@ pub(crate) async fn blocker_answered_in<W: HiveWindow>(
     let Some(line) = line else { return Ok(None) };
     ctx.window.decisions_changed(&caller.workspace_id);
     log::info!("hive {}: the human answered {} on task {task_id} ({})", caller.hive.id, line.key.as_deref().unwrap_or_default(), line.category);
-    if let Some(w) = workers.iter().find(|w| w.task_id == task_id) {
+    if let Some(w) = worker::worker_for_row(&workers, task_id, row_tab.as_deref()) {
         tell_coordinator(ctx, caller, blocker_answer_notice(&worker_name(w), &blocker, &answer)).await;
     }
     // An offer's or the plan's answer carried out (step 7e), and any offer it makes due.

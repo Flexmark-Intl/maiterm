@@ -712,6 +712,7 @@ pub fn record_blocker_answer(
     hive: &Hive,
     workers: &[WorkerRecord],
     task_id: &str,
+    task_tab: Option<&str>,
     blocker: &TaskBlocker,
     answer: &BlockerAnswerArg,
     after_timeout: bool,
@@ -735,7 +736,7 @@ pub fn record_blocker_answer(
     if mine.iter().any(|l| l.event == EVENT_ANSWERED) {
         return Ok(None);
     }
-    let worker = workers.iter().find(|w| w.task_id == task_id);
+    let worker = super::worker::worker_for_row(workers, task_id, task_tab);
     let own_recommended = blocker.options.iter().find(|o| o.recommended).map(|o| one_line(&o.label, 120));
     let (id, category) = match mine.first() {
         Some(first) => (first.id.clone(), first.category.clone()),
@@ -898,7 +899,7 @@ mod tests {
         let rec = DecisionLine { event: EVENT_RECOMMENDED.into(), by: BY_COORDINATOR.into(), recommended: Some("Postgres".into()), answer: Some("Postgres".into()), precedent: Some("P-1".into()), ..asked.clone() };
         append(&paths, &rec).unwrap();
 
-        let l = record_blocker_answer(&paths, &hive(), &[worker()], "t-w", &b, &pick(Some("Postgres"), "sessions outlive a restart"), true, "now").unwrap().unwrap();
+        let l = record_blocker_answer(&paths, &hive(), &[worker()], "t-w", None, &b, &pick(Some("Postgres"), "sessions outlive a restart"), true, "now").unwrap().unwrap();
         assert_eq!((l.id.as_str(), l.event.as_str(), l.category.as_str(), l.by.as_str()), ("D-route", "answered", "questions", "human"));
         assert_eq!((l.answer.as_deref(), l.reason.as_deref()), (Some("Postgres"), Some("sessions outlive a restart")));
         assert_eq!((l.recommended.as_deref(), l.precedent.as_deref()), (Some("Postgres"), Some("P-1")), "the coordinator's, not the worker's");
@@ -906,7 +907,7 @@ mod tests {
         assert_eq!(read(&paths).len(), 3, "no second asked line");
 
         // The same question again (a second card, the phone): nothing new.
-        assert!(record_blocker_answer(&paths, &hive(), &[worker()], "t-w", &b, &pick(Some("Redis"), ""), false, "later").unwrap().is_none());
+        assert!(record_blocker_answer(&paths, &hive(), &[worker()], "t-w", None, &b, &pick(Some("Redis"), ""), false, "later").unwrap().is_none());
         assert_eq!(read(&paths).len(), 3);
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -915,7 +916,7 @@ mod tests {
     fn a_coordinators_own_row_is_other_with_its_own_recommendation() {
         let (base, paths) = scratch();
         let b = blocker("decision", "2026-10-24T10:00:00Z", &[("Ship", true), ("Wait", false)]);
-        let l = record_blocker_answer(&paths, &hive(), &[worker()], "t-coord", &b, &pick(None, "wait for the review"), false, "now").unwrap().unwrap();
+        let l = record_blocker_answer(&paths, &hive(), &[worker()], "t-coord", None, &b, &pick(None, "wait for the review"), false, "now").unwrap().unwrap();
         let all = read(&paths);
         assert_eq!(all.iter().map(|x| x.event.as_str()).collect::<Vec<_>>(), vec!["asked", "answered"]);
         let asked = &all[0];
@@ -930,7 +931,7 @@ mod tests {
         let b2 = blocker("decision", "2026-10-24T12:00:00Z", &[("Yes", true), ("No", false)]);
         let offer = DecisionLine { id: "D-offer".into(), event: "offer".into(), category: "offer".into(), key: Some(super::super::prompts::blocker_key("t-coord", &b2.asked_at)), ..DecisionLine::default() };
         append(&paths, &offer).unwrap();
-        let l = record_blocker_answer(&paths, &hive(), &[], "t-coord", &b2, &pick(Some("No"), ""), false, "now").unwrap().unwrap();
+        let l = record_blocker_answer(&paths, &hive(), &[], "t-coord", None, &b2, &pick(Some("No"), ""), false, "now").unwrap().unwrap();
         assert_eq!((l.id.as_str(), l.category.as_str(), l.reason), ("D-offer", "offer", None));
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -939,14 +940,14 @@ mod tests {
     fn unrouted_worker_blockers_follow_the_allowlist_and_bad_answers_are_refused() {
         let (base, paths) = scratch();
         let act = blocker("action", "2026-10-24T10:00:00Z", &[]);
-        let l = record_blocker_answer(&paths, &hive(), &[worker()], "t-w", &act, &pick(None, ""), false, "now").unwrap().unwrap();
+        let l = record_blocker_answer(&paths, &hive(), &[worker()], "t-w", None, &act, &pick(None, ""), false, "now").unwrap().unwrap();
         assert_eq!((l.category.as_str(), l.answer.as_deref()), (CATEGORY_NEVER, Some("Done by the human")), "an action is never the coordinator's");
         let q = blocker("decision", "2026-10-24T11:00:00Z", &[("A", false)]);
-        let l = record_blocker_answer(&paths, &hive(), &[worker()], "t-w", &q, &pick(Some("A"), ""), false, "now").unwrap().unwrap();
+        let l = record_blocker_answer(&paths, &hive(), &[worker()], "t-w", None, &q, &pick(Some("A"), ""), false, "now").unwrap().unwrap();
         assert_eq!((l.category.as_str(), l.recommended), ("questions", None), "no coordinator recommendation: none");
-        let e = record_blocker_answer(&paths, &hive(), &[worker()], "t-w", &blocker("decision", "x", &[("A", false)]), &pick(Some("B"), ""), false, "now").unwrap_err();
+        let e = record_blocker_answer(&paths, &hive(), &[worker()], "t-w", None, &blocker("decision", "x", &[("A", false)]), &pick(Some("B"), ""), false, "now").unwrap_err();
         assert!(e.contains("not one of the choices"), "{e}");
-        let e = record_blocker_answer(&paths, &hive(), &[worker()], "t-w", &blocker("decision", "y", &[]), &pick(None, "  "), false, "now").unwrap_err();
+        let e = record_blocker_answer(&paths, &hive(), &[worker()], "t-w", None, &blocker("decision", "y", &[]), &pick(None, "  "), false, "now").unwrap_err();
         assert!(e.contains("needs an option or words"), "{e}");
         assert_eq!(read(&paths).len(), 4, "a refused answer writes nothing");
         let _ = std::fs::remove_dir_all(&base);

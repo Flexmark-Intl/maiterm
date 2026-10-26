@@ -675,6 +675,31 @@ fn an_ordinary_workspace_has_no_hive_to_log_a_blocker_answer_in() {
     assert!(crate::hive::tools::caller_for_workspace(&data, "plain-ws").is_none(), "hive_blocker_answered answers None, writing nothing");
 }
 
+#[tokio::test]
+async fn a_sub_task_the_worker_made_routes_its_blocker_and_the_answer_patches_that_row() {
+    let rig = Rig::new();
+    let mut sub = rig.data.read().windows[0].workspaces[0].tasks[0].clone();
+    sub.id = "t-sub".into();
+    sub.title = "Run web:check".into();
+    sub.status = "blocked".into();
+    let b = decision("2026-10-24T10:00:00Z", &[("Yes", true), ("No", false)]);
+    sub.blocker = Some(b.clone());
+    rig.data.write().windows[0].workspaces[0].tasks.push(sub.clone());
+
+    blockers_changed_in(&rig.ctx(), &rig.caller, vec![sub], Vec::new()).await;
+    let key = blocker_key("t-sub", &b.asked_at);
+    let r = find(&rig.wtab, &key).expect("a sub-task on the worker's tab is the worker's");
+    assert_eq!((r.owner.as_str(), r.task_id.as_str(), r.badge), (OWNER_COORDINATOR, "t-sub", 2));
+    assert!(rig.to_coordinator()[0].starts_with("⟦HIVE QUESTION · #2 Session store⟧"));
+
+    rig.answer(json!({ "prompt_id": key, "answer": "Yes" })).await.unwrap();
+    let reqs = rig.win.st().requests.clone();
+    assert_eq!(reqs[0].1["task_id"], "t-sub", "the blocked row, not the worker's task");
+    let to_worker: Vec<String> = rig.win.st().delivered.iter().filter(|(t, _)| *t == rig.wtab).map(|(_, m)| m.clone()).collect();
+    assert!(to_worker[0].starts_with("[maiTerm] Your coordinator answered your question on task id t-sub."), "{}", to_worker[0]);
+    assert_eq!(rig.lines()[0].task_id.as_deref(), Some("t-sub"));
+}
+
 // ── Blockers from a task write ──
 
 #[tokio::test]
@@ -686,6 +711,7 @@ async fn a_task_write_routes_a_new_worker_decision_once_and_ignores_the_coordina
     asked.blocker = Some(decision("2026-10-24T10:00:00Z", &[("Redis", true)]));
     let mut coord_row = worker_row.clone();
     coord_row.id = "coordinator-row".into();
+    coord_row.tab_id = Some(rig.coord.clone());
     coord_row.status = "blocked".into();
     coord_row.blocker = Some(decision("2026-10-24T10:00:00Z", &[]));
     let mut external = worker_row.clone();

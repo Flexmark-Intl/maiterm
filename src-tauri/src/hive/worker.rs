@@ -394,6 +394,15 @@ pub fn list_workers(paths: &HivePaths) -> Vec<WorkerRecord> {
     out
 }
 
+/// The worker a task row is: the task it was given, or a sub-task it made on its own tab (workers
+/// split their work, and block those rows too).
+pub fn worker_for_row<'a>(workers: &'a [WorkerRecord], task_id: &str, task_tab: Option<&str>) -> Option<&'a WorkerRecord> {
+    workers.iter().find(|w| w.task_id == task_id).or_else(|| {
+        let tab = task_tab.filter(|t| !t.is_empty())?;
+        workers.iter().find(|w| w.tab_id.as_deref() == Some(tab))
+    })
+}
+
 pub fn worker_for_tab(paths: &HivePaths, tab_id: &str) -> Option<WorkerRecord> {
     if tab_id.is_empty() {
         return None;
