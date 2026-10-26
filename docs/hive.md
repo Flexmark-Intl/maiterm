@@ -246,9 +246,9 @@ from its chat, or answers in the Hive view.
 
 ### 4.1 Layout: Miller columns
 
-The Hive header carries the name, the goal, worker counts, Pause, settings, and three views:
-**Board · Gallery · Memory**. The coordinator column stays put whichever view is showing, so you
-can talk to the Hive about what you're looking at.
+The Hive header carries the name, the goal, worker counts, Pause, settings, and four views:
+**Board · Needs you · Gallery · Memory** (Needs you is §4.8). The coordinator column stays put
+whichever view is showing, so you can talk to the Hive about what you're looking at.
 
 Columns run left to right, each one resizable by its border (the widths are kept per viewer
 in `localStorage`, as the Loom does):
@@ -472,7 +472,7 @@ In a Hive workspace there's no tab strip, so the tab keys are free:
 | Cmd+1 | Focus the coordinator's composer |
 | Cmd+2…9 | Switch to the worker column with badge 1…8 (in place of the unpinned ones, as a click does, §4.1) |
 | Cmd+Shift+[ / ] | Move focus between columns |
-| Cmd+Shift+Y | Cycle the view: Board → Gallery → Memory |
+| Cmd+Shift+Y | Cycle the view: Board → Needs you → Gallery → Memory |
 | Cmd+W | Close the focused worker column (never the agent; needs two presses like tabs) |
 | Escape | In a composer, blur it. In a column, close it. In the gallery's detail view, back to the grid. **Inside a raw terminal, Escape belongs to the terminal** (it interrupts the agent), so the column doesn't take it |
 
@@ -530,6 +530,37 @@ twin for the doorbell.
 - **Not `Tab.muted`.** Muting is the human's own setting and silences everything from a tab,
   including the timeout notice and blockers. The gate is computed from the Hive's checkpoints
   each time and never writes a mute flag.
+
+### 4.8 Needs you: one place for everything waiting on the human
+
+Darryl's first real use (2026-10-26): workers' cards ended up sitting in the workers' own
+columns, and finding the one waiting meant clicking through workers. **Needs you** is a view
+beside the board (`HiveNeedsYou.svelte`, the pure queue in `hive/needsYou.ts`) that gathers,
+oldest first, everything any of the Hive's agents waits on the human for:
+
+- a **task blocker** (decision or action) on any row of the Hive, whoever asked: the coordinator,
+  a worker on the task it was given, or a worker on a **sub-task it made on its own tab**;
+- an **open permission dialog or question** on a live worker's or the coordinator's screen
+  (the agent's hook state, as the board's card reads it);
+- a worker's **watch script** waiting to be allowed;
+- the Hive's **agent requests**: lands, undos, settings changes (§3.4, §8.1).
+
+Each item is the same card every other surface uses (`BlockerCard`, `PromptCard`,
+`ScriptApprovalCard`, `AgentRequestCard`), so its guards are the same, with **Open worker** (or
+Open coordinator) beside it. What the coordinator holds (§7.4, not timed out, not taken over) is
+listed below the rest under "With the coordinator", reads "With coordinator" with Take over, and
+is **not counted**. The header shows **Needs you · N** while N > 0, and the view tab carries the
+count, so the human sees from any view that something waits.
+
+**Sub-tasks are the worker's** (`worker::worker_for_row`). Workers split their work into rows on
+their own tab and block those. Before 2026-10-26 only the task a worker was given was routed
+(§7.4), so a question on a sub-task never reached the coordinator or the decision log as the
+worker's, and its card didn't read Needs you either. Now a blocked row on a worker's tab routes
+like its own task's, `hiveAnswerWorker` answers it on that row, and the card reads it
+(`cardTask`). An `action` blocker (“install the dependencies outside my sandbox”) is still
+the human's alone (§7.4's allowlist): the coordinator is told of it, and may resolve the cause.
+Not covered: a worker relaunched into a new tab keeps its own row (moved to the new tab) but not
+its sub-tasks, whose rows keep the old tab id.
 
 ## 5. Hidden tabs: two predicates
 

@@ -207,9 +207,9 @@ export interface HiveViewState {
 }
 
 /** A string kept in localStorage: one a later build adds reads as the board here (`parseView`). */
-export type HiveViewName = 'board' | 'gallery' | 'memory';
+export type HiveViewName = 'board' | 'needs' | 'gallery' | 'memory';
 /** §4.6's order, which Cmd+Shift+Y cycles (plan D24). */
-export const HIVE_VIEWS: readonly HiveViewName[] = ['board', 'gallery', 'memory'];
+export const HIVE_VIEWS: readonly HiveViewName[] = ['board', 'needs', 'gallery', 'memory'];
 
 export const defaultView = (): HiveViewState => ({ open: [], focused: 'coordinator', coordFocusedAt: 0, coordCollapsed: false, terminalShown: [], view: 'board' });
 

@@ -6,8 +6,9 @@ const file = { indexed: true, folded: false, pinned: false, in_subfolder: false,
 const budget = { lines: 7, bytes: 512, kept_lines: 1, kept_bytes: 20, max_lines: 200, max_bytes: 25000, kept_max_lines: 60, kept_max_bytes: 8000 };
 
 describe('memory view', () => {
-  it('cycles Board, Gallery and Memory (Cmd+Shift+Y)', () => {
-    expect(nextView('board')).toBe('gallery');
+  it('cycles Board, Needs you, Gallery and Memory (Cmd+Shift+Y)', () => {
+    expect(nextView('board')).toBe('needs');
+    expect(nextView('needs')).toBe('gallery');
     expect(nextView('gallery')).toBe('memory');
     expect(nextView('memory')).toBe('board');
   });

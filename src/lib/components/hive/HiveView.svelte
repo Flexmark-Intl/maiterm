@@ -19,8 +19,9 @@
   the completion criteria (read-only: the coordinator sets them), where lands go, autonomy and
   the run queue.
 
-  Gallery (§10.4, step 8d) and Memory (§9, step 7a) are the header's other views (Board, Gallery,
-  Memory, Cmd+Shift+Y): GalleryView or HiveMemoryView takes the board's place and the worker
+  Needs you (§4.8), Gallery (§10.4, step 8d) and Memory (§9, step 7a) are the header's other views
+  (Board, Needs you, Gallery, Memory, Cmd+Shift+Y): HiveNeedsYou, GalleryView or HiveMemoryView
+  takes the board's place and the worker
   columns', which stay mounted, hidden, so their drafts survive (plan D10). The coordinator column
   stays put. An inline asset in a chat (`HIVE_OPEN_ASSET`) opens the gallery at it.
 
@@ -70,6 +71,10 @@
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
   import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
   import HiveMemoryView from './HiveMemoryView.svelte';
+  import HiveNeedsYou from './HiveNeedsYou.svelte';
+  import { cardTask, needsYouCount, needsYouQueue, type HiveAsker } from '$lib/hive/needsYou';
+  import { followUpsStore } from '$lib/stores/followUps.svelte';
+  import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
   import GalleryView from './gallery/GalleryView.svelte';
   import { hiveGallery } from '$lib/stores/hiveGallery.svelte';
   import { HIVE_OPEN_ASSET, type HiveOpenAssetDetail } from '$lib/hive/gallery';
@@ -209,7 +214,8 @@
       const agent = tab ? agentStateStore.getState(tab.id) ?? null : null;
       const tabFields = tab ? { suspended: !!tab.suspended_at || !!ws?.suspended } : null;
       const meta = hiveFeed.meta(tab?.id);
-      const state = cardState(worker, task, agent, tabFields);
+      // A blocked sub-task the worker made reads Needs you on its card too.
+      const state = cardState(worker, cardTask(tasks, worker.task_id, worker.tab_id), agent, tabFields);
       return {
         worker,
         state,
@@ -230,6 +236,22 @@
     });
   });
   const columns = $derived(waves(sortCards(cards)));
+
+  // ── Needs you (§4.8): every agent's waiting item in one place, whichever column holds it. ──
+  const needs = $derived(needsYouQueue({
+    coordinatorTabId: coordId,
+    workers: board?.workers ?? [],
+    tasks,
+    agent: (tabId) => agentStateStore.getState(tabId),
+    routes: hivePrompts.routesFor(workspaceId),
+    approvals: followUpsStore.pendingApprovals,
+    requests: agentRequestsStore.pending,
+  }));
+  const needsCount = $derived(needsYouCount(needs));
+  function openAsker(a: HiveAsker, e: MouseEvent) {
+    if (a.taskId) openCard(a.taskId, a.tabId, e);
+    else open({ workspaceId, tabId: a.tabId });
+  }
   const cardByTask = $derived(new Map(cards.map((c) => [c.worker.task_id, c])));
 
   // ── The coordinator's width (380–560 px) and the rail's (200–240 px), kept per viewer (§4.1).
@@ -270,8 +292,11 @@
    *  terminal on screen. Opening a worker column goes back to the board (`open`). */
   const showMemory = $derived(view.view === 'memory');
   const showGallery = $derived(view.view === 'gallery');
-  const VIEW_TABS = [{ key: 'board', label: 'Board' }, { key: 'gallery', label: 'Gallery' }, { key: 'memory', label: 'Memory' }] as const;
-  const layoutCols = $derived(showMemory || showGallery ? [] : openCols);
+  const showNeeds = $derived(view.view === 'needs');
+  const VIEW_TABS = [{ key: 'board', label: 'Board' }, { key: 'needs', label: 'Needs you' }, { key: 'gallery', label: 'Gallery' }, { key: 'memory', label: 'Memory' }] as const;
+  /** Memory, the gallery or Needs you has the board's place. */
+  const offBoard = $derived(showMemory || showGallery || showNeeds);
+  const layoutCols = $derived(offBoard ? [] : openCols);
   const fit = $derived(fitColumns({
     main: mainW > 0 ? mainW : Number.POSITIVE_INFINITY,
     coordW: width,
@@ -764,6 +789,13 @@
         {:else if board}
           <span class="crew-n">No workers yet</span>
         {/if}
+        {#if needsCount}
+          <Tooltip text="Questions, permissions and approvals from any of the Hive's agents, in one place">
+            <button type="button" class="needs-pill" class:on={showNeeds} onclick={() => hiveView.setView(workspaceId, showNeeds ? 'board' : 'needs')}>
+              <span class="needs-dot" aria-hidden="true"></span>Needs you · {needsCount}
+            </button>
+          </Tooltip>
+        {/if}
         {#if hive}
           {#if hive.status === 'done'}
             <span class="status done"><Icon name="check" size={11} />{doneLabel(hive.done_at)}</span>
@@ -823,7 +855,7 @@
               class:active={view.view === key}
               aria-selected={view.view === key}
               onclick={() => hiveView.setView(workspaceId, key)}
-            >{label}</button>
+            >{label}{#if key === 'needs' && needsCount}<span class="view-n">{needsCount}</span>{/if}</button>
           </Tooltip>
         {/each}
       </div>
@@ -1017,7 +1049,7 @@
     <section
       bind:this={boardEl}
       class="board"
-      class:gone={showMemory || showGallery}
+      class:gone={offBoard}
       class:rail={boardMode === 'rail'}
       class:focused={focusedKey === 'board' && boardMode === 'rail'}
       style={boardMode === 'rail' ? `width: ${railW}px` : undefined}
@@ -1097,6 +1129,9 @@
     </section>
     {#if showMemory}
       <HiveMemoryView {workspaceId} />
+    {/if}
+    {#if showNeeds}
+      <HiveNeedsYou items={needs} active={showNeeds} onopen={openAsker} />
     {/if}
     {#if showGallery && hive}
       <GalleryView
@@ -1212,6 +1247,11 @@
   .views { display: flex; gap: 18px; font-size: 12.5px; }
   .view-btn { background: none; border: none; padding: 4px 0 8px; margin-bottom: -1px; color: var(--fg-dim); font: inherit; cursor: pointer; border-bottom: 2px solid transparent; }
   .view-btn:hover { color: var(--fg); }
+  .view-n { display: inline-block; margin-left: 6px; min-width: 16px; padding: 0 4px; border-radius: 8px; background: var(--orange, #ff9e64); color: var(--bg-dark); font-size: 10.5px; font-weight: 600; line-height: 16px; text-align: center; font-variant-numeric: tabular-nums; }
+  .needs-pill { display: inline-flex; align-items: center; gap: 6px; background: color-mix(in srgb, var(--orange, #ff9e64) 14%, transparent); border: 1px solid color-mix(in srgb, var(--orange, #ff9e64) 45%, transparent); color: var(--orange, #ff9e64); border-radius: 999px; padding: 2px 10px; font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+  .needs-pill:hover, .needs-pill.on { background: color-mix(in srgb, var(--orange, #ff9e64) 24%, transparent); }
+  .needs-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .needs-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .view-btn.active { color: var(--fg); font-weight: 500; border-bottom-color: var(--accent); }
   .view-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 2px; }
 
