@@ -245,7 +245,10 @@ export const register: Register = on => {
     const to = await linkOf($)
     if (!to) return next(e)
     // A /clear starts a new session in this process (and no `session.start`): the loop runs on.
-    if (inboxRunning) await $.env.set('MAITERM_MOD_SESSION', e.session_id)
+    // Also when the mod was reloaded and the inbox hasn't restarted yet: the variable is set (to
+    // the old id) only in an interactive process, and without this the new session would never
+    // match it, so it would never be told its linked Chrome tabs.
+    if (inboxRunning || (await $.env.get('MAITERM_MOD_SESSION'))) await $.env.set('MAITERM_MOD_SESSION', e.session_id)
     // The server's reply is the session's standing instructions: the tab and session ids and
     // whatever this tab's features need (the Overlord, tasks, the stack, follow-ups).
     const priming = await send($, to, e, '&prime=1')

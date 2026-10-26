@@ -3,7 +3,7 @@
 // maiTerm relays from an agent on its linked tabs. A Chrome tab is linked to one agent; an agent
 // can hold several, each under a handle (b1, b2…) maiTerm gives it.
 
-import { runAction, detach, forget } from './driver.js';
+import { runAction, detach, forget, release } from './driver.js';
 import { mark, unmark, retitle, releaseIfOurs, sweepOrphans } from './marker.js';
 
 const PROTOCOL = 1;
@@ -312,6 +312,8 @@ async function link(host, maitermTab, chromeTab, openerChromeTabId) {
     });
     // This maiTerm already moved the tab on its side; another maiTerm holding it is told.
     const previous = all.filter((l) => l.chromeTabId === chromeTab.id);
+    // Relinked or moved to another agent: a wait still running for the old link ends.
+    if (previous.length) release(chromeTab.id);
     for (const l of previous) if (l.host !== host) await request(l.host, 'unlink', { chromeTabId: l.chromeTabId, reason: 'moved' }).catch(() => {});
     const opener = all.find((l) => l.chromeTabId === openerChromeTabId);
     const rest = all.filter((l) => !previous.includes(l));

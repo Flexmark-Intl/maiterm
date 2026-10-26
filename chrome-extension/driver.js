@@ -56,6 +56,12 @@ export async function ensureAttached(tabId) {
       await sleep(400);
     }
   }
+  // Unlinked while the attach was retrying (another extension's frame held it up for seconds): let
+  // go at once, or Chrome's debugging bar stays on a tab nobody holds.
+  if (released.has(tabId)) {
+    await chrome.debugger.detach({ tabId }).catch(() => {});
+    throw new Error('That Chrome tab is no longer linked.');
+  }
   attached.add(tabId);
   // Whatever was in flight before this session will never report its end to it.
   inflight.set(tabId, new Map());
@@ -81,6 +87,12 @@ export async function ensureAttached(tabId) {
   // input to a hidden page, and pauses its timers; focus emulation makes it behave as the
   // focused, visible tab (verified: clicks and keys land, visibilityState reads "visible").
   await send(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true });
+}
+
+/** The link ended or moved to another agent without the tab being detached: a wait running for
+ *  the old link ends instead of reporting the page to an agent that no longer holds it. */
+export function release(tabId) {
+  released.add(tabId);
 }
 
 export async function detach(tabId) {
@@ -322,6 +334,7 @@ async function waitFor(tabId, args) {
         });
         textOk = result.value === true;
       } catch (e) {
+        if (released.has(tabId)) continue; // unlinked during the attach: the check above answers
         // The page navigated mid-wait (look again in the new one), or Chrome detached maiTerm.
         if (/not attached|detached/i.test(String(e?.message ?? e))) attached.delete(tabId);
         await sleep(e?.message === BLOCKED ? 400 : 100);
