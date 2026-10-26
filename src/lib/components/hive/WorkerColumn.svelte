@@ -1,6 +1,6 @@
 <!--
   One worker's column in a Hive (docs/hive.md §4.1, §4.2): its own header (badge, title, folders
-  and branches, the diff stat and, apart, what's committed, and a menu), then its transcript
+  and branches, the diff stat and, apart, what's committed, a menu and Close at its top right), then its transcript
   through ChatColumn. A transcript, never the terminal: opening, closing or squeezing this column
   touches no PTY (principle 3). Show terminal adds the raw terminal under the chat (HiveTerminal),
   at the PTY's own fixed size.
@@ -125,7 +125,6 @@
     ...(heldLand ? [{ label: retrying ? 'Retrying held land…' : 'Retry held land', action: () => void retryLand() }] : []),
     ...(hasLanded ? [{ label: card.undone ? 'Land log' : 'Undo land…', action: onlandlog }] : []),
     { label: pinned ? 'Unpin column' : 'Pin column', action: onpin },
-    { label: 'Close column', action: onclose },
   ]);
 </script>
 
@@ -140,6 +139,7 @@
       <span bind:this={menuBtn}>
         <IconButton tooltip="Column menu" aria-haspopup="menu" onclick={openMenu}><Icon name="more" size={13} /></IconButton>
       </span>
+      <IconButton tooltip="Close column" onclick={onclose}><Icon name="close" size={13} /></IconButton>
     </div>
     <div class="facts">
       <span class="st" data-state={cardState.state}>{stateLine(cardState)}{#if cardState.sub} · {cardState.sub}{/if}</span>

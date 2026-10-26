@@ -1,14 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
   closeColumn,
+  closeUnpinned,
   cycleOrder,
   defaultView,
   fitColumns,
   mostRecent,
   nextFocus,
   openColumn,
+  openColumnAs,
   parseView,
   serializeView,
+  switchColumn,
   tabsOnScreen,
   togglePin,
   W,
@@ -44,6 +47,45 @@ describe('openColumn', () => {
     const r = openColumn([col('a', 1), col('b', 2)], 'a', 9);
     expect(r.refused).toBeUndefined();
     expect(r.open).toEqual([col('a', 9), col('b', 2)]);
+  });
+});
+
+describe('switchColumn (a plain click)', () => {
+  it('shows the worker in place of the open one, not beside it', () => {
+    expect(switchColumn([], 'a', 1).open).toEqual([col('a', 1)]);
+    expect(switchColumn([col('a', 1)], 'b', 2).open).toEqual([col('b', 2)]);
+    // Two open (a Shift+click earlier): both unpinned ones give way to the one clicked.
+    expect(switchColumn([col('a', 1), col('b', 2)], 'c', 3).open).toEqual([col('c', 3)]);
+  });
+
+  it('keeps pinned columns where they are, taking the unpinned one\'s place', () => {
+    expect(switchColumn([col('a', 1, true), col('b', 2)], 'c', 3).open).toEqual([col('a', 1, true), col('c', 3)]);
+    expect(switchColumn([col('b', 2), col('a', 1, true)], 'c', 3).open).toEqual([col('c', 3), col('a', 1, true)]);
+    // One pinned alone: the new one goes beside it.
+    expect(switchColumn([col('a', 1, true)], 'c', 3).open).toEqual([col('a', 1, true), col('c', 3)]);
+  });
+
+  it('refuses when every slot is pinned', () => {
+    const both = [col('a', 1, true), col('b', 2, true)];
+    const r = switchColumn(both, 'c', 3);
+    expect(r.refused).toBe('both-pinned');
+    expect(r.open).toEqual(both);
+  });
+
+  it('clicking an open column keeps it (and its pin) and closes the other unpinned one', () => {
+    expect(switchColumn([col('a', 1), col('b', 2)], 'a', 9).open).toEqual([col('a', 9)]);
+    expect(switchColumn([col('a', 1, true), col('b', 2)], 'a', 9).open).toEqual([col('a', 9, true)]);
+    expect(switchColumn([col('a', 1, true), col('b', 2)], 'b', 9).open).toEqual([col('a', 1, true), col('b', 9)]);
+  });
+
+  it('openColumnAs: add is a Shift+click, beside the open one', () => {
+    expect(ids(openColumnAs([col('a', 1)], 'b', 2, 'add').open)).toEqual(['a', 'b']);
+    expect(ids(openColumnAs([col('a', 1)], 'b', 2, 'switch').open)).toEqual(['b']);
+  });
+
+  it('closeUnpinned keeps only the pinned columns', () => {
+    expect(closeUnpinned([col('a', 1), col('b', 2, true)])).toEqual([col('b', 2, true)]);
+    expect(closeUnpinned([col('a', 1)])).toEqual([]);
   });
 });
 

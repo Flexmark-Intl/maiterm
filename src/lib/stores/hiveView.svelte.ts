@@ -8,9 +8,10 @@
 import { workspacesStore } from './workspaces.svelte';
 import {
   closeColumn,
+  closeUnpinned,
   focusColumn,
   mostRecent,
-  openColumn,
+  openColumnAs,
   parseView,
   serializeView,
   togglePin,
@@ -18,6 +19,7 @@ import {
   type HiveFocus,
   type HiveViewName,
   type HiveViewState,
+  type OpenMode,
 } from '$lib/hive/columns';
 import { nextView } from '$lib/hive/memory';
 
@@ -75,10 +77,12 @@ function createHiveViewStore() {
       return read(wsId);
     },
 
-    /** Open or focus a worker's column, and focus it. Refused when both columns are pinned. */
-    open(wsId: string, taskId: string, now = Date.now()): { refused?: 'both-pinned' } {
+    /** Open or focus a worker's column, and focus it: in place of the unpinned columns
+     *  (`switch`, a plain click) or beside them (`add`, a Shift+click). Refused when every slot is
+     *  pinned. */
+    open(wsId: string, taskId: string, mode: OpenMode = 'switch', now = Date.now()): { refused?: 'both-pinned' } {
       const v = read(wsId);
-      const r = openColumn(v.open, taskId, now);
+      const r = openColumnAs(v.open, taskId, now, mode);
       if (r.refused) return { refused: r.refused };
       const open = new Set(r.open.map((c) => c.taskId));
       write(wsId, { ...v, open: r.open, focused: taskId, terminalShown: v.terminalShown.filter((k) => k === 'coordinator' || open.has(k)) });
@@ -110,6 +114,17 @@ function createHiveViewStore() {
       const open = closeColumn(v.open, taskId);
       const focused = v.focused === taskId ? (mostRecent(open) ?? 'board') : v.focused;
       write(wsId, { ...v, open, focused, terminalShown: v.terminalShown.filter((k) => k !== taskId) });
+    },
+
+    /** Every column the human hasn't pinned closes (a click on the rail's empty space). Focus goes
+     *  to a pinned column the human was in, else the board. */
+    closeUnpinned(wsId: string) {
+      const v = read(wsId);
+      const open = closeUnpinned(v.open);
+      if (open.length === v.open.length) return;
+      const kept = new Set(open.map((c) => c.taskId));
+      const focused = v.focused === 'coordinator' || kept.has(v.focused) ? v.focused : 'board';
+      write(wsId, { ...v, open, focused, terminalShown: v.terminalShown.filter((k) => k === 'coordinator' || kept.has(k)) });
     },
 
     togglePin(wsId: string, taskId: string) {

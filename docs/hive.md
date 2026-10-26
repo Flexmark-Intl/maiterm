@@ -16,7 +16,8 @@ dedicated view in place of the split tree:
 - **Middle:** the **board**. Every worker the coordinator spawned is a card: the task it owns,
   who it is, what it is doing right now, and whether it needs you.
 - **Right:** **worker columns.** Click a card and that worker's chat opens as a column beside
-  the board. You can read it, answer its prompt, or steer it directly.
+  the board; click another and it switches to that worker (Shift+click opens a second beside
+  it). You can read it, answer its prompt, or steer it directly.
 
 A Hive works on a **primary folder plus any number of others**. They can be git repositories,
 where each worker gets **its own worktree on its own branch** (its own copy of the code), or
@@ -206,7 +207,7 @@ in `localStorage`, as the Loom does):
 |---|---|---|
 | Coordinator | 380–560 px | Always present; can be collapsed to a 44 px strip with an unread dot |
 | Board | flexible, min 260 px | Shrinks to a **rail** (200–240 px, compact rows) when a worker column opens |
-| Worker columns | min 420 px each | **At most two** side by side. Opening a third replaces the least recently focused unpinned one. A pin keeps a column open |
+| Worker columns | min 420 px each | **At most two** side by side. A click on a card **switches**: its column shows in place of the open unpinned ones. **Shift+click adds** it beside them; a third replaces the least recently focused unpinned one. A pin keeps a column open through both |
 
 **The widths have to fit a laptop.** Coordinator 380 + rail 200 + two workers at 420 is about
 1420 px before the 215 px sidebar and an open Files column (280 px, which counts in the
@@ -223,6 +224,15 @@ between workers. The rail is the same cards in compact form (badge number §4.6,
 title, activity line), sorted by the order in §4.3. A rail title **wraps to two lines** rather
 than clipping, since worker titles often share a prefix ("Session store: reads", "Session
 store: writes"), and the full title is on a `Tooltip.svelte` (never a native `title=`).
+
+**Opening and closing columns** (`hive/columns.ts`, `openColumnAs`). A human clicking another
+worker expects to switch to it, not to grow a column, so a plain click (and Cmd+2…9, a
+notification, the gallery's links) shows that worker **in place of** the unpinned columns, in the
+first unpinned one's place; pinned columns stay put. Shift+click opens it **beside** them, and
+while fewer than two are open a dim line at the foot of the rail says so. Each column's header
+has its ⋯ menu and, at the top right, **Close column**. A click on the rail's **empty space**
+(not a card or a control, not the end of a drag or a text selection) closes every unpinned
+column, and with none pinned the board comes back to full width.
 
 **Files in a Hive.** The Files column follows "the active tab" (`docs/file-tree.md`), which a
 Hive never has, and today's fallback (`fileTree.svelte.ts:649-705`) would adopt the first hidden
@@ -347,7 +357,8 @@ draws dependency strings between cards, with the same vocabulary: dots moving al
 mean the upstream task is active, an amber dash means the card is waiting on it. A Weave of
 agent→task strings would show nothing here, since every worker owns exactly one task.
 Dependencies are the relationship worth drawing, and the waves show the plan and its progress
-in one picture. In rail mode the waves flatten into the sorted list.
+in one picture. In rail mode the waves flatten into the sorted list. A click on a card switches
+to its worker's column and Shift+click opens it beside the open one (§4.1).
 
 **The activity line comes from hooks, not transcripts.** `PreToolUse`/`PostToolUse`/`Stop`
 already reach `claude_code/server.rs`, and the agent state the frontend already keeps per tab
@@ -409,7 +420,7 @@ In a Hive workspace there's no tab strip, so the tab keys are free:
 | Key | Action |
 |---|---|
 | Cmd+1 | Focus the coordinator's composer |
-| Cmd+2…9 | Open/focus the worker column with badge 1…8 |
+| Cmd+2…9 | Switch to the worker column with badge 1…8 (in place of the unpinned ones, as a click does, §4.1) |
 | Cmd+Shift+[ / ] | Move focus between columns |
 | Cmd+Shift+Y | Cycle the view: Board → Gallery → Memory |
 | Cmd+W | Close the focused worker column (never the agent; needs two presses like tabs) |

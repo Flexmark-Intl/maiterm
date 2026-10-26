@@ -48,6 +48,41 @@ export function openColumn(open: readonly OpenColumn[], taskId: string, now: num
   return { open: [...open.filter((c) => c !== victim), fresh] };
 }
 
+/** How a worker's column opens (§4.1): `switch` (a plain click, Cmd+2…9, a notification) shows it
+ *  in place of the open unpinned columns; `add` (Shift+click) opens it beside them. */
+export type OpenMode = 'switch' | 'add';
+
+/** Show a worker's column in place of the unpinned ones: pinned columns stay where they are, and
+ *  the new one takes the first unpinned column's place, so switching doesn't make the screen jump.
+ *  Already open, it stays (pin and all) and the other unpinned ones close. With every slot pinned
+ *  it's refused, never a pin overridden. */
+export function switchColumn(open: readonly OpenColumn[], taskId: string, now: number): { open: OpenColumn[]; refused?: 'both-pinned' } {
+  if (open.some((c) => c.taskId === taskId)) {
+    return { open: focusColumn(open.filter((c) => c.pinned || c.taskId === taskId), taskId, now) };
+  }
+  const fresh = { taskId, pinned: false, focusedAt: now };
+  const pinned = open.filter((c) => c.pinned);
+  if (pinned.length >= MAX_WORKER_COLUMNS) return { open: [...open], refused: 'both-pinned' };
+  const at = open.findIndex((c) => !c.pinned);
+  if (at < 0) return { open: [...open, fresh] };
+  const next: OpenColumn[] = [];
+  open.forEach((c, i) => {
+    if (i === at) next.push(fresh);
+    else if (c.pinned) next.push(c);
+  });
+  return { open: next };
+}
+
+/** Open a worker's column the way the human asked. */
+export function openColumnAs(open: readonly OpenColumn[], taskId: string, now: number, mode: OpenMode) {
+  return mode === 'add' ? openColumn(open, taskId, now) : switchColumn(open, taskId, now);
+}
+
+/** Clicking the rail's empty space (§4.1): every column the human hasn't pinned closes. */
+export function closeUnpinned(open: readonly OpenColumn[]): OpenColumn[] {
+  return open.filter((c) => c.pinned);
+}
+
 export function focusColumn(open: readonly OpenColumn[], taskId: string, now: number): OpenColumn[] {
   return open.map((c) => (c.taskId === taskId ? { ...c, focusedAt: now } : c));
 }

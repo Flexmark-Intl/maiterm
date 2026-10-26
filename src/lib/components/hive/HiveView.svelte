@@ -25,7 +25,9 @@
   stays put. An inline asset in a chat (`HIVE_OPEN_ASSET`) opens the gallery at it.
 
   Worker columns (§4.1): opening one turns the board into a rail; at most two show, and on a
-  narrow window one gives way, then the coordinator goes to its strip (`hive/columns.ts`). Which
+  narrow window one gives way, then the coordinator goes to its strip (`hive/columns.ts`). A
+  click on a card switches to its worker (in place of the unpinned columns), Shift+click opens it
+  beside them, and a click on the rail's empty space closes the unpinned ones. Which
   are open and which has focus is `hiveView`'s, per workspace; the focused column's tab is what
   the Files column follows here. Every column is a transcript, so none of this touches a PTY.
 
@@ -33,7 +35,7 @@
   `fixedSize`, so that touches no PTY either; this view tells `+page` which ones are on screen
   (`hiveView.setTerminalsOnScreen`), which is all that makes Rust render them.
 
-  The keyboard (§4.6, `hive/keys.ts`): Cmd+1 the coordinator, Cmd+2…9 a worker by badge,
+  The keyboard (§4.6, `hive/keys.ts`): Cmd+1 the coordinator, Cmd+2…9 switches to a worker by badge,
   Cmd+Shift+[ ] between columns, Cmd+W (twice) closes the focused worker column, Escape blurs a
   composer or closes a worker column, and inside a raw terminal stays the agent's.
 -->
@@ -77,10 +79,10 @@
   import { hiveFeed } from '$lib/stores/hiveFeed.svelte';
   import { hiveView } from '$lib/stores/hiveView.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
-  import { clampCoord, clampRail, cycleOrder, fitColumns, nextFocus, tabsOnScreen, W } from '$lib/hive/columns';
+  import { clampCoord, clampRail, cycleOrder, fitColumns, MAX_WORKER_COLUMNS, nextFocus, tabsOnScreen, W, type OpenMode } from '$lib/hive/columns';
   import { escapeAction, HIVE_KEY, type HiveKeyAction, type HiveKeyDetail } from '$lib/hive/keys';
   import { modSymbol } from '$lib/utils/platform';
-  import { dispatchHiveOpenColumn, HIVE_OPEN_COLUMN, takePendingHiveOpen, type HiveOpenColumnDetail } from '$lib/hive/model';
+  import { HIVE_OPEN_COLUMN, takePendingHiveOpen, type HiveOpenColumnDetail } from '$lib/hive/model';
   import { cardAge, cardState, latestNote, onScreenAgent, sortCards, STATE_LABEL, STATE_ORDER, waves, type CardStateName } from '$lib/hive/cards';
   import { activityLine, contextGauge, formatDiffStat } from '$lib/hive/activity';
   import { strings, type Box, type HiveString } from '$lib/hive/strings';
@@ -494,9 +496,11 @@
   let flash = $state(false);
   /** A worker asked for before its card was on the board (a fresh mount, a spawn the board hasn't
    *  refetched yet): applied when it arrives, if that's soon. */
-  let pendingWorker: { detail: HiveOpenColumnDetail; at: number } | null = null;
+  let pendingWorker: { detail: HiveOpenColumnDetail; mode: OpenMode; at: number } | null = null;
   let flashTimer: ReturnType<typeof setTimeout> | null = null;
-  function open(detail: HiveOpenColumnDetail) {
+  /** `mode` (§4.1): a worker's column shows in place of the unpinned ones (`switch`: a click, a
+   *  badge key, a notification, the gallery) or beside them (`add`: a Shift+click on a card). */
+  function open(detail: HiveOpenColumnDetail, mode: OpenMode = 'switch') {
     if (detail.workspaceId !== workspaceId) return;
     if (detail.tabId && detail.tabId === coordId) {
       hiveView.setCoordCollapsed(workspaceId, false);
@@ -509,22 +513,22 @@
     }
     const w = board?.workers.find((c) => (detail.taskId && c.task_id === detail.taskId) || (detail.tabId && c.tab_id === detail.tabId));
     if (!w) {
-      if (pendingWorker?.detail !== detail) pendingWorker = { detail, at: Date.now() };
+      if (pendingWorker?.detail !== detail) pendingWorker = { detail, mode, at: Date.now() };
       return;
     }
     pendingWorker = null;
     // A worker's column lives in the board view.
     hiveView.setView(workspaceId, 'board');
-    if (hiveView.open(workspaceId, w.task_id).refused) {
+    if (hiveView.open(workspaceId, w.task_id, mode).refused) {
       toastStore.addToast('Both worker columns are pinned', `Unpin one to open #${w.badge} ${w.title}.`, 'info');
       return;
     }
-    // A third column evicts one: an arm on it goes too (`closeColumn`).
+    // A switch, or a third column, closes one: an arm on it goes too (`closeColumn`).
     if (closeArm && !hiveView.view(workspaceId).open.some((c) => c.taskId === closeArm?.taskId)) disarmClose();
     // After the column mounts: its composer, or the column itself for a worker with no chat.
     requestAnimationFrame(() => workerCols[w.task_id]?.focusColumn());
   }
-  /** Every way a column closes (Cmd+W, Escape, its menu) takes back a Cmd+W armed on it, so a
+  /** Every way a column closes (Cmd+W, Escape, its close button, the rail's empty space) takes back a Cmd+W armed on it, so a
    *  reopened column never closes on one press. */
   function closeColumn(taskId: string) {
     if (closeArm?.taskId === taskId) disarmClose();
@@ -536,10 +540,30 @@
     if (!board || !pendingWorker) return;
     const p = pendingWorker;
     if (Date.now() - p.at > 5000) pendingWorker = null;
-    else untrack(() => open(p.detail));
+    else untrack(() => open(p.detail, p.mode));
   });
-  function openCard(taskId: string, tabId: string | null | undefined) {
-    dispatchHiveOpenColumn({ workspaceId, tabId: tabId ?? '', taskId });
+  /** A card's click: Shift opens it beside the open column, any other click switches to it. */
+  function openCard(taskId: string, tabId: string | null | undefined, e?: MouseEvent) {
+    open({ workspaceId, tabId: tabId ?? '', taskId }, e?.shiftKey ? 'add' : 'switch');
+  }
+
+  /** A click on the rail's empty space (§4.1): the unpinned worker columns close and the board
+   *  comes back to full width. Only a plain click that starts and ends on the rail's own
+   *  background, never a card or a control, the end of a drag, or a text selection. */
+  let railDown: { x: number; y: number } | null = null;
+  const isRailBackground = (t: EventTarget | null) =>
+    t instanceof HTMLElement && (t === boardEl || t.classList.contains('rail-list') || t.classList.contains('rail-hint') || t.getAttribute('role') === 'listitem');
+  function onRailPointerDown(e: PointerEvent) {
+    railDown = boardMode === 'rail' && e.button === 0 && isRailBackground(e.target) ? { x: e.clientX, y: e.clientY } : null;
+  }
+  function onRailClick(e: MouseEvent) {
+    const down = railDown;
+    railDown = null;
+    if (!down || boardMode !== 'rail' || dragging || e.button !== 0 || !isRailBackground(e.target)) return;
+    if (Math.abs(e.clientX - down.x) > 4 || Math.abs(e.clientY - down.y) > 4) return;
+    if (window.getSelection()?.isCollapsed === false) return;
+    hiveView.closeUnpinned(workspaceId);
+    if (closeArm && !hiveView.view(workspaceId).open.some((c) => c.taskId === closeArm?.taskId)) disarmClose();
   }
 
   // ── The gallery's Iterate and Send to worker… (§10.4): files onto a composer ──
@@ -980,8 +1004,9 @@
         onkeydown={(e) => onResizerKey(e, 'coord')}
       ></div>
     {/if}
-    <!-- A focus stop of its own for Cmd+Shift+[ ] (§4.6); Tab goes on into its cards. -->
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <!-- A focus stop of its own for Cmd+Shift+[ ] (§4.6); Tab goes on into its cards. A click on
+         its empty space closes the unpinned worker columns (§4.1): Escape and Cmd+W are its keys. -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_click_events_have_key_events -->
     <section
       bind:this={boardEl}
       class="board"
@@ -992,7 +1017,11 @@
       tabindex="-1"
       aria-label="Board"
       onfocusin={focusTo('board')}
-      onpointerdown={focusTo('board')}
+      onpointerdown={(e) => {
+        focusTo('board')();
+        onRailPointerDown(e);
+      }}
+      onclick={onRailClick}
     >
       {#if boardMode === 'rail' && railCards.length}
         <!-- §4.4: in rail mode the waves flatten into the sorted list. -->
@@ -1012,10 +1041,13 @@
                 ctx={c.ctx}
                 failure={failureOf(c.worker.tab_id)}
                 focused={fit.shown.includes(c.worker.task_id) && focusedKey === c.worker.task_id}
-                onopen={() => openCard(c.worker.task_id, c.worker.tab_id)}
+                onopen={(e) => openCard(c.worker.task_id, c.worker.tab_id, e)}
               />
             </div>
           {/each}
+          {#if openCols.length < MAX_WORKER_COLUMNS}
+            <p class="rail-hint">Shift-click a card to open another worker beside this one.</p>
+          {/if}
         </div>
       {:else if columns.length}
         <div class="waves" bind:this={wavesEl}>
@@ -1042,7 +1074,7 @@
                     ctx={c.ctx}
                     failure={failureOf(c.worker.tab_id)}
                     focused={fit.shown.includes(c.worker.task_id) && focusedKey === c.worker.task_id}
-                    onopen={() => openCard(c.worker.task_id, c.worker.tab_id)}
+                    onopen={(e) => openCard(c.worker.task_id, c.worker.tab_id, e)}
                   />
                 </div>
               {/each}
@@ -1236,6 +1268,7 @@
   .board:focus { outline: none; }
   .board.focused { box-shadow: inset 0 2px 0 var(--accent); }
   .rail-list { flex: 1; display: flex; flex-direction: column; gap: 6px; padding: 10px; min-width: 0; }
+  .rail-hint { margin: auto 0 0; padding: 10px 2px 0; font-size: 11px; line-height: 1.4; color: var(--fg-dim); overflow-wrap: anywhere; }
   /* Strings run under the cards (they're opaque), so one that skips a wave passes behind it. The
      Weave's vocabulary (docs/loom.md): moving dots = the upstream is active, a slow amber dash
      running backwards = this card waits on it, faint dots = a dependency that is neither. */

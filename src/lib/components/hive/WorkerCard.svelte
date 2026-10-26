@@ -36,7 +36,8 @@
     hiveId?: string;
     /** Its last turn failed, not on a usage limit (the board's `turn_failures`). */
     failure?: HiveTurnFailure | null;
-    onopen: () => void;
+    /** Its click: the event says whether Shift was held (open beside, §4.1). */
+    onopen: (e: MouseEvent) => void;
   }
   let { card, state, note, runtime, age, activity, diff, model, ctx, compact = false, focused = false, hiveId = '', failure = null, onopen }: Props = $props();
 
