@@ -250,6 +250,7 @@ fn block(profile: &str, head: &str) -> Vec<String> {
 fn assert_sandboxed(rig: &Rig, job: &Job, want_argv: &dyn Fn(&[u16]) -> Vec<String>) -> Option<String> {
     let res = queue::prepare_in(&rig.data, job, &rig.paths, &rig.bin, &[]);
     crate::stack::ports::release(&job.id);
+    super::registry_proxy::close(&job.id);
     if !cfg!(target_os = "macos") {
         let e = res.err().expect("no sandbox, no job");
         assert!(e.contains("only on macOS"), "{e}");
@@ -314,9 +315,16 @@ fn assert_sandboxed(rig: &Rig, job: &Job, want_argv: &dyn Fn(&[u16]) -> Vec<Stri
     assert_eq!(got_deny, want_deny, "the worker's deny list, whole: {profile}");
     assert!(lists.deny.iter().any(|d| d.path == rig.paths.runs()), "the runs folder (its marks and profiles) is denied");
     assert!(profile.contains("(deny network*)\n") && profile.contains("(deny file-ioctl (ioctl-command TIOCSTI))"), "{profile}");
+    // An install's one way out: maiTerm's registry proxy, named in its line.
+    let proxy: Option<u16> = w.iter().find_map(|x| x.strip_prefix("HTTPS_PROXY=")).and_then(|u| u.rsplit(':').next()?.parse().ok());
+    assert_eq!(proxy.is_some(), job.registries, "the proxy for an install, and only for one: {}", p.line);
     for l in profile.lines().filter(|l| l.contains("network-") && l.starts_with("(allow")) {
         let port: u16 = l.split("localhost:").nth(1).and_then(|r| r.split('"').next()).and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("{l}"));
-        assert!(p.ports.contains(&port), "only the job's own ports: {l}");
+        let reaches_proxy = Some(port) == proxy && l.starts_with("(allow network-outbound");
+        assert!(p.ports.contains(&port) || reaches_proxy, "only the job's own ports and an install's proxy: {l}");
+    }
+    if let Some(port) = proxy {
+        assert!(profile.contains(&format!("(allow network-outbound (remote ip \"localhost:{port}\"))")), "{profile}");
     }
     Some(profile)
 }
@@ -432,6 +440,21 @@ async fn spike_15_every_path() {
         assert!(!profile.contains("com.aiterm.dev\""), "never dev's own folders: {profile}");
         assert_eq!(profile.matches("network-bind").count(), 2, "its vite and MCP ports: {profile}");
     }
+    // A package install the human's lockfile names (first real use): queued for the worker
+    // although the human queued none, run in its profile with its manager's caches and the
+    // registry proxy, and refused in its own shell, which can't install.
+    assert!(run_job("pnpm install").unwrap_err().contains("isn't a queued command"), "no lockfile, no install");
+    fs::write(rig.base.join("web/pnpm-lock.yaml"), "").unwrap();
+    let job = run_job("pnpm install --frozen-lockfile").unwrap();
+    assert!(job.registries);
+    if let Some(profile) = assert_sandboxed(&rig, &job, &words_of("pnpm install --frozen-lockfile")) {
+        assert!(profile.contains("deps-cache"), "its own cache folder: {profile}");
+        assert!(!profile.contains("/Library/pnpm") && !profile.contains("/Library/Caches/pnpm"), "never the human's pnpm caches: {profile}");
+        assert!(!profile.contains("network-bind"), "{profile}");
+    }
+    assert!(run::queued_prefixes(&rig.hive).contains(&vec!["pnpm".to_string(), "install".to_string()]), "the worker's shell sends it to hiveRun");
+    assert!(!run_job("cargo test -p core").unwrap().registries, "a test run reaches no registry");
+    fs::remove_file(rig.base.join("web/pnpm-lock.yaml")).unwrap();
 
     // ── A worker's service verbs: through the real routing into the queue ──
     let verb = |tool: &'static str, args: Value| {

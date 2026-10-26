@@ -2,12 +2,14 @@
 //! file (sandbox, memory folder, permission rules, command hooks), the `--mcp-config` file, and
 //! the hook script those hooks run.
 //!
-//! The coordinator's settings are the set that passed spike 13 plus the two additions it named
-//! (maiTerm's MCP tools, each by name, and `git -C` rules), and the git option denies those
-//! rules turned out to need (`GIT_ESCAPE_DENIES`). Each layer covers another's gap: every path
-//! on the sandbox's `denyWrite` has an `Edit(//…)` deny rule and the reverse, since the Write
-//! tool ignores the sandbox and an Edit deny alone let `python3 -c open(…)` through (spikes 10,
-//! 14). Edit rules are the ones Claude matches for the Write tool too (`FILE_RULE_TOOL`).
+//! A worker's settings hold it in its sandbox. Each layer covers another's gap: every path on
+//! the sandbox's `denyWrite` has an `Edit(//…)` deny rule and the reverse, since the Write tool
+//! ignores the sandbox and an Edit deny alone let `python3 -c open(…)` through (spikes 10, 14).
+//! Edit rules are the ones Claude matches for the Write tool too (`FILE_RULE_TOOL`).
+//!
+//! The coordinator is a normal agent tab by the human's decision (2026-10-26, first real use):
+//! no sandbox, no allow list, no permission mode of its own. Its settings keep only what makes
+//! it a Hive agent: the memory folder, maiTerm's command hooks and the push denies.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,8 +50,10 @@ pub const OBSERVED_EVENTS: &[&str] = &[
     "StopFailure",
 ];
 
-/// The tools the fail-closed gate sees (§6.8). Monitor joins once its sandboxing is proven.
+/// The tools a worker's fail-closed gate sees (§6.8). Monitor joins once its sandboxing is proven.
 pub const GATE_MATCHER: &str = "Bash|PowerShell|Write|Edit";
+/// The coordinator's: its shell only, where the gate refuses a push and nothing else (§7.3).
+pub const COORDINATOR_GATE_MATCHER: &str = "Bash|PowerShell";
 /// Under Claude's hook timeout, which the script's own curl deadline (8 s) stays under.
 const GATE_TIMEOUT_SECS: u64 = 10;
 const OBSERVE_TIMEOUT_SECS: u64 = 5;
@@ -66,9 +70,10 @@ const PUSH_DENIES: &[&str] = &[
     "Bash(gh pr merge*)",
 ];
 
-/// The `*` in `git -C * diff` spans any global option, so a config value that runs a command
-/// rode a review rule: `git -C <copy> -c core.fsmonitor=<cmd> diff` ran `<cmd>` (the 3e review).
-/// The gate refuses these too (`gate::check_git`); these hold them with the gate answering allow.
+/// A worker's: the `*` in `git -C * diff` spans any global option, so a config value that runs a
+/// command rode a review rule: `git -C <copy> -c core.fsmonitor=<cmd> diff` ran `<cmd>` (the 3e
+/// review). The gate refuses these too (`gate::check_git`); these hold them with the gate
+/// answering allow.
 const GIT_ESCAPE_DENIES: &[&str] = &[
     "Bash(git -c *)",
     "Bash(git * -c *)",
@@ -85,10 +90,9 @@ const GIT_ESCAPE_DENIES: &[&str] = &[
     "Bash(git * grep *--op*)",
 ];
 
-/// The maiTerm tools the coordinator is allowed, by name (§7.1: hive, gallery, task, notes). Never
-/// the server wildcard: MCP calls are made by Claude's own process, outside the sandbox, and
-/// `createService` + `startService` alone would type any command into an unsandboxed shell.
-/// The hive and gallery tools arrive in later steps; until then these rules match nothing.
+/// The maiTerm tools a coordinator's work rests on (§7.1: hive, gallery, task, notes), whose
+/// hive and gallery names are what only it holds (`coordinator_only_mcp_tools`). No longer an
+/// allow list: the coordinator has every tool a normal agent tab has (2026-10-26).
 pub const COORDINATOR_MCP_TOOLS: &[&str] = &[
     "initSession",
     "listTasks",
@@ -125,9 +129,8 @@ pub const COORDINATOR_MCP_TOOLS: &[&str] = &[
     "galleryDeliver",
 ];
 
-/// Denied as well, a backstop to dontAsk's "not listed is denied": the tools that act outside
-/// the sandbox (run a command, write a file, drive a browser or another tab, reach out of the
-/// machine) or change maiTerm itself.
+/// Denied to every worker: the tools that act outside the sandbox (run a command, write a file,
+/// drive a browser or another tab, reach out of the machine) or change maiTerm itself.
 pub const ESCAPE_MCP_TOOLS: &[&str] = &[
     "createService",
     "updateService",
@@ -203,11 +206,10 @@ pub fn overlord_mcp_tools() -> impl Iterator<Item = &'static str> {
     crate::claude_code::server::OVERLORD_CALLER_TOOLS.iter().copied().filter(|t| !COORDINATOR_MCP_TOOLS.contains(t))
 }
 
-/// The coordinator's denies: `ESCAPE_MCP_TOOLS` and the Overlord's tools, once each.
+/// The coordinator's denies: the Overlord's tools, which Rust refuses it too. Everything else a
+/// normal agent tab holds is its own (2026-10-26).
 pub fn coordinator_denied_mcp_tools() -> Vec<&'static str> {
-    let mut out: Vec<&'static str> = ESCAPE_MCP_TOOLS.to_vec();
-    out.extend(overlord_mcp_tools().filter(|t| !ESCAPE_MCP_TOOLS.contains(t)));
-    out
+    overlord_mcp_tools().collect()
 }
 
 /// The package registries a worker's sandbox reaches (§14.16), beside the Hive's generator hosts
@@ -261,25 +263,20 @@ pub fn abs_rule(tool: &str, p: &Path, dir: bool) -> String {
     format!("{tool}(//{body}{})", if dir { "/**" } else { "" })
 }
 
-/// The coordinator's `denyWrite` (§7.1, §6.7): the repos and its read copies, every local-path
-/// remote (§7.3), the hook script's folder, the gallery, the Hive's Rust-owned folders, and its
-/// home's project settings, which would otherwise load unseen and outside the sandbox on its
-/// next launch.
-pub fn deny_write_paths(hive: &Hive, paths: &HivePaths, bin_dir: &Path) -> Vec<DenyPath> {
+/// What the coordinator's Edit deny rules hold (§7.1): maiTerm's own records of the Hive (its
+/// land log, receipts, precedents, gallery and hook script), every local-path remote (no agent
+/// pushes, §7.3), and its home's project settings. Speed bumps, not walls: it runs unsandboxed,
+/// so its shell can write anywhere its human can. The human's repos and its read copies are its
+/// to edit, as any agent tab's.
+pub fn coordinator_deny_paths(hive: &Hive, paths: &HivePaths, bin_dir: &Path) -> Vec<DenyPath> {
     let mut out: Vec<DenyPath> = Vec::new();
     let mut add = |path: PathBuf, dir: bool| {
         if !out.iter().any(|d| d.path == path) {
             out.push(DenyPath { path, dir });
         }
     };
-    for f in &hive.folders {
-        add(PathBuf::from(&f.path), true);
-        if f.is_git() {
-            add(paths.coordinator_worktree(&f.name), true);
-        }
-        for r in &f.local_remotes {
-            add(PathBuf::from(r), true);
-        }
+    for r in hive.folders.iter().flat_map(|f| &f.local_remotes) {
+        add(PathBuf::from(r), true);
     }
     add(bin_dir.to_path_buf(), true);
     add(paths.gallery(), true);
@@ -294,8 +291,9 @@ pub fn deny_write_paths(hive: &Hive, paths: &HivePaths, bin_dir: &Path) -> Vec<D
     out
 }
 
-/// The hooks block: every entry `type:"command"`, the gate with `onFailure:"block"` (§6.8).
-pub fn hive_hooks(script: &Path, known_newer: &[&str]) -> Value {
+/// The hooks block: every entry `type:"command"`, the gate with `onFailure:"block"` on the tools
+/// `gate_matcher` names (§6.8).
+pub fn hive_hooks(script: &Path, known_newer: &[&str], gate_matcher: &str) -> Value {
     let script = sh_quote(&script.to_string_lossy());
     let mut hooks = serde_json::Map::new();
     for event in OBSERVED_EVENTS {
@@ -309,7 +307,7 @@ pub fn hive_hooks(script: &Path, known_newer: &[&str]) -> Value {
         let entries = if *event == "PreToolUse" {
             json!([
                 {
-                    "matcher": GATE_MATCHER,
+                    "matcher": gate_matcher,
                     "hooks": [{ "type": "command", "command": format!("{script} gate"), "timeout": GATE_TIMEOUT_SECS, "onFailure": "block" }]
                 },
                 observe
@@ -322,58 +320,28 @@ pub fn hive_hooks(script: &Path, known_newer: &[&str]) -> Value {
     Value::Object(hooks)
 }
 
-/// The coordinator's `--settings` file. A worker's is `worker_settings_json`, which needs its
-/// `worker.json` and what surrounds it.
+/// The coordinator's `--settings` file (§7.1): a normal agent tab's. No sandbox, no allow list and
+/// no permission mode: they come from the human's own settings, which its launch loads like any
+/// tab's, so it reaches what they reach (a linked browser, its own MCP servers) and its
+/// permission prompts are the human's. The Hive's part: the memory folder, the command hooks
+/// (the gate on its shell refusing a push), the push denies, the Overlord's tools, and Edit
+/// denies on maiTerm's own records. A worker's is `worker_settings_json`.
 pub fn hive_settings_json(hive: &Hive, record: &LaunchRecord, paths: &HivePaths, hooks: &HookEnv) -> Result<Value, String> {
     if record.role != ROLE_COORDINATOR {
         return Err(format!("No coordinator settings for a Hive \"{}\"", record.role));
     }
-    let home = paths.coordinator_home();
-    let deny = deny_write_paths(hive, paths, &hooks.bin_dir);
     let mcp = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
-
-    // Plain `git diff` from home would find only a repo the agent wrote, whose config runs a
-    // command; Claude allows its read-only git verbs with no rule at all (the 3e probe), so it's
-    // the gate that refuses git outside the read copies, not the absence of these.
-    let mut allow: Vec<String> = ["Bash(git diff *)", "Bash(git log *)", "Bash(git show *)"].map(String::from).to_vec();
-    // Its cwd is home, not a repo, so a review names the copy (§7.1). A trailing ` *` is optional
-    // only in a pattern with no other wildcard: `git -C * diff *` refused a bare
-    // `git -C <copy> diff` (the 3e probe), so each verb also gets its bare form.
-    for verb in ["diff", "log", "show"] {
-        allow.push(format!("Bash(git -C * {verb})"));
-        allow.push(format!("Bash(git -C * {verb} *)"));
-    }
-    allow.push(abs_rule(FILE_RULE_TOOL, &home, true));
-    // dontAsk denies every tool not listed, maiTerm's own included.
-    allow.extend(COORDINATOR_MCP_TOOLS.iter().map(|t| format!("mcp__{mcp}__{t}")));
-
-    let mut deny_rules: Vec<String> = vec!["WebFetch".into(), "WebSearch".into()];
-    deny_rules.extend(PUSH_DENIES.iter().chain(GIT_ESCAPE_DENIES).map(|s| s.to_string()));
+    let mut deny_rules: Vec<String> = PUSH_DENIES.iter().map(|s| s.to_string()).collect();
     deny_rules.extend(coordinator_denied_mcp_tools().iter().map(|t| format!("mcp__{mcp}__{t}")));
-    for d in &deny {
+    for d in coordinator_deny_paths(hive, paths, &hooks.bin_dir) {
         deny_rules.push(abs_rule(FILE_RULE_TOOL, &d.path, d.dir));
     }
-
-    let path_str = |p: &Path| p.to_string_lossy().to_string();
     Ok(json!({
-        "sandbox": {
-            "enabled": true,
-            "failIfUnavailable": true,
-            "allowUnsandboxedCommands": false,
-            // Default true, which ran any sandboxed Bash regardless of the allow rules (spike 13).
-            "autoAllowBashIfSandboxed": false,
-            "filesystem": {
-                "allowWrite": [path_str(&home)],
-                "denyWrite": deny.iter().map(|d| path_str(&d.path)).collect::<Vec<_>>(),
-            },
-            // It reaches generators and maiTerm only as MCP servers, made by Claude's own process.
-            "network": { "allowedDomains": [], "strictAllowlist": true },
-        },
         // Absolute, the only kind Claude honours; re-passed on every launch or the first
         // compaction moves memory to the human's per-repo folder (§9, spike 1).
-        "autoMemoryDirectory": path_str(&paths.memory()),
-        "permissions": { "allow": allow, "deny": deny_rules },
-        "hooks": hive_hooks(&hooks.script, &hooks.known_newer),
+        "autoMemoryDirectory": paths.memory().to_string_lossy(),
+        "permissions": { "deny": deny_rules },
+        "hooks": hive_hooks(&hooks.script, &hooks.known_newer, COORDINATOR_GATE_MATCHER),
     }))
 }
 
@@ -547,6 +515,12 @@ pub fn worker_deny_write_paths(hive: &Hive, w: &WorkerRecord, paths: &HivePaths,
         add(wt.join(".git"), false);
         add(wt.join(".claude"), true);
         add(wt.join(".mcp.json"), false);
+        // An editor's config at the top runs tasks when the folder opens. Claude's sandbox denies
+        // these under its cwd itself (2.1.310); named here so a secondary worktree and a job's
+        // profile, which has no such rule, deny them too, and only at the top: an install job
+        // writes the `.vscode` folders packages ship inside `node_modules`.
+        add(wt.join(".vscode"), true);
+        add(wt.join(".idea"), true);
     }
     // A scratch-only worker's cwd: a repo made here would be the one Claude's own git reads.
     let scratch = paths.worker_scratch(&w.slug);
@@ -714,7 +688,7 @@ pub fn worker_settings_json(hive: &Hive, record: &LaunchRecord, w: &WorkerRecord
         "disableAllHooks": false,
         "autoMemoryDirectory": path_str(&paths.memory()),
         "permissions": { "allow": allow, "deny": deny_rules },
-        "hooks": hive_hooks(&hooks.script, &hooks.known_newer),
+        "hooks": hive_hooks(&hooks.script, &hooks.known_newer, GATE_MATCHER),
     }))
 }
 
@@ -739,9 +713,11 @@ pub fn worker_domains(hive: &Hive, remote_hosts: &[String], generates: bool) -> 
     out
 }
 
-/// The `--mcp-config` file: maiTerm's server only, under `--strict-mcp-config`. Nothing baked:
-/// the port, token and tab expand from the tab's environment in the url and headers (the
-/// expansion table in claude_code/CLAUDE.md), and a sandboxed Claude reached it this way.
+/// The `--mcp-config` file: maiTerm's server only, under a worker's `--strict-mcp-config`.
+/// Nothing baked: the port, token and tab expand from the tab's environment in the url and
+/// headers (the expansion table in claude_code/CLAUDE.md), and a sandboxed Claude reached it
+/// this way. A coordinator gets it only when its account's `.claude.json` has no maiTerm entry
+/// (`has_maiterm_server`).
 pub fn hive_mcp_config() -> Value {
     let key = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
     json!({
@@ -756,6 +732,15 @@ pub fn hive_mcp_config() -> Value {
             }
         }
     })
+}
+
+/// Whether the account's `.claude.json` serves this build's maiTerm server, as it does for every
+/// tab while the Claude Code integration is on (`lockfile.rs`). The coordinator then reads it from
+/// there like any tab, with the human's own servers; passing ours too would name one server
+/// twice.
+pub fn has_maiterm_server(claude_json: Option<&Value>) -> bool {
+    let key = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
+    claude_json.and_then(|c| c.get("mcpServers")).and_then(|s| s.get(key)).is_some_and(|e| e.get("url").and_then(Value::as_str).is_some())
 }
 
 /// A worker's `--mcp-config` (plan D1, §6.8 "only the servers it needs"): maiTerm's server, and
@@ -828,128 +813,110 @@ mod tests {
 
     #[test]
     fn every_hook_is_a_command_and_the_gate_blocks_on_failure() {
-        let s = settings();
-        let hooks = s["hooks"].as_object().unwrap();
-        for event in OBSERVED_EVENTS {
-            assert!(hooks.contains_key(*event), "{event}");
-        }
-        for (event, entries) in hooks {
-            for e in entries.as_array().unwrap() {
-                for h in e["hooks"].as_array().unwrap() {
-                    assert_eq!(h["type"], "command", "{event}");
-                    assert!(h["command"].as_str().unwrap().starts_with("'/Users/x/Library/Application Support/"), "quoted script path");
+        let (worker, _) = worker_settings();
+        for (role, s, matcher) in [("coordinator", settings(), COORDINATOR_GATE_MATCHER), ("worker", worker, GATE_MATCHER)] {
+            let hooks = s["hooks"].as_object().unwrap();
+            for event in OBSERVED_EVENTS {
+                assert!(hooks.contains_key(*event), "{role}: {event}");
+            }
+            for (event, entries) in hooks {
+                for e in entries.as_array().unwrap() {
+                    for h in e["hooks"].as_array().unwrap() {
+                        assert_eq!(h["type"], "command", "{role}: {event}");
+                        assert!(h["command"].as_str().unwrap().starts_with("'/Users/x/Library/Application Support/"), "quoted script path");
+                    }
                 }
             }
+            let pre = hooks["PreToolUse"].as_array().unwrap();
+            let gate = pre.iter().find(|e| e["matcher"] == matcher).unwrap_or_else(|| panic!("{role}: a gate entry"));
+            assert_eq!(gate["hooks"][0]["onFailure"], "block");
+            assert!(gate["hooks"][0]["command"].as_str().unwrap().ends_with(" gate"));
+            assert!(gate["hooks"][0]["timeout"].as_u64().unwrap() <= 10);
+            // The observing copy never blocks: only the gate may.
+            let blocking = hooks.values().flat_map(|v| v.as_array().unwrap()).filter(|e| e["hooks"][0].get("onFailure").is_some()).count();
+            assert_eq!(blocking, 1, "{role}");
         }
-        let pre = hooks["PreToolUse"].as_array().unwrap();
-        let gate = pre.iter().find(|e| e["matcher"] == GATE_MATCHER).expect("a gate entry");
-        assert_eq!(gate["hooks"][0]["onFailure"], "block");
-        assert!(gate["hooks"][0]["command"].as_str().unwrap().ends_with(" gate"));
-        assert!(gate["hooks"][0]["timeout"].as_u64().unwrap() <= 10);
-        // The observing copy never blocks: only the gate may.
-        let blocking = hooks.values().flat_map(|v| v.as_array().unwrap()).filter(|e| e["hooks"][0].get("onFailure").is_some()).count();
-        assert_eq!(blocking, 1);
+        assert!(!COORDINATOR_GATE_MATCHER.contains("Write") && !COORDINATOR_GATE_MATCHER.contains("Edit"), "the coordinator writes where its human's settings let it");
     }
 
     #[test]
     fn newer_events_go_in_only_when_every_claude_knows_them() {
-        let h = hive_hooks(Path::new("/s"), &["PreModelSwitch"]);
+        let h = hive_hooks(Path::new("/s"), &["PreModelSwitch"], GATE_MATCHER);
         assert!(h.get("PreModelSwitch").is_some());
         assert!(h.get("StopFailure").is_none());
         assert!(h.get("Stop").is_some());
-        assert!(hive_hooks(Path::new("/s"), &[]).get("PreModelSwitch").is_none());
+        assert!(hive_hooks(Path::new("/s"), &[], GATE_MATCHER).get("PreModelSwitch").is_none());
     }
 
-    // The sample paths are POSIX, and absolute only there; Claude has no sandbox on Windows.
-    #[cfg(unix)]
+    /// The human's decision (2026-10-26): the coordinator is a normal agent tab. Nothing in its
+    /// settings sandboxes it, lists what it may do or sets a permission mode, so the human's own
+    /// settings decide, as for any tab.
     #[test]
-    fn the_sandbox_holds_the_three_settings_spike_13_named() {
+    fn the_coordinator_runs_like_a_normal_agent_tab() {
         let s = settings();
-        let sb = &s["sandbox"];
-        assert_eq!(sb["enabled"], true);
-        assert_eq!(sb["failIfUnavailable"], true);
-        assert_eq!(sb["allowUnsandboxedCommands"], false);
-        assert_eq!(sb["autoAllowBashIfSandboxed"], false);
-        assert_eq!(sb["network"]["strictAllowlist"], true);
-        assert_eq!(sb["network"]["allowedDomains"], json!([]));
-        let p = crate::hive::launch::tests::sample_paths();
-        assert_eq!(strings(&sb["filesystem"]["allowWrite"]), vec![p.coordinator_home().to_string_lossy().to_string()]);
-        let mem = s["autoMemoryDirectory"].as_str().unwrap();
-        assert!(Path::new(mem).is_absolute() && mem.ends_with("/memory"), "{mem}");
-    }
-
-    #[test]
-    fn permissions_are_the_whole_list_and_use_forms_claude_matches() {
-        let s = settings();
-        let allow = strings(&s["permissions"]["allow"]);
-        let deny = strings(&s["permissions"]["deny"]);
-        for r in ["Bash(git diff *)", "Bash(git -C * show *)", "Bash(git -C * diff)", "Bash(git -C * log)", "WebFetch", "WebSearch", "Bash(git * push*)", "Bash(git remote*)", "Bash(gh pr merge*)"] {
-            assert!(allow.contains(&r.to_string()) || deny.contains(&r.to_string()), "{r}");
+        for key in ["sandbox", "disableAllHooks"] {
+            assert!(s.get(key).is_none(), "{key}");
         }
-        assert!(deny.contains(&"WebFetch".to_string()) && !allow.contains(&"WebFetch".to_string()));
-        // A review rule's `*` spans `-c core.fsmonitor=<cmd>`; the denies take it back.
-        for r in ["Bash(git * -c *)", "Bash(git -c *)", "Bash(git *--config-env*)", "Bash(git *--ext-diff*)", "Bash(git *--no-index*)", "Bash(git *--output*)"] {
+        assert!(s["permissions"].get("allow").is_none(), "no allow list: its human's settings decide");
+        assert!(s["permissions"].get("defaultMode").is_none());
+        assert_eq!(s["autoMemoryDirectory"].as_str(), Some(&*crate::hive::launch::tests::sample_paths().memory().to_string_lossy()));
+        let deny = strings(&s["permissions"]["deny"]);
+        let mcp = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
+        for t in ["browserClick", "browserNavigate", "createService", "startService", "createFollowUp", "WebFetch"] {
+            assert!(!deny.iter().any(|r| r == t || *r == format!("mcp__{mcp}__{t}")), "{t} is a normal tab's");
+        }
+        for r in ["WebFetch", "WebSearch", "Bash(git -c *)", "Bash(git * -c *)"] {
+            assert!(!deny.contains(&r.to_string()), "{r}");
+        }
+    }
+
+    #[test]
+    fn the_coordinator_keeps_the_push_denies_and_the_overlord_s_tools_out() {
+        let s = settings();
+        let deny = strings(&s["permissions"]["deny"]);
+        for r in PUSH_DENIES {
             assert!(deny.contains(&r.to_string()), "{r}");
         }
         let mcp = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
-        assert!(allow.contains(&format!("mcp__{mcp}__listTasks")));
-        // Named tools only: a server wildcard hands it createService + startService, a command
-        // typed into an unsandboxed shell.
-        for r in allow.iter().filter(|r| r.starts_with("mcp__")) {
-            assert!(!r.contains('*'), "a wildcard MCP allow: {r}");
-        }
-        for t in ESCAPE_MCP_TOOLS {
-            let rule = format!("mcp__{mcp}__{t}");
-            assert!(deny.contains(&rule) && !allow.contains(&rule), "{rule}");
-        }
-        assert!(!COORDINATOR_MCP_TOOLS.iter().any(|t| ESCAPE_MCP_TOOLS.contains(t)));
-        // The Overlord's tools are denied it too, as Rust refuses them to any Hive role.
+        // Rust refuses them to any Hive role (`refuse_agent_tool`): a Hive agent is never the Overlord.
         for t in crate::claude_code::server::OVERLORD_CALLER_TOOLS {
-            let rule = format!("mcp__{mcp}__{t}");
-            assert!(deny.contains(&rule) && !allow.contains(&rule), "{rule}");
+            assert!(deny.contains(&format!("mcp__{mcp}__{t}")), "{t}");
         }
         let mcp_denies: Vec<&String> = deny.iter().filter(|r| r.starts_with("mcp__")).collect();
         let mut unique = mcp_denies.clone();
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), mcp_denies.len(), "each tool denied once");
-        for r in deny.iter().chain(&allow) {
+        for r in &deny {
             let inner = r.split_once('(').map(|(_, i)| i.trim_end_matches(')')).unwrap_or("");
             assert!(!inner.trim_end_matches(":*").contains(":*"), "a mid-pattern :* matches nothing: {r}");
             assert!(!inner.ends_with(":*"), "the colon form missed real pushes: {r}");
-            if r.starts_with("Write(") || r.starts_with("Edit(") {
+            if r.starts_with("Edit(") {
                 assert!(inner.starts_with("//"), "absolute paths need the // form: {r}");
             }
+            assert!(!r.starts_with("Write("), "Claude never matches a Write(path) rule: {r}");
         }
     }
 
+    /// Its Edit denies hold maiTerm's own records and every local remote, never the human's repos
+    /// or its read copies, which are its to edit as any agent tab's.
     #[test]
-    fn deny_write_and_the_write_edit_deny_rules_mirror_each_other() {
+    fn the_coordinator_s_edit_denies_hold_maiterm_s_records_not_the_repos() {
         let s = settings();
-        let deny_write = strings(&s["sandbox"]["filesystem"]["denyWrite"]);
         let deny = strings(&s["permissions"]["deny"]);
         let (h, p) = (crate::hive::launch::tests::sample_hive(), crate::hive::launch::tests::sample_paths());
-        let listed = deny_write_paths(&h, &p, &env().bin_dir);
-        assert_eq!(listed.len(), deny_write.len());
+        let listed = coordinator_deny_paths(&h, &p, &env().bin_dir);
         for d in &listed {
-            assert!(deny_write.contains(&d.path.to_string_lossy().to_string()));
             assert!(deny.contains(&abs_rule("Edit", &d.path, d.dir)), "Edit rule for {}", d.path.display());
         }
-        // No `Write(path)` rule: Claude never matches one, and 2.1.310 warns about each at launch.
-        let all = strings(&s["permissions"]["allow"]).into_iter().chain(deny.iter().cloned()).collect::<Vec<_>>();
-        assert!(!all.iter().any(|r| r.starts_with("Write(")), "{all:?}");
-        // The reverse: every Edit deny rule names a denyWrite path.
-        for r in deny.iter().filter(|r| r.starts_with("Edit(")) {
-            let inner = r.split_once("(/").unwrap().1.trim_end_matches(')').trim_end_matches("/**");
-            assert!(deny_write.iter().any(|d| d == inner), "{r} has no denyWrite twin");
+        assert_eq!(deny.iter().filter(|r| r.starts_with("Edit(")).count(), listed.len());
+        let named: Vec<PathBuf> = listed.iter().map(|d| d.path.clone()).collect();
+        for must in [PathBuf::from("/srv/web.git"), p.gallery(), env().bin_dir, p.tasks(), p.logs(), p.runs(), p.coordinator_home().join(".claude"), p.precedents(), p.global_precedents()] {
+            assert!(named.contains(&must), "{}", must.display());
         }
-        for must in ["/r/web", "/r/brand assets", "/srv/web.git"] {
-            assert!(deny_write.contains(&must.to_string()), "{must}");
+        for free in [PathBuf::from("/r/web"), PathBuf::from("/r/brand assets"), p.coordinator_worktree("web"), p.coordinator_home(), p.memory()] {
+            assert!(!named.iter().any(|n| free.starts_with(n)), "{} is the coordinator's to edit", free.display());
         }
-        for must in [p.coordinator_worktree("web"), p.gallery(), env().bin_dir, p.coordinator_home().join(".claude"), p.precedents(), p.global_precedents()] {
-            assert!(deny_write.contains(&must.to_string_lossy().to_string()), "{}", must.display());
-        }
-        assert!(!deny_write.iter().any(|d| *d == p.coordinator_home().to_string_lossy()), "home stays writable");
     }
 
     #[test]
@@ -1246,7 +1213,7 @@ mod tests {
             assert!(deny.contains(&must.to_string()), "{must} in denyWrite");
         }
         let wt = p.worker_worktree("auth", "web");
-        for must in [wt.join(".git"), wt.join(".claude"), wt.join(".mcp.json"), p.worker_scratch("auth").join(".claude"), p.worker_scratch("auth").join(".git")] {
+        for must in [wt.join(".git"), wt.join(".claude"), wt.join(".mcp.json"), wt.join(".vscode"), wt.join(".idea"), p.worker_worktree("auth", "api").join(".vscode"), p.worker_scratch("auth").join(".claude"), p.worker_scratch("auth").join(".git")] {
             assert!(deny.contains(&sp(must.clone())), "{}", must.display());
         }
         for must in [p.coordinator_worktree("web").parent().unwrap().to_path_buf(), p.worktrees().join("billing"), p.gallery(), p.tasks(), p.logs(), p.precedents(), p.global_precedents(), env().bin_dir] {
@@ -1418,6 +1385,24 @@ mod tests {
         assert!(deny.contains(&sp(&p.runs())), "a job's profile and pass mark are out of the worker's reach");
         assert!(strings(&s["permissions"]["deny"]).contains(&abs_rule("Edit", &p.runs(), true)));
         assert_eq!(lists.own[0], p.worker_scratch("auth"));
+    }
+
+    /// The first real use: Claude's sandbox refuses every `**/.vscode/**` under a worker's cwd, so
+    /// `pnpm install` failed on the folders packages ship. A job's profile is drawn from these
+    /// lists (§6.8), which name agent and editor config at a worktree's top only.
+    #[test]
+    fn the_job_lists_let_an_install_write_node_modules_config_but_not_the_worktree_s() {
+        let (h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        let lists = worker_write_lists(&h, &w, &p, &worker_ctx(), &env().bin_dir).unwrap();
+        let writes = |f: &Path| lists.allow.iter().any(|a| f.starts_with(a)) && !lists.deny.iter().any(|d| if d.dir { f.starts_with(&d.path) } else { f == d.path });
+        for wt in [p.worker_worktree("auth", "web"), p.worker_worktree("auth", "api")] {
+            for ok in ["node_modules/x/.vscode/settings.json", "node_modules/.pnpm/y@1/node_modules/y/.idea/z.xml", "node_modules/x/.claude/f", "packages/a/node_modules/b/.vscode/f", "src/main.ts"] {
+                assert!(writes(&wt.join(ok)), "{}", wt.join(ok).display());
+            }
+            for refused in [".vscode/tasks.json", ".idea/workspace.xml", ".claude/settings.json", ".mcp.json", ".git"] {
+                assert!(!writes(&wt.join(refused)), "{}", wt.join(refused).display());
+            }
+        }
     }
 
     #[test]
@@ -1619,7 +1604,7 @@ mod tests {
         assert!(denied.contains(&"crates.io".to_string()) && denied.contains(&"gist.github.com".to_string()), "{denied:?}");
 
         let coord = hive_settings_json(&h, &coordinator_record(&h, &p), &p, &env()).unwrap();
-        assert_eq!(coord["sandbox"]["network"]["allowedDomains"], json!([]), "the coordinator reaches generators only as MCP servers");
+        assert!(coord.get("sandbox").is_none(), "the coordinator's network is its human's settings'");
     }
 
     /// A code worker and a reviewer (even of a media role) reach the package registries only: the

@@ -30,6 +30,9 @@ pub struct FolderInfo {
     /// false, never a refusal: trusting a repo is the human's act (§6.6).
     pub trusted: bool,
     pub local_remotes: Vec<String>,
+    /// The install its lockfiles name (`deps::setup_for`), which the sheet offers as its setup:
+    /// a fresh worktree has no dependencies, and a worker can't install them in its own shell.
+    pub setup: Option<String>,
 }
 
 /// `claude_json` is the roots the Hive's agents will launch under (the active account's, or
@@ -49,6 +52,7 @@ pub fn detect_folder(path: &Path, claude_json: &[PathBuf]) -> FolderInfo {
         Some(top) => (KIND_PLAIN, None, Vec::new(), Some(top.to_string_lossy().to_string())),
         None => (KIND_PLAIN, None, Vec::new(), None),
     };
+    let setup = (kind == KIND_GIT).then(|| super::deps::setup_for(&real)).flatten();
     FolderInfo {
         path: real.to_string_lossy().to_string(),
         kind: kind.to_string(),
@@ -56,6 +60,7 @@ pub fn detect_folder(path: &Path, claude_json: &[PathBuf]) -> FolderInfo {
         base,
         trusted: super::trust::trusted_in_all(claude_json, &real),
         local_remotes,
+        setup,
     }
 }
 
@@ -515,11 +520,16 @@ mod tests {
         assert_eq!(info.base.as_deref(), Some("main"));
         assert_eq!(info.local_remotes, vec![crate::share::canon(&bare).to_string_lossy().to_string()], "network remotes aren't local; one path, once");
         assert!(!info.trusted, "no root asked: no evidence of trust");
+        assert_eq!(info.setup, None, "no lockfile, no setup");
+        fs::write(web.join("pnpm-lock.yaml"), "").unwrap();
+        assert_eq!(detect_folder(&web, &[]).setup.as_deref(), Some("pnpm install --frozen-lockfile"), "the sheet's setup, from the lockfile");
 
         let plain = base.join("plain");
         fs::create_dir_all(&plain).unwrap();
+        fs::write(plain.join("package-lock.json"), "").unwrap();
         let info = detect_folder(&plain, &[]);
         assert_eq!((info.kind.as_str(), info.base, info.local_remotes.len(), info.repo_top), (KIND_PLAIN, None, 0, None));
+        assert_eq!(info.setup, None, "a plain folder has no worktree to set up");
 
         // Inside a repo but below its top: plain, with the repo offered.
         let sub = web.join("packages/app");

@@ -62,6 +62,7 @@ pub mod create;
 pub mod decisions;
 pub mod delete;
 pub(crate) mod deliver;
+pub mod deps;
 pub mod diffstat;
 pub mod events;
 pub mod feed;
@@ -88,6 +89,7 @@ pub mod prompts;
 mod probe;
 pub mod queue;
 pub mod record;
+pub mod registry_proxy;
 pub(crate) mod report;
 pub mod retire;
 pub mod review;
@@ -354,6 +356,18 @@ pub fn refuse_share(ws: &Workspace) -> Result<(), String> {
 
 /// A live tab with a `hive_role`, wherever it is. Refusals ask this rather than
 /// `find_hive_tab`: a role without its Hive record is still nobody else's to drive.
+/// A copy of a Hive tab's event from a hook its launch doesn't own: the human's own settings,
+/// which the coordinator loads like any tab (§7.1, 2026-10-26), carry maiTerm's global hooks
+/// (http, and the SessionStart command hook). Its own command hook (`via=hive`) sends every
+/// event, so these are dropped rather than handled, primed or notified twice; the mod's copy is
+/// the mod dedup's. The tab is the copy's `tab_id`, else the one its session was registered to.
+pub fn duplicate_hook_copy(data: &AppData, via: Option<&str>, tab: Option<&str>, session_tab: Option<&str>) -> bool {
+    if matches!(via, Some("hive" | "mod")) {
+        return false;
+    }
+    tab.or(session_tab).is_some_and(|t| is_hive_role_tab(data, t))
+}
+
 pub fn is_hive_role_tab(data: &AppData, tab_id: &str) -> bool {
     data.windows
         .iter()

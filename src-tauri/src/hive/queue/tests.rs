@@ -829,3 +829,136 @@ fn a_suspended_hive_is_parked_again_after_a_restart() {
     release_worker(&awake.task_id, "test over");
     release_worker(&resumed.task_id, "test over");
 }
+
+/// The first real use: `pnpm install` failed in every worktree on the `.vscode` folders packages
+/// ship, which Claude's sandbox refuses under a worker's cwd. A job's profile, drawn from the same
+/// lists, lets an install write them inside `node_modules` and still refuses the worktree's own
+/// agent and editor config; and an install job reaches only maiTerm's registry proxy, which
+/// tunnels to a granted host alone. For real, under `sandbox-exec` (macOS only), over scratch
+/// folders and loopback.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_install_job_writes_node_modules_config_and_reaches_only_the_registry_proxy() {
+    use crate::hive::job_sandbox::{profile, profile_path, real_path, ProfileSpec, PROFILE_FILE};
+    use crate::hive::record::{Hive, HiveFolder, KIND_GIT};
+    use crate::hive::settings::{worker_write_lists, DenyPath, WorkerContext};
+    use crate::hive::worker::{WorkerFolder, WorkerRecord};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::process::Command;
+
+    let base = real_path(&std::env::temp_dir().join(format!("hive-install-job-{}", uuid::Uuid::new_v4())));
+    let repo = base.join("repo");
+    let paths = HivePaths::new(base.join("hive"));
+    let wt = paths.worker_worktree("auth", "app");
+    for d in [repo.join(".git/worktrees/app"), repo.join(".git/objects"), wt.clone(), paths.runs(), paths.worker_job_tmp("auth")] {
+        std::fs::create_dir_all(&d).unwrap();
+    }
+    let hive = Hive { id: "install".into(), slug: "install".into(), folders: vec![HiveFolder { name: "app".into(), path: repo.to_string_lossy().to_string(), kind: KIND_GIT.into(), primary: true, ..HiveFolder::default() }], ..Hive::default() };
+    let w = WorkerRecord {
+        task_id: "t-auth".into(),
+        slug: "auth".into(),
+        folders: vec![WorkerFolder {
+            name: "app".into(),
+            kind: KIND_GIT.into(),
+            worktree: Some(wt.to_string_lossy().to_string()),
+            branch: Some("hive/install--auth".into()),
+            common_dir: Some(repo.join(".git").to_string_lossy().to_string()),
+            admin_dir: Some(repo.join(".git/worktrees/app").to_string_lossy().to_string()),
+            ..WorkerFolder::default()
+        }],
+        ..WorkerRecord::default()
+    };
+    let lists = worker_write_lists(&hive, &w, &paths, &WorkerContext::default(), &base.join("bin")).unwrap();
+
+    // A registry stand-in on loopback, granted to this job through the proxy.
+    let registry = TcpListener::bind("127.0.0.1:0").unwrap();
+    let registry_port = registry.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for s in registry.incoming().flatten() {
+            let mut s = s;
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi");
+        }
+    });
+    let job = format!("j-install-{}", uuid::Uuid::new_v4().simple());
+    let (proxy_port, url) = crate::hive::registry_proxy::open_on(&job, vec!["127.0.0.1".into()], registry_port).unwrap();
+
+    let writable: Vec<PathBuf> = lists.allow.iter().cloned().chain([paths.worker_job_tmp("auth")]).collect();
+    let spec = ProfileSpec {
+        allow: writable.iter().map(|p| profile_path(p, &writable).unwrap()).collect(),
+        deny: lists.deny.iter().map(|d| DenyPath { path: profile_path(&d.path, &writable).unwrap(), dir: d.dir }).collect(),
+        own_ports: vec![],
+        reach_ports: vec![proxy_port],
+    };
+    let profile_file = paths.run(&job).join(PROFILE_FILE);
+    std::fs::create_dir_all(profile_file.parent().unwrap()).unwrap();
+    std::fs::write(&profile_file, profile(&spec).unwrap()).unwrap();
+    let sandboxed = |script: &str| -> (bool, String) {
+        let out = Command::new("/usr/bin/sandbox-exec").arg("-f").arg(&profile_file).args(["/bin/sh", "-c", script]).output().unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string())
+    };
+    let q = |p: &Path| crate::hive::launch::sh_quote(&p.to_string_lossy());
+
+    for ok in ["node_modules/x/.vscode/settings.json", "node_modules/.pnpm/y@1/node_modules/y/.idea/z.xml", "packages/a/node_modules/b/.vscode/f"] {
+        let f = wt.join(ok);
+        assert!(sandboxed(&format!("mkdir -p {} && echo x > {}", q(f.parent().unwrap()), q(&f))).0, "an install writes {ok}");
+        assert!(f.is_file(), "{ok}");
+    }
+    for refused in [".vscode/tasks.json", ".idea/workspace.xml", ".claude/settings.json", ".mcp.json"] {
+        let f = wt.join(refused);
+        assert!(!sandboxed(&format!("mkdir -p {} ; echo x > {}", q(f.parent().unwrap()), q(&f))).0, "{refused} is refused");
+        assert!(!f.exists(), "{refused}");
+    }
+
+    let through = format!("/usr/bin/curl -s -m 10 -p -x '{url}' http://127.0.0.1:{registry_port}/");
+    assert_eq!(sandboxed(&through), (true, "hi".to_string()), "the registry, through the proxy");
+    assert!(!sandboxed(&format!("/usr/bin/curl -s -m 5 http://127.0.0.1:{registry_port}/")).0, "never straight to it");
+    assert!(!sandboxed(&format!("/usr/bin/curl -s -m 5 -p -x '{url}' http://localhost:{registry_port}/")).0, "nor through the proxy to a host it wasn't granted");
+    crate::hive::registry_proxy::close(&job);
+    assert!(!sandboxed(&through).0, "the grant ends with its job");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A real `pnpm install` as an install job (macOS, network): the job's profile with only the
+/// registry proxy's port open, the proxy granting the npm registry, and a scratch `HOME` and
+/// store, so nothing of the human's is written. Passed 2026-10-26 (pnpm 11.1.2): the package
+/// resolved, downloaded and linked through the proxy; `curl` straight to the registry refused.
+///
+/// `cargo test --lib real_pnpm_install_probe -- --ignored --nocapture`
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn real_pnpm_install_probe() {
+    use crate::hive::job_sandbox::{profile, real_path, ProfileSpec};
+    use std::process::Command;
+
+    let base = real_path(&std::env::temp_dir().join(format!("hive-pnpm-probe-{}", uuid::Uuid::new_v4())));
+    let (wt, home, cache) = (base.join("wt"), base.join("home"), base.join("deps-cache"));
+    for d in [&wt, &home, &cache] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(wt.join("package.json"), r#"{"name":"probe","version":"0.0.0","private":true,"dependencies":{"is-number":"7.0.0"}}"#).unwrap();
+    let job = format!("j-probe-{}", uuid::Uuid::new_v4().simple());
+    let (proxy_port, url) = crate::hive::registry_proxy::open(&job, vec!["registry.npmjs.org".into()]).unwrap();
+    // HOME isn't writable: pnpm must keep everything in the worker's cache, as `deps::cache_env` says.
+    let spec = ProfileSpec { allow: vec![wt.clone(), cache.clone()], deny: vec![], own_ports: vec![], reach_ports: vec![proxy_port] };
+    let profile_file = base.join("profile.sb");
+    std::fs::write(&profile_file, profile(&spec).unwrap()).unwrap();
+    let mut cmd = Command::new("/usr/bin/sandbox-exec");
+    cmd.arg("-f").arg(&profile_file).args(["pnpm", "install", "--no-frozen-lockfile"]).current_dir(&wt).env("HOME", &home);
+    for (k, v) in crate::hive::registry_proxy::env(&url).into_iter().chain(crate::hive::deps::cache_env(&cache)) {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().unwrap();
+    println!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "pnpm install through the proxy");
+    assert!(wt.join("node_modules/is-number/package.json").is_file());
+    assert!(cache.join("pnpm-store").is_dir(), "the store is the worker's own");
+    // And never straight out: the profile has no route but the proxy.
+    let direct = Command::new("/usr/bin/sandbox-exec").arg("-f").arg(&profile_file).args(["/usr/bin/curl", "-s", "-m", "5", "https://registry.npmjs.org/"]).output().unwrap();
+    assert!(!direct.status.success());
+    crate::hive::registry_proxy::close(&job);
+    let _ = std::fs::remove_dir_all(&base);
+}

@@ -265,6 +265,13 @@ impl HivePaths {
         self.worker_dir(slug).join(CLAUDE_TMP)
     }
 
+    /// Every package cache of the worker's installs (`deps::cache_env`): maiTerm's, written only
+    /// by its install jobs and its first setup, never by its own sandbox nor shared with the
+    /// human's caches.
+    pub fn worker_deps_cache(&self, slug: &str) -> PathBuf {
+        self.worker_dir(slug).join("deps-cache")
+    }
+
     /// A queued job's `TMPDIR`: inside the worker's own temp, which its sandbox already writes,
     /// so a job never writes anywhere its worker can't.
     pub fn worker_job_tmp(&self, slug: &str) -> PathBuf {

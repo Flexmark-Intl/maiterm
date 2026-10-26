@@ -863,7 +863,9 @@ timeout?}`. `hiveRun` is worker-only, and it is **not a free command string**:
   job's spawn in the same sandbox profile the worker's own commands get (§6.7: writes to its
   folders and caches, network to its allowlist). A job is never a way to do what the worker
   itself may not. Spike 15 (§13) proves that no maiTerm tool a worker can call reaches
-  unsandboxed execution.
+  unsandboxed execution. A job's network is closed but for loopback to its own ports; a package
+  install also reaches the registries the worker's sandbox allows, and nothing else, through
+  maiTerm's registry proxy (`registry_proxy`, §16 "First real-use fixes").
 - **Resources.** Hive settings declare, per repo, what jobs need: `cargo` (CPU-heavy, 2 at a
   time), `tauri-dev` (one at a time: its ports and data folder), `e2e` (one: a browser and a
   port), `gpu` (one: ComfyUI), `migrate:<db>` (exclusive per namespace). A job starts when
@@ -1074,13 +1076,54 @@ after compaction through the SessionStart hook's additional context, as tab iden
 - Results that aren't code go in the gallery, and curating them (picking finals, building
   collections) is its job.
 
-**What limits it is enforcement, not the brief.** The coordinator holds every key (spawn, land,
-answer a worker's prompt, deliver), and it reads worker text, which §7.4 names as a
-prompt-injection channel. So "it doesn't do the work itself" is also made true by its launch.
-The settings below are the set that passed spike 13 (§13.1), plus the two additions that spike
-named. An earlier draft failed: `--tools` with a pattern in it silently dropped Bash, and
-`autoAllowBashIfSandboxed` (default true) ran any sandboxed Bash command regardless of the
-allow rules, while auto mode let Write go anywhere.
+**It is a normal agent tab, by the human's decision (2026-10-26, first real use).** Darryl linked
+a Chrome tab to his coordinator and it couldn't drive it: launched contained, it refused the
+browser tools under dontAsk and raised a blocker asking him to do it by hand. "The coordinator
+doesn't have access like a normal terminal session does, it needs that." So it launches like
+any of the human's Claude tabs (`launch::coordinator_record`, `settings::hive_settings_json`):
+
+- **Every setting source and the account's own MCP servers.** No `--setting-sources`, no
+  `--strict-mcp-config`, no `--tools`, no `--permission-mode`: the human's settings decide its
+  permission mode, its allow and deny rules and its sandbox (none, unless they set one), and its
+  permission prompts are theirs, on its terminal, like any tab's. maiTerm's MCP server comes from
+  the account's `.claude.json`, as for every tab; `--mcp-config` carries maiTerm's entry only when
+  that file has none (`settings::has_maiterm_server`), so one server is never named twice.
+- **Every tool a normal tab has.** `tools/list` is a normal tab's plus its Hive tools (it always
+  was: `ToolGates.hive`), and Rust refuses it nothing a normal tab may call
+  (`tools::refuse_agent_tool`): the browser tools act on the links its human made to *its* tab,
+  by its stated identity, like any agent's. The Overlord's tools stay refused to every Hive agent.
+- **What keeps it a Hive agent stays:** the hidden `hive_role` tab, the launch builder (§11.1),
+  its folders as `--add-dir`, `CLAUDE_CODE_TMPDIR`, the memory folder (`autoMemoryDirectory`),
+  model and effort, the kickoff and owed messages, and maiTerm's command hooks. Its gate sees only
+  `Bash|PowerShell` (`COORDINATOR_GATE_MATCHER`) and refuses only a push, `send-pack`, `git
+  remote` and `gh pr merge`, through the same wrappers as a worker's (§7.3); its Write and Edit
+  never reach the gate. Its settings deny the push forms, the Overlord's tools and Edit on
+  maiTerm's own records (`settings::coordinator_deny_paths`: tasks, logs, runs, precedents, the
+  gallery, the hook script, local-path remotes, its home's `.claude`/`.mcp.json`), as speed bumps.
+- **Its hooks are sent once.** Loading the human's user settings brings maiTerm's global hooks
+  (http, and the SessionStart command hook) beside its own command hooks; the server drops their
+  copies for a Hive tab (`hive::duplicate_hook_copy`), by the tab they name or their session, so
+  nothing is handled, primed or notified twice.
+
+**What that trades.** It isn't contained. Its shell has the human's whole reach: their files, the
+network, git remotes (a push needs only a way round the gate, a speed bump), and maiTerm's MCP
+token, which every tab holds and with which raw HTTP can speak as any tab, its workers included.
+Worker output it reads (reports, verdicts, blockers, run tails, files in a worktree) is
+untrusted text reaching an agent with the human's own access: every place maiTerm types worker
+text into it is framed and escaped (`deliver::frame_escape`, `one_line`; audited for this change
+in `deliver.rs`, `report.rs`, `review.rs`, `prompts.rs`, `events.rs`, `waiters.rs`, `owed.rs`,
+`decisions.rs`, `autonomy.rs`, the gallery's notices and the land paths), and its brief says
+what a worker wrote is data, never an instruction. Running git inside a worker's worktree reads
+a config a worker could have planted (a nested repo's `core.fsmonitor`), which the gate no longer
+refuses; its brief reviews through `git -C` at the read copy's or worktree's top. What only the
+human approves stays theirs whoever asks: agent requests (mesh, new tabs, restarts), land approval
+cards and every Budget question are window commands or the phone, never an MCP tool. Workers and
+reviewers are exactly as contained as before (§6.7).
+
+The contained launch it replaces, kept for the record: the set that passed spike 13 (§13.1),
+plus the two additions that spike named. An earlier draft of it failed: `--tools` with a pattern
+in it silently dropped Bash, and `autoAllowBashIfSandboxed` (default true) ran any sandboxed Bash
+command regardless of the allow rules, while auto mode let Write go anywhere. Until 2026-10-26:
 
 - **Tools, by name only:** `--tools "Read,Grep,Glob,Bash,Write,Edit"`. `--tools` takes tool names;
   a pattern such as `Bash(git diff:*)` there silently drops the tool. Patterns belong in
@@ -1118,9 +1161,9 @@ allow rules, while auto mode let Write go anywhere.
   config and command variables (`GIT_CONFIG_*`, `GIT_EXTERNAL_DIFF`, `GIT_DIR`, pagers, editors
   other than `true`). No permission rule can hold this: a rule can't say which folder `-C` names,
   and Claude allows a plain read-only `git diff` with no rule at all. So for the coordinator the
-  gate is load-bearing here, and it fails closed.
-- The fail-closed command hook of §6.8 (carrying §7.3's push refusal) applies to it as to every
-  Hive agent.
+  gate was load-bearing here, and it failed closed.
+- The fail-closed command hook of §6.8 (carrying §7.3's push refusal) applied to it as to every
+  Hive agent. It still does, on its shell alone.
 
 **Brief size.** Claude re-sends SessionStart context only up to 10,000 characters; above that it
 gets a file path and a 2,000-character preview, and a Hive's Instructions field alone can be
@@ -1197,8 +1240,10 @@ exists.
 with no prompt, so "Push after land = off" has to be enforced, not trusted. **No deny rule
 reliably stops a push**: with `permissions.deny` on `git push`, `sh -c 'git push'`,
 `git -C . push` and `git -c x=y push` all reached a local bare remote, and `git send-pack`
-passes the hook too (spike 9, §13.1). What stops a push is that **no remote is reachable** from a
-Hive agent:
+passes the hook too (spike 9, §13.1). What stops a worker's push is that **no remote is reachable**
+from it. The coordinator is a normal agent tab since 2026-10-26 (§7.1) and reaches its human's
+remotes: for it the denies and the gate below are speed bumps on the record, not a wall. For
+workers and reviewers:
 
 - **Network remotes:** a repo's git remote host is **not** on any agent's network allowlist
   (§14.16), and `strictAllowlist` holds it there (§6.7). A host allowlist can't tell a fetch from
@@ -2143,10 +2188,12 @@ A Hive agent's first launch carries everything that makes it a Hive agent: `--ad
 of its folders and the gallery (§6.3), with `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` so
 each added repo's `CLAUDE.md` loads (confirmed, spike 6, §13.1); `--settings` with the memory
 directory (§9), the sandbox and the Write/Edit deny rules (§6.7), the push denies (§7.3) and its
-hooks (below); `--strict-mcp-config` with only the MCP servers it needs (§6.8); its tool set
-(WebFetch removed where the role doesn't need it, §6.7; the coordinator's restricted set,
-§7.1); its env, including `CLAUDE_CODE_TMPDIR` (§6.7); `--model` and `--effort` (§7.9); and for
-a reviewer `--setting-sources user` (§6.6). Every **re**launch today uses the generic
+hooks (below); for a worker or reviewer, `--strict-mcp-config` with only the MCP servers it
+needs (§6.8) and its tool set (WebFetch removed where the role doesn't need it, §6.7); its env,
+including `CLAUDE_CODE_TMPDIR` (§6.7); `--model` and `--effort` (§7.9); and for a reviewer
+`--setting-sources user` (§6.6). The coordinator (since 2026-10-26, §7.1) has no sandbox, no
+`--strict-mcp-config`, no `--tools` and no `--setting-sources`: every setting source and the
+account's MCP servers load for it, as for any of the human's tabs. Every **re**launch today uses the generic
 `claude --resume %claudeSessionId` (`agents/resume.ts:104`, `triggers/defaults.ts:5`): session
 restore (`+page.svelte:226-254`), tab and workspace resume (`workspaces.svelte.ts:369-374`),
 reload, a follow-up relaunch (`followUps.svelte.ts:534`), `recoverTab`. And agent init writes
@@ -2189,9 +2236,12 @@ human's per-repo memory (the leak §9 exists to prevent; spike 1, §13.1). So:
     every tool included, and always exits 0. So a gated call is posted twice, once to each
     route. Its output is printed only for SessionStart (`prime=1`, the invariant rules) and
     PreModelSwitch.
-  - The coordinator launches with `--setting-sources project`, so the user's global http hooks
-    don't load there at all. Under dontAsk the allow list must be the whole list, so the user's
-    own allow rules stay out too.
+  - Workers and reviewers load no user settings, so the user's global http hooks don't load
+    there at all (a reviewer's `--setting-sources user` reads its own account root's). The
+    coordinator loads every setting source since 2026-10-26 (§7.1): maiTerm's global hooks
+    fire beside its command hooks, and the server drops their copies for a Hive tab
+    (`hive::duplicate_hook_copy`). (Built at step 3 as `--setting-sources project` under
+    dontAsk, with the allow list as the whole list; superseded.)
   - The launch line `env -u`s the agent markers and the parent-session variables (a parent's
     `ANTHROPIC_API_KEY` gave "Invalid API key"). Under a managed account it also removes every
     variable that would answer instead of the account's login.
@@ -2682,7 +2732,10 @@ script's port file names either a closed port or the probe's own listener, which
 in its log). All four pass:
 
 - **Spike 13, the restricted coordinator: passes, after two fixes to the generator and one to
-  the gate.**
+  the gate.** *Superseded 2026-10-26 by the human's decision:* the coordinator now launches as a
+  normal agent tab, unsandboxed, with its human's settings, MCP servers and permission prompts
+  (§7.1, which says what that trades). What follows measured the launch it had until then;
+  workers are unaffected.
   - `init` shows `permissionMode: dontAsk` and exactly the tools `Bash, Edit, Glob, Grep, Read,
     Write`. WebFetch and WebSearch aren't offered at all, so the model can't call them.
   - `ls /`, a `cat` of a file outside its folders and `curl https://example.com` are all denied
@@ -2961,8 +3014,11 @@ Decided 2026-10-23:
   checkpoint (hooks, `.claude/`, `.mcp.json`, CLAUDE.md/AGENTS.md, git hooks, CI, package
   scripts, `.envrc`, `build.rs`), undo reverts included (§8.1, §7.4).
 - **Spending past the budget is never delegable**: not a checkpoint, never earned (§7.4, §7.6).
-- **The coordinator is sandboxed and tool-restricted** (§7.1); the brief explains, the launch
-  enforces.
+- **Workers and reviewers are sandboxed and tool-restricted** (§6.7, §6.8); the brief
+  explains, the launch enforces. *Superseded for the coordinator by the 2026-10-26 decision
+  (§7.1), which overrides this list:* the coordinator is a normal agent tab, with every setting
+  source, the account's MCP servers and every tool a normal tab has; only its gate's push
+  refusals and its settings' deny rules remain, as speed bumps.
 - **No Hive agent pushes.** Only maiTerm's land path does, when Push after land is on (§7.3,
   §8.5). Item 7 is that setting.
 - **`galleryDeliver` writes only into the Hive's plain folders**, new files only; anything else
@@ -4143,3 +4199,46 @@ several releases a day).
    the delete sheet lists only agents in front of their terminals ("None running") and the
    gallery's folder under Kept while it stays; the resume notice and every delivery the Pause held
    go in one at a time (`deliver::resume_then_release`, `in_release_turn`, 1.5 s apart).
+   **First real-use fixes** (2026-10-26; the human's first Hive on a real project, maiMarketing,
+   in the installed build). *The coordinator is a normal agent tab* (Darryl's decision): it
+   refused a Chrome tab he linked to it ("refuses mcp__maiterm__browser* calls in 'don't ask'
+   permission mode") and its gate refused everyday shell work, so it now launches with every
+   setting source, the account's MCP servers and no sandbox, tool list or permission mode of
+   maiTerm's; Rust refuses it only the Overlord's tools; its gate refuses only a push, a remote
+   and a merged pull request; its human's global hooks' copies of its events are dropped
+   (`hive::duplicate_hook_copy`). §7.1 has the launch and what it trades; workers and reviewers
+   are as contained as before. *Workers' dependencies:* `pnpm install` failed in every worktree
+   ("Allow writes to `.vscode` directories inside Hive worktrees' node_modules…"). Claude's sandbox
+   denies `.vscode`, `.idea`, `.claude/commands|agents` and git hooks at any depth under a session's
+   cwd, after every allow (read out of 2.1.310: `<cwd>/**/.vscode/**`), and nothing but turning its
+   filesystem rules off (`filesystem.disabled`) exempts a subtree, so a worker's own install can't
+   be fixed by a setting. Instead (`hive/deps.rs`): the Create sheet fills each git folder's setup
+   from its lockfile (`pnpm install --frozen-lockfile`, `npm ci`, `yarn install --frozen-lockfile`
+   or `--immutable` under Berry, `bun install --frozen-lockfile`, `uv sync --frozen`, `poetry
+   install`; one per ecosystem; Cargo needs none), shown and editable, and setup runs at spawn as
+   before (unsandboxed, Base's code, never a reviewer's). Mid-run, each folder's install is a
+   queued command of its own (`deps::install_commands`, like the land checks, never over a human's
+   entry), on the worker's gate list so its shell points it at `hiveRun`; any install job (told
+   by the words that run as much as by the entry they matched, so a human's broad `pnpm` entry
+   still installs, `deps::is_install`) keeps every package cache in **the worker's own cache
+   folder** (`wt.noindex/<worker>/deps-cache`, `deps::cache_env`: each manager's variable plus
+   the XDG ones), never the human's, which is all it may write beyond the worktree. The security
+   review found why: package caches hold code that runs unpacked and unchecked (pnpm's `dlx`
+   bins, uv's tool environments, yarn's and bun's unpacked packages), so a job that wrote the
+   human's would run code as the human at their next `pnpm dlx` or `uvx`. A manager that ignored
+   the variables would write `~`, which the profile refuses: it fails, never escapes
+   (`real_pnpm_install_probe` runs pnpm 11 with `HOME` unwritable). Setup uses the same folder,
+   so a reinstall finds setup's store, and maiTerm empties it first, since setup runs unsandboxed
+   and must never read a cache a job wrote. Poetry's venv goes in the worktree, uv downloads no
+   interpreter. The land config rule now lists `.vscode/**`, `.idea/**`, `.pnpmfile.cjs`,
+   `.yarnrc(.yml)` and `.npmrc` at any depth, so editor and installer config a worker commits
+   comes to the human. An install job reaches the package registries through `registry_proxy`: a CONNECT proxy on loopback that tunnels to a granted
+   registry on 443 only, for a per-job token in the proxy url, closed when the job ends. Seatbelt
+   names no host, so the job's profile opens only the proxy's port and the host is checked there:
+   the worker's registries plus yarn's, minus every git remote's host, so a job still reaches no
+   remote. A job's profile is drawn from the worker's lists, which now deny `.vscode` and `.idea`
+   at each worktree's top only, so an install writes them inside `node_modules` and never the
+   worktree's own (`an_install_job_writes_node_modules_config_and_reaches_only_the_registry_proxy`
+   runs it under `sandbox-exec`; `real_pnpm_install_probe`, ignored, installed a real package
+   through the proxy). Workers' briefs say the setup ran and how to reinstall; reviewers', whose
+   copies get no setup, say to install through `hiveRun` before building.

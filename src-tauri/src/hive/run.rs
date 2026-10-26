@@ -153,20 +153,27 @@ pub fn land_check_commands(hive: &Hive) -> Vec<QueuedCommand> {
         .collect()
 }
 
-/// What `hiveRun` matches: the human's queued commands and the land checks
-/// (`land_check_commands`).
+/// What `hiveRun` matches: the human's queued commands, the land checks
+/// (`land_check_commands`) and each folder's package installs (`deps::install_commands`). Reads
+/// the disk.
 pub fn runnable_commands(hive: &Hive) -> RunQueueSettings {
     let mut q = hive.settings.run_queue.clone();
     q.commands.extend(land_check_commands(hive));
+    let installs = super::deps::install_commands(hive, &|folder, argv| match_entry(&q, folder, argv).is_some());
+    q.commands.extend(installs);
     q
 }
 
 /// Every queued command's words, once each: what a worker's gate denies run directly (§6.8).
-/// Only the human's entries: a land check runs through `hiveRun` for a receipt, and still freely
-/// in the worker's own shell, as it did before it was runnable there.
+/// The human's entries and the package installs, which can't work in the worker's own shell
+/// (Claude's sandbox refuses the `.vscode` folders packages ship, `deps`), so the refusal points
+/// it at `hiveRun`. Not a land check: it runs through `hiveRun` for a receipt, and still freely in
+/// the worker's shell, as it did before it was runnable there. Reads the disk.
 pub fn queued_prefixes(hive: &Hive) -> Vec<Vec<String>> {
     let mut out: Vec<Vec<String>> = Vec::new();
-    for c in &hive.settings.run_queue.commands {
+    let q = &hive.settings.run_queue;
+    let installs = super::deps::install_commands(hive, &|folder, argv| match_entry(q, folder, argv).is_some());
+    for c in hive.settings.run_queue.commands.iter().chain(&installs) {
         let w: Vec<String> = c.words().into_iter().map(str::to_string).collect();
         if !w.is_empty() && !out.contains(&w) {
             out.push(w);
@@ -260,6 +267,27 @@ pub(crate) fn build_spec(caller: &Caller, w: &WorkerRecord, a: &RunArgs, stack: 
     let wt = f.worktree.clone().unwrap_or_default();
     let target = format!("{}{wt}", crate::stack::target::CHECKOUT);
     let leases = leases_for(entry, stack, &target)?;
+    // A package install gets the registries, its caches and its env: told by what runs as much
+    // as by the entry, since a human's broad `pnpm` is the entry `pnpm install` matches, and it
+    // hides the detected one (`deps::install_commands`).
+    let argv: Vec<&str> = a.argv.iter().map(String::as_str).collect();
+    let words = entry.words();
+    let registries = super::deps::is_install(&argv) || super::deps::is_install(&words);
+    let mut extra_write = entry.extra_write.clone();
+    // Its caches are the worker's own, never the human's (`deps::cache_env`).
+    let cache = caller.paths.worker_deps_cache(&w.slug);
+    let install_words: &[&str] = if super::deps::is_install(&argv) { &argv } else { &words };
+    for c in super::deps::install_writes(install_words, &cache) {
+        if !extra_write.contains(&c) {
+            extra_write.push(c);
+        }
+    }
+    // The entry's own env over the installer's.
+    let mut env: Vec<(String, String)> = Vec::new();
+    for (k, v) in super::deps::install_env(install_words, &cache).into_iter().chain(entry.env.iter().cloned()) {
+        env.retain(|(o, _)| *o != k);
+        env.push((k, v));
+    }
     Ok(JobSpec {
         hive_id: hive.id.clone(),
         workspace_id: caller.workspace_id.clone(),
@@ -269,10 +297,11 @@ pub(crate) fn build_spec(caller: &Caller, w: &WorkerRecord, a: &RunArgs, stack: 
         folder: f.name.clone(),
         target,
         argv: a.argv.clone(),
-        entry: entry.words().join(" "),
+        entry: words.join(" "),
         needs: entry.needs.clone(),
-        env: entry.env.clone(),
-        extra_write: entry.extra_write.clone(),
+        env,
+        extra_write,
+        registries,
         leases,
         shares: q.resources.clone(),
         timeout_s: a.timeout_s,

@@ -199,6 +199,33 @@ fn a_folders_land_check_runs_through_hive_run() {
     assert!(land_check_commands(&r.hive).is_empty(), "a plain folder has no land");
 }
 
+/// A human's broad `pnpm` hides the detected `pnpm install` and is the entry it matches: the
+/// install still gets the registries, the store and the env, from the words that run; and a
+/// detected install gets them as the human's own would.
+#[test]
+fn an_install_is_told_by_what_runs_not_by_the_entry_it_matched() {
+    let mut r = Rig::new();
+    fs::write(r.repo.join("pnpm-lock.yaml"), "").unwrap();
+    let s = build_spec(&r.caller(), &r.w, &args("pnpm install"), &[]).unwrap();
+    let cache = r.caller().paths.worker_deps_cache(&r.w.slug).to_string_lossy().to_string();
+    assert!(s.registries && s.extra_write == vec![cache.clone()], "the detected entry, the worker's own cache: {s:?}");
+    assert!(s.env.iter().any(|(k, v)| k == "npm_config_store_dir" && v.starts_with(&cache)), "{s:?}");
+    r.hive.settings.run_queue.commands.push(qc("web", "pnpm", &[]));
+    assert!(runnable_commands(&r.hive).commands.iter().all(|c| c.prefix != "pnpm install"), "the human's entry covers it");
+    let s = build_spec(&r.caller(), &r.w, &args("pnpm install --no-frozen-lockfile"), &[]).unwrap();
+    assert_eq!(s.entry, "pnpm");
+    assert!(s.registries && s.extra_write == vec![cache.clone()], "{s:?}");
+    let s = build_spec(&r.caller(), &r.w, &args("pnpm test"), &[]).unwrap();
+    assert!(!s.registries && s.extra_write.is_empty(), "the same entry, no install: {s:?}");
+
+    // The installer's env, under the entry's own.
+    r.hive.settings.run_queue.commands.push(QueuedCommand { env: vec![("POETRY_VIRTUALENVS_IN_PROJECT".into(), "false".into())], ..qc("web", "poetry install", &[]) });
+    let s = build_spec(&r.caller(), &r.w, &args("poetry install"), &[]).unwrap();
+    assert_eq!(s.env.last(), Some(&("POETRY_VIRTUALENVS_IN_PROJECT".to_string(), "false".to_string())));
+    assert_eq!(s.env.iter().filter(|(k, _)| k == "POETRY_VIRTUALENVS_IN_PROJECT").count(), 1, "the entry's wins, once");
+    assert!(s.env.iter().any(|(k, v)| k == "POETRY_CACHE_DIR" && v.starts_with(&cache)));
+}
+
 #[test]
 fn run_arguments_are_checked() {
     let a = RunArgs::parse(&json!({ "command": "cargo test", "folder": " web ", "timeout": 600 })).unwrap();

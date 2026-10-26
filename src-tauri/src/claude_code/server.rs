@@ -622,7 +622,9 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
         out.push_str(&crate::hive::priming_rules(&hive, &role, &paths, tab_id));
     }
     // A Hive agent is told only what its own settings let it do: the Overlord skips it
-    // (docs/hive.md §7.3), and replyToOverlord, follow-ups and the stack writes are denied it.
+    // (docs/hive.md §7.3), and a worker is denied replyToOverlord, follow-ups and the stack
+    // writes. The coordinator is a normal agent tab (§7.1) and is told of the stack and its
+    // follow-ups like one.
     let in_hive = hive_role.is_some();
     let hive_worker = hive_role.as_deref() == Some(crate::hive::ROLE_WORKER);
 
@@ -717,7 +719,7 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
     // text: the point is that an agent resuming mid-project knows what is up right now.
     // Status comes from the mirror the frontend store publishes (`publish_stack_runtime`);
     // a service it has never reported is `stopped`.
-    if let Some(list) = stack_priming_list(state, tab_id).filter(|_| !in_hive) {
+    if let Some(list) = stack_priming_list(state, tab_id).filter(|_| !hive_worker) {
         out.push_str(&format!(
             "\n\nThis workspace runs a stack maiTerm manages: {}. Use listStack / \
              getServiceOutput / restartService rather than starting these yourself. If you \
@@ -728,7 +730,7 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
         ));
     }
 
-    if let Some(line) = follow_ups_priming(state, tab_id).filter(|_| !in_hive) {
+    if let Some(line) = follow_ups_priming(state, tab_id).filter(|_| !hive_worker) {
         out.push_str(&line);
     }
 
@@ -4832,6 +4834,15 @@ async fn hooks_handler(
         .into_response();
     }
 
+    // A Hive coordinator loads the human's own settings, maiTerm's global hooks among them, beside
+    // the command hooks its launch installs (docs/hive.md §7.1): those send every event already.
+    let session_tab = srv.state.agent_sessions.read().get(&session_id).map(|s| s.tab_id.clone());
+    if crate::hive::duplicate_hook_copy(&srv.state.app_data.read(), params.get("via").map(String::as_str), tab_id_from_param.as_deref(), session_tab.as_deref()) {
+        log::debug!("Claude hook: '{}' session={} dropped, the Hive tab's own hook sends it",
+            hook_event_name, &session_id[..session_id.len().min(8)]);
+        return StatusCode::OK.into_response();
+    }
+
     // Kept aside for the `prime=1` reply at the end — the match arms below consume
     // `tab_id_from_param`. Only cloned when a reply is actually asked for.
     let prime_tab = if params.contains_key("prime") {
@@ -5879,7 +5890,8 @@ mod tests {
 
     /// A worker is told only what its settings let it do: its blocker asks the coordinator
     /// (docs/hive.md §7.2), and the Overlord's, the stack's and follow-ups' lines, whose tools
-    /// it is denied, aren't there. Nor are they a coordinator's.
+    /// it is denied, aren't there. The coordinator is a normal agent tab (§7.1): follow-ups are
+    /// its own, but the Overlord skips every Hive tab.
     #[test]
     fn a_hive_agent_is_never_primed_with_tools_it_is_denied() {
         use std::sync::Arc;
@@ -5907,10 +5919,11 @@ mod tests {
         };
         let plain_text = super::session_priming_text(&state, &plain);
         assert!(plain_text.contains("replyToOverlord with kind:") && plain_text.contains("createFollowUp"), "the fixture primes an ordinary tab with both: {plain_text}");
-        for tab in [&coord, &worker] {
-            let text = super::session_priming_text(&state, tab);
-            assert!(!text.contains("Call replyToOverlord") && !text.contains("createFollowUp") && !text.contains("createService"), "{text}");
-        }
+        let text = super::session_priming_text(&state, &worker);
+        assert!(!text.contains("Call replyToOverlord") && !text.contains("createFollowUp") && !text.contains("createService"), "{text}");
+        let text = super::session_priming_text(&state, &coord);
+        assert!(!text.contains("Call replyToOverlord"), "{text}");
+        assert!(text.contains("createFollowUp"), "a normal tab's follow-ups: {text}");
         let text = super::session_priming_text(&state, &worker);
         assert!(text.contains("it goes to your coordinator, which answers it or asks your human"), "{text}");
         assert!(!text.contains("When you need your human to decide"), "the generic line says the opposite: {text}");

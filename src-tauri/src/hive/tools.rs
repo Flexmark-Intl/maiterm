@@ -108,7 +108,7 @@ fn tab_role<'a>(data: &'a AppData, tab_id: &str) -> Option<Option<&'a str>> {
 /// Why `tool` is refused to its caller, or None. `callers` are every identity the request carries
 /// for itself (the connection's tab, the tab its header names); ids that name no live tab are
 /// ignored. A Hive tool needs every one of them to hold its role; a worker anywhere among them is
-/// refused what reaches outside its sandbox (§7.2), and a coordinator `ESCAPE_MCP_TOOLS`.
+/// refused what reaches outside its sandbox (§7.2), and any Hive agent the Overlord's tools.
 pub fn refuse_agent_tool(data: &AppData, callers: &[&str], tool: &str) -> Option<String> {
     let roles: Vec<Option<&str>> = callers.iter().filter_map(|id| tab_role(data, id)).collect();
     if tool.starts_with("hive") {
@@ -146,12 +146,9 @@ pub fn refuse_agent_tool(data: &AppData, callers: &[&str], tool: &str) -> Option
              report it to your coordinator."
         ));
     }
-    if roles.contains(&Some(ROLE_COORDINATOR)) && super::settings::ESCAPE_MCP_TOOLS.contains(&tool) {
-        return Some(format!(
-            "{tool} refused (reason 'hive'): a Hive coordinator acts through its Hive tools and its workers, never \
-             outside the sandbox."
-        ));
-    }
+    // The coordinator holds every tool a normal agent tab holds (docs/hive.md §7.1, the human's
+    // decision of 2026-10-26): a linked browser, the stack, follow-ups. What only the human may
+    // approve stays theirs whoever asks (agent requests, land cards, a spend).
     None
 }
 
@@ -1747,18 +1744,20 @@ mod tests {
             assert_eq!(crate::hive::run::queued_verb_caller(&d, &["w1"], tool).as_deref(), Some("w1"), "{tool}");
             assert_eq!(crate::hive::run::queued_verb_caller(&d, &["t1", "w1"], tool).as_deref(), Some("w1"), "naming an ordinary tab: {tool}");
             assert_eq!(crate::hive::run::queued_verb_caller(&d, &["t1"], tool), None, "an ordinary agent's goes to its window: {tool}");
-            assert_eq!(crate::hive::run::queued_verb_caller(&d, &["coord"], tool), None, "the coordinator's settings deny it: {tool}");
+            assert_eq!(crate::hive::run::queued_verb_caller(&d, &["coord"], tool), None, "the coordinator's goes to its window, as any tab's: {tool}");
         }
         assert_eq!(crate::hive::run::queued_verb_caller(&d, &["w1"], "createService"), None, "refused by the role check instead");
         for tool in ["listTasks", "createTasks", "updateTasks", "getTabNotes", "setTabNotes", "writeWorkspaceNote"] {
             assert!(!refused(&["w1"], tool), "a worker keeps {tool}");
             assert!(!refused(&["coord"], tool), "the coordinator keeps {tool}");
         }
-        for tool in super::super::settings::ESCAPE_MCP_TOOLS {
-            assert!(refused(&["coord"], tool), "the coordinator: {tool}");
+        // The coordinator is a normal agent tab (2026-10-26): what any tab may call, it may, but
+        // the Overlord's (below).
+        let overlord = crate::claude_code::server::OVERLORD_CALLER_TOOLS;
+        for tool in super::super::settings::ESCAPE_MCP_TOOLS.iter().chain(&["stopService", "browserSnapshot", "browserStatus", "getTabContext", "readLogs"]).filter(|t| !overlord.contains(t)) {
+            assert!(!refused(&["coord"], tool), "the coordinator: {tool}");
             assert!(!refused(&["t1"], tool), "an ordinary agent: {tool}");
         }
-        assert!(!refused(&["coord"], "stopService"), "not an escape: Rust leaves it to the coordinator's allow list");
         // The Overlord's tools close, archive, recover and resume the human's tabs: a Hive role
         // among the callers is impersonation, whichever tab the connection was bound to.
         for tool in crate::claude_code::server::OVERLORD_CALLER_TOOLS {
@@ -1827,6 +1826,42 @@ mod tests {
         for t in WORKER_TOOLS {
             assert_eq!(hive_tool_role(t), Some(ROLE_WORKER), "{t}");
         }
+    }
+
+    /// The coordinator loads the human's settings, maiTerm's global hooks with them: their copies
+    /// of an event its own hook sends are dropped, by the tab they name or the session they're of.
+    #[test]
+    fn a_hive_tab_s_events_are_handled_once() {
+        use crate::hive::duplicate_hook_copy as dup;
+        let d = roles_app();
+        assert!(!dup(&d, Some("hive"), Some("coord"), None), "its own hook's copy is the one handled");
+        assert!(!dup(&d, Some("mod"), Some("coord"), None), "the mod's is the mod dedup's");
+        assert!(dup(&d, None, Some("coord"), None), "the global SessionStart command hook's, which names the tab");
+        assert!(dup(&d, None, None, Some("coord")), "a global http hook's, by its session");
+        assert!(!dup(&d, None, Some("t1"), None) && !dup(&d, None, None, Some("t1")), "an ordinary tab's are its only copies");
+        assert!(!dup(&d, None, None, None), "a session nobody knows yet");
+    }
+
+    /// The first real use: the human linked a Chrome tab to the coordinator and it couldn't drive
+    /// it. Its `tools/list` is a normal tab's (every group the preferences turn on) plus its Hive
+    /// tools, and Rust refuses it none of the browser tools, which act on its own links.
+    #[test]
+    fn the_coordinator_lists_and_may_call_a_normal_tab_s_tools_and_its_hive_tools() {
+        use crate::claude_code::protocol::{tool_list_response, ToolGates};
+        let d = roles_app();
+        let names = |tab: &str| -> Vec<String> {
+            let gates = ToolGates { hive: listed_role(&d, tab), browser_link: true, tasks: true, stack: true, ..ToolGates::from_prefs(&d.preferences) };
+            tool_list_response(gates)["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+        };
+        let (coord, plain) = (names("coord"), names("t1"));
+        for t in &plain {
+            assert!(coord.contains(t), "a normal tab's {t}");
+        }
+        for t in ["browserClick", "browserNavigate", "browserSnapshot", "browserScreenshot", "createService", "startService", "listTasks", "hiveSpawnWorker", "hiveLand", "galleryDeliver"] {
+            assert!(coord.iter().any(|n| n == t), "{t} listed");
+            assert!(refuse_agent_tool(&d, &["coord"], t).is_none(), "{t} callable");
+        }
+        assert!(!plain.iter().any(|t| t.starts_with("hive")), "an ordinary tab carries no Hive schema");
     }
 
     // ── Arguments ──

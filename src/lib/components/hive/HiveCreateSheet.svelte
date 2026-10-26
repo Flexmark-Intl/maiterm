@@ -132,7 +132,9 @@
         detectedKind: info.kind,
         base: info.base ?? '',
         detectedBase: info.base,
-        setup: '',
+        // A fresh worktree has no dependencies, and a worker can't install them in its own
+        // shell: the lockfile's install, shown and editable.
+        setup: info.setup ?? '',
         land_check: '',
         primary: at !== undefined ? folders[at].primary : !folders.some((x) => x.primary),
         trusted: info.trusted,

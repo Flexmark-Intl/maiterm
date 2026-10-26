@@ -4,13 +4,13 @@
 //! `base64 -d | sh` and a script written then run straight past a hook like this one, and no
 //! pattern match on a command line closes that list. What it catches is the obvious forms and
 //! their wrappers (`sh -c`, `bash -lc`, `env X=…`, aliases, full paths, `git -C`/`-c`), and
-//! every refusal is logged. What actually stops a push is that no remote is reachable (§7.3);
-//! what stops a write is the sandbox. Nothing else in the design leans on this for pushes.
+//! every refusal is logged. What actually stops a worker's push is that no remote is reachable
+//! (§7.3); what stops its write is the sandbox. Nothing else in the design leans on this for
+//! pushes.
 //!
-//! One thing it does hold for the coordinator: git, the only Bash its rules allow, runs no
-//! command of the agent's choosing. A config value does that (`-c core.fsmonitor=…`, a
-//! `GIT_CONFIG_*`, a `.git/config` written in its home), so `-c`, git's config and command
-//! variables, and any repo outside the read copies and folders are refused.
+//! The coordinator is a normal agent tab by the human's decision (2026-10-26): unsandboxed, its
+//! shell is its human's, and its gate refuses only a push, a remote or a merged pull request,
+//! wrapped or not. Its Write and Edit don't reach the gate at all.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -30,13 +30,13 @@ pub enum GateDecision {
 #[derive(Debug, Clone)]
 pub struct GateScope {
     pub role: String,
+    /// A worker's: its writes, its git and its queued commands are held to the lists below. The
+    /// coordinator's isn't: only a push, a remote or a merge is refused it.
+    pub contained: bool,
     /// Where Write and Edit may land, by real path.
     pub write_roots: Vec<PathBuf>,
     /// Where `git -C`, `--git-dir` and `--work-tree` may point.
     pub git_roots: Vec<PathBuf>,
-    /// Git must find the repo each root is, never one nested under it: another agent can write
-    /// inside these roots, and a repo it made there runs its config's commands as this agent.
-    pub roots_are_repos: bool,
     /// A worker's: the queued commands' words (`run::queued_prefixes`), which it runs through
     /// `hiveRun`, never directly (§6.8).
     pub queued: Vec<Vec<String>>,
@@ -45,32 +45,19 @@ pub struct GateScope {
 /// In every queued-command refusal: `decide_event` puts those on the run log too.
 pub const QUEUED_DENY: &str = "is queued in this Hive";
 
-/// The coordinator writes its home and the memory folder (§7.1, §9). Its git reads go only to
-/// repos maiTerm made: its read copies, each worker's worktrees and the human's folders, never
-/// its home or anything else under `wt.noindex/`, where workers write. A repo an agent wrote
-/// (`.git/config`, or a bare one's `config`) runs `core.fsmonitor` on the next `git diff` (the 3e
-/// review), so one nested inside a worker's worktree is refused too. A worker's is `worker_scope`.
-/// Blocks on the disk: the workers' worktrees are read from their records.
-pub fn scope_for(hive: &Hive, role: &str, paths: &HivePaths) -> GateScope {
-    let mut git_roots: Vec<PathBuf> = hive.git_folders().map(|f| paths.coordinator_worktree(&f.name)).collect();
-    for w in super::worker::list_workers(paths) {
-        git_roots.extend(w.git_folders().filter_map(|f| f.worktree.as_ref()).map(PathBuf::from));
-    }
-    git_roots.extend(hive.folders.iter().map(|f| PathBuf::from(&f.path)));
-    GateScope {
-        role: role.to_string(),
-        write_roots: vec![paths.coordinator_home(), paths.memory()],
-        git_roots,
-        roots_are_repos: true,
-        queued: Vec::new(),
-    }
+const PUSH_REFUSAL: &str = "No agent in a Hive pushes: landed work is pushed by maiTerm itself, and only when the Hive allows it.";
+const REMOTE_REFUSAL: &str = "Hive agents can't use git remote: remotes are maiTerm's to manage.";
+
+/// The coordinator's (§7.1, 2026-10-26): a normal agent tab's shell, but for a push.
+pub fn coordinator_scope() -> GateScope {
+    GateScope { role: super::ROLE_COORDINATOR.to_string(), contained: false, write_roots: Vec::new(), git_roots: Vec::new(), queued: Vec::new() }
 }
 
 /// A worker writes its own worktrees, its `scratch/` and the memory folder; its git runs in its
 /// own worktrees and `scratch/` only, never `git -C` into a human checkout or another agent's
-/// worktree. The git options and variables that run a command stay refused (`check_git`), as for
-/// the coordinator; its own commits pass. A repo nested in its own folders is its own, and its
-/// git runs inside its sandbox, so that isn't refused.
+/// worktree. The git options and variables that run a command stay refused (`check_git`); its
+/// own commits pass. A repo nested in its own folders is its own, and its git runs inside its
+/// sandbox, so that isn't refused.
 pub fn worker_scope(paths: &HivePaths, w: &super::worker::WorkerRecord) -> GateScope {
     let worktrees: Vec<PathBuf> = w.git_folders().filter_map(|f| f.worktree.as_ref()).map(PathBuf::from).collect();
     let scratch = paths.worker_scratch(&w.slug);
@@ -78,7 +65,7 @@ pub fn worker_scope(paths: &HivePaths, w: &super::worker::WorkerRecord) -> GateS
     write_roots.extend([scratch.clone(), paths.memory()]);
     let mut git_roots = worktrees;
     git_roots.push(scratch);
-    GateScope { role: super::ROLE_WORKER.to_string(), write_roots, git_roots, roots_are_repos: false, queued: Vec::new() }
+    GateScope { role: super::ROLE_WORKER.to_string(), contained: true, write_roots, git_roots, queued: Vec::new() }
 }
 
 /// The queued command `word args…` starts with, word by word, if any. Programs compare by
@@ -95,16 +82,6 @@ fn queued_match<'a>(word: &str, args: &[String], queued: &'a [Vec<String>]) -> O
     })
 }
 
-/// A repo git would find from `p` below `root`: a `.git` entry, or a folder that is itself a git
-/// dir (a bare repo, or anywhere inside a `.git`), between them. The root's own `.git` is fine.
-fn nested_repo(root: &Path, p: &Path) -> Option<PathBuf> {
-    let is_git_dir = |d: &Path| d.join("HEAD").is_file() && (d.join("objects").is_dir() || d.join("commondir").is_file());
-    p.ancestors()
-        .take_while(|d| *d != root && d.starts_with(root))
-        .find(|d| std::fs::symlink_metadata(d.join(".git")).is_ok() || is_git_dir(d) || d.file_name().is_some_and(|n| n.eq_ignore_ascii_case(".git")))
-        .map(Path::to_path_buf)
-}
-
 /// Names under a write root no agent's Write or Edit may create: project settings and MCP
 /// servers Claude would load unseen, and a repo (or a worktree's `.git` pointer) whose config
 /// Claude's own unsandboxed git would read. The deny rules hold these too; this reads the path.
@@ -118,6 +95,9 @@ pub fn gate_decision(tool: &str, input: &Value, cwd: Option<&Path>, scope: &Gate
             Some(cmd) => check_command(cmd, cwd, scope, 0),
             None => Err("maiTerm couldn't read this command, so it is blocked.".to_string()),
         },
+        // The coordinator's hook doesn't send these (`COORDINATOR_GATE_MATCHER`): its writes are
+        // its human's settings' to allow.
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" if !scope.contained => Ok(()),
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
             let p = input.get("file_path").or_else(|| input.get("notebook_path")).and_then(Value::as_str);
             match p {
@@ -403,7 +383,11 @@ const GIT_ENV_REFUSED: &[&str] = &[
     "VISUAL",
 ];
 
-fn git_env_refusal(assignment: &str) -> Option<String> {
+/// A worker's only: the coordinator's git runs its human's way (2026-10-26).
+fn git_env_refusal(assignment: &str, scope: &GateScope) -> Option<String> {
+    if !scope.contained {
+        return None;
+    }
     let (name, value) = assignment.split_once('=')?;
     // `GIT_EDITOR=true git rebase --continue` is how an agent gets past an editor.
     let harmless_editor = name.ends_with("EDITOR") && matches!(value, "true" | ":");
@@ -416,7 +400,7 @@ fn check_segment(words: &[String], cwd: Option<&Path>, scope: &GateScope, depth:
     while i < words.len() {
         let w = words[i].as_str();
         if KEYWORDS.contains(&w) || is_assignment(w) {
-            if let Some(r) = is_assignment(w).then(|| git_env_refusal(w)).flatten() {
+            if let Some(r) = is_assignment(w).then(|| git_env_refusal(w, scope)).flatten() {
                 return Err(r);
             }
             i += 1;
@@ -436,7 +420,7 @@ fn check_segment(words: &[String], cwd: Option<&Path>, scope: &GateScope, depth:
             while i < words.len() {
                 let a = words[i].as_str();
                 if prog == "env" && is_assignment(a) {
-                    if let Some(r) = git_env_refusal(a) {
+                    if let Some(r) = git_env_refusal(a, scope) {
                         return Err(r);
                     }
                 }
@@ -479,7 +463,7 @@ fn check_segment(words: &[String], cwd: Option<&Path>, scope: &GateScope, depth:
                 }
                 Ok(())
             }
-            "export" | "declare" | "typeset" | "readonly" | "local" => match args.iter().find_map(|a| git_env_refusal(a)) {
+            "export" | "declare" | "typeset" | "readonly" | "local" => match args.iter().find_map(|a| git_env_refusal(a, scope)) {
                 Some(r) => Err(r),
                 None => Ok(()),
             },
@@ -533,16 +517,6 @@ fn shell_command_string(args: &[String]) -> Option<&str> {
 const GIT_VERB_OPTS_REFUSED: &[&str] =
     &["--ext-diff", "--textconv", "--output", "--no-index", "--upload-pack", "--receive-pack", "--exec", "--open-files-in-pager"];
 
-/// The coordinator's git verbs: reading only. The `*` in `Bash(git -C * diff)` spans any verb
-/// too, so `git -C <copy> grep -O<cmd> -e diff` matched that rule and ran `<cmd>` (the first live
-/// test's review); a verb outside this list is refused whatever the rules allow. Writes would
-/// meet the sandbox anyway.
-const COORDINATOR_GIT_VERBS: &[&str] = &[
-    "diff", "log", "show", "status", "blame", "grep", "rev-parse", "rev-list", "ls-files", "ls-tree", "cat-file", "merge-base",
-    "branch", "tag", "describe", "shortlog", "reflog", "for-each-ref", "show-ref", "name-rev", "range-diff", "diff-tree",
-    "diff-files", "diff-index", "whatchanged", "check-ignore", "check-attr", "count-objects", "help", "version",
-];
-
 /// Real options that are prefixes of a refused one: an exact name wins over an abbreviation.
 const GIT_VERB_OPTS_PREFIX_OK: &[&str] = &["--text"];
 
@@ -562,7 +536,34 @@ fn is_grep_pager_flag(a: &str) -> bool {
     a.strip_prefix('-').is_some_and(|f| !f.starts_with('-') && f.contains('O'))
 }
 
+/// What git verb `args` run, if one can be read: global options and their values skipped.
+fn git_verb(args: &[String]) -> Option<&str> {
+    let mut j = 0;
+    while j < args.len() {
+        match args[j].as_str() {
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--super-prefix" | "--config-env" => j += 2,
+            a if a.starts_with('-') => j += 1,
+            a => return Some(a),
+        }
+    }
+    None
+}
+
+/// Whether a git verb is one the gate can name: what isn't a plain word may expand into one
+/// (`c=pu; git ${c}sh`) or into an option (`c=-c; git $c core.fsmonitor=… diff`).
+fn plain_verb(a: &str) -> bool {
+    !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 fn check_git(args: &[String], cwd: Option<&Path>, scope: &GateScope) -> Result<(), String> {
+    if !scope.contained {
+        return match git_verb(args) {
+            Some("push" | "send-pack") => Err(PUSH_REFUSAL.to_string()),
+            Some("remote") => Err(REMOTE_REFUSAL.to_string()),
+            Some(a) if !plain_verb(a) => Err(format!("maiTerm can't tell which git command `{a}` is, so it is blocked.")),
+            _ => Ok(()),
+        };
+    }
     let mut base: Option<PathBuf> = cwd.and_then(real_path);
     let roots: Vec<PathBuf> = scope.git_roots.iter().filter_map(|g| real_path(g)).collect();
     // The deepest root holding `r`: a Hive folder inside another is checked as itself.
@@ -574,22 +575,12 @@ fn check_git(args: &[String], cwd: Option<&Path>, scope: &GateScope) -> Result<(
             _ => Err(format!("git {flag} {p} points outside this agent's folders, so it is blocked.")),
         }
     };
-    // The repo git discovers from here must be one maiTerm made, never one the agent could write
-    // (its home, or anywhere a `cd` left it), nor one another agent nested inside a root.
+    // Git runs in the agent's own folders, never wherever a `cd` left it.
     let repo_check = |b: Option<&Path>| -> Result<(), String> {
-        let Some(root) = b.and_then(|b| root_of(b)) else {
-            return Err("git runs here only in the Hive's read copies and folders: name one with git -C <folder>.".to_string());
-        };
-        match b.and_then(|b| nested_repo(root, b)).filter(|_| scope.roots_are_repos) {
-            Some(n) => Err(format!("git in {} would read a repo an agent could have made there, so it is blocked.", n.display())),
-            None => Ok(()),
+        match b.and_then(|b| root_of(b)) {
+            Some(_) => Ok(()),
+            None => Err("git runs here only in your own worktrees and folders: name one with git -C <folder>.".to_string()),
         }
-    };
-    // A git dir named outright skips the discovery `repo_check` reads; the coordinator's rules
-    // deny `--git-dir` too.
-    let git_dir_check = |flag: &str| match scope.roots_are_repos && flag == "--git-dir" {
-        true => Err("git --git-dir is refused here: name the folder with git -C <folder>.".to_string()),
-        false => Ok(()),
     };
     // Not just `alias.*`: `core.fsmonitor`, `diff.external` and their kin run any command, so a
     // `git -C <copy> -c core.fsmonitor=… diff` was general Bash under a diff rule (the 3e review).
@@ -609,36 +600,22 @@ fn check_git(args: &[String], cwd: Option<&Path>, scope: &GateScope) -> Result<(
             "--git-dir" | "--work-tree" => {
                 let p = args.get(j + 1).ok_or("a git option with no folder")?;
                 check_path(&base, p, a)?;
-                git_dir_check(a)?;
                 j += 2;
-            }
-            // The folder `-C` names, read as a git dir itself: a worker's worktree holding its own
-            // `config` and `HEAD` would be the repo, and its config's commands would run here.
-            "--bare" if scope.roots_are_repos => {
-                return Err("git --bare is refused here: it reads the folder itself as a repo.".to_string());
             }
             "--namespace" | "--super-prefix" => j += 2,
             _ if a.starts_with("--git-dir=") || a.starts_with("--work-tree=") => {
                 let (flag, p) = a.split_once('=').unwrap_or((a, ""));
                 check_path(&base, p, flag)?;
-                git_dir_check(flag)?;
                 j += 1;
             }
             _ if a.starts_with('-') => j += 1,
-            "push" | "send-pack" => {
-                return Err("No agent in a Hive pushes: landed work is pushed by maiTerm itself, and only when the Hive allows it.".to_string());
-            }
-            "remote" => return Err("Hive agents can't use git remote: remotes are maiTerm's to manage.".to_string()),
-            // `c=-c; git -C <copy> $c core.fsmonitor=… diff`: what isn't a plain verb may expand
-            // into an option.
-            _ if a.is_empty() || !a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') => {
+            "push" | "send-pack" => return Err(PUSH_REFUSAL.to_string()),
+            "remote" => return Err(REMOTE_REFUSAL.to_string()),
+            _ if !plain_verb(a) => {
                 return Err(format!("maiTerm can't tell which git command `{a}` is, so it is blocked."));
             }
             _ => {
                 repo_check(base.as_deref())?;
-                if scope.role != super::ROLE_WORKER && !COORDINATOR_GIT_VERBS.contains(&a) {
-                    return Err(format!("git {a} is refused for the coordinator: its git only reads (diff, log, show, status, grep…)."));
-                }
                 let refused = args[j + 1..].iter().find(|o| is_refused_long_opt(o) || (a == "grep" && is_grep_pager_flag(o)));
                 return match refused {
                     Some(o) => Err(format!("git {a} {o} is refused in a Hive: it runs a configured command, writes a file or reads one from anywhere.")),
@@ -685,8 +662,11 @@ pub fn decide_event(tab_id: &str, agent: Option<(Hive, String, HivePaths)>, body
                 return GateDecision::Deny("maiTerm has no record of this worker, so the call is blocked.".to_string());
             }
         }
+    } else if role == super::ROLE_COORDINATOR {
+        coordinator_scope()
     } else {
-        scope_for(&hive, &role, &paths)
+        log::warn!("hive {}: gate: tab {tab_id} has no role \"{role}\" maiTerm knows; refused", hive.id);
+        return GateDecision::Deny("maiTerm doesn't know this Hive agent's role, so the call is blocked.".to_string());
     };
     let decision = gate_decision(tool, &input, cwd.as_deref(), &scope);
     if let GateDecision::Deny(reason) = &decision {
@@ -747,10 +727,15 @@ mod tests {
     use serde_json::json;
     use std::fs;
 
+    /// A scratch Hive: the coordinator's home and read copy, the memory folder, a worker's web
+    /// worktree and scratch, another worker's worktree beside it, the human's checkout, and a
+    /// folder outside it all. `scope` is the coordinator's, `worker` the worker's.
     struct Fx {
         base: PathBuf,
         paths: HivePaths,
         scope: GateScope,
+        worker: GateScope,
+        wt: PathBuf,
     }
 
     fn fx() -> Fx {
@@ -763,26 +748,27 @@ mod tests {
         for d in [paths.coordinator_home(), paths.memory(), paths.coordinator_worktree("web"), base.join("repo/web"), base.join("outside")] {
             fs::create_dir_all(d).unwrap();
         }
-        let mut hive = crate::hive::launch::tests::sample_hive();
-        hive.folders.truncate(1);
-        hive.folders[0].path = base.join("repo/web").to_string_lossy().to_string();
-        let scope = scope_for(&hive, crate::hive::ROLE_COORDINATOR, &paths);
-        Fx { base, paths, scope }
+        let (w, worker) = worker_fx(&paths);
+        let wt = PathBuf::from(w.folders[0].worktree.clone().unwrap());
+        Fx { base, paths, scope: coordinator_scope(), worker, wt }
     }
 
+    /// The coordinator's shell, in its home.
     fn bash(f: &Fx, cmd: &str) -> GateDecision {
-        bash_in(f, &f.paths.coordinator_home(), cmd)
+        gate_decision("Bash", &json!({ "command": cmd }), Some(&f.paths.coordinator_home()), &f.scope)
     }
 
-    fn bash_in(f: &Fx, cwd: &Path, cmd: &str) -> GateDecision {
-        gate_decision("Bash", &json!({ "command": cmd }), Some(cwd), &f.scope)
+    /// The worker's shell, in its web worktree.
+    fn wbash(f: &Fx, cmd: &str) -> GateDecision {
+        gate_decision("Bash", &json!({ "command": cmd }), Some(&f.wt), &f.worker)
     }
 
-    /// Spike 9's table: what a hook like this caught, and the forms around it.
+    /// Spike 9's table: what a hook like this caught, and the forms around it. Every Hive agent's
+    /// gate refuses these, the coordinator's included (§7.3).
     #[test]
     fn pushes_and_their_wrappers_are_refused() {
         let f = fx();
-        let wt = f.paths.coordinator_worktree("web");
+        let wt = f.wt.clone();
         let refused = [
             "git push".to_string(),
             "git push origin main".into(),
@@ -811,47 +797,63 @@ mod tests {
             "eval git push".into(),
             "git remote add x /tmp/x".into(),
             "git remote -v".into(),
-            "git -c alias.p=push p".into(),
             "gh pr merge 3 --squash".into(),
             "gh -R o/r pr merge 3".into(),
         ];
         for cmd in &refused {
-            assert!(matches!(bash(&f, cmd), GateDecision::Deny(_)), "should refuse: {cmd}");
+            assert!(matches!(bash(&f, cmd), GateDecision::Deny(_)), "the coordinator should refuse: {cmd}");
+            assert!(matches!(wbash(&f, cmd), GateDecision::Deny(_)), "a worker should refuse: {cmd}");
         }
+        // A config value renames push, and only a worker's `-c` is refused: the coordinator's git
+        // runs its human's way, so for it this is a speed bump with a known way round (§7.3).
+        assert!(matches!(wbash(&f, "git -c alias.p=push p"), GateDecision::Deny(_)));
+        assert_eq!(bash(&f, "git -c alias.p=push p"), GateDecision::Allow);
         let _ = fs::remove_dir_all(&f.base);
     }
 
+    /// The human's decision (2026-10-26): the coordinator's shell is a normal agent tab's. Its
+    /// git goes anywhere with any option, its tools run, and the gate passes its writes.
     // POSIX paths in shell words: a Windows path's backslashes are escapes to the parser.
     #[cfg(unix)]
     #[test]
-    fn reads_and_reviews_inside_the_folders_pass() {
+    fn the_coordinator_runs_its_shell_like_any_agent_tab() {
         let f = fx();
-        let wt = f.paths.coordinator_worktree("web");
-        for cmd in ["git diff", "git log --oneline -5", "git log --grep push", "git show HEAD:README.md", "git status # git push later"] {
-            assert_eq!(bash_in(&f, &wt, cmd), GateDecision::Allow, "should allow in the read copy: {cmd}");
-        }
-        let allowed = [
-            format!("git -C '{}' diff HEAD~1", wt.display()),
-            format!("git -C '{}' diff", wt.display()),
-            format!("git -C {} log", f.base.join("repo/web").display()),
-            format!("cd /tmp && git -C '{}' log", wt.display()),
-            format!("GIT_EDITOR=true git -C '{}' log", wt.display()),
-            format!("git -C '{}' log --output-indicator-new=+", wt.display()),
+        let (copy, out, human) = (f.paths.coordinator_worktree("web"), f.base.join("outside"), f.base.join("repo/web"));
+        for cmd in [
+            "git diff".to_string(),
+            "git status # git push later".into(),
+            "git log --grep push".into(),
+            format!("git -C '{}' diff HEAD~1", copy.display()),
+            format!("git -C '{}' -c core.pager=less log", out.display()),
+            format!("cd '{}' && git commit -m 'fix the push button'", human.display()),
+            format!("git --git-dir='{}/.git' log", human.display()),
+            "GIT_PAGER=less git log".into(),
+            "git config user.name x".into(),
+            "git --bare log".into(),
+            "git fetch origin".into(),
+            "pnpm install --frozen-lockfile".into(),
+            "npm run build && npm test".into(),
+            "rm -rf node_modules".into(),
+            "curl -s https://example.com".into(),
             "echo push".into(),
-            "ls -la".into(),
-        ];
-        for cmd in &allowed {
-            assert_eq!(bash(&f, cmd), GateDecision::Allow, "should allow: {cmd}");
+        ] {
+            assert_eq!(bash(&f, &cmd), GateDecision::Allow, "should allow: {cmd}");
+        }
+        let home = f.paths.coordinator_home();
+        for (tool, p) in [("Write", out.join("x")), ("Edit", human.join("src/main.rs")), ("Write", home.join(".claude/settings.json")), ("MultiEdit", copy.join("README.md"))] {
+            assert_eq!(gate_decision(tool, &json!({ "file_path": p }), Some(&home), &f.scope), GateDecision::Allow, "{tool} {}", p.display());
         }
         let _ = fs::remove_dir_all(&f.base);
     }
 
     /// The 3e review: git config runs commands, so `git -C <copy> -c core.fsmonitor=… diff`
-    /// was general Bash under a diff rule. `diff.external`, a pager, `GIT_CONFIG_*` likewise.
+    /// was general Bash under a diff rule. `diff.external`, a pager, `GIT_CONFIG_*` likewise; and
+    /// parse-options takes any unambiguous prefix of a long option (the first live test's
+    /// review), so `grep --op=<cmd>` is `--open-files-in-pager=<cmd>`. A worker's git runs none.
     #[test]
     fn git_config_and_command_options_are_refused() {
         let f = fx();
-        let wt = f.paths.coordinator_worktree("web");
+        let wt = f.wt.clone();
         let c = format!("git -C '{}'", wt.display());
         for cmd in [
             format!("{c} -c core.fsmonitor='touch x' diff"),
@@ -875,30 +877,9 @@ mod tests {
             format!("c=-c; {c} $c core.fsmonitor=x diff"),
             format!("{c} \"$(echo -c)\" core.fsmonitor=x diff"),
             format!("{c} '' diff"),
-        ] {
-            assert!(matches!(bash(&f, &cmd), GateDecision::Deny(_)), "should refuse: {cmd}");
-        }
-        let _ = fs::remove_dir_all(&f.base);
-    }
-
-    /// The first live test's review of `Bash(git -C * diff|log|show[ *])`: the `*` spans a verb as
-    /// readily as an option, so every git the coordinator's rules let through must be refused here
-    /// when it can run a command, write a file, read anywhere or leave the folders.
-    #[cfg(unix)]
-    #[test]
-    fn what_the_git_c_allow_rules_let_through_the_gate_refuses() {
-        let f = fx();
-        let wt = f.paths.coordinator_worktree("web");
-        let c = format!("git -C '{}'", wt.display());
-        for cmd in [
-            // Each matches `Bash(git -C * diff)` or `Bash(git -C * diff *)` as written.
-            format!("{c} -c core.fsmonitor=x diff"),
-            format!("{c} diff --output=/tmp/x"),
-            format!("{c} diff --ext-diff"),
             format!("{c} fetch --upload-pack='sh -c x' . diff"),
             format!("{c} grep -O'sh -c x' -e diff"),
             format!("{c} grep --open-files-in-pager='sh -c x' -e diff"),
-            // parse-options takes any unambiguous prefix of a long option.
             format!("{c} grep --open='sh -c x' -e diff"),
             format!("{c} grep --op='sh -c x' -e diff"),
             format!("{c} grep --open-files='sh -c x' -e diff"),
@@ -909,63 +890,31 @@ mod tests {
             format!("{c} diff --textc"),
             format!("{c} diff --no-ind /etc/passwd x"),
             format!("{c} grep -nOx -e diff"),
-            format!("{c} config core.fsmonitor x diff"),
-            format!("{c} difftool -x x diff"),
-            format!("{c} submodule foreach x diff"),
-            format!("{c} --bare log -p diff"),
-            format!("git -C '{}' diff", f.base.join("outside").display()),
             format!("git -C '{}' -C .. diff", wt.display()),
         ] {
-            assert!(matches!(bash(&f, &cmd), GateDecision::Deny(_)), "should refuse: {cmd}");
+            assert!(matches!(wbash(&f, &cmd), GateDecision::Deny(_)), "should refuse: {cmd}");
         }
-        // What a review needs still reads.
-        for cmd in [format!("{c} grep -n -e diff"), format!("{c} status"), format!("{c} log -p --stat"), format!("{c} diff -O{}/order", wt.display()), format!("{c} diff --text --no-ext-diff"), format!("{c} grep --only-matching -e diff")] {
-            assert_eq!(bash(&f, &cmd), GateDecision::Allow, "should allow: {cmd}");
-        }
-        let _ = fs::remove_dir_all(&f.base);
-    }
-
-    /// A worker's git is its own, in its sandbox: verbs beyond reading pass, `--bare` too.
-    #[cfg(unix)]
-    #[test]
-    fn the_coordinators_verb_list_is_not_a_workers() {
-        let f = fx();
-        let wt = f.paths.coordinator_worktree("web");
-        let scope = GateScope { role: crate::hive::ROLE_WORKER.to_string(), write_roots: vec![wt.clone()], git_roots: vec![wt.clone()], roots_are_repos: false, queued: Vec::new() };
-        for cmd in ["git commit -m x", "git add -A", "git --bare log"] {
-            assert_eq!(gate_decision("Bash", &json!({ "command": cmd }), Some(&wt), &scope), GateDecision::Allow, "{cmd}");
-        }
-        assert!(matches!(gate_decision("Bash", &json!({ "command": "git grep -Ox -e a" }), Some(&wt), &scope), GateDecision::Deny(_)));
-        let _ = fs::remove_dir_all(&f.base);
-    }
-
-    /// Home is writable, so a repo there is the agent's: a `.git/config` (or a bare repo's
-    /// `config`) it wrote runs `core.fsmonitor` on the next `git diff`. Git runs only where
-    /// maiTerm made the repo.
-    #[test]
-    fn git_in_a_repo_the_agent_could_write_is_refused() {
-        let f = fx();
-        let home = f.paths.coordinator_home();
-        let wt = f.paths.coordinator_worktree("web");
-        for (cwd, cmd) in [
-            (home.clone(), "git diff".to_string()),
-            (home.clone(), "git log".into()),
-            (home.clone(), format!("git -C '{}' diff", home.join("sub").display())),
-            (home.clone(), "git -C sub diff".into()),
-            (home.clone(), format!("git -C '{}' --git-dir='{}' diff", wt.display(), home.join("x").display())),
-            (home.clone(), format!("cd '{}' && git diff", wt.display())),
-            (home.clone(), format!("(cd '{}'); git diff", wt.display())),
-            (wt.clone(), "cd .. && git -C web diff".into()),
-            (wt.clone(), format!("sh -c 'cd {} && git diff'", home.display())),
-            (f.base.join("outside"), "git diff".into()),
+        // What review and work need still runs, and a worker's own git has every verb.
+        for cmd in [
+            format!("{c} grep -n -e diff"),
+            format!("{c} status"),
+            format!("{c} log -p --stat"),
+            format!("{c} diff -O{}/order", wt.display()),
+            format!("{c} diff --text --no-ext-diff"),
+            format!("{c} grep --only-matching -e diff"),
+            format!("{c} log --output-indicator-new=+"),
+            format!("GIT_EDITOR=true {c} log"),
+            "git commit -m x".into(),
+            "git add -A".into(),
+            "git --bare log".into(),
         ] {
-            assert!(matches!(bash_in(&f, &cwd, &cmd), GateDecision::Deny(_)), "should refuse in {}: {cmd}", cwd.display());
+            assert_eq!(wbash(&f, &cmd), GateDecision::Allow, "should allow: {cmd}");
         }
         let _ = fs::remove_dir_all(&f.base);
     }
 
     #[test]
-    fn git_pointed_outside_the_folders_is_refused() {
+    fn git_pointed_outside_a_worker_s_folders_is_refused() {
         let f = fx();
         let out = f.base.join("outside");
         for cmd in [
@@ -975,45 +924,48 @@ mod tests {
             "git -C ../../.. log".to_string(),
             "git -C /etc log".into(),
         ] {
-            assert!(matches!(bash(&f, &cmd), GateDecision::Deny(r) if r.contains("outside")), "{cmd}");
+            assert!(matches!(wbash(&f, &cmd), GateDecision::Deny(r) if r.contains("outside")), "{cmd}");
         }
         let _ = fs::remove_dir_all(&f.base);
     }
 
-    /// What spike 9 saw get past a hook like this. Not claimed: the sandbox and the unreachable
-    /// remotes are what hold these.
+    /// What spike 9 saw get past a hook like this. Not claimed: a worker's sandbox and its
+    /// unreachable remotes are what hold these.
     #[test]
     fn the_known_bypasses_are_not_claimed() {
         let f = fx();
         // A verb built from a variable is refused now, but the program itself can be one.
-        assert!(matches!(bash_in(&f, &f.paths.coordinator_worktree("web"), "c=pu; git ${c}sh"), GateDecision::Deny(_)));
-        assert_eq!(bash_in(&f, &f.paths.coordinator_worktree("web"), "c=pu; g=git; $g ${c}sh"), GateDecision::Allow);
-        assert_eq!(bash(&f, "echo Z2l0IHB1c2g= | base64 -d | sh"), GateDecision::Allow);
+        let deciders: [fn(&Fx, &str) -> GateDecision; 2] = [bash, wbash];
+        for decide in deciders {
+            assert!(matches!(decide(&f, "c=pu; git ${c}sh"), GateDecision::Deny(_)));
+            assert_eq!(decide(&f, "c=pu; g=git; $g ${c}sh"), GateDecision::Allow);
+            assert_eq!(decide(&f, "echo Z2l0IHB1c2g= | base64 -d | sh"), GateDecision::Allow);
+        }
         let _ = fs::remove_dir_all(&f.base);
     }
 
     #[test]
-    fn writes_land_only_in_home_and_memory_by_real_path() {
+    fn a_worker_s_writes_land_only_in_its_folders_by_real_path() {
         let f = fx();
-        let home = f.paths.coordinator_home();
-        let w = |p: &Path| gate_decision("Write", &json!({ "file_path": p }), Some(&home), &f.scope);
-        assert_eq!(w(&home.join("plan.md")), GateDecision::Allow);
-        assert_eq!(w(&home.join("new/dir/plan.md")), GateDecision::Allow, "a folder that doesn't exist yet");
+        let wt = f.wt.clone();
+        let w = |p: &Path| gate_decision("Write", &json!({ "file_path": p }), Some(&wt), &f.worker);
+        assert_eq!(w(&wt.join("plan.md")), GateDecision::Allow);
+        assert_eq!(w(&wt.join("new/dir/plan.md")), GateDecision::Allow, "a folder that doesn't exist yet");
         assert_eq!(w(&f.paths.memory().join("decision.md")), GateDecision::Allow);
-        assert_eq!(gate_decision("Edit", &json!({ "file_path": "notes.md" }), Some(&home), &f.scope), GateDecision::Allow, "relative to cwd");
+        assert_eq!(gate_decision("Edit", &json!({ "file_path": "notes.md" }), Some(&wt), &f.worker), GateDecision::Allow, "relative to cwd");
         assert!(matches!(w(&f.base.join("outside/x")), GateDecision::Deny(_)));
-        assert!(matches!(w(&f.paths.coordinator_worktree("web").join("src.rs")), GateDecision::Deny(_)), "read copies are read-only");
-        assert!(matches!(w(&home.join("../../../outside/x")), GateDecision::Deny(_)), "climbing out by ..");
-        assert!(matches!(w(&home.join("missing/../../outside/x")), GateDecision::Deny(_)), "climbing out past a missing folder");
+        assert!(matches!(w(&f.paths.coordinator_worktree("web").join("src.rs")), GateDecision::Deny(_)), "the coordinator's read copy");
+        assert!(matches!(w(&wt.join("../../../../outside/x")), GateDecision::Deny(_)), "climbing out by ..");
+        assert!(matches!(w(&wt.join("missing/../../../../../outside/x")), GateDecision::Deny(_)), "climbing out past a missing folder");
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(f.base.join("outside"), home.join("escape")).unwrap();
-            assert!(matches!(w(&home.join("escape/x")), GateDecision::Deny(_)), "a symlink out of home");
-            std::os::unix::fs::symlink(f.base.join("outside/nothing-here"), home.join("dangling")).unwrap();
-            assert!(matches!(w(&home.join("dangling")), GateDecision::Deny(_)), "a dangling symlink can't be checked");
+            std::os::unix::fs::symlink(f.base.join("outside"), wt.join("escape")).unwrap();
+            assert!(matches!(w(&wt.join("escape/x")), GateDecision::Deny(_)), "a symlink out of its worktree");
+            std::os::unix::fs::symlink(f.base.join("outside/nothing-here"), wt.join("dangling")).unwrap();
+            assert!(matches!(w(&wt.join("dangling")), GateDecision::Deny(_)), "a dangling symlink can't be checked");
         }
-        assert!(matches!(gate_decision("Write", &json!({}), Some(&home), &f.scope), GateDecision::Deny(_)));
-        assert_eq!(gate_decision("Read", &json!({ "file_path": "/etc/passwd" }), Some(&home), &f.scope), GateDecision::Allow, "not the gate's");
+        assert!(matches!(gate_decision("Write", &json!({}), Some(&wt), &f.worker), GateDecision::Deny(_)));
+        assert_eq!(gate_decision("Read", &json!({ "file_path": "/etc/passwd" }), Some(&wt), &f.worker), GateDecision::Allow, "not the gate's");
         let _ = fs::remove_dir_all(&f.base);
     }
 
@@ -1021,23 +973,29 @@ mod tests {
     fn an_event_the_gate_cannot_place_is_refused() {
         let f = fx();
         let hive = crate::hive::launch::tests::sample_hive();
-        let agent = || Some((hive.clone(), crate::hive::ROLE_COORDINATOR.to_string(), HivePaths::new(f.paths.root.clone())));
+        let agent = |role: &str| Some((hive.clone(), role.to_string(), HivePaths::new(f.paths.root.clone())));
+        let coordinator = || agent(crate::hive::ROLE_COORDINATOR);
         assert!(matches!(decide_event("t", None, r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#), GateDecision::Deny(_)), "not a Hive tab");
-        assert!(matches!(decide_event("t", agent(), "{not json"), GateDecision::Deny(_)));
+        assert!(matches!(decide_event("t", coordinator(), "{not json"), GateDecision::Deny(_)));
+        assert!(matches!(decide_event("t", agent("visitor"), r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#), GateDecision::Deny(_)), "a role maiTerm doesn't know");
         let home = f.paths.coordinator_home().to_string_lossy().to_string();
-        let wt = f.paths.coordinator_worktree("web").to_string_lossy().to_string();
-        let ok = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git diff"}, "cwd": wt}).to_string();
-        assert_eq!(decide_event("t", agent(), &ok), GateDecision::Allow);
+        let out = f.base.join("outside").to_string_lossy().to_string();
+        for cmd in ["git diff", "npm install", "git -c core.pager=less log"] {
+            let ev = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": out}).to_string();
+            assert_eq!(decide_event("t", coordinator(), &ev), GateDecision::Allow, "{cmd}");
+        }
+        let write = serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": format!("{out}/x")}, "cwd": home}).to_string();
+        assert_eq!(decide_event("t", coordinator(), &write), GateDecision::Allow);
         let push = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": home}).to_string();
-        assert!(matches!(decide_event("t", agent(), &push), GateDecision::Deny(_)));
+        assert!(matches!(decide_event("t", coordinator(), &push), GateDecision::Deny(_)));
         assert!(fs::read_to_string(f.paths.logs().join("gate.log")).unwrap().contains("git push"), "the refusal is on the record");
         let _ = fs::remove_dir_all(&f.base);
     }
 
     /// A worker of the fixture's Hive with real folders: its web worktree and scratch, another
-    /// worker's worktree beside it, and the human's checkout.
-    fn worker_fx(f: &Fx) -> (crate::hive::worker::WorkerRecord, GateScope) {
-        for d in [f.paths.worker_worktree("auth", "web"), f.paths.worker_scratch("auth"), f.paths.worker_worktree("billing", "web")] {
+    /// worker's worktree beside it.
+    fn worker_fx(paths: &HivePaths) -> (crate::hive::worker::WorkerRecord, GateScope) {
+        for d in [paths.worker_worktree("auth", "web"), paths.worker_scratch("auth"), paths.worker_worktree("billing", "web")] {
             fs::create_dir_all(d).unwrap();
         }
         let w = crate::hive::worker::WorkerRecord {
@@ -1047,19 +1005,19 @@ mod tests {
             folders: vec![crate::hive::worker::WorkerFolder {
                 name: "web".into(),
                 kind: "git".into(),
-                worktree: Some(f.paths.worker_worktree("auth", "web").to_string_lossy().to_string()),
+                worktree: Some(paths.worker_worktree("auth", "web").to_string_lossy().to_string()),
                 ..Default::default()
             }],
             ..Default::default()
         };
-        let scope = worker_scope(&f.paths, &w);
+        let scope = worker_scope(paths, &w);
         (w, scope)
     }
 
     #[test]
     fn a_worker_writes_and_runs_git_only_in_its_own_folders() {
         let f = fx();
-        let (_, scope) = worker_fx(&f);
+        let (_, scope) = worker_fx(&f.paths);
         let wt = f.paths.worker_worktree("auth", "web");
         let human = f.base.join("repo/web");
         let w = |p: &Path| gate_decision("Write", &json!({ "file_path": p }), Some(&wt), &scope);
@@ -1088,54 +1046,12 @@ mod tests {
         let _ = fs::remove_dir_all(&f.base);
     }
 
-    /// Workers write under `wt.noindex/`, so the coordinator's git goes only to the repos maiTerm
-    /// made there: a repo a worker nested in its worktree or scratch (`core.fsmonitor` in its
-    /// config) would run the worker's command as the coordinator.
-    #[test]
-    fn the_coordinator_never_runs_git_in_a_repo_a_worker_made() {
-        let f = fx();
-        let (w, _) = worker_fx(&f);
-        crate::hive::worker::write_worker(&f.paths.task("t-auth"), &w).unwrap();
-        let wt = f.paths.worker_worktree("auth", "web");
-        fs::write(wt.join(".git"), "gitdir: /r/web/.git/worktrees/web\n").unwrap();
-        let scratch = f.paths.worker_scratch("auth");
-        for nested in [wt.join("pkg"), scratch.join("x")] {
-            fs::create_dir_all(nested.join(".git")).unwrap();
-        }
-        let bare = wt.join("evil.git");
-        fs::create_dir_all(bare.join("objects")).unwrap();
-        fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        let mut hive = crate::hive::launch::tests::sample_hive();
-        hive.folders.truncate(1);
-        hive.folders[0].path = f.base.join("repo/web").to_string_lossy().to_string();
-        let scope = scope_for(&hive, crate::hive::ROLE_COORDINATOR, &f.paths);
-        let bash = |cmd: &str| gate_decision("Bash", &json!({ "command": cmd }), Some(&f.paths.coordinator_home()), &scope);
-
-        assert_eq!(bash(&format!("git -C '{}' log --oneline", wt.display())), GateDecision::Allow, "the worktree maiTerm made");
-        assert_eq!(bash(&format!("git -C '{}' diff", wt.join("src").display())), GateDecision::Allow, "a folder of it finds its own repo");
-        assert_eq!(bash(&format!("git -C '{}' diff", f.paths.coordinator_worktree("web").display())), GateDecision::Allow);
-        for cmd in [
-            format!("git -C '{}' diff", wt.join("pkg").display()),
-            format!("git -C '{}' diff", wt.join("pkg/src").display()),
-            format!("git -C '{}' diff", scratch.join("x").display()),
-            format!("git -C '{}' log", scratch.display()),
-            format!("git -C '{}' diff HEAD~1", bare.display()),
-            format!("git -C '{}' log", f.paths.worker_dir("auth").display()),
-            format!("git -C '{}' log", f.paths.worktrees().display()),
-            format!("git -C '{}' --git-dir='{}' log", wt.display(), wt.join("pkg/.git").display()),
-            format!("git -C '{}' log", f.base.join("repo/web/.git").display()),
-        ] {
-            assert!(matches!(bash(&cmd), GateDecision::Deny(_)), "should refuse: {cmd}");
-        }
-        let _ = fs::remove_dir_all(&f.base);
-    }
-
     /// The deny rules hold these too; the gate reads the real path, so a symlink or a relative
     /// path doesn't slip past a glob.
     #[test]
-    fn no_agent_writes_claude_settings_mcp_servers_or_a_git_pointer() {
+    fn no_worker_writes_claude_settings_mcp_servers_or_a_git_pointer() {
         let f = fx();
-        let (_, scope) = worker_fx(&f);
+        let (_, scope) = worker_fx(&f.paths);
         let wt = f.paths.worker_worktree("auth", "web");
         let w = |p: &str| gate_decision("Write", &json!({ "file_path": p }), Some(&wt), &scope);
         for p in [".claude/settings.json", ".mcp.json", ".git", ".git/config", ".CLAUDE/settings.local.json"] {
@@ -1144,15 +1060,13 @@ mod tests {
         assert!(matches!(w(&f.paths.worker_scratch("auth").join(".git/config").to_string_lossy()), GateDecision::Deny(_)));
         assert_eq!(w("docs/.claude-notes.md"), GateDecision::Allow, "only the names themselves, at the root");
         assert_eq!(w("packages/x/.gitignore"), GateDecision::Allow);
-        let coord = gate_decision("Edit", &json!({ "file_path": ".claude/settings.json" }), Some(&f.paths.coordinator_home()), &f.scope);
-        assert!(matches!(coord, GateDecision::Deny(_)), "the coordinator's home too");
         let _ = fs::remove_dir_all(&f.base);
     }
 
     #[test]
     fn a_worker_the_gate_cannot_find_is_refused() {
         let f = fx();
-        let (w, _) = worker_fx(&f);
+        let (w, _) = worker_fx(&f.paths);
         let hive = crate::hive::launch::tests::sample_hive();
         let agent = || Some((hive.clone(), crate::hive::ROLE_WORKER.to_string(), HivePaths::new(f.paths.root.clone())));
         let wt = f.paths.worker_worktree("auth", "web").to_string_lossy().to_string();
@@ -1168,7 +1082,7 @@ mod tests {
     #[test]
     fn a_worker_runs_queued_commands_only_through_hive_run() {
         let f = fx();
-        let (w, scope) = worker_fx(&f);
+        let (w, scope) = worker_fx(&f.paths);
         let scope = GateScope { queued: vec![vec!["cargo".into(), "test".into()], vec!["npm".into(), "run".into(), "tauri:dev".into()]], ..scope };
         let wt = f.paths.worker_worktree("auth", "web");
         let bash = |cmd: &str| gate_decision("Bash", &json!({ "command": cmd }), Some(&wt), &scope);
@@ -1231,8 +1145,9 @@ mod tests {
         let push = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": wt}).to_string();
         assert!(matches!(decide_event("tab-w", agent, &push), GateDecision::Deny(_)));
         assert_eq!(fs::read_to_string(f.paths.run_log()).unwrap().lines().count(), 1, "only queued-command refusals go on the run log");
-        let coordinator = scope_for(&hive, crate::hive::ROLE_COORDINATOR, &f.paths);
-        assert!(coordinator.queued.is_empty(), "the coordinator runs no cargo anyway: its rules have no such Bash");
+        // The coordinator's shell runs what its human's would: nothing is queued for it.
+        let coordinator = Some((hive, crate::hive::ROLE_COORDINATOR.to_string(), HivePaths::new(f.paths.root.clone())));
+        assert_eq!(decide_event("coord", coordinator, &ev), GateDecision::Allow);
         let _ = fs::remove_dir_all(&f.base);
     }
 

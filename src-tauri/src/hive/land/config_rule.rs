@@ -33,6 +33,16 @@ pub const DEFAULT_PATTERNS: &[&str] = &[
     "build.rs",
     ".gitmodules",
     ".gitattributes",
+    // What runs when the human opens the folder in an editor (a task on `folderOpen`, a setting
+    // that names a binary), at any depth: an install job may write them under `node_modules`'
+    // neighbours, and a worker's own shell below the top (first real use, 2026-10-26).
+    ".vscode/**",
+    ".idea/**",
+    // What runs at the human's next install.
+    ".pnpmfile.cjs",
+    ".yarnrc.yml",
+    ".yarnrc",
+    ".npmrc",
 ];
 
 /// `*` and `?` inside one path part.
@@ -296,6 +306,11 @@ mod tests {
             "src-tauri/build.rs",
             ".gitmodules",
             "assets/.gitattributes",
+            "packages/app/.vscode/tasks.json",
+            ".idea/workspace.xml",
+            ".pnpmfile.cjs",
+            "web/.yarnrc.yml",
+            ".npmrc",
         ] {
             assert!(listed(p, &[]), "{p}");
         }

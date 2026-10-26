@@ -2,9 +2,10 @@
 //! §11.1).
 //!
 //! A Hive agent's first launch carries everything that makes it one: its folders as
-//! `--add-dir`, the sandbox, deny rules and command hooks in `--settings`, only maiTerm's MCP
-//! server, its tool set, model and effort. A generic `claude --resume <id>` drops all of it, so
-//! a `hive_role` tab never starts any other way: no record, no launch.
+//! `--add-dir`, the memory folder, deny rules and command hooks in `--settings`, its model and
+//! effort, and for a worker its sandbox, only maiTerm's MCP server and its tool set. A generic
+//! `claude --resume <id>` drops all of it, so a `hive_role` tab never starts any other way: no
+//! record, no launch.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,9 +29,6 @@ pub const SESSIONS_FILE: &str = "sessions.json";
 
 /// `onFailure` on a hook, which the fail-closed gate depends on, arrived in 2.1.295 (§6.8).
 pub const MIN_CLAUDE: (u32, u32, u32) = (2, 1, 295);
-
-/// The coordinator's built-in tools, by name: a pattern here silently drops the tool (spike 13).
-pub const COORDINATOR_TOOLS: &str = "Read,Grep,Glob,Bash,Write,Edit";
 
 /// Set by a parent Claude for its own children; inherited, they make the new session a child
 /// of it, bill the parent's key or override `--effort` (measured running `claude -p` from a
@@ -63,12 +61,14 @@ pub struct LaunchRecord {
     pub add_dirs: Vec<String>,
     /// The env maiTerm sets on the launch line, in order.
     pub env: Vec<(String, String)>,
-    /// `--setting-sources`, when the launch narrows them.
+    /// `--setting-sources`, when the launch narrows them: a worker's. The coordinator loads every
+    /// source, as a normal tab does.
     pub setting_sources: Option<String>,
     pub settings_path: String,
+    /// `--mcp-config`; empty passes none (a coordinator whose account serves maiTerm already).
     pub mcp_config_path: String,
-    /// `--permission-mode` for a worker (`"auto"`); the coordinator's `dontAsk` is fixed in the
-    /// builder, never read from here.
+    /// `--permission-mode` for a worker (`"auto"`). The coordinator has none: its human's
+    /// settings pick it, as for any tab.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
     /// `--disallowedTools`, by name: WebFetch on every worker, WebSearch unless its role has `web`.
@@ -99,10 +99,10 @@ fn s(p: &Path) -> String {
 }
 
 /// The coordinator's record, all of it derived from the Hive: its home as cwd, a read copy of
-/// each git folder, the plain folders and the gallery as `--add-dir`, and its own temp (§6.3,
-/// §6.7). `--setting-sources project` keeps the user's own allow rules out: under dontAsk the
-/// launch's allow list must be the whole list (§7.1), and its home holds no project settings
-/// (they're on its `denyWrite`).
+/// each git folder, the plain folders and the gallery as `--add-dir`, and its own temp (§6.3).
+/// Every setting source, as a plain tab: by the human's decision (2026-10-26) it runs with their
+/// own settings, MCP servers and permission mode (§7.1). `prepare_coordinator` drops the MCP
+/// config when the account already serves maiTerm.
 pub fn coordinator_record(hive: &Hive, paths: &HivePaths) -> LaunchRecord {
     let task = paths.coordinator_task();
     let mut add_dirs: Vec<String> = Vec::new();
@@ -126,7 +126,7 @@ pub fn coordinator_record(hive: &Hive, paths: &HivePaths) -> LaunchRecord {
             ("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD".to_string(), "1".to_string()),
             ("CLAUDE_CODE_TMPDIR".to_string(), s(&paths.coordinator_tmp())),
         ],
-        setting_sources: Some("project".to_string()),
+        setting_sources: None,
         settings_path: s(&task.join(SETTINGS_FILE)),
         mcp_config_path: s(&task.join(MCP_FILE)),
         permission_mode: None,
@@ -138,7 +138,7 @@ pub fn coordinator_record(hive: &Hive, paths: &HivePaths) -> LaunchRecord {
 /// A worker's record, derived from the Hive and its `worker.json` on every launch (§6.3, §6.7):
 /// its first worktree (or `scratch/`) as cwd; its other worktrees, the plain folders it was
 /// given, `scratch/` and the gallery as `--add-dir`; its own temp and, for a Rust worker, its
-/// own cargo target. Project settings only, as the coordinator: `--settings` outranks only the
+/// own cargo target. Project settings only, never the user's: `--settings` outranks only the
 /// keys it sets, and Claude merges the sandbox's lists across sources and honours a user
 /// setting's `allowLocalBinding` or `allowedDomains`, so the human's own settings would widen
 /// every worker's sandbox. Under `allowUnsandboxedCommands: false` and `strictAllowlist` from
@@ -283,7 +283,8 @@ fn write_bytes_as(path: &Path, bytes: &[u8], private: bool) -> Result<(), String
 
 /// The whole command line after `claude`. `--model` and `--effort` on every launch: on resume
 /// Claude keeps the model but drops effort to medium (spike 11), and the record, not the resumed
-/// session, decides both.
+/// session, decides both. A worker gets only the MCP servers its config names; the coordinator
+/// the account's own as well, like any tab (§7.1).
 pub fn hive_launch_args(record: &LaunchRecord, resume: Option<&str>) -> Vec<String> {
     let mut a: Vec<String> = Vec::new();
     let mut push = |k: &str, v: &str| {
@@ -291,8 +292,12 @@ pub fn hive_launch_args(record: &LaunchRecord, resume: Option<&str>) -> Vec<Stri
         a.push(v.to_string());
     };
     push("--settings", &record.settings_path);
-    push("--mcp-config", &record.mcp_config_path);
-    a.push("--strict-mcp-config".to_string());
+    if !record.mcp_config_path.is_empty() {
+        push("--mcp-config", &record.mcp_config_path);
+    }
+    if record.role != ROLE_COORDINATOR {
+        a.push("--strict-mcp-config".to_string());
+    }
     if let Some(src) = record.setting_sources.as_deref() {
         a.push("--setting-sources".to_string());
         a.push(src.to_string());
@@ -309,9 +314,7 @@ pub fn hive_launch_args(record: &LaunchRecord, resume: Option<&str>) -> Vec<Stri
         a.push("--effort".to_string());
         a.push(record.effort.clone());
     }
-    if record.role == ROLE_COORDINATOR {
-        a.extend(["--tools", COORDINATOR_TOOLS, "--permission-mode", "dontAsk"].map(String::from));
-    } else if let Some(mode) = record.permission_mode.as_deref().filter(|m| !m.is_empty()) {
+    if let Some(mode) = record.permission_mode.as_deref().filter(|m| !m.is_empty()) {
         a.push("--permission-mode".to_string());
         a.push(mode.to_string());
     }
@@ -625,7 +628,9 @@ pub fn claude_new_enough() -> Result<(), String> {
 pub fn write_launch_files(hive: &Hive, paths: &HivePaths, record: &LaunchRecord, hooks: &super::settings::HookEnv) -> Result<(), String> {
     let settings = super::settings::hive_settings_json(hive, record, paths, hooks)?;
     write_json(Path::new(&record.settings_path), &settings)?;
-    write_private_json(Path::new(&record.mcp_config_path), &super::settings::hive_mcp_config())?;
+    if !record.mcp_config_path.is_empty() {
+        write_private_json(Path::new(&record.mcp_config_path), &super::settings::hive_mcp_config())?;
+    }
     if record.role == ROLE_COORDINATOR {
         let counts = super::precedents::counts(paths);
         write_bytes(&paths.coordinator_brief(), super::brief::brief_md(hive, paths, &counts).as_bytes())?;
@@ -775,13 +780,27 @@ fn first_launch_setup(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> Resul
     if w.is_reviewer() {
         return Ok(prefix);
     }
+    // Setup's package caches are the worker's own, as its later install jobs' are: one store, so
+    // a reinstall finds what setup put there. Emptied first: setup runs unsandboxed, so it must
+    // never read a cache a worker's job could have written (`deps::cache_env`).
+    let cache = paths.worker_deps_cache(&w.slug);
+    let exports: String = super::deps::cache_env(&cache).iter().map(|(k, v)| format!(" {k}={}", sh_quote(v))).collect();
+    let mut emptied = false;
     for f in w.git_folders() {
         let setup = hive.folders.iter().find(|h| h.name == f.name).and_then(|h| h.setup.as_deref()).map(str::trim).filter(|s| !s.is_empty());
         let (Some(setup), Some(wt)) = (setup, f.worktree.as_deref()) else { continue };
         if setup.chars().any(char::is_control) {
             return Err(format!("The setup command of \"{}\" has a line break in it, so it can't be typed as one line. Fix it in the Hive's settings.", f.name));
         }
-        prefix.push_str(&format!("( cd {} && {setup} ) && ", sh_quote(wt)));
+        if !emptied {
+            emptied = true;
+            if fs::symlink_metadata(&cache).is_ok() {
+                if let Err(e) = fs::remove_dir_all(&cache).or_else(|_| fs::remove_file(&cache)) {
+                    return Err(format!("maiTerm couldn't empty {}'s package cache ({e}), so its setup didn't run.", w.slug));
+                }
+            }
+        }
+        prefix.push_str(&format!("( cd {} && export{exports} && {setup} ) && ", sh_quote(wt)));
     }
     Ok(prefix)
 }
@@ -886,15 +905,19 @@ fn prepare_coordinator(hive: &Hive, paths: &HivePaths, prefs: &crate::state::Pre
     })?;
     claude_new_enough()?;
 
+    let root = launch_config_root(prefs);
+    let launch_json = claude_json_for(root.as_deref()).ok_or("Couldn't find the home folder")?;
     // The coordinator's record is all derived from the Hive, so a folder added since the last
-    // launch reaches this one.
-    let record = coordinator_record(hive, paths);
+    // launch reaches this one; and its MCP servers from the account it starts under, which serves
+    // maiTerm's to every tab while the Claude Code integration is on.
+    let mut record = coordinator_record(hive, paths);
+    let claude_json = fs::read(&launch_json).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    if super::settings::has_maiterm_server(claude_json.as_ref()) {
+        record.mcp_config_path.clear();
+    }
     if record != existing {
         write_record(&task, &record)?;
     }
-
-    let root = launch_config_root(prefs);
-    let launch_json = claude_json_for(root.as_deref()).ok_or("Couldn't find the home folder")?;
     ensure_trust(&launch_json, paths, &paths.coordinator_home())?;
 
     let hooks = super::settings::HookEnv::current()?;
@@ -983,12 +1006,7 @@ pub(crate) mod tests {
             assert_eq!(flag_values(&a, "--effort"), vec!["medium"]);
             assert_eq!(flag_values(&a, "--model"), vec!["opus"]);
             assert_eq!(flag_values(&a, "--settings"), vec![r.settings_path.as_str()]);
-            assert!(a.contains(&"--strict-mcp-config".to_string()));
             assert_eq!(flag_values(&a, "--add-dir").len(), r.add_dirs.len());
-            assert_eq!(flag_values(&a, "--permission-mode"), vec!["dontAsk"]);
-            let tools = flag_values(&a, "--tools");
-            assert_eq!(tools.len(), 1);
-            assert!(!tools[0].contains('(') && !tools[0].contains(' '), "names only: {}", tools[0]);
             assert_eq!(flag_values(&a, "--resume"), resume.into_iter().collect::<Vec<_>>());
         }
     }
@@ -1306,25 +1324,63 @@ pub(crate) mod tests {
         (h, p, w)
     }
 
+    /// The human's decision (2026-10-26): the coordinator launches as a normal agent tab, every
+    /// setting source and the account's MCP servers, no sandbox, tool list or permission mode of
+    /// maiTerm's. What stays is the Hive's: its settings file (hooks, memory, push denies), its
+    /// folders, model and effort.
     #[test]
-    fn the_coordinators_arguments_are_unchanged() {
-        let r = coordinator_record(&sample_hive(), &sample_paths());
+    fn the_coordinator_launches_like_a_normal_agent_tab() {
+        let mut r = coordinator_record(&sample_hive(), &sample_paths());
         let p = sample_paths();
         let mut want: Vec<String> = vec!["--settings".into(), r.settings_path.clone(), "--mcp-config".into(), r.mcp_config_path.clone()];
-        want.extend(["--strict-mcp-config", "--setting-sources", "project"].map(String::from));
         for d in [s(&p.coordinator_worktree("web")), "/r/brand assets".to_string(), s(&p.gallery()), s(&p.coordinator_home())] {
             want.push("--add-dir".into());
             want.push(d);
         }
-        want.extend(["--model", "opus", "--effort", "medium", "--tools", COORDINATOR_TOOLS, "--permission-mode", "dontAsk", "--resume", "sid"].map(String::from));
-        assert_eq!(hive_launch_args(&r, Some("sid")), want);
+        want.extend(["--model", "opus", "--effort", "medium", "--resume", "sid"].map(String::from));
+        assert_eq!(hive_launch_args(&r, Some("sid")), want, "an account without maiTerm's server gets it from the Hive");
+        for absent in ["--strict-mcp-config", "--setting-sources", "--tools", "--permission-mode", "--disallowedTools"] {
+            assert!(!hive_launch_args(&r, None).iter().any(|a| a == absent), "{absent}");
+        }
+        // The account serves maiTerm (`prepare_coordinator`): no second copy of it.
+        r.mcp_config_path.clear();
+        assert!(flag_values(&hive_launch_args(&r, None), "--mcp-config").is_empty());
         let text = serde_json::to_string(&r).unwrap();
         for absent in ["permission_mode", "disallowed_tools", "task_id"] {
             assert!(!text.contains(absent), "the coordinator's launch.json gains no {absent}");
         }
-        // A record written before these fields reads as it always did.
         let old: LaunchRecord = serde_json::from_str(&text).unwrap();
         assert_eq!(old, r);
+    }
+
+    /// Workers and reviewers launch exactly as contained as before: their own MCP servers only,
+    /// narrowed setting sources, auto mode.
+    #[test]
+    fn workers_keep_the_strict_mcp_config_and_their_narrowed_sources() {
+        let (h, p, w) = sample_worker_hive();
+        let mut reviewer = w.clone();
+        reviewer.reviews = Some("t-other".into());
+        for (who, rec) in [("worker", worker_record(&h, &p, &w)), ("reviewer", worker_record(&h, &p, &reviewer))] {
+            let a = hive_launch_args(&rec, None);
+            assert!(a.contains(&"--strict-mcp-config".to_string()), "{who}");
+            assert_eq!(flag_values(&a, "--mcp-config"), vec![rec.mcp_config_path.as_str()], "{who}");
+            assert_eq!(flag_values(&a, "--permission-mode"), vec![WORKER_PERMISSION_MODE], "{who}");
+            assert_eq!(flag_values(&a, "--setting-sources").len(), 1, "{who}");
+        }
+    }
+
+    #[test]
+    fn the_coordinator_reads_maiterm_from_its_account_only_when_it_is_there() {
+        use crate::hive::settings::has_maiterm_server;
+        let key = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
+        let served = serde_json::json!({ "mcpServers": { key: { "type": "http", "url": "http://127.0.0.1:1/mcp" }, "railway": { "command": "x" } } });
+        assert!(has_maiterm_server(Some(&served)));
+        let other = if key == "maiterm" { "maiterm-dev" } else { "maiterm" };
+        let other_build = serde_json::json!({ "mcpServers": { other: { "type": "http", "url": "http://127.0.0.1:1/mcp" } } });
+        assert!(!has_maiterm_server(Some(&other_build)), "another build's server is no maiTerm for this one");
+        assert!(!has_maiterm_server(Some(&serde_json::json!({ "mcpServers": { key: {} } }))));
+        assert!(!has_maiterm_server(Some(&serde_json::json!({}))));
+        assert!(!has_maiterm_server(None));
     }
 
     #[test]

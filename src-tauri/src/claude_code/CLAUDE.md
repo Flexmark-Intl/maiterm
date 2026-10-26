@@ -688,8 +688,16 @@ each other. The mod could drop inbound per tab (`session.receive` → `{ consume
 
 **Hive tabs are different: every hook is a command hook, from the launch's own `--settings`**
 (docs/hive.md §6.8, §11.1; `hive/settings.rs`, `resources/hive/maiterm-hive-hook.sh`). A Hive
-agent runs in Claude's sandbox, which breaks every localhost `type:"http"` hook (spike 9), and
-it launches with `--setting-sources project`, so none of the hooks above load there at all.
+worker runs in Claude's sandbox, which breaks every localhost `type:"http"` hook (spike 9), and
+it launches with `--setting-sources project` (a reviewer `local`), so none of the hooks above
+load there at all.
+- **The coordinator is a normal agent tab since 2026-10-26** (docs/hive.md §7.1): every setting
+  source, so the hooks above DO load beside its own command hooks. `hooks_handler` drops their
+  copies for any Hive tab (`hive::duplicate_hook_copy`: not `via=hive`/`via=mod`, and the tab
+  the copy names, or its session's tab, is a `hive_role` tab), after the PreModelSwitch reply.
+  Its gate sees `Bash|PowerShell` only and refuses only a push, `send-pack`, `git remote` and
+  `gh pr merge`; what the probes below say of the coordinator's git describes its launch before
+  that date.
 - **One script, two modes.** It lives at `<app data>/hive/bin/maiterm-hive-hook`, is rewritten
   with its `port` file on every server bind (`settings::install_hook`), and reads the port from
   that file on each call (`$MAITERM_PORT` only as the fallback), so a restart on a new port

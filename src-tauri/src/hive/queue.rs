@@ -140,6 +140,9 @@ pub struct JobSpec {
     pub needs: Vec<String>,
     pub env: Vec<(String, String)>,
     pub extra_write: Vec<String>,
+    /// A package install (`deps::is_install`): the job reaches the package registries through
+    /// `registry_proxy`, the one way out of its profile's closed network.
+    pub registries: bool,
     /// Copy keys it leases while it runs.
     pub leases: Vec<String>,
     /// The Hive's `run_queue.resources` when it was queued.
@@ -228,6 +231,8 @@ pub struct Job {
     pub env: Vec<(String, String)>,
     #[serde(skip)]
     pub extra_write: Vec<String>,
+    #[serde(skip)]
+    pub registries: bool,
     #[serde(skip)]
     shares: BTreeMap<String, u32>,
     #[serde(skip)]
@@ -413,6 +418,7 @@ impl Queue {
             leases,
             env: spec.env,
             extra_write: spec.extra_write,
+            registries: spec.registries,
             shares: spec.shares,
             seq: self.seq,
             service_id: spec.service_id,
@@ -1373,6 +1379,7 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
     let ports = if n > 0 { crate::stack::ports::take(&job.id, n, crate::stack::ports::DEFAULT_BASE, false, forbidden)? } else { Vec::new() };
     let release = |e: String| {
         crate::stack::ports::release(&job.id);
+        super::registry_proxy::close(&job.id);
         e
     };
     values.port = ports.first().copied();
@@ -1410,6 +1417,13 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
             reach.extend(copy.unwrap_or_default());
         }
     }
+    // A package install reaches the registries, and only them, through maiTerm's proxy: its
+    // profile opens that port, the proxy checks the host (§6.8).
+    let proxy = match job.registries {
+        true => Some(super::registry_proxy::open(&job.id, super::registry_proxy::install_hosts(&hive, &ctx.remote_hosts)).map_err(release)?),
+        false => None,
+    };
+    reach.extend(proxy.as_ref().map(|(port, _)| *port));
 
     let run_dir = paths.run(&job.id);
     let job_tmp = match &job.land {
@@ -1459,6 +1473,9 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
         line_env.push(("CARGO_TARGET_DIR".to_string(), s(&paths.worker_cargo_target(&w.slug))));
     }
     line_env.push(("CARGO_NET_OFFLINE".to_string(), "true".to_string()));
+    if let Some((_, url)) = &proxy {
+        line_env.extend(super::registry_proxy::env(url));
+    }
     for (k, v) in env {
         line_env.retain(|(o, _)| *o != k);
         line_env.push((k, v));
@@ -1658,6 +1675,7 @@ async fn finish(d: &'static Driver, e: Ended) {
     let tail = super::run::screen_tail(&d.app, job.pty_id.as_deref());
     set_row(&d.app, &job, None);
     crate::stack::ports::release(&job.id);
+    super::registry_proxy::close(&job.id);
     let (logged, app) = (job.clone(), d.app.clone());
     // A pass is checked against the worktree as it is now before it is logged as one.
     let wrote = tauri::async_runtime::spawn_blocking(move || {

@@ -871,6 +871,8 @@ export interface HiveFolderInfo {
   /** Claude would skip the trust dialog here. False is a warning, never a refusal. */
   trusted: boolean;
   local_remotes: string[];
+  /** The install its lockfiles name (`pnpm install --frozen-lockfile`…): the sheet's setup. */
+  setup: string | null;
 }
 
 /** A tool the Hive can make things with (docs/hive.md §3 Tools). `id` is what `Hive.tools` holds. */
