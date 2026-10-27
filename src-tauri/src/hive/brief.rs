@@ -403,7 +403,8 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
         paths.gallery().display()
     ));
     b.push_str(&format!(
-        "## How this Hive runs\n\n- Workers at once: {}.\n- Landing: {}.\n- {MEMORY_RULE} So a decision running workers \
+        "## How this Hive runs\n\n- Workers at once: at most {}. A ceiling, not a target: start as many as the plan can use in \
+         parallel without workers colliding in the same files, and no more.\n- Landing: {}.\n- {MEMORY_RULE} So a decision running workers \
          need also goes to them by message (hiveMessageWorker).\n",
         hive.cap,
         if hive.is_integration() { format!("into `{}`, each land approved by your human", hive.integration_branch()) } else { "straight into each folder\u{2019}s Base".to_string() }
