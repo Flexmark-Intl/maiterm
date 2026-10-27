@@ -87,9 +87,15 @@ each was made, in the spirit of Higgsfield's library.
 
 ## 3. Turning a workspace into a Hive
 
-Creating a Hive is a sheet, opened from the workspace row's menu ("Make this a Hive…"). It's
-offered only when the workspace has **no tabs** (or only one fresh, unused shell, which the Hive
-replaces):
+Creating a Hive is a guided wizard, opened from the workspace row's menu ("Make this a Hive…").
+It's offered only when the workspace has **no tabs** (or only one fresh, unused shell, which the
+Hive replaces). One question a step (Darryl, 2026-10-27: the single scrolling sheet read as a
+preferences screen): **Goal** (goal, name, instructions), **Folders**, **Crew** (workers at once,
+models, how work lands, push after land, the phone), **Tools** (tools, budget), **Stack**, and
+**Review**, a plain-language account of what Create will start. Every step but Goal and Folders
+has defaults, so Next is all most of them need. The step rail is a running receipt: a step passed
+shows what was chosen there, and any step whose earlier steps are complete opens from it
+(`HiveCreateSheet.svelte`; each step's check is its part of `validateSpec`). The fields:
 
 | Field | Meaning |
 |---|---|

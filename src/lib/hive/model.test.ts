@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   adoptInstalled, charCount, checkpointAsks, checkpointFor, coordinatorHolds, dispatchHiveOpenColumn, engineSkips, folderName, HIVE_HUMAN_KIND,
-  HIVE_PROMPT_KINDS, hiveOwnsPromptIn, isEligible, MAX_INSTRUCTIONS, openTargetFor, pausedLabel, slugify, throttleTip, boardGone, takePendingHiveOpen, validateSpec, withCoordinatorText,
+  HIVE_PROMPT_KINDS, hiveOwnsPromptIn, isEligible, MAX_INSTRUCTIONS, openTargetFor, pausedLabel, slugify, throttleTip, boardGone, takePendingHiveOpen, validateAbout, validateCap, validateFolders, validateSpec, withCoordinatorText,
 } from './model';
 
 describe('boardGone', () => {
@@ -114,6 +114,15 @@ describe('validateSpec', () => {
     expect(with_({ cap: 65 })).toMatch(/1 to 64/);
     expect(with_({ cap: 64 })).toBeNull();
     expect(with_({ cap: 24 })).toBeNull();
+  });
+
+  it("each wizard step checks only its own part, and together they are validateSpec", () => {
+    expect(validateAbout({ ...ok, goal: '' })).toMatch(/goal/);
+    expect(validateAbout({ ...ok, folders: [] } as typeof ok)).toBeNull();
+    expect(validateFolders({ folders: [] })).toMatch(/Primary/);
+    expect(validateCap({ cap: 65 })).toMatch(/1 to 64/);
+    expect(with_({ goal: '', folders: [], cap: 0 })).toBe(validateAbout({ ...ok, goal: '' }));
+    expect(with_({ folders: [], cap: 0 })).toBe(validateFolders({ folders: [] }));
   });
 
   it('needs a Base for a git folder, as Rust does', () => {

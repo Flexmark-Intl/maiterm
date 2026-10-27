@@ -166,20 +166,35 @@ type SpecFields = {
 };
 
 /** The first thing stopping Create, in a sentence, or null. Same rules and order as Rust's
- *  `validate_spec`. */
+ *  `validate_spec`; the Create wizard asks each step's part on its own. */
 export function validateSpec(spec: SpecFields): string | null {
+  return validateAbout(spec) ?? validateFolders(spec) ?? validateCap(spec);
+}
+
+/** The wizard's Goal step: the name, the goal, the instructions. */
+export function validateAbout(spec: Pick<SpecFields, 'name' | 'goal' | 'instructions'>): string | null {
   if (!spec.name.trim()) return 'Name the Hive.';
   if (!slugify(spec.name)) return "The name needs at least one letter or digit: it names the Hive's branches.";
   if (!spec.goal.trim()) return 'Give the Hive a goal.';
   const n = charCount(spec.instructions);
   if (n > MAX_INSTRUCTIONS) return `The instructions are ${n} characters; the limit is 16,000. Shorten them: nothing is cut.`;
+  return null;
+}
+
+/** The wizard's Crew step. */
+export function validateCap(spec: Pick<SpecFields, 'cap'>): string | null {
+  if (!Number.isInteger(spec.cap) || spec.cap < 1 || spec.cap > MAX_CAP) return `Workers at once is 1 to ${MAX_CAP}.`;
+  return null;
+}
+
+/** The wizard's Folders step. */
+export function validateFolders(spec: Pick<SpecFields, 'folders'>): string | null {
   const primaries = spec.folders.filter((f) => f.primary).length;
   if (primaries === 0) return 'Pick a Primary folder.';
   if (primaries > 1) return 'Only one folder can be Primary.';
   // Rust's `resolve_folders` refuses it too, once it has re-detected the repo.
   const baseless = spec.folders.find((f) => f.kind === 'git' && !f.base?.trim() && !f.detectedBase?.trim());
   if (baseless) return `${baseless.name?.trim() || baseless.path}: pick a Base branch (the repo is on a detached HEAD), or share it as a plain folder.`;
-  if (!Number.isInteger(spec.cap) || spec.cap < 1 || spec.cap > MAX_CAP) return `Workers at once is 1 to ${MAX_CAP}.`;
   return null;
 }
 
