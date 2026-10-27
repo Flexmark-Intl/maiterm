@@ -78,6 +78,11 @@
   let picked = $state(new Set<string>());
   let budgetDollars = $state(10);
   let pushAfterLand = $state(false);
+  /** The budget as Create sends it: an emptied or negative field is $0, and the receipt and the
+   *  review say what is sent. */
+  const budget = $derived(Math.max(0, Number(budgetDollars) || 0));
+  /** Rust pushes only lands to Base: an integration branch is never pushed. */
+  const pushes = $derived(pushAfterLand && landing === 'base');
   /** Who is a chat on the phone. "none" makes every Hive tab off it: Create launches the
    *  coordinator at once, so there's no later moment to exclude it before its first turn. */
   let phone = $state<'coordinator' | 'all' | 'none'>('coordinator');
@@ -157,8 +162,8 @@
     switch (k) {
       case 'goal': return goal.trim() || null;
       case 'folders': return folderList.length ? folderList.join(', ') : null;
-      case 'crew': return `Up to ${cap} ${cap1(workerModel)} workers`;
-      case 'tools': return `${pickedTools.length ? `${pickedTools.length} tool${pickedTools.length === 1 ? '' : 's'}` : 'No tools'}, $${budgetDollars} budget`;
+      case 'crew': return validateCap({ cap: Number(cap) }) ? null : `Up to ${cap} ${cap1(workerModel)} workers`;
+      case 'tools': return `${pickedTools.length ? `${pickedTools.length} tool${pickedTools.length === 1 ? '' : 's'}` : 'No tools'}, $${budget} budget`;
       case 'stack': return stackRows.length ? `${stackRows.length} service${stackRows.length === 1 ? '' : 's'}` : 'Nothing to run';
       default: return null;
     }
@@ -380,8 +385,8 @@
         worker: { runtime: 'claude', model: workerModel, effort: workerEffort },
       },
       tools: [...picked],
-      budget_cents: Math.max(0, Math.round(Number(budgetDollars) * 100)),
-      push_after_land: pushAfterLand,
+      budget_cents: Math.round(budget * 100),
+      push_after_land: pushes,
       stack: $state.snapshot(stackRows) as Service[],
       keep_off_phone: phone === 'none',
       workers_on_phone: phone === 'all',
@@ -419,7 +424,7 @@
       <nav class="rail" aria-label="Steps">
         <ol>
           {#each STEPS as s, i (s.key)}
-            {@const done = i < step || (i <= reached && i !== step && !stepProblem(s.key))}
+            {@const done = i <= reached && i !== step && !stepProblem(s.key)}
             {@const r = i <= reached && i !== step ? receipt(s.key) : null}
             <li>
               <button
@@ -568,10 +573,12 @@
             <label class="choice"><input type="radio" name="hive-landing" value="base" bind:group={landing} /><span><b>Straight into Base</b><span class="hint">The coordinator merges each finished worker into its repo's Base branch.</span></span></label>
             <label class="choice"><input type="radio" name="hive-landing" value="integration" bind:group={landing} /><span><b>Into an integration branch, each land approved by you</b><span class="hint">Base stays untouched until you merge the branch yourself.</span></span></label>
           </fieldset>
-          <label class="choice field">
-            <input type="checkbox" bind:checked={pushAfterLand} />
-            <span><b>Push after each land</b><span class="hint">Each land to Base also pushes that repo's Base.</span></span>
-          </label>
+          {#if landing === 'base'}
+            <label class="choice field">
+              <input type="checkbox" bind:checked={pushAfterLand} />
+              <span><b>Push after each land</b><span class="hint">Each land to Base also pushes that repo's Base.</span></span>
+            </label>
+          {/if}
           <fieldset class="field">
             <legend class="label">Chats on your phone</legend>
             <label class="choice"><input type="radio" name="hive-phone" value="coordinator" bind:group={phone} /><span><b>The coordinator only</b><span class="hint">It speaks for its workers.</span></span></label>
@@ -664,11 +671,11 @@
               A coordinator on <b>Claude {coordModel}</b> ({coordEffort} effort) works toward
               “{goal.trim()}”. It starts up to <b>{cap}</b> workers on <b>Claude {workerModel}</b> ({workerEffort} effort)
               in <b>{folderList.join(', ')}</b>, and lands each finished worker
-              {landing === 'base' ? "straight into its repo's Base" : `into hive/${slug}, each land approved by you`}{pushAfterLand ? ', then pushes it' : ''}.
+              {landing === 'base' ? "straight into its repo's Base" : `into hive/${slug}, each land approved by you`}{pushes ? ', then pushes it' : ''}.
             </p>
             <p>
               {pickedTools.length ? `It can make things with ${pickedTools.join(', ')}` : 'No extra tools'}, with
-              a ${budgetDollars} budget for paid generation.
+              a ${budget} budget for paid generation.
               {stackRows.length ? `Its stack: ${stackRows.map((r) => r.name).join(', ')}.` : 'It has no stack services.'}
               On your phone: {PHONE_TEXT[phone].toLowerCase()}.
             </p>
@@ -686,8 +693,8 @@
         <span class="error foot">{createError}</span>
       {:else if here && !blocked}
         <span class="hint foot">{here}</span>
-      {:else if isLast && problem && !blocked}
-        <span class="hint foot">{problem}</span>
+      {:else if isLast && (problem ?? stackProblem) && !blocked}
+        <span class="hint foot">{problem ?? stackProblem}</span>
       {:else}
         <span class="foot"></span>
       {/if}
