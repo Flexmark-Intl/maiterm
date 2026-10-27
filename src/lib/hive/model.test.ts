@@ -82,9 +82,8 @@ describe('validateSpec', () => {
     instructions: '',
     folders: [{ path: '/r/web', primary: true }],
     cap: 4,
-    cap_confirmed: false,
   };
-  const with_ = (patch: Partial<typeof ok>) => validateSpec({ ...ok, ...patch }, 5);
+  const with_ = (patch: Partial<typeof ok>) => validateSpec({ ...ok, ...patch });
 
   it('accepts a complete spec', () => {
     expect(with_({})).toBeNull();
@@ -110,15 +109,15 @@ describe('validateSpec', () => {
     expect(with_({ goal: '' })).toMatch(/goal/);
   });
 
-  it('holds a cap above the ceiling until confirmed', () => {
-    expect(with_({ cap: 0 })).toMatch(/at least 1/);
-    expect(with_({ cap: 6 })).toMatch(/ceiling of 5/);
-    expect(with_({ cap: 6, cap_confirmed: true })).toBeNull();
-    expect(with_({ cap: 5 })).toBeNull();
+  it('takes any cap from 1 to 64: no machine ceiling, memory pressure governs', () => {
+    expect(with_({ cap: 0 })).toMatch(/1 to 64/);
+    expect(with_({ cap: 65 })).toMatch(/1 to 64/);
+    expect(with_({ cap: 64 })).toBeNull();
+    expect(with_({ cap: 24 })).toBeNull();
   });
 
   it('needs a Base for a git folder, as Rust does', () => {
-    const git = (f: object) => validateSpec({ ...ok, folders: [{ path: '/r/web', primary: true, name: 'web', kind: 'git', ...f }] }, 5);
+    const git = (f: object) => validateSpec({ ...ok, folders: [{ path: '/r/web', primary: true, name: 'web', kind: 'git', ...f }] });
     expect(git({ base: '', detectedBase: null })).toMatch(/^web: pick a Base branch/);
     expect(git({ base: ' ', detectedBase: 'main' })).toBeNull();
     expect(git({ base: 'release', detectedBase: null })).toBeNull();

@@ -27,8 +27,8 @@ use crate::state::{AppData, Task, Workspace, Workstream};
 pub const FUSES_VERSION: u32 = 1;
 pub const FUSES_FILE: &str = "fuses.json";
 /// Defaults of §7.8; machine-wide, not per Hive.
-pub const PER_HOUR: usize = 20;
-pub const PER_DAY: usize = 100;
+pub const PER_HOUR: usize = 60;
+pub const PER_DAY: usize = 300;
 /// How long a spawn's window has to confirm the new tab before its slot is given back (§7.2).
 pub const RESERVATION_TTL: Duration = Duration::from_secs(120);
 pub const STATUS_PAUSED: &str = "paused";

@@ -97,7 +97,7 @@ replaces):
 | Folders | **Primary** (required) plus any number more. The Primary defaults to the folder of the window's active tab (the workspace being converted usually has none, so it's the tab the human was last looking at), and to nothing when that tab has no known folder; the human then picks one. Each folder is detected as a git repo or a plain folder; a repo shows its Base branch (default: its current branch). See §6.1 |
 | Goal | One line. Shown on the Hive header, and sent to the coordinator first |
 | Instructions | Standing rules, the brief every agent in the Hive starts from (Projects' 16k-char instructions) |
-| Workers at once | **Hard cap**, enforced in Rust (default 4). What it counts is §3.1 |
+| Workers at once | **Hard cap**, enforced in Rust (default 24, at most 64; §6.8). A ceiling, not a target: the coordinator starts what the plan needs. What it counts is §3.1 |
 | Landing | **Land to Base** (default: the coordinator merges each finished worker into its repos' Base) or **Integration branch, I approve each land** (§8). **Fixed at creation.** It's a branch topology, not a checkpoint: the Landing checkpoint (§7.4) only decides who calls `hiveLand` *within* the mode, and integration mode is always Ask me. Switching later would fast-forward integration commits into Base, so a different mode means a new Hive |
 | Stack | The services this Hive's work needs, proposed from the repos' own stacks and the human's other workspaces (§6.8). See step 3 below |
 | Land check | Optional command per repo that must pass before a land (e.g. `npm run check`), run on the reviewed commit merged with Base in a temporary worktree (§8.1) |
@@ -201,7 +201,7 @@ Slots readout):
 
 | Setting | Who may change it | Takes effect |
 |---|---|---|
-| Workers at once (`cap`, 1–32) | The human; the coordinator up to this computer's ceiling (§6.8) | At once. Lowering it stops nobody: no new worker starts while more are running |
+| Workers at once (`cap`, 1–64) | The human; the coordinator may lower it, and a raise is always a card the human approves | At once. Lowering it stops nobody: no new worker starts while more are running |
 | Coordinator and worker model and effort | Both | Each agent's next launch (the launch builder rewrites its settings, §11.1). A worker spawned with its own model keeps it |
 | Hosts every builder may reach (`settings.worker_hosts`) | Both | Each worker's next launch. Added to `allowedDomains` after the registries (`settings::worker_domains`); never a repo remote's host; never given to reviewers |
 | Push after land | The human only | The next land |
@@ -1076,14 +1076,18 @@ passed to `hiveLand`** (§8.1), never of workers that are merely Reported: revie
 When everything passes, N workers cost one suite instead of N. Batching comes after per-worker
 landing works (§16), not before it.
 
-**The machine sets the ceiling.** The agents themselves aren't free. A Claude session plus its
+**The machine still has limits.** The agents themselves aren't free. A Claude session plus its
 MCP-server children (a median of seven) is a median 0.9 GB, p90 1.1 GB, and about 2 GB for a
 long session; idle, it uses about 0% CPU, so the cost is what it runs (spike 8, §13.1). So:
 
-- **The default worker cap is 4.** The sheet's ceiling scales at about **one worker per 16 GB
-  of RAM above a 32 GB reserve**, and never more than **ncpu/4**:
-  `max(1, min((RAM−32)/16, ncpu/4))`, so 5 on a 128 GB, 20-CPU Mac and 1 at 32 GB. A cap set
-  above it needs the human's confirmation in the sheet (`create::cap_ceiling`).
+- **The default worker cap is 24, at most 64** (Darryl, 2026-10-27: a small default read as
+  "don't go big", which isn't what a Hive is for). There is **no machine ceiling** on the cap any
+  more: the RAM/CPU formula (5 on a 128 GB, 20-CPU Mac) guarded a cost the measurements above
+  don't support (idle sessions ~1 GB and ~0% CPU), and the real guards are the memory-pressure
+  throttle below and the run queue's capacities. The cap is a ceiling, not a target: the
+  coordinator starts only what the plan needs. What bounds a big Hive in practice is the Claude
+  plan's usage limit (the quota breaker, §7.8), the land lock (lands go one at a time), and one
+  coordinator reading every worker.
 - **Workers launch with `--strict-mcp-config`** and only the MCP servers they need (maiTerm's,
   and the generators the role uses), since the MCP children are half a session's memory.
 - **Pressure** is read from `kern.memorystatus_vm_pressure_level` on macOS, which is the
@@ -1396,7 +1400,7 @@ and no agent pushes (§7.3).
 What never moves to the coordinator, whatever the settings (Rust refusals by tab identity, not
 words in a brief):
 
-- creating a Hive, raising the budget or the cap past this computer's ceiling (§3.4), and
+- creating a Hive, raising the budget or the cap (§3.4; the coordinator may lower the cap), and
   **spending past the budget**;
 - Claude's workspace-trust dialog (`trust_dialog_open`) and the plan dialog, whose rows are mode
   changes;
@@ -1612,7 +1616,8 @@ checks these in Rust **before** a worker starts:
 - the worker cap (§3.1);
 - **spawns per hour and per day**, counted **across every Hive on the machine**, not per Hive
   (decided 2026-10-23): the Claude plan they draw on is shared, so two Hives each under their own
-  limits could still drain it together (defaults 20 and 100; Projects enforces 200 threads a day
+  limits could still drain it together (defaults 60 and 300, raised from 20 and 100 with the
+  default cap on 2026-10-27; Projects enforces 200 threads a day
   across all of a user's projects). Each Hive's budget stays its own, and the header also shows
   the total across Hives;
 - **a quota breaker**, also machine-wide (below).
@@ -2735,9 +2740,8 @@ running. Load average was 25–87, but CPU was 67% idle.
     (about 480 MB). Session plus children: median 0.9 GB, p90 1.1 GB, long sessions about 2 GB.
   - Idle sessions use about 0% CPU. The cost is what they run.
   - So, in §6.8:
-    - the default worker cap is 4, scaling at about one worker per 16 GB above a 32 GB reserve
-      and no more than ncpu/4: the ceiling is `max(1, min((RAM−32)/16, ncpu/4))`, which is 5 on
-      this Mac (128 GB gives 6, but 20 CPUs give 5; an earlier draft said 6);
+    - the default worker cap was 4, under a machine ceiling of `max(1, min((RAM−32)/16, ncpu/4))`
+      (5 on this Mac). Superseded 2026-10-27: default 24, at most 64, no machine ceiling (§6.8);
     - workers launch with `--strict-mcp-config` and only the MCP servers they need;
     - start nothing new at `kern.memorystatus_vm_pressure_level` ≥ 2 or under 25% free, and drop
       heavy resources to one at level 4 or under 10% free;

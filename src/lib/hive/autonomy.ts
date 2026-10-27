@@ -21,12 +21,12 @@ export const CHECKPOINT_ROWS: readonly CheckpointRow[] = [
   { key: 'landing', label: 'Landing', note: 'Who calls hiveLand, within the landing mode fixed at creation.' },
   { key: 'finals', label: 'Picking finals in the gallery', note: 'Creative Hives often set this to Ask me.' },
   { key: 'interfaces', label: 'Adding a dependency, changing a public interface', note: 'Listed so a Hive can tighten them.' },
-  { key: 'settings', label: 'Changing Hive settings', note: 'Workers at once, models, and the hosts workers reach. Ask me (the default) puts each change on a card for you. Never past this computer\'s worker ceiling, never pushing.' },
+  { key: 'settings', label: 'Changing Hive settings', note: 'Workers at once, models, and the hosts workers reach. Ask me (the default) puts each change on a card for you. Raising workers at once always comes to you; never pushing.' },
 ];
 
 /** What never moves to the coordinator, whatever the settings (§7.4): Rust refuses it by tab. */
 export const NEVER_DELEGATED: readonly string[] = [
-  "Creating a Hive, raising the budget or the cap past this computer's ceiling, and spending past the budget",
+  "Creating a Hive, raising the budget or workers at once, and spending past the budget",
   "Claude's workspace-trust dialog and the plan dialog",
   'Any prompt option that saves a setting or a rule, or changes a mode',
   'Pushing',

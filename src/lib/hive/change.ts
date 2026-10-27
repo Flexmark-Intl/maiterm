@@ -8,7 +8,7 @@ import { normalizeHost } from './budget';
 export const MODELS = ['opus', 'sonnet', 'haiku'] as const;
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 /** `change::MAX_CAP` and `MAX_WORKER_HOSTS`. */
-export const MAX_CAP = 32;
+export const MAX_CAP = 64;
 export const MAX_WORKER_HOSTS = 50;
 
 /** Who is a chat on the phone: `keep_off_phone` and `workers_on_phone`, as one choice. The

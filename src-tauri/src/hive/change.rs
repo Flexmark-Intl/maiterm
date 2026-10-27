@@ -28,7 +28,7 @@ pub const SETTINGS_CHANGED_EVENT: &str = "hive-settings-changed";
 pub const MODELS: [&str; 3] = ["opus", "sonnet", "haiku"];
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 /// Workers at once, whoever sets it: past this, no machine runs them.
-pub const MAX_CAP: u32 = 32;
+pub const MAX_CAP: u32 = 64;
 pub const MAX_WORKER_HOSTS: usize = 50;
 const MAX_REASON: usize = 500;
 
@@ -61,11 +61,11 @@ pub struct SettingsChange {
 /// Who a change comes from, which sets its limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum By {
-    /// Hive settings: anything here, the cap past the machine's ceiling included.
+    /// Hive settings: anything here.
     Human,
     /// The human's approval of the coordinator's card: the human's limits, on the coordinator's fields.
     Approved,
-    /// `hiveChangeSettings` with the checkpoint handed over: never past the ceiling, never push.
+    /// `hiveChangeSettings` with the checkpoint handed over: may lower the cap, never raise it, never push.
     Coordinator,
 }
 
@@ -87,8 +87,8 @@ fn pick(v: &Option<String>, allowed: &[&str], what: &str) -> Result<Option<Strin
 }
 
 /// The change as it would land on `hive`, or why not. `remote_hosts` are the hosts the Hive's
-/// repos push to, which no worker may reach (§7.3); `ceiling` is this computer's cap ceiling.
-pub fn check(hive: &Hive, c: &SettingsChange, by: By, ceiling: u32, remote_hosts: &[String]) -> Result<Checked, String> {
+/// repos push to, which no worker may reach (§7.3).
+pub fn check(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[String]) -> Result<Checked, String> {
     if hive.status == super::record::STATUS_DONE {
         return Err("This Hive is done: a message to its coordinator wakes it first.".to_string());
     }
@@ -99,11 +99,9 @@ pub fn check(hive: &Hive, c: &SettingsChange, by: By, ceiling: u32, remote_hosts
         if cap == 0 || cap > MAX_CAP {
             return Err(format!("Workers at once is 1 to {MAX_CAP}."));
         }
-        if by == By::Coordinator && cap > ceiling.max(hive.cap) {
-            return Err(format!(
-                "{cap} workers at once is past this computer\u{2019}s ceiling of {ceiling}: only your human can go past it. With the \
-                 Settings checkpoint at Ask me, ask on a card instead."
-            ));
+        // Raising it is the human's, always (a card); the coordinator may lower it on its own.
+        if by == By::Coordinator && cap > hive.cap {
+            return Err(format!("Raising workers at once ({} \u{2192} {cap}) is your human\u{2019}s: it goes on a card.", hive.cap));
         }
         if cap != hive.cap {
             out.cap = Some(cap);
@@ -216,12 +214,12 @@ pub fn apply_to(hive: &mut Hive, c: &SettingsChange) {
 
 /// Checked against the record as it is under the write lock, then saved and announced. The new
 /// record and the lines that describe what changed.
-fn write<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, c: &SettingsChange, by: By, ceiling: u32) -> Result<(Hive, Vec<String>), String> {
+fn write<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, c: &SettingsChange, by: By) -> Result<(Hive, Vec<String>), String> {
     let remotes = super::settings::hive_remote_hosts(&caller.hive);
     let mut outcome: Result<Vec<String>, String> = Err("This Hive is gone.".to_string());
     // A refused check leaves the record as it was (saved again, unchanged: harmless).
     let hive = super::finish::write_status(ctx, caller, &[STATUS_ACTIVE, STATUS_PAUSED], None, |h| {
-        outcome = check(h, c, by, ceiling, &remotes).map(|ch| {
+        outcome = check(h, c, by, &remotes).map(|ch| {
             apply_to(h, &ch.change);
             ch.lines
         });
@@ -312,8 +310,8 @@ pub fn tool_definition(tab_id: &Value) -> Value {
              and the hosts every builder\u{2019}s sandbox may reach beyond the package registries (an API, its docs). Name only \
              what changes. Under the Settings checkpoint\u{2019}s Ask me (see your brief) this files a card your human approves or \
              denies, and maiTerm tells you which; handed to you, it applies at once and your human is told. A change reaches each \
-             agent at its next launch: a running worker keeps its model and network until it is relaunched. Never past this \
-             computer\u{2019}s worker ceiling on your own, and never pushing. Models: {}. Efforts: {}.",
+             agent at its next launch: a running worker keeps its model and network until it is relaunched. Raising workers at \
+             once always goes on a card (lowering it doesn\u{2019}t), and never pushing. Models: {}. Efforts: {}.",
             MODELS.join(", "),
             EFFORTS.join(", ")
         ),
@@ -340,20 +338,18 @@ pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     let (change, reason) = parse_args(args)?;
     refuse_private_hosts(&change.add_hosts).await?;
     let hive = super::autonomy::current_hive(ctx, caller).ok_or("This Hive is gone.")?;
-    let ceiling = super::create::machine_ceiling();
-    if !checkpoints::asks(&hive, SETTINGS) {
-        let (_, lines) = write(ctx, caller, &change, By::Coordinator, ceiling)?;
+    // A raise of the cap is the human's whoever holds the checkpoint: the whole change goes on a card.
+    let raises = change.cap.is_some_and(|c| c > hive.cap);
+    if !checkpoints::asks(&hive, SETTINGS) && !raises {
+        let (_, lines) = write(ctx, caller, &change, By::Coordinator)?;
         log_line(caller,"coordinator", &lines, reason.as_deref());
         ctx.window.settings_changed(&caller.workspace_id, &format!("The coordinator changed this Hive\u{2019}s settings: {}.", lines.join("; ")));
         ctx.window.poll_waiters(&caller.workspace_id);
         return Ok(json!({ "status": "applied", "changes": lines, "note": "Your human was told. Each agent gets it at its next launch." }));
     }
     // The human's limits apply on approval, but a card that can't apply now isn't filed.
-    let checked = check(&hive, &change, By::Approved, ceiling, &super::settings::hive_remote_hosts(&hive))?;
+    let checked = check(&hive, &change, By::Approved, &super::settings::hive_remote_hosts(&hive))?;
     let mut effects = checked.lines.clone();
-    if checked.change.cap.is_some_and(|c| c > ceiling) {
-        effects.push(format!("That is past this computer\u{2019}s ceiling of {ceiling} workers at once: expect it to slow down or run short of memory."));
-    }
     if !checked.change.add_hosts.is_empty() {
         effects.push("A host a worker can reach can also receive what it sends: only hosts you trust with this project\u{2019}s code.".to_string());
     }
@@ -379,7 +375,7 @@ pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
 /// Hive settings: the human's own change. The coordinator is told.
 pub(crate) async fn set_by_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, change: &SettingsChange) -> Result<Hive, String> {
     refuse_private_hosts(&change.add_hosts).await?;
-    let (hive, lines) = write(ctx, caller, change, By::Human, super::create::machine_ceiling())?;
+    let (hive, lines) = write(ctx, caller, change, By::Human)?;
     log_line(caller,"human", &lines, None);
     tell_coordinator(ctx, caller, format!("[maiTerm] Your human changed this Hive\u{2019}s settings:{}", bulleted(&lines))).await;
     ctx.window.poll_waiters(&caller.workspace_id);
@@ -393,7 +389,7 @@ pub(crate) async fn approved_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         args.get("change").cloned().ok_or_else(|| "it had no change".to_string()).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()));
     let res = match change {
         Ok(c) => match refuse_private_hosts(&c.add_hosts).await {
-            Ok(()) => write(ctx, caller, &c, By::Approved, super::create::machine_ceiling()),
+            Ok(()) => write(ctx, caller, &c, By::Approved),
             Err(e) => Err(e),
         },
         Err(e) => Err(e),
@@ -478,33 +474,34 @@ mod tests {
     #[test]
     fn a_change_keeps_only_what_differs_and_says_each_line() {
         let c = SettingsChange { cap: Some(3), worker_model: Some("Opus".into()), worker_effort: Some("high".into()), ..Default::default() };
-        let ch = check(&hive(), &c, By::Coordinator, 5, &[]).unwrap();
+        let ch = check(&hive(), &c, By::Coordinator, &[]).unwrap();
         assert_eq!(ch.change.cap, None, "the cap is already 3");
         assert_eq!(ch.change.worker_model.as_deref(), Some("opus"), "lower-cased");
         assert_eq!(ch.change.worker_effort, None, "workers are already at high effort");
         assert_eq!(ch.lines, vec!["Workers (each from its next launch): Claude sonnet, high effort \u{2192} Claude opus, high effort".to_string()]);
         let none = SettingsChange { cap: Some(3), ..Default::default() };
-        assert!(check(&hive(), &none, By::Human, 5, &[]).unwrap_err().starts_with("Nothing would change"));
+        assert!(check(&hive(), &none, By::Human, &[]).unwrap_err().starts_with("Nothing would change"));
     }
 
     #[test]
-    fn the_coordinator_stays_under_the_ceiling_and_never_pushes() {
+    fn the_coordinator_lowers_the_cap_but_never_raises_it_and_never_pushes() {
         let up = SettingsChange { cap: Some(8), ..Default::default() };
-        assert!(check(&hive(), &up, By::Coordinator, 5, &[]).unwrap_err().contains("ceiling of 5"));
-        assert_eq!(check(&hive(), &up, By::Approved, 5, &[]).unwrap().change.cap, Some(8), "the human may go past it");
-        assert_eq!(check(&hive(), &up, By::Human, 5, &[]).unwrap().change.cap, Some(8));
-        assert!(check(&hive(), &SettingsChange { cap: Some(MAX_CAP + 1), ..Default::default() }, By::Human, 5, &[]).is_err());
-        assert!(check(&hive(), &SettingsChange { cap: Some(0), ..Default::default() }, By::Human, 5, &[]).is_err());
+        assert!(check(&hive(), &up, By::Coordinator, &[]).unwrap_err().contains("goes on a card"));
+        assert_eq!(check(&hive(), &SettingsChange { cap: Some(2), ..Default::default() }, By::Coordinator, &[]).unwrap().change.cap, Some(2));
+        assert_eq!(check(&hive(), &up, By::Approved, &[]).unwrap().change.cap, Some(8), "the human raises it on the card");
+        assert_eq!(check(&hive(), &up, By::Human, &[]).unwrap().change.cap, Some(8));
+        assert!(check(&hive(), &SettingsChange { cap: Some(MAX_CAP + 1), ..Default::default() }, By::Human, &[]).is_err());
+        assert!(check(&hive(), &SettingsChange { cap: Some(0), ..Default::default() }, By::Human, &[]).is_err());
         let push = SettingsChange { push_after_land: Some(true), ..Default::default() };
-        assert!(check(&hive(), &push, By::Coordinator, 5, &[]).is_err());
-        assert!(check(&hive(), &push, By::Approved, 5, &[]).is_err());
-        assert!(check(&hive(), &push, By::Human, 5, &[]).is_ok());
+        assert!(check(&hive(), &push, By::Coordinator, &[]).is_err());
+        assert!(check(&hive(), &push, By::Approved, &[]).is_err());
+        assert!(check(&hive(), &push, By::Human, &[]).is_ok());
         let args = json!({ "push_after_land": true, "reason": "ship it" });
         assert!(parse_args(&args).is_err(), "the tool refuses push outright");
         let phone = SettingsChange { workers_on_phone: Some(true), ..Default::default() };
-        assert!(check(&hive(), &phone, By::Approved, 5, &[]).is_err());
+        assert!(check(&hive(), &phone, By::Approved, &[]).is_err());
         let mut h = hive();
-        apply_to(&mut h, &check(&hive(), &phone, By::Human, 5, &[]).unwrap().change);
+        apply_to(&mut h, &check(&hive(), &phone, By::Human, &[]).unwrap().change);
         assert!(h.settings.workers_on_phone);
     }
 
@@ -515,19 +512,19 @@ mod tests {
             remove_hosts: vec!["docs.example.com".into(), "never.there".into()],
             ..Default::default()
         };
-        let ch = check(&hive(), &c, By::Coordinator, 5, &[]).unwrap();
+        let ch = check(&hive(), &c, By::Coordinator, &[]).unwrap();
         assert_eq!(ch.change.add_hosts, vec!["api.example.com".to_string()], "one copy; a host also removed isn't re-added");
         assert_eq!(ch.change.remove_hosts, vec!["docs.example.com".to_string()], "only a host it has");
         let mut h = hive();
         apply_to(&mut h, &ch.change);
         assert_eq!(h.settings.worker_hosts, vec!["api.example.com".to_string()]);
         let remote = SettingsChange { add_hosts: vec!["github.com".into()], ..Default::default() };
-        assert!(check(&hive(), &remote, By::Human, 5, &["github.com".into()]).unwrap_err().contains("push"));
+        assert!(check(&hive(), &remote, By::Human, &["github.com".into()]).unwrap_err().contains("push"));
         let bad = SettingsChange { add_hosts: vec!["https://x.com/path".into()], ..Default::default() };
-        assert!(check(&hive(), &bad, By::Human, 5, &[]).is_err());
+        assert!(check(&hive(), &bad, By::Human, &[]).is_err());
         for home in ["lvh.me", "*.nip.io", "127.0.0.1.nip.io", "app.localtest.me"] {
             let c = SettingsChange { add_hosts: vec![home.into()], ..Default::default() };
-            assert!(check(&hive(), &c, By::Human, 5, &[]).unwrap_err().contains("127.0.0.1"), "{home}");
+            assert!(check(&hive(), &c, By::Human, &[]).unwrap_err().contains("127.0.0.1"), "{home}");
         }
     }
 
@@ -544,15 +541,15 @@ mod tests {
     #[test]
     fn models_and_efforts_are_from_the_lists_and_a_done_hive_refuses() {
         let c = SettingsChange { coordinator_model: Some("gpt".into()), ..Default::default() };
-        assert!(check(&hive(), &c, By::Human, 5, &[]).is_err());
+        assert!(check(&hive(), &c, By::Human, &[]).is_err());
         let c = SettingsChange { coordinator_effort: Some("max".into()), ..Default::default() };
-        let ch = check(&hive(), &c, By::Coordinator, 5, &[]).unwrap();
+        let ch = check(&hive(), &c, By::Coordinator, &[]).unwrap();
         let mut h = hive();
         apply_to(&mut h, &ch.change);
         assert_eq!((h.models.coordinator.model.as_str(), h.models.coordinator.effort.as_str()), ("opus", "max"));
         let mut done = hive();
         done.status = super::super::record::STATUS_DONE.into();
-        assert!(check(&done, &c, By::Human, 5, &[]).is_err());
+        assert!(check(&done, &c, By::Human, &[]).is_err());
     }
 
     #[test]

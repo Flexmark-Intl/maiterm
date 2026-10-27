@@ -24,6 +24,7 @@
   import { hiveDetectFolder, hiveDetectTools, hivePreflight, hiveTrustRepo, suggestStack, type StackSuggestion } from '$lib/tauri/commands';
   import type { HiveDetectedTool, HivePreflight, HiveSpec, Service } from '$lib/tauri/types';
   import { charCount, folderName, MAX_INSTRUCTIONS, slugify, validateSpec } from '$lib/hive/model';
+  import { MAX_CAP } from '$lib/hive/change';
   import { createHive } from '$lib/hive/create';
 
   interface Props {
@@ -53,8 +54,8 @@
 
   const ws = $derived(workspacesStore.workspaces.find((w) => w.id === workspaceId));
   let preflight = $state<HivePreflight | null>(null);
-  /** Until the preflight (and its default Primary's detection) answers: the ceiling and the
-   *  folder list show a loading line, never a ceiling of 1 or an empty list. */
+  /** Until the preflight (and its default Primary's detection) answers: the
+   *  folder list shows a loading line, never an empty list. */
   let primaryPending = $state(true);
   let loadError = $state<string | null>(null);
   let tools = $state<HiveDetectedTool[] | null>(null);
@@ -66,7 +67,6 @@
   let goal = $state('');
   let instructions = $state('');
   let cap = $state(4);
-  let capConfirmed = $state(false);
   let landing = $state<'base' | 'integration'>('base');
   let coordModel = $state('opus');
   let coordEffort = $state('medium');
@@ -104,7 +104,7 @@
     try {
       const p = await hivePreflight(workspaceId, ids, live);
       preflight = p;
-      cap = Math.min(p.default_cap, Math.max(p.ceiling, 1));
+      cap = p.default_cap;
       if (p.default_primary && folders.length === 0) await addFolder(p.default_primary);
     } catch (e) {
       loadError = String(e);
@@ -270,10 +270,7 @@
 
   const slug = $derived(slugify(name));
   const instructionCount = $derived(charCount(instructions));
-  const ceiling = $derived(preflight?.ceiling ?? 1);
-  const problem = $derived(
-    validateSpec({ name, goal, instructions, folders, cap: Number(cap), cap_confirmed: capConfirmed }, ceiling),
-  );
+  const problem = $derived(validateSpec({ name, goal, instructions, folders, cap: Number(cap) }));
   const blocked = $derived(
     !preflight ? 'Checking the workspace…'
       : !preflight.eligible ? (preflight.reason ?? "This workspace can't become a Hive.")
@@ -302,7 +299,6 @@
         local_remotes: [],
       })),
       cap: Number(cap),
-      cap_confirmed: capConfirmed,
       landing_mode: landing,
       models: {
         coordinator: { runtime: 'claude', model: coordModel, effort: coordEffort },
@@ -446,21 +442,11 @@
       <div class="field">
         <span class="label">Workers at once</span>
         <div class="inline">
-          <input class="num" type="number" min="1" bind:value={cap} onchange={() => (capConfirmed = false)} />
-          {#if preflight}
-            <Tooltip text="About one worker per 16 GB of memory above 32 GB, and no more than a quarter of the CPU cores. Each worker is a Claude session plus its tools.">
-              <span class="hint">This computer's ceiling: {ceiling}</span>
-            </Tooltip>
-          {:else if !loadError}
-            <span class="hint">Measuring this computer…</span>
-          {/if}
+          <input class="num" type="number" min="1" max={MAX_CAP} bind:value={cap} />
+          <Tooltip text="The coordinator starts only as many as the plan needs. If memory runs short, maiTerm holds new workers until it eases, and builds and tests take turns in the run queue.">
+            <span class="hint">At most this many; the coordinator decides how many it needs</span>
+          </Tooltip>
         </div>
-        {#if preflight && Number(cap) > ceiling}
-          <label class="check warn">
-            <input type="checkbox" bind:checked={capConfirmed} />
-            Use {cap} anyway: more than this computer is sized for
-          </label>
-        {/if}
       </div>
 
       <fieldset class="field">

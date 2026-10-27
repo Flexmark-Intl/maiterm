@@ -306,7 +306,7 @@ fn checkpoint_lines(hive: &Hive) -> String {
          Unanswered after {minutes} min, your human is told and either of you may answer; your human may take any prompt over. \
          Every answer is logged for your human.\n\nNever yours, whatever the checkpoints: Claude\u{2019}s workspace-trust and plan \
          dialogs; any row that saves a setting or a rule, or changes a mode; the sandbox and reads outside the working folder; \
-         an action blocker (only your human can do it); spending past the budget, and raising the budget, or the cap past this computer\u{2019}s ceiling; pushing; \
+         an action blocker (only your human can do it); spending past the budget, and raising the budget or the cap; pushing; \
          a land or undo whose diff changes agent or execution config. maiTerm sends those to your human and tells you.\n"
     ));
     if super::checkpoints::asks(hive, super::checkpoints::PLAN) {

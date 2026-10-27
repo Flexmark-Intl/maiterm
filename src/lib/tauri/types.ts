@@ -812,8 +812,6 @@ export interface HiveSpec {
   instructions: string;
   folders: HiveFolder[];
   cap: number;
-  /** The human confirmed a cap above the machine's ceiling. */
-  cap_confirmed: boolean;
   landing_mode: string;
   models: HiveModels;
   tools: string[];
@@ -862,8 +860,6 @@ export interface HivePreflight {
   replaceable_tab: HiveReplaceable | null;
   /** The folder of the tab the human was last looking at, when it's a folder on this disk. */
   default_primary: string | null;
-  /** The machine's worker ceiling: min((RAM − 32 GB) / 16 GB, ncpu / 4), at least 1. */
-  ceiling: number;
   default_cap: number;
   platform_ok: boolean;
   claude_ok: boolean;

@@ -1,5 +1,7 @@
 /** Hive decisions with no store behind them (docs/hive.md), so tests and stores share them. */
 
+import { MAX_CAP } from './change';
+
 type TabFields = { id: string; service_id?: string | null; hive_role?: string | null; overlord_exempt?: boolean };
 type WorkspaceFields = { id: string; overlord_exempt?: boolean };
 
@@ -161,12 +163,11 @@ type SpecFields = {
   instructions: string;
   folders: SpecFolder[];
   cap: number;
-  cap_confirmed: boolean;
 };
 
 /** The first thing stopping Create, in a sentence, or null. Same rules and order as Rust's
  *  `validate_spec`. */
-export function validateSpec(spec: SpecFields, ceiling: number): string | null {
+export function validateSpec(spec: SpecFields): string | null {
   if (!spec.name.trim()) return 'Name the Hive.';
   if (!slugify(spec.name)) return "The name needs at least one letter or digit: it names the Hive's branches.";
   if (!spec.goal.trim()) return 'Give the Hive a goal.';
@@ -178,10 +179,7 @@ export function validateSpec(spec: SpecFields, ceiling: number): string | null {
   // Rust's `resolve_folders` refuses it too, once it has re-detected the repo.
   const baseless = spec.folders.find((f) => f.kind === 'git' && !f.base?.trim() && !f.detectedBase?.trim());
   if (baseless) return `${baseless.name?.trim() || baseless.path}: pick a Base branch (the repo is on a detached HEAD), or share it as a plain folder.`;
-  if (!Number.isInteger(spec.cap) || spec.cap < 1) return 'Workers at once must be at least 1.';
-  if (spec.cap > ceiling && !spec.cap_confirmed) {
-    return `${spec.cap} workers at once is above this computer's ceiling of ${ceiling}. Confirm it to go ahead.`;
-  }
+  if (!Number.isInteger(spec.cap) || spec.cap < 1 || spec.cap > MAX_CAP) return `Workers at once is 1 to ${MAX_CAP}.`;
   return null;
 }
 

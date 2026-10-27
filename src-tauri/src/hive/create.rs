@@ -1,5 +1,5 @@
 //! Turning a workspace into a Hive (docs/hive.md §3): what the Create sheet reads (preflight,
-//! folder and tool detection, the machine's cap ceiling) and `hive_create`.
+//! folder and tool detection) and `hive_create`.
 //!
 //! The sheet's checks are advice; Rust re-checks everything on Create, and the workspace's
 //! eligibility again under the write lock that installs the Hive.
@@ -24,7 +24,9 @@ use crate::state::{save_state, AppData, AppState, Service, Tab, Workspace};
 /// Projects' instructions limit. Over it is refused, never cut: a truncated rule reads as a
 /// different rule (§3).
 pub const MAX_INSTRUCTIONS: usize = 16_000;
-pub const DEFAULT_CAP: u32 = 4;
+/// Workers at once on a new Hive (§6.8): a ceiling, not a target. The coordinator starts only what
+/// the plan needs, and memory pressure and the run queue govern the machine.
+pub const DEFAULT_CAP: u32 = 24;
 pub const DEFAULT_BUDGET_CENTS: u64 = 1000;
 pub const COORDINATOR_TAB_NAME: &str = "Coordinator";
 
@@ -38,22 +40,6 @@ pub fn default_checkpoints(landing_mode: &str) -> BTreeMap<String, String> {
         out.insert("landing".to_string(), "ask".to_string());
     }
     out
-}
-
-/// About one worker per 16 GB above a 32 GB reserve, never more than ncpu/4, never below one
-/// (§6.8: 5 on a 128 GB, 20-CPU Mac, where the ncpu term is the smaller).
-pub fn cap_ceiling(ram_gb: u64, ncpu: u32) -> u32 {
-    let by_ram = ram_gb.saturating_sub(32) / 16;
-    let by_cpu = u64::from(ncpu / 4);
-    by_ram.min(by_cpu).max(1) as u32
-}
-
-pub fn machine_ceiling() -> u32 {
-    let mut sys = sysinfo::System::new();
-    sys.refresh_memory();
-    let ram_gb = sys.total_memory() / (1 << 30);
-    let ncpu = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
-    cap_ceiling(ram_gb, ncpu)
 }
 
 /// Every Hive agent runs in Claude's sandbox, which native Windows doesn't have, the
@@ -166,7 +152,6 @@ pub struct Preflight {
     pub replaceable_tab: Option<Replaceable>,
     /// The folder of the tab the human was last looking at, when it's a folder on this disk.
     pub default_primary: Option<String>,
-    pub ceiling: u32,
     pub default_cap: u32,
     pub platform_ok: bool,
     pub claude_ok: bool,
@@ -361,7 +346,6 @@ pub async fn hive_preflight(
             reason,
             replaceable_tab,
             default_primary,
-            ceiling: machine_ceiling(),
             default_cap: DEFAULT_CAP,
             platform_ok: platform_refusal(cfg!(windows)).is_ok(),
             claude_ok: claude.is_ok(),
@@ -613,8 +597,6 @@ pub struct HiveSpec {
     pub instructions: String,
     pub folders: Vec<HiveFolder>,
     pub cap: u32,
-    /// The human confirmed a cap above the machine's ceiling.
-    pub cap_confirmed: bool,
     pub landing_mode: String,
     pub models: HiveModels,
     pub tools: Vec<String>,
@@ -637,7 +619,6 @@ impl Default for HiveSpec {
             instructions: String::new(),
             folders: Vec::new(),
             cap: DEFAULT_CAP,
-            cap_confirmed: false,
             landing_mode: LANDING_BASE.to_string(),
             models: HiveModels::default(),
             tools: Vec::new(),
@@ -762,7 +743,7 @@ pub fn slugify(name: &str) -> String {
 }
 
 /// The sheet's rules, checked again here (the TS twin is `validateSpec`).
-pub fn validate_spec(spec: &HiveSpec, ceiling: u32) -> Result<(), String> {
+pub fn validate_spec(spec: &HiveSpec) -> Result<(), String> {
     if spec.name.trim().is_empty() {
         return Err("Name the Hive.".to_string());
     }
@@ -784,11 +765,8 @@ pub fn validate_spec(spec: &HiveSpec, ceiling: u32) -> Result<(), String> {
     if spec.folders.iter().any(|f| !Path::new(&f.path).is_absolute()) {
         return Err("Every folder needs a full path.".to_string());
     }
-    if spec.cap == 0 {
-        return Err("Workers at once must be at least 1.".to_string());
-    }
-    if spec.cap > ceiling && !spec.cap_confirmed {
-        return Err(format!("{} workers at once is above this computer's ceiling of {ceiling}. Confirm it to go ahead.", spec.cap));
+    if spec.cap == 0 || spec.cap > super::change::MAX_CAP {
+        return Err(format!("Workers at once is 1 to {}.", super::change::MAX_CAP));
     }
     if ![LANDING_BASE, LANDING_INTEGRATION].contains(&spec.landing_mode.as_str()) {
         return Err(format!("Unknown landing mode \"{}\"", spec.landing_mode));
@@ -977,8 +955,7 @@ pub async fn hive_create(
     platform_refusal(cfg!(windows))?;
     crate::instance::hive_refusal()?;
     let label = window.label().to_string();
-    let ceiling = machine_ceiling();
-    validate_spec(&spec, ceiling)?;
+    validate_spec(&spec)?;
     let (replaceable, prefs, stack) = {
         let data = state.app_data.read();
         let ws = data.window(&label).and_then(|w| w.workspaces.iter().find(|w| w.id == workspace_id)).ok_or("Workspace not found")?;
@@ -1098,16 +1075,6 @@ mod tests {
 
     fn sample() -> Hive {
         Hive { id: "h1".into(), slug: "ship".into(), goal: "Ship".into(), ..Hive::default() }
-    }
-
-    #[test]
-    fn the_ceiling_follows_ram_and_cpus() {
-        assert_eq!(cap_ceiling(128, 20), 5, "this Mac: RAM allows 6, ncpu/4 is 5");
-        assert_eq!(cap_ceiling(32, 10), 1, "nothing above the reserve still allows one");
-        assert_eq!(cap_ceiling(16, 8), 1);
-        assert_eq!(cap_ceiling(64, 16), 2);
-        assert_eq!(cap_ceiling(256, 64), 14);
-        assert_eq!(cap_ceiling(256, 2), 1, "ncpu/4 rounds to zero, still one");
     }
 
     #[test]
@@ -1355,11 +1322,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_spec_is_validated_like_the_sheet() {
-        assert_eq!(validate_spec(&spec(), 5), Ok(()));
+        assert_eq!(validate_spec(&spec()), Ok(()));
         let bad = |f: &dyn Fn(&mut HiveSpec)| {
             let mut s = spec();
             f(&mut s);
-            validate_spec(&s, 5).err()
+            validate_spec(&s).err()
         };
         assert!(bad(&|s| s.instructions = "x".repeat(MAX_INSTRUCTIONS)).is_none(), "16,000 exactly is allowed");
         let over = bad(&|s| s.instructions = "é".repeat(MAX_INSTRUCTIONS + 1)).unwrap();
@@ -1370,8 +1337,8 @@ mod tests {
         assert!(bad(&|s| s.goal = "  ".into()).is_some());
         assert!(bad(&|s| s.name = "!!!".into()).unwrap().contains("letter or digit"));
         assert!(bad(&|s| s.cap = 0).is_some());
-        assert!(bad(&|s| s.cap = 6).unwrap().contains("ceiling of 5"));
-        assert!(bad(&|s| { s.cap = 6; s.cap_confirmed = true; }).is_none(), "confirmed");
+        assert!(bad(&|s| s.cap = crate::hive::change::MAX_CAP + 1).unwrap().contains("1 to 64"));
+        assert!(bad(&|s| s.cap = crate::hive::change::MAX_CAP).is_none(), "no machine ceiling: memory pressure governs");
         assert!(bad(&|s| s.landing_mode = "someday".into()).is_some());
         assert!(bad(&|s| s.models.worker.runtime = "codex".into()).is_some());
     }
