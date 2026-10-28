@@ -13,6 +13,13 @@ reach a value through the first draft, and they are fixed below. The most import
 §1's second paragraph: what the vault can promise against an agent running as the same OS
 user.
 
+**Reshaped 2026-10-28: a provider first.** maiTerm is the layer between agents and the human's
+secrets manager. Values live in **1Password or Doppler** whenever one is connected (§5.1);
+maiTerm's own vault is the **fallback** for people without one, with a label saying plainly what
+it protects (§5.2). **Every key gets the same protection, whatever its tier**: a "dev" key is
+often a live key. **Prod-tier values need a provider** (§16 decisions 11–13). Darryl's reasoning:
+"it basically is adding a much better integration layer on to Doppler and 1Password".
+
 ## 1. The rule
 
 > **An agent handles a secret's name, never its value. Rust looks up the value at the moment
@@ -28,16 +35,19 @@ running as the human's own OS user. Such a process can read:
 So the vault stops **accidental and naive exposure** (an agent printing env, pasting a key
 into chat, committing `.env`). It also stops **a prompt-injected agent sending a value
 somewhere directly**. It does **not** stop a same-user agent that is set on getting a value
-and knows where to look. For prod keys, the real boundary is running agents sandboxed (Claude
-Code's sandbox) or as a different OS user, and §5 puts prod values behind an unlock the OS
-enforces (how far that holds differs per platform; §5 says exactly). Every card on a prod path says this in one line.
+and knows where to look. A provider doesn't change that on its own: 1Password and Doppler
+also hand values to anything running as the human once they are signed in (§5.1). The real
+boundaries are a gate the provider enforces per program (1Password's app authorization, which
+is how prod values are read, §5.1), running agents sandboxed (Claude Code's sandbox), or a
+different OS user. Every card on a prod path says this in one line.
 
 Everything else follows from the rule:
 
-1. **No MCP tool returns a value, and no tool accepts one.** Values reach the vault in five ways
-   only: the human types them into maiTerm's own entry sheet, Rust generates them, Rust
-   captures them from an approved command's output, Rust reads them out of a file (§6), or the
-   human imports a vault export (§5).
+1. **No MCP tool returns a value, and no tool accepts one.** Through maiTerm, values reach the
+   store (the provider or the local vault) in five ways only: the human types them into
+   maiTerm's own entry sheet, Rust generates them, Rust captures them from an approved command's
+   output, Rust reads them out of a file (§6), or the human imports a local-vault export (§5.2).
+   The human can also set values in the provider's own app, which maiTerm then reads.
 2. **A value never passes through a PTY, argv, a log line, `aiterm-state.json` or the scrollback
    database, the phone, a share file, or a tool result.** The remote setup-token kept itself out
    of argv, the terminal and state the same way (docs/login.md §9). The analogy stops there: that
@@ -64,15 +74,38 @@ Everything else follows from the rule:
 | **SOPS / dotenvx** | Encrypted secret files that can be committed. We don't take this (§15), but it is a valid answer for teams that want values in git. |
 | **GitHub push protection / gitleaks / trufflehog** | Provider token formats (`ghp_`, `sk_live_`, `AKIA…`, `xoxb-`) let a scanner recognize a leak, and they also identify **which provider** a key belongs to, so the scanner knows how to rotate it and can tell a test key from a live one. |
 
-What maiTerm adds that none of them have is **the agent in the loop**. The agent does the
+**Where 1Password and Doppler stand in 2026** (checked 2026-10-28):
+- **1Password** moved into this space. **Environments** (beta) group a project's secrets, and
+  can mount a `.env` that is never on disk (Mac and Linux). An **Environments MCP server**
+  lets Codex, Cursor and Kiro agents create Environments and list names, "doesn't read or return
+  secrets to the AI agent", and requires "a secure 1Password authorization prompt … for every
+  action". `op run --environment` injects into one process. **NVIDIA OpenShell** (beta) gives a
+  sandboxed agent placeholders, and a gateway swaps in real secrets for approved hosts only.
+  Third-party roundups add Unified Access for agent credentials (March), a Credential Broker
+  minting per-run GitHub Actions credentials (preview, July) and Developer Watchtower, which
+  finds plaintext `.env` files.
+- **Doppler** has the strongest environment model (dev/staging/prod configs), change requests
+  with approvals and 30+ sync integrations (Vercel, AWS, GitHub Actions, Kubernetes). Reviewers
+  rate its agent support "env injection only": it has no idea of an agent's identity.
+
+**What maiTerm adds that neither has is the agent's side of the loop.** The agent does the
 legwork (declares what the code needs, deploys, restarts, verifies, runs the rotation
-checklist). The human makes the few irreversible decisions, on cards built from maiTerm's
-own state.
+checklist), and the human makes the few irreversible decisions on cards built from maiTerm's
+own state. Around that:
+- delivery into stack services and ssh hosts;
+- a ledger of every delivery, which drives rotation runs;
+- leak scanning of the agents' own transcripts;
+- read-deny rules across every agent runtime;
+- phone approvals, and noting what reached an agent before it asked.
+
+So maiTerm builds that layer, and leaves storage, team sharing, recovery and sync to the
+provider (§5).
 
 ## 3. Shape
 
 ```
 Secret project  (bound to local folders the human approved; the repo's remote URL only matches shares)
+├── store          where its values live: a provider connection (1Password, Doppler) or the local vault (§5)
 ├── environments   development · staging · production · custom (each has a TIER: dev | staging | prod)
 ├── keys           the names the code needs (declared by agents or the human)
 │   └── per environment: versions labelled current / pending / previous
@@ -93,7 +126,7 @@ card.
 ## 4. Data model
 
 Metadata is not secret and lives in AppData, like the MCP proxy's catalog. **Values live only
-in the vault file (§5).** Kinds and labels are **strings, not serde enum variants**: a new
+in the project's store (§5): the provider, or the local vault file.** Kinds and labels are **strings, not serde enum variants**: a new
 variant makes an older build load empty state (memory: "New serde enum variant = downgrade
 wipe").
 
@@ -104,6 +137,8 @@ SecretProject {
     id, name,
     paths: Vec<String>,             // canonical local roots the human approved (§3)
     remote: Option<RepoRoot>,       // remote URL + subpath: share-import matching only
+    store: StoreBinding,            // "local", or a provider connection id + per-environment
+                                    // mapping (a 1Password vault/item, a Doppler project/config) (§5.1)
     environments: Vec<SecretEnv>,
     keys: Vec<KeyDef>,
     targets: Vec<SecretTarget>,
@@ -130,6 +165,8 @@ KeyDef {
     name,                           // "STRIPE_SECRET_KEY": the env var name, used everywhere
     kind: String,                   // "string" | "file" (a service-account JSON, a .p8, a TLS key: §7.1)
     path_var: Option<String>,       // file kind: the variable that gets the PATH, "GOOGLE_APPLICATION_CREDENTIALS"
+    risk: String,                   // "live" (default) | "low": a test-mode prefix, a localhost URL,
+                                    // or the human's say-so. Never set by an agent (§5)
     description: Option<String>,    // the AGENT'S words; always shown quoted, as agent text
     provider: Option<String>,       // "stripe" (declared, or detected from the value's format)
     format: Option<String>,         // a prefix or regex the value must match: "sk_(test|live)_"
@@ -152,7 +189,7 @@ KeyDef {
 ### 4.3 Value metadata
 
 ```rust
-ValueMeta {                         // plaintext metadata; the value itself is in the vault file
+ValueMeta {                         // plaintext metadata; the value itself is in the store
     key, env, version: u32,
     label: String,                  // "current" | "pending" | "previous"
     created_at, source: String,     // "human" | "generated" | "captured" | "adopted" | "imported"
@@ -195,9 +232,111 @@ tab, agent}`. It is the consumer list for rotation (§9.2) and the audit log (§
 records what was delivered, not what happened after: a key the human copied into a dashboard
 by hand is invisible to it, which is why rotation also searches for consumers (§9.2).
 
-## 5. Storage, across macOS, Windows and Linux
+## 5. Where values live: a provider first, the local vault as the fallback
 
-> **Envelope encryption: data keys in the OS keychain, every value in one encrypted file.**
+> **Values live in the human's secrets manager (1Password or Doppler; Infisical later)
+> whenever one is connected. maiTerm's own vault is the fallback for people without one, labelled
+> for what it does and doesn't protect. Prod-tier values need a provider.** (§16 decisions
+> 11–13, 2026-10-28.)
+
+**Why a provider first.** What only maiTerm can do is the layer around the store (§2): the
+cards, the ledger, delivery, rotation runs, leak scanning and read-deny rules. Storage, team
+sharing, recovery, audit and sync to hosting are what 1Password and Doppler already do, and do
+better. Guarding a live key against an agent running as the human needs a gate the OS or the
+provider enforces. 1Password's app authorization is one. Building our own equally on macOS,
+Windows and Linux is the heaviest and weakest part of the earlier design (§5.3).
+
+**Every key gets the same protection, whatever its tier** (decision 12). A "dev" AWS key can
+still create real infrastructure; a "staging" database is often a copy of prod; a "dev" LLM key
+bills the same account. So every key is **live** by default (`KeyDef.risk`, §4.2), and is marked
+**low** only when it provably can't do harm: a test-mode prefix from a provider pack (§9.5:
+`sk_test_`), a `localhost` connection string, or the human's own say-so. **The tier decides
+where a key may go and what needs a card (§8), never how well it is stored.**
+
+### 5.1 Provider connections
+
+A connection holds **maiTerm's own narrow credential**, never the human's login. Facts below
+were checked against each provider's docs on 2026-10-28.
+
+**1Password**
+- **Dev and staging: a service account** (`ops_…`), limited to the project's own vaults.
+  Service accounts work on every plan, Individual and Families included. Two limits shape the
+  layout:
+  - they can't reach the built-in Personal/Private vault;
+  - they can only **read** Environments.
+
+  So maiTerm uses **dedicated vaults** per project and tier ("maiTerm · api · dev"), with one
+  item per environment and one concealed field per key. A service account can read and write
+  those. Environments can be added as an extra read source. Service account permissions can't
+  be changed after creation, so widening one means making a new one, and the panel says so.
+  Rate limits on personal plans are 1,000 reads and 100 writes per hour.
+- **Prod: the 1Password app's authorization, never a stored credential.** The desktop app can
+  authorize one program at a time: the prompt names the program's path, approval is
+  biometric, and it lasts up to 10 idle minutes **for that process only**, so an agent's own
+  process doesn't inherit it. Every prod read is gated by the human's Touch ID, enforced by
+  1Password. Two caveats, stated:
+  - 1Password can't verify a third-party program's identity, so the human is the final check;
+  - the official SDKs are Go, JavaScript and Python and maiTerm is Rust, so **a spike must prove
+    the path**: `op` as a child process, or a small SDK sidecar, and what 1Password then counts as
+    "the process".
+
+**Doppler**
+- **A service token per project and config** (`dp.st.<env>.…`): scoped to one config,
+  read-only by default.
+- Writes (the entry sheet, generate, capture, rotation) use a **separate write-enabled token**,
+  held apart and used only inside an approved write.
+- **Prod has no per-use human gate**: the token's narrow scope, maiTerm's card policy (§8) and
+  Doppler's audit log are the guard. The panel says so, and points to 1Password for a
+  biometric gate on prod.
+
+**Infisical (later):** a machine identity scoped to one project and environment.
+
+**Rules for every connection**
+1. **Never the human's personal login.** A pasted Doppler token that isn't a service token is
+   refused: Doppler warns that a personal or CLI token carries the account's full rights,
+   writes included. maiTerm never piggybacks on an `op` sign-in.
+2. **maiTerm can mint the credentials.** The human signs in to the provider's CLI once. maiTerm
+   runs the mint in its own process (`doppler configs tokens create … --plain`, read from
+   stdout), stores the tokens, then signs the CLI out. Otherwise it links to the exact page and
+   the human pastes the token into the native sheet.
+3. **Scope is checked at connect.** maiTerm lists what the credential can reach, and warns when
+   that is wider than chosen: "this token can read 14 configs; you picked 2".
+4. **The credential stays inside maiTerm's process where it can.**
+   - Doppler and Infisical: Rust calls the REST API with the token in a header (the endpoint is to
+     verify). Never `doppler run` with `DOPPLER_TOKEN` in a child's environment, which any
+     same-user agent can read with `ps eww`.
+   - 1Password: service accounts are used through `op` or the SDKs, so `op` runs as a short-lived
+     child with `OP_SERVICE_ACCOUNT_TOKEN` set for one call. That exposure is stated, and it is
+     why prod uses the app's authorization instead.
+5. **Credentials are stored like secrets.** They go in the OS keychain under maiTerm's own
+   service name, Windows entries with local persistence (§5.2). Never in `aiterm-state.json`,
+   the phone or a share file.
+6. **The provider CLIs are kept away from agents** (§10.3, §10.4):
+   - deny `Bash(op *)`, `Bash(doppler *)` and `Bash(infisical *)`, and the CLIs' config (`~/.doppler`);
+   - onboarding says don't leave a personal `doppler login` on a machine where agents run;
+   - don't use `op` in an agent's tab, since its authorization covers that terminal session and
+     sub-shells for 10 idle minutes;
+   - **refuse a 1Password prompt you didn't just cause.**
+7. **No values cached on disk.** If the provider is unreachable, delivery fails with a sentence.
+   Values read for a delivery live in memory for that delivery only.
+8. **Don't push where the provider already syncs.** If Doppler syncs a config to Vercel, the
+   ledger records the consumer as "synced by Doppler", and maiTerm's own adapter (§7.3) doesn't
+   push there too.
+9. **What the provider brings that the local vault can't:**
+   - **recovery**: a lost machine means revoking maiTerm's credentials in the provider and
+     reconnecting;
+   - team sharing;
+   - the provider's own audit log;
+   - its own sync to hosting.
+
+### 5.2 The local vault: the fallback
+
+For people with no secrets manager, or trying the feature out: no account, works offline. It
+takes **any tier except prod** (decision 13). **Every key it holds is labelled**, in the panel
+and on the entry sheet: *"Kept out of files, backups and agent sessions. An agent running as you
+can still read it."*
+
+> **Envelope encryption: one data key in the OS keychain, every value in one encrypted file.**
 
 `keyring` v4 (already a dependency) covers all three platforms: the Apple Keychain, Windows
 Credential Manager and Secret Service over zbus. Putting each secret in its own keychain item
@@ -213,61 +352,13 @@ looks simpler and is worse on every platform:
 
 So:
 
-- **Two data keys.** 256 random bits each, under service `{app_data_slug()}.secrets`:
-  - `vault-dek` seals dev- and staging-tier values. It is the keychain item alone.
-  - `vault-dek-prod` seals prod-tier values, and **the OS guards it**, not just a dialog (§16
-    decision 2):
-    - **macOS**: an item in the **data-protection keychain** (`kSecUseDataProtectionKeychain`),
-      `AccessibleWhenUnlockedThisDeviceOnly` plus a user-presence access control. The keychain
-      itself then refuses to release it without Touch ID or the login password, and the
-      `security` CLI can't reach it at all (it reads only file-based keychains). Three costs:
-      - The data-protection keychain needs an `application-identifier` /
-        `keychain-access-groups` entitlement, so **a Developer ID provisioning profile embedded
-        in the release build**. maiTerm has neither today; that is release-pipeline work in
-        phase 3.
-      - **Ad-hoc dev builds can't use it** (errSecMissingEntitlement) and use the passphrase.
-      - `keyring`'s `protected` feature can require user presence, but pairs it with
-        `AccessibleWhenUnlocked`, not ThisDeviceOnly, which would let the item travel in a
-        backup. So this one item uses `security-framework` directly.
-    - **Windows**: a Windows Hello key (`KeyCredentialManager`) signs a fixed per-install
-      challenge, and HKDF over that signature (with a random per-install salt) is the key that
-      unwraps `vault-dek-prod`. Bitwarden desktop uses the same pattern. The rules:
-      - Enrollment signs twice and compares, so a change to randomized padding fails loudly
-        instead of locking the vault.
-      - The signature is the key: it is never persisted or logged.
-
-      Two weaknesses to state on the card that turns prod on:
-      - **For an unpackaged app the Hello credential is not app-bound.** A same-user agent can
-        open the same credential and raise a Hello prompt that doesn't clearly name who is
-        asking. So: **refuse any Hello prompt maiTerm didn't just ask for.**
-      - **Windows has no hardened runtime.** While unlocked, any same-user process can read
-        maiTerm's memory (`ReadProcessMemory`), the unwrapped key included.
-
-      Not `UserConsentVerifier`, which only shows a prompt and releases no key material.
-    - **Linux, and dev builds anywhere**: a passphrase (Argon2id).
-
-    **Unlocked until 15 minutes idle, where idle means no human-initiated use**: an unlock, a
-    reveal or copy, a prod delivery approved by a click. Agent calls, the scanner and the
-    scrubber never count, so an agent can't hold it open.
-
-    **Phase 1 → phase 3 migration.** Phase 1 wraps the prod key with a passphrase everywhere.
-    When the OS guard becomes available, phase 3 **re-wraps the key under it and deletes the
-    passphrase wrap**. Otherwise a same-user agent can attack the passphrase blob offline, or
-    show a fake passphrase prompt, and the OS guard means nothing.
-
-    **Opting dev and staging into the guard is per project**: that project's dev and staging
-    values are then sealed under `vault-dek-prod` instead of `vault-dek`. Their "at once"
-    actions in §8 then need the unlock too, and wait for it like prod ones.
-
-    **What the lock does not cover: detection.** The scrubber (§10.1) and the scanner (§10.2)
-    need the values they look for. A service started while unlocked keeps printing after the
-    lock. So from the first prod unlock after launch, prod match tables stay in memory until
-    maiTerm quits; the lock governs **use** (delivery, reveal, export), not detection. The cost,
-    stated: on Windows those tables are readable by a same-user process like the unlocked key.
-    Before the first unlock after launch, prod values are not scanned; the first unlock rescans
-    the transcripts written in between.
-- **Storage sits behind a `ValueStore` interface** (read, write, list versions) from the first
-  commit, so 1Password can be a second backend without a rewrite (§16 decision 3).
+- **One data key**, 256 random bits, under service `{app_data_slug()}.secrets`, user
+  `vault-dek`. It is the keychain item alone, which is exactly why the label above is honest
+  and why prod values don't go here (§5.3).
+- **The local vault and every provider sit behind one `Store` interface**: read, write, list
+  versions, plus what each one can do (environments, a runner, sync to targets, versioning,
+  a per-use approval, output masking). Delivery, rotation and the panel ask the interface,
+  never a particular store.
 - **Dev and prod builds get separate entries**, the same split as `accounts/vault.rs` rule 3.
 - **Windows: entries are created with local persistence.** keyring's Windows store defaults to
   `CRED_PERSIST_ENTERPRISE`, which **roams** with a roaming domain profile. A data key must
@@ -277,45 +368,65 @@ So:
   `project|env|key|version`, so a record can't be cut out and moved under another name. The
   file is written atomically (temp file, then rename) and is mode 0600 on Unix.
 - **Headless Linux, WSL, a box with no Secret Service**: the same rule as `accounts/vault.rs`,
-  **no plaintext fallback**. Both data keys can be passphrase-unlocked for the session instead.
-  Without that the vault is unavailable and says so.
-- **In memory**: delivery paths decrypt a value only for that delivery and hold it in a
+  **no plaintext fallback**. The data key can be passphrase-unlocked (Argon2id) for the session
+  instead. Without that the local vault is unavailable and says so, and a provider still works.
+- **In memory**: delivery paths hold a value (from either store) only for that delivery, in a
   `Secret` type with a hand-written redacted `Debug`, `zeroize`d on drop. The existing `Secret`
   grows into this. **The scrubber and the leak scanner are the exception** (§10.1, §10.2): they
-  keep the values they look for in their own tables, and that memory is **not** zeroized. Dev and
-  staging tables live while the app runs; prod tables live from the first prod unlock until quit
-  (see "What the lock does not cover" above).
+  keep the values they look for in their own tables while the app runs, and that memory is
+  **not** zeroized. For provider-held values, the tables fill as values are read for delivery,
+  so a value maiTerm never delivered isn't scanned for. A prod value is read only through
+  1Password's app authorization, and its table entry lives until quit.
 - **Crates**: `chacha20poly1305`, `argon2`, `zeroize` (RustCrypto, pure Rust, all three
   platforms). No OpenSSL.
 
 **Backups.** A backup of `secrets.vault` alone is useless elsewhere. A backup that also carries
 the keychain (a full macOS backup includes `login.keychain-db`) is protected only by the login
-password for dev and staging values.
+password.
 
-**The prod key itself never travels with a backup**: the macOS item is ThisDeviceOnly, and the
-Windows Hello key is held in the TPM. A backup carries prod values only **behind the recovery
-key** (below). A new Mac, a reinstalled Windows, or a Hello or PIN reset loses every prod value
-**unless an Export vault was made or the recovery key was kept**. Export needs the prod
-unlock. The panel says this when prod is turned on and offers the export then.
+**Recovery** (§16 decision 10). Once the local vault holds any value, maiTerm offers a
+**recovery key**: 256 random bits shown once as words, never stored on the machine. It wraps a
+copy of the data key, kept beside the vault file. Because the key is random rather than chosen,
+that copy can't be attacked offline the way a passphrase can. What it does do, stated where it
+is made and in §14:
+- **anyone who finds it**, an agent included, can open the local vault;
+- so the screen says **write it on paper**: a saved PDF or a photo is a file an agent can read;
+- **it is never shown in a build with the MCP bridge**, whose webview tools could read it off the
+  screen (§6.1).
 
-**Recovery** (§16 decision 10). At setup, and when prod is first turned on, maiTerm offers a
-**recovery key**: 256 random bits shown once as words to print or keep offline, never stored on
-the machine. It wraps a copy of each data key, `vault-dek-prod` included, and the wrapped copies
-sit beside the vault file. Because the key is random rather than chosen, the wrapped copies can't be
-attacked offline the way the phase 1 passphrase wrap can, so keeping them on disk opens no new
-attack. What it does do, stated where it is made and in §14:
-- **It bypasses** the OS-enforced unlock, the idle lock and the audit log. Anyone who *finds*
-  it, an agent included, can open the whole vault, prod values too.
-- So the screen says **write it on paper**. A saved PDF or a photo in the camera roll is a
-  file an agent can read.
-- **It is never shown in a build with the MCP bridge**, whose webview tools could read it off
-  the screen (the same rule as prod entry, §6.1).
+**It covers only the local vault**: values in 1Password or Doppler are recovered through them
+(§5.1 rule 9). If a project's values all live with a provider, no recovery key is needed. Moving
+the local vault on purpose is an explicit **Export vault** with a passphrase, in age's format
+so the file opens with the `age` CLI too. **Import vault** is the fifth way a value enters (§1).
 
-**It covers only the values maiTerm stores itself** (decision 3): values held in 1Password are
-recovered through 1Password. The data keys are vault-wide, so the key is offered once the local
-store holds any values. If every value lives in 1Password, none is needed. Moving the vault
-on purpose is an explicit **Export vault** with a passphrase, in age's format so the file opens
-with the `age` CLI too. **Import vault** is the fifth way a value enters (§1).
+**Moving from the local vault to a provider** is one action in the panel: connect the provider,
+pick the project, and maiTerm copies each value across through the provider's write path, checks
+it reads back, then deletes the local copy. The ledger and every target binding stay as they
+are.
+
+### 5.3 Not built: an OS-guarded local store for prod
+
+The earlier design (2026-10-22/23, reviewed three times) kept prod values in maiTerm's own store
+behind an unlock the OS enforces. **It was dropped for decision 13**, because a provider does the
+job better. The research is kept here in case a user ever needs prod without a provider:
+- **macOS**: a data-protection keychain item (`kSecUseDataProtectionKeychain`),
+  `AccessibleWhenUnlockedThisDeviceOnly` plus a user-presence access control. The keychain
+  refuses it without Touch ID or the login password, and the `security` CLI can't reach it. It
+  needs an `application-identifier` / `keychain-access-groups` entitlement and a **Developer ID
+  provisioning profile** in the release build. Ad-hoc dev builds can't use it. `keyring`'s
+  `protected` feature requires presence but only `AccessibleWhenUnlocked`, so the item would go
+  through `security-framework` directly.
+- **Windows**: HKDF over a Windows Hello signature of a per-install challenge. For an unpackaged
+  app the Hello credential **isn't app-bound** (an agent can raise the same prompt), and Windows
+  has no hardened runtime, so the unlocked key can be read from maiTerm's memory.
+  `UserConsentVerifier` is a prompt that releases no key, and protects nothing.
+- **Linux**: only a passphrase.
+- **And around it**: a 15-minute idle lock only human actions extend, a migration that deletes the
+  passphrase wrap once the OS guard exists, recovery for a key that never leaves the device, and
+  keeping leak detection running while locked.
+
+The verdict: a large amount of platform work for a guard that is partial on Windows and absent on
+Linux, while 1Password's app authorization gives every platform a per-process biometric gate.
 
 ## 6. The agent's side: MCP tools
 
@@ -326,7 +437,7 @@ browser-link tools.
 
 | Tool | Acts at once? | What it does |
 |---|---|---|
-| `listSecrets` | yes: read-only | The project's keys × environments: set / missing / pending / expiring / overdue, age, provider, targets, the latest delivery per target. **Never a value, a length, or a fingerprint.** |
+| `listSecrets` | yes: read-only | The project's store (provider or local vault), and its keys × environments: set / missing / pending / expiring / overdue, age, `risk`, targets, the latest delivery per target. **Never a value, a length, or a fingerprint.** For a provider, "set" is read from the provider's key names, so a value the human added in 1Password or Doppler shows up. |
 | `declareSecrets` | yes, for new keys | Adds key definitions (§4.2): names, descriptions, format, `required_in`, `generate`. Names are harmless, and nothing is sent anywhere. Changing a definition the human set, a locked `format`, or a `template` on a key in use needs a card (§4.2). |
 | `declareTargets` | **never: a request** | Proposes destinations (§4.4). Widens where values may go, so the human approves. maiTerm checks each address with its adapter before the card is filed (the repo exists, the Railway service exists). |
 | `requestSecretValues` | **never: a request** | Opens the entry sheet (§6.1) for named keys × environments. Settles when the human clicks Done. |
@@ -363,7 +474,16 @@ This is the flow Darryl described:
      whitespace is trimmed (the `Secret::new` lesson);
    - **Generate** when the key has a `GenerateSpec`, and **Skip**.
 4. **Done** calls one Rust command with the sheet's values. That command **stores them, then
-   approves the request, then settles it**, in that order, before returning. Rust then runs the
+   approves the request, then settles it**, in that order, before returning. "Stores" means the
+   project's store (§5):
+   - a 1Password vault through the service account;
+   - a prod value through the 1Password app's authorization, so the human approves the write
+     with Touch ID;
+   - Doppler through its write token;
+   - or the local vault, which refuses a prod value.
+
+   The sheet also offers **"I'll set these in 1Password / Doppler myself"**: Done then checks
+   that the provider has the names and settles the same way. Rust then runs the
    checks that need other values (**the same value in two tiers**) and can return warnings the
    human confirms or fixes. The values are never kept in a Svelte store, and the inputs are
    cleared on submit and on unmount. **Cancel** denies the request.
@@ -419,7 +539,8 @@ files across projects, which is wider than any one agent's project (§3).
 
 ## 7. Delivery: getting a value where it needs to be
 
-Every delivery path follows the same four rules:
+Every delivery reads its values from the project's store at that moment (§5): nothing is
+copied out of a provider ahead of time. Every delivery path follows the same four rules:
 - **stdin or an API, never argv.** A test runs every adapter against a fake binary and fails if
   any value shows up in argv.
 - **Never typed into a PTY.**
@@ -541,15 +662,15 @@ scrollback, the shell history and the scrollback database. So:
 - A rotation restarts every service in its ledger (§9.2).
 - **A service bound to a prod-tier environment is off by default**, like a prod `run` (§8): the
   human turns it on per service, with a card. Once on, starting and restarting it are at once.
-- **An agent's `startService` / `restartService` never raises an unlock prompt.** A prompt the
+- **An agent's `startService` / `restartService` never raises a 1Password prompt.** A prompt the
   human didn't cause trains them to approve prompts. The service waits instead (below), and the
-  human unlocks from the panel or the notice.
-- **A service that needs prod values waits for the unlock.** After a relaunch, `was_running`
-  services start on their own (docs/stack.md §5), and an overnight restart or a deploy with the
-  screens off can't do Touch ID. Such a service shows **waiting for unlock** rather than
-  crashed, sends one notice (gated by mute), and starts when the human unlocks. Dev and staging
-  services start as usual. The state is transient, like all service status, and never
-  persisted.
+  human authorizes from the panel or the notice.
+- **A service that needs 1Password prod values waits for the human's authorization.** After a
+  relaunch, `was_running` services start on their own (docs/stack.md §5), and an overnight
+  restart or a deploy with the screens off can't do Touch ID. Such a service shows **waiting
+  for 1Password** rather than crashed, sends one notice (gated by mute), and starts when the
+  human authorizes. Services fed by Doppler or by dev/staging values start as usual. The state
+  is transient, like all service status, and never persisted.
 - The shell underneath never holds the values. Only the service process does, so a Ctrl-C in
   the console leaves nothing behind.
 
@@ -610,6 +731,14 @@ The weakest destination, and the one every framework reads. Rules:
   rotation rewrites it.
 
 The panel nudges toward `runWithSecrets` and service secrets, which leave nothing on disk.
+**Better than a file, where available: a `.env` that is never on disk.**
+- For a 1Password-backed project on Mac or Linux, 1Password's own mounted `.env` (Environments)
+  does this, and maiTerm points the target at it instead of writing.
+- Otherwise, on Mac and Linux, maiTerm can serve the path as a named pipe that hands the rendered
+  values to each reader and holds nothing at rest. The cost: a framework that reads the file
+  twice, or only checks that it exists, needs testing per framework.
+
+A plain file stays the last resort.
 
 ### 7.5 SSH hosts
 
@@ -648,10 +777,11 @@ panel. **No MCP tool can change policy**, and policy is not in `preference_meta`
 | `deploySecrets` to an approved target | at once | at once | **a card each time**, listing keys and version changes (`STRIPE_SECRET_KEY v3 → v4`) |
 | `runWithSecrets` | a card once per command + place, then at once | same as dev | **off**. The human can turn it on, then it is a card per run |
 | `writeEnvFile` to an approved file | at once | a card each write | **off**. Enabled per target with a card, then a card each write |
-| a stack service bound to the environment (§7.2) | at once | at once | **off**. Enabled per service with a card, then starts at once (waiting for the unlock if locked) |
+| a stack service bound to the environment (§7.2) | at once | at once | **off**. Enabled per service with a card, then starts at once (waiting for 1Password's authorization if needed) |
 | `generateSecret` (missing value) | at once | at once | a card |
 | `captureSecret` | a card the first time per command + place + `extract` | same | a card each time |
-| reveal / copy in the panel | yes | yes | after the prod unlock (§5: Touch ID / Windows Hello / passphrase) |
+| where values may live (§5) | provider, or the labelled local vault | same as dev | **a provider only** |
+| reveal / copy in the panel | yes | yes | **no**: open it in the provider's own app |
 | leak found | reported to the human | reported, rotation proposed | reported, **rotation proposed as a Decision** |
 
 A prod card can be approved on the phone (§12): it names what moves and where, never a value.
@@ -660,8 +790,13 @@ A prod card can be approved on the phone (§12): it names what moves and where, 
 
 ### 9.1 A rotation run
 
-A run rotates one or more keys in one environment as a single plan. It follows the AWS
-staging-label model:
+A run rotates one or more keys in one environment as a single plan. **With a provider, the
+provider stores the versions and maiTerm drives the consumer side**: every consumer, the
+overlap, the verification and the revoke card. A pending value is held where the provider
+**does not sync it onward**: a separate Doppler config that has no integrations, or a separate
+1Password item. Never a reserved name in the live config, which Doppler's own sync would push
+to Vercel along with everything else. Exactly how is designed in the rotation phase, under that
+constraint. It follows the AWS staging-label model:
 
 ```
 planned → minting → staged (pending) → distributing → verifying → promoted → overlap → revoking → done
@@ -784,8 +919,8 @@ must be checked against the provider's current docs when it is written**, not fr
 
 **A dedicated scanner**, not maiLink's tail: `mailink/transcript.rs` skips tool outputs (exactly
 where `cat .env` or `ps eww` output appears), reads only a tail, and runs only when maiLink asks.
-The scanner holds the values in memory (not zeroized; prod ones only from the first prod
-unlock after launch, §5) and runs
+The scanner holds the values in memory (not zeroized; for provider-held values, only those
+maiTerm has read for a delivery, §5.2) and runs
 one Aho-Corasick pass, in raw, JSON-escaped, URL-encoded, hex and three-alignment base64 forms,
 over:
 - Claude JSONL and Codex rollouts, read **whole and incrementally, `tool_result` included**,
@@ -821,6 +956,11 @@ under 12 characters are skipped, since they would match by accident. The panel n
 - **Each runtime's own read-deny rules** for the vault file and the ledger's files, written by
   maiTerm into every runtime it supports (§10.4, §16 decision 6). Unlike the hook, they hold
   when maiTerm is down.
+- **The provider CLIs are denied to agents** (§5.1 rule 6): `Bash(op *)`, `Bash(doppler *)`,
+  `Bash(infisical *)` and the CLIs' config folders, in the hook and in each runtime's read-deny
+  rules (§10.4). Without this, a provider is just a faster way for an agent to read everything:
+  a signed-in `doppler` hands out any value without a prompt, and `op` does for 10 minutes after
+  the human has used it in that terminal.
 - **For prod, the boundary that holds** is the agent's own sandbox or a separate OS user (§1).
   Claude Code's sandbox **does nothing for this out of the box**: its default read policy is
   "most of the machine, including credential files", sandboxed commands inherit the
@@ -942,6 +1082,9 @@ A full-window view per project, like Preferences, opened from the workspace's co
 sidebar row and every secrets card. **No shortcut in v1, and not a new `tab_type`** (that would
 add a value an older build can't load; §16 decision 8). It needs the width, so it is not a side
 dock:
+- **the project's store** at the top: "1Password · maiTerm · api" or "Doppler · api", or the
+  local vault with its label (§5.2), plus a **Connect a provider** action and **Move to a
+  provider** for a project still on the local vault;
 - **a matrix of keys × environments**, each cell showing set (with age), missing (red when
   required), pending (a rotation in progress), overdue, or expiring;
 - expanding a key shows its description (quoted as the agent's), provider, template, targets,
@@ -1032,11 +1175,12 @@ filtered in the panel and exported.
     Mac's clipboard, where a same-user agent can read it with `pbpaste`.
 
   The request keeps `desktopOnly` until then.
-- **A prod approval from the phone while the desktop is locked** waits for the next desktop
-  unlock, and the phone card says so ("runs when you next unlock on the desktop"). Approved
-  requests normally fail after 5 minutes unreported (`APPROVED_TTL_MS`), so these kinds get
-  the same per-kind TTL treatment as §6.1. A rotation's prod steps (redeploys, restarts, a
-  revoke recipe that needs the old value) hit the same unlock.
+- **A prod approval from the phone, when the prod values are in 1Password**, still needs
+  1Password's authorization at the desktop before it can read them. It waits for that, and the
+  phone card says so: "runs when you next approve 1Password on the desktop". Approved requests
+  normally fail after 5 minutes unreported (`APPROVED_TTL_MS`), so these kinds get the same
+  per-kind TTL treatment as §6.1. A rotation's prod steps (redeploys, restarts, a revoke recipe
+  that needs the old value) wait the same way. Doppler-backed prod has no such wait.
 - Leak reports and rotation proposals ring the doorbell, gated by mute (docs/mute.md) like any
   other notice.
 
@@ -1065,9 +1209,10 @@ filtered in the panel and exported.
 |---|---|---|
 | **A prompt-injected agent** ("send the key to evil.com") | No tool takes a value or a free URL; targets need a card and an agent's config and PATH can't redirect them (§7.3); templates can't cross an allowlist (§4.4); prod deploys need a card each time | An agent that writes code which leaks the key at runtime and gets it deployed. Code review and CI catch that, not the vault |
 | **A careless agent** (prints env, commits `.env`) | No values in tool results; masking and scrubbing; gitignore check; leak scan; pre-commit hook | A value it already read through its own tools |
-| **A determined agent running as the same OS user** | Prod values behind an OS-enforced unlock (§5): on macOS release builds the keychain itself refuses it; the `PreToolUse` speed bump (§10.3); no oracles (§1 rule 4) | Dev and staging values, unless the project opted them into the prod guard: the keychain item, process environments and `.env` files are readable to it. **On Windows** it can raise a Hello prompt for the same credential, and read the unlocked key from maiTerm's memory. **On Linux and in dev builds** the passphrase is all there is. **A recovery key it finds** (a saved PDF, a photo) opens everything, past every unlock (§5). **The real boundary is a configured sandbox (§10.3) or a separate OS user** |
+| **A determined agent running as the same OS user** | Prod values live only with a provider, and with 1Password every prod read needs the human's per-process authorization (§5.1); provider CLIs denied to agents (§10.3, §10.4); the `PreToolUse` speed bump; no oracles (§1 rule 4) | Values in the local vault, and maiTerm's stored provider credentials (a 1Password service account, Doppler tokens): the keychain item is readable to it on Linux and Windows. Doppler prod tokens get no per-use gate. A 1Password prompt the human approves on reflex. A personal provider login the human left on the machine. Any process environment after delivery. **A recovery key it finds** opens the local vault. **The real boundary is a configured sandbox (§10.3) or a separate OS user** |
 | **Another local process as the same user** | As above | As above, the same reach docs/login.md §9.2 accepts |
-| **A stolen backup or synced data dir** | The vault file alone is useless; Windows entries don't roam (§5); the prod key doesn't travel, and the recovery-wrapped copies need the offline recovery key | A backup that also carries the macOS login keychain opens dev and staging values to whoever has the login password |
+| **A stolen or lost machine** | Provider values: revoke maiTerm's credentials in the provider and reconnect (§5.1 rule 9) | Local-vault values, if the thief also has the login password |
+| **A stolen backup or synced data dir** | The vault file alone is useless; Windows entries don't roam (§5.2); provider values were never on disk | A backup that also carries the macOS login keychain opens the local vault to whoever has the login password |
 | **A lost or compromised phone** | Values never reach the phone; approvals need a paired device token (docs/agent-requests.md §2) | A paired phone can approve a prod deploy, so unpairing is the response |
 | **A shared screen / shoulder** | Masked by default; reveal times out; copy stays out of clipboard history | — |
 | **maiTerm's own logs and errors** | `Secret` has no `Display`/`Serialize`; errors name the operation and key, never the value (the `accounts/vault.rs` rule 1); adapter errors are fixed sentences (§7.3) | — |
@@ -1080,7 +1225,12 @@ user.** Every card on a `run` or prod path says so in one line.
 
 ## 15. Rejected
 
-- **One keychain item per secret**: §5.
+- **One keychain item per secret**: §5.2.
+- **The tier deciding how well a key is stored** (2026-10-28): a "dev" key is often live. The tier
+  decides routing and cards; protection is the same for every key (§5).
+- **maiTerm's own OS-guarded store for prod** (2026-10-28): §5.3. A provider does it better.
+- **Using the human's own provider login** (`doppler login`, an `op` sign-in): it reaches
+  everything they can, and any agent running as them can use it too (§5.1).
 - **Giving the agent the value and asking it not to print it**: it ends up in the transcript,
   so with the model provider, the moment the agent reads it.
 - **Typing `export`s into a PTY**: scrollback, history and the scrollback database (§7.2).
@@ -1090,7 +1240,9 @@ user.** Every card on a `run` or prod path says so in one line.
 - **Trusting a CLI's own config for the destination**: the agent can edit it (§7.3).
 - **A `curl`-style "call this URL with the key" tool**: every exfiltration needs exactly that.
   A later "signed request" tool would be acceptable only with a per-key host allowlist, set by
-  a card.
+  a card. **Reconsidered 2026-10-28** after 1Password's OpenShell gateway (§2), which does
+  exactly that: the agent holds a placeholder, and the gateway swaps the real value in only for
+  approved hosts and a set time window. Still not in v1; a candidate after leak detection.
 - **Encrypted files in the repo (SOPS / dotenvx) as the store**: a good tool, but its key
   management is the same problem one level down, and it puts rotation history in git. A team
   that uses it can still adopt from it.
@@ -1110,18 +1262,10 @@ Darryl re-decided it the same day.
    once rotation exists (pasting a newly minted key from a mobile dashboard or a password
    manager). Sealing the value to a one-time key on the desktop card protects the value; the
    card's public key is protected by maiLink's pinned TLS, which the relay never carries.
-2. **Prod unlock: OS-enforced, not a dialog** (§5). macOS release builds: a data-protection
-   keychain item, ThisDeviceOnly, requiring user presence (needs a provisioning profile).
-   Windows: a key derived from a Hello signature. Linux and dev builds: a passphrase. Unlocked
-   until 15 minutes without human-initiated use. Dev and staging can opt in per project, not by
-   default. A passphrase on every prod action gets turned off within a week, and only the
-   OS-enforced form also stops a same-user agent, fully on macOS and partly on Windows (§5
-   lists the gaps).
-3. **1Password: designed for from phase 1, built right after targets.** Storage sits behind a
-   `ValueStore` interface from the start (§5); the 1Password backend resolves with `op read` and
-   writes back on rotation, while manifest, targets, ledger and runs stay in maiTerm. Doppler and
-   Infisical wait for someone to ask. 1Password is what most developers already have and is
-   teams' sharing for free; retrofitting a second backend later is a rewrite.
+2. **Superseded by decision 13** (2026-10-28). It was an OS-enforced unlock for prod values in
+   maiTerm's own store. The research is kept in §5.3.
+3. **Superseded by decision 11** (2026-10-28). It was "1Password as a second backend, built
+   after targets". Providers are now the first-class store.
 4. **Targets: GitHub Actions, Cloudflare, Railway; then Vercel, Fly; AWS and Kubernetes
    later** (§7.3). **Provider packs: Stripe, GitHub, Anthropic, OpenAI, Cloudflare, AWS** (§9.5).
    GitHub is near-universal, maiTerm itself deploys to Cloudflare, Railway is in use here, and
@@ -1154,19 +1298,36 @@ Darryl re-decided it the same day.
    (The SSO token cached in `~/.aws/sso/cache` is itself a bearer credential an agent can read;
    the advice says so.)
 
-10. **A recovery key, for the values maiTerm stores itself** (§5 "Recovery"). Darryl: yes, "but
-    it depends. If we are integrating with another password manager, then I'd say no, as the
-    recovery is tied to that password manager." So it is offered when the local store holds
-    values, and not for values that live in 1Password (decision 3), whose recovery is
-    1Password's. It is 256 random bits, so unlike a passphrase it can't be guessed offline. It is
-    never stored on the machine.
+10. **A recovery key, for the local vault only** (§5.2 "Recovery"). Darryl: yes, "but it
+    depends. If we are integrating with another password manager, then I'd say no, as the
+    recovery is tied to that password manager." So it is offered when the local vault holds
+    values, and never for values held by a provider, whose recovery is the provider's. It is 256
+    random bits, so unlike a passphrase it can't be guessed offline. It is never stored on the
+    machine.
+
+**Added 2026-10-28**, after Darryl asked whether 1Password had moved toward Doppler and whether
+maiTerm should lean on them instead of its own vault:
+
+11. **Providers first** (§5, §5.1). Values live in 1Password or Doppler whenever one is connected;
+    Infisical later. maiTerm builds the integration layer around them: "it basically is adding a
+    much better integration layer on to Doppler and 1Password". maiTerm always uses **its own
+    narrow credentials** (a 1Password service account, Doppler service tokens), never the
+    human's login, and the provider CLIs are kept away from agents.
+12. **The same protection for every key** (§5). Darryl: "why would dev/staging need less
+    security? Oftentimes those would still be functional keys even if labeled as dev." Every key
+    is `live` unless it provably can't do harm. The tier decides routing and cards, not storage.
+13. **The local vault is a labelled fallback, and prod needs a provider** (§5.2, §5.3). The local
+    vault holds any non-prod key for people without a provider, with a label saying plainly what
+    it does and doesn't protect. Prod values need a provider, and through 1Password every prod
+    read is gated by the human's Touch ID. That drops the OS-guarded local prod store, the
+    heaviest and weakest part of the earlier design.
 
 ### 16.1 Added 2026-10-23: considerations raised after the decisions
 
 Darryl asked what else should be asked. Each item was then written into its section:
 - recovery (§5, decision 10);
 - secrets that are files (§4.2, §7.1);
-- services waiting on the prod unlock after a restart (§7.2);
+- services waiting on the human's 1Password authorization after a restart (§7.2);
 - checking the shim's code signature, not its path (§7.1);
 - the Overlord and mesh peers never approving, and cards naming a mesh origin (§11.2);
 - unused keys (§11.1);
@@ -1177,25 +1338,30 @@ Free or paid is Darryl's product call and doesn't change the design.
 
 ## 17. Build order
 
-1. **Vault core.** `src-tauri/src/secrets/`: the envelope store behind the `ValueStore`
-   interface, with the two data keys and local-only Windows persistence (§5), the passphrase
-   unlock (the Linux path and the fallback everywhere), the data model, the Secrets panel as a
-   full-window view with human entry, environments, the audit log, **the recovery key** (§5).
-   `accounts/vault.rs`'s `Secret` grows `zeroize` and moves to a shared module.
+1. **Core and the provider spikes.**
+   - **First, two spikes**: driving 1Password's app authorization from maiTerm (a Rust app; `op`
+     as a child, or a small SDK sidecar), and the Doppler REST endpoint for reading a config with
+     a service token (§5.1).
+   - `src-tauri/src/secrets/`: the `Store` interface; the data model with `risk`; the Secrets
+     panel as a full-window view, with the store and the local vault's label shown; environments;
+     the audit log.
+   - **Doppler and 1Password connections**: minting or pasting maiTerm's own credentials, the
+     token-type refusal, the scope check, keychain storage. Dedicated 1Password vaults.
+   - **The local vault**: one data key, local-only Windows persistence, the passphrase for
+     boxes with no keychain, the recovery key, moving the vault to a provider (§5.2).
+   - `accounts/vault.rs`'s `Secret` grows `zeroize` and moves to a shared module.
 2. **The agent manifest.** `listSecrets`, `declareSecrets` with its locked fields,
-   `requestSecretValues`, the entry sheet, the combined store-approve-settle Done, per-kind
-   request TTLs and the reload remap (§6.1), the phone refusal and `desktopOnly` (§12), the
-   ⟦SECRETS⟧ notice, `generateSecret`, the "no agent approves" test and the mesh-origin line on
-   cards (§11.2). **This is the first phase an agent can use, and it proves Darryl's flow end to
-   end.**
-3. **Prod guards, before anything can deliver a prod value.** The OS-enforced prod unlock (§5):
-   on macOS the data-protection keychain item, **with the release pipeline's entitlement and
-   Developer ID provisioning profile**; on Windows the Hello-derived key. The re-wrap that
-   deletes phase 1's passphrase wrap. The detection-vs-use split for prod match tables. The
-   sandbox spike (§10.3), and the one-click offer only if it passes.
+   `requestSecretValues`, the entry sheet writing to the project's store (or "I'll set these
+   myself"), the combined store-approve-settle Done, per-kind request TTLs and the reload remap
+   (§6.1), the phone refusal and `desktopOnly` (§12), the ⟦SECRETS⟧ notice, `generateSecret`, the
+   "no agent approves" test and the mesh-origin line on cards (§11.2). **This is the first phase an
+   agent can use, and it proves Darryl's flow end to end.**
+3. **Keeping agents off the provider, before anything delivers.** The provider-CLI deny rules
+   (`op`, `doppler`, `infisical`, their config folders) and onboarding's warnings (§5.1 rule 6).
+   The sandbox spike (§10.3), and the one-click offer only if it passes.
 4. **Local delivery.** The scrubber at every MCP and persistence boundary (§10.1) **first**,
    then `runWithSecrets` with masking and file keys, the `maiterm-run` shim with peer-verified,
-   **signature-checked** tickets for stack services, and "waiting for unlock" (§7.1, §7.2),
+   **signature-checked** tickets for stack services, and "waiting for 1Password" (§7.1, §7.2),
    `writeEnvFile`, `adoptSecrets` with the first-run scan (§6.2), and with them **the
    ledger-file `PreToolUse` deny and the read-deny writers** (§10.3, §10.4), each runtime only
    after its behavioural check passes: Claude first, then Grok's native rules; Gemini CLI
@@ -1204,17 +1370,18 @@ Free or paid is Darryl's product call and doesn't change the design.
    with them.
 5. **Targets.** `declareTargets`, `deploySecrets`, the ledger, adapters with pinned addresses and
    binaries (§7.3): GitHub Actions, Cloudflare, Railway. The OIDC / AWS SSO advice, which is
-   about targets. "Last delivered" and the unused-key flag (§11.1). **The end of v1**, followed
-   by §18 before it is advertised.
-6. **1Password backend** on the `ValueStore` interface (§16 decision 3).
-7. **Rotation.** Runs with human mint and revoke, `requestRotation`, the run view, age and
+   about targets. "Synced by the provider" consumers, so maiTerm doesn't push where Doppler
+   already syncs (§5.1 rule 8). "Last delivered" and the unused-key flag (§11.1). **The end of
+   v1**, followed by §18 before it is advertised.
+6. **Rotation.** Runs with human mint and revoke, `requestRotation`, the run view, age and
    expiry proposals, the first provider packs (§9.5), end-to-end encrypted value entry on the
    phone (§12).
-8. **Leak detection.** The dedicated transcript scanner, scrollback and pre-commit scans,
+7. **Leak detection.** The dedicated transcript scanner, scrollback and pre-commit scans,
    leak-triggered rotation, the rest of the `PreToolUse` deny (keychain CLIs, process
    environments).
-9. **Automation and reach.** Capture recipes with their oracle guards, adapter mint/revoke, ssh
-   delivery, Vercel and Fly, then AWS and Kubernetes.
+8. **Automation and reach.** Capture recipes with their oracle guards, adapter mint/revoke, ssh
+   delivery, Infisical, Vercel and Fly, then AWS and Kubernetes; a signed-request gateway in the
+   OpenShell style (§15).
 
 Each phase is reviewed before the next. The shim, the adapters and the read-deny writers must be
 reviewed with a scratch HOME. **Two tests must exist before the first adapter ships**: no value
