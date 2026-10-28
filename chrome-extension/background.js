@@ -20,7 +20,7 @@ const conns = new Map(HOSTS.map((h) => [h, { status: 'disconnected', pending: ne
 
 // ── links (chrome.storage.session: survives a service-worker restart, not the browser) ─────
 
-/** @returns {Promise<Array<{host, maitermTabId, maitermTabName, chromeTabId, handle, openedBy, title, url, placement?}>>} */
+/** @returns {Promise<Array<{host, maitermTabId, maitermTabName, chromeTabId, handle, openedBy, title, url, purpose?, placement?}>>} */
 async function getLinks() {
   const { links } = await chrome.storage.session.get('links');
   return links ?? [];
@@ -160,7 +160,7 @@ async function connect(host) {
           protocol: PROTOCOL,
           version: VERSION,
           browser: browserName(),
-          links: links.map(({ maitermTabId, chromeTabId, handle, openedBy, title, url }) => ({ maitermTabId, chromeTabId, handle, openedBy, title, url })),
+          links: links.map(({ maitermTabId, chromeTabId, handle, openedBy, title, url, purpose }) => ({ maitermTabId, chromeTabId, handle, openedBy, title, url, purpose })),
           handleFloors,
         },
       }),
@@ -296,6 +296,22 @@ async function unlinkChromeTab(chromeTabId, reason = 'unlinked') {
   });
 }
 
+/** The human wrote what a linked tab is for (the popup). Its agent is told. */
+async function setPurpose(chromeTabId, text) {
+  const purpose = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, PURPOSE_MAX);
+  await mutateLinks(async (links) => {
+    const mine = links.filter((l) => l.chromeTabId === chromeTabId);
+    if (!mine.length) throw new Error('That tab is no longer linked.');
+    for (const l of mine) {
+      l.purpose = purpose;
+      // A maiTerm from before purpose notes doesn't know the method: the note stays here only.
+      await request(l.host, 'purpose', { chromeTabId, purpose }).catch(() => {});
+    }
+    return links;
+  });
+}
+const PURPOSE_MAX = 200;
+
 /** Link a Chrome tab to an agent. An agent may hold several Chrome tabs; a Chrome tab has one
  *  agent, so linking it again moves it (§1.3). `openerChromeTabId`: it joins the agent of the
  *  linked tab that opened it. */
@@ -303,15 +319,18 @@ async function link(host, maitermTab, chromeTab, openerChromeTabId) {
   // Inside the queue, so a frame from maiTerm about this tab (queued behind the reply) applies
   // after the new link is written, not over it.
   await mutateLinks(async (all) => {
+    const previous = all.filter((l) => l.chromeTabId === chromeTab.id);
+    // What the human said the tab is for describes the tab, so it stays with it through a move.
+    const purpose = previous.find((l) => l.purpose)?.purpose ?? '';
     const r = await request(host, 'link', {
       maitermTabId: maitermTab.id,
       chromeTabId: chromeTab.id,
       title: chromeTab.title ?? '',
       url: chromeTab.url ?? '',
+      purpose,
       ...(openerChromeTabId != null ? { openerChromeTabId } : {}),
     });
     // This maiTerm already moved the tab on its side; another maiTerm holding it is told.
-    const previous = all.filter((l) => l.chromeTabId === chromeTab.id);
     // Relinked or moved to another agent: a wait still running for the old link ends.
     if (previous.length) release(chromeTab.id);
     for (const l of previous) if (l.host !== host) await request(l.host, 'unlink', { chromeTabId: l.chromeTabId, reason: 'moved' }).catch(() => {});
@@ -326,6 +345,7 @@ async function link(host, maitermTab, chromeTab, openerChromeTabId) {
       openedBy: opener?.handle,
       title: chromeTab.title ?? '',
       url: chromeTab.url ?? '',
+      purpose,
     };
     // Into its agent's tab group. A relink or a move between agents carries where the human had
     // it, as long as the tab is still where we put it (`mark` checks), so the final unlink puts it
@@ -468,6 +488,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return { ok: true };
       case 'unlink':
         await unlinkChromeTab(msg.chromeTabId);
+        return { ok: true };
+      case 'setPurpose':
+        await setPurpose(msg.chromeTabId, msg.purpose);
         return { ok: true };
       default:
         return { error: 'unknown message' };

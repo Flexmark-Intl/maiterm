@@ -9,6 +9,8 @@ const RUNTIME = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini' };
 
 let chromeTab;
 let groups = [];
+/** Just linked: the purpose box takes the keyboard, since writing one is the next step. */
+let justLinked = false;
 
 function el(tag, attrs = {}, ...children) {
   const n = document.createElement(tag);
@@ -66,11 +68,14 @@ async function render() {
         link.handle
           ? el('span', { class: 'meta' }, [`The agent knows this tab as ${link.handle}`, link.openedBy ? `opened by ${link.openedBy}` : null].filter(Boolean).join(' · '))
           : null,
+        purposeField(link),
         el('span', { class: 'hint' }, 'That agent can diagnose this tab (console, network) and drive it (read, click, type), and no other tab. While it does, Chrome shows its “debugging this browser” bar in every tab: that bar is Chrome’s and covers the whole browser. Cancelling it unlinks every linked tab.'),
         el('button', { class: 'primary', onclick: unlink }, 'Unlink'),
       ),
     );
     $('picker').hidden = true;
+    if (justLinked) $('purpose').focus();
+    justLinked = false;
     return;
   }
 
@@ -88,6 +93,54 @@ async function render() {
   $('filter').focus();
 }
 
+/** What this tab is for, in the human's words: the agent reads it to tell its tabs apart. Saved
+ *  when the field is left or on Enter. */
+function purposeField(link) {
+  const status = el('span', { class: 'saved', 'aria-live': 'polite' });
+  const input = el('input', {
+    id: 'purpose',
+    type: 'text',
+    maxlength: '200',
+    placeholder: 'e.g. staging admin, signed in as support',
+    autocomplete: 'off',
+    spellcheck: 'false',
+  });
+  input.value = link.purpose ?? '';
+  let saved = input.value;
+  const save = async () => {
+    if (input.value.trim() === saved.trim()) return;
+    const r = await ask({ type: 'setPurpose', chromeTabId: chromeTab.id, purpose: input.value });
+    if (r?.error) return showError(r.error);
+    saved = input.value;
+    status.textContent = input.value.trim() ? 'Saved: the agent is told' : 'Cleared';
+  };
+  // Saved as they type: the popup closes the moment it loses focus, before a change event.
+  let timer;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(save, 500);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      clearTimeout(timer);
+      save();
+    }
+  });
+  addEventListener('pagehide', () => {
+    clearTimeout(timer);
+    if (input.value.trim() !== saved.trim()) ask({ type: 'setPurpose', chromeTabId: chromeTab.id, purpose: input.value });
+  });
+  return el(
+    'label',
+    { class: 'purpose' },
+    el('span', { class: 'label' }, 'What is this tab for?'),
+    input,
+    el('span', { class: 'hint' }, 'Optional. With several tabs linked, the agent uses this to load each page in the right one.'),
+    status,
+  );
+}
+
 /** Every linked tab, from any page: which ones they are, and a way to get to each. */
 function drawLinked(links) {
   const others = links.filter((l) => l.chromeTabId !== chromeTab?.id);
@@ -100,7 +153,7 @@ function drawLinked(links) {
         'button',
         { class: 'tab', onclick: () => goTo(l.chromeTabId) },
         el('span', { class: 'name' }, l.title || l.url || 'A linked tab'),
-        el('span', { class: 'meta' }, [l.maitermTabName ?? 'an agent tab', l.handle].filter(Boolean).join(' · ')),
+        el('span', { class: 'meta' }, [l.maitermTabName ?? 'an agent tab', l.handle, l.purpose ? `for “${l.purpose}”` : null].filter(Boolean).join(' · ')),
       ),
     ),
   );
@@ -153,6 +206,7 @@ function drawGroups() {
 async function doLink(host, maitermTab) {
   const r = await ask({ type: 'link', host, maitermTab: { id: maitermTab.id, name: maitermTab.name }, chromeTab: { id: chromeTab.id, title: chromeTab.title, url: chromeTab.url } });
   if (r?.error) return showError(r.error);
+  justLinked = true;
   await render();
 }
 

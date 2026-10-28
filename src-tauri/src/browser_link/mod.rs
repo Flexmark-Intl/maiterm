@@ -143,13 +143,29 @@ pub struct Link {
     pub browser: String,
     pub title: String,
     pub url: String,
+    /// What the tab is for, in its human's words, written in the extension's popup ("staging
+    /// admin, signed in as support"). Empty when they wrote none. The human's own words, unlike
+    /// the title: it may go into what an agent is told unasked.
+    pub purpose: String,
 }
 
 impl Link {
     fn describe(&self) -> String {
         let what = if self.title.is_empty() { &self.url } else { &self.title };
-        format!("{} ({what})", self.handle)
+        if self.purpose.is_empty() {
+            format!("{} ({what})", self.handle)
+        } else {
+            format!("{} (for \u{201C}{}\u{201D}: {what})", self.handle, self.purpose)
+        }
     }
+}
+
+/// The longest purpose note kept.
+const PURPOSE_MAX: usize = 200;
+
+/// A purpose note as the extension sent it, made one short line.
+fn clean_purpose(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ").chars().filter(|c| !c.is_control()).take(PURPOSE_MAX).collect()
 }
 
 fn handle_number(h: &str) -> Option<u32> {
@@ -382,6 +398,7 @@ fn set_link(mut link: Link, fresh: bool) -> Result<Link, String> {
         let l = &mut reg.links[i];
         l.title = link.title;
         l.url = link.url;
+        l.purpose = link.purpose;
         return Ok(l.clone());
     }
     let held = reg.links.iter().filter(|l| l.maiterm_tab_id == link.maiterm_tab_id).count();
@@ -462,7 +479,8 @@ pub fn prompt_context(state: &Arc<AppState>, maiterm_tab_id: &str) -> Option<Str
 /// The agent's linked tabs, if their handles changed since it was last told (and now it has been).
 fn untold_links(maiterm_tab_id: &str) -> Option<Vec<Link>> {
     let mine = links_of(maiterm_tab_id);
-    let now = mine.iter().map(|l| l.handle.as_str()).collect::<Vec<_>>().join(",");
+    // A changed purpose is news too: it is what tells the agent which tab is which.
+    let now = mine.iter().map(|l| format!("{}={}", l.handle, l.purpose)).collect::<Vec<_>>().join("\n");
     let mut reg = REG.lock();
     if reg.told.get(maiterm_tab_id).map(String::as_str).unwrap_or("") == now {
         return None;
@@ -492,17 +510,30 @@ fn prompt_context_text(mine: &[Link]) -> String {
                 nothing to act on until your human links one again."
             .into();
     }
-    // Handle and site only. This text reaches the model unasked, in maiTerm's voice; a page's
-    // title, or the rest of its URL, is the page's own words and could read as an instruction.
-    // browserStatus, which the agent asks for, carries those.
-    let list = mine.iter().map(|l| format!("{} on {}", l.handle, site_of(&l.url))).collect::<Vec<_>>().join(", ");
+    // Handle, site and the human's purpose note only. This text reaches the model unasked, in
+    // maiTerm's voice; a page's title, or the rest of its URL, is the page's own words and could
+    // read as an instruction. browserStatus, which the agent asks for, carries those.
+    let list = mine
+        .iter()
+        .map(|l| {
+            let on = format!("{} on {}", l.handle, site_of(&l.url));
+            if l.purpose.is_empty() { on } else { format!("{on} (your human: this tab is for \u{201C}{}\u{201D})", l.purpose) }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let (tabs, them) = if mine.len() == 1 { ("tab", "It is") } else { ("tabs", "They are") };
+    let several = if mine.len() > 1 {
+        " Each has its own job: name the one you mean with tab (browserNavigate requires it), and \
+          load a page in the tab whose purpose fits it."
+    } else {
+        ""
+    };
     format!(
         "maiTerm: your human has linked Chrome {tabs} to you: {list}. {them} in their own browser, \
          signed in as them. When they mention their browser, a tab or the page, they mean this: \
          use the maiTerm browser tools (browserSnapshot, browserClick, browserType, \
          browserConsole, browserNetwork, browserWaitFor…; browserStatus lists your tabs), not \
-         another browser tool or skill, which would open a different browser without their session."
+         another browser tool or skill, which would open a different browser without their session.{several}"
     )
 }
 
@@ -516,6 +547,31 @@ fn remove_link_by_chrome(conn_id: &str, chrome_tab_id: i64, why: &str) -> bool {
     let gone = reg.links.remove(i);
     reg.tell(&gone.maiterm_tab_id, format!("{} {why}.", gone.describe()));
     reg.forget_current(&gone);
+    true
+}
+
+/// The human wrote (or cleared) what a linked tab is for, in the extension's popup.
+fn set_purpose(conn_id: &str, chrome_tab_id: i64, purpose: &str) -> bool {
+    let purpose = clean_purpose(purpose);
+    let mut reg = REG.lock();
+    let Some(l) = reg.links.iter_mut().find(|l| l.conn_id == conn_id && l.chrome_tab_id == chrome_tab_id) else {
+        return false;
+    };
+    if l.purpose == purpose {
+        return false;
+    }
+    l.purpose = purpose;
+    let (tab, msg) = if l.purpose.is_empty() {
+        (l.maiterm_tab_id.clone(), format!("Your human cleared what {} is for.", l.handle))
+    } else {
+        (l.maiterm_tab_id.clone(), format!("Your human says {} is for \u{201C}{}\u{201D}.", l.handle, l.purpose))
+    };
+    // Saved as the human types: only the latest note for this tab is news.
+    let handle = reg.links.iter().find(|l| l.conn_id == conn_id && l.chrome_tab_id == chrome_tab_id).map(|l| l.handle.clone());
+    if let (Some(h), Some(news)) = (handle, reg.news.get_mut(&tab)) {
+        news.retain(|m| !m.starts_with(&format!("Your human says {h} is for ")) && m != &format!("Your human cleared what {h} is for."));
+    }
+    reg.tell(&tab, msg);
     true
 }
 
@@ -763,6 +819,7 @@ mod tests {
             browser: "Chrome".into(),
             title: String::new(),
             url: String::new(),
+            purpose: String::new(),
         }
     }
 
@@ -797,6 +854,32 @@ mod tests {
         assert!(untold_links("tab-t").unwrap().is_empty(), "the last one going is news too");
         assert!(untold_links("tab-t").is_none());
         assert!(prompt_context_text(&[]).contains("no Chrome tab is linked"));
+    }
+
+    /// The human's purpose note is one short line, and it reaches the agent: a change to it re-tells.
+    #[test]
+    fn a_purpose_note_is_cleaned_and_told() {
+        let _serial = SERIAL.lock();
+        reset();
+        assert_eq!(clean_purpose("  staging\n admin\t\u{7}x "), "staging admin x");
+        assert_eq!(clean_purpose(&"a".repeat(500)).len(), PURPOSE_MAX);
+        set_link(link("tab-u", "c7", 1), true).unwrap();
+        set_link(link("tab-u", "c7", 2), true).unwrap();
+        assert!(untold_links("tab-u").is_some());
+        take_news("tab-u");
+        assert!(set_purpose("c7", 2, "billing"));
+        assert!(set_purpose("c7", 2, "billing, signed in as support"));
+        assert!(!set_purpose("c7", 2, "billing,  signed in as support"), "the same note is no change");
+        assert_eq!(take_news("tab-u"), ["Your human says b2 is for \u{201C}billing, signed in as support\u{201D}."], "only the latest note");
+        let mine = untold_links("tab-u").expect("a new purpose is news");
+        let text = prompt_context_text(&mine);
+        assert!(text.contains("b2 on a page (your human: this tab is for \u{201C}billing, signed in as support\u{201D})"), "{text}");
+        assert!(text.contains("browserNavigate requires it"), "{text}");
+        // A relink from the popup carries the note.
+        let mut again = link("tab-u", "c7", 2);
+        again.purpose = "billing".into();
+        assert_eq!(set_link(again, true).unwrap().purpose, "billing");
+        reset();
     }
 
     /// The unasked notice carries no words the page chose: not its title, not its path.

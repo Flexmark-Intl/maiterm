@@ -2724,6 +2724,8 @@ export interface BrowserLinkView {
   browser: string;
   title: string;
   url: string;
+  /** What the human said this tab is for, in the extension's popup; empty when they wrote none. */
+  purpose: string;
   /** null when the maiTerm tab is gone (it is pruned on the next read). */
   tab_name: string | null;
 }

@@ -229,7 +229,7 @@
         {#each status.links as l (`${l.maiterm_tab_id}/${l.handle}`)}
           <div class="link">
             <div class="link-text">
-              <div class="name">{l.tab_name ?? 'A closed tab'} · {l.handle}</div>
+              <div class="name">{l.tab_name ?? 'A closed tab'} · {l.handle}{l.purpose ? ` · for “${l.purpose}”` : ''}</div>
               <div class="hint">
                 {l.browser}: {l.title || l.url}{l.opened_by ? ` (opened by ${l.opened_by})` : ''}
               </div>

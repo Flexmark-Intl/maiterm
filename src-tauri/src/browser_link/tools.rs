@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tauri::AppHandle;
 
-use super::{command, connected, current_handle, links_of, pick, prune, tab_name, take_news, Link};
+use super::{command, connected, current_handle, links_of, pick, prune, site_of, tab_name, take_news, Link};
 use crate::state::AppState;
 
 /// The tool → extension action table. `browserStatus` never reaches the extension.
@@ -71,7 +71,57 @@ fn split_ref(r: &str) -> (Option<&str>, &str) {
 }
 
 fn tab_line(l: &Link) -> String {
-    format!("Tab {}: {} — {}", l.handle, l.title, l.url)
+    format!("Tab {}{}: {} — {}", l.handle, purpose_part(l), l.title, l.url)
+}
+
+/// ` (for "staging admin")`, or nothing when the human wrote no purpose.
+fn purpose_part(l: &Link) -> String {
+    if l.purpose.is_empty() {
+        String::new()
+    } else {
+        format!(" (for \u{201C}{}\u{201D})", l.purpose)
+    }
+}
+
+/// One tab in a list the agent chooses from: its handle, what it is for, and where it is now.
+fn choice(l: &Link) -> String {
+    format!("{}{} now on {}", l.handle, purpose_part(l), site_of(&l.url))
+}
+
+/// browserNavigate with several linked tabs and none named: refused. The current tab is only the
+/// last one the agent named, and loading a page there is how a tab kept for one job (a signed-in
+/// admin) ends up showing another's.
+fn navigate_needs_a_tab(mine: &[Link]) -> Option<String> {
+    (mine.len() > 1).then(|| {
+        format!(
+            "You have {} linked tabs, each for its own job: say which one should load this with tab. Yours: {}.",
+            mine.len(),
+            mine.iter().map(choice).collect::<Vec<_>>().join("; ")
+        )
+    })
+}
+
+/// Loading `url` in `target` when ANOTHER of the agent's tabs already has that site open, and
+/// `target` isn't on it: likely the wrong tab. Said after the fact (the page has loaded), with the
+/// way back.
+fn same_site_warning(mine: &[Link], target: &Link, url: &str) -> Option<String> {
+    if !url.contains("://") {
+        return None; // back, forward, reload
+    }
+    let site = site_of(url);
+    if site_of(&target.url) == site {
+        return None;
+    }
+    let others: Vec<&Link> = mine.iter().filter(|l| l.handle != target.handle && site_of(&l.url) == site).collect();
+    if others.is_empty() {
+        return None;
+    }
+    let back = if target.url.is_empty() { String::new() } else { format!(" To put {} back, navigate it to {}.", target.handle, target.url) };
+    Some(format!(
+        "{} already has {site} open: {}. If that is the tab you meant, use it next time.{back}",
+        others.iter().map(|l| l.handle.as_str()).collect::<Vec<_>>().join(" and "),
+        others.iter().map(|l| choice(l)).collect::<Vec<_>>().join("; "),
+    ))
 }
 
 /// Run a browser tool. Results in `__mcp_content` are passed through as the MCP content array
@@ -104,6 +154,7 @@ pub async fn handle_tool(tool: &str, arguments: &Value, state: &Arc<AppState>, a
                     "url": l.url,
                     "browser": l.browser,
                     "opened_by": l.opened_by,
+                    "purpose": (!l.purpose.is_empty()).then_some(&l.purpose),
                     "current": current.as_deref() == Some(l.handle.as_str()),
                 })
             })
@@ -111,7 +162,7 @@ pub async fn handle_tool(tool: &str, arguments: &Value, state: &Arc<AppState>, a
         let v = serde_json::json!({
             "linked": true,
             "tabs": tabs,
-            "note": "A browser tool acts on the tab you name with tab, which then becomes current, or else on the current one. A tab your human links later, or one a page opens, doesn't become current until you name it. Refs from browserSnapshot carry their tab (b1:e42), so a click or type with one goes to that tab.",
+            "note": "A browser tool acts on the tab you name with tab, which then becomes current, or else on the current one; browserNavigate needs tab whenever you have several. A tab's purpose is what your human said it is for: load a page in the tab whose purpose fits. A tab your human links later, or one a page opens, doesn't become current until you name it. Refs from browserSnapshot carry their tab (b1:e42), so a click or type with one goes to that tab.",
         });
         return with_news(v, news);
     }
@@ -124,6 +175,11 @@ pub async fn handle_tool(tool: &str, arguments: &Value, state: &Arc<AppState>, a
     if let (Some(t), Some(r)) = (handle, ref_tab) {
         if t != r {
             return with_news(error(format!("ref {} is from tab {r}, not {t}.", raw_ref.unwrap_or(""))), news);
+        }
+    }
+    if tool == "browserNavigate" && handle.is_none() {
+        if let Some(e) = navigate_needs_a_tab(&links_of(tab_id)) {
+            return with_news(error(e), news);
         }
     }
     let link = match pick(tab_id, handle.or(ref_tab)) {
@@ -139,6 +195,10 @@ pub async fn handle_tool(tool: &str, arguments: &Value, state: &Arc<AppState>, a
             o.insert("ref".into(), Value::String(bare_ref.to_string()));
         }
     }
+    let warning = match (action, arguments.get("url").and_then(|v| v.as_str())) {
+        ("navigate", Some(url)) => same_site_warning(&links_of(tab_id), &link, url),
+        _ => None,
+    };
     let out = match command(&link, action, args).await {
         Err(e) => serde_json::json!({ "tab": link.handle, "error": e }),
         Ok(r) => match action {
@@ -151,8 +211,9 @@ pub async fn handle_tool(tool: &str, arguments: &Value, state: &Arc<AppState>, a
             },
             "snapshot" => {
                 let head = format!(
-                    "Tab: {}\nPage: {}\nURL: {}\n\n",
+                    "Tab: {}{}\nPage: {}\nURL: {}\n\n",
                     link.handle,
+                    purpose_part(&link),
                     r.get("title").and_then(|v| v.as_str()).unwrap_or(""),
                     r.get("url").and_then(|v| v.as_str()).unwrap_or("")
                 );
@@ -162,6 +223,9 @@ pub async fn handle_tool(tool: &str, arguments: &Value, state: &Arc<AppState>, a
             _ => match r {
                 Value::Object(mut o) => {
                     o.insert("tab".into(), Value::String(link.handle.clone()));
+                    if let Some(w) = warning {
+                        o.insert("warning".into(), Value::String(w));
+                    }
                     Value::Object(o)
                 }
                 other => serde_json::json!({ "tab": link.handle, "result": other }),
@@ -169,4 +233,49 @@ pub async fn handle_tool(tool: &str, arguments: &Value, state: &Arc<AppState>, a
         },
     };
     with_news(out, news)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tab(handle: &str, url: &str, purpose: &str) -> Link {
+        Link {
+            maiterm_tab_id: "t".into(),
+            chrome_tab_id: 1,
+            handle: handle.into(),
+            opened_by: None,
+            conn_id: "c".into(),
+            browser: "Chrome".into(),
+            title: String::new(),
+            url: url.into(),
+            purpose: purpose.into(),
+        }
+    }
+
+    /// With several tabs, a navigation names its tab; the refusal lists each with its job.
+    #[test]
+    fn navigate_names_a_tab_when_several_are_linked() {
+        let admin = tab("b1", "https://admin.example.com/users", "staging admin");
+        let shop = tab("b2", "https://shop.example.com/", "");
+        assert!(navigate_needs_a_tab(std::slice::from_ref(&admin)).is_none());
+        let e = navigate_needs_a_tab(&[admin, shop]).unwrap();
+        assert!(e.contains("b1 (for \u{201C}staging admin\u{201D}) now on admin.example.com"), "{e}");
+        assert!(e.contains("b2 now on shop.example.com"), "{e}");
+    }
+
+    /// Loading a site another tab already holds, into a tab that isn't on it, is warned about.
+    #[test]
+    fn loading_another_tabs_site_is_warned_about() {
+        let admin = tab("b1", "https://admin.example.com/users", "staging admin");
+        let shop = tab("b2", "https://shop.example.com/cart", "");
+        let mine = [admin.clone(), shop.clone()];
+        let w = same_site_warning(&mine, &shop, "https://admin.example.com/settings").unwrap();
+        assert!(w.starts_with("b1 already has admin.example.com open"), "{w}");
+        assert!(w.contains("navigate it to https://shop.example.com/cart"), "{w}");
+        // Within its own site, a new site, or back/reload: nothing to say.
+        assert!(same_site_warning(&mine, &admin, "https://admin.example.com/settings").is_none());
+        assert!(same_site_warning(&mine, &shop, "https://docs.example.com/").is_none());
+        assert!(same_site_warning(&mine, &shop, "back").is_none());
+    }
 }

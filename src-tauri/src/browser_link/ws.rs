@@ -195,6 +195,7 @@ fn parse_link(v: &Value, conn_id: &str, browser: &str) -> Option<Link> {
         browser: browser.to_string(),
         title: v.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
         url: v.get("url").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+        purpose: super::clean_purpose(v.get("purpose").and_then(|t| t.as_str()).unwrap_or("")),
     })
 }
 
@@ -270,6 +271,14 @@ fn handle(v: &Value, conn_id: &str, browser: &str, version: &str, state: &Arc<Ap
                 _ => "was unlinked by your human",
             };
             if remove_link_by_chrome(conn_id, chrome, why) {
+                emit_changed(app);
+            }
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        "purpose" => {
+            let chrome = params.get("chromeTabId").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let purpose = params.get("purpose").and_then(|v| v.as_str()).unwrap_or("");
+            if super::set_purpose(conn_id, chrome, purpose) {
                 emit_changed(app);
             }
             Ok(serde_json::json!({ "ok": true }))

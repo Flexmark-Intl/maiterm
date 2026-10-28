@@ -589,7 +589,7 @@
     chromeMenu = {
       x: e.clientX,
       y: e.clientY,
-      items: links.map((l) => ({ label: `${l.handle}: ${l.title || l.url}`, action: () => void revealChromeTab(tabId, l.handle) })),
+      items: links.map((l) => ({ label: `${l.handle}: ${l.purpose || l.title || l.url}`, action: () => void revealChromeTab(tabId, l.handle) })),
     };
   }
   /** Windows/workspaces the menu's "Move to" can send to, fetched as the menu opens. */
@@ -1397,7 +1397,7 @@
           {#if chromeLinks.length > 0}
             <!-- Linked Chrome tabs (docs/browser-link.md): the link is made in Chrome, so this is
                  where maiTerm shows it. -->
-            <Tooltip text={`Linked to Chrome — this agent can use ${chromeLinks.map((l) => `${l.handle}: ${l.title || l.url}`).join('; ')}. Click to show ${chromeLinks.length > 1 ? 'one' : 'it'} in Chrome. Unlink from the extension's icon in Chrome, or Preferences → Chrome extension.`}>
+            <Tooltip text={`Linked to Chrome — this agent can use ${chromeLinks.map((l) => `${l.handle}: ${l.purpose || l.title || l.url}`).join('; ')}. Click to show ${chromeLinks.length > 1 ? 'one' : 'it'} in Chrome. Unlink from the extension's icon in Chrome, or Preferences → Chrome extension.`}>
               <button class="browser-link-indicator" onclick={(e) => handleChromeMark(tab.id, e)} aria-label="Show the linked Chrome tab"><Icon name="browser" size={12} />{#if chromeLinks.length > 1}<span class="browser-link-count">{chromeLinks.length}</span>{/if}</button>
             </Tooltip>
           {/if}

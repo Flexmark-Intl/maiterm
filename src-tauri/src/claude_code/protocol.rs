@@ -1430,7 +1430,7 @@ fn browser_tools() -> Vec<Value> {
         },
         {
             "name": "browserNavigate",
-            "description": format!("Load a URL in your linked Chrome tab, or go back, forward or reload. Waits for the page to load (up to 15 s) and settle (its requests go quiet), and says whether it settled, so don't sleep after it; browserWaitFor waits for something specific. {LINKED}"),
+            "description": format!("Load a URL in your linked Chrome tab, or go back, forward or reload. Waits for the page to load (up to 15 s) and settle (its requests go quiet), and says whether it settled, so don't sleep after it; browserWaitFor waits for something specific. With several linked tabs you must name one with tab: each has its own job (browserStatus shows what your human said each is for), so pick the one whose purpose fits the page. The result warns when another of your tabs already has that site open. {LINKED}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {

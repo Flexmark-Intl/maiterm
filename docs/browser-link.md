@@ -33,8 +33,19 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    Refs carry their tab (`b1:e42`, written by the snapshot), so a ref always acts where it was read.
    Handles are never reused: the extension keeps each agent tab's highest handle
    (`handleFloors`, sent on `hello`), since a maiTerm restart empties the counter.
-   What changed that the agent didn't do (a tab joined, closed, moved, was unlinked) is held and
-   handed over as `linked_tabs_changed` on its next browser tool call.
+   What changed that the agent didn't do (a tab joined, closed, moved, was unlinked, got a new
+   purpose) is held and handed over as `linked_tabs_changed` on its next browser tool call.
+   **Several tabs usually have different jobs, and agents loaded pages into the wrong one**
+   (2026-10-27), so: the human may write what each tab is for in the popup (`purpose`, ≤200
+   chars, one line; it stays with the Chrome tab through a relink or a move). It is the human's
+   own words, so unlike a title it goes into the unasked notice (§6), and into `browserStatus`,
+   every refusal list and the snapshot/screenshot head. `browserNavigate` without `tab` is
+   REFUSED while the agent holds two or more, with each tab's handle, purpose and site: the
+   current tab is just the last one named, and a navigation there is how a tab kept for one
+   job ends up showing another's. Loading a site another of the agent's tabs already has open,
+   into a tab that isn't on it, answers with a `warning` naming that tab and the URL to go back
+   to (after the fact: the page has loaded; it isn't refused, since two tabs on one site is
+   legitimate — two users of a chat app).
 4. **The human can always see and stop it.** Chrome's own "started debugging this browser" bar
    shows while a linked tab is attached — in EVERY tab of every window (Chrome's choice: it is
    browser-wide, no extension can scope or hide it; only Chrome's `--silent-debugger-extension-api`
@@ -125,7 +136,8 @@ Extension → maiTerm:
 |---|---|---|
 | `hello` (first frame, within 5 s) | `{token, protocol, version, browser, links:[Link], handleFloors?:{maitermTabId: n}}` | `{instance, protocol, accepted:[chromeTabId], handles:{chromeTabId: handle}}` (handles beside `accepted`, not in it: an older extension reads `accepted` as ids) |
 | `listTabs` | — | `{tabs:[{id, name, workspace, window, runtime, front, linked:[{handle, title, browser}]}], windows}` agent tabs only, in §1.7 order |
-| `link` | `{maitermTabId, chromeTabId, title, url, openerChromeTabId?}` | `{ok, handle}` / error (cap, closed tab, opener not that agent's) |
+| `link` | `{maitermTabId, chromeTabId, title, url, purpose?, openerChromeTabId?}` | `{ok, handle}` / error (cap, closed tab, opener not that agent's) |
+| `purpose` | `{chromeTabId, purpose}` — the human wrote (or cleared, `""`) what the tab is for | `{ok}`; an older maiTerm answers unknown method and the note stays in the extension |
 | `unlink` | `{chromeTabId, reason?}` — `unlinked` \| `closed` \| `cancelled` \| `moved`, for the agent's notice | `{ok}` |
 | `tabUpdated` (notif) | `{chromeTabId, title, url}` | |
 | `ping` | — | `{}` (keeps the MV3 service worker alive) |
@@ -146,7 +158,7 @@ is read → await → write, and two interleaved lost the newer write (a re-link
 `unlinked`, every connection closed, a new `hello` is refused, and the tools refuse too — an
 agent's tool list is cached, so hiding the tools alone left them working.
 
-`Link = {maitermTabId, chromeTabId, handle, openedBy?, title, url}`. The toolbar badge shows a linked tab's handle.
+`Link = {maitermTabId, chromeTabId, handle, openedBy?, title, url, purpose?}`. The toolbar badge shows a linked tab's handle.
 
 A major-version mismatch in `protocol` is refused with a sentence the popup shows ("update the
 extension" / "update maiTerm"). Additive changes don't bump it.
@@ -159,8 +171,8 @@ from (`tab`, or a `Tab: bN` line on the snapshot and screenshot).
 
 | MCP tool | action | notes |
 |---|---|---|
-| `browserStatus` | — (Rust only) | every linked tab: handle, title, url, `opened_by`, which is `current`; or how to get linked |
-| `browserNavigate` | `navigate` | `url`, or `back`/`forward`/`reload`; waits for load (≤15 s), then settles (below) |
+| `browserStatus` | — (Rust only) | every linked tab: handle, title, url, `opened_by`, `purpose`, which is `current`; or how to get linked |
+| `browserNavigate` | `navigate` | `url`, or `back`/`forward`/`reload`; waits for load (≤15 s), then settles (below). `tab` required with several linked; a same-site `warning` (§1.3) |
 | `browserSnapshot` | `snapshot` | accessibility tree as indented text; interactive/named nodes carry `[ref=eN]` |
 | `browserClick` | `click` | `ref`; real mouse events at the element's centre, `this.click()` fallback |
 | `browserType` | `type` | `ref` (optional: else the focused element), `text`, `clear` (default true), `submit` |
@@ -238,8 +250,9 @@ agent whose human said "check the page" used to reach for a browser tool of its 
 that opens a different browser, without the human's session) unless told where its tab was. The
 `maiterm-tab` mod's UserPromptSubmit asks `/hooks?…&context=1`, and the reply goes into the
 model's context as `additionalContext`: the linked tabs by handle and site (host and port only:
-the text arrives unasked in maiTerm's voice, so no title or path the page chose goes in), and that the
-maiTerm browser tools reach them. Only when the set of handles changed since it was last told
+the text arrives unasked in maiTerm's voice, so no title or path the page chose goes in) with the
+human's purpose note, and that the maiTerm browser tools reach them (with several, that
+navigation must name its tab). Only when the set of handles or purposes changed since it was last told
 (`Registry.told`), so it costs nothing on an ordinary message; a session start (new, resume,
 `/clear`, compaction: every `prime=1`) clears it, so a fresh context is told again. Only the tab's interactive session asks (a `claude -p` an agent
 runs there inherits the mod). Claude
