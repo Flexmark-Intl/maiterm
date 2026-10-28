@@ -589,7 +589,13 @@ pub(crate) fn models_for_tab(app: &AppState, tab: &str) -> Vec<models::ModelOpti
             },
         }
     };
-    models::available_from(source)
+    // A tab whose Claude predates 2.1.311 still has distinct `[1m]` windows (an ssh host that
+    // hasn't updated); its transcript says which version wrote it.
+    let legacy = resolved_session_for_tab(app, tab)
+        .filter(|(rt, _)| *rt == AgentRuntime::Claude)
+        .and_then(|(_, sid)| transcript::claude_session_version(&sid))
+        .is_some_and(|v| models::pairs_windows(&v));
+    models::available_from(source, legacy)
 }
 
 /// `GET /accounts` — §14.3 `AccountsSnapshot`.

@@ -58,10 +58,10 @@ pub struct ModelOption {
     /// True when another row in the SAME response carries this `display`, so matching it does not
     /// identify one row.
     ///
-    /// The curated tiers no longer collide (their `[1m]` pairs went with Claude Code 2.1.311), but
-    /// an account row still can: `display_model` strips the window marker, so a pinned
-    /// `claude-haiku[1m]` renders "Haiku" like the `haiku` alias. A consumer must treat a match on
-    /// an ambiguous row as "on this model", never as "on this row".
+    /// `display_model` strips the window marker, so a row and its `[1m]` twin render alike: the
+    /// curated pairs a tab on a Claude Code before 2.1.311 still gets ([`LEGACY_BUILTIN`]), or a
+    /// pinned account row like `claude-haiku[1m]` beside the `haiku` alias. A consumer must treat
+    /// a match on an ambiguous row as "on this model", never as "on this row".
     pub ambiguous: bool,
 }
 
@@ -122,6 +122,32 @@ const BUILTIN: [(&str, &str, &str); 3] = [
     ("sonnet", "Sonnet", "Most efficient for simpler tasks · 1M context"),
     ("haiku", "Haiku", "Fastest for quick answers · 1M context"),
 ];
+
+/// The list a Claude Code before 2.1.311 offered, for a tab known to run one (an ssh host that
+/// hasn't updated). There `opus` and `opus[1m]` were different windows, so collapsing them would
+/// switch a 1M session to 200k with no way back, under a note promising 1M.
+const LEGACY_BUILTIN: [(&str, &str, &str); 5] = [
+    ("opus", "Opus", "Everyday complex work"),
+    ("opus[1m]", "Opus", "Everyday complex work · 1M context"),
+    ("sonnet", "Sonnet", "Balanced speed and capability"),
+    ("sonnet[1m]", "Sonnet", "Balanced · 1M context"),
+    ("haiku", "Haiku", "Fastest, for simple work"),
+];
+
+/// Does this Claude Code version still pair each tier with a `[1m]` variant (before 2.1.311)?
+/// An unparsable version is taken as current: Claude Code updates itself, so most are.
+pub fn pairs_windows(version: &str) -> bool {
+    let parts: Vec<u64> = version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|n| !n.is_empty())
+        .take(3)
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    match parts.as_slice() {
+        [major, minor, patch] => (*major, *minor, *patch) < (2, 1, 311),
+        _ => false,
+    }
+}
 
 /// Read `~/.claude.json` and return its `additionalModelOptionsCache` entries.
 /// Values are passed through EXACTLY as the cache spells them, pinned release and all
@@ -194,14 +220,18 @@ fn entries_from(doc: &serde_json::Value) -> Vec<ModelOption> {
 /// value already claimed. Pure, and deduping by a set covers account-vs-account duplicates too,
 /// which a scan against `BUILTIN` alone never saw.
 fn merge(account: Vec<ModelOption>) -> Vec<ModelOption> {
+    merge_tiers(account, &BUILTIN)
+}
+
+fn merge_tiers(account: Vec<ModelOption>, tiers: &[(&str, &str, &str)]) -> Vec<ModelOption> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut out = Vec::with_capacity(account.len() + BUILTIN.len());
+    let mut out = Vec::with_capacity(account.len() + tiers.len());
     for m in account {
         if seen.insert(m.value.clone()) {
             out.push(m);
         }
     }
-    for (value, name, note) in BUILTIN {
+    for &(value, name, note) in tiers {
         if seen.insert(value.to_string()) {
             out.push(option(
                 value.to_string(),
@@ -231,12 +261,14 @@ pub enum Cache {
     None,
 }
 
-pub fn available_from(cache: Cache) -> Vec<ModelOption> {
-    merge(match cache {
+/// `legacy`: the tab runs a Claude Code that still pairs `[1m]` variants ([`pairs_windows`]).
+pub fn available_from(cache: Cache, legacy: bool) -> Vec<ModelOption> {
+    let account = match cache {
         Cache::Home => from_account_cache(),
         Cache::At(path) => from_file(&path),
         Cache::None => Vec::new(),
-    })
+    };
+    merge_tiers(account, if legacy { &LEGACY_BUILTIN } else { &BUILTIN })
 }
 
 #[cfg(test)]
@@ -271,6 +303,27 @@ mod tests {
         assert_eq!(opus[0].source, Source::Account, "the account's copy wins");
         assert_eq!(opus[0].note, "from the server");
         assert_eq!(out.len(), BUILTIN.len(), "and the other tiers still come through");
+    }
+
+    #[test]
+    fn a_claude_before_2_1_311_keeps_its_1m_pairs() {
+        // Review of f8364583: on an ssh host still on 2.1.310, `opus` is the 200k window, so the
+        // one-row list would switch a 1M session down with no way back.
+        assert!(pairs_windows("2.1.310"));
+        assert!(pairs_windows("2.1.295"));
+        assert!(!pairs_windows("2.1.311"));
+        assert!(!pairs_windows("2.1.312"));
+        assert!(!pairs_windows("2.2.0"));
+        assert!(!pairs_windows("3.0.0"));
+        assert!(!pairs_windows("garbage"), "unknown is taken as current");
+
+        let legacy = available_from(Cache::None, true);
+        let opus: Vec<&ModelOption> = legacy.iter().filter(|m| m.family == "opus").collect();
+        assert_eq!(opus.len(), 2);
+        assert!(opus.iter().any(|m| m.value == "opus[1m]"));
+        assert!(opus.iter().all(|m| m.ambiguous), "the pair renders alike, so it says so");
+        let current = available_from(Cache::None, false);
+        assert!(current.iter().all(|m| !m.value.contains("[1m]")));
     }
 
     #[test]

@@ -988,10 +988,11 @@ interface ModelOption {
   ambiguous: boolean;       // another row in THIS response shares this `display`, so matching it
                             // does not identify this row. `display` strips the `[1m]` window
                             // marker, so an account row carrying it can render like a builtin
-                            // alias. The builtin tiers no longer pair (Claude Code 2.1.311 dropped
-                            // `[1m]` where it changes nothing — every current model is 1M — and
-                            // `/model` lists one row per tier). Treat a match on an ambiguous row
-                            // as "on this model", never as "on this row".
+                            // alias. The builtin tiers pair only for a tab whose Claude Code
+                            // predates 2.1.311 (read from its transcript): 2.1.311 dropped `[1m]`
+                            // where it changes nothing — every current model is 1M — and `/model`
+                            // lists one row per tier. Treat a match on an ambiguous row as "on
+                            // this model", never as "on this row".
   note: string;
   source: 'account' | 'builtin';
                             // NOT decoration — the two are not equally trustworthy.
