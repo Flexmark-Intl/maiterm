@@ -85,8 +85,10 @@ A tab a linked page opens joins that page's agent by itself, so a flow like "Sig
 
 Linking a tab that's already linked to another agent moves it to the one you choose.
 
+When tabs have different jobs, say what each is for. Once a tab is linked, the extension's menu on that tab has a **What is this tab for?** box: "staging admin, signed in as support", say. The agent is told, and sees it beside the tab's name from then on. With two or more tabs linked, an agent has to name the tab it loads a page in, and if it loads a site that another of its tabs already has open, it's warned and told how to put the page back.
+
 :::note
-Several tabs per agent and popups joining need maiTerm 3.12.0 or later. In 3.11.0 an agent has one tab, and linking another replaces it.
+Several tabs per agent and popups joining need maiTerm 3.12.0 or later. Purpose notes need extension 0.2.3 and a maiTerm after 3.12.0. In 3.11.0 an agent has one tab, and linking another replaces it.
 :::
 
 ## The tools
@@ -95,7 +97,7 @@ Agents in an agent tab get these while the feature is on. Every one acts on the 
 
 | Tool | What it does |
 |------|-------------|
-| `browserStatus` | This agent's linked tabs, each with its name, title and address, which one opened it, and which is current |
+| `browserStatus` | This agent's linked tabs, each with its name, title and address, what you said it's for, which one opened it, and which is current |
 | `browserConsole` | Console messages, uncaught exceptions with their source, and the browser's warnings since the link — or only errors |
 | `browserNetwork` | Requests since the link: method, address, status, failure, size and time; failed ones only, or one request's response body |
 | `browserSnapshot` | The page as an accessibility tree, each element it can act on numbered for the tools below |
@@ -103,7 +105,7 @@ Agents in an agent tab get these while the feature is on. Every one acts on the 
 | `browserType` | Type into an element, or the focused one |
 | `browserPressKey` | Press a key or a combination: Enter, Tab, Escape, arrows, Shift+Tab, Cmd/Ctrl+A and so on |
 | `browserWaitFor` | Wait until text appears or disappears, or the address changes, and return the moment it does |
-| `browserNavigate` | Go to an address, or back, forward or reload, and wait for the page |
+| `browserNavigate` | Go to an address, or back, forward or reload, and wait for the page. With several tabs linked, the agent must say which |
 | `browserScreenshot` | What the tab shows, as an image |
 | `browserEval` | Run a JavaScript expression in the page and return its value |
 
