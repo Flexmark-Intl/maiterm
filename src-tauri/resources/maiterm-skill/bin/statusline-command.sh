@@ -28,7 +28,7 @@ model=$(echo "$input" | jq -r '.model.display_name // empty')
 model_id=$(echo "$input" | jq -r '.model.id // empty')
 effort=$(echo "$input" | jq -r '.effort.level // empty')
 
-# Prefer the official model id (e.g. opus-5[1m]) over the friendly display name,
+# Prefer the official model id (e.g. opus-5-5) over the friendly display name,
 # falling back to the display name if the id isn't present.
 model_label="${model_id#claude-}"
 [ -z "$model_label" ] && model_label="$model"
@@ -54,13 +54,15 @@ host=$(hostname -s 2>/dev/null | tr '[:lower:]' '[:upper:]')
 # keeping 11 plus an ellipsis so truncation is visible.
 [ "${#host}" -gt 12 ] && host="${host:0:11}…"
 
-# Context window for this model. THREE tests, in falling order of confidence — the same
-# ladder as `context_limit_for` in src-tauri/src/mailink/mod.rs, which solved this first.
-# Keep the two in step: they are separate code paths reading different inputs, which is
-# exactly why this one sat wrong after the other was fixed.
+# Context window for this model. Claude Code now reports it (`.context_window`, with the
+# used percentage alongside), and model ids no longer carry `[1m]`, so that is the answer
+# whenever it is present and nothing below runs.
 #
-#   1. The explicit variant marker. Claude Code puts it on `.model.id` in the statusLine
-#      input, so for Claude this is authoritative and nothing below runs.
+# Older Claude Code builds and other runtimes don't send it, so they fall back to the
+# ladder `context_limit_for` in src-tauri/src/mailink/mod.rs uses (maiLink never sees the
+# statusLine input, so it has only the ladder). Three tests, in falling order of confidence:
+#
+#   1. The explicit variant marker on `.model.id`, which older Claude Code builds carry.
 #   2. Model families known to be 1M with no marker. Other runtimes carry no marker at all:
 #      `fable-5-1` matched neither pattern, fell through to 200k, and rendered a real
 #      session as "182.2%" — which is not a percentage of anything.
@@ -68,18 +70,26 @@ host=$(hostname -s 2>/dev/null | tr '[:lower:]' '[:upper:]')
 #      definitively on a bigger window whatever its id says. This is the part that makes
 #      the next unrecognised 1M model merely wrong-until-200k instead of permanently
 #      pegged over 100%, with no code change per model.
-case "$model_id" in
-  *"[1m]"*|*"-1m"*) ctx_limit=1000000 ;;
-  *"opus-4-8"*|*"opus-5"*|*"fable-5"*) ctx_limit=1000000 ;;
-  *) ctx_limit=200000 ;;
-esac
-# Compared through awk, not `[ -gt ]`, so a non-integer token count can never make this
-# render an error instead of a status line. Non-numeric reads as 0 there and the backstop
-# simply doesn't trigger, which is the right way to fail.
-if [ "$ctx_limit" -eq 200000 ] && awk -v t="$ctx_tokens" 'BEGIN{exit !(t>200000)}'; then
-  ctx_limit=1000000
+ctx_limit=$(echo "$input" | jq -r '.context_window.context_window_size // empty')
+if [ -z "$ctx_limit" ] || [ "$ctx_limit" = "0" ]; then
+  case "$model_id" in
+    *"[1m]"*|*"-1m"*) ctx_limit=1000000 ;;
+    *"opus-4-8"*|*"opus-5"*|*"fable-5"*) ctx_limit=1000000 ;;
+    *) ctx_limit=200000 ;;
+  esac
+  # Compared through awk, not `[ -gt ]`, so a non-integer token count can never make this
+  # render an error instead of a status line. Non-numeric reads as 0 there and the backstop
+  # simply doesn't trigger, which is the right way to fail.
+  if [ "$ctx_limit" -eq 200000 ] && awk -v t="$ctx_tokens" 'BEGIN{exit !(t>200000)}'; then
+    ctx_limit=1000000
+  fi
 fi
-pct=$(awk -v t="$ctx_tokens" -v l="$ctx_limit" 'BEGIN{printf "%.1f", (t/l)*100}')
+pct=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
+if [ -n "$pct" ]; then
+  pct=$(awk -v p="$pct" 'BEGIN{printf "%.1f", p}')
+else
+  pct=$(awk -v t="$ctx_tokens" -v l="$ctx_limit" 'BEGIN{printf "%.1f", (t/l)*100}')
+fi
 
 GREEN='\033[1;32m'
 CYAN='\033[1;36m'
