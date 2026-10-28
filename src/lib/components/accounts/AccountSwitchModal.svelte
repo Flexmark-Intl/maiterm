@@ -16,6 +16,7 @@
    *  starts under the active account, so reloading it would spawn shells nobody asked for. */
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { info as logInfo } from '@tauri-apps/plugin-log';
   import Button from '$lib/components/ui/Button.svelte';
   import * as commands from '$lib/tauri/commands';
   import type { AccountReloadWindow, AccountReloadDone } from '$lib/tauri/commands';
@@ -40,7 +41,9 @@
   /** Per-target progress, keyed by window id or workspace id. `pending` until the window that
    *  did the work reports back — there is no other completion signal, because the live tab
    *  counts look identical afterwards (the replacements are live too). */
-  type Progress = { state: 'pending'; requestId: string } | { state: 'done'; reloaded: number };
+  type Progress =
+    | { state: 'pending'; requestId: string; reloaded: number; total: number | null }
+    | { state: 'done'; requestId: string; reloaded: number; total: number; stalled: string | null };
   let progress = $state<Record<string, Progress>>({});
 
   $effect(() => {
@@ -48,10 +51,21 @@
     let dead = false;
     void (async () => {
       const fn = await listen<AccountReloadDone>(commands.ACCOUNT_RELOAD_DONE_EVENT, e => {
-        const { request_id, reloaded } = e.payload;
+        const { request_id, reloaded, total, finished, stalled } = e.payload;
+        if (finished) {
+          logInfo(`[accounts] reload ${request_id.slice(0, 8)} finished: ${reloaded}/${total}${stalled ? `, stalled on ${stalled}` : ''}`);
+        }
         for (const [key, p] of Object.entries(progress)) {
-          if (p.state === 'pending' && p.requestId === request_id) {
-            progress = { ...progress, [key]: { state: 'done', reloaded } };
+          if (p.requestId !== request_id) continue;
+          if (finished) {
+            progress = { ...progress, [key]: { state: 'done', requestId: request_id, reloaded, total, stalled } };
+          } else if (p.state === 'pending') {
+            // Progress reports are fire-and-forget, so one can land after the final report; once
+            // done, a request stays done. Among themselves, the higher count wins.
+            progress = {
+              ...progress,
+              [key]: { ...p, reloaded: Math.max(p.reloaded, reloaded), total },
+            };
           }
         }
       });
@@ -100,7 +114,7 @@
   async function reload(w: AccountReloadWindow, workspaceIds: string[] | undefined, key: string) {
     error = null;
     const requestId = crypto.randomUUID();
-    progress = { ...progress, [key]: { state: 'pending', requestId } };
+    progress = { ...progress, [key]: { state: 'pending', requestId, reloaded: 0, total: null } };
     try {
       await commands.requestAccountReload(
         w.label,
@@ -131,6 +145,15 @@
    *  racing them, but two requests over the same tabs is never what anyone meant — "Reload all"
    *  after a workspace reload would reload those tabs twice. Block it at the source. */
   const pending = $derived(Object.values(progress).some(p => p.state === 'pending'));
+
+  function pendingLabel(p: Progress & { state: 'pending' }): string {
+    return p.total === null ? 'Reloading…' : `Reloading ${Math.min(p.reloaded + 1, p.total)} of ${p.total}…`;
+  }
+
+  function doneLabel(p: Progress & { state: 'done' }): string {
+    if (p.stalled) return `${p.reloaded} of ${p.total} reloaded — still on “${p.stalled}”`;
+    return p.total === 0 ? 'Nothing to reload' : `Reloaded ${p.reloaded}`;
+  }
 
   function handleKeydown(e: KeyboardEvent) {
     const closeKey = e.key === 'Escape' || (e.key.toLowerCase() === 'w' && (e.metaKey || e.ctrlKey));
@@ -204,13 +227,14 @@
           </div>
           {#each live as w (w.window_id)}
             {@const wKey = `w:${w.window_id}`}
+            {@const wp = progress[wKey]}
             <div class="win">
               <div class="win-head">
                 <span class="win-name">{windowTitle(w)}</span>
-                {#if progress[wKey]?.state === 'pending'}
-                  <span class="done">Reloading…</span>
-                {:else if progress[wKey]?.state === 'done'}
-                  <span class="done">Reloaded</span>
+                {#if wp?.state === 'pending'}
+                  <span class="done">{pendingLabel(wp)}</span>
+                {:else if wp?.state === 'done'}
+                  <span class="done" class:warn={!!wp.stalled}>{doneLabel(wp)}</span>
                 {:else}
                   <Button variant="ghost" disabled={pending} onclick={() => reload(w, undefined, wKey)}>
                     Reload window
@@ -220,6 +244,7 @@
               {#each w.workspaces as ws (ws.id)}
                 {@const wsKey = `ws:${ws.id}`}
                 {@const p = rowProgress(wKey, wsKey)}
+                {@const fromWindow = !progress[wsKey]}
                 <div class="ws">
                   <span class="ws-name">
                     {ws.name}
@@ -228,10 +253,14 @@
                     </span>
                   </span>
                   {#if p?.state === 'pending'}
-                    <span class="done">Reloading…</span>
+                    <!-- A window-wide request reports for the whole window, so its workspace rows
+                         say only that they are covered; the count is on the window's row. -->
+                    <span class="done">{fromWindow ? 'Included' : pendingLabel(p)}</span>
                   {:else if p?.state === 'done'}
                     <!-- The count is what the window actually reloaded, not what we asked for. -->
-                    <span class="done">Reloaded {p.reloaded}</span>
+                    <span class="done" class:warn={!!p.stalled}>
+                      {fromWindow ? (p.stalled ? 'See above' : 'Reloaded') : doneLabel(p)}
+                    </span>
                   {:else}
                     <Button variant="ghost" disabled={pending} onclick={() => reload(w, [ws.id], wsKey)}>
                       Reload
@@ -242,6 +271,15 @@
             </div>
           {/each}
         </section>
+      {/if}
+
+      {#if pending}
+        <!-- The question this dialog left people sitting on: the work is the other window's,
+             so closing here stops nothing. -->
+        <p class="hint">
+          You can close this — the reload carries on in its window whether this dialog is open or
+          not.
+        </p>
       {/if}
 
       {#if error}<p class="error">{error}</p>{/if}
@@ -385,6 +423,10 @@
     font-size: 0.7rem;
     opacity: 0.8;
     padding-left: 6px;
+  }
+
+  .done.warn {
+    color: var(--yellow);
   }
 
   .done {

@@ -442,6 +442,8 @@
     // makes it a queue rather than a race; an in-flight flag that dropped the second request
     // would silently ignore work the user asked for.
     let accountReloadChain: Promise<void> = Promise.resolve();
+    /** How long one tab's reload may run before the dialog stops waiting on it. */
+    const ACCOUNT_RELOAD_STALL_MS = 30_000;
     listen<commands.AccountReloadRequest>(commands.ACCOUNT_RELOAD_TABS_EVENT, (event) => {
       accountReloadChain = accountReloadChain.then(() => runAccountReload(event.payload));
     }, { target: appWindow.label }).then(unlisten => { unlistenAccountReload = unlisten; });
@@ -458,7 +460,7 @@
       // and then deletes the original — observed losing two of three tabs in a workspace.
       // Iterating the live arrays is the same bug from the other end, since each reload
       // reorders the very list being walked.
-      const targets: { wsId: string; paneId: string; tabId: string }[] = [];
+      const targets: { wsId: string; paneId: string; tabId: string; name: string }[] = [];
       for (const ws of workspacesStore.workspaces) {
         if (wanted && !wanted.includes(ws.id)) continue;
         for (const pane of ws.panes) {
@@ -472,28 +474,53 @@
             // Only live shells need moving. Anything else already starts under the active
             // account, so reloading it would spawn a shell nobody asked for.
             if (!terminalsStore.get(tab.id)) continue;
-            targets.push({ wsId: ws.id, paneId: pane.id, tabId: tab.id });
+            targets.push({ wsId: ws.id, paneId: pane.id, tabId: tab.id, name: tab.name });
           }
         }
       }
 
+      const total = targets.length;
+      const report = (r: { reloaded: number; finished: boolean; stalled?: string | null }) =>
+        commands
+          .reportAccountReloadDone(payload.reply_to, payload.request_id, { ...r, total })
+          .catch(e => logError(`[accounts] reporting reload progress failed: ${e}`));
+
+      // Progress after every tab, not only at the end. A window of sixty tabs takes a while, and
+      // a dialog that says "Reloading…" with no movement reads as hung whether it is or not.
+      void report({ reloaded: 0, finished: false });
       let reloaded = 0;
+      /** Set once the dialog has been told to stop waiting; later per-tab reports would put it
+       *  back into "Reloading…". The final report still goes. */
+      let releasedDialog = false;
       for (const t of targets) {
-        try {
-          await workspacesStore.reloadTab(t.wsId, t.paneId, t.tabId);
-          reloaded++;
-        } catch (e) {
-          // One failure must not strand the rest, nor the completion report. Logged to the log
-          // FILE, not the console — a tab that failed to come back is exactly what someone goes
-          // looking for in aiterm.log afterwards.
-          logError(`[accounts] reload failed for tab ${t.tabId}: ${e}`);
+        const run = workspacesStore.reloadTab(t.wsId, t.paneId, t.tabId).then(
+          () => true,
+          e => {
+            // One failure must not strand the rest, nor the completion report. Logged to the log
+            // FILE, not the console — a tab that failed to come back is exactly what someone goes
+            // looking for in aiterm.log afterwards.
+            logError(`[accounts] reload failed for tab ${t.tabId}: ${e}`);
+            return false;
+          },
+        );
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const stalled = new Promise<'stalled'>(resolve => {
+          timer = setTimeout(() => resolve('stalled'), ACCOUNT_RELOAD_STALL_MS);
+        });
+        const first = await Promise.race([run, stalled]);
+        clearTimeout(timer);
+        if (first === 'stalled' && !releasedDialog) {
+          // Free the DIALOG, never the loop: the next reload must still wait for this one, since
+          // two `reloadTab`s at once is the index race that destroyed tabs (above).
+          logError(`[accounts] reload of tab ${t.tabId} (${t.name}) still running after ${ACCOUNT_RELOAD_STALL_MS / 1000}s`);
+          releasedDialog = true;
+          void report({ reloaded, finished: true, stalled: t.name });
         }
+        if (await run) reloaded++;
+        if (!releasedDialog) void report({ reloaded, finished: false });
       }
-      try {
-        await commands.reportAccountReloadDone(payload.reply_to, payload.request_id, reloaded);
-      } catch (e) {
-        logError(`[accounts] reporting reload completion failed: ${e}`);
-      }
+      logInfo(`[accounts] reload ${payload.request_id.slice(0, 8)}: ${reloaded}/${total} tabs, reporting to ${payload.reply_to}`);
+      await report({ reloaded, finished: true });
     }
 
     // A maiLink phone renamed a tab — the backend already persisted it; sync the store so the

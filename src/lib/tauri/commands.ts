@@ -2388,12 +2388,17 @@ export interface AccountReloadRequest {
   request_id: string;
 }
 
-/** Emitted back to the requester once a window has finished reloading. */
+/** Emitted back to the requester after every tab, and once more when the window is finished. */
 export const ACCOUNT_RELOAD_DONE_EVENT = 'accounts-reload-done';
 
 export interface AccountReloadDone {
   request_id: string;
   reloaded: number;
+  total: number;
+  /** False on a progress report. */
+  finished: boolean;
+  /** Name of the tab whose reload stopped answering, when the window stopped waiting for it. */
+  stalled: string | null;
 }
 
 /** Report that this window finished reloading.
@@ -2404,9 +2409,16 @@ export interface AccountReloadDone {
 export async function reportAccountReloadDone(
   replyTo: string,
   requestId: string,
-  reloaded: number,
+  report: { reloaded: number; total: number; finished: boolean; stalled?: string | null },
 ): Promise<void> {
-  return invoke('report_account_reload_done', { replyTo, requestId, reloaded });
+  return invoke('report_account_reload_done', {
+    replyTo,
+    requestId,
+    reloaded: report.reloaded,
+    total: report.total,
+    finished: report.finished,
+    stalled: report.stalled ?? null,
+  });
 }
 
 /** Which windows and workspaces still have tabs running under the previous account.

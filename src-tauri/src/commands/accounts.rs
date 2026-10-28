@@ -2258,7 +2258,7 @@ pub struct ReloadWindow {
 /// Emitted to ONE window, asking it to reload the tabs running under the old account.
 pub const RELOAD_TABS_EVENT: &str = "accounts-reload-tabs";
 
-/// Emitted back to whoever asked, once that window has finished.
+/// Emitted back to whoever asked: after every tab, and once more when the window has finished.
 pub const RELOAD_DONE_EVENT: &str = "accounts-reload-done";
 
 #[derive(Debug, Clone, Serialize)]
@@ -2275,6 +2275,12 @@ struct ReloadTabsEvent {
 struct ReloadDoneEvent {
     request_id: String,
     reloaded: usize,
+    /// Tabs this request covers, so the dialog can say "12 of 57" rather than only "Reloading…".
+    total: usize,
+    /// False on a progress report, true on the last one.
+    finished: bool,
+    /// The tab whose reload stopped answering, when the window gave up waiting on it.
+    stalled: Option<String>,
 }
 
 /// Which windows and workspaces have tabs still running under the previous account.
@@ -2350,17 +2356,21 @@ pub async fn request_account_reload(
     .map_err(|e| format!("asking {label} to reload: {e}"))
 }
 
-/// Report that a window has finished reloading, so the dialog that asked can stop claiming it is
-/// still in progress. Without this there is no completion signal at all: the request is one-way,
-/// and the tab counts look identical afterwards because the replacements are live too.
+/// Report a window's reload progress, and its end, so the dialog that asked can stop claiming it
+/// is still in progress. Without this there is no completion signal at all: the request is
+/// one-way, and the tab counts look identical afterwards because the replacements are live too.
 #[tauri::command]
 pub async fn report_account_reload_done(
     app: tauri::AppHandle,
     reply_to: String,
     request_id: String,
     reloaded: usize,
+    total: usize,
+    finished: bool,
+    stalled: Option<String>,
 ) -> Result<(), String> {
-    app.emit_to(&reply_to, RELOAD_DONE_EVENT, ReloadDoneEvent { request_id, reloaded })
+    let event = ReloadDoneEvent { request_id, reloaded, total, finished, stalled };
+    app.emit_to(&reply_to, RELOAD_DONE_EVENT, event)
         .map_err(|e| format!("reporting reload completion to {reply_to}: {e}"))
 }
 
