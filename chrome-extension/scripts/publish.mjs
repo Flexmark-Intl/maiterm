@@ -5,6 +5,7 @@
 //   node scripts/publish.mjs --target=trustedTesters
 //   node scripts/publish.mjs --percentage=20        staged rollout
 //   node scripts/publish.mjs --dry-run              check credentials and preflight only
+//   node scripts/publish.mjs --publish-only         submit the draft already uploaded for this version
 //
 // Requires four environment variables — see chrome-extension/PUBLISHING.md for how to get
 // them. No dependencies: plain fetch.
@@ -36,6 +37,7 @@ const option = (name, fallback) => {
 
 const OPTIONS = {
   uploadOnly: flag('upload-only'),
+  publishOnly: flag('publish-only'),
   dryRun: flag('dry-run'),
   target: option('target', 'default'),
   percentage: option('percentage', null),
@@ -192,7 +194,12 @@ const item = await getItem(token, env.itemId);
 console.log(`  published version: ${item.crxVersion ?? '(none yet)'}`);
 console.log(`  upload state:      ${item.uploadState ?? 'unknown'}`);
 
-if (item.crxVersion === manifest.version) {
+if (OPTIONS.publishOnly) {
+  // The tag already uploaded this version as a draft; submitting it is all that is left.
+  if (item.crxVersion !== manifest.version) {
+    fail(`--publish-only: the store's draft is ${item.crxVersion ?? '(none)'}, not ${manifest.version}. Upload it first (push its ext-v tag).`);
+  }
+} else if (item.crxVersion === manifest.version) {
   fail(
     `Version ${manifest.version} is already the draft/published version in the store.\n\n` +
       'The store rejects re-uploads of the same version. Bump "version" in\n' +
@@ -205,9 +212,11 @@ if (OPTIONS.dryRun) {
   process.exit(0);
 }
 
-step(`Uploading ${manifest.version}`);
-const upload = await uploadZip(token, env.itemId, zipBytes);
-console.log(`  uploadState: ${upload.uploadState}`);
+if (!OPTIONS.publishOnly) {
+  step(`Uploading ${manifest.version}`);
+  const upload = await uploadZip(token, env.itemId, zipBytes);
+  console.log(`  uploadState: ${upload.uploadState}`);
+}
 
 if (OPTIONS.uploadOnly) {
   console.log(

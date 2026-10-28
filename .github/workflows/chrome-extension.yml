@@ -21,6 +21,10 @@ on:
         description: Publish after uploading (otherwise leave it as a draft)
         type: boolean
         default: false
+      publish_only:
+        description: Submit the draft a tag already uploaded for this version, without uploading again
+        type: boolean
+        default: false
       target:
         description: Who the published version goes to
         type: choice
@@ -91,7 +95,10 @@ jobs:
             PUBLISH="${{ vars.CWS_AUTO_PUBLISH == 'true' }}"
             TARGET="default"
           fi
-          if [ "$PUBLISH" = "true" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.publish_only }}" = "true" ]; then
+            echo "args=--publish-only --target=$TARGET" >> "$GITHUB_OUTPUT"
+            echo "::notice::Submitting the uploaded draft to '$TARGET'."
+          elif [ "$PUBLISH" = "true" ]; then
             echo "args=--target=$TARGET" >> "$GITHUB_OUTPUT"
             echo "::notice::Uploading and publishing to '$TARGET'."
           else

@@ -93,6 +93,11 @@ a **draft**. It does not publish: that queues a review CI can't cancel. To publi
 Chrome extension → Run workflow** with *publish* ticked (trusted testers first), or set the repo
 variable `CWS_AUTO_PUBLISH=true`.
 
+To submit the draft a tag already uploaded (the dashboard's **Submit for review**), run the
+workflow with *publish_only* ticked and *target* `default`: it publishes the stored draft without
+uploading again (the store refuses a second upload of one version). An agent does this with
+`gh workflow run chrome-extension.yml -f publish_only=true -f target=default`.
+
 A protocol change between maiTerm and the extension (`PROTOCOL` in `browser_link/mod.rs`,
 `PROTOCOL` in `background.js`) must ship in maiTerm and the extension together; the store review
 takes days, so release the extension first when maiTerm can speak both.
