@@ -37,9 +37,9 @@ into chat, committing `.env`). It also stops **a prompt-injected agent sending a
 somewhere directly**. It does **not** stop a same-user agent that is set on getting a value
 and knows where to look. A provider doesn't change that on its own: 1Password and Doppler
 also hand values to anything running as the human once they are signed in (§5.1). The real
-boundaries are a gate the provider enforces per program (1Password's app authorization, which
-is how prod values are read, §5.1), running agents sandboxed (Claude Code's sandbox), or a
-different OS user. Every card on a prod path says this in one line.
+boundaries are a gate the provider enforces per program (1Password's app authorization: one
+per human action that reads prod, in a process that exits afterwards, §5.1), running agents
+sandboxed (Claude Code's sandbox), or a different OS user. Every card on a prod path says this in one line.
 
 Everything else follows from the rule:
 
@@ -67,7 +67,7 @@ Everything else follows from the rule:
 | Tool | The idea worth taking |
 |---|---|
 | **Doppler / Infisical** | A project has **environments** (dev / staging / prod), and each environment has a full key set built from the same list of names, so "missing in prod" is visible at a glance. `doppler run -- cmd` / `infisical run -- cmd` inject values into one process's environment and nowhere else. "Integrations" sync values to Vercel, GitHub Actions, AWS and so on. |
-| **1Password CLI** | References instead of values (`op://vault/item/field`). `op run` **masks secret values in the child's output** by default. `op inject` fills a template. Shell plugins ask for biometric approval per use. |
+| **1Password CLI** | References instead of values (`op://vault/item/field`). `op run` **masks secret values in the child's output** by default. `op inject` fills a template. Shell plugins ask for biometric approval once per terminal session, which then lasts 10 idle minutes. |
 | **AWS Secrets Manager** | Rotation as a four-step machine (createSecret → setSecret → testSecret → finishSecret) with **staging labels**: `AWSPENDING`, `AWSCURRENT`, `AWSPREVIOUS`. Rollback means moving a label back. The "alternating users" strategy rotates database credentials without downtime. |
 | **HashiCorp Vault** | **Dynamic secrets**: short-lived credentials minted per use, under a lease that expires. The best rotation is not having a long-lived key at all. |
 | **GitHub Actions OIDC** | The same idea for CI: the workflow trades an OIDC token for short-lived cloud credentials, so no cloud key is stored in GitHub. |
@@ -75,7 +75,9 @@ Everything else follows from the rule:
 | **GitHub push protection / gitleaks / trufflehog** | Provider token formats (`ghp_`, `sk_live_`, `AKIA…`, `xoxb-`) let a scanner recognize a leak, and they also identify **which provider** a key belongs to, so the scanner knows how to rotate it and can tell a test key from a live one. |
 
 **Where 1Password and Doppler stand in 2026** (checked 2026-10-28):
-- **1Password** moved into this space. **Environments** (beta) group a project's secrets, and
+- **1Password** moved into this space. **Environments** (generally available since August 2026;
+  programmatic reads through the CLI, SDKs and service accounts arrived as a beta in February)
+  group a project's secrets, and
   can mount a `.env` that is never on disk (Mac and Linux). An **Environments MCP server**
   lets Codex, Cursor and Kiro agents create Environments and list names, "doesn't read or return
   secrets to the AI agent", and requires "a secure 1Password authorization prompt … for every
@@ -258,70 +260,127 @@ where a key may go and what needs a card (§8), never how well it is stored.**
 A connection holds **maiTerm's own narrow credential**, never the human's login. Facts below
 were checked against each provider's docs on 2026-10-28.
 
-**1Password**
-- **Dev and staging: a service account** (`ops_…`), limited to the project's own vaults.
-  Service accounts work on every plan, Individual and Families included. Two limits shape the
-  layout:
-  - they can't reach the built-in Personal/Private vault;
-  - they can only **read** Environments.
-
-  So maiTerm uses **dedicated vaults** per project and tier ("maiTerm · api · dev"), with one
-  item per environment and one concealed field per key. A service account can read and write
-  those. Environments can be added as an extra read source. Service account permissions can't
-  be changed after creation, so widening one means making a new one, and the panel says so.
-  Rate limits on personal plans are 1,000 reads and 100 writes per hour.
-- **Prod: the 1Password app's authorization, never a stored credential.** The desktop app can
-  authorize one program at a time: the prompt names the program's path, approval is
-  biometric, and it lasts up to 10 idle minutes **for that process only**, so an agent's own
-  process doesn't inherit it. Every prod read is gated by the human's Touch ID, enforced by
-  1Password. Two caveats, stated:
-  - 1Password can't verify a third-party program's identity, so the human is the final check;
-  - the official SDKs are Go, JavaScript and Python and maiTerm is Rust, so **a spike must prove
-    the path**: `op` as a child process, or a small SDK sidecar, and what 1Password then counts as
-    "the process".
+**1Password: everything goes through one small sidecar**
+- maiTerm talks to 1Password only through **`maiterm-1p`**, a small helper built on 1Password's
+  official SDK (the SDKs are Go, JavaScript and Python; maiTerm is Rust). It ships beside
+  maiTerm, signed, with the hardened runtime on macOS. It takes work only over a channel maiTerm
+  opens and authenticates, and **any credential reaches it over stdin**: never in an environment
+  variable. With `op` and `OP_SERVICE_ACCOUNT_TOKEN`, an agent could trigger the call and read
+  the token from `ps eww` at that moment.
+- **Dev and staging: a read-only service account** (`ops_…`, `read_items`) limited to the
+  project's dev and staging vaults. Facts that shape it:
+  - service accounts work on every plan, Individual and Families included;
+  - they can't reach the built-in Personal/Private vault, so maiTerm uses **dedicated vaults**
+    per project and tier ("maiTerm · api · dev"), one item per environment, one concealed field
+    per key;
+  - they can only read Environments, which can be an extra read source;
+  - their permissions can't be changed after creation, so **the connect check refuses any service
+    account that can see a prod-tier vault**: one that could would bypass the prod gate for
+    good.
+  - **Limits:** 1,000 reads and 100 writes per hour per token on personal and Teams plans
+    (10,000 / 1,000 on Business), and a **daily cap per account of 1,000 requests** (Individual
+    and Families), 5,000 (Teams) or 50,000 (Business), reads and writes combined. One delivery is
+    one read (one item per environment). When a cap is hit, delivery fails with a sentence
+    naming it, and the panel shows the day's use.
+- **Writes go through the app's authorization, never the service account.** Entering values,
+  generating, capturing and minting during a rotation are human events anyway, so each one
+  raises the human's 1Password approval. That keeps the stored credential read-only.
+- **Prod: one 1Password authorization per human action.** The 1Password app authorizes **one
+  process** at a time, with biometric or system authentication. The authorization lasts until
+  **10 minutes of inactivity**, and every read counts as activity, including reads an agent
+  causes. So a long-lived authorized client would let an agent keep the window open forever (by
+  restarting a prod service every 9 minutes). Instead:
+  - every prod read runs in a **fresh `maiterm-1p` process started for one human action** (a card
+    approved, a click in the panel). The batch of reads that action needs is done, and the process
+    exits, so its authorization dies with it;
+  - **nothing an agent does starts a prod read on its own.** `startService` and `restartService`
+    on a prod service, a prod `runWithSecrets` and a prod deploy each wait for the human's click
+    (§7.2, §8);
+  - prod names in `listSecrets` come from a cache of the last human-authorized read, so listing
+    never prompts.
+- **What a prod read uses is the human's own account.** The app authorizes maiTerm's helper as
+  the human, so it could read every vault they have, Private included. **maiTerm restricts it to
+  the bound prod vault in its own code; no credential does.** §15's rule "never use the human's
+  login" holds for everything that is stored, and this is the deliberate exception, made because
+  nothing is stored. The panel says so.
+- **The prompt can't prove who asked.** It names the requesting app, and 1Password says it can't
+  verify a third-party program, so the human is the final check. An agent can raise the same
+  prompt by running the helper itself, or any program of its own built on the SDK. So **maiTerm
+  shows "1Password will ask you now" in its own window at the moment it asks**, and the card says
+  **refuse a 1Password prompt that comes without that message.**
+- **Spike, pass or fail:** that `maiterm-1p` gets per-process authorization as the docs say. That
+  includes whether an agent running `op` or the helper under a maiTerm child (with no tty, through
+  `setsid`) shares maiTerm's authorization. 1Password CLI 2.40 (2026-09) made "successive
+  invocations by a coding agent, script, or other program" share one authorization on macOS, and
+  what that is keyed on is unknown. If the helper's authorization can be shared, prod through
+  1Password doesn't ship until it can't.
 
 **Doppler**
-- **A service token per project and config** (`dp.st.<env>.…`): scoped to one config,
-  read-only by default.
-- Writes (the entry sheet, generate, capture, rotation) use a **separate write-enabled token**,
-  held apart and used only inside an approved write.
-- **Prod has no per-use human gate**: the token's narrow scope, maiTerm's card policy (§8) and
-  Doppler's audit log are the guard. The panel says so, and points to 1Password for a
-  biometric gate on prod.
+- **A read-only service token per project and config** (`dp.st.<env>.…`): one config each,
+  read through the REST API (`GET /v3/configs/config/secrets/download`, the `secrets=` filter
+  limiting the keys returned).
+- **Writes are opt-in.** A write-enabled token is a standing credential that can change values,
+  and Doppler's own sync then delivers them: an attacker pointing `DATABASE_URL` at their own
+  host would be deployed by Doppler. So by default the entry sheet says **"set these in Doppler"**
+  and checks they arrived. A write token is added only on the human's choice, with that risk
+  stated. To verify: whether a token can be minted with an expiry at the moment of use instead.
+- **Prod gains scope, audit and revocation, not a per-use gate.** A Doppler prod token is a
+  keychain item like any other: on Linux and Windows a same-user agent can read it without a
+  prompt, as it could a local-vault value. What a provider adds is a narrow scope (one config),
+  Doppler's audit log, revocation from anywhere and nothing on disk. **Whether that is enough for
+  prod is Darryl's call** (§16.1), against requiring 1Password for prod.
 
 **Infisical (later):** a machine identity scoped to one project and environment.
 
 **Rules for every connection**
-1. **Never the human's personal login.** A pasted Doppler token that isn't a service token is
-   refused: Doppler warns that a personal or CLI token carries the account's full rights,
-   writes included. maiTerm never piggybacks on an `op` sign-in.
+1. **No stored human login.** A pasted Doppler token is accepted only as a service token
+   (`dp.st.`): `dp.pt.` (personal), `dp.ct.` (CLI) and `dp.sa.` (service account) carry far more,
+   and Doppler warns that a personal or CLI token has the account's full rights. maiTerm never
+   piggybacks on the human's `op` sign-in. The 1Password prod read above is the one use of the
+   human's account, through a fresh process per human action, with nothing stored.
 2. **maiTerm can mint the credentials.** The human signs in to the provider's CLI once. maiTerm
    runs the mint in its own process (`doppler configs tokens create … --plain`, read from
    stdout), stores the tokens, then signs the CLI out. Otherwise it links to the exact page and
    the human pastes the token into the native sheet.
-3. **Scope is checked at connect.** maiTerm lists what the credential can reach, and warns when
-   that is wider than chosen: "this token can read 14 configs; you picked 2".
-4. **The credential stays inside maiTerm's process where it can.**
-   - Doppler and Infisical: Rust calls the REST API with the token in a header (the endpoint is to
-     verify). Never `doppler run` with `DOPPLER_TOKEN` in a child's environment, which any
-     same-user agent can read with `ps eww`.
-   - 1Password: service accounts are used through `op` or the SDKs, so `op` runs as a short-lived
-     child with `OP_SERVICE_ACCOUNT_TOKEN` set for one call. That exposure is stated, and it is
-     why prod uses the app's authorization instead.
-5. **Credentials are stored like secrets.** They go in the OS keychain under maiTerm's own
-   service name, Windows entries with local persistence (§5.2). Never in `aiterm-state.json`,
-   the phone or a share file.
-6. **The provider CLIs are kept away from agents** (§10.3, §10.4):
-   - deny `Bash(op *)`, `Bash(doppler *)` and `Bash(infisical *)`, and the CLIs' config (`~/.doppler`);
-   - onboarding says don't leave a personal `doppler login` on a machine where agents run;
-   - don't use `op` in an agent's tab, since its authorization covers that terminal session and
-     sub-shells for 10 idle minutes;
-   - **refuse a 1Password prompt you didn't just cause.**
+3. **Scope is checked at connect.**
+   - **1Password:** maiTerm lists the vaults the service account can see, warns when that is wider
+     than chosen ("this service account can read 14 vaults; you picked 2"), and **refuses one
+     that can see a prod-tier vault or has write access**. Since permissions can't be changed,
+     the fix is a new service account, and the panel says so.
+   - **Doppler:** a `dp.st.` token is one config by definition, so the check is that it is the
+     config the human picked and that it is read-only. How to detect write access is to verify.
+4. **The credential never sits in a process environment.**
+   - Doppler and Infisical: Rust calls the REST API with the token in a header. Never `doppler
+     run` with `DOPPLER_TOKEN` in a child's environment, which any same-user agent can read with
+     `ps eww`.
+   - 1Password: the token goes to `maiterm-1p` over stdin (above), never `OP_SERVICE_ACCOUNT_TOKEN`.
+5. **Credentials are stored like secrets**: in the OS keychain under maiTerm's own service name,
+   Windows entries with local persistence (§5.2). Never in `aiterm-state.json`, the phone or a
+   share file.
+   - **A box with no keychain** (headless Linux, WSL) stores them under the same passphrase-wrapped
+     key as the local vault (§5.2). Without a passphrase, providers are unavailable there too.
+   - **What that storage doesn't stop**: on Linux and Windows a same-user agent can read these
+     items without a prompt. That means a read-only dev/staging service account, read-only
+     Doppler tokens, and a Doppler write token or prod token if the human added one. A full macOS
+     backup carries them inside `login.keychain-db`, behind the login password. Both are in §14.
+     The response to either is revocation in the provider.
+6. **The provider CLIs are kept away from agents**, as a **speed bump** (§10.3, §10.4):
+   - deny `Bash(op *)`, `Bash(doppler *)` and `Bash(infisical *)`. These are trivially bypassed
+     (`/opt/homebrew/bin/op`, `env op`, `sh -c`, a script, a Python subprocess), like the
+     `PreToolUse` deny;
+   - **the controls that actually work**:
+     - no personal provider login on a machine where agents run. Onboarding says so: `doppler
+       logout`, and don't use `op` in an agent's tab, since its authorization covers that terminal
+       session and its sub-shells for 10 idle minutes;
+     - a sandbox (§10.3);
+     - refusing a 1Password prompt that comes without maiTerm's "1Password will ask you now".
 7. **No values cached on disk.** If the provider is unreachable, delivery fails with a sentence.
    Values read for a delivery live in memory for that delivery only.
 8. **Don't push where the provider already syncs.** If Doppler syncs a config to Vercel, the
    ledger records the consumer as "synced by Doppler", and maiTerm's own adapter (§7.3) doesn't
-   push there too.
+   push there too. **The reverse holds too: a write into a synced config is a deploy.** Doppler
+   pushes it on to every integration, so writing into a synced prod config gets the prod-deploy
+   card (§8).
 9. **What the provider brings that the local vault can't:**
    - **recovery**: a lost machine means revoking maiTerm's credentials in the provider and
      reconnecting;
@@ -375,8 +434,9 @@ So:
   grows into this. **The scrubber and the leak scanner are the exception** (§10.1, §10.2): they
   keep the values they look for in their own tables while the app runs, and that memory is
   **not** zeroized. For provider-held values, the tables fill as values are read for delivery,
-  so a value maiTerm never delivered isn't scanned for. A prod value is read only through
-  1Password's app authorization, and its table entry lives until quit.
+  so a value maiTerm never delivered isn't scanned for. A prod value's entry lives until quit
+  once a human action has read it. The cost, stated: on Windows, which has no hardened runtime,
+  a same-user process can read these tables from maiTerm's memory (`ReadProcessMemory`).
 - **Crates**: `chacha20poly1305`, `argon2`, `zeroize` (RustCrypto, pure Rust, all three
   platforms). No OpenSSL.
 
@@ -399,10 +459,22 @@ is made and in §14:
 the local vault on purpose is an explicit **Export vault** with a passphrase, in age's format
 so the file opens with the `age` CLI too. **Import vault** is the fifth way a value enters (§1).
 
-**Moving from the local vault to a provider** is one action in the panel: connect the provider,
-pick the project, and maiTerm copies each value across through the provider's write path, checks
-it reads back, then deletes the local copy. The ledger and every target binding stay as they
-are.
+**Moving from the local vault to a provider** is one action in the panel. Connect the provider,
+pick the project, then:
+1. maiTerm **compares names first**. A key the provider already holds is never overwritten
+   without its own tick on the move sheet.
+2. **A synced destination is a deploy.** If the Doppler config syncs to Vercel or elsewhere,
+   copying a value in pushes it there (§5.1 rule 8). The sheet says so per config, and a synced
+   prod config gets the prod-deploy card.
+3. maiTerm copies each **current** value through the provider's write path (the human's
+   1Password approval, or Doppler's own dashboard when there's no write token) and checks it
+   reads back.
+4. **Only when every key has verified** does it delete the local copies. A partial failure leaves
+   both, says which keys moved, and can be resumed. Earlier local versions (previous, and any
+   pending) aren't copied: the provider starts its own history at the current value. The local
+   history is kept until the human confirms the delete.
+
+The ledger and every target binding stay as they are.
 
 ### 5.3 Not built: an OS-guarded local store for prod
 
@@ -476,10 +548,11 @@ This is the flow Darryl described:
 4. **Done** calls one Rust command with the sheet's values. That command **stores them, then
    approves the request, then settles it**, in that order, before returning. "Stores" means the
    project's store (§5):
-   - a 1Password vault through the service account;
-   - a prod value through the 1Password app's authorization, so the human approves the write
-     with Touch ID;
-   - Doppler through its write token;
+   - 1Password, any tier, through a fresh `maiterm-1p` process. The human approves the write in
+     1Password, with biometric or system authentication (§5.1). The stored service account is
+     read-only and never writes;
+   - Doppler through its write token, if the human added one. Otherwise the sheet says "set
+     these in Doppler" and Done checks they arrived;
    - or the local vault, which refuses a prod value.
 
    The sheet also offers **"I'll set these in 1Password / Doppler myself"**: Done then checks
@@ -661,16 +734,20 @@ scrollback, the shell history and the scrollback database. So:
   secrets. The plain `env` exports stay as they are for non-secret values.
 - A rotation restarts every service in its ledger (§9.2).
 - **A service bound to a prod-tier environment is off by default**, like a prod `run` (§8): the
-  human turns it on per service, with a card. Once on, starting and restarting it are at once.
-- **An agent's `startService` / `restartService` never raises a 1Password prompt.** A prompt the
-  human didn't cause trains them to approve prompts. The service waits instead (below), and the
-  human authorizes from the panel or the notice.
-- **A service that needs 1Password prod values waits for the human's authorization.** After a
-  relaunch, `was_running` services start on their own (docs/stack.md §5), and an overnight
-  restart or a deploy with the screens off can't do Touch ID. Such a service shows **waiting
-  for 1Password** rather than crashed, sends one notice (gated by mute), and starts when the
-  human authorizes. Services fed by Doppler or by dev/staging values start as usual. The state
-  is transient, like all service status, and never persisted.
+  human turns it on per service, with a card.
+- **Every start of a prod service is a human action.** An agent's `startService` /
+  `restartService` on one, and a relaunch's `was_running` start, put the service in **waiting
+  for you** rather than starting it. It shows that state rather than crashed, sends one notice
+  (gated by mute), and starts on the human's click in the console, the panel or the notice. With
+  1Password, that click is the one authorization (§5.1).
+  - It never raises a 1Password prompt the human didn't cause, which would train them to approve
+    prompts.
+  - It never rides an earlier authorization, which would let an agent hold the 10-minute window
+    open by restarting the service.
+  - The same holds for Doppler-fed prod services, so an agent can't put prod values into a
+    process environment it can read (`ps eww`) on its own.
+  - Dev and staging services start as usual. The state is transient, like all service status,
+    and never persisted.
 - The shell underneath never holds the values. Only the service process does, so a Ctrl-C in
   the console leaves nothing behind.
 
@@ -777,7 +854,7 @@ panel. **No MCP tool can change policy**, and policy is not in `preference_meta`
 | `deploySecrets` to an approved target | at once | at once | **a card each time**, listing keys and version changes (`STRIPE_SECRET_KEY v3 → v4`) |
 | `runWithSecrets` | a card once per command + place, then at once | same as dev | **off**. The human can turn it on, then it is a card per run |
 | `writeEnvFile` to an approved file | at once | a card each write | **off**. Enabled per target with a card, then a card each write |
-| a stack service bound to the environment (§7.2) | at once | at once | **off**. Enabled per service with a card, then starts at once (waiting for 1Password's authorization if needed) |
+| a stack service bound to the environment (§7.2) | at once | at once | **off**. Enabled per service with a card; then **every start is the human's click** (§7.2) |
 | `generateSecret` (missing value) | at once | at once | a card |
 | `captureSecret` | a card the first time per command + place + `extract` | same | a card each time |
 | where values may live (§5) | provider, or the labelled local vault | same as dev | **a provider only** |
@@ -793,10 +870,18 @@ A prod card can be approved on the phone (§12): it names what moves and where, 
 A run rotates one or more keys in one environment as a single plan. **With a provider, the
 provider stores the versions and maiTerm drives the consumer side**: every consumer, the
 overlap, the verification and the revoke card. A pending value is held where the provider
-**does not sync it onward**: a separate Doppler config that has no integrations, or a separate
-1Password item. Never a reserved name in the live config, which Doppler's own sync would push
-to Vercel along with everything else. Exactly how is designed in the rotation phase, under that
-constraint. It follows the AWS staging-label model:
+**does not sync it onward**. Never a reserved name in the live config, which Doppler's own sync
+would push to Vercel along with everything else.
+- **Doppler:** a `<config>_pending` branch config with no integrations, which **the human
+  creates when rotation is first set up**. maiTerm's service tokens can't create configs, and it
+  keeps no CLI login. It needs its own token, write-enabled, added on the human's choice like
+  any write token (§5.1).
+- **1Password:** a separate item in the project's vault, **outside any Environment** that is
+  mounted or used as a read source. It is written through the human's approval, like every
+  1Password write.
+
+The rest is designed in the rotation phase, under that constraint. It follows the AWS
+staging-label model:
 
 ```
 planned → minting → staged (pending) → distributing → verifying → promoted → overlap → revoking → done
@@ -1209,10 +1294,10 @@ filtered in the panel and exported.
 |---|---|---|
 | **A prompt-injected agent** ("send the key to evil.com") | No tool takes a value or a free URL; targets need a card and an agent's config and PATH can't redirect them (§7.3); templates can't cross an allowlist (§4.4); prod deploys need a card each time | An agent that writes code which leaks the key at runtime and gets it deployed. Code review and CI catch that, not the vault |
 | **A careless agent** (prints env, commits `.env`) | No values in tool results; masking and scrubbing; gitignore check; leak scan; pre-commit hook | A value it already read through its own tools |
-| **A determined agent running as the same OS user** | Prod values live only with a provider, and with 1Password every prod read needs the human's per-process authorization (§5.1); provider CLIs denied to agents (§10.3, §10.4); the `PreToolUse` speed bump; no oracles (§1 rule 4) | Values in the local vault, and maiTerm's stored provider credentials (a 1Password service account, Doppler tokens): the keychain item is readable to it on Linux and Windows. Doppler prod tokens get no per-use gate. A 1Password prompt the human approves on reflex. A personal provider login the human left on the machine. Any process environment after delivery. **A recovery key it finds** opens the local vault. **The real boundary is a configured sandbox (§10.3) or a separate OS user** |
+| **A determined agent running as the same OS user** | Prod values live only with a provider. With 1Password, each human action that reads prod costs one authorization, in a process that exits afterwards, and nothing an agent does starts a prod read (§5.1, §7.2). Stored provider credentials are read-only by default. Provider CLIs are a speed bump (§10.3, §10.4); the `PreToolUse` speed bump; no oracles (§1 rule 4) | Values in the local vault, and maiTerm's stored provider credentials: the keychain item is readable to it on Linux and Windows. That covers the read-only dev/staging service account and Doppler tokens, plus a **Doppler prod token** (no per-use gate) or **write token** (it can change values that Doppler then syncs) if the human added one. A 1Password prompt the human approves without maiTerm's "will ask you now". A personal provider login left on the machine. Any process environment after delivery. **A recovery key it finds** opens the local vault. **The real boundary is a configured sandbox (§10.3) or a separate OS user** |
 | **Another local process as the same user** | As above | As above, the same reach docs/login.md §9.2 accepts |
 | **A stolen or lost machine** | Provider values: revoke maiTerm's credentials in the provider and reconnect (§5.1 rule 9) | Local-vault values, if the thief also has the login password |
-| **A stolen backup or synced data dir** | The vault file alone is useless; Windows entries don't roam (§5.2); provider values were never on disk | A backup that also carries the macOS login keychain opens the local vault to whoever has the login password |
+| **A stolen backup or synced data dir** | The vault file alone is useless; Windows entries don't roam (§5.2); provider values were never on disk | A backup that also carries the macOS login keychain, plus the login password, opens the local vault **and maiTerm's stored provider credentials**, a Doppler prod or write token included. The response is revoking them in the provider |
 | **A lost or compromised phone** | Values never reach the phone; approvals need a paired device token (docs/agent-requests.md §2) | A paired phone can approve a prod deploy, so unpairing is the response |
 | **A shared screen / shoulder** | Masked by default; reveal times out; copy stays out of clipboard history | — |
 | **maiTerm's own logs and errors** | `Secret` has no `Display`/`Serialize`; errors name the operation and key, never the value (the `accounts/vault.rs` rule 1); adapter errors are fixed sentences (§7.3) | — |
@@ -1318,14 +1403,16 @@ maiTerm should lean on them instead of its own vault:
     is `live` unless it provably can't do harm. The tier decides routing and cards, not storage.
 13. **The local vault is a labelled fallback, and prod needs a provider** (§5.2, §5.3). The local
     vault holds any non-prod key for people without a provider, with a label saying plainly what
-    it does and doesn't protect. Prod values need a provider, and through 1Password every prod
-    read is gated by the human's Touch ID. That drops the OS-guarded local prod store, the
-    heaviest and weakest part of the earlier design.
+    it does and doesn't protect. Prod values need a provider. Through 1Password, each human
+    action that reads prod costs one biometric or system authorization, in a process that exits
+    afterwards (§5.1). Through Doppler, prod gains scope, audit and revocation but no per-use
+    gate, and whether that is enough is open (§16.1). That drops the OS-guarded local prod store,
+    the heaviest and weakest part of the earlier design.
 
 ### 16.1 Added 2026-10-23: considerations raised after the decisions
 
 Darryl asked what else should be asked. Each item was then written into its section:
-- recovery (§5, decision 10);
+- recovery (§5.2, decision 10);
 - secrets that are files (§4.2, §7.1);
 - services waiting on the human's 1Password authorization after a restart (§7.2);
 - checking the shim's code signature, not its path (§7.1);
@@ -1336,17 +1423,36 @@ Darryl asked what else should be asked. Each item was then written into its sect
 
 Free or paid is Darryl's product call and doesn't change the design.
 
+### 16.2 Open, 2026-10-28
+
+1. **Is Doppler enough for prod?** A review of the provider rewrite (2cb381bb) found that a
+   Doppler prod token is protected like a local-vault value: a keychain item a same-user agent
+   can read on Linux and Windows. What Doppler adds is a narrow scope, its audit log, revocation
+   from anywhere and nothing on disk, but no per-use human gate. The choices:
+   - **allow Doppler for prod**, with that stated on the panel and the card;
+   - **require 1Password for prod**, the only provider with a per-use gate;
+   - **allow the local vault for prod too**, since it would then be no weaker than Doppler.
+
+   Recommended: allow Doppler, stated. Its scope, audit and revocation are real gains over a
+   local file, and the people choosing Doppler are choosing its sync to hosting.
+
 ## 17. Build order
 
 1. **Core and the provider spikes.**
-   - **First, two spikes**: driving 1Password's app authorization from maiTerm (a Rust app; `op`
-     as a child, or a small SDK sidecar), and the Doppler REST endpoint for reading a config with
-     a service token (§5.1).
+   - **First, the `maiterm-1p` spike, pass or fail** (§5.1). The helper gets per-process
+     authorization from the 1Password app. An agent running `op` or the helper under a maiTerm
+     child (no tty, `setsid`) does **not** share it. A service-account token passed over stdin
+     works. If an agent can share the helper's authorization, prod through 1Password waits until
+     it can't. Also: how to detect a Doppler token's write access, and whether one can be minted
+     with an expiry.
    - `src-tauri/src/secrets/`: the `Store` interface; the data model with `risk`; the Secrets
      panel as a full-window view, with the store and the local vault's label shown; environments;
      the audit log.
    - **Doppler and 1Password connections**: minting or pasting maiTerm's own credentials, the
-     token-type refusal, the scope check, keychain storage. Dedicated 1Password vaults.
+     token-type refusal, the scope check (refusing a service account that can see prod or
+     write), keychain storage. Dedicated 1Password vaults; the `maiterm-1p` helper, signed, with
+     the hardened runtime; a fresh helper per human action for prod and for every write; the
+     daily-cap display.
    - **The local vault**: one data key, local-only Windows persistence, the passphrase for
      boxes with no keychain, the recovery key, moving the vault to a provider (§5.2).
    - `accounts/vault.rs`'s `Secret` grows `zeroize` and moves to a shared module.
@@ -1401,5 +1507,6 @@ advertised on maiterm.dev:
   fetches the details over maiLink's pinned LAN connection.
 - **The website copy stays true** (website/CLAUDE.md): it says what §1 and §14 say, including
   that the vault does not contain an agent running as the same OS user, and that prod protection
-  differs by platform. It makes no "military-grade"-style claims.
+  differs by provider: a 1Password authorization per human action, against Doppler's scope and
+  audit. It makes no "military-grade"-style claims.
 - **Free or paid** is Darryl's call, and doesn't change the design.
