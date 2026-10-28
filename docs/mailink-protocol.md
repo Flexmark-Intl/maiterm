@@ -986,15 +986,12 @@ interface ModelOption {
                             // affordance without inferring one from punctuation in a label.
                             // Never empty: a value naming no family names no model, and is dropped.
   ambiguous: boolean;       // another row in THIS response shares this `display`, so matching it
-                            // does not identify this row. Set on every [1m] pair — the window
-                            // marker is not part of a model's identity and `display` strips it, so
-                            // `opus` and `opus[1m]` both render "Opus" and a session stamping the
-                            // bare alias equals both, though only one leaves its window alone.
-                            // maiTerm CANNOT break that tie: a session's window is inferred per
-                            // family (transcripts do not reliably carry the marker), not observed.
-                            // So: treat a match on an ambiguous row as "on this model", never as
-                            // "on this row", and never promise an outcome that only telling the
-                            // two apart could confirm.
+                            // does not identify this row. `display` strips the `[1m]` window
+                            // marker, so an account row carrying it can render like a builtin
+                            // alias. The builtin tiers no longer pair (Claude Code 2.1.311 dropped
+                            // `[1m]` where it changes nothing — every current model is 1M — and
+                            // `/model` lists one row per tier). Treat a match on an ambiguous row
+                            // as "on this model", never as "on this row".
   note: string;
   source: 'account' | 'builtin';
                             // NOT decoration — the two are not equally trustworthy.
@@ -1009,7 +1006,8 @@ interface ModelOption {
                             //   switch that gets refused at the TUI is a 'builtin' row's failure
                             //   mode, not a bug.
   // Account values are PINNED ids (`claude-fable-5-1[1m]`) because that is what the cache holds;
-  // builtin values are aliases (`opus[1m]`) so a point release inside a tier needs no edit.
+  // builtin values are aliases (`opus`) so a point release inside a tier needs no edit; their
+  // `note` says the window ("… · 1M context"), as `/model` does.
   // maiTerm does not rewrite one into the other — inventing an alias it cannot verify would fail
   // at the TUI in front of the human instead of here, where it can simply not be claimed.
   //
@@ -1994,7 +1992,8 @@ export interface AgentMeta {
                           //   never as a value.
   contextPct?: number;    // 0–100, normalized — the always-present field
   contextUsed?: number;   // token detail for the "142k / 1M" readout
-  contextLimit?: number;  // model-dependent (1,000,000 for [1m] variants, else 200,000)
+  contextLimit?: number;  // the window Claude Code reports for the session's model when known,
+                          // else guessed from the model id (see "meta" below)
 }
 
 export type ThreadKind = 'topic' | 'solo';
@@ -2216,14 +2215,15 @@ export interface WsAttentionEvent {
   (`mailink/transcript.rs`, dispatched by runtime):
   - *Claude*: the last JSONL line carrying `message.usage`, summed
     `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`, over a
-    model-dependent limit, and `model` normalized from `message.model`
-    ("claude-opus-5" → "Opus 5"). The limit is 1,000,000 for `[1m]`/`-1m` ids — but note the
-    transcript's `message.model` NEVER carries that marker (Claude Code exposes it only on the
-    statusLine input, which maiTerm doesn't receive), so a 1M session and a 200k one report the
-    same bare id. The desktop therefore infers it: an allowlist of ids whose 1M variant is the
-    one in use (`ASSUMED_1M_MODELS` in `mailink/mod.rs`), plus a backstop that treats any
-    session already past 200,000 tokens as 1M. Clients should treat `contextLimit` as
-    authoritative and not re-derive it from the model name.
+    window, and `model` normalized from `message.model` ("claude-opus-5-5" → "Opus 5.5"). The
+    window is the one Claude Code itself reports: the maiterm-tab mod reads `$.session.usage()`
+    at each turn's end and sends it with the Stop event, and it applies while the transcript
+    still names the model it was reported for. The transcript never states the window, and since
+    2.1.311 model ids no longer carry `[1m]`, so until a report arrives (a fresh maiTerm, an older
+    Claude, no mod) the desktop guesses: 1,000,000 for `[1m]`/`-1m` ids and an allowlist of
+    1M models (`ASSUMED_1M_MODELS` in `mailink/mod.rs`), plus a backstop that treats any session
+    already past 200,000 tokens as 1M. Clients should treat `contextLimit` as authoritative and
+    not re-derive it from the model name.
   - *Codex*: the rollout's last `token_count` — `last_token_usage.total_tokens` over the
     stated `model_context_window` — and `turn_context.model` ("gpt-5.5" → "GPT-5.5").
   Emitted on the `/chats` object, in `chat_detail`, and on the WS `chat_state` event (so the

@@ -74,7 +74,7 @@ ctx_limit=$(echo "$input" | jq -r '.context_window.context_window_size // empty'
 if [ -z "$ctx_limit" ] || [ "$ctx_limit" = "0" ]; then
   case "$model_id" in
     *"[1m]"*|*"-1m"*) ctx_limit=1000000 ;;
-    *"opus-4-8"*|*"opus-5"*|*"fable-5"*) ctx_limit=1000000 ;;
+    *"opus-4-8"*|*"opus-5"*|*"fable-5"*|*"sonnet-5-5"*|*"haiku-5-5"*) ctx_limit=1000000 ;;
     *) ctx_limit=200000 ;;
   esac
   # Compared through awk, not `[ -gt ]`, so a non-integer token count can never make this

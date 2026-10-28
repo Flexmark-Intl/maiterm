@@ -58,17 +58,10 @@ pub struct ModelOption {
     /// True when another row in the SAME response carries this `display`, so matching it does not
     /// identify one row.
     ///
-    /// It is set on every `[1m]` pair, because the window marker is not part of a model's identity
-    /// and `display_model` strips it: `opus` and `opus[1m]` both render "Opus". A session whose
-    /// transcript stamps the bare alias therefore equals both, and only one of them would leave
-    /// its context window alone.
-    ///
-    /// maiTerm cannot break the tie, and that is the point of saying so here rather than in prose.
-    /// A session's window is inferred per FAMILY (`ASSUMED_1M_MODELS`) because the transcript does
-    /// not reliably carry the marker, so "is this session on the 1M variant" is not a question this
-    /// side can answer. A consumer must treat a match on an ambiguous row as "on this model",
-    /// never as "on this row", and must not promise an outcome that only distinguishing the two
-    /// could confirm.
+    /// The curated tiers no longer collide (their `[1m]` pairs went with Claude Code 2.1.311), but
+    /// an account row still can: `display_model` strips the window marker, so a pinned
+    /// `claude-haiku[1m]` renders "Haiku" like the `haiku` alias. A consumer must treat a match on
+    /// an ambiguous row as "on this model", never as "on this row".
     pub ambiguous: bool,
 }
 
@@ -118,22 +111,16 @@ fn mark_ambiguous(rows: &mut [ModelOption]) {
 /// table ages only in its labels. Deliberately short — anything genuinely new arrives through the
 /// account cache, which is the half that actually moves.
 ///
-/// **`sonnet` and `sonnet[1m]` may be one model, and the pair stays anyway.** Strings in the CLI
-/// binary suggest `claude-sonnet-5` is natively 1M, which would make these two rows for one thing.
-/// I could not confirm it with anything better: no Sonnet session on this machine has ever passed
-/// 200k tokens (77k is the high-water mark), so the transcripts cannot settle it either way. Under
-/// that uncertainty, keeping both is the cheap error — a redundant row — while collapsing them
-/// removes a capability if the suffix does mean something on some account. The visible symptom is
-/// that only the non-1M row highlights, since `ASSUMED_1M_MODELS` has no `sonnet` entry and must
-/// not gain one on this evidence: guessing 1M for an account that has 200k overstates the window,
-/// and that direction has no backstop. Settle it with a Sonnet session that exceeds 200k, not with
-/// another read of the binary.
-const BUILTIN: [(&str, &str, &str); 5] = [
-    ("opus", "Opus", "Everyday complex work"),
-    ("opus[1m]", "Opus", "Everyday complex work · 1M context"),
-    ("sonnet", "Sonnet", "Balanced speed and capability"),
-    ("sonnet[1m]", "Sonnet", "Balanced · 1M context"),
-    ("haiku", "Haiku", "Fastest, for simple work"),
+/// **One row per tier, with the window in the note.** Through 2.1.310 the list paired each tier
+/// with a `[1m]` variant. Claude Code 2.1.311 dropped the marker "on models where the suffix has
+/// no effect", and its 2.1.312 catalog gives every current model (Opus, Sonnet and Haiku 5.5,
+/// Fable 5.1) a 1M window, so a pair would be two rows for one model. `/model` itself now lists
+/// one row per tier and says the window in its description; this follows it. The marker is still
+/// accepted, so an account cache entry that carries it passes through unchanged.
+const BUILTIN: [(&str, &str, &str); 3] = [
+    ("opus", "Opus", "For complex work and everyday tasks · 1M context"),
+    ("sonnet", "Sonnet", "Most efficient for simpler tasks · 1M context"),
+    ("haiku", "Haiku", "Fastest for quick answers · 1M context"),
 ];
 
 /// Read `~/.claude.json` and return its `additionalModelOptionsCache` entries.
@@ -261,11 +248,8 @@ mod tests {
         // A pinned id here would make this table wrong on every Claude release. `opus` keeps
         // meaning the current Opus; only the human-readable label ages.
         for (value, _, _) in BUILTIN {
-            // The tier name is everything before the `[1m]` variant marker, which is a window
-            // size and not a version — `opus[1m]` is still an alias.
-            let tier = value.split('[').next().unwrap_or(value);
             assert!(
-                !tier.contains(char::is_numeric) && !tier.contains("claude-"),
+                !value.contains(char::is_numeric) && !value.contains("claude-"),
                 "{value} pins a version — the curated table must hold aliases only"
             );
         }
@@ -277,12 +261,12 @@ mod tests {
         // inside the test, so deleting the dedup from `merge` left it passing while the endpoint
         // emitted duplicate rows.
         let out = merge(vec![option(
-            "opus[1m]".into(),
+            "opus".into(),
             "Opus 5".into(),
             "from the server".into(),
             Source::Account,
         )]);
-        let opus: Vec<&ModelOption> = out.iter().filter(|m| m.value == "opus[1m]").collect();
+        let opus: Vec<&ModelOption> = out.iter().filter(|m| m.value == "opus").collect();
         assert_eq!(opus.len(), 1, "no duplicate rows for one value");
         assert_eq!(opus[0].source, Source::Account, "the account's copy wins");
         assert_eq!(opus[0].note, "from the server");
@@ -368,11 +352,6 @@ mod tests {
         assert_eq!(opus.display, "Opus");
         assert_eq!(opus.family, "opus");
         assert_ne!(opus.display, "Opus 4.6");
-
-        // The window marker is not part of the model's identity, so both windows render alike.
-        let opus_1m = merge(Vec::new()).into_iter().find(|m| m.value == "opus[1m]").unwrap();
-        assert_eq!(opus_1m.display, "Opus", "[1m] is a window, not a different model");
-        assert_eq!(opus_1m.family, "opus");
     }
 
     #[test]
@@ -412,22 +391,17 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_display_is_flagged_so_a_match_is_not_read_as_identifying_one_row() {
-        // Found by review. `display_model` strips `[1m]`, so `opus` and `opus[1m]` both render
-        // "Opus" — and a transcript stamping the bare alias (53 real occurrences on this machine)
-        // equals BOTH, one of which would change the context window. maiTerm cannot break the tie:
-        // a session's window is inferred per family, not observed. So the response says so.
+    fn the_curated_tiers_are_one_row_each_and_none_is_ambiguous() {
+        // Claude Code 2.1.311 dropped the `[1m]` variants where the marker changes nothing, which
+        // is every current model, so a tier is one row and matching it identifies that row.
         let out = merge(Vec::new());
-        for pair in ["opus", "sonnet"] {
-            let rows: Vec<&ModelOption> = out.iter().filter(|m| m.family == pair).collect();
-            assert_eq!(rows.len(), 2, "{pair} should have a 1M pair");
-            assert_eq!(rows[0].display, rows[1].display, "which render identically");
-            assert!(rows.iter().all(|r| r.ambiguous), "{pair} rows must admit the tie");
+        for family in ["opus", "sonnet", "haiku"] {
+            let rows: Vec<&ModelOption> = out.iter().filter(|m| m.family == family).collect();
+            assert_eq!(rows.len(), 1, "{family} should be one row");
+            assert!(!rows[0].ambiguous, "{family} has nothing to be confused with");
+            assert!(!rows[0].value.contains("[1m]"));
+            assert!(rows[0].note.ends_with("1M context"), "the note says the window");
         }
-        // Haiku is unpaired, so its match DOES identify its row.
-        let haiku: Vec<&ModelOption> = out.iter().filter(|m| m.family == "haiku").collect();
-        assert_eq!(haiku.len(), 1);
-        assert!(!haiku[0].ambiguous, "an unpaired row must not be flagged");
     }
 
     #[test]

@@ -5999,15 +5999,18 @@ fn preview_for(state: &str, tool: Option<&str>) -> String {
 /// OVERSTATES the window, the gauge reads a fifth of the truth, and unlike the understating
 /// direction nothing self-corrects it. Add a family here only when that tier has no 200k variant
 /// to be wrong about.
-const ASSUMED_1M_MODELS: [&str; 3] = ["opus-4-8", "opus-5", "fable-5"];
-
-/// The context window for a model id: 1M-context variants vs the 200k default.
 ///
-/// The `[1m]` variant marker exists in Claude Code — its statusLine input carries it on
-/// `.model.id` — but NOT in the transcript's `message.model`, which reports a bare
-/// `claude-opus-5` for 1M and 200k sessions alike (verified across live transcripts). maiTerm
-/// never receives the statusLine, so the transcript is all we have and the variant has to be
-/// inferred. Hence [`ASSUMED_1M_MODELS`].
+/// `sonnet-5-5` and `haiku-5-5` qualify on Claude Code's own model catalog (2.1.312 ships every
+/// 5.5 model with `max_input_tokens: 1e6`, and drops `[1m]` where it has no effect): measured,
+/// a Sonnet 5.5 session reports a 1,000,000 window through the mod.
+const ASSUMED_1M_MODELS: [&str; 5] = ["opus-4-8", "opus-5", "fable-5", "sonnet-5-5", "haiku-5-5"];
+
+/// The context window GUESSED from a model id: 1M-context variants vs the 200k default.
+///
+/// The fallback only. Since 2.1.311 Claude Code drops the `[1m]` marker from ids where it has no
+/// effect, and the transcript's `message.model` never carried it, so the window Claude Code
+/// reports through the maiterm-tab mod (`SessionMeta.context_window`) answers first. This runs
+/// until a session's first turn ends under the mod, for an older Claude, or with no mod at all.
 ///
 /// `observed_tokens` is the session's current context usage and acts as a self-correcting
 /// backstop: a session that has already exceeded 200k is definitively on a larger window,
@@ -6078,7 +6081,7 @@ fn build_meta(app: &AppState, tab_id: &str) -> Option<Value> {
     let (rt, sid) = resolved_session_for_tab(app, tab_id)?;
     let meta = transcript::meta_for(rt, &sid)?;
     let model_id = meta.model_id.as_deref().unwrap_or("");
-    // Codex rollouts carry the window; Claude's is derived from the model id.
+    // Codex rollouts carry the window, and Claude's mod reports it; otherwise guessed from the id.
     let limit = meta
         .context_window
         .unwrap_or_else(|| context_limit_for(model_id, meta.context_tokens));
@@ -7408,6 +7411,10 @@ mod tests {
         // on a 1M session, pegging it at ~100% until the observed-tokens backstop tripped.
         assert_eq!(context_limit_for("claude-fable-5", 0), 1_000_000);
         assert_eq!(context_limit_for("claude-fable-5-1", 0), 1_000_000);
+        // The 5.5 models are 1M with no marker at all (Claude Code's catalog, 2.1.312).
+        assert_eq!(context_limit_for("claude-opus-5-5", 0), 1_000_000);
+        assert_eq!(context_limit_for("claude-sonnet-5-5", 0), 1_000_000);
+        assert_eq!(context_limit_for("claude-haiku-5-5", 0), 1_000_000);
         // Everything else defaults to 200k — including other Opus releases, which a blanket
         // "any opus is 1M" rule would have wrongly promoted.
         assert_eq!(context_limit_for("claude-sonnet-4-5", 0), 200_000);

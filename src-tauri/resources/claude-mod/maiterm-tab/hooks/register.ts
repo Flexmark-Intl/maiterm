@@ -10,7 +10,7 @@ import type { EngineInterface, PermissionRequestDecision, Register } from 'claud
 // (`via=mod`), so the server drops the settings hooks' copy of each one. A Claude Code too old for mods never loads this, and its settings hooks
 // run exactly as before.
 
-// Tested against 2.1.295; the API is early access and may move between releases.
+// Tested against 2.1.312; the API is early access and may move between releases.
 const MIN_VERSION = [2, 1, 290]
 
 type Link = { tab: string; port: string; auth: string }
@@ -219,6 +219,20 @@ async function reportAppended($: EngineInterface, to: Link): Promise<void> {
   }
 }
 
+// `{ maiterm_context: { model, window } }` for the session's current model, or nothing when Claude
+// can't say. The model rides along so maiTerm applies the window only while the transcript still
+// names that model: a `/model` switch otherwise leaves the old window on the new one until a turn ends.
+async function contextOf($: EngineInterface): Promise<Record<string, unknown>> {
+  try {
+    const [model, usage] = await Promise.all([$.session.model(), $.session.usage()])
+    const window = usage?.context?.window
+    if (typeof model !== 'string' || !model || typeof window !== 'number' || window <= 0) return {}
+    return { maiterm_context: { model, window } }
+  } catch {
+    return {}
+  }
+}
+
 // The events maiTerm's server reads, forwarded as the settings hooks would have sent them.
 // Sent BEFORE `next(e)`: the settings hooks run beneath, so maiTerm hears this copy first
 // and knows to drop theirs.
@@ -259,7 +273,17 @@ export const register: Register = on => {
 
   on('classic.SessionEnd', relay)
   on('classic.Notification', relay)
-  on('classic.Stop', relay)
+  // Each turn's end also carries the context window Claude Code sizes this session's model at.
+  // Model ids stopped saying it (no `[1m]` since 2.1.311), and the transcript never did, so this
+  // is the only place maiTerm's context gauge can read it rather than guess it from the id.
+  on('classic.Stop', async ($, e, next) => {
+    const to = await linkOf($)
+    if (to) {
+      await send($, to, { ...e, ...(await contextOf($)) })
+      await ensureInbox($, to)
+    }
+    return next(e)
+  })
   // A turn that ends in an API error (an expired login) sends this instead of Stop. A Claude
   // without the event never fires it; its settings hook is gated the same way (lockfile.rs).
   on('classic.StopFailure', relay)

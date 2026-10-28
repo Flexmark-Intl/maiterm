@@ -659,12 +659,11 @@ fn keep_last_turns(mut msgs: Vec<Value>, limit: usize) -> Vec<Value> {
 pub struct SessionMeta {
     /// Raw model id from the last assistant turn (e.g. "claude-opus-5", "gpt-5.5"). Caller
     /// normalizes for display.
-    /// NOTE (Claude): the transcript records only the BARE id — it never carries the 1M-context
-    /// variant marker (no "[1m]", no betas field), so the 1M window can't be detected from the id.
-    /// Confirmed still true for Opus 5: a 1M session records exactly "claude-opus-5". Claude Code
-    /// DOES expose the marker, but only on the statusLine input, which maiTerm never receives.
-    /// maiLink works around it with an allowlist + a past-200k backstop (context_limit_for in
-    /// mod.rs) — extend that list when a new 1M-by-default model appears.
+    /// NOTE (Claude): the transcript records only the BARE id and never the window, and since
+    /// 2.1.311 no id carries `[1m]` either. The window comes from the maiterm-tab mod, which
+    /// reports what Claude Code sizes the session at on each Stop ([`record_claude_window`]);
+    /// until one arrives (a fresh maiTerm, an old Claude, no mod) the caller guesses from the id
+    /// (context_limit_for in mod.rs).
     pub model_id: Option<String>,
     /// Tokens currently in the context window. Claude: input + cache_read + cache_creation
     /// (matches the maiTerm statusline). Codex: the last token_count's
@@ -673,8 +672,9 @@ pub struct SessionMeta {
     /// long session) and is what codex-rs's own gauge divides by the window only as a
     /// no-window fallback display.
     pub context_tokens: u64,
-    /// The model's context window when the transcript states it directly (Codex rollouts carry
-    /// `model_context_window`). `None` for Claude — the caller derives it from the model id.
+    /// The model's context window when it is known rather than guessed: a Codex rollout states it
+    /// (`model_context_window`); a Claude session has it once its mod has reported it for the
+    /// model the transcript names. `None` otherwise — the caller derives it from the model id.
     pub context_window: Option<u64>,
     /// Reasoning-effort level from the last assistant turn (Claude: low/medium/high/xhigh/max —
     /// a top-level `effort` field on each JSONL entry). `None` for a model with no effort param,
@@ -703,7 +703,38 @@ pub struct SessionMeta {
 /// Served from the (mtime, len)-gated tail-facts cache.
 fn session_meta(session_id: &str) -> Option<SessionMeta> {
     let path = locate_jsonl(session_id)?;
-    tail_facts(&path, claude_tail_facts).meta
+    let mut meta = tail_facts(&path, claude_tail_facts).meta?;
+    meta.context_window = meta.model_id.as_deref().and_then(|m| reported_window(session_id, m));
+    Some(meta)
+}
+
+/// The context window Claude Code reported for each session, with the model it was reported for.
+/// In memory: after a restart the gauge guesses until the session's next turn ends.
+static REPORTED_WINDOWS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (String, u64)>>> =
+    std::sync::OnceLock::new();
+
+/// Record the window Claude Code sizes `session_id`'s model at (the maiterm-tab mod sends it with
+/// each Stop as `maiterm_context`).
+pub fn record_claude_window(session_id: &str, model: &str, window: u64) {
+    if session_id.is_empty() || model.is_empty() || window == 0 {
+        return;
+    }
+    let map = REPORTED_WINDOWS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(mut m) = map.lock() {
+        m.insert(session_id.to_string(), (model.to_string(), window));
+    }
+}
+
+/// The reported window, only while the transcript still names the model it was reported for: after
+/// a `/model` switch the old window says nothing about the new model until its turn ends.
+fn reported_window(session_id: &str, model_id: &str) -> Option<u64> {
+    let map = REPORTED_WINDOWS.get()?;
+    let m = map.lock().ok()?;
+    let (model, window) = m.get(session_id)?;
+    // The transcript's id is bare; a session started on an id with the (still accepted) `[1m]`
+    // reports it with the marker.
+    let bare = |s: &str| s.replace("[1m]", "");
+    (bare(model) == bare(model_id)).then_some(*window)
 }
 
 /// Parse both cached facts (last real turn ts + meta) from one Claude JSONL tail.
@@ -2736,6 +2767,21 @@ mod tests {
         assert_eq!(rfc3339_to_ms("2000-01-01T00:00:00Z"), 946684800000);
         // Garbage → 0, never panics.
         assert_eq!(rfc3339_to_ms("not-a-date"), 0);
+    }
+
+    #[test]
+    fn a_reported_window_holds_only_for_the_model_it_was_reported_for() {
+        record_claude_window("rw-session", "claude-sonnet-5-5", 1_000_000);
+        assert_eq!(reported_window("rw-session", "claude-sonnet-5-5"), Some(1_000_000));
+        // After a `/model` switch the transcript names another model: the old window says nothing.
+        assert_eq!(reported_window("rw-session", "claude-opus-4-7"), None);
+        assert_eq!(reported_window("other-session", "claude-sonnet-5-5"), None);
+        // A session started on a (still accepted) `[1m]` id reports it with the marker.
+        record_claude_window("rw-session-1m", "claude-opus-4-8[1m]", 1_000_000);
+        assert_eq!(reported_window("rw-session-1m", "claude-opus-4-8"), Some(1_000_000));
+        // Nothing usable is never recorded.
+        record_claude_window("rw-empty", "claude-sonnet-5-5", 0);
+        assert_eq!(reported_window("rw-empty", "claude-sonnet-5-5"), None);
     }
 
     #[test]

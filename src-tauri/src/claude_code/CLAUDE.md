@@ -474,7 +474,10 @@ The settings hooks still fire beneath it, and three things keep the two paths fr
 
 PreToolUse comes from the mod's `tool.call` hook, not `classic.PreToolUse`, whose input lacks
 the session id and the subagent's `agent_id` (gate.rs keys on both). PreModelSwitch's `allow`
-is returned as the mod's own result. A Claude Code too old for mods ignores the variable, so
+is returned as the mod's own result. The mod's Stop also carries `maiterm_context: { model,
+window }` from `$.session.usage()`: the only source of a Claude session's context window since
+2.1.311 dropped `[1m]` from model ids (`transcript::record_claude_window`, read by the phone's
+and the Overlord's context gauges while the transcript names that model). A Claude Code too old for mods ignores the variable, so
 its tabs run on the settings hooks exactly as before. That fallback is why both paths exist.
 Verified end to end against a dev instance: one event per hook, each naming its tab, every
 anonymous copy dropped, and the priming delivered once.

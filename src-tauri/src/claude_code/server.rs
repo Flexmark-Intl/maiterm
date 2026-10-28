@@ -5211,6 +5211,17 @@ async fn hooks_handler(
             }
             .or(tab_id_from_param);
 
+            // The maiterm-tab mod's copy says how big Claude Code sizes this session's window
+            // (model ids stopped saying so in 2.1.311); the context gauges read it from here.
+            if let Some(ctx) = event.get("maiterm_context") {
+                if let (Some(model), Some(window)) = (
+                    ctx.get("model").and_then(|v| v.as_str()),
+                    ctx.get("window").and_then(|v| v.as_u64()),
+                ) {
+                    crate::mailink::transcript::record_claude_window(&session_id, model, window);
+                }
+            }
+
             // Update session state to stopped + clear tool
             let mut subagent_gate = false;
             if !session_id.is_empty() {
