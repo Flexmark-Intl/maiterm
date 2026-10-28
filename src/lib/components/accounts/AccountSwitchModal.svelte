@@ -58,6 +58,9 @@
         for (const [key, p] of Object.entries(progress)) {
           if (p.requestId !== request_id) continue;
           if (finished) {
+            // Two final reports can arrive — the stall release, then the real end — and in
+            // either order. A clean finish is never replaced by a stalled one.
+            if (p.state === 'done' && !p.stalled) continue;
             progress = { ...progress, [key]: { state: 'done', requestId: request_id, reloaded, total, stalled } };
           } else if (p.state === 'pending') {
             // Progress reports are fire-and-forget, so one can land after the final report; once
@@ -151,6 +154,7 @@
   }
 
   function doneLabel(p: Progress & { state: 'done' }): string {
+    if (p.stalled && p.total === 0) return `Waiting — the window is still on “${p.stalled}”`;
     if (p.stalled) return `${p.reloaded} of ${p.total} reloaded — still on “${p.stalled}”`;
     return p.total === 0 ? 'Nothing to reload' : `Reloaded ${p.reloaded}`;
   }

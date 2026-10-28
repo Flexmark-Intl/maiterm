@@ -205,11 +205,27 @@ struct LoginHandle {
     cancelled: bool,
 }
 
+/// Cancels that arrived before their sign-in had a child to kill.
+///
+/// Cancel is live from the moment the dialog starts, but a sign-in only registers once its child
+/// is spawned — after a reconcile and, for `reauth_account_login`, an identity read that is a
+/// whole CLI start-up. A cancel in that gap found nothing, returned Ok, and the browser opened
+/// anyway. Recorded here instead, and honoured by `register_login`. Cleared when a sign-in for
+/// the id STARTS (`forget_early_cancel`), so a cancel landing after one finished cannot kill the
+/// next attempt.
+static EARLY_CANCELS: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+fn forget_early_cancel(id: &str) {
+    EARLY_CANCELS.lock().remove(id);
+}
+
 fn register_login(id: &str, child: std::sync::Arc<parking_lot::Mutex<std::process::Child>>) {
-    ACTIVE_LOGINS.lock().insert(
-        id.to_string(),
-        LoginHandle { child, cancelled: false },
-    );
+    let cancelled = EARLY_CANCELS.lock().remove(id);
+    if cancelled {
+        let _ = child.lock().kill();
+    }
+    ACTIVE_LOGINS.lock().insert(id.to_string(), LoginHandle { child, cancelled });
 }
 
 fn unregister_login(id: &str) {
@@ -563,6 +579,35 @@ mod tests {
         assert_eq!(transcript_tail(""), None);
         assert_eq!(transcript_tail("  \n\n \n"), None);
     }
+
+    /// A cancel that lands before the child exists must still stop it — and must not outlive the
+    /// next attempt's start.
+    #[cfg(unix)]
+    #[test]
+    fn cancel_before_spawn_kills_the_child_when_it_registers() {
+        use super::{
+            cancel_account_login, cancelled, forget_early_cancel, register_login, unregister_login,
+        };
+        let id = "test-early-cancel-0001";
+        tauri::async_runtime::block_on(cancel_account_login(id.to_string())).unwrap();
+        let child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let child = std::sync::Arc::new(parking_lot::Mutex::new(child));
+        register_login(id, child.clone());
+        assert!(cancelled(id));
+        let status = child.lock().wait().unwrap();
+        assert!(!status.success(), "the child should have been killed");
+        unregister_login(id);
+
+        // A stale cancel is cleared when a sign-in for the id starts.
+        tauri::async_runtime::block_on(cancel_account_login(id.to_string())).unwrap();
+        forget_early_cancel(id);
+        let child = std::process::Command::new("sleep").arg("0").spawn().unwrap();
+        let child = std::sync::Arc::new(parking_lot::Mutex::new(child));
+        register_login(id, child.clone());
+        assert!(!cancelled(id));
+        let _ = child.lock().wait();
+        unregister_login(id);
+    }
 }
 
 /// Stop a sign-in that is still running. The child is killed, so the browser flow cannot
@@ -575,9 +620,14 @@ pub async fn cancel_account_login(account_id: String) -> Result<(), String> {
     if let Some(handle) = ACTIVE_MINTS.lock().get_mut(&account_id) {
         handle.cancelled = true;
     }
+    let minting = ACTIVE_MINTS.lock().contains_key(&account_id);
     let mut guard = ACTIVE_LOGINS.lock();
     let Some(handle) = guard.get_mut(&account_id) else {
-        // Already finished or never started. Nothing to stop, and not an error.
+        // Not spawned yet, or already finished. Recorded either way: `register_login` honours it
+        // if the child is still to come, and the next sign-in for this id clears it if not.
+        if !minting {
+            EARLY_CANCELS.lock().insert(account_id);
+        }
         return Ok(());
     };
     handle.cancelled = true;
@@ -635,6 +685,7 @@ pub async fn begin_account_login(
     if uuid::Uuid::parse_str(&account_id).is_err() {
         return Err("account id must be a UUID".to_string());
     }
+    forget_early_cancel(&account_id);
     let home = home_dir()?;
     let id_for_reconcile = account_id.clone();
     tauri::async_runtime::spawn_blocking(move || accounts::reconcile(rt, &id_for_reconcile, &home))
@@ -686,14 +737,20 @@ pub async fn reauth_account_login(
     if rt != Runtime::Claude {
         return Err(format!("{} sign-in is not implemented yet", rt.profile().label));
     }
-    let (email, org_id, label) = {
+    forget_early_cancel(&account_id);
+    let (email, org_id, org_name, label) = {
         let prefs = &state.app_data.read().preferences;
         let account = prefs
             .managed_accounts
             .iter()
             .find(|a| a.id == account_id && a.runtime == runtime)
             .ok_or_else(|| "that account no longer exists".to_string())?;
-        (account.email.clone(), account.org_id.clone(), account.label.clone())
+        (
+            account.email.clone(),
+            account.org_id.clone(),
+            account.org_name.clone(),
+            account.label.clone(),
+        )
     };
     let matches =
         |i: &AccountIdentity| i.is_account_login && i.email == email && i.org_id == org_id;
@@ -717,27 +774,63 @@ pub async fn reauth_account_login(
     // the one hint the CLI takes. It does not stop a browser session for another account
     // answering, which is what the check below is for.
     let identity =
-        login_into_root(&app, rt, &account_id, timeout_secs, open_with, email.as_deref()).await?;
+        match login_into_root(&app, rt, &account_id, timeout_secs, open_with, email.as_deref())
+            .await
+        {
+            Ok(identity) => identity,
+            Err(e) => {
+                // The login may have SUCCEEDED and only the identity read after it failed — or a
+                // cancel or timeout may have killed the child just after it saved a credential.
+                // Either way there may now be a login nobody has checked, possibly the browser's
+                // other account. The root was signed out (or wrong) to begin with, so signing it
+                // out loses nothing, and leaving it is the §6.1 failure. `begin_account_login`
+                // covers the same case by removing its root, which this one cannot do.
+                if let Err(out) = sign_out_root(rt, &account_id).await {
+                    return Err(format!(
+                        "{e} — and signing {label} back out failed ({out}), so it may be signed \
+                         in as an account nobody checked. Verify it before using it."
+                    ));
+                }
+                return Err(e);
+            }
+        };
     if matches(&identity) {
         return Ok(identity);
     }
 
-    let got = identity
-        .email
-        .clone()
-        .or(identity.shadowed_by.clone())
-        .unwrap_or_else(|| "a different account".to_string());
+    // Same email, different org: the address is a member of several, and the sign-in page picked
+    // another one. Naming only the email would read "signed in as a@x, not a@x" and send the user
+    // to a private window, which does not help — choosing the org on the page does.
+    let same_email = identity.is_account_login && identity.email == email;
+    let got = if same_email {
+        identity.org_name.clone().unwrap_or_else(|| "another organization".to_string())
+    } else {
+        identity
+            .email
+            .clone()
+            .or(identity.shadowed_by.clone())
+            .unwrap_or_else(|| "a different account".to_string())
+    };
+    let want = if same_email {
+        org_name.clone().unwrap_or_else(|| "the organization it was added with".to_string())
+    } else {
+        label.clone()
+    };
     let undone = sign_out_root(rt, &account_id).await;
     Err(match undone {
+        Ok(()) if same_email => format!(
+            "That signed in to {got}, not {want}, so it was signed back out. Try again and choose \
+             {want} on the sign-in page."
+        ),
         Ok(()) => format!(
-            "That signed in as {got}, not {label}, so it was signed back out. Your browser is \
+            "That signed in as {got}, not {want}, so it was signed back out. Your browser is \
              probably still signed in to {got}: try again with “Sign in privately”, or sign out \
              of it in the browser first."
         ),
         // The one outcome worse than signed out: say it plainly, since new tabs under this
         // account would now run as someone else.
         Err(e) => format!(
-            "That signed in as {got}, not {label}, and signing it back out failed ({e}). New \
+            "That signed in as {got}, not {want}, and signing it back out failed ({e}). New \
              tabs under {label} would run as {got} — remove this account until it is fixed."
         ),
     })

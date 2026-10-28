@@ -444,12 +444,37 @@
     let accountReloadChain: Promise<void> = Promise.resolve();
     /** How long one tab's reload may run before the dialog stops waiting on it. */
     const ACCOUNT_RELOAD_STALL_MS = 30_000;
+    /** The tab the running reload has been stuck on past the stall limit, if any. */
+    let accountReloadStalledOn: string | null = null;
+    /** Requests received but not yet started, each with the timer that frees its dialog. */
+    const accountReloadQueued = new Map<string, ReturnType<typeof setTimeout>>();
     listen<commands.AccountReloadRequest>(commands.ACCOUNT_RELOAD_TABS_EVENT, (event) => {
-      accountReloadChain = accountReloadChain.then(() => runAccountReload(event.payload));
+      const payload = event.payload;
+      // The stall clock starts on RECEIPT, not when the run starts. A request queued behind a
+      // stuck tab otherwise reported nothing at all — no count, no release — and its dialog
+      // disabled every Reload button for as long as that tab stayed stuck.
+      accountReloadQueued.set(payload.request_id, setTimeout(() => {
+        accountReloadQueued.delete(payload.request_id);
+        void commands
+          .reportAccountReloadDone(payload.reply_to, payload.request_id, {
+            reloaded: 0,
+            total: 0,
+            finished: true,
+            stalled: accountReloadStalledOn ?? 'an earlier reload in this window',
+          })
+          .catch(e => logError(`[accounts] reporting a queued reload failed: ${e}`));
+      }, ACCOUNT_RELOAD_STALL_MS));
+      accountReloadChain = accountReloadChain.then(() => runAccountReload(payload));
     }, { target: appWindow.label }).then(unlisten => { unlistenAccountReload = unlisten; });
 
     async function runAccountReload(payload: commands.AccountReloadRequest) {
       const wanted = payload.workspace_ids;
+      // Still queued → cancel its release timer. Gone → the timer fired and its dialog has been
+      // told to stop waiting, so this run reports only its final result.
+      const queuedTimer = accountReloadQueued.get(payload.request_id);
+      const releasedEarly = queuedTimer === undefined;
+      clearTimeout(queuedTimer);
+      accountReloadQueued.delete(payload.request_id);
 
       // SNAPSHOT the ids first, then reload them ONE AT A TIME.
       //
@@ -487,11 +512,11 @@
 
       // Progress after every tab, not only at the end. A window of sixty tabs takes a while, and
       // a dialog that says "Reloading…" with no movement reads as hung whether it is or not.
-      void report({ reloaded: 0, finished: false });
       let reloaded = 0;
       /** Set once the dialog has been told to stop waiting; later per-tab reports would put it
        *  back into "Reloading…". The final report still goes. */
-      let releasedDialog = false;
+      let releasedDialog = releasedEarly;
+      if (!releasedDialog) void report({ reloaded: 0, finished: false });
       for (const t of targets) {
         const run = workspacesStore.reloadTab(t.wsId, t.paneId, t.tabId).then(
           () => true,
@@ -516,7 +541,9 @@
           releasedDialog = true;
           void report({ reloaded, finished: true, stalled: t.name });
         }
+        if (first === 'stalled') accountReloadStalledOn = t.name;
         if (await run) reloaded++;
+        accountReloadStalledOn = null;
         if (!releasedDialog) void report({ reloaded, finished: false });
       }
       logInfo(`[accounts] reload ${payload.request_id.slice(0, 8)}: ${reloaded}/${total} tabs, reporting to ${payload.reply_to}`);
