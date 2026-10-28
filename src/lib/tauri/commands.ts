@@ -2304,6 +2304,23 @@ export async function beginAccountLogin(
   });
 }
 
+/** Sign an existing account back in, in its own root, keeping its id, remote token and hosts.
+ *  Rejects — after signing the root back out — when the browser answers as a different
+ *  account; Rust checks that against the account's recorded identity. Same `openWith` and the
+ *  same {@link ACCOUNT_LOGIN_URL_EVENT}, keyed by the account's own id. */
+export async function reauthAccountLogin(
+  runtime: string,
+  accountId: string,
+  opts?: { timeoutSecs?: number; openWith?: string },
+): Promise<AccountIdentity> {
+  return invoke('reauth_account_login', {
+    runtime,
+    accountId,
+    timeoutSecs: opts?.timeoutSecs ?? null,
+    openWith: opts?.openWith ?? null,
+  });
+}
+
 /** Emitted once per sign-in, as soon as the runtime prints its authorization URL.
  *
  *  Broadcasts to every window, so a listener MUST match `account_id` against the attempt it

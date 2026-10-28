@@ -1028,6 +1028,7 @@ pub fn run() {
             commands::accounts::read_account_identity,
             commands::accounts::account_spawn_env,
             commands::accounts::begin_account_login,
+            commands::accounts::reauth_account_login,
             commands::accounts::cancel_account_login,
             commands::accounts::mint_account_token,
             commands::accounts::forget_account_token,

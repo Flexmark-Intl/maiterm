@@ -111,7 +111,8 @@ hypothetical. Any status UI must show the *resolved* source, never a green "logg
 `loggedIn`, `authMethod`, `apiProvider`, `analyticsDisabled`, `projectsDirectory`,
 `configDirectory`, `apiKeySource`, `email`, `orgId`, `orgName`, `subscriptionType`.
 
-**No expiry field.** See §7 for why we derive expiry instead of parsing for it.
+**No expiry field**, and none in 2.1.312 either (re-checked 2026-10-28: same fields, no reason
+for a signed-out state). See §7 for why we derive expiry instead of parsing for it.
 
 ### 2.4 `claude setup-token`
 
@@ -969,6 +970,19 @@ behaves exactly like not-set-up.
 > the shared path also covers the §5.1 duplicate discard, which has a credential of its own
 > because it signed in. Best effort: a sign-out failure still removes the root, since leaving
 > that behind as well would be strictly worse.
+
+**Sign in again** (2026-10-28) recovers a signed-out account in place: `reauth_account_login`
+runs the same `auth login` into the account's EXISTING root, so its id — and with it the active
+pointer, the §6 token and its hosts — survives. Before this the only fix was Remove + add,
+which threw all of that away. The pane offers it only when Verify reads the root as not this
+account's own login and nothing is shadowing it. **Rust checks the identity that comes back
+against the account's recorded email + org, read from state, never from the caller**: the
+browser reuses its session (§5.1), and a different account left in the root would run every new
+tab under this one's name as someone else. A mismatch is signed straight back out (the root
+was already signed out, so that is the state it started in) and reported. No failure removes
+the root, unlike `begin_account_login`. It passes `auth login --email <recorded email>` (§5.3),
+which pre-fills the sign-in page — a hint only; a browser session for another account still
+answers, so the identity check stays the guard.
 
 > **Removing an account does not stop the sessions already running under it, and they bring the
 > root back.** A runtime process holds `CLAUDE_CONFIG_DIR` for its whole life. After

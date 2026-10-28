@@ -646,7 +646,7 @@ pub async fn begin_account_login(
     // for anyone whose `claude` lives somewhere resolve_cli does not look), a join error, and a
     // failed identity read AFTER a successful login, which strands a root holding a live
     // credential that no UI can reach.
-    let outcome = login_into_root(&app, rt, &account_id, timeout_secs, open_with).await;
+    let outcome = login_into_root(&app, rt, &account_id, timeout_secs, open_with, None).await;
     match outcome {
         Ok(identity) => Ok(NewAccount { account_id, identity }),
         Err(e) => {
@@ -656,6 +656,91 @@ pub async fn begin_account_login(
             Err(e)
         }
     }
+}
+
+/// Sign an EXISTING account back in, in its own root.
+///
+/// The alternative was Remove and add again, which threw away everything hung off the account
+/// id — its place as the active account, its remote token (§6) and the hosts that token goes to
+/// — to fix nothing but an expired login. Here the id, the root and all of that stay; only the
+/// credential inside the root is replaced, by the runtime's own `auth login` as at add time.
+///
+/// **The identity must come back as THIS account, and Rust checks it rather than the caller.**
+/// The browser reuses its session (§5.1), so the common wrong answer is a different account.
+/// Left in place, that credential would run every new tab under this account's name as someone
+/// else, billed to them — the §6.1 failure, silently. So a mismatch is signed straight back out,
+/// returning the root to the signed-out state it was in, and reported. The expected identity is
+/// read from state, never taken from the caller.
+///
+/// Unlike `begin_account_login`, no failure removes the root: it is a live account's root.
+#[tauri::command]
+pub async fn reauth_account_login(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+    runtime: String,
+    account_id: String,
+    timeout_secs: Option<u64>,
+    open_with: Option<String>,
+) -> Result<AccountIdentity, String> {
+    let rt = runtime_from_slug(&runtime)?;
+    if rt != Runtime::Claude {
+        return Err(format!("{} sign-in is not implemented yet", rt.profile().label));
+    }
+    let (email, org_id, label) = {
+        let prefs = &state.app_data.read().preferences;
+        let account = prefs
+            .managed_accounts
+            .iter()
+            .find(|a| a.id == account_id && a.runtime == runtime)
+            .ok_or_else(|| "that account no longer exists".to_string())?;
+        (account.email.clone(), account.org_id.clone(), account.label.clone())
+    };
+    let matches =
+        |i: &AccountIdentity| i.is_account_login && i.email == email && i.org_id == org_id;
+
+    // Already signed in as itself: nothing to do, and running a login anyway could only make it
+    // worse — a wrong account answering would then be signed out of a root that worked.
+    let current = read_account_identity(runtime.clone(), account_id.clone()).await?;
+    if matches(&current) {
+        return Ok(current);
+    }
+
+    // Repairs the farm first, as at add time, so the login writes into a root with hooks and MCP
+    // — and unlinks any write-through `.claude.json` before the runtime touches it.
+    let home = home_dir()?;
+    let id_for_reconcile = account_id.clone();
+    tauri::async_runtime::spawn_blocking(move || accounts::reconcile(rt, &id_for_reconcile, &home))
+        .await
+        .map_err(|e| format!("reconcile task failed: {e}"))??;
+
+    // `--email` pre-fills the sign-in page with the address this account must come back as —
+    // the one hint the CLI takes. It does not stop a browser session for another account
+    // answering, which is what the check below is for.
+    let identity =
+        login_into_root(&app, rt, &account_id, timeout_secs, open_with, email.as_deref()).await?;
+    if matches(&identity) {
+        return Ok(identity);
+    }
+
+    let got = identity
+        .email
+        .clone()
+        .or(identity.shadowed_by.clone())
+        .unwrap_or_else(|| "a different account".to_string());
+    let undone = sign_out_root(rt, &account_id).await;
+    Err(match undone {
+        Ok(()) => format!(
+            "That signed in as {got}, not {label}, so it was signed back out. Your browser is \
+             probably still signed in to {got}: try again with “Sign in privately”, or sign out \
+             of it in the browser first."
+        ),
+        // The one outcome worse than signed out: say it plainly, since new tabs under this
+        // account would now run as someone else.
+        Err(e) => format!(
+            "That signed in as {got}, not {label}, and signing it back out failed ({e}). New \
+             tabs under {label} would run as {got} — remove this account until it is fixed."
+        ),
+    })
 }
 
 /// A runtime subcommand that authenticates through a browser.
@@ -695,6 +780,7 @@ async fn run_browser_flow(
     timeout_secs: Option<u64>,
     open_with: Option<String>,
     flow: &'static BrowserFlow,
+    extra_args: Vec<String>,
 ) -> Result<String, String> {
     let profile = rt.profile();
     let account_id = account_id.to_string();
@@ -717,6 +803,7 @@ async fn run_browser_flow(
     let login = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let mut cmd = Command::new(&cli);
         cmd.args(flow.args);
+        cmd.args(&extra_args);
         cmd.env(&config_env, &root);
         for var in &scrub {
             cmd.env_remove(var);
@@ -992,8 +1079,10 @@ async fn login_into_root(
     account_id: &str,
     timeout_secs: Option<u64>,
     open_with: Option<String>,
+    email: Option<&str>,
 ) -> Result<AccountIdentity, String> {
-    run_browser_flow(app, rt, account_id, timeout_secs, open_with, &LOGIN_FLOW).await?;
+    let extra = email.map(|e| vec!["--email".to_string(), e.to_string()]).unwrap_or_default();
+    run_browser_flow(app, rt, account_id, timeout_secs, open_with, &LOGIN_FLOW, extra).await?;
     read_account_identity(rt.slug().to_string(), account_id.to_string()).await
 }
 
@@ -2150,7 +2239,6 @@ async fn run_ssh(ssh_args: &str, script: &str, stdin_data: Option<&str>) -> Resu
 #[tauri::command]
 pub async fn discard_account_root(runtime: String, account_id: String) -> Result<(), String> {
     let rt = runtime_from_slug(&runtime)?;
-    let profile = rt.profile();
 
     // Drop any remote token with the account, in the same shared path as the sign-out and for
     // the same reason: every caller of this promises the user the account is gone, and a vault
@@ -2166,49 +2254,61 @@ pub async fn discard_account_root(runtime: String, account_id: String) -> Result
         log::warn!("accounts: could not remove the vault entry for {account_id}: {e}");
     }
 
-    if let (Some(cli), Some(root)) = (
-        accounts::resolve_cli(profile),
-        accounts::account_root(rt, &account_id),
-    ) {
-        if root.exists() {
-            // Before running anything against this root: a root built by an earlier build has
-            // `.claude.json` as a symlink, and the runtime writes THROUGH it — observed live,
-            // sign-out stripped the identity block out of the user's own ~/.claude.json.
-            if let Err(e) = accounts::detach_write_through_links(rt, &account_id) {
-                log::warn!("accounts: detaching write-through links for {account_id}: {e}");
-            }
-            let config_env = profile.config_env.to_string();
-            let scrub: Vec<String> =
-                profile.shadowing_env.iter().map(|s| s.to_string()).collect();
-            let result = tauri::async_runtime::spawn_blocking(move || {
-                let mut cmd = Command::new(&cli);
-                cmd.args(["auth", "logout"]);
-                cmd.env(&config_env, &root);
-                // Same scrub as everywhere else: sign out THIS root's credential, not whatever
-                // a leftover variable would have answered with.
-                for var in &scrub {
-                    cmd.env_remove(var);
-                }
-                cmd.stdin(std::process::Stdio::null());
-                cmd.output()
-            })
-            .await;
-            match result {
-                Ok(Ok(out)) if !out.status.success() => log::warn!(
-                    "accounts: sign-out for {account_id} exited {}: {}",
-                    out.status.code().unwrap_or(-1),
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-                Err(e) => log::warn!("accounts: sign-out task for {account_id} failed: {e}"),
-                Ok(Err(e)) => log::warn!("accounts: sign-out for {account_id} failed: {e}"),
-                Ok(Ok(_)) => {}
-            }
-        }
-    }
+    // Best effort: a failure is logged, never returned — see the doc comment.
+    let _ = sign_out_root(rt, &account_id).await;
 
     tauri::async_runtime::spawn_blocking(move || accounts::remove_root(rt, &account_id))
         .await
         .map_err(|e| format!("discard task failed: {e}"))?
+}
+
+/// `auth logout` against one account root. Logs every failure and also returns it, so a caller
+/// that must know whether the root really is signed out — `reauth_account_login` putting back a
+/// wrong account — can say so, while `discard_account_root` ignores it.
+async fn sign_out_root(rt: Runtime, account_id: &str) -> Result<(), String> {
+    let profile = rt.profile();
+    let (Some(cli), Some(root)) = (
+        accounts::resolve_cli(profile),
+        accounts::account_root(rt, account_id),
+    ) else {
+        return Err(format!("could not find the `{}` command", profile.cli));
+    };
+    if !root.exists() {
+        return Ok(());
+    }
+    // Before running anything against this root: a root built by an earlier build has
+    // `.claude.json` as a symlink, and the runtime writes THROUGH it — observed live,
+    // sign-out stripped the identity block out of the user's own ~/.claude.json.
+    if let Err(e) = accounts::detach_write_through_links(rt, account_id) {
+        log::warn!("accounts: detaching write-through links for {account_id}: {e}");
+    }
+    let config_env = profile.config_env.to_string();
+    let scrub: Vec<String> = profile.shadowing_env.iter().map(|s| s.to_string()).collect();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut cmd = Command::new(&cli);
+        cmd.args(["auth", "logout"]);
+        cmd.env(&config_env, &root);
+        // Same scrub as everywhere else: sign out THIS root's credential, not whatever
+        // a leftover variable would have answered with.
+        for var in &scrub {
+            cmd.env_remove(var);
+        }
+        cmd.stdin(std::process::Stdio::null());
+        cmd.output()
+    })
+    .await;
+    let failure = match result {
+        Ok(Ok(out)) if !out.status.success() => format!(
+            "exited {}: {}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => format!("task failed: {e}"),
+        Ok(Err(e)) => e.to_string(),
+        Ok(Ok(_)) => return Ok(()),
+    };
+    log::warn!("accounts: sign-out for {account_id} {failure}");
+    Err(failure)
 }
 
 /// Browsers on this machine that can be told to open a private window, in preference order.

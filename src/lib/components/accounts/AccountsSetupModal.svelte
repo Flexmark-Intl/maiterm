@@ -7,7 +7,9 @@
    *  created. `add` runs every time after that, when all of that has already been read and
    *  agreed to; repeating it there is noise that hides the one thing that IS new each time —
    *  the browser is already signed in to the account you just added, so a second sign-in
-   *  silently returns the first one (§5.1).
+   *  silently returns the first one (§5.1). `reauth` signs an account that has been signed out
+   *  back in, in its own root, so its active status, remote token and hosts survive — the
+   *  browser session matters there in reverse: it has to be THIS account's.
    *
    *  Follows ServiceModal — same backdrop/panel/btn vocabulary, same explicit rAF focus
    *  (Svelte's `autofocus` is not focus; it no-ops when a keyboard opened the dialog). */
@@ -18,17 +20,23 @@
   import Button from '$lib/components/ui/Button.svelte';
   import * as commands from '$lib/tauri/commands';
   import type {
+    AccountIdentity,
     AccountRuntimeInfo,
     NewAccount,
     AccountLoginUrl,
     PrivateBrowserInfo,
   } from '$lib/tauri/commands';
+  import type { ManagedAccount } from '$lib/tauri/types';
 
   interface Props {
     runtimes: AccountRuntimeInfo[];
     /** `setup` the first time — full disclosure, and finishing turns the feature on. `add`
      *  afterwards: the disclosure has been read, so this is about the browser session. */
-    mode: 'setup' | 'add';
+    mode: 'setup' | 'add' | 'reauth';
+    /** `reauth` only: the account being signed back in. */
+    account?: ManagedAccount;
+    /** `reauth` only: called once Rust has confirmed the sign-in came back as `account`. */
+    onreauthed?: (account: ManagedAccount, identity: AccountIdentity) => Promise<void>;
     /** Labels of the accounts already held, for the §5.1 warning. Empty in `setup`. */
     existing?: string[];
     /** Called with the account the sign-in produced. The parent owns the duplicate check and
@@ -37,7 +45,7 @@
     oncancel: () => void;
   }
 
-  let { runtimes, mode, existing = [], oncomplete, oncancel }: Props = $props();
+  let { runtimes, mode, account, onreauthed, existing = [], oncomplete, oncancel }: Props = $props();
 
   let phase = $state<'explain' | 'signing-in' | 'saving'>('explain');
   let error = $state<string | null>(null);
@@ -45,7 +53,8 @@
 
   const supported = $derived(runtimes.filter(r => r.supported));
   const unsupported = $derived(runtimes.filter(r => !r.supported));
-  let runtime = $state('claude');
+  // svelte-ignore state_referenced_locally
+  let runtime = $state(account?.runtime ?? 'claude');
 
   $effect(() => {
     const id = requestAnimationFrame(() => panelEl?.focus());
@@ -53,6 +62,9 @@
   });
 
   const busy = $derived(phase !== 'explain');
+  const heading = $derived(
+    mode === 'reauth' ? 'Sign in again' : mode === 'setup' ? 'Set up managed accounts' : 'Add an account',
+  );
 
   /** The id of the sign-in in flight. Minted here rather than in Rust so Cancel has something
    *  to name while `beginAccountLogin` is still outstanding. */
@@ -157,15 +169,33 @@
     openedPrivately = false;
     onUrl = then;
     phase = 'signing-in';
+    const openWith =
+      then === 'private' ? (browser?.id ?? 'default') : then === 'copy' ? undefined : 'default';
+    if (mode === 'reauth' && account) {
+      // The account's own id: the root is the account's, and the URL event and Cancel are both
+      // keyed by it.
+      pendingId = account.id;
+      try {
+        const identity = await commands.reauthAccountLogin(account.runtime, account.id, { openWith });
+        await focusThisWindow();
+        phase = 'saving';
+        await onreauthed?.(account, identity);
+      } catch (e) {
+        await focusThisWindow();
+        error = e instanceof Error ? e.message : String(e);
+        phase = 'explain';
+      } finally {
+        pendingId = null;
+        onUrl = 'none';
+      }
+      return;
+    }
     const id = crypto.randomUUID();
     pendingId = id;
     try {
       // Rust opens the link, because only Rust can see the URL that works — the runtime prints
       // a different one, pointing at a hosted page that asks for a code to paste.
-      const account = await commands.beginAccountLogin(runtime, id, {
-        openWith:
-          then === 'private' ? (browser?.id ?? 'default') : then === 'copy' ? undefined : 'default',
-      });
+      const account = await commands.beginAccountLogin(runtime, id, { openWith });
       // The browser took focus to authorize and does not give it back — this window ends up
       // behind the main one, which reads as "preferences closed itself". Whatever the outcome,
       // the next thing to look at is in here: the new account, or the error explaining why
@@ -222,14 +252,17 @@
   onkeydown={handleKeydown}
   role="dialog"
   aria-modal="true"
-  aria-label={mode === 'setup' ? 'Set up managed accounts' : 'Add an account'}
+  aria-label={heading}
   tabindex="-1"
 >
   <div class="panel" bind:this={panelEl} tabindex="-1">
     <div class="header">
-      <div class="title">{mode === 'setup' ? 'Set up managed accounts' : 'Add an account'}</div>
+      <div class="title">{heading}</div>
       <div class="subtitle">
-        {#if mode === 'setup'}
+        {#if mode === 'reauth' && account}
+          {account.label} is signed out. Sign it back in here — it keeps its place, its SSH token
+          and its hosts.
+        {:else if mode === 'setup'}
           maiTerm holds your agent logins, switches between them per tab, and keeps track of
           when they expire.
         {:else}
@@ -239,7 +272,20 @@
     </div>
 
     <div class="body">
-      {#if mode === 'setup'}
+      {#if mode === 'reauth' && account}
+        <!-- The browser session matters in reverse here: reused, it is the thing that makes this
+             work in one click — or, signed in as someone else, the thing Rust refuses. -->
+        <section>
+          <p>
+            Your browser has to finish as <strong>{account.email ?? account.label}</strong>
+            {#if account.org_name}in {account.org_name}{/if}. If it is signed in to a different
+            account, maiTerm refuses the result and signs this one straight back out, so nothing
+            runs as the wrong account — use
+            {#if browser}<strong>Sign in privately</strong>{:else}<strong>Sign in and copy link</strong>
+              with a private window{/if} to choose the account yourself.
+          </p>
+        </section>
+      {:else if mode === 'setup'}
         <!-- The five disclosure sections live on the Accounts pane behind this dialog, not
              here. A modal is read once, under pressure to get past it, and is then unreachable;
              the pane shows the same text before setup AND afterwards, which is when the
@@ -286,7 +332,9 @@
 
       <section>
         <h4>Sign in</h4>
-        {#if supported.length > 1}
+        {#if mode === 'reauth'}
+          <!-- The runtime is the account's own; there is nothing to choose. -->
+        {:else if supported.length > 1}
           <label class="field">
             <span class="label">Runtime</span>
             <select bind:value={runtime} disabled={busy}>
@@ -298,7 +346,7 @@
         {:else if supported.length === 1}
           <p>Signing in to <strong>{supported[0].label}</strong>.</p>
         {/if}
-        {#if unsupported.length}
+        {#if unsupported.length && mode !== 'reauth'}
           <p class="hint">
             Not yet available: {unsupported.map(r => r.label).join(', ')}.
           </p>

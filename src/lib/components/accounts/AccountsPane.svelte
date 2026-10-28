@@ -48,6 +48,8 @@
   let announce = $state<{ title: string; subtitle: string; destination: string } | null>(null);
   /** Last identity read per account id, for the resolved-source row. */
   let identities = $state<Record<string, AccountIdentity>>({});
+  /** The account being signed back in, if any. */
+  let reauthing = $state<ManagedAccount | null>(null);
   /** The account whose remote-token dialog is open, if any (§6). */
   let minting = $state<ManagedAccount | null>(null);
   /** Whether the VAULT holds a token per account id — not whether state says so.
@@ -244,7 +246,7 @@
           ? `${account.label} is signed in, but as ` +
             `${identity.shadowed_by ?? 'something else'} rather than this account. ` +
             `Remove it and add it again.`
-          : `${account.label} is signed out. Remove it and add it again to sign back in.`;
+          : `${account.label} is signed out. Use “Sign in again” — it keeps its SSH token and hosts.`;
         return;
       }
       if (identity.email !== (account.email ?? null)) {
@@ -263,6 +265,30 @@
       error = e instanceof Error ? e.message : String(e);
     } finally {
       busy = false;
+    }
+  }
+
+  /** Whether a fresh sign-in into the account's own root would fix what Verify found.
+   *  Not when something else is shadowing it: that answers above the login whatever the login
+   *  is, so signing in again would change nothing the user can see. */
+  function canSignInAgain(identity: AccountIdentity | undefined): boolean {
+    return !!identity && !identity.is_account_login && !identity.shadowed_by;
+  }
+
+  /** Rust has already checked the identity is this account's; record it as verified. */
+  async function reauthed(account: ManagedAccount, identity: AccountIdentity) {
+    about(account);
+    identities = { ...identities, [account.id]: identity };
+    try {
+      await patchAccount(account.id, {
+        last_verified_at: Math.floor(Date.now() / 1000),
+        plan: identity.plan ?? account.plan,
+      });
+      notice =
+        `${account.label} is signed in again. New tabs use it; reload a running tab if its ` +
+        `agent still reports being signed out.`;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
     }
   }
 
@@ -744,6 +770,13 @@
                       </Button>
                     </Tooltip>
                   {/if}
+                  {#if canSignInAgain(identity)}
+                    <Tooltip text="Sign this account back in, keeping its SSH token and hosts">
+                      <Button variant="secondary" disabled={busy} onclick={() => (reauthing = account)}>
+                        Sign in again
+                      </Button>
+                    </Tooltip>
+                  {/if}
                   <Tooltip text="Check which identity this account currently resolves to">
                     <Button variant="ghost" disabled={busy} onclick={() => verify(account)}>Verify</Button>
                   </Tooltip>
@@ -988,6 +1021,22 @@
       minting = null;
     }}
     oncancel={() => (minting = null)}
+  />
+{/if}
+
+{#if reauthing}
+  <AccountsSetupModal
+    {runtimes}
+    mode="reauth"
+    account={reauthing}
+    onreauthed={async (acct, identity) => {
+      // `acct` comes from the dialog, not from `reauthing`, for the reason given at the mint
+      // dialog below; and it is recorded before closing, as there.
+      await reauthed(acct, identity);
+      reauthing = null;
+    }}
+    oncomplete={async () => {}}
+    oncancel={() => (reauthing = null)}
   />
 {/if}
 
