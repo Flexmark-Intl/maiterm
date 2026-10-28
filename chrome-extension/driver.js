@@ -619,7 +619,10 @@ async function navigate(tabId, args) {
   else if (target === 'forward') await chrome.tabs.goForward(tabId);
   else if (target === 'reload') await chrome.tabs.reload(tabId);
   else {
-    const url = /^[a-z][a-z0-9+.-]*:/i.test(target) ? target : `https://${target}`;
+    // A scheme, but not a port: `localhost:3000/x` is a host (tools.rs `has_scheme` agrees). With
+    // none, https, except a local dev server, which is http as in Chrome's address bar.
+    const local = /^(localhost|127(\.\d+){3}|\[::1\])([:/?#]|$)/i.test(target);
+    const url = /^[a-z][a-z0-9+.-]*:(?!\d)/i.test(target) ? target : `${local ? 'http' : 'https'}://${target}`;
     await chrome.tabs.update(tabId, { url });
   }
   return { loaded: await waitForLoad(tabId) };

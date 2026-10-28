@@ -101,6 +101,16 @@ fn navigate_needs_a_tab(mine: &[Link]) -> Option<String> {
     })
 }
 
+/// Does `url` start with a scheme? The same rule as driver.js `navigate`: letters, digits, `+.-`,
+/// then a colon, and not a port (`localhost:3000` is a host).
+fn has_scheme(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once(':') else { return false };
+    let mut c = scheme.chars();
+    c.next().is_some_and(|f| f.is_ascii_alphabetic())
+        && c.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '.' | '-'))
+        && !rest.starts_with(|ch: char| ch.is_ascii_digit())
+}
+
 /// Loading `url` in `target` when ANOTHER of the agent's tabs already has that site open, and
 /// `target` isn't on it: likely the wrong tab. Said after the fact (the page has loaded), with the
 /// way back.
@@ -109,8 +119,13 @@ fn same_site_warning(mine: &[Link], target: &Link, url: &str) -> Option<String> 
     if matches!(url, "back" | "forward" | "reload") {
         return None;
     }
-    // As the extension loads it: no scheme is https.
-    let site = if url.contains("://") { site_of(url) } else { site_of(&format!("https://{url}")) };
+    // As the extension loads it (driver.js `navigate`): no scheme is https, and a scheme without a
+    // host (about:, data:, javascript:) names no site.
+    let site = match has_scheme(url) {
+        true if url.contains("://") => site_of(url),
+        true => return None,
+        false => site_of(&format!("https://{url}")),
+    };
     if site_of(&target.url) == site {
         return None;
     }
@@ -280,5 +295,11 @@ mod tests {
         assert!(same_site_warning(&mine, &shop, "https://docs.example.com/").is_none());
         assert!(same_site_warning(&mine, &shop, "back").is_none());
         assert!(same_site_warning(&mine, &shop, "admin.example.com/settings").is_some(), "no scheme is https");
+        let blank = tab("b3", "about:blank", "");
+        let with_blank = [admin.clone(), shop.clone(), blank];
+        assert!(same_site_warning(&with_blank, &shop, "about:blank").is_none(), "about: names no site");
+        assert!(same_site_warning(&with_blank, &shop, "data:text/html,hi").is_none());
+        let local = tab("b4", "http://localhost:3000/", "");
+        assert!(same_site_warning(&[local, shop.clone()], &shop, "localhost:3000/x").is_some(), "a port is not a scheme");
     }
 }
