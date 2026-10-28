@@ -98,9 +98,13 @@ const TRANSCRIPT_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 // 256 KB read+parses to one stat. Transcripts are append-only, so (mtime, len) is a sound
 // change key; a miss re-reads and replaces the entry.
 
-/// Bytes scanned for the last-turn / meta facts. The newest usage line and the last real turn
-/// both sit near EOF (a resume appends only small scaffolding past them).
+/// Bytes first scanned for the last-turn / meta facts. The newest usage line and the last real
+/// turn usually sit near EOF, but not always: a resume can append hundreds of KB of attachment
+/// rows past them (seen: 251 KB on one session), and since 2.1.300 Claude Code also stores each
+/// request's system prompt and tools (up to 178 KB a row). So a tail that answers neither fact is
+/// read again at twice the size, up to [`FACTS_TAIL_MAX_BYTES`].
 const FACTS_TAIL_BYTES: u64 = 256 * 1024;
+const FACTS_TAIL_MAX_BYTES: u64 = TRANSCRIPT_TAIL_BYTES;
 
 #[derive(Clone, Default)]
 struct TailFacts {
@@ -142,9 +146,15 @@ fn tail_facts(path: &PathBuf, parse: fn(&str) -> TailFacts) -> TailFacts {
             }
         }
     }
-    let facts = read_tail(path, FACTS_TAIL_BYTES)
-        .map(|tail| parse(&tail))
-        .unwrap_or_default();
+    let mut window = FACTS_TAIL_BYTES;
+    let facts = loop {
+        let facts = read_tail(path, window).map(|tail| parse(&tail)).unwrap_or_default();
+        let answered = facts.meta.is_some() && facts.last_turn_ts.is_some();
+        if answered || window >= len || window >= FACTS_TAIL_MAX_BYTES {
+            break facts;
+        }
+        window = (window * 2).min(FACTS_TAIL_MAX_BYTES);
+    };
     if let Ok(mut c) = cache.lock() {
         c.insert(path.clone(), (mtime_ms, len, facts.clone()));
     }
@@ -1340,9 +1350,8 @@ pub fn claude_session_version(session_id: &str) -> Option<String> {
 /// transcript can't be found/read or no real turn falls within the scanned tail.
 fn session_last_turn_ts(session_id: &str) -> Option<u64> {
     let path = locate_jsonl(session_id)?;
-    // The last real turn sits just before whatever small scaffolding a resume appends at EOF, so
-    // FACTS_TAIL_BYTES clears the largest realistic resume dump (hook context + deferred-tool
-    // list) easily. Served from the (mtime, len)-gated tail-facts cache.
+    // The last real turn sits before whatever scaffolding a resume appends at EOF; `tail_facts`
+    // widens its read until it finds it. Served from the (mtime, len)-gated tail-facts cache.
     tail_facts(&path, claude_tail_facts).last_turn_ts
 }
 
@@ -2755,6 +2764,43 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         let gone = tail_facts(&path, claude_tail_facts);
         assert!(gone.last_turn_ts.is_none() && gone.meta.is_none());
+    }
+
+    #[test]
+    fn the_last_turn_is_found_behind_more_than_the_first_window_of_scaffolding() {
+        // Seen on real sessions: a resume appended 251 KB of attachment rows after the last
+        // reply, and Claude Code 2.1.300+ stores each request's system prompt and tools (rows up
+        // to 178 KB). The first 256 KB then holds no reply, and the chat list lost the model,
+        // the context gauge and the last-turn time.
+        let dir = std::env::temp_dir().join("aiterm-tail-facts-test");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join("facts-behind-scaffolding.jsonl");
+        let mut body = format!(
+            "{}\n",
+            json!({
+                "type": "assistant",
+                "timestamp": "2026-10-28T10:00:00.000Z",
+                "message": {
+                    "model": "claude-sonnet-5-5",
+                    "content": [{ "type": "text", "text": "done" }],
+                    "usage": { "input_tokens": 1000, "cache_read_input_tokens": 500 }
+                }
+            })
+        );
+        let pad = "x".repeat(100 * 1024);
+        for _ in 0..3 {
+            body.push_str(&format!("{}\n", json!({ "type": "api-request-shape", "shape": { "system": pad } })));
+            body.push_str(&format!("{}\n", json!({ "type": "attachment", "attachment": { "type": "deferred_tools_delta", "text": pad } })));
+        }
+        assert!(body.len() as u64 > 2 * FACTS_TAIL_BYTES);
+        std::fs::write(&path, body).expect("write");
+
+        let facts = tail_facts(&path, claude_tail_facts);
+        assert_eq!(facts.last_turn_ts, Some(1793181600000));
+        let meta = facts.meta.expect("meta found behind the scaffolding");
+        assert_eq!(meta.model_id.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(meta.context_tokens, 1500);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
