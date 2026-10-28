@@ -105,10 +105,12 @@ fn navigate_needs_a_tab(mine: &[Link]) -> Option<String> {
 /// `target` isn't on it: likely the wrong tab. Said after the fact (the page has loaded), with the
 /// way back.
 fn same_site_warning(mine: &[Link], target: &Link, url: &str) -> Option<String> {
-    if !url.contains("://") {
-        return None; // back, forward, reload
+    let url = url.trim();
+    if matches!(url, "back" | "forward" | "reload") {
+        return None;
     }
-    let site = site_of(url);
+    // As the extension loads it: no scheme is https.
+    let site = if url.contains("://") { site_of(url) } else { site_of(&format!("https://{url}")) };
     if site_of(&target.url) == site {
         return None;
     }
@@ -277,5 +279,6 @@ mod tests {
         assert!(same_site_warning(&mine, &admin, "https://admin.example.com/settings").is_none());
         assert!(same_site_warning(&mine, &shop, "https://docs.example.com/").is_none());
         assert!(same_site_warning(&mine, &shop, "back").is_none());
+        assert!(same_site_warning(&mine, &shop, "admin.example.com/settings").is_some(), "no scheme is https");
     }
 }

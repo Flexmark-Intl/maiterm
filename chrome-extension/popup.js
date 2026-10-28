@@ -11,6 +11,23 @@ let chromeTab;
 let groups = [];
 /** Just linked: the purpose box takes the keyboard, since writing one is the next step. */
 let justLinked = false;
+/** The purpose box on screen: its input, what was last sent, and its pending save. Dropped (the
+ *  pending save cancelled) whenever the popup redraws, so a note typed for one link can't land
+ *  on the tab after it is unlinked or linked elsewhere. */
+let purposeBox = null;
+
+function dropPurposeBox() {
+  if (purposeBox) clearTimeout(purposeBox.timer);
+  purposeBox = null;
+}
+
+// The popup closes the moment it loses focus: whatever wasn't sent yet goes now.
+addEventListener('pagehide', () => {
+  const b = purposeBox;
+  if (!b) return;
+  clearTimeout(b.timer);
+  if (b.input.value.trim() !== b.sent.trim()) ask({ type: 'setPurpose', chromeTabId: b.chromeTabId, purpose: b.input.value });
+});
 
 function el(tag, attrs = {}, ...children) {
   const n = document.createElement(tag);
@@ -41,6 +58,7 @@ function instanceLine(i) {
 }
 
 async function render() {
+  dropPurposeBox();
   showError('');
   [chromeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const state = await ask({ type: 'state' });
@@ -106,30 +124,34 @@ function purposeField(link) {
     spellcheck: 'false',
   });
   input.value = link.purpose ?? '';
-  let saved = input.value;
+  const box = { input, sent: input.value, timer: undefined, chromeTabId: chromeTab.id };
+  purposeBox = box;
   const save = async () => {
-    if (input.value.trim() === saved.trim()) return;
-    const r = await ask({ type: 'setPurpose', chromeTabId: chromeTab.id, purpose: input.value });
-    if (r?.error) return showError(r.error);
-    saved = input.value;
-    status.textContent = input.value.trim() ? 'Saved: the agent is told' : 'Cleared';
+    if (purposeBox !== box) return;
+    // What is sent now, not what the box holds when the answer comes back: they may type on.
+    const sending = input.value;
+    if (sending.trim() === box.sent.trim()) return;
+    const before = box.sent;
+    box.sent = sending;
+    const r = await ask({ type: 'setPurpose', chromeTabId: box.chromeTabId, purpose: sending });
+    if (purposeBox !== box) return;
+    if (r?.error) {
+      if (box.sent === sending) box.sent = before;
+      return showError(r.error);
+    }
+    status.textContent = sending.trim() ? 'Saved: the agent is told' : 'Cleared';
   };
   // Saved as they type: the popup closes the moment it loses focus, before a change event.
-  let timer;
   input.addEventListener('input', () => {
-    clearTimeout(timer);
-    timer = setTimeout(save, 500);
+    clearTimeout(box.timer);
+    box.timer = setTimeout(save, 500);
   });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      clearTimeout(timer);
+      clearTimeout(box.timer);
       save();
     }
-  });
-  addEventListener('pagehide', () => {
-    clearTimeout(timer);
-    if (input.value.trim() !== saved.trim()) ask({ type: 'setPurpose', chromeTabId: chromeTab.id, purpose: input.value });
   });
   return el(
     'label',
@@ -211,6 +233,7 @@ async function doLink(host, maitermTab) {
 }
 
 async function unlink() {
+  dropPurposeBox();
   const r = await ask({ type: 'unlink', chromeTabId: chromeTab.id });
   if (r?.error) return showError(r.error);
   await render();
