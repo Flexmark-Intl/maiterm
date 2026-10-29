@@ -48,6 +48,11 @@
     highlighted = 0;
   });
 
+  // A row closed or archived from inside the menu can shrink the list under the highlight.
+  $effect(() => {
+    if (highlighted >= ordered.length) highlighted = Math.max(0, ordered.length - 1);
+  });
+
   function moveHighlight(delta: number) {
     if (ordered.length === 0) return;
     highlighted = (highlighted + delta + ordered.length) % ordered.length;
