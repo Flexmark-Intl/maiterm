@@ -30,3 +30,11 @@ export function frameEscape(text: string): string {
     })
     .join('\n');
 }
+
+/** `frameEscape`d onto one line, at most `max` characters: a path or a name inside a sentence
+ *  (Rust's `deliver::one_line`). */
+export function oneLine(text: string, max: number): string {
+  const flat = frameEscape(text).replace(/[\n\t]/g, ' ').trim();
+  const chars = [...flat];
+  return chars.length <= max ? flat : `${chars.slice(0, Math.max(0, max - 1)).join('')}…`;
+}
