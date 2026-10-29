@@ -24,7 +24,7 @@ export function provenance(f: Pick<HiveMemoryFile, 'by' | 'by_kind'>): Provenanc
     case 'human':
       return { text: 'You', tone: 'human', tip: 'You wrote this in the Memory view' };
     case 'coordinator':
-      return { text: 'Coordinator', tone: 'coordinator', tip: "Written by the coordinator's Write or Edit, as its hook reported it" };
+      return { text: 'Queen', tone: 'coordinator', tip: "Written by the queen's Write or Edit, as its hook reported it" };
     case 'worker':
       return { text: f.by || 'A worker', tone: 'worker', tip: `Written by worker ${f.by}'s Write or Edit, as its hook reported it` };
     case 'maiterm':

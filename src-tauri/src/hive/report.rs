@@ -448,7 +448,7 @@ pub(crate) async fn report<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, arg
     })
     .await?;
     // A land waiting on the human was of the commits reported before this.
-    super::land::approval::withdraw(&ctx.window, caller, &w, "the worker reported again, so its coordinator lands its new commits instead");
+    super::land::approval::withdraw(&ctx.window, caller, &w, "the worker reported again, so its queen lands its new commits instead");
     ctx.window.workers_changed(&caller.workspace_id);
     // A report is read beside the work it reports: measure it now rather than at the next Stop.
     ctx.window.diff_stat_touch(caller, &w.task_id);

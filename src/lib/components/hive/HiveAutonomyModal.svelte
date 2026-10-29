@@ -77,8 +77,8 @@
     <div class="header">
       <div class="title">Autonomy</div>
       <div class="subtitle">
-        The coordinator decides everything it can; you're asked where a checkpoint says Ask me. Every decision is logged, and the
-        coordinator is told when you change these.
+        The queen decides everything it can; you're asked where a checkpoint says Ask me. Every decision is logged, and the
+        queen is told when you change these.
       </div>
     </div>
 
@@ -121,7 +121,7 @@
 
       <div class="line">
         <label class="field">
-          <span class="label">Prompt timeout <span class="opt">minutes, {TIMEOUT_MIN_MINUTES}–{TIMEOUT_MAX_MINUTES}: a prompt the coordinator hasn't answered by then is yours too, and you're told once</span></span>
+          <span class="label">Prompt timeout <span class="opt">minutes, {TIMEOUT_MIN_MINUTES}–{TIMEOUT_MAX_MINUTES}: a prompt the queen hasn't answered by then is yours too, and you're told once</span></span>
           <input class="text-input num" type="number" min={TIMEOUT_MIN_MINUTES} max={TIMEOUT_MAX_MINUTES} step="1" bind:value={minutes} />
         </label>
         <label class="check">

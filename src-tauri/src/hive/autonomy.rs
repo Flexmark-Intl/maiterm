@@ -173,8 +173,8 @@ pub fn offer_blocker(o: &Offer, asked_at: &str) -> TaskBlocker {
     let (question, context, yes, no) = if o.kind == HAND_OVER {
         (
             format!("You\u{2019}ve agreed with the queen\u{2019}s last {} calls on {label}. Let it handle {label} from now on?", o.count),
-            "maiTerm counted this from the decision log: each time, you chose what the coordinator recommended. Yes sets this \
-             checkpoint to Coordinator; every decision it makes stays in Memory \u{2192} Decisions, and Autonomy in the Hive \
+            "maiTerm counted this from the decision log: each time, you chose what the queen recommended. Yes sets this \
+             checkpoint to Queen; every decision it makes stays in Memory \u{2192} Decisions, and Autonomy in the Hive \
              header sets it back.",
             YES_HAND_OVER,
             NO_HAND_OVER,

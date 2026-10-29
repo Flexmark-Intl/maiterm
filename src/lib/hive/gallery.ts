@@ -88,7 +88,7 @@ export function fmtBytes(n: number): string {
 /** Who filed it, as the view says it: `#3 Hero`, `Coordinator`, `You`. */
 export function madeByLabel(m: GalleryMadeBy): string {
   if (m.kind === 'worker') return `#${m.badge} ${m.worker_title}`;
-  if (m.kind === 'coordinator') return 'Coordinator';
+  if (m.kind === 'coordinator') return 'Queen';
   if (m.kind === 'human') return 'You';
   return m.kind || 'Unknown';
 }

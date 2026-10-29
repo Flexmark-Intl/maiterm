@@ -459,7 +459,7 @@
 
         {#if current.key === 'goal'}
           <p class="lede">
-            A coordinator agent works toward the goal, starting worker agents on the Hive's folders and
+            A queen agent works toward the goal, starting worker agents on the Hive's folders and
             landing what they finish. It reads code in its own copies, never in your checkouts.
           </p>
           {#if preflight?.login_warning}
@@ -668,7 +668,7 @@
         {:else}
           <div class="review">
             <p>
-              A coordinator on <b>Claude {coordModel}</b> ({coordEffort} effort) works toward
+              A queen on <b>Claude {coordModel}</b> ({coordEffort} effort) works toward
               “{goal.trim()}”. It starts up to <b>{cap}</b> workers on <b>Claude {workerModel}</b> ({workerEffort} effort)
               in <b>{folderList.join(', ')}</b>, and lands each finished worker
               {landing === 'base' ? "straight into its repo's Base" : `into hive/${slug}, each land approved by you`}{pushes ? ', then pushes it' : ''}.

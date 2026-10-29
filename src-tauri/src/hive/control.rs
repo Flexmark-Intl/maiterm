@@ -116,7 +116,7 @@ pub(crate) async fn stop_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
             // A held land resumed meanwhile is running again.
             ok = w.phase != worker::PHASE_LANDING || super::land::held(w);
             if ok {
-                super::land::approval::hold_if_partial(w, "its coordinator stopped the worker");
+                super::land::approval::hold_if_partial(w, "its queen stopped the worker");
                 w.phase = worker::PHASE_STOPPED.to_string();
                 w.wait_reason = None;
             }
@@ -156,7 +156,7 @@ pub(crate) async fn stop_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     }
     // Its queued runs go, and running ones are interrupted: a stopped worker holds no resource.
     let released = super::queue::release_worker(&w.task_id, "your coordinator stopped you");
-    super::land::approval::withdraw(&ctx.window, caller, &w, "its coordinator stopped the worker, so nothing would land");
+    super::land::approval::withdraw(&ctx.window, caller, &w, "its queen stopped the worker, so nothing would land");
     // A stop is never held back by the board: its note is best effort.
     let note = format!("Stopped by the queen: {reason}");
     if let Err(e) = task_note(ctx, caller, &w.task_id, &note, None).await {

@@ -95,7 +95,7 @@
       <div class="title">Workers and access</div>
       <div class="subtitle">
         Each agent picks a change up at its next launch: a running worker keeps its model and network until it is relaunched. The
-        coordinator is told what you changed.
+        queen is told what you changed.
       </div>
     </div>
 
