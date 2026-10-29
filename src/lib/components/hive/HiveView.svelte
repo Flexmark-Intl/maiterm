@@ -75,6 +75,8 @@
   import { cardTask, needsYouCount, needsYouQueue, type HiveAsker } from '$lib/hive/needsYou';
   import { followUpsStore } from '$lib/stores/followUps.svelte';
   import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
+  import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
+  import { navigateToTab } from '$lib/stores/workspaces.svelte';
   import GalleryView from './gallery/GalleryView.svelte';
   import { hiveGallery } from '$lib/stores/hiveGallery.svelte';
   import { HIVE_OPEN_ASSET, type HiveOpenAssetDetail } from '$lib/hive/gallery';
@@ -103,6 +105,10 @@
   const tabs = $derived(ws?.panes.flatMap((p) => p.tabs) ?? []);
   const coordinator = $derived(tabs.find((t) => t.hive_role === 'coordinator') ?? null);
   const coordId = $derived(coordinator?.id ?? null);
+  // The queen's bridge partner, an agent outside the Hive (docs/hive.md §5.1). Its tab isn't in
+  // this view, so the header is where the human sees the bridge, opens that tab, or closes it.
+  const partnerId = $derived(coordId && agentBridgeStore.isBridgedToLivePartner(coordId) ? agentBridgeStore.getPartnerTabId(coordId) : null);
+  const partnerLabel = $derived(coordId && partnerId ? (agentBridgeStore.getPartnerLabel(coordId) ?? 'another agent') : '');
   const source = $derived(coordId ? { kind: 'tab' as const, tabId: coordId } : null);
   const tasks = $derived(tasksStore.forWorkspace(workspaceId));
   /** Hive settings → Run queue (docs/hive.md §6.8), from the header. */
@@ -796,6 +802,18 @@
             </button>
           </Tooltip>
         {/if}
+        {#if partnerId && coordId}
+          <span class="bridge-chip">
+            <Tooltip text="The queen is bridged to {partnerLabel}, an agent outside this Hive: they agree the interface between their two sides. Open its tab">
+              <button type="button" class="bridge-open" onclick={() => void navigateToTab(partnerId)}>
+                <span aria-hidden="true">⇄</span>{partnerLabel}
+              </button>
+            </Tooltip>
+            <IconButton tooltip="Close the queen's bridge to {partnerLabel}" onclick={() => agentBridgeStore.disconnect(coordId)}>
+              <Icon name="close" size={10} />
+            </IconButton>
+          </span>
+        {/if}
         {#if hive}
           {#if hive.status === 'done'}
             <span class="status done"><Icon name="check" size={11} />{doneLabel(hive.done_at)}</span>
@@ -1251,6 +1269,11 @@
   .needs-pill { display: inline-flex; align-items: center; gap: 6px; background: color-mix(in srgb, var(--orange, #ff9e64) 14%, transparent); border: 1px solid color-mix(in srgb, var(--orange, #ff9e64) 45%, transparent); color: var(--orange, #ff9e64); border-radius: 999px; padding: 2px 10px; font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap; }
   .needs-pill:hover, .needs-pill.on { background: color-mix(in srgb, var(--orange, #ff9e64) 24%, transparent); }
   .needs-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .bridge-chip { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--bg-light); border-radius: 999px; padding-left: 2px; min-width: 0; max-width: 260px; }
+  .bridge-open { display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; color: var(--fg); font: inherit; font-size: 11.5px; padding: 2px 4px 2px 8px; cursor: pointer; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bridge-open span { color: var(--accent); }
+  .bridge-open:hover { color: var(--accent); }
+  .bridge-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 999px; }
   .needs-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .view-btn.active { color: var(--fg); font-weight: 500; border-bottom-color: var(--accent); }
   .view-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 2px; }

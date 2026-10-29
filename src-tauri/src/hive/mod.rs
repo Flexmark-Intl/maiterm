@@ -376,6 +376,18 @@ pub fn is_hive_role_tab(data: &AppData, tab_id: &str) -> bool {
         .any(|ws| live_tab(ws, tab_id).is_some_and(|t| t.hive_role.is_some()))
 }
 
+fn hive_role_of<'a>(data: &'a AppData, tab_id: &str) -> Option<&'a str> {
+    data.windows.iter().flat_map(|w| w.workspaces.iter()).find_map(|ws| live_tab(ws, tab_id)).and_then(|t| t.hive_role.as_deref())
+}
+
+/// One end a Hive's coordinator, the other a live tab with no Hive role.
+fn bridge_ends_are_a_coordinator_and_an_outsider(data: &AppData, a: Option<&str>, b: Option<&str>) -> bool {
+    let (Some(a), Some(b)) = (a, b) else { return false };
+    let outsider = |id: &str| data.windows.iter().flat_map(|w| w.workspaces.iter()).any(|ws| live_tab(ws, id).is_some_and(|t| t.hive_role.is_none()));
+    let coordinator = |id: &str| hive_role_of(data, id) == Some(ROLE_COORDINATOR);
+    (coordinator(a) && outsider(b)) || (coordinator(b) && outsider(a))
+}
+
 fn is_hive_workspace(data: &AppData, workspace_id: &str) -> bool {
     data.windows.iter().flat_map(|w| w.workspaces.iter()).any(|ws| ws.id == workspace_id && ws.hive.is_some())
 }
@@ -415,8 +427,14 @@ pub fn refuse_request(data: &AppData, kind: &str, args: &serde_json::Value) -> R
         "tab_move" if hive_ws("to_workspace_id") => "A tab can't be moved into a Hive",
         "workspace_move" if hive_ws("workspace_id") => "A Hive can't move to another window",
         "tab_create" if hive_ws("workspace_id") => "A Hive's agents are started by the Hive, not as new tabs",
+        // The one bridge a Hive allows: its coordinator with one running agent outside every Hive
+        // (§5.1), the other half of a two-sided build. Never a worker, and never a fork, which
+        // would start a tab beside a Hive agent.
+        "bridge_connect" if bridge_ends_are_a_coordinator_and_an_outsider(data, s("caller_tab_id"), s("target_tab_id")) => {
+            return Ok(());
+        }
         "bridge_connect" | "bridge_fork" if hive_tab("caller_tab_id") || hive_tab("target_tab_id") => {
-            "A Hive's agent is never bridged: it talks to its coordinator"
+            "A Hive's workers are never bridged: they talk to their coordinator, which may be bridged to one agent outside any Hive"
         }
         _ => return Ok(()),
     };
@@ -751,7 +769,14 @@ mod tests {
         assert!(refused("workspace_move", j!({ "workspace_id": "hive-ws" })));
         assert!(refused("tab_create", j!({ "workspace_id": "hive-ws" })));
         assert!(!refused("tab_create", j!({ "workspace_id": "plain-ws" })));
-        assert!(refused("bridge_connect", j!({ "caller_tab_id": "t1", "target_tab_id": "coord" })));
+        // The coordinator connects to an agent outside any Hive, either end asking; nothing else.
+        assert!(!refused("bridge_connect", j!({ "caller_tab_id": "t1", "target_tab_id": "coord" })));
+        assert!(!refused("bridge_connect", j!({ "caller_tab_id": "coord", "target_tab_id": "t1" })));
+        assert!(refused("bridge_fork", j!({ "caller_tab_id": "coord", "target_tab_id": "t1" })), "never a fork");
+        assert!(refused("bridge_fork", j!({ "caller_tab_id": "t1", "target_tab_id": "coord" })));
+        assert!(refused("bridge_connect", j!({ "caller_tab_id": "coord", "target_tab_id": "w1" })), "its own worker");
+        assert!(refused("bridge_connect", j!({ "caller_tab_id": "w1", "target_tab_id": "t1" })), "a worker");
+        assert!(refused("bridge_connect", j!({ "caller_tab_id": "coord", "target_tab_id": "gone" })), "no live tab is no outsider");
         assert!(refused("bridge_fork", j!({ "caller_tab_id": "w1", "target_tab_id": "t1" })));
         assert!(!refused("bridge_connect", j!({ "caller_tab_id": "t1", "target_tab_id": "plain-in-hive" })));
         assert!(!refused("bridge_disconnect", j!({ "caller_tab_id": "coord", "partner_tab_id": "t1" })), "closing a bridge is always allowed");

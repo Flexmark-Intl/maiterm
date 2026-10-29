@@ -346,7 +346,14 @@ async function bridgeWith(a: { tabId?: string; with_tab_id?: string; fork?: bool
   const them = locateTab(a.with_tab_id);
   if (!them) return { error: 'That tab is not in your window. A bridge joins two tabs in one window (getMeshLayout / listWorkspaces show where each is).' };
   if (them.tab.id === me.tab.id) return { error: 'You cannot bridge with yourself.' };
-  if (me.tab.hive_role || them.tab.hive_role) return { error: "A Hive's agent is never bridged: it talks to its coordinator." };
+  // The one bridge a Hive allows (docs/hive.md §5.1): its coordinator with one agent outside every
+  // Hive, never a fork. Rust refuses the rest too (hive/mod.rs `refuse_request`).
+  const hiveEnds = [me.tab.hive_role, them.tab.hive_role];
+  if (hiveEnds.some(Boolean)) {
+    const queenAndOutsider = hiveEnds.includes('coordinator') && hiveEnds.some((r) => !r);
+    if (!queenAndOutsider) return { error: "A Hive's workers are never bridged: they talk to their coordinator, which may be bridged to one agent outside any Hive." };
+    if (a.fork === true) return { error: "A Hive's coordinator is bridged with an agent as it is, never with a fork." };
+  }
   if ((them.tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(them.tab)) return { error: `“${them.tab.name}” is not an agent tab.` };
   if (!claudeStateStore.getState(them.tab.id)) return { error: `“${them.tab.name}” has no running agent session right now.` };
   const fork = a.fork === true;

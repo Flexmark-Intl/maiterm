@@ -1060,7 +1060,7 @@ fn mesh_layout(state: &Arc<AppState>) -> Value {
         "Agents in a mesh workspace (and in workspaces linked with it) can message each other. Changing that needs the human's approval: setMesh, linkMeshes, unlinkMesh, and a moveTab that changes a tab's mesh file a request instead of acting.",
     );
     if app_data.windows.iter().flat_map(|w| w.workspaces.iter()).any(|ws| ws.hive.is_some()) {
-        note.push_str(" A workspace marked hive is a Hive: its agents (hive_member) talk only to their coordinator, and are never meshed, bridged or moved.");
+        note.push_str(" A workspace marked hive is a Hive: its agents (hive_member) talk only to their coordinator, and are never meshed, bridged or moved. The one exception: its coordinator may be bridged (bridgeWith, never a fork) to one running agent outside any Hive.");
     }
     serde_json::json!({ "windows": windows, "note": note })
 }

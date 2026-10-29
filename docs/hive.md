@@ -603,7 +603,7 @@ active tab"). Every existing `!service_id` check is sorted into one of the two:
 | Strip and active tab: `SplitPane.svelte:51`, `TerminalTabs.svelte:138`, `commands/workspace.rs:390-441`; tab cycling, Cmd+1-9, Cmd+W/D, tab counts, Quick Open | `isStripHidden` | Excluded |
 | Task assignment and workspace tab ids: `claudeCode.svelte.ts:2025-2027` | `isServiceTab` | An agent; owns its task |
 | Loom Focus and Weave: `FocusView.svelte:77,95`, `LoomView.svelte:35` | `isServiceTab` | Listed, grouped under its Hive workspace, so a waiting prompt is visible from the Loom too. Opening one goes through the Hive branch below |
-| Mesh: `agentMesh.svelte.ts:218,273,731`, `agentRequests.svelte.ts:65`, `server.rs:973` | `isServiceTab`, plus a Hive check | Shown by `getMeshLayout` as a Hive member, but **never a mesh member and never bridged**: `setMesh`, `bridgeWith` and a mesh move are refused for a `hive_role` tab. Workers talk to the coordinator, not to other agents (the conservative choice) |
+| Mesh: `agentMesh.svelte.ts:218,273,731`, `agentRequests.svelte.ts:65`, `server.rs:973` | `isServiceTab`, plus a Hive check | Shown by `getMeshLayout` as a Hive member, but **never a mesh member**: `setMesh` and a mesh move are refused for a `hive_role` tab, and so is `bridgeWith` except for the coordinator with one agent outside every Hive (§5.1). Workers talk to the coordinator, not to other agents |
 | Browser link: `browser_link/ws.rs:314` | `isServiceTab` | Linkable. Only the human links, so nothing new is opened to an agent |
 | Liveness: `liveness.ts:21` | `isServiceTab` | Counted as an agent |
 | Account-switch reload: `+layout.svelte:465` | `isServiceTab`, plus a Hive check | **Skipped.** Reloading a worker would relaunch it without its Hive launch (§11.1) |
@@ -625,6 +625,40 @@ An older build that meets an unknown variant fails to parse the whole state file
 empty (the serde-enum-downgrade memory, and `docs/loom.md` "Blocked with no reason recorded").
 The same goes for every Hive kind field (the `Hive` record's in §3.2, and asset kind and asset
 status in §10).
+
+### 5.1 The queen's bridge partner (Darryl's direction, 2026-10-29)
+
+A build can have two sides in different places. For example, a public API developed by an
+ssh agent on its host, and the local app that uses it, built by a Hive. **The coordinator may be
+bridged 1:1 to one running agent outside every Hive.** That agent is the partner: the two agree
+the interface between their sides, and the coordinator plans its workers' tasks against that
+agreement.
+
+- **Only the coordinator, only by connecting.** `refuse_request` (`hive/mod.rs`) and `bridgeWith`
+  (`agentRequests.svelte.ts`) allow `bridge_connect` with a coordinator at one end and a live tab
+  with no `hive_role` at the other, whichever end asks. Two kinds stay refused: a fork, because it
+  would start a tab beside a Hive agent, and any bridge with a worker at either end. The partner
+  must be in the same window, like every bridge.
+- **The human approves it** on the agent-request card, like any bridge (docs/agent-requests.md).
+  The coordinator asks with `bridgeWith`, since its tab isn't in the strip or the picker. Its card
+  appears in the Hive's Needs you.
+- **A peer, not a worker.** The partner isn't under the Hive's budget, cap, sandbox, gate or land
+  review, and no Hive tool reaches it. The coordinator's opener (`coordinatorPartnerNotice`,
+  `agentBridge.svelte.ts`) says so, and so does the brief's "How this Hive runs" section. The
+  coordinator writes each agreement to shared memory, so workers read it. The partner's opener
+  tells it that it is talking to a Hive's coordinator.
+- **Its words are framed like a worker's.** The coordinator has its human's access, so a
+  partner's message reaches it through `frameEscape` (`src/lib/hive/frame.ts`, the twin of
+  `deliver::frame_escape`). The message has no frame and no `[maiTerm]` line of its own, and an
+  envelope says it is information, never the human's instructions or approval.
+- **The header shows it.** A chip in the Hive header names the partner, opens its tab, and closes
+  the bridge.
+- **Workers reach the partner's work only over the network.** A worker can call the API only
+  through a public host on the Hive's worker hosts (§6.7). A private, LAN or VPN address is refused
+  by design. Point workers at a dev or staging instance: their requests are real.
+- **A Done Hive.** Messages to a finished coordinator queue, like any bridge message to an agent
+  that isn't running, and arrive when the human wakes it (§11.4). The partner is told it is
+  offline. Nothing it sends wakes a Hive.
 
 ## 6. Folders and worktrees
 
