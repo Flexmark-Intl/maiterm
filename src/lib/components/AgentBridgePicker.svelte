@@ -50,11 +50,18 @@
   const candidates = $derived.by((): Candidate[] => {
     void agentBridgeStore.version; // re-evaluate when bridges change
     const out: Candidate[] = [];
+    const callerRole = workspacesStore.workspaces.flatMap((w) => w.panes.flatMap((p) => p.tabs)).find((t) => t.id === callerTabId)?.hive_role;
     for (const ws of workspacesStore.workspaces) {
       for (const pane of ws.panes) {
         for (const tab of pane.tabs) {
           if (tab.tab_type !== 'terminal') continue;
           if (tab.id === callerTabId) continue;
+          // The one bridge a Hive allows (docs/hive.md §5.1): its coordinator connected, never
+          // forked, with an agent outside every Hive. A worker is never offered or offered to.
+          if (tab.hive_role || callerRole) {
+            const ends = [tab.hive_role, callerRole];
+            if (mode === 'fork' || !ends.includes('coordinator') || !ends.some((r) => !r)) continue;
+          }
           // Only a LIVE bridge (partner tab still open) constrains selection. A dead
           // bridge — partner tab was closed — is effectively unbridged, so don't hide
           // the survivor (this is what previously made a tab invisible to the picker
