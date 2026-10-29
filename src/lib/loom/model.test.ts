@@ -232,7 +232,7 @@ describe('chat sources', () => {
 
 describe('sentNote', () => {
   it('says which wake a send took, and a woken Hive in its own words', () => {
-    expect(sentNote({ woke: 'hive' })).toBe("Woke the Hive: its coordinator resumes and gets your message once it's up.");
+    expect(sentNote({ woke: 'hive' })).toBe("Woke the Hive: its queen resumes and gets your message once it's up.");
     expect(sentNote({ woke: 'hive', detail: 'Its window didn’t confirm.' })).toBe('Its window didn’t confirm.');
     expect(sentNote({ woke: 'init' }, 'Sent a.png.')).toBe('Woke the agent (re-registered it) and sent.');
     expect(sentNote({ woke: 'resume' })).toBe('Woke the agent (resumed it) and sent.');

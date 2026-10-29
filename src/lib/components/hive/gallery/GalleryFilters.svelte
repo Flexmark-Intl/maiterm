@@ -52,7 +52,7 @@
     <select value={query.madeBy} onchange={(e) => onchange({ madeBy: (e.currentTarget as HTMLSelectElement).value })} aria-label="Made by">
       <option value="">Anyone</option>
       <option value="human">You</option>
-      <option value="coordinator">Coordinator</option>
+      <option value="coordinator">Queen</option>
       {#each byBadge as w (w.task_id)}
         <option value="task:{w.task_id}">#{w.badge} {w.title}</option>
       {/each}
@@ -101,7 +101,7 @@
         {/each}
       </div>
     {:else}
-      <p class="none">None yet: you or the coordinator make them.</p>
+      <p class="none">None yet: you or the queen make them.</p>
     {/if}
     <button type="button" class="manage" onclick={onmanage}>Manage collections…</button>
   </section>

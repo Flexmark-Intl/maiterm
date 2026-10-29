@@ -1394,7 +1394,7 @@ async fn phone_hive_send(s: &ApiState, headers: &HeaderMap, tab_id: &str, body: 
     };
     authorize_human(s, headers)?;
     let Some(h) = s.app_handle.as_ref() else {
-        return Ok(Some(hive_unreachable("hive", "No maiTerm window is open to relaunch this Hive's coordinator in.")));
+        return Ok(Some(hive_unreachable("hive", "No maiTerm window is open to relaunch this Hive's queen in.")));
     };
     let ctx = crate::hive::tools::app_ctx(&s.app, h, &caller);
     Ok(phone_wake_reply(finish::wake(&ctx, &caller, &body.text, finish::BY_PHONE).await))
@@ -1408,10 +1408,10 @@ fn phone_wake_reply(outcome: Result<crate::hive::finish::WakeOutcome, String>) -
     use crate::hive::finish::{WakeOutcome, NOT_DONE};
     let held = |detail: &str| json!({ "status": "held", "reason": "hive_wake", "msg_id": format!("hw-{}", uuid::Uuid::new_v4()), "woke": "hive", "detail": detail });
     Some(match outcome {
-        Ok(WakeOutcome::Relaunching) => held("This Hive was done; its coordinator is resuming and gets your message once it's up."),
-        Ok(WakeOutcome::Unconfirmed) => held("This Hive was done. Its window didn't confirm the coordinator's relaunch (its screen may be asleep); your message waits for the coordinator's next start."),
+        Ok(WakeOutcome::Relaunching) => held("This Hive was done; its queen is resuming and gets your message once it's up."),
+        Ok(WakeOutcome::Unconfirmed) => held("This Hive was done. Its window didn't confirm the queen's relaunch (its screen may be asleep); your message waits for the queen's next start."),
         Ok(WakeOutcome::Delivered) => json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()), "woke": "hive",
-            "detail": "Woke the Hive: its coordinator was still up and has your message." }),
+            "detail": "Woke the Hive: its queen was still up and has your message." }),
         Err(e) if e == NOT_DONE => return None,
         Err(e) => hive_unreachable("hive", &e),
     })
@@ -1481,20 +1481,20 @@ pub(crate) async fn send_tab_message(
         crate::hive::finish::Route::Refuse(detail) => return json!({ "status": "failed", "detail": detail }),
         crate::hive::finish::Route::Wake(caller) => {
             let Some(h) = handle else {
-                return json!({ "status": "failed", "detail": "No maiTerm window to relaunch the Hive's coordinator in." });
+                return json!({ "status": "failed", "detail": "No maiTerm window to relaunch the Hive's queen in." });
             };
             let ctx = crate::hive::tools::app_ctx(app, h, &caller);
             match crate::hive::finish::wake(&ctx, &caller, text, crate::hive::finish::BY_DESKTOP).await {
                 Ok(crate::hive::finish::WakeOutcome::Relaunching) => {
                     return json!({ "status": "delivered", "woke": "hive",
-                        "detail": "This Hive was done; its coordinator is resuming and gets your message once it's up." });
+                        "detail": "This Hive was done; its queen is resuming and gets your message once it's up." });
                 }
                 Ok(crate::hive::finish::WakeOutcome::Unconfirmed) => {
                     return json!({ "status": "delivered", "woke": "hive",
-                        "detail": "This Hive was done. Its window didn't confirm the coordinator's relaunch (its screen may be asleep); your message waits for the coordinator's next start." });
+                        "detail": "This Hive was done. Its window didn't confirm the queen's relaunch (its screen may be asleep); your message waits for the queen's next start." });
                 }
                 Ok(crate::hive::finish::WakeOutcome::Delivered) => {
-                    return json!({ "status": "delivered", "woke": "hive", "detail": "Woke the Hive: its coordinator was still up and has your message." });
+                    return json!({ "status": "delivered", "woke": "hive", "detail": "Woke the Hive: its queen was still up and has your message." });
                 }
                 // Woken meanwhile (the phone): an ordinary message now.
                 Err(e) if e == crate::hive::finish::NOT_DONE => {}
@@ -1597,7 +1597,7 @@ fn wake_detail(reason: &str) -> &'static str {
         "no-agent" => "This tab's agent has exited and it has no resume command to restart it.",
         "trust_dialog" => "Claude is asking whether to trust this folder. Answer that first.",
         "hive_done" => "This Hive is done. Send a message to wake it.",
-        "hive" => "A Hive agent starts through its Hive: its coordinator restarts a worker, and a coordinator comes back when its Hive is resumed.",
+        "hive" => "A Hive agent starts through its Hive: its queen restarts a worker, and a queen comes back when its Hive is resumed.",
         _ => "The agent is still starting up — try again in a moment.",
     }
 }
@@ -1905,10 +1905,10 @@ pub(crate) async fn respond_as_human(
     if prompts::coordinator_holds(tab_id, &key) {
         log::info!("[maiLink] refusing a human answer for tab {tab_id}: its Hive coordinator holds {key}");
         return json!({ "ok": false, "reason": "coordinator",
-            "detail": "Your Hive's coordinator answers this prompt; take it over in the worker's column" });
+            "detail": "Your Hive's queen answers this prompt; take it over in the worker's column" });
     }
     if !prompts::begin_answer(tab_id, &key) {
-        return json!({ "ok": false, "reason": "coordinator", "detail": "Your Hive's coordinator is answering this prompt right now" });
+        return json!({ "ok": false, "reason": "coordinator", "detail": "Your Hive's queen is answering this prompt right now" });
     }
     let out = respond_to_prompt(app, tab_id, prompt_id, choice, answers).await;
     prompts::end_answer(tab_id, &key);
@@ -6540,7 +6540,7 @@ fn held_by_coordinator(pp: &mut Value, tab_id: &str) {
     pp["options"] = json!([]);
     if let Some(qs) = pp.as_object_mut().and_then(|o| o.remove("questions")) {
         let asked: Vec<&str> = qs.as_array().into_iter().flatten().filter_map(|q| q["question"].as_str()).collect();
-        pp["text"] = json!(if asked.is_empty() { "The agent is asking its coordinator a question.".to_string() } else { asked.join(" · ") });
+        pp["text"] = json!(if asked.is_empty() { "The agent is asking its queen a question.".to_string() } else { asked.join(" · ") });
     }
 }
 

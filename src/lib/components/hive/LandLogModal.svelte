@@ -70,7 +70,7 @@
     undoing = true;
     try {
       const r = await hiveUndoLand(workspaceId, id, fp);
-      result = { id, text: r.result ?? (r.state === 'checking' ? 'Its land check runs now; the coordinator hears the result.' : r.state), failed: false };
+      result = { id, text: r.result ?? (r.state === 'checking' ? 'Its land check runs now; the queen hears the result.' : r.state), failed: false };
       open = null;
     } catch (err) {
       result = { id, text: String(err).replace(/^Error: /, ''), failed: true };

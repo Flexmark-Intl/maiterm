@@ -74,7 +74,7 @@
     {#if i.asker}
       {@const a = i.asker}
       <div class="actions">
-        <button type="button" onclick={(e) => onopen(a, e)}>{a.taskId ? 'Open worker' : 'Open coordinator'}</button>
+        <button type="button" onclick={(e) => onopen(a, e)}>{a.taskId ? 'Open worker' : 'Open queen'}</button>
       </div>
     {/if}
   </article>
@@ -91,10 +91,10 @@
   {#each mine as i (i.key)}
     {@render item(i)}
   {:else}
-    <p class="empty">Nothing is waiting on you. When a worker or the coordinator stops on a question, a permission or an approval, it shows up here.</p>
+    <p class="empty">Nothing is waiting on you. When a worker or the queen stops on a question, a permission or an approval, it shows up here.</p>
   {/each}
   {#if held.length}
-    <h4 class="held-h">With the coordinator</h4>
+    <h4 class="held-h">With the queen</h4>
     <p class="held-sub">It answers these, and you're told if it takes too long. Take one over to answer it yourself.</p>
     {#each held as i (i.key)}
       {@render item(i)}

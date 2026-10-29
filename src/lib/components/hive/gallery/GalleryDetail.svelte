@@ -228,7 +228,7 @@
           {/each}
         </div>
         {#if recommendation !== undefined && !gone}
-          <p class="rec">The coordinator recommends <b>{recommendation || 'no status'}</b>: picking finals is yours in this Hive, and your pick answers it.</p>
+          <p class="rec">The queen recommends <b>{recommendation || 'no status'}</b>: picking finals is yours in this Hive, and your pick answers it.</p>
           <!-- The buttons above toggle, so keeping the status it has needs its own answer. -->
           <Tooltip text="Answers the recommendation with the status it has now">
             <button type="button" class="act small" onclick={() => actions.tag([shown.id], { status: shown.status })}>Keep {shown.status || 'no status'}</button>
@@ -236,7 +236,7 @@
         {/if}
         <div class="acts">
           {#if !gone}
-            <Tooltip text="Onto the coordinator’s composer with its recipe quoted, for “three more like this”">
+            <Tooltip text="Onto the queen’s composer with its recipe quoted, for “three more like this”">
               <button type="button" class="act" onclick={() => actions.iterate(shown.id)}>Iterate</button>
             </Tooltip>
             <button type="button" class="act" bind:this={sendBtn} onclick={() => sendBtn && actions.pickWorker([shown.id], sendBtn)}>Send to worker…</button>
@@ -259,7 +259,7 @@
             {#if shown.made_by.kind === 'worker' && shown.task_id}
               <button type="button" class="link" onclick={() => onopenworker(shown.task_id!)}>{madeByLabel(shown.made_by)}</button>
             {:else if shown.made_by.kind === 'coordinator'}
-              <button type="button" class="link" onclick={onopencoordinator}>Coordinator</button>
+              <button type="button" class="link" onclick={onopencoordinator}>Queen</button>
             {:else}
               {madeByLabel(shown.made_by)}
             {/if}

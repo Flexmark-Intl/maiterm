@@ -464,7 +464,7 @@ pub(crate) async fn retire_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         from: RETIRABLE.to_vec(),
         reason: reason.clone(),
         task_status: "dropped",
-        note: format!("Retired by the coordinator: {reason}"),
+        note: format!("Retired by the queen: {reason}"),
         landed: None,
         held_land: true,
     };

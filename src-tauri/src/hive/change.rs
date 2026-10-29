@@ -90,7 +90,7 @@ fn pick(v: &Option<String>, allowed: &[&str], what: &str) -> Result<Option<Strin
 /// repos push to, which no worker may reach (§7.3).
 pub fn check(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[String]) -> Result<Checked, String> {
     if hive.status == super::record::STATUS_DONE {
-        return Err("This Hive is done: a message to its coordinator wakes it first.".to_string());
+        return Err("This Hive is done: a message to its queen wakes it first.".to_string());
     }
     let mut out = SettingsChange::default();
     let mut lines = Vec::new();
@@ -114,9 +114,9 @@ pub fn check(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[String]) -
         let (nm, ne) = (model.clone().unwrap_or_else(|| m.model.clone()), effort.clone().unwrap_or_else(|| m.effort.clone()));
         (nm != m.model || ne != m.effort).then(|| format!("{who}: {} \u{2192} {}", describe_model(&m.model, &m.effort), describe_model(&nm, &ne)))
     };
-    let cm = pick(&c.coordinator_model, &MODELS, "The coordinator\u{2019}s model")?.filter(|m| *m != hive.models.coordinator.model);
-    let ce = pick(&c.coordinator_effort, &EFFORTS, "The coordinator\u{2019}s effort")?.filter(|e| *e != hive.models.coordinator.effort);
-    if let Some(l) = model_line("Coordinator (from its next launch)", &hive.models.coordinator, &cm, &ce) {
+    let cm = pick(&c.coordinator_model, &MODELS, "The queen\u{2019}s model")?.filter(|m| *m != hive.models.coordinator.model);
+    let ce = pick(&c.coordinator_effort, &EFFORTS, "The queen\u{2019}s effort")?.filter(|e| *e != hive.models.coordinator.effort);
+    if let Some(l) = model_line("Queen (from its next launch)", &hive.models.coordinator, &cm, &ce) {
         lines.push(l);
     }
     let wm = pick(&c.worker_model, &MODELS, "The workers\u{2019} model")?.filter(|m| *m != hive.models.worker.model);
@@ -171,7 +171,7 @@ pub fn check(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[String]) -
         }
         if v != hive.settings.workers_on_phone {
             out.workers_on_phone = Some(v);
-            lines.push(format!("On the phone: {} (workers started from now on)", if v { "the coordinator and its workers" } else { "the coordinator only" }));
+            lines.push(format!("On the phone: {} (workers started from now on)", if v { "the queen and its workers" } else { "the queen only" }));
         }
     }
 
@@ -343,7 +343,7 @@ pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     if !checkpoints::asks(&hive, SETTINGS) && !raises {
         let (_, lines) = write(ctx, caller, &change, By::Coordinator)?;
         log_line(caller,"coordinator", &lines, reason.as_deref());
-        ctx.window.settings_changed(&caller.workspace_id, &format!("The coordinator changed this Hive\u{2019}s settings: {}.", lines.join("; ")));
+        ctx.window.settings_changed(&caller.workspace_id, &format!("The queen changed this Hive\u{2019}s settings: {}.", lines.join("; ")));
         ctx.window.poll_waiters(&caller.workspace_id);
         return Ok(json!({ "status": "applied", "changes": lines, "note": "Your human was told. Each agent gets it at its next launch." }));
     }

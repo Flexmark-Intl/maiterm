@@ -28,7 +28,7 @@ pub const MAX_INSTRUCTIONS: usize = 16_000;
 /// the plan needs, and memory pressure and the run queue govern the machine.
 pub const DEFAULT_CAP: u32 = 24;
 pub const DEFAULT_BUDGET_CENTS: u64 = 1000;
-pub const COORDINATOR_TAB_NAME: &str = "Coordinator";
+pub const COORDINATOR_TAB_NAME: &str = "Queen";
 
 /// The §7.4 checkpoints, Coordinator by default but Settings (§3.4), whose changes the human
 /// approves until they hand them over. In integration mode a land is always the human's (§8.3).
@@ -72,7 +72,7 @@ pub fn structural_eligibility(ws: &Workspace) -> Result<Option<Replaceable>, Str
         return Err("The Overlord's workspace can't be a Hive.".to_string());
     }
     if ws.bridge_all {
-        return Err("A mesh workspace can't be a Hive: a Hive's agents talk to their coordinator.".to_string());
+        return Err("A mesh workspace can't be a Hive: a Hive's agents talk to their queen.".to_string());
     }
     if ws.suspended {
         return Err("Resume the workspace first.".to_string());

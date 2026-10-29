@@ -166,7 +166,7 @@ export function chatKey(s: ChatSource | null): string | null {
 export function sentNote(r: Pick<SendResult, 'woke' | 'detail'>, plain: string | null = null): string | null {
   switch (r.woke) {
     case 'hive':
-      return r.detail || "Woke the Hive: its coordinator resumes and gets your message once it's up.";
+      return r.detail || "Woke the Hive: its queen resumes and gets your message once it's up.";
     case 'init':
       return 'Woke the agent (re-registered it) and sent.';
     case 'resume':

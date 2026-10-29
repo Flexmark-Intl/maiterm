@@ -110,13 +110,13 @@ export function hiveOwnsPromptIn(
 
 /** Why the human's answer to a held worker question is refused (the phone shows it as is). */
 export const HIVE_COORDINATOR_HOLDS =
-  "Your Hive's coordinator answers this question. Take it over in the worker's column, or answer it once you're told it waited too long.";
+  "Your Hive's queen answers this question. Take it over in the worker's column, or answer it once you're told it waited too long.";
 
 /** "With coordinator" under a held prompt or question (§7.4): when the human hears of it. */
 export function withCoordinatorText(dueMs: number | null | undefined, now: number): string {
-  if (!dueMs) return 'With coordinator';
+  if (!dueMs) return 'With the queen';
   const mins = Math.max(1, Math.ceil((dueMs - now) / 60_000));
-  return `With coordinator · you're told if it isn't answered in ${mins} min`;
+  return `With the queen · you're told if it isn't answered in ${mins} min`;
 }
 
 /** The last open asked for, kept briefly: `navigateToTab` switches workspace and dispatches at
@@ -307,5 +307,5 @@ export function throttleTip(critical: boolean): string {
   const held = critical
     ? 'The computer is critically short of memory: no worker or queued run starts, and the heavy runs go one at a time.'
     : 'The computer is short of memory: no worker or queued run starts until it eases.';
-  return `${held} A worker the coordinator starts meanwhile waits on its card and launches on its own once memory frees up.`;
+  return `${held} A worker the queen starts meanwhile waits on its card and launches on its own once memory frees up.`;
 }

@@ -5,6 +5,13 @@
 > workers and shared memory, running in maiTerm on this machine, plus a gallery for results
 > that aren't code.
 
+> **Naming (Darryl, 2026-10-29):** on screen the coordinator is the **Queen** (labels, cards,
+> notices, the phone's details, the Create wizard, its tab's name on a new Hive). This doc, the
+> code, the saved role value (`hive_role: "coordinator"`, never renamed: a state file and an older
+> build read it), the wire values (`owner`, `reason`) and everything agents read keep
+> "coordinator"; the Queen's brief tells it its human's screen calls it the Queen. Not "Overlord":
+> that is the window supervisor (`docs/overlord.md`), which runs beside a Hive and skips its tabs.
+
 ## 1. What it is
 
 A **Hive** is a workspace whose terminals you never see. You turn an empty workspace into a

@@ -771,7 +771,7 @@ pub(crate) fn register(hive: &Hive, paths: &HivePaths, a: SpawnArgs, tasks: &[Ta
 /// The worker's row on the board: assigned to its tab once it has one.
 fn worker_task(w: &WorkerRecord, brief: &str, tab_id: Option<&str>, now: &str) -> Task {
     let note = match tab_id {
-        Some(_) => format!("Worker #{} ({}) started by the coordinator", w.badge, w.role),
+        Some(_) => format!("Worker #{} ({}) started by the queen", w.badge, w.role),
         None => format!("Worker #{} ({}) {}", w.badge, w.role, w.wait_reason.as_deref().unwrap_or("waiting")),
     };
     Task {
@@ -2613,7 +2613,7 @@ mod tests {
         assert_eq!(rig.agents.lock().unwrap().stopped, vec![tab.clone()]);
         assert_eq!(rig.record(&w.task_id).phase, worker::PHASE_STOPPED);
         let note = rig.calls_of(rpc::VERB_TASK).pop().unwrap();
-        assert_eq!(note["note"], "Stopped by the coordinator: Wrong approach");
+        assert_eq!(note["note"], "Stopped by the queen: Wrong approach");
         assert!(PathBuf::from(w.folders[0].worktree.as_ref().unwrap()).is_dir(), "its worktree stays");
         assert_eq!(rig.headroom().live, 0, "its slot is free: the cap of 1 takes another");
         rig.spawn(accept, args("Two")).await.unwrap();
@@ -3295,7 +3295,7 @@ mod tests {
         assert!(!ws.panes[0].tabs.iter().any(|t| t.id == tab), "its tab is dropped");
         let row = ws.tasks.iter().find(|t| t.id == w.task_id).expect("its row is kept as history");
         assert_eq!(row.status, "dropped");
-        assert!(row.notes.last().unwrap().text.contains("Retired by the coordinator: Wrong approach"));
+        assert!(row.notes.last().unwrap().text.contains("Retired by the queen: Wrong approach"));
         let sent = rig.calls_of(rpc::VERB_RETIRE).pop().unwrap();
         assert_eq!((sent["tab_id"].as_str(), sent["status"].as_str()), (Some(tab.as_str()), Some("dropped")));
         assert_eq!(rig.headroom().live, 0, "a retired worker holds no slot");
@@ -3393,12 +3393,12 @@ mod tests {
         assert_eq!(pv.dirty.len(), 1, "the clean worktree and the read copies aren't listed: {:?}", pv.dirty);
         assert_eq!((pv.gallery_files, pv.gallery_bytes), (1, 3));
         assert_eq!(pv.gallery_path, p.gallery().to_string_lossy());
-        assert_eq!(pv.live_agents, vec!["the coordinator", "#1 clean", "#2 dirty"]);
+        assert_eq!(pv.live_agents, vec!["the queen", "#1 clean", "#2 dirty"]);
         // Only agents in front of their terminals stop (the third live test listed an exited
         // Done coordinator).
         let coord = rig.caller.tab_id.clone();
         let only_coord = crate::hive::delete::preview(&rig.caller.hive, &p, &coord, &|t| t == coord);
-        assert_eq!(only_coord.live_agents, vec!["the coordinator"]);
+        assert_eq!(only_coord.live_agents, vec!["the queen"]);
         assert!(crate::hive::delete::preview(&rig.caller.hive, &p, &coord, &|_| false).live_agents.is_empty());
         assert!(pv.branches.contains(&"web: hive/ship--clean".to_string()));
         // The memory folder, a file the human wrote in it included, is listed as kept.

@@ -66,7 +66,7 @@ export function formFor(hive: HiveFields): AutonomyForm {
 export function validateForm(hive: Pick<Hive, 'landing_mode'>, form: AutonomyForm): string | null {
   for (const r of CHECKPOINT_ROWS) {
     const v = form.values[r.key];
-    if (v !== 'coordinator' && v !== 'ask') return `${r.label}: pick Coordinator or Ask me.`;
+    if (v !== 'coordinator' && v !== 'ask') return `${r.label}: pick Queen or Ask me.`;
     if (v === 'coordinator' && lockedReason(hive, r.key)) return lockedReason(hive, r.key);
   }
   if (!Number.isInteger(form.minutes) || form.minutes < TIMEOUT_MIN_MINUTES || form.minutes > TIMEOUT_MAX_MINUTES) {
@@ -90,5 +90,5 @@ export function askCount(hive: Pick<Hive, 'landing_mode' | 'checkpoints'>): numb
 /** The header's Autonomy readout: "Coordinator decides", or "You decide 2 of 5". */
 export function autonomyLabel(hive: Pick<Hive, 'landing_mode' | 'checkpoints'>): string {
   const n = askCount(hive);
-  return n === 0 ? 'Coordinator decides' : `You decide ${n} of ${CHECKPOINT_ROWS.length}`;
+  return n === 0 ? 'Queen decides' : `You decide ${n} of ${CHECKPOINT_ROWS.length}`;
 }

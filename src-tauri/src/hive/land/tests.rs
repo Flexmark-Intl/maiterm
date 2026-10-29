@@ -2482,7 +2482,7 @@ async fn the_coordinators_land_is_its_decision_with_the_outcome_and_the_citation
     assert_eq!(ds[0].outcome.as_deref(), Some("landed"));
     assert_eq!(crate::hive::precedents::get(&rig.caller.paths, "P-0000c001").unwrap().cited, 1);
     let v = crate::hive::decisions::view(&rig.caller.paths);
-    assert_eq!((v[0].by_label.as_str(), v[0].can_override), ("coordinator \u{b7} by precedent", true));
+    assert_eq!((v[0].by_label.as_str(), v[0].can_override), ("queen \u{b7} by precedent", true));
 }
 
 #[tokio::test]

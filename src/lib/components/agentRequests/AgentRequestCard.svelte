@@ -75,8 +75,8 @@
           ? 'It was already answered, or it lapsed.'
           : approve
             ? r.kind === 'restart' ? 'Approved. maiTerm is restarting.'
-              : r.kind === 'hive_land' ? 'Approved. maiTerm lands it now, and the coordinator will be told.'
-              : r.kind === 'hive_settings' ? 'Approved. The settings are changed, and the coordinator will be told.'
+              : r.kind === 'hive_land' ? 'Approved. maiTerm lands it now, and the queen will be told.'
+              : r.kind === 'hive_settings' ? 'Approved. The settings are changed, and the queen will be told.'
               : 'Approved. It is being carried out, and the agent will be told.'
             : 'Denied. The agent will be told.',
       );

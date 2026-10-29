@@ -36,7 +36,7 @@ pub const HAND_BACK: &str = "hand_back";
 pub const SOURCE_OFFER: &str = "offer";
 pub const CATEGORY_DIGEST: &str = "digest";
 
-pub const YES_HAND_OVER: &str = "Yes, let the coordinator decide";
+pub const YES_HAND_OVER: &str = "Yes, let the queen decide";
 pub const NO_HAND_OVER: &str = "No, keep asking me";
 pub const YES_HAND_BACK: &str = "Yes, ask me";
 pub const NO_HAND_BACK: &str = "No";
@@ -172,7 +172,7 @@ pub fn offer_blocker(o: &Offer, asked_at: &str) -> TaskBlocker {
     let label = checkpoints::label(&o.checkpoint);
     let (question, context, yes, no) = if o.kind == HAND_OVER {
         (
-            format!("You\u{2019}ve agreed with the coordinator\u{2019}s last {} calls on {label}. Let it handle {label} from now on?", o.count),
+            format!("You\u{2019}ve agreed with the queen\u{2019}s last {} calls on {label}. Let it handle {label} from now on?", o.count),
             "maiTerm counted this from the decision log: each time, you chose what the coordinator recommended. Yes sets this \
              checkpoint to Coordinator; every decision it makes stays in Memory \u{2192} Decisions, and Autonomy in the Hive \
              header sets it back.",
@@ -182,8 +182,8 @@ pub fn offer_blocker(o: &Offer, asked_at: &str) -> TaskBlocker {
     } else {
         let times = if o.count == 2 { "twice".to_string() } else { format!("{} times", o.count) };
         (
-            format!("You\u{2019}ve overridden the coordinator {times} in the last day on {label}. Ask you about {label} from now on?"),
-            "Yes sets this checkpoint to Ask me: the coordinator recommends, and you decide.",
+            format!("You\u{2019}ve overridden the queen {times} in the last day on {label}. Ask you about {label} from now on?"),
+            "Yes sets this checkpoint to Ask me: the queen recommends, and you decide.",
             YES_HAND_BACK,
             NO_HAND_BACK,
         )
@@ -408,7 +408,7 @@ pub(crate) async fn on_offer_answered<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &
                 log::warn!("hive {}: offer {} not carried out: {e}", caller.hive.id, offer.id);
                 format!("not changed: {e}")
             }
-            Ok(None) => if hand_over { "already the coordinator\u{2019}s" } else { "already Ask me" }.to_string(),
+            Ok(None) => if hand_over { "already the queen\u{2019}s" } else { "already Ask me" }.to_string(),
             Ok(Some(hive)) => {
                 let snapshot = ctx.data.read().clone();
                 if let Err(e) = (ctx.save)(&snapshot) {
@@ -431,7 +431,7 @@ pub(crate) async fn on_offer_answered<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &
                     let sent = ctx.window.deliver(&t, text, "Hive autonomy").await;
                     log::info!("hive {}: autonomy notice to the coordinator: {}", caller.hive.id, sent.describe());
                 }
-                if hand_over { "handed to the coordinator" } else { "handed back to the human" }.to_string()
+                if hand_over { "handed to the queen" } else { "handed back to the human" }.to_string()
             }
         }
     };

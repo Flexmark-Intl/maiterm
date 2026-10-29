@@ -52,7 +52,7 @@ const GONE_PHASES = ['landed', 'retired', 'stopped', 'failed', 'waiting'];
 
 export function askers(input: Pick<NeedsYouInput, 'coordinatorTabId' | 'workers'>): Map<string, HiveAsker> {
   const out = new Map<string, HiveAsker>();
-  if (input.coordinatorTabId) out.set(input.coordinatorTabId, { tabId: input.coordinatorTabId, taskId: null, badge: null, name: 'Coordinator' });
+  if (input.coordinatorTabId) out.set(input.coordinatorTabId, { tabId: input.coordinatorTabId, taskId: null, badge: null, name: 'Queen' });
   for (const w of input.workers) {
     if (w.tab_id) out.set(w.tab_id, { tabId: w.tab_id, taskId: w.task_id, badge: w.badge, name: `#${w.badge} ${w.title}` });
   }

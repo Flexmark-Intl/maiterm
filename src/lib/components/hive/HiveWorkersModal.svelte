@@ -109,14 +109,14 @@
       <div class="field">
         <span class="label">Models</span>
         <div class="grid">
-          <span class="who">Coordinator</span>
-          <select aria-label="Coordinator model" bind:value={coordinatorModel}>{#each MODELS as m (m)}<option value={m}>Claude {m}</option>{/each}</select>
-          <select aria-label="Coordinator effort" bind:value={coordinatorEffort}>{#each EFFORTS as e (e)}<option value={e}>{e} effort</option>{/each}</select>
+          <span class="who">Queen</span>
+          <select aria-label="Queen model" bind:value={coordinatorModel}>{#each MODELS as m (m)}<option value={m}>Claude {m}</option>{/each}</select>
+          <select aria-label="Queen effort" bind:value={coordinatorEffort}>{#each EFFORTS as e (e)}<option value={e}>{e} effort</option>{/each}</select>
           <span class="who">Workers</span>
           <select aria-label="Worker model" bind:value={workerModel}>{#each MODELS as m (m)}<option value={m}>Claude {m}</option>{/each}</select>
           <select aria-label="Worker effort" bind:value={workerEffort}>{#each EFFORTS as e (e)}<option value={e}>{e} effort</option>{/each}</select>
         </div>
-        <span class="note">A worker the coordinator started with its own model keeps it.</span>
+        <span class="note">A worker the queen started with its own model keeps it.</span>
       </div>
 
       <div class="field">
@@ -162,8 +162,8 @@
         {#if offPhone}
           <span class="note">Kept off when the Hive was made: no agent of this Hive is a chat on the phone.</span>
         {:else}
-          <label class="check"><input type="radio" name="phone" value="coordinator" bind:group={phone} /><span>The coordinator only</span></label>
-          <label class="check"><input type="radio" name="phone" value="all" bind:group={phone} /><span>The coordinator and its workers</span></label>
+          <label class="check"><input type="radio" name="phone" value="coordinator" bind:group={phone} /><span>The queen only</span></label>
+          <label class="check"><input type="radio" name="phone" value="all" bind:group={phone} /><span>The queen and its workers</span></label>
           <span class="note">Applies to workers started from now on.</span>
         {/if}
       </div>

@@ -146,7 +146,7 @@
           <button type="button" class="t" onclick={() => onopen(p.id)}>{p.title}</button>
           <span class="by">{madeByLabel(p.made_by)}{p.model ? ` · ${p.model}` : ''}</span>
           {#if recommendations[p.id] !== undefined}
-            <span class="rec">Coordinator recommends: {recommendations[p.id] || 'no status'}
+            <span class="rec">Queen recommends: {recommendations[p.id] || 'no status'}
               <Tooltip text="Answers the recommendation with the status it has now">
                 <button type="button" class="act" onclick={() => ontag([p.id], { status: p.status })}>Keep {p.status || 'no status'}</button>
               </Tooltip>

@@ -56,7 +56,7 @@
   <div class="panel" bind:this={panelEl}>
     <div class="header">
       <div class="title">{report ? doneLabel(report.at_ms) : 'Done'}</div>
-      <div class="subtitle">What the coordinator finished, with the receipts maiTerm checked. Its own words are quoted.</div>
+      <div class="subtitle">What the queen finished, with the receipts maiTerm checked. Its own words are quoted.</div>
     </div>
 
     <div class="body">
@@ -68,7 +68,7 @@
         <p class="dim">This Hive has no report yet.</p>
       {:else}
         <section>
-          <span class="label">The coordinator’s summary</span>
+          <span class="label">The queen’s summary</span>
           <blockquote>{report.summary}</blockquote>
         </section>
 
@@ -138,7 +138,7 @@
               {#each report.decided_alone as d, i (i)}<li>{d}</li>{/each}
             </ul>
           {:else}
-            <p class="dim">The coordinator decided nothing alone.</p>
+            <p class="dim">The queen decided nothing alone.</p>
           {/if}
         </section>
       {/if}

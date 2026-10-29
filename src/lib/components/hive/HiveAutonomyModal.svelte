@@ -92,7 +92,7 @@
               <span class="note">{row.note}</span>
             </div>
             <div class="seg" role="radiogroup" aria-label={row.label}>
-              {#each [['coordinator', 'Coordinator'], ['ask', 'Ask me']] as [v, text] (v)}
+              {#each [['coordinator', 'Queen'], ['ask', 'Ask me']] as [v, text] (v)}
                 {#if locked && v === 'coordinator'}
                   <Tooltip text={locked}>
                     <button type="button" role="radio" aria-checked="false" disabled>{text}</button>
@@ -126,7 +126,7 @@
         </label>
         <label class="check">
           <input type="checkbox" bind:checked={digest} />
-          <span>Daily digest <span class="opt">what the coordinator decided alone, once a day in its chat</span></span>
+          <span>Daily digest <span class="opt">what the queen decided alone, once a day in its chat</span></span>
         </label>
       </div>
       {#if problem}<p class="error">{problem}</p>{/if}

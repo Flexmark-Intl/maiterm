@@ -49,7 +49,7 @@ const WHAT: Record<string, string> = {
 /** What the human is told: `hive-human`, which the gate never holds back. */
 export function noticeFor(n: HivePromptNotice, timeoutSecs: number): { title: string; body: string; source: ToastSource } {
   let body: string;
-  if (n.why === 'timeout') body = `Needs your answer: the coordinator hasn't answered in ${Math.max(1, Math.round(timeoutSecs / 60))} min`;
+  if (n.why === 'timeout') body = `Needs your answer: the queen hasn't answered in ${Math.max(1, Math.round(timeoutSecs / 60))} min`;
   else if (n.why === 'ask') body = `Needs your answer: ${WHAT[n.kind] ?? 'this checkpoint'} is set to Ask me`;
   else if (n.why === 'take_over') body = 'Needs your answer: you took it over';
   else body = `Needs you: ${n.why}`;

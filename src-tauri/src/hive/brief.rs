@@ -403,7 +403,7 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
         paths.gallery().display()
     ));
     b.push_str(&format!(
-        "## How this Hive runs\n\n- Workers at once: at most {}. A ceiling, not a target: start as many as the plan can use in \
+        "## How this Hive runs\n\n- Your human\u{2019}s screen calls you the Queen; maiTerm and your workers call you their coordinator.\n- Workers at once: at most {}. A ceiling, not a target: start as many as the plan can use in \
          parallel without workers colliding in the same files, and no more.\n- Landing: {}.\n- {MEMORY_RULE} So a decision running workers \
          need also goes to them by message (hiveMessageWorker).\n",
         hive.cap,

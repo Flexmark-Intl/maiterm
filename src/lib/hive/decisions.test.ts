@@ -14,10 +14,10 @@ describe('decision log view', () => {
   it('says who decided, or where it stands', () => {
     expect(whoText({ ...answered, by_label: 'coordinator · by precedent' })).toBe('coordinator · by precedent');
     expect(whoText({ ...answered, by_label: 'human, after the coordinator’s timeout' })).toBe('human, after the coordinator’s timeout');
-    expect(whoText({ status: 'recommended', by_label: '', recommended: 'Yes' })).toBe('waiting for you · the coordinator recommends “Yes”');
+    expect(whoText({ status: 'recommended', by_label: '', recommended: 'Yes' })).toBe('waiting for you · the queen recommends “Yes”');
     expect(whoText({ status: 'lapsed', by_label: '', recommended: null })).toBe('closed unanswered');
     expect(whoText({ status: 'open', by_label: '', recommended: null })).toBe('waiting');
-    expect(whoText({ status: 'digest', by_label: 'maiTerm', recommended: null })).toBe('sent to the coordinator’s chat');
+    expect(whoText({ status: 'digest', by_label: 'maiTerm', recommended: null })).toBe('sent to the queen’s chat');
     expect(categoryLabel('digest')).toBe('Daily digest');
     expect(whoTone({ status: 'answered', by: 'human' })).toBe('human');
     expect(whoTone({ status: 'answered', by: 'maiterm' })).toBe('maiterm');
@@ -48,7 +48,7 @@ describe('decision log view', () => {
     expect(outcomeText('landed')).toBe('Landed');
     expect(outcomeText('held: main keeps moving')).toBe('Held: main keeps moving');
     expect(outcomeText(null)).toBe('');
-    expect(outcomeText('hand_over')).toBe('Offers to let the coordinator decide this');
+    expect(outcomeText('hand_over')).toBe('Offers to let the queen decide this');
     expect(outcomeText('hand_back')).toBe('Offers to hand this back to you');
     expect(outcomeText('handed to the coordinator')).toBe('Handed to the coordinator');
   });
@@ -58,7 +58,7 @@ describe('precedents view', () => {
   const p = { scope: 'hive', status: 'active', hive_name: 'Ship it', promoted_to: null as string | null, rule_by: 'coordinator', cited: 1, overridden: 0 };
 
   it('labels whose wording the rule is', () => {
-    expect(ruleWording(p)).toBe('the coordinator’s wording');
+    expect(ruleWording(p)).toBe('the queen’s wording');
     expect(ruleWording({ rule_by: 'human' })).toBe('your wording');
   });
 

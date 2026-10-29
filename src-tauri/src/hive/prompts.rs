@@ -613,7 +613,7 @@ pub(crate) async fn route_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w
     let timeout = timeout_secs(&caller.hive);
     let (owner, why, due_ms) = match &classified {
         Err(why) => (OWNER_HUMAN, why.clone(), 0),
-        Ok(()) if !has_coordinator => (OWNER_HUMAN, "this Hive has no coordinator to answer it".to_string(), 0),
+        Ok(()) if !has_coordinator => (OWNER_HUMAN, "this Hive has no queen to answer it".to_string(), 0),
         Ok(()) if checkpoints::asks(&caller.hive, &checkpoint) => (OWNER_HUMAN, WHY_ASK.to_string(), 0),
         Ok(()) => (OWNER_COORDINATOR, String::new(), now + (timeout as i64) * 1000),
     };

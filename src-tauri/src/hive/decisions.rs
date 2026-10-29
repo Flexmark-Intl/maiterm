@@ -315,9 +315,9 @@ pub struct DecisionView {
 pub fn by_label(d: &Decision) -> String {
     let Some(a) = &d.answered else { return String::new() };
     match a.by.as_str() {
-        BY_COORDINATOR if a.precedent.is_some() => "coordinator \u{b7} by precedent".to_string(),
-        BY_COORDINATOR => "coordinator".to_string(),
-        BY_HUMAN if a.after_timeout => "human, after the coordinator\u{2019}s timeout".to_string(),
+        BY_COORDINATOR if a.precedent.is_some() => "queen \u{b7} by precedent".to_string(),
+        BY_COORDINATOR => "queen".to_string(),
+        BY_HUMAN if a.after_timeout => "human, after the queen\u{2019}s timeout".to_string(),
         BY_HUMAN => "human".to_string(),
         _ => "maiTerm".to_string(),
     }
@@ -450,7 +450,7 @@ pub(crate) struct Overridden {
 pub(crate) fn override_decision(paths: &HivePaths, decision_id: &str, note: &str, now: &str) -> Result<Overridden, String> {
     let note = one_line(note, super::prompts::MAX_REASON);
     if note.is_empty() {
-        return Err("Say what should have happened: your note goes to the coordinator.".to_string());
+        return Err("Say what should have happened: your note goes to the queen.".to_string());
     }
     let _held = RECORD.lock().unwrap_or_else(|e| e.into_inner());
     let d = find(&read(paths), decision_id).ok_or("That decision isn\u{2019}t in this Hive\u{2019}s log.")?;
@@ -459,9 +459,9 @@ pub(crate) fn override_decision(paths: &HivePaths, decision_id: &str, note: &str
     }
     if !d.can_override() {
         return Err(match d.answered_by() {
-            Some(BY_HUMAN) => "That was your own answer: only the coordinator\u{2019}s decisions are overridden.".to_string(),
+            Some(BY_HUMAN) => "That was your own answer: only the queen\u{2019}s decisions are overridden.".to_string(),
             None => "That decision isn\u{2019}t answered yet.".to_string(),
-            _ => "Only a decision the coordinator made can be overridden.".to_string(),
+            _ => "Only a decision the queen made can be overridden.".to_string(),
         });
     }
     let a = d.answered.clone().expect("can_override has an answer");
@@ -979,10 +979,10 @@ mod tests {
         let views: Vec<DecisionView> = folded.iter().map(|d| view_of(d, |id| (id == "P-1").then(|| ("When green, land".to_string(), "active".to_string())))).collect();
         let (b, a, l) = (&views[0], &views[1], &views[2]);
         assert_eq!((b.status.as_str(), b.by_label.as_str(), b.reason.as_deref(), b.can_override), ("lapsed", "", Some("closed"), false));
-        assert_eq!((a.status.as_str(), a.by_label.as_str(), a.answer.as_deref()), ("answered", "human, after the coordinator\u{2019}s timeout", Some("Postgres")));
+        assert_eq!((a.status.as_str(), a.by_label.as_str(), a.answer.as_deref()), ("answered", "human, after the queen\u{2019}s timeout", Some("Postgres")));
         assert_eq!(a.recommended.as_deref(), Some("Postgres"), "the coordinator's, never the worker's");
         assert!(!a.can_override, "the human's own answer");
-        assert_eq!((l.by_label.as_str(), l.outcome.as_deref(), l.source.as_str()), ("coordinator \u{b7} by precedent", Some("landed"), "land"));
+        assert_eq!((l.by_label.as_str(), l.outcome.as_deref(), l.source.as_str()), ("queen \u{b7} by precedent", Some("landed"), "land"));
         assert_eq!(l.precedent.as_ref().map(|p| (p.id.as_str(), p.rule.as_deref())), Some(("P-1", Some("When green, land"))));
         // Open, and recommended under Ask me, before anyone answers.
         let open = fold(&lines[..3]);

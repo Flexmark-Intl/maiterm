@@ -43,7 +43,7 @@
   const trashed = $derived(!!row.deleted_at);
   const tip = $derived(
     `${row.title} · ${madeByLabel(row.made_by)}${row.prompt_head ? `\n${row.prompt_head}` : ''}${trashed ? '\nIn the trash' : ''}${
-      recommended !== undefined ? `\nThe coordinator recommends: ${recommended || 'no status'}` : ''
+      recommended !== undefined ? `\nThe queen recommends: ${recommended || 'no status'}` : ''
     }`,
   );
 

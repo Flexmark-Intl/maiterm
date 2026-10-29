@@ -28,11 +28,11 @@ pub const KIND_WAKE_FAILED: &str = "wake_failed";
 /// `wake`'s refusal when the Hive isn't done (any more): the caller sends as usual.
 pub const NOT_DONE: &str = "not done";
 
-pub const FILES_REFUSAL: &str = "This Hive is done. Send a message first to wake it, then attach files once its coordinator is back.";
-pub const FILES_STARTING: &str = "This Hive's coordinator is still starting: attach files once it's back.";
+pub const FILES_REFUSAL: &str = "This Hive is done. Send a message first to wake it, then attach files once its queen is back.";
+pub const FILES_STARTING: &str = "This Hive's queen is still starting: attach files once it's back.";
 /// While the coordinator's session start is typing the message that woke it: anything sent
 /// meanwhile could land ahead of it.
-pub const TAKING_REFUSAL: &str = "This Hive's coordinator is taking the message that woke it right now: send this again in a moment.";
+pub const TAKING_REFUSAL: &str = "This Hive's queen is taking the message that woke it right now: send this again in a moment.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WakeOutcome {
@@ -113,7 +113,7 @@ fn check_text(text: &str) -> Result<String, String> {
     }
     // A picker's `/model` or `/effort` would land as words inside maiTerm's frame, not as a command.
     if is_command(t) {
-        return Err("This Hive is done: a slash command can't wake it. Send a message first; its coordinator takes commands once it's back.".to_string());
+        return Err("This Hive is done: a slash command can't wake it. Send a message first; its queen takes commands once it's back.".to_string());
     }
     Ok(t.to_string())
 }
@@ -199,13 +199,13 @@ pub(crate) async fn wake<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text:
         return Ok(WakeOutcome::Relaunching);
     }
     let text = check_text(text)?;
-    let tab = coordinator_tab(ctx.data, caller).ok_or("This Hive has no coordinator tab to wake.")?;
+    let tab = coordinator_tab(ctx.data, caller).ok_or("This Hive has no queen tab to wake.")?;
     match ctx.window.front(&tab).await {
         Front::Job if ENDING.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) => {
-            return Err("This Hive's coordinator is still being ended: send this again in a moment.".to_string())
+            return Err("This Hive's queen is still being ended: send this again in a moment.".to_string())
         }
         Front::Job => return wake_running(ctx, caller, &before, &tab, &text, by).await,
-        Front::Unknown => return Err("maiTerm can't tell what holds the coordinator's terminal, so the Hive wasn't woken. Try again in a moment.".to_string()),
+        Front::Unknown => return Err("maiTerm can't tell what holds the queen's terminal, so the Hive wasn't woken. Try again in a moment.".to_string()),
         Front::Shell | Front::NoTerminal => ENDING.lock().unwrap_or_else(|e| e.into_inner()).retain(|k| k != &key),
     }
 
@@ -247,7 +247,7 @@ pub(crate) async fn wake<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text:
             if roll_back(ctx, caller, &before, by, &e).await {
                 restore_wake(caller, prev).await;
             }
-            Err(format!("This Hive stays done: its coordinator couldn't be relaunched. {e}"))
+            Err(format!("This Hive stays done: its queen couldn't be relaunched. {e}"))
         }
     }
 }
@@ -270,7 +270,7 @@ async fn owe(caller: &Caller, text: String, by: &str, since: Option<i64>, joinin
                 None => text,
             };
             if joined.chars().count() > MAX_MESSAGE {
-                res = Err(format!("Your earlier message to wake this Hive is still waiting, and with this one it is over {MAX_MESSAGE} characters. Send this once the coordinator is back."));
+                res = Err(format!("Your earlier message to wake this Hive is still waiting, and with this one it is over {MAX_MESSAGE} characters. Send this once the queen is back."));
                 return false;
             }
             res = Ok(o.wake.clone());
@@ -302,7 +302,7 @@ async fn wake_running<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, before: 
         }
         Sent::Refused(why) => {
             roll_back(ctx, caller, before, by, &why).await;
-            Err(format!("The coordinator didn't take your message ({why}), so this Hive stays done. Try again in a moment."))
+            Err(format!("The queen didn't take your message ({why}), so this Hive stays done. Try again in a moment."))
         }
     }
 }

@@ -466,7 +466,7 @@
     {:else if !decisions}
       <p class="note pad">Reading the decision log…</p>
     {:else if !decisions.length}
-      <p class="note pad">No decisions yet. Every prompt, question and land the coordinator or you decide is logged here.</p>
+      <p class="note pad">No decisions yet. Every prompt, question and land the queen or you decide is logged here.</p>
     {:else}
       {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
       <ul role="list" class="cards">
@@ -490,7 +490,7 @@
               <p class="dim">{d.reason}</p>
             {/if}
             {#if d.recommended && d.status === 'answered' && d.by === 'human'}
-              <p class="dim">The coordinator recommended: {d.recommended}</p>
+              <p class="dim">The queen recommended: {d.recommended}</p>
             {/if}
             {#if d.precedent}
               <p class="dim">
@@ -505,7 +505,7 @@
                   <textarea
                     class="editor note-editor"
                     bind:value={overriding.note}
-                    placeholder="What should have happened? The coordinator is told."
+                    placeholder="What should have happened? The queen is told."
                     aria-label="Override note"
                   ></textarea>
                   {#if overriding.note && overrideErr}<p class="error">{overrideErr}</p>{/if}
@@ -517,7 +517,7 @@
                 </form>
               {:else}
                 <div class="actions">
-                  <Tooltip text="Mark the coordinator's decision wrong, with a note it reads">
+                  <Tooltip text="Mark the queen's decision wrong, with a note it reads">
                     <button type="button" class="link" disabled={busy} onclick={() => { actionError = null; overriding = { id: d.id, note: '' }; }}>Override…</button>
                   </Tooltip>
                 </div>
@@ -560,7 +560,7 @@
         <button type="button" class="link" disabled={busy} onclick={() => { actionError = null; editing = { id: p.id, draft: p.rule }; }}>Edit</button>
       {/if}
       {#if canPromote(p, globalIds)}
-        <Tooltip text="Copy it to every Hive's precedents: their coordinators may cite it">
+        <Tooltip text="Copy it to every Hive's precedents: their queens may cite it">
           <button type="button" class="link" disabled={busy} onclick={() => precedentAct('promote', () => hivePrecedentPromote(workspaceId, p.id))}>Make global</button>
         </Tooltip>
       {/if}
@@ -583,15 +583,15 @@
       <p class="note pad">Reading the precedents…</p>
     {:else}
       {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
-      <div class="detail-h pad"><b>This Hive</b><span class="dim">Recorded by the coordinator from your answers. The rule is its wording until you edit it.</span></div>
+      <div class="detail-h pad"><b>This Hive</b><span class="dim">Recorded by the queen from your answers. The rule is its wording until you edit it.</span></div>
       {#if precedents.hive.length}
         <ul role="list" class="cards">
           {#each precedents.hive as p (p.id)}{@render precedentCard(p)}{/each}
         </ul>
       {:else}
-        <p class="note pad">None yet. After you answer a blocker, the coordinator records what it teaches.</p>
+        <p class="note pad">None yet. After you answer a blocker, the queen records what it teaches.</p>
       {/if}
-      <div class="detail-h pad"><b>Global</b><span class="dim">Made global by you; every Hive's coordinator may cite them.</span></div>
+      <div class="detail-h pad"><b>Global</b><span class="dim">Made global by you; every Hive's queen may cite them.</span></div>
       {#if precedents.global.length}
         <ul role="list" class="cards">
           {#each precedents.global as p (p.id)}{@render precedentCard(p)}{/each}

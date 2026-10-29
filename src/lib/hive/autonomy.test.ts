@@ -50,7 +50,7 @@ describe('the Autonomy form', () => {
     expect(askCount(hive())).toBe(1);
     const of = CHECKPOINT_ROWS.length;
     const handed = { settings: 'coordinator' };
-    expect(autonomyLabel(hive({ checkpoints: handed }))).toBe('Coordinator decides');
+    expect(autonomyLabel(hive({ checkpoints: handed }))).toBe('Queen decides');
     expect(autonomyLabel(hive())).toBe(`You decide 1 of ${of}`);
     expect(autonomyLabel(hive({ landing_mode: 'integration', checkpoints: handed }))).toBe(`You decide 1 of ${of}`);
     expect(autonomyLabel(hive({ checkpoints: { plan: 'ask', questions: 'ask' } }))).toBe(`You decide 3 of ${of}`);

@@ -191,7 +191,7 @@
     try {
       await hivePrompts.takeOver(forTab, pid);
       logInfo(`Loom prompt card: took over ${pid} on ${forTab} from the Hive's coordinator`);
-      if (forTab === tabId) note = "Yours now: the coordinator was told to leave it.";
+      if (forTab === tabId) note = "Yours now: the queen was told to leave it.";
     } catch (err) {
       logWarn(`Loom prompt card: take over of ${pid} on ${forTab} failed: ${err}`);
       if (forTab === tabId) note = `Not taken over: ${err instanceof Error ? err.message : err}`;
@@ -210,7 +210,7 @@
     {#if held}
       <div class="held-bar">
         <span>{withCoordinatorText(prompt.due_at, clock)}</span>
-        <Tooltip text="Answer it yourself: the coordinator is told to leave it">
+        <Tooltip text="Answer it yourself: the queen is told to leave it">
           <button class="take" disabled={sending} onclick={takeOver}>Take over</button>
         </Tooltip>
       </div>

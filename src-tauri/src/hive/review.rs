@@ -133,7 +133,7 @@ pub(crate) fn spawn_refusal(builder: &WorkerRecord, workers: &[WorkerRecord]) ->
 
 /// What a reviewer's spawn note says on its task.
 pub(crate) fn spawn_note(w: &WorkerRecord, builder_label: &str) -> String {
-    format!("Worker #{} ({}) started by the coordinator to review {builder_label}", w.badge, w.role)
+    format!("Worker #{} ({}) started by the queen to review {builder_label}", w.badge, w.role)
 }
 
 // ── hiveVerdict ──
@@ -606,7 +606,7 @@ pub(crate) async fn resolve<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, ar
     }
     let now = crate::commands::workspace::iso_now();
     let resolution = Resolution { kind: kind.clone(), reason: reason.clone(), at: now.clone(), ..Resolution::default() };
-    let note = format!("Escalated review resolved by the coordinator: {kind}: {reason}");
+    let note = format!("Escalated review resolved by the queen: {kind}: {reason}");
 
     if RETIRING.contains(&kind.as_str()) {
         if let Some(why) = retire_refusal(&label, &w.phase, super::land::held(&w)) {

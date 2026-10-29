@@ -269,13 +269,13 @@ pub(crate) fn preview(hive: &Hive, paths: &HivePaths, coordinator: &str, running
             continue;
         }
         match found_folder(&f.name, Path::new(&f.path), &wt) {
-            Some(rc) => p.dirty.extend(keep_reason(&rc).map(|why| format!("coordinator's copy of {why}"))),
-            None => p.dirty.push(format!("coordinator's copy of {}: {} (not a worktree maiTerm can vouch for)", f.name, wt.display())),
+            Some(rc) => p.dirty.extend(keep_reason(&rc).map(|why| format!("queen's copy of {why}"))),
+            None => p.dirty.push(format!("queen's copy of {}: {} (not a worktree maiTerm can vouch for)", f.name, wt.display())),
         }
     }
     p.dirty.extend(unaccounted(hive, paths, &workers).into_iter().map(|(why, _)| why));
     if !coordinator.is_empty() && running(coordinator) {
-        p.live_agents.insert(0, "the coordinator".to_string());
+        p.live_agents.insert(0, "the queen".to_string());
     }
     (p.gallery_files, p.gallery_bytes) = gallery_totals(hive, paths);
     p.gallery_path = paths.gallery().to_string_lossy().to_string();
@@ -341,7 +341,7 @@ pub(crate) fn going(paths: &HivePaths) -> Vec<String> {
         ));
     }
     if fs::symlink_metadata(paths.coordinator_home()).is_ok() {
-        out.push(format!("The coordinator's home and brief ({})", paths.root.join("coordinator").display()));
+        out.push(format!("The queen's home and brief ({})", paths.root.join("coordinator").display()));
     }
     out
 }
@@ -396,9 +396,9 @@ pub(crate) fn remove_disk(hive: &Hive, paths: &HivePaths, workers: &[WorkerRecor
             Some(rc) => match remove_if_clean(Path::new(&f.path), &rc) {
                 Removal::Removed => out.removed += 1,
                 Removal::Gone => {}
-                Removal::Kept(why) => kept(format!("coordinator's copy of {why}"), wt, &mut out),
+                Removal::Kept(why) => kept(format!("queen's copy of {why}"), wt, &mut out),
             },
-            None => kept(format!("coordinator's copy of {}: {} (not a worktree maiTerm can vouch for)", f.name, wt.display()), wt, &mut out),
+            None => kept(format!("queen's copy of {}: {} (not a worktree maiTerm can vouch for)", f.name, wt.display()), wt, &mut out),
         }
     }
 

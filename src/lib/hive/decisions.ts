@@ -25,7 +25,7 @@ const CATEGORY: Record<string, string> = {
 
 /** An open offer's outcome is its kind until the human answers (Rust's `autonomy.rs`). */
 const OFFER_KIND: Record<string, string> = {
-  hand_over: 'Offers to let the coordinator decide this',
+  hand_over: 'Offers to let the queen decide this',
   hand_back: 'Offers to hand this back to you',
 };
 
@@ -42,9 +42,9 @@ export function whoText(d: Pick<HiveDecisionView, 'status' | 'by_label' | 'recom
     case 'lapsed':
       return 'closed unanswered';
     case 'digest':
-      return 'sent to the coordinator’s chat';
+      return 'sent to the queen’s chat';
     case 'recommended':
-      return d.recommended ? `waiting for you · the coordinator recommends “${d.recommended}”` : 'waiting for you';
+      return d.recommended ? `waiting for you · the queen recommends “${d.recommended}”` : 'waiting for you';
     default:
       return 'waiting';
   }
@@ -74,7 +74,7 @@ export function outcomeText(outcome: string | null | undefined): string {
 /** The override note: null when Rust would take it. */
 export function noteError(note: string): string | null {
   const n = note.trim();
-  if (!n) return 'Say what should have happened: your note goes to the coordinator.';
+  if (!n) return 'Say what should have happened: your note goes to the queen.';
   if ([...n].length > MAX_NOTE) return `Keep the note under ${MAX_NOTE} characters.`;
   return null;
 }
@@ -93,7 +93,7 @@ export function ruleError(rule: string): string | null {
 
 /** Whose wording a rule is: the coordinator's until the human edits it. */
 export function ruleWording(p: Pick<HivePrecedent, 'rule_by'>): string {
-  return p.rule_by === 'human' ? 'your wording' : 'the coordinator’s wording';
+  return p.rule_by === 'human' ? 'your wording' : 'the queen’s wording';
 }
 
 /** The small tags beside a precedent. */

@@ -334,7 +334,7 @@ fn two_overrides_in_a_day_offer_the_checkpoint_back_once() {
     lines.push(overridden("permissions", None, "2026-10-24T11:30:00Z"));
     let offers = evaluate(&lines, &h, &[], now(), |_| None);
     assert_eq!(offers, vec![Offer { checkpoint: "permissions".into(), kind: HAND_BACK.into(), count: 2 }]);
-    assert!(offer_blocker(&offers[0], NOW).question.contains("overridden the coordinator twice in the last day"));
+    assert!(offer_blocker(&offers[0], NOW).question.contains("overridden the queen twice in the last day"));
     let mut asks = h.clone();
     asks.checkpoints.insert("permissions".into(), ASK.into());
     assert!(evaluate(&lines, &asks, &[], now(), |_| None).is_empty(), "already the human's");
@@ -364,7 +364,7 @@ async fn an_offer_is_filed_once_and_yes_hands_the_checkpoint_over() {
     let row = rig.row(&title).expect("maiTerm's row on the coordinator's tab");
     assert_eq!((row.status.as_str(), row.tab_id.as_deref()), ("blocked", Some(rig.coord.as_str())));
     let b = row.blocker.clone().unwrap();
-    assert_eq!(b.question, "You\u{2019}ve agreed with the coordinator\u{2019}s last 5 calls on workers\u{2019} questions. Let it handle workers\u{2019} questions from now on?");
+    assert_eq!(b.question, "You\u{2019}ve agreed with the queen\u{2019}s last 5 calls on workers\u{2019} questions. Let it handle workers\u{2019} questions from now on?");
     assert_eq!((b.kind.as_str(), b.options[0].label.as_str(), b.options[0].recommended), ("decision", YES_HAND_OVER, true));
     let offer = rig.lines().pop().unwrap();
     assert_eq!((offer.event.as_str(), offer.category.as_str(), offer_checkpoint(&offer), offer.outcome.as_deref()), (EVENT_OFFER, "offer", Some("questions"), Some(HAND_OVER)));
@@ -377,7 +377,7 @@ async fn an_offer_is_filed_once_and_yes_hands_the_checkpoint_over() {
     assert_eq!(rig.win.st().hives.len(), 1, "the window's mirror was told");
     assert!(rig.to_coordinator().iter().any(|m| m.starts_with("[maiTerm] Your human handed you workers\u{2019} questions")), "{:?}", rig.to_coordinator());
     let d = decisions::find(&rig.lines(), &offer.id).unwrap();
-    assert_eq!((d.answered_by(), d.category(), d.outcome.as_deref()), (Some(BY_HUMAN), "offer", Some("handed to the coordinator")));
+    assert_eq!((d.answered_by(), d.category(), d.outcome.as_deref()), (Some(BY_HUMAN), "offer", Some("handed to the queen")));
     assert!(review(&rig.ctx(), &rig.caller).await.is_empty(), "the offer's own answer starts no new run");
 }
 

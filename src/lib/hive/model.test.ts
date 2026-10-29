@@ -241,9 +241,9 @@ describe('"With coordinator"', () => {
   });
 
   it('says when the human is told', () => {
-    expect(withCoordinatorText(10_000 + 4 * 60_000 + 1, 10_000)).toBe("With coordinator · you're told if it isn't answered in 5 min");
-    expect(withCoordinatorText(10_000, 20_000)).toBe("With coordinator · you're told if it isn't answered in 1 min");
-    expect(withCoordinatorText(0, 1)).toBe('With coordinator');
+    expect(withCoordinatorText(10_000 + 4 * 60_000 + 1, 10_000)).toBe("With the queen · you're told if it isn't answered in 5 min");
+    expect(withCoordinatorText(10_000, 20_000)).toBe("With the queen · you're told if it isn't answered in 1 min");
+    expect(withCoordinatorText(0, 1)).toBe('With the queen');
   });
 });
 

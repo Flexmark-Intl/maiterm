@@ -158,7 +158,7 @@ pub(crate) async fn stop_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     let released = super::queue::release_worker(&w.task_id, "your coordinator stopped you");
     super::land::approval::withdraw(&ctx.window, caller, &w, "its coordinator stopped the worker, so nothing would land");
     // A stop is never held back by the board: its note is best effort.
-    let note = format!("Stopped by the coordinator: {reason}");
+    let note = format!("Stopped by the queen: {reason}");
     if let Err(e) = task_note(ctx, caller, &w.task_id, &note, None).await {
         log::warn!("hive {}: worker {} stop note not written: {e}", caller.hive.id, worker_label(&w));
     }
@@ -299,7 +299,7 @@ pub(crate) async fn restart_worker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
     }
     ctx.window.workers_changed(&caller.workspace_id);
     let how = if fresh { "a fresh session" } else { "resuming its session" };
-    if let Err(e) = task_note(ctx, caller, &w.task_id, &format!("Restarted by the coordinator ({how})"), None).await {
+    if let Err(e) = task_note(ctx, caller, &w.task_id, &format!("Restarted by the queen ({how})"), None).await {
         log::info!("hive {}: worker {} restart note not written: {e}", caller.hive.id, worker_label(&w));
     }
     log::info!("hive {}: worker {} restarted ({how}, was {})", caller.hive.id, worker_label(&w), w.phase);
@@ -344,7 +344,7 @@ async fn rewait<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerReco
     })
     .await?;
     ctx.window.workers_changed(&caller.workspace_id);
-    if let Err(e) = task_note(ctx, caller, &w.task_id, "Put back to waiting by the coordinator", None).await {
+    if let Err(e) = task_note(ctx, caller, &w.task_id, "Put back to waiting by the queen", None).await {
         log::info!("hive {}: worker {} rewait note not written: {e}", caller.hive.id, worker_label(w));
     }
     log::info!("hive {}: worker {} waits again (was {}, never launched)", caller.hive.id, worker_label(w), w.phase);

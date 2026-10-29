@@ -39,7 +39,7 @@ describe('hive-prompt-notify', () => {
   it('is dispatched as hive-human, which the gate never holds back', () => {
     const dispatch = vi.fn();
     handleNotice(notice(), 300, dispatch);
-    expect(dispatch).toHaveBeenCalledWith('Hive · #2 Session store', "Needs your answer: the coordinator hasn't answered in 5 min", 'info', { tabId: 'k', kind: 'hive-human' });
+    expect(dispatch).toHaveBeenCalledWith('Hive · #2 Session store', "Needs your answer: the queen hasn't answered in 5 min", 'info', { tabId: 'k', kind: 'hive-human' });
   });
 
   it('says why it is the human’s', () => {

@@ -646,7 +646,7 @@ async fn finish<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, mut u: UndoSta
             vec![format!("It landed, but maiTerm couldn't finish recording it: {e}")]
         }
     };
-    let who = if u.by_human() { "the human" } else { "the coordinator" };
+    let who = if u.by_human() { "the human" } else { "the queen" };
     // The human's own Undo of the coordinator's land overrides that decision (plan D17).
     if u.by_human() {
         crate::hive::decisions::land_undone_by_human(ctx, caller, &u.land, e.decision.as_deref()).await;
@@ -865,7 +865,7 @@ pub(crate) async fn approved<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, d
     let result = |v: &Value| v.get("result").and_then(Value::as_str).unwrap_or_default().to_string();
     let (ok, outcome) = match &out {
         Outcome::Landed(v) | Outcome::Held(v) | Outcome::Waiting(v) => (true, result(v)),
-        Outcome::Checking(_) => (true, "approved: its land check runs now; the coordinator hears the result".to_string()),
+        Outcome::Checking(_) => (true, "approved: its land check runs now; the queen hears the result".to_string()),
         Outcome::Awaiting(_) => (false, "its config change is no longer the one you approved, so a new card asks again".to_string()),
         Outcome::Refused(e) => (false, e.clone()),
         Outcome::Gone => (false, "the undo isn't there to carry out any more".to_string()),

@@ -36,7 +36,7 @@ describe('Hive Needs you', () => {
       task('ci', 'w1', blocker('2026-10-26T08:00:00Z', 'external')),
     ];
     const q = needsYouQueue(input({ tasks }));
-    expect(q.map((i) => [i.kind, i.asker?.name])).toEqual([['blocker', 'Coordinator'], ['blocker', '#1 Session store']]);
+    expect(q.map((i) => [i.kind, i.asker?.name])).toEqual([['blocker', 'Queen'], ['blocker', '#1 Session store']]);
     expect(needsYouCount(q)).toBe(2);
   });
 

@@ -314,7 +314,7 @@ pub fn refuse_tab_archive(ws: &Workspace, tab_id: &str) -> Result<(), String> {
 pub fn refuse_tab_close(ws: &Workspace, tab_id: &str, replaced_by: Option<&str>) -> Result<(), String> {
     match live_tab(ws, tab_id) {
         Some(t) if is_coordinator(t) && replaced_by.is_none() => {
-            Err("A Hive's coordinator can't be closed: a Hive ends through Done or Delete".to_string())
+            Err("A Hive's queen can't be closed: a Hive ends through Done or Delete".to_string())
         }
         _ => Ok(()),
     }
@@ -324,7 +324,7 @@ pub fn refuse_tab_close(ws: &Workspace, tab_id: &str, replaced_by: Option<&str>)
 pub fn refuse_pane_close(ws: &Workspace, pane_id: &str) -> Result<(), String> {
     let holds = ws.panes.iter().filter(|p| p.id == pane_id).flat_map(|p| p.tabs.iter()).any(is_coordinator);
     if holds {
-        return Err("This pane holds the Hive's coordinator and can't be closed".to_string());
+        return Err("This pane holds the Hive's queen and can't be closed".to_string());
     }
     Ok(())
 }

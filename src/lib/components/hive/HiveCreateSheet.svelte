@@ -157,7 +157,7 @@
     [...folders].sort((a, b) => Number(b.primary) - Number(a.primary)).map((f) => f.name.trim() || f.path),
   );
   const pickedTools = $derived((tools ?? []).filter((t) => picked.has(t.id)).map((t) => t.label));
-  const PHONE_TEXT = { coordinator: 'The coordinator only', all: 'The coordinator and its workers', none: 'Nobody' } as const;
+  const PHONE_TEXT = { coordinator: 'The queen only', all: 'The queen and its workers', none: 'Nobody' } as const;
   function receipt(k: StepKey): string | null {
     switch (k) {
       case 'goal': return goal.trim() || null;
@@ -469,7 +469,7 @@
           <label class="field">
             <span class="label">Goal</span>
             <input bind:value={goal} placeholder="One line: what done looks like" />
-            <span class="hint">Shown on the Hive's header, and the first thing the coordinator is told.</span>
+            <span class="hint">Shown on the Hive's header, and the first thing the queen is told.</span>
           </label>
           <label class="field">
             <span class="label">Name</span>
@@ -551,17 +551,17 @@
             <span class="label">Workers at once</span>
             <div class="inline">
               <input class="num" type="number" min="1" max={MAX_CAP} bind:value={cap} />
-              <Tooltip text="The coordinator starts only as many as the plan needs. If memory runs short, maiTerm holds new workers until it eases, and builds and tests take turns in the run queue.">
-                <span class="hint">At most this many; the coordinator decides how many it needs</span>
+              <Tooltip text="The queen starts only as many as the plan needs. If memory runs short, maiTerm holds new workers until it eases, and builds and tests take turns in the run queue.">
+                <span class="hint">At most this many; the queen decides how many it needs</span>
               </Tooltip>
             </div>
           </div>
           <div class="field">
             <span class="label">Models</span>
             <div class="models">
-              <span>Coordinator</span>
-              <select aria-label="Coordinator model" bind:value={coordModel}>{#each MODELS as m (m)}<option value={m}>Claude {m}</option>{/each}</select>
-              <select aria-label="Coordinator effort" bind:value={coordEffort}>{#each EFFORTS as e (e)}<option value={e}>{e} effort</option>{/each}</select>
+              <span>Queen</span>
+              <select aria-label="Queen model" bind:value={coordModel}>{#each MODELS as m (m)}<option value={m}>Claude {m}</option>{/each}</select>
+              <select aria-label="Queen effort" bind:value={coordEffort}>{#each EFFORTS as e (e)}<option value={e}>{e} effort</option>{/each}</select>
               <span>Workers</span>
               <select aria-label="Worker model" bind:value={workerModel}>{#each MODELS as m (m)}<option value={m}>Claude {m}</option>{/each}</select>
               <select aria-label="Worker effort" bind:value={workerEffort}>{#each EFFORTS as e (e)}<option value={e}>{e} effort</option>{/each}</select>
@@ -570,7 +570,7 @@
           </div>
           <fieldset class="field">
             <legend class="label">How work lands <span class="opt">can't be changed later</span></legend>
-            <label class="choice"><input type="radio" name="hive-landing" value="base" bind:group={landing} /><span><b>Straight into Base</b><span class="hint">The coordinator merges each finished worker into its repo's Base branch.</span></span></label>
+            <label class="choice"><input type="radio" name="hive-landing" value="base" bind:group={landing} /><span><b>Straight into Base</b><span class="hint">The queen merges each finished worker into its repo's Base branch.</span></span></label>
             <label class="choice"><input type="radio" name="hive-landing" value="integration" bind:group={landing} /><span><b>Into an integration branch, each land approved by you</b><span class="hint">Base stays untouched until you merge the branch yourself.</span></span></label>
           </fieldset>
           {#if landing === 'base'}
@@ -581,8 +581,8 @@
           {/if}
           <fieldset class="field">
             <legend class="label">Chats on your phone</legend>
-            <label class="choice"><input type="radio" name="hive-phone" value="coordinator" bind:group={phone} /><span><b>The coordinator only</b><span class="hint">It speaks for its workers.</span></span></label>
-            <label class="choice"><input type="radio" name="hive-phone" value="all" bind:group={phone} /><span><b>The coordinator and its workers</b></span></label>
+            <label class="choice"><input type="radio" name="hive-phone" value="coordinator" bind:group={phone} /><span><b>The queen only</b><span class="hint">It speaks for its workers.</span></span></label>
+            <label class="choice"><input type="radio" name="hive-phone" value="all" bind:group={phone} /><span><b>The queen and its workers</b></span></label>
             <label class="choice"><input type="radio" name="hive-phone" value="none" bind:group={phone} /><span><b>Nobody</b><span class="hint">No agent of this Hive is a chat in maiLink. Can't be changed later.</span></span></label>
           </fieldset>
 
@@ -594,7 +594,7 @@
             {:else if tools.length === 0}
               <p class="hint">Nothing detected: no MCP servers, ffmpeg, ImageMagick, SoX, Blender, skills or ComfyUI.</p>
             {:else}
-              <span class="hint">Tells the coordinator what it can really make things with.</span>
+              <span class="hint">Tells the queen what it can really make things with.</span>
               <div class="tools">
                 {#each tools as t (t.id)}
                   <label class="check">
@@ -682,7 +682,7 @@
             {#if instructions.trim()}
               <p class="hint">Every agent starts from your {instructionCount.toLocaleString()} characters of instructions.</p>
             {/if}
-            <p class="hint">Creating it replaces this workspace's shell with the coordinator, which starts at once.</p>
+            <p class="hint">Creating it replaces this workspace's shell with the queen, which starts at once.</p>
           </div>
         {/if}
       </div>

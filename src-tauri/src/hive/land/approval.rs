@@ -69,7 +69,7 @@ pub(crate) struct Card {
 fn why_line(why: &str, target: &str, checked: &[&str], unchecked: &[&str]) -> String {
     match why {
         WHY_INTEGRATION => {
-            let mut s = format!("This Hive lands into {target} only with your approval. maiTerm merges exactly the commit its coordinator reviewed, --no-ff");
+            let mut s = format!("This Hive lands into {target} only with your approval. maiTerm merges exactly the commit its queen reviewed, --no-ff");
             if unchecked.is_empty() {
                 s.push_str(", and runs its land check first.");
             } else {
@@ -120,7 +120,7 @@ pub(crate) fn card(hive: &Hive, workspace_id: &str, w: &WorkerRecord, land: &Lan
         match land.review.as_str() {
             super::log::REVIEW_PASS => "A reviewer passed it at exactly these commits.",
             super::log::REVIEW_ACCEPTED => "Its review failed; the coordinator accepted it as it is.",
-            _ => "No reviewer looked at it; its coordinator did.",
+            _ => "No reviewer looked at it; its queen did.",
         }
         .to_string(),
     );
@@ -170,7 +170,7 @@ fn catch_before_step1(hive: &Hive, land: &mut LandState) -> Result<(), String> {
 pub(crate) async fn await_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, land: LandState, why: &'static str) -> Outcome {
     let label = worker_label(w);
     if caller.tab_id.is_empty() {
-        return driver::fail(ctx, caller, w, land, "This land needs the human's approval, and this Hive has no coordinator tab to ask from.".to_string()).await;
+        return driver::fail(ctx, caller, w, land, "This land needs the human's approval, and this Hive has no queen tab to ask from.".to_string()).await;
     }
     let (hive, paths, rec, ws, mut l) = (caller.hive.clone(), caller.paths.clone(), w.clone(), caller.workspace_id.clone(), land.clone());
     let built = blocking(move || {
@@ -310,7 +310,7 @@ fn settle_line(out: &Outcome) -> (bool, String) {
     let result = |v: &Value| v.get("result").and_then(Value::as_str).unwrap_or_default().to_string();
     match out {
         Outcome::Landed(v) | Outcome::Held(v) | Outcome::Waiting(v) => (true, result(v)),
-        Outcome::Checking(_) => (true, "approved: its land check runs now; the coordinator hears the result".to_string()),
+        Outcome::Checking(_) => (true, "approved: its land check runs now; the queen hears the result".to_string()),
         Outcome::Awaiting(_) => (false, "its config change is no longer the one you approved, so a new card asks again".to_string()),
         Outcome::Refused(e) => (false, e.clone()),
         Outcome::Gone => (false, "the land isn't there to carry out any more".to_string()),

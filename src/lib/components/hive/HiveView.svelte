@@ -481,8 +481,8 @@
   );
   const stripTip = $derived(
     view.coordCollapsed
-      ? `Show the coordinator${unread ? ': it has news' : ''}`
-      : `Show the coordinator: the window is too narrow for it beside a worker, which steps aside until you go back to it${unread ? '. It has news' : ''}`,
+      ? `Show the queen${unread ? ': it has news' : ''}`
+      : `Show the queen: the window is too narrow for it beside a worker, which steps aside until you go back to it${unread ? '. It has news' : ''}`,
   );
   /** Focused, the coordinator never gives way (`fitColumns`): a worker steps aside if it must. Its
    *  composer takes the keyboard once the layout has shown it. */
@@ -799,7 +799,7 @@
         {#if hive}
           {#if hive.status === 'done'}
             <span class="status done"><Icon name="check" size={11} />{doneLabel(hive.done_at)}</span>
-            <Tooltip text="The coordinator's report: each criterion's receipts, what landed, final assets, spend, what it decided alone">
+            <Tooltip text="The queen's report: each criterion's receipts, what landed, final assets, spend, what it decided alone">
               <button type="button" class="btn primary" onclick={() => (reportOpen = true)}>Report</button>
             </Tooltip>
           {:else if hive.status === 'paused'}
@@ -892,7 +892,7 @@
           {/if}
           <div class="ro">
             <span class="k">Criteria</span>
-            <Tooltip text={hive.criteria.length ? 'What must be true for the goal to be met: hiveFinish proves each one' : 'The coordinator sets these with hiveSetCriteria'}>
+            <Tooltip text={hive.criteria.length ? 'What must be true for the goal to be met: hiveFinish proves each one' : 'The queen sets these with hiveSetCriteria'}>
               <span class="v">
                 <button type="button" class="ro-btn" aria-expanded={criteriaOpen} onclick={() => (criteriaOpen = !criteriaOpen)}>
                   {hive.criteria.length ? hive.criteria.length : 'None yet'}<span class="chev" class:open={criteriaOpen}><Icon name="chevron" size={9} /></span>
@@ -908,7 +908,7 @@
           </div>
           <div class="ro">
             <span class="k">Autonomy</span>
-            <Tooltip text="Which decisions the coordinator makes and which come to you, the prompt timeout and the daily digest">
+            <Tooltip text="Which decisions the queen makes and which come to you, the prompt timeout and the daily digest">
               <span class="v"><button type="button" class="ro-btn" onclick={() => (autonomyOpen = true)}>{autonomyLabel(hive)}</button></span>
             </Tooltip>
           </div>
@@ -936,7 +936,7 @@
           {#each hive.criteria as c, i (i)}<li>{c}</li>{/each}
         </ol>
       {:else}
-        <span class="dim">No completion criteria yet: the coordinator sets them.</span>
+        <span class="dim">No completion criteria yet: the queen sets them.</span>
       {/if}
     </div>
   {/if}
@@ -978,7 +978,7 @@
       <Tooltip text={stripTip}>
         <button class="strip" class:focused={focusedKey === 'coordinator'} aria-label={stripTip} onclick={expandCoordinator}>
           <Icon name="chevron" size={12} />
-          <span class="strip-label">Coordinator</span>
+          <span class="strip-label">Queen</span>
           {#if unread}<span class="dot" aria-hidden="true"></span>{/if}
         </button>
       </Tooltip>
@@ -992,7 +992,7 @@
       class:focused={focusedKey === 'coordinator' && fit.board === 'rail'}
       class:dragging={dragging === 'coord'}
       style="width: {width}px"
-      aria-label="Coordinator"
+      aria-label="Queen"
       onfocusin={focusTo('coordinator')}
       onpointerdown={focusTo('coordinator')}
     >
@@ -1002,17 +1002,17 @@
       <ChatColumn
         bind:this={column}
         {source}
-        name="Coordinator"
+        name="Queen"
         workspace={ws?.name ?? ''}
         {tasks}
         active={fit.coord === 'full'}
         actions={null}
-        emptyText="This Hive has no coordinator tab."
+        emptyText="This Hive has no queen tab."
         gallery={hive ? { hiveId: hive.id, workspaceId } : null}
         composerPlaceholder={hive?.status === 'done' ? 'This Hive is done. Send a message to wake it.' : undefined}
       >
         {#snippet header()}
-          <span class="role">coordinator</span>
+          <span class="role">queen</span>
           {#if coordId}
             <IconButton
               tooltip={coordTerminal ? 'Hide the terminal' : 'Show the terminal'}
@@ -1034,7 +1034,7 @@
         class:dragging={dragging === 'coord'}
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize the coordinator column"
+        aria-label="Resize the queen column"
         aria-valuemin={W.COORD_MIN}
         aria-valuemax={W.COORD_MAX}
         aria-valuenow={width}
@@ -1123,7 +1123,7 @@
       {:else}
         <div class="empty">
           <b>No workers yet</b>
-          <span>Workers the coordinator starts show up here as cards, one per task.</span>
+          <span>Workers the queen starts show up here as cards, one per task.</span>
         </div>
       {/if}
     </section>

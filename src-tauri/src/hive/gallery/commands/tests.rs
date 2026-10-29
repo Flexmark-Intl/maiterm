@@ -104,7 +104,7 @@ async fn changing_the_coordinators_finals_overrides_it_and_two_in_a_day_offer_it
 
     human(&r, &[&b], status("")).await.unwrap();
     let row = offer_row(&r).expect("two overrides in a day offer Finals back");
-    assert!(row.blocker.unwrap().question.contains("overridden the coordinator twice"));
+    assert!(row.blocker.unwrap().question.contains("overridden the queen twice"));
 }
 
 /// Under Ask me a recommendation the coordinator then decides itself (Finals handed over) is

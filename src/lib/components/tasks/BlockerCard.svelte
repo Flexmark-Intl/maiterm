@@ -87,7 +87,7 @@
     sending = true;
     try {
       await hivePrompts.takeOver(route.tab_id, route.key);
-      onnote?.("Yours now: the coordinator was told to leave it.");
+      onnote?.("Yours now: the queen was told to leave it.");
     } catch (err) {
       onnote?.(`Not taken over: ${err instanceof Error ? err.message : err}`);
     } finally {
@@ -151,7 +151,7 @@
     <div class="head">
       <span class="kind">{BLOCKER_LABEL[b.kind]} · {fmtAge(b.asked_at)}</span>
       {#if held}
-        <Tooltip text="Answer it yourself: the coordinator is told to leave it">
+        <Tooltip text="Answer it yourself: the queen is told to leave it">
           <button class="dismiss take" disabled={sending} onclick={takeOver}>Take over</button>
         </Tooltip>
       {:else}

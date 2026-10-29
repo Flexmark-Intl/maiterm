@@ -41,11 +41,11 @@ export function doneLabel(doneAt: number | null | undefined, now: number = Date.
 /** The header's word on a stale Done (`Hive.done_stale`): which land was undone, and that the
  *  coordinator hears of it only once woken. */
 export function doneStaleTip(land: string): string {
-  return `Land ${land}, which the report counted as landed, was undone after the Hive was done. The coordinator hears of it when you wake the Hive with a message.`;
+  return `Land ${land}, which the report counted as landed, was undone after the Hive was done. The queen hears of it when you wake the Hive with a message.`;
 }
 
 /** The notice when a Hive moves to done, or null for any other move. */
 export function doneNotice(before: string | null | undefined, after: string, name: string): { title: string; body: string } | null {
   if (after !== 'done' || before === 'done' || before == null) return null;
-  return { title: `Hive done: ${name}`, body: 'Its coordinator finished the goal. The report is in the Hive header.' };
+  return { title: `Hive done: ${name}`, body: 'Its queen finished the goal. The report is in the Hive header.' };
 }

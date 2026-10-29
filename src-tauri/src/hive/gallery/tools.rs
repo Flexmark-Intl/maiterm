@@ -250,7 +250,7 @@ impl GalleryCaller {
     }
 
     fn label(&self) -> String {
-        self.worker.as_ref().map(crate::hive::tools::worker_label).unwrap_or_else(|| "the coordinator".to_string())
+        self.worker.as_ref().map(crate::hive::tools::worker_label).unwrap_or_else(|| "the queen".to_string())
     }
 }
 
@@ -975,7 +975,7 @@ fn withdrawn_line(hive_id: &str, d: &decisions::Decision) -> DecisionLine {
         task_id: r.task_id,
         key: r.key,
         question: r.question,
-        outcome: Some("withdrawn: the coordinator decided it once Finals was its".to_string()),
+        outcome: Some("withdrawn: the queen decided it once Finals was its".to_string()),
         by: decisions::BY_MAITERM.to_string(),
         at: crate::commands::workspace::iso_now(),
         ..DecisionLine::default()
