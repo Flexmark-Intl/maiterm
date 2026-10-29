@@ -433,12 +433,17 @@ function createAgentBridgeStore() {
     getBridgeInfo(tabId: string) {
       const bridge = bridges.get(tabId);
       if (!bridge) return { bridged: false };
+      // A coordinator reads its partner's name and folder escaped here too, as Rust's Hive tools
+      // quote worker text in their results.
+      const shown = isCoordinator(tabId)
+        ? partnerIdentity(bridge.partnerLabel, bridge.partnerTabId)
+        : { name: bridge.partnerLabel, cwd: getCwd(bridge.partnerTabId) };
       return {
         bridged: true,
         partner: {
           tabId: bridge.partnerTabId,
-          label: bridge.partnerLabel,
-          cwd: getCwd(bridge.partnerTabId),
+          label: shown.name,
+          cwd: shown.cwd,
           available: tabExists(bridge.partnerTabId),
         },
       };
@@ -632,7 +637,7 @@ function createAgentBridgeStore() {
       void persistBridge(senderTabId); // keep the turn counter durable
       const text = buildEnvelope(senderTabId, recipient, message, bridge.turn);
       const status = await deliveryCtl.deliver(recipient, text);
-      const recipName = bridge.partnerLabel;
+      const recipName = isCoordinator(senderTabId) ? oneLine(bridge.partnerLabel, 120) : bridge.partnerLabel;
       if (status === 'delivered') {
         return { ok: true, delivered: true, recipient: recipName, note: `Delivered to ${recipName}. Their reply will arrive as a new prompt — finish your turn now.` };
       }
