@@ -36,6 +36,40 @@
   const shellItems = $derived(filtered.filter(i => i.tab.tab_type === 'terminal' || !i.tab.tab_type));
   const viewerItems = $derived(filtered.filter(i => i.tab.tab_type === 'editor' || i.tab.tab_type === 'diff'));
   const showHeaders = $derived(shellItems.length > 0 && viewerItems.length > 0);
+  // Rows in the order they are drawn, for arrow-key navigation from the search box.
+  const ordered = $derived([...shellItems, ...viewerItems]);
+
+  let highlighted = $state(0);
+  let menuEl = $state<HTMLElement | null>(null);
+
+  // A new query starts over at the first match, so typing then Enter opens it.
+  $effect(() => {
+    void query;
+    highlighted = 0;
+  });
+
+  function moveHighlight(delta: number) {
+    if (ordered.length === 0) return;
+    highlighted = (highlighted + delta + ordered.length) % ordered.length;
+    requestAnimationFrame(() => {
+      menuEl?.querySelector('.tab-menu-item.highlighted')?.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  function handleSearchKeydown(e: KeyboardEvent) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      moveHighlight(1);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      moveHighlight(-1);
+    } else if (e.key === 'Enter') {
+      const item = ordered[highlighted];
+      if (!item) return;
+      e.preventDefault();
+      onActivate(item.tab);
+    }
+  }
 
   const posStyle = $derived(
     `top:${position.top}px;` +
@@ -48,7 +82,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="tab-menu" style={posStyle} onwheel={(e) => e.stopPropagation()}>
+<div class="tab-menu" style={posStyle} bind:this={menuEl} onwheel={(e) => e.stopPropagation()}>
   {#if searchable}
     <div class="tab-menu-search">
       <Icon name="search" size={12} />
@@ -56,6 +90,7 @@
         type="text"
         placeholder="Search tabs…"
         bind:value={query}
+        onkeydown={handleSearchKeydown}
         use:autofocus
         spellcheck="false"
         autocomplete="off"
@@ -68,19 +103,24 @@
   {#if showHeaders && shellItems.length > 0}
     <div class="tab-menu-header">Shells</div>
   {/if}
-  {#each shellItems as item (item.tab.id)}
-    {@render row(item)}
+  {#each shellItems as item, i (item.tab.id)}
+    {@render row(item, i)}
   {/each}
   {#if showHeaders && viewerItems.length > 0}
     <div class="tab-menu-header">Viewers</div>
   {/if}
-  {#each viewerItems as item (item.tab.id)}
-    {@render row(item)}
+  {#each viewerItems as item, i (item.tab.id)}
+    {@render row(item, shellItems.length + i)}
   {/each}
 </div>
 
-{#snippet row(item: TabMenuItem)}
-  <div class="tab-menu-item">
+{#snippet row(item: TabMenuItem, index: number)}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="tab-menu-item"
+    class:highlighted={searchable && index === highlighted}
+    onmouseenter={() => (highlighted = index)}
+  >
     {#if item.tab.tab_type === 'diff'}
       <Tooltip text="Diff"><span class="tab-menu-icon"><Icon name="diff" size={12} /></span></Tooltip>
     {:else if item.tab.tab_type === 'editor'}
@@ -168,7 +208,8 @@
     transition: background 0.1s;
   }
 
-  .tab-menu-item:hover {
+  .tab-menu-item:hover,
+  .tab-menu-item.highlighted {
     background: var(--bg-light);
   }
 
