@@ -14,7 +14,8 @@ reach a value through the first draft, and they are fixed below. The most import
 user.
 
 **Reshaped 2026-10-28: a provider first.** maiTerm is the layer between agents and the human's
-secrets manager. Values live in **1Password or Doppler** whenever one is connected (§5.1);
+secrets manager. Values live in **1Password** whenever it is connected (§5.1; Doppler deferred
+2026-10-30, decision 14);
 maiTerm's own vault is the **fallback** for people without one, with a label saying plainly what
 it protects (§5.2). **Every key gets the same protection, whatever its tier**: a "dev" key is
 often a live key. **Prod-tier values need a provider** (§16 decisions 11–13). Darryl's reasoning:
@@ -236,7 +237,8 @@ by hand is invisible to it, which is why rotation also searches for consumers (�
 
 ## 5. Where values live: a provider first, the local vault as the fallback
 
-> **Values live in the human's secrets manager (1Password or Doppler; Infisical later)
+> **Values live in the human's secrets manager (1Password; Doppler and Infisical only once
+> someone asks, decision 14)
 > whenever one is connected. maiTerm's own vault is the fallback for people without one, labelled
 > for what it does and doesn't protect. Prod-tier values need a provider.** (§16 decisions
 > 11–13, 2026-10-28.)
@@ -315,7 +317,7 @@ were checked against each provider's docs on 2026-10-28.
   what that is keyed on is unknown. If the helper's authorization can be shared, prod through
   1Password doesn't ship until it can't.
 
-**Doppler**
+**Doppler (deferred, decision 14: kept as research until someone asks)**
 - **A read-only service token per project and config** (`dp.st.<env>.…`): one config each,
   read through the REST API (`GET /v3/configs/config/secrets/download`, the `secrets=` filter
   limiting the keys returned).
@@ -1423,18 +1425,20 @@ Darryl asked what else should be asked. Each item was then written into its sect
 
 Free or paid is Darryl's product call and doesn't change the design.
 
-### 16.2 Open, 2026-10-28
+### 16.2 Decided 2026-10-30
 
-1. **Is Doppler enough for prod?** A review of the provider rewrite (2cb381bb) found that a
-   Doppler prod token is protected like a local-vault value: a keychain item a same-user agent
-   can read on Linux and Windows. What Doppler adds is a narrow scope, its audit log, revocation
-   from anywhere and nothing on disk, but no per-use human gate. The choices:
-   - **allow Doppler for prod**, with that stated on the panel and the card;
-   - **require 1Password for prod**, the only provider with a per-use gate;
-   - **allow the local vault for prod too**, since it would then be no weaker than Doppler.
-
-   Recommended: allow Doppler, stated. Its scope, audit and revocation are real gains over a
-   local file, and the people choosing Doppler are choosing its sync to hosting.
+14. **1Password only, at first; Doppler and Infisical wait until someone asks.** Darryl: "maybe
+    we don't support Doppler, at least at first. Those with Doppler are probably already doing
+    things the Doppler way, so may not ever be something someone ends up using."
+    - Doppler users already inject with `doppler run` and sync with Doppler's integrations, so
+      maiTerm would change little for them.
+    - This also settles the question a review of 2cb381bb raised: a Doppler prod token has no
+      per-use gate, which made "prod needs a provider" weaker for Doppler than for 1Password.
+    - **v1's providers are 1Password (any tier, prod through its app authorization) and the
+      labelled local vault (non-prod).** Someone on Doppler uses the local vault for non-prod,
+      and keeps prod in Doppler, outside maiTerm.
+    - The Doppler and Infisical notes in §5.1 stay as research for when one is asked for. The
+      `Store` interface (§5.2) keeps adding one cheap.
 
 ## 17. Build order
 
@@ -1443,14 +1447,13 @@ Free or paid is Darryl's product call and doesn't change the design.
      authorization from the 1Password app. An agent running `op` or the helper under a maiTerm
      child (no tty, `setsid`) does **not** share it. A service-account token passed over stdin
      works. If an agent can share the helper's authorization, prod through 1Password waits until
-     it can't. Also: how to detect a Doppler token's write access, and whether one can be minted
-     with an expiry.
+     it can't.
    - `src-tauri/src/secrets/`: the `Store` interface; the data model with `risk`; the Secrets
      panel as a full-window view, with the store and the local vault's label shown; environments;
      the audit log.
-   - **Doppler and 1Password connections**: minting or pasting maiTerm's own credentials, the
-     token-type refusal, the scope check (refusing a service account that can see prod or
-     write), keychain storage. Dedicated 1Password vaults; the `maiterm-1p` helper, signed, with
+   - **The 1Password connection** (decision 14: the only provider at first): pasting maiTerm's
+     own service account, the scope check (refusing one that can see prod or write), keychain
+     storage. Dedicated 1Password vaults; the `maiterm-1p` helper, signed, with
      the hardened runtime; a fresh helper per human action for prod and for every write; the
      daily-cap display.
    - **The local vault**: one data key, local-only Windows persistence, the passphrase for
