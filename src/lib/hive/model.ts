@@ -224,45 +224,6 @@ export function folderName(path: string, taken: string[]): string {
   return name;
 }
 
-type EligibleTab = {
-  id: string;
-  tab_type?: string;
-  runtime?: string | null;
-  auto_resume_command?: string | null;
-  notes?: string | null;
-  service_id?: string | null;
-  hive_role?: string | null;
-  agent_bridge?: unknown;
-};
-type EligibleWorkspace = {
-  hive?: unknown;
-  overlord?: boolean;
-  bridge_all?: boolean;
-  suspended?: boolean;
-  panes: { tabs: EligibleTab[] }[];
-  archived_tabs?: unknown[];
-};
-type EligibleTask = { tab_id?: string | null; status: string };
-
-/** Whether the workspace row offers "Make this a Hive…": no tabs, or one fresh, unused shell the
- *  Hive replaces (§3). The record's half of Rust's check; whether that shell is running something
- *  only Rust can see, so the menu still asks `hive_preflight`. */
-export function isEligible(ws: EligibleWorkspace, tasks: EligibleTask[]): boolean {
-  if (ws.hive || ws.overlord || ws.bridge_all || ws.suspended || ws.archived_tabs?.length) return false;
-  const tabs = ws.panes.flatMap((p) => p.tabs);
-  if (tabs.length === 0) return true;
-  if (tabs.length > 1) return false;
-  const t = tabs[0];
-  const fresh = (t.tab_type ?? 'terminal') === 'terminal'
-    && !t.runtime
-    && !t.auto_resume_command?.trim()
-    && !t.notes?.trim()
-    && !t.service_id
-    && !t.hive_role
-    && !t.agent_bridge;
-  return fresh && !tasks.some((k) => k.tab_id === t.id && k.status !== 'done' && k.status !== 'dropped');
-}
-
 type AdoptTab = { id: string };
 type AdoptPane<T extends AdoptTab> = { id: string; tabs: T[]; active_tab_id?: string | null };
 type AdoptWorkspace<T extends AdoptTab, S> = { hive?: unknown; name: string; stack?: S[]; panes: AdoptPane<T>[] };

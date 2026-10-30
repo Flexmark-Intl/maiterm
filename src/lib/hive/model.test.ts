@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   adoptInstalled, charCount, checkpointAsks, checkpointFor, coordinatorHolds, dispatchHiveOpenColumn, engineSkips, folderName, HIVE_HUMAN_KIND,
-  HIVE_PROMPT_KINDS, hiveOwnsPromptIn, isEligible, MAX_INSTRUCTIONS, openTargetFor, pausedLabel, slugify, throttleTip, boardGone, takePendingHiveOpen, validateAbout, validateCap, validateFolders, validateSpec, withCoordinatorText,
+  HIVE_PROMPT_KINDS, hiveOwnsPromptIn, MAX_INSTRUCTIONS, openTargetFor, pausedLabel, slugify, throttleTip, boardGone, takePendingHiveOpen, validateAbout, validateCap, validateFolders, validateSpec, withCoordinatorText,
 } from './model';
 
 describe('boardGone', () => {
@@ -154,32 +154,6 @@ describe('folderName', () => {
     expect(folderName('/x/Claude-Tmp', [])).toBe('Claude-Tmp-2');
     expect(folderName('/r/Web', ['web'])).toBe('Web-2');
     expect(folderName('/r/.dots', [])).toBe('dots');
-  });
-});
-
-describe('isEligible', () => {
-  const shell = { id: 's', tab_type: 'terminal' };
-  const ws = (tabs: Parameters<typeof isEligible>[0]['panes'][number]['tabs'], extra: object = {}) => ({ panes: [{ tabs }], ...extra });
-
-  it('offers an empty workspace or one fresh shell', () => {
-    expect(isEligible(ws([]), [])).toBe(true);
-    expect(isEligible(ws([shell]), [])).toBe(true);
-    expect(isEligible(ws([shell]), [{ tab_id: 's', status: 'done' }])).toBe(true);
-  });
-
-  it('never a used shell, two tabs, or a special workspace', () => {
-    expect(isEligible(ws([shell, { id: 't' }]), [])).toBe(false);
-    expect(isEligible(ws([{ ...shell, runtime: 'claude' }]), [])).toBe(false);
-    expect(isEligible(ws([{ ...shell, auto_resume_command: 'claude --resume x' }]), [])).toBe(false);
-    expect(isEligible(ws([{ ...shell, notes: 'mine' }]), [])).toBe(false);
-    expect(isEligible(ws([{ ...shell, tab_type: 'editor' }]), [])).toBe(false);
-    expect(isEligible(ws([shell]), [{ tab_id: 's', status: 'active' }])).toBe(false);
-    expect(isEligible(ws([], { bridge_all: true }), [])).toBe(false);
-    expect(isEligible(ws([], { overlord: true }), [])).toBe(false);
-    expect(isEligible(ws([], { hive: { id: 'h' } }), [])).toBe(false);
-    expect(isEligible(ws([], { suspended: true }), [])).toBe(false);
-    expect(isEligible(ws([], { archived_tabs: [{ id: 'old' }] }), [])).toBe(false);
-    expect(isEligible(ws([], { archived_tabs: [] }), [])).toBe(true);
   });
 });
 
