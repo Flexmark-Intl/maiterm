@@ -134,7 +134,7 @@
   let reached = $state(saved?.reached ?? 0);
   function keepDraft() {
     // Nothing answered yet: nothing to come back to, and the next open finds the defaults again.
-    if (!goal.trim() && !brief.trim() && !instructions.trim() && !briefFiles.length && reached === 0) {
+    if (name === (ws?.name ?? '') && !goal.trim() && !brief.trim() && !instructions.trim() && !briefFiles.length && reached === 0) {
       createDrafts.clear(workspaceId);
       return;
     }
@@ -273,13 +273,15 @@
     closingLone = true;
     try {
       // Asked again at the click: something may have started in that shell since.
+      // Asked with no tabs to read a folder from: the first answer's default Primary stands.
+      const keep = (p: HivePreflight): HivePreflight => ({ ...p, default_primary: preflight?.default_primary ?? p.default_primary });
       const now = await hivePreflight(workspaceId, [], []);
       if (now.closable_tab !== t.id) {
-        preflight = now;
+        preflight = keep(now);
         return;
       }
       await workspacesStore.deleteTab(workspaceId, pane.id, t.id);
-      preflight = await hivePreflight(workspaceId, [], []);
+      preflight = keep(await hivePreflight(workspaceId, [], []));
     } catch (e) {
       loadError = String(e);
       logError(`hive: closing the used tab failed: ${e}`);

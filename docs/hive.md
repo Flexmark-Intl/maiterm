@@ -115,7 +115,7 @@ Nothing in it sends the human away to start over (Darryl, 2026-10-30, after doin
   shell, which the old wording suggested, is what used that shell up.
 - **The menu offers "Make this a Hive…" for any workspace that could be one** (not a Hive, not the
   Overlord's). What stands in the way is the sheet's to say. When it is one used tab with no agent
-  running and no open tasks, and Rust reads its shell as idle at its prompt (`Preflight.closable_tab`, read again at the click), the sheet offers **Close "…" and use this workspace**, on the human's
+  running and no open tasks, and Rust reads its shell as idle at its prompt with no child process, so no background or stopped job (`Preflight.closable_tab`, read again at the click), the sheet offers **Close "…" and use this workspace**, on the human's
   click.
 
 The fields:

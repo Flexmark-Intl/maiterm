@@ -146,6 +146,23 @@ fn shell_check(state: &Arc<AppState>, tab_id: &str) -> Result<(), String> {
     shell_verdict(pty.map(|p| crate::pty::get_pty_foreground_job(state, &p, true).ok().and_then(|f| f.shell_at_prompt)))
 }
 
+/// Stricter than `shell_check`, for offering to close a tab (`Preflight.closable_tab`): its shell
+/// at its prompt AND with no child process at all. A job sent to the background with `&` or
+/// stopped with Ctrl+Z leaves the shell at its prompt, and closing the tab hangs it up too. A
+/// prompt helper that lives under the shell (gitstatusd) also counts: the cost is only that the
+/// button isn't offered, and the human can still close the tab. Blocks on `ps`.
+fn shell_idle_and_childless(state: &Arc<AppState>, tab_id: &str) -> bool {
+    if shell_check(state, tab_id).is_err() {
+        return false;
+    }
+    let Some(pty) = state.tab_pty_map.read().get(tab_id).cloned() else { return true };
+    match crate::pty::pty_child_pid_of(state, &pty) {
+        Some(pid) => crate::pty::manager::child_processes(pid).is_empty(),
+        // Registered without a pid: nothing to read, so nothing is offered.
+        None => !state.pty_registry.read().contains_key(&pty),
+    }
+}
+
 /// `<app data>`: a folder that is it, holds it or sits in it would put the state file, other
 /// Hives' Rust-owned folders and secrets on an agent's reach list, and its `denyWrite` would
 /// cover the coordinator's own home (§6.2).
@@ -355,7 +372,7 @@ pub async fn hive_preflight(
             Ok(None) => (true, None, None),
             Err(e) => (false, Some(e), None),
         };
-        let closable_tab = lone.filter(|t| shell_check(&app, t).is_ok());
+        let closable_tab = lone.filter(|t| shell_idle_and_childless(&app, t));
         let claude = launch::claude_new_enough();
         let app_data = app_data_dir();
         // Never one Create would refuse: a tab sitting in ~ would otherwise propose ~.
