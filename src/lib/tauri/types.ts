@@ -884,6 +884,9 @@ export interface HivePreflight {
   trust_account?: string | null;
   /** With no managed account, the user's own CLAUDE_CONFIG_DIR the agents read trust from. */
   trust_root_dir?: string | null;
+  /** The one used tab in the way, offered for closing: Rust sets it only when that tab's shell is
+   *  idle at its prompt, so nothing running is ever offered. */
+  closable_tab?: string | null;
 }
 
 /** `hive_detect_folder`: what the sheet shows for a picked folder (docs/hive.md §6.1, §6.6). */

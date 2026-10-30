@@ -13,6 +13,7 @@
   as one-copy and flagged (`importVerdict`). Rust re-checks every row (`import_stack`).
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { open as dialogOpen } from '@tauri-apps/plugin-dialog';
   import { error as logError } from '@tauri-apps/plugin-log';
   import Button from '$lib/components/ui/Button.svelte';
@@ -72,6 +73,9 @@
   const saved = draftFor();
   /** Opened on a kept draft: the header offers Start over. */
   let resumed = $state(!!saved);
+  /** Whether the preflight's answer fills in the defaults (the Primary, the cap): a fresh open,
+   *  or a Start over made before it answered. */
+  let useDefaults = !saved;
 
   let preflight = $state<HivePreflight | null>(null);
   /** Until the preflight (and its default Primary's detection) answers: the
@@ -80,7 +84,7 @@
   let loadError = $state<string | null>(null);
   let tools = $state<HiveDetectedTool[] | null>(null);
 
-  let name = $state(saved?.name ?? workspacesStore.workspaces.find((w) => w.id === workspaceId)?.name ?? '');
+  let name = $state(saved?.name || (workspacesStore.workspaces.find((w) => w.id === workspaceId)?.name ?? ''));
   let folders = $state<Folder[]>(saved?.folders ?? []);
   let folderKey = Math.max(0, ...(saved?.folders ?? []).map((f) => f.key));
   let folderNote = $state<string | null>(null);
@@ -129,17 +133,27 @@
   /** The furthest step reached: the rail shows a receipt for each step before it. */
   let reached = $state(saved?.reached ?? 0);
   function keepDraft() {
+    // Nothing answered yet: nothing to come back to, and the next open finds the defaults again.
+    if (!goal.trim() && !brief.trim() && !instructions.trim() && !briefFiles.length && reached === 0) {
+      createDrafts.clear(workspaceId);
+      return;
+    }
+    // A suggestion still being read is read again on reopening, never kept as one that is.
+    const read = Object.fromEntries(Object.entries(suggestions).filter(([, v]) => v !== null));
     createDrafts.set<Draft>(workspaceId, $state.snapshot({
-      name, goal, instructions, brief, briefFiles, rulesOpen, folders, cap, landing, coordModel, coordEffort, workerModel, workerEffort,
-      picked: [...picked], budgetDollars, pushAfterLand, phone, suggestions, shareChoice, picks, step, reached,
+      // Kept only as edited: a rename of the workspace meanwhile otherwise wins.
+      name: name === ws?.name ? '' : name, goal, instructions, brief, briefFiles, rulesOpen, folders, cap, landing, coordModel, coordEffort, workerModel, workerEffort,
+      picked: [...picked], budgetDollars, pushAfterLand, phone, suggestions: read, shareChoice, picks, step, reached,
     }) as Draft);
   }
   function startOver() {
     createDrafts.clear(workspaceId);
     resumed = false;
+    useDefaults = true;
+    createError = null; trustError = null; folderNote = null;
     name = ws?.name ?? '';
     goal = ''; instructions = ''; brief = ''; briefFiles = []; rulesOpen = false;
-    folders = []; folderNote = null; suggestions = {}; shareChoice = {}; picks = {};
+    folders = []; suggestions = {}; shareChoice = {}; picks = {};
     cap = preflight?.default_cap ?? 4; landing = 'base';
     coordModel = 'opus'; coordEffort = 'medium'; workerModel = 'sonnet'; workerEffort = 'high';
     picked = new Set(); budgetDollars = 10; pushAfterLand = false; phone = 'coordinator';
@@ -225,13 +239,10 @@
     try {
       const p = await hivePreflight(workspaceId, ids, live);
       preflight = p;
-      if (saved) {
-        // Trust may have changed while it was closed (Trust it, or claude run in another tab).
-        void recheckTrust();
-      } else {
-        cap = p.default_cap;
-        if (p.default_primary && folders.length === 0) await addFolder(p.default_primary);
-      }
+      if (useDefaults) cap = p.default_cap;
+      // Trust may have changed while it was closed (Trust it, or claude run in another tab).
+      else void recheckTrust();
+      if (p.default_primary && folders.length === 0) await addFolder(p.default_primary);
     } catch (e) {
       loadError = String(e);
       logError(`hive: preflight failed: ${e}`);
@@ -247,9 +258,10 @@
     const tabs = ws?.panes.flatMap((p) => p.tabs) ?? [];
     return tabs.length === 1 ? tabs[0] : null;
   });
+  // Rust names it only when its shell is idle at its prompt (`closable_tab`); a session state or
+  // a task that arrived since is checked here too.
   const closable = $derived(
-    !!preflight && !preflight.eligible && !!lone && !ws?.archived_tabs?.length && !ws?.hive && !ws?.overlord && !ws?.bridge_all && !ws?.suspended
-      && (lone.tab_type ?? 'terminal') === 'terminal' && !lone.hive_role && !lone.service_id
+    !!preflight && !preflight.eligible && !!lone && preflight.closable_tab === lone.id
       && !agentStateStore.getState(lone.id)
       && !tasksStore.forWorkspace(workspaceId).some((k) => k.tab_id === lone.id && k.status !== 'done' && k.status !== 'dropped'),
   );
@@ -260,6 +272,12 @@
     if (!t || !pane || closingLone) return;
     closingLone = true;
     try {
+      // Asked again at the click: something may have started in that shell since.
+      const now = await hivePreflight(workspaceId, [], []);
+      if (now.closable_tab !== t.id) {
+        preflight = now;
+        return;
+      }
       await workspacesStore.deleteTab(workspaceId, pane.id, t.id);
       preflight = await hivePreflight(workspaceId, [], []);
     } catch (e) {
@@ -271,6 +289,17 @@
   }
 
   hiveDetectTools().then((t) => (tools = t)).catch((e) => { tools = []; logError(`hive: tool detection failed: ${e}`); });
+
+  /** The folder's stack suggestions, read once. */
+  function readSuggestions(path: string) {
+    if (path in suggestions) return;
+    suggestions = { ...suggestions, [path]: null };
+    suggestStack(path)
+      .then((s) => (suggestions = { ...suggestions, [path]: s.filter((x) => x.recommended) }))
+      .catch(() => (suggestions = { ...suggestions, [path]: [] }));
+  }
+  // A draft's folders whose suggestions were still being read when it closed.
+  for (const f of untrack(() => folders)) readSuggestions(f.path);
 
   async function addFolder(path: string, at?: number) {
     folderNote = null;
@@ -298,12 +327,7 @@
         repoTop: info.repo_top,
       };
       folders = at !== undefined ? folders.map((x, i) => (i === at ? f : x)) : [...folders, f];
-      if (!(info.path in suggestions)) {
-        suggestions = { ...suggestions, [info.path]: null };
-        suggestStack(info.path)
-          .then((s) => (suggestions = { ...suggestions, [info.path]: s.filter((x) => x.recommended) }))
-          .catch(() => (suggestions = { ...suggestions, [info.path]: [] }));
-      }
+      readSuggestions(info.path);
     } catch (e) {
       folderNote = String(e);
     }
@@ -580,7 +604,7 @@
           <p class="error">{blocked}</p>
           {#if closable && lone}
             <div class="trust">
-              <span class="trust-text">Its conversation stays in Claude's history, so <code>claude --resume</code> in another tab can pick it up.</span>
+              <span class="trust-text">Nothing is running in it.{#if lone.runtime} Its agent's conversation stays in its history, so you can resume it from another tab.{/if}</span>
               <Button variant="secondary" disabled={closingLone} onclick={() => void closeLone()}>{closingLone ? 'Closing…' : `Close “${lone.name}” and use this workspace`}</Button>
             </div>
           {/if}

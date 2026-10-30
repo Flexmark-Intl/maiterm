@@ -111,6 +111,21 @@ pub fn structural_eligibility(ws: &Workspace) -> Result<Option<Replaceable>, Str
     Ok(Some(Replaceable { pane_id: pane_id.to_string(), tab_id: tab.id.clone() }))
 }
 
+/// The workspace's only tab when it alone keeps the workspace from becoming a Hive: everything
+/// else `structural_eligibility` asks holds, the tab is a plain terminal, and closing it takes
+/// nothing but the tab (no bridge, no service, no open task). Whether its shell is idle is
+/// `shell_check`'s, at the caller.
+pub fn lone_used_tab(ws: &Workspace) -> Option<String> {
+    if ws.hive.is_some() || ws.overlord || ws.bridge_all || ws.suspended || !ws.archived_tabs.is_empty() {
+        return None;
+    }
+    let tabs: Vec<(&str, &Tab)> = all_tabs(ws).collect();
+    let [(_, tab)] = tabs.as_slice() else { return None };
+    let plain = tab.tab_type == TabType::Terminal && tab.hive_role.is_none() && tab.service_id.is_none() && tab.agent_bridge.is_none();
+    let tasks = ws.tasks.iter().any(|t| t.tab_id.as_deref() == Some(tab.id.as_str()) && !t.is_retired());
+    (plain && !tasks && structural_eligibility(ws).is_err()).then(|| tab.id.clone())
+}
+
 const SHELL_BUSY: &str = "The shell in this workspace is running something. Stop it, or close the tab, then try again.";
 const SHELL_UNREADABLE: &str = "Couldn't tell whether the shell in this workspace is running something. Close the tab, then try again.";
 const WORKSPACE_CHANGED: &str = "The workspace's tabs changed while the Hive was being made. Try again.";
@@ -172,6 +187,10 @@ pub struct Preflight {
     /// With no managed account, the user's own `CLAUDE_CONFIG_DIR` the agents read trust from
     /// instead of `~/.claude` (`launch::TrustRoot::Dir`).
     pub trust_root_dir: Option<String>,
+    /// The one used tab standing in the way, offered for the human to close: only when nothing
+    /// else does and its shell is idle at its prompt, the test a shell must pass to be replaced
+    /// (`lone_used_tab`, `shell_check`). Never a tab with something running in it.
+    pub closable_tab: Option<String>,
 }
 
 /// The account a new Hive's agents run under, as the human knows it: the active managed Claude
@@ -306,7 +325,7 @@ pub async fn hive_preflight(
 ) -> Result<Preflight, String> {
     crate::instance::hive_refusal()?;
     let label = window.label().to_string();
-    let (structural, last_cwds) = {
+    let (structural, last_cwds, lone) = {
         let data = state.app_data.read();
         let win = data.window(&label).ok_or("Window not found")?;
         let ws = win.workspaces.iter().find(|w| w.id == workspace_id).ok_or("Workspace not found")?;
@@ -316,7 +335,7 @@ pub async fn hive_preflight(
             .flat_map(|w| all_tabs(w))
             .filter_map(|(_, t)| t.last_cwd.clone().map(|c| (t.id.clone(), c)))
             .collect();
-        (structural_eligibility(ws), last)
+        (structural_eligibility(ws), last, lone_used_tab(ws))
     };
     // In the caller's order: the window's active tab, then the one looked at before it.
     let from_cwds = primary_candidates(
@@ -336,6 +355,7 @@ pub async fn hive_preflight(
             Ok(None) => (true, None, None),
             Err(e) => (false, Some(e), None),
         };
+        let closable_tab = lone.filter(|t| shell_check(&app, t).is_ok());
         let claude = launch::claude_new_enough();
         let app_data = app_data_dir();
         // Never one Create would refuse: a tab sitting in ~ would otherwise propose ~.
@@ -360,6 +380,7 @@ pub async fn hive_preflight(
             login_warning: login_check(&prefs),
             trust_account,
             trust_root_dir,
+            closable_tab,
         }
     })
     .await
@@ -1375,6 +1396,32 @@ mod tests {
         assert!(shell_verdict(Some(Some(true))).is_ok());
         assert_eq!(shell_verdict(Some(Some(false))).unwrap_err(), SHELL_BUSY);
         assert_eq!(shell_verdict(Some(None)).unwrap_err(), SHELL_UNREADABLE, "can't tell is never idle");
+    }
+
+    /// Only a used tab that alone stands in the way is offered for closing; a fresh shell, two
+    /// tabs, a bridged tab, one with open tasks or a mesh workspace never is.
+    #[test]
+    fn only_a_lone_used_tab_is_offered_for_closing() {
+        let used = |f: &dyn Fn(&mut Tab)| {
+            let mut ws = empty_ws();
+            let mut t = shell("sh");
+            t.runtime = Some(crate::state::AgentRuntime::Claude);
+            f(&mut t);
+            ws.panes[0].tabs = vec![t];
+            ws
+        };
+        assert_eq!(lone_used_tab(&used(&|_| {})), Some("sh".to_string()));
+        assert_eq!(lone_used_tab(&used(&|t| t.runtime = None)), None, "a fresh shell is replaced, not closed");
+        assert_eq!(lone_used_tab(&used(&|t| t.agent_bridge = serde_json::from_value(serde_json::json!({ "partner_tab_id": "p", "partner_label": "P" })).ok())), None);
+        let mut two = used(&|_| {});
+        two.panes[0].tabs.push(shell("other"));
+        assert_eq!(lone_used_tab(&two), None);
+        let mut mesh = used(&|_| {});
+        mesh.bridge_all = true;
+        assert_eq!(lone_used_tab(&mesh), None);
+        let mut tasked = used(&|_| {});
+        tasked.tasks.push(task("sh", "active"));
+        assert_eq!(lone_used_tab(&tasked), None);
     }
 
     #[test]
