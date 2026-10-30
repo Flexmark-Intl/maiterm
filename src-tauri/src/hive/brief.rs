@@ -373,7 +373,7 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
     b.push_str(&format!("## Goal\n\n{}\n\n", hive.goal.trim()));
     // Yours alone: workers learn what it says through you (§3.5). In whole, like the rules.
     if !hive.brief.trim().is_empty() || !hive.brief_files.is_empty() {
-        b.push_str("## Project brief from your human\n\nThis is yours alone: no worker sees it.\n\n");
+        b.push_str("## Project brief from your human\n\nThis is yours alone: no worker is given it.\n\n");
         if !hive.brief.trim().is_empty() {
             b.push_str(&format!("{}\n\n", hive.brief.trim()));
         }

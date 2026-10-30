@@ -345,11 +345,17 @@ pub const SOURCE_CRITERIA: &str = "criteria";
 
 /// What a spawn hears while the human hasn't confirmed the criteria. A reviewer never does: it
 /// reviews work already started.
-pub fn criteria_spawn_refusal(hive: &Hive) -> Option<&'static str> {
+/// `tasks` is the workspace's rows: a question dismissed, cleared or deleted without an answer
+/// leaves nothing to wait for, so the coordinator is told to ask again rather than to wait.
+pub fn criteria_spawn_refusal(hive: &Hive, tasks: &[Task]) -> Option<&'static str> {
     match hive.criteria_confirm.as_str() {
         CRITERIA_NEEDED => Some(
             "Your human confirms this Hive's completion criteria before any worker starts: set them with hiveSetCriteria, \
              and spawn once they confirm.",
+        ),
+        CRITERIA_ASKED if !criteria_question_waiting(hive, tasks) => Some(
+            "Your question on the completion criteria is no longer waiting: it was cleared without an answer. If your human \
+             told you their answer another way, ask again with hiveSetCriteria; no worker starts until they confirm on the row.",
         ),
         CRITERIA_ASKED => Some(
             "Your human hasn't confirmed the completion criteria yet: their answer comes on your \u{201c}Completion criteria \
@@ -357,6 +363,11 @@ pub fn criteria_spawn_refusal(hive: &Hive) -> Option<&'static str> {
         ),
         _ => None,
     }
+}
+
+/// The question `criteria_key` names still stands on its row.
+fn criteria_question_waiting(hive: &Hive, tasks: &[Task]) -> bool {
+    tasks.iter().any(|t| t.blocker.as_ref().is_some_and(|b| super::prompts::blocker_key(&t.id, &b.asked_at) == hive.criteria_key))
 }
 
 /// The human's question, in maiTerm's words: the criteria as the coordinator set them.

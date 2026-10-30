@@ -535,7 +535,7 @@ async fn a_new_hives_criteria_are_asked_and_only_confirm_on_the_newest_question_
     use crate::hive::record::{CRITERIA_ASKED, CRITERIA_CONFIRMED, CRITERIA_NEEDED};
     let rig = Rig::new("base");
     rig.data.write().windows[0].workspaces[0].hive.as_mut().unwrap().criteria_confirm = CRITERIA_NEEDED.into();
-    assert!(finish::criteria_spawn_refusal(&rig.hive()).unwrap().contains("hiveSetCriteria"));
+    assert!(finish::criteria_spawn_refusal(&rig.hive(), &rig.tasks()).unwrap().contains("hiveSetCriteria"));
 
     let set = |list: &[&str]| json!({ "criteria": list });
     let out = finish::set_criteria_tool(&rig.ctx(), &rig.caller, &set(&["The API answers /login"])).await.unwrap();
@@ -544,7 +544,11 @@ async fn a_new_hives_criteria_are_asked_and_only_confirm_on_the_newest_question_
     assert_eq!(first.question, "Are these the completion criteria for \u{201c}Ship it\u{201d}?");
     assert_eq!(first.context.as_deref(), Some("1. The API answers /login\nNo worker starts until you confirm them."));
     assert_eq!(rig.hive().criteria_confirm, CRITERIA_ASKED);
-    assert!(finish::criteria_spawn_refusal(&rig.hive()).unwrap().contains("hasn't confirmed"));
+    assert!(finish::criteria_spawn_refusal(&rig.hive(), &rig.tasks()).unwrap().contains("hasn't confirmed"));
+    // Dismissed without an answer: nothing to wait for, so ask again.
+    let mut cleared = rig.tasks();
+    cleared.iter_mut().filter(|t| t.title == CRITERIA_TASK_TITLE).for_each(|t| t.blocker = None);
+    assert!(finish::criteria_spawn_refusal(&rig.hive(), &cleared).unwrap().contains("no longer waiting"));
 
     // A changed list asks again on the same row; only the newest question counts.
     let first_key = rig.hive().criteria_key;
@@ -560,7 +564,7 @@ async fn a_new_hives_criteria_are_asked_and_only_confirm_on_the_newest_question_
     rig.answer_row(CRITERIA_TASK_TITLE, CRITERIA_CONFIRM).await;
     let h = rig.hive();
     assert_eq!((h.criteria_confirm.as_str(), h.criteria_key.as_str()), (CRITERIA_CONFIRMED, ""));
-    assert!(finish::criteria_spawn_refusal(&h).is_none());
+    assert!(finish::criteria_spawn_refusal(&h, &rig.tasks()).is_none());
     let asked = rig.lines().into_iter().filter(|l| l.event == EVENT_ASKED && l.source == finish::SOURCE_CRITERIA).count();
     assert_eq!(asked, 3, "each question logged");
 

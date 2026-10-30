@@ -268,7 +268,9 @@ was the wrong place for a plan: Darryl avoided Instructions for that reason. So 
 sheet's Goal step has two fields:
 
 - **Project brief: the coordinator's alone.** It goes into `brief.md` whole, with the attached
-  files listed by their copies' paths. No worker's brief carries it. **Workers know what the
+  files listed by their copies' paths. No worker's brief carries it. That is about focus, not
+  secrecy: a worker's sandbox limits writes and network, not reads, so one that went looking on
+  disk could find it. **Workers know what the
   coordinator tells them**: their spawn brief, their role, the rules and shared memory. The
   coordinator's brief says so, and asks that each spawn's brief carry the context its task needs.
 - **Rules for every agent**: what was Instructions, renamed and folded away. Kept for rules that

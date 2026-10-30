@@ -998,7 +998,9 @@ pub fn copy_brief_files(sources: &[String], home: &Path) -> Result<Vec<String>, 
         };
         let mut candidate = name.clone();
         let mut n = 2;
-        while names.contains(&candidate) {
+        // Asked of the disk too: APFS folds case and Unicode form, so `Spec.md` and `spec.md`
+        // would be one file there.
+        while names.contains(&candidate) || std::fs::symlink_metadata(dir.join(&candidate)).is_ok() {
             candidate = format!("{stem}-{n}{ext}");
             n += 1;
         }
@@ -1419,6 +1421,12 @@ mod tests {
         let names = copy_brief_files(&[s(&a.join("plan.md")), s(&b.join("plan.md")), s(&a.join("Makefile"))], &home).unwrap();
         assert_eq!(names, vec!["plan.md", "plan-2.md", "Makefile"]);
         assert_eq!(std::fs::read_to_string(home.join("brief/plan-2.md")).unwrap(), "second", "each its own copy");
+        std::fs::write(b.join("PLAN.md"), "third").unwrap();
+        // True on APFS's default (case-insensitive), false on a case-sensitive disk such as CI's.
+        let folds_case = home.join("brief/PLAN.md").exists();
+        let more = copy_brief_files(&[s(&b.join("PLAN.md"))], &home).unwrap();
+        assert_eq!(more != vec!["PLAN.md"], folds_case, "a name the disk already holds, whatever its case, gets a number");
+        assert_eq!(std::fs::read_to_string(home.join("brief/plan.md")).unwrap(), "first", "nothing overwritten");
         assert!(copy_brief_files(&[s(&a)], &home).unwrap_err().contains("isn't a file"));
         assert!(copy_brief_files(&[s(&a.join("gone.md"))], &home).unwrap_err().contains("isn't there"));
         let _ = std::fs::remove_dir_all(&base);

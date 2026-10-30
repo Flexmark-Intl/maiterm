@@ -719,7 +719,7 @@ pub(crate) fn register(hive: &Hive, paths: &HivePaths, a: SpawnArgs, tasks: &[Ta
     // What done means is agreed before any work starts (§11.4). A reviewer reviews work already
     // started, so it never waits on this.
     if plan.reviews.is_none() {
-        if let Some(why) = super::finish::criteria_spawn_refusal(hive) {
+        if let Some(why) = super::finish::criteria_spawn_refusal(hive, tasks) {
             return Err(why.to_string());
         }
     }
@@ -3837,7 +3837,8 @@ mod tests {
         use crate::hive::record::{CRITERIA_ASKED, CRITERIA_CONFIRMED, CRITERIA_NEEDED};
         let mut rig = Rig::new("criteria", 4);
         let p = rig.caller.paths.clone();
-        for (state, says) in [(CRITERIA_NEEDED, "hiveSetCriteria"), (CRITERIA_ASKED, "hasn't confirmed")] {
+        // Asked with no question on any row: it was cleared, so the coordinator asks again.
+        for (state, says) in [(CRITERIA_NEEDED, "hiveSetCriteria"), (CRITERIA_ASKED, "no longer waiting")] {
             rig.caller.hive.criteria_confirm = state.into();
             let e = rig.spawn(accept, args("Login API")).await.unwrap_err();
             assert!(e.contains(says), "{e}");

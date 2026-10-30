@@ -495,7 +495,7 @@
           <label class="field">
             <span class="label">Project brief <span class="opt">optional</span></span>
             <textarea rows="7" bind:value={brief} placeholder="What the queen needs to start: the plan, who it's for, constraints, links. Or where to get them: “Bridge to the API tab for the specs.”"></textarea>
-            <span class="hint">Only the queen reads this; workers get what she tells them.</span>
+            <span class="hint">Given to the queen only; workers get what she tells them.</span>
             <span class="hint count" class:over={briefCount > MAX_BRIEF}>{briefCount.toLocaleString()} / 32,000 characters</span>
           </label>
           <div class="brief-files">
