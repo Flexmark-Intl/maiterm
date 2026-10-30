@@ -330,7 +330,7 @@ were checked against each provider's docs on 2026-10-28.
   keychain item like any other: on Linux and Windows a same-user agent can read it without a
   prompt, as it could a local-vault value. What a provider adds is a narrow scope (one config),
   Doppler's audit log, revocation from anywhere and nothing on disk. **Whether that is enough for
-  prod is Darryl's call** (§16.1), against requiring 1Password for prod.
+  prod would be decided if Doppler is ever added**; for now it isn't (decision 14).
 
 **Infisical (later):** a machine identity scoped to one project and environment.
 
@@ -1408,7 +1408,7 @@ maiTerm should lean on them instead of its own vault:
     it does and doesn't protect. Prod values need a provider. Through 1Password, each human
     action that reads prod costs one biometric or system authorization, in a process that exits
     afterwards (§5.1). Through Doppler, prod gains scope, audit and revocation but no per-use
-    gate, and whether that is enough is open (§16.1). That drops the OS-guarded local prod store,
+    gate, which is part of why Doppler is deferred (decision 14). That drops the OS-guarded local prod store,
     the heaviest and weakest part of the earlier design.
 
 ### 16.1 Added 2026-10-23: considerations raised after the decisions
