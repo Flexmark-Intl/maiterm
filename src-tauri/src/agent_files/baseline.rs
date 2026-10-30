@@ -675,12 +675,20 @@ mod tests {
         b.content.as_deref()
     }
 
+    /// Real disk reads outlast 25 ms on a loaded CI runner (Windows twice), which records a
+    /// timeout and fails a test about something else. Only the deadline's own test keeps it.
+    const ROOMY: Duration = Duration::from_secs(5);
+
+    fn store() -> Arc<Baselines> {
+        Baselines::with(Arc::new(read_capped), ROOMY, BUDGET)
+    }
+
     #[tokio::test]
     async fn only_the_first_write_in_a_turn_captures() {
         let d = dir("first");
         let f = p(&d, "a.ts");
         std::fs::write(&f, "v1\n").unwrap();
-        let b = Baselines::new();
+        let b = store();
         let got = b.capture("t1", "s1", "claude", 1, vec![f.clone()]).await;
         assert_eq!(got, vec![(f.clone(), Some(true))]);
         // The agent's first edit lands; its second edit in the same turn captures nothing.
@@ -701,7 +709,7 @@ mod tests {
     async fn a_new_file_is_none_and_said_not_to_exist() {
         let d = dir("new");
         let f = p(&d, "new.ts");
-        let b = Baselines::new();
+        let b = store();
         assert_eq!(b.capture("t1", "s1", "claude", 1, vec![f.clone()]).await, vec![(f.clone(), Some(false))]);
         let got = b.lookup("t1", "s1", &f, "turn", 1);
         assert_eq!((got.content, got.unavailable), (None, None));
@@ -752,7 +760,7 @@ mod tests {
         std::fs::write(&latin, [0x63, 0x61, 0x66, 0xe9]).unwrap();
         let ok = p(&d, "exactly.txt");
         std::fs::write(&ok, vec![b'a'; MAX_FILE as usize]).unwrap();
-        let b = Baselines::new();
+        let b = store();
         b.capture("t1", "s1", "claude", 1, vec![big.clone(), nul.clone(), latin.clone(), ok.clone()]).await;
         let why = |f: &str| b.lookup("t1", "s1", f, "turn", 1).unavailable;
         assert_eq!(why(&big).as_deref(), Some("too_large"));
@@ -770,7 +778,7 @@ mod tests {
         for f in &files {
             std::fs::write(f, "x".repeat(40)).unwrap();
         }
-        let b = Baselines::with(Arc::new(read_capped), DEADLINE, 100);
+        let b = Baselines::with(Arc::new(read_capped), ROOMY, 100);
         let state = |f: &str, turn: u64| b.lookup("t1", "s1", f, "turn", turn).unavailable;
         b.capture("t1", "s1", "claude", 1, vec![files[0].clone(), files[1].clone()]).await;
         // A turn-2 capture closes turn 1 and goes over the budget: turn 1's oldest goes.
@@ -802,7 +810,7 @@ mod tests {
         for f in &files {
             std::fs::write(f, "x".repeat(40)).unwrap();
         }
-        let b = Baselines::with(Arc::new(read_capped), DEADLINE, 100);
+        let b = Baselines::with(Arc::new(read_capped), ROOMY, 100);
         b.capture("t1", "s1", "claude", 1, vec![new.clone(), nul.clone(), files[0].clone(), files[1].clone()]).await;
         b.capture("t1", "s1", "claude", 2, vec![files[2].clone()]).await;
         // Turn 1's oldest content went; the two older empty records did not.
@@ -822,7 +830,7 @@ mod tests {
         let (a, c) = (p(&d, "a.ts"), p(&d, "c.ts"));
         std::fs::write(&a, "a1\n").unwrap();
         std::fs::write(&c, "c1\n").unwrap();
-        let b = Baselines::new();
+        let b = store();
         b.capture("t1", "s1", "claude", 3, vec![c.clone()]).await;
         b.capture("t1", "s1", "claude", 2, vec![a.clone(), c.clone()]).await;
         b.rekey("t1", "s1", 2, 3, &[a.clone(), c.clone()]);
@@ -841,7 +849,7 @@ mod tests {
         let d = dir("session");
         let f = p(&d, "a.ts");
         std::fs::write(&f, "old\n").unwrap();
-        let b = Baselines::new();
+        let b = store();
         b.capture("t1", "s1", "claude", 1, vec![f.clone()]).await;
         // A lookup in the ledger's new session never serves the old session's turn 1.
         assert_eq!(b.lookup("t1", "s2", &f, "turn", 1).unavailable.as_deref(), Some("not_captured"));
@@ -873,7 +881,7 @@ mod tests {
         let (a, x) = (p(&d, "a.ts"), p(&d, "x.ts"));
         std::fs::write(&a, "v0\n").unwrap();
         std::fs::write(&x, "x\n").unwrap();
-        let b = Baselines::new();
+        let b = store();
         b.capture("t1", "s1", "claude", 3, vec![a.clone()]).await;
         std::fs::write(&a, "v1\n").unwrap();
         for child in 0..SESSIONS - 1 {
@@ -895,7 +903,7 @@ mod tests {
         std::fs::write(&a, "v0\n").unwrap();
         std::fs::write(&c, "c0\n").unwrap();
         std::fs::write(&x, "x\n").unwrap();
-        let b = Baselines::new();
+        let b = store();
         b.capture("t1", "s1", "claude", 3, vec![a.clone()]).await;
         std::fs::write(&a, "v1\n").unwrap();
         for child in 0..SESSIONS {
@@ -927,7 +935,7 @@ mod tests {
         let d = dir("forgot");
         let a = p(&d, "a.ts");
         std::fs::write(&a, "v0\n").unwrap();
-        let b = Baselines::new();
+        let b = store();
         b.capture("t1", "s1", "claude", 1, vec![a.clone()]).await;
         std::fs::write(&a, "v5\n").unwrap();
         b.lose_session("t1", "s1");
@@ -949,7 +957,7 @@ mod tests {
         let d = dir("back");
         let a = p(&d, "a.ts");
         std::fs::write(&a, "v0\n").unwrap();
-        let b = Baselines::new();
+        let b = store();
         b.capture("t1", "s1", "claude", 3, vec![a.clone()]).await;
         std::fs::write(&a, "v1\n").unwrap();
         b.lose_session("t1", "s1");
@@ -981,7 +989,7 @@ mod tests {
         let d = dir("canon");
         let f = p(&d, "a.ts");
         std::fs::write(&f, "x\n").unwrap();
-        let b = Baselines::new();
+        let b = store();
         b.capture("t1", "s1", "claude", 1, vec![f.clone()]).await;
         let canon = std::fs::canonicalize(&f).unwrap().to_string_lossy().into_owned();
         assert_eq!(content(&b.lookup("t1", "s1", &canon, "turn", 1)), Some("x\n"));
