@@ -26,7 +26,7 @@
   import { normalizeTitle } from '$lib/tasks/model';
   import { hiveDetectFolder, hiveDetectTools, hivePreflight, hiveTrustRepo, suggestStack, type StackSuggestion } from '$lib/tauri/commands';
   import type { HiveDetectedTool, HivePreflight, HiveSpec, Service } from '$lib/tauri/types';
-  import { charCount, folderName, MAX_INSTRUCTIONS, slugify, validateAbout, validateCap, validateFolders, validateSpec } from '$lib/hive/model';
+  import { charCount, folderName, MAX_BRIEF, MAX_BRIEF_FILES, MAX_INSTRUCTIONS, slugify, validateAbout, validateCap, validateFolders, validateSpec } from '$lib/hive/model';
   import { MAX_CAP } from '$lib/hive/change';
   import { createHive } from '$lib/hive/create';
 
@@ -69,6 +69,11 @@
   let folderNote = $state<string | null>(null);
   let goal = $state('');
   let instructions = $state('');
+  // The project brief and its files: the queen's alone (docs/hive.md §3.5).
+  let brief = $state('');
+  let briefFiles = $state<string[]>([]);
+  // Rules for every agent stay folded away until wanted: most Hives need none.
+  let rulesOpen = $state(false);
   let cap = $state(4);
   let landing = $state<'base' | 'integration'>('base');
   let coordModel = $state('opus');
@@ -111,7 +116,7 @@
 
   /** What stops leaving a step, in its own words. */
   function stepProblem(k: StepKey): string | null {
-    if (k === 'goal') return validateAbout({ name, goal, instructions });
+    if (k === 'goal') return validateAbout({ name, goal, instructions, brief, brief_files: briefFiles });
     if (k === 'folders') return primaryPending && !folders.length ? 'Finding your folder…' : validateFolders({ folders });
     if (k === 'crew') return validateCap({ cap: Number(cap) });
     if (k === 'stack') return stackProblem;
@@ -253,6 +258,14 @@
     }
   }
 
+  const fileName = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
+
+  async function attachBriefFiles() {
+    const picked = await dialogOpen({ directory: false, multiple: true, title: 'Attach files to the project brief' }).catch(() => null);
+    const paths = (Array.isArray(picked) ? picked : picked ? [picked] : []).filter((p): p is string => typeof p === 'string' && !!p);
+    briefFiles = [...briefFiles, ...paths.filter((p) => !briefFiles.includes(p))];
+  }
+
   async function pickFolder() {
     const path = await dialogOpen({ directory: true, multiple: false, title: 'Add a folder to the Hive' }).catch(() => null);
     if (typeof path === 'string' && path) await addFolder(path);
@@ -350,7 +363,8 @@
 
   const slug = $derived(slugify(name));
   const instructionCount = $derived(charCount(instructions));
-  const problem = $derived(validateSpec({ name, goal, instructions, folders, cap: Number(cap) }));
+  const briefCount = $derived(charCount(brief));
+  const problem = $derived(validateSpec({ name, goal, instructions, brief, brief_files: briefFiles, folders, cap: Number(cap) }));
   const blocked = $derived(
     !preflight ? 'Checking the workspace…'
       : !preflight.eligible ? (preflight.reason ?? "This workspace can't become a Hive.")
@@ -368,6 +382,8 @@
       name: name.trim(),
       goal: goal.trim(),
       instructions,
+      brief,
+      brief_files: briefFiles,
       folders: folders.map((f) => ({
         name: f.name.trim(),
         path: f.path,
@@ -469,7 +485,7 @@
           <label class="field">
             <span class="label">Goal</span>
             <input bind:value={goal} placeholder="One line: what done looks like" />
-            <span class="hint">Shown on the Hive's header, and the first thing the queen is told.</span>
+            <span class="hint">Shown on the Hive's header. The queen won't start workers on this line alone.</span>
           </label>
           <label class="field">
             <span class="label">Name</span>
@@ -477,10 +493,33 @@
             <span class="hint">The workspace's name, and the workstream's on the task board.{#if landing === 'integration' && slug} Branch: <code>hive/{slug}</code>{/if}</span>
           </label>
           <label class="field">
-            <span class="label">Instructions <span class="opt">optional</span></span>
-            <textarea rows="5" bind:value={instructions} placeholder="Standing rules every agent in the Hive starts from"></textarea>
-            <span class="hint count" class:over={instructionCount > MAX_INSTRUCTIONS}>{instructionCount.toLocaleString()} / 16,000 characters</span>
+            <span class="label">Project brief <span class="opt">optional</span></span>
+            <textarea rows="7" bind:value={brief} placeholder="What the queen needs to start: the plan, who it's for, constraints, links. Or where to get them: “Bridge to the API tab for the specs.”"></textarea>
+            <span class="hint">Only the queen reads this; workers get what she tells them.</span>
+            <span class="hint count" class:over={briefCount > MAX_BRIEF}>{briefCount.toLocaleString()} / 32,000 characters</span>
           </label>
+          <div class="brief-files">
+            {#each briefFiles as f (f)}
+              <div class="brief-file">
+                <code>{fileName(f)}</code>
+                <IconButton tooltip="Remove {fileName(f)}" onclick={() => (briefFiles = briefFiles.filter((x) => x !== f))} aria-label="Remove {fileName(f)}">&times;</IconButton>
+              </div>
+            {/each}
+            {#if briefFiles.length < MAX_BRIEF_FILES}
+              <Button variant="secondary" onclick={attachBriefFiles}>Attach files…</Button>
+            {/if}
+            <span class="hint">A plan, a spec, notes. Copied for the queen when the Hive is made.</span>
+          </div>
+          {#if rulesOpen || instructions.trim()}
+            <label class="field">
+              <span class="label">Rules for every agent <span class="opt">optional</span></span>
+              <textarea rows="4" bind:value={instructions} placeholder="Rules for all work, whatever the task: “use pnpm”, “don't touch legacy/”, “British English”"></textarea>
+              <span class="hint">Every worker gets these too, so keep them short.</span>
+              <span class="hint count" class:over={instructionCount > MAX_INSTRUCTIONS}>{instructionCount.toLocaleString()} / 16,000 characters</span>
+            </label>
+          {:else}
+            <button type="button" class="reveal" onclick={() => (rulesOpen = true)}>Add rules for every agent</button>
+          {/if}
 
         {:else if current.key === 'folders'}
           <p class="lede">Workers get their own copies of each git folder, and land their work back into it. A plain folder is shared read-only.</p>
@@ -679,9 +718,15 @@
               {stackRows.length ? `Its stack: ${stackRows.map((r) => r.name).join(', ')}.` : 'It has no stack services.'}
               On your phone: {PHONE_TEXT[phone].toLowerCase()}.
             </p>
-            {#if instructions.trim()}
-              <p class="hint">Every agent starts from your {instructionCount.toLocaleString()} characters of instructions.</p>
-            {/if}
+            <p>
+              {#if brief.trim() || briefFiles.length}
+                It starts from your project brief{briefFiles.length ? ` and ${briefFiles.length} attached file${briefFiles.length === 1 ? '' : 's'}` : ''},
+              {:else}
+                With no project brief it asks you what it needs,
+              {/if}
+              and you confirm its completion criteria before any worker starts.
+              {#if instructions.trim()}Every agent also follows your {instructionCount.toLocaleString()} characters of rules.{/if}
+            </p>
             <p class="hint">Creating it replaces this workspace's shell with the queen, which starts at once.</p>
           </div>
         {/if}
@@ -821,6 +866,13 @@
   .hint { font-size: 0.846rem; color: var(--fg-dim); overflow-wrap: anywhere; line-height: 1.45; }
   .count { align-self: flex-end; font-variant-numeric: tabular-nums; }
   .count.over { color: var(--red, #f7768e); }
+  .brief-files { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+  .brief-files .hint { flex-basis: 100%; }
+  .brief-file { display: inline-flex; align-items: center; gap: 2px; min-width: 0; max-width: 100%; border: 1px solid var(--bg-light); border-radius: 6px; padding-left: 8px; }
+  .brief-file code { font-size: 0.846rem; overflow-wrap: anywhere; }
+  .reveal { align-self: flex-start; background: none; border: 0; padding: 2px 0; color: var(--accent); font: inherit; font-size: 0.923rem; cursor: pointer; }
+  .reveal:hover { text-decoration: underline; }
+  .reveal:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
   .list { display: flex; flex-direction: column; gap: 8px; }
   .row { border: 1px solid var(--bg-light); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
   .row.primary { border-color: color-mix(in srgb, var(--accent) 50%, var(--bg-light)); }

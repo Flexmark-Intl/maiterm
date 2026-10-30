@@ -87,9 +87,21 @@
         </ul>
       </section>
 
+      {#if hive.brief?.trim() || hive.brief_files?.length}
+        <section>
+          <h4>Project brief <span class="who">the queen's only</span></h4>
+          {#if hive.brief?.trim()}<pre class="instr">{hive.brief}</pre>{/if}
+          {#if hive.brief_files?.length}
+            <ul>
+              {#each hive.brief_files as f (f)}<li><code>{f}</code></li>{/each}
+            </ul>
+          {/if}
+        </section>
+      {/if}
+
       {#if hive.instructions.trim()}
         <section>
-          <h4>Instructions</h4>
+          <h4>Rules for every agent</h4>
           <pre class="instr">{hive.instructions}</pre>
         </section>
       {/if}
@@ -129,6 +141,7 @@
   ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 4px; }
   li { color: var(--fg); font-size: 0.8rem; display: flex; flex-direction: column; gap: 1px; overflow-wrap: anywhere; }
   code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.75rem; color: var(--fg-dim); overflow-wrap: anywhere; }
+  .who { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 6px; }
   .instr { margin: 0; font-family: inherit; font-size: 0.8rem; color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12em; overflow-y: auto; }
   .footer { align-items: center; border-top: 1px solid var(--bg-light); display: flex; justify-content: flex-end; padding: 10px 14px; }
   .btn {

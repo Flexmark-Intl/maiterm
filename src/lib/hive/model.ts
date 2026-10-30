@@ -139,8 +139,12 @@ export function takePendingHiveOpen(workspaceId: string, now = Date.now()): Hive
 
 // ── The Create sheet (docs/hive.md §3). Rust re-checks all of this in `hive_create`. ──────────
 
-/** Projects' instructions limit, in characters (Rust counts `chars()`): refused, never cut. */
+/** Projects' instructions limit, in characters (Rust counts `chars()`): refused, never cut.
+ *  The Hive's rules for every agent. */
 export const MAX_INSTRUCTIONS = 16_000;
+/** The project brief's limit, and the files attached to it (Rust's `create::MAX_BRIEF*`). */
+export const MAX_BRIEF = 32_000;
+export const MAX_BRIEF_FILES = 10;
 
 /** Characters as Rust counts them (code points), not UTF-16 units. */
 export const charCount = (s: string) => [...s].length;
@@ -161,6 +165,8 @@ type SpecFields = {
   name: string;
   goal: string;
   instructions: string;
+  brief?: string;
+  brief_files?: string[];
   folders: SpecFolder[];
   cap: number;
 };
@@ -171,13 +177,16 @@ export function validateSpec(spec: SpecFields): string | null {
   return validateAbout(spec) ?? validateFolders(spec) ?? validateCap(spec);
 }
 
-/** The wizard's Goal step: the name, the goal, the instructions. */
-export function validateAbout(spec: Pick<SpecFields, 'name' | 'goal' | 'instructions'>): string | null {
+/** The wizard's Goal step: the name, the goal, the project brief and its files, the rules. */
+export function validateAbout(spec: Pick<SpecFields, 'name' | 'goal' | 'instructions' | 'brief' | 'brief_files'>): string | null {
   if (!spec.name.trim()) return 'Name the Hive.';
   if (!slugify(spec.name)) return "The name needs at least one letter or digit: it names the Hive's branches.";
   if (!spec.goal.trim()) return 'Give the Hive a goal.';
   const n = charCount(spec.instructions);
-  if (n > MAX_INSTRUCTIONS) return `The instructions are ${n} characters; the limit is 16,000. Shorten them: nothing is cut.`;
+  if (n > MAX_INSTRUCTIONS) return `The rules for every agent are ${n} characters; the limit is 16,000. Shorten them: nothing is cut.`;
+  const b = charCount(spec.brief ?? '');
+  if (b > MAX_BRIEF) return `The project brief is ${b} characters; the limit is 32,000. Shorten it, or attach the rest as a file.`;
+  if ((spec.brief_files?.length ?? 0) > MAX_BRIEF_FILES) return `Attach at most ${MAX_BRIEF_FILES} files to the project brief.`;
   return null;
 }
 

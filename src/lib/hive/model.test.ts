@@ -80,6 +80,8 @@ describe('validateSpec', () => {
     name: 'Ship it',
     goal: 'Ship the thing',
     instructions: '',
+    brief: '',
+    brief_files: [] as string[],
     folders: [{ path: '/r/web', primary: true }],
     cap: 4,
   };
@@ -107,6 +109,13 @@ describe('validateSpec', () => {
     expect(with_({ name: ' ' })).toBe('Name the Hive.');
     expect(with_({ name: '!!!' })).toMatch(/letter or digit/);
     expect(with_({ goal: '' })).toMatch(/goal/);
+  });
+
+  it('limits the project brief and its files as Rust does, refused and never cut', () => {
+    expect(with_({ brief: 'é'.repeat(32_000) })).toBeNull();
+    expect(with_({ brief: 'x'.repeat(32_001) })).toMatch(/project brief is 32001 characters/);
+    expect(with_({ brief_files: Array(11).fill('/a/plan.md') })).toMatch(/at most 10 files/);
+    expect(with_({ instructions: 'x'.repeat(16_001) })).toMatch(/^The rules for every agent are 16001/);
   });
 
   it('takes any cap from 1 to 64: no machine ceiling, memory pressure governs', () => {

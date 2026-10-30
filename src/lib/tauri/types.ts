@@ -506,7 +506,15 @@ export interface Hive {
   /** Its own uuid, never the workspace id: names `<app data>/hive/<id>/`. */
   id: string;
   goal: string;
+  /** Rules for every agent in the Hive, workers included (the field keeps its first name). */
   instructions: string;
+  /** The project brief: the queen's alone, never a worker's. Absent when empty. */
+  brief?: string;
+  /** Files attached to it, copied into the queen's home under `brief/`: their names there. */
+  brief_files?: string[];
+  /** Whether the human confirms the completion criteria before the first worker starts:
+   *  absent (a Hive from before it) | "needed" | "asked" | "confirmed". */
+  criteria_confirm?: string;
   folders: HiveFolder[];
   /** Workers at once, enforced in Rust. */
   cap: number;
@@ -809,7 +817,12 @@ export interface HiveModel {
 export interface HiveSpec {
   name: string;
   goal: string;
+  /** Rules for every agent (`Hive.instructions`). */
   instructions: string;
+  /** The project brief, the queen's alone. */
+  brief: string;
+  /** Full paths of files attached to it; Rust copies them at creation. */
+  brief_files: string[];
   folders: HiveFolder[];
   cap: number;
   landing_mode: string;

@@ -15,7 +15,7 @@ use tauri::State;
 use super::layout::{self, FolderInfo};
 use super::launch;
 use super::paths::{hive_root, HivePaths};
-use super::record::{Hive, HiveFolder, HiveModels, HiveSettings, KIND_GIT, KIND_PLAIN, LANDING_BASE, LANDING_INTEGRATION, STATUS_ACTIVE};
+use super::record::{Hive, HiveFolder, HiveModels, HiveSettings, CRITERIA_NEEDED, KIND_GIT, KIND_PLAIN, LANDING_BASE, LANDING_INTEGRATION, STATUS_ACTIVE};
 use super::ROLE_COORDINATOR;
 use crate::state::app_state::StackRuntimeRow;
 use crate::state::workspace::TabType;
@@ -24,6 +24,13 @@ use crate::state::{save_state, AppData, AppState, Service, Tab, Workspace};
 /// Projects' instructions limit. Over it is refused, never cut: a truncated rule reads as a
 /// different rule (§3).
 pub const MAX_INSTRUCTIONS: usize = 16_000;
+/// The project brief, in characters: refused, never cut (the TS twin is `MAX_BRIEF`).
+pub const MAX_BRIEF: usize = 32_000;
+/// Files attached to the project brief: how many, and how big each.
+pub const MAX_BRIEF_FILES: usize = 10;
+pub const MAX_BRIEF_FILE_BYTES: u64 = 5 * 1024 * 1024;
+/// The coordinator home's folder holding them.
+pub const BRIEF_FILES_DIR: &str = "brief";
 /// Workers at once on a new Hive (§6.8): a ceiling, not a target. The coordinator starts only what
 /// the plan needs, and memory pressure and the run queue govern the machine.
 pub const DEFAULT_CAP: u32 = 24;
@@ -594,7 +601,12 @@ pub async fn hive_detect_tools(state: State<'_, Arc<AppState>>) -> Result<Vec<De
 pub struct HiveSpec {
     pub name: String,
     pub goal: String,
+    /// Rules for every agent (`Hive.instructions`).
     pub instructions: String,
+    /// The project brief, the coordinator's alone (`Hive.brief`).
+    pub brief: String,
+    /// Full paths of the files attached to it, copied at creation (`copy_brief_files`).
+    pub brief_files: Vec<String>,
     pub folders: Vec<HiveFolder>,
     pub cap: u32,
     pub landing_mode: String,
@@ -617,6 +629,8 @@ impl Default for HiveSpec {
             name: String::new(),
             goal: String::new(),
             instructions: String::new(),
+            brief: String::new(),
+            brief_files: Vec::new(),
             folders: Vec::new(),
             cap: DEFAULT_CAP,
             landing_mode: LANDING_BASE.to_string(),
@@ -755,7 +769,17 @@ pub fn validate_spec(spec: &HiveSpec) -> Result<(), String> {
     }
     let n = spec.instructions.chars().count();
     if n > MAX_INSTRUCTIONS {
-        return Err(format!("The instructions are {n} characters; the limit is 16,000. Shorten them: nothing is cut."));
+        return Err(format!("The rules for every agent are {n} characters; the limit is 16,000. Shorten them: nothing is cut."));
+    }
+    let n = spec.brief.chars().count();
+    if n > MAX_BRIEF {
+        return Err(format!("The project brief is {n} characters; the limit is 32,000. Shorten it, or attach the rest as a file."));
+    }
+    if spec.brief_files.len() > MAX_BRIEF_FILES {
+        return Err(format!("Attach at most {MAX_BRIEF_FILES} files to the project brief."));
+    }
+    if spec.brief_files.iter().any(|f| !crate::share::expand_tilde(f.trim()).is_absolute()) {
+        return Err("Every attached file needs a full path.".to_string());
     }
     match spec.folders.iter().filter(|f| f.primary).count() {
         0 => return Err("Pick a Primary folder.".to_string()),
@@ -844,6 +868,10 @@ pub fn build_hive(spec: &HiveSpec, id: String, folders: Vec<HiveFolder>) -> Hive
         // One line: it's the header and the kickoff's last words.
         goal: spec.goal.split_whitespace().collect::<Vec<_>>().join(" "),
         instructions: spec.instructions.clone(),
+        brief: spec.brief.trim().to_string(),
+        // The copies' names, set once they're made (`copy_brief_files`).
+        brief_files: Vec::new(),
+        criteria_confirm: CRITERIA_NEEDED.to_string(),
         folders,
         cap: spec.cap,
         landing_mode: spec.landing_mode.clone(),
@@ -944,6 +972,42 @@ pub struct HiveCreated {
     pub replace_tab: Option<Replaceable>,
 }
 
+/// The project brief's attached files, copied into the coordinator's home (`brief/`), so it reads
+/// them in its own folder as they were when the Hive was made. Their names there, in order: a
+/// name already taken gets a number before its extension.
+pub fn copy_brief_files(sources: &[String], home: &Path) -> Result<Vec<String>, String> {
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dir = home.join(BRIEF_FILES_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't make the project brief's folder: {e}"))?;
+    let mut names: Vec<String> = Vec::new();
+    for s in sources {
+        let src = crate::share::expand_tilde(s.trim());
+        let meta = std::fs::metadata(&src).map_err(|_| format!("The attached file {} isn't there.", src.display()))?;
+        if !meta.is_file() {
+            return Err(format!("{} isn't a file: attach files, not folders.", src.display()));
+        }
+        if meta.len() > MAX_BRIEF_FILE_BYTES {
+            return Err(format!("{} is over 5 MB: attach a smaller file, or put it in one of the Hive's folders.", src.display()));
+        }
+        let name = src.file_name().map(|n| n.to_string_lossy().to_string()).filter(|n| !n.is_empty()).ok_or_else(|| format!("{} has no file name.", src.display()))?;
+        let (stem, ext) = match name.rsplit_once('.') {
+            Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+            _ => (name.clone(), String::new()),
+        };
+        let mut candidate = name.clone();
+        let mut n = 2;
+        while names.contains(&candidate) {
+            candidate = format!("{stem}-{n}{ext}");
+            n += 1;
+        }
+        std::fs::copy(&src, dir.join(&candidate)).map_err(|e| format!("Couldn't copy {}: {e}", src.display()))?;
+        names.push(candidate);
+    }
+    Ok(names)
+}
+
 #[tauri::command]
 pub async fn hive_create(
     window: tauri::Window,
@@ -987,6 +1051,13 @@ pub async fn hive_create(
             let _ = std::fs::remove_dir_all(&root);
         })?;
         let paths = HivePaths::new(&root);
+        match copy_brief_files(&spec_for_disk.brief_files, &paths.coordinator_home()) {
+            Ok(names) => hive.brief_files = names,
+            Err(e) => {
+                layout::undo_layout(&root, &hive);
+                return Err(e);
+            }
+        }
         if let Err(e) = launch::write_record(&paths.coordinator_task(), &launch::coordinator_record(&hive, &paths)) {
             layout::undo_layout(&root, &hive);
             return Err(e);
@@ -1117,6 +1188,19 @@ mod tests {
 
     fn the_shell(ws: &Workspace) -> Replaceable {
         Replaceable { pane_id: ws.panes[0].id.clone(), tab_id: "sh".into() }
+    }
+
+    /// A new Hive waits for its criteria to be confirmed; one from before that, with no state
+    /// recorded, never does.
+    #[test]
+    fn a_new_hive_keeps_its_brief_and_waits_for_confirmed_criteria() {
+        let hive = build_hive(&HiveSpec { brief: "  The plan.\n".into(), ..HiveSpec::default() }, "h1".into(), Vec::new());
+        assert_eq!((hive.brief.as_str(), hive.criteria_confirm.as_str()), ("The plan.", CRITERIA_NEEDED));
+        assert!(hive.criteria_unconfirmed());
+        let old: Hive = serde_json::from_value(serde_json::json!({ "id": "h0", "goal": "g" })).unwrap();
+        assert!(!old.criteria_unconfirmed(), "a Hive from before the gate isn't held by it");
+        let saved = serde_json::to_value(&old).unwrap();
+        assert!(saved.get("brief").is_none() && saved.get("criteria_confirm").is_none(), "nothing new written for it");
     }
 
     /// "Keep this Hive's agents off the phone": the coordinator is excluded before its launch,
@@ -1321,6 +1405,26 @@ mod tests {
     // `/r/web` is absolute only on Unix; no Hive is made on Windows (§14.16).
     #[cfg(unix)]
     #[test]
+    fn brief_files_are_copied_into_the_coordinators_home_under_names_of_their_own() {
+        let base = std::env::temp_dir().join(format!("hive-brief-{}", uuid::Uuid::new_v4()));
+        let (a, b, home) = (base.join("a"), base.join("b"), base.join("home"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("plan.md"), "first").unwrap();
+        std::fs::write(b.join("plan.md"), "second").unwrap();
+        std::fs::write(a.join("Makefile"), "m").unwrap();
+        let s = |p: &Path| p.to_string_lossy().to_string();
+        assert_eq!(copy_brief_files(&[], &home).unwrap(), Vec::<String>::new());
+        assert!(!home.exists(), "nothing attached, no folder");
+        let names = copy_brief_files(&[s(&a.join("plan.md")), s(&b.join("plan.md")), s(&a.join("Makefile"))], &home).unwrap();
+        assert_eq!(names, vec!["plan.md", "plan-2.md", "Makefile"]);
+        assert_eq!(std::fs::read_to_string(home.join("brief/plan-2.md")).unwrap(), "second", "each its own copy");
+        assert!(copy_brief_files(&[s(&a)], &home).unwrap_err().contains("isn't a file"));
+        assert!(copy_brief_files(&[s(&a.join("gone.md"))], &home).unwrap_err().contains("isn't there"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn the_spec_is_validated_like_the_sheet() {
         assert_eq!(validate_spec(&spec()), Ok(()));
         let bad = |f: &dyn Fn(&mut HiveSpec)| {
@@ -1331,6 +1435,10 @@ mod tests {
         assert!(bad(&|s| s.instructions = "x".repeat(MAX_INSTRUCTIONS)).is_none(), "16,000 exactly is allowed");
         let over = bad(&|s| s.instructions = "é".repeat(MAX_INSTRUCTIONS + 1)).unwrap();
         assert!(over.contains("16001") && over.contains("nothing is cut"), "counted in characters, refused: {over}");
+        assert!(bad(&|s| s.brief = "é".repeat(MAX_BRIEF)).is_none(), "32,000 exactly is allowed");
+        assert!(bad(&|s| s.brief = "x".repeat(MAX_BRIEF + 1)).unwrap().contains("32001"));
+        assert!(bad(&|s| s.brief_files = vec!["/a/plan.md".into(); MAX_BRIEF_FILES + 1]).unwrap().contains("at most 10"));
+        assert!(bad(&|s| s.brief_files = vec!["plan.md".into()]).unwrap().contains("full path"));
         assert!(bad(&|s| s.folders[0].primary = false).unwrap().contains("Primary"));
         assert!(bad(&|s| s.folders.push(HiveFolder { name: "api".into(), path: "/r/api".into(), primary: true, ..HiveFolder::default() })).is_some());
         assert!(bad(&|s| s.folders[0].path = "relative/web".into()).is_some());

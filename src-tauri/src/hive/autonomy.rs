@@ -382,6 +382,9 @@ pub(crate) async fn after_blocker_answer<W: HiveWindow>(ctx: &Ctx<'_, W>, caller
                 Err(e) => log::warn!("hive {}: the human's plan answer not recorded: {e}", caller.hive.id),
             }
         }
+        Some(f) if f.source == super::finish::SOURCE_CRITERIA => {
+            super::finish::on_criteria_answered(ctx, caller, line.key.as_deref().unwrap_or_default(), line.answer.as_deref().unwrap_or_default());
+        }
         _ => {}
     }
     review(ctx, caller).await;

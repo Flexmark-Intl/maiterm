@@ -97,7 +97,7 @@ each was made, in the spirit of Higgsfield's library.
 Creating a Hive is a guided wizard, opened from the workspace row's menu ("Make this a Hive…").
 It's offered only when the workspace has **no tabs** (or only one fresh, unused shell, which the
 Hive replaces). One question a step (Darryl, 2026-10-27: the single scrolling sheet read as a
-preferences screen): **Goal** (goal, name, instructions), **Folders**, **Crew** (workers at once,
+preferences screen): **Goal** (goal, name, project brief and its files, rules for every agent folded away), **Folders**, **Crew** (workers at once,
 models, how work lands, push after land, the phone), **Tools** (tools, budget), **Stack**, and
 **Review**, a plain-language account of what Create will start. Every step but Goal and Folders
 has defaults, so Next is all most of them need. The step rail is a running receipt: a step passed
@@ -108,8 +108,9 @@ shows what was chosen there, and any step whose earlier steps are complete opens
 |---|---|
 | Name | The workspace name; also the workstream name on the task board |
 | Folders | **Primary** (required) plus any number more. The Primary defaults to the folder of the window's active tab (the workspace being converted usually has none, so it's the tab the human was last looking at), and to nothing when that tab has no known folder; the human then picks one. Each folder is detected as a git repo or a plain folder; a repo shows its Base branch (default: its current branch). See §6.1 |
-| Goal | One line. Shown on the Hive header, and sent to the coordinator first |
-| Instructions | Standing rules, the brief every agent in the Hive starts from (Projects' 16k-char instructions) |
+| Goal | One line. Shown on the Hive header, and sent to the coordinator first. Never enough to start workers on by itself (§3.5) |
+| Project brief | Optional, up to 32,000 characters, plus up to 10 attached files (5 MB each). **The coordinator's alone** (§3.5): the plan, background, constraints, or where to get them ("Bridge to the API tab for the specs") |
+| Rules for every agent | Optional, up to 16,000 characters (Projects' instructions limit), folded away by default. Every worker gets them too, so only rules for all work: tools, style, places not to touch. Stored as `Hive.instructions` |
 | Workers at once | **Hard cap**, enforced in Rust (default 24, at most 64; §6.8). A ceiling, not a target: the coordinator starts what the plan needs. What it counts is §3.1 |
 | Landing | **Land to Base** (default: the coordinator merges each finished worker into its repos' Base) or **Integration branch, I approve each land** (§8). **Fixed at creation.** It's a branch topology, not a checkpoint: the Landing checkpoint (§7.4) only decides who calls `hiveLand` *within* the mode, and integration mode is always Ask me. Switching later would fast-forward integration commits into Base, so a different mode means a new Hive |
 | Stack | The services this Hive's work needs, proposed from the repos' own stacks and the human's other workspaces (§6.8). See step 3 below |
@@ -139,7 +140,8 @@ On **Create**, maiTerm:
    - **The main read copy** reuses the human's running service for that repo on Base when
      there is one, rather than starting its own.
 4. Creates the coordinator tab hidden, launched in its home folder (§6.3) with the Hive's
-   settings, and sends it the Hive brief: role, goal, folders, tools, instructions, rules.
+   settings, and sends it the Hive brief: role, goal, project brief, folders, tools, rules. The
+   project brief's attached files are copied into its home's `brief/` first.
 5. Switches the workspace's view to the Hive.
 
 Folders can be added later in Hive settings. New workers can use them, and the coordinator is
@@ -165,7 +167,11 @@ A Hive is `Workspace.hive: Option<Hive>` in the state file:
 struct Hive {
     id: String,              // its own uuid, never the workspace id
     goal: String,
-    instructions: String,
+    instructions: String,    // rules for every agent
+    brief: String,           // the project brief, the coordinator's alone (§3.5)
+    brief_files: Vec<String>, // its attached files' copies, in <coordinator home>/brief/
+    criteria_confirm: String, // "" (from before it) | "needed" | "asked" | "confirmed" (§11.4)
+    criteria_key: String,     // the open criteria question's blocker key
     folders: Vec<HiveFolder>, // { name, path, kind, base, setup, land_check, primary }
     cap: u32,
     landing_mode: String,    // "base" | "integration"; fixed at creation
@@ -254,6 +260,33 @@ A worker's tab is made `mailink_excluded` unless its Hive shows workers; tabs ma
 change keep theirs. The trade: a worker's prompt that falls to the human (a timeout, a take-over)
 can't be answered from the phone while workers are off it; the human tells the coordinator
 from its chat, or answers in the Hive view.
+
+### 3.5 The project brief, and how a Hive starts (Darryl's direction, 2026-10-30)
+
+A one-line goal is rarely enough to start a project well, and a field that reached every agent
+was the wrong place for a plan: Darryl avoided Instructions for that reason. So the Create
+sheet's Goal step has two fields:
+
+- **Project brief: the coordinator's alone.** It goes into `brief.md` whole, with the attached
+  files listed by their copies' paths. No worker's brief carries it. **Workers know what the
+  coordinator tells them**: their spawn brief, their role, the rules and shared memory. The
+  coordinator's brief says so, and asks that each spawn's brief carry the context its task needs.
+- **Rules for every agent**: what was Instructions, renamed and folded away. Kept for rules that
+  apply to all work, which the coordinator would otherwise have to repeat in every task.
+
+The files are copied at Create, so the coordinator reads them in its own home without a
+permission prompt, as they were when the Hive was made.
+
+**How it starts.** While the criteria are unconfirmed, `brief.md` has a **Starting work** section,
+and the kickoff says not to start workers on the goal alone:
+
+1. Get what the project brief points to: read every attached file. If it names a tab to bridge
+   to, find its id with `listWorkspaces` and ask with `bridgeWith` (§5.1). The human approves
+   that card: a sentence in the brief states the human's intent, but only their click approves.
+2. Judge whether that is enough to write criteria it could check. If not, raise **one** blocker
+   listing each gap as its own question, and wait. Don't guess.
+3. Set the criteria with `hiveSetCriteria`. The human confirms them (§11.4).
+4. Plan, and start workers once confirmed.
 
 ## 4. The view
 
@@ -2436,9 +2469,23 @@ mint a second task. So:
 
 ### 11.4 Done
 
-At the start, the coordinator turns the one-line goal into **completion criteria**, each one
-checkable like a receipt (§7.7), and posts them where the human sees them first; a criterion can
-be changed in conversation, and Rust keeps the current list on the Hive record. Done is then a
+At the start, the coordinator turns the goal and the project brief into **completion criteria**,
+each one checkable like a receipt (§7.7); a criterion can be changed in conversation, and Rust
+keeps the current list on the Hive record.
+
+**In a new Hive the human confirms them before any worker starts** (2026-10-30). Agreeing what
+done means is the cheapest point to catch a misunderstood goal:
+
+- `hiveSetCriteria` asks on the coordinator's **Completion criteria for this Hive** row:
+  **Confirm**, or **Change them** with what to change. The question shows in Needs you, with the
+  list. A newer list replaces a question still waiting, and only the newest question's answer
+  counts (`criteria_key`).
+- `hiveSpawnWorker` is refused until it is Confirmed (`finish::criteria_spawn_refusal`). A
+  reviewer is exempt: it reviews work already started.
+- **Change them** puts it back to `needed`. The human's words reach the coordinator with the
+  answer, and it sets a new list.
+- Once confirmed, later changes are made as the human agrees, as before, with no new question.
+- A Hive created before this has no `criteria_confirm` and is never held by it. Done is then a
 tool, not a word in the chat (principle 8): **`hiveFinish {report}`** (coordinator). The report
 addresses every criterion with its receipts, and lists what landed, the assets that are final,
 what was spent and what the coordinator decided alone.

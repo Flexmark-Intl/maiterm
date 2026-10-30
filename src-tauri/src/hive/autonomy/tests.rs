@@ -527,6 +527,49 @@ async fn a_plan_is_asked_on_the_coordinators_row_and_go_ahead_approves_it() {
     assert_eq!((a.category.as_str(), a.recommended.as_deref(), a.answer.as_deref()), ("plan", Some(plan::ANSWER_GO), Some(plan::ANSWER_GO)), "a taken recommendation toward a plan streak");
 }
 
+// ── Confirming the completion criteria (§11.4) ──
+
+#[tokio::test]
+async fn a_new_hives_criteria_are_asked_and_only_confirm_on_the_newest_question_lets_workers_start() {
+    use crate::hive::finish::{self, CRITERIA_CHANGE, CRITERIA_CONFIRM, CRITERIA_TASK_TITLE};
+    use crate::hive::record::{CRITERIA_ASKED, CRITERIA_CONFIRMED, CRITERIA_NEEDED};
+    let rig = Rig::new("base");
+    rig.data.write().windows[0].workspaces[0].hive.as_mut().unwrap().criteria_confirm = CRITERIA_NEEDED.into();
+    assert!(finish::criteria_spawn_refusal(&rig.hive()).unwrap().contains("hiveSetCriteria"));
+
+    let set = |list: &[&str]| json!({ "criteria": list });
+    let out = finish::set_criteria_tool(&rig.ctx(), &rig.caller, &set(&["The API answers /login"])).await.unwrap();
+    assert_eq!(out["confirmed"], false);
+    let first = rig.row(CRITERIA_TASK_TITLE).unwrap().blocker.unwrap();
+    assert_eq!(first.question, "Are these the completion criteria for \u{201c}Ship it\u{201d}?");
+    assert_eq!(first.context.as_deref(), Some("1. The API answers /login\nNo worker starts until you confirm them."));
+    assert_eq!(rig.hive().criteria_confirm, CRITERIA_ASKED);
+    assert!(finish::criteria_spawn_refusal(&rig.hive()).unwrap().contains("hasn't confirmed"));
+
+    // A changed list asks again on the same row; only the newest question counts.
+    let first_key = rig.hive().criteria_key;
+    finish::set_criteria_tool(&rig.ctx(), &rig.caller, &set(&["The API answers /login", "The app signs in"])).await.unwrap();
+    assert_eq!(rig.tasks().iter().filter(|t| t.title == CRITERIA_TASK_TITLE).count(), 1, "one row");
+    assert_ne!(rig.hive().criteria_key, first_key);
+    let mut h = rig.hive();
+    assert!(!finish::criteria_answer(&mut h, &first_key, CRITERIA_CONFIRM), "a superseded question's answer changes nothing");
+
+    rig.answer_row(CRITERIA_TASK_TITLE, CRITERIA_CHANGE).await;
+    assert_eq!(rig.hive().criteria_confirm, CRITERIA_NEEDED, "sent back to hiveSetCriteria");
+    finish::set_criteria_tool(&rig.ctx(), &rig.caller, &set(&["The app signs in"])).await.unwrap();
+    rig.answer_row(CRITERIA_TASK_TITLE, CRITERIA_CONFIRM).await;
+    let h = rig.hive();
+    assert_eq!((h.criteria_confirm.as_str(), h.criteria_key.as_str()), (CRITERIA_CONFIRMED, ""));
+    assert!(finish::criteria_spawn_refusal(&h).is_none());
+    let asked = rig.lines().into_iter().filter(|l| l.event == EVENT_ASKED && l.source == finish::SOURCE_CRITERIA).count();
+    assert_eq!(asked, 3, "each question logged");
+
+    // Once confirmed, a change asks nothing (it is made as the human agrees).
+    let out = finish::set_criteria_tool(&rig.ctx(), &rig.caller, &set(&["The app signs in", "Docs updated"])).await.unwrap();
+    assert!(out.get("confirmed").is_none());
+    assert_eq!(rig.hive().criteria_confirm, CRITERIA_CONFIRMED);
+}
+
 // ── The daily digest ──
 
 fn by_coordinator(source: &str, at: &str, precedent: Option<&str>) -> DecisionLine {

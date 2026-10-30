@@ -716,6 +716,13 @@ pub(crate) fn register(hive: &Hive, paths: &HivePaths, a: SpawnArgs, tasks: &[Ta
     if std::fs::symlink_metadata(paths.worker_dir(&plan.slug)).is_ok() {
         return Err(format!("A worker called \"{}\" already has folders here. Give this one another title.", plan.slug));
     }
+    // What done means is agreed before any work starts (§11.4). A reviewer reviews work already
+    // started, so it never waits on this.
+    if plan.reviews.is_none() {
+        if let Some(why) = super::finish::criteria_spawn_refusal(hive) {
+            return Err(why.to_string());
+        }
+    }
     // "Show me the plan first" (§7.4, plan D20): only a title the human approved, once. A
     // reviewer is the plan's review cycle, not new work.
     let plan_claim = match plan.reviews {
@@ -3821,6 +3828,23 @@ mod tests {
         assert_eq!(rec.review.unwrap().resolution.map(|x| x.kind), Some("reassign".to_string()));
         assert!(!git(&rig.web, &["branch", "--list", "hive/ship--login"]).is_empty(), "its branch stays");
         assert_eq!(rig.ws().tasks.into_iter().find(|t| t.id == b.task_id).unwrap().status, "dropped");
+    }
+
+    // ── Confirmed criteria before work starts (§11.4) ──
+
+    #[tokio::test]
+    async fn no_worker_starts_until_the_human_has_confirmed_the_criteria() {
+        use crate::hive::record::{CRITERIA_ASKED, CRITERIA_CONFIRMED, CRITERIA_NEEDED};
+        let mut rig = Rig::new("criteria", 4);
+        let p = rig.caller.paths.clone();
+        for (state, says) in [(CRITERIA_NEEDED, "hiveSetCriteria"), (CRITERIA_ASKED, "hasn't confirmed")] {
+            rig.caller.hive.criteria_confirm = state.into();
+            let e = rig.spawn(accept, args("Login API")).await.unwrap_err();
+            assert!(e.contains(says), "{e}");
+            assert!(worker::list_workers(&p).is_empty() && rig.verbs().is_empty(), "refused before anything was made");
+        }
+        rig.caller.hive.criteria_confirm = CRITERIA_CONFIRMED.into();
+        rig.spawn(accept, args("Login API")).await.unwrap();
     }
 
     // ── The plan checkpoint (7e) ──

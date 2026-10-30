@@ -30,7 +30,9 @@ use super::deliver::one_line;
 use super::fuses::{set_status_with, StatusChange, STATUS_PAUSED};
 use super::land::log::{self as landlog, Folded, KIND_BATCH_MEMBER, KIND_INTEGRATION, KIND_LAND};
 use super::paths::HivePaths;
-use super::record::{Hive, HiveFolder, STATUS_ACTIVE, STATUS_DONE};
+use super::decisions::{self, DecisionLine, DecisionOption};
+use super::record::{Hive, HiveFolder, CRITERIA_ASKED, CRITERIA_CONFIRMED, CRITERIA_NEEDED, STATUS_ACTIVE, STATUS_DONE};
+use crate::state::workspace::{BlockerOption, TaskBlocker};
 use super::rpc::{self, HiveWindow};
 use super::tools::{blocking, find_worker, worker_label, Caller, Ctx};
 use super::worker::{self, WorkerRecord};
@@ -281,7 +283,8 @@ pub fn set_criteria_tool_definition(tab_id: &Value) -> Value {
             "Set this Hive's completion criteria: what must be true for the goal to be met, each one a checkable statement \
              (a land, a passing run, a commit, a file, an asset proves it). maiTerm keeps the list on the Hive, numbered, \
              shows it to your human in the Hive header, and logs every change. Call it at the start, and again only as your \
-             human agrees: the list replaces the old one whole. hiveFinish addresses each criterion by its number. 1 to \
+             human agrees: the list replaces the old one whole. In a new Hive, maiTerm asks your human to confirm the list \
+             and no worker starts until they do. hiveFinish addresses each criterion by its number. 1 to \
              {MAX_CRITERIA} criteria, one line each, at most {MAX_CRITERION} characters. Refused once the Hive is done."
         ),
         "inputSchema": {
@@ -313,10 +316,133 @@ pub(crate) async fn set_criteria_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &
         log::warn!("hive {}: criteria set but not logged: {e}", caller.hive.id);
     }
     log::info!("hive {}: {} completion criteria set", caller.hive.id, hive.criteria.len());
+    if hive.criteria_unconfirmed() {
+        ask_criteria(ctx, caller, &hive).await?;
+        return Ok(json!({
+            "criteria": numbered(&hive.criteria),
+            "confirmed": false,
+            "note": format!(
+                "Your human confirms these before any worker starts: maiTerm asks them on your \"{CRITERIA_TASK_TITLE}\" row \
+                 ({CRITERIA_CONFIRM}, or {CRITERIA_CHANGE} with what to change), and their answer is typed to you. Meanwhile \
+                 keep planning. If they ask for changes, call hiveSetCriteria again with the new list."
+            ),
+        }));
+    }
     Ok(json!({
         "criteria": numbered(&hive.criteria),
         "note": "hiveFinish addresses each criterion by its number. Your human sees this list in the Hive header.",
     }))
+}
+
+// ── Confirming the criteria before work starts (§11.4) ──
+
+/// The coordinator's row the criteria question waits on.
+pub const CRITERIA_TASK_TITLE: &str = "Completion criteria for this Hive";
+pub const CRITERIA_CONFIRM: &str = "Confirm";
+pub const CRITERIA_CHANGE: &str = "Change them";
+/// The question's decision-log source and category.
+pub const SOURCE_CRITERIA: &str = "criteria";
+
+/// What a spawn hears while the human hasn't confirmed the criteria. A reviewer never does: it
+/// reviews work already started.
+pub fn criteria_spawn_refusal(hive: &Hive) -> Option<&'static str> {
+    match hive.criteria_confirm.as_str() {
+        CRITERIA_NEEDED => Some(
+            "Your human confirms this Hive's completion criteria before any worker starts: set them with hiveSetCriteria, \
+             and spawn once they confirm.",
+        ),
+        CRITERIA_ASKED => Some(
+            "Your human hasn't confirmed the completion criteria yet: their answer comes on your \u{201c}Completion criteria \
+             for this Hive\u{201d} row. Keep planning meanwhile, and spawn once they confirm.",
+        ),
+        _ => None,
+    }
+}
+
+/// The human's question, in maiTerm's words: the criteria as the coordinator set them.
+pub fn criteria_blocker(goal: &str, criteria: &[String], asked_at: &str) -> TaskBlocker {
+    let mut context: Vec<String> = criteria.iter().enumerate().map(|(i, c)| format!("{}. {}", i + 1, one_line(c, MAX_CRITERION))).collect();
+    context.push("No worker starts until you confirm them.".to_string());
+    TaskBlocker {
+        kind: "decision".into(),
+        question: format!("Are these the completion criteria for \u{201c}{}\u{201d}?", one_line(goal, 160)),
+        context: Some(context.join("\n")),
+        options: vec![
+            BlockerOption { label: CRITERIA_CONFIRM.into(), detail: Some("the queen plans her workers against these".into()), recommended: true },
+            BlockerOption { label: CRITERIA_CHANGE.into(), detail: Some("answer with what to change".into()), recommended: false },
+        ],
+        command: None,
+        asked_at: asked_at.into(),
+        asked_by: "agent".into(),
+    }
+}
+
+/// Asks the human to confirm the criteria just set, on the coordinator's row: a newer list
+/// replaces a question still waiting, and only the newest question's answer counts.
+async fn ask_criteria<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, hive: &Hive) -> Result<(), String> {
+    let coordinator = super::tools::coordinator_tab(ctx.data, caller).ok_or("This Hive has no coordinator tab to ask on.")?;
+    let now = crate::mailink::board::iso_now();
+    let blocker = criteria_blocker(&hive.goal, &hive.criteria, &now);
+    let note = format!("Needs you: {}", blocker.question);
+    let (task_id, asked_at, tasks, workstreams) = {
+        let mut d = ctx.data.write();
+        let ws = super::tools::workspace_mut(&mut d, caller)?;
+        let (task_id, asked_at) = super::fuses::file_row_blocker(ws, Some(&coordinator), CRITERIA_TASK_TITLE, blocker.clone(), &note, &now);
+        (task_id, asked_at, ws.tasks.clone(), ws.workstreams.clone())
+    };
+    let key = super::prompts::blocker_key(&task_id, &asked_at);
+    let k = key.clone();
+    // Saves the row with it: both are in the state this write saves.
+    write_status(ctx, caller, &[STATUS_ACTIVE, STATUS_PAUSED], None, move |h| {
+        h.criteria_confirm = CRITERIA_ASKED.to_string();
+        h.criteria_key = k;
+    })?;
+    let line = DecisionLine {
+        id: decisions::new_id(),
+        hive_id: hive.id.clone(),
+        category: SOURCE_CRITERIA.to_string(),
+        source: SOURCE_CRITERIA.to_string(),
+        task_id: Some(task_id),
+        key: Some(key),
+        question: one_line(&blocker.question, 400),
+        context: blocker.context.as_deref().map(|c| one_line(c, 1000)),
+        options: blocker.options.iter().map(|o| DecisionOption { label: o.label.clone(), recommended: o.recommended }).collect(),
+        recommended: Some(CRITERIA_CONFIRM.to_string()),
+        at: asked_at,
+        ..DecisionLine::default()
+    };
+    let paths = caller.paths.clone();
+    let _ = blocking(move || {
+        decisions::record(&paths, &line);
+        Ok(())
+    })
+    .await;
+    ctx.window.tasks_changed(&caller.workspace_id, &tasks, &workstreams);
+    ctx.window.decisions_changed(&caller.workspace_id);
+    Ok(())
+}
+
+/// The human answered the criteria question `key`: Confirm lets workers start, anything else
+/// sends the coordinator back to hiveSetCriteria (their words reach it with the answer). A
+/// superseded question's answer changes nothing.
+pub fn criteria_answer(hive: &mut Hive, key: &str, answer: &str) -> bool {
+    if hive.criteria_confirm != CRITERIA_ASKED || hive.criteria_key != key {
+        return false;
+    }
+    hive.criteria_confirm = if answer.trim().eq_ignore_ascii_case(CRITERIA_CONFIRM) { CRITERIA_CONFIRMED } else { CRITERIA_NEEDED }.to_string();
+    hive.criteria_key.clear();
+    true
+}
+
+pub(crate) fn on_criteria_answered<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, key: &str, answer: &str) {
+    let (key, answer) = (key.to_string(), answer.to_string());
+    let mut changed = false;
+    let result = write_status(ctx, caller, &[STATUS_ACTIVE, STATUS_PAUSED], None, |h| changed = criteria_answer(h, &key, &answer));
+    match result {
+        Ok(h) if changed => log::info!("hive {}: completion criteria {} by the human", caller.hive.id, if h.criteria_unconfirmed() { "sent back" } else { "confirmed" }),
+        Ok(_) => {}
+        Err(e) => log::warn!("hive {}: the human's answer on the criteria not recorded: {e}", caller.hive.id),
+    }
 }
 
 fn numbered(criteria: &[String]) -> Vec<Value> {

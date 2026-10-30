@@ -16,6 +16,10 @@ pub const KIND_PLAIN: &str = "plain";
 pub const STATUS_ACTIVE: &str = "active";
 /// `hiveFinish` accepted (§11.4): nothing starts, until the human wakes it with a message.
 pub const STATUS_DONE: &str = "done";
+/// `Hive.criteria_confirm` (§11.4).
+pub const CRITERIA_NEEDED: &str = "needed";
+pub const CRITERIA_ASKED: &str = "asked";
+pub const CRITERIA_CONFIRMED: &str = "confirmed";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -24,7 +28,24 @@ pub struct Hive {
     /// window duplicate or an import re-mints workspace ids.
     pub id: String,
     pub goal: String,
+    /// The human's rules for every agent in the Hive, workers included (shown as "Rules for every
+    /// agent"; the field keeps its first name).
     pub instructions: String,
+    /// The human's project brief: the coordinator's alone, never a worker's (§3.5). Workers learn
+    /// what it tells them.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub brief: String,
+    /// Files attached to the project brief, copied at creation into the coordinator's home under
+    /// `brief/`: their names there, in order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub brief_files: Vec<String>,
+    /// Whether the human confirms the completion criteria before the first worker starts
+    /// (§11.4): `""` (a Hive from before it: not asked) | `"needed"` | `"asked"` | `"confirmed"`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub criteria_confirm: String,
+    /// While `asked`: the open question's blocker key, so only its answer confirms.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub criteria_key: String,
     pub folders: Vec<HiveFolder>,
     /// Workers at once, enforced in Rust (§3.1).
     pub cap: u32,
@@ -65,6 +86,10 @@ impl Default for Hive {
             id: String::new(),
             goal: String::new(),
             instructions: String::new(),
+            brief: String::new(),
+            brief_files: Vec::new(),
+            criteria_confirm: String::new(),
+            criteria_key: String::new(),
             folders: Vec::new(),
             cap: 4,
             landing_mode: LANDING_BASE.to_string(),
@@ -93,6 +118,11 @@ impl Hive {
 
     pub fn git_folders(&self) -> impl Iterator<Item = &HiveFolder> {
         self.folders.iter().filter(|f| f.is_git())
+    }
+
+    /// No worker starts until the human has confirmed the completion criteria (§11.4).
+    pub fn criteria_unconfirmed(&self) -> bool {
+        matches!(self.criteria_confirm.as_str(), CRITERIA_NEEDED | CRITERIA_ASKED)
     }
 
     pub fn is_integration(&self) -> bool {

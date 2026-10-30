@@ -239,8 +239,10 @@ pub fn priming_rules(hive: &Hive, role: &str, paths: &paths::HivePaths, tab_id: 
 /// The first thing the coordinator is told, once: maiTerm's words, never a human's.
 pub fn kickoff_text(hive: &Hive, paths: &paths::HivePaths) -> String {
     format!(
-        "[maiTerm] This Hive has just been created, and you are its coordinator. Read {} first: it has your full brief, the \
-         folders and your human's Instructions. Then plan the work toward the goal: {}",
+        "[maiTerm] This Hive has just been created, and you are its coordinator. Read {} first: it has your human's \
+         project brief, the folders and their rules, and says how to start (Starting work). Don't start workers on the \
+         goal alone: get what the brief points you to, ask your human for anything still missing, and have them confirm \
+         the completion criteria first. The goal: {}",
         paths.coordinator_brief().display(),
         hive.goal.trim()
     )
