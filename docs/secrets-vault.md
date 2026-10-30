@@ -15,7 +15,9 @@ user.
 
 **Reshaped 2026-10-28: a provider first.** maiTerm is the layer between agents and the human's
 secrets manager. Values live in **1Password** whenever it is connected (§5.1; Doppler deferred
-2026-10-30, decision 14);
+2026-10-30, decision 14. **Where this doc describes Doppler, it describes how it would work once
+added; v1 builds only the 1Password parts.** Denying the `doppler` CLI to agents stays, since
+people may have it installed);
 maiTerm's own vault is the **fallback** for people without one, with a label saying plainly what
 it protects (§5.2). **Every key gets the same protection, whatever its tier**: a "dev" key is
 often a live key. **Prod-tier values need a provider** (§16 decisions 11–13). Darryl's reasoning:
@@ -553,11 +555,11 @@ This is the flow Darryl described:
    - 1Password, any tier, through a fresh `maiterm-1p` process. The human approves the write in
      1Password, with biometric or system authentication (§5.1). The stored service account is
      read-only and never writes;
-   - Doppler through its write token, if the human added one. Otherwise the sheet says "set
-     these in Doppler" and Done checks they arrived;
+   - (once Doppler is added, decision 14) Doppler through its write token, if the human added
+     one. Otherwise the sheet says "set these in Doppler" and Done checks they arrived;
    - or the local vault, which refuses a prod value.
 
-   The sheet also offers **"I'll set these in 1Password / Doppler myself"**: Done then checks
+   The sheet also offers **"I'll set these in 1Password myself"**: Done then checks
    that the provider has the names and settles the same way. Rust then runs the
    checks that need other values (**the same value in two tiers**) and can return warnings the
    human confirms or fixes. The values are never kept in a Svelte store, and the inputs are
@@ -1169,7 +1171,7 @@ A full-window view per project, like Preferences, opened from the workspace's co
 sidebar row and every secrets card. **No shortcut in v1, and not a new `tab_type`** (that would
 add a value an older build can't load; §16 decision 8). It needs the width, so it is not a side
 dock:
-- **the project's store** at the top: "1Password · maiTerm · api" or "Doppler · api", or the
+- **the project's store** at the top: "1Password · maiTerm · api", or the
   local vault with its label (§5.2), plus a **Connect a provider** action and **Move to a
   provider** for a project still on the local vault;
 - **a matrix of keys × environments**, each cell showing set (with age), missing (red when
@@ -1396,7 +1398,7 @@ Darryl re-decided it the same day.
 maiTerm should lean on them instead of its own vault:
 
 11. **Providers first** (§5, §5.1). Values live in 1Password or Doppler whenever one is connected;
-    Infisical later. maiTerm builds the integration layer around them: "it basically is adding a
+    Infisical later. (Narrowed by decision 14: 1Password only, at first.) maiTerm builds the integration layer around them: "it basically is adding a
     much better integration layer on to Doppler and 1Password". maiTerm always uses **its own
     narrow credentials** (a 1Password service account, Doppler service tokens), never the
     human's login, and the provider CLIs are kept away from agents.
@@ -1479,8 +1481,8 @@ Free or paid is Darryl's product call and doesn't change the design.
    with them.
 5. **Targets.** `declareTargets`, `deploySecrets`, the ledger, adapters with pinned addresses and
    binaries (§7.3): GitHub Actions, Cloudflare, Railway. The OIDC / AWS SSO advice, which is
-   about targets. "Synced by the provider" consumers, so maiTerm doesn't push where Doppler
-   already syncs (§5.1 rule 8). "Last delivered" and the unused-key flag (§11.1). **The end of
+   about targets. (The "synced by the provider" ledger entries of §5.1 rule 8 come with Doppler,
+   when it is added; 1Password doesn't sync to hosting.) "Last delivered" and the unused-key flag (§11.1). **The end of
    v1**, followed by §18 before it is advertised.
 6. **Rotation.** Runs with human mint and revoke, `requestRotation`, the run view, age and
    expiry proposals, the first provider packs (§9.5), end-to-end encrypted value entry on the
@@ -1510,6 +1512,6 @@ advertised on maiterm.dev:
   fetches the details over maiLink's pinned LAN connection.
 - **The website copy stays true** (website/CLAUDE.md): it says what §1 and §14 say, including
   that the vault does not contain an agent running as the same OS user, and that prod protection
-  differs by provider: a 1Password authorization per human action, against Doppler's scope and
-  audit. It makes no "military-grade"-style claims.
+  depends on the store: a 1Password authorization per human action for prod, and the local
+  vault's stated limits for everything else. It makes no "military-grade"-style claims.
 - **Free or paid** is Darryl's call, and doesn't change the design.
