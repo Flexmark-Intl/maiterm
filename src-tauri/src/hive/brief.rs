@@ -867,7 +867,7 @@ mod tests {
         let p = crate::hive::launch::tests::sample_paths();
         let b = brief_md(&h, &p, &PrecedentCounts::default());
         assert!(b.contains(h.brief.trim()), "never truncated");
-        assert!(b.contains(&*p.coordinator_home().join("brief/plan.md").to_string_lossy()));
+        assert!(b.contains(&*p.coordinator_home().join("brief").join("plan.md").to_string_lossy()));
         assert!(b.contains("## Starting work") && b.contains("bridgeWith") && b.contains("ONE blocker"));
         assert!(b.find("## Project brief") < b.find("## Starting work"));
         h.criteria_confirm = crate::hive::record::CRITERIA_CONFIRMED.into();

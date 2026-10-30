@@ -1404,8 +1404,6 @@ mod tests {
         }
     }
 
-    // `/r/web` is absolute only on Unix; no Hive is made on Windows (§14.16).
-    #[cfg(unix)]
     #[test]
     fn brief_files_are_copied_into_the_coordinators_home_under_names_of_their_own() {
         let base = std::env::temp_dir().join(format!("hive-brief-{}", uuid::Uuid::new_v4()));
@@ -1432,6 +1430,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    // `/r/web` is absolute only on Unix; no Hive is made on Windows (§14.16).
+    #[cfg(unix)]
     #[test]
     fn the_spec_is_validated_like_the_sheet() {
         assert_eq!(validate_spec(&spec()), Ok(()));
