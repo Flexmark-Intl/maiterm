@@ -102,7 +102,23 @@ models, how work lands, push after land, the phone), **Tools** (tools, budget), 
 **Review**, a plain-language account of what Create will start. Every step but Goal and Folders
 has defaults, so Next is all most of them need. The step rail is a running receipt: a step passed
 shows what was chosen there, and any step whose earlier steps are complete opens from it
-(`HiveCreateSheet.svelte`; each step's check is its part of `validateSpec`). The fields:
+(`HiveCreateSheet.svelte`; each step's check is its part of `validateSpec`).
+
+Nothing in it sends the human away to start over (Darryl, 2026-10-30, after doing exactly that):
+
+- **Closing keeps the answers.** Escape, the close button or a click on the backdrop keeps a
+  draft for that workspace (`lib/hive/createDraft.ts`, in memory), and reopening lands where it
+  was, with **Start over** in the header. Create and Start over clear it.
+- **An untrusted repo is a row with a button**, "Trust this repo", saying the wizard can carry on.
+  Review repeats it for any repo still untrusted. Trust is read again whenever the window regains
+  focus, so trusting it some other way needs no restart. Running `claude` in the workspace's own
+  shell, which the old wording suggested, is what used that shell up.
+- **The menu offers "Make this a Hive…" for any workspace that could be one** (not a Hive, not the
+  Overlord's). What stands in the way is the sheet's to say. When it is one used tab with no agent
+  running and no open tasks, the sheet offers **Close "…" and use this workspace**, on the human's
+  click.
+
+The fields:
 
 | Field | Meaning |
 |---|---|

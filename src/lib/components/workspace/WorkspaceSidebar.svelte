@@ -26,8 +26,6 @@
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
   import ShareExportModal from '$lib/components/share/ShareExportModal.svelte';
   import HiveCreateSheet from '$lib/components/hive/HiveCreateSheet.svelte';
-  import { isEligible as isHiveEligible } from '$lib/hive/model';
-  import { tasksStore } from '$lib/stores/tasks.svelte';
   import StackSection from '$lib/components/stack/StackSection.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
@@ -494,11 +492,12 @@
   let shareExportFor = $state<string | null>(null);
   /** The workspace the Hive Create sheet is open for (docs/hive.md §3). */
   let hiveSheetFor = $state<string | null>(null);
-  /** Rust's answer for the open menu's workspace: only it can see whether the shell a Hive
-   *  would replace is running something. */
-  let hiveOffer = $state<{ workspaceId: string; eligible: boolean } | null>(null);
+  /** Offered for any workspace that could become one: what stands in the way (a used tab, an
+   *  archived one) is the sheet's to say and, where it can, to clear. Hiding the item left the
+   *  human with no word on why it was gone. */
   function hiveItems(workspaceId: string): MenuItem[] {
-    if (hiveOffer?.workspaceId !== workspaceId || !hiveOffer.eligible) return [];
+    const ws = workspacesStore.workspaces.find((w) => w.id === workspaceId);
+    if (!ws || ws.hive || ws.overlord) return [];
     return [
       { label: '', separator: true, action: () => {} },
       { label: 'Make this a Hive…', action: () => { hiveSheetFor = workspaceId; } },
@@ -593,13 +592,6 @@
     e.preventDefault();
     moveTargets = null;
     commands.listMoveTargets().then((t) => { moveTargets = t; }).catch((err) => logError(`listMoveTargets: ${err}`));
-    hiveOffer = null;
-    const ws = workspacesStore.workspaces.find((w) => w.id === workspaceId);
-    if (ws && isHiveEligible(ws, tasksStore.forWorkspace(workspaceId))) {
-      commands.hivePreflight(workspaceId, [])
-        .then((p) => { if (workspaceMenu?.workspaceId === workspaceId) hiveOffer = { workspaceId, eligible: p.eligible }; })
-        .catch((err) => logError(`hivePreflight: ${err}`));
-    }
     workspaceMenu = { x: e.clientX, y: e.clientY, workspaceId };
   }
 

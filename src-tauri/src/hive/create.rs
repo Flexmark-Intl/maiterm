@@ -103,7 +103,7 @@ pub fn structural_eligibility(ws: &Workspace) -> Result<Option<Replaceable>, Str
         && tab.hive_role.is_none()
         && tab.agent_bridge.is_none();
     if !fresh {
-        return Err(format!("Its tab \"{}\" has been used. A Hive replaces only a fresh shell.", tab.name));
+        return Err(format!("Its tab \"{}\" has been used (an agent ran in it, or it has notes). A Hive replaces only a fresh shell: close that tab, and this workspace can become one.", tab.name));
     }
     if ws.tasks.iter().any(|t| t.tab_id.as_deref() == Some(tab.id.as_str()) && !t.is_retired()) {
         return Err(format!("Its tab \"{}\" has tasks assigned.", tab.name));

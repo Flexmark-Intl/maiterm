@@ -20,12 +20,15 @@
   import Tooltip from '$lib/components/Tooltip.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
+  import { agentStateStore } from '$lib/stores/agentState.svelte';
+  import { tasksStore } from '$lib/stores/tasks.svelte';
   import { navHistoryStore } from '$lib/stores/navHistory.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { importVerdict, sameService, sharesByDefault, type RunningElsewhere, type StackOffer } from '$lib/stack/model';
   import { normalizeTitle } from '$lib/tasks/model';
   import { hiveDetectFolder, hiveDetectTools, hivePreflight, hiveTrustRepo, suggestStack, type StackSuggestion } from '$lib/tauri/commands';
   import type { HiveDetectedTool, HivePreflight, HiveSpec, Service } from '$lib/tauri/types';
+  import { createDrafts } from '$lib/hive/createDraft';
   import { charCount, folderName, MAX_BRIEF, MAX_BRIEF_FILES, MAX_INSTRUCTIONS, slugify, validateAbout, validateCap, validateFolders, validateSpec } from '$lib/hive/model';
   import { MAX_CAP } from '$lib/hive/change';
   import { createHive } from '$lib/hive/create';
@@ -56,6 +59,20 @@
   const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
   const ws = $derived(workspacesStore.workspaces.find((w) => w.id === workspaceId));
+  // ── The draft (lib/hive/createDraft.ts): the answers survive a close, until Create or Start over ──
+  interface Draft {
+    name: string; goal: string; instructions: string; brief: string; briefFiles: string[]; rulesOpen: boolean;
+    folders: Folder[]; cap: number; landing: 'base' | 'integration';
+    coordModel: string; coordEffort: string; workerModel: string; workerEffort: string;
+    picked: string[]; budgetDollars: number; pushAfterLand: boolean; phone: 'coordinator' | 'all' | 'none';
+    suggestions: Record<string, StackSuggestion[] | null>; shareChoice: Record<string, boolean>;
+    picks: Record<string, { on: boolean; command: string }>; step: number; reached: number;
+  }
+  const draftFor = () => createDrafts.get<Draft>(workspaceId);
+  const saved = draftFor();
+  /** Opened on a kept draft: the header offers Start over. */
+  let resumed = $state(!!saved);
+
   let preflight = $state<HivePreflight | null>(null);
   /** Until the preflight (and its default Primary's detection) answers: the
    *  folder list shows a loading line, never an empty list. */
@@ -63,26 +80,26 @@
   let loadError = $state<string | null>(null);
   let tools = $state<HiveDetectedTool[] | null>(null);
 
-  let name = $state(workspacesStore.workspaces.find((w) => w.id === workspaceId)?.name ?? '');
-  let folders = $state<Folder[]>([]);
-  let folderKey = 0;
+  let name = $state(saved?.name ?? workspacesStore.workspaces.find((w) => w.id === workspaceId)?.name ?? '');
+  let folders = $state<Folder[]>(saved?.folders ?? []);
+  let folderKey = Math.max(0, ...(saved?.folders ?? []).map((f) => f.key));
   let folderNote = $state<string | null>(null);
-  let goal = $state('');
-  let instructions = $state('');
+  let goal = $state(saved?.goal ?? '');
+  let instructions = $state(saved?.instructions ?? '');
   // The project brief and its files: the queen's alone (docs/hive.md §3.5).
-  let brief = $state('');
-  let briefFiles = $state<string[]>([]);
+  let brief = $state(saved?.brief ?? '');
+  let briefFiles = $state<string[]>(saved?.briefFiles ?? []);
   // Rules for every agent stay folded away until wanted: most Hives need none.
-  let rulesOpen = $state(false);
-  let cap = $state(4);
-  let landing = $state<'base' | 'integration'>('base');
-  let coordModel = $state('opus');
-  let coordEffort = $state('medium');
-  let workerModel = $state('sonnet');
-  let workerEffort = $state('high');
-  let picked = $state(new Set<string>());
-  let budgetDollars = $state(10);
-  let pushAfterLand = $state(false);
+  let rulesOpen = $state(saved?.rulesOpen ?? false);
+  let cap = $state(saved?.cap ?? 4);
+  let landing = $state<'base' | 'integration'>(saved?.landing ?? 'base');
+  let coordModel = $state(saved?.coordModel ?? 'opus');
+  let coordEffort = $state(saved?.coordEffort ?? 'medium');
+  let workerModel = $state(saved?.workerModel ?? 'sonnet');
+  let workerEffort = $state(saved?.workerEffort ?? 'high');
+  let picked = $state(new Set<string>(saved?.picked ?? []));
+  let budgetDollars = $state(saved?.budgetDollars ?? 10);
+  let pushAfterLand = $state(saved?.pushAfterLand ?? false);
   /** The budget as Create sends it: an emptied or negative field is $0, and the receipt and the
    *  review say what is sent. */
   const budget = $derived(Math.max(0, Number(budgetDollars) || 0));
@@ -90,10 +107,10 @@
   const pushes = $derived(pushAfterLand && landing === 'base');
   /** Who is a chat on the phone. "none" makes every Hive tab off it: Create launches the
    *  coordinator at once, so there's no later moment to exclude it before its first turn. */
-  let phone = $state<'coordinator' | 'all' | 'none'>('coordinator');
+  let phone = $state<'coordinator' | 'all' | 'none'>(saved?.phone ?? 'coordinator');
   let creating = $state(false);
   let createError = $state<string | null>(null);
-  let suggestions = $state<Record<string, StackSuggestion[] | null>>({});
+  let suggestions = $state<Record<string, StackSuggestion[] | null>>(saved?.suggestions ?? {});
 
   let modalEl = $state<HTMLDivElement | undefined>();
   let bodyEl = $state<HTMLDivElement | undefined>();
@@ -108,9 +125,28 @@
     { key: 'review', title: 'Review', ask: 'Ready to start' },
   ] as const;
   type StepKey = (typeof STEPS)[number]['key'];
-  let step = $state(0);
+  let step = $state(saved?.step ?? 0);
   /** The furthest step reached: the rail shows a receipt for each step before it. */
-  let reached = $state(0);
+  let reached = $state(saved?.reached ?? 0);
+  function keepDraft() {
+    createDrafts.set<Draft>(workspaceId, $state.snapshot({
+      name, goal, instructions, brief, briefFiles, rulesOpen, folders, cap, landing, coordModel, coordEffort, workerModel, workerEffort,
+      picked: [...picked], budgetDollars, pushAfterLand, phone, suggestions, shareChoice, picks, step, reached,
+    }) as Draft);
+  }
+  function startOver() {
+    createDrafts.clear(workspaceId);
+    resumed = false;
+    name = ws?.name ?? '';
+    goal = ''; instructions = ''; brief = ''; briefFiles = []; rulesOpen = false;
+    folders = []; folderNote = null; suggestions = {}; shareChoice = {}; picks = {};
+    cap = preflight?.default_cap ?? 4; landing = 'base';
+    coordModel = 'opus'; coordEffort = 'medium'; workerModel = 'sonnet'; workerEffort = 'high';
+    picked = new Set(); budgetDollars = 10; pushAfterLand = false; phone = 'coordinator';
+    step = 0; reached = 0;
+    if (preflight?.default_primary) void addFolder(preflight.default_primary);
+  }
+
   const current = $derived(STEPS[step]);
   const isLast = $derived(step === STEPS.length - 1);
 
@@ -189,8 +225,13 @@
     try {
       const p = await hivePreflight(workspaceId, ids, live);
       preflight = p;
-      cap = p.default_cap;
-      if (p.default_primary && folders.length === 0) await addFolder(p.default_primary);
+      if (saved) {
+        // Trust may have changed while it was closed (Trust it, or claude run in another tab).
+        void recheckTrust();
+      } else {
+        cap = p.default_cap;
+        if (p.default_primary && folders.length === 0) await addFolder(p.default_primary);
+      }
     } catch (e) {
       loadError = String(e);
       logError(`hive: preflight failed: ${e}`);
@@ -198,6 +239,37 @@
       primaryPending = false;
     }
   })();
+  // ── A used tab in the way (§3) ──
+  // A Hive replaces only an empty workspace or one fresh shell, so a shell `claude` ran in (to
+  // trust a repo, say) stops it. When that one tab is all that's in the way and nothing runs in
+  // it, the sheet offers to close it, on the human's click, rather than send them away.
+  const lone = $derived.by(() => {
+    const tabs = ws?.panes.flatMap((p) => p.tabs) ?? [];
+    return tabs.length === 1 ? tabs[0] : null;
+  });
+  const closable = $derived(
+    !!preflight && !preflight.eligible && !!lone && !ws?.archived_tabs?.length && !ws?.hive && !ws?.overlord && !ws?.bridge_all && !ws?.suspended
+      && (lone.tab_type ?? 'terminal') === 'terminal' && !lone.hive_role && !lone.service_id
+      && !agentStateStore.getState(lone.id)
+      && !tasksStore.forWorkspace(workspaceId).some((k) => k.tab_id === lone.id && k.status !== 'done' && k.status !== 'dropped'),
+  );
+  let closingLone = $state(false);
+  async function closeLone() {
+    const t = lone;
+    const pane = ws?.panes.find((p) => p.tabs.some((x) => x.id === t?.id));
+    if (!t || !pane || closingLone) return;
+    closingLone = true;
+    try {
+      await workspacesStore.deleteTab(workspaceId, pane.id, t.id);
+      preflight = await hivePreflight(workspaceId, [], []);
+    } catch (e) {
+      loadError = String(e);
+      logError(`hive: closing the used tab failed: ${e}`);
+    } finally {
+      closingLone = false;
+    }
+  }
+
   hiveDetectTools().then((t) => (tools = t)).catch((e) => { tools = []; logError(`hive: tool detection failed: ${e}`); });
 
   async function addFolder(path: string, at?: number) {
@@ -236,6 +308,35 @@
       folderNote = String(e);
     }
   }
+
+  /** Each untrusted repo's trust read again, as Rust reads it: trusting it from another tab
+   *  needs no restart of the wizard. On reopening a draft and whenever the window regains focus. */
+  const trustTip = $derived(
+    "Claude asks whether to trust a folder the first time it runs there, and nothing in maiTerm may answer that for you: this button is you answering it. " +
+      "A trusted repo's project settings, hooks and MCP servers run without asking, and trusting it covers every copy the Hive makes of it" +
+      (preflight?.trust_account
+        ? `. It's recorded for “${preflight.trust_account}”, the account this Hive's agents run as.`
+        : preflight?.trust_root_dir
+          ? `. It's recorded in the Claude config at ${preflight.trust_root_dir} (your CLAUDE_CONFIG_DIR), the one this Hive's agents run as.`
+          : '.'),
+  );
+  const untrusted = $derived(folders.filter((f) => f.kind === 'git' && !f.trusted));
+
+  async function recheckTrust() {
+    for (const f of folders.filter((x) => x.kind === 'git' && !x.trusted)) {
+      try {
+        const info = await hiveDetectFolder(f.path);
+        if (info.trusted) patch(f.key, { trusted: true });
+      } catch {
+        // The folder's own row says what's wrong when it's next detected.
+      }
+    }
+  }
+  $effect(() => {
+    const onFocus = () => void recheckTrust();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  });
 
   /** Trust it (§6.6): the human's click is the human trusting their repo, written by Rust into
    *  the root the Hive's agents launch under. The other remedy, `claude` in this workspace's own
@@ -309,7 +410,7 @@
   /** The step's choices: shared sources by service id (default on for infrastructure only,
    *  `sharesByDefault`), suggestions by `path|name` (default on for the recommended ones), with
    *  the command as edited. */
-  let shareChoice = $state<Record<string, boolean>>({});
+  let shareChoice = $state<Record<string, boolean>>(saved?.shareChoice ?? {});
   const offers = $derived<StackOffer[]>(folders.flatMap((f) => suggestions[f.path] ?? []));
   function shareOn(r: (typeof runningElsewhere)[number]): boolean {
     return shareChoice[r.id] ?? sharesByDefault(r.service, offers);
@@ -319,7 +420,7 @@
   function coveredBy(s: StackSuggestion, command: string) {
     return runningElsewhere.find((r) => shareOn(r) && sameService(r.service, { name: s.name, command, cwd: s.cwd }));
   }
-  let picks = $state<Record<string, { on: boolean; command: string }>>({});
+  let picks = $state<Record<string, { on: boolean; command: string }>>(saved?.picks ?? {});
   function pickOf(path: string, s: StackSuggestion) {
     return picks[`${path}|${s.name}`] ?? { on: true, command: s.command };
   }
@@ -409,6 +510,7 @@
     };
     try {
       await createHive(workspaceId, spec);
+      createDrafts.clear(workspaceId);
       onclose();
     } catch (e) {
       createError = String(e);
@@ -418,7 +520,9 @@
   }
 
   function close() {
-    if (!creating) onclose();
+    if (creating) return;
+    keepDraft();
+    onclose();
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -433,6 +537,9 @@
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="hive-sheet-title" tabindex="-1" bind:this={modalEl} onkeydown={handleKeydown}>
     <div class="header">
       <h2 id="hive-sheet-title">Make “{ws?.name ?? ''}” a Hive</h2>
+      {#if resumed}
+        <span class="resumed">Picked up where you left off. <button type="button" class="link" onclick={startOver}>Start over</button></span>
+      {/if}
       <IconButton tooltip="Close" style="font-size: 1.538rem;padding:4px 8px;width:auto;height:auto" onclick={close}>&times;</IconButton>
     </div>
 
@@ -471,6 +578,12 @@
           <p class="error">{loadError}</p>
         {:else if blocked && preflight}
           <p class="error">{blocked}</p>
+          {#if closable && lone}
+            <div class="trust">
+              <span class="trust-text">Its conversation stays in Claude's history, so <code>claude --resume</code> in another tab can pick it up.</span>
+              <Button variant="secondary" disabled={closingLone} onclick={() => void closeLone()}>{closingLone ? 'Closing…' : `Close “${lone.name}” and use this workspace`}</Button>
+            </div>
+          {/if}
         {/if}
 
         {#if current.key === 'goal'}
@@ -561,18 +674,11 @@
                     <label><span>Land check</span><input value={f.land_check} placeholder="npm run check" oninput={(e) => patch(f.key, { land_check: (e.currentTarget as HTMLInputElement).value })} /></label>
                   </div>
                   {#if !f.trusted}
-                    <div class="warn">
-                      <Tooltip text="Claude asks whether to trust a folder the first time it runs there, and nothing in maiTerm may answer that for you. A trusted repo's project settings, hooks and MCP servers run without asking. Trusting the repo also covers every copy the Hive makes of it.">
-                        <span>Claude hasn't been told to trust this repo{preflight?.trust_account
-                          ? ` under "${preflight.trust_account}", the account this Hive's agents run as`
-                          : preflight?.trust_root_dir
-                            ? ` under the Claude config at ${preflight.trust_root_dir} (your CLAUDE_CONFIG_DIR), the one this Hive's agents run as`
-                            : ''}.</span>
+                    <div class="trust">
+                      <Tooltip text={trustTip}>
+                        <span class="trust-text">Claude doesn't trust this repo yet{preflight?.trust_account ? ` under “${preflight.trust_account}”` : ''}. You can carry on and trust it any time before Create.</span>
                       </Tooltip>
-                      <Tooltip text="Records your trust of this repo where those agents read it, as Claude's own question would">
-                        <button class="link" disabled={trusting === f.key} onclick={() => void trustRepo(f)}>{trusting === f.key ? 'Trusting…' : 'Trust it'}</button>
-                      </Tooltip>
-                      or run <code>claude</code> once in it in another tab under that account (not this workspace's shell: the Hive replaces it).
+                      <Button variant="secondary" disabled={trusting === f.key} onclick={() => void trustRepo(f)}>{trusting === f.key ? 'Trusting…' : 'Trust this repo'}</Button>
                       {#if trustError?.key === f.key}<span class="err">{trustError.text}</span>{/if}
                     </div>
                   {/if}
@@ -727,6 +833,15 @@
               and you confirm its completion criteria before any worker starts.
               {#if instructions.trim()}Every agent also follows your {instructionCount.toLocaleString()} characters of rules.{/if}
             </p>
+            {#each untrusted as f (f.key)}
+              <div class="trust">
+                <Tooltip text={trustTip}>
+                  <span class="trust-text">Claude doesn't trust <b>{f.name}</b> yet: the queen and its workers would stop at Claude's trust question there.</span>
+                </Tooltip>
+                <Button variant="secondary" disabled={trusting === f.key} onclick={() => void trustRepo(f)}>{trusting === f.key ? 'Trusting…' : 'Trust this repo'}</Button>
+                {#if trustError?.key === f.key}<span class="err">{trustError.text}</span>{/if}
+              </div>
+            {/each}
             <p class="hint">Creating it replaces this workspace's shell with the queen, which starts at once.</p>
           </div>
         {/if}
@@ -910,7 +1025,10 @@
   .error { color: var(--red, #f7768e); font-size: 0.923rem; overflow-wrap: anywhere; margin: 0; }
   .link { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; font-size: 0.846rem; }
   .link:disabled { color: var(--fg-dim); cursor: default; }
-  .warn .err { display: block; color: var(--red, #f7768e); }
+  .trust { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--yellow, #e0af68) 10%, transparent); }
+  .trust-text { font-size: 0.846rem; color: var(--fg); overflow-wrap: anywhere; flex: 1 1 220px; }
+  .trust .err { flex-basis: 100%; font-size: 0.846rem; color: var(--red, #f7768e); }
+  .resumed { font-size: 0.846rem; color: var(--fg-dim); margin-left: auto; margin-right: 8px; }
   .footer { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--bg-light); flex-wrap: wrap; }
   .foot { margin-right: auto; flex: 1 1 200px; }
 
