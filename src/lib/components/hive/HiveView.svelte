@@ -869,7 +869,7 @@
           <span class="bridge-chip">
             <Tooltip text="The queen is bridged to {partnerLabel}, an agent outside this Hive: they agree the interface between their two sides. Open its tab">
               <button type="button" class="bridge-open" onclick={() => void navigateToTab(partnerId)}>
-                <span aria-hidden="true">⇄</span>{partnerLabel}
+                <span aria-hidden="true">⇄</span><b class="bridge-name">{partnerLabel}</b>
               </button>
             </Tooltip>
             <IconButton tooltip="Close the queen's bridge to {partnerLabel}" onclick={() => agentBridgeStore.disconnect(coordId)}>
@@ -1379,8 +1379,12 @@
   .needs-pill { display: inline-flex; align-items: center; gap: 6px; background: color-mix(in srgb, var(--orange, #ff9e64) 14%, transparent); border: 1px solid color-mix(in srgb, var(--orange, #ff9e64) 45%, transparent); color: var(--orange, #ff9e64); border-radius: 999px; padding: 2px 10px; font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap; }
   .needs-pill:hover, .needs-pill.on { background: color-mix(in srgb, var(--orange, #ff9e64) 24%, transparent); }
   .needs-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .bridge-chip { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--bg-light); border-radius: 999px; padding-left: 2px; min-width: 0; max-width: 260px; }
-  .bridge-open { display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; color: var(--fg); font: inherit; font-size: 11.5px; padding: 2px 4px 2px 8px; cursor: pointer; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bridge-chip { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--bg-light); border-radius: 999px; padding-left: 2px; min-width: 0; max-width: 260px; flex-shrink: 1; overflow: hidden; }
+  /* The Tooltip's wrapper sits between the chip and the button: it has to shrink too, or the
+     name never ellipsizes and spills over the status pill beside it. The full name is in the tooltip. */
+  .bridge-chip > :global(.tooltip-wrapper:first-child) { min-width: 0; flex: 1 1 auto; overflow: hidden; }
+  .bridge-open { display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; color: var(--fg); font: inherit; font-size: 11.5px; padding: 2px 4px 2px 8px; cursor: pointer; min-width: 0; max-width: 100%; }
+  .bridge-name { font-weight: inherit; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bridge-open span { color: var(--accent); }
   .bridge-open:hover { color: var(--accent); }
   .bridge-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 999px; }
