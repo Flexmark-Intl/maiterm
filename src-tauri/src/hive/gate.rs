@@ -1582,4 +1582,47 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&f.base);
     }
+
+    /// The review of the gate's cd fixes (2026-10-31): the forms around each fix that it closes.
+    #[cfg(unix)]
+    #[test]
+    fn review_cd_fixes_hold_for_the_forms_around_them() {
+        let f = fx();
+        let wt = f.wt.display().to_string();
+        let out = f.base.join("outside").display().to_string();
+        let from_out = |cmd: &str| gate_decision("Bash", &json!({ "command": cmd }), Some(Path::new(&out)), &f.worker);
+        let denied = |d: GateDecision| matches!(d, GateDecision::Deny(_));
+        fs::create_dir_all(f.wt.join("a")).unwrap();
+        // `..` quoted, trailing, after `./`, and under `cd -P`.
+        for cmd in [
+            format!("cd \"{wt}/a/..\" && git status"),
+            format!("cd '{wt}/a/../a' && git status"),
+            format!("cd '{wt}/..' && git status"),
+            format!("cd -P '{wt}/a/..' && git status"),
+            "cd ./a/.. && git status".to_string(),
+        ] {
+            assert!(denied(from_out(&cmd)), "a `..` in a cd: {cmd}");
+        }
+        // `~user`, `~+`, and `~` in every git path flag.
+        for cmd in ["cd ~root && git status", "cd ~+ && git status", "git -C ~root/x status", "git --git-dir ~/x status", "git --work-tree=~/x status", "git --git-dir=~ status"] {
+            assert!(denied(from_out(cmd)), "a `~`: {cmd}");
+        }
+        // A newline is a `;`: the cd may have failed. A `&` backgrounds the cd: it moves nothing.
+        for cmd in [format!("cd '{wt}'\ngit status"), format!("cd '{wt}' & git status"), format!("cd '{wt}' &\ngit status")] {
+            assert!(denied(from_out(&cmd)), "{cmd:?}");
+            assert_eq!(wbash(&f, &format!("cd '{wt}'\ngit status")), GateDecision::Allow);
+        }
+        // A cd hidden behind builtin/command, and git through a shell's -c.
+        for cmd in [
+            "builtin cd /tmp; git status".to_string(),
+            "command cd /tmp; git status".to_string(),
+            format!("bash -c \"cd '{out}'; git status\""),
+            format!("sh -c 'cd {out} && git status'"),
+            format!("bash -lc 'git -C {out} status'"),
+        ] {
+            assert!(denied(wbash(&f, &cmd)), "{cmd}");
+        }
+        assert_eq!(wbash(&f, &format!("bash -c \"cd '{wt}' && git status\"")), GateDecision::Allow);
+        let _ = fs::remove_dir_all(&f.base);
+    }
 }

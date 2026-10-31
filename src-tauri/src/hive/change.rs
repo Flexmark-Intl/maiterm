@@ -948,4 +948,19 @@ mod tests {
         assert!(refuse_private_hosts(&[name.clone()], true).await.unwrap_err().contains("doesn\u{2019}t resolve yet"));
         assert!(refuse_private_hosts(&[name], false).await.is_ok());
     }
+
+    /// The review of the remote-host fix (2026-10-31): forms it closes.
+    #[test]
+    fn review_remote_host_forms_it_closes() {
+        let add = |h: &str| SettingsChange { add_hosts: vec![h.into()], ..Default::default() };
+        let gh = ["github.com".to_string()];
+        // A unicode spelling isn't a host name at all; a remote's port never reaches url_host.
+        for h in ["gïthub.com", "github.com:22", "*.com", "com"] {
+            assert!(check(&hive(), &add(h), By::Coordinator, &gh).is_err(), "{h}");
+        }
+        assert_eq!(super::super::settings::url_host("ssh://git@GitHub.com:2222/o/r").as_deref(), Some("github.com"));
+        assert_eq!(super::super::settings::url_host("git@github.com:o/r").as_deref(), Some("github.com"));
+        // A forge's sibling under an unrelated label is another domain.
+        assert!(check(&hive(), &add("github.io"), By::Coordinator, &gh).is_ok());
+    }
 }
