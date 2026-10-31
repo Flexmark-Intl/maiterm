@@ -844,7 +844,11 @@
   .agent :global(ul), .agent :global(ol) { margin: 0 0 8px; padding-left: 1.4em; }
   .agent :global(li) { margin: 2px 0; }
   .agent :global(li::marker) { color: var(--fg-dim); }
-  .agent :global(pre) { background: var(--bg-medium); padding: 9px 11px; border-radius: 6px; overflow-x: auto; font-size: 11.5px; }
+  /* A long line scrolls sideways. WebKit draws that scrollbar below the box's laid-out height, over
+     the next paragraph, so the block keeps a bottom margin the bar can sit in (and never scrolls
+     vertically, which would add a second bar). */
+  .agent :global(pre) { background: var(--bg-medium); padding: 9px 11px; border-radius: 6px; overflow-x: auto; overflow-y: hidden; font-size: 11.5px; margin: 0 0 12px; }
+  .agent :global(pre:last-child) { margin-bottom: 4px; }
   .agent :global(code) { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.9em; background: var(--bg-medium); padding: 1px 4px; border-radius: 3px; }
   .agent :global(pre code) { background: none; padding: 0; }
   .agent :global(a) { color: var(--accent); }
