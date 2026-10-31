@@ -268,6 +268,7 @@
   box-shadow: none;
 }
 .ov-num { width: 66px; text-align: right; }
+.ov-tokens { width: 92px; text-align: right; }
 
 /* Checkbox rendered as a deck switch. */
 .ov-check {

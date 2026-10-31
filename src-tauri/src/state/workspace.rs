@@ -1575,7 +1575,14 @@ pub struct Trigger {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum OverlordCondition {
-    ContextPct { at_or_above: u64 },
+    /// `min_tokens` is an absolute floor on top of the percentage. A percentage alone means
+    /// very different things on a 200k and a 1M window. A field, not a new variant: an older
+    /// build ignores it, where a new variant would make it load EMPTY state.
+    ContextPct {
+        at_or_above: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_tokens: Option<u64>,
+    },
     TurnEnd,
     Commit,
     TabIdle { minutes: u64 },

@@ -71,11 +71,11 @@
   const PRESSURE_FALLBACK_PCT = 60;
   const STALE_DAYS = 3;
 
-  /** Raise pressure at the level where a checkpoint will actually fire, not at a constant
-   *  of our own. The old hardcoded 50 sat five points below the default rule's 55, so
-   *  every tab in that band got a card saying "a checkpoint should run" while no rule
+  /** Raise pressure at the level where a checkpoint will actually fire on this tab, not at a
+   *  constant of our own. The old hardcoded 50 sat five points below the default rule's 55,
+   *  so every tab in that band got a card saying "a checkpoint should run" while no rule
    *  could possibly run one. */
-  const PRESSURE_PCT = $derived(overlordStore.checkpointThreshold ?? PRESSURE_FALLBACK_PCT);
+  const pressurePct = (tabId: string) => overlordStore.checkpointThresholdFor(tabId) ?? PRESSURE_FALLBACK_PCT;
 
   /** Which view is showing lives in the loom store: Cmd+Shift+J and "show in the weave" links
    *  set it from outside the deck. The Loom is home. */
@@ -138,7 +138,7 @@
       }
     }
     const rank = (u: FleetUnit) =>
-      (u.ritual ? 0 : u.state === 'permission' ? 1 : (u.pct ?? 0) >= PRESSURE_PCT ? 2 : u.state === 'dormant' ? 4 : 3);
+      (u.ritual ? 0 : u.state === 'permission' ? 1 : (u.pct ?? 0) >= pressurePct(u.tab.id) ? 2 : u.state === 'dormant' ? 4 : 3);
     return units.sort((a, b) => rank(a) - rank(b) || (b.pct ?? 0) - (a.pct ?? 0));
   });
 
@@ -214,7 +214,7 @@
     for (const p of overlordStore.proposals) out.push({ sev: 1, id: p.id, type: 'proposal', p });
     for (const u of fleet) {
       if (u.state === 'permission') out.push({ sev: 2, id: `perm-${u.tab.id}`, type: 'permission', u });
-      else if ((u.pct ?? 0) >= PRESSURE_PCT) out.push({ sev: 3, id: `ctx-${u.tab.id}`, type: 'pressure', u });
+      else if ((u.pct ?? 0) >= pressurePct(u.tab.id)) out.push({ sev: 3, id: `ctx-${u.tab.id}`, type: 'pressure', u });
       // `loaded` gates this, not just dormancy. A tab in a suspended or never-opened
       // workspace has no mounted pane, so nothing can probe it, classify it or type into
       // it — it would raise a permanent card that describes a problem and offers nothing,
@@ -238,7 +238,8 @@
   });
 
   // ── Telemetry ───────────────────────────────────────────────────────────────
-  const peakPct = $derived(fleet.reduce((m, u) => Math.max(m, u.pct ?? 0), 0));
+  const peakUnit = $derived(fleet.reduce<FleetUnit | null>((m, u) => ((u.pct ?? 0) > (m?.pct ?? 0) ? u : m), null));
+  const peakPct = $derived(peakUnit?.pct ?? 0);
   const inFlight = $derived(overlordStore.ritualProgress.length);
   const sentToday = $derived.by(() => {
     void now;
@@ -382,12 +383,12 @@
     recoverNote = `Run all: sent ${r.sent}${r.skipped ? `, skipped ${r.skipped}` : ''}.`;
   }
 
-  function pctTone(pct: number | null): string {
-    if (pct === null) return 'var(--ov-ink-dim)';
-    if (pct >= 75) return 'var(--ov-critical)';
-    if (pct >= PRESSURE_PCT) return 'var(--ov-pressure)';
+  const peakTone = $derived.by(() => {
+    if (!peakUnit) return 'var(--ov-ink-dim)';
+    if (peakPct >= 75) return 'var(--ov-critical)';
+    if (peakPct >= pressurePct(peakUnit.tab.id)) return 'var(--ov-pressure)';
     return 'var(--ov-ok)';
-  }
+  });
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -444,9 +445,9 @@
         <span class="ov-label">watched</span>
       </div>
       <div class="readout">
-        <span class="ov-mono readout-value" style:color={pctTone(peakPct || null)}>{peakPct || '—'}<i>%</i></span>
+        <span class="ov-mono readout-value" style:color={peakTone}>{peakPct || '—'}<i>%</i></span>
         <span class="ov-label">peak context</span>
-        <div class="readout-bar"><span style:width="{peakPct}%" style:background={pctTone(peakPct || null)}></span></div>
+        <div class="readout-bar"><span style:width="{peakPct}%" style:background={peakTone}></span></div>
       </div>
       <div class="readout">
         <span class="ov-mono readout-value" style:color={inFlight ? 'var(--ov-live)' : undefined}>{inFlight}</span>
@@ -735,9 +736,6 @@
                   A checkpoint ran recently, so the rule holds off for another {cp.minutes}m.
                 {:else if cp.kind === 'busy'}
                   The agent is mid-turn — the checkpoint runs as soon as it finishes.
-                {:else if cp.kind === 'below_rule'}
-                  This tab's own rule doesn't fire until {cp.at}% — nothing runs on its own
-                  before then. Checkpoint now if you'd rather not wait.
                 {:else}
                   The checkpoint runs on the next tick.
                 {/if}

@@ -106,12 +106,17 @@ describe('seedDefaultOverlordRules — a flagged rule that is still ours', () =>
 
   /** Every default was idle-only until 2026-10-19. */
   const IDLE_ONLY = { ...tmpl.guards, agent_state: ['idle'] } as OverlordRule['guards'];
+  /** The one rule fired at 55% with no floor, for idle and busy agents, until 2026-10-31. */
+  const OLD_WHEN = { event: 'context_pct', at_or_above: 55 } as OverlordRule['when'];
+  const IDLE_OR_BUSY = { ...tmpl.guards, agent_state: ['idle', 'active'] } as OverlordRule['guards'];
+  const CLAUDE_ONLY_COMPACT = { ...tmpl.sequence[1], runtimes: ['claude'] } as OverlordRule['sequence'][number];
 
   it('migrates a flagged copy of a previous version, keeping scope and enabled', () => {
-    const r = shipped({ description: OLD_DESCRIPTION, sequence: OLD_SEQUENCE, guards: IDLE_ONLY, user_modified: true, enabled: false, workspaces: ['ws-1'] });
+    const r = shipped({ description: OLD_DESCRIPTION, when: OLD_WHEN, sequence: OLD_SEQUENCE, guards: IDLE_ONLY, user_modified: true, enabled: false, workspaces: ['ws-1'] });
     const row = seedDefaultOverlordRules([r], [])!.find((x) => x.default_id === ID)!;
     expect(row.sequence).toEqual(tmpl.sequence);
     expect(row.guards).toEqual(tmpl.guards);
+    expect(row.when).toEqual(tmpl.when);
     expect(row.user_modified).toBe(false);
     expect(row.enabled).toBe(false);
     expect(row.workspaces).toEqual(['ws-1']);
@@ -120,9 +125,11 @@ describe('seedDefaultOverlordRules — a flagged rule that is still ours', () =>
   it('moves an untouched copy of the wording that left stale tasks onto the current one', () => {
     const old = shipped({
       description: OLD_DESCRIPTION,
+      when: OLD_WHEN,
+      guards: IDLE_OR_BUSY,
       sequence: [
         { ...tmpl.sequence[0], text: 'Prepare for compaction: make sure any relevant docs, memory, code comments and tasks are updated if needed.' },
-        tmpl.sequence[1],
+        CLAUDE_ONLY_COMPACT,
       ],
     });
     const row = seedDefaultOverlordRules([old], [])!.find((x) => x.default_id === ID)!;
@@ -130,8 +137,34 @@ describe('seedDefaultOverlordRules — a flagged rule that is still ours', () =>
     expect(row.description).toBe(tmpl.description);
   });
 
+  it('moves a flagged copy of the single 55% rule onto the idle rule, and adds the busy one', () => {
+    const old = shipped({
+      description: 'At ~55% context, have the agent commit finished work, update docs/memory, clean up its tasks and note where it is, then compact — instead of hitting the auto-compact wall mid-thought.',
+      when: OLD_WHEN,
+      guards: IDLE_OR_BUSY,
+      sequence: [tmpl.sequence[0], CLAUDE_ONLY_COMPACT],
+      user_modified: true,
+    });
+    const rows = seedDefaultOverlordRules([old], [])!;
+    const idle = rows.find((x) => x.default_id === ID)!;
+    expect(idle.when).toEqual({ event: 'context_pct', at_or_above: 35, min_tokens: 130_000 });
+    expect(idle.guards.agent_state).toEqual(['idle']);
+    expect(idle.user_modified).toBe(false);
+    const busy = rows.find((x) => x.default_id === 'checkpoint_busy_agent')!;
+    expect(busy.when).toEqual({ event: 'context_pct', at_or_above: 55, min_tokens: 130_000 });
+    expect(busy.guards.agent_state).toEqual(['active']);
+  });
+
+  it('compacts on Codex too, so a Codex tab never repeats the prep with nothing to show for it', () => {
+    for (const id of [ID, 'checkpoint_busy_agent']) {
+      expect(DEFAULT_OVERLORD_RULES[id].sequence[1].runtimes).toEqual(['claude', 'codex']);
+    }
+  });
+
   it('moves every untouched idle-only default onto busy-or-idle', () => {
-    for (const [id, t] of Object.entries(DEFAULT_OVERLORD_RULES)) {
+    // The checkpoint is idle-only again, on purpose: its busy half is a separate rule.
+    const others = Object.entries(DEFAULT_OVERLORD_RULES).filter(([id]) => id !== ID && id !== 'checkpoint_busy_agent');
+    for (const [id, t] of others) {
       const old = rule({ ...structuredClone(t), default_id: id, guards: { ...t.guards, agent_state: ['idle'] } });
       const row = seedDefaultOverlordRules([old], [])!.find((x) => x.default_id === id)!;
       expect(row.guards.agent_state).toEqual(['idle', 'active']);

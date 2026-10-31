@@ -211,6 +211,13 @@
     updateRule(rule.id, { when: w as unknown as OverlordCondition });
   }
 
+  /** Blank or 0 removes the floor. */
+  function setMinTokens(rule: OverlordRule, value: number) {
+    if (rule.when.event !== 'context_pct') return;
+    const { min_tokens: _, ...when } = rule.when;
+    updateRule(rule.id, { when: value > 0 ? { ...when, min_tokens: value } : when });
+  }
+
   // ── Steps ───────────────────────────────────────────────────────────────────
   const GATES = [
     { value: 'none', label: "Don't wait" },
@@ -621,6 +628,14 @@
                 <input class="ov-input ov-num" type="number" min="1" value={conditionParam(rule.when)}
                        onchange={(e) => setConditionParam(rule, Number(e.currentTarget.value))} />
                 <span class="unit">{conditionUnit(rule.when)}</span>
+              {/if}
+              {#if rule.when.event === 'context_pct'}
+                <span class="unit">and</span>
+                <input class="ov-input ov-tokens" type="number" min="0" step="10000" placeholder="any"
+                       aria-label="Minimum tokens"
+                       value={rule.when.min_tokens ?? ''}
+                       onchange={(e) => setMinTokens(rule, Number(e.currentTarget.value))} />
+                <span class="unit">tokens</span>
               {/if}
               <span class="spacer"></span>
               <span class="ov-label">then rest</span>

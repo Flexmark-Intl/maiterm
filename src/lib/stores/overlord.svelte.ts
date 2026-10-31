@@ -22,7 +22,14 @@ import { bracketedPasteSubmit, deliverPrompt } from '$lib/utils/agentPrompt';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { pruneHiddenDefaultOverlordRules, seedDefaultOverlordRules } from '$lib/overlord/defaults';
-import { DEFAULT_AGENT_STATES, guardsForCondition } from '$lib/overlord/format';
+import {
+  contextConditionMet,
+  contextFiresAtPct,
+  DEFAULT_AGENT_STATES,
+  describeCondition as conditionClause,
+  guardsForCondition,
+  type ContextCondition,
+} from '$lib/overlord/format';
 import { getVariables, interpolateShell, setVariable } from '$lib/stores/triggers.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { coordinatorHolds, engineSkips, HIVE_COORDINATOR_HOLDS, HIVE_SUPERVISED_DETAIL } from '$lib/hive/model';
@@ -254,12 +261,6 @@ export type CheckpointState =
   | { kind: 'no_rule' }
   | { kind: 'cooling'; minutes: number }
   | { kind: 'busy' }
-  /** A card is showing, but this tab's own applicable rule fires higher up. The deck's
-   *  threshold is one window-wide number (the lowest enabled `context_pct`, scope
-   *  ignored); `checkpointRuleFor` respects workspace scope. So a workspace-scoped rule at
-   *  40% anywhere in the window raised a card for a tab in a DIFFERENT workspace at 42%
-   *  and told it a checkpoint was coming — while the rule that governs it needs 55%. */
-  | { kind: 'below_rule'; at: number }
   | { kind: 'ready' };
 
 /** An agent tab whose tracked work is finished and which has gone quiet — a candidate for
@@ -914,9 +915,11 @@ function createOverlordStore() {
 
   function guardsPassSync(rule: OverlordRule, tabId: string, now: number): boolean {
     const g = rule.guards;
-    // cooldown per (rule, tab)
+    // cooldown per (rule, tab). Checkpoint rules share one: they run the same ritual, split
+    // by agent state, so a ritual the human aborted by typing would otherwise have the busy
+    // rule interrupt them within a tick, because the agent is now working on what they typed.
     const key = `${rule.id}|${tabId}`;
-    const last = lastFiredAt.get(key) ?? 0;
+    const last = rule.when.event === 'context_pct' ? checkpointFiredAt(tabId) : (lastFiredAt.get(key) ?? 0);
     if (rule.cooldown > 0 && now - last < rule.cooldown * 1000) return false;
     // agent_state (default idle or busy, `DEFAULT_AGENT_STATES`). agent_unready rules are the
     // exception: the condition MEANS "no live agent state", so requiring one would make the
@@ -1856,7 +1859,7 @@ function createOverlordStore() {
 
   function describeCondition(when: OverlordRule['when']): string {
     switch (when.event) {
-      case 'context_pct': return `context reaches ${when.at_or_above}%`;
+      case 'context_pct': return conditionClause(when);
       case 'turn_end': return 'a turn ends';
       case 'commit': return 'a git commit lands';
       case 'tab_idle': return `a tab sits idle ${when.minutes} min`;
@@ -2267,7 +2270,7 @@ function createOverlordStore() {
     const f = facts.get(tab.id);
     switch (w.event) {
       case 'context_pct':
-        return f?.context_pct !== undefined && f.context_pct >= w.at_or_above;
+        return contextConditionMet(w, f);
       case 'turn_end':
         return turnEnded;
       case 'commit':
@@ -2320,7 +2323,10 @@ function createOverlordStore() {
   }
 
   function propose(rule: OverlordRule, tabId: string) {
-    if (proposals.some((p) => p.ruleId === rule.id && p.tabId === tabId)) return;
+    // One checkpoint card per tab: its two rules run the same ritual.
+    const sameJob = (ruleId: string) =>
+      ruleId === rule.id || (rule.when.event === 'context_pct' && isCheckpointRule(ruleId));
+    if (proposals.some((p) => p.tabId === tabId && sameJob(p.ruleId))) return;
     const ws = workspaceForTab(tabId);
     proposals = [
       ...proposals,
@@ -2716,16 +2722,50 @@ function createOverlordStore() {
     return { proposalIds: proposals.map((p) => p.id) };
   }
 
-  /** The enabled `context_pct` rule that would checkpoint this tab — lowest threshold
-   *  first, since that is the one that fires. */
-  function checkpointRuleFor(tabId: string): OverlordRule | null {
+  /** The enabled `context_pct` rules in this tab's scope. */
+  function checkpointRulesFor(tabId: string): OverlordRule[] {
     const ws = workspaceForTab(tabId);
+    return preferencesStore.overlordRules.filter(
+      (r) =>
+        r.enabled && r.when.event === 'context_pct' && hasRunnableSequence(r)
+        && (!r.workspaces.length || (!!ws && r.workspaces.includes(ws.id))),
+    );
+  }
+
+  function isCheckpointRule(ruleId: string): boolean {
+    return preferencesStore.overlordRules.find((r) => r.id === ruleId)?.when.event === 'context_pct';
+  }
+
+  /** When a checkpoint last fired on this tab, by any of its rules. */
+  function checkpointFiredAt(tabId: string): number {
+    return Math.max(0, ...checkpointRulesFor(tabId).map((r) => lastFiredAt.get(`${r.id}|${tabId}`) ?? 0));
+  }
+
+  /** The percentage of this tab's window where its first checkpoint rule fires, or null with
+   *  none enabled. `contextLimit` is for a caller that has it and the facts don't. */
+  function checkpointThresholdFor(tabId: string, contextLimit?: number): number | null {
+    const limit = contextLimit ?? facts.get(tabId)?.context_limit;
+    const pcts = checkpointRulesFor(tabId).map((r) => contextFiresAtPct(r.when as ContextCondition, limit));
+    return pcts.length ? Math.min(...pcts) : null;
+  }
+
+  /**
+   * The rule that would checkpoint this tab: one that fires for it right now, else the one
+   * that fires first. The rules split by agent state, so the lowest threshold alone would name
+   * the idle rule for a busy agent while the busy rule is the one that fires.
+   */
+  function checkpointRuleFor(tabId: string): OverlordRule | null {
+    const f = facts.get(tabId);
+    const st = mappedState(tabId);
+    const firesNow = (r: OverlordRule) =>
+      contextConditionMet(r.when as ContextCondition, f)
+      && !!st && (r.guards.agent_state ?? DEFAULT_AGENT_STATES).includes(st);
+    const at = (r: OverlordRule) => contextFiresAtPct(r.when as ContextCondition, f?.context_limit);
     let best: OverlordRule | null = null;
-    for (const r of preferencesStore.overlordRules) {
-      if (!r.enabled || r.when.event !== 'context_pct' || !hasRunnableSequence(r)) continue;
-      if (r.workspaces.length && (!ws || !r.workspaces.includes(ws.id))) continue;
-      const at = r.when.at_or_above;
-      if (!best || at < (best.when as { at_or_above: number }).at_or_above) best = r;
+    for (const r of checkpointRulesFor(tabId)) {
+      if (!best) { best = r; continue; }
+      const [now, bestNow] = [firesNow(r), firesNow(best)];
+      if ((now && !bestNow) || (now === bestNow && at(r) < at(best))) best = r;
     }
     return best;
   }
@@ -4106,28 +4146,11 @@ function createOverlordStore() {
 
     // ── Context pressure: checkpoint ─────────────────────────────────────────
 
-    /** The context level at which something will ACTUALLY happen: the lowest enabled
-     *  `context_pct` threshold. The deck reads this instead of its own constant — a
-     *  hardcoded 50 against a rule firing at 55 gave a five-point band where the deck
-     *  complained and nothing could act, which is advice wearing a supervisor's badge.
-     *  Null when no rule is enabled, which the deck says out loud. */
-    get checkpointThreshold(): number | null {
-      // The LOWEST enabled threshold — the level at which the first rule can fire, which is
-      // what `checkpointRuleFor` picks too. Returning the first rule in list order meant a
-      // second rule added at a lower threshold fired a checkpoint on a tab the deck was
-      // showing no pressure card for: the same deck-says-one-thing, engine-does-another
-      // gap this whole change closed, just inverted.
-      //
-      // Workspace scope is deliberately ignored: this is one window-wide number for the
-      // deck's severity ramp, and a scoped rule still narrows what actually fires.
-      let lowest: number | null = null;
-      for (const r of preferencesStore.overlordRules) {
-        if (!r.enabled || r.when.event !== 'context_pct' || !hasRunnableSequence(r)) continue;
-        const at = (r.when as { at_or_above: number }).at_or_above;
-        if (lowest === null || at < lowest) lowest = at;
-      }
-      return lowest;
-    },
+    /** The context level at which something will ACTUALLY happen on this tab. The deck reads
+     *  this instead of its own constant, or it complains where nothing can act. Per tab
+     *  because a token floor puts that level at 65% of a 200k window and 35% of a 1M one.
+     *  Null when no rule applies, which the deck says out loud. */
+    checkpointThresholdFor,
 
     /** Why a tab under context pressure is or isn't being checkpointed right now. The deck
      *  renders this verbatim: "a checkpoint should run" is not an answer when the whole
@@ -4138,14 +4161,8 @@ function createOverlordStore() {
       if (run) return { kind: 'running', step: run.stepIndex + 1, steps: run.stepCount };
       const rule = checkpointRuleFor(tabId);
       if (!rule) return { kind: 'no_rule' };
-      if (proposals.some((p) => p.tabId === tabId && p.ruleId === rule.id)) return { kind: 'proposed' };
-      // The card's threshold and this tab's rule are not the same number (see `below_rule`).
-      // Say the rule's, or the card promises a checkpoint that is not coming.
-      const at = (rule.when as { at_or_above?: number }).at_or_above;
-      const pct = facts.get(tabId)?.context_pct;
-      if (at !== undefined && pct !== undefined && pct < at) return { kind: 'below_rule', at };
-      const last = lastFiredAt.get(`${rule.id}|${tabId}`) ?? 0;
-      const left = rule.cooldown * 1000 - (Date.now() - last);
+      if (proposals.some((p) => p.tabId === tabId && isCheckpointRule(p.ruleId))) return { kind: 'proposed' };
+      const left = rule.cooldown * 1000 - (Date.now() - checkpointFiredAt(tabId));
       if (left > 0) return { kind: 'cooling', minutes: Math.max(1, Math.ceil(left / 60_000)) };
       const st = mappedState(tabId);
       if (st && st !== 'idle') return { kind: 'busy' };

@@ -255,7 +255,7 @@
     headNote = text === null ? null : { chat, text };
   }
   const ctxTone = (p: number | null) =>
-    p === null ? 'var(--fg-dim)' : p >= 75 ? 'var(--red)' : p >= (overlordStore.checkpointThreshold ?? 60) ? 'var(--orange, #ff9e64)' : 'var(--green)';
+    p === null ? 'var(--fg-dim)' : p >= 75 ? 'var(--red)' : p >= ((tabId ? overlordStore.checkpointThresholdFor(tabId) : null) ?? 60) ? 'var(--orange, #ff9e64)' : 'var(--green)';
 
   // ── Composer ──────────────────────────────────────────────────────────────────────────────
   /** Drafts by chat, so switching chats never sends one agent's words to another. */

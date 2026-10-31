@@ -217,7 +217,6 @@
 
   const cards = $derived.by(() => {
     const list = board?.workers ?? [];
-    const warnAt = overlordStore.checkpointThreshold;
     return list.map((worker) => {
       const tab = worker.tab_id ? tabs.find((t) => t.id === worker.tab_id) ?? null : null;
       const task = tasks.find((t) => t.id === worker.task_id) ?? null;
@@ -234,7 +233,7 @@
         activity: activityLine(onScreenAgent(worker.phase, agent, tabFields) ?? undefined, now, hiveFeed.sticky(tab?.id)),
         diff: formatDiffStat(hiveFeed.diffStat(worker.task_id)),
         model: meta?.model || worker.model,
-        ctx: contextGauge(meta, warnAt),
+        ctx: contextGauge(meta, tab ? overlordStore.checkpointThresholdFor(tab.id, meta?.contextLimit) : null),
         node: {
           taskId: worker.task_id,
           dependsOn: worker.depends_on,

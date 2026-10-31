@@ -689,7 +689,7 @@ not on output text, and the payload is a directive rather than an action enum.
 
 ```ts
 export type OverlordCondition =
-  | { event: 'context_pct';       at_or_above: number }      // 55
+  | { event: 'context_pct';       at_or_above: number; min_tokens?: number }  // 35, 130000
   | { event: 'turn_end' }
   | { event: 'commit' }
   | { event: 'tab_idle';          minutes: number }
@@ -840,15 +840,15 @@ firing `/compact` early truncates the work just asked for.
 {
   default_id: 'checkpoint_at_context_pressure',
   name: 'Checkpoint before compaction',
-  when:   { event: 'context_pct', at_or_above: 55 },
-  guards: { agent_state: ['idle', 'active'], min_quiet_ms: 3000, require_live_repl: true,
+  when:   { event: 'context_pct', at_or_above: 35, min_tokens: 130000 },
+  guards: { agent_state: ['idle'], min_quiet_ms: 3000, require_live_repl: true,
             max_per_hour: 1, only_if_no_outstanding: true },
   cooldown: 1800,
   sequence: [
     { kind: 'process',
       text: "Prepare for compaction: commit finished work (never half-finished work) and update any docs, memory and code comments that need it. Clean up your own tasks on the maiTerm board (listTasks, scope 'tab'): mark finished ones done, drop ones that are outdated or superseded, and fix any stale status or title. On the task you are in the middle of, add a note saying where you are and what comes next, so you can pick it up after compaction. Leave other tabs' tasks and anything waiting on your human alone.",
       await: { until: 'turn_end' }, timeout_seconds: 900, on_timeout: 'abort' },
-    { kind: 'slash', text: '/compact', runtimes: ['claude'],
+    { kind: 'slash', text: '/compact', runtimes: ['claude', 'codex'],
       await: { until: 'context_below', pct: 30 }, timeout_seconds: 300,
       on_timeout: 'notify_human' },
   ],
@@ -857,6 +857,29 @@ firing `/compact` early truncates the work just asked for.
 
 `on_timeout: 'abort'` on step 1 is the important default — if the docs pass
 stalls, `/compact` must not fire into a half-finished turn.
+
+**When it fires (2026-10-31).** Two rules run this same ritual, split by agent state:
+
+| Rule | Agent | Fires at | On 200k | On 250k | On 1M |
+|---|---|---|---|---|---|
+| `checkpoint_at_context_pressure` | idle | 35% and 130k tokens | 130k | 130k | 350k |
+| `checkpoint_busy_agent` | active | 55% and 130k tokens | 130k | 137.5k | 550k |
+
+- **The floor** is why a percentage isn't enough. Claude auto-compacts at about 167k on a
+  small window (p10 167,041, p90 175,563) and about 1M on a 1M one, so 130k leaves room for
+  the prep turn, about 37k. 35% is a judgment call rather than a computed optimum: a smaller
+  context costs less per call, but the model leaves out rework after a compaction.
+- **`min_tokens` is a field, not a new condition.** A new serde variant makes an older build
+  load empty state. A rule without it behaves as it always did, and a size that can't be read
+  never satisfies it.
+- **The two rules share a cooldown and a card.** They are one job. Separately, a human aborting
+  a ritual by typing would set the agent working, and the busy rule would interrupt them on the
+  next tick. Rate limits (`max_per_hour`) stay per rule.
+- **Codex compacts.** Tested on codex-cli 0.157.1 by bracketed paste: `/compact` runs and the
+  rollout writes a `token_count` with the smaller size at once (15,995 to 6,146), so
+  `context_below` clears. Listing only Claude here meant a Codex tab took the prep turn and kept
+  its context, so the rule prepped it again each time its limits allowed. Gemini has `/compress`,
+  but no transcript, so no `context_pct` rule fires there and it isn't listed.
 
 Interruption semantics (decided 2026-08-22):
 
@@ -1578,9 +1601,10 @@ The `pressure` card had the same shortcoming twice over:
 1. **The threshold was a lie.** The deck hardcoded `PRESSURE_PCT = 50` while the
    default `checkpoint_at_context_pressure` rule fires at 55, so every tab between
    50–55% got a card saying a checkpoint should run while no rule could run one. The
-   deck now reads `overlordStore.checkpointThreshold` — the lowest enabled
-   `context_pct` rule — so it raises pressure exactly where something will act. With
-   no such rule enabled it falls back to 60% and says outright that nothing will run.
+   deck now reads `overlordStore.checkpointThresholdFor(tabId)` — where this tab's first
+   `context_pct` rule fires, in this tab's scope and on this tab's window — so it raises
+   pressure exactly where something will act. With no such rule enabled it falls back to
+   60% and says outright that nothing will run.
 2. **There was no button.** Now `checkpointState(tabId)` drives both the copy and the
    control, so they cannot drift:
 
@@ -1591,16 +1615,12 @@ The `pressure` card had the same shortcoming twice over:
 | `cooling` | rule holds off for another N min | Checkpoint now |
 | `busy` | runs as soon as the turn finishes | Checkpoint now |
 | `ready` | runs on the next tick | Checkpoint now |
-| `below_rule` | this tab's rule doesn't fire until N% | Checkpoint now |
 | `no_rule` | nothing will run on its own | pointer to Preferences |
 
-`below_rule` is the 50-vs-55 dead band inverted, and it survived the first fix.
-`checkpointThreshold` is one window-wide number that **ignores workspace scope on
-purpose**; `checkpointRuleFor` respects it. So a workspace-scoped rule at 40%
-anywhere in the window raises a card for a tab in a *different* workspace at 42%,
-whose own rule needs 55%. The card was right to appear — the human may well want
-to checkpoint early, and the button always worked — but it said "runs on the next
-tick", which was false. It now names the rule's own threshold.
+The threshold used to be one window-wide number, so a workspace-scoped rule at 40% raised a
+card for a tab elsewhere whose own rule needed 55%, and a `below_rule` state had to explain
+that. A token floor made the gap the normal case, 65% of a 200k window against 35% of a 1M one,
+so the threshold is per tab now and the card and the rule can't disagree.
 
 `checkpointTab()` bypasses the **rate limiters** (`cooldown`, `max_per_hour`) — those
 exist to stop the *engine* nagging, and a human clicking the button is the override
@@ -2023,7 +2043,7 @@ Two scope decisions:
   the guards on purpose, that need the one guard a human can't override.
 - **Five call sites asked "has a sequence" and each counted steps.**
   `hasRunnableSequence` (a step with text) is now the one answer, used by
-  `rulesForTab`, `fireRule`, `checkpointRuleFor`, `checkpointThreshold` and
+  `rulesForTab`, `fireRule`, `checkpointRulesFor` and
   the tick. The second was the worst:
   a blank `context_pct` rule prepended by the editor at a lower threshold won
   `checkpointRuleFor`'s strict tie-break, so the deck's Checkpoint button

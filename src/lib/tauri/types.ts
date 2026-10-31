@@ -1512,7 +1512,7 @@ export interface Trigger {
 // ─── Overlord (docs/overlord.md) — Rust mirror in state/workspace.rs ─────────────────
 
 export type OverlordCondition =
-  | { event: 'context_pct'; at_or_above: number }
+  | { event: 'context_pct'; at_or_above: number; min_tokens?: number }
   | { event: 'turn_end' }
   | { event: 'commit' }
   | { event: 'tab_idle'; minutes: number }

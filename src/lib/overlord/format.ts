@@ -25,10 +25,41 @@ export const DEFAULT_AGENT_STATES: ('idle' | 'active' | 'permission')[] = ['idle
 
 // ── Conditions ────────────────────────────────────────────────────────────────
 
+export type ContextCondition = Extract<OverlordCondition, { event: 'context_pct' }>;
+
+/** "130k", "1.5M": the tokens in a rule's own words. */
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(1)}M`;
+  return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
+}
+
+/**
+ * Whether a tab has reached a `context_pct` condition: the percentage AND any token floor.
+ * A floor with no reading is not met: an unknown size is never a reason to fire.
+ */
+export function contextConditionMet(
+  when: ContextCondition,
+  facts: { context_pct?: number; context_used?: number } | undefined,
+): boolean {
+  if (facts?.context_pct === undefined || facts.context_pct < when.at_or_above) return false;
+  return when.min_tokens === undefined || (facts.context_used ?? 0) >= when.min_tokens;
+}
+
+/**
+ * The percentage of THIS window at which a condition fires. The floor can be the higher of
+ * the two: 35% and 130k fires at 65% of a 200k window and at 35% of a 1M one. With no known
+ * window, only the percentage can be stated.
+ */
+export function contextFiresAtPct(when: ContextCondition, contextLimit: number | undefined): number {
+  if (!when.min_tokens || !contextLimit) return when.at_or_above;
+  return Math.max(when.at_or_above, Math.ceil((when.min_tokens / contextLimit) * 100));
+}
+
 /** Full clause: "context reaches 55%". Reads after the word "When". */
 export function describeCondition(when: OverlordCondition): string {
   switch (when.event) {
-    case 'context_pct': return `context reaches ${when.at_or_above}%`;
+    case 'context_pct':
+      return `context reaches ${when.at_or_above}%${when.min_tokens ? ` and ${fmtTokens(when.min_tokens)} tokens` : ''}`;
     case 'turn_end': return 'a turn ends';
     case 'commit': return 'a commit lands';
     case 'tab_idle': return `a tab idles ${fmtMinutes(when.minutes)}`;
@@ -43,7 +74,8 @@ export function describeCondition(when: OverlordCondition): string {
 /** Two-word chip label for dense rows. */
 export function conditionChip(when: OverlordCondition): string {
   switch (when.event) {
-    case 'context_pct': return `${when.at_or_above}% CTX`;
+    case 'context_pct':
+      return `${when.at_or_above}%${when.min_tokens ? ` ${fmtTokens(when.min_tokens).toUpperCase()}` : ''} CTX`;
     case 'turn_end': return 'TURN END';
     case 'commit': return 'COMMIT';
     case 'tab_idle': return `IDLE ${when.minutes}M`;
