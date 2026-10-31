@@ -90,6 +90,9 @@ describe('seedDefaultOverlordRules — retiring a default', () => {
 describe('seedDefaultOverlordRules — a flagged rule that is still ours', () => {
   const ID = 'checkpoint_at_context_pressure';
   const tmpl = DEFAULT_OVERLORD_RULES[ID];
+  /** The description every version before 2026-10-31 shipped with. */
+  const OLD_DESCRIPTION =
+    'At ~55% context, have the agent update docs/memory, prepare for compaction, then compact — instead of hitting the auto-compact wall mid-thought.';
   /** Exactly what shipped before 2026-10-05 — a separate prep and "Prepare for compaction." */
   const OLD_SEQUENCE = [
     { kind: 'process', text: 'Before we continue — make sure any relevant docs, memory, code comments and tasks are updated if needed.', await: { until: 'turn_end' }, timeout_seconds: 900, on_timeout: 'abort' },
@@ -105,13 +108,26 @@ describe('seedDefaultOverlordRules — a flagged rule that is still ours', () =>
   const IDLE_ONLY = { ...tmpl.guards, agent_state: ['idle'] } as OverlordRule['guards'];
 
   it('migrates a flagged copy of a previous version, keeping scope and enabled', () => {
-    const r = shipped({ sequence: OLD_SEQUENCE, guards: IDLE_ONLY, user_modified: true, enabled: false, workspaces: ['ws-1'] });
+    const r = shipped({ description: OLD_DESCRIPTION, sequence: OLD_SEQUENCE, guards: IDLE_ONLY, user_modified: true, enabled: false, workspaces: ['ws-1'] });
     const row = seedDefaultOverlordRules([r], [])!.find((x) => x.default_id === ID)!;
     expect(row.sequence).toEqual(tmpl.sequence);
     expect(row.guards).toEqual(tmpl.guards);
     expect(row.user_modified).toBe(false);
     expect(row.enabled).toBe(false);
     expect(row.workspaces).toEqual(['ws-1']);
+  });
+
+  it('moves an untouched copy of the wording that left stale tasks onto the current one', () => {
+    const old = shipped({
+      description: OLD_DESCRIPTION,
+      sequence: [
+        { ...tmpl.sequence[0], text: 'Prepare for compaction: make sure any relevant docs, memory, code comments and tasks are updated if needed.' },
+        tmpl.sequence[1],
+      ],
+    });
+    const row = seedDefaultOverlordRules([old], [])!.find((x) => x.default_id === ID)!;
+    expect(row.sequence).toEqual(tmpl.sequence);
+    expect(row.description).toBe(tmpl.description);
   });
 
   it('moves every untouched idle-only default onto busy-or-idle', () => {

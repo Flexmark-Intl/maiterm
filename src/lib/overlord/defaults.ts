@@ -15,7 +15,7 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
   checkpoint_at_context_pressure: {
     name: 'Checkpoint before compaction',
     description:
-      'At ~55% context, have the agent update docs/memory, prepare for compaction, then compact — instead of hitting the auto-compact wall mid-thought.',
+      'At ~55% context, have the agent commit finished work, update docs/memory, clean up its tasks and note where it is, then compact — instead of hitting the auto-compact wall mid-thought.',
     cooldown: 1800,
     when: { event: 'context_pct', at_or_above: 55 },
     guards: {
@@ -30,7 +30,8 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
         kind: 'process',
         // One prep turn, not two: a separate "Prepare for compaction." after this asked for
         // the same work again and spent a whole turn on "already done".
-        text: 'Prepare for compaction: make sure any relevant docs, memory, code comments and tasks are updated if needed.',
+        // One line: this is typed into the agent's input box.
+        text: "Prepare for compaction: commit finished work (never half-finished work) and update any docs, memory and code comments that need it. Clean up your own tasks on the maiTerm board (listTasks, scope 'tab'): mark finished ones done, drop ones that are outdated or superseded, and fix any stale status or title. On the task you are in the middle of, add a note saying where you are and what comes next, so you can pick it up after compaction. Leave other tabs' tasks and anything waiting on your human alone.",
         await: { until: 'turn_end' },
         timeout_seconds: 900,
         on_timeout: 'abort',
@@ -178,6 +179,39 @@ const PREVIOUS_DEFAULT_OVERLORD_RULES: Record<string, OverlordRuleTemplate[]> = 
       when: { event: 'context_pct', at_or_above: 55 },
       guards: {
         agent_state: ['idle'],
+        min_quiet_ms: 3000,
+        require_live_repl: true,
+        max_per_hour: 1,
+        only_if_no_outstanding: true,
+      },
+      sequence: [
+        {
+          kind: 'process',
+          text: 'Prepare for compaction: make sure any relevant docs, memory, code comments and tasks are updated if needed.',
+          await: { until: 'turn_end' },
+          timeout_seconds: 900,
+          on_timeout: 'abort',
+        },
+        {
+          kind: 'slash',
+          text: '/compact',
+          runtimes: ['claude'],
+          await: { until: 'context_below', pct: 30 },
+          timeout_seconds: 300,
+          on_timeout: 'notify_human',
+        },
+      ],
+    },
+    // Until 2026-10-31: no commit, no note of where the agent is, and "tasks ... updated"
+    // left outdated rows on the board.
+    {
+      name: 'Checkpoint before compaction',
+      description:
+        'At ~55% context, have the agent update docs/memory, prepare for compaction, then compact — instead of hitting the auto-compact wall mid-thought.',
+      cooldown: 1800,
+      when: { event: 'context_pct', at_or_above: 55 },
+      guards: {
+        agent_state: ['idle', 'active'],
         min_quiet_ms: 3000,
         require_live_repl: true,
         max_per_hour: 1,
