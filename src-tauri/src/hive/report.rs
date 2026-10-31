@@ -309,11 +309,28 @@ fn verify_commit(w: &WorkerRecord, sha: &str) -> Result<(String, String), String
 }
 
 /// A file that exists, inside the worker's worktrees or its scratch folder, symlinks resolved.
+/// A relative path is read from the worker's working folder, then from its scratch folder (a
+/// live worker reported `scratch/report.md` and was told only that it doesn't exist).
 fn verify_file(paths: &HivePaths, w: &WorkerRecord, f: &str) -> Result<String, String> {
     let p = Path::new(f);
-    let p = if p.is_absolute() { p.to_path_buf() } else { w.cwd(paths).join(p) };
     let shown = one_line(f, 200);
-    let real = std::fs::canonicalize(&p).map(|r| crate::share::canon(&r)).map_err(|_| format!("File {shown} doesn't exist."))?;
+    let scratch = paths.worker_scratch(&w.slug);
+    let real = if p.is_absolute() {
+        std::fs::canonicalize(p).map_err(|_| format!("File {shown} doesn't exist."))?
+    } else {
+        let cwd = w.cwd(paths);
+        // `scratch/x` names the scratch folder as often as a folder called scratch in the cwd.
+        let in_scratch = scratch.file_name().and_then(|n| p.strip_prefix(n).ok()).filter(|r| !r.as_os_str().is_empty()).unwrap_or(p);
+        [cwd.join(p), scratch.join(p), scratch.join(in_scratch)].iter().find_map(|c| std::fs::canonicalize(c).ok()).ok_or_else(|| {
+            format!(
+                "File {shown} doesn't exist in your working folder {} or your scratch folder {}. Report it by its absolute path, such as {}.",
+                cwd.display(),
+                scratch.display(),
+                scratch.join(in_scratch).display()
+            )
+        })?
+    };
+    let real = crate::share::canon(&real);
     let roots: Vec<PathBuf> = w
         .git_folders()
         .filter_map(|f| f.worktree.as_ref().map(PathBuf::from))
@@ -654,7 +671,14 @@ mod tests {
             assert!(e.contains("isn't in your worktrees"), "a symlink out is resolved: {e}");
         }
         let e = r.check(done(json!({ "files": ["missing.txt"] }))).unwrap_err();
-        assert!(e.contains("doesn't exist"), "{e}");
+        let scratch = r.paths.worker_scratch("auth");
+        assert!(e.contains("doesn't exist in your working folder") && e.contains(&scratch.join("missing.txt").display().to_string()), "{e}");
+        // A live worker's `scratch/report.md`: found in its scratch folder, as `report.md` is.
+        fs::write(scratch.join("report.md"), "x").unwrap();
+        let c = r.check(done(json!({ "files": ["scratch/report.md", "report.md"] }))).unwrap();
+        assert_eq!(c.files, vec![crate::share::canon(&scratch.join("report.md")).to_string_lossy().to_string()], "both name it, once");
+        let e = r.check(done(json!({ "files": ["scratch/nope.md"] }))).unwrap_err();
+        assert!(e.contains(&format!("such as {}.", scratch.join("nope.md").display())), "{e}");
         let e = r.check(done(json!({ "files": ["."] }))).unwrap_err();
         assert!(e.contains("is a folder"), "{e}");
     }
