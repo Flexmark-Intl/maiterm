@@ -1,7 +1,7 @@
 ---
 name: frontend
 description: Builds user-facing features: components, screens, state and styling, with tests.
-pairs_with: ui-reviewer
+pairs_with: ui-reviewer, code-reviewer
 web: false
 source: maiterm
 ---

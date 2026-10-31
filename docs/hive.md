@@ -1816,7 +1816,12 @@ edit and art-director.
 **Pairings.** Each kind of task has a builder role and a checker role (agency-agents' pairing
 table, adapted): backend API → backend engineer + API tester; UI → frontend engineer + UI
 reviewer; a hero image → image maker + art director. The coordinator uses the pairing unless it
-has a reason not to, and says the reason.
+has a reason not to, and says the reason. Frontend pairs with both ui-reviewer and
+code-reviewer (2026-10-31: a live Hive's full-stack frontend task got a ui-reviewer whose brief
+was mostly sessions, cookies, API and security). A builder has one reviewer at a time
+(`review::spawn_refusal`), so for both the coordinator reviews in turn: after the first passes,
+the builder is still reported done and the second is spawned with the same `reviews:`; a land
+needs the latest verdict to be a pass.
 
 **The brief** is typed: goal, context (files, assets, precedents that apply), acceptance
 criteria (each one checkable), the evidence wanted, what to do when something is missing (stop

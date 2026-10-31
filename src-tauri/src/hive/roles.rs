@@ -134,7 +134,9 @@ mod tests {
             assert!(role(name).is_some(), "{name}");
         }
         assert_eq!(role("backend").unwrap().pairs_with, vec!["api-tester"]);
-        assert_eq!(role("frontend").unwrap().pairs_with, vec!["ui-reviewer"]);
+        // A full-stack frontend task's sessions, cookies and API calls are a code review's, not a
+        // ui review's (the live Hive, 2026-10-31): the queen may pick either, or both in turn.
+        assert_eq!(role("frontend").unwrap().pairs_with, vec!["ui-reviewer", "code-reviewer"]);
         assert!(role("docs").unwrap().web && !role("backend").unwrap().web);
         assert!(role("nope").is_none());
     }
