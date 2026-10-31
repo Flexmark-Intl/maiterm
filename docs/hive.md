@@ -118,6 +118,21 @@ Nothing in it sends the human away to start over (Darryl, 2026-10-30, after doin
   running and no open tasks, and Rust reads its shell as idle at its prompt with no child process, so no background or stopped job (`Preflight.closable_tab`, read again at the click), the sheet offers **Close "…" and use this workspace**, on the human's
   click.
 
+**Defaults for new Hives** (Darryl, 2026-10-31: the full tool checklist every time was too much).
+Preferences → Hive (`HiveDefaultsSection.svelte`) holds `Preferences.hive_defaults`: the tools to
+start ticked, the queen's and workers' model and effort, workers at once, budget, phone, push after
+land and default rules for every agent. The wizard starts every one of those from it when it opens
+with no draft and on Start over; a draft still wins, since it is what the human already typed.
+Unset fields (empty, null) are the built-ins below (`lib/hive/defaults.ts` `wizardStart`). Default
+rules prefill the field and open it. A default tool not detected on this machine any more is
+dropped silently. With default tools, the Tools step shows them as one line ("From your defaults:
+ffmpeg, Figma, frontend-design (+4 more)") with **Change** behind it; otherwise, and after Change,
+the same grouped, filterable picker as Preferences (`HiveToolPicker.svelte`). **Save as my
+defaults** on the Tools step writes the current tool picks and crew choices (not the rules) back.
+`hive_defaults` is deliberately not in `preference_meta`: no agent can change what a new Hive may
+spend, or which tools it gets, through `setPreference`. Every field is a String or number, never
+an enum.
+
 The fields:
 
 | Field | Meaning |

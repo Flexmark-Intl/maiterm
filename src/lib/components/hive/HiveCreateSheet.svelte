@@ -33,6 +33,9 @@
   import { charCount, folderName, MAX_BRIEF, MAX_BRIEF_FILES, MAX_INSTRUCTIONS, slugify, validateAbout, validateCap, validateFolders, validateSpec } from '$lib/hive/model';
   import { MAX_CAP } from '$lib/hive/change';
   import { createHive } from '$lib/hive/create';
+  import { preferencesStore } from '$lib/stores/preferences.svelte';
+  import { defaultsFromWizard, FALLBACK_CAP, HIVE_EFFORTS, HIVE_MODELS, knownTools, summarizeTools, wizardStart } from '$lib/hive/defaults';
+  import HiveToolPicker from './HiveToolPicker.svelte';
 
   interface Props {
     workspaceId: string;
@@ -61,8 +64,8 @@
     uncommitted?: boolean;
   }
 
-  const MODELS = ['opus', 'sonnet', 'haiku'];
-  const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+  const MODELS = HIVE_MODELS;
+  const EFFORTS = HIVE_EFFORTS;
 
   const ws = $derived(workspacesStore.workspaces.find((w) => w.id === workspaceId));
   // ── The draft (lib/hive/createDraft.ts): the answers survive a close, until Create or Start over ──
@@ -81,6 +84,11 @@
   /** Whether the preflight's answer fills in the defaults (the Primary, the cap): a fresh open,
    *  or a Start over made before it answered. */
   let useDefaults = !saved;
+  /** The human's defaults for new Hives (Preferences → Hive), resolved against the built-ins.
+   *  Everything below starts from them unless a draft says otherwise: a draft is what the human
+   *  already typed. Read again on Start over. */
+  const initial = wizardStart(preferencesStore.hiveDefaults);
+  let fromDefaults = $state(initial);
 
   let preflight = $state<HivePreflight | null>(null);
   /** Until the preflight (and its default Primary's detection) answers: the
@@ -94,21 +102,23 @@
   let folderKey = Math.max(0, ...(saved?.folders ?? []).map((f) => f.key));
   let folderNote = $state<string | null>(null);
   let goal = $state(saved?.goal ?? '');
-  let instructions = $state(saved?.instructions ?? '');
+  let instructions = $state(saved?.instructions ?? initial.rules);
   // The project brief and its files: the queen's alone (docs/hive.md §3.5).
   let brief = $state(saved?.brief ?? '');
   let briefFiles = $state<string[]>(saved?.briefFiles ?? []);
   // Rules for every agent stay folded away until wanted: most Hives need none.
-  let rulesOpen = $state(saved?.rulesOpen ?? false);
-  let cap = $state(saved?.cap ?? 4);
+  // Default rules open them: they're already there to read.
+  let rulesOpen = $state(saved?.rulesOpen ?? !!initial.rules.trim());
+  let cap = $state(saved?.cap ?? initial.cap ?? FALLBACK_CAP);
   let landing = $state<'base' | 'integration'>(saved?.landing ?? 'base');
-  let coordModel = $state(saved?.coordModel ?? 'opus');
-  let coordEffort = $state(saved?.coordEffort ?? 'medium');
-  let workerModel = $state(saved?.workerModel ?? 'sonnet');
-  let workerEffort = $state(saved?.workerEffort ?? 'high');
-  let picked = $state(new Set<string>(saved?.picked ?? []));
-  let budgetDollars = $state(saved?.budgetDollars ?? 10);
-  let pushAfterLand = $state(saved?.pushAfterLand ?? false);
+  let coordModel = $state(saved?.coordModel ?? initial.coordModel);
+  let coordEffort = $state(saved?.coordEffort ?? initial.coordEffort);
+  let workerModel = $state(saved?.workerModel ?? initial.workerModel);
+  let workerEffort = $state(saved?.workerEffort ?? initial.workerEffort);
+  // Ids not detected on this machine are dropped once detection answers (`knownTools`).
+  let picked = $state(new Set<string>(saved?.picked ?? initial.tools));
+  let budgetDollars = $state(saved?.budgetDollars ?? initial.budgetDollars);
+  let pushAfterLand = $state(saved?.pushAfterLand ?? initial.pushAfterLand);
   /** The budget as Create sends it: an emptied or negative field is $0, and the receipt and the
    *  review say what is sent. */
   const budget = $derived(Math.max(0, Number(budgetDollars) || 0));
@@ -116,7 +126,7 @@
   const pushes = $derived(pushAfterLand && landing === 'base');
   /** Who is a chat on the phone. "none" makes every Hive tab off it: Create launches the
    *  coordinator at once, so there's no later moment to exclude it before its first turn. */
-  let phone = $state<'coordinator' | 'all' | 'none'>(saved?.phone ?? 'coordinator');
+  let phone = $state<'coordinator' | 'all' | 'none'>(saved?.phone ?? initial.phone);
   let creating = $state(false);
   let createError = $state<string | null>(null);
   let suggestions = $state<Record<string, StackSuggestion[] | null>>(saved?.suggestions ?? {});
@@ -139,7 +149,8 @@
   let reached = $state(saved?.reached ?? 0);
   function keepDraft() {
     // Nothing answered yet: nothing to come back to, and the next open finds the defaults again.
-    if (name === (ws?.name ?? '') && !goal.trim() && !brief.trim() && !instructions.trim() && !briefFiles.length && reached === 0) {
+    // Default rules prefilled and left alone are not an answer.
+    if (name === (ws?.name ?? '') && !goal.trim() && !brief.trim() && instructions.trim() === fromDefaults.rules.trim() && !briefFiles.length && reached === 0) {
       createDrafts.clear(workspaceId);
       return;
     }
@@ -157,11 +168,14 @@
     useDefaults = true;
     createError = null; trustError = null; folderNote = null;
     name = ws?.name ?? '';
-    goal = ''; instructions = ''; brief = ''; briefFiles = []; rulesOpen = false;
+    const d = (fromDefaults = wizardStart(preferencesStore.hiveDefaults));
+    goal = ''; instructions = d.rules; brief = ''; briefFiles = []; rulesOpen = !!d.rules.trim();
     folders = []; suggestions = {}; shareChoice = {}; picks = {};
-    cap = preflight?.default_cap ?? 4; landing = 'base';
-    coordModel = 'opus'; coordEffort = 'medium'; workerModel = 'sonnet'; workerEffort = 'high';
-    picked = new Set(); budgetDollars = 10; pushAfterLand = false; phone = 'coordinator';
+    cap = d.cap ?? preflight?.default_cap ?? FALLBACK_CAP; landing = 'base';
+    coordModel = d.coordModel; coordEffort = d.coordEffort; workerModel = d.workerModel; workerEffort = d.workerEffort;
+    picked = new Set(tools ? knownTools(d.tools, tools) : d.tools);
+    budgetDollars = d.budgetDollars; pushAfterLand = d.pushAfterLand; phone = d.phone;
+    toolsOpen = false; savedDefaults = false;
     step = 0; reached = 0;
     if (preflight?.default_primary) void addFolder(preflight.default_primary);
   }
@@ -244,7 +258,8 @@
     try {
       const p = await hivePreflight(workspaceId, ids, live);
       preflight = p;
-      if (useDefaults) cap = p.default_cap;
+      // A cap set in the defaults stands; otherwise Create's own.
+      if (useDefaults && fromDefaults.cap === null) cap = p.default_cap;
       // Trust may have changed while it was closed (Trust it, or claude run in another tab).
       else void recheckTrust();
       if (p.default_primary && folders.length === 0) await addFolder(p.default_primary);
@@ -295,7 +310,46 @@
     }
   }
 
-  hiveDetectTools().then((t) => (tools = t)).catch((e) => { tools = []; logError(`hive: tool detection failed: ${e}`); });
+  hiveDetectTools()
+    .then((t) => {
+      tools = t;
+      // A default (or a draft's pick) this machine no longer has is dropped, silently: Create
+      // sends only what the queen can really use.
+      picked = new Set(knownTools(picked, t));
+    })
+    .catch((e) => { tools = []; picked = new Set(); logError(`hive: tool detection failed: ${e}`); });
+
+  // ── The Tools step: the defaults as one line, the grouped picker behind Change ──
+  /** The default tools this machine has. */
+  const defaultTools = $derived(tools ? knownTools(fromDefaults.tools, tools) : []);
+  /** The summary line stands for the list while the picks are still exactly the defaults. */
+  let toolsOpen = $state(false);
+  const toolsSummary = $derived(
+    !toolsOpen && defaultTools.length > 0 && picked.size === defaultTools.length && defaultTools.every((id) => picked.has(id)),
+  );
+  let savedDefaults = $state(false);
+  let saveDefaultsError = $state<string | null>(null);
+  /** "Save as my defaults": this wizard's tool picks and crew choices become Preferences → Hive. */
+  async function saveAsDefaults() {
+    saveDefaultsError = null;
+    const next = defaultsFromWizard(
+      { coordModel, coordEffort, workerModel, workerEffort, cap: Number(cap), budgetDollars: budget, pushAfterLand, phone, tools: [...picked] },
+      preferencesStore.hiveDefaults,
+    );
+    try {
+      await preferencesStore.setHiveDefaults(next);
+      fromDefaults = wizardStart(preferencesStore.hiveDefaults);
+      savedDefaults = true;
+    } catch (e) {
+      saveDefaultsError = String(e).replace(/^Error: /, '');
+      logError(`hive: saving defaults failed: ${e}`);
+    }
+  }
+  // A change after saving makes "Saved" untrue.
+  $effect(() => {
+    void [coordModel, coordEffort, workerModel, workerEffort, cap, budgetDollars, pushAfterLand, phone, picked];
+    untrack(() => (savedDefaults = false));
+  });
 
   /** The folder's stack suggestions, read once. */
   function readSuggestions(path: string) {
@@ -598,8 +652,6 @@
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') { e.stopPropagation(); close(); }
   }
-
-  const KIND_LABEL: Record<string, string> = { mcp: 'MCP server', cli: 'Command-line tool', skill: 'Skill', comfyui: 'Local generator' };
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -822,15 +874,14 @@
               <p class="hint">Nothing detected: no MCP servers, ffmpeg, ImageMagick, SoX, Blender, skills or ComfyUI.</p>
             {:else}
               <span class="hint">Tells the queen what it can really make things with.</span>
-              <div class="tools">
-                {#each tools as t (t.id)}
-                  <label class="check">
-                    <input type="checkbox" checked={picked.has(t.id)} onchange={() => { const n = new Set(picked); if (n.has(t.id)) n.delete(t.id); else n.add(t.id); picked = n; }} />
-                    <span>{t.label}</span>
-                    <span class="hint">{KIND_LABEL[t.kind] ?? t.kind}{#if t.host} · {t.host}{/if}</span>
-                  </label>
-                {/each}
-              </div>
+              {#if toolsSummary}
+                <p class="summary">
+                  From your defaults: {summarizeTools(pickedTools)}
+                  <button type="button" class="link" onclick={() => (toolsOpen = true)}>Change</button>
+                </p>
+              {:else}
+                <HiveToolPicker {tools} {picked} onchange={(next) => (picked = next)} />
+              {/if}
             {/if}
           </div>
           <div class="field">
@@ -839,6 +890,16 @@
               <span>$</span><input class="num" type="number" min="0" step="1" bind:value={budgetDollars} />
             </div>
             <span class="hint">A rule agents follow and a total you watch, not a wall: spends already under way can carry the total past it, and the only hard limit is your provider account's own credit.</span>
+          </div>
+          <div class="save-defaults">
+            {#if savedDefaults}
+              <span class="hint">Saved. New Hives start from these tools and crew choices.</span>
+            {:else}
+              <Tooltip text="Your tool picks, models, workers at once, budget, push after land and phone choice become the starting point for new Hives (Preferences → Hive).">
+                <button type="button" class="link" disabled={!!validateCap({ cap: Number(cap) })} onclick={() => void saveAsDefaults()}>Save as my defaults</button>
+              </Tooltip>
+            {/if}
+            {#if saveDefaultsError}<span class="error">{saveDefaultsError}</span>{/if}
           </div>
 
         {:else if current.key === 'stack'}
@@ -1091,7 +1152,9 @@
   .inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .num { width: 80px; }
   .models { display: grid; grid-template-columns: auto 1fr 1fr; gap: 6px 8px; align-items: center; font-size: 0.923rem; color: var(--fg); }
-  .tools { display: flex; flex-direction: column; gap: 4px; }
+  .summary { margin: 0; font-size: 0.923rem; color: var(--fg); overflow-wrap: anywhere; line-height: 1.5; }
+  .summary .link { margin-left: 6px; font-size: 0.923rem; }
+  .save-defaults { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: auto; padding-top: 4px; }
   .stack-row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
   .stack-pick { display: flex; flex-direction: column; gap: 4px; padding: 4px 0; }
   .cmd { width: 100%; }
