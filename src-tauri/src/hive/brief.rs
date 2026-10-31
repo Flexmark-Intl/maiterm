@@ -511,6 +511,18 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
         hive.cap,
         if hive.is_integration() { format!("into `{}`, each land approved by your human", hive.integration_branch()) } else { "straight into each folder\u{2019}s Base".to_string() }
     ));
+    b.push_str(
+        "- Planning, to keep the Hive busy:\n\
+         \x20 - Before the first spawn, lay the work out as waves with their dependencies.\n\
+         \x20 - Spawn later waves at once with `depends_on`: each waits as a card (not counted against the cap) and launches \
+         by itself once every dependency\u{2019}s task is done (landed) and the cap has room, branching from what has \
+         landed by then.\n\
+         \x20 - Split as finely as the files allow: one screen or endpoint per worker when they don\u{2019}t edit the same files.\n\
+         \x20 - Run chores beside the critical path: dependency bumps, scans, fixtures, docs, design tokens.\n\
+         \x20 - A new project\u{2019}s foundation goes first, but whatever doesn\u{2019}t need its code (fixtures from an API \
+         contract, copy, assets, test plans) starts alongside it.\n\
+         \x20 - When your human\u{2019}s requests come one by one, start each as it comes unless it collides with running work.\n",
+    );
     if !hive.tools.is_empty() {
         b.push_str(&format!("- Tools this Hive has: {}. A tool that isn\u{2019}t listed isn\u{2019}t there.\n", hive.tools.join(", ")));
     }
@@ -864,6 +876,8 @@ mod tests {
         assert!(q.contains("never tell a worker to load a skill"), "{q}");
         assert!(q.contains("hiveChangeSettings {add_hosts, reason} only when the worker\u{2019}s task needs it"), "{q}");
         assert!(q.contains("only maiTerm does, once your grant has applied"), "{q}");
+        // The EWS Partners Hive ran one builder at a time: the queen plans in waves.
+        assert!(q.contains("- Planning, to keep the Hive busy:") && q.contains("`depends_on`") && q.contains("chores beside the critical path"), "{q}");
         assert!(q.contains("A worker\u{2019}s **action** blocker") && !q.contains("only your human can do it"), "{q}");
     }
 
