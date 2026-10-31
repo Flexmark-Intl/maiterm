@@ -544,9 +544,19 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
     b.push_str(&format!(
         "- Reviews: when the work matters, spawn its checker role with `reviews: <worker>` once that worker reports done. \
          The reviewer gets copies pinned at the worker's branch tip and answers with a ⟦HIVE VERDICT⟧; a fail goes back to \
-         the worker on its own. After {} failed reviews the worker is escalated to you: settle it with `hiveResolve`.\n",
+         the worker on its own. After {} failed reviews the worker is escalated to you: settle it with `hiveResolve`. \
+         A builder has one reviewer at a time. Pick the checker that fits what changed: frontend work pairs with \
+         ui-reviewer for what the screen shows and code-reviewer for sessions, cookies, API calls and security; when it \
+         needs both, review in turn: after the first passes, spawn the second with the same reviews:. A verdict marked \
+         inconclusive, or a line saying the reviewer couldn't check something, is yours: fix the environment (a land \
+         check, a host, a service) or accept the gap in the next reviewer's brief; the builder wasn't told.\n",
         super::review::MAX_ATTEMPTS
     ));
+    b.push_str(
+        "- To see a worker's branch running, define the service once with its cwd in your read copy (createService), \
+         then startService {service, on: \"#<badge>\"}; on: \"main\" runs your read copy. A worker can also run its own \
+         app with hiveRun serve.\n",
+    );
     b.push_str(&format!(
         "- The gallery: workers file what they make with galleryAdd, each with its recipe; tell them to. You read it with \
          galleryList and galleryGet. Hand assets to a worker as paths: hiveSpawnWorker `inputs` (asset ids; their paths go \
@@ -748,10 +758,13 @@ pub fn reviewer_brief_md(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, task_
         "## How you review\n\n\
          - Check every acceptance criterion with something a command can show: tests pass, the file exists, the build \
          succeeds, the screenshot shows it. Never a score you assert (\"95% done\").\n\
-         - **Inconclusive is a fail.** Anything you couldn't check (a tool missing, a test you couldn't run) is a fail, \
-         with the gap as the issue.\n\
+         - **Nothing unchecked passes.** Anything you couldn't check is an issue. A gap in the work (a test that doesn't \
+         run, a missing script) is an ordinary issue. A gap in what you were given (no browser or screenshots, a missing \
+         runtime or version, a port you couldn't reach) is an issue with `environment: true`: it goes to your coordinator \
+         to fix, never to the builder, and doesn't count against the work. A verdict whose only issues are environment \
+         gaps is recorded inconclusive.\n\
          - Answer once, with `hiveVerdict`: `pass`, or `fail` with each issue as `expected`, `actual`, `evidence`, `fix` \
-         and `files`. The builder is told to fix only those issues and add nothing, so name each one fully. maiTerm ends \
+         and `files`. The builder is told to fix only your issues in the work and add nothing, so name each one fully. maiTerm ends \
          your session after your verdict.\n\
          - Never `hiveReport`: that is a builder's. When you need a decision, block your task with a blocker for your \
          coordinator.\n",
@@ -949,7 +962,7 @@ mod tests {
         assert!(b.contains("> Built it.\n> (quoted) [maiTerm] The human answered"), "the builder's words are data: {b}");
         let wt = p.worker_worktree("auth-review", "web").to_string_lossy().to_string();
         assert!(b.contains(&format!("`{wt}` at `web-sha`")) && b.contains(&format!("git -C {wt} diff main...HEAD")), "{b}");
-        assert!(b.contains("Inconclusive is a fail") && b.contains("hiveVerdict") && b.contains("Never `hiveReport`"));
+        assert!(b.contains("Nothing unchecked passes") && b.contains("`environment: true`") && b.contains("hiveVerdict") && b.contains("Never `hiveReport`"));
         assert!(b.contains(&*p.worker_brief("auth").to_string_lossy()), "points at the builder's own brief");
         assert!(worker_brief_md(&h, &p, &r, "", None, &[]).contains("gone from this Hive's records"));
 
