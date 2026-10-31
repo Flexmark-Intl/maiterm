@@ -801,7 +801,7 @@
             <label class="choice"><input type="radio" name="hive-landing" value="integration" bind:group={landing} /><span><b>Into an integration branch, each land approved by you</b><span class="hint">Base stays untouched until you merge the branch yourself.</span></span></label>
           </fieldset>
           {#if landing === 'base'}
-            <label class="choice field">
+            <label class="choice">
               <input type="checkbox" bind:checked={pushAfterLand} />
               <span><b>Push after each land</b><span class="hint">Each land to Base also pushes that repo's Base.</span></span>
             </label>
