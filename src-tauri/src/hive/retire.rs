@@ -487,6 +487,12 @@ pub(crate) async fn retire_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     if !landed.is_empty() {
         answer["landed"] = json!(landed);
     }
+    // A builder gone with room under the cap: the queen is asked what can start now.
+    if !w.is_reviewer() {
+        if let Some(n) = super::land::driver::capacity_nudge_now(ctx, caller).await {
+            answer["next"] = json!(n);
+        }
+    }
     Ok(answer)
 }
 

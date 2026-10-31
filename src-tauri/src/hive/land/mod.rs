@@ -581,7 +581,16 @@ pub(crate) async fn land_tool_with<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
     if let Some(out) = batch::try_join(ctx, caller, &w, &land).await {
         return out.answer();
     }
-    driver::drive(ctx, caller, &w.task_id, &opts, false).await.answer()
+    let out = driver::drive(ctx, caller, &w.task_id, &opts, false).await;
+    let landed = matches!(out, driver::Outcome::Landed(_));
+    let mut v = out.answer()?;
+    // Few builders left with room under the cap: the queen is asked what can start now.
+    if landed {
+        if let (Some(n), Some(o)) = (driver::capacity_nudge_now(ctx, caller).await, v.as_object_mut()) {
+            o.insert("next".to_string(), Value::String(n));
+        }
+    }
+    Ok(v)
 }
 
 /// A new land, or a held one resumed: its landed repos and their pins kept, a repo still to land

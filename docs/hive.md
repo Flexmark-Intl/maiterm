@@ -1364,6 +1364,18 @@ long session; idle, it uses about 0% CPU, so the cost is what it runs (spike 8, 
   coordinator starts only what the plan needs. What bounds a big Hive in practice is the Claude
   plan's usage limit (the quota breaker, §7.8), the land lock (lands go one at a time), and one
   coordinator reading every worker.
+- **But the plan should use it** (Darryl, 2026-10-31: the EWS Partners Hive peaked at 3
+  builders against a cap of 24, its small jobs in strict sequence, no `depends_on` ever used).
+  The queen's brief has a Planning list: waves with dependencies before the first spawn, later
+  waves spawned at once with `depends_on` (a waiter isn't counted against the cap and launches
+  by itself once its dependencies' tasks are done and the cap has room), work split as finely as
+  the files allow, chores beside the critical path, a new project's foundation first with
+  whatever doesn't need its code alongside, and the human's requests started as they come. And
+  maiTerm nudges: when a land completes (the `⟦HIVE LAND⟧`, or `hiveLand`'s own answer as `next`)
+  or the queen retires a builder, and fewer than 2 builders are running or waiting while the cap
+  allows more, one line asks "Only N builders are running or waiting (up to CAP allowed): what
+  else in your plan can start now?" (`land::driver::capacity_nudge`). Never while the Hive is done
+  or paused, or while her plan waits on the human.
 - **Workers launch with `--strict-mcp-config`** and only the MCP servers they need (maiTerm's,
   and the generators the role uses), since the MCP children are half a session's memory.
 - **Pressure** is read from `kern.memorystatus_vm_pressure_level` on macOS, which is the

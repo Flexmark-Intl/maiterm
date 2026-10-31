@@ -1158,8 +1158,40 @@ pub(crate) async fn on_check_end<W: HiveWindow>(
 }
 
 pub(super) async fn tell<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, o: &Outcome) {
-    let Some(text) = o.message(w) else { return };
+    let Some(mut text) = o.message(w) else { return };
+    if matches!(o, Outcome::Landed(_)) {
+        if let Some(n) = capacity_nudge_now(ctx, caller).await {
+            text.push_str(&format!("\n{n}"));
+        }
+    }
     tell_text(ctx, caller, w, text).await;
+}
+
+/// The phases of a builder that is building or about to: what the nudge counts.
+const BUILDING: [&str; 4] = [worker::PHASE_WAITING, worker::PHASE_LAUNCHING, worker::PHASE_RUNNING, worker::PHASE_BLOCKED];
+
+/// One line for the queen after a land when few builders are left while the cap allows more
+/// (Darryl, 2026-10-31: the EWS Partners Hive ran about one worker at a time against a cap of 24,
+/// its small jobs strictly in sequence). Never while the Hive is done or paused, or while her
+/// plan waits on the human.
+pub(crate) fn capacity_nudge(hive: &Hive, workers: &[WorkerRecord], plan_proposed: bool) -> Option<String> {
+    if hive.status != crate::hive::record::STATUS_ACTIVE || plan_proposed {
+        return None;
+    }
+    let busy = workers.iter().filter(|w| !w.is_reviewer() && BUILDING.contains(&w.phase.as_str())).count();
+    (busy < 2 && (busy as u32) < hive.cap).then(|| {
+        let are = if busy == 1 { "builder is" } else { "builders are" };
+        format!("Only {busy} {are} running or waiting (up to {} allowed): what else in your plan can start now?", hive.cap)
+    })
+}
+
+/// `capacity_nudge` against the records as they are now.
+pub(crate) async fn capacity_nudge_now<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller) -> Option<String> {
+    let hive = crate::hive::autonomy::current_hive(ctx, caller)?;
+    let paths = caller.paths.clone();
+    let (workers, plan) = blocking(move || Ok((worker::list_workers(&paths), crate::hive::plan::read(&paths)))).await.ok()?;
+    let proposed = plan.is_some_and(|p| p.status == crate::hive::plan::STATUS_PROPOSED);
+    capacity_nudge(&hive, &workers, proposed)
 }
 
 /// A `⟦HIVE LAND⟧` typed into the coordinator through the delivery gate.
@@ -1213,4 +1245,35 @@ pub(crate) fn resume_background(app: Arc<crate::state::AppState>, handle: tauri:
             }
         }
     });
+}
+
+#[cfg(test)]
+mod nudge_tests {
+    use super::*;
+
+    fn builder(phase: &str) -> WorkerRecord {
+        WorkerRecord { phase: phase.into(), ..WorkerRecord::default() }
+    }
+
+    /// The EWS Partners Hive ran about one builder at a time against a cap of 24: after a land the
+    /// queen is asked what else can start, but only while the Hive runs and her plan isn't waiting.
+    #[test]
+    fn a_land_with_few_builders_left_asks_what_can_start() {
+        let hive = Hive { cap: 24, status: crate::hive::record::STATUS_ACTIVE.into(), ..Hive::default() };
+        let one = [builder(worker::PHASE_RUNNING), builder(worker::PHASE_LANDED), builder(worker::PHASE_REPORTED)];
+        let n = capacity_nudge(&hive, &one, false).unwrap();
+        assert_eq!(n, "Only 1 builder is running or waiting (up to 24 allowed): what else in your plan can start now?");
+        assert!(capacity_nudge(&hive, &[], false).unwrap().starts_with("Only 0 builders are"));
+        // A reviewer isn't a builder; a waiting builder is.
+        let reviewer = WorkerRecord { reviews: Some("t".into()), ..builder(worker::PHASE_RUNNING) };
+        assert!(capacity_nudge(&hive, &[builder(worker::PHASE_RUNNING), reviewer], false).is_some());
+        assert!(capacity_nudge(&hive, &[builder(worker::PHASE_RUNNING), builder(worker::PHASE_WAITING)], false).is_none(), "two at work");
+        assert!(capacity_nudge(&hive, &one, true).is_none(), "her plan waits on the human");
+        for status in [crate::hive::record::STATUS_DONE, crate::hive::fuses::STATUS_PAUSED] {
+            assert!(capacity_nudge(&Hive { status: status.into(), ..hive.clone() }, &one, false).is_none(), "{status}");
+        }
+        let cap1 = Hive { cap: 1, ..hive.clone() };
+        assert!(capacity_nudge(&cap1, &one, false).is_none(), "the cap allows no more");
+        assert!(capacity_nudge(&cap1, &[], false).is_some());
+    }
 }
