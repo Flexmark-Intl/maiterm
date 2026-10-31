@@ -171,6 +171,12 @@ impl HivePaths {
         self.logs().join("deliveries.jsonl")
     }
 
+    /// The coordinator's answers on serving an unlisted command (`hiveApproveServe`, §6.8):
+    /// append-only, the latest answer for a command standing.
+    pub fn serve_approvals(&self) -> PathBuf {
+        self.logs().join("serve-approvals.jsonl")
+    }
+
     /// The decision log: every prompt and question routed, recommended, answered or lapsed (§7.6).
     pub fn decision_log(&self) -> PathBuf {
         self.logs().join("decisions.jsonl")

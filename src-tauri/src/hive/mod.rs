@@ -99,6 +99,7 @@ pub mod roles;
 pub(crate) mod rpc;
 pub mod run;
 pub mod sandbox_events;
+pub mod serve;
 pub mod settings;
 // Spike 15's acceptance test, over scratch git repos and Unix paths.
 #[cfg(all(test, unix))]

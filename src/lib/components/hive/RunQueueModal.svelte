@@ -136,7 +136,7 @@
       <button type="button" class="btn" disabled={gitFolders.length === 0} onclick={add}>Add a queued command</button>
 
       <label class="field">
-        <span class="label">Limits <span class="opt">optional, resource=count per line: lowers this Hive's share of cargo (2), tauri-dev, e2e or gpu (1 each), or sizes its own</span></span>
+        <span class="label">Limits <span class="opt">optional, resource=count per line: lowers this Hive's share of cargo (2), tauri-dev, e2e or gpu (1 each), serve (8: apps workers run to look at), or sizes its own</span></span>
         <textarea class="text-input mono" rows="2" bind:value={resources} placeholder="cargo=1" spellcheck="false"></textarea>
       </label>
       {#if refusal}<p class="error" role="alert">{refusal}</p>{/if}

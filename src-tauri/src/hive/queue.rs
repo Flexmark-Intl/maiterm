@@ -37,7 +37,11 @@ use super::paths::HivePaths;
 use super::pressure::Gate;
 use crate::state::{AppData, AppState, Service};
 
-pub const POOLS: [(&str, u32); 4] = [("cargo", 2), ("tauri-dev", 1), ("e2e", 1), ("gpu", 1)];
+/// `serve`: a worker's app served for it to look at (`hiveRun` `serve`, `hive::serve`). A dev
+/// server is mostly idle once up, so eight run at once across the machine; under critical memory
+/// pressure, like every pool, one.
+pub const POOLS: [(&str, u32); 5] = [("cargo", 2), ("tauri-dev", 1), ("e2e", 1), ("gpu", 1), (SERVE, 8)];
+pub const SERVE: &str = "serve";
 pub const MIGRATE: &str = "migrate:";
 
 pub const QUEUED: &str = "queued";
@@ -53,6 +57,11 @@ pub const BY_RELEASE: &str = "release";
 pub const BY_RESTART: &str = "restart";
 /// The worker itself, stopping or restarting its own copy of a service.
 pub const BY_WORKER: &str = "worker";
+/// A served app nobody fetched or screenshotted for `SERVE_IDLE_MS`.
+pub const BY_IDLE: &str = "idle";
+/// A served app with no `hiveFetch` or `hiveScreenshot` for this long is stopped: it holds a
+/// `serve` slot and a port, and its worker has moved on.
+pub const SERVE_IDLE_MS: i64 = 30 * 60 * 1000;
 
 pub const DEFAULT_TIMEOUT_S: u64 = 30 * 60;
 pub const MAX_TIMEOUT_S: u64 = 4 * 3600;
@@ -161,6 +170,9 @@ pub struct JobSpec {
     pub command: Option<String>,
     /// A land check (§8.1): run in the land's temporary worktree, its end routed to the land.
     pub land: Option<LandRun>,
+    /// A served app (`hiveRun` `serve`): it is booked a port (`PORT`, `{port}` in its words),
+    /// runs until stopped, idle or timed out, and is never a receipt.
+    pub serve: bool,
 }
 
 /// Where a land check runs: the land's temporary worktree, and the git dir git gave it.
@@ -227,6 +239,11 @@ pub struct Job {
     pub command: Option<String>,
     /// A land check's place, as `JobSpec`'s.
     pub land: Option<LandRun>,
+    /// As `JobSpec`'s.
+    pub serve: bool,
+    /// A served app's last `hiveFetch` or `hiveScreenshot`: its idle stop counts from here.
+    #[serde(skip)]
+    pub last_used: Option<i64>,
     #[serde(skip)]
     pub env: Vec<(String, String)>,
     #[serde(skip)]
@@ -425,6 +442,7 @@ impl Queue {
             cwd: spec.cwd,
             command: spec.command,
             land: spec.land,
+            serve: spec.serve,
             ..Job::default()
         };
         self.jobs.push(job.clone());
@@ -650,6 +668,28 @@ impl Queue {
             .filter(|j| j.state == RUNNING && j.started_at.is_some_and(|t| now - t >= (j.timeout_s as i64) * 1000))
             .map(|j| j.id.clone())
             .collect()
+    }
+
+    /// A served app was used (fetched, screenshotted): its idle clock restarts.
+    pub fn touch(&mut self, id: &str, now: i64) {
+        if let Some(j) = self.job_mut(id).filter(|j| j.serve) {
+            j.last_used = Some(now);
+        }
+    }
+
+    /// Running served apps unused for `SERVE_IDLE_MS` since they began or were last used.
+    pub fn idle_serves(&self, now: i64) -> Vec<String> {
+        self.jobs
+            .iter()
+            .filter(|j| j.serve && j.state == RUNNING)
+            .filter(|j| j.last_used.or(j.started_at).is_some_and(|t| now - t >= SERVE_IDLE_MS))
+            .map(|j| j.id.clone())
+            .collect()
+    }
+
+    /// A worker's served apps, queued, starting or running.
+    pub fn active_serves(&self, task_id: &str) -> Vec<&Job> {
+        self.jobs.iter().filter(|j| j.serve && j.is_active() && j.task_id == task_id).collect()
     }
 
     /// Everything a worker has in the queue: queued jobs dropped, started ones interrupted. Never
@@ -1162,6 +1202,16 @@ pub fn job(id: &str) -> Option<Job> {
     queue().job(id).cloned()
 }
 
+/// A served app was fetched or screenshotted: its idle stop counts from now.
+pub fn touch(id: &str) {
+    queue().touch(id, super::fuses::now_ms());
+}
+
+/// A worker's served apps still queued, starting or running.
+pub fn active_serves(task_id: &str) -> Vec<Job> {
+    queue().active_serves(task_id).into_iter().cloned().collect()
+}
+
 /// Called by the PTY's teardown, however it ended: a job still mapped to it ends now.
 pub fn on_pty_closed(pty_id: &str) {
     let ended = queue().pty_closed(pty_id, super::fuses::now_ms());
@@ -1248,7 +1298,11 @@ fn ensure_ticker(d: &'static Driver) {
             let ended: Vec<Ended> = {
                 let mut q = queue();
                 let ids = q.timed_out(now);
-                ids.iter().filter_map(|id| q.interrupt(id, BY_TIMEOUT, "it ran past its timeout", now)).collect()
+                let mut ended: Vec<Ended> = ids.iter().filter_map(|id| q.interrupt(id, BY_TIMEOUT, "it ran past its timeout", now)).collect();
+                let idle = q.idle_serves(now);
+                let why = format!("nothing fetched or screenshotted it for {} minutes", SERVE_IDLE_MS / 60_000);
+                ended.extend(idle.iter().filter_map(|id| q.interrupt(id, BY_IDLE, &why, now)));
+                ended
             };
             for e in ended {
                 spawn_finish(e);
@@ -1376,6 +1430,8 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
     }
     check(&needs, &values)?;
     let n = if needs.port2 { 2 } else if needs.port { 1 } else { 0 };
+    // A served app always has its port: it is what `hiveFetch` and `hiveScreenshot` reach.
+    let n = if job.serve { n.max(1) } else { n };
     let ports = if n > 0 { crate::stack::ports::take(&job.id, n, crate::stack::ports::DEFAULT_BASE, false, forbidden)? } else { Vec::new() };
     let release = |e: String| {
         crate::stack::ports::release(&job.id);
@@ -1389,6 +1445,12 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
         Some(c) => {
             let filled = fill(c, &values).map_err(release)?;
             (super::job_sandbox::service_argv(&filled), filled)
+        }
+        // A served app's words take its port where they say `{port}` (`serve::fill_port`).
+        None if job.serve => {
+            let argv = super::serve::fill_port(&job.argv, values.port.unwrap_or_default());
+            let command = argv.join(" ");
+            (argv, command)
         }
         None => (job.argv.clone(), job.argv.join(" ")),
     };
@@ -1476,6 +1538,11 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
     if let Some((_, url)) = &proxy {
         line_env.extend(super::registry_proxy::env(url));
     }
+    if job.serve {
+        // The port it was booked, on loopback: its profile lets it bind only `localhost:<port>`,
+        // so a server that defaults to every interface (adapter-node's `0.0.0.0`) is pointed home.
+        line_env.extend(super::serve::serve_env(values.port.unwrap_or_default()));
+    }
     for (k, v) in env {
         line_env.retain(|(o, _)| *o != k);
         line_env.push((k, v));
@@ -1504,7 +1571,7 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
         restart: "never".to_string(),
         ready_pattern: None,
         port: ports.first().copied(),
-        url: None,
+        url: ports.first().filter(|_| job.serve).map(|p| super::serve::url_of(*p, "/")),
         // Never human-defined: a worker asked for it.
         origin: "agent".to_string(),
         agent_edited: true,

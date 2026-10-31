@@ -51,18 +51,29 @@ pub fn tool_definition(tab_id: &Value) -> Value {
              hiveReport. command must start with a queued command, word by word (further arguments are fine), and holds no \
              shell syntax: no ; | & $ ` < > ( ) \\ ' \" or line breaks. Answers at once with the job and its place in the \
              queue (or the result, if it ends within {} s); the result arrives later as a ⟦HIVE RUN⟧ message. Run anything \
-             that isn't queued straight in your own shell.",
-            INLINE_WAIT.as_secs()
+             that isn't queued straight in your own shell.\n\
+             serve: true runs your app so you can look at it (your own shell can't listen on a port: the sandbox refuses it). \
+             maiTerm books a free port, sets PORT and HOST=127.0.0.1 and puts it wherever your words say {{port}} \
+             (`npm run dev -- --port {{port}}`, `node build`), starts it under your sandbox, waits until it answers HTTP, and \
+             answers with the job, the port and its URL. Then hiveFetch reads a page and hiveScreenshot takes a picture of \
+             one; your own shell still can't reach the port. A command your human didn't queue is asked of your coordinator \
+             first; once approved it serves whenever you ask. It runs until hiveRun {{stop: <job>}}, until you stop or are \
+             retired, or after {} minutes with no hiveFetch or hiveScreenshot. A served app is never a receipt. \
+             stop: <job> stops one of your own runs.",
+            INLINE_WAIT.as_secs(),
+            queue::SERVE_IDLE_MS / 60_000
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "tabId": tab_id,
-                "command": { "type": "string", "description": "The command, starting with a queued command (`cargo test -p core`)" },
+                "command": { "type": "string", "description": "The command, starting with a queued command (`cargo test -p core`); with serve, the command that serves your app" },
                 "folder": { "type": "string", "description": "The Hive folder to run it in (default: the primary folder)" },
-                "timeout": { "type": "integer", "description": "Seconds before maiTerm stops it (default 1800, at most 14400)" }
-            },
-            "required": ["command"]
+                "timeout": { "type": "integer", "description": "Seconds before maiTerm stops it (default 1800, at most 14400; a served app ignores it)" },
+                "serve": { "type": "boolean", "description": "Serve your app on a port maiTerm books, for hiveFetch and hiveScreenshot (default false)" },
+                "readyTimeout": { "type": "integer", "description": "With serve: seconds to wait for it to answer HTTP (default 120, at most 600)" },
+                "stop": { "type": "string", "description": "A job id (j-…) of yours to stop instead of starting anything" }
+            }
         }
     })
 }
@@ -215,7 +226,7 @@ pub(crate) fn worktree_state(f: &WorkerFolder) -> Result<(String, bool), String>
 
 /// The copies an entry leases, on the job's own checkout: its `services` by name. A shared
 /// service is another workspace's and never leased (§6.8).
-fn leases_for(entry: &QueuedCommand, stack: &[Service], target: &str) -> Result<Vec<String>, String> {
+pub(crate) fn leases_for(entry: &QueuedCommand, stack: &[Service], target: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for name in entry.services.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         let want = Service::normalize_name(name);
@@ -235,7 +246,7 @@ fn leases_for(entry: &QueuedCommand, stack: &[Service], target: &str) -> Result<
 }
 
 /// The worker's folder a run goes to, with its worktree.
-fn run_folder<'a>(hive: &Hive, w: &'a WorkerRecord, name: Option<&str>) -> Result<&'a WorkerFolder, String> {
+pub(crate) fn run_folder<'a>(hive: &Hive, w: &'a WorkerRecord, name: Option<&str>) -> Result<&'a WorkerFolder, String> {
     let name = match name {
         Some(n) => n.to_string(),
         None => hive.primary().map(|f| f.name.clone()).ok_or("This Hive has no primary folder: name one with folder.")?,
@@ -459,10 +470,10 @@ fn duration(job: &Job) -> String {
     }
 }
 
-/// Whether a finished run can stand as a receipt: a `hiveRun` job (never a service copy, whose
-/// exit 0 tested nothing), done, begun, exit 0, on a committed tree.
+/// Whether a finished run can stand as a receipt: a `hiveRun` job (never a service copy or a
+/// served app, whose exit 0 tested nothing), done, begun, exit 0, on a committed tree.
 pub fn is_pass(job: &Job) -> bool {
-    job.service_id.is_none() && job.state == queue::DONE && job.began && job.exit_code == Some(0) && !job.dirty
+    job.service_id.is_none() && !job.serve && job.state == queue::DONE && job.began && job.exit_code == Some(0) && !job.dirty
 }
 
 /// A passing run's worktree, read again at its end: if HEAD moved or tracked files changed while
@@ -531,6 +542,7 @@ pub fn result_message(job: &Job, tail: &str) -> String {
                 Some(queue::BY_RESTART) => "maiTerm restarted",
                 Some(queue::BY_RELEASE) => "you were released",
                 Some(queue::BY_WORKER) => "you stopped it",
+                Some(queue::BY_IDLE) => "nothing used it for a while",
                 _ => "its tab went away",
             };
             format!("interrupted: {by}{}", if reason.is_empty() { String::new() } else { format!(" ({reason})") })
@@ -539,7 +551,9 @@ pub fn result_message(job: &Job, tail: &str) -> String {
     };
     let mut out = format!("⟦HIVE RUN · {}⟧ `{}` on {at}: {head}{}.", job.id, one_line(&job.entry, 120), duration(job));
     out.push_str(&format!("\nCommand: {}", one_line(&job.argv.join(" "), 400)));
-    if job.service_id.is_some() {
+    if job.serve {
+        out.push_str("\nYour served app is down: hiveRun {serve: true} starts it again. A served app is no check and no receipt.");
+    } else if job.service_id.is_some() {
         if job.state == queue::DONE {
             out.push_str("\nA service copy is no check: run a queued command with hiveRun for a receipt.");
         }
@@ -734,12 +748,12 @@ pub(crate) fn restart_notices_in(paths: &HivePaths, hive_id: &str, workspace_id:
 
 // ── The tools ──
 
-fn workspace_stack(data: &parking_lot::RwLock<AppData>, caller: &Caller) -> Vec<Service> {
+pub(crate) fn workspace_stack(data: &parking_lot::RwLock<AppData>, caller: &Caller) -> Vec<Service> {
     let d = data.read();
     d.window(&caller.label).and_then(|w| w.workspaces.iter().find(|ws| ws.id == caller.workspace_id)).map(|ws| ws.stack.clone()).unwrap_or_default()
 }
 
-async fn calling_worker(caller: &Caller) -> Result<WorkerRecord, String> {
+pub(crate) async fn calling_worker(caller: &Caller) -> Result<WorkerRecord, String> {
     let (paths, tab) = (caller.paths.clone(), caller.tab_id.clone());
     let w = blocking(move || worker::worker_for_tab(&paths, &tab).ok_or_else(|| "No worker record names your tab.".to_string())).await?;
     if w.phase == worker::PHASE_STOPPED {
@@ -749,7 +763,7 @@ async fn calling_worker(caller: &Caller) -> Result<WorkerRecord, String> {
 }
 
 /// What a queued job's answer says about it now.
-fn job_view(job: &Job) -> Value {
+pub(crate) fn job_view(job: &Job) -> Value {
     let now = queue::job(&job.id).unwrap_or_else(|| job.clone());
     let place = queue::place(&job.id);
     json!({

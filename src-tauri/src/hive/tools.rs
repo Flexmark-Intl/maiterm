@@ -36,7 +36,7 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The Hive tools built so far: what `tools/list` offers each role and the handler answers.
 /// The rest of the coordinator's (settings' `COORDINATOR_MCP_TOOLS`) are refused as not yet here.
-pub const COORDINATOR_TOOLS: [&str; 17] = [
+pub const COORDINATOR_TOOLS: [&str; 18] = [
     "hiveSpawnWorker",
     "hiveListWorkers",
     "hiveMessageWorker",
@@ -54,12 +54,13 @@ pub const COORDINATOR_TOOLS: [&str; 17] = [
     "hiveSetCriteria",
     "hiveFinish",
     "hiveChangeSettings",
+    "hiveApproveServe",
 ];
-/// Every worker is offered all three; Rust refuses `hiveReport` to a reviewer and `hiveVerdict`
+/// Every worker is offered all of them; Rust refuses `hiveReport` to a reviewer and `hiveVerdict`
 /// to a builder (`review`).
-pub const WORKER_TOOLS: [&str; 3] = ["hiveReport", "hiveRun", "hiveVerdict"];
+pub const WORKER_TOOLS: [&str; 5] = ["hiveReport", "hiveRun", "hiveVerdict", "hiveFetch", "hiveScreenshot"];
 /// A worker's own Hive tools (§7.2), some built by later steps; the coordinator's are refused to it.
-const WORKER_HIVE_TOOLS: [&str; 3] = ["hiveReport", "hiveRun", "hiveVerdict"];
+const WORKER_HIVE_TOOLS: [&str; 5] = WORKER_TOOLS;
 pub const MAX_MESSAGE: usize = 16_000;
 
 /// Refused to a worker on top of its settings' denies (`worker_denied_mcp_tools`), spike 15's
@@ -185,7 +186,13 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
 fn hive_tool_definitions(role: &str) -> Vec<Value> {
     let tab_id = json!({ "type": "string", "description": "Your own tab (auto-injected)" });
     if role == ROLE_WORKER {
-        return vec![super::report::tool_definition(&tab_id), super::run::tool_definition(&tab_id), super::review::verdict_tool_definition(&tab_id)];
+        return vec![
+            super::report::tool_definition(&tab_id),
+            super::run::tool_definition(&tab_id),
+            super::review::verdict_tool_definition(&tab_id),
+            super::serve::fetch_tool_definition(&tab_id),
+            super::serve::screenshot_tool_definition(&tab_id),
+        ];
     }
     if role != ROLE_COORDINATOR {
         return Vec::new();
@@ -301,6 +308,7 @@ fn hive_tool_definitions(role: &str) -> Vec<Value> {
         super::finish::set_criteria_tool_definition(&tab_id),
         super::finish::finish_tool_definition(&tab_id),
         super::change::tool_definition(&tab_id),
+        super::serve::approve_tool_definition(&tab_id),
     ]
 }
 
@@ -444,7 +452,11 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         "hiveStopWorker" => super::control::stop_worker(&ctx, &caller, args).await,
         "hiveRestartWorker" => super::control::restart_worker(&ctx, &caller, args).await,
         "hiveReport" => super::report::report(&ctx, &caller, args).await,
+        "hiveRun" if super::serve::is_serve_call(args) => super::serve::serve_tool(&ctx, state, &caller, args).await,
         "hiveRun" => super::run::run_tool(&ctx, &caller, args).await,
+        "hiveFetch" => super::serve::fetch_tool(state, &caller, args).await,
+        "hiveScreenshot" => super::serve::screenshot_tool(state, &caller, args).await,
+        "hiveApproveServe" => super::serve::approve_tool(&ctx, &caller, args, Some(handle)).await,
         "hiveRunPriority" => super::run::priority_tool(&caller, args).await,
         "hiveRetireWorker" => super::retire::retire_tool(&ctx, &caller, args).await,
         "hiveVerdict" => super::review::verdict(&ctx, &caller, args).await,
@@ -3721,7 +3733,7 @@ mod tests {
         let e = rig.verdict(&r, json!({ "verdict": "pass", "summary": "x", "worker": "#9" })).await.unwrap_err();
         assert!(e.contains("You review worker #1 login"), "{e}");
         let tools: Vec<String> = tool_definitions(ROLE_WORKER).iter().map(|t| t["name"].as_str().unwrap().to_string()).filter(|t| t.starts_with("hive")).collect();
-        assert_eq!(tools, vec!["hiveReport", "hiveRun", "hiveVerdict"], "every worker is offered all three");
+        assert_eq!(tools, WORKER_TOOLS.to_vec(), "every worker is offered all of them");
 
         let out = rig.verdict(&r, json!({ "verdict": "pass", "summary": "Tests pass.", "worker": 1 })).await.unwrap();
         assert_eq!((out["verdict"].as_str(), out["attempt"].as_u64(), out["escalated"].as_bool()), (Some("pass"), Some(1), Some(false)));
