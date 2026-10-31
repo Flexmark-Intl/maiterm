@@ -22,7 +22,7 @@ import { bracketedPasteSubmit, deliverPrompt } from '$lib/utils/agentPrompt';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { CHECKPOINT_DEFAULT_IDS, pruneHiddenDefaultOverlordRules, seedDefaultOverlordRules } from '$lib/overlord/defaults';
-import { idleCompactionRefusal } from '$lib/overlord/idleCompaction';
+import { idleCompactionRefusal, pickIdleCompactionRule } from '$lib/overlord/idleCompaction';
 import {
   contextConditionMet,
   contextFiresAtPct,
@@ -2800,20 +2800,22 @@ function createOverlordStore() {
   async function prepareIdleCompaction(tabId: string, deadline: number): Promise<{ prepare: boolean; reason?: string }> {
     const no = (reason: string) => ({ prepare: false, reason });
     const now = Date.now();
-    const rule = checkpointRuleFor(tabId);
+    const hit = findTab(tabId);
+    const runtime = workspacesStore.getTabRuntime(tabId);
+    const rule = hit
+      ? pickIdleCompactionRule(rulesForWorkspace(hit.ws.id).filter(hasRunnableSequence), runtime, (r) => guardsPassSync(r, tabId, now))
+      : null;
     const refused = idleCompactionRefusal({
       now,
-      supervised: running && preferencesStore.overlordEnabled && !!findTab(tabId) && !engineSkipsTab(tabId),
+      supervised: running && preferencesStore.overlordEnabled && !!hit && !engineSkipsTab(tabId),
       proposeMode: preferencesStore.overlordProposeMode,
       rule,
-      runtime: workspacesStore.getTabRuntime(tabId),
       state: mappedState(tabId),
       occupied: rituals.has(tabId) || outstanding.has(tabId),
       lastTurnTs: facts.get(tabId)?.last_turn_ts,
       lastHumanInputAt: terminalsStore.getLastTakeoverInputAt(tabId),
     });
-    if (refused) return no(refused);
-    if (!rule || !guardsPassSync(rule, tabId, now)) return no('the rule\'s guards refuse');
+    if (refused || !rule) return no(refused ?? 'no checkpoint rule can run');
     if (permissionBlocks(rule, tabId)) return no('a permission prompt is open');
     if ((await replState(tabId)) !== 'ready') return no('no live agent');
     // Each of these would stop the ritual at its first step, after the block.

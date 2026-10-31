@@ -884,8 +884,13 @@ wrote 24, and `/compact` went from 359,037 to 5,320.
   runtime all refuse up front. Hooks can't start a turn, and Claude's compaction owns the turn
   until the block reaches it, so the run starts held for 1.5 s, with `rituals` keeping every
   other rule off the tab.
-- **`when` isn't asked, the guards are.** Claude's timer is the condition, and on a 1M window it
-  comes from 200k, under the rule's 350k. Cooldown and `max_per_hour` hold.
+- **`when` isn't asked, the guards are, all but quiet.** Claude's timer is the condition, and on
+  a 1M window it comes from 200k, under the rule's 350k. Cooldown and `max_per_hour` hold.
+  `min_quiet_ms` doesn't: Claude paints "Running PreCompact hooks…" 5 ms before the hook arrives
+  and spins every 100 ms after, so a quiet window refuses every takeover (found in review, by
+  measuring). The first step waits for quiet once the block has landed. The rule comes from
+  `rulesForWorkspace`, so a superseded one stays stopped, and must itself compact, so a
+  note-taking `context_pct` rule at a lower threshold doesn't get in the way.
 - **Propose mode doesn't block.** A card would ask nobody, with six minutes of cache left, and a
   blocked tab then pays the whole rebuild when its human returns.
 - **Three seconds, then Claude goes ahead.** `prepare_before_idle_compaction` (server.rs) gives
@@ -893,7 +898,8 @@ wrote 24, and `/compact` went from 359,037 to 5,320.
   a sleeping screen can't start a ritual on a session that has since compacted.
 - **The mod is the only path that blocks,** via `&prepare=1`. Every Claude with idle compaction
   has mods (both 2.1.290+), ssh hosts get the mod, and a mod older than this never asks, so the
-  server can't start a ritual whose block goes nowhere. Hive tabs aren't the engine's. The only
+  server can't start a ritual whose block goes nowhere. It asks only for the tab's own
+  interactive session, never a `claude -p` running in it. Hive tabs aren't the engine's. The only
   trace on screen is Claude's status line, "compaction blocked by PreCompact hook".
 
 **When it fires (2026-10-31).** Two rules run this same ritual, split by agent state:

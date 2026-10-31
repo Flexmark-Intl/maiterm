@@ -24,6 +24,27 @@ export function ruleCompacts(rule: OverlordRule, runtime: AgentRuntime): boolean
   );
 }
 
+/**
+ * The rule that takes this compaction over: the first checkpoint that compacts and whose guards
+ * pass, from the list the engine itself fires from, so a superseded rule stays stopped and a
+ * note-taking `context_pct` rule isn't mistaken for the checkpoint.
+ *
+ * The guards are asked with no quiet window. Claude repaints the moment it starts compacting
+ * (measured: 5 ms before the hook arrives, then a spinner every 100 ms), so a quiet window could
+ * only ever refuse here. The first step still waits for quiet once the block has landed.
+ */
+export function pickIdleCompactionRule(
+  rules: OverlordRule[],
+  runtime: AgentRuntime,
+  guardsPass: (rule: OverlordRule) => boolean,
+): OverlordRule | null {
+  for (const rule of rules) {
+    if (rule.when.event !== 'context_pct' || !ruleCompacts(rule, runtime)) continue;
+    if (guardsPass({ ...rule, guards: { ...rule.guards, min_quiet_ms: 0 } })) return rule;
+  }
+  return null;
+}
+
 export interface IdleCompactionFacts {
   now: number;
   /** The engine is running in this window, on a tab it supervises. */
@@ -31,7 +52,6 @@ export interface IdleCompactionFacts {
   /** A proposal waits for a click, and nobody is there; the cache ends in about six minutes. */
   proposeMode: boolean;
   rule: OverlordRule | null;
-  runtime: AgentRuntime;
   state: AgentState | undefined;
   /** A ritual or a directive already owns this tab. */
   occupied: boolean;
@@ -43,8 +63,7 @@ export interface IdleCompactionFacts {
 export function idleCompactionRefusal(f: IdleCompactionFacts): string | null {
   if (!f.supervised) return 'not supervised here';
   if (f.proposeMode) return 'propose mode';
-  if (!f.rule) return 'no checkpoint rule';
-  if (!ruleCompacts(f.rule, f.runtime)) return 'the rule does not compact';
+  if (!f.rule) return 'no checkpoint rule can run';
   if (f.state !== 'idle') return 'the agent is not idle';
   if (f.occupied) return 'the tab is already being driven';
   if (f.lastTurnTs === undefined) return 'no last turn on record';

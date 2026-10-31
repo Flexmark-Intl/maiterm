@@ -5,8 +5,8 @@ import type { On } from 'claude-code'
 
 // A maiTerm tab whose server answers every event with `reply`; `urls` collects where events went
 // and `beneath` counts the settings hooks that ran.
-function tab(on: On, urls: string[], reply: string, beneath: { runs: number }) {
-  mock.env(on, { MAITERM_TAB_ID: 'tab-1', MAITERM_PORT: '1', MAITERM_AUTH: 'x' })
+function tab(on: On, urls: string[], reply: string, beneath: { runs: number }, modSession = 'session-1') {
+  mock.env(on, { MAITERM_TAB_ID: 'tab-1', MAITERM_PORT: '1', MAITERM_AUTH: 'x', MAITERM_MOD_SESSION: modSession })
   on('env.set', () => ({ value: undefined }))
   on('session.version', () => ({ value: { version: '2.1.312' } }))
   on('session.id', () => ({ value: 'session-1' }))
@@ -64,6 +64,16 @@ test('the human or the ritual compacting is never asked about or blocked', async
   expect(urls.length).toBeGreaterThan(0)
   expect(urls.some(u => u.includes('prepare'))).toBe(false)
   expect(beneath.runs).toBe(1)
+})
+
+test('a claude -p run inside the tab is never asked about or blocked', async ($, on) => {
+  const urls: string[] = []
+  const beneath = { runs: 0 }
+  tab(on, urls, BLOCK, beneath, 'the-tabs-own-session')
+  const result = await $.classic.PreCompact({ trigger: 'auto', custom_instructions: null })
+  expect(result.block).toBeUndefined()
+  expect(urls.length).toBeGreaterThan(0)
+  expect(urls.some(u => u.includes('prepare'))).toBe(false)
 })
 
 test('a subagent compacting its own conversation is never asked about or blocked', async ($, on) => {

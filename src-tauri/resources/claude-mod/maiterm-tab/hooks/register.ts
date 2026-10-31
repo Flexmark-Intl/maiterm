@@ -341,7 +341,10 @@ export const register: Register = on => {
   on('classic.PreCompact', async ($, e, next) => {
     const to = await linkOf($)
     if (!to) return next(e)
-    const mayPrepare = e.trigger === 'auto' && !e.agent_id
+    // Only the tab's own interactive session: a `claude -p` an agent runs in the tab inherits
+    // this mod and the tab id, and its compaction says nothing about the agent in the tab.
+    const [mine, session] = await Promise.all([$.env.get('MAITERM_MOD_SESSION'), $.session.id()])
+    const mayPrepare = e.trigger === 'auto' && !e.agent_id && !!mine && mine === session
     const reply = await send($, to, e, mayPrepare ? '&prepare=1' : '')
     await ensureInbox($, to)
     if (mayPrepare) {

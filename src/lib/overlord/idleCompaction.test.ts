@@ -1,22 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import type { OverlordRule } from '$lib/tauri/types';
-import { idleCompactionRefusal, ruleCompacts, type IdleCompactionFacts } from './idleCompaction';
+import { idleCompactionRefusal, pickIdleCompactionRule, ruleCompacts, type IdleCompactionFacts } from './idleCompaction';
 
 const NOW = 1_800_000_000_000;
 const MIN = 60_000;
 
-const rule = (sequence: unknown[]) => ({ sequence }) as unknown as OverlordRule;
+const rule = (sequence: unknown[]) =>
+  ({ sequence, when: { event: 'context_pct', at_or_above: 35 }, guards: { min_quiet_ms: 3000 } }) as unknown as OverlordRule;
 const CHECKPOINT = rule([
   { kind: 'process', text: 'Prepare for compaction' },
   { kind: 'slash', text: '/compact', runtimes: ['claude', 'codex'] },
 ]);
+const NOTE = rule([{ kind: 'process', text: 'Write down where you are' }]);
 
 const idle = (over: Partial<IdleCompactionFacts> = {}): IdleCompactionFacts => ({
   now: NOW,
   supervised: true,
   proposeMode: false,
   rule: CHECKPOINT,
-  runtime: 'claude',
   state: 'idle',
   occupied: false,
   lastTurnTs: NOW - 54 * MIN,
@@ -46,7 +47,24 @@ describe('idleCompactionRefusal', () => {
     expect(idleCompactionRefusal(idle({ proposeMode: true }))).not.toBeNull();
     expect(idleCompactionRefusal(idle({ rule: null }))).not.toBeNull();
     expect(idleCompactionRefusal(idle({ occupied: true }))).not.toBeNull();
-    expect(idleCompactionRefusal(idle({ rule: rule([{ kind: 'process', text: 'Save your work' }]) }))).not.toBeNull();
+  });
+});
+
+describe('pickIdleCompactionRule', () => {
+  it('passes over a note rule that fires earlier than the checkpoint', () => {
+    expect(pickIdleCompactionRule([NOTE, CHECKPOINT], 'claude', () => true)).toBe(CHECKPOINT);
+  });
+
+  it('asks the guards with no quiet window, which Claude repainting could only ever fail', () => {
+    const asked: (number | undefined)[] = [];
+    pickIdleCompactionRule([CHECKPOINT], 'claude', (r) => { asked.push(r.guards.min_quiet_ms); return true; });
+    expect(asked).toEqual([0]);
+    expect(CHECKPOINT.guards.min_quiet_ms).toBe(3000);
+  });
+
+  it('finds nothing when every checkpoint is held by its guards or is not for this runtime', () => {
+    expect(pickIdleCompactionRule([CHECKPOINT], 'claude', () => false)).toBeNull();
+    expect(pickIdleCompactionRule([CHECKPOINT], 'gemini', () => true)).toBeNull();
   });
 });
 
