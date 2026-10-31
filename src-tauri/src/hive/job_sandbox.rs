@@ -234,6 +234,55 @@ fn line_text(l: &LineSpec) -> Result<String, String> {
     Ok(line)
 }
 
+/// Whether a listening socket's local host (as lsof names it) is loopback only.
+fn loopback_host(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']');
+    h == "localhost" || h.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// lsof's `-F n` output: each socket on one of `ports` whose local address isn't loopback, as
+/// `(port, address)`. A connected socket's name is `local->remote`; only the local half counts.
+pub fn parse_lsof(out: &str, ports: &[u16]) -> Vec<(u16, String)> {
+    let mut found: Vec<(u16, String)> = Vec::new();
+    for name in out.lines().filter_map(|l| l.strip_prefix('n')) {
+        let local = name.split("->").next().unwrap_or_default().trim();
+        let Some((host, port)) = local.rsplit_once(':') else { continue };
+        let Ok(port) = port.parse::<u16>() else { continue };
+        if ports.contains(&port) && !loopback_host(host) && !found.iter().any(|(p, a)| *p == port && a == local) {
+            found.push((port, local.to_string()));
+        }
+    }
+    found
+}
+
+/// Every TCP listener or UDP socket on one of `ports` bound beyond loopback (`0.0.0.0`, `[::]`,
+/// a LAN address), by this user's processes. A job's profile can't pin its address (Seatbelt's
+/// `localhost:<port>` filters the port only), so this is how a job listening to the network is
+/// found. Blocks on `lsof`; nothing found is an empty list.
+pub fn wide_listeners(ports: &[u16]) -> Result<Vec<(u16, String)>, String> {
+    if ports.is_empty() || !cfg!(unix) {
+        return Ok(Vec::new());
+    }
+    let list = ports.iter().map(u16::to_string).collect::<Vec<_>>().join(",");
+    let out = std::process::Command::new("lsof")
+        .args(["-nP", "-w", &format!("-iTCP:{list}"), "-sTCP:LISTEN", &format!("-iUDP:{list}"), "-F", "n"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("lsof couldn't run: {e}"))?;
+    // lsof exits 1 when any one `-i` matched nothing (no UDP socket, say), whatever the rest
+    // found: only no output with an error message is a failure.
+    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !out.status.success() && out.stdout.is_empty() && !err.is_empty() {
+        return Err(format!("lsof failed: {err}"));
+    }
+    Ok(parse_lsof(&String::from_utf8_lossy(&out.stdout), ports))
+}
+
+/// What a job stopped for listening beyond loopback is told.
+pub fn wide_reason(addr: &str) -> String {
+    format!("it listened beyond this computer ({addr}), so maiTerm stopped it: serve on 127.0.0.1, with HOST, which maiTerm sets")
+}
+
 /// A human-defined service run on a worker's branch: its own command, the human's text, run by
 /// `/bin/sh` inside the same profile (§6.8).
 pub fn service_argv(command: &str) -> Vec<String> {
@@ -372,6 +421,32 @@ mod tests {
         let mut l = line();
         l.argv = vec!["echo".into(), "$(touch /tmp/p)".into(), "`id`".into()];
         assert!(line_text(&l).unwrap().contains("'echo' '$(touch /tmp/p)' '`id`'"));
+    }
+
+    #[test]
+    fn a_listener_beyond_loopback_is_found_by_its_local_address() {
+        let out = "p100\nf5\nn127.0.0.1:5174\nf6\nn[::1]:5174\np200\nf3\nn*:5175\nf4\nn[::]:5176\nf7\nn10.0.2.20:5177\n\
+                   f8\nn127.0.0.1:5178->10.0.0.9:443\nf9\nn10.0.0.3:5179->127.0.0.1:5174\nf10\nnlocalhost:5180\nf11\nn0.0.0.0:9999\n";
+        let got = parse_lsof(out, &[5174, 5175, 5176, 5177, 5178, 5179, 5180]);
+        assert_eq!(
+            got,
+            vec![(5175, "*:5175".to_string()), (5176, "[::]:5176".to_string()), (5177, "10.0.2.20:5177".to_string()), (5179, "10.0.0.3:5179".to_string())],
+            "loopback is fine, a port not booked isn't looked at"
+        );
+        assert!(wide_reason("*:5175").contains("127.0.0.1"));
+    }
+
+    /// A real listener on every address is found; one on loopback isn't.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn lsof_finds_a_wildcard_listener_and_not_a_loopback_one() {
+        let wide = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let narrow = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let (w, n) = (wide.local_addr().unwrap().port(), narrow.local_addr().unwrap().port());
+        let got = wide_listeners(&[w, n]).unwrap();
+        assert!(got.iter().any(|(p, _)| *p == w), "{got:?}");
+        assert!(!got.iter().any(|(p, _)| *p == n), "{got:?}");
+        assert!(wide_listeners(&[]).unwrap().is_empty());
     }
 
     #[test]

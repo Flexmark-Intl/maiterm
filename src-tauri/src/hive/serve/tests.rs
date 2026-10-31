@@ -166,6 +166,9 @@ fn the_chrome_line_confines_the_page_to_the_apps_port() {
         "--window-size=1024,700",
         "--proxy-server=http://127.0.0.1:61000",
         "--proxy-bypass-list=<-loopback>;127.0.0.1:5180;localhost:5180;[::1]:5180",
+        "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+        "--dns-prefetch-disable",
+        "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost",
     ] {
         assert!(a.iter().any(|x| x == want), "{want} in {a:?}");
     }
@@ -313,28 +316,45 @@ async fn probe_a_real_screenshot_of_a_local_page() {
     let other_port = other.local_addr().unwrap().port();
     let other_hits = Arc::new(AtomicUsize::new(0));
     serve_http(other, "HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n", other_hits.clone());
+    // WebRTC's STUN goes around a proxy unless Chrome is told otherwise (the review of fbad7a4a).
+    let udp = std::net::UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+    udp.set_nonblocking(true).unwrap();
+    let udp_port = udp.local_addr().unwrap().port();
     let app = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = app.local_addr().unwrap().port();
     let page: &'static str = Box::leak(
         {
             let body = format!(
                 "<html><body style='background:#c33'><h1>maiTerm probe</h1><img src='http://127.0.0.1:{other_port}/leak.png'>\
-                 <img src='https://example.com/x.png'></body></html>"
+                 <img src='https://example.com/x.png'><script>\
+                 const pc = new RTCPeerConnection({{iceServers: [{{urls: 'stun:127.0.0.1:{udp_port}'}}]}});\
+                 pc.createDataChannel('x'); pc.createOffer().then(o => pc.setLocalDescription(o));\
+                 </script></body></html>"
             );
             format!("HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())
         }
         .into_boxed_str(),
     );
     serve_http(app, page, Arc::new(AtomicUsize::new(0)));
-    let work = std::env::temp_dir().join(format!("hive-shot-probe-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(work.join("profile")).unwrap();
-    let out = work.join("shot.png");
-    let proxy = DeadProxy::start().unwrap();
-    let argv = chrome_args(&Shot { out: &out, profile: &work.join("profile"), width: 800, height: 600, port, path: "/", dead_proxy: proxy.port });
-    run_browser(&bin, &argv, SHOT_TIMEOUT).await.unwrap();
-    drop(proxy);
-    let bytes = std::fs::read(&out).expect("a picture");
-    assert!(bytes.starts_with(b"\x89PNG"), "a PNG");
+    // A STUN request got out in one run of four under a flag that didn't hold: several rounds.
+    let mut leaks = 0;
+    for round in 0..8 {
+        let work = std::env::temp_dir().join(format!("hive-shot-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(work.join("profile")).unwrap();
+        let out = work.join("shot.png");
+        let proxy = DeadProxy::start().unwrap();
+        let argv = chrome_args(&Shot { out: &out, profile: &work.join("profile"), width: 800, height: 600, port, path: "/", dead_proxy: proxy.port });
+        run_browser(&bin, &argv, SHOT_TIMEOUT).await.unwrap();
+        drop(proxy);
+        let bytes = std::fs::read(&out).expect("a picture");
+        assert!(bytes.starts_with(b"\x89PNG"), "a PNG");
+        let mut buf = [0u8; 1500];
+        while udp.recv_from(&mut buf).is_ok() {
+            leaks += 1;
+        }
+        eprintln!("round {round}: screenshot {} bytes, UDP packets so far {leaks}", bytes.len());
+        let _ = std::fs::remove_dir_all(&work);
+    }
     assert_eq!(other_hits.load(Ordering::SeqCst), 0, "the page never reached another local port");
-    eprintln!("screenshot: {} ({} bytes)", out.display(), bytes.len());
+    assert_eq!(leaks, 0, "no WebRTC UDP left Chrome");
 }

@@ -1104,7 +1104,12 @@ worker's own running served apps**: never another worker's, an arbitrary port, o
 (`serve::serve_port`). The worker's own shell still can't reach the port. Chrome isn't in the
 sandbox, and the page is the worker's code, so it runs with a fresh profile maiTerm owns and every
 request but the app's own port goes to a proxy that answers nothing (`--proxy-bypass-list=
-<-loopback>;…:<port>`: measured, a page's `<img>` on another local port never reached it). So web
+<-loopback>;…:<port>`: measured, a page's `<img>` on another local port never reached it). WebRTC
+sends UDP around a proxy, so Chrome also gets `--webrtc-ip-handling-policy=disable_non_proxied_udp`
+(the review of `fbad7a4a` saw a page's STUN request reach loopback and the LAN; with the switch,
+none in eight runs, where `--force-webrtc-ip-handling-policy`, which this Chrome doesn't have, let 4
+of 8 out), and no host name resolves but `localhost` (`--host-resolver-rules`, `--dns-prefetch-disable`),
+so a DNS lookup carries nothing out either. So web
 fonts and CDNs don't load in a screenshot. Page text that reaches an agent is `frame_escape`d.
 
 **A block is a blocker, not a retry.** The detector is the worker's **`PostToolUseFailure` and
@@ -4753,9 +4758,16 @@ several releases a day).
    queen's standing answers and asks, the scratch write refusing links; `probe_a_real_screenshot_of_a_local_page`
    (ignored) took a real screenshot and showed the page's request to another local port never left
    Chrome. **Not yet:** tried live with a real worker; the human's Hive settings show no list of the
-   queen's serve approvals and nothing revokes one but a later refusal. **Open, and older than
-   serve:** a job's profile (`localhost:<port>` rules) also let a server bind `0.0.0.0` on its
-   booked port, and a request to this Mac's LAN address reached it (measured from the same Mac), so
-   any job with a port, a service copy included, may be reachable from the network if its server
-   ignores `HOST=127.0.0.1`. Seatbelt names only `localhost` or `*` as a host, so the profile can't
-   pin the address; a fix would check the job's listening sockets.
+   queen's serve approvals and nothing revokes one but a later refusal.
+   **A job listening beyond loopback is stopped** (review of `fbad7a4a`, older than serve): a job's
+   profile (`localhost:<port>` rules) filters the port only, so a server could bind `0.0.0.0`, `[::]`
+   or the LAN address on its booked port and a connection to the LAN address was accepted. Seatbelt
+   can't express loopback-only, so the queue's ticker, on **every** pass, runs one `lsof` over every
+   running job's booked ports (service copies included, not only served apps), and `hiveFetch` and
+   `hiveScreenshot` look again before each use (`job_sandbox::wide_listeners`). A TCP listener or UDP
+   socket on a booked port at a non-loopback address stops that job (`BY_EXPOSED`), told "it listened
+   beyond this computer (`<addr>`), so maiTerm stopped it: serve on 127.0.0.1, with HOST, which
+   maiTerm sets"; a queued entry's own env can no longer override a served app's `HOST=127.0.0.1`.
+   What's left: a job can be reached from the network for up to one tick (5 s) before it is stopped,
+   and a listener of another process of this user on the same port at another address stops the job
+   too (the conservative side).

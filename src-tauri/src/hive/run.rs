@@ -545,6 +545,7 @@ pub fn result_message(job: &Job, tail: &str) -> String {
                 Some(queue::BY_RELEASE) => "you were released",
                 Some(queue::BY_WORKER) => "you stopped it",
                 Some(queue::BY_IDLE) => "nothing used it for a while",
+                Some(queue::BY_EXPOSED) => "maiTerm stopped it",
                 _ => "its tab went away",
             };
             format!("interrupted: {by}{}", if reason.is_empty() { String::new() } else { format!(" ({reason})") })

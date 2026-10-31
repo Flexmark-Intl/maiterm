@@ -59,6 +59,8 @@ pub const BY_RESTART: &str = "restart";
 pub const BY_WORKER: &str = "worker";
 /// A served app nobody fetched or screenshotted for `SERVE_IDLE_MS`.
 pub const BY_IDLE: &str = "idle";
+/// A job that listened beyond loopback on its booked port (`job_sandbox::wide_listeners`).
+pub const BY_EXPOSED: &str = "exposed";
 /// A served app with no `hiveFetch` or `hiveScreenshot` for this long is stopped: it holds a
 /// `serve` slot and a port, and its worker has moved on.
 pub const SERVE_IDLE_MS: i64 = 30 * 60 * 1000;
@@ -687,6 +689,11 @@ impl Queue {
             .collect()
     }
 
+    /// Every running job's booked ports: each tick checks none listens beyond loopback.
+    pub fn running_ports(&self) -> Vec<(String, Vec<u16>)> {
+        self.jobs.iter().filter(|j| j.state == RUNNING && !j.ports.is_empty()).map(|j| (j.id.clone(), j.ports.clone())).collect()
+    }
+
     /// A worker's served apps, queued, starting or running.
     pub fn active_serves(&self, task_id: &str) -> Vec<&Job> {
         self.jobs.iter().filter(|j| j.serve && j.is_active() && j.task_id == task_id).collect()
@@ -1307,9 +1314,40 @@ fn ensure_ticker(d: &'static Driver) {
             for e in ended {
                 spawn_finish(e);
             }
+            stop_exposed().await;
             schedule_and_start(d).await;
         }
     });
+}
+
+/// Every running job whose booked port has a listener beyond loopback is stopped: its profile can
+/// pin the port, never the address (`job_sandbox::wide_listeners`). On every tick, since a job can
+/// rebind at any time.
+async fn stop_exposed() {
+    let jobs = queue().running_ports();
+    if jobs.is_empty() {
+        return;
+    }
+    let ports: Vec<u16> = jobs.iter().flat_map(|(_, p)| p.iter().copied()).collect();
+    let found = tauri::async_runtime::spawn_blocking(move || super::job_sandbox::wide_listeners(&ports)).await.map_err(|e| e.to_string()).and_then(|r| r);
+    let found = match found {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("hive queue: job ports not checked for listeners beyond loopback: {e}");
+            return;
+        }
+    };
+    for (port, addr) in found {
+        if let Some((id, _)) = jobs.iter().find(|(_, p)| p.contains(&port)) {
+            stop_one_exposed(id, &addr);
+        }
+    }
+}
+
+/// Stops job `id` for listening at `addr`, beyond loopback.
+pub fn stop_one_exposed(id: &str, addr: &str) {
+    log::warn!("hive queue: {id} listened beyond loopback at {addr}; stopped");
+    interrupt(id, BY_EXPOSED, &super::job_sandbox::wide_reason(addr));
 }
 
 fn emit_throttled(d: &Driver, gate: Gate) {
@@ -1546,6 +1584,11 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
     for (k, v) in env {
         line_env.retain(|(o, _)| *o != k);
         line_env.push((k, v));
+    }
+    if job.serve {
+        // maiTerm's loopback wins over a queued entry's own HOST.
+        line_env.retain(|(o, _)| o != "HOST");
+        line_env.push(("HOST".to_string(), "127.0.0.1".to_string()));
     }
     let line = super::job_sandbox::job_line(&super::job_sandbox::LineSpec {
         cwd: cwd.clone(),

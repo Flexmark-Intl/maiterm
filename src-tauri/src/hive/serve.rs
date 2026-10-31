@@ -15,9 +15,14 @@
 //! Whoever approves, the job runs under the worker's sandbox and reaches nothing but its own port.
 //!
 //! Chrome itself isn't sandboxed by maiTerm, and the page is the worker's code: so every request
-//! it makes goes to a proxy that answers nothing, except the app's own port (`chrome_args`), and
-//! its profile is a fresh folder maiTerm owns. Page text that reaches an agent is
-//! `frame_escape`d.
+//! it makes goes to a proxy that answers nothing, except the app's own port (`chrome_args`); WebRTC
+//! may send only proxied UDP (so none); no host name resolves but `localhost`; and its profile is a
+//! fresh folder maiTerm owns. Page text that reaches an agent is `frame_escape`d.
+//!
+//! A job's profile names its port, never the address (Seatbelt's `localhost:<port>` filters the
+//! port only), so a job could listen on `0.0.0.0` and be reached from the network. The queue's
+//! ticker looks at every running job's booked ports each pass, and `hiveFetch`/`hiveScreenshot`
+//! before each use, and stops a job listening beyond loopback (`job_sandbox::wide_listeners`).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -133,12 +138,19 @@ fn forbidden_ports(state: &AppState) -> Vec<u16> {
     crate::stack::ports::forbidden(*state.mcp_port.read(), state.mailink_info.read().as_ref().map(|(_, p)| *p))
 }
 
-/// `serve_port` for a job id the caller named, against the live queue and port book.
-fn own_port(state: &AppState, caller: &Caller, w: &WorkerRecord, id: &str) -> Result<u16, String> {
+/// `serve_port` for a job id the caller named, against the live queue and port book; then the
+/// app is looked at once more, and stopped if it listens beyond loopback (`job_sandbox::wide_listeners`).
+async fn own_port(state: &AppState, caller: &Caller, w: &WorkerRecord, id: &str) -> Result<u16, String> {
     if !queue::is_job_id(id) {
         return Err("job is required: your served app's job id (j- and 8 hex digits), from hiveRun's answer.".to_string());
     }
-    serve_port(queue::job(id).as_ref(), &w.task_id, &caller.hive.id, &crate::stack::ports::held(id), &forbidden_ports(state))
+    let port = serve_port(queue::job(id).as_ref(), &w.task_id, &caller.hive.id, &crate::stack::ports::held(id), &forbidden_ports(state))?;
+    let wide = blocking(move || super::job_sandbox::wide_listeners(&[port])).await?;
+    if let Some((_, addr)) = wide.first() {
+        queue::stop_one_exposed(id, addr);
+        return Err(format!("Your app {id} {}.", super::job_sandbox::wide_reason(addr)));
+    }
+    Ok(port)
 }
 
 // ── HTTP, from maiTerm ──
@@ -366,6 +378,14 @@ pub fn chrome_args(s: &Shot) -> Vec<String> {
         format!("--screenshot={}", s.out.display()),
         format!("--proxy-server=http://127.0.0.1:{}", s.dead_proxy),
         format!("--proxy-bypass-list=<-loopback>;127.0.0.1:{p};localhost:{p};[::1]:{p}"),
+        // WebRTC sends UDP around any proxy (a STUN request to loopback and the LAN got through,
+        // measured): only proxied UDP, which a dead proxy never carries. This switch, not
+        // `--force-webrtc-ip-handling-policy`, which this Chrome doesn't have: under that one a
+        // STUN request still left in 4 runs of 8 (`probe_a_real_screenshot_of_a_local_page`).
+        "--webrtc-ip-handling-policy=disable_non_proxied_udp".to_string(),
+        // No name resolves here but localhost: a lookup of `<data>.evil.example` is a way out too.
+        "--dns-prefetch-disable".to_string(),
+        "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost".to_string(),
         format!("--virtual-time-budget={VIRTUAL_TIME_MS}"),
         format!("http://localhost:{p}{}", s.path),
     ]
@@ -927,7 +947,7 @@ pub(crate) async fn fetch_tool(state: &Arc<AppState>, caller: &Caller, args: &Va
         Some(Value::String(_)) => return Err(format!("body is over {MAX_REQUEST_BODY} bytes.")),
         Some(_) => return Err("body is a string.".to_string()),
     };
-    let port = own_port(state, caller, &w, &id)?;
+    let port = own_port(state, caller, &w, &id).await?;
     queue::touch(&id);
     let got = fetch(port, &path, &method, body).await;
     queue::touch(&id);
@@ -952,7 +972,7 @@ pub(crate) async fn screenshot_tool(state: &Arc<AppState>, caller: &Caller, args
     let path = check_path(args.get("path").and_then(Value::as_str))?;
     let width = dimension(args, "width", SHOT_DEFAULT.0, SHOT_MAX.0)?;
     let height = dimension(args, "height", SHOT_DEFAULT.1, SHOT_MAX.1)?;
-    let port = own_port(state, caller, &w, &id)?;
+    let port = own_port(state, caller, &w, &id).await?;
     let Some(bin) = blocking(|| Ok(find_browser())).await? else { return Err(NO_BROWSER.to_string()) };
     queue::touch(&id);
     let shot = super::paths::is_component(&id).then(|| caller.paths.run(&id)).ok_or("job isn't a job id")?;
