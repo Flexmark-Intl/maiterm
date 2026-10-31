@@ -1895,4 +1895,38 @@ mod tests {
         assert!(denied(wbash(&f, &format!("bash -c \"cd '{wt}' && git status\""))));
         let _ = fs::remove_dir_all(&f.base);
     }
+
+    /// The heredoc strip (50f06d23) drops only the lines after the `<<WORD` line, up to the line
+    /// bash would end it on: text on the operator's own line, before and after it, is still read,
+    /// and a line bash doesn't take as the terminator (indented without `<<-`, a trailing space,
+    /// a decoy of a mixed-quoted word's first part) keeps the body open, as in bash 3.2 and zsh.
+    #[cfg(unix)]
+    #[test]
+    fn a_heredoc_hides_only_its_body() {
+        let f = fx();
+        let x = f.base.join("outside");
+        let x = x.display();
+        for cmd in [
+            format!("cat <<EOF && cd {x}; git status\nbody\nEOF"),
+            format!("cat <<EOF; cd {x}\nEOF\ngit status"),
+            format!("cat <<A <<B\na\nA\nb\nB\ncd {x} && git status"),
+            format!("cat <<EOF\nbody\n  EOF\ncd {x}; git status"),
+            format!("cat <<'E'\"OF\"\nbody\nEOF\ncd {x}; git status"),
+            format!("cat << EOF\nbody\nEOF\ncd {x}; git status"),
+            format!("cat <<< \"x\"; cd {x}; git status"),
+            format!("cat <<EOF \\\n; cd {x}; git status\nEOF"),
+        ] {
+            assert!(matches!(wbash(&f, &cmd), GateDecision::Deny(_)), "should refuse: {cmd}");
+        }
+        // Still inside the body in bash, so nothing there runs.
+        for cmd in [
+            format!("cat <<EOF\nbody\n  EOF\ncd {x}; git status\nEOF"),
+            format!("cat <<EOF\nEOF \ncd {x}; git status\nEOF"),
+            format!("cat <<'E'\"OF\"\nbody\nE\ncd {x}; git status\nEOF"),
+            "git commit -m \"$(cat <<'EOF'\nFix it\n\nmore\nEOF\n)\"".to_string(),
+        ] {
+            assert_eq!(wbash(&f, &cmd), GateDecision::Allow, "should allow: {cmd}");
+        }
+        let _ = fs::remove_dir_all(&f.base);
+    }
 }
