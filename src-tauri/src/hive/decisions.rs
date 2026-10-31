@@ -939,9 +939,11 @@ mod tests {
     #[test]
     fn unrouted_worker_blockers_follow_the_allowlist_and_bad_answers_are_refused() {
         let (base, paths) = scratch();
+        // A worker's action goes to the queen first now (2026-10-31); the human marking it done
+        // is still logged as the human's, never the queen's.
         let act = blocker("action", "2026-10-24T10:00:00Z", &[]);
         let l = record_blocker_answer(&paths, &hive(), &[worker()], "t-w", None, &act, &pick(None, ""), false, "now").unwrap().unwrap();
-        assert_eq!((l.category.as_str(), l.answer.as_deref()), (CATEGORY_NEVER, Some("Done by the human")), "an action is never the coordinator's");
+        assert_eq!((l.category.as_str(), l.answer.as_deref(), l.by.as_str()), ("questions", Some("Done by the human"), BY_HUMAN));
         let q = blocker("decision", "2026-10-24T11:00:00Z", &[("A", false)]);
         let l = record_blocker_answer(&paths, &hive(), &[worker()], "t-w", None, &q, &pick(Some("A"), ""), false, "now").unwrap().unwrap();
         assert_eq!((l.category.as_str(), l.recommended), ("questions", None), "no coordinator recommendation: none");

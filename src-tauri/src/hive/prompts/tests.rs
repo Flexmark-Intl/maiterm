@@ -280,8 +280,11 @@ fn the_allowlist_takes_plain_tool_dialogs_listed_questions_and_decisions_only() 
     refused(&open, "without options");
 
     assert!(ok(&PromptView::from_blocker("t1", &decision("a", &[]))));
+    // A worker's action goes to the queen first (2026-10-31), but a `Budget:` one stays the human's.
     let action = TaskBlocker { kind: "action".into(), ..decision("a", &[]) };
-    refused(&PromptView::from_blocker("t1", &action), "only your human can do it");
+    assert!(ok(&PromptView::from_blocker("t1", &action)));
+    let spend_action = TaskBlocker { kind: "action".into(), question: "Budget: top up the fal.ai credit".into(), ..decision("a", &[]) };
+    refused(&PromptView::from_blocker("t1", &spend_action), "spend past the budget");
     let external = TaskBlocker { kind: "external".into(), ..decision("a", &[]) };
     assert!(classify(&PromptView::from_blocker("t1", &external)).is_err());
 
@@ -569,6 +572,28 @@ async fn a_refused_keystroke_is_an_error_and_the_route_stays() {
     assert!(!r.answering, "the answer mark is cleared");
 }
 
+/// The card Darryl got ("Only you can do it": set allowLocalBinding) came straight from a worker's
+/// action blocker. An action goes to the queen first now; her answer is hers, framed as hers to
+/// the worker, and logged as hers: never "done by the human".
+#[tokio::test]
+async fn a_workers_action_goes_to_the_queen_and_her_answer_is_never_the_humans() {
+    let rig = Rig::new();
+    let b = TaskBlocker { kind: "action".into(), question: "Set sandbox.network.allowLocalBinding to true".into(), ..decision("2026-10-24T10:00:00Z", &[]) };
+    rig.set_blocker(Some(b.clone()));
+    let r = rig.route(PromptView::from_blocker(&rig.worker.task_id, &b), 1).await.unwrap();
+    assert_eq!(r.owner, OWNER_COORDINATOR, "{}", r.why);
+    let frame = rig.to_coordinator().pop().unwrap();
+    assert!(frame.contains("You can\u{2019}t do it as your human") && frame.contains("raise your own blocker"), "{frame}");
+    let key = blocker_key(&rig.worker.task_id, &b.asked_at);
+    rig.answer(json!({ "prompt_id": key, "answer": "Nobody can change that. Use hiveRun with serve: true." })).await.unwrap();
+    let to_worker: Vec<String> = rig.win.st().delivered.iter().filter(|(t, _)| *t == rig.wtab).map(|(_, m)| m.clone()).collect();
+    assert!(to_worker[0].starts_with("[maiTerm] Your coordinator answered your request on"), "{}", to_worker[0]);
+    assert!(to_worker[0].contains("nothing was done by your human"), "{}", to_worker[0]);
+    let answered = rig.lines().into_iter().find(|l| l.event == "answered").unwrap();
+    assert_eq!((answered.by.as_str(), answered.category.as_str()), (crate::hive::decisions::BY_COORDINATOR, "questions"));
+    assert_ne!(answered.answer.as_deref(), Some("Done by the human"));
+}
+
 #[tokio::test]
 async fn a_blocker_answer_patches_the_row_on_its_question_and_tells_the_worker() {
     let rig = Rig::new();
@@ -590,7 +615,7 @@ async fn a_blocker_answer_patches_the_row_on_its_question_and_tells_the_worker()
     let to_worker: Vec<String> = rig.win.st().delivered.iter().filter(|(t, _)| *t == rig.wtab).map(|(_, m)| m.clone()).collect();
     assert_eq!(to_worker.len(), 1);
     assert!(to_worker[0].starts_with("[maiTerm] Your coordinator answered your question on task \u{201c}Session store\u{201d}"), "{}", to_worker[0]);
-    assert!(to_worker[0].contains("Answer: Postgres"));
+    assert!(to_worker[0].contains("\nAnswer: Postgres"));
     let lines = rig.lines();
     assert_eq!(lines.iter().map(|l| l.event.as_str()).collect::<Vec<_>>(), vec!["asked", "answered"]);
     assert_eq!((lines[0].category.as_str(), lines[0].recommended.as_deref()), ("questions", Some("Redis")), "the worker's recommendation");

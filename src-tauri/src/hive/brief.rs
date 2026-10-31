@@ -304,10 +304,14 @@ fn checkpoint_lines(hive: &Hive) -> String {
          with its prompt_id. With hiveAnswerWorker you may answer only: a permission dialog\u{2019}s plain **Yes** or **No**; an \
          AskUserQuestion\u{2019}s **listed options**; a question blocker\u{2019}s **option**, or free text when it lists none. \
          Unanswered after {minutes} min, your human is told and either of you may answer; your human may take any prompt over. \
-         Every answer is logged for your human.\n\nNever yours, whatever the checkpoints: Claude\u{2019}s workspace-trust and plan \
-         dialogs; any row that saves a setting or a rule, or changes a mode; the sandbox and reads outside the working folder; \
-         an action blocker (only your human can do it); spending past the budget, and raising the budget or the cap; pushing; \
-         a land or undo whose diff changes agent or execution config. maiTerm sends those to your human and tells you.\n"
+         Every answer is logged for your human.\n\nA worker\u{2019}s **action** blocker (something it wants done) comes to you \
+         too. You can\u{2019}t do it as your human, and your answer never counts as done by them: handle it with your own tools \
+         and say what you did, refuse it and say what the worker does instead, or raise your own blocker to your human and say \
+         so. A request no one can grant (a sandbox or Claude setting maiTerm pins) is a refusal with new instructions.\n\nNever \
+         yours, whatever the checkpoints: Claude\u{2019}s workspace-trust and plan dialogs; any row that saves a setting or a \
+         rule, or changes a mode; the sandbox and reads outside the working folder; spending past the budget, and raising the \
+         budget or the cap; pushing; a land or undo whose diff changes agent or execution config. maiTerm sends those to your \
+         human and tells you.\n"
     ));
     if super::checkpoints::asks(hive, super::checkpoints::PLAN) {
         b.push_str(

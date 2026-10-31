@@ -1,5 +1,5 @@
 //! A worker's prompt or question, routed to one asker (docs/hive.md §4.7, §7.4): its permission
-//! dialog, its AskUserQuestion, or a decision blocker on its task goes to the coordinator, or to
+//! dialog, its AskUserQuestion, or a decision or action blocker on its task goes to the coordinator, or to
 //! the human when the checkpoint is Ask me or the prompt is outside `hiveAnswerWorker`'s
 //! allowlist. A coordinator that doesn't answer in time has the human told, and either may then
 //! answer; a take-over makes it the human's alone. Every route, recommendation and answer is a
@@ -401,8 +401,10 @@ pub(crate) fn classify(view: &PromptView) -> Result<(), String> {
         KIND_BLOCKER => match view.blocker.as_ref().map(|b| b.kind.as_str()) {
             // Before its kind: a `Budget:` question of any kind is the human's (plan D4).
             _ if view.blocker.as_ref().is_some_and(is_budget_blocker) => Err(SPEND_IS_HUMANS.to_string()),
-            Some("decision") => Ok(()),
-            Some("action") => Err("only your human can do it".to_string()),
+            // An action goes to the queen first too (Darryl, 2026-10-31): she handles it, refuses
+            // and re-instructs, or raises her own blocker to the human. Her answer is hers, never
+            // "done by the human" (`answer_blocker`, `decisions::record_blocker_answer`).
+            Some("decision" | "action") => Ok(()),
             _ => Err("it waits on something outside the Hive".to_string()),
         },
         _ => Err("maiTerm doesn\u{2019}t recognise this prompt".to_string()),
@@ -492,7 +494,13 @@ fn frame_body(view: &PromptView) -> String {
                 if let Some(c) = b.context.as_deref().filter(|c| !c.trim().is_empty()) {
                     s.push_str(&format!("Context: {}\n", frame_escape(c.trim())));
                 }
-                if b.options.is_empty() {
+                if b.kind == "action" {
+                    s.push_str(
+                        "It asks for something done. You can\u{2019}t do it as your human, and your answer never reads as done by them. \
+                         Handle it with your own tools and answer with what you did, refuse it and answer with what to do instead, or \
+                         raise your own blocker to your human and answer that you did.\n",
+                    );
+                } else if b.options.is_empty() {
                     s.push_str("No options: the answer is free text.\n");
                 } else {
                     let opts: Vec<String> =
@@ -1043,8 +1051,14 @@ async fn answer_blocker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &Wo
     });
     rpc::applied(ctx.window.request(rpc::VERB_TASK, args).await)?;
     let which = if task_id == w.task_id { format!("task \u{201c}{}\u{201d} (id {task_id})", one_line(&w.title, 120)) } else { format!("task id {task_id}") };
+    // An action's answer is the coordinator's word on it: never that the human did it.
+    let (what, label) = if b.kind == "action" {
+        ("request", "Your coordinator\u{2019}s answer (its own: nothing was done by your human unless it says it asked them)")
+    } else {
+        ("question", "Answer")
+    };
     let text = format!(
-        "[maiTerm] Your coordinator answered your question on {which}.\nQuestion: {}\nAnswer: {}\n\nThe task is back in \
+        "[maiTerm] Your coordinator answered your {what} on {which}.\nYou asked: {}\n{label}: {}\n\nThe task is back in \
          Active. Carry on from here, and close it with updateTasks (task id {task_id}) when it is done.",
         one_line(&b.question, 400),
         frame_escape(answer),

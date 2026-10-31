@@ -686,9 +686,13 @@ their own tab and block those. Before 2026-10-26 only the task a worker was give
 (§7.4), so a question on a sub-task never reached the coordinator or the decision log as the
 worker's, and its card didn't read Needs you either. Now a blocked row on a worker's tab routes
 like its own task's, `hiveAnswerWorker` answers it on that row, and the card reads it
-(`cardTask`). An `action` blocker (“install the dependencies outside my sandbox”) is still
-the human's alone (§7.4's allowlist): the coordinator is told of it, and may resolve the cause.
-Not covered: a worker relaunched into a new tab keeps its own row (moved to the new tab) but not
+(`cardTask`). A worker's `action` blocker (“install the dependencies outside my sandbox”)
+routes to the coordinator like a question (Darryl, 2026-10-31: a rogue worker still has to get
+past the queen). It was the human's alone until a worker asked Darryl, as "Only you can do it",
+to set a sandbox setting maiTerm pins. The queen handles it, refuses it with new instructions,
+or raises her own blocker to the human (§7.4); her answer is hers, never logged or told as done
+by the human. maiTerm's own `action` rows (a pause, the budget) are on the coordinator's row, no
+worker's, so they stay the human's. Not covered: a worker relaunched into a new tab keeps its own row (moved to the new tab) but not
 its sub-tasks, whose rows keep the old tab id.
 
 ## 5. Hidden tabs: two predicates
@@ -1610,9 +1614,10 @@ the answer path, and an agent's answer is checked against the `prompt_id` instea
 | A worker needs | Goes to | How |
 |---|---|---|
 | An answer to a question | The coordinator; the human if Workers' questions is Ask me | A **blocker** on its task (the worker's priming and `blocker` field say "your coordinator"). Rust routes it by the checkpoint. Answered back by `hiveMessageWorker` or, from the human, as a blocker answer |
+| Something done (an `action` blocker) | The coordinator first, as a question (2026-10-31); the human if Workers' questions is Ask me | The queen can't act as the human: she handles it with her own tools, refuses it with new instructions, or raises her **own** blocker to the human. `hiveAnswerWorker`'s free text closes it as hers ("Decided by your coordinator", logged `by: coordinator`); only the human's own answer is logged "Done by the human". A `Budget:` one stays the human's |
 | A permission prompt answered | The coordinator; the human if Workers' permission prompts is Ask me | `hiveAnswerWorker`, within the allowlist |
 | Money: a spend past the budget (§10.3) | **The human**, always | A `decision` blocker whose question starts `Budget:` (no new blocker kind, which an older build would drop; `gallery::budget::is_budget_question`, step 8f). Mislabelling only ever sends a question to the human, the safe direction |
-| A sandbox block (a host or path refused, §6.7) | The coordinator, which can't widen it | The coordinator raises its **own** blocker to the human, naming the host or path (§14.16) |
+| A sandbox block (a host or path refused, §6.7) | The coordinator, as an `action` blocker maiTerm files | She grants a host with `hiveChangeSettings` (at once, within Rust's limits, logged for the human, the blocker answered as hers), refuses it with new instructions, or raises her **own** blocker to the human (§14.16) |
 | To say it can't go on | The coordinator | `hiveReport {status: "blocked"}`: a status, not a question; the card reads **Blocked** (§4.3) |
 
 `replyToOverlord` is withheld from workers (§7.2), and AskUserQuestion in a worker is answered by
