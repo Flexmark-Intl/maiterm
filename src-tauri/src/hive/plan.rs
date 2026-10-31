@@ -208,18 +208,19 @@ pub fn parse_args(args: &Value) -> Result<ProposeArgs, String> {
 pub fn plan_blocker(goal: &str, a: &ProposeArgs, asked_at: &str) -> TaskBlocker {
     let n = a.titles.len();
     let workers = if n == 1 { "this worker".to_string() } else { format!("these {n} workers") };
-    let mut context: Vec<String> = a
+    let list: Vec<String> = a
         .titles
         .iter()
         .zip(&a.roles)
         .enumerate()
         .map(|(i, (t, r))| if r.is_empty() { format!("{}. {}", i + 1, one_line(t, MAX_TITLE)) } else { format!("{}. {} ({r})", i + 1, one_line(t, MAX_TITLE)) })
         .collect();
-    context.push(format!("The queen\u{2019}s summary: \u{201c}{}\u{201d}", one_line(&a.summary, MAX_SUMMARY)));
+    let summary = format!("The queen\u{2019}s summary: \u{201c}{}\u{201d}", one_line(&a.summary, MAX_SUMMARY));
     TaskBlocker {
         kind: "decision".into(),
         question: format!("Start {workers} for \u{201c}{}\u{201d}?", one_line(goal, 160)),
-        context: Some(context.join("\n")),
+        // Context renders as markdown: the blank line keeps the summary out of the last worker.
+        context: Some(format!("{}\n\n{summary}", list.join("\n"))),
         options: vec![
             BlockerOption { label: ANSWER_GO.into(), detail: Some("the queen starts exactly these".into()), recommended: true },
             BlockerOption { label: ANSWER_CHANGE.into(), detail: Some("answer with what to change".into()), recommended: false },
@@ -411,7 +412,7 @@ mod tests {
         let b = plan_blocker("Ship\nit", &ok, "2026-10-24T10:00:00.000Z");
         assert_eq!(b.question, "Start these 2 workers for \u{201c}Ship it\u{201d}?");
         assert_eq!(plan_blocker("g", &ProposeArgs { titles: vec!["A".into()], roles: vec![String::new()], ..ok.clone() }, "x").question, "Start this worker for \u{201c}g\u{201d}?");
-        assert_eq!(b.context.as_deref(), Some("1. Login API (backend)\n2. Login UI\nThe queen\u{2019}s summary: \u{201c}Two halves.\u{201d}"));
+        assert_eq!(b.context.as_deref(), Some("1. Login API (backend)\n2. Login UI\n\nThe queen\u{2019}s summary: \u{201c}Two halves.\u{201d}"));
         assert_eq!(b.options.iter().map(|o| (o.label.as_str(), o.recommended)).collect::<Vec<_>>(), vec![(ANSWER_GO, true), (ANSWER_CHANGE, false)]);
         assert_eq!((b.kind.as_str(), b.asked_by.as_str()), ("decision", "agent"));
     }
