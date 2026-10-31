@@ -319,6 +319,38 @@ async fn tell_coordinator<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text
     log::info!("hive {}: settings notice to the coordinator: {}", caller.hive.id, sent.describe());
 }
 
+/// Whether a change reaches workers only from their next launch: their model, effort or hosts.
+fn needs_worker_relaunch(c: &SettingsChange) -> bool {
+    c.worker_model.is_some() || c.worker_effort.is_some() || !c.add_hosts.is_empty() || !c.remove_hosts.is_empty()
+}
+
+/// For a change that reaches workers only at their next launch: which running workers still
+/// have the old settings, and what to do. None when none is running, or the change isn't one.
+fn relaunch_sentence(c: &SettingsChange, workers: &[super::worker::WorkerRecord]) -> Option<String> {
+    if !needs_worker_relaunch(c) {
+        return None;
+    }
+    let live: Vec<String> = workers.iter().filter(|w| w.is_live()).map(super::tools::worker_label).collect();
+    if live.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Running on the old settings until relaunched: {}. Relaunch each with hiveRestartWorker when it is at a good point (its \
+         session resumes).",
+        live.join(", ")
+    ))
+}
+
+/// `relaunch_sentence` from the workers on disk now.
+async fn relaunch_note(caller: &Caller, c: &SettingsChange) -> Option<String> {
+    if !needs_worker_relaunch(c) {
+        return None;
+    }
+    let p = caller.paths.clone();
+    let workers = super::tools::blocking(move || Ok(super::worker::list_workers(&p))).await.unwrap_or_default();
+    relaunch_sentence(c, &workers)
+}
+
 fn bulleted(lines: &[String]) -> String {
     lines.iter().map(|l| format!("\n- {l}")).collect()
 }
@@ -488,12 +520,17 @@ async fn coordinator_hosts<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, cha
     let settled = if checked.add_hosts.is_empty() { Vec::new() } else { super::prompts::settle_host_blockers(ctx, caller, &hive, reason).await };
     ctx.window.poll_waiters(&caller.workspace_id);
     let relaunch: Vec<Value> = settled.iter().map(|w| json!({ "worker": w.badge, "title": w.title })).collect();
-    let note = if relaunch.is_empty() {
+    let mut note = if relaunch.is_empty() {
         "Your human was told. A worker reaches a host from its next launch: hiveRestartWorker relaunches a running one (its session resumes)."
     } else {
         "Your human was told, and maiTerm answered these workers\u{2019} sandbox blockers as yours. Each reaches the host from its next \
          launch: relaunch it with hiveRestartWorker when it is at a good point (its session resumes)."
-    };
+    }
+    .to_string();
+    if let Some(running) = relaunch_note(caller, &checked).await {
+        note.push(' ');
+        note.push_str(&running);
+    }
     Ok(json!({ "status": "applied", "changes": lines, "answered_blockers": relaunch, "note": note }))
 }
 
@@ -523,7 +560,12 @@ pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         log_line(caller,"coordinator", &lines, reason.as_deref());
         ctx.window.settings_changed(&caller.workspace_id, &format!("The queen changed this Hive\u{2019}s settings: {}.", lines.join("; ")));
         ctx.window.poll_waiters(&caller.workspace_id);
-        return Ok(json!({ "status": "applied", "changes": lines, "note": "Your human was told. Each agent gets it at its next launch." }));
+        let mut note = "Your human was told. Each agent gets it at its next launch.".to_string();
+        if let Some(running) = relaunch_note(caller, &change).await {
+            note.push(' ');
+            note.push_str(&running);
+        }
+        return Ok(json!({ "status": "applied", "changes": lines, "note": note }));
     }
     let mut effects = checked.lines.clone();
     if !checked.change.add_hosts.is_empty() {
@@ -553,7 +595,8 @@ pub(crate) async fn set_by_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Calle
     refuse_private_hosts(&change.add_hosts).await?;
     let (hive, lines) = write(ctx, caller, change, By::Human)?;
     log_line(caller,"human", &lines, None);
-    tell_coordinator(ctx, caller, format!("[maiTerm] Your human changed this Hive\u{2019}s settings:{}", bulleted(&lines))).await;
+    let running = relaunch_note(caller, change).await.map(|s| format!("\n{s}")).unwrap_or_default();
+    tell_coordinator(ctx, caller, format!("[maiTerm] Your human changed this Hive\u{2019}s settings:{}{running}", bulleted(&lines))).await;
     ctx.window.poll_waiters(&caller.workspace_id);
     Ok(hive)
 }
@@ -565,16 +608,17 @@ pub(crate) async fn approved_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         args.get("change").cloned().ok_or_else(|| "it had no change".to_string()).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()));
     let res = match change {
         Ok(c) => match refuse_private_hosts(&c.add_hosts).await {
-            Ok(()) => write(ctx, caller, &c, By::Approved),
+            Ok(()) => write(ctx, caller, &c, By::Approved).map(|(h, lines)| (h, lines, c)),
             Err(e) => Err(e),
         },
         Err(e) => Err(e),
     };
     match res {
-        Ok((_, lines)) => {
+        Ok((_, lines, c)) => {
             log_line(caller,"coordinator, approved by the human", &lines, None);
             ctx.window.settle_request(request_id, true, format!("applied: {}", lines.join("; ")));
-            tell_coordinator(ctx, caller, format!("[maiTerm] Your human approved your settings change:{}", bulleted(&lines))).await;
+            let running = relaunch_note(caller, &c).await.map(|s| format!("\n{s}")).unwrap_or_default();
+            tell_coordinator(ctx, caller, format!("[maiTerm] Your human approved your settings change:{}{running}", bulleted(&lines))).await;
             ctx.window.poll_waiters(&caller.workspace_id);
         }
         Err(e) => {
@@ -657,6 +701,23 @@ mod tests {
         assert_eq!(ch.lines, vec!["Workers (each from its next launch): Claude sonnet, high effort \u{2192} Claude opus, high effort".to_string()]);
         let none = SettingsChange { cap: Some(3), ..Default::default() };
         assert!(check(&hive(), &none, By::Human, &[]).unwrap_err().starts_with("Nothing would change"));
+    }
+
+    /// A host or worker model approved mid-run reaches no running worker until it is relaunched:
+    /// the queen is told which ones, by name, and how.
+    #[test]
+    fn a_next_launch_change_names_the_running_workers_to_relaunch() {
+        use super::super::worker::{WorkerRecord, PHASE_REPORTED, PHASE_RETIRED, PHASE_RUNNING};
+        let w = |badge: u32, slug: &str, phase: &str| WorkerRecord { badge, slug: slug.into(), phase: phase.into(), ..WorkerRecord::default() };
+        let workers = [w(1, "login", PHASE_RUNNING), w(2, "api", PHASE_RETIRED), w(3, "screens", PHASE_REPORTED)];
+        let hosts = SettingsChange { add_hosts: vec!["api.example.com".into()], ..Default::default() };
+        let s = relaunch_sentence(&hosts, &workers).unwrap();
+        assert!(s.contains("#1 login, #3 screens") && !s.contains("#2 api") && s.contains("hiveRestartWorker"), "{s}");
+        let model = SettingsChange { worker_model: Some("opus".into()), ..Default::default() };
+        assert!(relaunch_sentence(&model, &workers).is_some());
+        let cap = SettingsChange { cap: Some(2), ..Default::default() };
+        assert!(relaunch_sentence(&cap, &workers).is_none(), "the cap needs no relaunch");
+        assert!(relaunch_sentence(&hosts, &workers[1..2]).is_none(), "nothing running, nothing to say");
     }
 
     #[test]

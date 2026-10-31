@@ -2654,6 +2654,15 @@ mint a second task. So:
   `docs/follow-ups.md` §6.2) and after the trust re-check (§6.6). By default it resumes the last
   session; `fresh` starts a new one, with the brief re-sent. The cap, fuses, quota breaker and
   memory pressure are re-checked first (§7.8), and the badge number is kept (§4.6).
+- A relaunch maiTerm itself asked for (`hiveRestartWorker`, a wake, New goal) **waits for the
+  tab's output to go quiet**, up to 20 s, instead of refusing "output still arriving" at once
+  (2026-10-31: right after `hiveStopWorker` the agent's exit is still printing, and the queen
+  slept 12 s and retried). Every other check still applies after the wait, and its window RPC
+  gets 45 s (`rpc::RELAUNCH_TIMEOUT`).
+- A settings change that reaches workers only at their next launch (their model or effort, the
+  hosts they may reach) tells the queen, when it applies or is approved, which running workers
+  still have the old settings, by name, and to relaunch each with `hiveRestartWorker`
+  (`change::relaunch_sentence`).
 - If the tab is gone, it opens a new hidden tab on the existing worktrees and moves the task's
   ownership to it, the way reload does (`remapTab`).
 

@@ -45,6 +45,9 @@ pub(crate) const VERB_JOB_CLEANUP: &str = "stack.job.cleanup";
 /// A job start's window waits out the stack's own guard (mount, first prompt, settle, the B)
 /// before it answers, so it gets longer than `TIMEOUT`.
 pub(crate) const JOB_START_TIMEOUT: Duration = Duration::from_secs(90);
+/// A relaunch waits up to 20 s for the tab's output to go quiet before it types
+/// (`followUps.svelte.ts` `RELAUNCH_QUIET_WAIT_MS`), then probes the shell: longer than `TIMEOUT`.
+pub(crate) const RELAUNCH_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// The window a Hive lives in, as the tools see it: the app's in production, a stub in tests.
 pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
@@ -186,7 +189,8 @@ pub(crate) struct AppWindow {
 impl HiveWindow for AppWindow {
     fn request(&self, verb: &'static str, args: Value) -> impl Future<Output = Outcome> + Send {
         let this = self.clone();
-        async move { crate::mailink::rpc::request_on(&this.app, Some(&this.handle), EVENT, &this.label, verb, args, TIMEOUT).await }
+        let timeout = if verb == VERB_RELAUNCH { RELAUNCH_TIMEOUT } else { TIMEOUT };
+        async move { crate::mailink::rpc::request_on(&this.app, Some(&this.handle), EVENT, &this.label, verb, args, timeout).await }
     }
 
     fn workers_changed(&self, workspace_id: &str) {
@@ -422,10 +426,7 @@ fn answer(outcome: Outcome, so: &str) -> Result<Value, String> {
             Some(err) => Err(format!("maiTerm's window refused it: {err}")),
             None => Ok(v),
         },
-        Outcome::Timeout => Err(format!(
-            "maiTerm's window didn't confirm within {} s (its screen may be asleep), so {so}.",
-            TIMEOUT.as_secs()
-        )),
+        Outcome::Timeout => Err(format!("maiTerm's window didn't confirm in time (its screen may be asleep), so {so}.")),
         Outcome::Disconnected => Err(format!("maiTerm's window dropped the request, so {so}.")),
         Outcome::NoWindow => Err(format!("This Hive's window isn't open, so {so}.")),
         Outcome::NoHandle => Err(format!("No maiTerm window to ask, so {so}.")),

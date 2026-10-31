@@ -60,6 +60,20 @@ const RESUME_WAIT_MS = 2 * 60_000;
 const GONE_CONFIRM_MS = 10_000;
 /** The hold reason for a tab with no agent — the one reason resume-then-deliver acts on. */
 const NO_AGENT = 'no agent is running in the tab — it goes after an agent starts there';
+/** Output this recent means the tab is still printing, and nothing is typed into it (§6.2). */
+const OUTPUT_QUIET_MS = 1500;
+/** How long a relaunch maiTerm itself asked for waits for that quiet before it refuses. */
+export const RELAUNCH_QUIET_WAIT_MS = 20_000;
+
+/** Resolves once `tabId` has printed nothing for `quietMs`, or after `maxMs` whatever it did. */
+async function waitForQuiet(tabId: string, quietMs: number, maxMs: number): Promise<void> {
+  const deadline = Date.now() + maxMs;
+  for (;;) {
+    const since = Date.now() - (terminalsStore.getLastOutputAt(tabId) ?? 0);
+    if (since >= quietMs || Date.now() >= deadline) return;
+    await new Promise(r => setTimeout(r, Math.min(quietMs - since + 50, deadline - Date.now(), 500)));
+  }
+}
 
 /** A watch script waiting for the human to allow it. */
 export interface PendingApproval {
@@ -523,6 +537,10 @@ function createFollowUpsStore() {
     const live = await commands.getAgentLiveness(inst.ptyId);
     if (live.agent_running) return 'an agent process is running in the tab but has not registered with maiTerm — run /maiterm init there';
     if (live.ssh_foreground) return "ssh is running in the tab, and maiTerm can't see whether the agent on the far side is up";
+    // A relaunch maiTerm itself asked for (`markless`: hiveRestartWorker, a wake) usually comes
+    // right after the agent was stopped, while its exit is still printing: it waits for the
+    // quiet (bounded) rather than refusing, and every check below then reads the settled tab.
+    if (markless) await waitForQuiet(tab.id, OUTPUT_QUIET_MS, RELAUNCH_QUIET_WAIT_MS);
     const fg = await commands.getPtyForegroundJob(inst.ptyId);
     if (fg.shell_at_prompt !== true) return `${NO_AGENT}, and the tab isn't at a shell prompt${fg.executable ? ` (${fg.executable} is running)` : ''}`;
     // A Hive relaunch (`markless`) also takes a shell whose prompt this webview never heard (a
@@ -536,7 +554,9 @@ function createFollowUpsStore() {
     if (evidence === 'no_mark') return `${NO_AGENT}, and maiTerm can't see the shell's prompt (no shell integration) — start it yourself`;
     if (evidence === 'running') return 'a command is running in the tab';
     if (evidence === 'typed') return `${NO_AGENT}, and something is typed at the shell prompt — maiTerm won't add to it`;
-    if (Date.now() - (terminalsStore.getLastOutputAt(tab.id) ?? 0) < 1500) return 'output still arriving';
+    if (Date.now() - (terminalsStore.getLastOutputAt(tab.id) ?? 0) < OUTPUT_QUIET_MS) {
+      return markless ? `output kept arriving for ${RELAUNCH_QUIET_WAIT_MS / 1000} s — try again once the tab is quiet` : 'output still arriving';
+    }
     const runtime = workspacesStore.getTabRuntime(tab.id);
     let text: string;
     if (tab.hive_role) {
