@@ -141,6 +141,13 @@ describe('validateSpec', () => {
     expect(git({ base: 'release', detectedBase: null })).toBeNull();
     expect(git({ kind: 'plain', base: '', detectedBase: null })).toBeNull();
   });
+
+  it('refuses a repo with files and no commit, whose workers would get none of them', () => {
+    const git = (f: object) => validateSpec({ ...ok, folders: [{ path: '/r/web', primary: true, name: 'web', kind: 'git', base: 'main', ...f }] });
+    expect(git({ uncommitted: true })).toMatch(/^web: the repo has no commit yet/);
+    expect(git({ uncommitted: true, kind: 'plain' })).toBeNull();
+    expect(git({})).toBeNull();
+  });
 });
 
 describe('folderName', () => {

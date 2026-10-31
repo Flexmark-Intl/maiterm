@@ -36,8 +36,9 @@ pub struct FolderInfo {
     /// Nothing in it but git's own folder: a new project. Create makes it a repo on
     /// `NEW_REPO_BRANCH` when it isn't one yet, and trusts it (`start_repo`, §3.6).
     pub empty: bool,
-    /// A repo with no commit yet. `base` is the branch its HEAD names, and Create gives it an
-    /// empty first commit, since a read copy needs a commit to check out.
+    /// A repo with no commit yet; `base` is the branch its HEAD names. Empty, Create gives it a
+    /// first commit; with files, Create refuses until the human commits them (a read copy is a
+    /// checkout of a commit, so workers would get none of them).
     pub unborn: bool,
 }
 
@@ -51,19 +52,26 @@ pub fn folder_is_empty(dir: &Path) -> bool {
     })
 }
 
-/// Create's start for a new project (§3.6): an empty folder that isn't a repo becomes one, and it
-/// or a repo with no commit yet gets an empty first commit on `branch` (no branch exists yet, so
-/// pointing HEAD there loses nothing), so a read copy has something to check out. The commit is
-/// made from an empty index of its own, so whatever the human staged or left untracked stays as
-/// it was. A repo with commits is left alone. Blocks on git.
+/// Create's start for a new project (§3.6): an empty folder becomes a repo if it isn't one, and
+/// gets an empty first commit on `branch`, so a read copy has something to check out. Only an
+/// empty folder with no branch at all: a repo with files and no commit would give its workers
+/// none of them, and pointing HEAD at a branch that exists (an orphan checkout's other
+/// branches) would commit an empty tree on top of it. The commit is made from an index of its
+/// own. A repo with commits is left alone. Blocks on git.
 pub fn start_repo(path: &Path, branch: &str) -> Result<(), String> {
     let info = detect_folder(path, &[]);
     let real = Path::new(&info.path);
     if info.kind == KIND_GIT && !info.unborn {
         return Ok(());
     }
-    if info.kind != KIND_GIT && !info.empty {
-        return Err(format!("{} isn't a git repository, and only an empty folder is made into one", info.path));
+    if !info.empty {
+        return Err(format!("{} has files but no commit, and only an empty folder is started as a new project", info.path));
+    }
+    if info.kind == KIND_GIT {
+        let branches = run(git_in(real).args(["for-each-ref", "--count=1", "--format=%(refname)", "refs/heads"]), QUERY_TIMEOUT)?;
+        if !branches.is_empty() {
+            return Err(format!("{} has branches but none checked out: switch to one, or pick it as Base", info.path));
+        }
     }
     // `git check-ref-format` needs no repo, so it's asked before one is made.
     run(crate::util::proc::git().args(["check-ref-format", "--branch", branch]), QUERY_TIMEOUT).map_err(|_| format!("\u{201c}{branch}\u{201d} isn't a branch name git takes"))?;
@@ -658,10 +666,12 @@ mod tests {
     }
 
     /// A repo with no commit names no branch to `rev-parse`: its Base is the branch HEAD points
-    /// at, and its first commit leaves what the human staged and wrote as it was.
+    /// at. Empty, it gets its first commit on the Base named; with files, or with branches HEAD
+    /// isn't on (an orphan checkout), it's never touched: workers would get none of the files,
+    /// or an empty tree would land on a branch's history (review of 679b1ba2).
     #[cfg(unix)]
     #[test]
-    fn a_repo_with_no_commit_gets_an_empty_first_one_and_keeps_its_files() {
+    fn only_an_empty_repo_with_no_branch_gets_a_first_commit() {
         let base = scratch("unborn");
         let r = base.join("r");
         fs::create_dir_all(&r).unwrap();
@@ -669,16 +679,23 @@ mod tests {
         let info = detect_folder(&r, &[]);
         assert_eq!((info.kind.as_str(), info.base.as_deref(), info.unborn, info.empty), (KIND_GIT, Some("trunk"), true, true));
 
-        fs::write(r.join("staged.txt"), "s").unwrap();
-        fs::write(r.join("loose.txt"), "l").unwrap();
-        git(&r, &["add", "staged.txt"]);
+        fs::write(r.join("app.js"), "x").unwrap();
         let info = detect_folder(&r, &[]);
         assert!(info.unborn && !info.empty);
+        assert!(start_repo(&r, "trunk").unwrap_err().contains("has files but no commit"));
+        assert!(detect_folder(&r, &[]).unborn, "left as it was");
+        fs::remove_file(r.join("app.js")).unwrap();
+
         start_repo(&r, "main").unwrap();
-        assert_eq!(git(&r, &["symbolic-ref", "--short", "HEAD"]), "main", "the Base the human named; no branch existed to lose");
+        assert_eq!(git(&r, &["symbolic-ref", "--short", "HEAD"]), "main", "the Base the human named");
         assert_eq!(git(&r, &["ls-tree", "-r", "--name-only", "HEAD"]), "");
-        assert_eq!(git(&r, &["status", "--porcelain"]), "A  staged.txt\n?? loose.txt","staged and loose as they were");
         assert!(!detect_folder(&r, &[]).unborn);
+
+        // An orphan checkout is empty and unborn, but `main` has history.
+        git(&r, &["switch", "-q", "--orphan", "scratch"]);
+        assert!(detect_folder(&r, &[]).unborn);
+        assert!(start_repo(&r, "main").unwrap_err().contains("has branches"));
+        assert_eq!(git(&r, &["rev-list", "--count", "main"]), "1", "main untouched");
         let _ = fs::remove_dir_all(&base);
     }
 }

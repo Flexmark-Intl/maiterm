@@ -54,11 +54,11 @@
     primary: boolean;
     trusted: boolean;
     repoTop: string | null;
-    /** A new project (§3.6): empty, or a repo with no commit. Create starts its repo on `base`,
-     *  and the queen sets its setup and land check once the code has them. */
+    /** A new project (§3.6): nothing in it but `.git`. Create starts its repo on `base` and trusts
+     *  it, and the queen sets its setup and land check once the code has them. */
     fresh?: boolean;
-    /** Nothing in it but `.git`: Create trusts it, as it has no settings of its own to trust. */
-    empty?: boolean;
+    /** A repo with files and no commit: refused until the human commits them (`validateFolders`). */
+    uncommitted?: boolean;
   }
 
   const MODELS = ['opus', 'sonnet', 'haiku'];
@@ -318,7 +318,7 @@
       }
       const taken = folders.filter((_, i) => i !== at).map((f) => f.name);
       // An empty folder is a new project, inside another repo or not: Create makes it one of its own.
-      const fresh = info.empty || info.unborn;
+      const fresh = info.empty;
       const kind = fresh ? 'git' : info.kind;
       const f: Folder = {
         key: ++folderKey,
@@ -336,7 +336,7 @@
         trusted: info.trusted,
         repoTop: fresh ? null : info.repo_top,
         fresh,
-        empty: info.empty,
+        uncommitted: info.unborn && !info.empty,
       };
       folders = at !== undefined ? folders.map((x, i) => (i === at ? f : x)) : [...folders, f];
       readSuggestions(info.path);
@@ -357,7 +357,7 @@
           : '.'),
   );
   // An empty folder is trusted by Create itself (§3.6): nothing in it for trust to let run.
-  const untrusted = $derived(folders.filter((f) => f.kind === 'git' && !f.trusted && !f.empty));
+  const untrusted = $derived(folders.filter((f) => f.kind === 'git' && !f.trusted && !f.fresh));
 
   async function recheckTrust() {
     for (const f of untrusted) {
@@ -527,7 +527,8 @@
         path: f.path,
         kind: f.kind,
         base: f.kind === 'git' ? (f.base.trim() || null) : null,
-        setup: f.kind === 'git' ? (f.setup.trim() || null) : null,
+        // A new project's setup is the queen's to set once the code has one (§3.6).
+        setup: f.kind === 'git' && !f.fresh ? (f.setup.trim() || null) : null,
         land_check: f.kind === 'git' ? (f.land_check.trim() || null) : null,
         primary: f.primary,
         local_remotes: [],
@@ -706,10 +707,16 @@
                 {/if}
                 {#if f.kind === 'git' && f.fresh}
                   <p class="note-line">
-                    A new project. At Create, maiTerm {f.empty && f.detectedBase === null ? `makes it a git repo on ${f.base.trim() || 'main'}` : `gives it a first commit on ${f.base.trim() || 'main'}`}{f.empty ? ' and trusts it' : ''}.
+                    A new project. At Create, maiTerm {f.detectedBase === null ? 'makes it a git repo' : 'gives it a first commit'} on {f.base.trim() || 'main'} and trusts it.
                     The queen adds the setup and land check once the code has them.
                   </p>
                 {:else if f.kind === 'git'}
+                  {#if f.uncommitted}
+                    <div class="note-line">
+                      <span class="warn">This repo has no commit yet, so a worker's copy would have none of its files. Commit what's here, then check again.</span>
+                      <button class="link" onclick={() => addFolder(f.path, i)}>Check again</button>
+                    </div>
+                  {/if}
                   <div class="grid">
                     <label><span>Base</span><input value={f.base} placeholder={f.detectedBase ?? 'branch'} oninput={(e) => patch(f.key, { base: (e.currentTarget as HTMLInputElement).value })} /></label>
                     <label><span>Setup</span><input value={f.setup} placeholder="optional" oninput={(e) => patch(f.key, { setup: (e.currentTarget as HTMLInputElement).value })} /></label>

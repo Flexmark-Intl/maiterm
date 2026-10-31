@@ -841,6 +841,9 @@ pub fn validate_spec(spec: &HiveSpec) -> Result<(), String> {
     Ok(())
 }
 
+/// A repo with files and no commit (the sheet's twin is in `validateFolders`).
+const UNBORN_REFUSAL: &str = "the repo has no commit yet, so a worker's copy would have none of its files. Commit what's there first.";
+
 fn non_empty(s: &Option<String>) -> Option<String> {
     s.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
 }
@@ -869,6 +872,10 @@ pub fn resolve_folders(spec: &[HiveFolder], roots: &[PathBuf], app_data: Option<
         if git && info.kind != KIND_GIT {
             return Err(format!("{name}: {} isn't the top folder of a git repository", info.path));
         }
+        // An empty one was given its first commit by `start_new_repos`.
+        if git && info.unborn {
+            return Err(format!("{name}: {UNBORN_REFUSAL}"));
+        }
         // Base is what a land merges into and the read copy sits on (§3, §8.1).
         let base = if git { non_empty(&f.base).or(info.base) } else { None };
         if git && base.is_none() {
@@ -890,9 +897,9 @@ pub fn resolve_folders(spec: &[HiveFolder], roots: &[PathBuf], app_data: Option<
 
 /// The new projects among the sheet's git folders, made ready for read copies before
 /// `resolve_folders` reads them (§3.6, `layout::start_repo`): an empty folder becomes a repo on
-/// its Base (`main` unless the human named another), and a repo with no commit gets its first.
-/// Answers the folders that were empty, which the caller trusts once Create succeeds. A Create
-/// that fails later leaves the repo made, which is all it is: an empty first commit.
+/// its Base (`main` unless the human named another), with an empty first commit. Answers them,
+/// for the caller to trust once Create succeeds. A Create that fails later leaves the repo made,
+/// which is all it is: an empty first commit.
 pub fn start_new_repos(spec: &[HiveFolder], app_data: Option<&Path>) -> Result<Vec<PathBuf>, String> {
     let mut empty = Vec::new();
     for f in spec.iter().filter(|f| f.kind == KIND_GIT) {
@@ -901,7 +908,8 @@ pub fn start_new_repos(spec: &[HiveFolder], app_data: Option<&Path>) -> Result<V
             continue; // `resolve_folders` says so
         }
         let info = layout::detect_folder(path, &[]);
-        if !(if info.kind == KIND_GIT { info.unborn } else { info.empty }) {
+        // Only an empty folder: a repo with files and no commit is `resolve_folders`' refusal.
+        if !info.empty || (info.kind == KIND_GIT && !info.unborn) {
             continue;
         }
         let name = f.name.trim();
@@ -910,9 +918,7 @@ pub fn start_new_repos(spec: &[HiveFolder], app_data: Option<&Path>) -> Result<V
         }
         let branch = non_empty(&f.base).or(info.base).unwrap_or_else(|| layout::NEW_REPO_BRANCH.to_string());
         layout::start_repo(path, &branch).map_err(|e| format!("{name}: {e}"))?;
-        if info.empty {
-            empty.push(PathBuf::from(&info.path));
-        }
+        empty.push(PathBuf::from(&info.path));
     }
     Ok(empty)
 }
