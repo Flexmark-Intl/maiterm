@@ -171,9 +171,28 @@ fn real_path(p: &Path) -> Option<PathBuf> {
 }
 
 /// Commands this line runs, as words, plus the command strings nested in `$(…)` and backticks.
+/// A substitution leaves [`SUBST`] in the word it sat in, so the word never reads as plain text
+/// (`git -C "$(echo /etc)"` was `git -C ""`, which resolved to the cwd).
 struct Lexed {
     segments: Vec<Vec<String>>,
+    /// Per segment: the separator before it and the one after it.
+    joins: Vec<(Join, Join)>,
     nested: Vec<String>,
+}
+
+const SUBST: &str = "$(…)";
+
+/// What joins one command to the next: `;`, a newline or the line's ends (`Seq`), `&&`, `||`,
+/// a pipe, a background `&`, or a subshell or group paren. Only the first two leave a `cd`'s
+/// folder certain for what follows (`places`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Join {
+    Seq,
+    And,
+    Or,
+    Pipe,
+    Bg,
+    Group,
 }
 
 fn take_parens(c: &[char], mut i: usize) -> (String, usize) {
@@ -209,10 +228,13 @@ fn take_backticks(c: &[char], mut i: usize) -> (String, usize) {
 
 fn lex(s: &str) -> Lexed {
     let c: Vec<char> = s.chars().collect();
-    let mut out = Lexed { segments: Vec::new(), nested: Vec::new() };
+    let mut out = Lexed { segments: Vec::new(), joins: Vec::new(), nested: Vec::new() };
     let mut words: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut in_word = false;
+    // The separator before the next segment: the first non-`Seq` one since the last segment,
+    // so `(cd x); git status` reads `git status` as after a group, not after the `;`.
+    let mut before = Join::Seq;
     let flush_word = |cur: &mut String, in_word: &mut bool, words: &mut Vec<String>| {
         if *in_word {
             words.push(std::mem::take(cur));
@@ -253,11 +275,13 @@ fn lex(s: &str) -> Lexed {
                         '$' if c.get(i + 1) == Some(&'(') => {
                             let (inner, end) = take_parens(&c, i + 2);
                             out.nested.push(inner);
+                            cur.push_str(SUBST);
                             i = end;
                         }
                         '`' => {
                             let (inner, end) = take_backticks(&c, i + 1);
                             out.nested.push(inner);
+                            cur.push_str(SUBST);
                             i = end;
                         }
                         other => {
@@ -271,21 +295,43 @@ fn lex(s: &str) -> Lexed {
             '$' if c.get(i + 1) == Some(&'(') => {
                 let (inner, end) = take_parens(&c, i + 2);
                 out.nested.push(inner);
+                cur.push_str(SUBST);
                 in_word = true;
                 i = end;
             }
             '`' => {
                 let (inner, end) = take_backticks(&c, i + 1);
                 out.nested.push(inner);
+                cur.push_str(SUBST);
                 in_word = true;
                 i = end;
             }
+            // A redirection's `&` (`2>&1`, `>&2`, `&>log`) is part of its word, not a separator.
+            '&' if (in_word && cur.ends_with(['>', '<'])) || c.get(i + 1) == Some(&'>') => {
+                cur.push('&');
+                in_word = true;
+                i += 1;
+            }
             ';' | '&' | '|' | '\n' | '(' | ')' => {
+                let next = c.get(i + 1).copied();
+                let (sep, len) = match (ch, next) {
+                    ('&', Some('&')) => (Join::And, 2),
+                    ('|', Some('|')) => (Join::Or, 2),
+                    ('|', Some('&')) => (Join::Pipe, 2),
+                    ('&', _) => (Join::Bg, 1),
+                    ('|', _) => (Join::Pipe, 1),
+                    ('(' | ')', _) => (Join::Group, 1),
+                    _ => (Join::Seq, 1),
+                };
                 flush_word(&mut cur, &mut in_word, &mut words);
                 if !words.is_empty() {
                     out.segments.push(std::mem::take(&mut words));
+                    out.joins.push((before, sep));
+                    before = sep;
+                } else if before == Join::Seq {
+                    before = sep;
                 }
-                i += 1;
+                i += len;
             }
             '#' if !in_word => {
                 while i < c.len() && c[i] != '\n' {
@@ -306,8 +352,152 @@ fn lex(s: &str) -> Lexed {
     flush_word(&mut cur, &mut in_word, &mut words);
     if !words.is_empty() {
         out.segments.push(words);
+        out.joins.push((before, Join::Seq));
     }
     out
+}
+
+/// Where a command runs, as far as the gate can tell: a real folder, or not known, with what
+/// the agent can do about it when there's something to say (`$W` it can't expand).
+#[derive(Debug, Clone)]
+enum Here {
+    At(PathBuf),
+    Unknown(Option<String>),
+}
+
+impl Here {
+    fn dir(&self) -> Option<&Path> {
+        match self {
+            Here::At(p) => Some(p),
+            Here::Unknown(_) => None,
+        }
+    }
+}
+
+/// The first part of `w` the gate can't expand (`$W`, `${W}`, `$(…)`), if any.
+fn unexpanded(w: &str) -> Option<String> {
+    let i = w.find('$')?;
+    let rest = &w[i + 1..];
+    let tok = if rest.starts_with('(') {
+        SUBST.to_string()
+    } else if let Some(inner) = rest.strip_prefix('{') {
+        format!("${{{}}}", inner.split('}').next().unwrap_or(""))
+    } else {
+        let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        if name.is_empty() {
+            format!("${}", rest.chars().next().map(String::from).unwrap_or_default())
+        } else {
+            format!("${name}")
+        }
+    };
+    Some(tok)
+}
+
+fn cant_expand(tok: &str) -> String {
+    format!("the gate can't expand {tok}: write the folder's path out")
+}
+
+/// The first word of a segment that makes a `cd`'s reach uncertain: a branch, a loop, a
+/// function or a brace group (piped, it's a subshell). A line holding one of these and a `cd`
+/// is placed nowhere, as is one with a subshell paren.
+const FLOW_WORDS: &[&str] =
+    &["if", "then", "else", "elif", "fi", "for", "while", "until", "select", "do", "done", "case", "esac", "function", "coproc", "{", "}", "!"];
+
+fn is_cd(w: &str) -> bool {
+    matches!(program(w), "cd" | "pushd" | "popd")
+}
+
+/// Where each segment of the line runs. Before any `cd`, the hook's cwd. A `cd` (or `pushd`) to a
+/// literal, existing folder moves what follows when it is the segment's own command, starts its
+/// chain (`;`, a newline or the line's start before it) or continues one with `&&`, and isn't
+/// piped or backgrounded: then the shell surely moved, for the rest of an `&&` chain, and past a
+/// `;` when it started its chain. Anything else after a `cd` — `popd`, `cd -`, a `||` once the
+/// chain has moved, a subshell, a branch or a loop anywhere in the line — is placed nowhere, so
+/// a git there needs an absolute `-C`.
+fn places(lexed: &Lexed, cwd: Option<&Path>) -> Vec<Here> {
+    let start = match cwd.and_then(real_path) {
+        Some(p) => Here::At(p),
+        None => Here::Unknown(None),
+    };
+    let n = lexed.segments.len();
+    if !lexed.segments.iter().flatten().any(|w| is_cd(w)) {
+        return vec![start; n];
+    }
+    let flow = lexed.joins.iter().any(|(b, a)| *b == Join::Group || *a == Join::Group)
+        || lexed.segments.iter().any(|s| s.first().is_some_and(|w| FLOW_WORDS.contains(&w.as_str())));
+    if flow {
+        return vec![Here::Unknown(None); n];
+    }
+    let mut out = Vec::with_capacity(n);
+    // `place`: where the next chain starts. `cur`: where this chain's next command runs.
+    let (mut place, mut cur) = (start.clone(), start);
+    let mut moved = false;
+    for (seg, &(before, after)) in lexed.segments.iter().zip(&lexed.joins) {
+        match before {
+            Join::Seq => {
+                cur = place.clone();
+                moved = false;
+            }
+            // `cd x && a || git`: git runs when either failed, so in either folder.
+            Join::Or if moved => cur = Here::Unknown(None),
+            _ => {}
+        }
+        out.push(cur.clone());
+        if !seg.iter().any(|w| is_cd(w)) {
+            continue;
+        }
+        let own = matches!(program(&seg[0]), "cd" | "pushd")
+            && matches!(before, Join::Seq | Join::And)
+            && matches!(after, Join::Seq | Join::And | Join::Or);
+        let target = if own { cd_target(&seg[1..], &cur) } else { Here::Unknown(None) };
+        moved = true;
+        place = if before == Join::Seq { target.clone() } else { Here::Unknown(None) };
+        cur = target;
+    }
+    out
+}
+
+/// The folder `cd <args>` lands in, if the gate can be sure: one literal argument naming an
+/// existing folder (a missing one fails the `cd` and leaves the shell where it was). A bare
+/// relative name isn't, since `CDPATH` can send it elsewhere.
+fn cd_target(args: &[String], cur: &Here) -> Here {
+    let mut rest: Vec<&str> = Vec::new();
+    let mut opts = true;
+    for a in args.iter().map(String::as_str) {
+        if opts && matches!(a, "-P" | "-L" | "-e" | "-@") {
+            continue;
+        }
+        if opts && a == "--" {
+            opts = false;
+            continue;
+        }
+        opts = false;
+        rest.push(a);
+    }
+    let arg = match rest.as_slice() {
+        [] => "~",
+        [a] => a,
+        _ => return Here::Unknown(None),
+    };
+    if let Some(tok) = unexpanded(arg).or_else(|| arg.contains('`').then(|| "`…`".to_string())) {
+        return Here::Unknown(Some(cant_expand(&tok)));
+    }
+    if arg.starts_with('-') || arg.contains(['*', '?', '[']) {
+        return Here::Unknown(None);
+    }
+    let anchored = arg == "~" || arg.starts_with("~/") || Path::new(arg).is_absolute() || [".", ".."].contains(&arg) || arg.starts_with("./") || arg.starts_with("../");
+    if !anchored {
+        return Here::Unknown(Some(format!("a bare `cd {arg}` can follow CDPATH elsewhere: write it ./{arg} or as the full path")));
+    }
+    let base = match cur {
+        Here::At(p) => Some(p.as_path()),
+        Here::Unknown(why) if !Path::new(arg).is_absolute() && !arg.starts_with('~') => return Here::Unknown(why.clone()),
+        Here::Unknown(_) => None,
+    };
+    match resolve(base, arg) {
+        Some(p) if p.is_dir() => Here::At(p),
+        _ => Here::Unknown(None),
+    }
 }
 
 fn check_command(cmd: &str, cwd: Option<&Path>, scope: &GateScope, depth: usize) -> Result<(), String> {
@@ -315,15 +505,14 @@ fn check_command(cmd: &str, cwd: Option<&Path>, scope: &GateScope, depth: usize)
         return Err("This command nests too deeply for maiTerm to check, so it is blocked.".to_string());
     }
     let lexed = lex(cmd);
-    // After a `cd` the folder git runs in isn't known here (a subshell's `cd` doesn't even
-    // last), so a git with no absolute `-C` is refused rather than placed by the event's cwd.
-    let moves = lexed.segments.iter().flatten().any(|w| matches!(program(w), "cd" | "pushd" | "popd"));
-    let cwd = if moves { None } else { cwd };
+    // A substitution's folder isn't followed through the line's `cd`s: with one in the line, a
+    // git inside `$(…)` needs an absolute `-C`.
+    let moves = lexed.segments.iter().flatten().any(|w| is_cd(w));
     for inner in &lexed.nested {
-        check_command(inner, cwd, scope, depth + 1)?;
+        check_command(inner, if moves { None } else { cwd }, scope, depth + 1)?;
     }
-    for seg in &lexed.segments {
-        check_segment(seg, cwd, scope, depth)?;
+    for (seg, here) in lexed.segments.iter().zip(places(&lexed, cwd)) {
+        check_segment(seg, &here, scope, depth)?;
     }
     Ok(())
 }
@@ -395,7 +584,8 @@ fn git_env_refusal(assignment: &str, scope: &GateScope) -> Option<String> {
         .then(|| format!("{name}=… is refused in a Hive: it points git at other config or has it run a command."))
 }
 
-fn check_segment(words: &[String], cwd: Option<&Path>, scope: &GateScope, depth: usize) -> Result<(), String> {
+fn check_segment(words: &[String], here: &Here, scope: &GateScope, depth: usize) -> Result<(), String> {
+    let mut here = here.clone();
     let mut i = 0;
     while i < words.len() {
         let w = words[i].as_str();
@@ -413,7 +603,7 @@ fn check_segment(words: &[String], cwd: Option<&Path>, scope: &GateScope, depth:
             if prog == "env" {
                 if let Some(j) = words[i..].iter().position(|a| a == "-S" || a == "--split-string") {
                     if let Some(s) = words.get(i + j + 1) {
-                        check_command(s, cwd, scope, depth + 1)?;
+                        check_command(s, here.dir(), scope, depth + 1)?;
                     }
                 }
             }
@@ -423,6 +613,10 @@ fn check_segment(words: &[String], cwd: Option<&Path>, scope: &GateScope, depth:
                     if let Some(r) = git_env_refusal(a, scope) {
                         return Err(r);
                     }
+                }
+                // `env -C <dir>`, `sudo -D <dir>`: the wrapped command runs somewhere else.
+                if matches!((prog, a), ("env", "-C" | "--chdir") | ("sudo" | "doas", "-D")) || (prog == "env" && a.starts_with("--chdir=")) {
+                    here = Here::Unknown(None);
                 }
                 if value_flags.contains(&a) {
                     i += 2;
@@ -451,14 +645,14 @@ fn check_segment(words: &[String], cwd: Option<&Path>, scope: &GateScope, depth:
         }
         return match prog {
             p if SHELLS.contains(&p) => match shell_command_string(args) {
-                Some(s) => check_command(s, cwd, scope, depth + 1),
+                Some(s) => check_command(s, here.dir(), scope, depth + 1),
                 None => Ok(()),
             },
-            "eval" => check_command(&args.join(" "), cwd, scope, depth + 1),
+            "eval" => check_command(&args.join(" "), here.dir(), scope, depth + 1),
             "alias" => {
                 for a in args {
                     if let Some((_, v)) = a.split_once('=') {
-                        check_command(v, cwd, scope, depth + 1)?;
+                        check_command(v, here.dir(), scope, depth + 1)?;
                     }
                 }
                 Ok(())
@@ -467,7 +661,7 @@ fn check_segment(words: &[String], cwd: Option<&Path>, scope: &GateScope, depth:
                 Some(r) => Err(r),
                 None => Ok(()),
             },
-            "git" => check_git(args, cwd, scope),
+            "git" => check_git(args, &here, scope),
             "gh" => check_gh(args),
             _ => Ok(()),
         };
@@ -555,7 +749,7 @@ fn plain_verb(a: &str) -> bool {
     !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn check_git(args: &[String], cwd: Option<&Path>, scope: &GateScope) -> Result<(), String> {
+fn check_git(args: &[String], here: &Here, scope: &GateScope) -> Result<(), String> {
     if !scope.contained {
         return match git_verb(args) {
             Some("push" | "send-pack") => Err(PUSH_REFUSAL.to_string()),
@@ -564,22 +758,35 @@ fn check_git(args: &[String], cwd: Option<&Path>, scope: &GateScope) -> Result<(
             _ => Ok(()),
         };
     }
-    let mut base: Option<PathBuf> = cwd.and_then(real_path);
+    let mut base: Option<PathBuf> = here.dir().map(Path::to_path_buf);
+    // Why the folder isn't known, while it isn't: said in the refusal.
+    let mut why: Option<String> = match here {
+        Here::Unknown(w) => w.clone(),
+        Here::At(_) => None,
+    };
     let roots: Vec<PathBuf> = scope.git_roots.iter().filter_map(|g| real_path(g)).collect();
     // The deepest root holding `r`: a Hive folder inside another is checked as itself.
     let root_of = |r: &Path| roots.iter().filter(|g| r.starts_with(g)).max_by_key(|g| g.components().count());
     let in_roots = |r: &Path| root_of(r).is_some();
-    let check_path = |base: &Option<PathBuf>, p: &str, flag: &str| -> Result<PathBuf, String> {
+    let check_path = |base: &Option<PathBuf>, why: &Option<String>, p: &str, flag: &str| -> Result<PathBuf, String> {
+        if let Some(tok) = unexpanded(p) {
+            return Err(format!("git {flag} {p}: {}, e.g. git {flag} '/full/path/to/folder'.", cant_expand(&tok)));
+        }
         match resolve(base.as_deref(), p) {
             Some(r) if in_roots(&r) => Ok(r),
+            None if base.is_none() && why.is_some() => {
+                Err(format!("git {flag} {p} is relative to a folder maiTerm can't place: {}.", why.as_deref().unwrap_or_default()))
+            }
             _ => Err(format!("git {flag} {p} points outside this agent's folders, so it is blocked.")),
         }
     };
     // Git runs in the agent's own folders, never wherever a `cd` left it.
-    let repo_check = |b: Option<&Path>| -> Result<(), String> {
-        match b.and_then(|b| root_of(b)) {
-            Some(_) => Ok(()),
-            None => Err("git runs here only in your own worktrees and folders: name one with git -C <folder>.".to_string()),
+    let repo_check = |b: Option<&Path>, why: &Option<String>| -> Result<(), String> {
+        match (b.map(|b| root_of(b).is_some()), why) {
+            (Some(true), _) => Ok(()),
+            (Some(false), _) => Err("git runs here only in your own worktrees and folders: this folder isn't one of them. Name one with git -C <folder>.".to_string()),
+            (None, Some(w)) => Err(format!("git runs only in your own worktrees and folders, and {w} (cd '/full/path' or git -C '/full/path').")),
+            (None, None) => Err("git runs here only in your own worktrees and folders, and maiTerm can't tell which folder this one runs in: name one with git -C <folder>.".to_string()),
         }
     };
     // Not just `alias.*`: `core.fsmonitor`, `diff.external` and their kin run any command, so a
@@ -591,7 +798,8 @@ fn check_git(args: &[String], cwd: Option<&Path>, scope: &GateScope) -> Result<(
         match a {
             "-C" => {
                 let p = args.get(j + 1).ok_or("git -C with no folder")?;
-                base = Some(check_path(&base, p, "-C")?);
+                base = Some(check_path(&base, &why, p, "-C")?);
+                why = None;
                 j += 2;
             }
             "-c" | "--config-env" => return Err(config_refusal()),
@@ -599,13 +807,13 @@ fn check_git(args: &[String], cwd: Option<&Path>, scope: &GateScope) -> Result<(
             _ if a.starts_with("--exec-path=") => return Err("git --exec-path=… is refused in a Hive: it picks the programs git runs.".to_string()),
             "--git-dir" | "--work-tree" => {
                 let p = args.get(j + 1).ok_or("a git option with no folder")?;
-                check_path(&base, p, a)?;
+                check_path(&base, &why, p, a)?;
                 j += 2;
             }
             "--namespace" | "--super-prefix" => j += 2,
             _ if a.starts_with("--git-dir=") || a.starts_with("--work-tree=") => {
                 let (flag, p) = a.split_once('=').unwrap_or((a, ""));
-                check_path(&base, p, flag)?;
+                check_path(&base, &why, p, flag)?;
                 j += 1;
             }
             _ if a.starts_with('-') => j += 1,
@@ -615,7 +823,7 @@ fn check_git(args: &[String], cwd: Option<&Path>, scope: &GateScope) -> Result<(
                 return Err(format!("maiTerm can't tell which git command `{a}` is, so it is blocked."));
             }
             _ => {
-                repo_check(base.as_deref())?;
+                repo_check(base.as_deref(), &why)?;
                 let refused = args[j + 1..].iter().find(|o| is_refused_long_opt(o) || (a == "grep" && is_grep_pager_flag(o)));
                 return match refused {
                     Some(o) => Err(format!("git {a} {o} is refused in a Hive: it runs a configured command, writes a file or reads one from anywhere.")),
@@ -1043,6 +1251,82 @@ mod tests {
         ] {
             assert!(matches!(bash(&refused), GateDecision::Deny(_)), "should refuse: {refused}");
         }
+        let _ = fs::remove_dir_all(&f.base);
+    }
+
+    /// A live worker's trips (2026-10-31): a `cd` into its own worktree, then git with no `-C`
+    /// or with `-C .`, was refused, since any `cd` dropped the cwd. A literal `cd` that surely
+    /// ran now places what follows; what the gate can't place stays refused, with what to do.
+    #[cfg(unix)]
+    #[test]
+    fn git_after_a_literal_cd_into_its_own_folders_runs_there() {
+        let f = fx();
+        let wt = f.wt.display().to_string();
+        let out = f.base.join("outside").display().to_string();
+        let human = f.base.join("repo/web").display().to_string();
+        // From the outside folder, as if an earlier call had cd'd there.
+        let from_out = |cmd: &str| gate_decision("Bash", &json!({ "command": cmd }), Some(Path::new(&out)), &f.worker);
+        for cmd in [
+            format!("cd \"{wt}\" && rm -f .gitignore && git status --short; S=x; npx sv create \"$S\" 2>&1 | tail -15; ls -la \"$S\""),
+            format!("cd \"{wt}\" && ls; git -C . status --short | head; npx x </dev/null 2>&1 | grep -v at | tail -12"),
+            format!("cd '{wt}'; git add -A && git commit -m x"),
+            format!("cd '{wt}' || exit 1; git status"),
+            format!("cd '{wt}' && git log | head -3"),
+            format!("cd '{wt}/../web' && git status"),
+            format!("cd -P -- '{wt}' && git status"),
+            format!("cd '{out}' && cd '{wt}' && git status"),
+            format!("cd '{wt}' && cd ./ && git -C ./ diff"),
+        ] {
+            assert_eq!(from_out(&cmd), GateDecision::Allow, "should allow: {cmd}");
+        }
+        // The cwd itself places a relative -C.
+        assert_eq!(wbash(&f, "git -C . status"), GateDecision::Allow);
+        assert_eq!(wbash(&f, "ls && git -C ./ log"), GateDecision::Allow);
+        for cmd in [
+            format!("cd '{human}' && git status"),
+            format!("cd '{wt}' && cd '{human}'; git status"),
+            format!("cd '{wt}' && cd .. && git status"),
+            format!("cd '{wt}/missing' ; git status"),
+            format!("true && cd '{wt}'; git status"),
+            format!("false || cd '{wt}' && git status"),
+            format!("cd '{wt}' && false || git status"),
+            format!("cd '{wt}' | true; git status"),
+            format!("cd '{wt}' & git status"),
+            format!("(cd '{wt}'); git status"),
+            format!("(cd '{wt}' && true) && git status"),
+            format!("if true; then cd '{wt}'; fi; git status"),
+            format!("for d in a; do git status; cd '{wt}'; done"),
+            format!("f() {{ git status; }}; cd '{wt}'; f"),
+            format!("{{ cd '{wt}'; }} | cat; git status"),
+            format!("! cd '{wt}' && git status"),
+            format!("cd '{wt}' && popd && git status"),
+            format!("cd '{wt}' && cd - && git status"),
+            format!("cd '{wt}' && cd '{wt}' '{human}' && git status"),
+            format!("cd '{wt}' && env -C '{human}' git status"),
+            format!("cd '{wt}' && echo $(cd '{human}' && git status)"),
+            format!("cd '{wt}' && echo \"$(git status)\""),
+            format!("git -C \"$(echo '{human}')\" status"),
+            "cd web && git status".into(),
+            "git status".into(),
+            "git -C . status".into(),
+        ] {
+            assert!(matches!(from_out(&cmd), GateDecision::Deny(_)), "should refuse: {cmd}");
+        }
+        // A command substitution was an empty word, which resolved to the cwd: never again.
+        assert!(matches!(wbash(&f, &format!("git -C \"$(echo '{human}')\" log")), GateDecision::Deny(_)));
+        assert!(matches!(wbash(&f, "git -C \"`echo /etc`\" log"), GateDecision::Deny(_)));
+        // What the gate can't expand, it says, and says what to do.
+        let says = |cmd: String, tok: &str| match from_out(&cmd) {
+            GateDecision::Deny(r) => assert!(r.contains(&format!("the gate can't expand {tok}: write the folder's path out")), "{cmd}: {r}"),
+            GateDecision::Allow => panic!("should refuse: {cmd}"),
+        };
+        says(format!("W='{wt}'; cd \"$W\" && git -C \"$W\" add x"), "$W");
+        says(format!("W='{wt}'; git -C \"$W\" status"), "$W");
+        says(format!("W='{wt}'; cd \"${{W}}\" && git status"), "${W}");
+        says(format!("W='{wt}'; cd \"$W\" && git -C . status"), "$W");
+        says("git -C \"$(pwd)\" status".into(), "$(…)");
+        let GateDecision::Deny(r) = from_out("cd web && git status") else { panic!() };
+        assert!(r.contains("./web"), "a bare cd name says how to write it: {r}");
         let _ = fs::remove_dir_all(&f.base);
     }
 

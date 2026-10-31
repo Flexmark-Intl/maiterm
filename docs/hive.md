@@ -843,9 +843,9 @@ Claude has one working directory plus `--add-dir` for the rest. So:
   through the gallery tools (§10.3).
 - The brief names every folder with its role: "web (git, your worktree, lands to main)",
   "brand (plain, read-only)", "scratch (yours: put renders here, then add them to the gallery)".
-  For a secondary repo it says to commit with `git -C <worktree> …`: `cd <worktree> && git …` is
-  refused by Claude's own check on changing directory before a version-control command (spike 6,
-  §13.1).
+  For a secondary repo it says to commit with `git -C <worktree> …`, the path written out: `cd
+  <worktree> && git …` met Claude's own check on changing directory before a version-control
+  command (spike 6, §13.1). The gate places a literal `cd` itself (§6.8).
 
 ### 6.4 Worktrees
 
@@ -1217,6 +1217,19 @@ Hive tab it carries §7.3's push refusal), leaving the global hook alone:
 
 With `onFailure:"block"`, a closed port, a timeout and an HTTP 500 all blocked the call; without
 it, the call ran (spike 9). Every other hook a Hive tab needs is a command hook too (§11.1).
+
+**Where a worker's git runs** (`gate::places`, 2026-10-31). A live worker lost four calls to
+`cd <its worktree> && git status`, `git -C . status` and `git -C "$W" add`: any `cd` in the line
+dropped the hook's `cwd`. Now the gate follows the line. Before any `cd`, git runs in the
+event's `cwd`. A `cd` (or `pushd`) to a literal, existing folder moves what follows when it is its
+segment's own command, starts its chain (or continues one with `&&`) and isn't piped or
+backgrounded: for the rest of that `&&` chain, and past a `;` when it started its chain. A
+relative `-C` resolves against that place. What it can't place stays refused (fail closed):
+`popd`, `cd -`, a `cd` after `&&`/`||` once the chain is uncertain, any subshell paren, branch,
+loop, function or brace group in a line with a `cd`, a bare `cd name` (CDPATH could send it
+elsewhere), `env -C`. A `$VAR` or `$(…)` in `-C` or `cd` is refused with "the gate can't expand
+$W: write the folder's path out". A command substitution now leaves a marker in its word: it was
+an empty word, so `git -C "$(echo /etc)"` resolved to the cwd.
 
 **Land checks can be batched** (a merge queue, like GitHub's or bors). Land checks are the
 heaviest runs, and they're one at a time per repo. A batch is made only of workers **already
