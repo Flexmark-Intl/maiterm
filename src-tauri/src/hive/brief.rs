@@ -529,8 +529,9 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
          \u{2026}\u{201d}), not to your human. Allow it with hiveChangeSettings {add_hosts, reason} only when the worker\u{2019}s task \
          needs it: a package registry, docs, an API the work talks to. Refuse anything unrelated to its task or that could \
          carry the project\u{2019}s code or data somewhere it shouldn\u{2019}t go (a paste site, a file host, an unknown \
-         endpoint), and answer the blocker with what the worker does instead. Your grant applies at once, answers the \
-         blocker, is logged for your human, and reaches the worker when you relaunch it (hiveRestartWorker resumes its \
+         endpoint), and answer the blocker with what the worker does instead. Never answer it with \u{201c}Allow\u{201d} or \
+         tell the worker a host works: only maiTerm does, once your grant has applied; if the call fails, the host \
+         isn\u{2019}t allowed. Your grant applies at once, answers the blocker, is logged for your human, and reaches the worker when you relaunch it (hiveRestartWorker resumes its \
          session). A repo remote\u{2019}s host, localhost and private addresses can\u{2019}t be granted by anyone; a worker \
          runs and looks at the app through hiveRun with serve: true, hiveScreenshot and hiveFetch. Raise your own blocker \
          to your human only for a host you can\u{2019}t judge.\n",
@@ -849,6 +850,7 @@ mod tests {
         let q = brief_md(&h, &p, &PrecedentCounts::default());
         assert!(q.contains("never tell a worker to load a skill"), "{q}");
         assert!(q.contains("hiveChangeSettings {add_hosts, reason} only when the worker\u{2019}s task needs it"), "{q}");
+        assert!(q.contains("only maiTerm does, once your grant has applied"), "{q}");
         assert!(q.contains("A worker\u{2019}s **action** blocker") && !q.contains("only your human can do it"), "{q}");
     }
 
