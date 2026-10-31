@@ -706,7 +706,7 @@ pub fn generator_hosts(detected: &[DetectedTool], chosen: &[String], remote_host
     let mut push = |h: &str| {
         let bare = h.rsplit_once(':').filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit())).map_or(h, |(host, _)| host);
         if let Ok(n) = super::gallery::budget::normalize_host(bare) {
-            let remote = remote_hosts.iter().any(|r| super::gallery::budget::host_covers(&n, &r.to_ascii_lowercase()));
+            let remote = super::gallery::budget::reaches_remote(&n, remote_hosts).is_some();
             if !remote && !out.contains(&n) {
                 out.push(n);
             }
@@ -1861,9 +1861,10 @@ mod tests {
 
         let hosts = generator_hosts(&detected, &chosen(&["mcp:fal", "mcp:local", "cli:ffmpeg"]), &[]);
         assert_eq!(hosts, vec!["mcp.fal.ai", "fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
-        // A remote host is never a generator host, however it was found.
+        // A remote host is never a generator host, however it was found, nor any name of its
+        // registrable domain (`budget::reaches_remote`, the final review).
         let hosts = generator_hosts(&detected, &chosen(&["mcp:fal"]), &["queue.fal.run".to_string()]);
-        assert!(!hosts.contains(&"queue.fal.run".to_string()) && hosts.contains(&"fal.run".to_string()), "{hosts:?}");
+        assert_eq!(hosts, vec!["mcp.fal.ai", "fal.media", "v3.fal.media"]);
         // By url suffix, by name word, the skill's table entry; a loopback proxy adds nothing.
         let hosts = generator_hosts(&detected, &chosen(&["mcp:higgs", "mcp:kling-video", "skill:generate", "mcp:proxied"]), &[]);
         assert_eq!(hosts, vec!["mcp.higgsfield.ai", "platform.higgsfield.ai", "api.klingai.com", "api.kie.ai"]);

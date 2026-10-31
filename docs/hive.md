@@ -1126,8 +1126,11 @@ once whatever the Settings checkpoint, only when the worker's task needs it (a r
 API the work talks to), and refuses anything unrelated or exfiltration-shaped with new
 instructions. Rust holds the hard limits whoever asks: never a repo remote's host (nor a name
 under it, a wildcard over it, or its registrable domain: `ssh.github.com:443` is GitHub's push
-endpoint; an ssh alias remote is resolved with `ssh -G`, and one that won't resolve makes every
-forge ungrantable), localhost, loopback names, LAN or private addresses, a port (maiTerm's
+endpoint; remote urls are read as git uses them, `insteadOf` applied; an ssh alias remote is
+resolved with `ssh -G` under a 3 s timeout, and a remote maiTerm can't name exactly, an IP, an
+alias `ssh -G` failed on or a `github.com-work`, makes every forge and its forge-like prefix
+ungrantable, and a name answering a remote IP too; `budget::reaches_remote` is the one rule for
+every place a host is allowed), localhost, loopback names, LAN or private addresses, a port (maiTerm's
 included), or past `MAX_WORKER_HOSTS`, and a reason is required. Her grant also needs a name that
 resolves now; the human's own may add one that doesn't yet. The grant is written to the settings log and the
 decision log (category `hosts`, by the queen), the human gets a notice saying it can be undone in

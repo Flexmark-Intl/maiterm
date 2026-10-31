@@ -446,7 +446,15 @@ pub fn hive_remote_hosts(hive: &Hive) -> Vec<String> {
             // An ssh remote may name an alias from ~/.ssh/config (`gh:owner/repo`): the host it
             // really reaches is what a grant must not cover (the review, 2026-10-31).
             let ssh = !url.contains("://") || url.to_ascii_lowercase().starts_with("ssh://") || url.to_ascii_lowercase().starts_with("git+ssh://");
-            let real = if ssh { ssh_hostname(&host) } else { None };
+            // ssh couldn't say (a failure, a timeout): marked so every forge stays ungrantable.
+            let real = if ssh {
+                match ssh_hostname(&host, SSH_G_TIMEOUT) {
+                    Ok(r) => r,
+                    Err(()) => Some(format!("{}{host}", super::gallery::budget::UNRESOLVED_ALIAS)),
+                }
+            } else {
+                None
+            };
             for h in std::iter::once(host).chain(real) {
                 if !out.contains(&h) {
                     out.push(h);
@@ -457,29 +465,80 @@ pub fn hive_remote_hosts(hive: &Hive) -> Vec<String> {
     out
 }
 
-/// What ssh resolves `alias` to (`ssh -G`, which reads the config and connects nowhere), when it
-/// differs. None when ssh isn't there or says nothing new.
-fn ssh_hostname(alias: &str) -> Option<String> {
-    if alias.starts_with('-') {
-        return None;
-    }
-    let out = std::process::Command::new("ssh").args(["-G", "--", alias]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let name = text.lines().find_map(|l| l.strip_prefix("hostname ")).map(|h| h.trim().to_ascii_lowercase())?;
-    (!name.is_empty() && name != alias).then_some(name)
+/// A `Match exec` in ~/.ssh/config can make `ssh -G` hang: host writes and worker launches wait on it.
+const SSH_G_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// What ssh resolves `alias` to (`ssh -G`, which reads the config and connects nowhere): Some when
+/// it differs, None when it's the same name. Err when ssh failed or ran out of time, which the
+/// caller reads as "could be anywhere" (the final review).
+fn ssh_hostname(alias: &str, timeout: std::time::Duration) -> Result<Option<String>, ()> {
+    ssh_hostname_with("ssh", alias, timeout)
 }
 
-/// Every fetch and push url of a repo's remotes. None at all is git's exit 1.
-fn remote_urls(repo: &Path) -> Vec<String> {
-    let mut cmd = super::git::git_in(repo);
-    cmd.args(["config", "--get-regexp", r"^remote\..*\.(push)?url$"]);
-    match super::git::run(&mut cmd, super::git::QUERY_TIMEOUT) {
-        Ok(out) => out.lines().filter_map(|l| l.split_once(' ').map(|(_, v)| v.trim().to_string())).collect(),
-        Err(_) => Vec::new(),
+fn ssh_hostname_with(program: &str, alias: &str, timeout: std::time::Duration) -> Result<Option<String>, ()> {
+    use std::io::Read;
+    if alias.starts_with('-') {
+        return Err(());
     }
+    let mut child = std::process::Command::new(program)
+        .args(["-G", "--", alias])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| ())?;
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if start.elapsed() < timeout => std::thread::sleep(std::time::Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(());
+            }
+        }
+    };
+    if !status.success() {
+        return Err(());
+    }
+    let mut text = String::new();
+    child.stdout.take().ok_or(())?.read_to_string(&mut text).map_err(|_| ())?;
+    let name = text.lines().find_map(|l| l.strip_prefix("hostname ")).map(|h| h.trim().to_ascii_lowercase()).ok_or(())?;
+    if name.is_empty() {
+        return Err(());
+    }
+    Ok((name != alias).then_some(name))
+}
+
+/// Every fetch and push url of a repo's remotes: the raw config, and each remote's effective urls
+/// (`git remote get-url --all [--push]`, which applies `insteadOf`/`pushInsteadOf` rewrites the
+/// raw value doesn't show, the final review). None at all is git's exit 1.
+fn remote_urls(repo: &Path) -> Vec<String> {
+    let run = |args: &[&str]| -> Vec<String> {
+        let mut cmd = super::git::git_in(repo);
+        cmd.args(args);
+        match super::git::run(&mut cmd, super::git::QUERY_TIMEOUT) {
+            Ok(out) => out.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect(),
+            Err(_) => Vec::new(),
+        }
+    };
+    let mut out: Vec<String> = run(&["config", "--get-regexp", r"^remote\..*\.(push)?url$"]).iter().filter_map(|l| l.split_once(' ').map(|(_, v)| v.trim().to_string())).collect();
+    for name in run(&["remote"]) {
+        for push in [false, true] {
+            let mut args = vec!["remote", "get-url", "--all"];
+            if push {
+                args.push("--push");
+            }
+            args.push(name.as_str());
+            for u in run(&args) {
+                if !out.contains(&u) {
+                    out.push(u);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The host a git remote url names, lowercased; None for a local path or `file://`.
@@ -901,6 +960,48 @@ mod tests {
         assert!(h.get("StopFailure").is_none());
         assert!(h.get("Stop").is_some());
         assert!(hive_hooks(Path::new("/s"), &[], GATE_MATCHER).get("PreModelSwitch").is_none());
+    }
+
+    /// The final review: `ssh -G` failing or hanging (a `Match exec`) fails closed and never stalls
+    /// longer than its timeout.
+    #[cfg(unix)]
+    #[test]
+    fn ssh_g_fails_closed_and_times_out() {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(ssh_hostname_with("/nonexistent/ssh", "github.com-work", SSH_G_TIMEOUT), Err(()));
+        let dir = std::env::temp_dir().join(format!("hive-sshg-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&dir).unwrap();
+        let fake = |name: &str, body: &str| {
+            let p = dir.join(name);
+            fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+            p.to_string_lossy().to_string()
+        };
+        let hangs = fake("hangs", "sleep 30");
+        let t = std::time::Instant::now();
+        assert_eq!(ssh_hostname_with(&hangs, "corp", std::time::Duration::from_millis(300)), Err(()));
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "killed at its timeout");
+        assert_eq!(ssh_hostname_with(&fake("fails", "exit 255"), "corp", SSH_G_TIMEOUT), Err(()));
+        assert_eq!(ssh_hostname_with(&fake("ok", "echo user x; echo hostname github.com"), "github.com-work", SSH_G_TIMEOUT), Ok(Some("github.com".into())));
+        assert_eq!(ssh_hostname_with(&fake("same", "echo hostname corp"), "corp", SSH_G_TIMEOUT), Ok(None));
+        assert_eq!(ssh_hostname_with(&fake("ok2", "echo hostname x.org"), "-oProxyCommand=x", SSH_G_TIMEOUT), Err(()), "never an option");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The final review: a remote's `insteadOf` rewrite is what git really reaches, and only the
+    /// effective url shows it.
+    #[test]
+    fn remote_urls_apply_insteadof() {
+        let dir = std::env::temp_dir().join(format!("hive-insteadof-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&dir).args(args).env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap().status.success(), "{args:?}");
+        git(&["init", "-q"]);
+        git(&["remote", "add", "origin", "work:owner/repo"]);
+        git(&["config", "url.https://github.com/.insteadOf", "work:"]);
+        let urls = remote_urls(&dir);
+        assert!(urls.iter().any(|u| u == "https://github.com/owner/repo"), "{urls:?}");
+        assert!(urls.iter().filter_map(|u| url_host(u)).any(|h| h == "github.com"), "{urls:?}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The human's decision (2026-10-26): the coordinator is a normal agent tab. Nothing in its

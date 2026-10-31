@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use super::checkpoints::{self, SETTINGS};
 use super::deliver::one_line;
 use super::fuses::STATUS_PAUSED;
-use super::gallery::budget::{host_covers, normalize_host};
+use super::gallery::budget::{normalize_host, reaches_remote};
 use super::record::{Hive, HiveModel, STATUS_ACTIVE};
 use super::rpc::{HiveRequest, HiveWindow};
 use super::tools::{Caller, Ctx};
@@ -229,42 +229,6 @@ pub fn check(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[String]) -
     Ok(Checked { change: out, lines })
 }
 
-/// Two-part public suffixes a registrable domain sits under (`example.co.uk`): enough to keep a
-/// forge's sibling names together without a suffix list.
-const TWO_PART_SUFFIXES: &[&str] = &["co.uk", "org.uk", "ac.uk", "com.au", "net.au", "co.jp", "co.nz", "com.br", "co.in", "co.za", "com.cn", "com.mx"];
-
-/// Forges whose push endpoints a remote behind an unresolved ssh alias could be.
-const FORGES: &[&str] = &["github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "sr.ht", "dev.azure.com", "visualstudio.com", "gitea.com"];
-
-/// `example.com` for `ssh.example.com`; the name itself when it has no more labels.
-fn registrable(host: &str) -> String {
-    let labels: Vec<&str> = host.trim_start_matches("*.").split('.').collect();
-    let n = labels.len();
-    let keep = if n >= 3 && TWO_PART_SUFFIXES.contains(&labels[n - 2..].join(".").as_str()) { 3 } else { 2 };
-    labels[n.saturating_sub(keep)..].join(".")
-}
-
-/// The repo remote host `h` (an entry, maybe `*.`) could reach, if any (the review, 2026-10-31):
-/// the remote itself, a name under it, a wildcard over it, or any name of its registrable domain
-/// (`ssh.github.com:443` is GitHub's push endpoint too). A remote host with no dot is an ssh
-/// alias ssh didn't resolve: then no forge is grantable at all.
-fn reaches_remote(h: &str, remote_hosts: &[String]) -> Option<String> {
-    let entry_base = h.strip_prefix("*.").unwrap_or(h);
-    for r in remote_hosts.iter().map(|r| r.trim_end_matches('.').to_ascii_lowercase()) {
-        if !r.contains('.') {
-            if let Some(f) = FORGES.iter().find(|f| registrable(entry_base) == registrable(f)) {
-                return Some(format!("{r} (an ssh alias; it may be {f})"));
-            }
-            continue;
-        }
-        let covers = host_covers(h, &r) || entry_base == r || entry_base.ends_with(&format!(".{r}")) || r.ends_with(&format!(".{entry_base}"));
-        if covers || registrable(entry_base) == registrable(&r) {
-            return Some(r);
-        }
-    }
-    None
-}
-
 /// A folder command as named: trimmed, `""` for none, one line no longer than the limit.
 fn folder_command(v: &Option<String>, what: &str, folder: &str) -> Result<Option<String>, String> {
     let Some(s) = v.as_deref().map(str::trim) else { return Ok(None) };
@@ -407,7 +371,7 @@ pub(crate) static TEST_PUBLIC: std::sync::Mutex<Vec<String>> = std::sync::Mutex:
 /// by a name under it. For the human, a name that doesn't resolve passes: its owner could point it
 /// home later, and the human chose it. The queen grants alone (2026-10-31), so for her
 /// (`must_resolve`) a name that doesn't resolve now is refused (the review).
-pub(crate) async fn refuse_private_hosts(hosts: &[String], must_resolve: bool) -> Result<(), String> {
+pub(crate) async fn refuse_private_hosts(hosts: &[String], must_resolve: bool, remote_ips: &[std::net::IpAddr]) -> Result<(), String> {
     for h in hosts {
         let Ok(h) = normalize_host(h) else { continue };
         let name = match h.strip_prefix("*.") {
@@ -427,11 +391,19 @@ pub(crate) async fn refuse_private_hosts(hosts: &[String], must_resolve: bool) -
             }
             continue;
         }
-        if let Some(ip) = addrs.into_iter().find(is_private_ip) {
+        if let Some(ip) = addrs.iter().find(|ip| is_private_ip(ip)) {
             return Err(format!("{h} answers {ip}, this computer or its network: a worker\u{2019}s localhost and LAN stay closed."));
+        }
+        if let Some(ip) = addrs.iter().find(|ip| remote_ips.contains(ip)) {
+            return Err(format!("{h} answers {ip}, a git remote of this Hive: no worker may reach it."));
         }
     }
     Ok(())
+}
+
+/// The remotes given as IP addresses: a name that answers one reaches the remote (the final review).
+fn ip_remotes(remote_hosts: &[String]) -> Vec<std::net::IpAddr> {
+    remote_hosts.iter().filter_map(|r| r.trim_start_matches(super::gallery::budget::UNRESOLVED_ALIAS).parse().ok()).collect()
 }
 
 /// `refuse_private_hosts` for one host, from a blocking caller (a worker's launch): whether it
@@ -599,7 +571,7 @@ pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
             return Err("Change hosts in a call of their own: they apply at once, and the rest follows the Settings checkpoint.".to_string());
         }
         // She grants alone: a name must resolve now, and nowhere home.
-        refuse_private_hosts(&change.add_hosts, true).await?;
+        refuse_private_hosts(&change.add_hosts, true, &ip_remotes(&super::settings::hive_remote_hosts(&hive))).await?;
         return coordinator_hosts(ctx, caller, &change, reason).await;
     }
     // The human's limits apply on approval, but a card that can't apply now isn't filed.
@@ -645,7 +617,7 @@ pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
 
 /// Hive settings: the human's own change. The coordinator is told.
 pub(crate) async fn set_by_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, change: &SettingsChange) -> Result<Hive, String> {
-    refuse_private_hosts(&change.add_hosts, false).await?;
+    refuse_private_hosts(&change.add_hosts, false, &ip_remotes(&super::settings::hive_remote_hosts(&caller.hive))).await?;
     let (hive, lines) = write(ctx, caller, change, By::Human)?;
     log_line(caller,"human", &lines, None);
     let running = relaunch_note(caller, change).await.map(|s| format!("\n{s}")).unwrap_or_default();
@@ -660,7 +632,7 @@ pub(crate) async fn approved_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     let change: Result<SettingsChange, String> =
         args.get("change").cloned().ok_or_else(|| "it had no change".to_string()).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()));
     let res = match change {
-        Ok(c) => match refuse_private_hosts(&c.add_hosts, false).await {
+        Ok(c) => match refuse_private_hosts(&c.add_hosts, false, &ip_remotes(&super::settings::hive_remote_hosts(&caller.hive))).await {
             Ok(()) => write(ctx, caller, &c, By::Approved).map(|(h, lines)| (h, lines, c)),
             Err(e) => Err(e),
         },
@@ -938,6 +910,22 @@ mod tests {
             assert!(check(&hive(), &add(h), By::Coordinator, &alias).is_err(), "{h}");
         }
         assert!(check(&hive(), &add("registry.npmjs.org"), By::Coordinator, &alias).is_ok());
+        // The final review: a remote maiTerm can't name exactly leaves no forge grantable.
+        for (remote, h) in [
+            ("140.82.112.3", "github.com"),
+            ("github.com-work", "github.com"),
+            ("github.com-work", "ssh.github.com"),
+            ("corp", "git.corp.example.com"),
+            ("?gitserver.example.org", "gitlab.com"),
+        ] {
+            assert!(check(&hive(), &add(h), By::Coordinator, &[remote.to_string()]).is_err(), "{h} with remote {remote}");
+        }
+        for (remote, h) in [("github.com-work", "registry.npmjs.org"), ("corp", "api.example.org"), ("140.82.112.3", "pypi.org")] {
+            assert!(check(&hive(), &add(h), By::Coordinator, &[remote.to_string()]).is_ok(), "{h} with remote {remote}");
+        }
+        // One rule wherever hosts are allowed: the gallery's generator hosts too.
+        assert!(super::super::gallery::budget::check_hosts(&["ssh.github.com".into()], &["github.com".into()]).is_err());
+        assert!(super::super::gallery::budget::check_hosts(&["github.com".into()], &["140.82.112.3".into()]).is_err());
     }
 
     /// The queen grants alone, so a name that doesn't resolve now is refused for her; the human's
@@ -945,8 +933,15 @@ mod tests {
     #[tokio::test]
     async fn the_queens_grant_needs_a_name_that_resolves() {
         let name = "nothing-here.maiterm-review.invalid".to_string();
-        assert!(refuse_private_hosts(&[name.clone()], true).await.unwrap_err().contains("doesn\u{2019}t resolve yet"));
-        assert!(refuse_private_hosts(&[name], false).await.is_ok());
+        assert!(refuse_private_hosts(&[name.clone()], true, &[]).await.unwrap_err().contains("doesn\u{2019}t resolve yet"));
+        assert!(refuse_private_hosts(&[name], false, &[]).await.is_ok());
+        // A name that answers a remote given as an IP reaches that remote.
+        let public = "answers-the-remote.maiterm-review.invalid".to_string();
+        TEST_PUBLIC.lock().unwrap().push(public.clone());
+        let remote_ip = ip_remotes(&["8.8.8.8".to_string(), "github.com".to_string()]);
+        assert_eq!(remote_ip, vec![std::net::IpAddr::from([8, 8, 8, 8])]);
+        assert!(refuse_private_hosts(&[public.clone()], true, &remote_ip).await.unwrap_err().contains("git remote"));
+        assert!(refuse_private_hosts(&[public], true, &[]).await.is_ok());
     }
 
     /// The review of the remote-host fix (2026-10-31): forms it closes.

@@ -294,13 +294,79 @@ pub fn host_covers(entry: &str, host: &str) -> bool {
     }
 }
 
+/// Two-part public suffixes a registrable domain sits under (`example.co.uk`): enough to keep a
+/// forge's sibling names together without a suffix list.
+const TWO_PART_SUFFIXES: &[&str] = &["co.uk", "org.uk", "ac.uk", "com.au", "net.au", "co.jp", "co.nz", "com.br", "co.in", "co.za", "com.cn", "com.mx"];
+
+/// Forges a remote maiTerm can't name exactly could be (an IP, an unresolved ssh alias).
+pub const FORGES: &[&str] = &["github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "sr.ht", "dev.azure.com", "visualstudio.com", "gitea.com"];
+
+/// How `settings::hive_remote_hosts` marks an ssh alias it couldn't resolve (`ssh -G` failed or
+/// timed out). No host matches it; `reaches_remote` reads it as "could be anywhere".
+pub const UNRESOLVED_ALIAS: &str = "?";
+
+/// `example.com` for `ssh.example.com`; the name itself when it has no more labels.
+pub fn registrable(host: &str) -> String {
+    let labels: Vec<&str> = host.trim_start_matches("*.").split('.').collect();
+    let n = labels.len();
+    let keep = if n >= 3 && TWO_PART_SUFFIXES.contains(&labels[n - 2..].join(".").as_str()) { 3 } else { 2 };
+    labels[n.saturating_sub(keep)..].join(".")
+}
+
+/// Whether a remote host is something other than a real host name maiTerm resolved: an IP, an
+/// unresolved alias, a name with no dot or with a top-level label no domain has (`github.com-work`).
+fn alias_like(r: &str) -> bool {
+    r.starts_with(UNRESOLVED_ALIAS)
+        || r.parse::<std::net::IpAddr>().is_ok()
+        || !r.contains('.')
+        || r.rsplit('.').next().is_some_and(|tld| !tld.bytes().all(|b| b.is_ascii_lowercase()))
+}
+
+/// The repo remote host an allowlist entry `h` (maybe `*.`) could reach, if any (the reviews of
+/// 2026-10-31): the remote itself, a name under it, a wildcard over it, or any name of its
+/// registrable domain (`ssh.github.com:443` is GitHub's push endpoint too). A remote maiTerm can't
+/// name exactly (an IP, an alias ssh didn't resolve, `github.com-work`) makes every forge
+/// ungrantable, and any name of a forge-like prefix of it or holding it as a label. One rule for
+/// every place a host is allowed.
+pub fn reaches_remote(h: &str, remote_hosts: &[String]) -> Option<String> {
+    let entry = h.strip_prefix("*.").unwrap_or(h);
+    let reg = registrable(entry);
+    for r in remote_hosts.iter().map(|r| r.trim_end_matches('.').to_ascii_lowercase()) {
+        if alias_like(&r) {
+            let name = r.trim_start_matches(UNRESOLVED_ALIAS);
+            if let Some(f) = FORGES.iter().find(|f| reg == registrable(f)) {
+                return Some(format!("{name} (it may be {f})"));
+            }
+            // `github.com-work` → `github.com`; `corp` → `git.corp.example.com`.
+            let prefixes = name.split('-').scan(String::new(), |acc, part| {
+                if !acc.is_empty() {
+                    acc.push('-');
+                }
+                acc.push_str(part);
+                Some(acc.clone())
+            });
+            let forge_like = prefixes.filter(|p| p.contains('.') && p.rsplit('.').next().is_some_and(|t| t.bytes().all(|b| b.is_ascii_lowercase()))).any(|p| registrable(&p) == reg);
+            let as_label = !name.contains('.') && name.split('-').filter(|l| l.len() > 1).any(|l| entry.split('.').any(|e| e == l));
+            if forge_like || as_label {
+                return Some(name.to_string());
+            }
+            continue;
+        }
+        let covers = host_covers(h, &r) || entry == r || entry.ends_with(&format!(".{r}")) || r.ends_with(&format!(".{entry}"));
+        if covers || reg == registrable(&r) {
+            return Some(r);
+        }
+    }
+    None
+}
+
 /// The human's hosts, normalized, deduplicated and capped. A repo's remote host stays denied: a
 /// host allowlist can't tell a fetch from a push (§7.3).
 pub fn check_hosts(raw: &[String], remote_hosts: &[String]) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
     for r in raw {
         let h = normalize_host(r)?;
-        if let Some(remote) = remote_hosts.iter().find(|rh| host_covers(&h, &rh.to_ascii_lowercase())) {
+        if let Some(remote) = reaches_remote(&h, remote_hosts) {
             return Err(format!("{h} reaches {remote}, a git remote of this Hive: no agent may reach a remote, so maiTerm keeps it denied."));
         }
         if !out.contains(&h) {
