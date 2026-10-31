@@ -2,19 +2,7 @@
  *  Shift-click; what the bulk star and status keys do; Iterate's words; the compare view's sync
  *  of its players and its audio A/B; and how an asset dragged onto a composer finds its chat. */
 
-import type { GalleryRecipe, GalleryTagChange } from '$lib/tauri/types';
-
-/** What the gallery's surfaces (grid, detail, compare) ask its view to do with assets. The menus
- *  and panels (a collection to add to, a worker to send to, Export…'s folder) open from `anchor`. */
-export interface CurateActions {
-  tag(ids: string[], change: GalleryTagChange): void;
-  pickCollection(ids: string[], anchor: HTMLElement): void;
-  iterate(id: string): void;
-  pickWorker(ids: string[], anchor: HTMLElement): void;
-  exportAssets(ids: string[]): void;
-  trash(ids: string[]): void;
-  restore(ids: string[]): void;
-}
+import type { GalleryRecipe } from '$lib/tauri/types';
 
 // ── Selection ──
 
@@ -46,6 +34,11 @@ export function selectWith(order: readonly string[], selection: readonly string[
   return [...kept, ...span];
 }
 
+/** Shift+arrow: the selection grows onto `id`, which becomes the cursor. */
+export function extendTo(selection: readonly string[], id: string): string[] {
+  return [...selection.filter((s) => s !== id), id];
+}
+
 /** F on the selection: all starred unstars them, otherwise stars them all. */
 export function nextStar(rows: readonly { starred: boolean }[]): boolean {
   return !(rows.length > 0 && rows.every((r) => r.starred));
@@ -54,6 +47,97 @@ export function nextStar(rows: readonly { starred: boolean }[]): boolean {
 /** 1/2/3 on the selection: every one already that status clears it, otherwise sets it. */
 export function nextStatus(rows: readonly { status: string }[], status: string): string {
   return rows.length > 0 && rows.every((r) => r.status === status) ? '' : status;
+}
+
+// ── The selection's menu: right-click, the context-menu key, More… ──
+
+export type SelectionAction =
+  | 'open'
+  | 'compare'
+  | 'star'
+  | 'picked'
+  | 'final'
+  | 'rejected'
+  | 'clearStatus'
+  | 'iterate'
+  | 'send'
+  | 'collect'
+  | 'tag'
+  | 'untag'
+  | 'export'
+  | 'reveal'
+  | 'copyPath'
+  | 'trash'
+  | 'restore';
+
+export interface SelectionEntry {
+  action?: SelectionAction;
+  label: string;
+  shortcut?: string;
+  disabled?: boolean;
+  separator?: boolean;
+  /** Opens a list the view fills: the running workers, the collections, the tags to remove. */
+  submenu?: 'workers' | 'collections' | 'untag';
+}
+
+export interface MenuRow {
+  starred: boolean;
+  status: string;
+  tags: string[];
+  deleted_at?: string | null;
+}
+
+/** Every action on the selection, in the menu's order. One asset gets the single-asset actions
+ *  (Open, Iterate); several get Compare (two to four) and the bulk ones. What
+ *  can't apply to an asset in the trash is disabled, never hidden, so the menu keeps its shape. */
+export function selectionMenu(rows: readonly MenuRow[], revealLabel: string): SelectionEntry[] {
+  const n = rows.length;
+  if (!n) return [];
+  const one = n === 1;
+  const anyTrashed = rows.some((r) => !!r.deleted_at);
+  const allTrashed = rows.every((r) => !!r.deleted_at);
+  const sep: SelectionEntry = { label: '', separator: true };
+  const out: SelectionEntry[] = [];
+  if (one) out.push({ action: 'open', label: 'Open large', shortcut: 'Space', disabled: allTrashed });
+  else
+    out.push({
+      action: 'compare',
+      label: n <= COMPARE_MAX ? `Compare ${n} side by side` : `Compare (select ${COMPARE_MAX} or fewer)`,
+      shortcut: 'C',
+      disabled: n > COMPARE_MAX,
+    });
+  out.push(sep);
+  out.push({ action: 'star', label: nextStar(rows) ? 'Star' : 'Unstar', shortcut: 'F' });
+  for (const [s, set, unset, key] of [
+    ['picked', 'Pick', 'Unpick', '1'],
+    ['final', 'Mark final', 'Unmark final', '2'],
+    ['rejected', 'Reject', 'Unreject', '3'],
+  ] as const) {
+    out.push({ action: s, label: nextStatus(rows, s) ? set : unset, shortcut: key });
+  }
+  if (rows.some((r) => r.status)) out.push({ action: 'clearStatus', label: 'Clear status' });
+  out.push(sep);
+  if (one) out.push({ action: 'iterate', label: 'Iterate with the queen', disabled: anyTrashed });
+  out.push({ action: 'send', label: 'Send to worker', submenu: 'workers', disabled: anyTrashed });
+  out.push({ action: 'collect', label: 'Add to collection', submenu: 'collections' });
+  out.push({ action: 'tag', label: one ? 'Add a tag…' : `Tag ${n} assets…` });
+  if (rows.some((r) => r.tags.length)) out.push({ action: 'untag', label: 'Remove a tag', submenu: 'untag' });
+  out.push({ action: 'export', label: one ? 'Export…' : `Export ${n} assets…`, disabled: allTrashed });
+  out.push(sep);
+  // The reveal command takes one path: several reveal the first picked, and say so.
+  out.push({ action: 'reveal', label: one ? revealLabel : `${revealLabel} (the first)`, disabled: anyTrashed });
+  out.push({ action: 'copyPath', label: one ? 'Copy path' : `Copy ${n} paths`, disabled: anyTrashed });
+  out.push(sep);
+  if (allTrashed) out.push({ action: 'restore', label: one ? 'Restore' : `Restore ${n}` });
+  else out.push({ action: 'trash', label: one ? 'Move to trash' : `Move ${n} to trash` });
+  return out;
+}
+
+/** The tags a "Remove a tag" list offers: those on the selection, most common first. */
+export function selectionTags(rows: readonly Pick<MenuRow, 'tags'>[]): string[] {
+  const n = new Map<string, number>();
+  for (const r of rows) for (const t of r.tags) n.set(t, (n.get(t) ?? 0) + 1);
+  return [...n].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([t]) => t);
 }
 
 // ── Iterate (§10.4): the asset on the coordinator's composer with its recipe quoted ──

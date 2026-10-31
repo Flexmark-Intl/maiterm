@@ -11,6 +11,7 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
+  import IconButton from '$lib/components/ui/IconButton.svelte';
   import type { GalleryAssetRow, GalleryTagChange } from '$lib/tauri/types';
   import { galleryUrl, madeByLabel, picture } from '$lib/hive/gallery';
   import { abSwitch, syncActions, type SyncEvent } from '$lib/hive/galleryCurate';
@@ -108,7 +109,7 @@
 
 <div class="compare">
   <div class="bar">
-    <button type="button" class="back" onclick={onback}><Icon name="chevron" size={11} /> Grid</button>
+    <IconButton tooltip="Close the comparison (Esc)" onclick={onback}><Icon name="close" size={14} /></IconButton>
     <span class="hint">Comparing {panes.length}: videos play together; X switches audio; F and 1/2/3 act on the focused pane.</span>
   </div>
   <div class="panes" style="--n: {Math.max(1, panes.length)}">
@@ -171,8 +172,6 @@
 <style>
   .compare { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
   .bar { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--bg-light); flex-wrap: wrap; }
-  .back { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; padding: 0; }
-  .back :global(svg) { transform: rotate(90deg); }
   .hint { font-size: 11.5px; color: var(--fg-dim); }
   .panes { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr)); gap: 8px; padding: 8px; overflow: auto; }
   .pane { min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--bg-light); border-radius: 6px; overflow: hidden; background: var(--bg-medium); }

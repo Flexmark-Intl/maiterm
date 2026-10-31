@@ -22,13 +22,19 @@
     hiveId: string;
     row: GalleryAssetRow;
     selected: boolean;
+    /** The keyboard's place in a selection of several (the last picked). */
+    cursor?: boolean;
+    /** Something is selected: every tile shows its check circle, so adding one is a click. */
+    selecting?: boolean;
     flashing: boolean;
     /** The coordinator's finals recommendation waiting on the human ("" no status). */
     recommended?: string;
     onselect: (e: MouseEvent) => void;
+    /** The check circle: adds or removes this one, as Cmd-click does. */
+    ontoggle: () => void;
     onopen: () => void;
   }
-  let { hiveId, row, selected, flashing, recommended, onselect, onopen }: Props = $props();
+  let { hiveId, row, selected, cursor = false, selecting = false, flashing, recommended, onselect, ontoggle, onopen }: Props = $props();
 
   const pic = $derived(picture(row));
   /** A picture that 404s (a thumbnail swept, an asset trashed meanwhile) falls back to the icon. */
@@ -91,22 +97,6 @@
     }
   }
   let audioPaused = $state(true);
-
-  /** Space on the grid's cursor (GalleryView): audio plays in place, a video plays muted as on
-   *  a resting pointer. False for a tile with nothing to play. */
-  export function togglePlay(): boolean {
-    if (row.kind === 'audio') {
-      toggleAudio();
-      return true;
-    }
-    if (row.kind === 'video') {
-      if (rest) clearTimeout(rest);
-      rest = null;
-      playing = !playing;
-      return true;
-    }
-    return false;
-  }
 </script>
 
 <Tooltip text={tip} block>
@@ -114,6 +104,8 @@
   <div
     class="tile"
     class:selected
+    class:cursor
+    class:selecting
     class:flash={flashing}
     class:rejected={row.status === 'rejected'}
     class:trashed
@@ -173,6 +165,13 @@
     </span>
     {#if row.children > 0}<span class="variants">⧉ {row.children} variant{row.children === 1 ? '' : 's'}</span>{/if}
     {#if trashed}<span class="b trash-b">In the trash</span>{/if}
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <span
+      class="check"
+      aria-hidden="true"
+      onclick={(e) => { e.stopPropagation(); ontoggle(); }}
+      ondblclick={(e) => e.stopPropagation()}
+    >{#if selected}<Icon name="check" size={11} />{/if}</span>
   </div>
 </Tooltip>
 
@@ -192,13 +191,43 @@
     -webkit-user-select: none;
     user-select: none;
   }
-  .tile.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .tile.flash { animation: flash 1.2s ease-out; }
   @keyframes flash { from { box-shadow: 0 0 0 3px var(--accent); } to { box-shadow: 0 0 0 0 transparent; } }
   .tile.rejected .pic, .tile.rejected .wave, .tile.trashed .pic { opacity: 0.35; filter: grayscale(0.7); }
   /* §10.4: an asset with children carries a stacked edge. */
   .tile.stacked { box-shadow: 3px 3px 0 -1px var(--bg-medium), 3px 3px 0 0 var(--bg-light); }
-  .tile.stacked.selected { box-shadow: 0 0 0 1px var(--accent), 3px 3px 0 -1px var(--bg-medium), 3px 3px 0 0 var(--accent); }
+  /* Selected: an accent frame, the picture inset inside it under an accent wash, and a filled
+     check. Each alone is easy to miss on a busy picture; together they read at any tile size. */
+  .tile.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 28%, var(--bg-dark)); box-shadow: 0 0 0 2px var(--accent); }
+  .tile.stacked.selected { box-shadow: 0 0 0 2px var(--accent), 4px 4px 0 0 var(--bg-medium), 4px 4px 0 1px var(--accent); }
+  .tile.selected::after { content: ''; position: absolute; inset: 0; z-index: 1; pointer-events: none; background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  .pic, .wave, .icon, .play, .strip { transition: transform 0.12s ease-out; }
+  .tile.selected .pic, .tile.selected .play, .tile.selected .strip, .tile.selected .icon { transform: scale(0.92); border-radius: 4px; }
+  .tile.selected .wave { transform: scale(0.92); }
+  /* The keyboard's place among several selected. */
+  .tile.cursor { outline: 2px solid var(--fg); outline-offset: -6px; }
+  .check {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 2;
+    width: 20px;
+    height: 20px;
+    box-sizing: border-box;
+    border-radius: 50%;
+    border: 1.5px solid rgba(255, 255, 255, 0.9);
+    background: rgba(0, 0, 0, 0.35);
+    color: var(--bg-dark);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    cursor: pointer;
+    transition: opacity 0.1s;
+  }
+  .tile:hover .check, .tile.selecting .check { opacity: 1; }
+  .tile.selected .check { opacity: 1; background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 2px var(--bg-dark); }
+  .badges, .corner, .variants, .trash-b, .aplay { z-index: 2; }
   .pic, .play { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
   .play { background: #000; }
   .strip { position: absolute; inset: 0; background-size: 1000% 100%; background-repeat: no-repeat; }
@@ -221,5 +250,8 @@
   .aplay { position: absolute; left: 6px; bottom: 5px; width: 22px; height: 22px; border-radius: 50%; border: none; background: var(--accent); color: var(--bg-dark); display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; }
   .aplay:focus-visible { outline: 2px solid var(--fg); }
   .tile[data-kind='audio'] .variants { left: 34px; }
-  @media (prefers-reduced-motion: reduce) { .tile.flash { animation: none; box-shadow: 0 0 0 2px var(--accent); } }
+  @media (prefers-reduced-motion: reduce) {
+    .tile.flash { animation: none; box-shadow: 0 0 0 2px var(--accent); }
+    .pic, .wave, .icon, .play, .strip { transition: none; }
+  }
 </style>

@@ -9,6 +9,7 @@
   import { error as logError } from '@tauri-apps/plugin-log';
   import Icon from '$lib/components/Icon.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
+  import IconButton from '$lib/components/ui/IconButton.svelte';
   import { galleryCollect, galleryDeleteCollection, galleryList, galleryRenameCollection } from '$lib/tauri/commands';
   import type { GalleryAssetRow, GalleryCollection } from '$lib/tauri/types';
   import { galleryUrl, picture } from '$lib/hive/gallery';
@@ -163,7 +164,7 @@
 
 <div class="panel">
   <div class="bar">
-    <button type="button" class="back" onclick={onback}><Icon name="chevron" size={11} /> Grid</button>
+    <IconButton tooltip="Close collections (Esc)" onclick={onback}><Icon name="close" size={14} /></IconButton>
     <b>Collections</b>
   </div>
   <div class="body">
@@ -254,8 +255,6 @@
 <style>
   .panel { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
   .bar { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--bg-light); font-size: 12.5px; }
-  .back { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; padding: 0; }
-  .back :global(svg) { transform: rotate(90deg); }
   .body { flex: 1; min-height: 0; display: flex; }
   .list { flex: none; width: 200px; overflow-y: auto; padding: 10px; border-right: 1px solid var(--bg-light); display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; }
   .list > button { display: flex; justify-content: space-between; gap: 6px; background: var(--bg-medium); border: 1px solid var(--bg-light); color: var(--fg-dim); border-radius: 5px; padding: 3px 7px; font: inherit; cursor: pointer; text-align: left; overflow-wrap: anywhere; }

@@ -4,7 +4,10 @@ import {
   appendToDraft,
   attachFor,
   compareSet,
+  extendTo,
   iterateText,
+  selectionMenu,
+  selectionTags,
   nextStar,
   nextStatus,
   selectMode,
@@ -110,5 +113,58 @@ describe('a drop onto a composer', () => {
     expect(attachFor(d, null)).toBeNull();
     expect(attachFor({ chatTabId: 'tab-1', paths: ['x'] }, 'tab-1')).toBeNull();
     expect(attachFor(undefined, 'tab-1')).toBeNull();
+  });
+});
+
+describe('the selection menu', () => {
+  const row = (o: Partial<{ starred: boolean; status: string; tags: string[]; deleted_at: string | null }> = {}) => ({ starred: false, status: '', tags: [], deleted_at: null, ...o });
+  const actions = (m: ReturnType<typeof selectionMenu>) => m.filter((e) => !e.separator).map((e) => e.action);
+
+  it('is empty with nothing selected', () => {
+    expect(selectionMenu([], 'Reveal')).toEqual([]);
+  });
+
+  it('offers one asset its own actions and no Compare', () => {
+    const m = selectionMenu([row()], 'Reveal in Finder');
+    expect(actions(m)).toEqual(['open', 'star', 'picked', 'final', 'rejected', 'iterate', 'send', 'collect', 'tag', 'export', 'reveal', 'copyPath', 'trash']);
+    expect(m.find((e) => e.action === 'reveal')?.label).toBe('Reveal in Finder');
+  });
+
+  it('offers several the bulk actions and Compare up to four', () => {
+    const two = selectionMenu([row(), row({ tags: ['warm'] })], 'R');
+    expect(actions(two)).not.toContain('open');
+    expect(actions(two)).not.toContain('iterate');
+    expect(two.find((e) => e.action === 'reveal')?.label).toBe('R (the first)');
+    expect(actions(two)).toContain('untag');
+    expect(two[0]).toMatchObject({ action: 'compare', disabled: false });
+    expect(two.find((e) => e.action === 'copyPath')?.label).toBe('Copy 2 paths');
+    const five = selectionMenu([row(), row(), row(), row(), row()], 'R');
+    expect(five[0]).toMatchObject({ action: 'compare', disabled: true });
+  });
+
+  it('says what a toggle will do', () => {
+    const m = selectionMenu([row({ starred: true, status: 'picked' }), row({ starred: true, status: 'picked' })], 'R');
+    expect(m.find((e) => e.action === 'star')?.label).toBe('Unstar');
+    expect(m.find((e) => e.action === 'picked')?.label).toBe('Unpick');
+    expect(m.find((e) => e.action === 'final')?.label).toBe('Mark final');
+    expect(actions(m)).toContain('clearStatus');
+  });
+
+  it('restores what is all in the trash and disables what cannot apply to it', () => {
+    const m = selectionMenu([row({ deleted_at: 'x' })], 'R');
+    expect(actions(m)).toContain('restore');
+    expect(actions(m)).not.toContain('trash');
+    for (const a of ['open', 'iterate', 'send', 'export', 'reveal', 'copyPath'] as const) expect(m.find((e) => e.action === a)?.disabled).toBe(true);
+    // A mix moves the rest to the trash.
+    expect(actions(selectionMenu([row({ deleted_at: 'x' }), row()], 'R'))).toContain('trash');
+  });
+
+  it('lists the selection’s tags, most common first', () => {
+    expect(selectionTags([{ tags: ['b', 'a'] }, { tags: ['a'] }, { tags: [] }])).toEqual(['a', 'b']);
+  });
+
+  it('extends onto an asset as the new cursor', () => {
+    expect(extendTo(['a', 'b'], 'c')).toEqual(['a', 'b', 'c']);
+    expect(extendTo(['a', 'b'], 'a')).toEqual(['b', 'a']);
   });
 });

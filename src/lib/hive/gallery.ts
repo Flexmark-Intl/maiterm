@@ -349,6 +349,38 @@ export function neighbor(pos: Map<string, Rect>, order: readonly string[], id: s
   return best ?? id;
 }
 
+// ── The viewer's image: fitted to the stage, zoomed to 100% and beyond, panned ──
+
+export interface Size2 {
+  w: number;
+  h: number;
+}
+
+/** The scale that fits `img` inside `stage`, never above 1: a small image shows at its own size
+ *  rather than blurred up. */
+export function fitScale(img: Size2, stage: Size2): number {
+  if (img.w <= 0 || img.h <= 0 || stage.w <= 0 || stage.h <= 0) return 1;
+  return Math.min(1, stage.w / img.w, stage.h / img.h);
+}
+
+export const ZOOM_MAX = 8;
+
+/** A pan that keeps the image over the stage: an axis the image doesn't overflow is centred. */
+export function clampPan(pan: { x: number; y: number }, img: Size2, scale: number, stage: Size2): { x: number; y: number } {
+  const limit = (len: number, room: number) => Math.max(0, (len * scale - room) / 2);
+  const lx = limit(img.w, stage.w);
+  const ly = limit(img.h, stage.h);
+  // `|| 0`: never a -0 for a centred axis.
+  return { x: Math.max(-lx, Math.min(lx, pan.x)) || 0, y: Math.max(-ly, Math.min(ly, pan.y)) || 0 };
+}
+
+/** Zoom from `from` to `to` keeping the point at `at` (relative to the stage's centre) where it
+ *  is on screen. */
+export function zoomAbout(pan: { x: number; y: number }, at: { x: number; y: number }, from: number, to: number): { x: number; y: number } {
+  const k = to / from;
+  return { x: at.x - (at.x - pan.x) * k, y: at.y - (at.y - pan.y) * k };
+}
+
 // ── Following (§10.4): on while agents work; scrolling away from the newest turns it off ──
 
 /** Within this of the top counts as at the top. */
@@ -376,39 +408,56 @@ export function followOnScroll(chosen: boolean | null, following: boolean, scrol
 // ── Keys (§4.6, §10.4): bare keys, only inside `[data-gallery]` and never in a field ──
 
 export type GalleryKeyAction =
-  | { kind: 'move'; dir: Dir }
+  | { kind: 'move'; dir: Dir; extend: boolean }
   | { kind: 'open' }
   | { kind: 'back' }
-  | { kind: 'play' }
+  /** Space: the grid previews the cursor's asset, the viewer closes, a comparison plays. */
+  | { kind: 'space' }
   | { kind: 'star' }
   | { kind: 'status'; status: 'picked' | 'final' | 'rejected' }
-  | { kind: 'compare' };
+  | { kind: 'compare' }
+  /** The context-menu key or Shift+F10: the selection's menu. */
+  | { kind: 'menu' }
+  /** Cmd/Ctrl+A: every asset listed. */
+  | { kind: 'selectAll' }
+  /** I: the viewer's info drawer. */
+  | { kind: 'info' };
 
-type KeyFields = Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'altKey'>;
+type KeyFields = Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'altKey'> & Partial<Pick<KeyboardEvent, 'shiftKey'>>;
 
 /** A key's gallery action. `editable`: focus is in an input, a textarea or a composer, where no
  *  bare key is the gallery's. `onControl`: focus is on a button, link or player inside the
- *  gallery, whose own Enter and Space activate it. A modifier is never one: those are the app's. */
+ *  gallery, whose own Enter and Space activate it. A modifier is never one (those are the
+ *  app's), except Cmd/Ctrl+A, which selects every asset, and Shift, which extends a move. */
 export function galleryKey(e: KeyFields, editable: boolean, onControl = false): GalleryKeyAction | null {
-  if (editable || e.metaKey || e.ctrlKey || e.altKey) return null;
+  if (editable) return null;
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'a') return { kind: 'selectAll' };
+  if (e.metaKey || e.ctrlKey || e.altKey) return null;
   if (onControl && (e.key === 'Enter' || e.key === ' ')) return null;
+  const extend = !!e.shiftKey;
   switch (e.key) {
     case 'ArrowLeft':
-      return { kind: 'move', dir: 'left' };
+      return { kind: 'move', dir: 'left', extend };
     case 'ArrowRight':
-      return { kind: 'move', dir: 'right' };
+      return { kind: 'move', dir: 'right', extend };
     case 'ArrowUp':
-      return { kind: 'move', dir: 'up' };
+      return { kind: 'move', dir: 'up', extend };
     case 'ArrowDown':
-      return { kind: 'move', dir: 'down' };
+      return { kind: 'move', dir: 'down', extend };
     case 'Enter':
       return { kind: 'open' };
     case 'Escape':
       return { kind: 'back' };
     case ' ':
-      return { kind: 'play' };
+      return { kind: 'space' };
+    case 'ContextMenu':
+      return { kind: 'menu' };
+    case 'F10':
+      return extend ? { kind: 'menu' } : null;
   }
   switch (e.key.toLowerCase()) {
+    case 'i':
+      return { kind: 'info' };
     case 'f':
       return { kind: 'star' };
     case '1':

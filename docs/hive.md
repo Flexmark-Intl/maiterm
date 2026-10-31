@@ -2467,9 +2467,24 @@ left.
 ```
 
 **The grid.** A masonry layout that keeps each asset's aspect ratio (images and video), with a
-size slider. It's virtualized, because a media Hive reaches thousands of assets. Kind tabs run
-across the top, and a filter rail holds Made by, Task, Status, Starred, Tags and Collections.
-Search covers titles, prompts and tags. **Group by** None, Task, Worker, Day or Collection.
+size slider. It's virtualized, because a media Hive reaches thousands of assets. Kind tabs,
+search, Group, Variants and Size run across the top; under them the filters (Made by, Task,
+Status, Starred, Tags, Collection, Trash) sit on one wrapping row, and the ones in force show as
+removable chips with Clear all. Search covers titles, prompts and tags. **Group by** None, Task,
+Worker, Day or Collection. The grid has the whole width: nothing beside it.
+
+**The selection strip** (2026-10-31, Darryl's review) sits under the filters at one fixed
+height, so selecting never moves the grid. With nothing selected it counts the assets and says
+how to act; with a selection it says how many and offers Star, Pick, Add to collection, Compare
+(two to four), More… and Clear. A selected tile has an accent frame, an inset picture under an
+accent wash and a filled check; with anything selected every tile shows its check circle, which
+adds or removes it.
+
+**The selection's menu** (`selectionMenu`, galleryCurate.ts) is the one place every action
+lives: right-click a tile (outside the selection it selects that tile first, as Finder does), the
+context-menu key or Shift+F10, More… in the strip or the viewer. One asset gets Open large,
+Iterate, Reveal and Copy path; several get Compare and the bulk actions. The questions an action
+asks (tags, a new collection's name, how an export lands) float over the bottom of the gallery.
 
 - Images: the thumbnail.
 - Video: a poster frame. **Hovering scrubs** through a frame strip, and holding plays muted.
@@ -2482,11 +2497,16 @@ Search covers titles, prompts and tags. **Group by** None, Task, Worker, Day or 
 **Following** (on by default while agents are working) keeps the newest in view.
 Scrolling away turns it off, the way a terminal stops following when you scroll up.
 
-**The detail view** opens in the gallery's area (never over the coordinator), with arrow keys
-for previous and next:
+**The viewer** opens over the whole gallery area (never over the coordinator). It is both the
+detail view and the Space preview: Space, Enter or a double-click opens it; Space, Escape or ×
+closes it; arrow keys step through the grid's order. The grid stays mounted under it.
 
-- A large preview with real players: `<video>` with frame stepping, `<audio>` over its waveform,
-  zoom for images, page through documents.
+- The media fills the area: an image fits it (never past its own size), a click or 100% shows
+  it pixel for pixel, the wheel zooms about the pointer, a drag pans. `<video>` with frame
+  stepping, `<audio>` over its waveform, a document's first page.
+- Star and Pick / Final / Reject in its bar; everything else in More… and right-click.
+- **Info** (an (i) button and the I key) is a drawer over the media's side, closed by default and
+  remembered for the session, holding what follows:
 - **The recipe**: prompt (with copy), model, tool, seed, settings.
 - **Made by** the worker and **for** the task, each a link that opens that worker's column
   (principle: every result is one click from the agent that made it).
@@ -2506,8 +2526,10 @@ A/B switched by a key. Picking a winner from variants is most of the work in a m
 composer attaches them, through the composer's existing attachments
 (`lib/composer/attachments.ts`), so the agent receives paths it can open.
 
-**Keyboard:** arrows move, Space plays or pauses, Enter opens the detail view, F stars,
-1/2/3 set Pick/Final/Reject, C compares the selection, Escape goes back. These bare keys act only
+**Keyboard:** arrows move (Shift extends), Cmd/Ctrl+A selects all, Space or Enter opens the
+viewer and Space closes it, Escape closes the viewer or clears the selection, F stars, 1/2/3 set
+Pick/Final/Reject, C compares the selection, I toggles the viewer's info, the context-menu key or
+Shift+F10 opens the selection's menu, and Space plays or pauses in a comparison. These bare keys act only
 while focus is inside `[data-gallery]`, never in an input, a textarea or a composer, and inside
 `[data-gallery]` only `isAppShortcut` keys reach the app, as `[data-filetree]` does for Files
 (§4.6).

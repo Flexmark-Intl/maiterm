@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   activeFilterChips,
   cardTopRow,
+  clampPan,
   clearedQuery,
   defaultQuery,
+  fitScale,
+  zoomAbout,
   filterToQuery,
   fmtDuration,
   foldVariants,
@@ -195,21 +198,48 @@ describe('the query', () => {
 });
 
 describe('galleryKey', () => {
-  const k = (key: string, mods: Partial<{ metaKey: boolean; ctrlKey: boolean; altKey: boolean }> = {}) => ({ key, metaKey: false, ctrlKey: false, altKey: false, ...mods });
+  const k = (key: string, mods: Partial<{ metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean }> = {}) => ({
+    key,
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    ...mods,
+  });
   it('maps the bare keys', () => {
-    expect(galleryKey(k('ArrowLeft'), false)).toEqual({ kind: 'move', dir: 'left' });
-    expect(galleryKey(k('ArrowDown'), false)).toEqual({ kind: 'move', dir: 'down' });
+    expect(galleryKey(k('ArrowLeft'), false)).toEqual({ kind: 'move', dir: 'left', extend: false });
+    expect(galleryKey(k('ArrowDown'), false)).toEqual({ kind: 'move', dir: 'down', extend: false });
     expect(galleryKey(k('Enter'), false)).toEqual({ kind: 'open' });
     expect(galleryKey(k('Escape'), false)).toEqual({ kind: 'back' });
-    expect(galleryKey(k(' '), false)).toEqual({ kind: 'play' });
+    expect(galleryKey(k(' '), false)).toEqual({ kind: 'space' });
     expect(galleryKey(k('F'), false)).toEqual({ kind: 'star' });
     expect(galleryKey(k('2'), false)).toEqual({ kind: 'status', status: 'final' });
     expect(galleryKey(k('c'), false)).toEqual({ kind: 'compare' });
+    expect(galleryKey(k('i'), false)).toEqual({ kind: 'info' });
     expect(galleryKey(k('x'), false)).toBeNull();
+  });
+
+  it('extends a move with Shift', () => {
+    expect(galleryKey(k('ArrowRight', { shiftKey: true }), false)).toEqual({ kind: 'move', dir: 'right', extend: true });
+  });
+
+  it('opens the menu by the context-menu key and Shift+F10, never bare F10', () => {
+    expect(galleryKey(k('ContextMenu'), false)).toEqual({ kind: 'menu' });
+    expect(galleryKey(k('F10', { shiftKey: true }), false)).toEqual({ kind: 'menu' });
+    expect(galleryKey(k('F10'), false)).toBeNull();
+  });
+
+  it('selects all with Cmd or Ctrl+A, never in a field', () => {
+    expect(galleryKey(k('a', { metaKey: true }), false)).toEqual({ kind: 'selectAll' });
+    expect(galleryKey(k('a', { ctrlKey: true }), false)).toEqual({ kind: 'selectAll' });
+    expect(galleryKey(k('a', { metaKey: true }), true)).toBeNull();
+    expect(galleryKey(k('a', { metaKey: true, shiftKey: true }), false)).toBeNull();
+    expect(galleryKey(k('a'), false)).toBeNull();
   });
 
   it('never acts in a field or with a modifier', () => {
     expect(galleryKey(k('f'), true)).toBeNull();
+    expect(galleryKey(k(' '), true)).toBeNull();
     expect(galleryKey(k('ArrowLeft'), true)).toBeNull();
     expect(galleryKey(k('1', { metaKey: true }), false)).toBeNull();
     expect(galleryKey(k('c', { ctrlKey: true }), false)).toBeNull();
@@ -219,7 +249,7 @@ describe('galleryKey', () => {
   it("leaves Enter and Space to a focused button, link or player, but still moves and goes back", () => {
     expect(galleryKey(k('Enter'), false, true)).toBeNull();
     expect(galleryKey(k(' '), false, true)).toBeNull();
-    expect(galleryKey(k('ArrowRight'), false, true)).toEqual({ kind: 'move', dir: 'right' });
+    expect(galleryKey(k('ArrowRight'), false, true)).toEqual({ kind: 'move', dir: 'right', extend: false });
     expect(galleryKey(k('Escape'), false, true)).toEqual({ kind: 'back' });
   });
 });
@@ -243,6 +273,31 @@ describe('filter chips', () => {
 
   it('clears all but the kind', () => {
     expect(clearedQuery({ ...defaultQuery(), kind: 'video', tag: 'x', search: 'y', trash: true })).toEqual({ ...defaultQuery(), kind: 'video' });
+  });
+});
+
+describe('the viewer image', () => {
+  it('fits inside the stage, never above its own size', () => {
+    expect(fitScale({ w: 1920, h: 741 }, { w: 960, h: 800 })).toBe(0.5);
+    expect(fitScale({ w: 600, h: 1200 }, { w: 1000, h: 600 })).toBe(0.5);
+    expect(fitScale({ w: 200, h: 100 }, { w: 1000, h: 600 })).toBe(1);
+    expect(fitScale({ w: 0, h: 0 }, { w: 1000, h: 600 })).toBe(1);
+  });
+
+  it('pans only where the image overflows the stage', () => {
+    const img = { w: 2000, h: 500 };
+    const stage = { w: 1000, h: 600 };
+    expect(clampPan({ x: 900, y: 300 }, img, 1, stage)).toEqual({ x: 500, y: 0 });
+    expect(clampPan({ x: -900, y: -10 }, img, 1, stage)).toEqual({ x: -500, y: 0 });
+    expect(clampPan({ x: 50, y: 50 }, img, 0.5, stage)).toEqual({ x: 0, y: 0 });
+  });
+
+  it('keeps the point under the pointer still while zooming', () => {
+    // A point 100px right of centre, at 1×, stays at 100px on screen at 2×.
+    const pan = zoomAbout({ x: 0, y: 0 }, { x: 100, y: 0 }, 1, 2);
+    expect(pan).toEqual({ x: -100, y: 0 });
+    // The image point under it: (100 - pan.x) / 2 = 100 at 2× is the same as 100 at 1×.
+    expect((100 - pan.x) / 2).toBe(100);
   });
 });
 

@@ -28,9 +28,11 @@
     recommendations: Record<string, string>;
     onfollowing: (on: boolean) => void;
     onselect: (id: string, e: MouseEvent) => void;
+    /** A tile's check circle: add or remove it. */
+    ontoggle: (id: string) => void;
     onopen: (id: string) => void;
   }
-  let { hiveId, entries, size, selection, following, followChosen, isFlashing, recommendations, onfollowing, onselect, onopen }: Props = $props();
+  let { hiveId, entries, size, selection, following, followChosen, isFlashing, recommendations, onfollowing, onselect, ontoggle, onopen }: Props = $props();
 
   const GAP = 8;
   const PAD = 12;
@@ -60,6 +62,8 @@
   const byId = $derived(new Map(entries.map((e) => [e.kind === 'band' ? e.key : e.row.id, e])));
   const shown = $derived(width > 0 ? visible(layout.pos, Math.max(0, scrollTop - PAD), viewH, viewH) : []);
   const selected = $derived(new Set(selection));
+  /** The keyboard's place, marked only among several selected (alone, the selection says it). */
+  const cursorId = $derived(selection.length > 1 ? selection.at(-1) : undefined);
 
   let raf = 0;
   function onScroll() {
@@ -99,11 +103,10 @@
   export function positions(): Map<string, Rect> {
     return layout.pos;
   }
-  /** The mounted tiles, for Space on the cursor's (Svelte nulls an unmounted one). */
-  const tiles: Record<string, GalleryTile | null | undefined> = {};
-  /** Space in the grid: play or pause the tile's audio or video. False when it has none. */
-  export function togglePlay(id: string): boolean {
-    return tiles[id]?.togglePlay() ?? false;
+  /** Where a tile is on screen (the keyboard's menu opens on it), if it's mounted. */
+  export function screenRect(id: string): DOMRect | null {
+    const el = scroller?.querySelector<HTMLElement>(`[data-asset-id="${CSS.escape(id)}"]`);
+    return el?.getBoundingClientRect() ?? null;
   }
 </script>
 
@@ -120,13 +123,15 @@
         {:else}
           <div class="cell" style="transform: translate({r.x + PAD}px, {r.y + PAD}px); width: {r.w}px; height: {r.h}px">
             <GalleryTile
-              bind:this={tiles[id]}
               {hiveId}
               row={e.row}
               selected={selected.has(id)}
+              cursor={cursorId === id}
+              selecting={selection.length > 0}
               flashing={isFlashing(id)}
               recommended={recommendations[id]}
               onselect={(ev) => onselect(id, ev)}
+              ontoggle={() => ontoggle(id)}
               onopen={() => onopen(id)}
             />
           </div>
