@@ -982,6 +982,23 @@ export interface HiveDetectedTool {
   host: string | null;
 }
 
+/** What the Make this a Hive wizard starts from (state/workspace.rs `HiveDefaults`). Empty
+ *  strings and null mean the built-in default; `lib/hive/defaults.ts` resolves them. */
+export interface HiveDefaults {
+  /** `HiveDetectedTool.id`s. */
+  tools: string[];
+  coordinator_model: string;
+  coordinator_effort: string;
+  worker_model: string;
+  worker_effort: string;
+  cap: number | null;
+  budget_dollars: number | null;
+  push_after_land: boolean;
+  /** "" | "coordinator" | "all" | "none". */
+  phone: string;
+  rules: string;
+}
+
 export interface HiveCreated {
   workspace: Workspace;
   coordinator_tab_id: string;
@@ -1673,6 +1690,8 @@ export interface Preferences {
   /** The human's standing answers for the Overlord agent, one entry each. Omitted by Rust
    *  when empty. Written only by the human or an approved proposal. */
   overlord_playbook?: string[];
+  /** Defaults for new Hives (docs/hive.md §3). Never settable over MCP. */
+  hive_defaults?: HiveDefaults;
   /** Follow-ups (docs/follow-ups.md §4) — a sub-feature of the Overlord. Never read alone:
    *  `preferencesStore.followUpsLive` is the combined answer. */
   follow_ups_enabled: boolean;

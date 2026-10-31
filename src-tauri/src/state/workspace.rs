@@ -1753,6 +1753,29 @@ pub enum CursorStyle {
     Bar,
 }
 
+/// What the Make this a Hive wizard starts from (docs/hive.md §3, Preferences → Hive). A draft
+/// the human already typed still wins. Every kind is a String, never an enum: an older build
+/// would load a new variant as EMPTY state. Empty strings and `None` mean the built-in default.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct HiveDefaults {
+    /// Tool ids as `hive_detect_tools` reports them (`DetectedTool.id`). One not detected on
+    /// this machine any more is dropped by the wizard, silently.
+    pub tools: Vec<String>,
+    pub coordinator_model: String,
+    pub coordinator_effort: String,
+    pub worker_model: String,
+    pub worker_effort: String,
+    /// Workers at once; `None` is Create's own default.
+    pub cap: Option<u32>,
+    pub budget_dollars: Option<u32>,
+    pub push_after_land: bool,
+    /// "" (built-in: the queen only) | "coordinator" | "all" | "none".
+    pub phone: String,
+    /// Prefills "Rules for every agent".
+    pub rules: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preferences {
     /// UI font size (non-terminal elements)
@@ -1936,6 +1959,10 @@ pub struct Preferences {
     /// an approval writes here. Not in `preference_meta`, for the same reason.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overlord_playbook: Vec<String>,
+    /// Defaults for new Hives (docs/hive.md §3). Not in `preference_meta`: an agent must not
+    /// be able to change what a new Hive may spend, or which tools it gets, by setPreference.
+    #[serde(default)]
+    pub hive_defaults: HiveDefaults,
     /// Follow-ups (docs/follow-ups.md §4): an agent schedules a prompt back into its own tab.
     /// A sub-feature of the Overlord — the toggle sits under "Enable Overlord" and does
     /// nothing while it is off. Default on, so turning the Overlord on brings follow-ups with
@@ -2341,6 +2368,7 @@ impl Default for Preferences {
             overlord_propose_mode: true,
             overlord_answers_escalations: false,
             overlord_playbook: Vec::new(),
+            hive_defaults: HiveDefaults::default(),
             follow_ups_enabled: true,
             follow_ups_resume_agent: true,
             follow_ups_scripts_unattended: false,
@@ -2642,6 +2670,46 @@ impl Workspace {
             suspended: false,
             pane_sizes: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod hive_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn hive_defaults_load_from_absent_partial_and_full_records() {
+        // A state file from before the field: empty defaults, nothing else disturbed.
+        let p: Preferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.hive_defaults, HiveDefaults::default());
+
+        // A partial record (an older or newer build's): what's missing is the default.
+        let p: Preferences = serde_json::from_str(r#"{"hive_defaults":{"tools":["cli:ffmpeg"],"cap":6}}"#).unwrap();
+        assert_eq!(p.hive_defaults.tools, vec!["cli:ffmpeg".to_string()]);
+        assert_eq!(p.hive_defaults.cap, Some(6));
+        assert_eq!(p.hive_defaults.budget_dollars, None);
+        assert_eq!(p.hive_defaults.phone, "");
+
+        // A phone value this build doesn't know is kept as written, never an error.
+        let p: Preferences = serde_json::from_str(r#"{"hive_defaults":{"phone":"someday"}}"#).unwrap();
+        assert_eq!(p.hive_defaults.phone, "someday");
+
+        // Round trip.
+        let mut p = Preferences::default();
+        p.hive_defaults = HiveDefaults {
+            tools: vec!["mcp:figma".into()],
+            coordinator_model: "opus".into(),
+            coordinator_effort: "high".into(),
+            worker_model: "sonnet".into(),
+            worker_effort: "medium".into(),
+            cap: Some(8),
+            budget_dollars: Some(25),
+            push_after_land: true,
+            phone: "all".into(),
+            rules: "use pnpm".into(),
+        };
+        let back: Preferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.hive_defaults, p.hive_defaults);
     }
 }
 

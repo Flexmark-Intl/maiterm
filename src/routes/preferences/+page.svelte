@@ -13,6 +13,7 @@
   import qrcode from 'qrcode-generator';
   import ImportPreviewModal from '$lib/components/ImportPreviewModal.svelte';
   import OverlordRulesSection from '$lib/components/overlord/OverlordRulesSection.svelte';
+  import HiveDefaultsSection from '$lib/components/hive/HiveDefaultsSection.svelte';
   import { open as dialogOpen, save as dialogSave } from '@tauri-apps/plugin-dialog';
 
   import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
@@ -84,7 +85,7 @@
     if (result) preferencesStore.setTriggers(result);
   }
 
-  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'files', 'notifications', 'triggers', 'overlord', 'claude_code', 'mailink', 'accounts', 'mcp', 'browser', 'deshittify', 'integrations', 'backup', 'updates', 'permissions'] as const;
+  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'files', 'notifications', 'triggers', 'overlord', 'hive', 'claude_code', 'mailink', 'accounts', 'mcp', 'browser', 'deshittify', 'integrations', 'backup', 'updates', 'permissions'] as const;
   type SectionId = typeof sectionIds[number];
   const saved = localStorage.getItem('prefs-section');
   let activeSection = $state<SectionId>(
@@ -423,6 +424,7 @@
     { id: 'notifications' as const, label: 'Notifications' },
     { id: 'triggers' as const, label: 'Triggers' },
     { id: 'overlord' as const, label: 'Overlord' },
+    { id: 'hive' as const, label: 'Hive' },
     { id: 'claude_code' as const, label: 'AI Agents' },
     { id: 'mailink' as const, label: 'maiLink' },
     { id: 'accounts' as const, label: 'Accounts' },
@@ -1600,6 +1602,9 @@
 
       {:else if activeSection === 'overlord'}
         <OverlordRulesSection />
+
+      {:else if activeSection === 'hive'}
+        <HiveDefaultsSection />
 
       {:else if activeSection === 'triggers'}
         <p class="section-desc">

@@ -1,4 +1,5 @@
-import type { CursorStyle, ManagedAccount, OverlordRule, Preferences, Trigger } from '$lib/tauri/types';
+import type { CursorStyle, HiveDefaults, ManagedAccount, OverlordRule, Preferences, Trigger } from '$lib/tauri/types';
+import { EMPTY_HIVE_DEFAULTS, normalizeHiveDefaults } from '$lib/hive/defaults';
 import type { Theme } from '$lib/themes';
 import { builtinThemes } from '$lib/themes';
 import * as commands from '$lib/tauri/commands';
@@ -66,6 +67,7 @@ function createPreferencesStore() {
   let overlordProposeMode = $state(true);
   let overlordAnswersEscalations = $state(false);
   let overlordPlaybook = $state<string[]>([]);
+  let hiveDefaults = $state<HiveDefaults>(EMPTY_HIVE_DEFAULTS);
   let followUpsEnabled = $state(true);
   let followUpsResumeAgent = $state(true);
   let followUpsScriptsUnattended = $state(false);
@@ -198,6 +200,8 @@ function createPreferencesStore() {
      *  Mirrors Rust `Preferences::escalations_to_overlord`, which decides what tabs are told. */
     get escalationsToOverlord() { return overlordEnabled && overlordAnswersEscalations; },
     get overlordPlaybook() { return overlordPlaybook; },
+    /** What the Make this a Hive wizard starts from (docs/hive.md §3). */
+    get hiveDefaults() { return hiveDefaults; },
     /** The raw toggle — for the Preferences switch only. Everything else asks `followUpsLive`. */
     get followUpsEnabled() { return followUpsEnabled; },
     /** Whether follow-ups are on at all: the Overlord AND its follow-ups toggle
@@ -331,6 +335,7 @@ function createPreferencesStore() {
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
       overlordAnswersEscalations = prefs.overlord_answers_escalations ?? false;
       overlordPlaybook = prefs.overlord_playbook ?? [];
+      hiveDefaults = normalizeHiveDefaults(prefs.hive_defaults);
       followUpsEnabled = prefs.follow_ups_enabled ?? true;
       followUpsResumeAgent = prefs.follow_ups_resume_agent ?? true;
       followUpsScriptsUnattended = prefs.follow_ups_scripts_unattended ?? false;
@@ -747,6 +752,12 @@ function createPreferencesStore() {
       await this.save();
     },
 
+    /** A patch over the current defaults, so each Preferences control sends only its field. */
+    async setHiveDefaults(patch: Partial<HiveDefaults>) {
+      hiveDefaults = { ...hiveDefaults, ...patch };
+      await this.save();
+    },
+
     async setOverlordRules(value: OverlordRule[]) {
       overlordRules = value;
       await this.save();
@@ -1023,6 +1034,7 @@ function createPreferencesStore() {
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
       overlordAnswersEscalations = prefs.overlord_answers_escalations ?? false;
       overlordPlaybook = prefs.overlord_playbook ?? [];
+      hiveDefaults = normalizeHiveDefaults(prefs.hive_defaults);
       followUpsEnabled = prefs.follow_ups_enabled ?? true;
       followUpsResumeAgent = prefs.follow_ups_resume_agent ?? true;
       followUpsScriptsUnattended = prefs.follow_ups_scripts_unattended ?? false;
@@ -1142,6 +1154,7 @@ function createPreferencesStore() {
         overlord_propose_mode: overlordProposeMode,
         overlord_answers_escalations: overlordAnswersEscalations,
         overlord_playbook: overlordPlaybook,
+        hive_defaults: hiveDefaults,
         follow_ups_enabled: followUpsEnabled,
         follow_ups_resume_agent: followUpsResumeAgent,
         follow_ups_scripts_unattended: followUpsScriptsUnattended,
