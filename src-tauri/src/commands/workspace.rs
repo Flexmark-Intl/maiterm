@@ -1419,6 +1419,11 @@ pub fn add_tab_follow_up(
             _ => false,
         };
     }
+    // A Hive's queen mid New goal (docs/hive.md §11.5): her follow-ups are about to be cleared with
+    // the old goal, and one made now would reach the fresh session as the old goal's.
+    if crate::hive::new_goal::queen_follow_up_refusal(&state.app_data.read(), &tab_id) {
+        return Err(crate::hive::new_goal::IN_PROGRESS_REFUSAL.to_string());
+    }
     let ((), list) = with_tab_follow_ups(&window, &state, &workspace_id, &tab_id, |list| {
         if !list.iter().any(|f| f.id == follow_up.id) {
             list.push(follow_up);

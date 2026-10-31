@@ -553,8 +553,12 @@ async fn a_failed_save_puts_the_memory_back_and_a_retry_never_deletes_it() {
     fn bad_save(_: &AppData) -> Result<(), String> {
         Err("disk full".into())
     }
+    rig.data.write().windows[0].workspaces[0].panes[0].tabs[0].follow_ups.push(follow_up("f1"));
+    rig.seen.lock().unwrap().front.insert("coord".into(), Front::Job);
     let err = new_goal(&rig.ctx_saving(bad_save), &rig.caller, s.clone()).await.unwrap_err();
     assert!(err.contains("disk full"), "{err}");
+    assert_eq!(rig.seen.lock().unwrap().stopped, vec!["coord".to_string()], "she was stopped before the save failed");
+    assert_eq!(rig.data.read().windows[0].workspaces[0].panes[0].tabs[0].follow_ups.len(), 1, "the old goal keeps its queen's follow-ups");
     assert_eq!(rig.hive().status, STATUS_DONE, "the old goal stands");
     assert!(rig.has_real_memory(&p.memory()), "put back after the failed save");
     assert!(!p.chapter(1).join("memory").exists());
@@ -605,4 +609,16 @@ fn a_second_spawn_of_a_title_numbered_past_an_old_goal_is_refused() {
     // A different title that happens to end in a number is no duplicate.
     let phase = WorkerRecord { slug: "phase-2".into(), title: "Phase 2".into(), badge: 3, chapter: 1, ..WorkerRecord::default() };
     assert!(crate::hive::tools::validate(&hive, &[phase], args("Phase")).is_ok());
+}
+
+#[test]
+fn no_follow_up_reaches_the_queen_while_a_new_goal_runs() {
+    let rig = Rig::new("fu", STATUS_DONE);
+    let root = crate::hive::paths::hive_root(&rig.caller.hive.id).unwrap();
+    assert!(!queen_follow_up_refusal(&rig.data.read(), "coord"));
+    let marker = InProgress::take(&root);
+    assert!(queen_follow_up_refusal(&rig.data.read(), "coord"));
+    assert!(!queen_follow_up_refusal(&rig.data.read(), "w1"), "only the queen's tab");
+    drop(marker);
+    assert!(!queen_follow_up_refusal(&rig.data.read(), "coord"));
 }

@@ -552,9 +552,9 @@ fn retitle_memory_goal(hive: &Hive, paths: &HivePaths, new_goal: &str) {
 
 /// The record saved under the state's lock while the Hive is still Done or paused, with the
 /// pause's question to the human closed, and only then announced. A failed save puts both back.
-fn save_record<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, edit: impl FnOnce(&mut Hive)) -> Result<StatusChange, String> {
+fn save_record<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, edit: impl FnOnce(&mut Hive)) -> Result<(StatusChange, bool), String> {
     let now = crate::mailink::board::iso_now();
-    let (prev, prev_tasks, change, snapshot) = {
+    let (prev, prev_tasks, prev_follow_ups, change, snapshot) = {
         let mut d = ctx.data.write();
         let label = caller.label.clone();
         let ws = super::tools::workspace_mut(&mut d, caller).map_err(|_| "This Hive is gone.".to_string())?;
@@ -569,8 +569,14 @@ fn save_record<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, edit: impl FnOn
         let hive = h.clone();
         let closed = super::fuses::close_pause_blocker(ws, coordinator.as_deref(), &now);
         let tasks = closed.then(|| (ws.tasks.clone(), ws.workstreams.clone()));
+        // The queen's follow-ups and watch scripts go in this same write (Rust owns them,
+        // docs/follow-ups.md; a delivery takes before it types, so a cleared one never goes out):
+        // only once the new goal is certain, and after her agent has stopped, so none she made
+        // meanwhile survives. Until then `in_progress` refuses a new one and a due one's relaunch.
+        let queen_tab = coordinator.as_deref().and_then(|c| ws.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()).find(|t| t.id == c));
+        let prev_follow_ups = queen_tab.map(|t| std::mem::take(&mut t.follow_ups)).unwrap_or_default();
         let change = StatusChange { window_label: label, workspace_id: ws.id.clone(), hive, coordinator, tasks };
-        (prev, prev_tasks, change, d.clone())
+        (prev, prev_tasks, prev_follow_ups, change, d.clone())
     };
     if let Err(e) = (ctx.save)(&snapshot) {
         let mut d = ctx.data.write();
@@ -580,11 +586,18 @@ fn save_record<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, edit: impl FnOn
                 if change.tasks.is_some() {
                     ws.tasks = prev_tasks;
                 }
+                let queen = change.coordinator.as_deref();
+                if let Some(t) = ws.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()).find(|t| Some(t.id.as_str()) == queen) {
+                    t.follow_ups = prev_follow_ups;
+                }
             }
         }
         return Err(format!("maiTerm couldn't save the Hive ({e}), so it keeps its old goal. Its workers are retired; try again."));
     }
-    Ok(change)
+    if !prev_follow_ups.is_empty() {
+        log::info!("hive {}: {} follow-up(s) of the queen cleared for the new goal", caller.hive.id, prev_follow_ups.len());
+    }
+    Ok((change, !prev_follow_ups.is_empty()))
 }
 
 /// Hives (by folder) a New goal is changing: their queen doesn't launch meanwhile.
@@ -596,6 +609,14 @@ pub const IN_PROGRESS_REFUSAL: &str = "This Hive is taking a new goal: its queen
 /// A New goal is under way in the Hive at `root`.
 pub fn in_progress(root: &Path) -> bool {
     IN_PROGRESS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|r| r == root)
+}
+
+/// `tab_id` is a Hive's queen and that Hive is taking a new goal: no follow-up may be added to her
+/// tab (`add_tab_follow_up`), since the record's save clears them with the old goal.
+pub fn queen_follow_up_refusal(data: &crate::state::AppData, tab_id: &str) -> bool {
+    let Some((ws, tab)) = super::find_hive_tab(data, tab_id) else { return false };
+    tab.hive_role.as_deref() == Some(super::ROLE_COORDINATOR)
+        && ws.hive.as_ref().and_then(|h| super::paths::hive_root(&h.id)).is_some_and(|root| in_progress(&root))
 }
 
 /// Held from the checks to the saved record; dropped on every way out.
@@ -615,27 +636,6 @@ impl Drop for InProgress {
             v.remove(i);
         }
     }
-}
-
-/// The queen tab's follow-ups (and watch scripts) gone, in Rust, which owns them
-/// (docs/follow-ups.md): a delivery takes its follow-up before it types, so one cleared here is
-/// never delivered. The window's mirror hears the empty list. Saved before the queen is stopped.
-fn clear_follow_ups<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, queen: &str) -> Result<(), String> {
-    let snapshot = {
-        let mut d = ctx.data.write();
-        let ws = super::tools::workspace_mut(&mut d, caller).map_err(|_| "This Hive is gone.".to_string())?;
-        let Some(tab) = ws.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()).find(|t| t.id == queen) else { return Ok(()) };
-        if tab.follow_ups.is_empty() {
-            return Ok(());
-        }
-        let n = tab.follow_ups.len();
-        tab.follow_ups.clear();
-        log::info!("hive {}: {n} follow-up(s) of the queen cleared for the new goal", caller.hive.id);
-        d.clone()
-    };
-    (ctx.save)(&snapshot).map_err(|e| format!("maiTerm couldn't save the queen's cleared follow-ups ({e}), so the Hive keeps its goal. Try again."))?;
-    ctx.window.follow_ups_changed(&caller.workspace_id, queen, &[]);
-    Ok(())
 }
 
 /// The retirement every current worker gets: abandoned with its task dropped, its branches kept.
@@ -658,8 +658,6 @@ fn retire_spec() -> RetireSpec {
 pub(crate) struct Done {
     pub hive: Hive,
     pub retired: usize,
-    /// The memory folder was set aside: the window's watcher must start on the new one.
-    pub memory_replaced: bool,
     /// The queen's relaunch went to the window and it answered.
     pub relaunched: bool,
 }
@@ -673,8 +671,9 @@ pub(crate) struct Done {
 /// 2. The old goal archived to `chapters/<n>/` (copies only; rewritten on a retry).
 /// 3. Every current worker retired. Stopping here leaves a Done or paused Hive with fewer (or no)
 ///    workers, its goal unchanged: valid, and the checks still pass.
-/// 4. The queen's follow-ups cleared, her agent stopped, her open cards failed. Stopping here: the
-///    same, with a Done or paused Hive whose queen isn't running, as a Done Hive always is.
+/// 4. The queen's agent stopped, her open cards failed. Stopping here: the same, with a Done or
+///    paused Hive whose queen isn't running, as a Done Hive always is. Her follow-ups stay until
+///    step 6 clears them in the record's own write; `in_progress` holds them off meanwhile.
 /// 5. The new brief files copied in, then what the old goal's queen was owed or had approved moved
 ///    into the chapter, the kickoff re-armed, the memory set aside if asked. A failure from here to
 ///    the saved record puts the memory back; a crash leaves it in the chapter, and the retry's
@@ -727,9 +726,8 @@ pub(crate) async fn new_goal<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, s
         retired += 1;
     }
 
-    // 4. Her follow-ups first: one due now would otherwise reach (or relaunch) the old session,
-    // and any left would be typed into the fresh one as the old goal's.
-    clear_follow_ups(ctx, caller, &queen)?;
+    // 4. Her follow-ups stay until the record is saved (cleared in the same write, `save_record`):
+    // meanwhile `in_progress` refuses a due one's relaunch and any new one.
     match ctx.window.front(&queen).await {
         Front::Job => {
             match ctx.window.stop_agent(&queen).await {
@@ -749,11 +747,9 @@ pub(crate) async fn new_goal<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, s
         log::info!("hive {}: {failed} of the queen's open cards failed: the Hive took a new goal", hive.id);
     }
 
-    // 5.
-    if !spec.keep_memory {
-        // No rebuild may write into the folder as it moves.
-        super::memory::unwatch(&hive.id);
-    }
+    // 5. No watch may follow the folder as it moves (a retry that keeps memory still puts back
+    // what a crashed attempt set aside); `hive_new_goal` watches the live one again on every exit.
+    super::memory::unwatch(&hive.id);
     // The new files are copied in first (nothing is removed yet), then what only the old goal
     // owned moves. Any failure from here to the saved record puts the memory back.
     let (p, dir, keep, goal, current, wanted) = (caller.paths.clone(), chapter_dir.clone(), spec.keep_memory, spec.goal.clone(), hive.brief_files.clone(), spec.brief_files.clone());
@@ -767,7 +763,7 @@ pub(crate) async fn new_goal<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, s
         Ok(names) => save_record(ctx, caller, |h| apply_new_goal(h, chapter, &spec, names)),
         Err(e) => Err(e),
     };
-    let change = match saved {
+    let (change, follow_ups_cleared) = match saved {
         Ok(c) => c,
         Err(e) => {
             let (p, dir) = (caller.paths.clone(), chapter_dir.clone());
@@ -792,6 +788,9 @@ pub(crate) async fn new_goal<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, s
         log::warn!("hive {}: after the new goal: {e}", hive.id);
     }
     ctx.window.hive_changed(&change.workspace_id, &change.hive);
+    if follow_ups_cleared {
+        ctx.window.follow_ups_changed(&change.workspace_id, &queen, &[]);
+    }
     if let Some((tasks, workstreams)) = &change.tasks {
         ctx.window.tasks_changed(&change.workspace_id, tasks, workstreams);
     }
@@ -811,7 +810,7 @@ pub(crate) async fn new_goal<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, s
             false
         }
     };
-    Ok(Done { hive: change.hive, retired, memory_replaced: !spec.keep_memory, relaunched })
+    Ok(Done { hive: change.hive, retired, relaunched })
 }
 
 // ── Asking the queen to land ──
@@ -910,14 +909,11 @@ pub async fn hive_new_goal_preview(window: tauri::Window, app: tauri::AppHandle,
 pub async fn hive_new_goal(window: tauri::Window, app: tauri::AppHandle, state: tauri::State<'_, Arc<AppState>>, workspace_id: String, spec: NewGoalSpec) -> Result<Hive, String> {
     let caller = super::land::caller_in(state.inner(), window.label(), &workspace_id)?;
     let ctx = super::tools::app_ctx(state.inner(), &app, &caller);
-    let sets_memory_aside = !spec.keep_memory;
     let res = new_goal(&ctx, &caller, spec).await;
-    // Setting memory aside unwatches it: watched again whatever happened, on the folder now live
-    // (the new seed, or the real one a failure put back).
-    if sets_memory_aside {
-        super::memory::watch(state.inner(), &app, &caller.hive.id, &caller.paths);
-        super::memory::emit_changed(&app, &caller.label, &caller.workspace_id);
-    }
+    // A New goal unwatches memory before any rename (set aside, or put back on a retry): watched
+    // again whatever happened, on the folder now live. A watch replaces any still there.
+    super::memory::watch(state.inner(), &app, &caller.hive.id, &caller.paths);
+    super::memory::emit_changed(&app, &caller.label, &caller.workspace_id);
     let done = res?;
     super::phone::bump();
     Ok(done.hive)
