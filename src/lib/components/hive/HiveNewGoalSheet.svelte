@@ -13,15 +13,19 @@
   import { toastStore } from '$lib/stores/toasts.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import { charCount, MAX_BRIEF, MAX_BRIEF_FILES, MAX_INSTRUCTIONS } from '$lib/hive/model';
-  import { newGoalProblem } from '$lib/hive/newGoal';
+  import { mergeBlocking, newGoalProblem } from '$lib/hive/newGoal';
+  import { untrack } from 'svelte';
   import HivePendingCommits from './HivePendingCommits.svelte';
 
   interface Props {
     workspaceId: string;
     name: string;
     onclose: () => void;
+    /** Changes whenever the Hive's board is refetched (a land, a worker stopping, Done): the
+     *  sheet re-reads what holds New goal then. */
+    refreshKey?: unknown;
   }
-  let { workspaceId, name, onclose }: Props = $props();
+  let { workspaceId, name, onclose, refreshKey }: Props = $props();
 
   let preview = $state<HiveNewGoalPreview | null>(null);
   let readError = $state<string | null>(null);
@@ -35,11 +39,13 @@
   let refusal = $state<string | null>(null);
   let goalEl = $state<HTMLInputElement | null>(null);
 
+  let readSeq = 0;
   $effect(() => {
     const id = workspaceId;
+    const mine = ++readSeq;
     hiveNewGoalPreview(id)
       .then((p) => {
-        if (id !== workspaceId) return;
+        if (id !== workspaceId || mine !== readSeq) return;
         preview = p;
         goal = p.goal;
         brief = p.brief;
@@ -52,6 +58,24 @@
         });
       })
       .catch((e) => { readError = String(e).replace(/^Error: /, ''); });
+  });
+
+  // Re-read on every board change, once the prefill is in: only what holds New goal is replaced,
+  // never the goal, brief, files or rules being edited (the prefill happens once).
+  let lastKey: unknown = undefined;
+  $effect(() => {
+    const key = refreshKey;
+    if (key === lastKey) return;
+    lastKey = key;
+    if (!untrack(() => preview) || submitting) return;
+    const id = workspaceId;
+    const mine = ++readSeq;
+    hiveNewGoalPreview(id)
+      .then((p) => {
+        if (id !== workspaceId || mine !== readSeq || !preview) return;
+        preview = mergeBlocking(preview, p);
+      })
+      .catch((e) => logError(`hive: new-goal preview of ${id.slice(0, 8)} not re-read: ${e}`));
   });
 
   // Before the preview the goal field is disabled: the keyboard waits on the dialog, so Escape works.

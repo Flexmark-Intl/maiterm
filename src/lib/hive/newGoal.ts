@@ -36,6 +36,20 @@ export function pendingKey(unlanded: HivePendingBranch[]): string {
   return unlanded.map((b) => `${b.folder}\u0000${b.branch}\u0000${b.ahead}`).join('|');
 }
 
+/** A re-read preview onto the sheet's: only what holds New goal (and what it would stop or keep)
+ *  is taken. The prefill fields stay the first read's, so a re-read never touches the human's edits. */
+export function mergeBlocking(prev: HiveNewGoalPreview, next: HiveNewGoalPreview): HiveNewGoalPreview {
+  return {
+    ...prev,
+    allowed: next.allowed,
+    reasons: next.reasons,
+    unlanded: next.unlanded,
+    live_workers: next.live_workers,
+    memory: next.memory,
+    next_chapter: next.next_chapter,
+  };
+}
+
 export interface NewGoalDraft {
   goal: string;
   brief: string;

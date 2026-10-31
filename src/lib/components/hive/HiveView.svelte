@@ -481,18 +481,6 @@
   let pendingCollapsedFor = $state<string | null>(null);
   const pendingSig = $derived(goalPreview ? pendingKey(goalPreview.unlanded) : '');
   const pendingCollapsed = $derived(boardMode === 'rail' || pendingCollapsedFor === pendingSig);
-  /** The layer covers the board's box only, measured within `.cols`. */
-  let layerBox = $state<{ l: number; t: number; w: number; h: number } | null>(null);
-  $effect(() => {
-    const el = boardEl;
-    if (!el || !pendingShown) return;
-    const measure = () => { layerBox = { l: el.offsetLeft, t: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight }; };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    if (colsEl) ro.observe(colsEl);
-    return () => ro.disconnect();
-  });
   /** A failed turn's notice (hive/turn_failure.rs), by tab: until a turn of that agent ends well. */
   const failureOf = (tabId: string | null | undefined) => (tabId ? board?.turn_failures?.[tabId] ?? null : null);
   const coordFailure = $derived(failureOf(coordId));
@@ -1055,7 +1043,7 @@
     </div>
   {/if}
   {#if newGoalOpen && hive}
-    <HiveNewGoalSheet {workspaceId} name={ws?.name ?? ''} onclose={() => (newGoalOpen = false)} />
+    <HiveNewGoalSheet {workspaceId} refreshKey={board} name={ws?.name ?? ''} onclose={() => (newGoalOpen = false)} />
   {/if}
   {#if settingsOpen && hive}
     <HiveSettingsModal
@@ -1162,14 +1150,15 @@
     {/if}
     <!-- A focus stop of its own for Cmd+Shift+[ ] (§4.6); Tab goes on into its cards. A click on
          its empty space closes the unpinned worker columns (§4.1): Escape and Cmd+W are its keys. -->
+    <!-- The wrap holds the board's place in the row (its width, the rail's), so the pending layer
+         sits over exactly the board wherever the row moves it (§11.5). -->
+    <div class="board-wrap" class:gone={offBoard} class:rail={boardMode === 'rail'} style={boardMode === 'rail' ? `width: ${railW}px` : undefined}>
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_click_events_have_key_events -->
     <section
       bind:this={boardEl}
       class="board"
-      class:gone={offBoard}
       class:rail={boardMode === 'rail'}
       class:focused={focusedKey === 'board' && boardMode === 'rail'}
-      style={boardMode === 'rail' ? `width: ${railW}px` : undefined}
       tabindex="-1"
       aria-label="Board"
       onfocusin={focusTo('board')}
@@ -1244,10 +1233,10 @@
         </div>
       {/if}
     </section>
-    {#if pendingShown && goalPreview && layerBox}
+    {#if pendingShown && goalPreview}
       <!-- New goal is held by these (§11.5): a layer over the workers' board, never over the queen.
            Collapsed, it's a banner at the board's foot; on a rail it's always that. -->
-      <div class="pending-layer" class:collapsed={pendingCollapsed} style="left: {layerBox.l}px; top: {layerBox.t}px; width: {layerBox.w}px; height: {layerBox.h}px">
+      <div class="pending-layer" class:collapsed={pendingCollapsed}>
         {#if pendingCollapsed}
           <div class="pending-banner" role="status">
             <span class="pb-dot" aria-hidden="true"></span>
@@ -1266,6 +1255,7 @@
         {/if}
       </div>
     {/if}
+    </div>
     {#if showMemory}
       <HiveMemoryView {workspaceId} />
     {/if}
@@ -1432,10 +1422,10 @@
   .criteria-panel ol { margin: 0; padding-left: 20px; }
   .criteria-panel li { overflow-wrap: anywhere; }
   .criteria-panel .dim { color: var(--fg-dim); }
-  .cols { position: relative; flex: 1; min-height: 0; display: flex; min-width: 0; overflow: hidden; }
+  .cols { flex: 1; min-height: 0; display: flex; min-width: 0; overflow: hidden; }
   /* New goal's pending commits (§11.5): a translucent layer over the board's box, the cards still
      showing through; collapsed, a banner at its foot that leaves the board to click. */
-  .pending-layer { position: absolute; z-index: 5; display: flex; align-items: flex-start; justify-content: center; padding: 28px 16px 16px; box-sizing: border-box; overflow-y: auto; background: color-mix(in srgb, var(--bg-dark) 72%, transparent); backdrop-filter: blur(2px); }
+  .pending-layer { position: absolute; inset: 0; z-index: 5; display: flex; align-items: flex-start; justify-content: center; padding: 28px 16px 16px; box-sizing: border-box; overflow-y: auto; background: color-mix(in srgb, var(--bg-dark) 72%, transparent); backdrop-filter: blur(2px); }
   .pending-layer.collapsed { align-items: flex-end; padding: 0 10px 10px; overflow: visible; background: none; backdrop-filter: none; pointer-events: none; }
   .pending-card { position: relative; width: 100%; max-width: 520px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--yellow) 60%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--yellow) 6%, var(--bg-medium)); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45); box-sizing: border-box; }
   .pc-close { position: absolute; top: 8px; right: 8px; }
@@ -1457,7 +1447,7 @@
   .coord.flash { box-shadow: inset 0 0 0 1px var(--accent); }
   .coord.focused { box-shadow: inset 0 2px 0 var(--accent); }
   .coord.dragging { user-select: none; }
-  .coord.gone, .wslot.gone, .board.gone { display: none; }
+  .coord.gone, .wslot.gone { display: none; }
   .coord-failed { margin: 0; padding: 6px 14px; border-bottom: 1px solid var(--bg-light); font-size: 11.5px; color: var(--yellow); overflow-wrap: anywhere; }
   /* §4.1: the coordinator collapsed to 44 px, with a dot when it has news. */
   .cols > :global(.tooltip-wrapper) { flex: none; display: flex; }
@@ -1469,12 +1459,14 @@
   .wslot { flex: 1 1 420px; min-width: 0; min-height: 0; display: flex; }
   .resizer { flex: none; width: 4px; cursor: col-resize; background: var(--bg-light); opacity: 0.5; }
   .resizer:hover, .resizer.dragging, .resizer:focus-visible { opacity: 1; background: var(--accent); outline: none; }
-  .board { flex: 1 1 260px; min-width: 260px; min-height: 0; overflow-y: auto; display: flex; }
+  .board-wrap { position: relative; flex: 1 1 260px; min-width: 260px; min-height: 0; display: flex; }
+  .board-wrap.rail { flex: none; min-width: 200px; max-width: 240px; }
+  .board-wrap.gone { display: none; }
+  .board { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; display: flex; }
   /* Waves sit side by side and wrap under each other when the board is narrow: the main area
      never scrolls sideways (§4.1). */
   .waves { position: relative; flex: 1; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 16px 24px; padding: 14px 16px; min-width: 0; }
   .wave { position: relative; z-index: 1; flex: 1 1 220px; max-width: 340px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
-  .board.rail { flex: none; min-width: 200px; max-width: 240px; }
   .board:focus { outline: none; }
   .board.focused { box-shadow: inset 0 2px 0 var(--accent); }
   .rail-list { flex: 1; display: flex; flex-direction: column; gap: 6px; padding: 10px; min-width: 0; }

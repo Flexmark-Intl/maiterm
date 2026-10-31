@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chapterLine, goalNumberLabel, newGoalOffered, newGoalProblem, pendingHeadline, pendingKey, pendingRow, showPendingLayer } from './newGoal';
+import { chapterLine, goalNumberLabel, mergeBlocking, newGoalOffered, newGoalProblem, pendingHeadline, pendingKey, pendingRow, showPendingLayer } from './newGoal';
 import type { HiveChapter, HiveNewGoalPreview, HivePendingBranch } from '$lib/tauri/types';
 
 const branch = (over: Partial<HivePendingBranch> = {}): HivePendingBranch => ({
@@ -52,6 +52,15 @@ describe('new goal', () => {
     expect(newGoalProblem(preview(), { ...draft, goal: '  ' })).toBe('Write the new goal.');
     expect(newGoalProblem(preview(), { ...draft, brief: 'x'.repeat(32_001) })).toMatch(/brief/);
     expect(newGoalProblem(preview(), draft)).toBeNull();
+  });
+
+  it('takes only the blocking fields from a re-read', () => {
+    const first = preview({ unlanded: [branch()], goal: 'Old', brief: 'b', brief_files: ['/a'], instructions: 'r' });
+    const next = preview({ unlanded: [], live_workers: ['W1'], next_chapter: 2, memory: { path: '/m', files: 3 }, goal: 'Other', brief: 'x', brief_files: [], instructions: '' });
+    const m = mergeBlocking(first, next);
+    expect(m).toMatchObject({ unlanded: [], live_workers: ['W1'], next_chapter: 2, memory: { path: '/m', files: 3 } });
+    expect(m).toMatchObject({ goal: 'Old', brief: 'b', brief_files: ['/a'], instructions: 'r' });
+    expect(newGoalProblem(m, draft)).toBeNull();
   });
 
   it('numbers the goal only once there are chapters', () => {
