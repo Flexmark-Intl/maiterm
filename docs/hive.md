@@ -202,6 +202,7 @@ struct Hive {
     criteria: Vec<String>,   // completion criteria, current list (§11.4)
     status: String,          // "active" | "paused" | "done"
     done_at: Option<i64>,    // set by hiveFinish (§11.4)
+    chapters: Vec<HiveChapter>, // earlier goals, archived by New goal (§11.5); len = current chapter
 }
 ```
 
@@ -2568,6 +2569,67 @@ and exits the coordinator. A Done Hive has no running agents, no watchers and co
 coordinator through the launch builder (§11.1), resuming its session, and delivers the message
 through `deliver_to_agent` once its first prompt is up. The Hive's status goes back to `active`.
 
+### 11.5 New goal (Darryl's direction, 2026-10-31)
+
+A Done or paused Hive can take a **new goal** instead of the human making a new Hive: the same
+folders, settings, models, cap, checkpoints, budget, gallery and logs, a fresh queen
+(`hive/new_goal.rs`, `hive_new_goal_preview` / `hive_new_goal` / `hive_ask_queen_to_land`).
+
+- **What goes.** Every worker of the current goal is retired the way `hiveRetireWorker` retires one
+  (`retire::retire_worker`: agent stopped, tab dropped, clean worktrees removed, task dropped,
+  branches kept). The queen's agent is stopped and her open cards fail. Her owed notices
+  (`owed.json`) and approved plan (`plan.json`) move into the chapter; the kickoff is re-armed.
+- **What is kept.** Everything else, and **never** the land log or the decision log: undo and
+  earned autonomy read them whole. Memory is kept by default, its seeded `- Goal:` line set to the
+  new goal (a line the human changed is left alone); `keep_memory: false` moves the folder and
+  maiTerm's record of it into the chapter and seeds an empty one.
+- **The chapter.** The old goal is archived under `chapters/<N>/`: `chapter.json` (goal, brief,
+  rules, criteria, every worker with its branches and last report, the goal's Done report), copies
+  of its brief files and `brief.md`, and what moved. `Hive.chapters` gains a `HiveChapter` (goal,
+  start, end, Done time, the report's first lines, what it spent): a plain struct, `serde(default)`,
+  skipped when empty. The queen's `brief.md`, rewritten every launch, lists the chapters under
+  **Earlier goals**; no worker's brief does.
+- **The record.** The new goal, brief and rules; brief files a path already in `brief/` keeps,
+  others copied in as Create copies, the unlisted removed (the chapter has them); `active`;
+  `done_at`, `done_stale` and `paused_by` cleared, the pause's question to the human closed;
+  criteria cleared and `criteria_confirm: needed`, so the human confirms criteria again before the
+  first worker (§11.4). The id never changes: the window applies the record by it.
+- **A fresh queen in the same tab** (its id is her phone identity). The relaunch is the wake's
+  (`hive.relaunch` through the builder, §11.1). Her kickoff says it is goal N of this Hive, that
+  the earlier goals are in her brief, and that criteria are proposed and confirmed again.
+- **Refused** while the Hive is active (pause it or wait for Done), suspended, has no queen tab, a
+  land not held or an undo is under way, or **any current worker has commits not on its landing
+  target**, except a worker the current goal's last Done report abandoned. The preview lists those
+  branches; the sheet shows them over itself with **Ask the queen to land**, which sends her
+  maiTerm's message naming each one (titles escaped). A Done Hive is woken for it like any wake
+  (`finish::wake_with_notice`: owed as a notice, never as the human's words) and goes `active`, so
+  she can `hiveLand` (refused while done) and then finish again; a paused Hive's queen gets it
+  past the Pause (the human's own click), relaunched first if her agent isn't running.
+
+**A goal is a number, never a moved file.** `Hive.chapters.len()` is the current chapter;
+`WorkerRecord.chapter` is set at spawn and `SessionEntry.chapter` at each coordinator session
+start. That handles what moving files would break:
+
+- `finish::unlanded`/`check` and the board counted every worker ever, and branches are never
+  deleted, so one new goal would have left the old goal's branches blocking every later Done and
+  New goal. They read `worker::current_workers` now: the current chapter only. Task folders stay
+  in `tasks/`, so badges are still never reused (§4.6) and retired chats stay readable.
+- A spawn refused a slug whose branch or scratch already existed. A clash with an **earlier**
+  goal's worker now takes `-2`, `-3`… (`tools::free_slug`: free of every worker, `wt.noindex/`
+  folder and branch in every repo); a clash within the current goal is refused as before.
+- `prepare_coordinator` resumed the last session. It resumes only the last session **of the
+  current chapter** (`launch::last_session_in`), so the first launch after a New goal is fresh,
+  and so is any later one (a restart's) until that fresh session has started.
+- What the human's Pause held for the old goal is dropped, not typed into the fresh queen
+  (`deliver::drop_pause_holds`).
+
+**The order** keeps every crash recoverable by trying again: checks under the Hive's turn (the
+wake's lock), archive (copies only), retire each worker, stop the queen, move the owed/plan/memory
+and settle the brief files, save the record, then drop the Pause's holds and relaunch. Until the
+record is saved the Hive is still Done or paused on its old goal, with fewer workers, which is a
+state it already knows; once it is saved, every reader sees the new goal, and the chapter tag
+starts the queen fresh whoever launches her.
+
 ## 12. Not in v1
 
 - **SSH Hives and container workers** (workers on a remote host, or each in its own Apple
@@ -4481,3 +4543,14 @@ several releases a day).
    runs it under `sandbox-exec`; `real_pnpm_install_probe`, ignored, installed a real package
    through the proxy). Workers' briefs say the setup ran and how to reinstall; reviewers', whose
    copies get no setup, say to install through `hiveRun` before building.
+10. New goal (§11.5). **Backend built** (2026-10-31): `hive/new_goal.rs` (`hive_new_goal_preview`,
+   `hive_new_goal`, `hive_ask_queen_to_land`), `Hive.chapters` and `HiveChapter`, `WorkerRecord.chapter` and
+   `SessionEntry.chapter`, `worker::current_workers` under `finish::check` and the board, `tools::free_slug`,
+   `launch::last_session_in` in `prepare_coordinator`, the new-goal kickoff, Earlier goals in `brief.md`,
+   `finish::wake_with_notice`, `deliver::drop_pause_holds`, and the delete sheet keeping a chapter's set-aside
+   memory unless Memory is ticked. **Decided here:** task folders stay in `tasks/` (badges, retired chats) and the
+   chapter is a number on each record, never a move; the old goal's archive is copies plus what only it owned
+   (`owed.json`, `plan.json`, set-aside memory); retire runs before the record is saved, so a failure leaves a
+   Done or paused Hive on its old goal; Ask the queen to land wakes a Done Hive to `active` (it can't land while
+   done) and reaches a paused one past the Pause. **Not yet:** the old goal's open blockers on the queen's own rows
+   stay on the board (the criteria row is replaced by her next `hiveSetCriteria`); not tried live.

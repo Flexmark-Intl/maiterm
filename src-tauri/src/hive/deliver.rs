@@ -142,12 +142,32 @@ async fn wait_for_resume(app: &AppState, hive_id: &str, tab: &str) {
     }
 }
 
+/// Per Hive, how many times what its Pause held was dropped (a New goal, §11.5): a delivery held
+/// under an older count is about the goal that was replaced, and never reaches the fresh queen.
+static PAUSE_DROPS: LazyLock<Mutex<HashMap<String, u64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn pause_drops(hive_id: &str) -> u64 {
+    PAUSE_DROPS.lock().unwrap_or_else(|e| e.into_inner()).get(hive_id).copied().unwrap_or(0)
+}
+
+/// What `hive_id`'s Pause holds is dropped, not delivered (a New goal replaced the goal it was
+/// about): each held delivery wakes, finds the count moved and logs instead of typing.
+pub(crate) fn drop_pause_holds(hive_id: &str) {
+    *PAUSE_DROPS.lock().unwrap_or_else(|e| e.into_inner()).entry(hive_id.to_string()).or_insert(0) += 1;
+    end_pause_hold(hive_id);
+}
+
 pub(crate) async fn deliver(app: &Arc<AppState>, handle: &AppHandle, tab: &str, text: &str, what: &'static str) -> Sent {
     if let Some(hive_id) = paused_by_human(app, tab) {
         let (app, handle, tab, text) = (app.clone(), handle.clone(), tab.to_string(), text.to_string());
         log::info!("hive {hive_id}: {what} for tab {tab} held while the human has the Hive paused");
+        let drops = pause_drops(&hive_id);
         tauri::async_runtime::spawn(async move {
             wait_for_resume(&app, &hive_id, &tab).await;
+            if pause_drops(&hive_id) != drops {
+                log::info!("hive {hive_id}: {what} for tab {tab}, held for the human's pause, dropped: the Hive took a new goal");
+                return;
+            }
             // Through every other hold: a land may have started meanwhile. One at a time, after
             // the resume notice.
             let sent = in_release_turn(&hive_id, RELEASE_GAP, deliver_through_pause(&app, &handle, &tab, &text, what)).await;

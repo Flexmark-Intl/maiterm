@@ -95,8 +95,17 @@ pub struct WorkerRecord {
     /// Gallery asset ids the coordinator gave it to start from (§7.2): their paths go in its
     /// brief at every launch.
     pub inputs: Vec<String>,
+    /// The goal it was spawned under: `Hive.chapter()` then (§11.5). Only the current goal's
+    /// workers count toward unlanded work, Done and the board; an earlier goal's are retired,
+    /// their branches kept. 0 for every worker of a Hive's first goal.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub chapter: u32,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// A builder's review record (§7.7): three failed attempts escalate, and only `hiveResolve`
@@ -224,12 +233,18 @@ impl Default for WorkerRecord {
             review: None,
             land: None,
             inputs: Vec::new(),
+            chapter: 0,
             extra: Map::new(),
         }
     }
 }
 
 impl WorkerRecord {
+    /// Spawned under the Hive's current goal (§11.5).
+    pub fn in_chapter(&self, hive: &super::record::Hive) -> bool {
+        self.chapter == hive.chapter()
+    }
+
     pub fn is_live(&self) -> bool {
         LIVE_PHASES.contains(&self.phase.as_str())
     }
@@ -392,6 +407,12 @@ pub fn list_workers(paths: &HivePaths) -> Vec<WorkerRecord> {
     }
     out.sort_by(|a, b| a.badge.cmp(&b.badge).then_with(|| a.created_at.cmp(&b.created_at)));
     out
+}
+
+/// The workers of the Hive's current goal (§11.5), by badge: an earlier goal's are retired and
+/// archived, and their kept branches must never block or count toward this one.
+pub fn current_workers(hive: &super::record::Hive, paths: &HivePaths) -> Vec<WorkerRecord> {
+    list_workers(paths).into_iter().filter(|w| w.in_chapter(hive)).collect()
 }
 
 /// The worker a task row is: the task it was given, or a sub-task it made on its own tab (workers

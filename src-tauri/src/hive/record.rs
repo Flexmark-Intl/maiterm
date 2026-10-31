@@ -76,6 +76,12 @@ pub struct Hive {
     /// never renames a branch out from under its worktrees.
     pub slug: String,
     pub created_at: String,
+    /// Earlier goals, oldest first, each archived by New goal under `chapters/<n>/` (n = index
+    /// + 1, §11.5). Its length is the current goal's chapter number: workers spawned under the
+    /// current goal carry it (`WorkerRecord.chapter`), and only they count toward unlanded work,
+    /// Done and the board.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub chapters: Vec<super::new_goal::HiveChapter>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -106,12 +112,23 @@ impl Default for Hive {
             paused_by: String::new(),
             slug: String::new(),
             created_at: String::new(),
+            chapters: Vec::new(),
             extra: Map::new(),
         }
     }
 }
 
 impl Hive {
+    /// The current goal's chapter number: 0 for a Hive's first goal, one more per New goal.
+    pub fn chapter(&self) -> u32 {
+        self.chapters.len() as u32
+    }
+
+    /// When the current goal started: the last New goal's time, or the Hive's creation.
+    pub fn chapter_started_at(&self) -> &str {
+        self.chapters.last().map_or(self.created_at.as_str(), |c| c.ended_at.as_str())
+    }
+
     pub fn primary(&self) -> Option<&HiveFolder> {
         self.folders.iter().find(|f| f.primary)
     }

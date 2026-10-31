@@ -53,6 +53,11 @@ pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     fn workers_changed(&self, workspace_id: &str);
     /// Types `text` into `tab`'s agent through the delivery gate (`deliver::deliver`).
     fn deliver(&self, tab: &str, text: String, what: &'static str) -> impl Future<Output = Sent> + Send;
+    /// `deliver` past the human's Pause (`deliver::deliver_through_pause`): only for what the
+    /// human's own click sends while they have the Hive paused (Ask the queen to land, §11.5).
+    fn deliver_through_pause(&self, tab: &str, text: String, what: &'static str) -> impl Future<Output = Sent> + Send {
+        self.deliver(tab, text, what)
+    }
     /// What holds `tab`'s terminal now.
     fn front(&self, tab: &str) -> impl Future<Output = Front> + Send;
     /// SIGTERM to `tab`'s agent, and only while it is the terminal's foreground job: never the
@@ -188,6 +193,11 @@ impl HiveWindow for AppWindow {
     fn deliver(&self, tab: &str, text: String, what: &'static str) -> impl Future<Output = Sent> + Send {
         let (this, tab) = (self.clone(), tab.to_string());
         async move { super::deliver::deliver(&this.app, &this.handle, &tab, &text, what).await }
+    }
+
+    fn deliver_through_pause(&self, tab: &str, text: String, what: &'static str) -> impl Future<Output = Sent> + Send {
+        let (this, tab) = (self.clone(), tab.to_string());
+        async move { super::deliver::deliver_through_pause(&this.app, &this.handle, &tab, &text, what).await }
     }
 
     fn front(&self, tab: &str) -> impl Future<Output = Front> + Send {

@@ -365,12 +365,45 @@ fn capitalised(s: &str) -> String {
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
+/// Report summaries past this are cut in the brief; the chapter folder has them whole.
+const EARLIER_SUMMARY_CHARS: usize = 600;
+
+/// `brief.md`'s Earlier goals (§11.5): the coordinator's alone, never a worker's. Each goal this
+/// Hive finished or set aside before the current one, with the start of its Done report and where
+/// its records are. Empty for a Hive on its first goal.
+pub fn earlier_goals_md(hive: &Hive, paths: &HivePaths) -> String {
+    if hive.chapters.is_empty() {
+        return String::new();
+    }
+    let mut b = String::from(
+        "## Earlier goals\n\nThis Hive worked on these before your human gave it the goal above. They are history: their \
+         workers are retired (branches kept) and their criteria no longer apply. What they built is in the folders, and \
+         shared memory and the gallery carry over.\n\n",
+    );
+    for (i, c) in hive.chapters.iter().enumerate() {
+        let n = i + 1;
+        let how = if c.done_at.is_some() { "done" } else { "set aside before Done" };
+        b.push_str(&format!("{n}. {} ({how}; {} to {}). Records: `{}`\n", one_line(&c.goal, 300), c.started_at, c.ended_at, paths.chapter(n as u32).display()));
+        let summary = c.report_summary.trim();
+        if !summary.is_empty() {
+            let cut: String = summary.chars().take(EARLIER_SUMMARY_CHARS).collect();
+            let more = if summary.chars().count() > EARLIER_SUMMARY_CHARS { "…" } else { "" };
+            for line in format!("{cut}{more}").lines().filter(|l| !l.trim().is_empty()) {
+                b.push_str(&format!("   > {}\n", line.trim()));
+            }
+        }
+    }
+    b.push('\n');
+    b
+}
+
 /// `brief.md`: the rest of the coordinator's brief, rewritten on every launch from the current
 /// Hive (§7.1) and its precedents' counts. The Instructions go in whole: the sheet refuses one
 /// that's too long rather than cutting it.
 pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> String {
     let mut b = String::from("# Your Hive\n\nmaiTerm writes this file on every launch; edits to it don't last.\n\n");
     b.push_str(&format!("## Goal\n\n{}\n\n", hive.goal.trim()));
+    b.push_str(&earlier_goals_md(hive, paths));
     // Yours alone: workers learn what it says through you (§3.5). In whole, like the rules.
     if !hive.brief.trim().is_empty() || !hive.brief_files.is_empty() {
         b.push_str("## Project brief from your human\n\nThis is yours alone: no worker is given it.\n\n");
@@ -378,7 +411,7 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
             b.push_str(&format!("{}\n\n", hive.brief.trim()));
         }
         if !hive.brief_files.is_empty() {
-            b.push_str("Files your human attached (copies made when the Hive was created). Read each before you plan:\n\n");
+            b.push_str("Files your human attached (copies maiTerm made when they gave this goal). Read each before you plan:\n\n");
             for f in &hive.brief_files {
                 b.push_str(&format!("- `{}`\n", paths.coordinator_home().join(super::create::BRIEF_FILES_DIR).join(f).display()));
             }

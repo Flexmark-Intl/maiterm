@@ -225,6 +225,15 @@ impl HivePaths {
 
     /// The coordinator's working directory: never the root, whose Grep would walk every
     /// worktree and the gallery (§6.3).
+    /// Earlier goals, one folder each, `chapters/<n>/` from 1 (§11.5): what New goal archived.
+    pub fn chapters(&self) -> PathBuf {
+        self.root.join("chapters")
+    }
+
+    pub fn chapter(&self, n: u32) -> PathBuf {
+        self.chapters().join(n.to_string())
+    }
+
     pub fn coordinator_home(&self) -> PathBuf {
         self.root.join("coordinator").join("home")
     }

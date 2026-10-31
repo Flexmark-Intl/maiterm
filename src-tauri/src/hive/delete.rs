@@ -343,6 +343,14 @@ pub(crate) fn going(paths: &HivePaths) -> Vec<String> {
     if fs::symlink_metadata(paths.coordinator_home()).is_ok() {
         out.push(format!("The queen's home and brief ({})", paths.root.join("coordinator").display()));
     }
+    let chapters = entries_in(&paths.chapters());
+    if chapters > 0 {
+        out.push(format!(
+            "The records of {chapters} earlier goal{} ({}); a goal's set-aside memory goes with Memory",
+            if chapters == 1 { "" } else { "s" },
+            paths.chapters().display()
+        ));
+    }
     out
 }
 
@@ -443,6 +451,16 @@ pub(crate) fn remove_disk(hive: &Hive, paths: &HivePaths, workers: &[WorkerRecor
     }
     if !delete_memory && fs::symlink_metadata(paths.memory()).is_ok() {
         keep.push(paths.memory());
+    }
+    // An earlier goal's memory a New goal set aside (§11.5) is memory too.
+    if !delete_memory {
+        for e in fs::read_dir(paths.chapters()).into_iter().flatten().flatten() {
+            let m = e.path().join("memory");
+            if fs::symlink_metadata(&m).is_ok_and(|m| m.is_dir()) {
+                out.kept.push(format!("an earlier goal's memory: {}", m.display()));
+                keep.push(m);
+            }
+        }
     }
     for e in remove_except(&paths.root, &keep) {
         out.kept.push(e);

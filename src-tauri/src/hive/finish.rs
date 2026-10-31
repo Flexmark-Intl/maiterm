@@ -16,7 +16,7 @@
 
 mod wake;
 pub use wake::{wake_text, WakeOutcome, BY_DESKTOP, BY_PHONE, NOT_DONE};
-pub(crate) use wake::{done_coordinator, route_send, wake, Route};
+pub(crate) use wake::{done_coordinator, route_send, wake, wake_with_notice, Route, Waking, TURN_WAIT};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -215,7 +215,7 @@ pub(crate) fn write_status<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, fro
 }
 
 /// `write_status` without the announcement, for a change that may yet be taken back.
-fn save_status<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, from: &[&str], to: Option<&str>, edit: impl FnOnce(&mut Hive)) -> Result<StatusChange, String> {
+pub(crate) fn save_status<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, from: &[&str], to: Option<&str>, edit: impl FnOnce(&mut Hive)) -> Result<StatusChange, String> {
     let id = caller.hive.id.as_str();
     let (prev, change, snapshot) = {
         let mut d = ctx.data.write();
@@ -738,7 +738,8 @@ pub(crate) fn check(s: &Standing, paths: &HivePaths, args: &Value) -> Result<(Fi
         return Err("This Hive has no completion criteria: set them with hiveSetCriteria first, as your human agrees.".to_string());
     }
     let a = parse_finish(args)?;
-    let workers = worker::list_workers(paths);
+    // The current goal's only (§11.5): an earlier goal's workers are retired, their branches kept.
+    let workers = worker::current_workers(hive, paths);
     let busy: Vec<String> = workers.iter().filter(|w| w.is_live() || w.phase == worker::PHASE_WAITING).map(|w| format!("{} ({})", worker_label(w), w.phase)).collect();
     if !busy.is_empty() {
         return Err(format!(

@@ -78,6 +78,7 @@ pub mod land;
 pub mod launch;
 pub mod layout;
 pub mod memory;
+pub mod new_goal;
 pub mod owed;
 pub mod paths;
 pub mod phone;
@@ -216,6 +217,7 @@ pub fn session_started(
         session_id: session_id.to_string(),
         transcript_path,
         started_at: crate::commands::workspace::iso_now(),
+        chapter: hive.chapter(),
     };
     if let Err(e) = launch::append_session(&task, entry) {
         log::warn!("hive {}: session {session_id} not recorded: {e}", hive.id);
@@ -238,6 +240,21 @@ pub fn priming_rules(hive: &Hive, role: &str, paths: &paths::HivePaths, tab_id: 
 
 /// The first thing the coordinator is told, once: maiTerm's words, never a human's.
 pub fn kickoff_text(hive: &Hive, paths: &paths::HivePaths) -> String {
+    // After a New goal (§11.5): the same Hive, a fresh session, a goal that needs its own criteria.
+    if !hive.chapters.is_empty() {
+        return format!(
+            "[maiTerm] Your human has given this Hive a new goal: goal {} of this Hive. You are its coordinator, in a fresh \
+             session. Read {} first: it has the new goal, your human's project brief, the folders and their rules, and \
+             under Earlier goals what this Hive did before (their records are in {}). The earlier goals' workers are \
+             retired and their branches kept; nothing of theirs is yours to land. Don't start workers on the goal alone: \
+             get what the brief points you to, ask your human for anything still missing, then set completion criteria for \
+             this goal with hiveSetCriteria and have your human confirm them before the first worker. The goal: {}",
+            hive.chapters.len() + 1,
+            paths.coordinator_brief().display(),
+            paths.chapters().display(),
+            hive.goal.trim()
+        );
+    }
     format!(
         "[maiTerm] This Hive has just been created, and you are its coordinator. Read {} first: it has your human's \
          project brief, the folders and their rules, and says how to start (Starting work). Don't start workers on the \

@@ -92,6 +92,14 @@ pub struct SessionEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
     pub started_at: String,
+    /// The Hive's goal when it started (`Hive.chapter()`, §11.5): the coordinator resumes only a
+    /// session of the current goal, so a New goal starts it fresh in the same tab.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub chapter: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn s(p: &Path) -> String {
@@ -509,6 +517,13 @@ pub fn last_session(task_dir: &Path) -> Option<String> {
     read_sessions(task_dir).pop().map(|e| e.session_id).filter(|s| !s.is_empty())
 }
 
+/// The last session started under goal `chapter` (§11.5): None after a New goal, until the fresh
+/// session it launches has started. Read from the Hive record's chapter, so a crash anywhere in
+/// a New goal never resumes the old goal's session under the new goal (or the reverse).
+pub fn last_session_in(task_dir: &Path, chapter: u32) -> Option<String> {
+    read_sessions(task_dir).into_iter().rev().find(|e| e.chapter == chapter).map(|e| e.session_id).filter(|s| !s.is_empty())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SessionAppend {
     pub added: bool,
@@ -924,9 +939,10 @@ fn prepare_coordinator(hive: &Hive, paths: &HivePaths, prefs: &crate::state::Pre
 
     let hooks = super::settings::HookEnv::current()?;
     write_launch_files(hive, paths, &record, &hooks)?;
-    let resume = last_session(&task);
+    // Only a session of the current goal: a New goal starts a fresh one in the same tab (§11.5).
+    let resume = last_session_in(&task, hive.chapter());
     let args = hive_launch_args(&record, resume.as_deref());
-    log::info!("hive {}: launching the coordinator ({})", hive.id, if resume.is_some() { "resume" } else { "first launch" });
+    log::info!("hive {}: launching the coordinator ({})", hive.id, if resume.is_some() { "resume" } else { "first launch of this goal" });
     Ok(launch_text(prefs, root.as_deref(), "", &record, &args))
 }
 
@@ -1255,7 +1271,7 @@ pub(crate) mod tests {
     #[test]
     fn sessions_are_listed_once_each_and_the_last_is_resumed() {
         let dir = scratch("sessions");
-        let e = |id: &str| SessionEntry { session_id: id.into(), transcript_path: None, started_at: "t".into() };
+        let e = |id: &str| SessionEntry { session_id: id.into(), transcript_path: None, started_at: "t".into(), chapter: 0 };
         assert_eq!(last_session(&dir), None);
         assert_eq!(append_session(&dir, e("a")).unwrap(), SessionAppend { added: true, first: true });
         assert_eq!(append_session(&dir, e("a")).unwrap(), SessionAppend { added: false, first: false }, "a resume reports the same id");

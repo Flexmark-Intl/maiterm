@@ -124,13 +124,19 @@ fn check_text(text: &str) -> Result<String, String> {
 static WAKING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Longer than anything that holds it: a wake's relaunch request, a delivery, an exit's grace.
-const TURN_WAIT: Duration = Duration::from_secs(30);
+pub(crate) const TURN_WAIT: Duration = Duration::from_secs(30);
 const TURN_POLL: Duration = Duration::from_millis(50);
 
-pub(super) struct Waking(String);
+/// The Hive's turn: a wake, the coordinator's exit after Done, and a New goal (§11.5) each hold it.
+pub(crate) struct Waking(String);
 
 impl Waking {
-    pub(super) fn take(key: &str) -> Option<Self> {
+    /// The turn key of a Hive: its folder (a test's scratch Hives share ids).
+    pub(crate) fn key(caller: &Caller) -> String {
+        caller.paths.root.to_string_lossy().to_string()
+    }
+
+    pub(crate) fn take(key: &str) -> Option<Self> {
         let mut w = WAKING.lock().unwrap_or_else(|e| e.into_inner());
         if w.iter().any(|k| k == key) {
             return None;
@@ -139,7 +145,7 @@ impl Waking {
         Some(Self(key.to_string()))
     }
 
-    async fn wait(key: &str, within: Duration) -> Option<Self> {
+    pub(crate) async fn wait(key: &str, within: Duration) -> Option<Self> {
         let start = Instant::now();
         loop {
             if let Some(w) = Self::take(key) {
@@ -247,6 +253,67 @@ pub(crate) async fn wake<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text:
             if roll_back(ctx, caller, &before, by, &e).await {
                 restore_wake(caller, prev).await;
             }
+            Err(format!("This Hive stays done: its queen couldn't be relaunched. {e}"))
+        }
+    }
+}
+
+/// Wakes the caller's Done Hive for maiTerm's own `text` (the human's click on a button that asks
+/// the Queen for something, §11.5), never as the human's words: owed as a notice, which its next
+/// session start types after its digest and before any wake message. The same turn, status flip,
+/// relaunch and rollback as `wake`. Err(`NOT_DONE`) when the Hive isn't done.
+pub(crate) async fn wake_with_notice<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, what: &'static str, text: String) -> Result<WakeOutcome, String> {
+    let key = Waking::key(caller);
+    let _held = Waking::wait(&key, TURN_WAIT).await.ok_or("This Hive's queen is being woken or ended right now: try again in a moment.")?;
+    let before = current_hive(ctx, caller)?;
+    if before.status != STATUS_DONE {
+        return Err(NOT_DONE.to_string());
+    }
+    let tab = coordinator_tab(ctx.data, caller).ok_or("This Hive has no queen tab to wake.")?;
+    match ctx.window.front(&tab).await {
+        Front::Job if ENDING.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) => {
+            return Err("This Hive's queen is still being ended: try again in a moment.".to_string())
+        }
+        Front::Job => {
+            // Still up inside `exit_coordinator`'s wait: active keeps it, and it hears this now.
+            let change = save_status(ctx, caller, &[STATUS_DONE], Some(STATUS_ACTIVE), |h| h.done_at = None)?;
+            return match ctx.window.deliver(&tab, text, what).await {
+                Sent::Delivered | Sent::Held(_) => {
+                    ctx.window.hive_changed(&change.workspace_id, &change.hive);
+                    log_line(caller, KIND_WAKE, BY_DESKTOP, None).await;
+                    Ok(WakeOutcome::Delivered)
+                }
+                Sent::Refused(why) => {
+                    roll_back(ctx, caller, &before, BY_DESKTOP, &why).await;
+                    Err(format!("The queen didn't take maiTerm's message ({why}), so this Hive stays done. Try again in a moment."))
+                }
+            };
+        }
+        Front::Unknown => return Err("maiTerm can't tell what holds the queen's terminal, so the Hive wasn't woken. Try again in a moment.".to_string()),
+        Front::Shell | Front::NoTerminal => ENDING.lock().unwrap_or_else(|e| e.into_inner()).retain(|k| k != &key),
+    }
+    // Owed before the flip, so a restart between them still delivers it once the Hive runs. A
+    // failed wake leaves it owed: it goes out whenever the queen next starts.
+    let paths = caller.paths.clone();
+    blocking(move || owed::owe_notice(&paths, what, text)).await?;
+    let change = save_status(ctx, caller, &[STATUS_DONE], Some(STATUS_ACTIVE), |h| h.done_at = None)?;
+    log_line(caller, KIND_WAKE, BY_DESKTOP, None).await;
+    let outcome = ctx.window.request(rpc::VERB_RELAUNCH, json!({ "workspace_id": caller.workspace_id, "tab_id": tab })).await;
+    let unanswered = matches!(outcome, Outcome::Timeout | Outcome::Disconnected);
+    match rpc::applied(outcome) {
+        Ok(_) => {
+            ctx.window.hive_changed(&change.workspace_id, &change.hive);
+            log::info!("hive {}: woken for {what}; the coordinator is relaunching", caller.hive.id);
+            Ok(WakeOutcome::Relaunching)
+        }
+        Err(e) if unanswered => {
+            ctx.window.hive_changed(&change.workspace_id, &change.hive);
+            log::warn!("hive {}: woken for {what}, the coordinator's relaunch unconfirmed: {e}", caller.hive.id);
+            Ok(WakeOutcome::Unconfirmed)
+        }
+        Err(e) => {
+            log::warn!("hive {}: wake for {what} failed, the coordinator wasn't relaunched: {e}", caller.hive.id);
+            roll_back(ctx, caller, &before, BY_DESKTOP, &e).await;
             Err(format!("This Hive stays done: its queen couldn't be relaunched. {e}"))
         }
     }

@@ -616,7 +616,9 @@ pub(crate) fn validate(hive: &Hive, workers: &[WorkerRecord], a: SpawnArgs) -> R
         return Err(format!("The title is too long: keep it under {MAX_TITLE} characters (it names the branch)."));
     }
     let slug = worker::worker_slug(&title)?;
-    if let Some(w) = workers.iter().find(|w| w.slug == slug) {
+    // Only this goal's workers refuse a name: an earlier goal's kept branch or scratch makes
+    // `register` pick `-2`, `-3`… instead (§11.5).
+    if let Some(w) = workers.iter().find(|w| w.slug == slug && w.in_chapter(hive)) {
         return Err(format!(
             "Worker #{} is already called \"{slug}\" ({}), and the name is its branch's. Give this one another title.",
             w.badge, w.phase
@@ -706,11 +708,36 @@ pub(crate) fn worker_label(w: &WorkerRecord) -> String {
     format!("#{} {}", w.badge, w.slug)
 }
 
+/// Past this many tries a name is refused as before: something else holds every suffix.
+const MAX_SLUG_SUFFIX: u32 = 99;
+
+/// The slug a new worker takes (§11.5). Unchanged unless an earlier goal's worker holds it: its
+/// branches are always kept and its scratch may be, so the new one is `<slug>-2`, `-3`…, the
+/// first that no worker, folder under `wt.noindex/` or branch in any of the Hive's repos holds.
+/// A clash with this goal's own worker was refused by `validate`; any other is refused later as
+/// before. Blocks on git.
+pub(crate) fn free_slug(hive: &Hive, paths: &HivePaths, workers: &[WorkerRecord], slug: &str) -> Result<String, String> {
+    if !workers.iter().any(|w| w.slug == slug && !w.in_chapter(hive)) {
+        return Ok(slug.to_string());
+    }
+    for n in 2..=MAX_SLUG_SUFFIX {
+        let candidate = format!("{slug}-{n}");
+        let taken = workers.iter().any(|w| w.slug == candidate)
+            || std::fs::symlink_metadata(paths.worker_dir(&candidate)).is_ok()
+            || !super::worktree::branch_free(hive, &candidate);
+        if !taken {
+            return Ok(candidate);
+        }
+    }
+    Err(format!("An earlier goal's worker is called \"{slug}\", and so are {MAX_SLUG_SUFFIX} numbered copies of it: give this one another title."))
+}
+
 pub(crate) fn register(hive: &Hive, paths: &HivePaths, a: SpawnArgs, tasks: &[Task], now: &str) -> Result<Registered, String> {
     let _held = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let workers = worker::list_workers(paths);
     let inputs = a.inputs.clone();
-    let plan = validate(hive, &workers, a)?;
+    let mut plan = validate(hive, &workers, a)?;
+    plan.slug = free_slug(hive, paths, &workers, &plan.slug)?;
     // Each must be filed here and out of the trash; their paths are read again at every launch.
     super::gallery::tools::live_inputs(&hive.id, paths, &inputs).map_err(|e| format!("inputs: {e}"))?;
     if std::fs::symlink_metadata(paths.worker_dir(&plan.slug)).is_ok() {
@@ -766,6 +793,7 @@ pub(crate) fn register(hive: &Hive, paths: &HivePaths, a: SpawnArgs, tasks: &[Ta
         created_at: now.to_string(),
         reviews: plan.reviews,
         inputs,
+        chapter: hive.chapter(),
         ..WorkerRecord::default()
     };
     worker::write_worker(&task_dir, &w).inspect_err(|_| {
@@ -1477,7 +1505,8 @@ pub struct HiveBoard {
 /// The Hive's workers by badge, with its headroom. `ahead` counts commits per worktree (one git
 /// call each), which only the coordinator's list needs. Blocks: worker records.
 pub(crate) fn board_view(hive: &Hive, paths: &HivePaths, fuses: &Fuses, now: i64, ahead: bool) -> HiveBoard {
-    let workers = worker::list_workers(paths);
+    // The current goal's workers (§11.5): an earlier goal's are archived in its chapter.
+    let workers = worker::current_workers(hive, paths);
     let folded = super::land::log::folded(paths);
     let suspect_tasks: Vec<&str> = folded.entries.iter().filter(|e| e.suspect).map(|e| e.entry.task_id.as_str()).collect();
     let live: Vec<String> = workers.iter().filter(|w| w.is_live()).map(|w| w.task_id.clone()).collect();

@@ -435,7 +435,7 @@ mod tests {
     }
 
     fn started(paths: &HivePaths, sid: &str) {
-        let entry = launch::SessionEntry { session_id: sid.into(), transcript_path: None, started_at: String::new() };
+        let entry = launch::SessionEntry { session_id: sid.into(), transcript_path: None, started_at: String::new(), chapter: 0 };
         launch::append_session(&paths.coordinator_task(), entry).unwrap();
     }
 

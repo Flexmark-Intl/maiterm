@@ -25,6 +25,17 @@ pub fn worker_branch(hive: &Hive, slug: &str) -> String {
     format!("hive/{}--{slug}", hive.slug)
 }
 
+/// No git folder of the Hive has the branch `slug` would name: what `create_worker_worktrees`
+/// refuses, asked ahead (§11.5's suffixed slugs). A repo that can't be read answers taken, so the
+/// next suffix is tried rather than a refusal at the add. Blocks on git.
+pub fn branch_free(hive: &Hive, slug: &str) -> bool {
+    let branch = worker_branch(hive, slug);
+    hive.git_folders().all(|f| {
+        let refs = run(git_in(Path::new(&f.path)).args(["for-each-ref", "--format=%(refname)"]).arg(format!("refs/heads/{branch}")), QUERY_TIMEOUT);
+        refs.is_ok_and(|r| !r.lines().any(|l| l.trim() == format!("refs/heads/{branch}")))
+    })
+}
+
 /// One git folder's add, worked out before anything is created.
 struct Plan<'a> {
     folder: &'a HiveFolder,

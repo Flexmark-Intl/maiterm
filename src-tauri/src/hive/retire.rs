@@ -618,11 +618,11 @@ mod tests {
 
         let task = base.join("hive/tasks/t1");
         fs::create_dir_all(&task).unwrap();
-        let entry = |sid: &str, p: &Path| SessionEntry { session_id: sid.into(), transcript_path: Some(p.to_string_lossy().into()), started_at: "now".into() };
+        let entry = |sid: &str, p: &Path| SessionEntry { session_id: sid.into(), transcript_path: Some(p.to_string_lossy().into()), started_at: "now".into(), chapter: 0 };
         append_session(&task, entry("s0", &outside)).unwrap();
         append_session(&task, entry("s1", &a)).unwrap();
         append_session(&task, entry("sx", &not_jsonl)).unwrap();
-        append_session(&task, SessionEntry { session_id: "sn".into(), transcript_path: None, started_at: "now".into() }).unwrap();
+        append_session(&task, SessionEntry { session_id: "sn".into(), transcript_path: None, started_at: "now".into(), chapter: 0 }).unwrap();
         append_session(&task, entry("s2", &b)).unwrap();
         // A path through `..` that lands outside is outside.
         append_session(&task, entry("s3", &projects.join("../../../../elsewhere/secret.jsonl"))).unwrap();
