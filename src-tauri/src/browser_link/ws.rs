@@ -307,6 +307,17 @@ fn handle(v: &Value, conn_id: &str, browser: &str, version: &str, state: &Arc<Ap
     id.map(|i| reply(&i, result))
 }
 
+fn is_queen(t: &crate::state::Tab) -> bool {
+    t.hive_role.as_deref() == Some(crate::hive::ROLE_COORDINATOR)
+}
+
+/// Whether the popup offers a tab: an agent tab, never a stack service's. Of a Hive's tabs only
+/// the Queen, a normal agent tab that may drive a browser (docs/hive.md §7.1); a worker is
+/// sandboxed and its settings deny the browser tools, so a link to one could never be used.
+fn offered(t: &crate::state::Tab) -> bool {
+    t.runtime.is_some() && !t.is_service_tab() && (t.hive_role.is_none() || is_queen(t))
+}
+
 /// The agent tabs the popup offers to link to, with what each holds now. Most recently used first,
 /// and each window's front tab above everything else: the agent the human is looking at is the one
 /// they most likely mean.
@@ -320,7 +331,7 @@ fn list_tabs(state: &Arc<AppState>, app: &AppHandle) -> Value {
         let window = w.name.clone().unwrap_or_else(|| w.label.clone());
         for ws in &w.workspaces {
             for t in ws.panes.iter().flat_map(|p| p.tabs.iter()) {
-                if t.runtime.is_none() || t.is_service_tab() {
+                if !offered(t) {
                     continue;
                 }
                 let linked: Vec<Value> = links
@@ -334,7 +345,9 @@ fn list_tabs(state: &Arc<AppState>, app: &AppHandle) -> Value {
                     tab_used(&t.id),
                     serde_json::json!({
                         "id": t.id,
-                        "name": t.name,
+                        // A Hive's coordinator is the Queen on every screen, whatever an older
+                        // Hive named its tab; its workspace is the Hive's name.
+                        "name": if is_queen(t) { crate::hive::create::COORDINATOR_TAB_NAME } else { t.name.as_str() },
                         "workspace": ws.name,
                         "window": window,
                         "runtime": t.runtime,
@@ -359,6 +372,26 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert("origin", v.parse().unwrap());
         h
+    }
+
+    /// Darryl wants to link Chrome to a Hive's Queen: she's offered, a worker never is.
+    #[test]
+    fn the_popup_offers_a_hives_queen_and_never_a_worker() {
+        let tab = |role: Option<&str>| {
+            let mut t = crate::state::Tab::new("t".into());
+            t.runtime = Some(crate::state::AgentRuntime::Claude);
+            t.hive_role = role.map(Into::into);
+            t
+        };
+        assert!(offered(&tab(None)), "an ordinary agent tab");
+        assert!(offered(&tab(Some(crate::hive::ROLE_COORDINATOR))), "the Queen");
+        assert!(!offered(&tab(Some("worker"))), "a worker");
+        let mut shell = tab(None);
+        shell.runtime = None;
+        assert!(!offered(&shell), "no agent");
+        let mut service = tab(None);
+        service.service_id = Some("s".into());
+        assert!(!offered(&service), "a stack service");
     }
 
     #[test]

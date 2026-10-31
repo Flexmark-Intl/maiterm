@@ -98,6 +98,9 @@ is versioned on its own (`chrome-extension/manifest.json`, tags `ext-v*`).
    workspace → active pane → active tab) above all. Recency is in memory (`browser_link::touch_tab`,
    from `set_active_tab` / `set_active_pane` / `set_active_workspace` and window focus); after a
    restart the tree order stands in.
+   Of a Hive's hidden tabs only its **Queen** is offered (2026-10-31, `ws::offered`), always
+   named "Queen" with the Hive as its workspace: she is a normal agent tab (docs/hive.md §7.1).
+   A worker is sandboxed and its settings deny the browser tools, so it is never offered.
 
 ## 2. Discovery and authentication (native messaging)
 
