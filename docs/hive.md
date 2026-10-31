@@ -325,8 +325,10 @@ and the kickoff says not to start workers on the goal alone:
 1. Get what the project brief points to: read every attached file. If it names a tab to bridge
    to, find its id with `listWorkspaces` and ask with `bridgeWith` (§5.1). The human approves
    that card: a sentence in the brief states the human's intent, but only their click approves.
-2. Judge whether that is enough to write criteria it could check. If not, raise **one** blocker
-   listing each gap as its own question, and wait. Don't guess.
+2. Judge whether that is enough to write criteria it could check. If not, raise **one decision
+   blocker per gap**, each on its own task row with options and a recommendation, and wait.
+   Don't guess. (It was one blocker listing every gap until Darryl, live, 2026-10-31: "make
+   multiple decision prompts, not all of them in one".)
 3. Set the criteria with `hiveSetCriteria`. The human confirms them (§11.4).
 4. Plan, and start workers once confirmed.
 

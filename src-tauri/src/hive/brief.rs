@@ -444,8 +444,9 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
              1. Get what the project brief points you to. Read every attached file. If it names a tab or agent to bridge to, \
              find its tab id with listWorkspaces, ask with bridgeWith (your human approves the bridge), then ask that \
              partner for what you need.\n\
-             2. Judge whether you now know enough to write completion criteria you could check. If not, raise ONE blocker \
-             on your own task listing exactly what\u{2019}s missing, each gap as its own question, and wait for the answer. \
+             2. Judge whether you now know enough to write completion criteria you could check. If not, ask about each \
+             gap separately: one decision blocker per gap, each on its own task row (createTasks with one blocked row per \
+             gap), each with options and the one you recommend, never several questions in one. Wait for the answers. \
              Don\u{2019}t guess the gaps.\n\
              3. Set the criteria with hiveSetCriteria. maiTerm asks your human to confirm them; their answer is typed to \
              you.\n\
@@ -978,7 +979,7 @@ mod tests {
         let b = brief_md(&h, &p, &PrecedentCounts::default());
         assert!(b.contains(h.brief.trim()), "never truncated");
         assert!(b.contains(&*p.coordinator_home().join("brief").join("plan.md").to_string_lossy()));
-        assert!(b.contains("## Starting work") && b.contains("bridgeWith") && b.contains("ONE blocker"));
+        assert!(b.contains("## Starting work") && b.contains("bridgeWith") && b.contains("one decision blocker per gap") && !b.contains("ONE blocker"));
         assert!(b.find("## Project brief") < b.find("## Starting work"));
         h.criteria_confirm = crate::hive::record::CRITERIA_CONFIRMED.into();
         assert!(!brief_md(&h, &p, &PrecedentCounts::default()).contains("## Starting work"), "only before work starts");
