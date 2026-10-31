@@ -2828,6 +2828,12 @@ export async function hiveTrustRepo(path: string): Promise<HiveFolderInfo> {
   return invoke('hive_trust_repo', { path });
 }
 
+/** The Create sheet's Commit these files: a repo with files and no commit gets them as its first
+ *  commit, at the human's click (docs/hive.md §3.6). Answers the folder detected again. */
+export async function hiveCommitFirst(path: string): Promise<HiveFolderInfo> {
+  return invoke('hive_commit_first', { path });
+}
+
 export async function hiveDetectTools(): Promise<HiveDetectedTool[]> {
   return invoke('hive_detect_tools');
 }

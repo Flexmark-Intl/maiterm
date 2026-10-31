@@ -1204,6 +1204,7 @@ pub fn run() {
             hive::create::hive_preflight,
             hive::create::hive_detect_folder,
             hive::create::hive_trust_repo,
+            hive::create::hive_commit_first,
             hive::create::hive_detect_tools,
             hive::create::hive_create,
             hive::fuses::hive_resume,

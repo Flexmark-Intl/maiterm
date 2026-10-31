@@ -27,7 +27,7 @@
   import { stackStore } from '$lib/stores/stack.svelte';
   import { importVerdict, sameService, sharesByDefault, type RunningElsewhere, type StackOffer } from '$lib/stack/model';
   import { normalizeTitle } from '$lib/tasks/model';
-  import { hiveDetectFolder, hiveDetectTools, hivePreflight, hiveTrustRepo, suggestStack, type StackSuggestion } from '$lib/tauri/commands';
+  import { hiveCommitFirst, hiveDetectFolder, hiveDetectTools, hivePreflight, hiveTrustRepo, suggestStack, type StackSuggestion } from '$lib/tauri/commands';
   import type { HiveDetectedTool, HivePreflight, HiveSpec, Service } from '$lib/tauri/types';
   import { createDrafts } from '$lib/hive/createDraft';
   import { charCount, folderName, MAX_BRIEF, MAX_BRIEF_FILES, MAX_INSTRUCTIONS, slugify, validateAbout, validateCap, validateFolders, validateSpec } from '$lib/hive/model';
@@ -396,6 +396,31 @@
     }
   }
 
+  /** Commit these files (§3.6): the human's click makes the repo's files (what .gitignore leaves)
+   *  its first commit, so workers' copies have them. The row keeps what was typed in it. */
+  let committing = $state<number | null>(null);
+  let commitError = $state<{ key: number; text: string } | null>(null);
+  async function commitFirst(f: Folder) {
+    if (committing !== null) return;
+    committing = f.key;
+    commitError = null;
+    try {
+      const info = await hiveCommitFirst(f.path);
+      patch(f.key, {
+        uncommitted: info.unborn,
+        detectedBase: info.base,
+        base: f.base.trim() ? f.base : (info.base ?? ''),
+        setup: f.setup.trim() ? f.setup : (info.setup ?? ''),
+        trusted: info.trusted,
+      });
+    } catch (e) {
+      commitError = { key: f.key, text: String(e).replace(/^Error: /, '') };
+      logError(`hive: committing ${f.path} failed: ${e}`);
+    } finally {
+      committing = null;
+    }
+  }
+
   const fileName = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
 
   async function attachBriefFiles() {
@@ -712,9 +737,10 @@
                   </p>
                 {:else if f.kind === 'git'}
                   {#if f.uncommitted}
-                    <div class="note-line">
-                      <span class="warn">This repo has no commit yet, so a worker's copy would have none of its files. Commit what's here, then check again.</span>
-                      <button class="link" onclick={() => addFolder(f.path, i)}>Check again</button>
+                    <div class="trust">
+                      <span class="trust-text">This repo has no commit yet, and a worker's copy starts from one.</span>
+                      <Button variant="secondary" disabled={committing === f.key} onclick={() => void commitFirst(f)}>{committing === f.key ? 'Committing…' : 'Commit these files'}</Button>
+                      {#if commitError?.key === f.key}<span class="err">{commitError.text}</span>{/if}
                     </div>
                   {/if}
                   <div class="grid">

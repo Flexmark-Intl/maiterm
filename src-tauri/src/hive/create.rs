@@ -443,6 +443,27 @@ pub async fn hive_trust_repo(state: State<'_, Arc<AppState>>, path: String) -> R
     .map_err(|e| e.to_string())?
 }
 
+/// The sheet's Commit these files (§3.6): the human's click makes a repo's files its first commit.
+/// A window command only, never reachable from an agent. Answers the folder detected again.
+#[tauri::command]
+pub async fn hive_commit_first(state: State<'_, Arc<AppState>>, path: String) -> Result<FolderInfo, String> {
+    crate::instance::hive_refusal()?;
+    let roots = trust_roots(&state.app_data.read().preferences);
+    let p = crate::share::expand_tilde(path.trim());
+    if !p.is_absolute() || !p.is_dir() {
+        return Err(format!("No folder at {path}"));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(why) = app_data_dir().and_then(|a| app_data_refusal(&crate::share::canon(&p), &a)) {
+            return Err(format!("{} {why}", p.display()));
+        }
+        layout::commit_first(&p)?;
+        Ok(layout::detect_folder(&p, &roots))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Something a Hive can make things with (§3 Tools, §10.3). `id` is what `Hive.tools` stores.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DetectedTool {
@@ -842,7 +863,7 @@ pub fn validate_spec(spec: &HiveSpec) -> Result<(), String> {
 }
 
 /// A repo with files and no commit (the sheet's twin is in `validateFolders`).
-const UNBORN_REFUSAL: &str = "the repo has no commit yet, so a worker's copy would have none of its files. Commit what's there first.";
+const UNBORN_REFUSAL: &str = "the repo has no commit yet, so a worker's copy would have none of its files. Use Commit these files on its row.";
 
 fn non_empty(s: &Option<String>) -> Option<String> {
     s.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
@@ -917,8 +938,9 @@ pub fn start_new_repos(spec: &[HiveFolder], app_data: Option<&Path>) -> Result<V
             return Err(format!("{name}: {} {why}, which a Hive's agents must never reach. Pick the project's own folder.", info.path));
         }
         let branch = non_empty(&f.base).or(info.base).unwrap_or_else(|| layout::NEW_REPO_BRANCH.to_string());
-        layout::start_repo(path, &branch).map_err(|e| format!("{name}: {e}"))?;
-        empty.push(PathBuf::from(&info.path));
+        if layout::start_repo(path, &branch).map_err(|e| format!("{name}: {e}"))? {
+            empty.push(PathBuf::from(&info.path));
+        }
     }
     Ok(empty)
 }

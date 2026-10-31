@@ -203,7 +203,7 @@ export function validateFolders(spec: Pick<SpecFields, 'folders'>): string | nul
   if (primaries > 1) return 'Only one folder can be Primary.';
   // Rust's `resolve_folders` refuses these too, once it has re-detected the repo.
   const uncommitted = spec.folders.find((f) => f.kind === 'git' && f.uncommitted);
-  if (uncommitted) return `${uncommitted.name?.trim() || uncommitted.path}: the repo has no commit yet, so a worker's copy would have none of its files. Commit what's there first.`;
+  if (uncommitted) return `${uncommitted.name?.trim() || uncommitted.path}: the repo has no commit yet, so a worker's copy would have none of its files. Use Commit these files on its row.`;
   const baseless = spec.folders.find((f) => f.kind === 'git' && !f.base?.trim() && !f.detectedBase?.trim());
   if (baseless) return `${baseless.name?.trim() || baseless.path}: pick a Base branch (the repo is on a detached HEAD), or share it as a plain folder.`;
   return null;

@@ -314,20 +314,24 @@ commit is `unborn` (`layout::detect_folder`). The sheet offers an empty one as a
 Base `main` (an unborn repo: the branch its HEAD names) and no setup or land check fields, only a
 line saying what Create will do. An empty folder inside another repo becomes a repo of its own.
 
-An unborn repo **with files** is refused until the human commits them, on the sheet
-(`validateFolders`, with Check again) and in `resolve_folders`. A read copy is a checkout of a
-commit, so an empty first commit would hand workers an empty repo while the code sits uncommitted
-in the checkout (review of 679b1ba2).
+**Nothing on the folders step sends the human away to fix something** (Darryl, 2026-10-31): an
+innocuous fix is made automatically, and one that isn't gets a button on the row. An unborn repo
+**with files** gets **Commit these files** (`hive_commit_first`): the human's click makes
+everything `.gitignore` leaves its first commit. Until then Create is refused, on the sheet
+(`validateFolders`) and in `resolve_folders`. A read copy is a checkout of a commit, so an empty
+first commit would hand workers an empty repo while the code sits uncommitted (review of
+679b1ba2). Committing the human's files isn't innocuous, so it's a button, never automatic.
 
 At Create, before the read copies are made (`create::start_new_repos` → `layout::start_repo`):
 
 - an empty folder that isn't a repo gets `git init`, with HEAD pointed at Base (not `init -b`,
   which git before 2.28 lacks);
 - it, or an empty repo with no branch at all, gets an empty first commit on Base, made from an
-  index of its own, so a read copy has something to check out. An empty orphan checkout is refused:
-  its repo's other branches have history, and pointing HEAD at one would commit an empty tree on
-  top of it. The committer is the repo's identity, or `maiTerm Hive` when it has none;
-- it is trusted in the root the Hive's agents launch under. Trusting a repo is otherwise the
+  index of its own, so a read copy has something to check out. In an empty orphan checkout whose
+  Base exists, Base is checked out instead (the empty working tree loses nothing): an empty commit
+  pointed there would land on top of its history. The committer is the repo's identity, or
+  `maiTerm Hive` when it has none;
+- a folder still empty (given that first commit) is trusted in the root the Hive's agents launch under. Trusting a repo is otherwise the
   human's act (§6.6), because it lets the repo's own settings, hooks and MCP servers run; an empty
   folder has none, and the human chose it for this Hive. A failure to trust leaves the usual
   untrusted warning.

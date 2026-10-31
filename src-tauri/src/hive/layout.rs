@@ -53,25 +53,25 @@ pub fn folder_is_empty(dir: &Path) -> bool {
 }
 
 /// Create's start for a new project (§3.6): an empty folder becomes a repo if it isn't one, and
-/// gets an empty first commit on `branch`, so a read copy has something to check out. Only an
-/// empty folder with no branch at all: a repo with files and no commit would give its workers
-/// none of them, and pointing HEAD at a branch that exists (an orphan checkout's other
-/// branches) would commit an empty tree on top of it. The commit is made from an index of its
-/// own. A repo with commits is left alone. Blocks on git.
-pub fn start_repo(path: &Path, branch: &str) -> Result<(), String> {
+/// gets an empty first commit on `branch`, so a read copy has something to check out. Answers
+/// whether it made that commit: only then is the folder still empty, and the caller's to trust.
+/// Only an empty folder: a repo with files and no commit would give its workers none of them.
+/// An empty orphan checkout whose `branch` exists is checked out instead (an empty working tree
+/// loses nothing), since an empty commit pointed there would land on top of its history. The
+/// commit is made from an index of its own. A repo with commits is left alone. Blocks on git.
+pub fn start_repo(path: &Path, branch: &str) -> Result<bool, String> {
     let info = detect_folder(path, &[]);
     let real = Path::new(&info.path);
     if info.kind == KIND_GIT && !info.unborn {
-        return Ok(());
+        return Ok(false);
     }
     if !info.empty {
         return Err(format!("{} has files but no commit, and only an empty folder is started as a new project", info.path));
     }
-    if info.kind == KIND_GIT {
-        let branches = run(git_in(real).args(["for-each-ref", "--count=1", "--format=%(refname)", "refs/heads"]), QUERY_TIMEOUT)?;
-        if !branches.is_empty() {
-            return Err(format!("{} has branches but none checked out: switch to one, or pick it as Base", info.path));
-        }
+    if info.kind == KIND_GIT && run(git_in(real).args(["rev-parse", "--verify", "--quiet"]).arg(format!("refs/heads/{branch}")), QUERY_TIMEOUT).is_ok() {
+        run(git_in(real).args(["checkout", "-q", branch]), QUERY_TIMEOUT).map_err(|e| format!("{}: couldn't check out {branch}: {e}", info.path))?;
+        log::info!("hive: checked out {branch} in the empty orphan checkout {}", info.path);
+        return Ok(false);
     }
     // `git check-ref-format` needs no repo, so it's asked before one is made.
     run(crate::util::proc::git().args(["check-ref-format", "--branch", branch]), QUERY_TIMEOUT).map_err(|_| format!("\u{201c}{branch}\u{201d} isn't a branch name git takes"))?;
@@ -93,6 +93,25 @@ pub fn start_repo(path: &Path, branch: &str) -> Result<(), String> {
     let _ = fs::remove_file(&index);
     res.map_err(|e| format!("{}: couldn't make its first commit: {e}", info.path))?;
     log::info!("hive: gave {} its first commit", info.path);
+    Ok(true)
+}
+
+/// The sheet's Commit these files (§3.6): a repo with files and no commit gets them as its first
+/// commit, everything `.gitignore` doesn't exclude, so its workers' copies have them. The human's
+/// click on that folder's row; never anything else. Refuses a repo with a commit. Blocks on git.
+pub fn commit_first(path: &Path) -> Result<(), String> {
+    let info = detect_folder(path, &[]);
+    let real = Path::new(&info.path);
+    if info.kind != KIND_GIT || !info.unborn {
+        return Err(format!("{} isn't a repository waiting for its first commit", info.path));
+    }
+    run(git_in(real).args(["add", "-A"]), QUERY_TIMEOUT).map_err(|e| format!("{}: couldn't add its files: {e}", info.path))?;
+    run(
+        git_in(real).args(super::land::git::identity(real)).args(["-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Start the project"]),
+        QUERY_TIMEOUT,
+    )
+    .map_err(|e| format!("{}: couldn't make its first commit: {e}", info.path))?;
+    log::info!("hive: committed {}'s files as its first commit, at the human's click", info.path);
     Ok(())
 }
 
@@ -691,11 +710,35 @@ mod tests {
         assert_eq!(git(&r, &["ls-tree", "-r", "--name-only", "HEAD"]), "");
         assert!(!detect_folder(&r, &[]).unborn);
 
-        // An orphan checkout is empty and unborn, but `main` has history.
+        // An orphan checkout is empty and unborn, but `main` has history: checked out, never
+        // committed on, and not the caller's to trust (its files are the branch's).
         git(&r, &["switch", "-q", "--orphan", "scratch"]);
         assert!(detect_folder(&r, &[]).unborn);
-        assert!(start_repo(&r, "main").unwrap_err().contains("has branches"));
+        assert!(!start_repo(&r, "main").unwrap());
+        assert_eq!(git(&r, &["symbolic-ref", "--short", "HEAD"]), "main");
         assert_eq!(git(&r, &["rev-list", "--count", "main"]), "1", "main untouched");
+        // A Base that doesn't exist yet is a new root of its own, on no branch's history.
+        git(&r, &["switch", "-q", "--orphan", "scratch"]);
+        assert!(start_repo(&r, "fresh").unwrap());
+        assert_eq!((git(&r, &["rev-list", "--count", "fresh"]), git(&r, &["rev-list", "--count", "main"])), ("1".into(), "1".into()));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The sheet's Commit these files: what `.gitignore` leaves becomes the first commit.
+    #[cfg(unix)]
+    #[test]
+    fn commit_these_files_makes_a_first_commit_of_what_isnt_ignored() {
+        let base = scratch("commit-first");
+        let r = base.join("r");
+        fs::create_dir_all(&r).unwrap();
+        git(&r, &["init", "-q", "-b", "main"]);
+        fs::write(r.join("app.js"), "x").unwrap();
+        fs::write(r.join(".gitignore"), ".env\n").unwrap();
+        fs::write(r.join(".env"), "SECRET=1").unwrap();
+        commit_first(&r).unwrap();
+        assert_eq!(git(&r, &["ls-tree", "-r", "--name-only", "HEAD"]), ".gitignore\napp.js");
+        assert!(!detect_folder(&r, &[]).unborn);
+        assert!(commit_first(&r).unwrap_err().contains("isn't a repository waiting"), "only once");
         let _ = fs::remove_dir_all(&base);
     }
 }
