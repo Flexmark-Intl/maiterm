@@ -1330,7 +1330,11 @@ holds `eval`, `source`, `.`, `exec`, `trap`, `builtin`, `command`, `pushd`/`popd
 variable or a substitution, is refused whole (`gate::hides_code`). It refuses some harmless lines,
 by design. The regression review narrowed it: a heredoc's body is data, taken out before the line
 is read (Claude Code's `git commit -m "$(cat <<'EOF' …)"` was refused for any body line
-starting with `source` or a backticked name); `xargs` and `find -exec` count only when they run
+starting with `source` or a backticked name). Only the narrow shape counts, so the strip fails
+closed (the heredoc review found five looser forms that hid lines bash runs): a quoted delimiter,
+at top level or in the commit form's `"$(`, never in `((…))`, a comment or a `<<<`, the body
+starting at the newline that ends the operator's line in that context, the terminator alone on its
+line. Anything else, an unquoted `<<EOF` included, is read as commands; `xargs` and `find -exec` count only when they run
 git, a shell, `cd`, `eval` or `env`; `command -v` is a lookup; and "names git" means a git
 command word or git in a string run as code, never a `.git/` path. A command substitution now leaves a marker in its word: it was
 an empty word, so `git -C "$(echo /etc)"` resolved to the cwd.

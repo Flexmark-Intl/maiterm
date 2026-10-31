@@ -226,29 +226,74 @@ fn take_backticks(c: &[char], mut i: usize) -> (String, usize) {
     (c[start..i].iter().collect(), (i + 1).min(c.len()))
 }
 
-/// `s` with every heredoc's body and terminator line taken out: the body is data, never commands
-/// (Claude Code's commit form is `git commit -m "$(cat <<'EOF' … EOF\n)"`, and a body line such as
-/// `source maps fixed` read as a command refused the commit, the regression review). Quote-aware,
-/// including `$(…)` inside double quotes, so a `<<` inside a string starts nothing. A heredoc
-/// whose terminator never comes leaves `s` as it was, so nothing is hidden.
+/// `s` with the bodies of heredocs in their narrow, common shape taken out: the body is data,
+/// never commands (Claude Code's commit form is `git commit -m "$(cat <<'EOF' … EOF\n)"`, and a
+/// body line such as `source maps fixed` read as a command refused the commit). Fail closed by
+/// construction (the heredoc review found five forms a looser strip hid lines bash runs): only a
+/// QUOTED delimiter (`<<'WORD'`, `<<"WORD"`, `<<-` too), at top level or in the commit form's
+/// `"$(`, never inside `((…))`, a comment or a `<<<`. The body starts at the newline that ends the
+/// operator's line in that same context; any newline met in another context while one waits, or
+/// a terminator that never comes alone on its line, leaves `s` as it was. Anything else isn't a
+/// heredoc here, so its lines are read as commands: refusal is the safe direction.
 fn strip_heredocs(s: &str) -> String {
-    #[derive(Clone, Copy, PartialEq)]
+    #[derive(Clone, Copy, PartialEq, Debug)]
     enum Ctx {
         Top,
         Dq,
         Subst,
+        Arith,
     }
     let c: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
     let mut stack = vec![Ctx::Top];
-    // Delimiters waiting for the end of their line: (word, tabs stripped).
+    // Delimiters waiting for the end of their line: (word, tabs stripped), and the context their
+    // operator was in, where the newline that starts the body must come.
     let mut pending: Vec<(String, bool)> = Vec::new();
+    let mut pending_at: Vec<Ctx> = Vec::new();
+    // The two shapes a heredoc is recognised in.
+    let allowed = |st: &[Ctx]| st == [Ctx::Top] || st == [Ctx::Top, Ctx::Dq, Ctx::Subst];
     let mut i = 0;
     while i < c.len() {
         let ch = c[i];
         let ctx = *stack.last().unwrap_or(&Ctx::Top);
+        if ctx == Ctx::Arith {
+            // `((…))`: only its parens matter; nothing in it starts a heredoc or a comment.
+            match ch {
+                '(' => stack.push(Ctx::Arith),
+                ')' => {
+                    stack.pop();
+                }
+                '\n' if !pending.is_empty() => return s.to_string(),
+                _ => {}
+            }
+            out.push(ch);
+            i += 1;
+            continue;
+        }
         let code = ctx != Ctx::Dq;
         match ch {
+            '\n' if !pending.is_empty() && stack != pending_at => return s.to_string(),
+            '(' if code && c.get(i + 1) == Some(&'(') && !(i > 0 && c[i - 1] == '$') => {
+                // `((x<<=1))`: arithmetic, two levels to close.
+                stack.push(Ctx::Arith);
+                stack.push(Ctx::Arith);
+                out.push_str("((");
+                i += 2;
+                continue;
+            }
+            '$' if c.get(i + 1) == Some(&'(') && c.get(i + 2) == Some(&'(') => {
+                stack.push(Ctx::Arith);
+                stack.push(Ctx::Arith);
+                out.push_str("$((");
+                i += 3;
+                continue;
+            }
+            '<' if code && c.get(i + 1) == Some(&'<') && c.get(i + 2) == Some(&'<') => {
+                // A here-string: the whole operator, never a heredoc.
+                out.push_str("<<<");
+                i += 3;
+                continue;
+            }
             '\\' => {
                 out.push(ch);
                 if let Some(&n) = c.get(i + 1) {
@@ -277,13 +322,14 @@ fn strip_heredocs(s: &str) -> String {
             ')' if ctx == Ctx::Subst => {
                 stack.pop();
             }
-            '#' if code && (i == 0 || c[i - 1].is_whitespace()) => {
+            // A comment starts at a word's start: after whitespace or an operator character.
+            '#' if code && (i == 0 || c[i - 1].is_whitespace() || matches!(c[i - 1], ';' | '&' | '|' | '(' | ')' | '<' | '>')) => {
                 let end = c[i..].iter().position(|&x| x == '\n').map_or(c.len(), |p| i + p);
                 out.extend(&c[i..end]);
                 i = end;
                 continue;
             }
-            '<' if code && c.get(i + 1) == Some(&'<') && c.get(i + 2) != Some(&'<') => {
+            '<' if code && c.get(i + 1) == Some(&'<') => {
                 let mut j = i + 2;
                 let dash = c.get(j) == Some(&'-');
                 if dash {
@@ -292,21 +338,27 @@ fn strip_heredocs(s: &str) -> String {
                 while c.get(j).is_some_and(|x| *x == ' ' || *x == '\t') {
                     j += 1;
                 }
-                let mut word = String::new();
-                while let Some(&x) = c.get(j) {
-                    if x.is_whitespace() || matches!(x, ';' | '&' | '|' | '(' | ')' | '<' | '>') {
-                        break;
+                // Only `'WORD'` or `"WORD"`, quoted whole and followed by a word's end.
+                let quote = c.get(j).copied().filter(|q| *q == '\'' || *q == '"');
+                let word_end = quote.and_then(|q| c[j + 1..].iter().position(|&x| x == q).map(|p| j + 1 + p));
+                let word: Option<String> = word_end.map(|e| c[j + 1..e].iter().collect());
+                let ends = word_end.is_some_and(|e| c.get(e + 1).is_none_or(|x| x.is_whitespace() || matches!(x, ';' | '&' | '|' | ')')));
+                match word.filter(|w| ends && !w.is_empty() && !w.contains(['\n', '\\', '$', '`', '\'', '"']) && allowed(&stack)) {
+                    // Two waiting in different contexts: too clever to read, so nothing is stripped.
+                    Some(_) if !pending.is_empty() && pending_at != stack => return s.to_string(),
+                    Some(w) => {
+                        let e = word_end.unwrap_or(j);
+                        pending.push((w, dash));
+                        pending_at = stack.clone();
+                        out.extend(&c[i..=e]);
+                        i = e + 1;
                     }
-                    if x != '\'' && x != '"' && x != '\\' {
-                        word.push(x);
+                    // Not the narrow shape: copied as text, so what follows is read as commands.
+                    None => {
+                        out.push_str("<<");
+                        i += 2;
                     }
-                    j += 1;
                 }
-                if !word.is_empty() {
-                    pending.push((word, dash));
-                }
-                out.extend(&c[i..j]);
-                i = j;
                 continue;
             }
             '\n' if !pending.is_empty() => {
@@ -1612,9 +1664,9 @@ mod tests {
         // runs that start no code.
         for cmd in [
             "git commit -m \"$(cat <<'EOF'\nFix the login form\n\n`source` maps were wrong; eval of the config is gone.\nenv X now read once\n\nCo-written\nEOF\n)\"".to_string(),
-            "git commit -m \"$(cat <<EOF\n`Button` keeps focus\nexec path fixed\nEOF\n)\"".into(),
+            "git commit -m \"$(cat <<\"EOF\"\n`Button` keeps focus\nexec path fixed\nEOF\n)\"".into(),
             "git commit -F - <<'EOF'\nsource maps: on\ncommand -p is gone\nEOF".into(),
-            "git commit -F - <<-EOF\n\teval removed\n\tEOF".into(),
+            "git commit -F - <<-'EOF'\n\teval removed\n\tEOF".into(),
             "git ls-files | xargs wc -l".into(),
             "git diff --name-only | xargs npx prettier --check".into(),
             "command -v git && git status".into(),
@@ -1628,6 +1680,8 @@ mod tests {
             "cat <<EOF\nhi\nEOF\neval 'cd /tmp'; git status".to_string(),
             "echo \"<<A\"\neval 'cd /tmp'; git status\nA".into(),
             "cat <<NEVER\neval 'cd /tmp'; git status".into(),
+            "cat <<'NEVER'\neval 'cd /tmp'; git status".into(),
+            "git commit -m \"$(cat <<EOF\nexec path fixed\nEOF\n)\"".into(),
             "git ls-files | xargs sh -c 'git add'".into(),
             "find . -exec git add {} ;".into(),
             "xargs -I{} git -C {} status".into(),
@@ -1915,15 +1969,32 @@ mod tests {
             format!("cat << EOF\nbody\nEOF\ncd {x}; git status"),
             format!("cat <<< \"x\"; cd {x}; git status"),
             format!("cat <<EOF \\\n; cd {x}; git status\nEOF"),
-        ] {
-            assert!(matches!(wbash(&f, &cmd), GateDecision::Deny(_)), "should refuse: {cmd}");
-        }
-        // Still inside the body in bash, so nothing there runs.
-        for cmd in [
+            // The heredoc review: five forms a looser strip hid lines bash runs.
+            format!("cat <<< x\ncd {x}; git status\nx"),
+            format!("echo $((1<<2))\ncd {x}; git status\n2"),
+            format!("((x<<=1))\ncd {x}; git status\n=1"),
+            format!("echo hi;#<<EOF\ncd {x}; git status\nEOF"),
+            format!("cat <<EOF; echo \"\n\"; cd {x}; git status\nEOF"),
+            format!("cat <<EOF; y=$(\n); cd {x}; git status\nEOF"),
+            // The same with a quoted delimiter: a newline in another context strips nothing.
+            format!("cat <<'EOF'; echo \"\n\"; cd {x}; git status\nEOF"),
+            format!("cat <<'EOF'; y=$(\n); cd {x}; git status\nEOF"),
+            format!("echo hi;#<<'EOF'\ncd {x}; git status\nEOF"),
+            format!("cat <<<'x'\ncd {x}; git status\nx"),
+            // An unquoted or mixed delimiter isn't a heredoc here: its lines are read as commands.
             format!("cat <<EOF\nbody\n  EOF\ncd {x}; git status\nEOF"),
             format!("cat <<EOF\nEOF \ncd {x}; git status\nEOF"),
             format!("cat <<'E'\"OF\"\nbody\nE\ncd {x}; git status\nEOF"),
+        ] {
+            assert!(matches!(wbash(&f, &cmd), GateDecision::Deny(_)), "should refuse: {cmd}");
+        }
+        // Still inside a quoted heredoc's body in bash, so nothing there runs.
+        for cmd in [
+            format!("cat <<'EOF'\nbody\n  EOF\ncd {x}; git status\nEOF"),
+            format!("cat <<\"EOF\"\nEOF \ncd {x}; git status\nEOF"),
+            format!("cat <<-'EOF'\n\tcd {x}; git status\n\tEOF"),
             "git commit -m \"$(cat <<'EOF'\nFix it\n\nmore\nEOF\n)\"".to_string(),
+            "git commit -F - <<'EOF'\nsource maps: on\nEOF".to_string(),
         ] {
             assert_eq!(wbash(&f, &cmd), GateDecision::Allow, "should allow: {cmd}");
         }
