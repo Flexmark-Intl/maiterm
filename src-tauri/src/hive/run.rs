@@ -876,9 +876,10 @@ pub(crate) fn one_copy_refusal(s: &Service) -> Result<(), String> {
 
 /// Where a service's copy on the worker's branch runs: the worker's folder of its repo, and its
 /// folder re-rooted in that worktree. Blocks on git.
-fn service_place(paths: &HivePaths, s: &Service, w: &WorkerRecord) -> Result<(String, String, PathBuf), String> {
+fn service_place(paths: &HivePaths, hive: &super::record::Hive, s: &Service, w: &WorkerRecord) -> Result<(String, String, PathBuf), String> {
     use crate::stack::target;
-    let ctx = crate::stack::context_for(Some(&paths.root));
+    // With the Hive's folders: a service defined in the coordinator's read copy maps to its repo.
+    let ctx = crate::stack::context_for(Some(&paths.root)).with_hive(Some(&paths.root), Some(hive));
     let repo = target::repo_of(std::path::Path::new(&s.cwd), &ctx)?;
     for f in w.git_folders() {
         let wt = f.worktree.clone().unwrap_or_default();
@@ -976,8 +977,8 @@ pub(crate) async fn service_verb(tool: &str, args: &Value, caller: &Caller, data
     if tool != "stopService" {
         one_copy_refusal(&s)?;
     }
-    let (paths, svc, rec) = (caller.paths.clone(), s.clone(), w.clone());
-    let (folder, wt, cwd) = blocking(move || service_place(&paths, &svc, &rec)).await?;
+    let (paths, hive, svc, rec) = (caller.paths.clone(), caller.hive.clone(), s.clone(), w.clone());
+    let (folder, wt, cwd) = blocking(move || service_place(&paths, &hive, &svc, &rec)).await?;
     let target = format!("{}{wt}", crate::stack::target::CHECKOUT);
     let key = crate::stack::copy_key(&s.id, &target);
     let mine = queue::active_service_job(&w.task_id, &s.id);

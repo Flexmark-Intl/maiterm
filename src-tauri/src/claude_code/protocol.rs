@@ -825,7 +825,7 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
     // they register services they start and report the ports they observe, so maiTerm
     // never has to sniff sockets. `service` accepts a name or an id everywhere, and `on`
     // picks a copy (docs/hive.md §6.9).
-    const STACK_ON: &str = "Which copy: \"main\" (the service's own folder), a branch name, or a Hive worker (badge or name). Without it: the one copy running; the own folder when none is; refused, naming them, when several are";
+    const STACK_ON: &str = "Which copy: \"main\" (the service's own folder), a branch name, or a Hive worker (badge \"#3\" or name: the same command, its folder re-rooted in that worker's worktree, so a Hive coordinator defines a service once in her read copy and runs any worker's branch with on). Without it: the one copy running; the own folder when none is; refused, naming them, when several are";
     tools.extend(serde_json::json!([
         {
             "name": "listStack",

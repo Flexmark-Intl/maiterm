@@ -1353,6 +1353,16 @@ short:
 - **Leases:** every path that stops or moves a copy checks it first, so a running job is never
   cut short (§6.8, stack §14.7). A code-bearing copy on a worker's branch runs under that
   worker's sandbox profile (§6.7).
+- **A service defined in a Hive copy** (2026-10-31, from a live Hive): the coordinator's
+  `createService` with its cwd in her read copy used to be accepted and then refused on
+  `startService {on:"#1"}` as "not in a git repository", because the stack refuses to run git in
+  any folder under a Hive (a worker may have written its `.git`) and the reason was swallowed.
+  Now a cwd inside the coordinator's read copy, or inside a worker's recorded worktree, is mapped
+  back to the human's repo **from the Hive record** (`HiveFolder.path` plus the subpath; never a
+  `.git` under the Hive), so its own copy stays in the read copy (main) and `on: "#n"` re-roots it
+  in worker n's worktree. Any other folder under a Hive is refused with a sentence naming the read
+  copy to use, and that refusal, not a generic one, is what `on` answers (`stack/target.rs`
+  `repo_of`, `Context::with_hive`).
 
 ## 7. Agents, tools and authority
 

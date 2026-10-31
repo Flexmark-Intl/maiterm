@@ -80,9 +80,48 @@ pub struct Context {
     pub hives: Option<PathBuf>,
     /// `<app data>/stack-wt.noindex`.
     pub stack_wt: Option<PathBuf>,
+    /// This workspace's Hive folder, and its git folders by name → the human's repo (from the
+    /// Hive record, never from a `.git` under the Hive): how a service whose cwd is a read copy
+    /// or a worker's worktree finds its real repo (`repo_of`).
+    pub hive_root: Option<PathBuf>,
+    pub folders: Vec<(String, PathBuf)>,
+}
+
+/// Where a folder under a Hive really belongs: the human's repo it is a copy of, the copy's
+/// root, and the branch maiTerm recorded for it (None for the detached read copy).
+struct HiveCopy {
+    repo: PathBuf,
+    root: PathBuf,
+    branch: Option<String>,
 }
 
 impl Context {
+    /// The Hive record's git folders, for `repo_of`'s mapping. Plain folders have no copies.
+    pub fn with_hive(mut self, hive_root: Option<&Path>, hive: Option<&crate::hive::record::Hive>) -> Self {
+        self.hive_root = hive_root.map(Path::to_path_buf);
+        self.folders = hive.map(|h| h.git_folders().map(|f| (f.name.clone(), PathBuf::from(&f.path))).collect()).unwrap_or_default();
+        self
+    }
+
+    /// `at` (canonical) as a copy of one of this Hive's folders: the coordinator's read copy of
+    /// it, or a worker's recorded worktree of it. None for anything else under a Hive.
+    fn hive_copy(&self, at: &Path) -> Option<HiveCopy> {
+        let repo_of = |name: &str| self.folders.iter().find(|(n, _)| n == name).map(|(_, p)| p.clone());
+        if let Some(root) = self.hive_root.as_deref() {
+            let paths = crate::hive::paths::HivePaths::new(root);
+            for (name, repo) in &self.folders {
+                let copy = canon(&paths.coordinator_worktree(name));
+                if at.starts_with(&copy) {
+                    return Some(HiveCopy { repo: repo.clone(), root: copy, branch: None });
+                }
+            }
+        }
+        self.workers.iter().flat_map(|w| w.git_folders()).find_map(|f| {
+            let root = canon(Path::new(f.worktree.as_deref()?));
+            at.starts_with(&root).then(|| Some(HiveCopy { repo: repo_of(&f.name)?, root, branch: f.branch.clone() })).flatten()
+        })
+    }
+
     /// Both roots are canonicalized when asked, not when built: either may not exist yet.
     fn under_hives(&self, p: &Path) -> bool {
         self.hives.as_deref().is_some_and(|h| p.starts_with(canon(h)))
@@ -113,6 +152,17 @@ pub struct Repo {
     pub common: PathBuf,
     /// The service's cwd under `top`; empty at the top itself.
     pub rel: PathBuf,
+    /// Set when the service's own folder is a Hive copy of the repo (the coordinator's read
+    /// copy, a worker's worktree), not the repo itself: that copy's root, and the branch maiTerm
+    /// recorded for it. Git is never run there.
+    pub own_copy: Option<(PathBuf, Option<String>)>,
+}
+
+impl Repo {
+    /// The checkout the service's own folder is in: its Hive copy, else the repo's top.
+    pub fn own_root(&self) -> &Path {
+        self.own_copy.as_ref().map_or(&self.top, |(root, _)| root)
+    }
 }
 
 pub fn repo_of(cwd: &Path, ctx: &Context) -> Result<Repo, String> {
@@ -121,9 +171,25 @@ pub fn repo_of(cwd: &Path, ctx: &Context) -> Result<Repo, String> {
         return Err(format!("{} doesn't exist", cwd.display()));
     }
     // A folder under a Hive is a worker's or a read copy, whose `.git` the worker may have
-    // written: git is never run there by path.
+    // written: git is never run there by path. A copy of one of the Hive's folders is mapped
+    // back to the human's repo from the Hive's records, and the service's cwd re-rooted there.
     if ctx.under_hives(&at) {
-        return Err(format!("{} is inside a Hive's folder, so it can't run on another checkout", cwd.display()));
+        let Some(copy) = ctx.hive_copy(&at) else {
+            let hint = match (ctx.hive_root.as_deref(), ctx.folders.first()) {
+                (Some(root), Some((name, _))) => format!(
+                    ": give the service a folder in the coordinator's read copy (such as {}) or in the human's repo, and run it on a \
+                     worker's branch with on: \"#<badge>\"",
+                    crate::hive::paths::HivePaths::new(root).coordinator_worktree(name).display()
+                ),
+                _ => ": give it a folder in the human's repo instead".to_string(),
+            };
+            return Err(format!("{} is inside a Hive's folder but isn't a copy of one of this Hive's repos{hint}", cwd.display()));
+        };
+        let rel = at.strip_prefix(&copy.root).map(Path::to_path_buf).map_err(|_| format!("{} isn't under {}", at.display(), copy.root.display()))?;
+        let mut repo = repo_of(&canon(&copy.repo), &Context { hives: None, ..ctx.clone() })?;
+        repo.rel = repo.rel.join(rel);
+        repo.own_copy = Some((copy.root, copy.branch));
+        return Ok(repo);
     }
     let out = git(git_in(&at).args(["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"]), QUERY_TIMEOUT)
         .map_err(|_| format!("{} isn't in a git repository, so the service can only run in its own folder", cwd.display()))?;
@@ -134,11 +200,15 @@ pub fn repo_of(cwd: &Path, ctx: &Context) -> Result<Repo, String> {
     let top = canon(Path::new(top.trim()));
     let common = canon(Path::new(common.trim()));
     let rel = at.strip_prefix(&top).map(Path::to_path_buf).map_err(|_| format!("{} isn't under {}", at.display(), top.display()))?;
-    Ok(Repo { top, common, rel })
+    Ok(Repo { top, common, rel, own_copy: None })
 }
 
-/// The branch the service's own folder is on; None when detached.
+/// The branch the service's own folder is on; None when detached. A Hive copy's is the one
+/// maiTerm recorded, never read from it.
 pub fn own_branch(repo: &Repo) -> Option<String> {
+    if let Some((_, branch)) = &repo.own_copy {
+        return branch.clone();
+    }
     git(git_in(&repo.top).args(["symbolic-ref", "--short", "-q", "HEAD"]), QUERY_TIMEOUT).ok().filter(|b| !b.is_empty())
 }
 
@@ -454,7 +524,7 @@ pub fn copy_targets(repo: Option<&Repo>, ctx: &Context) -> Vec<CopyTarget> {
         Ok(list) => {
             for wt in list {
                 let root = canon(&wt.path);
-                if root == repo.top || ctx.under_stack_wt(&root) {
+                if root == repo.own_root() || ctx.under_stack_wt(&root) {
                     continue;
                 }
                 let target = format!("{CHECKOUT}{}", root.display());
@@ -481,8 +551,9 @@ pub fn copy_targets(repo: Option<&Repo>, ctx: &Context) -> Vec<CopyTarget> {
 }
 
 /// An agent's `on`: `"main"` is the own folder, a worker of this workspace's Hive (by badge or
-/// name) its worktree of this repo, anything else a branch.
-pub fn target_for(on: &str, repo: Option<&Repo>, ctx: &Context) -> Result<String, String> {
+/// name) its worktree of this repo, anything else a branch. `repo` is the service's, or why it
+/// has none, which is the refusal when `on` names a worker.
+pub fn target_for(on: &str, repo: Result<&Repo, &str>, ctx: &Context) -> Result<String, String> {
     let on = on.trim();
     if on.is_empty() || on == "main" {
         return Ok(String::new());
@@ -490,7 +561,7 @@ pub fn target_for(on: &str, repo: Option<&Repo>, ctx: &Context) -> Result<String
     let badge = on.strip_prefix('#').unwrap_or(on).parse::<u32>().ok();
     let worker = ctx.workers.iter().find(|w| badge.is_some_and(|b| b == w.badge) || w.slug == on || w.title.eq_ignore_ascii_case(on));
     if let Some(w) = worker {
-        let repo = repo.ok_or("this service's folder isn't in a git repository, so it runs only in its own folder")?;
+        let repo = repo.map_err(|e| format!("this service can't run on worker {}'s branch: {e}", w.slug))?;
         let f = w
             .git_folders()
             .find(|f| f.common_dir.as_deref().map(|c| canon(Path::new(c))) == Some(repo.common.clone()))

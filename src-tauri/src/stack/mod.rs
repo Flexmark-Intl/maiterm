@@ -67,7 +67,16 @@ pub struct CopyRequest {
     pub ports_of: Vec<(String, Option<u16>)>,
     /// This workspace's Hive folder, whose workers' records name their worktrees.
     pub hive_root: Option<PathBuf>,
+    /// That Hive's record, whose git folders map a read copy back to its repo (`Context::with_hive`).
+    pub hive: Option<crate::hive::record::Hive>,
     pub forbidden_ports: Vec<u16>,
+}
+
+impl CopyRequest {
+    /// `context_for` this request's Hive, its folders included. Reads disk.
+    pub fn context(&self) -> Context {
+        context_for(self.hive_root.as_deref()).with_hive(self.hive_root.as_deref(), self.hive.as_ref())
+    }
 }
 
 fn find_workspace<'a>(data: &'a AppData, id: &str) -> Option<&'a Workspace> {
@@ -102,7 +111,8 @@ pub fn request_for(data: &AppData, label: &str, workspace_id: &str, service_id: 
         })
         .collect();
     let hive_root = ws.hive.as_ref().and_then(|h| crate::hive::paths::hive_root(&h.id));
-    Ok(CopyRequest { service, target: target.to_string(), shared_from_workspace, ports_of, hive_root, forbidden_ports: Vec::new() })
+    let hive = ws.hive.clone();
+    Ok(CopyRequest { service, target: target.to_string(), shared_from_workspace, ports_of, hive_root, hive, forbidden_ports: Vec::new() })
 }
 
 /// The workers of the Hive at `hive_root` and the folders a resolve guards. Reads disk.
@@ -111,6 +121,7 @@ pub fn context_for(hive_root: Option<&Path>) -> Context {
         workers: hive_root.map(|r| crate::hive::worker::list_workers(&crate::hive::paths::HivePaths::new(r))).unwrap_or_default(),
         hives: crate::hive::paths::hives_dir(),
         stack_wt: target::stack_wt_root(),
+        ..Context::default()
     }
 }
 
@@ -156,7 +167,7 @@ pub fn resolve(req: &CopyRequest, ctx: &Context) -> Result<ResolvedCopy, String>
             if needs.branch {
                 values.branch = repo.as_ref().and_then(target::own_branch);
             }
-            values.checkout = repo.as_ref().map(|r| r.top.display().to_string());
+            values.checkout = repo.as_ref().map(|r| r.own_root().display().to_string());
             values.worker = Some("main".to_string());
             (cwd, commit, checkout, worker, label) = (s.cwd.clone(), None, None, None, String::new());
         }
@@ -346,7 +357,7 @@ pub async fn stack_resolve_copy(
 ) -> Result<ResolvedCopy, String> {
     let mut req = request_for(&state.app_data.read(), window.label(), &workspace_id, &service_id, &target.unwrap_or_default())?;
     req.forbidden_ports = forbidden_ports(&state);
-    crate::hive::tools::blocking(move || resolve(&req, &context_for(req.hive_root.as_deref()))).await
+    crate::hive::tools::blocking(move || resolve(&req, &req.context())).await
 }
 
 /// Free a stopped copy's ports. False if it held none.
@@ -368,7 +379,7 @@ pub async fn stack_copy_targets(
         return Err(format!("{} is shared from {}; it runs there", req.service.name, req.shared_from_workspace.unwrap_or_default()));
     }
     crate::hive::tools::blocking(move || {
-        let ctx = context_for(req.hive_root.as_deref());
+        let ctx = req.context();
         let repo = target::repo_of(Path::new(&req.service.cwd), &ctx).ok();
         Ok(target::copy_targets(repo.as_ref(), &ctx))
     })
@@ -386,10 +397,11 @@ pub async fn stack_target_for(
 ) -> Result<String, String> {
     let req = request_for(&state.app_data.read(), window.label(), &workspace_id, &service_id, "")?;
     crate::hive::tools::blocking(move || {
-        let ctx = context_for(req.hive_root.as_deref());
-        // Only a worker needs the repo, and a branch name needs no git at all.
-        let repo = if ctx.workers.is_empty() { None } else { target::repo_of(Path::new(&req.service.cwd), &ctx).ok() };
-        target::target_for(&on, repo.as_ref(), &ctx)
+        let ctx = req.context();
+        // Only a worker needs the repo, and a branch name needs no git at all. Why there is no
+        // repo is the refusal when `on` names a worker.
+        let repo = if ctx.workers.is_empty() { Err("this workspace has no Hive workers".to_string()) } else { target::repo_of(Path::new(&req.service.cwd), &ctx) };
+        target::target_for(&on, repo.as_ref().map_err(String::as_str), &ctx)
     })
     .await
 }

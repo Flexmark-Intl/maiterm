@@ -64,12 +64,13 @@ fn request(s: Service, target: &str) -> CopyRequest {
         shared_from_workspace: None,
         ports_of: Vec::new(),
         hive_root: None,
+        hive: None,
         forbidden_ports: ports::forbidden(None, None),
     }
 }
 
 fn ctx(base: &Path) -> Context {
-    Context { workers: Vec::new(), hives: Some(base.join("hive")), stack_wt: Some(base.join("stack-wt.noindex")) }
+    Context { workers: Vec::new(), hives: Some(base.join("hive")), stack_wt: Some(base.join("stack-wt.noindex")), ..Context::default() }
 }
 
 fn git_calls() -> usize {
@@ -130,7 +131,7 @@ fn branch_names_with_shell_in_them_are_refused_before_git_sees_them() {
     for evil in ["x$(id>p)", "x`id>p`", "a;b", "a'b", "a\"b", "-rf", "a b", "x$(touch p)"] {
         let err = resolve(&request(s.clone(), &format!("branch:{evil}")), &ctx(&base)).unwrap_err();
         assert!(err.contains("can't be a branch"), "{evil}: {err}");
-        assert!(target::target_for(evil, None, &ctx(&base)).is_err(), "{evil}");
+        assert!(target::target_for(evil, Err("no repo"), &ctx(&base)).is_err(), "{evil}");
     }
     assert!(!repo.join("p").exists() && !repo.join("web/p").exists());
     let _ = fs::remove_dir_all(&base);
@@ -331,9 +332,9 @@ fn a_workers_worktree_runs_on_its_recorded_git_dir_never_its_git_file() {
     c.workers = vec![w.clone()];
     let mut s = service(&repo.join("web"), "vite --port {port} # {worker}", &[]);
     s.port = Some(25173);
-    let target = target::target_for("auth", Some(&target::repo_of(&repo, &c).unwrap()), &c).unwrap();
+    let target = target::target_for("auth", Ok(&target::repo_of(&repo, &c).unwrap()), &c).unwrap();
     assert_eq!(target, format!("checkout:{}", wt.display()));
-    assert_eq!(target::target_for("#2", Some(&target::repo_of(&repo, &c).unwrap()), &c).unwrap(), target, "by badge");
+    assert_eq!(target::target_for("#2", Ok(&target::repo_of(&repo, &c).unwrap()), &c).unwrap(), target, "by badge");
     let r = resolve(&request(s, &target), &c).unwrap();
     assert_eq!(r.commit.as_deref(), Some(real_head.as_str()), "the recorded git dir, not the forged one");
     assert_eq!(r.worker.as_deref(), Some("auth"));
@@ -346,6 +347,58 @@ fn a_workers_worktree_runs_on_its_recorded_git_dir_never_its_git_file() {
     assert!(err.contains("belongs to a Hive"), "{err}");
     // Nor does a service whose own folder is inside one get git run there.
     assert!(resolve(&request(service(&wt, "x {branch}", &[]), ""), &ctx(&base)).unwrap_err().contains("inside a Hive"));
+    let _ = fs::remove_dir_all(&base);
+}
+
+/// The live Hive's case (2026-10-31): the queen defines a dev server in her read copy, and
+/// `on: "#n"` runs it on that worker's branch (§6.9), never answering "not in a git repository".
+#[test]
+fn a_service_in_the_read_copy_maps_to_its_repo_and_runs_on_a_workers_branch() {
+    let base = scratch("readcopy");
+    let repo = repo(&base);
+    let w = worker(&base, &repo, "auth", 2);
+    let wt = PathBuf::from(w.folders[0].worktree.clone().unwrap());
+    let hive_root = base.join("hive/h1");
+    let copy = crate::hive::paths::HivePaths::new(&hive_root).coordinator_worktree("app");
+    git(&repo, &["worktree", "add", "-q", "--detach", copy.to_str().unwrap(), "main"]);
+    // The read copy's `.git` names a forged repo: it is never read.
+    let fake = base.join("fake");
+    fs::create_dir_all(&fake).unwrap();
+    git(&fake, &["init", "-q", "-b", "main"]);
+    commit(&fake, "f", "forged");
+    fs::write(copy.join(".git"), format!("gitdir: {}\n", canon(&fake.join(".git")).display())).unwrap();
+
+    let hive = crate::hive::record::Hive {
+        folders: vec![crate::hive::record::HiveFolder { name: "app".into(), path: repo.to_string_lossy().into(), kind: "git".into(), ..Default::default() }],
+        ..Default::default()
+    };
+    let mut c = ctx(&base).with_hive(Some(&hive_root), Some(&hive));
+    c.workers = vec![w.clone()];
+    let s = service(&copy.join("web"), "vite --port {port} # {worker}", &[("ROOT", "{checkout}")]);
+
+    let r = target::repo_of(Path::new(&s.cwd), &c).unwrap();
+    assert_eq!((r.top.clone(), r.rel.clone()), (canon(&repo), PathBuf::from("web")), "the human's repo, the cwd re-rooted");
+    assert_eq!(r.own_root(), canon(&copy));
+    let on = target::target_for("#2", Ok(&r), &c).unwrap();
+    assert_eq!(on, format!("checkout:{}", wt.display()));
+    let copy_run = resolve(&request(s.clone(), &on), &c).unwrap();
+    assert_eq!(PathBuf::from(&copy_run.cwd), wt.join("web"));
+    assert_eq!(copy_run.worker.as_deref(), Some("auth"));
+    ports::release(&copy_run.copy_key);
+    // Its own copy stays in the read copy, `{checkout}` naming it, on no branch.
+    let own = resolve(&request(s.clone(), ""), &c).unwrap();
+    assert_eq!(PathBuf::from(&own.cwd), copy.join("web"));
+    assert_eq!(own.env[0].1, canon(&copy).display().to_string());
+    ports::release(&own.copy_key);
+
+    // A folder under the Hive that is no copy of its repos names the right cwd.
+    let stray = hive_root.join("coordinator/home");
+    fs::create_dir_all(&stray).unwrap();
+    let e = target::repo_of(&stray, &c).unwrap_err();
+    assert!(e.contains("isn't a copy of one of this Hive's repos") && e.contains(&copy.display().to_string()), "{e}");
+    // And the reason reaches the agent that named a worker, rather than "not in a git repository".
+    let e = target::target_for("#2", target::repo_of(&stray, &c).as_ref().map_err(String::as_str), &c).unwrap_err();
+    assert!(e.starts_with("this service can't run on worker auth's branch: ") && e.contains("isn't a copy"), "{e}");
     let _ = fs::remove_dir_all(&base);
 }
 
@@ -391,8 +444,8 @@ fn run_on_lists_own_worktrees_workers_and_branches() {
     for b in ["main", "session-store", "feature", "hive/s--auth"] {
         assert!(list.iter().any(|t| t.kind == "branch" && t.target == format!("branch:{b}")), "{b}: {kinds:?}");
     }
-    assert_eq!(target::target_for("main", None, &c).unwrap(), "");
-    assert_eq!(target::target_for("session-store", None, &c).unwrap(), "branch:session-store");
+    assert_eq!(target::target_for("main", Err("no repo"), &c).unwrap(), "");
+    assert_eq!(target::target_for("session-store", Err("no repo"), &c).unwrap(), "branch:session-store");
     let _ = fs::remove_dir_all(&base);
 }
 

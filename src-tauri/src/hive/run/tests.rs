@@ -521,19 +521,26 @@ fn a_worker_runs_only_services_its_human_defined_and_only_on_its_branch() {
 fn a_service_follows_the_worker_onto_its_worktree() {
     let r = Rig::new();
     let s = service("web", &r.repo.join("app"), "npm run dev -- --port {port}");
-    let (folder, wt, cwd) = service_place(&r.paths, &s, &r.w).unwrap();
+    let (folder, wt, cwd) = service_place(&r.paths, &r.hive, &s, &r.w).unwrap();
     assert_eq!((folder.as_str(), PathBuf::from(&wt)), ("web", r.wt.clone()));
     assert_eq!(cwd, r.wt.join("app"), "re-rooted in the worktree, never the human's checkout");
 
+    // A service the queen defined in her read copy follows the worker the same way.
+    let copy = r.paths.coordinator_worktree("web");
+    fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    git(&r.repo, &["worktree", "add", "-q", "--detach", copy.to_str().unwrap(), "main"]);
+    let (_, _, cwd) = service_place(&r.paths, &r.hive, &service("web", &copy.join("app"), "npm run dev -- --port {port}"), &r.w).unwrap();
+    assert_eq!(cwd, r.wt.join("app"));
+
     // A folder that is only in the human's checkout isn't on the worker's branch.
     fs::create_dir_all(r.repo.join("local-only")).unwrap();
-    let e = service_place(&r.paths, &service("x", &r.repo.join("local-only"), "true"), &r.w).unwrap_err();
+    let e = service_place(&r.paths, &r.hive, &service("x", &r.repo.join("local-only"), "true"), &r.w).unwrap_err();
     assert!(e.contains("local-only/ doesn't exist on your branch"), "{e}");
     let other = r.base.join("other");
     fs::create_dir_all(&other).unwrap();
     git(&other, &["init", "-q", "-b", "main"]);
     commit(&other, "README.md");
-    let e = service_place(&r.paths, &service("y", &other, "true"), &r.w).unwrap_err();
+    let e = service_place(&r.paths, &r.hive, &service("y", &other, "true"), &r.w).unwrap_err();
     assert!(e.contains("no worktree of"), "{e}");
 }
 
