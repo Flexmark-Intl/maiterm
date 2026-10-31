@@ -540,6 +540,67 @@ export interface Hive {
   /** Names the `hive/<slug>` branches; stable across workspace renames. */
   slug: string;
   created_at: string;
+  /** Earlier goals, oldest first, each archived by New goal under `chapters/<n>/` (n = index + 1).
+   *  Absent on a Hive that never had a new goal. */
+  chapters?: HiveChapter[];
+}
+
+/** hive/new_goal.rs `HiveChapter`: one finished goal, as New goal archived it. */
+export interface HiveChapter {
+  goal: string;
+  /** When this goal started: the Hive's `created_at`, or the previous New goal's time. */
+  started_at: string;
+  /** When New goal replaced it (RFC 3339). */
+  ended_at: string;
+  /** Its Done time, if it reached Done (ms, as `Hive.done_at`). */
+  done_at?: number | null;
+  /** The first lines of its Done report; empty if it never finished. */
+  report_summary: string;
+  spent_cents: number;
+}
+
+/** A worker's branch of the CURRENT goal with commits not on its land target yet. */
+export interface HivePendingBranch {
+  /** "Worker 3 · Fix the login form", as the board names it. */
+  worker: string;
+  badge: number;
+  folder: string;
+  branch: string;
+  target?: string | null;
+  ahead: number;
+}
+
+/** hive/new_goal.rs `NewGoalPreview`: what the New goal sheet and the pending-commits overlay show. */
+export interface HiveNewGoalPreview {
+  /** False while anything in `reasons` holds. */
+  allowed: boolean;
+  /** Why New goal can't start now, one plain sentence each (e.g. "The Hive is still working on its
+   *  goal: pause it or wait for Done."). Pending commits are NOT repeated here: see `unlanded`. */
+  reasons: string[];
+  /** Commits not landed yet; New goal is refused while any are listed. */
+  unlanded: HivePendingBranch[];
+  /** Workers whose agent runs now: they stop. */
+  live_workers: string[];
+  /** The current goal, brief, brief files (absolute paths) and rules, to prefill the sheet. */
+  goal: string;
+  brief: string;
+  brief_files: string[];
+  instructions: string;
+  /** The number the current goal gets as a chapter. */
+  next_chapter: number;
+  /** The memory folder (kept by default), null when there is none. */
+  memory?: { path: string; files: number } | null;
+}
+
+/** What the human submits on the New goal sheet. */
+export interface HiveNewGoalSpec {
+  goal: string;
+  brief: string;
+  /** Absolute paths: the current ones (from the preview) to keep, plus any newly attached. */
+  brief_files: string[];
+  instructions: string;
+  /** False archives the memory folder into the old chapter and starts the new goal with none. */
+  keep_memory: boolean;
 }
 
 /** Hive settings: the sections built so far, the rest round-tripped as they are. */

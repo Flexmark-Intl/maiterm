@@ -3,7 +3,7 @@ import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { StackHeldAction, StackLeaseState } from './types';
-import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HiveLiveCwd, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
+import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HiveLiveCwd, HiveNewGoalPreview, HiveNewGoalSpec, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
 import type { HiveMemoryFileText, HiveMemoryView } from './types';
 import type { HiveDecisionView, HivePrecedentsView } from './types';
 import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
@@ -3019,6 +3019,24 @@ export async function galleryPaths(workspaceId: string, ids: string[]): Promise<
 /** The coordinator's finals recommendations waiting on the human: asset id → status. */
 export async function galleryRecommendations(workspaceId: string): Promise<Record<string, string>> {
   return invoke('gallery_recommendations', { workspaceId });
+}
+
+/** Whether a Done or paused Hive can take a new goal, what's in the way (commits not landed), and
+ *  the current goal's fields to prefill the sheet (docs/hive.md §11.5). Touches nothing. */
+export async function hiveNewGoalPreview(workspaceId: string): Promise<HiveNewGoalPreview> {
+  return invoke('hive_new_goal_preview', { workspaceId });
+}
+
+/** Give the Hive a new goal: the human's click. Retires every worker, archives the old goal as a
+ *  chapter, and starts a fresh Queen session in the same tab. Refused while commits aren't landed. */
+export async function hiveNewGoal(workspaceId: string, spec: HiveNewGoalSpec): Promise<Hive> {
+  return invoke('hive_new_goal', { workspaceId, spec });
+}
+
+/** Ask the Queen to land the current goal's pending commits (the overlay's button): wakes it if it's
+ *  Done, and delivers a maiTerm message listing the branches. */
+export async function hiveAskQueenToLand(workspaceId: string): Promise<void> {
+  return invoke('hive_ask_queen_to_land', { workspaceId });
 }
 
 /** What deleting the Hive would keep and stop (docs/hive.md §11.2), before anything is touched. */
