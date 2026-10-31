@@ -423,14 +423,27 @@ fn a_known_generation_is_answered_not_modified() {
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![DirReq { rel: "a".into(), known_gen: None }], rec.clone(), vec![]).unwrap();
+    // The generation the client holds: its latest listing OR delta. Windows' watcher can report the
+    // setup's own writes after the first listing (CI flake, 2026-10-31), moving the generation on;
+    // the test must hold the newest one, after the watcher has started and gone quiet.
     let gen_of = |rec: &Recorder, rel: &str| {
         rec.msgs.lock().iter().rev().find_map(|m| match &m.ev {
-            TreeEvent::Dir { rel: r, gen, .. } if r == rel => Some(*gen),
+            TreeEvent::Dir { rel: r, gen, .. } | TreeEvent::Delta { rel: r, gen, .. } if r == rel => Some(*gen),
             _ => None,
         })
     };
+    wait_watching(&ft.hub_of(ack.sub_id).unwrap());
     assert!(wait_for(&rec, Duration::from_secs(5), |e| matches!(e, TreeEvent::Dir { rel, .. } if rel == "a")).is_some());
-    let gen = gen_of(&rec, "a").unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    let mut gen = gen_of(&rec, "a").unwrap();
+    loop {
+        std::thread::sleep(Duration::from_millis(600));
+        let now = gen_of(&rec, "a").unwrap();
+        if now == gen || Instant::now() > end {
+            break;
+        }
+        gen = now;
+    }
     // Close and come back within the grace period: the folder is answered from memory.
     ft.close(ack.sub_id);
     let rec2 = Arc::new(Recorder::default());
