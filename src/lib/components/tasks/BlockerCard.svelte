@@ -15,6 +15,7 @@
   import { BLOCKER_LABEL } from '$lib/tasks/model';
   import { fmtAge } from '$lib/overlord/format';
   import Tooltip from '$lib/components/Tooltip.svelte';
+  import TaskMarkdown from './TaskMarkdown.svelte';
   import TaskText from './TaskText.svelte';
   import type { Task } from '$lib/tauri/types';
 
@@ -162,12 +163,12 @@
     </div>
     {#if held}<span class="with">{withCoordinatorText(route?.due_ms, clock)}</span>{/if}
     <span class="q"><TaskText text={b.question} of={task.id} /></span>
-    {#if b.context}<span class="ctx"><TaskText text={b.context} of={task.id} /></span>{/if}
+    {#if b.context}<div class="ctx"><TaskMarkdown text={b.context} of={task.id} /></div>{/if}
     {#if b.options?.length}
       <div class="opts">
         {#each b.options as o, i (i)}
           <button class="opt" disabled={sending || held} onclick={(e) => { if (!secondClick(e)) answer(i); }}>
-            <b><TaskText text={o.label} of={task.id} />{#if o.recommended}<em> recommended</em>{/if}</b>
+            <b><TaskText text={o.label} of={task.id} />{#if o.recommended}<em>recommended</em>{/if}</b>
             {#if o.detail}<span><TaskText text={o.detail} of={task.id} /></span>{/if}
           </button>
         {/each}
@@ -254,7 +255,7 @@
   .dismiss:disabled { opacity: 0.4; cursor: default; }
   .q { color: var(--fg); font-weight: 600; }
   .card .q { font-size: 15px; line-height: 1.3; }
-  .ctx { color: var(--fg-dim); }
+  .ctx { color: var(--fg); }
   .opts { display: flex; flex-direction: column; gap: 3px; }
   .card .opts { gap: 5px; }
   .opt {
@@ -272,7 +273,7 @@
   }
   .card .opt { padding: 7px 10px; border-radius: 6px; }
   .opt:hover:not(:disabled), .opt:focus-visible { border-color: var(--kind); }
-  .opt em { color: var(--kind); font-style: normal; font-size: 9.5px; font-weight: 400; }
+  .opt em { margin-left: 6px; color: var(--kind); font-style: normal; font-size: 9.5px; font-weight: 400; }
   .opt span { color: var(--fg-dim); }
   .cmd {
     font-family: var(--font-mono, ui-monospace, monospace);

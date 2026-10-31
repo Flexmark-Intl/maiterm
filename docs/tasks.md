@@ -326,6 +326,10 @@ TaskBlocker { kind, question, context?, options[{label, detail?, recommended?}],
               asked_at, asked_by }
 ```
 
+`context` renders as markdown on every surface (`TaskMarkdown.svelte`, through the transcript
+renderer, so raw HTML stays text): write lists as lists. A closing sentence after a list needs a
+blank line before it, or it joins the last item.
+
 | kind | means | carries |
 |---|---|---|
 | `decision` | the human has to choose | `options` (≤ 6; none = free-text answer) |

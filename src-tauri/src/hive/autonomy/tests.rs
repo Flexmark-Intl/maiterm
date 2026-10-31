@@ -542,7 +542,7 @@ async fn a_new_hives_criteria_are_asked_and_only_confirm_on_the_newest_question_
     assert_eq!(out["confirmed"], false);
     let first = rig.row(CRITERIA_TASK_TITLE).unwrap().blocker.unwrap();
     assert_eq!(first.question, "Are these the completion criteria for \u{201c}Ship it\u{201d}?");
-    assert_eq!(first.context.as_deref(), Some("1. The API answers /login\nNo worker starts until you confirm them."));
+    assert_eq!(first.context.as_deref(), Some("1. The API answers /login\n\nNo worker starts until you confirm them."));
     assert_eq!(rig.hive().criteria_confirm, CRITERIA_ASKED);
     assert!(finish::criteria_spawn_refusal(&rig.hive(), &rig.tasks()).unwrap().contains("hasn't confirmed"));
     // Dismissed without an answer: nothing to wait for, so ask again.

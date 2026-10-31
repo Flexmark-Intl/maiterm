@@ -372,12 +372,12 @@ fn criteria_question_waiting(hive: &Hive, tasks: &[Task]) -> bool {
 
 /// The human's question, in maiTerm's words: the criteria as the coordinator set them.
 pub fn criteria_blocker(goal: &str, criteria: &[String], asked_at: &str) -> TaskBlocker {
-    let mut context: Vec<String> = criteria.iter().enumerate().map(|(i, c)| format!("{}. {}", i + 1, one_line(c, MAX_CRITERION))).collect();
-    context.push("No worker starts until you confirm them.".to_string());
+    let list: Vec<String> = criteria.iter().enumerate().map(|(i, c)| format!("{}. {}", i + 1, one_line(c, MAX_CRITERION))).collect();
     TaskBlocker {
         kind: "decision".into(),
         question: format!("Are these the completion criteria for \u{201c}{}\u{201d}?", one_line(goal, 160)),
-        context: Some(context.join("\n")),
+        // Context renders as markdown: the blank line keeps the closing sentence out of the last item.
+        context: Some(format!("{}\n\nNo worker starts until you confirm them.", list.join("\n"))),
         options: vec![
             BlockerOption { label: CRITERIA_CONFIRM.into(), detail: Some("the queen plans her workers against these".into()), recommended: true },
             BlockerOption { label: CRITERIA_CHANGE.into(), detail: Some("answer with what to change".into()), recommended: false },
