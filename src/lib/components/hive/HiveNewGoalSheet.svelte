@@ -14,7 +14,6 @@
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import { charCount, MAX_BRIEF, MAX_BRIEF_FILES, MAX_INSTRUCTIONS } from '$lib/hive/model';
   import { mergeBlocking, newGoalProblem } from '$lib/hive/newGoal';
-  import { untrack } from 'svelte';
   import HivePendingCommits from './HivePendingCommits.svelte';
 
   interface Props {
@@ -61,13 +60,17 @@
   });
 
   // Re-read on every board change, once the prefill is in: only what holds New goal is replaced,
-  // never the goal, brief, files or rules being edited (the prefill happens once).
+  // never the goal, brief, files or rules being edited (the prefill happens once). A board change
+  // that comes while the prefill is in flight or a submit runs isn't dropped: `lastKey` moves only
+  // when a re-read starts, and `ready`/`submitting` are tracked, so it runs once they allow it (the
+  // first time the prefill lands, that is one extra read, which catches a land the prefill missed).
   let lastKey: unknown = undefined;
+  const ready = $derived(preview !== null);
   $effect(() => {
     const key = refreshKey;
+    if (!ready || submitting) return;
     if (key === lastKey) return;
     lastKey = key;
-    if (!untrack(() => preview) || submitting) return;
     const id = workspaceId;
     const mine = ++readSeq;
     hiveNewGoalPreview(id)
