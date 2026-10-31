@@ -34,6 +34,20 @@ export function selectWith(order: readonly string[], selection: readonly string[
   return [...kept, ...span];
 }
 
+/** The selection the grid can act on: only what it lists, in the order picked. A variant folded
+ *  under its original, or an asset the filters hide, is never "1 selected" with no tile shown. */
+export function listedSelection(selection: readonly string[], order: readonly string[]): string[] {
+  const listed = new Set(order);
+  return selection.filter((id) => listed.has(id));
+}
+
+/** The viewer's asset left the list (trashed, or rejected under a status filter): the asset now
+ *  at its old place is the next one, the last when it was at the end; null when none is left. */
+export function afterRemoval(lastIndex: number, length: number): number | null {
+  if (length <= 0 || lastIndex < 0) return null;
+  return Math.min(lastIndex, length - 1);
+}
+
 /** Shift+arrow: the selection grows onto `id`, which becomes the cursor. */
 export function extendTo(selection: readonly string[], id: string): string[] {
   return [...selection.filter((s) => s !== id), id];
@@ -128,8 +142,10 @@ export function selectionMenu(rows: readonly MenuRow[], revealLabel: string): Se
   out.push({ action: 'reveal', label: one ? revealLabel : `${revealLabel} (the first)`, disabled: anyTrashed });
   out.push({ action: 'copyPath', label: one ? 'Copy path' : `Copy ${n} paths`, disabled: anyTrashed });
   out.push(sep);
-  if (allTrashed) out.push({ action: 'restore', label: one ? 'Restore' : `Restore ${n}` });
-  else out.push({ action: 'trash', label: one ? 'Move to trash' : `Move ${n} to trash` });
+  // A mix gets both: Restore takes back the ones in the trash, Move to trash takes the rest.
+  const nTrashed = rows.filter((r) => !!r.deleted_at).length;
+  if (anyTrashed) out.push({ action: 'restore', label: one ? 'Restore' : allTrashed ? `Restore ${n}` : `Restore the ${nTrashed} in the trash` });
+  if (!allTrashed) out.push({ action: 'trash', label: one ? 'Move to trash' : anyTrashed ? `Move the other ${n - nTrashed} to trash` : `Move ${n} to trash` });
   return out;
 }
 

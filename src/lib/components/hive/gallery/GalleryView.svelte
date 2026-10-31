@@ -61,8 +61,10 @@
     COMPARE_MIN,
     dispatchGalleryAttach,
     DRAG_THRESHOLD,
+    afterRemoval,
     extendTo,
     iterateText,
+    listedSelection,
     nextStar,
     nextStatus,
     selectionMenu,
@@ -112,10 +114,18 @@
   const rows = $derived(foldVariants(hiveGallery.rows, ui.showVariants));
   const entries = $derived(groupRows(rows, ui.group, { task: (t) => titles.get(t), collection: (c) => collNames.get(c) }));
   const order = $derived(rows.map((r) => r.id));
-  const cursor = $derived(ui.selection.at(-1) ?? null);
   const rowById = $derived(new Map(hiveGallery.rows.map((r) => [r.id, r])));
-  /** The selection that is still listed, in the order picked. */
-  const selected = $derived(ui.selection.filter((id) => rowById.has(id)));
+  /** The selection the grid shows, in the order picked: never a folded variant or a filtered-out
+   *  asset (the viewer's own asset is acted on by id, not through this). */
+  const selected = $derived(listedSelection(ui.selection, order));
+  const cursor = $derived(selected.at(-1) ?? null);
+  // What the filters or the variants fold hide leaves the selection (not while the viewer shows a
+  // lineage step the grid doesn't list, nor before the rows are read).
+  $effect(() => {
+    if (!hiveGallery.loaded || ui.detail) return;
+    const kept = selected;
+    if (kept.length !== untrack(() => ui.selection.length)) hiveGallery.select(workspaceId, kept);
+  });
   const selRows = $derived(selected.map((id) => rowById.get(id)!).filter(Boolean));
   const liveWorkers = $derived([...workers].filter((w) => w.tab_id && !isRetired(w)).sort((a, b) => a.badge - b.badge));
 
@@ -189,6 +199,26 @@
     const i = detailIndex + dir;
     if (detailIndex >= 0 && i >= 0 && i < order.length) openDetail(order[i]);
   }
+  /** Where the viewer's asset was listed, so it can move on when an action takes it out of the
+   *  list (trashed, rejected under a status filter): ←/→ keep working. */
+  let lastPlace: { id: string; index: number } | null = null;
+  $effect(() => {
+    const id = ui.detail;
+    const i = detailIndex;
+    if (!id) {
+      lastPlace = null;
+      return;
+    }
+    if (i >= 0) {
+      lastPlace = { id, index: i };
+      return;
+    }
+    // Only an asset that WAS listed moves on; a lineage step the grid never listed stays.
+    if (!hiveGallery.loaded || lastPlace?.id !== id) return;
+    const next = afterRemoval(lastPlace.index, order.length);
+    lastPlace = null;
+    untrack(() => openDetail(next === null ? null : order[next]));
+  });
 
   // ── Curation: every write is the human's command; the window's event refetches ──
   const fail = (what: string) => (e: unknown) => {
@@ -337,6 +367,8 @@
   }
 
   function menuItems(ids: string[], mrows: MenuRow[]): MenuItem[] {
+    // The viewer's asset may be one the grid doesn't list: its own row then stands for it.
+    const inTrash = (id: string) => !!(rowById.get(id) ?? (ids.length === 1 ? mrows[0] : null))?.deleted_at;
     const run = (e: SelectionEntry): (() => void) => {
       switch (e.action) {
         case 'open':
@@ -364,9 +396,9 @@
         case 'copyPath':
           return () => void copyPaths(ids);
         case 'trash':
-          return () => trash(ids);
+          return () => trash(ids.filter((id) => !inTrash(id)));
         case 'restore':
-          return () => restore(ids);
+          return () => restore(ids.filter(inTrash));
         default:
           return () => {};
       }
@@ -409,7 +441,9 @@
     const ids = selected.includes(id) ? selected : [id];
     if (!selected.includes(id)) hiveGallery.select(workspaceId, [id]);
     root?.focus({ preventScroll: true });
-    openMenu(ids, e.clientX, e.clientY);
+    // The keyboard goes into the menu, as from the menu key: arrows, Enter and Space are its,
+    // never the grid's under it.
+    openMenu(ids, e.clientX, e.clientY, null, true);
   }
   /** The keyboard's menu: on the cursor's tile, or under the viewer's More…. */
   function openMenuByKey() {
@@ -470,7 +504,22 @@
     const t = e.target as HTMLElement | null;
     const inMenu = t?.closest?.<HTMLElement>('.context-menu');
     if (inMenu) return onMenuKey(e, inMenu);
+    // A menu open with the keyboard elsewhere: a gallery key goes into it (the arrows) or closes
+    // it first, never acting on the grid under it, whose selection the menu's actions hold.
     const editable = !!t && (t.isContentEditable || !!t.closest?.('input, textarea, select, [data-composer-drop]'));
+    if (menu && !editable) {
+      const first = document.querySelector<HTMLElement>('.context-menu .menu-item:not(:disabled)');
+      if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && first) {
+        e.preventDefault();
+        first.focus();
+        return;
+      }
+      if (galleryKey(e, false)) {
+        e.preventDefault();
+        closeMenu();
+        return;
+      }
+    }
     // A focused button, link or player takes its own Enter and Space (a tile is the grid's).
     const onControl = !!t?.closest?.('button, a[href], summary, video, audio, [role=tab], [role=radio], [role=button], [role=link]');
     // X switches audio in a comparison (§10.4).
@@ -513,7 +562,7 @@
         return;
       }
       case 'open':
-        if (!ui.detail && !ui.compare && cursor) {
+        if (!ui.detail && !ui.compare && cursor && rowById.has(cursor)) {
           e.preventDefault();
           openDetail(cursor);
         }
@@ -537,8 +586,10 @@
         }
         return;
       case 'selectAll':
+        // Elsewhere (the viewer's info drawer) Cmd+A is the text's.
+        if (!inGrid) return;
         e.preventDefault();
-        if (inGrid) selectAll();
+        selectAll();
         return;
       case 'menu':
         e.preventDefault();

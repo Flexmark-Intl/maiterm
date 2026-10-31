@@ -101,7 +101,8 @@
     <span class="sep" aria-hidden="true"></span>
     {#each chips as c (c.key)}
       <span class="chip">
-        <span class="cl">{c.label}</span>
+        <!-- A long label is cut to one line here; the whole of it is on the tooltip. -->
+        <Tooltip text={c.label}><span class="cl">{c.label}</span></Tooltip>
         <button type="button" class="x" aria-label="Remove the filter {c.label}" onmousedown={noFocus} onclick={() => onchange(c.clear)}><Icon name="close" size={9} /></button>
       </span>
     {/each}
@@ -118,7 +119,8 @@
   .tog em { font-style: normal; color: var(--fg-dim); font-variant-numeric: tabular-nums; }
   .sep { width: 1px; height: 16px; background: var(--bg-light); margin: 0 4px; }
   .chip { display: inline-flex; align-items: center; gap: 2px; height: 22px; box-sizing: border-box; padding: 0 2px 0 8px; border-radius: 11px; background: color-mix(in srgb, var(--accent) 16%, var(--bg-dark)); color: var(--fg); max-width: 260px; }
-  .cl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .chip > :global(.tooltip-wrapper) { min-width: 0; flex: 0 1 auto; width: auto; overflow: hidden; }
+  .cl { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .x { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; border: none; background: none; color: var(--fg-dim); cursor: pointer; padding: 0; }
   .x:hover { background: color-mix(in srgb, var(--fg) 14%, transparent); color: var(--fg); }
   .plain { background: none; border: none; padding: 0 4px; color: var(--accent); font: inherit; font-size: 11.5px; cursor: pointer; }

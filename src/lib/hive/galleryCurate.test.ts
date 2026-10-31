@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   abSwitch,
+  afterRemoval,
   appendToDraft,
   attachFor,
   compareSet,
   extendTo,
   iterateText,
+  listedSelection,
   selectionMenu,
   selectionTags,
   nextStar,
@@ -155,8 +157,24 @@ describe('the selection menu', () => {
     expect(actions(m)).toContain('restore');
     expect(actions(m)).not.toContain('trash');
     for (const a of ['open', 'iterate', 'send', 'export', 'reveal', 'copyPath'] as const) expect(m.find((e) => e.action === a)?.disabled).toBe(true);
-    // A mix moves the rest to the trash.
-    expect(actions(selectionMenu([row({ deleted_at: 'x' }), row()], 'R'))).toContain('trash');
+    // A mix restores the trashed ones and moves the rest to the trash.
+    const mix = selectionMenu([row({ deleted_at: 'x' }), row(), row()], 'R');
+    expect(mix.find((e) => e.action === 'restore')?.label).toBe('Restore the 1 in the trash');
+    expect(mix.find((e) => e.action === 'trash')?.label).toBe('Move the other 2 to trash');
+  });
+
+  it('acts only on what the grid lists', () => {
+    expect(listedSelection(['v', 'a', 'gone', 'b'], ['a', 'b', 'c'])).toEqual(['a', 'b']);
+    expect(listedSelection([], ['a'])).toEqual([]);
+  });
+
+  it('steps to the next asset when the viewed one leaves the list', () => {
+    // Was third of five, now four: the asset now third is the next one.
+    expect(afterRemoval(2, 4)).toBe(2);
+    // Was last: the new last, the previous one.
+    expect(afterRemoval(4, 4)).toBe(3);
+    expect(afterRemoval(0, 0)).toBeNull();
+    expect(afterRemoval(-1, 3)).toBeNull();
   });
 
   it('lists the selection’s tags, most common first', () => {
