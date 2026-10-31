@@ -1328,7 +1328,11 @@ trick (the final review): a worker's line that names git anywhere, quoted or nes
 holds `eval`, `source`, `.`, `exec`, `trap`, `builtin`, `command`, `pushd`/`popd`, `xargs`, `find
 -exec`, `env` with a command, a shell with `-c` anywhere in its args, or a command word held in a
 variable or a substitution, is refused whole (`gate::hides_code`). It refuses some harmless lines,
-by design. A command substitution now leaves a marker in its word: it was
+by design. The regression review narrowed it: a heredoc's body is data, taken out before the line
+is read (Claude Code's `git commit -m "$(cat <<'EOF' …)"` was refused for any body line
+starting with `source` or a backticked name); `xargs` and `find -exec` count only when they run
+git, a shell, `cd`, `eval` or `env`; `command -v` is a lookup; and "names git" means a git
+command word or git in a string run as code, never a `.git/` path. A command substitution now leaves a marker in its word: it was
 an empty word, so `git -C "$(echo /etc)"` resolved to the cwd.
 
 **Land checks can be batched** (a merge queue, like GitHub's or bors). Land checks are the

@@ -226,8 +226,122 @@ fn take_backticks(c: &[char], mut i: usize) -> (String, usize) {
     (c[start..i].iter().collect(), (i + 1).min(c.len()))
 }
 
-fn lex(s: &str) -> Lexed {
+/// `s` with every heredoc's body and terminator line taken out: the body is data, never commands
+/// (Claude Code's commit form is `git commit -m "$(cat <<'EOF' … EOF\n)"`, and a body line such as
+/// `source maps fixed` read as a command refused the commit, the regression review). Quote-aware,
+/// including `$(…)` inside double quotes, so a `<<` inside a string starts nothing. A heredoc
+/// whose terminator never comes leaves `s` as it was, so nothing is hidden.
+fn strip_heredocs(s: &str) -> String {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Ctx {
+        Top,
+        Dq,
+        Subst,
+    }
     let c: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut stack = vec![Ctx::Top];
+    // Delimiters waiting for the end of their line: (word, tabs stripped).
+    let mut pending: Vec<(String, bool)> = Vec::new();
+    let mut i = 0;
+    while i < c.len() {
+        let ch = c[i];
+        let ctx = *stack.last().unwrap_or(&Ctx::Top);
+        let code = ctx != Ctx::Dq;
+        match ch {
+            '\\' => {
+                out.push(ch);
+                if let Some(&n) = c.get(i + 1) {
+                    out.push(n);
+                }
+                i += 2;
+                continue;
+            }
+            '\'' if code => {
+                // A single-quoted string: copied whole.
+                let end = c[i + 1..].iter().position(|&x| x == '\'').map_or(c.len(), |p| i + 1 + p);
+                out.extend(&c[i..(end + 1).min(c.len())]);
+                i = end + 1;
+                continue;
+            }
+            '"' if code => stack.push(Ctx::Dq),
+            '"' => {
+                stack.pop();
+            }
+            '$' if c.get(i + 1) == Some(&'(') => {
+                stack.push(Ctx::Subst);
+                out.push_str("$(");
+                i += 2;
+                continue;
+            }
+            ')' if ctx == Ctx::Subst => {
+                stack.pop();
+            }
+            '#' if code && (i == 0 || c[i - 1].is_whitespace()) => {
+                let end = c[i..].iter().position(|&x| x == '\n').map_or(c.len(), |p| i + p);
+                out.extend(&c[i..end]);
+                i = end;
+                continue;
+            }
+            '<' if code && c.get(i + 1) == Some(&'<') && c.get(i + 2) != Some(&'<') => {
+                let mut j = i + 2;
+                let dash = c.get(j) == Some(&'-');
+                if dash {
+                    j += 1;
+                }
+                while c.get(j).is_some_and(|x| *x == ' ' || *x == '\t') {
+                    j += 1;
+                }
+                let mut word = String::new();
+                while let Some(&x) = c.get(j) {
+                    if x.is_whitespace() || matches!(x, ';' | '&' | '|' | '(' | ')' | '<' | '>') {
+                        break;
+                    }
+                    if x != '\'' && x != '"' && x != '\\' {
+                        word.push(x);
+                    }
+                    j += 1;
+                }
+                if !word.is_empty() {
+                    pending.push((word, dash));
+                }
+                out.extend(&c[i..j]);
+                i = j;
+                continue;
+            }
+            '\n' if !pending.is_empty() => {
+                out.push('\n');
+                i += 1;
+                for (word, dash) in std::mem::take(&mut pending) {
+                    loop {
+                        if i >= c.len() {
+                            return s.to_string();
+                        }
+                        let end = c[i..].iter().position(|&x| x == '\n').map_or(c.len(), |p| i + p);
+                        let line: String = c[i..end].iter().collect();
+                        i = (end + 1).min(c.len());
+                        let line = if dash { line.trim_start_matches('\t').to_string() } else { line };
+                        if line == word {
+                            break;
+                        }
+                        if end >= c.len() && i >= c.len() && line != word {
+                            return s.to_string();
+                        }
+                    }
+                }
+                continue;
+            }
+            _ => {}
+        }
+        out.push(ch);
+        i += 1;
+    }
+    if pending.is_empty() { out } else { s.to_string() }
+}
+
+fn lex(s: &str) -> Lexed {
+    let stripped = strip_heredocs(s);
+    let c: Vec<char> = stripped.chars().collect();
     let mut out = Lexed { segments: Vec::new(), joins: Vec::new(), nested: Vec::new() };
     let mut words: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -544,21 +658,45 @@ fn cd_target(args: &[String], cur: &Here) -> Here {
 const HIDDEN_CODE_REFUSAL: &str = "Run git as a plain command: `cd <folder> && git …` or `git -C <folder> …`, with nothing that runs \
      other code on the same line (eval, source, exec, trap, a shell's -c, xargs, find -exec, env, pushd, a command held in a variable).";
 
-/// Whether the raw text names git as a word anywhere: in quotes, substitutions and `-c` strings
-/// too (`/usr/bin/git`, `git-upload-pack`), not inside another word (`digit`, `github`).
-fn mentions_git(raw: &str) -> bool {
+const DYNAMIC_WORD_REFUSAL: &str = "Run git as a plain command, with no command word held in a variable or a substitution on the \
+     same line: write a path like \"$HOME/bin/lint\" out in full (/Users/…/bin/lint), or run it in a call of its own.";
+
+/// Whether text names git as a word: in a string run as code (`eval 'git status'`, `/usr/bin/git`,
+/// `git-upload-pack`), not inside another word (`digit`, `github`) and not a `.git` path.
+fn text_names_git(raw: &str) -> bool {
     let b = raw.as_bytes();
     let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    raw.match_indices("git").any(|(i, _)| (i == 0 || !(word(b[i - 1]) || b[i - 1] == b'-')) && b.get(i + 3).is_none_or(|&c| !word(c)))
+    raw.match_indices("git").any(|(i, _)| (i == 0 || !(word(b[i - 1]) || b[i - 1] == b'-' || b[i - 1] == b'.')) && b.get(i + 3).is_none_or(|&c| !word(c)))
 }
 
-/// Whether any command in the line (or a substitution in it) can move the shell or run code the
-/// gate can't read: eval, source, `.`, exec, trap, builtin, command, pushd, popd, xargs, find
-/// -exec, env with a command, a shell with `-c` anywhere in its args, or a command word held in a
-/// variable or a substitution.
-fn hides_code(lexed: &Lexed, depth: usize) -> bool {
+/// Whether the line names git (the regression review): a word whose program is git (`git`,
+/// `/usr/bin/git`, `xargs git`), an assignment's value naming it (`g=git`), or git in a word that
+/// holds code (spaces or separators: an `eval` or `-c` string), in the line or a substitution. A
+/// heredoc's body is data, already out of the lexed line; `cat .git/HEAD` names no git.
+fn names_git(lexed: &Lexed, depth: usize) -> bool {
     if depth > MAX_DEPTH {
         return true;
+    }
+    let named = lexed.segments.iter().flatten().any(|w| {
+        let value = if is_assignment(w) { w.split_once('=').map_or("", |(_, v)| v) } else { w.as_str() };
+        program(value) == "git" || (value.contains([' ', '\t', '\n', ';', '&', '|']) && text_names_git(value)) || (is_assignment(w) && text_names_git(value))
+    });
+    named || lexed.nested.iter().any(|n| names_git(&lex(n), depth + 1))
+}
+
+/// Programs whose run, by `xargs` or `find -exec`, can move the shell or run unseen code.
+fn runs_code(w: &str) -> bool {
+    let p = program(w);
+    p == "git" || SHELLS.contains(&p) || matches!(p, "cd" | "eval" | "env" | "source" | "." | "exec" | "xargs" | "find") || w.starts_with('$') || w.contains(SUBST) || w.contains('`')
+}
+
+/// Why a line (or a substitution in it) can move the shell or run code the gate can't read, if it
+/// can: eval, source, `.`, exec, trap, builtin, `command` (but `command -v`), pushd, popd, `xargs`
+/// or `find -exec` running git, a shell, cd, eval or env, `env` with a command, a shell with `-c`
+/// anywhere in its args, or a command word held in a variable or a substitution.
+fn hides_code(lexed: &Lexed, depth: usize) -> Option<&'static str> {
+    if depth > MAX_DEPTH {
+        return Some(HIDDEN_CODE_REFUSAL);
     }
     let dynamic = |w: &str| w.starts_with('$') || w.contains(SUBST) || w.contains('`');
     let wrappers = ["nohup", "time", "nice", "timeout", "sudo", "doas", "caffeinate", "stdbuf", "unbuffer"];
@@ -571,14 +709,35 @@ fn hides_code(lexed: &Lexed, depth: usize) -> bool {
                 continue;
             }
             if dynamic(w) {
-                return true;
+                return Some(DYNAMIC_WORD_REFUSAL);
             }
             let args = &seg[i + 1..];
             match program(w) {
-                "eval" | "source" | "." | "exec" | "trap" | "builtin" | "command" | "pushd" | "popd" | "xargs" => return true,
-                "find" if args.iter().any(|a| matches!(a.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir")) => return true,
-                "env" if args.iter().any(|a| !a.starts_with('-') && !is_assignment(a)) => return true,
-                p if SHELLS.contains(&p) && args.iter().any(|a| a == "-Command" || a.strip_prefix('-').is_some_and(|f| !f.starts_with('-') && f.contains('c'))) => return true,
+                "command" if args.first().is_some_and(|a| a == "-v" || a == "-V") => {}
+                "eval" | "source" | "." | "exec" | "trap" | "builtin" | "command" | "pushd" | "popd" => return Some(HIDDEN_CODE_REFUSAL),
+                "xargs" => {
+                    // The command xargs runs: the first word past its options and their values.
+                    let value_flags = wrapper_value_flags("xargs").unwrap_or(&[]);
+                    let mut j = 0;
+                    while j < args.len() && args[j].starts_with('-') {
+                        j += if value_flags.contains(&args[j].as_str()) { 2 } else { 1 };
+                    }
+                    if args.get(j).is_none_or(|a| runs_code(a)) {
+                        return Some(HIDDEN_CODE_REFUSAL);
+                    }
+                }
+                "find" => {
+                    let execs = args.iter().enumerate().filter(|(_, a)| matches!(a.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir"));
+                    for (j, _) in execs {
+                        if args.get(j + 1).is_none_or(|a| runs_code(a)) {
+                            return Some(HIDDEN_CODE_REFUSAL);
+                        }
+                    }
+                }
+                "env" if args.iter().any(|a| !a.starts_with('-') && !is_assignment(a)) => return Some(HIDDEN_CODE_REFUSAL),
+                p if SHELLS.contains(&p) && args.iter().any(|a| a == "-Command" || a.strip_prefix('-').is_some_and(|f| !f.starts_with('-') && f.contains('c'))) => {
+                    return Some(HIDDEN_CODE_REFUSAL)
+                }
                 p if wrappers.contains(&p) => {
                     // The wrapped command is the next word that isn't an option (or a duration).
                     i += 1;
@@ -592,7 +751,7 @@ fn hides_code(lexed: &Lexed, depth: usize) -> bool {
             break;
         }
     }
-    lexed.nested.iter().any(|n| hides_code(&lex(n), depth + 1))
+    lexed.nested.iter().find_map(|n| hides_code(&lex(n), depth + 1))
 }
 
 fn check_command(cmd: &str, cwd: Option<&Path>, scope: &GateScope, depth: usize) -> Result<(), String> {
@@ -606,8 +765,10 @@ fn check_command(cmd: &str, cwd: Option<&Path>, scope: &GateScope, depth: usize)
     // One blunt rule rather than one patch per shell trick (the final review, 2026-10-31): a
     // worker's line that mentions git anywhere, quoted or nested, and holds anything that can
     // move the shell or run code the gate can't read, is refused whole.
-    if depth == 0 && scope.contained && mentions_git(cmd) && hides_code(&lexed, 0) {
-        return Err(HIDDEN_CODE_REFUSAL.to_string());
+    if depth == 0 && scope.contained && names_git(&lexed, 0) {
+        if let Some(why) = hides_code(&lexed, 0) {
+            return Err(why.to_string());
+        }
     }
     for inner in &lexed.nested {
         check_command(inner, if moves { None } else { cwd }, scope, depth + 1)?;
@@ -1446,6 +1607,35 @@ mod tests {
         ] {
             assert!(matches!(wbash(&f, &cmd), GateDecision::Deny(r) if r.contains("Run git as a plain command")), "{cmd}");
         }
+        // The regression review: a heredoc's body is data. Claude Code's commit form, a body line
+        // starting with a backticked name or `source`, and `-F -`, all pass; so do lookups and
+        // runs that start no code.
+        for cmd in [
+            "git commit -m \"$(cat <<'EOF'\nFix the login form\n\n`source` maps were wrong; eval of the config is gone.\nenv X now read once\n\nCo-written\nEOF\n)\"".to_string(),
+            "git commit -m \"$(cat <<EOF\n`Button` keeps focus\nexec path fixed\nEOF\n)\"".into(),
+            "git commit -F - <<'EOF'\nsource maps: on\ncommand -p is gone\nEOF".into(),
+            "git commit -F - <<-EOF\n\teval removed\n\tEOF".into(),
+            "git ls-files | xargs wc -l".into(),
+            "git diff --name-only | xargs npx prettier --check".into(),
+            "command -v git && git status".into(),
+            "cat .git/HEAD && eval 'echo hi'".into(),
+            "find . -name '*.ts' -exec wc -l {} + && git status".into(),
+        ] {
+            assert_eq!(wbash(&f, &cmd), GateDecision::Allow, "should allow: {cmd}");
+        }
+        // A heredoc doesn't hide what follows it, nor does a `<<` inside a string start one.
+        for cmd in [
+            "cat <<EOF\nhi\nEOF\neval 'cd /tmp'; git status".to_string(),
+            "echo \"<<A\"\neval 'cd /tmp'; git status\nA".into(),
+            "cat <<NEVER\neval 'cd /tmp'; git status".into(),
+            "git ls-files | xargs sh -c 'git add'".into(),
+            "find . -exec git add {} ;".into(),
+            "xargs -I{} git -C {} status".into(),
+        ] {
+            assert!(matches!(wbash(&f, &cmd), GateDecision::Deny(_)), "should refuse: {cmd}");
+        }
+        let GateDecision::Deny(r) = wbash(&f, "\"$HOME/bin/lint\" && git status") else { panic!() };
+        assert!(r.contains("write a path like"), "{r}");
         // Without git in the line, the rule doesn't apply; nor to `digit` or `github`.
         for cmd in ["eval 'echo hi'", "find . -name x -exec rm {} ;", "env FOO=1 npm test", "sh -c 'echo digit github.com'"] {
             assert_eq!(wbash(&f, cmd), GateDecision::Allow, "{cmd}");
