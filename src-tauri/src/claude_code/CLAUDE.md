@@ -474,7 +474,9 @@ The settings hooks still fire beneath it, and three things keep the two paths fr
 
 PreToolUse comes from the mod's `tool.call` hook, not `classic.PreToolUse`, whose input lacks
 the session id and the subagent's `agent_id` (gate.rs keys on both). PreModelSwitch's `allow`
-is returned as the mod's own result. The mod's Stop also carries `maiterm_context: { model,
+is returned as the mod's own result, and so is PreCompact's block: an `auto` compaction is sent
+with `&prepare=1`, and when its window takes it over as Claude's idle compaction (`prepare_before_idle_compaction`,
+docs/overlord.md §7) the reply becomes `{ block }`. Anything else lets the compaction go ahead. The mod's Stop also carries `maiterm_context: { model,
 window }` from `$.session.usage()`: the only source of a Claude session's context window since
 2.1.311 dropped `[1m]` from model ids (`transcript::record_claude_window`, read by the phone's
 and the Overlord's context gauges while the transcript names that model). A Claude Code too old for mods ignores the variable, so

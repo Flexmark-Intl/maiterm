@@ -4648,6 +4648,48 @@ async fn hive_gate_handler(
     }
 }
 
+/// How long Claude's PreCompact hook waits on the window. Its compaction is holding the session
+/// meanwhile, and an idle compaction has minutes of cache left, not seconds.
+const IDLE_COMPACTION_ANSWER: std::time::Duration = std::time::Duration::from_secs(3);
+/// The window's own limit, under the wait above: a window that answers later than this has been
+/// given up on, so it must not start a ritual on a session that has compacted.
+const IDLE_COMPACTION_WINDOW_MS: i64 = 2_500;
+
+/// Whether this window takes an `auto` compaction over: when it is Claude's idle one, the window
+/// starts the prepare-for-compaction ritual, whose own `/compact` replaces it (docs/overlord.md
+/// §7). Every other outcome is `false`, so a slow or asleep window, a closed one, or the Overlord
+/// being off leaves Claude compacting as it would without maiTerm.
+async fn prepare_before_idle_compaction(srv: &ServerState, tab_id: &str) -> bool {
+    if !srv.state.app_data.read().preferences.overlord_enabled {
+        return false;
+    }
+    let Some(window) = find_window_for_tab(&srv.state, tab_id) else { return false };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let deadline = now.as_millis() as i64 + IDLE_COMPACTION_WINDOW_MS;
+    use crate::mailink::rpc;
+    let outcome = rpc::request_with_timeout(
+        &srv.state,
+        Some(&srv.app_handle),
+        &window,
+        "overlord.prepareIdleCompaction",
+        serde_json::json!({ "tabId": tab_id, "deadline": deadline }),
+        IDLE_COMPACTION_ANSWER,
+    )
+    .await;
+    match outcome {
+        rpc::Outcome::Answered(v) => {
+            let prepare = v.get("prepare").and_then(Value::as_bool) == Some(true);
+            log::info!("Claude hook: auto compaction on tab {tab_id}: prepare={prepare} ({})",
+                v.get("reason").and_then(Value::as_str).unwrap_or("ritual started"));
+            prepare
+        }
+        _ => {
+            log::info!("Claude hook: auto compaction on tab {tab_id}: its window did not answer, so it goes ahead");
+            false
+        }
+    }
+}
+
 /// Handle POST /hooks — receives agent hook events (Claude today; other runtimes
 /// post here with a ?runtime= tag). SessionStart registers a session→tab mapping;
 /// other events use it to route Tauri events to the correct frontend tab.
@@ -5721,6 +5763,19 @@ async fn hooks_handler(
 
             log::debug!("Claude hook: PreCompact trigger='{}' session={} (tab {:?})",
                 trigger, &session_id[..session_id.len().min(8)], tab_id);
+            // Blocked, this compaction never happens, so the tab must not read as compacting:
+            // that would hold the very ritual that was just agreed to.
+            if via_mod && params.contains_key("prepare") && trigger == "auto" {
+                if let Some(tab) = tab_id.as_deref() {
+                    if prepare_before_idle_compaction(&srv, tab).await {
+                        return axum::Json(serde_json::json!({
+                            "decision": "block",
+                            "reason": "maiTerm is preparing this session for compaction first",
+                        }))
+                        .into_response();
+                    }
+                }
+            }
             emit_dual(&srv.app_handle, "agent-hook-pre-compact", "claude-hook-pre-compact", serde_json::json!({
                 "runtime": runtime_key,
                 "session_id": session_id,

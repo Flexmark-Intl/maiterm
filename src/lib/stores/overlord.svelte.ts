@@ -22,6 +22,7 @@ import { bracketedPasteSubmit, deliverPrompt } from '$lib/utils/agentPrompt';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { CHECKPOINT_DEFAULT_IDS, pruneHiddenDefaultOverlordRules, seedDefaultOverlordRules } from '$lib/overlord/defaults';
+import { idleCompactionRefusal } from '$lib/overlord/idleCompaction';
 import {
   contextConditionMet,
   contextFiresAtPct,
@@ -56,6 +57,8 @@ import { listen } from '@tauri-apps/api/event';
 const TICK_MS = 5_000;
 /** Max wait for a step's pre-injection window (state + quiet) before aborting the ritual. */
 const INJECTABLE_WAIT_CAP_MS = 5 * 60_000;
+/** How long a ritual replacing Claude's idle compaction waits for the block to reach Claude. */
+const IDLE_COMPACTION_HOLD_MS = 1_500;
 /** How long the main turn must have stayed closed before a human-fired step types (`waitInjectable`). */
 const TURN_SETTLE_MS = 1500;
 /** After a human-fired step waited out a draft: how long since the last keystroke before it
@@ -2020,7 +2023,12 @@ function createOverlordStore() {
   }
 
   /** Run a rule's sequence against a tab. All ledger writes for the run happen here. */
-  async function runSequence(rule: OverlordRule, tabId: string, origin: OverlordLedgerEntry['origin']) {
+  async function runSequence(
+    rule: OverlordRule,
+    tabId: string,
+    origin: OverlordLedgerEntry['origin'],
+    startAfterMs = 0,
+  ) {
     if (rituals.has(tabId)) return;
     const run: RitualRun = {
       runId: crypto.randomUUID(),
@@ -2042,6 +2050,7 @@ function createOverlordStore() {
     fireLog.set(key, [...(fireLog.get(key) ?? []), Date.now()]);
     const runtime = workspacesStore.getTabRuntime(tabId);
     try {
+      if (startAfterMs > 0) await sleep(startAfterMs);
       for (let i = 0; i < rule.sequence.length; i++) {
         const step = rule.sequence[i];
         // A step with no text would still submit — `bracketedPasteSubmit` wraps the empty
@@ -2776,6 +2785,46 @@ function createOverlordStore() {
       if ((now && !bestNow) || (now === bestNow && at(r) < at(best))) best = r;
     }
     return best;
+  }
+
+  /**
+   * Claude is about to compact this tab on its own. Take it over if that is its idle compaction
+   * and the ritual can really run, which must be known now: the answer blocks the compaction, so
+   * a ritual that then gave up would leave the session uncompacted as its cache runs out.
+   *
+   * The rule's `when` is not asked, as with a human's fire: Claude's own timer is the condition,
+   * from 200k tokens, under the rule's threshold on a 1M window. Its guards hold, so the ritual
+   * doesn't run twice in a cooldown. The run starts held, because Claude's compaction owns the
+   * turn until the block reaches it; `rituals` keeps every other rule off the tab meanwhile.
+   */
+  async function prepareIdleCompaction(tabId: string, deadline: number): Promise<{ prepare: boolean; reason?: string }> {
+    const no = (reason: string) => ({ prepare: false, reason });
+    const now = Date.now();
+    const rule = checkpointRuleFor(tabId);
+    const refused = idleCompactionRefusal({
+      now,
+      supervised: running && preferencesStore.overlordEnabled && !!findTab(tabId) && !engineSkipsTab(tabId),
+      proposeMode: preferencesStore.overlordProposeMode,
+      rule,
+      runtime: workspacesStore.getTabRuntime(tabId),
+      state: mappedState(tabId),
+      occupied: rituals.has(tabId) || outstanding.has(tabId),
+      lastTurnTs: facts.get(tabId)?.last_turn_ts,
+      lastHumanInputAt: terminalsStore.getLastTakeoverInputAt(tabId),
+    });
+    if (refused) return no(refused);
+    if (!rule || !guardsPassSync(rule, tabId, now)) return no('the rule\'s guards refuse');
+    if (permissionBlocks(rule, tabId)) return no('a permission prompt is open');
+    if ((await replState(tabId)) !== 'ready') return no('no live agent');
+    // Each of these would stop the ritual at its first step, after the block.
+    if (await commands.agentDialogOpen(tabId).catch(() => true)) return no('a dialog is open');
+    if (await boxHasText(tabId)) return no('a draft is in the box');
+    // Read again after those awaits, and only then is the run started and the block promised.
+    if (Date.now() >= deadline) return no('answered too late');
+    if (rituals.has(tabId) || outstanding.has(tabId) || mappedState(tabId) !== 'idle') return no('the tab changed');
+    void runSequence($state.snapshot(rule) as OverlordRule, tabId, 'rule', IDLE_COMPACTION_HOLD_MS);
+    logInfo(`overlord: "${rule.name}" replaces Claude's idle compaction on ${tabId.slice(0, 8)}`);
+    return { prepare: true };
   }
 
   /**
@@ -4178,6 +4227,9 @@ function createOverlordStore() {
       if (st && st !== 'idle') return { kind: 'busy' };
       return { kind: 'ready' };
     },
+
+    /** Claude's PreCompact hook asking, through Rust. See the function. */
+    prepareIdleCompaction,
 
     /** Run the checkpoint on this tab now — `fireRule` with the tab's checkpoint rule. */
     async checkpointTab(tabId: string): Promise<{ started: boolean; reason?: string }> {

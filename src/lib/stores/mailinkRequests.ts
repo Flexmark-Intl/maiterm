@@ -130,6 +130,13 @@ export async function handleMailinkRequest(req: MailinkRequest): Promise<void> {
         else result = await overlordStore.fireRule(a.tabId, a.ruleId);
         break;
       }
+      // Asked by `hooks_handler`, never the phone: Claude's PreCompact hook is waiting on this.
+      case 'overlord.prepareIdleCompaction': {
+        const deadline = (req.args ?? {}).deadline;
+        if (typeof a.tabId !== 'string' || typeof deadline !== 'number') result = { error: 'tabId and deadline are required' };
+        else result = await overlordStore.prepareIdleCompaction(a.tabId, deadline);
+        break;
+      }
       case 'overlord.recoverTab': {
         if (typeof a.tabId !== 'string') result = { error: 'tabId is required' };
         else result = await overlordStore.recoverTab(a.tabId);

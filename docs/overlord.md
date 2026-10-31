@@ -858,6 +858,44 @@ firing `/compact` early truncates the work just asked for.
 `on_timeout: 'abort'` on step 1 is the important default — if the docs pass
 stalls, `/compact` must not fire into a half-finished turn.
 
+**Claude's idle compaction runs it too (2026-10-31).** Claude compacts on its own 54 minutes
+into a one hour cache, from 200k tokens, and it compacts unprepared. maiTerm doesn't replace
+that timer, it uses it: Claude's PreCompact reaches the `maiterm-tab` mod, which asks maiTerm,
+and a block leaves the conversation as it is while the ritual runs on the still warm cache. Its
+`/compact` arrives as `manual`, so nothing blocks that one.
+
+```
+Claude's timer → PreCompact(auto) → mod: POST /hooks?prepare=1 → window: prepareIdleCompaction
+   "take over"  → mod returns { block } → ritual: prep turn → /compact (manual)
+   anything else → Claude compacts as it would without maiTerm
+```
+
+Proved live on 2.1.316 with a settings hook (359k tokens, a one hour cache): the hook fired
+53m57s after the last turn, nothing compacted, the prep turn read 359,004 tokens from cache and
+wrote 24, and `/compact` went from 359,037 to 5,320.
+
+- **Claude reports idle and threshold compactions with one `auto` trigger.** Blocking a
+  threshold one would leave a full conversation nowhere to go, so `idleCompactionRefusal`
+  (`overlord/idleCompaction.ts`) takes over only an idle agent, 50+ minutes after its last turn,
+  whose human hasn't touched the tab in a minute. Anything it can't read refuses.
+- **The answer has to be known before the block.** A ritual that stops at its first step after
+  the block leaves the session uncompacted as its cache runs out, which is worse than doing
+  nothing. So a dialog, a draft, no live agent, a guard or a rule without a `/compact` for this
+  runtime all refuse up front. Hooks can't start a turn, and Claude's compaction owns the turn
+  until the block reaches it, so the run starts held for 1.5 s, with `rituals` keeping every
+  other rule off the tab.
+- **`when` isn't asked, the guards are.** Claude's timer is the condition, and on a 1M window it
+  comes from 200k, under the rule's 350k. Cooldown and `max_per_hour` hold.
+- **Propose mode doesn't block.** A card would ask nobody, with six minutes of cache left, and a
+  blocked tab then pays the whole rebuild when its human returns.
+- **Three seconds, then Claude goes ahead.** `prepare_before_idle_compaction` (server.rs) gives
+  the window that long, and the window refuses past its 2.5 s deadline, so a webview stalled by
+  a sleeping screen can't start a ritual on a session that has since compacted.
+- **The mod is the only path that blocks,** via `&prepare=1`. Every Claude with idle compaction
+  has mods (both 2.1.290+), ssh hosts get the mod, and a mod older than this never asks, so the
+  server can't start a ritual whose block goes nowhere. Hive tabs aren't the engine's. The only
+  trace on screen is Claude's status line, "compaction blocked by PreCompact hook".
+
 **When it fires (2026-10-31).** Two rules run this same ritual, split by agent state:
 
 | Rule | Agent | Fires at | On 200k | On 250k | On 1M |

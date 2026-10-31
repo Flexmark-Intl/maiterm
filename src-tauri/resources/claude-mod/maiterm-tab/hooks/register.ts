@@ -334,7 +334,27 @@ export const register: Register = on => {
     return { ...result, decision }
   })
   on('classic.SubagentStop', relay)
-  on('classic.PreCompact', relay)
+  // Claude's idle compaction reaches here as an `auto` compaction, the same as its threshold one.
+  // maiTerm tells them apart, and for an idle one it may run its own preparation first: blocked
+  // here, the conversation stays as it is and the cache stays warm, and the `/compact` that ends
+  // the ritual arrives as `manual`. Anything but a clear block lets the compaction go ahead.
+  on('classic.PreCompact', async ($, e, next) => {
+    const to = await linkOf($)
+    if (!to) return next(e)
+    const mayPrepare = e.trigger === 'auto' && !e.agent_id
+    const reply = await send($, to, e, mayPrepare ? '&prepare=1' : '')
+    await ensureInbox($, to)
+    if (mayPrepare) {
+      try {
+        const answer = reply ? JSON.parse(reply) : undefined
+        // Without `next`: the settings hooks' turn comes with the real compaction.
+        if (answer?.decision === 'block') return { block: String(answer.reason ?? 'maiTerm is preparing first') }
+      } catch {
+        // An empty or non-JSON reply decides nothing.
+      }
+    }
+    return next(e)
+  })
 
   // After the row is stored, never ahead of it: this hook sits in the store path. A subagent's
   // rows go to its own file, which maiTerm doesn't copy.
