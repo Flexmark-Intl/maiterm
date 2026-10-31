@@ -1303,12 +1303,16 @@ it, the call ran (spike 9). Every other hook a Hive tab needs is a command hook 
 dropped the hook's `cwd`. Now the gate follows the line. Before any `cd`, git runs in the
 event's `cwd`. A `cd` (or `pushd`) to a literal, existing folder moves what follows when it is its
 segment's own command, starts its chain (or continues one with `&&`) and isn't piped or
-backgrounded: for the rest of that `&&` chain, and past a `;` when it started its chain. A
-relative `-C` resolves against that place. What it can't place stays refused (fail closed):
-`popd`, `cd -`, a `cd` after `&&`/`||` once the chain is uncertain, any subshell paren, branch,
-loop, function or brace group in a line with a `cd`, a bare `cd name` (CDPATH could send it
-elsewhere), `env -C`. A `$VAR` or `$(…)` in `-C` or `cd` is refused with "the gate can't expand
-$W: write the folder's path out". A command substitution now leaves a marker in its word: it was
+backgrounded: for the rest of that `&&` chain. Past a `;` the `cd` may have failed (a folder it
+can't enter), so git there must be allowed in every place the shell could be, the old one
+included. A relative `-C` resolves against that place. What it can't place stays refused (fail
+closed): `popd`, `cd -`, a `cd` after `||`, any subshell paren, branch, loop, function or brace
+group in a line with a `cd`, a bare `cd name` (CDPATH could send it elsewhere), `..` in a `cd`
+(it's logical: `..` after a symlink isn't where canonicalising goes), `~` or a bare `cd` (the
+line can reassign `HOME`), `env -C`, and a worker's git sharing a line with `eval`, `source`, `.`
+or `exec` (a quoted `cd` the gate can't see). A `$VAR`, `$(…)` or `~` in `-C` or `cd` is refused
+with "the gate can't expand $W: write the folder's path out" (the review of 2026-10-31 found the
+symlink, failed-`cd`, `HOME` and `eval` cases). A command substitution now leaves a marker in its word: it was
 an empty word, so `git -C "$(echo /etc)"` resolved to the cwd.
 
 **Land checks can be batched** (a merge queue, like GitHub's or bors). Land checks are the

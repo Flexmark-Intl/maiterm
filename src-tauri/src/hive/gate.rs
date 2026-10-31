@@ -362,6 +362,9 @@ fn lex(s: &str) -> Lexed {
 #[derive(Debug, Clone)]
 enum Here {
     At(PathBuf),
+    /// One of these, the gate can't tell which (a `cd` that may have failed): git must be fine in
+    /// every one.
+    Any(Vec<PathBuf>),
     Unknown(Option<String>),
 }
 
@@ -369,7 +372,7 @@ impl Here {
     fn dir(&self) -> Option<&Path> {
         match self {
             Here::At(p) => Some(p),
-            Here::Unknown(_) => None,
+            Here::Any(_) | Here::Unknown(_) => None,
         }
     }
 }
@@ -429,7 +432,10 @@ fn places(lexed: &Lexed, cwd: Option<&Path>) -> Vec<Here> {
         return vec![Here::Unknown(None); n];
     }
     let mut out = Vec::with_capacity(n);
-    // `place`: where the next chain starts. `cur`: where this chain's next command runs.
+    // `place`: where the next chain may start, every folder the last chain could have left the
+    // shell in (a `cd` that failed — a folder it can't enter — leaves it where it was, and `;`
+    // runs on regardless: the review's `cd <locked>; git status`). `cur`: where this chain's next
+    // command runs, which an `&&` after a `cd` makes certain.
     let (mut place, mut cur) = (start.clone(), start);
     let mut moved = false;
     for (seg, &(before, after)) in lexed.segments.iter().zip(&lexed.joins) {
@@ -451,10 +457,34 @@ fn places(lexed: &Lexed, cwd: Option<&Path>) -> Vec<Here> {
             && matches!(after, Join::Seq | Join::And | Join::Or);
         let target = if own { cd_target(&seg[1..], &cur) } else { Here::Unknown(None) };
         moved = true;
-        place = if before == Join::Seq { target.clone() } else { Here::Unknown(None) };
+        // Where the shell was stays a candidate for the next chain; the target joins it.
+        place = merge(&place, &target);
         cur = target;
     }
     out
+}
+
+/// Every folder either place could be: the shell is in one of them.
+fn merge(a: &Here, b: &Here) -> Here {
+    let set = |h: &Here| -> Option<Vec<PathBuf>> {
+        match h {
+            Here::At(p) => Some(vec![p.clone()]),
+            Here::Any(v) => Some(v.clone()),
+            Here::Unknown(_) => None,
+        }
+    };
+    match (set(a), set(b)) {
+        (Some(mut x), Some(y)) => {
+            for p in y {
+                if !x.contains(&p) {
+                    x.push(p);
+                }
+            }
+            if x.len() == 1 { Here::At(x.remove(0)) } else { Here::Any(x) }
+        }
+        (None, _) => a.clone(),
+        (_, None) => b.clone(),
+    }
 }
 
 /// The folder `cd <args>` lands in, if the gate can be sure: one literal argument naming an
@@ -475,24 +505,35 @@ fn cd_target(args: &[String], cur: &Here) -> Here {
         rest.push(a);
     }
     let arg = match rest.as_slice() {
-        [] => "~",
+        // A bare `cd` goes to $HOME, which the line may have set.
+        [] => return Here::Unknown(Some(cant_expand("~"))),
         [a] => a,
         _ => return Here::Unknown(None),
     };
     if let Some(tok) = unexpanded(arg).or_else(|| arg.contains('`').then(|| "`…`".to_string())) {
         return Here::Unknown(Some(cant_expand(&tok)));
     }
+    // `~` is the shell's $HOME, which `HOME=… ; cd ~/x` reassigns: maiTerm's isn't it (the review).
+    if arg.starts_with('~') {
+        return Here::Unknown(Some(cant_expand("~")));
+    }
+    // `cd` is logical: it applies `..` to the path as typed, where canonicalising follows a
+    // symlink first (`cd l3/../../..` through `l3 -> a/b/c` lands elsewhere, the review).
+    if Path::new(arg).components().any(|c| c == std::path::Component::ParentDir) {
+        return Here::Unknown(Some(format!("the gate doesn\u{2019}t follow `..` in `cd {arg}`: write the folder\u{2019}s path out")));
+    }
     if arg.starts_with('-') || arg.contains(['*', '?', '[']) {
         return Here::Unknown(None);
     }
-    let anchored = arg == "~" || arg.starts_with("~/") || Path::new(arg).is_absolute() || [".", ".."].contains(&arg) || arg.starts_with("./") || arg.starts_with("../");
+    let anchored = Path::new(arg).is_absolute() || *arg == "." || arg.starts_with("./");
     if !anchored {
         return Here::Unknown(Some(format!("a bare `cd {arg}` can follow CDPATH elsewhere: write it ./{arg} or as the full path")));
     }
     let base = match cur {
         Here::At(p) => Some(p.as_path()),
-        Here::Unknown(why) if !Path::new(arg).is_absolute() && !arg.starts_with('~') => return Here::Unknown(why.clone()),
-        Here::Unknown(_) => None,
+        _ if Path::new(arg).is_absolute() => None,
+        Here::Unknown(why) => return Here::Unknown(why.clone()),
+        Here::Any(_) => return Here::Unknown(None),
     };
     match resolve(base, arg) {
         Some(p) if p.is_dir() => Here::At(p),
@@ -508,6 +549,16 @@ fn check_command(cmd: &str, cwd: Option<&Path>, scope: &GateScope, depth: usize)
     // A substitution's folder isn't followed through the line's `cd`s: with one in the line, a
     // git inside `$(…)` needs an absolute `-C`.
     let moves = lexed.segments.iter().flatten().any(|w| is_cd(w));
+    // `eval 'cd /tmp'; git status`: a quoted `cd` (or a sourced script's) moves the shell where
+    // the gate can't see. A worker's git shares a line with none of them.
+    if scope.contained {
+        let hides = |w: &String| matches!(program(w), "eval" | "source" | "." | "exec");
+        let mut firsts = lexed.segments.iter().filter_map(|s| s.iter().find(|w| !is_assignment(w) && !KEYWORDS.contains(&w.as_str())));
+        let has_git = lexed.segments.iter().flatten().any(|w| program(w) == "git");
+        if has_git && firsts.any(hides) {
+            return Err("git can\u{2019}t share a line with eval, source, `.` or exec: they can move the shell where maiTerm can\u{2019}t see. Run git in a call of its own.".to_string());
+        }
+    }
     for inner in &lexed.nested {
         check_command(inner, if moves { None } else { cwd }, scope, depth + 1)?;
     }
@@ -661,7 +712,13 @@ fn check_segment(words: &[String], here: &Here, scope: &GateScope, depth: usize)
                 Some(r) => Err(r),
                 None => Ok(()),
             },
-            "git" => check_git(args, &here, scope),
+            // Wherever the shell may be, git must be allowed there.
+            "git" => match &here {
+                Here::Any(all) => all.iter().try_for_each(|p| check_git(args, &Here::At(p.clone()), scope)).map_err(|e| {
+                    format!("{e} (a `cd` followed by `;` may have failed and left the shell where it was: write `cd <folder> && git …`)")
+                }),
+                _ => check_git(args, &here, scope),
+            },
             "gh" => check_gh(args),
             _ => Ok(()),
         };
@@ -762,14 +819,15 @@ fn check_git(args: &[String], here: &Here, scope: &GateScope) -> Result<(), Stri
     // Why the folder isn't known, while it isn't: said in the refusal.
     let mut why: Option<String> = match here {
         Here::Unknown(w) => w.clone(),
-        Here::At(_) => None,
+        Here::At(_) | Here::Any(_) => None,
     };
     let roots: Vec<PathBuf> = scope.git_roots.iter().filter_map(|g| real_path(g)).collect();
     // The deepest root holding `r`: a Hive folder inside another is checked as itself.
     let root_of = |r: &Path| roots.iter().filter(|g| r.starts_with(g)).max_by_key(|g| g.components().count());
     let in_roots = |r: &Path| root_of(r).is_some();
     let check_path = |base: &Option<PathBuf>, why: &Option<String>, p: &str, flag: &str| -> Result<PathBuf, String> {
-        if let Some(tok) = unexpanded(p) {
+        // `~` is the shell's $HOME, which the line may have reassigned.
+        if let Some(tok) = unexpanded(p).or_else(|| p.starts_with('~').then(|| "~".to_string())) {
             return Err(format!("git {flag} {p}: {}, e.g. git {flag} '/full/path/to/folder'.", cant_expand(&tok)));
         }
         match resolve(base.as_deref(), p) {
@@ -1268,17 +1326,52 @@ mod tests {
         let from_out = |cmd: &str| gate_decision("Bash", &json!({ "command": cmd }), Some(Path::new(&out)), &f.worker);
         for cmd in [
             format!("cd \"{wt}\" && rm -f .gitignore && git status --short; S=x; npx sv create \"$S\" 2>&1 | tail -15; ls -la \"$S\""),
-            format!("cd \"{wt}\" && ls; git -C . status --short | head; npx x </dev/null 2>&1 | grep -v at | tail -12"),
-            format!("cd '{wt}'; git add -A && git commit -m x"),
-            format!("cd '{wt}' || exit 1; git status"),
             format!("cd '{wt}' && git log | head -3"),
-            format!("cd '{wt}/../web' && git status"),
             format!("cd -P -- '{wt}' && git status"),
             format!("cd '{out}' && cd '{wt}' && git status"),
             format!("cd '{wt}' && cd ./ && git -C ./ diff"),
         ] {
             assert_eq!(from_out(&cmd), GateDecision::Allow, "should allow: {cmd}");
         }
+        // After `;` the `cd` may have failed and left the shell where it was (the review's
+        // `cd <locked>; git status`): git there needs both places its own.
+        for cmd in [
+            format!("cd \"{wt}\" && ls; git -C . status --short | head; npx x </dev/null 2>&1 | grep -v at | tail -12"),
+            format!("cd '{wt}'; git add -A && git commit -m x"),
+            format!("cd '{wt}' || exit 1; git status"),
+        ] {
+            assert_eq!(wbash(&f, &cmd), GateDecision::Allow, "from its own worktree: {cmd}");
+            match from_out(&cmd) {
+                GateDecision::Deny(r) => assert!(r.contains("may have failed"), "{cmd}: {r}"),
+                GateDecision::Allow => panic!("from outside, the old place counts: {cmd}"),
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = f.wt.join("locked");
+            fs::create_dir_all(&locked).unwrap();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(matches!(from_out(&format!("cd '{wt}/locked'; git status")), GateDecision::Deny(_)), "a cd that fails");
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            // `cd` is logical: `..` after a symlink is applied as typed, not after following it.
+            fs::create_dir_all(f.wt.join("a/b/c")).unwrap();
+            std::os::unix::fs::symlink(f.wt.join("a/b/c"), f.wt.join("l3")).unwrap();
+            let billing = f.paths.worker_worktree("billing", "web");
+            assert!(matches!(from_out(&format!("cd '{wt}/l3/../../../billing/web' && git commit -am x")), GateDecision::Deny(_)), "{}", billing.display());
+        }
+        // `~` is the shell's $HOME, which the line can reassign.
+        for cmd in [format!("HOME='{wt}/fake'; cd ~/x && git status"), "cd && git status".to_string(), "git -C ~/x status".into()] {
+            match from_out(&cmd) {
+                GateDecision::Deny(r) => assert!(r.contains("can't expand ~"), "{cmd}: {r}"),
+                GateDecision::Allow => panic!("should refuse: {cmd}"),
+            }
+        }
+        // A quoted `cd` the gate can't see.
+        for cmd in ["eval 'cd /tmp'; git status", "source ./env.sh && git status", ". ./env.sh; git log", "exec git status"] {
+            assert!(matches!(wbash(&f, cmd), GateDecision::Deny(r) if r.contains("eval, source")), "{cmd}");
+        }
+        assert_eq!(bash(&f, "eval 'cd /tmp'; git status"), GateDecision::Allow, "the coordinator's shell is its human's");
         // The cwd itself places a relative -C.
         assert_eq!(wbash(&f, "git -C . status"), GateDecision::Allow);
         assert_eq!(wbash(&f, "ls && git -C ./ log"), GateDecision::Allow);
@@ -1286,6 +1379,7 @@ mod tests {
             format!("cd '{human}' && git status"),
             format!("cd '{wt}' && cd '{human}'; git status"),
             format!("cd '{wt}' && cd .. && git status"),
+            format!("cd '{wt}/../web' && git status"),
             format!("cd '{wt}/missing' ; git status"),
             format!("true && cd '{wt}'; git status"),
             format!("false || cd '{wt}' && git status"),
