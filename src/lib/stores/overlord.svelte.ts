@@ -21,7 +21,7 @@ import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { bracketedPasteSubmit, deliverPrompt } from '$lib/utils/agentPrompt';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { toastStore } from '$lib/stores/toasts.svelte';
-import { pruneHiddenDefaultOverlordRules, seedDefaultOverlordRules } from '$lib/overlord/defaults';
+import { CHECKPOINT_DEFAULT_IDS, pruneHiddenDefaultOverlordRules, seedDefaultOverlordRules } from '$lib/overlord/defaults';
 import {
   contextConditionMet,
   contextFiresAtPct,
@@ -915,11 +915,9 @@ function createOverlordStore() {
 
   function guardsPassSync(rule: OverlordRule, tabId: string, now: number): boolean {
     const g = rule.guards;
-    // cooldown per (rule, tab). Checkpoint rules share one: they run the same ritual, split
-    // by agent state, so a ritual the human aborted by typing would otherwise have the busy
-    // rule interrupt them within a tick, because the agent is now working on what they typed.
+    // cooldown per (rule, tab)
     const key = `${rule.id}|${tabId}`;
-    const last = rule.when.event === 'context_pct' ? checkpointFiredAt(tabId) : (lastFiredAt.get(key) ?? 0);
+    const last = cooldownStartedAt(rule, tabId);
     if (rule.cooldown > 0 && now - last < rule.cooldown * 1000) return false;
     // agent_state (default idle or busy, `DEFAULT_AGENT_STATES`). agent_unready rules are the
     // exception: the condition MEANS "no live agent state", so requiring one would make the
@@ -2323,9 +2321,9 @@ function createOverlordStore() {
   }
 
   function propose(rule: OverlordRule, tabId: string) {
-    // One checkpoint card per tab: its two rules run the same ritual.
+    // One checkpoint card per tab: the two default rules run the same ritual.
     const sameJob = (ruleId: string) =>
-      ruleId === rule.id || (rule.when.event === 'context_pct' && isCheckpointRule(ruleId));
+      ruleId === rule.id || (isCheckpointDefault(rule) && isCheckpointDefault(ruleById(ruleId)));
     if (proposals.some((p) => p.tabId === tabId && sameJob(p.ruleId))) return;
     const ws = workspaceForTab(tabId);
     proposals = [
@@ -2732,13 +2730,23 @@ function createOverlordStore() {
     );
   }
 
-  function isCheckpointRule(ruleId: string): boolean {
-    return preferencesStore.overlordRules.find((r) => r.id === ruleId)?.when.event === 'context_pct';
+  function ruleById(ruleId: string): OverlordRule | undefined {
+    return preferencesStore.overlordRules.find((r) => r.id === ruleId);
   }
 
-  /** When a checkpoint last fired on this tab, by any of its rules. */
-  function checkpointFiredAt(tabId: string): number {
-    return Math.max(0, ...checkpointRulesFor(tabId).map((r) => lastFiredAt.get(`${r.id}|${tabId}`) ?? 0));
+  function isCheckpointDefault(rule: OverlordRule | undefined): boolean {
+    return !!rule?.default_id && CHECKPOINT_DEFAULT_IDS.has(rule.default_id);
+  }
+
+  /**
+   * When this rule's cooldown on this tab began. The two default checkpoint rules share one:
+   * they run the same ritual, split by agent state, so a ritual the human aborted by typing
+   * would otherwise have the busy rule interrupt them within a tick, because the agent is now
+   * working on what they typed. Any other rule, a `context_pct` one included, has its own.
+   */
+  function cooldownStartedAt(rule: OverlordRule, tabId: string): number {
+    const sharing = isCheckpointDefault(rule) ? preferencesStore.overlordRules.filter(isCheckpointDefault) : [rule];
+    return Math.max(0, ...sharing.map((r) => lastFiredAt.get(`${r.id}|${tabId}`) ?? 0));
   }
 
   /** The percentage of this tab's window where its first checkpoint rule fires, or null with
@@ -4161,8 +4169,10 @@ function createOverlordStore() {
       if (run) return { kind: 'running', step: run.stepIndex + 1, steps: run.stepCount };
       const rule = checkpointRuleFor(tabId);
       if (!rule) return { kind: 'no_rule' };
-      if (proposals.some((p) => p.tabId === tabId && isCheckpointRule(p.ruleId))) return { kind: 'proposed' };
-      const left = rule.cooldown * 1000 - (Date.now() - checkpointFiredAt(tabId));
+      if (proposals.some((p) => p.tabId === tabId && checkpointRulesFor(tabId).some((r) => r.id === p.ruleId))) {
+        return { kind: 'proposed' };
+      }
+      const left = rule.cooldown * 1000 - (Date.now() - cooldownStartedAt(rule, tabId));
       if (left > 0) return { kind: 'cooling', minutes: Math.max(1, Math.ceil(left / 60_000)) };
       const st = mappedState(tabId);
       if (st && st !== 'idle') return { kind: 'busy' };

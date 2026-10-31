@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { conditionChip, contextConditionMet, contextFiresAtPct, describeCondition } from './format';
+import type { OverlordRule } from '$lib/tauri/types';
+import { conditionChip, contextConditionMet, contextFiresAtPct, describeCondition, ruleWarnings } from './format';
 
 const FLOORED = { event: 'context_pct', at_or_above: 35, min_tokens: 130_000 } as const;
 const PLAIN = { event: 'context_pct', at_or_above: 55 } as const;
@@ -35,6 +36,20 @@ describe('contextFiresAtPct', () => {
   it('states only the percentage when the window is unknown or there is no floor', () => {
     expect(contextFiresAtPct(FLOORED, undefined)).toBe(35);
     expect(contextFiresAtPct(PLAIN, 200_000)).toBe(55);
+  });
+});
+
+describe('ruleWarnings', () => {
+  const slashRule = (agent_state: ('idle' | 'active')[]) =>
+    ({
+      when: PLAIN,
+      guards: { agent_state },
+      sequence: [{ kind: 'slash', text: '/compact' }],
+    }) as unknown as OverlordRule;
+
+  it('flags a slash step in a rule that allows only a busy agent', () => {
+    expect(ruleWarnings(slashRule(['active']))).toHaveLength(1);
+    expect(ruleWarnings(slashRule(['idle', 'active']))).toHaveLength(0);
   });
 });
 

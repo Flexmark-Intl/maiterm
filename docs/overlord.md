@@ -863,7 +863,7 @@ stalls, `/compact` must not fire into a half-finished turn.
 | Rule | Agent | Fires at | On 200k | On 250k | On 1M |
 |---|---|---|---|---|---|
 | `checkpoint_at_context_pressure` | idle | 35% and 130k tokens | 130k | 130k | 350k |
-| `checkpoint_busy_agent` | active | 55% and 130k tokens | 130k | 137.5k | 550k |
+| `checkpoint_busy_agent` | busy or idle | 55% and 130k tokens | 130k | 137.5k | 550k |
 
 - **The floor** is why a percentage isn't enough. Claude auto-compacts at about 167k on a
   small window (p10 167,041, p90 175,563) and about 1M on a 1M one, so 130k leaves room for
@@ -872,9 +872,17 @@ stalls, `/compact` must not fire into a half-finished turn.
 - **`min_tokens` is a field, not a new condition.** A new serde variant makes an older build
   load empty state. A rule without it behaves as it always did, and a size that can't be read
   never satisfies it.
-- **The two rules share a cooldown and a card.** They are one job. Separately, a human aborting
-  a ritual by typing would set the agent working, and the busy rule would interrupt them on the
-  next tick. Rate limits (`max_per_hour`) stay per rule.
+- **The busy rule lists `idle` too, and has to.** `agent_state` gates every step as well as the
+  fire, and a slash step never runs in `active`, so `['active']` alone can send the prep but
+  never `/compact`. `ruleWarnings` flags that shape on any rule.
+- **The two rules share a cooldown and a card, and nothing else does.** They are one job.
+  Separately, a human aborting a ritual by typing would set the agent working, and the busy
+  rule would interrupt them on the next tick. Any other `context_pct` rule keeps its own, or a
+  note-taking rule firing every five minutes would hold the checkpoint off for ever. Rate
+  limits (`max_per_hour`) stay per rule.
+- **The busy rule arrives on the human's terms** (`SPLIT_FROM`, defaults.ts): the same on/off
+  and scope as the rule it came from, and not at all while that rule is deleted, superseded or
+  holds their own words. Reset to default brings it in.
 - **Codex compacts.** Tested on codex-cli 0.157.1 by bracketed paste: `/compact` runs and the
   rollout writes a `token_count` with the smaller size at once (15,995 to 6,146), so
   `context_below` clears. Listing only Claude here meant a Codex tab took the prep turn and kept

@@ -62,7 +62,11 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
   },
 
   // The same ritual for an agent that never goes idle. Later than the idle rule because this
-  // one interrupts work. It shares that rule's cooldown (`guardsPassSync`).
+  // one interrupts work. It shares that rule's cooldown (`cooldownStartedAt`).
+  //
+  // `agent_state` gates every STEP as well as the fire, and a slash step never runs in
+  // `active`. So `idle` has to stay listed or /compact can never go in. At an idle tab this
+  // rule and the idle one both qualify, and the shared cooldown lets only one fire.
   checkpoint_busy_agent: {
     name: 'Checkpoint a busy agent',
     description:
@@ -70,7 +74,7 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
     cooldown: 1800,
     when: { event: 'context_pct', at_or_above: 55, min_tokens: CHECKPOINT_MIN_TOKENS },
     guards: {
-      agent_state: ['active'],
+      agent_state: ['idle', 'active'],
       min_quiet_ms: 3000,
       require_live_repl: true,
       max_per_hour: 1,
@@ -142,6 +146,23 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
       },
     ],
   },
+};
+
+/** The defaults that are one job: they share a cooldown and a card (`overlord.svelte.ts`). A
+ *  human's own `context_pct` rule is a different job and stays out of it. */
+export const CHECKPOINT_DEFAULT_IDS: ReadonlySet<string> = new Set([
+  'checkpoint_at_context_pressure',
+  'checkpoint_busy_agent',
+]);
+
+/**
+ * A default split out of an older one, keyed to that one, which must come first in
+ * DEFAULT_OVERLORD_RULES. It arrives on the human's terms for the job: with the same on/off and
+ * scope, and not at all if they deleted, edited or superseded the rule it came from. A new
+ * enabled, global rule would otherwise undo each of those decisions.
+ */
+const SPLIT_FROM: Record<string, string> = {
+  checkpoint_busy_agent: 'checkpoint_at_context_pressure',
 };
 
 type OverlordRuleTemplate = (typeof DEFAULT_OVERLORD_RULES)[string];
@@ -469,11 +490,18 @@ export function seedDefaultOverlordRules(
       continue;
     }
 
+    const sourceId = SPLIT_FROM[defaultId];
+    const source = sourceId ? list.find((r) => r.default_id === sourceId) : undefined;
+    if (sourceId) {
+      const superseded = source && list.some((r) => r.supersedes?.some((key) => key === source.id || key === sourceId));
+      if (!source || source.user_modified || superseded) continue;
+    }
+
     list = [{
       id: crypto.randomUUID(),
       ...structuredClone(tmpl),
-      enabled: true,
-      workspaces: [],
+      enabled: source?.enabled ?? true,
+      workspaces: source ? [...source.workspaces] : [],
       default_id: defaultId,
       origin: 'default',
     }, ...list];

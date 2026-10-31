@@ -157,7 +157,10 @@
     if (!rule.default_id) return;
     const tmpl = DEFAULT_OVERLORD_RULES[rule.default_id];
     if (!tmpl) return;
-    updateRule(rule.id, { ...structuredClone(tmpl), user_modified: false } as Partial<OverlordRule>, false);
+    const next = rules.map((r) => (r.id === rule.id ? { ...r, ...structuredClone(tmpl), user_modified: false } : r));
+    // Back on the default, a rule split out of it arrives now (`SPLIT_FROM`, defaults.ts).
+    const snapshot = $state.snapshot(next) as OverlordRule[];
+    setRules(seedDefaultOverlordRules(snapshot, preferencesStore.hiddenDefaultOverlordRules) ?? snapshot);
   }
 
   function restoreAllDefaults() {

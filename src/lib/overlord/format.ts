@@ -207,6 +207,10 @@ export function ruleWarnings(rule: OverlordRule): string[] {
   if (!rule.sequence.length || rule.sequence.every((s) => !s.text.trim())) {
     out.push('No directive text — nothing would be sent.');
   }
+  // A slash step waits for the turn to end, so it needs a state other than `active` to go in.
+  if (rule.sequence.some((s) => s.kind === 'slash' && s.text.trim()) && !states.some((s) => s !== 'active')) {
+    out.push('A slash command here can never run: it waits for the turn to end, but the guard allows only “active”.');
+  }
   // Runtime coverage is NOT warned about here. It belongs to `conditionSource`, which
   // states it neutrally where the condition is picked: every context_pct rule — including
   // the shipped default — is blind to Gemini, and turning that into a red warning on rules

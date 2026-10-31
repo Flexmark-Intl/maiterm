@@ -152,7 +152,45 @@ describe('seedDefaultOverlordRules — a flagged rule that is still ours', () =>
     expect(idle.user_modified).toBe(false);
     const busy = rows.find((x) => x.default_id === 'checkpoint_busy_agent')!;
     expect(busy.when).toEqual({ event: 'context_pct', at_or_above: 55, min_tokens: 130_000 });
-    expect(busy.guards.agent_state).toEqual(['active']);
+    expect(busy.guards.agent_state).toEqual(['idle', 'active']);
+  });
+
+  it('keeps idle in both rules, or their /compact step could never go in', () => {
+    for (const id of [ID, 'checkpoint_busy_agent']) {
+      expect(DEFAULT_OVERLORD_RULES[id].guards.agent_state).toContain('idle');
+    }
+  });
+
+  describe('the busy rule arrives on the terms of the rule it was split from', () => {
+    const BUSY = 'checkpoint_busy_agent';
+    const busyOf = (rows: OverlordRule[] | null) => rows?.find((x) => x.default_id === BUSY);
+
+    it('takes its on/off and scope', () => {
+      const rows = seedDefaultOverlordRules([shipped({ enabled: false, workspaces: ['ws-1'] })], []);
+      expect(busyOf(rows)!.enabled).toBe(false);
+      expect(busyOf(rows)!.workspaces).toEqual(['ws-1']);
+    });
+
+    it('stays out when the human deleted the rule', () => {
+      expect(busyOf(seedDefaultOverlordRules([], [ID]))).toBeUndefined();
+    });
+
+    it('stays out while the rule holds their own words, and arrives once it is back on the default', () => {
+      const edited = shipped({ sequence: [{ ...tmpl.sequence[0], text: 'My own wording.' }, tmpl.sequence[1]], user_modified: true });
+      expect(busyOf(seedDefaultOverlordRules([edited], []))).toBeUndefined();
+      expect(busyOf(seedDefaultOverlordRules([shipped()], []))).toBeDefined();
+    });
+
+    it('stays out when a rule of theirs supersedes it', () => {
+      const mine = rule({ id: 'mine', default_id: null, supersedes: [ID] });
+      expect(busyOf(seedDefaultOverlordRules([shipped(), mine], []))).toBeUndefined();
+    });
+
+    it('arrives with the rule on a fresh install', () => {
+      const rows = seedDefaultOverlordRules([], [])!;
+      expect(rows.find((x) => x.default_id === ID)!.enabled).toBe(true);
+      expect(busyOf(rows)!.enabled).toBe(true);
+    });
   });
 
   it('compacts on Codex too, so a Codex tab never repeats the prep with nothing to show for it', () => {
