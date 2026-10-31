@@ -1444,4 +1444,48 @@ mod tests {
         assert!(text.contains("tab=tab-1 tool=Bash refused: No agent pushes | git push origin"));
         let _ = fs::remove_dir_all(&f.base);
     }
+
+    /// The review of the `cd` placement (2026-10-31): git after a `cd` runs only where the gate
+    /// can place it in the worker's own folders. A `..` out of them, a symlink out, a `cd` that
+    /// failed, a `cd ~`, a `pushd` elsewhere, a substitution, and git's own redirections stay
+    /// refused; a line continuation, and the worker's folder spelled in another case on a
+    /// case-insensitive disk, are its own folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_cd_places_git_only_in_its_own_folders_and_fails_closed() {
+        let f = fx();
+        let wt = f.wt.display().to_string();
+        let out = f.base.join("outside");
+        std::os::unix::fs::symlink(&out, f.wt.join("link-out")).unwrap();
+        let from = |cwd: &Path, cmd: &str| gate_decision("Bash", &json!({ "command": cmd }), Some(cwd), &f.worker);
+        for cwd in [out.as_path(), f.wt.as_path()] {
+            for cmd in [
+                format!("cd '{wt}/../other' && git status"),
+                format!("cd '{wt}/../../billing/web' && git status"),
+                format!("cd '{wt}/link-out' && git status"),
+                "cd /nonexistent; git status".to_string(),
+                format!("cd '{wt}' && cd .. && git status"),
+                "cd ~ && git status".into(),
+                format!("cd '{wt}' && GIT_DIR=/tmp/x/.git git status"),
+                format!("cd '{wt}'; GIT_DIR=/tmp/x/.git git status"),
+                format!("cd '{wt}' && git --git-dir=/tmp/x/.git status"),
+                format!("cd '{wt}' && git -c core.worktree=/tmp status"),
+                format!("cd `echo '{wt}'` && git status"),
+                "pushd /tmp && git status".into(),
+            ] {
+                assert!(matches!(from(cwd, &cmd), GateDecision::Deny(_)), "should refuse from {}: {cmd}", cwd.display());
+            }
+        }
+        // Git before the cd runs where the hook's cwd is: refused outside, its own inside.
+        assert!(matches!(from(&out, &format!("git status && cd '{wt}'")), GateDecision::Deny(_)));
+        assert_eq!(from(&f.wt, &format!("git status && cd '{wt}'")), GateDecision::Allow);
+        // A line continuation is one command, as the shell reads it.
+        assert_eq!(from(&out, &format!("cd '{wt}' \\\n&& git status")), GateDecision::Allow);
+        // Another case of the same folder, where the disk doesn't tell case apart.
+        let upper = wt.to_uppercase();
+        if Path::new(&upper).is_dir() {
+            assert_eq!(from(&out, &format!("cd '{upper}' && git status")), GateDecision::Allow);
+        }
+        let _ = fs::remove_dir_all(&f.base);
+    }
 }
