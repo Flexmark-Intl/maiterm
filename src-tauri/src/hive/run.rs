@@ -269,7 +269,9 @@ pub(crate) fn build_spec(caller: &Caller, w: &WorkerRecord, a: &RunArgs, stack: 
     let q = &runnable;
     let entry = match_entry(q, &f.name, &a.argv).ok_or_else(|| {
         format!(
-            "`{}` isn't a queued command ({}). hiveRun runs only those; run anything else straight in your own shell.",
+            "`{}` isn't a queued command ({}). hiveRun runs only those and each folder's land check. For a receipt of it, ask your \
+             coordinator (a blocker, or say so in your report) to make it this folder's land check with hiveChangeSettings \
+             folders, or to have your human queue it; meanwhile run it straight in your own shell.",
             one_line(&a.argv.join(" "), 120),
             listed(q, &f.name)
         )

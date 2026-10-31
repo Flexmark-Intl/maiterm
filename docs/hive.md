@@ -373,6 +373,15 @@ the checkpoint: otherwise the queen could run anything unsandboxed without the p
 own Bash would raise. Both are one command line, at most 1,000 characters. The human has no editor
 for them after Create yet; they approve the queen's cards.
 
+The brief alone didn't get them set (the live "EWS Partners" Hive, 2026-10-31: no setup, no land
+check and no queued commands after workers had built and reported, although criterion 1 named the
+land check, and a worker's `hiveRun npm test` was refused). So every `⟦HIVE REPORT⟧` from a worker
+whose git folder has neither a setup nor a land check ends with one maiTerm line telling the queen
+to set them with `hiveChangeSettings folders` from the commands the report used
+(`report::unset_commands_line`), until either is set. A worker's `hiveRun` of an unlisted command
+is refused with the next step: ask the coordinator to make it the folder's land check (which makes
+it runnable, §6.8) or to have the human queue it, and meanwhile run it in its own shell.
+
 ## 4. The view
 
 ### 4.1 Layout: Miller columns

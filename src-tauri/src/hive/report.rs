@@ -380,6 +380,27 @@ pub(crate) fn report_message(w: &WorkerRecord, a: &ReportArgs, c: &Checked) -> S
     out
 }
 
+/// For a report from a worker whose git folders have neither a setup nor a land check (a new
+/// project, 2026-10-31: no worker could `hiveRun npm test`, and no land was checked): one line
+/// telling the coordinator to set them from what the report ran. None once either is set.
+pub(crate) fn unset_commands_line(hive: &super::record::Hive, w: &WorkerRecord) -> Option<String> {
+    let unset: Vec<&str> = w
+        .git_folders()
+        .filter_map(|wf| hive.git_folders().find(|f| f.name == wf.name))
+        .filter(|f| f.setup.as_deref().is_none_or(|s| s.trim().is_empty()) && f.land_check.as_deref().is_none_or(|s| s.trim().is_empty()))
+        .map(|f| f.name.as_str())
+        .collect();
+    if unset.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[maiTerm] {} {} no setup and no land check yet, so no land is checked and workers can't hiveRun its tests. Set them with \
+         hiveChangeSettings folders (setup: the install, land_check: what a land must pass) from the commands this report used.",
+        unset.join(", "),
+        if unset.len() == 1 { "has" } else { "have" }
+    ))
+}
+
 /// The task note: the status and the summary, as the board shows it.
 fn report_note(a: &ReportArgs, c: &Checked) -> String {
     let mut note = format!("Reported {}: {}", a.status, frame_escape(&a.summary));
@@ -453,8 +474,14 @@ pub(crate) async fn report<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, arg
     // A report is read beside the work it reports: measure it now rather than at the next Stop.
     ctx.window.diff_stat_touch(caller, &w.task_id);
 
+    let mut message = report_message(&w, &a, &checked);
+    let hive = super::autonomy::current_hive(ctx, caller).unwrap_or_else(|| caller.hive.clone());
+    if let Some(line) = unset_commands_line(&hive, &w) {
+        message.push('\n');
+        message.push_str(&line);
+    }
     let delivery = match super::tools::coordinator_tab(ctx.data, caller) {
-        Some(c) => ctx.window.deliver(&c, report_message(&w, &a, &checked), "Hive report").await.describe(),
+        Some(c) => ctx.window.deliver(&c, message, "Hive report").await.describe(),
         None => "not delivered: this Hive has no coordinator tab".to_string(),
     };
     log::info!("hive {}: worker {} reported {} ({delivery})", caller.hive.id, worker_label(&w), a.status);
@@ -763,5 +790,32 @@ mod tests {
             assert!(!line.trim_start().to_ascii_lowercase().starts_with("[maiterm]"), "forged: {line}");
         }
         assert!(report_note(&a, &c).starts_with("Reported done: Built it."));
+    }
+
+    /// A new project's folders start with no setup and no land check (the live Hive, 2026-10-31):
+    /// each report says so to the queen until either is set.
+    #[test]
+    fn a_report_on_a_folder_with_no_setup_or_land_check_says_to_set_them() {
+        use crate::hive::record::{Hive, HiveFolder, KIND_GIT, KIND_PLAIN};
+        let folder = |name: &str, setup: Option<&str>, check: Option<&str>| HiveFolder {
+            name: name.into(),
+            kind: KIND_GIT.into(),
+            setup: setup.map(str::to_string),
+            land_check: check.map(str::to_string),
+            ..HiveFolder::default()
+        };
+        let mut hive = Hive {
+            folders: vec![folder("partners", None, Some(" ")), folder("api", None, Some("cargo test")), HiveFolder { name: "brand".into(), kind: KIND_PLAIN.into(), ..HiveFolder::default() }],
+            ..Hive::default()
+        };
+        let wt = |name: &str| worker::WorkerFolder { name: name.into(), worktree: Some(format!("/wt/{name}")), ..Default::default() };
+        let w = WorkerRecord { folders: vec![wt("partners"), wt("api")], ..WorkerRecord::default() };
+        let line = unset_commands_line(&hive, &w).unwrap();
+        assert!(line.starts_with("[maiTerm] partners has no setup and no land check") && line.contains("hiveChangeSettings folders"), "{line}");
+        assert!(!line.contains("api"), "api has a land check: {line}");
+        hive.folders[0].setup = Some("npm ci".into());
+        assert!(unset_commands_line(&hive, &w).is_none(), "a setup is enough");
+        let plain = WorkerRecord { folders: vec![worker::WorkerFolder { name: "brand".into(), ..Default::default() }], ..WorkerRecord::default() };
+        assert!(unset_commands_line(&hive, &plain).is_none(), "a plain folder runs nothing");
     }
 }
