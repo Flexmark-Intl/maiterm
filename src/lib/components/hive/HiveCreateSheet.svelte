@@ -140,7 +140,7 @@
     { key: 'folders', title: 'Folders', ask: 'Where does the work happen?' },
     { key: 'crew', title: 'Crew', ask: 'Who does the work, and how does it land?' },
     { key: 'tools', title: 'Tools', ask: 'What can it make things with?' },
-    { key: 'stack', title: 'Stack', ask: 'What does the work run?' },
+    { key: 'stack', title: 'Stack', ask: 'Does the work need anything running?' },
     { key: 'review', title: 'Review', ask: 'Ready to start' },
   ] as const;
   type StepKey = (typeof STEPS)[number]['key'];
@@ -240,7 +240,7 @@
       case 'folders': return folderList.length ? folderList.join(', ') : null;
       case 'crew': return validateCap({ cap: Number(cap) }) ? null : `Up to ${cap} ${cap1(workerModel)} workers`;
       case 'tools': return `${pickedTools.length ? `${pickedTools.length} tool${pickedTools.length === 1 ? '' : 's'}` : 'No tools'}, $${budget} budget`;
-      case 'stack': return stackRows.length ? `${stackRows.length} service${stackRows.length === 1 ? '' : 's'}` : 'Nothing to run';
+      case 'stack': return stackRows.length ? `${stackRows.length} service${stackRows.length === 1 ? '' : 's'}` : 'Nothing to run yet';
       default: return null;
     }
   }
@@ -587,6 +587,10 @@
     }
     return out;
   });
+  /** Every folder read and nothing found anywhere: the Stack step says why, in words. */
+  const nothingToRun = $derived(!runningElsewhere.length && folders.length > 0 && folders.every((f) => suggestions[f.path]?.length === 0));
+  /** "a", "a and b", "a, b and c". */
+  const andList = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
   const stackProblem = $derived.by(() => {
     const seen = new Set<string>();
     for (const r of stackRows) {
@@ -915,11 +919,24 @@
           </div>
 
         {:else if current.key === 'stack'}
-          <p class="lede">Something you already run in another workspace is used from there, never started twice. A service that takes <code>{'{port}'}</code> in its command runs a copy per branch.</p>
+          <p class="lede">What workers start to try their work, such as a dev server, an API or a database. Found in your folders and your other workspaces.</p>
           {#if folders.length === 0}
-            <p class="hint">Add a folder to see its services.</p>
-          {:else if !runningElsewhere.length && folders.every((f) => suggestions[f.path]?.length === 0)}
-            <p class="hint">Nothing to run was found in these folders. You can skip this step.</p>
+            <p class="hint">Add a folder to see what it runs.</p>
+          {:else if nothingToRun}
+            {@const fresh = folders.filter((f) => f.fresh)}
+            {@const found = folders.filter((f) => !f.fresh)}
+            {#if fresh.length}
+              <p class="hint">{andList(fresh.map((f) => f.name))} {fresh.length === 1 ? 'is a new project' : 'are new projects'}, so there's nothing to run yet. The queen adds a dev server or other services to the workspace's stack once the code has them.</p>
+            {/if}
+            {#if found.length}
+              <p class="hint">No dev server, database or other service was found in {andList(found.map((f) => f.name))}. If the work needs one later, the queen can add it.</p>
+            {/if}
+          {/if}
+          {#if runningElsewhere.length}
+            <div class="stack-group">
+              <span class="label">Already running in another workspace</span>
+              <span class="hint">Used from there, never started twice.</span>
+            </div>
           {/if}
           {#each runningElsewhere as s (s.id)}
             {@const on = shareOn(s)}
@@ -940,8 +957,12 @@
           {#each folders as f (f.key)}
             {@const list = suggestions[f.path]}
             {#if list === undefined || list === null}
-              <div class="stack-row"><span class="mono">{f.name}</span><span class="hint">reading…</span></div>
+              <p class="hint">Looking in {f.name}…</p>
             {:else if list.length}
+              <div class="stack-group">
+                <span class="label">Found in {f.name}</span>
+                <span class="hint">A command with <code>{'{port}'}</code> gives each worker's branch its own copy on its own port. Without it, the workers take turns.</span>
+              </div>
               {#each list as s (s.name)}
                 {@const p = pickOf(f.path, s)}
                 {@const v = importVerdict({ command: p.command, cwd: s.cwd }, clashes)}
@@ -951,7 +972,7 @@
                     <input type="checkbox" checked={p.on && !cover && v.kind !== 'refused'} disabled={!!cover || v.kind === 'refused'}
                       onchange={() => setPick(f.path, s, { on: !p.on })} />
                     <span class="mono">{s.name}</span>
-                    <span class="hint">{f.name} · {s.source}</span>
+                    <span class="hint">{s.source}</span>
                   </label>
                   <input class="mono cmd" aria-label="Command for {s.name}" value={p.command}
                     oninput={(e) => setPick(f.path, s, { command: (e.currentTarget as HTMLInputElement).value })} />
@@ -1167,6 +1188,7 @@
   .summary { margin: 0; font-size: 0.923rem; color: var(--fg); overflow-wrap: anywhere; line-height: 1.5; }
   .summary .link { margin-left: 6px; font-size: 0.923rem; }
   .save-defaults { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: auto; padding-top: 4px; }
+  .stack-group { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
   .stack-row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
   .stack-pick { display: flex; flex-direction: column; gap: 4px; padding: 4px 0; }
   .cmd { width: 100%; }
