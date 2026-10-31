@@ -7,8 +7,8 @@
   import { error as logError } from '@tauri-apps/plugin-log';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { hiveDetectTools } from '$lib/tauri/commands';
-  import type { HiveDetectedTool } from '$lib/tauri/types';
-  import { BUILTIN, fullPacks, HIVE_EFFORTS, HIVE_MODELS, wizardStart } from '$lib/hive/defaults';
+  import type { HiveDefaults, HiveDetectedTool } from '$lib/tauri/types';
+  import { BUILTIN, clampDefault, fullPacks, HIVE_EFFORTS, HIVE_MODELS, MAX_BUDGET, wizardStart } from '$lib/hive/defaults';
   import { MAX_CAP } from '$lib/hive/change';
   import { MAX_INSTRUCTIONS, charCount } from '$lib/hive/model';
   import HiveToolPicker from './HiveToolPicker.svelte';
@@ -25,13 +25,25 @@
   /** Saved picks this computer doesn't have: kept (they may come back), and said. */
   const missing = $derived(tools ? d.tools.filter((id) => !tools!.some((t) => t.id === id)) : []);
 
-  function setNumber(raw: string, field: 'cap' | 'budget_dollars') {
-    const s = raw.trim();
-    if (!s) { void preferencesStore.setHiveDefaults({ [field]: null }); return; }
-    const n = Math.round(Number(s));
-    if (!Number.isFinite(n)) return;
-    const v = field === 'cap' ? Math.min(MAX_CAP, Math.max(1, n)) : Math.max(0, n);
-    void preferencesStore.setHiveDefaults({ [field]: v });
+  /** A write that failed is rolled back by the store; this says so. */
+  let saveError = $state<string | null>(null);
+  async function save(patch: Partial<HiveDefaults>) {
+    saveError = null;
+    try {
+      await preferencesStore.setHiveDefaults(patch);
+    } catch (e) {
+      saveError = `Couldn't save that: ${String(e).replace(/^Error: /, '')}`;
+      logError(`hive defaults: save failed: ${e}`);
+    }
+  }
+
+  /** Within bounds (Rust keeps a u32), and the field shows what was kept. */
+  async function setNumber(el: HTMLInputElement, field: 'cap' | 'budget_dollars') {
+    const s = el.value.trim();
+    const v = s ? (field === 'cap' ? clampDefault(Number(s), 1, MAX_CAP) : clampDefault(Number(s), 0, MAX_BUDGET)) : null;
+    if (s && v === null) { el.value = String(d[field] ?? ''); return; }
+    await save({ [field]: v });
+    el.value = String(preferencesStore.hiveDefaults[field] ?? '');
   }
 
   // ── Rules: typed into a local draft, saved shortly after typing stops and on blur. Closing
@@ -46,7 +58,7 @@
   });
   function flushRules() {
     if (rulesTimer) { clearTimeout(rulesTimer); rulesTimer = null; }
-    if (rulesDraft !== preferencesStore.hiveDefaults.rules) void preferencesStore.setHiveDefaults({ rules: rulesDraft });
+    if (rulesDraft !== preferencesStore.hiveDefaults.rules) void save({ rules: rulesDraft });
   }
   function onRulesInput() {
     if (rulesTimer) clearTimeout(rulesTimer);
@@ -70,6 +82,7 @@
 <div class="hive-defaults">
   <h3 class="heading">Defaults for new Hives</h3>
   <p class="desc">The Make this a Hive wizard starts from these. Each Hive can still change them.</p>
+  {#if saveError}<p class="error" role="alert">{saveError}</p>{/if}
 
   <div class="block">
     <div class="copy">
@@ -82,12 +95,12 @@
       <p class="hint">Nothing detected: no MCP servers, ffmpeg, ImageMagick, SoX, Blender, skills or ComfyUI.</p>
     {:else}
       <!-- A pack picked whole is stored by name too, so a skill it adds later comes with it. -->
-      <HiveToolPicker {tools} {picked} onchange={(next) => void preferencesStore.setHiveDefaults({ tools: [...next], packs: fullPacks(next, tools!) })} />
+      <HiveToolPicker {tools} {picked} onchange={(next) => void save({ tools: [...next], packs: fullPacks(next, tools!) })} />
     {/if}
     {#if missing.length}
       <p class="hint">
         {missing.length} saved tool{missing.length === 1 ? " isn't" : "s aren't"} detected on this computer.
-        <button type="button" class="link" onclick={() => void preferencesStore.setHiveDefaults({ tools: d.tools.filter((id) => !missing.includes(id)) })}>Remove {missing.length === 1 ? 'it' : 'them'}</button>
+        <button type="button" class="link" onclick={() => void save({ tools: d.tools.filter((id) => !missing.includes(id)) })}>Remove {missing.length === 1 ? 'it' : 'them'}</button>
       </p>
     {/if}
   </div>
@@ -96,17 +109,17 @@
     <span class="label">Models</span>
     <div class="models">
       <span>Queen</span>
-      <select aria-label="Queen model" value={start.coordModel} onchange={(e) => void preferencesStore.setHiveDefaults({ coordinator_model: e.currentTarget.value })}>
+      <select aria-label="Queen model" value={start.coordModel} onchange={(e) => void save({ coordinator_model: e.currentTarget.value })}>
         {#each HIVE_MODELS as m (m)}<option value={m}>Claude {m}</option>{/each}
       </select>
-      <select aria-label="Queen effort" value={start.coordEffort} onchange={(e) => void preferencesStore.setHiveDefaults({ coordinator_effort: e.currentTarget.value })}>
+      <select aria-label="Queen effort" value={start.coordEffort} onchange={(e) => void save({ coordinator_effort: e.currentTarget.value })}>
         {#each HIVE_EFFORTS as x (x)}<option value={x}>{x} effort</option>{/each}
       </select>
       <span>Workers</span>
-      <select aria-label="Worker model" value={start.workerModel} onchange={(e) => void preferencesStore.setHiveDefaults({ worker_model: e.currentTarget.value })}>
+      <select aria-label="Worker model" value={start.workerModel} onchange={(e) => void save({ worker_model: e.currentTarget.value })}>
         {#each HIVE_MODELS as m (m)}<option value={m}>Claude {m}</option>{/each}
       </select>
-      <select aria-label="Worker effort" value={start.workerEffort} onchange={(e) => void preferencesStore.setHiveDefaults({ worker_effort: e.currentTarget.value })}>
+      <select aria-label="Worker effort" value={start.workerEffort} onchange={(e) => void save({ worker_effort: e.currentTarget.value })}>
         {#each HIVE_EFFORTS as x (x)}<option value={x}>{x} effort</option>{/each}
       </select>
     </div>
@@ -117,7 +130,7 @@
       <label for="hive-def-cap" class="label">Workers at once</label>
       <p class="hint">At most this many workers run at a time. Leave it empty for maiTerm's own default.</p>
     </div>
-    <input id="hive-def-cap" class="num" type="number" min="1" max={MAX_CAP} placeholder="default" value={d.cap ?? ''} onchange={(e) => setNumber(e.currentTarget.value, 'cap')} />
+    <input id="hive-def-cap" class="num" type="number" min="1" max={MAX_CAP} placeholder="default" value={d.cap ?? ''} onchange={(e) => void setNumber(e.currentTarget,'cap')} />
   </div>
 
   <div class="row">
@@ -125,7 +138,7 @@
       <label for="hive-def-budget" class="label">Budget for paid generation</label>
       <p class="hint">Dollars a Hive may spend on paid generation. Empty is ${BUILTIN.budgetDollars}.</p>
     </div>
-    <div class="inline"><span>$</span><input id="hive-def-budget" class="num" type="number" min="0" step="1" placeholder="10" value={d.budget_dollars ?? ''} onchange={(e) => setNumber(e.currentTarget.value, 'budget_dollars')} /></div>
+    <div class="inline"><span>$</span><input id="hive-def-budget" class="num" type="number" min="0" max={MAX_BUDGET} step="1" placeholder="10" value={d.budget_dollars ?? ''} onchange={(e) => void setNumber(e.currentTarget,'budget_dollars')} /></div>
   </div>
 
   <div class="row">
@@ -133,7 +146,7 @@
       <label for="hive-def-phone" class="label">Chats on your phone</label>
       <p class="hint">Which of a Hive's agents are chats in maiLink.</p>
     </div>
-    <select id="hive-def-phone" value={start.phone} onchange={(e) => void preferencesStore.setHiveDefaults({ phone: e.currentTarget.value })}>
+    <select id="hive-def-phone" value={start.phone} onchange={(e) => void save({ phone: e.currentTarget.value })}>
       <option value="coordinator">The queen only</option>
       <option value="all">The queen and its workers</option>
       <option value="none">Nobody</option>
@@ -149,7 +162,7 @@
       id="hive-def-push"
       class="toggle"
       class:active={d.push_after_land}
-      onclick={() => void preferencesStore.setHiveDefaults({ push_after_land: !d.push_after_land })}
+      onclick={() => void save({ push_after_land: !d.push_after_land })}
       aria-pressed={d.push_after_land}
       aria-label="Toggle push after each land"
     >
@@ -193,6 +206,7 @@
   .copy { min-width: 0; flex: 1; }
   .label { font-size: 1rem; color: var(--fg); }
   .hint { font-size: 0.846rem; color: var(--fg-dim); line-height: 1.5; margin: 3px 0 0; overflow-wrap: anywhere; max-width: 62ch; }
+  .error { margin: 0; font-size: 0.923rem; color: var(--red, #f7768e); overflow-wrap: anywhere; }
   .count { align-self: flex-end; font-variant-numeric: tabular-nums; margin: 0; }
   .count.over { color: var(--red, #f7768e); }
   .models { display: grid; grid-template-columns: auto 1fr 1fr; gap: 6px 8px; align-items: center; font-size: 0.923rem; color: var(--fg); max-width: 480px; }

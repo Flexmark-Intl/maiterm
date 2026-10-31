@@ -4,6 +4,15 @@
  * Pure: no store, no Tauri.
  */
 import type { HiveDefaults, HiveDetectedTool } from '$lib/tauri/types';
+import { MAX_CAP } from './change';
+
+/** The largest default budget kept, in dollars. Rust stores it as a u32: a bigger number would
+ *  make serde refuse the WHOLE preferences write, and every later save from that window. */
+export const MAX_BUDGET = 1_000_000;
+/** A default number as stored: a whole number within bounds, or null for anything else. */
+export function clampDefault(n: number, min: number, max: number): number | null {
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : null;
+}
 
 export const HIVE_MODELS = ['opus', 'sonnet', 'haiku'] as const;
 export const HIVE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -80,8 +89,8 @@ export function wizardStart(d: HiveDefaults): WizardStart {
     coordEffort: oneOf(d.coordinator_effort, HIVE_EFFORTS, BUILTIN.coordEffort),
     workerModel: oneOf(d.worker_model, HIVE_MODELS, BUILTIN.workerModel),
     workerEffort: oneOf(d.worker_effort, HIVE_EFFORTS, BUILTIN.workerEffort),
-    cap: d.cap !== null && Number.isInteger(d.cap) && d.cap >= 1 ? d.cap : null,
-    budgetDollars: d.budget_dollars !== null && d.budget_dollars >= 0 ? d.budget_dollars : BUILTIN.budgetDollars,
+    cap: d.cap !== null && Number.isInteger(d.cap) && d.cap >= 1 ? Math.min(MAX_CAP, d.cap) : null,
+    budgetDollars: (d.budget_dollars === null ? null : clampDefault(d.budget_dollars, 0, MAX_BUDGET)) ?? BUILTIN.budgetDollars,
     pushAfterLand: d.push_after_land,
     phone: oneOf(d.phone, ['coordinator', 'all', 'none'] as const, BUILTIN.phone),
     rules: d.rules,
@@ -115,20 +124,30 @@ export function knownTools(ids: Iterable<string>, detected: readonly HiveDetecte
 }
 
 /** What "Save as my defaults" writes: the wizard's tool picks and crew choices. The rules
- *  default is kept as it was: the rules typed for one Hive are rarely everyone's. */
+ *  default is kept as it was: the rules typed for one Hive are rarely everyone's.
+ *
+ *  The wizard only ever saw the tools detected right now, so a default it couldn't show (a
+ *  ComfyUI that isn't running, an MCP server set up under another account) is kept, not read as
+ *  unticked; likewise a pack none of whose members is detected. `detected` null means detection
+ *  failed: every default tool and pack is kept. */
 export function defaultsFromWizard(
   w: Omit<WizardStart, 'rules' | 'cap'> & { cap: number },
   was: HiveDefaults,
+  detected: readonly HiveDetectedTool[] | null,
 ): HiveDefaults {
+  const have = new Set((detected ?? []).map((t) => t.id));
+  const havePacks = new Set((detected ?? []).map((t) => t.pack).filter((p): p is string => !!p));
+  const unseenTools = detected ? was.tools.filter((id) => !have.has(id)) : was.tools;
+  const unseenPacks = detected ? was.packs.filter((p) => !havePacks.has(p)) : was.packs;
   return {
-    tools: [...new Set(w.tools)],
-    packs: [...new Set(w.packs)],
+    tools: [...new Set([...w.tools, ...unseenTools])],
+    packs: [...new Set([...w.packs, ...unseenPacks])],
     coordinator_model: w.coordModel,
     coordinator_effort: w.coordEffort,
     worker_model: w.workerModel,
     worker_effort: w.workerEffort,
-    cap: w.cap,
-    budget_dollars: Math.max(0, Math.round(w.budgetDollars)),
+    cap: clampDefault(w.cap, 1, MAX_CAP),
+    budget_dollars: clampDefault(w.budgetDollars, 0, MAX_BUDGET) ?? 0,
     push_after_land: w.pushAfterLand,
     phone: w.phone,
     rules: was.rules,

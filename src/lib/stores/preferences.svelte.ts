@@ -752,10 +752,18 @@ function createPreferencesStore() {
       await this.save();
     },
 
-    /** A patch over the current defaults, so each Preferences control sends only its field. */
+    /** A patch over the current defaults, so each Preferences control sends only its field.
+     *  A refused write is rolled back and thrown: left in the store, a value Rust can't take
+     *  would make every later save from this window fail with it. */
     async setHiveDefaults(patch: Partial<HiveDefaults>) {
+      const was = hiveDefaults;
       hiveDefaults = { ...hiveDefaults, ...patch };
-      await this.save();
+      try {
+        await this.save();
+      } catch (e) {
+        hiveDefaults = was;
+        throw e;
+      }
     },
 
     async setOverlordRules(value: OverlordRule[]) {

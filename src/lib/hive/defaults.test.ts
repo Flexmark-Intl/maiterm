@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { HiveDetectedTool } from '$lib/tauri/types';
 import {
-  BUILTIN, defaultsFromWizard, defaultToolIds, EMPTY_HIVE_DEFAULTS, fullPacks, groupTools, knownTools, normalizeHiveDefaults,
+  BUILTIN, clampDefault, MAX_BUDGET, defaultsFromWizard, defaultToolIds, EMPTY_HIVE_DEFAULTS, fullPacks, groupTools, knownTools, normalizeHiveDefaults,
   pickedItems, summarizeTools, toggleGroup, togglePack, toolMatches, wizardStart,
 } from './defaults';
+import { MAX_CAP } from './change';
 
 const tool = (id: string, kind: string, label: string, host: string | null = null): HiveDetectedTool => ({ id, kind, label, host });
 const TOOLS = [
@@ -56,6 +57,7 @@ describe('defaultsFromWizard', () => {
     const d = defaultsFromWizard(
       { coordModel: 'opus', coordEffort: 'high', workerModel: 'haiku', workerEffort: 'low', cap: 7, budgetDollars: 12.4, pushAfterLand: true, phone: 'none', tools: ['b', 'a', 'b'], packs: ['p'] },
       { ...EMPTY_HIVE_DEFAULTS, rules: 'keep me' },
+      [],
     );
     expect(d).toEqual({
       tools: ['b', 'a'], packs: ['p'], coordinator_model: 'opus', coordinator_effort: 'high', worker_model: 'haiku', worker_effort: 'low',
@@ -141,5 +143,38 @@ describe('skill packs', () => {
     const later = [...PACKED, { ...g('canary'), pack: 'gstack' }];
     expect(defaultToolIds({ tools: ['skill:qa', 'skill:gone'], packs: ['gstack'] }, later).sort())
       .toEqual(['skill:canary', 'skill:qa', 'skill:review', 'skill:ship']);
+  });
+});
+
+describe('review fixes', () => {
+  const crew = { coordModel: 'opus', coordEffort: 'medium', workerModel: 'sonnet', workerEffort: 'high', pushAfterLand: false, phone: 'coordinator' as const };
+
+  it('budget and cap are clamped to what Rust can store, wherever they come from', () => {
+    expect(clampDefault(10_000_000_000, 0, MAX_BUDGET)).toBe(MAX_BUDGET);
+    expect(clampDefault(Number.NaN, 0, MAX_BUDGET)).toBeNull();
+    const d = defaultsFromWizard({ ...crew, cap: 500, budgetDollars: 10_000_000_000, tools: [], packs: [] }, EMPTY_HIVE_DEFAULTS, []);
+    expect(d.budget_dollars).toBe(MAX_BUDGET);
+    expect(d.cap).toBe(MAX_CAP);
+    expect(d.budget_dollars! <= 4_294_967_295).toBe(true);
+    const s = wizardStart({ ...EMPTY_HIVE_DEFAULTS, cap: 9_999, budget_dollars: 10_000_000_000 });
+    expect(s.cap).toBe(MAX_CAP);
+    expect(s.budgetDollars).toBe(MAX_BUDGET);
+    expect(defaultsFromWizard({ ...crew, cap: 4, budgetDollars: -5, tools: [], packs: [] }, EMPTY_HIVE_DEFAULTS, []).budget_dollars).toBe(0);
+  });
+
+  it('saving keeps default tools and packs this machine does not detect right now', () => {
+    const was = { ...EMPTY_HIVE_DEFAULTS, tools: ['comfyui', 'cli:ffmpeg', 'mcp:figma'], packs: ['gstack', 'other'] };
+    const detected = [tool('cli:ffmpeg', 'cli', 'ffmpeg'), tool('mcp:figma', 'mcp', 'Figma'), { ...tool('skill:qa', 'skill', 'qa'), pack: 'gstack' }];
+    // The human unticked figma and the gstack pack; ComfyUI (not running) and "other" were never shown.
+    const d = defaultsFromWizard({ ...crew, cap: 4, budgetDollars: 10, tools: ['cli:ffmpeg'], packs: [] }, was, detected);
+    expect(d.tools.sort()).toEqual(['cli:ffmpeg', 'comfyui']);
+    expect(d.packs).toEqual(['other']);
+  });
+
+  it('a failed detection keeps every default tool and pack', () => {
+    const was = { ...EMPTY_HIVE_DEFAULTS, tools: ['comfyui', 'cli:ffmpeg'], packs: ['gstack'] };
+    const d = defaultsFromWizard({ ...crew, cap: 4, budgetDollars: 10, tools: [], packs: [] }, was, null);
+    expect(d.tools).toEqual(['comfyui', 'cli:ffmpeg']);
+    expect(d.packs).toEqual(['gstack']);
   });
 });

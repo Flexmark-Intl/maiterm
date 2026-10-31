@@ -320,7 +320,9 @@
       // a pack picked whole, a skill added to it since included.
       picked = new Set(useDefaults ? defaultToolIds(fromDefaults, t) : knownTools(picked, t));
     })
-    .catch((e) => { tools = []; picked = new Set(); logError(`hive: tool detection failed: ${e}`); });
+    .catch((e) => { tools = []; toolsFailed = true; picked = new Set(); logError(`hive: tool detection failed: ${e}`); });
+  /** Detection failed: Save as my defaults keeps every default tool rather than clear them. */
+  let toolsFailed = $state(false);
 
   // ── The Tools step: the defaults as one line, the grouped picker behind Change ──
   /** The default tools this machine has. */
@@ -330,6 +332,11 @@
   const toolsSummary = $derived(
     !toolsOpen && defaultTools.length > 0 && picked.size === defaultTools.length && defaultTools.every((id) => picked.has(id)),
   );
+  // Once the picker is on screen it stays: picks that happen to equal the defaults again (or a
+  // Save as my defaults) must never swap it for the summary under the human's pointer.
+  $effect(() => {
+    if (current.key === 'tools' && tools?.length && !toolsSummary) untrack(() => (toolsOpen = true));
+  });
   let savedDefaults = $state(false);
   let saveDefaultsError = $state<string | null>(null);
   /** "Save as my defaults": this wizard's tool picks and crew choices become Preferences → Hive. */
@@ -338,6 +345,8 @@
     const next = defaultsFromWizard(
       { coordModel, coordEffort, workerModel, workerEffort, cap: Number(cap), budgetDollars: budget, pushAfterLand, phone, tools: [...picked], packs: fullPacks(picked, tools ?? []) },
       preferencesStore.hiveDefaults,
+      // Defaults not detected right now (a ComfyUI that isn't running) are kept.
+      toolsFailed ? null : tools,
     );
     try {
       await preferencesStore.setHiveDefaults(next);
