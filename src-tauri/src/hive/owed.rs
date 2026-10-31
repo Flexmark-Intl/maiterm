@@ -92,6 +92,11 @@ pub struct OwedWake {
     /// When the Hive was done since (ms), for the message's wording.
     pub done_since: Option<i64>,
     pub at: String,
+    /// The phone sends this carries (mailink-protocol v0.25), by the `msg_id` each was answered
+    /// with: listed in `ChatDetail.held` while owed, and as typed once it goes. On disk with the
+    /// text, so a restart keeps them held.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub msg_ids: Vec<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

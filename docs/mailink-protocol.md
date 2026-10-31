@@ -16,8 +16,9 @@
 > - **Waking a Done Hive from the phone.** `POST /chats/{tabId}/message` to a Done Hive's
 >   coordinator wakes the Hive: maiTerm relaunches the coordinator in its old session and types
 >   the message once it is up. It answers **`{status:"held", reason:"hive_wake", msg_id:"hw-…",
->   woke:"hive", detail}`**. That `msg_id` is in neither `held` nor `heldOutcomes`: the message
->   shows in the thread when the coordinator takes it. A coordinator still up when the message
+>   woke:"hive", detail}`**. That `msg_id` is listed in `ChatDetail.held` while the message
+>   waits (across a maiTerm restart too: it is kept with the message) and in `heldOutcomes` as
+>   `typed` once the coordinator's session takes it, the same as a draft hold. A coordinator still up when the message
 >   came answers `{status:"delivered", woke:"hive", detail}`. A wake maiTerm refuses answers
 >   `{status:"unreachable", reason:"hive", detail}` (show `detail` verbatim), and so does a message
 >   with images: send text first, then the images once the coordinator is back. Only a paired

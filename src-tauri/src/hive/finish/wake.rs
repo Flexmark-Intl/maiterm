@@ -189,8 +189,10 @@ pub(super) async fn hold_until_ended<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &C
 }
 
 /// Wakes the caller's Done Hive with the human's `text` (§11.4, plan D10–D12). `by` is
-/// `BY_DESKTOP` or `BY_PHONE`. Err(`NOT_DONE`) when the Hive isn't done: send as usual.
-pub(crate) async fn wake<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text: &str, by: &str) -> Result<WakeOutcome, String> {
+/// `BY_DESKTOP` or `BY_PHONE`; `msg_id` is the id a phone send will be answered with, kept with
+/// the owed message so the phone sees it held, then typed. Err(`NOT_DONE`) when the Hive isn't
+/// done: send as usual.
+pub(crate) async fn wake<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text: &str, by: &str, msg_id: Option<&str>) -> Result<WakeOutcome, String> {
     // By folder, not id: a test's scratch Hives share ids.
     let key = caller.paths.root.to_string_lossy().to_string();
     let _held = Waking::wait(&key, TURN_WAIT).await.ok_or("A wake of this Hive is already under way: send this again in a moment.")?;
@@ -200,7 +202,7 @@ pub(crate) async fn wake<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text:
         if !owed::wake_relaunching(&caller.paths.coordinator_task()) {
             return Err(NOT_DONE.to_string());
         }
-        owe(caller, check_text(text)?, by, None, true).await?;
+        owe(caller, check_text(text)?, by, None, true, msg_id).await?;
         log::info!("hive {}: another message from the human ({by}) joins the wake", caller.hive.id);
         return Ok(WakeOutcome::Relaunching);
     }
@@ -217,7 +219,7 @@ pub(crate) async fn wake<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text:
 
     // Owed before the flip, so a restart between them still delivers it once the Hive runs.
     let task = caller.paths.coordinator_task();
-    let prev = owe(caller, text, by, before.done_at, false).await?;
+    let prev = owe(caller, text, by, before.done_at, false, msg_id).await?;
 
     // Saved, not yet announced: if the relaunch fails, the window never hears `active` and the
     // human gets no second "Hive done" notice when it goes back.
@@ -323,8 +325,9 @@ pub(crate) async fn wake_with_notice<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &C
 /// go, in order, refused together over the cap). Answers what was owed before. `joining`: only
 /// while a wake's relaunch still holds messages, checked under the file's lock, since the session
 /// start ends that hold as it reads what it is owed.
-async fn owe(caller: &Caller, text: String, by: &str, since: Option<i64>, joining: bool) -> Result<Option<OwedWake>, String> {
+async fn owe(caller: &Caller, text: String, by: &str, since: Option<i64>, joining: bool, msg_id: Option<&str>) -> Result<Option<OwedWake>, String> {
     let (task, by, at) = (caller.paths.coordinator_task(), by.to_string(), crate::mailink::board::iso_now());
+    let msg_id = msg_id.map(str::to_string);
     blocking(move || {
         let mut res = Ok(None);
         owed::update(&task, |o| {
@@ -346,6 +349,7 @@ async fn owe(caller: &Caller, text: String, by: &str, since: Option<i64>, joinin
             w.by = by;
             w.done_since = w.done_since.or(since);
             w.at = at;
+            w.msg_ids.extend(msg_id);
             true
         })?;
         res

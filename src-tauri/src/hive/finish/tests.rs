@@ -1035,7 +1035,7 @@ impl Rig {
     }
 
     async fn wake(&self, text: &str) -> Result<WakeOutcome, String> {
-        wake(&self.ctx(ok_save), &self.caller, text, BY_DESKTOP).await
+        wake(&self.ctx(ok_save), &self.caller, text, BY_DESKTOP, None).await
     }
 
     /// `route_send` on the coordinator's tab, with the scratch folder in place of the app's.
@@ -1167,11 +1167,14 @@ async fn a_message_still_owed_from_an_earlier_wake_goes_first() {
 #[tokio::test]
 async fn a_wake_from_the_phone_tells_the_coordinator_where_it_came_from() {
     let rig = Rig::done("wake-phone");
-    assert_eq!(wake(&rig.ctx(ok_save), &rig.caller, "Add a dark mode too.", BY_PHONE).await, Ok(WakeOutcome::Relaunching));
+    assert_eq!(wake(&rig.ctx(ok_save), &rig.caller, "Add a dark mode too.", BY_PHONE, Some("hw-1")).await, Ok(WakeOutcome::Relaunching));
+    // A second send while it relaunches joins it, and the phone's ids go with the owed message.
+    assert_eq!(wake(&rig.ctx(ok_save), &rig.caller, "And a logo.", BY_PHONE, Some("hw-2")).await, Ok(WakeOutcome::Relaunching));
     let w = rig.owed_wake().unwrap();
+    assert_eq!(w.msg_ids, vec!["hw-1".to_string(), "hw-2".to_string()]);
     assert_eq!(w.by, BY_PHONE);
     let text = wake_text(w.done_since, &w.by, &w.text);
-    assert!(text.contains("Their message (from their phone):\n\nAdd a dark mode too."), "{text}");
+    assert!(text.contains("Their message (from their phone):\n\nAdd a dark mode too.\n\nAnd a logo."), "{text}");
     assert!(done_coordinator(&rig.data.read(), "coord").is_none(), "active again");
 }
 
@@ -1264,7 +1267,7 @@ async fn a_wake_during_the_exit_waits_for_the_agent_to_go_then_relaunches() {
         while !signalled() {
             tokio::time::sleep(ms(2)).await;
         }
-        wake(&ctx, &rig.caller, "One more thing", BY_DESKTOP).await
+        wake(&ctx, &rig.caller, "One more thing", BY_DESKTOP, None).await
     };
     // The agent leaves its terminal a moment after its signal.
     let dying = async {

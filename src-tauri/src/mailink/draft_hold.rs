@@ -96,20 +96,60 @@ pub(crate) fn new_msg_id() -> String {
     format!("m_{}_h{n}", super::now_ms())
 }
 
+/// Phone sends a Hive wake owes its coordinator (v0.25 `hive_wake`), by tab: (msg_id, held at).
+/// The message itself waits on disk in the Hive's owed record, which says which ids it still
+/// carries (`settle_wake`).
+static WAKE_HELD: LazyLock<Mutex<HashMap<String, Vec<(String, u64)>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn hold_for_wake(tab_id: &str, msg_id: &str) {
+    WAKE_HELD.lock().entry(tab_id.to_string()).or_default().push((msg_id.to_string(), super::now_ms()));
+}
+
+pub(crate) fn wake_held(tab_id: &str) -> bool {
+    WAKE_HELD.lock().contains_key(tab_id)
+}
+
+/// Settles the tab's wake sends against the ids its coordinator is still owed: the rest were
+/// typed by its session start. An owed id not known here (maiTerm restarted since) is held from
+/// now. None: the Hive is gone, and took nothing.
+pub(crate) fn settle_wake(tab_id: &str, still_owed: Option<&[String]>) {
+    let mut all = WAKE_HELD.lock();
+    if let Some(owed) = still_owed.filter(|o| !o.is_empty()) {
+        let ids = all.entry(tab_id.to_string()).or_default();
+        for id in owed {
+            if !ids.iter().any(|(k, _)| k == id) {
+                ids.push((id.clone(), super::now_ms()));
+            }
+        }
+    }
+    let Some(ids) = all.get_mut(tab_id) else { return };
+    let mut gone = Vec::new();
+    ids.retain(|(id, _)| {
+        let keep = still_owed.is_some_and(|o| o.contains(id));
+        if !keep {
+            gone.push(id.clone());
+        }
+        keep
+    });
+    if ids.is_empty() {
+        all.remove(tab_id);
+    }
+    drop(all);
+    let (outcome, why) = if still_owed.is_some() { ("typed", None) } else { ("dropped", Some("terminal_gone")) };
+    for msg_id in gone {
+        record(tab_id, &Held { msg_id, paths: Vec::new(), text: String::new(), what: "Hive wake", desktop: false }, outcome, why);
+    }
+}
+
 /// `ChatDetail.held` (v0.19): the phone's messages still waiting for this tab, oldest first.
 /// `reason` stays `"draft"` on the wire whatever holds it — the only value v0.19 defines.
 pub(crate) fn held_for_tab(tab_id: &str) -> Vec<serde_json::Value> {
-    QUEUES
-        .lock()
-        .get(tab_id)
-        .map(|q| {
-            q.items
-                .iter()
-                .filter(|(h, _, _)| !h.desktop)
-                .map(|(h, at, _)| serde_json::json!({ "msg_id": h.msg_id, "heldAt": at, "reason": "draft" }))
-                .collect()
-        })
-        .unwrap_or_default()
+    let mut held: Vec<(String, u64)> = WAKE_HELD.lock().get(tab_id).cloned().unwrap_or_default();
+    if let Some(q) = QUEUES.lock().get(tab_id) {
+        held.extend(q.items.iter().filter(|(h, _, _)| !h.desktop).map(|(h, at, _)| (h.msg_id.clone(), *at)));
+    }
+    // A wake's message goes before anything typed into the agent it starts.
+    held.into_iter().map(|(id, at)| serde_json::json!({ "msg_id": id, "heldAt": at, "reason": "draft" })).collect()
 }
 
 /// `ChatDetail.heldOutcomes` (v0.19): what became of this tab's held sends in the last hour.

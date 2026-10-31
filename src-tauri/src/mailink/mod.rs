@@ -1397,16 +1397,23 @@ async fn phone_hive_send(s: &ApiState, headers: &HeaderMap, tab_id: &str, body: 
         return Ok(Some(hive_unreachable("hive", "No maiTerm window is open to relaunch this Hive's queen in.")));
     };
     let ctx = crate::hive::tools::app_ctx(&s.app, h, &caller);
-    Ok(phone_wake_reply(finish::wake(&ctx, &caller, &body.text, finish::BY_PHONE).await))
+    // Owed with the message, so `ChatDetail.held` lists it until the session start types it.
+    let msg_id = format!("hw-{}", uuid::Uuid::new_v4());
+    let reply = phone_wake_reply(finish::wake(&ctx, &caller, &body.text, finish::BY_PHONE, Some(&msg_id)).await, &msg_id);
+    if reply.as_ref().is_some_and(|r| r["status"] == "held") {
+        draft_hold::hold_for_wake(tab_id, &msg_id);
+    }
+    Ok(reply)
 }
 
 /// What the phone is answered for a wake. None when the Hive wasn't done after all (woken from the
-/// desktop meanwhile): the message goes the ordinary way. A relaunch is `held`: the message is
-/// typed at the coordinator's session start, and shows in the thread when it takes it; it has no
-/// `held` / `heldOutcomes` entry.
-fn phone_wake_reply(outcome: Result<crate::hive::finish::WakeOutcome, String>) -> Option<Value> {
+/// desktop meanwhile): the message goes the ordinary way. A relaunch is `held` under `msg_id`: the
+/// message is typed at the coordinator's session start, listed in `ChatDetail.held` until then and
+/// in `heldOutcomes` as typed after (`wake_held_detail`), since a phone reads an id in neither as
+/// a message maiTerm lost.
+fn phone_wake_reply(outcome: Result<crate::hive::finish::WakeOutcome, String>, msg_id: &str) -> Option<Value> {
     use crate::hive::finish::{WakeOutcome, NOT_DONE};
-    let held = |detail: &str| json!({ "status": "held", "reason": "hive_wake", "msg_id": format!("hw-{}", uuid::Uuid::new_v4()), "woke": "hive", "detail": detail });
+    let held = |detail: &str| json!({ "status": "held", "reason": "hive_wake", "msg_id": msg_id, "woke": "hive", "detail": detail });
     Some(match outcome {
         Ok(WakeOutcome::Relaunching) => held("This Hive was done; its queen is resuming and gets your message once it's up."),
         Ok(WakeOutcome::Unconfirmed) => held("This Hive was done. Its window didn't confirm the queen's relaunch (its screen may be asleep); your message waits for the queen's next start."),
@@ -1484,7 +1491,7 @@ pub(crate) async fn send_tab_message(
                 return json!({ "status": "failed", "detail": "No maiTerm window to relaunch the Hive's queen in." });
             };
             let ctx = crate::hive::tools::app_ctx(app, h, &caller);
-            match crate::hive::finish::wake(&ctx, &caller, text, crate::hive::finish::BY_DESKTOP).await {
+            match crate::hive::finish::wake(&ctx, &caller, text, crate::hive::finish::BY_DESKTOP, None).await {
                 Ok(crate::hive::finish::WakeOutcome::Relaunching) => {
                     return json!({ "status": "delivered", "woke": "hive",
                         "detail": "This Hive was done; its queen is resuming and gets your message once it's up." });
@@ -6627,6 +6634,13 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
 
     // v0.19: phone sends held for a draft in the agent's box, and what became of recent ones —
     // the phone can't tell typed from dropped by watching for an echo. Only when non-empty.
+    // A Hive wake's sends (v0.25) are settled first against what its coordinator is still owed
+    // (on disk, so a restart keeps them held).
+    let coordinator = crate::hive::tools::caller_for_tab(&app.app_data.read(), tab_id).filter(|c| c.tab_id == tab_id);
+    if coordinator.is_some() || draft_hold::wake_held(tab_id) {
+        let owed = coordinator.map(|c| crate::hive::owed::read(&c.paths.coordinator_task()).wake.map(|w| w.msg_ids).unwrap_or_default());
+        draft_hold::settle_wake(tab_id, owed.as_deref());
+    }
     let held = draft_hold::held_for_tab(tab_id);
     if !held.is_empty() {
         detail["held"] = json!(held);
@@ -8442,16 +8456,42 @@ mod tests {
     #[test]
     fn a_phone_wake_is_held_until_the_coordinator_takes_it() {
         use crate::hive::finish::{WakeOutcome, NOT_DONE};
-        let r = phone_wake_reply(Ok(WakeOutcome::Relaunching)).unwrap();
+        let r = phone_wake_reply(Ok(WakeOutcome::Relaunching), "hw-1").unwrap();
         assert_eq!((r["status"].as_str(), r["reason"].as_str(), r["woke"].as_str()), (Some("held"), Some("hive_wake"), Some("hive")));
-        assert!(r["msg_id"].as_str().unwrap().starts_with("hw-"));
-        assert_eq!(phone_wake_reply(Ok(WakeOutcome::Unconfirmed)).unwrap()["reason"], "hive_wake");
-        let r = phone_wake_reply(Ok(WakeOutcome::Delivered)).unwrap();
+        assert_eq!(r["msg_id"], "hw-1", "the id the owed message carries");
+        assert_eq!(phone_wake_reply(Ok(WakeOutcome::Unconfirmed), "hw-1").unwrap()["reason"], "hive_wake");
+        let r = phone_wake_reply(Ok(WakeOutcome::Delivered), "hw-1").unwrap();
         assert_eq!((r["status"].as_str(), r["woke"].as_str()), (Some("delivered"), Some("hive")));
-        let r = phone_wake_reply(Err("This Hive stays done: its coordinator couldn't be relaunched.".into())).unwrap();
+        let r = phone_wake_reply(Err("This Hive stays done: its coordinator couldn't be relaunched.".into()), "hw-1").unwrap();
         assert_eq!((r["status"].as_str(), r["reason"].as_str()), (Some("unreachable"), Some("hive")));
         assert!(r["detail"].as_str().unwrap().contains("stays done"));
-        assert!(phone_wake_reply(Err(NOT_DONE.into())).is_none(), "woken meanwhile: sent as usual");
+        assert!(phone_wake_reply(Err(NOT_DONE.into()), "hw-1").is_none(), "woken meanwhile: sent as usual");
+    }
+
+    /// A phone's wake message is `held` while its coordinator is owed it and `typed` once the
+    /// session start took it: a phone reads an id in neither list as a message maiTerm lost.
+    #[test]
+    fn a_phone_wake_is_listed_held_then_typed() {
+        let tab = "tab-wake-listed";
+        draft_hold::hold_for_wake(tab, "hw-a");
+        draft_hold::hold_for_wake(tab, "hw-b");
+        draft_hold::settle_wake(tab, Some(&["hw-a".to_string(), "hw-b".to_string()]));
+        let held: Vec<Value> = draft_hold::held_for_tab(tab);
+        assert_eq!(held.iter().map(|h| h["msg_id"].as_str().unwrap()).collect::<Vec<_>>(), vec!["hw-a", "hw-b"]);
+        assert!(draft_hold::outcomes_for_tab(tab).is_empty());
+        // The session start typed the owed wake: nothing owed any more.
+        draft_hold::settle_wake(tab, Some(&[]));
+        assert!(draft_hold::held_for_tab(tab).is_empty());
+        let out = draft_hold::outcomes_for_tab(tab);
+        assert_eq!(out.iter().map(|o| (o["msg_id"].as_str().unwrap(), o["outcome"].as_str().unwrap())).collect::<Vec<_>>(), vec![("hw-a", "typed"), ("hw-b", "typed")]);
+        assert!(!draft_hold::wake_held(tab));
+        // After a restart nothing is known in memory: what the owed record still carries is held.
+        draft_hold::settle_wake("tab-wake-restart", Some(&["hw-r".to_string()]));
+        assert_eq!(draft_hold::held_for_tab("tab-wake-restart")[0]["msg_id"], "hw-r");
+        // A Hive that is gone took nothing.
+        draft_hold::hold_for_wake("tab-wake-gone", "hw-c");
+        draft_hold::settle_wake("tab-wake-gone", None);
+        assert_eq!(draft_hold::outcomes_for_tab("tab-wake-gone")[0]["outcome"], "dropped");
     }
 
     /// Only the human wakes a Hive: the dev token any local agent can read is refused, a paired
