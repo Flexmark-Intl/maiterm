@@ -1082,6 +1082,22 @@ explicit per-Hive widening in Hive settings, never for maiTerm's MCP, proxy or m
 Bash can reach that port through the sandbox's proxy, so the service there must not trust a
 local caller.
 
+**Seeing its own app is serve plus fetch or screenshot, never a widening** (built 2026-10-31,
+`hive/serve.rs`). A live worker on a new SvelteKit project ran `PORT=3199 node build`, got
+`listen EPERM 127.0.0.1:3199`, and asked the human for a sandbox change nobody can make. The way
+is: `hiveRun {serve: true, command}` runs the app as a job under the job sandbox (§6.8), which
+may bind exactly the one port maiTerm books for it (measured: the job's profile let a server bind
+its booked port and refused another with EPERM); then maiTerm, outside every sandbox, reaches that
+port for the worker: `hiveFetch` (an HTTP request, status, headers and a bounded body) or
+`hiveScreenshot` (headless Chrome, the PNG written into the worker's `scratch/screenshots/`,
+where it can Read it and `galleryAdd` it). Both reach **only a port booked for one of the calling
+worker's own running served apps**: never another worker's, an arbitrary port, or maiTerm's
+(`serve::serve_port`). The worker's own shell still can't reach the port. Chrome isn't in the
+sandbox, and the page is the worker's code, so it runs with a fresh profile maiTerm owns and every
+request but the app's own port goes to a proxy that answers nothing (`--proxy-bypass-list=
+<-loopback>;…:<port>`: measured, a page's `<img>` on another local port never reached it). So web
+fonts and CDNs don't load in a screenshot. Page text that reaches an agent is `frame_escape`d.
+
 **A block is a blocker, not a retry.** The detector is the worker's **`PostToolUseFailure` and
 `PostToolUse` command hooks**: they parse the `<sandbox_violations>` note in the call's output
 (a successful shell call's too: a curl loop that exited 0 carried one in its stderr and was lost
@@ -1155,6 +1171,28 @@ timeout?}`. `hiveRun` is worker-only, and it is **not a free command string**:
   the queue. The result arrives as a framed `⟦HIVE RUN⟧` message between turns: the follow-ups
   delivery path (`docs/follow-ups.md`), take-before-type, held only for a dialog or a draft. A
   short job that finishes within a few seconds answers in the tool result directly.
+- **Serving the app to look at it** (`hiveRun {serve: true}`, `hive/serve.rs`, 2026-10-31). A
+  served app is a job like any other (its row and output in the worker's column, its end a
+  `⟦HIVE RUN⟧`, `Job.serve`), with four differences. It is always booked a port: `PORT` and
+  `HOST=127.0.0.1` are set and `{port}` in its words is filled. `hiveRun` waits (default 120 s, at
+  most 600) until something answers HTTP on that port and replies with the job, the port and
+  `http://127.0.0.1:<port>`. It runs until `hiveRun {stop: <job>}` (which stops any of the
+  worker's own runs but a land check), until the worker stops, suspends or is retired (the
+  ordinary release), after **30 minutes with no `hiveFetch` or `hiveScreenshot`** (`BY_IDLE`), or
+  after the 4 h job ceiling. And it is never a receipt. **Resources:** a queued command served
+  keeps that entry's needs, leases and env, and every served app also takes the machine-wide
+  `serve` pool (8 at once, 1 under critical pressure); a worker serves at most 3 at once. **An
+  unlisted command is asked of the coordinator, not the human** (Darryl, 2026-10-31: a rogue
+  worker still needs the queen's permission, and she can refuse what doesn't make sense). Before
+  this, `hiveRun` refused an unlisted command outright, and a new project lists none, so serve mode
+  would have been a dead end. The worker's call files an ask (once per worker and command) and the
+  queen gets a `⟦HIVE SERVE⟧` message; `hiveApproveServe {command, folder?, approve?, reason?}`
+  answers it. The answer **stands for the Hive** (`logs/serve-approvals.jsonl`, a command
+  starting with the approved words, the most specific answer winning, the latest among equals),
+  is a decision-log line (`source: "serve"`, by the coordinator), and is typed to every worker
+  waiting on a command it covers. Whoever approves, the job runs under the worker's sandbox and
+  reaches nothing but its own port, so an approval never widens anything. Non-serve `hiveRun` still
+  takes queued commands only.
 - **The coordinator sets priority, not timing.** `hiveRunPriority` (coordinator-only) moves a
   job forward (the run blocking a land, say). Deciding when each test runs turn by turn would be
   slow and wrong for an LLM, and it's easy for a queue. That's principle 8 again.
@@ -4642,3 +4680,19 @@ several releases a day).
    Done or paused Hive on its old goal; Ask the queen to land wakes a Done Hive to `active` (it can't land while
    done) and reaches a paused one past the Pause. **Not yet:** the old goal's open blockers on the queen's own rows
    stay on the board (the criteria row is replaced by her next `hiveSetCriteria`); not tried live.
+11. A worker runs its app and looks at it (§6.7, §6.8). **Built** (2026-10-31): `hive/serve.rs`
+   (`hiveRun {serve: true}` and `{stop}`, `hiveFetch`, `hiveScreenshot`, the coordinator's
+   `hiveApproveServe`), `Job.serve` and the `serve` pool, the 30-minute idle stop
+   (`queue::idle_serves`, `BY_IDLE`), the served app's port, `PORT`/`HOST` and `{port}` in
+   `queue::prepare_in`, `logs/serve-approvals.jsonl`. Tests: the port rule (another worker's, another
+   Hive's, an unserved run, an unbooked or maiTerm port), the readiness wait against a server that
+   comes up late, fetch bounds, framing and unfollowed redirects, the Chrome line, discovery, the
+   queen's standing answers and asks, the scratch write refusing links; `probe_a_real_screenshot_of_a_local_page`
+   (ignored) took a real screenshot and showed the page's request to another local port never left
+   Chrome. **Not yet:** tried live with a real worker; the human's Hive settings show no list of the
+   queen's serve approvals and nothing revokes one but a later refusal. **Open, and older than
+   serve:** a job's profile (`localhost:<port>` rules) also let a server bind `0.0.0.0` on its
+   booked port, and a request to this Mac's LAN address reached it (measured from the same Mac), so
+   any job with a port, a service copy included, may be reachable from the network if its server
+   ignores `HOST=127.0.0.1`. Seatbelt names only `localhost` or `*` as a host, so the profile can't
+   pin the address; a fix would check the job's listening sockets.
