@@ -411,15 +411,25 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
         let role = if f.primary { "primary, " } else { "" };
         let line = if f.is_git() {
             let base = f.base.as_deref().unwrap_or("its current branch");
+            let cmd = |v: &Option<String>| v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map_or("none yet".to_string(), |s| format!("`{s}`"));
             format!(
-                "- **{}** ({role}git, lands to {base}). Your read copy: `{}`. Review with `git -C <path> diff|log|show`.\n",
+                "- **{}** ({role}git, lands to {base}; setup {}, land check {}). Your read copy: `{}`. Review with `git -C <path> diff|log|show`.\n",
                 f.name,
+                cmd(&f.setup),
+                cmd(&f.land_check),
                 paths.coordinator_worktree(&f.name).display()
             )
         } else {
             format!("- **{}** ({role}plain, read-only): `{}`\n", f.name, f.path)
         };
         b.push_str(&line);
+    }
+    if hive.git_folders().any(|f| f.setup.as_deref().is_none_or(|s| s.trim().is_empty()) || f.land_check.as_deref().is_none_or(|s| s.trim().is_empty())) {
+        b.push_str(
+            "\nSetup is the install each new worker\u{2019}s copy runs before it starts; a land check is the command a land must \
+             pass, and with none a land runs no check. A new project starts with neither: once the code has an install or a test \
+             command, set them with hiveChangeSettings `folders`, and change them as the project grows.\n",
+        );
     }
     b.push_str(&format!(
         "\nYour home is `{}`, your working folder. You aren\u{2019}t sandboxed: you run like your human\u{2019}s other agent \

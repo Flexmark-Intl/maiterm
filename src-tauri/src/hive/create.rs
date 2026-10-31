@@ -888,6 +888,47 @@ pub fn resolve_folders(spec: &[HiveFolder], roots: &[PathBuf], app_data: Option<
     Ok(out)
 }
 
+/// The new projects among the sheet's git folders, made ready for read copies before
+/// `resolve_folders` reads them (§3.6, `layout::start_repo`): an empty folder becomes a repo on
+/// its Base (`main` unless the human named another), and a repo with no commit gets its first.
+/// Answers the folders that were empty, which the caller trusts once Create succeeds. A Create
+/// that fails later leaves the repo made, which is all it is: an empty first commit.
+pub fn start_new_repos(spec: &[HiveFolder], app_data: Option<&Path>) -> Result<Vec<PathBuf>, String> {
+    let mut empty = Vec::new();
+    for f in spec.iter().filter(|f| f.kind == KIND_GIT) {
+        let path = Path::new(&f.path);
+        if !path.is_dir() {
+            continue; // `resolve_folders` says so
+        }
+        let info = layout::detect_folder(path, &[]);
+        if !(if info.kind == KIND_GIT { info.unborn } else { info.empty }) {
+            continue;
+        }
+        let name = f.name.trim();
+        if let Some(why) = app_data.and_then(|a| app_data_refusal(Path::new(&info.path), a)) {
+            return Err(format!("{name}: {} {why}, which a Hive's agents must never reach. Pick the project's own folder.", info.path));
+        }
+        let branch = non_empty(&f.base).or(info.base).unwrap_or_else(|| layout::NEW_REPO_BRANCH.to_string());
+        layout::start_repo(path, &branch).map_err(|e| format!("{name}: {e}"))?;
+        if info.empty {
+            empty.push(PathBuf::from(&info.path));
+        }
+    }
+    Ok(empty)
+}
+
+/// A new project's repo trusted where the Hive's agents launch (§3.6): an empty folder has no
+/// project settings, hooks or MCP servers of its own, which are what trusting a repo lets run, and
+/// the human chose it for this Hive. A failure is the sheet's untrusted warning, never a refusal.
+fn trust_new_repos(empty: &[PathBuf], roots: &[PathBuf]) {
+    let Some(launch_json) = roots.first() else { return };
+    for p in empty {
+        if let Err(e) = super::trust::trust_repo(launch_json, p) {
+            log::warn!("hive: couldn't trust the new repo {}: {e}", p.display());
+        }
+    }
+}
+
 pub fn build_hive(spec: &HiveSpec, id: String, folders: Vec<HiveFolder>) -> Hive {
     let mut models = spec.models.clone();
     for m in [&mut models.coordinator, &mut models.worker] {
@@ -1077,7 +1118,9 @@ pub async fn hive_create(
         }
         // A coordinator that can't start is a broken Hive: refuse here rather than at launch.
         launch::claude_new_enough()?;
-        let folders = resolve_folders(&spec_for_disk.folders, &trust_roots(&prefs), app_data_dir().as_deref())?;
+        let roots = trust_roots(&prefs);
+        let empty = start_new_repos(&spec_for_disk.folders, app_data_dir().as_deref())?;
+        let folders = resolve_folders(&spec_for_disk.folders, &roots, app_data_dir().as_deref())?;
         let mut hive = build_hive(&spec_for_disk, uuid::Uuid::new_v4().to_string(), folders);
         // The queued commands it starts with, read from the folders (§6.8); edited in settings.
         hive.settings.run_queue = super::queue::detect_commands(&hive.folders);
@@ -1102,6 +1145,7 @@ pub async fn hive_create(
             layout::undo_layout(&root, &hive);
             return Err(e);
         }
+        trust_new_repos(&empty, &roots);
         Ok((hive, root))
     })
     .await

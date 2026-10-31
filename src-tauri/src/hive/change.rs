@@ -56,7 +56,27 @@ pub struct SettingsChange {
     /// The human's alone: which of the Hive's agents are chats on the phone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workers_on_phone: Option<bool>,
+    /// A git folder's setup or land check, as the project takes shape (§3.6).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<FolderChange>,
 }
+
+/// One git folder's commands, by its name. `""` clears one; left out, it stays as it is.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FolderChange {
+    pub name: String,
+    /// Runs outside any sandbox before each worker starts, so the coordinator's change of it is
+    /// always a card, whoever holds the Settings checkpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
+    /// Runs under the workers' sandbox before a land: the checkpoint decides, as for a model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub land_check: Option<String>,
+}
+
+/// A setup or land check, at most: a command line, never a script.
+pub const MAX_FOLDER_COMMAND: usize = 1000;
 
 /// Who a change comes from, which sets its limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,10 +195,55 @@ pub fn check(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[String]) -
         }
     }
 
+    for fc in &c.folders {
+        let Some(f) = hive.git_folders().find(|f| f.name == fc.name.trim()) else {
+            let names: Vec<&str> = hive.git_folders().map(|f| f.name.as_str()).collect();
+            return Err(format!("This Hive has no git folder named \u{201c}{}\u{201d}; its git folders: {}.", one_line(fc.name.trim(), 60), names.join(", ")));
+        };
+        let mut one = FolderChange { name: f.name.clone(), ..FolderChange::default() };
+        if let Some(new) = folder_command(&fc.setup, "setup", &f.name)?.filter(|n| *n != f.setup.clone().unwrap_or_default()) {
+            if by == By::Coordinator {
+                return Err(format!("A folder\u{2019}s setup runs outside any sandbox before each worker starts, so changing {}\u{2019}s goes on a card.", f.name));
+            }
+            lines.push(format!("Setup of {} (runs outside the sandbox before each worker starts, from the next one on): {} \u{2192} {}", f.name, shown(&f.setup), shown(&Some(new.clone()))));
+            one.setup = Some(new);
+        }
+        if let Some(new) = folder_command(&fc.land_check, "land check", &f.name)?.filter(|n| *n != f.land_check.clone().unwrap_or_default()) {
+            lines.push(format!("Land check of {} (runs before each land, in the workers\u{2019} sandbox): {} \u{2192} {}", f.name, shown(&f.land_check), shown(&Some(new.clone()))));
+            one.land_check = Some(new);
+        }
+        if one.setup.is_some() || one.land_check.is_some() {
+            if out.folders.iter().any(|o| o.name == one.name) {
+                return Err(format!("Name {} once.", f.name));
+            }
+            out.folders.push(one);
+        }
+    }
+
     if lines.is_empty() {
         return Err("Nothing would change: every setting named is already so.".to_string());
     }
     Ok(Checked { change: out, lines })
+}
+
+/// A folder command as named: trimmed, `""` for none, one line no longer than the limit.
+fn folder_command(v: &Option<String>, what: &str, folder: &str) -> Result<Option<String>, String> {
+    let Some(s) = v.as_deref().map(str::trim) else { return Ok(None) };
+    if s.chars().any(char::is_control) {
+        return Err(format!("The {what} of {folder} has a line break or control character in it: it\u{2019}s one command line."));
+    }
+    if s.chars().count() > MAX_FOLDER_COMMAND {
+        return Err(format!("The {what} of {folder} is over {MAX_FOLDER_COMMAND} characters: put a longer one in a script in the repo."));
+    }
+    Ok(Some(s.to_string()))
+}
+
+/// A command for a card: quoted whole, or "none".
+fn shown(v: &Option<String>) -> String {
+    match v.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => format!("`{s}`"),
+        None => "none".to_string(),
+    }
 }
 
 pub fn describe_model(model: &str, effort: &str) -> String {
@@ -209,6 +274,16 @@ pub fn apply_to(hive: &mut Hive, c: &SettingsChange) {
     }
     if let Some(v) = c.workers_on_phone {
         hive.settings.workers_on_phone = v;
+    }
+    let none_if_empty = |s: &String| Some(s.clone()).filter(|s| !s.is_empty());
+    for fc in &c.folders {
+        let Some(f) = hive.folders.iter_mut().find(|f| f.name == fc.name) else { continue };
+        if let Some(s) = &fc.setup {
+            f.setup = none_if_empty(s);
+        }
+        if let Some(s) = &fc.land_check {
+            f.land_check = none_if_empty(s);
+        }
     }
 }
 
@@ -307,11 +382,13 @@ pub fn tool_definition(tab_id: &Value) -> Value {
         "name": "hiveChangeSettings",
         "description": format!(
             "Change this Hive\u{2019}s settings: workers at once (cap), the coordinator\u{2019}s or the workers\u{2019} model and effort, \
-             and the hosts every builder\u{2019}s sandbox may reach beyond the package registries (an API, its docs). Name only \
-             what changes. Under the Settings checkpoint\u{2019}s Ask me (see your brief) this files a card your human approves or \
-             denies, and maiTerm tells you which; handed to you, it applies at once and your human is told. A change reaches each \
-             agent at its next launch: a running worker keeps its model and network until it is relaunched. Raising workers at \
-             once always goes on a card (lowering it doesn\u{2019}t), and never pushing. Models: {}. Efforts: {}.",
+             the hosts every builder\u{2019}s sandbox may reach beyond the package registries (an API, its docs), and a git \
+             folder\u{2019}s setup (the install each new worker\u{2019}s copy runs before it starts) and land check (the command a \
+             land must pass) as the project takes shape. Name only what changes. Under the Settings checkpoint\u{2019}s Ask me (see \
+             your brief) this files a card your human approves or denies, and maiTerm tells you which; handed to you, it applies \
+             at once and your human is told. A change reaches each agent at its next launch: a running worker keeps its model and \
+             network until it is relaunched. Raising workers at once and any setup (it runs outside the sandbox) always go on a \
+             card; lowering it doesn\u{2019}t, and never pushing. Models: {}. Efforts: {}.",
             MODELS.join(", "),
             EFFORTS.join(", ")
         ),
@@ -326,6 +403,19 @@ pub fn tool_definition(tab_id: &Value) -> Value {
                 "worker_effort": { "type": "string", "enum": EFFORTS },
                 "add_hosts": { "type": "array", "items": { "type": "string" }, "description": "Bare host names (api.example.com, *.example.com) every builder may reach" },
                 "remove_hosts": { "type": "array", "items": { "type": "string" } },
+                "folders": {
+                    "type": "array",
+                    "description": "Git folders whose setup or land check changes, by name. \"\" clears one; leave a field out to keep it.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "setup": { "type": "string", "description": "One command line, run in each new worker's copy before it starts (e.g. `npm ci`)" },
+                            "land_check": { "type": "string", "description": "One command line a land must pass (e.g. `npm test`)" }
+                        },
+                        "required": ["name"]
+                    }
+                },
                 "reason": { "type": "string", "description": "Why: your human reads it on the card" }
             },
             "required": ["reason"]
@@ -338,17 +428,19 @@ pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     let (change, reason) = parse_args(args)?;
     refuse_private_hosts(&change.add_hosts).await?;
     let hive = super::autonomy::current_hive(ctx, caller).ok_or("This Hive is gone.")?;
-    // A raise of the cap is the human's whoever holds the checkpoint: the whole change goes on a card.
+    // The human's limits apply on approval, but a card that can't apply now isn't filed.
+    let checked = check(&hive, &change, By::Approved, &super::settings::hive_remote_hosts(&hive))?;
+    // A raise of the cap, or a setup (it runs outside any sandbox), is the human's whoever holds
+    // the checkpoint: the whole change goes on a card.
     let raises = change.cap.is_some_and(|c| c > hive.cap);
-    if !checkpoints::asks(&hive, SETTINGS) && !raises {
+    let setup = checked.change.folders.iter().any(|f| f.setup.is_some());
+    if !checkpoints::asks(&hive, SETTINGS) && !raises && !setup {
         let (_, lines) = write(ctx, caller, &change, By::Coordinator)?;
         log_line(caller,"coordinator", &lines, reason.as_deref());
         ctx.window.settings_changed(&caller.workspace_id, &format!("The queen changed this Hive\u{2019}s settings: {}.", lines.join("; ")));
         ctx.window.poll_waiters(&caller.workspace_id);
         return Ok(json!({ "status": "applied", "changes": lines, "note": "Your human was told. Each agent gets it at its next launch." }));
     }
-    // The human's limits apply on approval, but a card that can't apply now isn't filed.
-    let checked = check(&hive, &change, By::Approved, &super::settings::hive_remote_hosts(&hive))?;
     let mut effects = checked.lines.clone();
     if !checked.change.add_hosts.is_empty() {
         effects.push("A host a worker can reach can also receive what it sends: only hosts you trust with this project\u{2019}s code.".to_string());
@@ -550,6 +642,42 @@ mod tests {
         let mut done = hive();
         done.status = super::super::record::STATUS_DONE.into();
         assert!(check(&done, &c, By::Human, &[]).is_err());
+    }
+
+    /// §3.6: the queen sets a new project's commands as it grows. A land check follows the
+    /// checkpoint; a setup runs outside the sandbox, so only the human's approval applies it.
+    #[test]
+    fn a_folders_commands_change_and_only_the_human_approves_a_setup() {
+        let mut h = hive();
+        h.folders = vec![
+            super::super::record::HiveFolder { name: "web".into(), kind: super::super::record::KIND_GIT.into(), land_check: Some("npm test".into()), ..Default::default() },
+            super::super::record::HiveFolder { name: "brand".into(), kind: super::super::record::KIND_PLAIN.into(), ..Default::default() },
+        ];
+        let fc = |setup: Option<&str>, land: Option<&str>| SettingsChange {
+            folders: vec![FolderChange { name: "web".into(), setup: setup.map(Into::into), land_check: land.map(Into::into) }],
+            ..Default::default()
+        };
+
+        let land = check(&h, &fc(None, Some(" cargo test ")), By::Coordinator, &[]).unwrap();
+        assert_eq!(land.change.folders[0].land_check.as_deref(), Some("cargo test"), "trimmed");
+        assert!(land.lines[0].contains("`npm test` \u{2192} `cargo test`"), "{:?}", land.lines);
+
+        let setup = fc(Some("npm ci"), None);
+        assert!(check(&h, &setup, By::Coordinator, &[]).unwrap_err().contains("goes on a card"));
+        let ok = check(&h, &setup, By::Approved, &[]).unwrap();
+        assert!(ok.lines[0].contains("outside the sandbox") && ok.lines[0].contains("none \u{2192} `npm ci`"), "{:?}", ok.lines);
+        apply_to(&mut h, &ok.change);
+        assert_eq!(h.folders[0].setup.as_deref(), Some("npm ci"));
+
+        assert!(check(&h, &fc(Some("npm ci"), Some("npm test")), By::Human, &[]).unwrap_err().starts_with("Nothing would change"));
+        let cleared = check(&h, &fc(None, Some("")), By::Coordinator, &[]).unwrap();
+        apply_to(&mut h, &cleared.change);
+        assert_eq!((h.folders[0].land_check.clone(), h.folders[0].setup.as_deref()), (None, Some("npm ci")), "\"\" clears; left out stays");
+
+        assert!(check(&h, &fc(Some("npm ci\nrm -rf ~"), None), By::Human, &[]).unwrap_err().contains("line break"));
+        assert!(check(&h, &fc(None, Some(&"x".repeat(MAX_FOLDER_COMMAND + 1))), By::Human, &[]).is_err());
+        let plain = SettingsChange { folders: vec![FolderChange { name: "brand".into(), land_check: Some("true".into()), ..Default::default() }], ..Default::default() };
+        assert!(check(&h, &plain, By::Human, &[]).unwrap_err().contains("its git folders: web"), "a plain folder has no commands");
     }
 
     #[test]

@@ -850,6 +850,8 @@ export interface HiveSettingsChange {
   remove_hosts?: string[];
   push_after_land?: boolean;
   workers_on_phone?: boolean;
+  /** A git folder's setup or land check by name; "" clears one (docs/hive.md §3.6). */
+  folders?: { name: string; setup?: string; land_check?: string }[];
 }
 
 export interface HiveReplaceable {
@@ -904,6 +906,10 @@ export interface HiveFolderInfo {
   local_remotes: string[];
   /** The install its lockfiles name (`pnpm install --frozen-lockfile`…): the sheet's setup. */
   setup: string | null;
+  /** Nothing in it but `.git`: a new project, made a repo and trusted at Create (docs/hive.md §3.6). */
+  empty: boolean;
+  /** A repo with no commit yet: `base` is the branch HEAD names, and Create makes a first commit. */
+  unborn: boolean;
 }
 
 /** A tool the Hive can make things with (docs/hive.md §3 Tools). `id` is what `Hive.tools` holds. */

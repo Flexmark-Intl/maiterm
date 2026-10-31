@@ -33,6 +33,59 @@ pub struct FolderInfo {
     /// The install its lockfiles name (`deps::setup_for`), which the sheet offers as its setup:
     /// a fresh worktree has no dependencies, and a worker can't install them in its own shell.
     pub setup: Option<String>,
+    /// Nothing in it but git's own folder: a new project. Create makes it a repo on
+    /// `NEW_REPO_BRANCH` when it isn't one yet, and trusts it (`start_repo`, §3.6).
+    pub empty: bool,
+    /// A repo with no commit yet. `base` is the branch its HEAD names, and Create gives it an
+    /// empty first commit, since a read copy needs a commit to check out.
+    pub unborn: bool,
+}
+
+/// The branch a new project's repo starts on (§3.6).
+pub const NEW_REPO_BRANCH: &str = "main";
+
+/// Nothing but `.git` (and Finder's `.DS_Store`) in it. Unreadable is not empty.
+pub fn folder_is_empty(dir: &Path) -> bool {
+    fs::read_dir(dir).is_ok_and(|entries| {
+        entries.into_iter().all(|e| e.is_ok_and(|e| matches!(e.file_name().to_str(), Some(".git" | ".DS_Store"))))
+    })
+}
+
+/// Create's start for a new project (§3.6): an empty folder that isn't a repo becomes one, and it
+/// or a repo with no commit yet gets an empty first commit on `branch` (no branch exists yet, so
+/// pointing HEAD there loses nothing), so a read copy has something to check out. The commit is
+/// made from an empty index of its own, so whatever the human staged or left untracked stays as
+/// it was. A repo with commits is left alone. Blocks on git.
+pub fn start_repo(path: &Path, branch: &str) -> Result<(), String> {
+    let info = detect_folder(path, &[]);
+    let real = Path::new(&info.path);
+    if info.kind == KIND_GIT && !info.unborn {
+        return Ok(());
+    }
+    if info.kind != KIND_GIT && !info.empty {
+        return Err(format!("{} isn't a git repository, and only an empty folder is made into one", info.path));
+    }
+    // `git check-ref-format` needs no repo, so it's asked before one is made.
+    run(crate::util::proc::git().args(["check-ref-format", "--branch", branch]), QUERY_TIMEOUT).map_err(|_| format!("\u{201c}{branch}\u{201d} isn't a branch name git takes"))?;
+    if info.kind != KIND_GIT {
+        // Plain `init` then the branch below, rather than `init -b`, which git before 2.28 lacks.
+        run(git_in(real).args(["init", "-q"]), QUERY_TIMEOUT).map_err(|e| format!("git init in {}: {e}", info.path))?;
+        log::info!("hive: made {} a git repository", info.path);
+    }
+    run(git_in(real).args(["symbolic-ref", "HEAD"]).arg(format!("refs/heads/{branch}")), QUERY_TIMEOUT)
+        .map_err(|e| format!("{}: couldn't start it on {branch}: {e}", info.path))?;
+    let index = std::env::temp_dir().join(format!("maiterm-hive-start-{}", uuid::Uuid::new_v4()));
+    let res = run(
+        git_in(real)
+            .env("GIT_INDEX_FILE", &index)
+            .args(super::land::git::identity(real))
+            .args(["-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Start the project"]),
+        QUERY_TIMEOUT,
+    );
+    let _ = fs::remove_file(&index);
+    res.map_err(|e| format!("{}: couldn't make its first commit: {e}", info.path))?;
+    log::info!("hive: gave {} its first commit", info.path);
+    Ok(())
 }
 
 /// `claude_json` is the roots the Hive's agents will launch under (the active account's, or
@@ -41,16 +94,21 @@ pub fn detect_folder(path: &Path, claude_json: &[PathBuf]) -> FolderInfo {
     let real = crate::share::canon(path);
     let top = run(git_in(&real).args(["rev-parse", "--show-toplevel"]), QUERY_TIMEOUT).ok().filter(|t| !t.is_empty());
     let top = top.map(|t| crate::share::canon(Path::new(&t)));
-    let (kind, base, local_remotes, repo_top) = match top {
+    let (kind, base, local_remotes, repo_top, unborn) = match top {
         Some(top) if top == real => {
-            let base = run(git_in(&real).args(["rev-parse", "--abbrev-ref", "HEAD"]), QUERY_TIMEOUT)
-                .ok()
-                .filter(|b| !b.is_empty() && b != "HEAD");
+            let unborn = run(git_in(&real).args(["rev-parse", "--verify", "--quiet", "HEAD"]), QUERY_TIMEOUT).is_err();
+            // No commit, no `rev-parse` name: the branch HEAD points at is the one it will be on.
+            let base = if unborn {
+                run(git_in(&real).args(["symbolic-ref", "--short", "--quiet", "HEAD"]), QUERY_TIMEOUT).ok()
+            } else {
+                run(git_in(&real).args(["rev-parse", "--abbrev-ref", "HEAD"]), QUERY_TIMEOUT).ok()
+            }
+            .filter(|b| !b.is_empty() && b != "HEAD");
             let remotes = run(git_in(&real).args(["remote", "-v"]), QUERY_TIMEOUT).unwrap_or_default();
-            (KIND_GIT, base, local_remote_paths(&remotes, &top), None)
+            (KIND_GIT, base, local_remote_paths(&remotes, &top), None, unborn)
         }
-        Some(top) => (KIND_PLAIN, None, Vec::new(), Some(top.to_string_lossy().to_string())),
-        None => (KIND_PLAIN, None, Vec::new(), None),
+        Some(top) => (KIND_PLAIN, None, Vec::new(), Some(top.to_string_lossy().to_string()), false),
+        None => (KIND_PLAIN, None, Vec::new(), None, false),
     };
     let setup = (kind == KIND_GIT).then(|| super::deps::setup_for(&real)).flatten();
     FolderInfo {
@@ -61,6 +119,8 @@ pub fn detect_folder(path: &Path, claude_json: &[PathBuf]) -> FolderInfo {
         trusted: super::trust::trusted_in_all(claude_json, &real),
         local_remotes,
         setup,
+        empty: folder_is_empty(&real),
+        unborn,
     }
 }
 
@@ -566,6 +626,59 @@ mod tests {
         git(&web, &["remote", "add", "enc", &format!("file://{}/../my%20remote.git", web.display())]);
         let info = detect_folder(&web, &[]);
         assert_eq!(info.local_remotes, vec![bare.to_string_lossy().to_string()], "both name the same repo");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// §3.6: an empty folder is a new project. Create makes it a repo on main with an empty first
+    /// commit, so a read copy has something to check out.
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_folder_becomes_a_repo_on_main_with_a_first_commit() {
+        let base = scratch("start");
+        let new = base.join("new");
+        fs::create_dir_all(&new).unwrap();
+        fs::write(new.join(".DS_Store"), "").unwrap();
+        let info = detect_folder(&new, &[]);
+        assert!(info.empty && !info.unborn && info.kind == KIND_PLAIN, "{info:?}");
+
+        start_repo(&new, NEW_REPO_BRANCH).unwrap();
+        let info = detect_folder(&new, &[]);
+        assert_eq!((info.kind.as_str(), info.base.as_deref(), info.unborn, info.empty), (KIND_GIT, Some("main"), false, true));
+        assert_eq!(git(&new, &["ls-tree", "-r", "--name-only", "HEAD"]), "", "the first commit is empty");
+        start_repo(&new, "other").unwrap();
+        assert_eq!(git(&new, &["rev-list", "--count", "HEAD"]), "1", "a repo with a commit is left alone");
+
+        let full = base.join("full");
+        fs::create_dir_all(&full).unwrap();
+        fs::write(full.join("notes.txt"), "x").unwrap();
+        assert!(!detect_folder(&full, &[]).empty);
+        assert!(start_repo(&full, "main").unwrap_err().contains("only an empty folder"));
+        assert!(!full.join(".git").exists(), "a folder with things in it is never made a repo");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A repo with no commit names no branch to `rev-parse`: its Base is the branch HEAD points
+    /// at, and its first commit leaves what the human staged and wrote as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_repo_with_no_commit_gets_an_empty_first_one_and_keeps_its_files() {
+        let base = scratch("unborn");
+        let r = base.join("r");
+        fs::create_dir_all(&r).unwrap();
+        git(&r, &["init", "-q", "-b", "trunk"]);
+        let info = detect_folder(&r, &[]);
+        assert_eq!((info.kind.as_str(), info.base.as_deref(), info.unborn, info.empty), (KIND_GIT, Some("trunk"), true, true));
+
+        fs::write(r.join("staged.txt"), "s").unwrap();
+        fs::write(r.join("loose.txt"), "l").unwrap();
+        git(&r, &["add", "staged.txt"]);
+        let info = detect_folder(&r, &[]);
+        assert!(info.unborn && !info.empty);
+        start_repo(&r, "main").unwrap();
+        assert_eq!(git(&r, &["symbolic-ref", "--short", "HEAD"]), "main", "the Base the human named; no branch existed to lose");
+        assert_eq!(git(&r, &["ls-tree", "-r", "--name-only", "HEAD"]), "");
+        assert_eq!(git(&r, &["status", "--porcelain"]), "A  staged.txt\n?? loose.txt","staged and loose as they were");
+        assert!(!detect_folder(&r, &[]).unborn);
         let _ = fs::remove_dir_all(&base);
     }
 }

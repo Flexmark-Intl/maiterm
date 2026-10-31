@@ -54,6 +54,11 @@
     primary: boolean;
     trusted: boolean;
     repoTop: string | null;
+    /** A new project (§3.6): empty, or a repo with no commit. Create starts its repo on `base`,
+     *  and the queen sets its setup and land check once the code has them. */
+    fresh?: boolean;
+    /** Nothing in it but `.git`: Create trusts it, as it has no settings of its own to trust. */
+    empty?: boolean;
   }
 
   const MODELS = ['opus', 'sonnet', 'haiku'];
@@ -312,13 +317,16 @@
         return;
       }
       const taken = folders.filter((_, i) => i !== at).map((f) => f.name);
+      // An empty folder is a new project, inside another repo or not: Create makes it one of its own.
+      const fresh = info.empty || info.unborn;
+      const kind = fresh ? 'git' : info.kind;
       const f: Folder = {
         key: ++folderKey,
         name: folderName(info.path, taken),
         path: info.path,
-        kind: info.kind,
-        detectedKind: info.kind,
-        base: info.base ?? '',
+        kind,
+        detectedKind: kind,
+        base: info.base ?? (fresh ? 'main' : ''),
         detectedBase: info.base,
         // A fresh worktree has no dependencies, and a worker can't install them in its own
         // shell: the lockfile's install, shown and editable.
@@ -326,7 +334,9 @@
         land_check: '',
         primary: at !== undefined ? folders[at].primary : !folders.some((x) => x.primary),
         trusted: info.trusted,
-        repoTop: info.repo_top,
+        repoTop: fresh ? null : info.repo_top,
+        fresh,
+        empty: info.empty,
       };
       folders = at !== undefined ? folders.map((x, i) => (i === at ? f : x)) : [...folders, f];
       readSuggestions(info.path);
@@ -346,10 +356,11 @@
           ? `. It's recorded in the Claude config at ${preflight.trust_root_dir} (your CLAUDE_CONFIG_DIR), the one this Hive's agents run as.`
           : '.'),
   );
-  const untrusted = $derived(folders.filter((f) => f.kind === 'git' && !f.trusted));
+  // An empty folder is trusted by Create itself (§3.6): nothing in it for trust to let run.
+  const untrusted = $derived(folders.filter((f) => f.kind === 'git' && !f.trusted && !f.empty));
 
   async function recheckTrust() {
-    for (const f of folders.filter((x) => x.kind === 'git' && !x.trusted)) {
+    for (const f of untrusted) {
       try {
         const info = await hiveDetectFolder(f.path);
         if (info.trusted) patch(f.key, { trusted: true });
@@ -661,7 +672,7 @@
           {/if}
 
         {:else if current.key === 'folders'}
-          <p class="lede">Workers get their own copies of each git folder, and land their work back into it. A plain folder is shared read-only.</p>
+          <p class="lede">Workers get their own copies of each git folder, and land their work back into it. A plain folder is shared read-only. Setup and land check can wait: the queen can set them as the project takes shape.</p>
           {#if folders.length === 0 && primaryPending}
             <p class="hint">Finding the folder you were working in…</p>
           {:else if folders.length === 0}
@@ -693,11 +704,16 @@
                     <button class="link" onclick={() => addFolder(f.repoTop!, i)}>Use the whole repo</button>
                   </div>
                 {/if}
-                {#if f.kind === 'git'}
+                {#if f.kind === 'git' && f.fresh}
+                  <p class="note-line">
+                    A new project. At Create, maiTerm {f.empty && f.detectedBase === null ? `makes it a git repo on ${f.base.trim() || 'main'}` : `gives it a first commit on ${f.base.trim() || 'main'}`}{f.empty ? ' and trusts it' : ''}.
+                    The queen adds the setup and land check once the code has them.
+                  </p>
+                {:else if f.kind === 'git'}
                   <div class="grid">
                     <label><span>Base</span><input value={f.base} placeholder={f.detectedBase ?? 'branch'} oninput={(e) => patch(f.key, { base: (e.currentTarget as HTMLInputElement).value })} /></label>
-                    <label><span>Setup</span><input value={f.setup} placeholder="npm ci" oninput={(e) => patch(f.key, { setup: (e.currentTarget as HTMLInputElement).value })} /></label>
-                    <label><span>Land check</span><input value={f.land_check} placeholder="npm run check" oninput={(e) => patch(f.key, { land_check: (e.currentTarget as HTMLInputElement).value })} /></label>
+                    <label><span>Setup</span><input value={f.setup} placeholder="optional" oninput={(e) => patch(f.key, { setup: (e.currentTarget as HTMLInputElement).value })} /></label>
+                    <label><span>Land check</span><input value={f.land_check} placeholder="optional" oninput={(e) => patch(f.key, { land_check: (e.currentTarget as HTMLInputElement).value })} /></label>
                   </div>
                   {#if !f.trusted}
                     <div class="trust">
