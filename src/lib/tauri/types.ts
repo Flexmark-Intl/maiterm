@@ -1094,7 +1094,7 @@ export interface HiveReviewView {
   attempts: number;
   max_attempts: number;
   verdicts: number;
-  /** "pass" | "fail": the latest verdict. */
+  /** "pass" | "fail" | "inconclusive": the latest verdict. */
   last?: string | null;
   escalated: boolean;
   /** "reassign" | "decompose" | "revise" | "accept" | "defer". */

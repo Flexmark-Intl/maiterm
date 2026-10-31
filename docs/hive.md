@@ -1850,8 +1850,15 @@ It answers with `hiveVerdict`:
 
 - `pass`, or `fail` with issues, each one *expected / actual / evidence / fix / files*.
 - The builder gets the issues and the rule "fix only these; add nothing".
-- **Inconclusive is a fail.** A reviewer that couldn't check something says so, and that's a
-  fail with the gap as the issue.
+- **Nothing unchecked passes.** A reviewer that couldn't check something says so, as an issue.
+  A gap in the work (a test that doesn't run) is an ordinary issue. A gap in what the reviewer
+  was given (no browser, a missing runtime, a port it couldn't reach) is marked
+  `environment: true` (2026-10-31: the live Hive's first ui review failed its builder on two such
+  gaps, sent them to it as "fix only these", and counted 1/3). Environment gaps never go to the
+  builder and never count as an attempt: they reach the coordinator as one line each ("the
+  reviewer couldn't check X: why") for her to fix the environment or accept the gap. A verdict
+  whose only issues are environment gaps is recorded **inconclusive**, not fail: no attempt, the
+  builder untouched, and a land still needs a pass.
 - **Three attempts**, then escalation with one of five resolutions: reassign, decompose, revise
   the brief, accept as is, or defer. The coordinator picks one under the checkpoints, and a
   precedent can settle it.

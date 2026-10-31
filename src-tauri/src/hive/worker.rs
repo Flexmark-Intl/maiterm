@@ -142,7 +142,7 @@ pub struct Verdict {
     pub reviewer_task: String,
     /// The review round it closed, from 1.
     pub attempt: u32,
-    /// `"pass"` | `"fail"`.
+    /// `"pass"` | `"fail"` | `"inconclusive"` (every issue an environment gap: not counted).
     pub verdict: String,
     /// The commits reviewed, folder → sha.
     pub shas: BTreeMap<String, String>,
@@ -162,6 +162,10 @@ pub struct ReviewIssue {
     pub evidence: String,
     pub fix: String,
     pub files: Vec<String>,
+    /// A gap in what the Hive gave the reviewer (no browser, a missing runtime, an unreachable
+    /// port), not a fault in the work: never sent to the builder, never counted (§7.7).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub environment: bool,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

@@ -110,6 +110,8 @@ export function reviewLine(w: Pick<HiveWorkerCard, 'reviews' | 'review'>): { tex
   // A revise starts the attempts again: its earlier fails no longer count.
   if (r.resolution === 'revise' && r.attempts === 0 && r.last !== 'pass') return { text: 'Brief revised after review', urgent: false };
   if (r.last === 'pass') return { text: 'Review passed', urgent: false };
+  // Every issue was a gap in the reviewer's environment: nothing counted against the builder.
+  if (r.last === 'inconclusive') return { text: 'Review inconclusive · environment', urgent: false };
   return { text: `Review failed · ${r.attempts}/${r.max_attempts}`, urgent: false };
 }
 

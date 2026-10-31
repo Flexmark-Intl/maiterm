@@ -28,7 +28,10 @@ pub const MAX_ISSUES: usize = 20;
 /// Per field: the summary and each issue's expected, actual, evidence, fix and file paths.
 pub const MAX_FIELD: usize = 2_000;
 pub const MAX_FILES: usize = 50;
-pub const VERDICTS: [&str; 2] = ["pass", "fail"];
+/// What a reviewer may send. `fail` and `inconclusive` are one input: maiTerm records `fail` when
+/// any issue is in the work, `inconclusive` when every issue is an environment gap.
+pub const VERDICTS: [&str; 3] = ["pass", "fail", "inconclusive"];
+pub const INCONCLUSIVE: &str = "inconclusive";
 pub const RESOLUTIONS: [&str; 5] = ["reassign", "decompose", "revise", "accept", "defer"];
 /// The resolutions that retire the builder, its task dropped.
 const RETIRING: [&str; 3] = ["reassign", "decompose", "defer"];
@@ -143,10 +146,13 @@ pub fn verdict_tool_definition(tab_id: &Value) -> Value {
         "name": "hiveVerdict",
         "description": format!(
             "For a reviewer only: your one verdict on the work you were spawned to review, at the commits your brief names. \
-             pass, or fail with every issue as expected, actual, evidence, fix and files. Inconclusive is a fail: anything you \
-             couldn't check (a tool missing, a test you couldn't run) is a fail with the gap as the issue. A pass carries no \
-             issues. The builder is told to fix only your issues and add nothing. maiTerm ends your session after it. At most \
-             {MAX_ISSUES} issues and {MAX_FIELD} characters per field. A builder reports with hiveReport instead."
+             pass, or fail with every issue as expected, actual, evidence, fix and files. Nothing unchecked passes: a check you \
+             couldn't make is an issue. If the gap is in the work (a test that doesn't run, a missing script), it's an ordinary \
+             issue. If it's in what you were given (no browser, a missing runtime, a port you couldn't reach), mark it \
+             environment: true: it goes to your coordinator to fix, never to the builder, and doesn't count as a failed attempt. \
+             A verdict whose only issues are environment gaps is recorded as inconclusive. A pass carries no issues. The builder \
+             is told to fix only your other issues and add nothing. maiTerm ends your session after it. At most {MAX_ISSUES} \
+             issues and {MAX_FIELD} characters per field. A builder reports with hiveReport instead."
         ),
         "inputSchema": {
             "type": "object",
@@ -163,7 +169,13 @@ pub fn verdict_tool_definition(tab_id: &Value) -> Value {
                             "actual": { "type": "string", "description": "What is" },
                             "evidence": { "type": "string", "description": "How you know: the command and its output, the file and line" },
                             "fix": { "type": "string", "description": "What would make it right" },
-                            "files": { "type": "array", "items": { "type": "string" }, "description": "Files it concerns" }
+                            "files": { "type": "array", "items": { "type": "string" }, "description": "Files it concerns" },
+                            "environment": {
+                                "type": "boolean",
+                                "description": "true when you couldn't check something because of what you were given (no browser or \
+                                                screenshot, a missing runtime or version, a port or service you couldn't reach), \
+                                                not because of the work. Say in actual what stopped you"
+                            }
                         },
                         "required": ["expected", "actual", "evidence"]
                     },
@@ -201,9 +213,9 @@ fn field(v: &Value, k: &str, what: &str, required: bool) -> Result<String, Strin
 
 impl VerdictArgs {
     pub(crate) fn parse(args: &Value) -> Result<Self, String> {
-        let verdict = args.get("verdict").and_then(Value::as_str).map(str::trim).unwrap_or_default().to_string();
+        let mut verdict = args.get("verdict").and_then(Value::as_str).map(str::trim).unwrap_or_default().to_string();
         if !VERDICTS.contains(&verdict.as_str()) {
-            return Err("verdict must be pass or fail (inconclusive is a fail).".to_string());
+            return Err("verdict must be pass, fail or inconclusive.".to_string());
         }
         let summary = field(args, "summary", "The verdict", true)?;
         let issues = match args.get("issues") {
@@ -237,17 +249,30 @@ impl VerdictArgs {
                         evidence: field(v, "evidence", &what, true)?,
                         fix: field(v, "fix", &what, false)?,
                         files,
+                        environment: match v.get("environment") {
+                            None | Some(Value::Null) => false,
+                            Some(Value::Bool(b)) => *b,
+                            Some(_) => return Err(format!("{what}'s environment must be true or false")),
+                        },
                         ..ReviewIssue::default()
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?,
             Some(_) => return Err("issues must be a list".to_string()),
         };
-        if verdict == "fail" && issues.is_empty() {
-            return Err("A fail needs at least one issue: what's wrong, and how you know.".to_string());
+        if verdict != "pass" && issues.is_empty() {
+            return Err(format!("A {verdict} needs at least one issue: what's wrong or what you couldn't check, and how you know."));
         }
         if verdict == "pass" && !issues.is_empty() {
-            return Err("A pass carries no issues: anything that must change makes it a fail.".to_string());
+            return Err(
+                "A pass carries no issues: anything that must change makes it a fail, and a check you couldn't make is an issue \
+                 with environment: true (inconclusive)."
+                    .to_string(),
+            );
+        }
+        // Which of fail and inconclusive it is follows from the issues, not the word sent.
+        if verdict != "pass" {
+            verdict = if issues.iter().all(|i| i.environment) { INCONCLUSIVE } else { "fail" }.to_string();
         }
         let worker = match args.get("worker") {
             Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
@@ -258,10 +283,11 @@ impl VerdictArgs {
     }
 }
 
-/// The issues, numbered, each field on its own line and flattened: the reviewer's words, quoted.
+/// The issues in the work, numbered, each field on its own line and flattened: the reviewer's
+/// words, quoted. Environment gaps are left out: they are `gap_lines`, the coordinator's.
 fn issue_lines(issues: &[ReviewIssue]) -> String {
     let mut out = String::new();
-    for (i, x) in issues.iter().enumerate() {
+    for (i, x) in issues.iter().filter(|x| !x.environment).enumerate() {
         out.push_str(&format!("\n{}. Expected: {}", i + 1, one_line(&x.expected, MAX_FIELD)));
         out.push_str(&format!("\n   Actual: {}", one_line(&x.actual, MAX_FIELD)));
         out.push_str(&format!("\n   Evidence: {}", one_line(&x.evidence, MAX_FIELD)));
@@ -276,6 +302,15 @@ fn issue_lines(issues: &[ReviewIssue]) -> String {
     out
 }
 
+/// One line per environment gap: what the reviewer couldn't check and why, flattened.
+fn gap_lines(issues: &[ReviewIssue]) -> String {
+    issues
+        .iter()
+        .filter(|x| x.environment)
+        .map(|x| format!("\n- The reviewer couldn't check {}: {}", one_line(&x.expected, 400), one_line(&x.actual, 600)))
+        .collect()
+}
+
 /// What the coordinator reads (§7.7): maiTerm's frame and account, then the reviewer's words.
 /// `builder_told` is the delivery to the builder, for a fail it was sent back on.
 /// `fail 2/3`, or past the cap (a fail after an `accept`) the plain count: never a smaller one.
@@ -284,7 +319,7 @@ fn fail_count(attempts: u32) -> String {
 }
 
 pub(crate) fn coordinator_message(builder: &WorkerRecord, reviewer: &WorkerRecord, v: &Verdict, review: &Review, builder_told: Option<&str>) -> String {
-    let tag = if v.verdict == "pass" { "pass".to_string() } else { fail_count(review.attempts) };
+    let tag = if v.verdict == "fail" { fail_count(review.attempts) } else { v.verdict.clone() };
     let mut out = format!(
         "⟦HIVE VERDICT · {} · {tag}⟧ Reviewer {} reviewed worker {} at {}: {}.",
         one_line(&builder.title, 120),
@@ -293,14 +328,26 @@ pub(crate) fn coordinator_message(builder: &WorkerRecord, reviewer: &WorkerRecor
         shas_line(&v.shas),
         v.verdict
     );
-    if !v.issues.is_empty() {
+    if v.issues.iter().any(|x| !x.environment) {
         out.push_str("\nIssues, in the reviewer's words (quoted, not maiTerm's or the human's):");
         out.push_str(&issue_lines(&v.issues));
+    }
+    let gaps = gap_lines(&v.issues);
+    if !gaps.is_empty() {
+        out.push_str("\nGaps in what the reviewer was given, in its words (yours to fix; never sent to the builder):");
+        out.push_str(&gaps);
     }
     out.push_str("\nIts summary, quoted:\n");
     out.push_str(&frame_escape(&v.summary));
     let next = if v.verdict == "pass" {
         "It passed at exactly these commits: a land of any other commit needs another review.".to_string()
+    } else if v.verdict == INCONCLUSIVE {
+        format!(
+            "Inconclusive: every issue is a gap in the environment, so nothing went to the builder and no attempt counted. Fix \
+             the environment (hiveChangeSettings, a queued command, a service) or accept the gap, then spawn a new reviewer with \
+             reviews: {} and say in its brief what changed or what it may leave unchecked.",
+            builder.slug
+        )
     } else if review.escalated {
         format!(
             "That makes {} failed reviews, so it's escalated{} and the builder wasn't told. Settle it with hiveResolve: {}.",
@@ -310,9 +357,10 @@ pub(crate) fn coordinator_message(builder: &WorkerRecord, reviewer: &WorkerRecor
         )
     } else {
         format!(
-            "maiTerm sent these issues back to the builder ({}), to fix only these. When it reports done again, spawn a new reviewer \
-             with reviews: {}.",
+            "maiTerm sent these issues back to the builder ({}), to fix only these{}. When it reports done again, spawn a new \
+             reviewer with reviews: {}.",
             builder_told.unwrap_or("not sent"),
+            if gaps.is_empty() { "" } else { "; the gaps weren't sent, so fix them before that review" },
             builder.slug
         )
     };
@@ -332,7 +380,11 @@ pub(crate) fn builder_message(v: &Verdict, attempts: u32) -> String {
 
 /// The verdict as its builder's task note.
 fn verdict_note(v: &Verdict, reviewer: &WorkerRecord, attempts: u32) -> String {
-    let tag = if v.verdict == "pass" { "passed".to_string() } else { format!("failed ({})", fail_count(attempts).trim_start_matches("fail ")) };
+    let tag = match v.verdict.as_str() {
+        "pass" => "passed".to_string(),
+        INCONCLUSIVE => "inconclusive (the environment, not counted)".to_string(),
+        _ => format!("failed ({})", fail_count(attempts).trim_start_matches("fail ")),
+    };
     format!("Review {tag} by worker {}: {}", worker_label(reviewer), one_line(&v.summary, 600))
 }
 
@@ -757,7 +809,8 @@ mod tests {
             let e = VerdictArgs::parse(&args).unwrap_err();
             assert!(e.contains(says), "{e}");
         };
-        bad(json!({ "verdict": "inconclusive", "summary": "s" }), "inconclusive is a fail");
+        bad(json!({ "verdict": "maybe", "summary": "s" }), "pass, fail or inconclusive");
+        bad(json!({ "verdict": "inconclusive", "summary": "s" }), "at least one issue");
         bad(json!({ "verdict": "fail", "summary": "s" }), "at least one issue");
         bad(json!({ "verdict": "fail", "summary": "s", "issues": [] }), "at least one issue");
         bad(json!({ "verdict": "pass", "summary": "s", "issues": [issue("nit")] }), "A pass carries no issues");
@@ -770,6 +823,48 @@ mod tests {
         bad(json!({ "verdict": "fail", "summary": "s", "issues": ["just text"] }), "must be {expected");
         bad(json!({ "verdict": "fail", "summary": "s", "issues": [{ "expected": "e", "actual": "a", "evidence": "v", "files": "a.rs" }] }), "must be a list");
         bad(json!({ "verdict": "fail", "summary": "s", "issues": "broken" }), "issues must be a list");
+        bad(json!({ "verdict": "fail", "summary": "s", "issues": [{ "expected": "e", "actual": "a", "evidence": "v", "environment": "yes" }] }), "true or false");
+    }
+
+    fn gap(text: &str) -> Value {
+        json!({ "expected": text, "actual": "no browser in my sandbox", "evidence": "hiveScreenshot isn't in my tools", "environment": true })
+    }
+
+    /// The live Hive's first review (2026-10-31): two environment gaps failed a builder, were sent
+    /// to it as "fix only these", and counted 1/3. A gap is the coordinator's, never the builder's.
+    #[test]
+    fn environment_gaps_make_a_verdict_inconclusive_and_never_reach_the_builder() {
+        // Only gaps, sent as fail or as inconclusive: recorded inconclusive.
+        for word in ["fail", "inconclusive"] {
+            let a = VerdictArgs::parse(&json!({ "verdict": word, "summary": "s", "issues": [gap("the sign-in screen at 375px")] })).unwrap();
+            assert_eq!(a.verdict, INCONCLUSIVE, "{word}");
+            assert!(a.issues[0].environment);
+        }
+        // Any issue in the work makes it a fail, whatever word was sent.
+        let a = VerdictArgs::parse(&json!({ "verdict": "inconclusive", "summary": "s", "issues": [gap("layout"), issue("401 on expiry")] })).unwrap();
+        assert_eq!(a.verdict, "fail");
+        bad_pass_with_gap();
+
+        let builder = rec("t-b", 3, "login");
+        let reviewer = rec("t-r", 4, "login-review");
+        let mixed = Verdict { verdict: "fail".into(), summary: "Checked.".into(), issues: a.issues.clone(), ..Verdict::default() };
+        let b = builder_message(&mixed, 1);
+        assert!(b.contains("401 on expiry") && !b.contains("layout") && !b.contains("no browser"), "gaps never reach the builder: {b}");
+        let c = coordinator_message(&builder, &reviewer, &mixed, &Review { attempts: 1, ..Review::default() }, Some("delivered"));
+        assert!(c.contains("\n- The reviewer couldn't check layout: no browser in my sandbox"), "{c}");
+        assert!(c.contains("the gaps weren't sent"), "{c}");
+
+        let only = Verdict { verdict: INCONCLUSIVE.into(), summary: "s".into(), issues: vec![ReviewIssue { expected: "Node 22 checks".into(), actual: "node 18 only".into(), evidence: "e".into(), environment: true, ..Default::default() }], ..Verdict::default() };
+        let c = coordinator_message(&builder, &reviewer, &only, &Review::default(), None);
+        assert!(c.starts_with("⟦HIVE VERDICT · Title login · inconclusive⟧"), "{c}");
+        assert!(!c.contains("Issues, in the reviewer's words") && c.contains("couldn't check Node 22 checks: node 18 only"), "{c}");
+        assert!(c.contains("nothing went to the builder and no attempt counted") && c.contains("reviews: login"), "{c}");
+        assert!(verdict_note(&only, &reviewer, 0).starts_with("Review inconclusive"));
+    }
+
+    fn bad_pass_with_gap() {
+        let e = VerdictArgs::parse(&json!({ "verdict": "pass", "summary": "s", "issues": [gap("x")] })).unwrap_err();
+        assert!(e.contains("environment: true"), "{e}");
     }
 
     fn rec(task: &str, badge: u32, slug: &str) -> WorkerRecord {

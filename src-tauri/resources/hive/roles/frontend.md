@@ -20,14 +20,16 @@ project's existing components, styles and patterns.
 
 ## Deliverable
 
-Commits on your branch: the change and its tests. If the brief asks for screenshots, save them
-in your scratch folder.
+Commits on your branch: the change and its tests. If the brief asks for screenshots, take them
+with `hiveRun` (`serve: true`) and `hiveScreenshot`, and file them in the gallery with
+`galleryAdd`.
 
 ## Done means
 
 - The project's type check, build and tests pass in your worktree.
 - Every acceptance criterion in the brief is met, each one checked.
-- Your report lists the commits, the files of any screenshots, and how you checked each criterion.
+- Your report lists the commits, the gallery ids of any screenshots, and how you checked each
+  criterion.
 
 ## Tools
 

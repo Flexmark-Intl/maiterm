@@ -366,7 +366,11 @@ pub(crate) fn review_standing(w: &WorkerRecord, commits: &BTreeMap<String, Strin
     if accepted && accept_review {
         return Ok(log::REVIEW_ACCEPTED);
     }
-    let why = if latest.verdict == "pass" { "passed at other commits than these".to_string() } else { "failed".to_string() };
+    let why = match latest.verdict.as_str() {
+        "pass" => "passed at other commits than these".to_string(),
+        super::review::INCONCLUSIVE => "was inconclusive (its reviewer couldn't check everything: fix that and review again)".to_string(),
+        _ => "failed".to_string(),
+    };
     Err(if accepted {
         format!("Worker {label}'s last review {why}; you resolved its escalation with accept, so pass accept_review: true to land it as it is.")
     } else {

@@ -197,6 +197,7 @@ describe('reviewLine', () => {
     expect(reviewLine({ review: review() })).toBeNull();
     expect(reviewLine({ review: review({ verdicts: 1, last: 'pass' }) })?.text).toBe('Review passed');
     expect(reviewLine({ review: review({ verdicts: 2, last: 'fail', attempts: 2 }) })).toEqual({ text: 'Review failed · 2/3', urgent: false });
+    expect(reviewLine({ review: review({ verdicts: 2, last: 'inconclusive', attempts: 1 }) })).toEqual({ text: 'Review inconclusive · environment', urgent: false });
     expect(reviewLine({ review: review({ verdicts: 3, last: 'fail', attempts: 3, escalated: true }) })).toEqual({ text: 'Escalated · 3 failed reviews', urgent: true });
     expect(reviewLine({ review: review({ verdicts: 3, last: 'fail', attempts: 3, escalated: true, resolution: 'accept' }) })?.text).toBe('Review accepted as is');
     expect(reviewLine({ review: review({ verdicts: 3, last: 'fail', attempts: 3, escalated: true, resolution: 'reassign' }) })?.text).toBe('Review resolved: reassign');
