@@ -774,7 +774,7 @@ pub(crate) async fn blockers_changed_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller:
             changed = true;
         }
     }
-    // Rust's own sandbox blockers (`external`) already told the coordinator.
+    // An `external` blocker waits on something outside the Hive: the human's (plan D13), unrouted.
     let added: Vec<Task> = added.into_iter().filter(|t| t.blocker.as_ref().is_some_and(|b| b.kind != "external")).collect();
     if !added.is_empty() {
         let paths = caller.paths.clone();
@@ -1066,6 +1066,48 @@ async fn answer_blocker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &Wo
     let sent = ctx.window.deliver(tab, text, "Hive answer").await;
     log::info!("hive {}: coordinator's answer to {}: {}", caller.hive.id, worker_name(w), sent.describe());
     Ok(())
+}
+
+/// The queen allowed hosts for workers (`change::change_tool`): each open sandbox blocker of
+/// Rust's whose every refused host `hive` now covers is answered as hers, with her reason, and its
+/// worker told the host reaches it from its next launch. The workers answered.
+pub(crate) async fn settle_host_blockers<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, hive: &Hive, reason: &str) -> Vec<WorkerRecord> {
+    use super::gallery::budget::{host_covers, normalize_host};
+    let allowed: Vec<String> = hive.settings.worker_hosts.iter().filter_map(|h| normalize_host(h).ok()).collect();
+    let Ok(tasks) = super::tools::workspace_tasks(ctx.data, caller) else { return Vec::new() };
+    let paths = caller.paths.clone();
+    let workers = blocking(move || Ok(worker::list_workers(&paths))).await.unwrap_or_default();
+    let mut out = Vec::new();
+    for row in tasks.iter().filter(|t| t.status == "blocked") {
+        let Some(b) = row.blocker.as_ref().filter(|b| b.kind == "action") else { continue };
+        let Some(hosts) = super::events::sandbox_question_hosts(&b.question) else { continue };
+        if !hosts.iter().all(|h| allowed.iter().any(|a| host_covers(a, h))) {
+            continue;
+        }
+        let Some(w) = worker::worker_for_row(&workers, &row.id, row.tab_id.as_deref()) else { continue };
+        let Some(tab) = w.tab_id.clone().filter(|t| super::tools::has_tab(ctx.data, caller, t)) else { continue };
+        let view = PromptView::from_blocker(&row.id, b);
+        let answer = format!(
+            "Allowed for this Hive\u{2019}s workers: {} ({}). Your sandbox reaches it from your next launch: your coordinator \
+             relaunches you, and your session resumes. Until then, carry on with what doesn\u{2019}t need it.",
+            hosts.join(", "),
+            one_line(reason, 300)
+        );
+        if let Err(e) = answer_blocker(ctx, caller, w, &tab, &view, &answer).await {
+            log::info!("hive {}: {}\u{2019}s sandbox blocker not answered after the grant: {e}", caller.hive.id, worker_name(w));
+            continue;
+        }
+        if let Some(r) = drop_key(&view.key) {
+            let mut l = base_line(&r, decisions::EVENT_ANSWERED, decisions::BY_COORDINATOR);
+            (l.answer, l.reason) = (Some(format!("Allowed {}", hosts.join(", "))), Some(one_line(reason, MAX_REASON)));
+            log_line(&caller.paths, l).await;
+        }
+        out.push(w.clone());
+    }
+    if !out.is_empty() {
+        emit(ctx, &caller.workspace_id);
+    }
+    out
 }
 
 // ── The human's side ──

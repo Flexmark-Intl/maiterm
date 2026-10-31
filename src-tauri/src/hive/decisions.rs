@@ -53,6 +53,8 @@ pub const CATEGORY_CONFIG: &str = "config";
 pub const CATEGORY_INTEGRATION: &str = "integration";
 /// maiTerm's own offers: never a precedent, never a streak.
 pub const CATEGORY_OFFER: &str = "offer";
+/// The queen's own change to the hosts workers reach (2026-10-31): logged for the human, never a streak.
+pub const CATEGORY_HOSTS: &str = "hosts";
 
 pub const SOURCE_PROMPT: &str = "prompt";
 pub const SOURCE_QUESTION: &str = "question";
@@ -61,6 +63,8 @@ pub const SOURCE_LAND: &str = "land";
 pub const SOURCE_RESOLVE: &str = "resolve";
 /// The coordinator setting an asset final or rejected under the Finals checkpoint (step 8b).
 pub const SOURCE_GALLERY: &str = "gallery";
+/// A Hive settings change the queen made on her own (`change::coordinator_hosts`).
+pub const SOURCE_SETTINGS: &str = "settings";
 
 pub const ANSWER_LAND: &str = "Land";
 pub const ANSWER_DONT_LAND: &str = "Don\u{2019}t land";

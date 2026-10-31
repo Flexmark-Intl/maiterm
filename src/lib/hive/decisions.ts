@@ -22,6 +22,7 @@ const CATEGORY: Record<string, string> = {
   offer: 'Autonomy offer',
   digest: 'Daily digest',
   criteria: 'Completion criteria',
+  hosts: 'Hosts workers reach',
 };
 
 /** An open offer's outcome is its kind until the human answers (Rust's `autonomy.rs`). */

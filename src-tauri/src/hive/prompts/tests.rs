@@ -822,3 +822,40 @@ fn a_human_answer_reads_as_their_choice_or_their_selections() {
     let a = vec![Answer { selected: vec!["A".into()], other: None }, Answer { selected: vec![], other: Some("my own".into()) }];
     assert_eq!(answer_summary(None, Some(&a)), "Q1: A; Q2: \u{201c}my own\u{201d}");
 }
+
+/// A refused host goes to the queen (2026-10-31): her `hiveChangeSettings` host grant applies at
+/// once under Ask me, with no card, is logged as hers for the human, and answers the worker's
+/// sandbox blocker it settles.
+#[tokio::test]
+async fn the_queens_host_grant_applies_at_once_and_answers_the_sandbox_blocker() {
+    let mut rig = Rig::new();
+    rig.set_checkpoint(crate::hive::checkpoints::SETTINGS, "ask");
+    rig.caller.hive.status = crate::hive::record::STATUS_ACTIVE.into();
+    rig.data.write().windows[0].workspaces[0].hive.as_mut().unwrap().status = crate::hive::record::STATUS_ACTIVE.into();
+    let host = "docs.maiterm-test.invalid";
+    let b = TaskBlocker { kind: "action".into(), question: format!("The sandbox refused host {host}"), context: None, ..decision("2026-10-24T10:00:00Z", &[]) };
+    rig.set_blocker(Some(b.clone()));
+    rig.route(PromptView::from_blocker(&rig.worker.task_id, &b), 1).await.unwrap();
+
+    let ctx = rig.ctx();
+    let no_reason = crate::hive::change::change_tool(&ctx, &rig.caller, &json!({ "add_hosts": [host] })).await.unwrap_err();
+    assert!(no_reason.contains("needs a reason"), "{no_reason}");
+    let mixed = crate::hive::change::change_tool(&ctx, &rig.caller, &json!({ "add_hosts": [host], "cap": 1, "reason": "r" })).await.unwrap_err();
+    assert!(mixed.contains("call of their own"), "{mixed}");
+    let out = crate::hive::change::change_tool(&ctx, &rig.caller, &json!({ "add_hosts": [host], "reason": "the component docs" })).await.unwrap();
+    assert_eq!(out["status"], "applied", "no card under Ask me: {out}");
+    assert_eq!(out["answered_blockers"][0]["worker"], 2);
+    let saved = rig.data.read().windows[0].workspaces[0].hive.clone().unwrap();
+    assert_eq!(saved.settings.worker_hosts, vec![host.to_string()]);
+
+    let lines = rig.lines();
+    let grant = lines.iter().find(|l| l.source == crate::hive::decisions::SOURCE_SETTINGS).expect("the grant is in the decision log");
+    assert_eq!((grant.by.as_str(), grant.answer.as_deref()), ("coordinator", Some(format!("The queen allowed {host} for workers: the component docs").as_str())));
+    let answered = lines.iter().find(|l| l.event == "answered" && l.source == crate::hive::decisions::SOURCE_BLOCKER).expect("the blocker's answer");
+    assert_eq!(answered.by, "coordinator");
+    assert!(std::fs::read_to_string(rig.caller.paths.settings_log()).unwrap().contains("the component docs"));
+    let task = rig.win.st().requests.iter().rev().find(|(v, _)| v == rpc::VERB_TASK).map(|(_, a)| a.clone()).unwrap();
+    assert_eq!(task["status"], "active");
+    let to_worker: Vec<String> = rig.win.st().delivered.iter().filter(|(t, _)| *t == rig.wtab).map(|(_, m)| m.clone()).collect();
+    assert!(to_worker.last().unwrap().contains("from your next launch"), "{to_worker:?}");
+}

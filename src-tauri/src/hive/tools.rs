@@ -2874,17 +2874,18 @@ mod tests {
         });
         crate::hive::events::tool_failed(&ctx, &rig.caller, &tab, &event).await;
         let task = rig.calls_of(rpc::VERB_TASK).pop().unwrap();
-        assert_eq!((task["status"].as_str(), task["blocker"]["kind"].as_str()), (Some("blocked"), Some("external")));
+        // An action, so it routes to the queen, whose route frame says what she may do (2026-10-31).
+        assert_eq!((task["status"].as_str(), task["blocker"]["kind"].as_str()), (Some("blocked"), Some("action")));
         assert_eq!(task["blocker"]["question"], "The sandbox refused host example.com");
+        assert!(task["blocker"]["context"].as_str().unwrap().contains("hiveChangeSettings"), "{task}");
         assert_eq!(rig.record(&w.task_id).violations_seen, vec!["host:example.com".to_string()]);
-        let (to, text) = rig.delivered().pop().unwrap();
-        assert!(to == "coord" && text.contains("can't widen") && text.contains("host example.com"), "{text}");
+        assert!(rig.delivered().is_empty(), "no notice of its own: the blocker's route tells the queen");
 
         // The retry's refusal files nothing new; nor does a failure the sandbox didn't make.
         crate::hive::events::tool_failed(&ctx, &rig.caller, &tab, &event).await;
         crate::hive::events::tool_failed(&ctx, &rig.caller, &tab, &json!({ "tool_name": "Bash", "error": "Exit code 1\nno such file" })).await;
         assert_eq!(rig.calls_of(rpc::VERB_TASK).len(), 1);
-        assert_eq!(rig.delivered().len(), 1);
+        assert!(rig.delivered().is_empty());
     }
 
     #[tokio::test]

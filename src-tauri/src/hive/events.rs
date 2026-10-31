@@ -5,9 +5,10 @@
 //! coordinator is told; a stop is marked before its signal, a suspend or reload kills the PTY
 //! (never read as a death), and a report moves the phase off `running`, so none of those count.
 //!
-//! A sandbox refusal: a failed call whose output names a host or path the sandbox refused
-//! becomes an `external` blocker on the worker's task, once per target, and the coordinator,
-//! which can't widen a worker's sandbox, is told to raise its own blocker to the human.
+//! A sandbox refusal: a call (failed, or a shell call that exited 0) whose output names a host or
+//! path the sandbox refused becomes an `action` blocker on the worker's task, once per target. It
+//! routes to the queen, who grants a host (`change::change_tool`), refuses it with new
+//! instructions, or raises her own blocker to the human (Darryl, 2026-10-31).
 //!
 //! A prompt: a dialog or question opening is routed to one asker, and one closing drops its route
 //! (`prompts`, §7.4).
@@ -49,16 +50,21 @@ pub(crate) enum Action {
 
 /// The tools that change files: a shell command can as much as an edit.
 const EDITING_TOOLS: [&str; 6] = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"];
+/// The tools the sandbox holds: a successful call of one may still carry its note.
+const SHELL_TOOLS: [&str; 3] = ["Bash", "PowerShell", "Monitor"];
 
 /// The routing table of `observed`. A failed shell command may still have written files, so it
 /// touches the diff stat too. SessionStart covers a compaction (`source: compact`). Any tool's
 /// end, a turn's end, a new prompt and the session's end can each close a prompt.
 pub(crate) fn feed_actions(event: &str, tool: Option<&str>) -> &'static [Action] {
     let edits = tool.is_some_and(|t| EDITING_TOOLS.contains(&t));
+    let shell = tool.is_some_and(|t| SHELL_TOOLS.contains(&t));
     match event {
         "SessionEnd" => &[Action::SessionEnded, Action::PromptGone],
         "PostToolUseFailure" if edits => &[Action::ToolFailed, Action::DiffStat, Action::PromptGone],
         "PostToolUseFailure" => &[Action::ToolFailed, Action::PromptGone],
+        // A command that exits 0 can carry the sandbox's note too (`observed` reads it only then).
+        "PostToolUse" if shell => &[Action::ToolFailed, Action::DiffStat, Action::PromptGone],
         "PostToolUse" if edits => &[Action::DiffStat, Action::PromptGone],
         "PostToolUse" => &[Action::PromptGone],
         "Stop" => &[Action::DiffStat, Action::Meta, Action::PromptGone],
@@ -107,6 +113,8 @@ pub fn observed(state: &Arc<AppState>, handle: &AppHandle, tab_id: &str, event_n
                     }
                 });
             }
+            // Every successful shell call comes here: read on only when the sandbox left its note.
+            Action::ToolFailed if event_name == "PostToolUse" && !sandbox_events::has_note(event) => {}
             Action::ToolFailed => {
                 let (state, handle, caller, tab, event) = (state.clone(), handle.clone(), caller.clone(), tab_id.to_string(), event.clone());
                 tauri::async_runtime::spawn(async move {
@@ -301,21 +309,71 @@ pub(crate) async fn tool_failed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     if fresh.is_empty() {
         return;
     }
-    file_sandbox_blocker(ctx, caller, &w, &fresh).await;
+    let command = event.get("tool_input").and_then(|i| i.get("command")).and_then(Value::as_str).map(|c| one_line(c, 300));
+    file_sandbox_blocker(ctx, caller, &w, &fresh, command.as_deref()).await;
 }
 
 fn describe(v: &Violation) -> String {
     format!("{} {}", v.kind, one_line(&v.target, 200))
 }
 
-async fn file_sandbox_blocker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, fresh: &[Violation]) {
+/// How Rust's sandbox questions start: `"The sandbox refused host a.com, path /x"`.
+pub(crate) const SANDBOX_QUESTION: &str = "The sandbox refused ";
+
+/// The hosts a sandbox question of Rust's names, when every refusal in it is a host. None for
+/// anything else (a path among them, a worker's own words).
+pub(crate) fn sandbox_question_hosts(question: &str) -> Option<Vec<String>> {
+    let rest = question.strip_prefix(SANDBOX_QUESTION)?;
+    rest.split(", ").map(|n| n.strip_prefix(&format!("{} ", sandbox_events::KIND_HOST)).map(str::to_string)).collect::<Option<Vec<_>>>().filter(|h| !h.is_empty())
+}
+
+/// What the queen may do about one refused host, in maiTerm's words: grant it, or why it can't be
+/// granted whoever asks (§6.7). `remotes` are the Hive's repo remote hosts.
+fn host_remedy(host: &str, remotes: &[String]) -> String {
+    use super::gallery::budget::{host_covers, normalize_host};
+    let local = host.parse::<std::net::IpAddr>().map(|ip| crate::host_guard::is_home(&ip));
+    match normalize_host(host) {
+        _ if local == Ok(true) => format!(
+            "{host} is this computer or its network: a worker\u{2019}s localhost stays closed. To run the app and look at it, a \
+             worker uses hiveRun with serve: true, hiveScreenshot and hiveFetch."
+        ),
+        Err(_) => format!("{host} can\u{2019}t be allowed for workers (only public host names can)."),
+        Ok(h) if remotes.iter().any(|r| host_covers(&h, &r.to_ascii_lowercase())) => {
+            format!("{host} is where this Hive\u{2019}s repos push: no worker may reach it.")
+        }
+        Ok(h) => format!(
+            "If the task needs {h} (a package registry, docs, an API the work talks to), allow it: hiveChangeSettings \
+             {{add_hosts: [\"{h}\"], reason: \"\u{2026}\"}} applies at once and maiTerm answers this blocker. If not, refuse it with \
+             what to do instead."
+        ),
+    }
+}
+
+async fn file_sandbox_blocker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, fresh: &[Violation], command: Option<&str>) {
     let names: Vec<String> = fresh.iter().map(describe).collect();
     let now = crate::commands::workspace::iso_now();
-    let context = (names.len() > 1).then(|| format!("Also refused: {}", names[1..].join(", ")));
+    let remotes = super::settings::hive_remote_hosts(&caller.hive);
+    let mut context: Vec<String> = Vec::new();
+    if let Some(c) = command {
+        context.push(format!("While running: `{c}`"));
+    }
+    for v in fresh {
+        if v.kind == sandbox_events::KIND_HOST {
+            context.push(host_remedy(&v.target, &remotes));
+        } else {
+            context.push(format!(
+                "{} is outside the folders this worker may write, and no one widens that: tell it how to do without (its \
+                 worktree, its scratch folder, or mktemp -d -p \"$TMPDIR\"), or raise your own blocker.",
+                one_line(&v.target, 200)
+            ));
+        }
+    }
+    // An action, so it goes to the queen first (`prompts::classify`), and she grants, refuses or
+    // escalates (§7.4). The route's frame tells her; nothing else does.
     let blocker = json!({
-        "kind": "external",
-        "question": format!("The sandbox refused {}", names[0]),
-        "context": context,
+        "kind": "action",
+        "question": format!("{SANDBOX_QUESTION}{}", names.join(", ")),
+        "context": context.join("\n"),
         "asked_at": now,
         "asked_by": "agent",
     });
@@ -331,17 +389,6 @@ async fn file_sandbox_blocker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, 
     }
     log::info!("hive {}: worker {}: the sandbox refused {}", caller.hive.id, worker_label(w), names.join(", "));
     ctx.window.workers_changed(&caller.workspace_id);
-    notify(
-        ctx,
-        caller,
-        format!(
-            "[maiTerm] Worker {}'s sandbox refused {}. You can't widen a worker's sandbox. If the work needs it, raise your own \
-             blocker to the human naming it; if not, tell the worker (hiveMessageWorker) to do without it.",
-            worker_label(w),
-            names.join(", ")
-        ),
-    )
-    .await;
 }
 
 pub(crate) async fn notify<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text: String) {
@@ -358,9 +405,11 @@ mod tests {
     #[test]
     fn hooks_route_to_their_actions() {
         for tool in EDITING_TOOLS {
-            assert_eq!(feed_actions("PostToolUse", Some(tool)), &[DiffStat, PromptGone], "{tool}");
+            let after = if SHELL_TOOLS.contains(&tool) { &[ToolFailed, DiffStat, PromptGone][..] } else { &[DiffStat, PromptGone][..] };
+            assert_eq!(feed_actions("PostToolUse", Some(tool)), after, "{tool}: a shell call that exited 0 can carry the sandbox's note");
             assert_eq!(feed_actions("PostToolUseFailure", Some(tool)), &[ToolFailed, DiffStat, PromptGone], "{tool}");
         }
+        assert_eq!(feed_actions("PostToolUse", Some("Monitor")), &[ToolFailed, DiffStat, PromptGone]);
         for tool in [Some("Read"), Some("Grep"), Some("mcp__maiterm__hiveReport"), Some("edit"), None] {
             assert_eq!(feed_actions("PostToolUse", tool), &[PromptGone], "{tool:?}: changes no file");
             assert_eq!(feed_actions("PostToolUseFailure", tool), &[ToolFailed, PromptGone], "{tool:?}");

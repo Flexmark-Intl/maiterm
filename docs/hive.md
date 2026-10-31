@@ -1067,12 +1067,26 @@ explicit per-Hive widening in Hive settings, never for maiTerm's MCP, proxy or m
 Bash can reach that port through the sandbox's proxy, so the service there must not trust a
 local caller.
 
-**A block is a blocker, not a retry.** The detector is a **`PostToolUseFailure` command hook**
-on the worker: it parses the `<sandbox_violations>` note in the failed call's output and turns
-it into a worker blocker naming the host or path. PostToolUse doesn't fire for the failure, and
-http hooks don't arrive from a sandboxed tab (spike 10, §13.1). The blocker goes to the
-coordinator, which can't widen the sandbox and raises its own blocker to the human (§7.4); the
-fix is in Hive settings (§14.16).
+**A block is a blocker, not a retry.** The detector is the worker's **`PostToolUseFailure` and
+`PostToolUse` command hooks**: they parse the `<sandbox_violations>` note in the call's output
+(a successful shell call's too: a curl loop that exited 0 carried one in its stderr and was lost
+until 2026-10-31; a bare EPERM counts only in a failed call) and turn it into an `action` blocker
+on the worker's task naming the host or path, the command, and what may be done, once per target
+(`violations_seen`). http hooks don't arrive from a sandboxed tab (spike 10, §13.1).
+
+**The queen grants hosts** (Darryl, 2026-10-31: "rogue workers would still have to get
+permission from the queen overseeing all work"). The blocker routes to her, never straight to
+the human. She allows a host with `hiveChangeSettings {add_hosts, reason}`, which applies at
+once whatever the Settings checkpoint, only when the worker's task needs it (a registry, docs, an
+API the work talks to), and refuses anything unrelated or exfiltration-shaped with new
+instructions. Rust holds the hard limits whoever asks: never a repo remote's host, localhost,
+loopback names, LAN or private addresses, a port (maiTerm's included), or past
+`MAX_WORKER_HOSTS`, and a reason is required. The grant is written to the settings log and the
+decision log (category `hosts`, by the queen), the human gets a notice saying it can be undone in
+Hive settings, and maiTerm answers each open sandbox blocker the grant covers as hers, telling
+the worker the host reaches it from its next launch (`hiveRestartWorker` relaunches it, resuming
+its session). A path refusal can't be widened by anyone: she re-instructs. She raises her own
+blocker to the human only for what she can't judge.
 
 **Native Windows** has no Claude sandbox. With `failIfUnavailable`, a Hive worker can't start
 there; the Create sheet says so up front rather than offering an unsandboxed Hive (the
@@ -3340,7 +3354,8 @@ Decided 2026-10-23:
       can't be denied, so it is not a boundary and nothing a worker owns lives there.
     - **Localhost** is closed by default: `allowLocalBinding` and a bare `127.0.0.1` in
       `allowedDomains` each open every local port, maiTerm's 8765 and the proxy included. Local
-      services (ComfyUI, a dev server) are reached through MCP or `hiveRun`; a per-Hive widening,
+      services (ComfyUI, a dev server) are reached through MCP or `hiveRun`; a worker sees its own
+      app through `hiveRun` serve plus `hiveFetch` or `hiveScreenshot` (§6.7); a per-Hive widening,
       if ever, opens one port (`127.0.0.1:<port>`), never maiTerm's own.
     - **Media CLIs** (ffmpeg, ImageMagick, sox, Blender) stay sandboxed and work because
       `allowWrite` names the worker's folders. `excludedCommands` is never used: an excluded

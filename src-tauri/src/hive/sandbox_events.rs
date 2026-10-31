@@ -1,8 +1,9 @@
-//! What the sandbox refused, read off a failed tool call (docs/hive.md §6.7, §14.16): the
-//! `<sandbox_violations>` note Claude appends to a sandboxed command's error. A worker's
-//! `PostToolUseFailure` command hook forwards the event, and each refusal becomes a blocker naming
-//! the host or path (wired in step 4e). PostToolUse doesn't fire for the failure, and http hooks
-//! don't arrive from a sandboxed tab (spike 10).
+//! What the sandbox refused, read off a tool call (docs/hive.md §6.7, §14.16): the
+//! `<sandbox_violations>` note Claude appends to a sandboxed command's output. A worker's
+//! `PostToolUseFailure` and `PostToolUse` command hooks forward the event (a command that exits 0
+//! can carry a note too: its stderr does, in the event's `tool_response`), and each refusal
+//! becomes a blocker naming the host or path, for the coordinator. PostToolUse doesn't fire for a
+//! failure, and http hooks don't arrive from a sandboxed tab (spike 10).
 
 use std::path::{Path, PathBuf};
 
@@ -69,6 +70,10 @@ impl Writable {
 /// not permitted`. Most EPERMs aren't the sandbox's (a privacy-protected read, a chmod of another
 /// user's file), so a failed Bash call's line counts only in a write's shape and for a path
 /// `writable` refuses.
+///
+/// A call that succeeded (`PostToolUse`) counts only for the note: a curl loop that printed one
+/// and exited 0 lost it before (2026-10-31), but a bare EPERM in output that didn't fail the call
+/// is too often a program's own business.
 pub fn parse_violations(event: &Value, writable: &Writable) -> Vec<Violation> {
     let mut out: Vec<Violation> = Vec::new();
     let mut add = |v: Violation| {
@@ -76,7 +81,8 @@ pub fn parse_violations(event: &Value, writable: &Writable) -> Vec<Violation> {
             out.push(v);
         }
     };
-    let bash = event.get("tool_name").and_then(Value::as_str).is_none_or(|t| matches!(t, "Bash" | "PowerShell" | "Monitor"));
+    let succeeded = event.get("hook_event_name").and_then(Value::as_str) == Some("PostToolUse");
+    let bash = !succeeded && event.get("tool_name").and_then(Value::as_str).is_none_or(|t| matches!(t, "Bash" | "PowerShell" | "Monitor"));
     for text in failure_texts(event) {
         let mut rest = text.as_str();
         while let Some(start) = rest.find(OPEN) {
@@ -90,6 +96,12 @@ pub fn parse_violations(event: &Value, writable: &Writable) -> Vec<Violation> {
         }
     }
     out
+}
+
+/// Whether a call's event carries the sandbox's note at all: the cheap test before a successful
+/// call's event is read further.
+pub fn has_note(event: &Value) -> bool {
+    failure_texts(event).iter().any(|t| t.contains(OPEN))
 }
 
 const NOT_PERMITTED: &str = "Operation not permitted";
@@ -273,6 +285,23 @@ mod tests {
         let settings = json!({"sandbox": {"filesystem": {"allowWrite": ["/T/a"], "denyWrite": ["/T/a/.git"]}}});
         let w = Writable::from_settings(&settings, Path::new("/T/cwd"));
         assert!(!w.refuses("/T/a/x") && !w.refuses("/T/cwd/y") && w.refuses("/T/a/.git/config") && w.refuses("/T/b"));
+    }
+
+    /// The live worker's curl loop (2026-10-31): it printed `000` per host and exited 0, so only
+    /// PostToolUse carried the note, in its `tool_response.stderr` as the transcript shows.
+    #[test]
+    fn a_note_in_a_call_that_exited_0_is_read_but_a_bare_eperm_there_isnt() {
+        let ok = json!({
+            "hook_event_name": "PostToolUse", "tool_name": "Bash",
+            "tool_response": {"stdout": "https://raw.githubusercontent.com/x: 000\nhttps://registry.npmjs.org/bits-ui: 200\n", "stderr": "\n<sandbox_violations>\n\
+                deny network-outbound raw.githubusercontent.com:443 (host is not on the allow list)\n\
+                deny network-outbound shadcn-svelte.com:443 (host is not on the allow list)\n</sandbox_violations>", "interrupted": false}
+        });
+        assert!(has_note(&ok));
+        let targets: Vec<String> = parse(&ok).into_iter().map(|v| v.target).collect();
+        assert_eq!(targets, vec!["raw.githubusercontent.com", "shadcn-svelte.com"]);
+        let eperm = json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_response": {"stderr": "/bin/bash: /T/p/repo/api/.git/hooks/x: Operation not permitted"}});
+        assert!(!has_note(&eperm) && parse(&eperm).is_empty(), "a call that succeeded: only the note counts");
     }
 
     #[test]

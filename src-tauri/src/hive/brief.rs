@@ -497,6 +497,17 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
          substitute or mock it.\n",
     );
     b.push_str(
+        "- A host a worker\u{2019}s sandbox refused comes to you as its action blocker (\u{201c}The sandbox refused host \
+         \u{2026}\u{201d}), not to your human. Allow it with hiveChangeSettings {add_hosts, reason} only when the worker\u{2019}s task \
+         needs it: a package registry, docs, an API the work talks to. Refuse anything unrelated to its task or that could \
+         carry the project\u{2019}s code or data somewhere it shouldn\u{2019}t go (a paste site, a file host, an unknown \
+         endpoint), and answer the blocker with what the worker does instead. Your grant applies at once, answers the \
+         blocker, is logged for your human, and reaches the worker when you relaunch it (hiveRestartWorker resumes its \
+         session). A repo remote\u{2019}s host, localhost and private addresses can\u{2019}t be granted by anyone; a worker \
+         runs and looks at the app through hiveRun with serve: true, hiveScreenshot and hiveFetch. Raise your own blocker \
+         to your human only for a host you can\u{2019}t judge.\n",
+    );
+    b.push_str(
         "- A spawn refused because Claude Code doesn't trust a repo is your human's to fix: put maiTerm's refusal to them \
          in an action blocker, as it says (which account, which folder of theirs). Never run claude anywhere to trust it \
          yourself: a read copy or worktree takes its trust from your human's repo, under the account the Hive runs as.\n",

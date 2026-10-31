@@ -5,6 +5,9 @@
 //! default) that files a card only the human approves (an agent request of kind `hive_settings`,
 //! carried out here from its stored arguments); handed to the coordinator, it applies at once and
 //! the human is told. All three go through `check`, against the record as it is when they apply.
+//! The workers' hosts are the exception (Darryl, 2026-10-31): the queen grants and removes them at
+//! once, whatever the checkpoint, with a reason the decision log keeps (`coordinator_hosts`), so a
+//! worker's refused host goes to her rather than to the human.
 //!
 //! A change reaches an agent at its next launch, which rewrites its settings (§11.1): a running
 //! worker keeps its model and its network until it is relaunched, and a cap lowered under the
@@ -388,7 +391,10 @@ pub fn tool_definition(tab_id: &Value) -> Value {
              your brief) this files a card your human approves or denies, and maiTerm tells you which; handed to you, it applies \
              at once and your human is told. A change reaches each agent at its next launch: a running worker keeps its model and \
              network until it is relaunched. Raising workers at once and any setup (it runs outside the sandbox) always go on a \
-             card; lowering it doesn\u{2019}t, and never pushing. Models: {}. Efforts: {}.",
+             card; lowering it doesn\u{2019}t, and never pushing. Hosts are yours whatever the checkpoint: add_hosts or \
+             remove_hosts in a call of their own, with a reason, applies at once, is logged for your human, and answers each open \
+             sandbox blocker it settles. Allow a host only when a worker\u{2019}s task needs it; a repo remote\u{2019}s host, \
+             localhost or a private address is refused for anyone. Models: {}. Efforts: {}.",
             MODELS.join(", "),
             EFFORTS.join(", ")
         ),
@@ -423,11 +429,89 @@ pub fn tool_definition(tab_id: &Value) -> Value {
     })
 }
 
+/// Whether a change is only the workers' hosts.
+fn hosts_only(c: &SettingsChange) -> bool {
+    (!c.add_hosts.is_empty() || !c.remove_hosts.is_empty()) && *c == SettingsChange { add_hosts: c.add_hosts.clone(), remove_hosts: c.remove_hosts.clone(), ..Default::default() }
+}
+
+/// The queen's host change as the human reads it: the notice and the decision log's answer.
+fn hosts_sentence(c: &SettingsChange, reason: &str) -> String {
+    let mut parts = Vec::new();
+    if !c.add_hosts.is_empty() {
+        parts.push(format!("allowed {} for workers", c.add_hosts.join(", ")));
+    }
+    if !c.remove_hosts.is_empty() {
+        parts.push(format!("stopped workers reaching {}", c.remove_hosts.join(", ")));
+    }
+    format!("The queen {}: {}", parts.join(" and "), one_line(reason, MAX_REASON))
+}
+
+/// A line in the decision log for the queen's own host change: hers, auditable, and undone in
+/// Hive settings → Workers and access.
+pub(crate) fn hosts_decision_line(hive_id: &str, c: &SettingsChange, reason: &str) -> super::decisions::DecisionLine {
+    use super::decisions::{self, DecisionLine};
+    DecisionLine {
+        id: decisions::new_id(),
+        event: decisions::EVENT_ANSWERED.to_string(),
+        hive_id: hive_id.to_string(),
+        category: decisions::CATEGORY_HOSTS.to_string(),
+        source: decisions::SOURCE_SETTINGS.to_string(),
+        question: "Which hosts the workers\u{2019} sandbox may reach".to_string(),
+        answer: Some(hosts_sentence(c, reason)),
+        reason: Some(one_line(reason, MAX_REASON)),
+        by: decisions::BY_COORDINATOR.to_string(),
+        at: crate::commands::workspace::iso_now(),
+        ..DecisionLine::default()
+    }
+}
+
+/// The queen's host change (Darryl, 2026-10-31): applied at once, whoever holds the Settings
+/// checkpoint, within the limits Rust holds for anyone (never a repo remote's host, localhost, a
+/// private address, a port, past `MAX_WORKER_HOSTS`). The human hears of it, and the decision
+/// log and the settings log keep it; each open sandbox blocker it settles is answered as hers.
+async fn coordinator_hosts<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, change: &SettingsChange, reason: &str) -> Result<Value, String> {
+    // What actually changes, normalised: checked again under the write lock by `write`.
+    let current = super::autonomy::current_hive(ctx, caller).ok_or("This Hive is gone.")?;
+    let checked = check(&current, change, By::Coordinator, &super::settings::hive_remote_hosts(&current))?.change;
+    let (hive, lines) = write(ctx, caller, &checked, By::Coordinator)?;
+    log_line(caller, "coordinator", &lines, Some(reason));
+    let sentence = hosts_sentence(&checked, reason);
+    let line = hosts_decision_line(&hive.id, &checked, reason);
+    let p = caller.paths.clone();
+    let _ = super::tools::blocking(move || {
+        super::decisions::record(&p, &line);
+        Ok(())
+    })
+    .await;
+    ctx.window.decisions_changed(&caller.workspace_id);
+    ctx.window.settings_changed(&caller.workspace_id, &format!("{sentence}. Undo it in Hive settings \u{2192} Workers and access."));
+    let settled = if checked.add_hosts.is_empty() { Vec::new() } else { super::prompts::settle_host_blockers(ctx, caller, &hive, reason).await };
+    ctx.window.poll_waiters(&caller.workspace_id);
+    let relaunch: Vec<Value> = settled.iter().map(|w| json!({ "worker": w.badge, "title": w.title })).collect();
+    let note = if relaunch.is_empty() {
+        "Your human was told. A worker reaches a host from its next launch: hiveRestartWorker relaunches a running one (its session resumes)."
+    } else {
+        "Your human was told, and maiTerm answered these workers\u{2019} sandbox blockers as yours. Each reaches the host from its next \
+         launch: relaunch it with hiveRestartWorker when it is at a good point (its session resumes)."
+    };
+    Ok(json!({ "status": "applied", "changes": lines, "answered_blockers": relaunch, "note": note }))
+}
+
 /// `hiveChangeSettings` (§3.4).
 pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, args: &Value) -> Result<Value, String> {
     let (change, reason) = parse_args(args)?;
     refuse_private_hosts(&change.add_hosts).await?;
     let hive = super::autonomy::current_hive(ctx, caller).ok_or("This Hive is gone.")?;
+    let hosts = !change.add_hosts.is_empty() || !change.remove_hosts.is_empty();
+    if hosts {
+        let Some(reason) = reason.as_deref() else {
+            return Err("A host change needs a reason: your human reads it in the decision log.".to_string());
+        };
+        if hosts_only(&change) {
+            return coordinator_hosts(ctx, caller, &change, reason).await;
+        }
+        return Err("Change hosts in a call of their own: they apply at once, and the rest follows the Settings checkpoint.".to_string());
+    }
     // The human's limits apply on approval, but a card that can't apply now isn't filed.
     let checked = check(&hive, &change, By::Approved, &super::settings::hive_remote_hosts(&hive))?;
     // A raise of the cap, or a setup (it runs outside any sandbox), is the human's whoever holds
@@ -618,6 +702,28 @@ mod tests {
             let c = SettingsChange { add_hosts: vec![home.into()], ..Default::default() };
             assert!(check(&hive(), &c, By::Human, &[]).unwrap_err().contains("127.0.0.1"), "{home}");
         }
+    }
+
+    /// The queen grants hosts herself now (2026-10-31), within the limits Rust holds for anyone.
+    #[test]
+    fn the_queens_host_grant_keeps_every_hard_limit() {
+        let add = |h: &str| SettingsChange { add_hosts: vec![h.into()], ..Default::default() };
+        assert_eq!(check(&hive(), &add("shadcn-svelte.com"), By::Coordinator, &[]).unwrap().change.add_hosts, vec!["shadcn-svelte.com".to_string()]);
+        assert!(check(&hive(), &add("github.com"), By::Coordinator, &["github.com".into()]).unwrap_err().contains("push"), "a repo remote's host");
+        for refused in ["localhost", "app.localhost", "printer.local", "10.0.0.1", "127.0.0.1", "lvh.me", "x.com:8765", "https://x.com"] {
+            assert!(check(&hive(), &add(refused), By::Coordinator, &[]).is_err(), "{refused}");
+        }
+        let mut full = hive();
+        full.settings.worker_hosts = (0..MAX_WORKER_HOSTS).map(|i| format!("h{i}.example.com")).collect();
+        assert!(check(&full, &add("one-more.example.com"), By::Coordinator, &[]).unwrap_err().contains("at most"));
+        // Hosts alone, so they apply at once while the rest follows the checkpoint.
+        assert!(hosts_only(&add("a.example.com")));
+        assert!(hosts_only(&SettingsChange { remove_hosts: vec!["docs.example.com".into()], ..Default::default() }));
+        assert!(!hosts_only(&SettingsChange { cap: Some(2), ..add("a.example.com") }));
+        assert!(!hosts_only(&SettingsChange::default()));
+        let l = hosts_decision_line("h1", &add("shadcn-svelte.com"), "the components registry");
+        assert_eq!((l.by.as_str(), l.category.as_str(), l.source.as_str()), ("coordinator", "hosts", "settings"));
+        assert_eq!(l.answer.as_deref(), Some("The queen allowed shadcn-svelte.com for workers: the components registry"));
     }
 
     #[test]
