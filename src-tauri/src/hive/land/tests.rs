@@ -618,8 +618,17 @@ async fn a_review_must_pass_at_exactly_these_commits_or_be_accepted() {
     let e = rig.land(&w).await.unwrap_err();
     assert!(e.contains("last review failed") && e.contains("reviews: rev"), "{e}");
     let other = std::collections::BTreeMap::from([("web".to_string(), "0".repeat(40))]);
-    set_review(Review { verdicts: vec![verdict("pass", other)], ..Review::default() });
+    set_review(Review { verdicts: vec![verdict("pass", other.clone())], ..Review::default() });
     assert!(rig.land(&w).await.unwrap_err().contains("passed at other commits"));
+    // An inconclusive review (a reviewer couldn't check something) doesn't cancel a pass before
+    // it at these commits, nor turn a fail into one, nor let a pass at other commits through.
+    let inconclusive = crate::hive::review::INCONCLUSIVE;
+    set_review(Review { verdicts: vec![verdict("fail", tips.clone()), verdict(inconclusive, tips.clone())], ..Review::default() });
+    assert!(rig.land(&w).await.unwrap_err().contains("inconclusive"));
+    set_review(Review { verdicts: vec![verdict("pass", other), verdict(inconclusive, tips.clone())], ..Review::default() });
+    assert!(rig.land(&w).await.is_err(), "a pass at other commits stays one");
+    set_review(Review { verdicts: vec![verdict(inconclusive, tips.clone())], ..Review::default() });
+    assert!(rig.land(&w).await.unwrap_err().contains("inconclusive"));
     let accepted = Review {
         attempts: 3,
         escalated: true,
@@ -636,7 +645,9 @@ async fn a_review_must_pass_at_exactly_these_commits_or_be_accepted() {
     let w2 = rig.reported("rev2", &["web"], "rev2.rs", "rev2\n");
     let tips2: std::collections::BTreeMap<String, String> = serde_json::from_value(rig.tips(&w2)).unwrap();
     let mut rec = rig.record(&w2.task_id);
-    rec.review = Some(Review { verdicts: vec![verdict("pass", tips2)], ..Review::default() });
+    // A pass, then a reviewer that could only report environment gaps at the same commits: the
+    // pass stands.
+    rec.review = Some(Review { verdicts: vec![verdict("pass", tips2.clone()), verdict(crate::hive::review::INCONCLUSIVE, tips2)], ..Review::default() });
     worker::write_worker(&rig.caller.paths.task(&w2.task_id), &rec).unwrap();
     // A reviewer still at work holds the land.
     let reviewer = WorkerRecord { task_id: "t-live".into(), slug: "live".into(), badge: 9, reviews: Some(w2.task_id.clone()), phase: worker::PHASE_RUNNING.into(), ..WorkerRecord::default() };

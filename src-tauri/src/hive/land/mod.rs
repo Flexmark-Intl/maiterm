@@ -357,9 +357,14 @@ pub(crate) fn review_standing(w: &WorkerRecord, commits: &BTreeMap<String, Strin
     }
     let Some(review) = w.review.as_ref().filter(|r| !r.verdicts.is_empty()) else { return Ok(log::REVIEW_NONE) };
     let latest = review.latest().expect("verdicts isn't empty");
+    // An inconclusive verdict only says a reviewer couldn't check something (an environment gap,
+    // never the builder's), so it doesn't cancel the newest pass or fail before it: what lands is
+    // decided by the newest verdict that judged the work. A pass at other commits still doesn't
+    // count, so an inconclusive review of NEWER commits can't let an older pass through.
+    let decisive = review.verdicts.iter().rev().find(|v| v.verdict != super::review::INCONCLUSIVE);
     // Every named commit is one the pass reviewed: a held land's repos still to land are named
     // without the ones that landed.
-    if latest.verdict == "pass" && commits.iter().all(|(f, s)| latest.shas.get(f) == Some(s)) {
+    if decisive.is_some_and(|d| d.verdict == "pass" && commits.iter().all(|(f, s)| d.shas.get(f) == Some(s))) {
         return Ok(log::REVIEW_PASS);
     }
     let accepted = review.resolution.as_ref().is_some_and(|r| r.kind == "accept");
