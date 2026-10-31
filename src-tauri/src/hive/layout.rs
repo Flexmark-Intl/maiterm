@@ -68,12 +68,17 @@ pub fn start_repo(path: &Path, branch: &str) -> Result<bool, String> {
     if !info.empty {
         return Err(format!("{} has files but no commit, and only an empty folder is started as a new project", info.path));
     }
-    // Empty means the index too: an orphan made with `checkout --orphan` keeps the old index, and
-    // checking Base out over it would leave every file of Base showing as deleted.
-    if info.kind == KIND_GIT && !run(git_in(real).args(["ls-files"]), QUERY_TIMEOUT)?.is_empty() {
-        return Err(format!("{} has files staged but none on disk and no commit, so it isn't started as a new project", info.path));
-    }
     if info.kind == KIND_GIT && run(git_in(real).args(["rev-parse", "--verify", "--quiet"]).arg(format!("refs/heads/{branch}")), QUERY_TIMEOUT).is_ok() {
+        // An orphan made with `checkout --orphan` keeps the old index, and checking Base out over
+        // it would leave every file of Base showing as deleted. Clearing the index would throw
+        // away what the human staged, so this one case is refused, never fixed behind them. The
+        // empty-commit path below never reads the human's index, so it needs no such check.
+        if !run(git_in(real).args(["ls-files"]), QUERY_TIMEOUT)?.is_empty() {
+            return Err(format!(
+                "{} is on a branch with no commit, with files staged but none on disk. Pick a Base other than {branch}, or share it as a plain folder",
+                info.path
+            ));
+        }
         run(git_in(real).args(["checkout", "-q", branch]), QUERY_TIMEOUT).map_err(|e| format!("{}: couldn't check out {branch}: {e}", info.path))?;
         log::info!("hive: checked out {branch} in the empty orphan checkout {}", info.path);
         return Ok(false);
@@ -116,22 +121,27 @@ pub fn commit_first(path: &Path) -> Result<(), String> {
         return Ok(());
     }
     // A git killed at the time limit leaves its `index.lock`, which would refuse every later git
-    // in the human's repo: one that wasn't there before is ours, and goes.
+    // in the human's repo. Only then is a lock ours: a git that fails by itself removes its own,
+    // and one found after any other failure is another process's, still running (review of
+    // 6dd8a8e0).
     let lock = run(git_in(real).args(["rev-parse", "--git-path", "index.lock"]), QUERY_TIMEOUT).map(|p| real.join(p)).ok();
     let had_lock = lock.as_ref().is_some_and(|l| l.exists());
-    let res = run(git_in(real).args(["add", "-A"]), WORKTREE_TIMEOUT).map_err(|e| format!("{}: couldn't add its files: {e}", info.path)).and_then(|_| {
+    let timed_out = |e: &String| e == &crate::util::proc::RunError::TimedOut.to_string();
+    let res = run(git_in(real).args(["add", "-A"]), WORKTREE_TIMEOUT).map_err(|e| ("couldn't add its files", e)).and_then(|_| {
         run(
             git_in(real).args(super::land::git::identity(real)).args(["-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Start the project"]),
             WORKTREE_TIMEOUT,
         )
-        .map_err(|e| format!("{}: couldn't make its first commit: {e}", info.path))
+        .map_err(|e| ("couldn't make its first commit", e))
     });
-    if res.is_err() && !had_lock {
-        if let Some(l) = lock.filter(|l| l.exists()) {
-            let _ = fs::remove_file(&l);
+    if let Err((what, e)) = res {
+        if timed_out(&e) && !had_lock {
+            if let Some(l) = lock.filter(|l| l.exists()) {
+                let _ = fs::remove_file(&l);
+            }
         }
+        return Err(format!("{}: {what}: {e}", info.path));
     }
-    res?;
     log::info!("hive: committed {}'s files as its first commit, at the human's click", info.path);
     Ok(())
 }
@@ -747,6 +757,11 @@ mod tests {
         assert!(detect_folder(&r, &[]).empty && detect_folder(&r, &[]).unborn);
         assert!(start_repo(&r, "main").unwrap_err().contains("staged"));
         assert_eq!(git(&r, &["symbolic-ref", "--short", "HEAD"]), "kept-index");
+        // With no such branch, the first commit comes from its own index: allowed, and what the
+        // human staged stays staged (review of 6dd8a8e0).
+        assert!(start_repo(&r, "kept-index").unwrap());
+        assert_eq!(git(&r, &["ls-tree", "-r", "--name-only", "HEAD"]), "", "the commit is empty");
+        assert_eq!(git(&r, &["diff", "--cached", "--name-only"]), "c.txt", "still staged");
         // A Base that doesn't exist yet is a new root of its own, on no branch's history.
         git(&r, &["rm", "-q", "-r", "--cached", "--ignore-unmatch", "."]);
         git(&r, &["switch", "-q", "--orphan", "scratch"]);
