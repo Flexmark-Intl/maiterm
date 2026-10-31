@@ -130,13 +130,25 @@ pub(crate) struct Standing {
     pub workers: Vec<WorkerRecord>,
 }
 
-/// The workers the last Done report of the current goal abandoned (its `abandoned`, by label):
-/// their branches stay unlanded by the human's own reading of that report.
-fn abandoned_in_report(hive: &Hive, paths: &HivePaths) -> HashSet<String> {
+/// The workers the last Done report of the current goal abandoned (its `abandoned`, by label),
+/// and when that report was written (ms): their branches stay unlanded by the human's own reading
+/// of that report, as it stood then.
+fn abandoned_in_report(hive: &Hive, paths: &HivePaths) -> (HashSet<String>, i64) {
     match finish::last_finish(paths) {
-        Some(r) if report_in_chapter(hive, &r) => r.abandoned.iter().map(|a| a.worker.clone()).collect(),
-        _ => HashSet::new(),
+        Some(r) if report_in_chapter(hive, &r) => (r.abandoned.iter().map(|a| a.worker.clone()).collect(), r.at_ms),
+        _ => (HashSet::new(), 0),
     }
+}
+
+/// The branch's tip was committed at or before `at_ms`: nothing on it is newer than the report
+/// that abandoned it. Unreadable answers no, so the branch is listed. Blocks on git.
+fn tip_not_after(hive: &Hive, folder: &str, branch: &str, at_ms: i64) -> bool {
+    let Some(f) = hive.folders.iter().find(|f| f.name == folder) else { return false };
+    let out = super::git::run(
+        super::git::verify_in(Path::new(&f.path)).args(["log", "-1", "--format=%ct"]).arg(format!("refs/heads/{branch}")),
+        super::git::QUERY_TIMEOUT,
+    );
+    out.ok().and_then(|s| s.trim().parse::<i64>().ok()).is_some_and(|ct| ct.saturating_mul(1000) <= at_ms)
 }
 
 /// A report written during the current goal: at or after its start.
@@ -147,10 +159,16 @@ fn report_in_chapter(hive: &Hive, r: &FinishRecord) -> bool {
 /// The current goal's branches with commits not landed, those the report abandoned left out.
 /// A repo maiTerm can't read is a reason, never "nothing pending". Blocks on git.
 pub(crate) fn pending_branches(hive: &Hive, paths: &HivePaths, workers: &[WorkerRecord]) -> Result<Vec<PendingBranch>, String> {
-    let abandoned = abandoned_in_report(hive, paths);
+    let (abandoned, report_ms) = abandoned_in_report(hive, paths);
     let mut out = Vec::new();
-    for w in workers.iter().filter(|w| !abandoned.contains(&super::tools::worker_label(w))) {
+    for w in workers {
+        let named = abandoned.contains(&super::tools::worker_label(w));
         for u in finish::unlanded(hive, w)? {
+            // Abandoned by the report, and nothing committed since: the human read it so. A
+            // worker the queen restarted after the report and that committed again is listed.
+            if named && tip_not_after(hive, &u.folder, &u.branch, report_ms) {
+                continue;
+            }
             let target = w.folders.iter().find(|f| f.name == u.folder).and_then(|f| f.target.clone());
             out.push(PendingBranch { worker: worker_name(w), badge: w.badge, folder: u.folder, branch: u.branch, target, ahead: u.ahead });
         }
@@ -383,28 +401,64 @@ pub(crate) fn archive_chapter(hive: &Hive, paths: &HivePaths, n: u32, chapter: &
     Ok(dir)
 }
 
-/// The brief files the new goal has, as names in `brief/`: a path already there keeps its name,
-/// any other is copied in as Create copies (`copy_brief_files`), and a file no longer listed
-/// leaves `brief/` (the chapter kept its copy). Blocks.
-pub(crate) fn settle_brief_files(paths: &HivePaths, current: &[String], wanted: &[String]) -> Result<Vec<String>, String> {
-    let dir = brief_dir(paths);
+/// Each wanted brief file, as `Ok(name)` when it is already one of the current goal's copies in
+/// `brief/` (kept as it is), or `Err(source)` when it must be copied in.
+fn sort_brief_files(paths: &HivePaths, current: &[String], wanted: &[String]) -> Vec<Result<String, String>> {
     let canon = |p: &Path| fs::canonicalize(p).map(|c| crate::share::canon(&c)).unwrap_or_else(|_| p.to_path_buf());
-    let dir_c = canon(&dir);
-    let mut names: Vec<String> = Vec::new();
-    for raw in wanted {
-        let p = crate::share::expand_tilde(raw.trim());
-        let in_brief = p.parent().is_some_and(|d| canon(d) == dir_c);
-        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        if in_brief && current.contains(&name) && fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()) {
-            if !names.contains(&name) {
-                names.push(name);
+    let dir_c = canon(&brief_dir(paths));
+    wanted
+        .iter()
+        .map(|raw| {
+            let p = crate::share::expand_tilde(raw.trim());
+            let in_brief = p.parent().is_some_and(|d| canon(d) == dir_c);
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            if in_brief && current.contains(&name) && fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()) {
+                Ok(name)
+            } else {
+                Err(raw.clone())
             }
-            continue;
+        })
+        .collect()
+}
+
+/// What `copy_brief_files` would refuse, asked before anything of the New goal moves: a missing
+/// path, a folder, a file over 5 MB, one with no name. Blocks.
+pub(crate) fn check_brief_files(paths: &HivePaths, current: &[String], wanted: &[String]) -> Result<(), String> {
+    for src in sort_brief_files(paths, current, wanted).into_iter().filter_map(Result::err) {
+        let p = crate::share::expand_tilde(src.trim());
+        let meta = fs::metadata(&p).map_err(|_| format!("The attached file {} isn't there.", p.display()))?;
+        if !meta.is_file() {
+            return Err(format!("{} isn't a file: attach files, not folders.", p.display()));
         }
-        let copied = super::create::copy_brief_files(&[raw.clone()], &paths.coordinator_home())?;
-        names.extend(copied);
+        if meta.len() > super::create::MAX_BRIEF_FILE_BYTES {
+            return Err(format!("{} is over 5 MB: attach a smaller file, or put it in one of the Hive's folders.", p.display()));
+        }
+        if p.file_name().is_none_or(|n| n.is_empty()) {
+            return Err(format!("{} has no file name.", p.display()));
+        }
     }
-    for e in fs::read_dir(&dir).into_iter().flatten().flatten() {
+    Ok(())
+}
+
+/// The brief files the new goal has, as names in `brief/`: a path already there keeps its name,
+/// any other is copied in as Create copies (`copy_brief_files`). Nothing is removed here: the
+/// files no longer listed leave only once the record names the new list
+/// (`remove_unlisted_brief_files`). Blocks.
+pub(crate) fn copy_new_brief_files(paths: &HivePaths, current: &[String], wanted: &[String]) -> Result<Vec<String>, String> {
+    let mut names: Vec<String> = Vec::new();
+    for item in sort_brief_files(paths, current, wanted) {
+        match item {
+            Ok(name) if !names.contains(&name) => names.push(name),
+            Ok(_) => {}
+            Err(src) => names.extend(super::create::copy_brief_files(&[src], &paths.coordinator_home())?),
+        }
+    }
+    Ok(names)
+}
+
+/// Files in `brief/` the record no longer names (the chapter kept a copy of each). Best effort. Blocks.
+pub(crate) fn remove_unlisted_brief_files(paths: &HivePaths, names: &[String]) {
+    for e in fs::read_dir(brief_dir(paths)).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         if !names.contains(&name) {
             if let Err(err) = retire::remove_path(&e.path()) {
@@ -412,35 +466,67 @@ pub(crate) fn settle_brief_files(paths: &HivePaths, current: &[String], wanted: 
             }
         }
     }
-    Ok(names)
 }
 
-/// Moves `from` to `to` when it exists. Blocks.
+/// `to`, or beside it a name no file has yet: an archive step never removes what is there.
+fn free_dest(to: &Path) -> PathBuf {
+    if fs::symlink_metadata(to).is_err() {
+        return to.to_path_buf();
+    }
+    let name = to.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name, String::new()),
+    };
+    to.with_file_name(format!("{stem}-{}{ext}", &uuid::Uuid::new_v4().simple().to_string()[..8]))
+}
+
+/// Moves `from` into `to` when it exists, beside an earlier one rather than over it. Blocks.
 fn move_if_there(from: &Path, to: &Path) -> Result<(), String> {
     if fs::symlink_metadata(from).is_err() {
         return Ok(());
     }
-    if fs::symlink_metadata(to).is_ok() {
-        retire::remove_path(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    let to = free_dest(to);
+    fs::rename(from, &to).map_err(|e| format!("Couldn't move {} to {}: {e}", from.display(), to.display()))
+}
+
+const ARCHIVED_MEMORY: &str = "memory";
+const ARCHIVED_MEMORY_RECORD: &str = "memory.json";
+
+/// A memory folder an earlier attempt set aside into this chapter goes back in place: the live
+/// one is then the seed that attempt made (or what was written to it since), which moves aside
+/// into the chapter as `memory.discarded-…`, never deleted. A no-op when nothing was set aside.
+/// Blocks.
+pub(crate) fn restore_memory(paths: &HivePaths, chapter_dir: &Path) -> Result<(), String> {
+    let archived = chapter_dir.join(ARCHIVED_MEMORY);
+    if fs::symlink_metadata(&archived).is_err() {
+        return Ok(());
     }
-    fs::rename(from, to).map_err(|e| format!("Couldn't move {} to {}: {e}", from.display(), to.display()))
+    move_if_there(&paths.memory(), &chapter_dir.join("memory.discarded"))?;
+    fs::rename(&archived, paths.memory()).map_err(|e| format!("Couldn't put the memory folder back from {}: {e}", archived.display()))?;
+    let record = chapter_dir.join(ARCHIVED_MEMORY_RECORD);
+    if fs::symlink_metadata(&record).is_ok() {
+        move_if_there(&paths.memory_record(), &chapter_dir.join("memory.discarded.json"))?;
+        fs::rename(&record, paths.memory_record()).map_err(|e| format!("Couldn't put the memory record back: {e}"))?;
+    }
+    Ok(())
 }
 
 /// What the old goal's coordinator was owed or had approved leaves with it: `owed.json` (notices
 /// about the old goal's work) and `plan.json` (titles approved under "Show me the plan first"),
 /// moved into the chapter; the kickoff re-armed for the fresh session. With `keep_memory` false
 /// the memory folder and maiTerm's record of it go to the chapter too, and the new goal starts
-/// with a seeded empty one. Blocks.
-pub(crate) fn set_aside(hive: &Hive, paths: &HivePaths, chapter_dir: &Path, keep_memory: bool, new_goal: &str) -> Result<(), String> {
+/// with a seeded empty one. A retry after a failed attempt first puts back what that attempt set
+/// aside (`restore_memory`), so the real memory is never the one replaced. Blocks.
+pub(crate) fn set_aside(paths: &HivePaths, chapter_dir: &Path, keep_memory: bool, new_goal: &str) -> Result<(), String> {
     let task = paths.coordinator_task();
+    restore_memory(paths, chapter_dir)?;
     move_if_there(&task.join(super::owed::OWED_FILE), &chapter_dir.join(super::owed::OWED_FILE))?;
     move_if_there(&paths.plan_record(), &chapter_dir.join("plan.json"))?;
     super::launch::reset_kickoff(&task)?;
-    if keep_memory {
-        retitle_memory_goal(hive, paths, new_goal);
-    } else {
-        move_if_there(&paths.memory(), &chapter_dir.join("memory"))?;
-        move_if_there(&paths.memory_record(), &chapter_dir.join("memory.json"))?;
+    if !keep_memory {
+        move_if_there(&paths.memory(), &chapter_dir.join(ARCHIVED_MEMORY))?;
+        move_if_there(&paths.memory_record(), &chapter_dir.join(ARCHIVED_MEMORY_RECORD))?;
         fs::create_dir_all(paths.memory()).map_err(|e| format!("{}: {e}", paths.memory().display()))?;
         super::launch::write_bytes(&paths.memory_index(), super::layout::memory_seed(new_goal).as_bytes())?;
         let rec = super::memory::record::MemoryRecord { v: super::memory::record::RECORD_VERSION, kept: super::layout::seed_kept(new_goal), ..Default::default() };
@@ -501,6 +587,57 @@ fn save_record<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, edit: impl FnOn
     Ok(change)
 }
 
+/// Hives (by folder) a New goal is changing: their queen doesn't launch meanwhile.
+static IN_PROGRESS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// `prepare_launch`'s refusal while a New goal runs.
+pub const IN_PROGRESS_REFUSAL: &str = "This Hive is taking a new goal: its queen starts once that's done.";
+
+/// A New goal is under way in the Hive at `root`.
+pub fn in_progress(root: &Path) -> bool {
+    IN_PROGRESS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|r| r == root)
+}
+
+/// Held from the checks to the saved record; dropped on every way out.
+pub(crate) struct InProgress(PathBuf);
+
+impl InProgress {
+    pub(crate) fn take(root: &Path) -> Self {
+        IN_PROGRESS.lock().unwrap_or_else(|e| e.into_inner()).push(root.to_path_buf());
+        Self(root.to_path_buf())
+    }
+}
+
+impl Drop for InProgress {
+    fn drop(&mut self) {
+        let mut v = IN_PROGRESS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = v.iter().position(|r| *r == self.0) {
+            v.remove(i);
+        }
+    }
+}
+
+/// The queen tab's follow-ups (and watch scripts) gone, in Rust, which owns them
+/// (docs/follow-ups.md): a delivery takes its follow-up before it types, so one cleared here is
+/// never delivered. The window's mirror hears the empty list. Saved before the queen is stopped.
+fn clear_follow_ups<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, queen: &str) -> Result<(), String> {
+    let snapshot = {
+        let mut d = ctx.data.write();
+        let ws = super::tools::workspace_mut(&mut d, caller).map_err(|_| "This Hive is gone.".to_string())?;
+        let Some(tab) = ws.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()).find(|t| t.id == queen) else { return Ok(()) };
+        if tab.follow_ups.is_empty() {
+            return Ok(());
+        }
+        let n = tab.follow_ups.len();
+        tab.follow_ups.clear();
+        log::info!("hive {}: {n} follow-up(s) of the queen cleared for the new goal", caller.hive.id);
+        d.clone()
+    };
+    (ctx.save)(&snapshot).map_err(|e| format!("maiTerm couldn't save the queen's cleared follow-ups ({e}), so the Hive keeps its goal. Try again."))?;
+    ctx.window.follow_ups_changed(&caller.workspace_id, queen, &[]);
+    Ok(())
+}
+
 /// The retirement every current worker gets: abandoned with its task dropped, its branches kept.
 fn retire_spec() -> RetireSpec {
     use worker::*;
@@ -530,18 +667,22 @@ pub(crate) struct Done {
 /// Gives the caller's Hive a new goal (§11.5). The order is chosen so a crash or a failure at any
 /// step leaves a state the Hive already knows, and New goal can simply be tried again:
 ///
-/// 1. Everything checked again under the Hive's turn (a wake and the exit after Done hold it too).
+/// 1. Everything checked again under the Hive's turn (a wake and the exit after Done hold it too),
+///    the attached files included (what can fail on the human's input fails here, before anything
+///    moves). Then no queen launch is accepted until the record is saved (`in_progress`).
 /// 2. The old goal archived to `chapters/<n>/` (copies only; rewritten on a retry).
 /// 3. Every current worker retired. Stopping here leaves a Done or paused Hive with fewer (or no)
 ///    workers, its goal unchanged: valid, and the checks still pass.
-/// 4. The queen's agent stopped, her open cards failed. Stopping here: the same, with a Done or
-///    paused Hive whose queen isn't running, which is how a Done Hive always is.
-/// 5. What the old goal's queen was owed or had approved moved into the chapter, the kickoff
-///    re-armed, the memory set aside if asked, the new brief files settled. Stopping here: the old
-///    goal stays current with no owed notices and a kickoff its next wake re-sends (harmless).
+/// 4. The queen's follow-ups cleared, her agent stopped, her open cards failed. Stopping here: the
+///    same, with a Done or paused Hive whose queen isn't running, as a Done Hive always is.
+/// 5. The new brief files copied in, then what the old goal's queen was owed or had approved moved
+///    into the chapter, the kickoff re-armed, the memory set aside if asked. A failure from here to
+///    the saved record puts the memory back; a crash leaves it in the chapter, and the retry's
+///    `set_aside` puts it back before anything else. No archive step removes what it finds.
 /// 6. The record saved: the chapter appended, the new goal, criteria to confirm, `active`. From
 ///    here every reader sees the new goal, and since the coordinator resumes only a session of the
-///    current chapter, any launch from now (this one, a restart's) starts it fresh.
+///    current chapter, any launch from now (this one, a restart's) starts it fresh. Only now do the
+///    unlisted brief files leave `brief/`.
 /// 7. What the Pause held dropped, and the queen relaunched in her own tab through the builder.
 pub(crate) async fn new_goal<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, spec: NewGoalSpec) -> Result<Done, String> {
     let spec = check_spec(spec)?;
@@ -558,6 +699,13 @@ pub(crate) async fn new_goal<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, s
         return Err(format!("Commits of this goal aren't landed yet: {}. Ask the queen to land them first.", list.join("; ")));
     }
     let queen = queen.ok_or("This Hive has no queen tab to start the new goal in.")?;
+    // What the attached files would refuse, before anything moves: a retry must find the old
+    // goal exactly as this attempt found it.
+    let (p, current, wanted) = (caller.paths.clone(), hive.brief_files.clone(), spec.brief_files.clone());
+    blocking(move || check_brief_files(&p, &current, &wanted)).await?;
+    // From here until the record is saved, no launch may start the queen: a follow-up's resume
+    // would bring back the old goal's session (`launch::prepare_launch`).
+    let marker = InProgress::take(&caller.paths.root);
 
     // 2.
     let n = hive.chapter() + 1;
@@ -579,7 +727,9 @@ pub(crate) async fn new_goal<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, s
         retired += 1;
     }
 
-    // 4.
+    // 4. Her follow-ups first: one due now would otherwise reach (or relaunch) the old session,
+    // and any left would be typed into the fresh one as the old goal's.
+    clear_follow_ups(ctx, caller, &queen)?;
     match ctx.window.front(&queen).await {
         Front::Job => {
             match ctx.window.stop_agent(&queen).await {
@@ -604,16 +754,43 @@ pub(crate) async fn new_goal<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, s
         // No rebuild may write into the folder as it moves.
         super::memory::unwatch(&hive.id);
     }
-    let (h, p, dir, keep, goal, wanted) = (hive.clone(), caller.paths.clone(), chapter_dir.clone(), spec.keep_memory, spec.goal.clone(), spec.brief_files.clone());
-    let brief_files = blocking(move || {
-        set_aside(&h, &p, &dir, keep, &goal)?;
-        let current = h.brief_files.clone();
-        settle_brief_files(&p, &current, &wanted)
+    // The new files are copied in first (nothing is removed yet), then what only the old goal
+    // owned moves. Any failure from here to the saved record puts the memory back.
+    let (p, dir, keep, goal, current, wanted) = (caller.paths.clone(), chapter_dir.clone(), spec.keep_memory, spec.goal.clone(), hive.brief_files.clone(), spec.brief_files.clone());
+    let prepared = blocking(move || {
+        let names = copy_new_brief_files(&p, &current, &wanted)?;
+        set_aside(&p, &dir, keep, &goal)?;
+        Ok(names)
     })
-    .await?;
+    .await;
+    let saved = match prepared {
+        Ok(names) => save_record(ctx, caller, |h| apply_new_goal(h, chapter, &spec, names)),
+        Err(e) => Err(e),
+    };
+    let change = match saved {
+        Ok(c) => c,
+        Err(e) => {
+            let (p, dir) = (caller.paths.clone(), chapter_dir.clone());
+            if let Err(re) = blocking(move || restore_memory(&p, &dir)).await {
+                log::warn!("hive {}: a failed New goal's set-aside memory is still in {}: {re}", hive.id, chapter_dir.display());
+            }
+            return Err(e);
+        }
+    };
 
-    // 6.
-    let change = save_record(ctx, caller, |h| apply_new_goal(h, chapter, &spec, brief_files))?;
+    // 6. Saved: the files the record no longer names leave `brief/`, and kept memory names the goal.
+    let (h, p, names, keep, goal) = (hive.clone(), caller.paths.clone(), change.hive.brief_files.clone(), spec.keep_memory, spec.goal.clone());
+    if let Err(e) = blocking(move || {
+        remove_unlisted_brief_files(&p, &names);
+        if keep {
+            retitle_memory_goal(&h, &p, &goal);
+        }
+        Ok(())
+    })
+    .await
+    {
+        log::warn!("hive {}: after the new goal: {e}", hive.id);
+    }
     ctx.window.hive_changed(&change.workspace_id, &change.hive);
     if let Some((tasks, workstreams)) = &change.tasks {
         ctx.window.tasks_changed(&change.workspace_id, tasks, workstreams);
@@ -622,6 +799,7 @@ pub(crate) async fn new_goal<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, s
     log::info!("hive {}: new goal (chapter {n} archived at {}), {retired} worker(s) retired", hive.id, chapter_dir.display());
 
     // 7.
+    drop(marker);
     super::deliver::drop_pause_holds(&hive.id);
     let outcome = ctx.window.request(rpc::VERB_RELAUNCH, json!({ "workspace_id": caller.workspace_id, "tab_id": queen })).await;
     let relaunched = match rpc::applied(outcome) {
@@ -732,11 +910,15 @@ pub async fn hive_new_goal_preview(window: tauri::Window, app: tauri::AppHandle,
 pub async fn hive_new_goal(window: tauri::Window, app: tauri::AppHandle, state: tauri::State<'_, Arc<AppState>>, workspace_id: String, spec: NewGoalSpec) -> Result<Hive, String> {
     let caller = super::land::caller_in(state.inner(), window.label(), &workspace_id)?;
     let ctx = super::tools::app_ctx(state.inner(), &app, &caller);
-    let done = new_goal(&ctx, &caller, spec).await?;
-    if done.memory_replaced {
+    let sets_memory_aside = !spec.keep_memory;
+    let res = new_goal(&ctx, &caller, spec).await;
+    // Setting memory aside unwatches it: watched again whatever happened, on the folder now live
+    // (the new seed, or the real one a failure put back).
+    if sets_memory_aside {
         super::memory::watch(state.inner(), &app, &caller.hive.id, &caller.paths);
         super::memory::emit_changed(&app, &caller.label, &caller.workspace_id);
     }
+    let done = res?;
     super::phone::bump();
     Ok(done.hive)
 }

@@ -2598,7 +2598,9 @@ folders, settings, models, cap, checkpoints, budget, gallery and logs, a fresh q
 
 - **What goes.** Every worker of the current goal is retired the way `hiveRetireWorker` retires one
   (`retire::retire_worker`: agent stopped, tab dropped, clean worktrees removed, task dropped,
-  branches kept). The queen's agent is stopped and her open cards fail. Her owed notices
+  branches kept). The queen's follow-ups and watch scripts are cleared in Rust, then her agent is
+  stopped and her open cards fail; from the checks until the record is saved no queen launch is
+  accepted (`new_goal::in_progress`), since one would resume the old goal's session. Her owed notices
   (`owed.json`) and approved plan (`plan.json`) move into the chapter; the kickoff is re-armed.
 - **What is kept.** Everything else, and **never** the land log or the decision log: undo and
   earned autonomy read them whole. Memory is kept by default, its seeded `- Goal:` line set to the
@@ -2645,8 +2647,12 @@ start. That handles what moving files would break:
   (`deliver::drop_pause_holds`).
 
 **The order** keeps every crash recoverable by trying again: checks under the Hive's turn (the
-wake's lock), archive (copies only), retire each worker, stop the queen, move the owed/plan/memory
-and settle the brief files, save the record, then drop the Pause's holds and relaunch. Until the
+wake's lock), the attached files included, archive (copies only), retire each worker, clear the
+queen's follow-ups and stop her, copy in the new brief files, move the owed/plan/memory, save the
+record, then remove the unlisted brief files, drop the Pause's holds and relaunch. No archive step
+removes what it finds (an existing destination gets a name beside it); a failure before the save
+puts set-aside memory back, and a retry after a crash restores it from the chapter first, so the
+real memory is never the folder replaced. Until the
 record is saved the Hive is still Done or paused on its old goal, with fewer workers, which is a
 state it already knows; once it is saved, every reader sees the new goal, and the chapter tag
 starts the queen fresh whoever launches her.

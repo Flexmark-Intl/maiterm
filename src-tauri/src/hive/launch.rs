@@ -841,6 +841,11 @@ pub fn prepare_launch(hive: &Hive, role: &str, tab_id: &str, tasks: &[crate::sta
     crate::instance::hive_refusal()?;
     let root = hive_root(&hive.id).ok_or_else(|| format!("\"{}\" can't name a Hive folder", hive.id))?;
     let paths = HivePaths::new(root);
+    // Mid New goal (§11.5) the record still names the old goal, so a launch now (a due follow-up's
+    // resume, a mount) would resume the old session; the New goal relaunches her itself.
+    if role == ROLE_COORDINATOR && super::new_goal::in_progress(&paths.root) {
+        return Err(super::new_goal::IN_PROGRESS_REFUSAL.to_string());
+    }
     match role {
         ROLE_COORDINATOR => prepare_coordinator(hive, &paths, prefs),
         ROLE_WORKER => prepare_worker(hive, &paths, tab_id, tasks, prefs),

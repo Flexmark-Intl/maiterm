@@ -617,8 +617,10 @@ pub(crate) fn validate(hive: &Hive, workers: &[WorkerRecord], a: SpawnArgs) -> R
     }
     let slug = worker::worker_slug(&title)?;
     // Only this goal's workers refuse a name: an earlier goal's kept branch or scratch makes
-    // `register` pick `-2`, `-3`… instead (§11.5).
-    if let Some(w) = workers.iter().find(|w| w.slug == slug && w.in_chapter(hive)) {
+    // `register` pick `-2`, `-3`… instead (§11.5). A worker of this goal already took this title
+    // if its slug is this one, or its title makes this slug (it was numbered past an old one).
+    let taken = |w: &&WorkerRecord| w.in_chapter(hive) && (w.slug == slug || worker::worker_slug(&w.title).is_ok_and(|s| s == slug));
+    if let Some(w) = workers.iter().find(taken) {
         return Err(format!(
             "Worker #{} is already called \"{slug}\" ({}), and the name is its branch's. Give this one another title.",
             w.badge, w.phase

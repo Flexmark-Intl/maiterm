@@ -142,7 +142,21 @@ impl Rig {
     }
 
     fn ctx(&self) -> Ctx<'_, Stub> {
-        Ctx { data: &self.data, fuses: self.fuses, window: Stub(self.seen.clone()), save: ok_save, preflight: ok_preflight }
+        self.ctx_saving(ok_save)
+    }
+
+    fn ctx_saving(&self, save: fn(&AppData) -> Result<(), String>) -> Ctx<'_, Stub> {
+        Ctx { data: &self.data, fuses: self.fuses, window: Stub(self.seen.clone()), save, preflight: ok_preflight }
+    }
+
+    /// The real memory: a file only it has.
+    fn real_memory(&self) {
+        fs::write(self.caller.paths.memory().join("notes.md"), "old notes").unwrap();
+        fs::write(self.caller.paths.memory_record(), "{\"v\":1,\"real\":true}").unwrap();
+    }
+
+    fn has_real_memory(&self, dir: &Path) -> bool {
+        fs::read_to_string(dir.join("notes.md")).is_ok_and(|t| t == "old notes")
     }
 
     fn hive(&self) -> Hive {
@@ -185,7 +199,8 @@ impl Rig {
         let rec = FinishRecord {
             id: "F-1".into(),
             at: at.into(),
-            at_ms: 1_700_000_000_000,
+            // A minute from now: after every commit the test made so far.
+            at_ms: crate::hive::fuses::now_ms() + 60_000,
             summary: "All criteria met.\nLogin landed in L-1.\n\nMore detail".into(),
             abandoned: abandoned.iter().map(|w| FinishAbandoned { worker: w.to_string(), ..FinishAbandoned::default() }).collect(),
             ..FinishRecord::default()
@@ -254,6 +269,24 @@ fn a_branch_the_done_report_abandoned_is_not_pending() {
     rig.finish_record("2026-10-20T00:00:00.000Z", &["#1 api"]);
     let st = standing(&rig.hive(), &rig.caller.paths, false, true);
     assert_eq!(st.unlanded.iter().map(|u| u.badge).collect::<Vec<_>>(), vec![2]);
+    // Restarted after the report and committed again: listed, abandoned or not.
+    let later = format!("@{} +0000", crate::hive::fuses::now_ms() / 1000 + 120);
+    git(&rig.web, &["checkout", "-q", "hive/ship--api"]);
+    fs::write(rig.web.join("later.txt"), "later\n").unwrap();
+    git(&rig.web, &["add", "-A"]);
+    let out = Command::new("git")
+        .current_dir(&rig.web)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_COMMITTER_DATE", &later)
+        .env("GIT_AUTHOR_DATE", &later)
+        .args(["-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--no-verify", "-m", "later"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    git(&rig.web, &["checkout", "-q", "main"]);
+    let st = standing(&rig.hive(), &rig.caller.paths, false, true);
+    assert_eq!(st.unlanded.iter().map(|u| u.badge).collect::<Vec<_>>(), vec![1, 2], "committed after the report");
     // A report from before this goal started abandons nothing of it.
     rig.edit_hive(|h| h.chapters.push(HiveChapter { ended_at: "2026-10-25T00:00:00.000Z".into(), ..HiveChapter::default() }));
     let hive = rig.hive();
@@ -383,6 +416,7 @@ async fn a_new_goal_retires_archives_and_relaunches_the_queen_fresh() {
     fs::write(paths.memory().join("notes.md"), "old notes").unwrap();
     let attached = paths.root.join("new-attachment.md");
     fs::write(&attached, "new").unwrap();
+    rig.data.write().windows[0].workspaces[0].panes[0].tabs[0].follow_ups.push(follow_up("f1"));
 
     let mut s = spec("Ship billing");
     s.keep_memory = false;
@@ -414,6 +448,8 @@ async fn a_new_goal_retires_archives_and_relaunches_the_queen_fresh() {
     assert!(!paths.memory().join("notes.md").exists());
     assert!(crate::hive::launch::kickoff_pending(&paths.coordinator_task()), "the fresh session is told its kickoff");
     assert_eq!(last_session_in(&paths.coordinator_task(), h.chapter()), None, "no --resume of the old session");
+    assert!(rig.data.read().windows[0].workspaces[0].panes[0].tabs[0].follow_ups.is_empty(), "the old goal's follow-ups never reach the fresh queen");
+    assert!(!in_progress(&paths.root), "the marker is gone once the record is saved");
 
     let seen = rig.seen.lock().unwrap();
     assert_eq!(seen.stopped, vec!["coord".to_string()], "the queen was stopped (the worker had no agent)");
@@ -438,14 +474,12 @@ fn kept_memory_names_the_new_goal_unless_the_human_changed_the_line() {
         crate::hive::memory::record::save(p, &rec).unwrap();
     };
     seed("Ship the login");
-    let dir = p.chapter(1);
-    fs::create_dir_all(&dir).unwrap();
-    set_aside(&rig.hive(), p, &dir, true, "Ship billing").unwrap();
+    retitle_memory_goal(&rig.hive(), p, "Ship billing");
     let text = fs::read_to_string(p.memory_index()).unwrap();
     assert!(text.contains("- Goal: Ship billing") && !text.contains("Ship the login"), "{text}");
 
     seed("Something the human wrote");
-    set_aside(&rig.hive(), p, &dir, true, "Ship billing").unwrap();
+    retitle_memory_goal(&rig.hive(), p, "Ship billing");
     assert!(fs::read_to_string(p.memory_index()).unwrap().contains("Something the human wrote"));
 }
 
@@ -476,4 +510,99 @@ async fn asking_a_done_queen_to_land_wakes_the_hive() {
     rig.seen.lock().unwrap().front.insert("coord".into(), Front::Job);
     ask_queen_to_land(&rig.ctx(), &rig.caller).await.unwrap();
     assert_eq!(rig.seen.lock().unwrap().delivered.len(), 1);
+}
+
+fn follow_up(id: &str) -> crate::state::workspace::FollowUp {
+    crate::state::workspace::FollowUp {
+        id: id.into(),
+        text: "check the deploy".into(),
+        due: crate::state::workspace::FollowUpDue { kind: "at".into(), ..Default::default() },
+        author: "agent".into(),
+        created_at: "2026-10-30T00:00:00Z".into(),
+        expires_at: None,
+    }
+}
+
+#[tokio::test]
+async fn a_bad_attachment_refuses_before_anything_moves() {
+    let rig = Rig::new("badfile", STATUS_DONE);
+    rig.real_memory();
+    rig.worker(1, "api", worker::PHASE_STOPPED, 0, 0);
+    let mut s = spec("Ship billing");
+    s.keep_memory = false;
+    s.brief_files = vec![rig.caller.paths.root.join("missing.md").to_string_lossy().into()];
+    let err = new_goal(&rig.ctx(), &rig.caller, s.clone()).await.unwrap_err();
+    assert!(err.contains("isn't there"), "{err}");
+    let big = rig.caller.paths.root.join("big.bin");
+    fs::write(&big, vec![0u8; (crate::hive::create::MAX_BRIEF_FILE_BYTES + 1) as usize]).unwrap();
+    s.brief_files = vec![big.to_string_lossy().into()];
+    assert!(new_goal(&rig.ctx(), &rig.caller, s).await.unwrap_err().contains("over 5 MB"));
+    assert!(rig.has_real_memory(&rig.caller.paths.memory()), "memory never moved");
+    assert!(!rig.caller.paths.chapters().exists(), "nothing archived");
+    assert_eq!(worker::read_worker(&rig.caller.paths.task("t-api")).unwrap().phase, worker::PHASE_STOPPED, "nobody retired");
+    assert!(!in_progress(&rig.caller.paths.root));
+}
+
+#[tokio::test]
+async fn a_failed_save_puts_the_memory_back_and_a_retry_never_deletes_it() {
+    let rig = Rig::new("retry", STATUS_DONE);
+    rig.real_memory();
+    let p = rig.caller.paths.clone();
+    let mut s = spec("Ship billing");
+    s.keep_memory = false;
+    fn bad_save(_: &AppData) -> Result<(), String> {
+        Err("disk full".into())
+    }
+    let err = new_goal(&rig.ctx_saving(bad_save), &rig.caller, s.clone()).await.unwrap_err();
+    assert!(err.contains("disk full"), "{err}");
+    assert_eq!(rig.hive().status, STATUS_DONE, "the old goal stands");
+    assert!(rig.has_real_memory(&p.memory()), "put back after the failed save");
+    assert!(!p.chapter(1).join("memory").exists());
+
+    // A crash after the move left the real memory in the chapter and the seed live.
+    fs::rename(p.memory(), p.chapter(1).join("memory")).unwrap();
+    fs::create_dir_all(p.memory()).unwrap();
+    fs::write(p.memory_index(), "seed").unwrap();
+    // A retry that keeps memory starts the new goal with the real one.
+    let mut keep = s.clone();
+    keep.keep_memory = true;
+    new_goal(&rig.ctx(), &rig.caller, keep).await.unwrap();
+    assert!(rig.has_real_memory(&p.memory()), "the archived memory came back, not the seed");
+    // Each live folder a restore replaced is set aside in the chapter, never deleted: the seed the
+    // failed save made, and the one the crash left.
+    let kept_seed = fs::read_dir(p.chapter(1)).unwrap().flatten().any(|e| fs::read_to_string(e.path().join("MEMORY.md")).is_ok_and(|t| t == "seed"));
+    assert!(kept_seed, "the crash's seed is set aside, not deleted");
+}
+
+#[tokio::test]
+async fn a_retry_that_sets_memory_aside_archives_the_real_one() {
+    let rig = Rig::new("retry2", STATUS_PAUSED);
+    rig.real_memory();
+    let p = rig.caller.paths.clone();
+    fs::create_dir_all(p.chapter(1)).unwrap();
+    fs::rename(p.memory(), p.chapter(1).join("memory")).unwrap();
+    fs::create_dir_all(p.memory()).unwrap();
+    fs::write(p.memory_index(), "seed").unwrap();
+    let mut s = spec("Ship billing");
+    s.keep_memory = false;
+    new_goal(&rig.ctx(), &rig.caller, s).await.unwrap();
+    assert!(rig.has_real_memory(&p.chapter(1).join("memory")), "the real memory is the archived one");
+    assert!(fs::read_to_string(p.memory_index()).unwrap().contains("- Goal: Ship billing"));
+}
+
+#[test]
+fn a_second_spawn_of_a_title_numbered_past_an_old_goal_is_refused() {
+    let rig = Rig::new("dup", STATUS_ACTIVE);
+    rig.edit_hive(|h| h.chapters.push(HiveChapter::default()));
+    let hive = rig.hive();
+    let old = WorkerRecord { slug: "login-api".into(), title: "Login API".into(), badge: 1, chapter: 0, ..WorkerRecord::default() };
+    let now = WorkerRecord { slug: "login-api-2".into(), title: "Login API".into(), badge: 2, chapter: 1, ..WorkerRecord::default() };
+    let args = |title: &str| crate::hive::tools::SpawnArgs { title: title.into(), role: "backend".into(), brief: "b".into(), ..Default::default() };
+    let err = crate::hive::tools::validate(&hive, &[old.clone(), now.clone()], args("Login API")).unwrap_err();
+    assert!(err.contains("Worker #2"), "{err}");
+    // Only the old goal's worker holds it: numbered, not refused.
+    assert!(crate::hive::tools::validate(&hive, &[old], args("Login API")).is_ok());
+    // A different title that happens to end in a number is no duplicate.
+    let phase = WorkerRecord { slug: "phase-2".into(), title: "Phase 2".into(), badge: 3, chapter: 1, ..WorkerRecord::default() };
+    assert!(crate::hive::tools::validate(&hive, &[phase], args("Phase")).is_ok());
 }

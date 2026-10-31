@@ -120,6 +120,9 @@ pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     /// Rust wrote the workspace's task list itself (a row maiTerm asks the human on): the tasks
     /// store adopts it (`mailink-tasks-changed`), or its next whole-list persist drops the row.
     fn tasks_changed(&self, _workspace_id: &str, _tasks: &[crate::state::Task], _workstreams: &[crate::state::Workstream]) {}
+    /// Rust changed a tab's follow-ups (a New goal cleared the queen's): the window's follow-ups
+    /// store mirrors the list (`follow-ups-changed`).
+    fn follow_ups_changed(&self, _workspace_id: &str, _tab_id: &str, _list: &[crate::state::workspace::FollowUp]) {}
     /// Rust changed the Hive's record (a checkpoint handed over or back): the window's mirror follows.
     fn hive_changed(&self, _workspace_id: &str, _hive: &super::record::Hive) {}
     /// Assets were filed or changed (`hive-gallery-changed`): the gallery view refetches.
@@ -198,6 +201,14 @@ impl HiveWindow for AppWindow {
     fn deliver_through_pause(&self, tab: &str, text: String, what: &'static str) -> impl Future<Output = Sent> + Send {
         let (this, tab) = (self.clone(), tab.to_string());
         async move { super::deliver::deliver_through_pause(&this.app, &this.handle, &tab, &text, what).await }
+    }
+
+    fn follow_ups_changed(&self, workspace_id: &str, tab_id: &str, list: &[crate::state::workspace::FollowUp]) {
+        use tauri::Emitter;
+        let payload = serde_json::json!({ "workspace_id": workspace_id, "tab_id": tab_id, "follow_ups": list });
+        if let Err(e) = self.handle.emit_to(self.label.as_str(), crate::watch::CHANGED_EVENT, payload) {
+            log::warn!("hive: follow-ups-changed not sent to window {}: {e}", self.label);
+        }
     }
 
     fn front(&self, tab: &str) -> impl Future<Output = Front> + Send {
