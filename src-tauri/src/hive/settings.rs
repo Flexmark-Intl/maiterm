@@ -791,7 +791,9 @@ pub fn worker_settings_json(hive: &Hive, record: &LaunchRecord, w: &WorkerRecord
                 "allowAllUnixSockets": false,
                 // Blocked even if another source allows them: no remote is reachable, so no
                 // agent pushes (§7.3).
-                "deniedDomains": ctx.remote_hosts,
+                // maiTerm's own `?alias` markers (an alias ssh couldn't resolve) are for the refusal
+                // logic only: never a domain in Claude's settings.
+                "deniedDomains": denied_domains(&ctx.remote_hosts),
             },
         },
         // Every Hive hook is the gate or maiTerm's observer; nothing may switch them off.
@@ -802,14 +804,18 @@ pub fn worker_settings_json(hive: &Hive, record: &LaunchRecord, w: &WorkerRecord
     }))
 }
 
+/// The remotes' hosts as `deniedDomains` takes them: without the unresolved-alias markers.
+pub fn denied_domains(remote_hosts: &[String]) -> Vec<String> {
+    remote_hosts.iter().filter(|h| !h.starts_with(super::gallery::budget::UNRESOLVED_ALIAS)).cloned().collect()
+}
+
 /// A worker's network allowlist (§14.16): the package registries, for a builder (not a
 /// reviewer) the Hive's worker hosts (§3.4) and, for a media worker (`generates`), its generator
 /// hosts, minus anything that reaches a repo's remote, which `deniedDomains` also lists. The hosts
 /// were checked when they were saved; checked again here, since the state file is plain JSON, and
 /// a remote added since is taken out all the same.
 pub fn worker_domains(hive: &Hive, remote_hosts: &[String], builder: bool, generates: bool) -> Vec<String> {
-    use super::gallery::budget::{host_covers, normalize_host};
-    let remotes: Vec<String> = remote_hosts.iter().map(|h| h.to_ascii_lowercase()).collect();
+    use super::gallery::budget::{normalize_host, reaches_remote};
     let chosen: &[String] = if generates { &hive.settings.gallery.generator_hosts } else { &[] };
     let generators = chosen.iter().filter_map(|h| {
         normalize_host(h).map_err(|e| log::warn!("hive {}: generator host left out: {e}", hive.id)).ok()
@@ -820,7 +826,9 @@ pub fn worker_domains(hive: &Hive, remote_hosts: &[String], builder: bool, gener
     });
     let mut out: Vec<String> = Vec::new();
     for d in PACKAGE_REGISTRIES.iter().map(|d| d.to_string()).chain(granted).chain(generators) {
-        if !remotes.iter().any(|r| host_covers(&d, r)) && !out.contains(&d) {
+        // The one rule every grant passes (`budget::reaches_remote`), so a saved host refused
+        // since (`ssh.github.com` beside a github.com remote) is dropped here too.
+        if reaches_remote(&d, remote_hosts).is_none() && !out.contains(&d) {
             out.push(d);
         }
     }
@@ -986,6 +994,23 @@ mod tests {
         assert_eq!(ssh_hostname_with(&fake("same", "echo hostname corp"), "corp", SSH_G_TIMEOUT), Ok(None));
         assert_eq!(ssh_hostname_with(&fake("ok2", "echo hostname x.org"), "-oProxyCommand=x", SSH_G_TIMEOUT), Err(()), "never an option");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The regression review: the launch re-check uses the grant's own rule, so a saved host
+    /// refused since is dropped, and maiTerm's `?alias` markers never reach Claude's settings.
+    #[test]
+    fn the_launch_recheck_drops_a_refused_host_and_no_marker_is_a_domain() {
+        let (mut h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        h.settings.worker_hosts = vec!["ssh.github.com".into(), "docs.example.com".into()];
+        let remotes = vec!["github.com".to_string(), format!("{}corp", super::super::gallery::budget::UNRESOLVED_ALIAS)];
+        let d = worker_domains(&h, &remotes, true, false);
+        assert!(d.contains(&"docs.example.com".to_string()) && !d.contains(&"ssh.github.com".to_string()), "{d:?}");
+        assert_eq!(denied_domains(&remotes), vec!["github.com".to_string()]);
+        let mut ctx = worker_ctx();
+        ctx.remote_hosts = remotes;
+        let s = worker_settings_json(&h, &crate::hive::launch::worker_record(&h, &p, &w), &w, &p, &ctx, &env()).unwrap();
+        let denied = strings(&s["sandbox"]["network"]["deniedDomains"]);
+        assert_eq!(denied, vec!["github.com".to_string()], "no marker in Claude's settings");
     }
 
     /// The final review: a remote's `insteadOf` rewrite is what git really reaches, and only the

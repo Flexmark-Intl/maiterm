@@ -292,12 +292,18 @@ pub fn apply_to(hive: &mut Hive, c: &SettingsChange) {
 
 /// Checked against the record as it is under the write lock, then saved and announced. The new
 /// record and the lines that describe what changed.
-fn write<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, c: &SettingsChange, by: By) -> Result<(Hive, Vec<String>), String> {
-    let remotes = super::settings::hive_remote_hosts(&caller.hive);
+/// The Hive's remote hosts (git, and `ssh -G` up to its timeout per alias), read once per request
+/// off the async thread (the regression review).
+async fn remotes_of(hive: &Hive) -> Result<Vec<String>, String> {
+    let h = hive.clone();
+    super::tools::blocking(move || Ok(super::settings::hive_remote_hosts(&h))).await
+}
+
+fn write<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, c: &SettingsChange, by: By, remotes: &[String]) -> Result<(Hive, Vec<String>), String> {
     let mut outcome: Result<Vec<String>, String> = Err("This Hive is gone.".to_string());
     // A refused check leaves the record as it was (saved again, unchanged: harmless).
     let hive = super::finish::write_status(ctx, caller, &[STATUS_ACTIVE, STATUS_PAUSED], None, |h| {
-        outcome = check(h, c, by, &remotes).map(|ch| {
+        outcome = check(h, c, by, remotes).map(|ch| {
             apply_to(h, &ch.change);
             ch.lines
         });
@@ -525,11 +531,11 @@ pub(crate) fn hosts_decision_line(hive_id: &str, c: &SettingsChange, reason: &st
 /// checkpoint, within the limits Rust holds for anyone (never a repo remote's host, localhost, a
 /// private address, a port, past `MAX_WORKER_HOSTS`). The human hears of it, and the decision
 /// log and the settings log keep it; each open sandbox blocker it settles is answered as hers.
-async fn coordinator_hosts<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, change: &SettingsChange, reason: &str) -> Result<Value, String> {
+async fn coordinator_hosts<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, change: &SettingsChange, reason: &str, remotes: &[String]) -> Result<Value, String> {
     // What actually changes, normalised: checked again under the write lock by `write`.
     let current = super::autonomy::current_hive(ctx, caller).ok_or("This Hive is gone.")?;
-    let checked = check(&current, change, By::Coordinator, &super::settings::hive_remote_hosts(&current))?.change;
-    let (hive, lines) = write(ctx, caller, &checked, By::Coordinator)?;
+    let checked = check(&current, change, By::Coordinator, remotes)?.change;
+    let (hive, lines) = write(ctx, caller, &checked, By::Coordinator, remotes)?;
     log_line(caller, "coordinator", &lines, Some(reason));
     let sentence = hosts_sentence(&checked, reason);
     let line = hosts_decision_line(&hive.id, &checked, reason);
@@ -571,17 +577,19 @@ pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
             return Err("Change hosts in a call of their own: they apply at once, and the rest follows the Settings checkpoint.".to_string());
         }
         // She grants alone: a name must resolve now, and nowhere home.
-        refuse_private_hosts(&change.add_hosts, true, &ip_remotes(&super::settings::hive_remote_hosts(&hive))).await?;
-        return coordinator_hosts(ctx, caller, &change, reason).await;
+        let remotes = remotes_of(&hive).await?;
+        refuse_private_hosts(&change.add_hosts, true, &ip_remotes(&remotes)).await?;
+        return coordinator_hosts(ctx, caller, &change, reason, &remotes).await;
     }
     // The human's limits apply on approval, but a card that can't apply now isn't filed.
-    let checked = check(&hive, &change, By::Approved, &super::settings::hive_remote_hosts(&hive))?;
+    let remotes = remotes_of(&hive).await?;
+    let checked = check(&hive, &change, By::Approved, &remotes)?;
     // A raise of the cap, or a setup (it runs outside any sandbox), is the human's whoever holds
     // the checkpoint: the whole change goes on a card.
     let raises = change.cap.is_some_and(|c| c > hive.cap);
     let setup = checked.change.folders.iter().any(|f| f.setup.is_some());
     if !checkpoints::asks(&hive, SETTINGS) && !raises && !setup {
-        let (_, lines) = write(ctx, caller, &change, By::Coordinator)?;
+        let (_, lines) = write(ctx, caller, &change, By::Coordinator, &remotes)?;
         log_line(caller,"coordinator", &lines, reason.as_deref());
         ctx.window.settings_changed(&caller.workspace_id, &format!("The queen changed this Hive\u{2019}s settings: {}.", lines.join("; ")));
         ctx.window.poll_waiters(&caller.workspace_id);
@@ -617,8 +625,9 @@ pub(crate) async fn change_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
 
 /// Hive settings: the human's own change. The coordinator is told.
 pub(crate) async fn set_by_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, change: &SettingsChange) -> Result<Hive, String> {
-    refuse_private_hosts(&change.add_hosts, false, &ip_remotes(&super::settings::hive_remote_hosts(&caller.hive))).await?;
-    let (hive, lines) = write(ctx, caller, change, By::Human)?;
+    let remotes = remotes_of(&caller.hive).await?;
+    refuse_private_hosts(&change.add_hosts, false, &ip_remotes(&remotes)).await?;
+    let (hive, lines) = write(ctx, caller, change, By::Human, &remotes)?;
     log_line(caller,"human", &lines, None);
     let running = relaunch_note(caller, change).await.map(|s| format!("\n{s}")).unwrap_or_default();
     tell_coordinator(ctx, caller, format!("[maiTerm] Your human changed this Hive\u{2019}s settings:{}{running}", bulleted(&lines))).await;
@@ -632,8 +641,11 @@ pub(crate) async fn approved_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     let change: Result<SettingsChange, String> =
         args.get("change").cloned().ok_or_else(|| "it had no change".to_string()).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()));
     let res = match change {
-        Ok(c) => match refuse_private_hosts(&c.add_hosts, false, &ip_remotes(&super::settings::hive_remote_hosts(&caller.hive))).await {
-            Ok(()) => write(ctx, caller, &c, By::Approved).map(|(h, lines)| (h, lines, c)),
+        Ok(c) => match remotes_of(&caller.hive).await {
+            Ok(remotes) => match refuse_private_hosts(&c.add_hosts, false, &ip_remotes(&remotes)).await {
+                Ok(()) => write(ctx, caller, &c, By::Approved, &remotes).map(|(h, lines)| (h, lines, c)),
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         },
         Err(e) => Err(e),

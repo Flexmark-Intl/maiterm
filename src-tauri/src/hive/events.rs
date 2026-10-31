@@ -330,7 +330,7 @@ pub(crate) fn sandbox_question_hosts(question: &str) -> Option<Vec<String>> {
 /// What the queen may do about one refused host, in maiTerm's words: grant it, or why it can't be
 /// granted whoever asks (§6.7). `remotes` are the Hive's repo remote hosts.
 fn host_remedy(host: &str, remotes: &[String]) -> String {
-    use super::gallery::budget::{host_covers, normalize_host};
+    use super::gallery::budget::{normalize_host, reaches_remote};
     let local = host.parse::<std::net::IpAddr>().map(|ip| crate::host_guard::is_home(&ip));
     match normalize_host(host) {
         _ if local == Ok(true) => format!(
@@ -338,8 +338,9 @@ fn host_remedy(host: &str, remotes: &[String]) -> String {
              worker uses hiveRun with serve: true, hiveScreenshot and hiveFetch."
         ),
         Err(_) => format!("{host} can\u{2019}t be allowed for workers (only public host names can)."),
-        Ok(h) if remotes.iter().any(|r| host_covers(&h, &r.to_ascii_lowercase())) => {
-            format!("{host} is where this Hive\u{2019}s repos push: no worker may reach it.")
+        // The same rule a grant meets, so she's never told to grant what will be refused.
+        Ok(h) if reaches_remote(&h, remotes).is_some() => {
+            format!("{host} reaches where this Hive\u{2019}s repos push: it can\u{2019}t be granted, so refuse it with what the worker does instead.")
         }
         Ok(h) => format!(
             "If the task needs {h} (a package registry, docs, an API the work talks to), allow it: hiveChangeSettings \
@@ -352,7 +353,9 @@ fn host_remedy(host: &str, remotes: &[String]) -> String {
 async fn file_sandbox_blocker<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w: &WorkerRecord, fresh: &[Violation], command: Option<&str>) {
     let names: Vec<String> = fresh.iter().map(describe).collect();
     let now = crate::commands::workspace::iso_now();
-    let remotes = super::settings::hive_remote_hosts(&caller.hive);
+    // git and `ssh -G`: off the async thread.
+    let h = caller.hive.clone();
+    let remotes = blocking(move || Ok(super::settings::hive_remote_hosts(&h))).await.unwrap_or_default();
     let mut context: Vec<String> = Vec::new();
     if let Some(c) = command {
         context.push(format!("While running: `{c}`"));
@@ -401,6 +404,18 @@ pub(crate) async fn notify<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, tex
 mod tests {
     use super::*;
     use Action::*;
+
+    /// The regression review: the remedy uses the grant's rule, so the queen is never told to
+    /// grant what `hiveChangeSettings` would refuse.
+    #[test]
+    fn the_remedy_never_offers_a_host_the_grant_refuses() {
+        let remotes = vec!["github.com".to_string()];
+        for h in ["api.github.com", "ssh.github.com", "github.com"] {
+            let r = host_remedy(h, &remotes);
+            assert!(r.contains("can\u{2019}t be granted") && !r.contains("add_hosts"), "{h}: {r}");
+        }
+        assert!(host_remedy("registry.example.org", &remotes).contains("add_hosts"));
+    }
 
     #[test]
     fn hooks_route_to_their_actions() {
