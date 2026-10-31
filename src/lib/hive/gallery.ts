@@ -151,6 +151,51 @@ export function filterToQuery(q: GalleryQuery): GalleryListFilter {
 
 export const isFiltered = (q: GalleryQuery) => JSON.stringify({ ...q, kind: '' }) !== JSON.stringify({ ...defaultQuery() });
 
+/** One active filter as the bar shows it: a removable chip, and what removing it changes. */
+export interface FilterChip {
+  key: keyof GalleryQuery;
+  label: string;
+  clear: Partial<GalleryQuery>;
+}
+
+export interface FilterNames {
+  /** `task:<id>` and plain task ids: the worker's label (`#3 Hero`) and its task's title. */
+  worker?: (taskId: string) => string | undefined;
+  task?: (taskId: string) => string | undefined;
+  collection?: (id: string) => string | undefined;
+}
+
+export const STATUS_FILTERS = [
+  { key: '', label: 'Any status' },
+  { key: 'picked', label: 'Picked' },
+  { key: 'final', label: 'Final' },
+  { key: 'rejected', label: 'Rejected' },
+  { key: 'none', label: 'No status' },
+] as const;
+
+/** The filters in force, in the bar's order, each with what clears it. The kind is a tab, so
+ *  never a chip. */
+export function activeFilterChips(q: GalleryQuery, names: FilterNames = {}): FilterChip[] {
+  const out: FilterChip[] = [];
+  const s = q.search.trim();
+  if (s) out.push({ key: 'search', label: `“${s.length > 24 ? `${s.slice(0, 23)}…` : s}”`, clear: { search: '' } });
+  if (q.madeBy) {
+    const who =
+      q.madeBy === 'human' ? 'You' : q.madeBy === 'coordinator' ? 'Queen' : q.madeBy.startsWith('task:') ? names.worker?.(q.madeBy.slice(5)) ?? 'a worker' : q.madeBy;
+    out.push({ key: 'madeBy', label: `Made by ${who}`, clear: { madeBy: '' } });
+  }
+  if (q.task) out.push({ key: 'task', label: `For ${names.task?.(q.task) ?? q.task}`, clear: { task: '' } });
+  if (q.status) out.push({ key: 'status', label: STATUS_FILTERS.find((x) => x.key === q.status)?.label ?? q.status, clear: { status: '' } });
+  if (q.starred) out.push({ key: 'starred', label: 'Starred', clear: { starred: false } });
+  if (q.tag) out.push({ key: 'tag', label: `Tag ${q.tag}`, clear: { tag: '' } });
+  if (q.collection) out.push({ key: 'collection', label: `In ${names.collection?.(q.collection) ?? 'a collection'}`, clear: { collection: '' } });
+  if (q.trash) out.push({ key: 'trash', label: 'With the trash', clear: { trash: false } });
+  return out;
+}
+
+/** Clear all: every filter and the search back to none, the kind tab kept. */
+export const clearedQuery = (q: GalleryQuery): GalleryQuery => ({ ...defaultQuery(), kind: q.kind });
+
 // ── Variants and groups ──
 
 /** §10.4: a child whose parent is in the set folds under it unless "Show variants" is on. The

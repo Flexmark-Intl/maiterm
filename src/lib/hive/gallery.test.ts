@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  activeFilterChips,
   cardTopRow,
+  clearedQuery,
   defaultQuery,
   filterToQuery,
   fmtDuration,
@@ -219,6 +221,28 @@ describe('galleryKey', () => {
     expect(galleryKey(k(' '), false, true)).toBeNull();
     expect(galleryKey(k('ArrowRight'), false, true)).toEqual({ kind: 'move', dir: 'right' });
     expect(galleryKey(k('Escape'), false, true)).toEqual({ kind: 'back' });
+  });
+});
+
+describe('filter chips', () => {
+  it('lists what is in force with what clears it, never the kind', () => {
+    expect(activeFilterChips({ ...defaultQuery(), kind: 'image' })).toEqual([]);
+    const q = { ...defaultQuery(), madeBy: 'task:t-1', task: 't-2', status: 'none', starred: true, tag: 'warm', collection: 'c1', search: ' sky ', trash: true };
+    const chips = activeFilterChips(q, { worker: () => '#3 Hero', task: () => 'Hero shot', collection: () => 'Finals' });
+    expect(chips.map((c) => c.label)).toEqual(['“sky”', 'Made by #3 Hero', 'For Hero shot', 'No status', 'Starred', 'Tag warm', 'In Finals', 'With the trash']);
+    let after = q;
+    for (const c of chips) after = { ...after, ...c.clear };
+    expect(after).toEqual(defaultQuery());
+  });
+
+  it('names you and the queen, and survives a worker it cannot name', () => {
+    expect(activeFilterChips({ ...defaultQuery(), madeBy: 'human' })[0].label).toBe('Made by You');
+    expect(activeFilterChips({ ...defaultQuery(), madeBy: 'coordinator' })[0].label).toBe('Made by Queen');
+    expect(activeFilterChips({ ...defaultQuery(), madeBy: 'task:gone' })[0].label).toBe('Made by a worker');
+  });
+
+  it('clears all but the kind', () => {
+    expect(clearedQuery({ ...defaultQuery(), kind: 'video', tag: 'x', search: 'y', trash: true })).toEqual({ ...defaultQuery(), kind: 'video' });
   });
 });
 
