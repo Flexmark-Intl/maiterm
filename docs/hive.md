@@ -1056,7 +1056,20 @@ can't be denied either: Claude writes its cwd file there, and denying it breaks 
 - maiTerm sets `CLAUDE_CODE_TMPDIR` per worker (`wt.noindex/<worker>/claude-tmp/`, §6.2), which
   moves Claude's own state (tasks, sockets) out of the shared folder;
 - briefs say `mktemp -p "$TMPDIR"` (plain `mktemp` fails in the sandbox) and that anything in
-  temp is visible to, and changeable by, every other worker.
+  temp is visible to, and changeable by, every other worker;
+- a scaffolder that writes `.vscode/` (`npx sv create`: EPERM, since Claude's sandbox denies
+  `**/.vscode/**`) runs in `mktemp -d -p "$TMPDIR"` and is copied into the worktree without
+  `.vscode`, or with its own flag to skip editor config (the worker brief, 2026-10-31). The brief
+  also says never to ask anyone for a sandbox or Claude setting (a worker asked Darryl to set
+  `allowLocalBinding`), and to run and look at the app with `hiveRun` `serve: true`,
+  `hiveScreenshot` and `hiveFetch`.
+
+**Workers have no skills.** The Tools row lists the human's `~/.claude/skills` (`skill:…`), but a
+worker launches with `--setting-sources project` (a reviewer `local`), so none load: a live
+worker told it had `skill:langsys` and `skill:browse` got "Unknown skill" for both, after its
+queen told it to load one. A worker's brief lists the Hive's tools without skills and says it has
+none; the queen's says skills are hers alone and their substance goes in a spawn brief. Giving
+workers skills (a copy under their own settings) is open.
 
 **Localhost** is closed by default (measured, spike 10). Two settings open it, and both open
 **every** port, maiTerm's 8765 and the MCP proxy included: `allowLocalBinding: true`, and a bare

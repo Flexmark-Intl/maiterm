@@ -28,6 +28,22 @@ fn shell_safe(s: &str, max: usize) -> String {
 
 const TITLE_IN_RULES: usize = 120;
 
+/// How the Tools row names a skill (`create::skill_tools`).
+const SKILL_PREFIX: &str = "skill:";
+
+/// The Hive's tools a worker really has: not its human's skills, which load from user settings a
+/// worker never reads (`--setting-sources project`, or `local` for a reviewer). A live worker
+/// told it had `skill:langsys` got "Unknown skill: langsys" (2026-10-31).
+fn worker_tools_line(hive: &Hive) -> String {
+    let tools: Vec<&str> = hive.tools.iter().map(String::as_str).filter(|t| !t.starts_with(SKILL_PREFIX)).collect();
+    let skills = hive.tools.len() > tools.len();
+    let none = if skills { " You have no skills (the Skill tool loads none of your human\u{2019}s): ask your coordinator for what one would tell you." } else { "" };
+    if tools.is_empty() {
+        return if skills { format!("-{none}\n") } else { String::new() };
+    }
+    format!("- Tools this Hive has: {}. A tool that isn\u{2019}t listed isn\u{2019}t there.{none}\n", tools.join(", "))
+}
+
 /// A gallery asset a worker starts from (`hiveSpawnWorker` inputs, §7.2), as its brief lists it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GalleryInput {
@@ -492,6 +508,12 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
     if !hive.tools.is_empty() {
         b.push_str(&format!("- Tools this Hive has: {}. A tool that isn\u{2019}t listed isn\u{2019}t there.\n", hive.tools.join(", ")));
     }
+    if hive.tools.iter().any(|t| t.starts_with(SKILL_PREFIX)) {
+        b.push_str(
+            "- Skills (`skill:\u{2026}`) load in your session only. A worker runs without your human\u{2019}s user settings, so it \
+             has none of them: never tell a worker to load a skill. Put what it needs from one in its spawn brief.\n",
+        );
+    }
     b.push_str(
         "- Your maiTerm tools are in your tool list. If one you need is missing, ask your human with a blocker; never \
          substitute or mock it.\n",
@@ -589,8 +611,8 @@ pub fn worker_brief_md(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, task_br
                     format!("- **{}** (git, your worktree and working directory, lands to {lands}): `{wt}`, on branch `{branch}`.\n", f.name)
                 } else {
                     format!(
-                        "- **{}** (git, your worktree, lands to {lands}): `{wt}`, on branch `{branch}`. Run git here with `git -C {wt} …`: \
-                         `cd {wt} && git …` is refused.\n",
+                        "- **{}** (git, your worktree, lands to {lands}): `{wt}`, on branch `{branch}`. Run git here with `git -C {wt} …`, \
+                         the path written out: the gate can\u{2019}t expand a `$VAR` in it.\n",
                         f.name
                     )
                 }
@@ -620,8 +642,15 @@ pub fn worker_brief_md(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, task_br
          one you don't own, say so in your report instead of making it.\n\
          - When something is missing or you need a decision, block your task with a blocker. It goes to your coordinator, \
          who answers or asks your human. Never substitute or mock a missing tool, file or service.\n\
-         - The sandbox refuses network hosts and folders outside your own. A refusal is a blocker to report, never \
-         something to work around.\n\
+         - The sandbox refuses network hosts and folders outside your own. A refused host becomes a blocker for your \
+         coordinator by itself: don\u{2019}t file your own, carry on with what doesn\u{2019}t need it, and never work around it. \
+         **Never ask anyone to change a sandbox or Claude setting** (allowLocalBinding, allowed domains, permissions): \
+         maiTerm pins them, and nobody can change them for you.\n\
+         - To run the app and look at it, use `hiveRun` with `serve: true`, then `hiveScreenshot` and `hiveFetch`. Your own \
+         shell can\u{2019}t listen on a port.\n\
+         - A scaffolder that writes editor config (`npx sv create` makes `.vscode/`, which your sandbox refuses) runs in a \
+         fresh temp folder, `mktemp -d -p \"$TMPDIR\"`, and you copy the result into your worktree without `.vscode`; or \
+         pass the scaffolder\u{2019}s own flag to skip editor config, if it has one.\n\
          - Anything you produce that a person would look at (renders, video, audio, documents, screenshots, recordings) \
          goes in the gallery with `galleryAdd`, **with the recipe that made it** (tool, model, prompt, seed, settings): a \
          result without its recipe can't be iterated on. Render into your scratch folder first; a generator that answers \
@@ -640,9 +669,7 @@ pub fn worker_brief_md(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, task_br
     let worktrees: Vec<&str> = w.folders.iter().filter(|f| f.worktree.is_some()).map(|f| f.name.as_str()).collect();
     b.push_str(&deps_line(hive, &worktrees, true));
     b.push_str(&queued_lines(hive, worktrees, true));
-    if !hive.tools.is_empty() {
-        b.push_str(&format!("- Tools this Hive has: {}. A tool that isn\u{2019}t listed isn\u{2019}t there.\n", hive.tools.join(", ")));
-    }
+    b.push_str(&worker_tools_line(hive));
     if !hive.instructions.trim().is_empty() {
         b.push_str(&format!("\n## Rules from your human\n\n{}\n", hive.instructions.trim()));
     }
@@ -735,9 +762,7 @@ pub fn reviewer_brief_md(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, task_
             listed.join("; ")
         ));
     }
-    if !hive.tools.is_empty() {
-        b.push_str(&format!("- Tools this Hive has: {}. A tool that isn\u{2019}t listed isn\u{2019}t there.\n", hive.tools.join(", ")));
-    }
+    b.push_str(&worker_tools_line(hive));
     if !hive.instructions.trim().is_empty() {
         b.push_str(&format!("\n## Rules from your human\n\n{}\n", hive.instructions.trim()));
     }
@@ -792,6 +817,33 @@ mod tests {
         let b = worker_brief_md(&h, &p, &w, "", None, &[]);
         assert!(b.contains("setup ran in your worktrees") && b.contains("Nothing but the installs is queued"), "{b}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A live worker (2026-10-31) was told it had `skill:langsys` and `skill:browse`, got "Unknown
+    /// skill" for both, then asked its human to set allowLocalBinding. A worker's brief lists only
+    /// what it has and says what it does instead; the queen's says skills are hers alone.
+    #[test]
+    fn a_worker_is_told_only_the_tools_it_has_and_never_to_ask_for_sandbox_changes() {
+        let (mut h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        h.tools = vec!["mcp:langsys".into(), "skill:browse".into(), "skill:langsys".into()];
+        let b = worker_brief_md(&h, &p, &w, "", None, &[]);
+        assert!(b.contains("- Tools this Hive has: mcp:langsys.") && !b.contains("skill:"), "{b}");
+        assert!(b.contains("You have no skills"), "{b}");
+        assert!(b.contains("Never ask anyone to change a sandbox or Claude setting"), "{b}");
+        assert!(b.contains("`hiveRun` with `serve: true`, then `hiveScreenshot` and `hiveFetch`"), "{b}");
+        assert!(b.contains("mktemp -d -p \"$TMPDIR\"") && b.contains("without `.vscode`"), "{b}");
+        let reviewer = WorkerRecord { reviews: Some("t-auth".into()), ..w.clone() };
+        assert!(!reviewer_brief_md(&h, &p, &reviewer, "", None, &[]).contains("skill:"));
+        h.tools = vec!["skill:browse".into()];
+        assert_eq!(worker_tools_line(&h).matches("Tools this Hive has").count(), 0, "only skills: no empty list");
+        h.tools.clear();
+        assert_eq!(worker_tools_line(&h), "");
+
+        h.tools = vec!["skill:langsys".into()];
+        let q = brief_md(&h, &p, &PrecedentCounts::default());
+        assert!(q.contains("never tell a worker to load a skill"), "{q}");
+        assert!(q.contains("hiveChangeSettings {add_hosts, reason} only when the worker\u{2019}s task needs it"), "{q}");
+        assert!(q.contains("A worker\u{2019}s **action** blocker") && !q.contains("only your human can do it"), "{q}");
     }
 
     #[test]
