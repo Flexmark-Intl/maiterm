@@ -322,8 +322,9 @@ pub fn hive_hooks(script: &Path, known_newer: &[&str], gate_matcher: &str) -> Va
     Value::Object(hooks)
 }
 
-/// The coordinator's `--settings` file (§7.1): a normal agent tab's. No sandbox, no allow list and
-/// no permission mode: they come from the human's own settings, which its launch loads like any
+/// The coordinator's `--settings` file (§7.1): a normal agent tab's. No sandbox and no permission
+/// mode, and an allow list of only her own Hive and gallery tools by name: the rest comes from the
+/// human's own settings, which its launch loads like any
 /// tab's, so it reaches what they reach (a linked browser, its own MCP servers) and its
 /// permission prompts are the human's. The Hive's part: the memory folder, the command hooks
 /// (the gate on its shell refusing a push), the push denies, the Overlord's tools, and Edit
@@ -342,9 +343,23 @@ pub fn hive_settings_json(hive: &Hive, record: &LaunchRecord, paths: &HivePaths,
         // Absolute, the only kind Claude honours; re-passed on every launch or the first
         // compaction moves memory to the human's per-repo folder (§9, spike 1).
         "autoMemoryDirectory": paths.memory().to_string_lossy(),
-        "permissions": { "deny": deny_rules },
+        "permissions": { "allow": coordinator_allowed_tools(), "deny": deny_rules },
         "hooks": hive_hooks(&hooks.script, &hooks.known_newer, COORDINATOR_GATE_MATCHER),
     }))
+}
+
+/// The queen's own Hive and gallery tools, allowed BY NAME, never the server wildcard (§7.1):
+/// Darryl's call, 2026-10-31, after Claude's auto-mode classifier denied her `hiveChangeSettings`
+/// grant as "weakening security". Every limit on them is Rust's (remote hosts, localhost, spend
+/// stays the human's), so this only stops Claude second-guessing maiTerm's own tools; every other
+/// tool still follows the human's settings.
+fn coordinator_allowed_tools() -> Vec<String> {
+    let mcp = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
+    super::tools::COORDINATOR_TOOLS
+        .iter()
+        .chain(super::gallery::tools::COORDINATOR_GALLERY_TOOLS.iter())
+        .map(|t| format!("mcp__{mcp}__{t}"))
+        .collect()
 }
 
 /// What a worker's settings need from outside its own record, read at each launch.
@@ -875,7 +890,18 @@ mod tests {
         for key in ["sandbox", "disableAllHooks"] {
             assert!(s.get(key).is_none(), "{key}");
         }
-        assert!(s["permissions"].get("allow").is_none(), "no allow list: its human's settings decide");
+        // Only her own Hive and gallery tools are allowed, each by name: everything else is the
+        // human's settings' to decide.
+        let allow = strings(&s["permissions"]["allow"]);
+        let mcp = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
+        let ours: Vec<String> = crate::hive::tools::COORDINATOR_TOOLS
+            .iter()
+            .chain(crate::hive::gallery::tools::COORDINATOR_GALLERY_TOOLS.iter())
+            .map(|t| format!("mcp__{mcp}__{t}"))
+            .collect();
+        assert!(allow.contains(&format!("mcp__{mcp}__hiveChangeSettings")), "{allow:?}");
+        assert_eq!(allow, ours, "exactly her own tools, each by name");
+        assert!(allow.iter().all(|r| !r.contains('*') && r != &format!("mcp__{mcp}")), "never a wildcard: {allow:?}");
         assert!(s["permissions"].get("defaultMode").is_none());
         assert_eq!(s["autoMemoryDirectory"].as_str(), Some(&*crate::hive::launch::tests::sample_paths().memory().to_string_lossy()));
         let deny = strings(&s["permissions"]["deny"]);

@@ -1427,7 +1427,10 @@ any of the human's Claude tabs (`launch::coordinator_record`, `settings::hive_se
 - **Every setting source and the account's own MCP servers.** No `--setting-sources`, no
   `--strict-mcp-config`, no `--tools`, no `--permission-mode`: the human's settings decide its
   permission mode, its allow and deny rules and its sandbox (none, unless they set one), and its
-  permission prompts are theirs, on its terminal, like any tab's. maiTerm's MCP server comes from
+  permission prompts are theirs, on its terminal, like any tab's. One exception (Darryl,
+  2026-10-31): her `--settings` allows her own Hive and gallery tools, each by name, never the
+  server wildcard, because Claude's auto-mode classifier denied a `hiveChangeSettings` host grant
+  as "weakening security" while every limit on those tools is Rust's. maiTerm's MCP server comes from
   the account's `.claude.json`, as for every tab; `--mcp-config` carries maiTerm's entry only when
   that file has none (`settings::has_maiterm_server`), so one server is never named twice.
 - **Every tool a normal tab has.** `tools/list` is a normal tab's plus its Hive tools (it always
@@ -3444,10 +3447,11 @@ Decided 2026-10-23:
     - **Media CLIs** (ffmpeg, ImageMagick, sox, Blender) stay sandboxed and work because
       `allowWrite` names the worker's folders. `excludedCommands` is never used: an excluded
       command gets full disk and network.
-    - **A block is a blocker.** A `PostToolUseFailure` command hook parsing
-      `<sandbox_violations>` turns a sandbox refusal into a blocker
-      naming the host or path, routed to the coordinator, which raises its own blocker to the
-      human (§7.4); the fix is one click in Hive settings, not a worker working around it.
+    - **A block is a blocker.** `PostToolUseFailure` and `PostToolUse` command hooks parsing
+      `<sandbox_violations>` turn a sandbox refusal into an `action` blocker naming the host or
+      path, routed to the queen (§7.4). She grants a host herself with `hiveChangeSettings`
+      (2026-10-31: at once, within Rust's limits, logged and undoable in Hive settings), refuses
+      it with new instructions, or escalates; a worker never works around it.
     - **Native Windows** has no Claude sandbox, so with `failIfUnavailable` a Hive can't run
       there and the Create sheet says so; the conservative choice over an unsandboxed Hive (WSL
       is a later option, §12).
