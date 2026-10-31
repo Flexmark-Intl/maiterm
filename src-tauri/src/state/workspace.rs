@@ -1762,6 +1762,9 @@ pub struct HiveDefaults {
     /// Tool ids as `hive_detect_tools` reports them (`DetectedTool.id`). One not detected on
     /// this machine any more is dropped by the wizard, silently.
     pub tools: Vec<String>,
+    /// Skill packs (`DetectedTool.pack`) every detected member of which was picked: the wizard
+    /// picks the pack's CURRENT members too, so a skill the pack adds later comes with it.
+    pub packs: Vec<String>,
     pub coordinator_model: String,
     pub coordinator_effort: String,
     pub worker_model: String,
@@ -2698,6 +2701,7 @@ mod hive_defaults_tests {
         let mut p = Preferences::default();
         p.hive_defaults = HiveDefaults {
             tools: vec!["mcp:figma".into()],
+            packs: vec!["gstack".into()],
             coordinator_model: "opus".into(),
             coordinator_effort: "high".into(),
             worker_model: "sonnet".into(),

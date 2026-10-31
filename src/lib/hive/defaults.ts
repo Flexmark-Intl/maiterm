@@ -24,6 +24,7 @@ export const FALLBACK_CAP = 4;
 
 export const EMPTY_HIVE_DEFAULTS: HiveDefaults = {
   tools: [],
+  packs: [],
   coordinator_model: '',
   coordinator_effort: '',
   worker_model: '',
@@ -41,6 +42,7 @@ export function normalizeHiveDefaults(raw: Partial<HiveDefaults> | null | undefi
   const r = raw ?? {};
   return {
     tools: Array.isArray(r.tools) ? r.tools.filter((t): t is string => typeof t === 'string') : [],
+    packs: Array.isArray(r.packs) ? r.packs.filter((t): t is string => typeof t === 'string') : [],
     coordinator_model: r.coordinator_model ?? '',
     coordinator_effort: r.coordinator_effort ?? '',
     worker_model: r.worker_model ?? '',
@@ -70,6 +72,7 @@ export interface WizardStart {
   phone: HivePhone;
   rules: string;
   tools: string[];
+  packs: string[];
 }
 export function wizardStart(d: HiveDefaults): WizardStart {
   return {
@@ -83,7 +86,25 @@ export function wizardStart(d: HiveDefaults): WizardStart {
     phone: oneOf(d.phone, ['coordinator', 'all', 'none'] as const, BUILTIN.phone),
     rules: d.rules,
     tools: [...new Set(d.tools)],
+    packs: [...new Set(d.packs)],
   };
+}
+
+/** The default tool ids this machine has: the stored ids plus every current member of a stored
+ *  pack (a skill the pack added since it was saved included), minus anything not detected. */
+export function defaultToolIds(d: Pick<WizardStart, 'tools' | 'packs'>, detected: readonly HiveDetectedTool[]): string[] {
+  const members = detected.filter((t) => t.pack && d.packs.includes(t.pack)).map((t) => t.id);
+  return knownTools([...d.tools, ...members], detected);
+}
+
+/** The packs every detected member of which is picked: what Preferences stores as `packs`. */
+export function fullPacks(picked: ReadonlySet<string>, detected: readonly HiveDetectedTool[]): string[] {
+  const byPack = new Map<string, boolean>();
+  for (const t of detected) {
+    if (!t.pack) continue;
+    byPack.set(t.pack, (byPack.get(t.pack) ?? true) && picked.has(t.id));
+  }
+  return [...byPack].filter(([, all]) => all).map(([p]) => p).sort();
 }
 
 /** The ids that are detected on this machine, in their given order. A default tool that's
@@ -101,6 +122,7 @@ export function defaultsFromWizard(
 ): HiveDefaults {
   return {
     tools: [...new Set(w.tools)],
+    packs: [...new Set(w.packs)],
     coordinator_model: w.coordModel,
     coordinator_effort: w.coordEffort,
     worker_model: w.workerModel,
@@ -122,49 +144,104 @@ const GROUPS: { kind: string; label: string }[] = [
   { kind: 'comfyui', label: 'Local generators' },
 ];
 
+/** One row of a group: a tool, or a pack of skills shown as one row (`HiveDetectedTool.pack`). */
+export type ToolEntry =
+  | { type: 'tool'; tool: HiveDetectedTool }
+  | {
+      type: 'pack';
+      name: string;
+      /** Every detected member: the pack's checkbox picks or clears all of them. */
+      members: HiveDetectedTool[];
+      /** The members the filter shows (all of them when it matched the pack's name). */
+      shown: HiveDetectedTool[];
+      /** Opened by the filter: a member matched, the pack's name didn't. */
+      open: boolean;
+    };
+
 export interface ToolGroup {
   kind: string;
   label: string;
+  /** Every tool the filter shows, pack members included: what the group's all/none acts on. */
   tools: HiveDetectedTool[];
+  /** Packs first, by name, then the tools, by label. */
+  entries: ToolEntry[];
 }
 
-/** Whether a tool matches the filter box: every word, in its label, host or kind. */
+const words = (query: string) => query.toLowerCase().split(/\s+/).filter(Boolean);
+const byLabel = (a: HiveDetectedTool, b: HiveDetectedTool) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
+
+/** Whether a tool matches the filter box: every word, in its label, host or id. */
 export function toolMatches(t: HiveDetectedTool, query: string): boolean {
-  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-  if (!words.length) return true;
+  const w = words(query);
+  if (!w.length) return true;
   const hay = `${t.label} ${t.host ?? ''} ${t.id}`.toLowerCase();
-  return words.every((w) => hay.includes(w));
+  return w.every((x) => hay.includes(x));
 }
 
 /** The detected tools by kind, in a fixed group order (an unknown kind last, under its own
- *  name), each group sorted by label, filtered, empty groups left out. */
+ *  name), filtered, empty groups left out. A pack matches by its name (all its members shown)
+ *  or by any member (only the matching ones shown, and the pack opened). */
 export function groupTools(tools: readonly HiveDetectedTool[], query = ''): ToolGroup[] {
-  const byKind = new Map<string, HiveDetectedTool[]>();
+  const q = words(query);
+  const byKind = new Map<string, { loose: HiveDetectedTool[]; packs: Map<string, HiveDetectedTool[]> }>();
   for (const t of tools) {
-    if (!toolMatches(t, query)) continue;
-    const list = byKind.get(t.kind) ?? [];
-    list.push(t);
-    byKind.set(t.kind, list);
+    const g = byKind.get(t.kind) ?? { loose: [] as HiveDetectedTool[], packs: new Map<string, HiveDetectedTool[]>() };
+    byKind.set(t.kind, g);
+    if (t.pack) g.packs.set(t.pack, [...(g.packs.get(t.pack) ?? []), t]);
+    else if (toolMatches(t, query)) g.loose.push(t);
   }
+  const out: ToolGroup[] = [];
   const known = GROUPS.map((g) => g.kind);
   const kinds = [...known.filter((k) => byKind.has(k)), ...[...byKind.keys()].filter((k) => !known.includes(k)).sort()];
-  return kinds.map((kind) => ({
-    kind,
-    label: GROUPS.find((g) => g.kind === kind)?.label ?? kind,
-    tools: [...byKind.get(kind)!].sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })),
-  }));
+  for (const kind of kinds) {
+    const g = byKind.get(kind)!;
+    const entries: ToolEntry[] = [];
+    for (const name of [...g.packs.keys()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))) {
+      const members = [...g.packs.get(name)!].sort(byLabel);
+      const byName = q.every((x) => name.toLowerCase().includes(x));
+      const shown = byName ? members : members.filter((t) => toolMatches(t, query));
+      if (shown.length) entries.push({ type: 'pack', name, members, shown, open: !byName && q.length > 0 });
+    }
+    for (const t of [...g.loose].sort(byLabel)) entries.push({ type: 'tool', tool: t });
+    if (!entries.length) continue;
+    out.push({
+      kind,
+      label: GROUPS.find((x) => x.kind === kind)?.label ?? kind,
+      tools: entries.flatMap((e) => (e.type === 'tool' ? [e.tool] : e.shown)),
+      entries,
+    });
+  }
+  return out;
+}
+
+/** A pack's checkbox: when every member is picked it clears them all, otherwise picks them all. */
+export function togglePack(picked: ReadonlySet<string>, members: readonly HiveDetectedTool[]): Set<string> {
+  const next = new Set(picked);
+  const all = members.every((t) => next.has(t.id));
+  for (const t of members) {
+    if (all) next.delete(t.id);
+    else next.add(t.id);
+  }
+  return next;
+}
+
+/** The picks in words, as the wizard's summary and review say them: a fully picked pack is one
+ *  item ("gstack (54 skills)"), a partly picked one its picked members. */
+export function pickedItems(tools: readonly HiveDetectedTool[], picked: ReadonlySet<string>): string[] {
+  return groupTools(tools).flatMap((g) =>
+    g.entries.flatMap((e) => {
+      if (e.type === 'tool') return picked.has(e.tool.id) ? [e.tool.label] : [];
+      const mine = e.members.filter((t) => picked.has(t.id));
+      if (mine.length && mine.length === e.members.length) return [`${e.name} (${e.members.length} ${e.members.length === 1 ? 'skill' : 'skills'})`];
+      return mine.map((t) => t.label);
+    }),
+  );
 }
 
 /** A group's all/none toggle: when every shown tool is picked it clears them, otherwise it
  *  picks them all. Tools hidden by the filter are left as they were. */
 export function toggleGroup(picked: ReadonlySet<string>, group: ToolGroup): Set<string> {
-  const next = new Set(picked);
-  const all = group.tools.every((t) => next.has(t.id));
-  for (const t of group.tools) {
-    if (all) next.delete(t.id);
-    else next.add(t.id);
-  }
-  return next;
+  return togglePack(picked, group.tools);
 }
 
 /** "ffmpeg, Figma, frontend-design (+4 more)". */

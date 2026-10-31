@@ -127,7 +127,13 @@ Unset fields (empty, null) are the built-ins below (`lib/hive/defaults.ts` `wiza
 rules prefill the field and open it. A default tool not detected on this machine any more is
 dropped silently. With default tools, the Tools step shows them as one line ("From your defaults:
 ffmpeg, Figma, frontend-design (+4 more)") with **Change** behind it; otherwise, and after Change,
-the same grouped, filterable picker as Preferences (`HiveToolPicker.svelte`). **Save as my
+the same grouped, filterable picker as Preferences (`HiveToolPicker.svelte`). A **skill pack**
+(two or more skills sharing SKILL.md `metadata.package`, or a trailing `(word)` on the
+description, as gstack's 54 do: `DetectedTool.pack`, `create::skill_pack`) is one row there, "gstack
+— 54 skills", whose checkbox picks every member and whose arrow lists them; a filter matching a
+member opens it. Ids stay per skill (nothing downstream knows packs); a pack picked whole in
+Preferences is also stored by name (`hive_defaults.packs`), so a skill the pack adds later is
+picked too. **Save as my
 defaults** on the Tools step writes the current tool picks and crew choices (not the rules) back.
 `hive_defaults` is deliberately not in `preference_meta`: no agent can change what a new Hive may
 spend, or which tools it gets, through `setPreference`. Every field is a String or number, never

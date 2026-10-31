@@ -8,7 +8,7 @@
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { hiveDetectTools } from '$lib/tauri/commands';
   import type { HiveDetectedTool } from '$lib/tauri/types';
-  import { BUILTIN, HIVE_EFFORTS, HIVE_MODELS, wizardStart } from '$lib/hive/defaults';
+  import { BUILTIN, fullPacks, HIVE_EFFORTS, HIVE_MODELS, wizardStart } from '$lib/hive/defaults';
   import { MAX_CAP } from '$lib/hive/change';
   import { MAX_INSTRUCTIONS, charCount } from '$lib/hive/model';
   import HiveToolPicker from './HiveToolPicker.svelte';
@@ -20,7 +20,8 @@
   let tools = $state<HiveDetectedTool[] | null>(null);
   hiveDetectTools().then((t) => (tools = t)).catch((e) => { tools = []; logError(`hive defaults: tool detection failed: ${e}`); });
 
-  const picked = $derived(new Set(d.tools));
+  // A stored pack counts its members detected since as picked, as the wizard does.
+  const picked = $derived(new Set([...d.tools, ...(tools ?? []).filter((t) => t.pack && d.packs.includes(t.pack)).map((t) => t.id)]));
   /** Saved picks this computer doesn't have: kept (they may come back), and said. */
   const missing = $derived(tools ? d.tools.filter((id) => !tools!.some((t) => t.id === id)) : []);
 
@@ -80,7 +81,8 @@
     {:else if tools.length === 0}
       <p class="hint">Nothing detected: no MCP servers, ffmpeg, ImageMagick, SoX, Blender, skills or ComfyUI.</p>
     {:else}
-      <HiveToolPicker {tools} {picked} onchange={(next) => void preferencesStore.setHiveDefaults({ tools: [...next] })} />
+      <!-- A pack picked whole is stored by name too, so a skill it adds later comes with it. -->
+      <HiveToolPicker {tools} {picked} onchange={(next) => void preferencesStore.setHiveDefaults({ tools: [...next], packs: fullPacks(next, tools!) })} />
     {/if}
     {#if missing.length}
       <p class="hint">

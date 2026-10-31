@@ -980,6 +980,9 @@ export interface HiveDetectedTool {
   kind: string;
   label: string;
   host: string | null;
+  /** The skill pack it came with ("gstack"), set only when two or more detected skills share it.
+   *  Pickers show a pack as one row; what's stored is still each member's id. */
+  pack?: string;
 }
 
 /** What the Make this a Hive wizard starts from (state/workspace.rs `HiveDefaults`). Empty
@@ -987,6 +990,8 @@ export interface HiveDetectedTool {
 export interface HiveDefaults {
   /** `HiveDetectedTool.id`s. */
   tools: string[];
+  /** Packs every detected member of which was picked: the wizard also picks members added since. */
+  packs: string[];
   coordinator_model: string;
   coordinator_effort: string;
   worker_model: string;

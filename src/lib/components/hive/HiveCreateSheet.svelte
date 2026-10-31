@@ -34,7 +34,7 @@
   import { MAX_CAP } from '$lib/hive/change';
   import { createHive } from '$lib/hive/create';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
-  import { defaultsFromWizard, FALLBACK_CAP, HIVE_EFFORTS, HIVE_MODELS, knownTools, summarizeTools, wizardStart } from '$lib/hive/defaults';
+  import { defaultsFromWizard, defaultToolIds, FALLBACK_CAP, fullPacks, HIVE_EFFORTS, HIVE_MODELS, knownTools, pickedItems, summarizeTools, wizardStart } from '$lib/hive/defaults';
   import HiveToolPicker from './HiveToolPicker.svelte';
 
   interface Props {
@@ -173,7 +173,7 @@
     folders = []; suggestions = {}; shareChoice = {}; picks = {};
     cap = d.cap ?? preflight?.default_cap ?? FALLBACK_CAP; landing = 'base';
     coordModel = d.coordModel; coordEffort = d.coordEffort; workerModel = d.workerModel; workerEffort = d.workerEffort;
-    picked = new Set(tools ? knownTools(d.tools, tools) : d.tools);
+    picked = new Set(tools ? defaultToolIds(d, tools) : d.tools);
     budgetDollars = d.budgetDollars; pushAfterLand = d.pushAfterLand; phone = d.phone;
     toolsOpen = false; savedDefaults = false;
     step = 0; reached = 0;
@@ -231,6 +231,8 @@
     [...folders].sort((a, b) => Number(b.primary) - Number(a.primary)).map((f) => f.name.trim() || f.path),
   );
   const pickedTools = $derived((tools ?? []).filter((t) => picked.has(t.id)).map((t) => t.label));
+  /** The picks in words: a pack picked whole is one item, "gstack (54 skills)". */
+  const pickedWords = $derived(pickedItems(tools ?? [], picked));
   const PHONE_TEXT = { coordinator: 'The queen only', all: 'The queen and its workers', none: 'Nobody' } as const;
   function receipt(k: StepKey): string | null {
     switch (k) {
@@ -314,14 +316,15 @@
     .then((t) => {
       tools = t;
       // A default (or a draft's pick) this machine no longer has is dropped, silently: Create
-      // sends only what the queen can really use.
-      picked = new Set(knownTools(picked, t));
+      // sends only what the queen can really use. Defaults also bring every current member of
+      // a pack picked whole, a skill added to it since included.
+      picked = new Set(useDefaults ? defaultToolIds(fromDefaults, t) : knownTools(picked, t));
     })
     .catch((e) => { tools = []; picked = new Set(); logError(`hive: tool detection failed: ${e}`); });
 
   // ── The Tools step: the defaults as one line, the grouped picker behind Change ──
   /** The default tools this machine has. */
-  const defaultTools = $derived(tools ? knownTools(fromDefaults.tools, tools) : []);
+  const defaultTools = $derived(tools ? defaultToolIds(fromDefaults, tools) : []);
   /** The summary line stands for the list while the picks are still exactly the defaults. */
   let toolsOpen = $state(false);
   const toolsSummary = $derived(
@@ -333,7 +336,7 @@
   async function saveAsDefaults() {
     saveDefaultsError = null;
     const next = defaultsFromWizard(
-      { coordModel, coordEffort, workerModel, workerEffort, cap: Number(cap), budgetDollars: budget, pushAfterLand, phone, tools: [...picked] },
+      { coordModel, coordEffort, workerModel, workerEffort, cap: Number(cap), budgetDollars: budget, pushAfterLand, phone, tools: [...picked], packs: fullPacks(picked, tools ?? []) },
       preferencesStore.hiveDefaults,
     );
     try {
@@ -876,7 +879,7 @@
               <span class="hint">Tells the queen what it can really make things with.</span>
               {#if toolsSummary}
                 <p class="summary">
-                  From your defaults: {summarizeTools(pickedTools)}
+                  From your defaults: {summarizeTools(pickedWords)}
                   <button type="button" class="link" onclick={() => (toolsOpen = true)}>Change</button>
                 </p>
               {:else}
@@ -962,7 +965,7 @@
               {landing === 'base' ? "straight into its repo's Base" : `into hive/${slug}, each land approved by you`}{pushes ? ', then pushes it' : ''}.
             </p>
             <p>
-              {pickedTools.length ? `It can make things with ${pickedTools.join(', ')}` : 'No extra tools'}, with
+              {pickedWords.length ? `It can make things with ${pickedWords.join(', ')}` : 'No extra tools'}, with
               a ${budget} budget for paid generation.
               {stackRows.length ? `Its stack: ${stackRows.map((r) => r.name).join(', ')}.` : 'It has no stack services.'}
               On your phone: {PHONE_TEXT[phone].toLowerCase()}.

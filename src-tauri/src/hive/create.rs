@@ -473,6 +473,10 @@ pub struct DetectedTool {
     pub label: String,
     /// Where it answers, for one that's reached over the network.
     pub host: Option<String>,
+    /// The skill pack a skill came with ("gstack", "langsys"), when at least two detected skills
+    /// share it (`skill_pack`). The pickers show a pack as one row; ids stay per skill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack: Option<String>,
 }
 
 pub const DETECTED_CLIS: [&str; 4] = ["ffmpeg", "magick", "sox", "blender"];
@@ -501,6 +505,7 @@ pub fn mcp_tools(claude_json: &serde_json::Value) -> Vec<DetectedTool> {
             kind: "mcp".to_string(),
             label: name.clone(),
             host: entry.get("url").and_then(|u| u.as_str()).and_then(url_host),
+            pack: None,
         })
         .collect()
 }
@@ -515,7 +520,93 @@ fn skill_tools(skills_dir: &Path) -> Vec<DetectedTool> {
         .filter(|n| !n.starts_with('.'))
         .collect();
     names.sort();
-    names.into_iter().map(|n| DetectedTool { id: format!("skill:{n}"), kind: "skill".to_string(), label: n, host: None }).collect()
+    let packs: Vec<Option<String>> = names.iter().map(|n| skill_pack(&skills_dir.join(n).join("SKILL.md"))).collect();
+    // A pack of one is just a skill.
+    let mut count: HashMap<&str, usize> = HashMap::new();
+    for p in packs.iter().flatten() {
+        *count.entry(p.as_str()).or_default() += 1;
+    }
+    let packs: Vec<Option<String>> = packs.iter().map(|p| p.clone().filter(|p| count.get(p.as_str()).copied().unwrap_or(0) > 1)).collect();
+    names
+        .into_iter()
+        .zip(packs)
+        .map(|(n, pack)| DetectedTool { id: format!("skill:{n}"), kind: "skill".to_string(), label: n, host: None, pack })
+        .collect()
+}
+
+/// How much of a SKILL.md is read for its frontmatter: the block is at the top, and a skill's
+/// body can be long.
+const FRONTMATTER_MAX: u64 = 16 * 1024;
+
+/// The pack a skill belongs to, from its SKILL.md frontmatter: `metadata.package` with a
+/// trailing `-skill`/`-skills` dropped, or else a trailing `(word)` on its `description`
+/// (gstack's convention). Read cheaply: only the first block, at most `FRONTMATTER_MAX` bytes,
+/// and only the two keys, by line (no YAML parser: nothing else in it matters here).
+fn skill_pack(skill_md: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(skill_md).ok()?.take(FRONTMATTER_MAX).read_to_end(&mut buf).ok()?;
+    pack_from_frontmatter(&String::from_utf8_lossy(&buf))
+}
+
+fn pack_from_frontmatter(text: &str) -> Option<String> {
+    let mut lines = text.lines();
+    if lines.next()?.trim_end() != "---" {
+        return None;
+    }
+    let block: Vec<&str> = lines.take_while(|l| l.trim_end() != "---").collect();
+    let indented = |l: &str| l.starts_with(' ') || l.starts_with('\t');
+    let unquote = |v: &str| {
+        let v = v.trim();
+        let v = v.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(v);
+        v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')).unwrap_or(v).trim().to_string()
+    };
+    let mut package: Option<String> = None;
+    let mut description: Option<String> = None;
+    let mut i = 0;
+    while i < block.len() {
+        let line = block[i];
+        if let Some(v) = line.strip_prefix("metadata:") {
+            if v.trim().is_empty() {
+                let mut j = i + 1;
+                while j < block.len() && (indented(block[j]) || block[j].trim().is_empty()) {
+                    if let Some(p) = block[j].trim().strip_prefix("package:") {
+                        package = Some(unquote(p));
+                    }
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+        } else if let Some(v) = line.strip_prefix("description:") {
+            let v = v.trim();
+            if v.starts_with('|') || v.starts_with('>') {
+                // A block scalar: its lines are the indented ones that follow.
+                let mut parts = Vec::new();
+                let mut j = i + 1;
+                while j < block.len() && (indented(block[j]) || block[j].trim().is_empty()) {
+                    parts.push(block[j].trim());
+                    j += 1;
+                }
+                description = Some(parts.join(" ").trim().to_string());
+                i = j;
+                continue;
+            }
+            description = Some(unquote(v));
+        }
+        i += 1;
+    }
+    if let Some(p) = package {
+        let p = p.strip_suffix("-skills").or_else(|| p.strip_suffix("-skill")).unwrap_or(&p).to_string();
+        if !p.is_empty() {
+            return Some(p);
+        }
+    }
+    let d = description?;
+    let inner = d.trim_end().strip_suffix(')')?;
+    let word = &inner[inner.rfind('(')? + 1..];
+    let ok = !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    ok.then(|| word.to_string())
 }
 
 /// Hosted generators' API and media hosts, a starting point the human edits (plan D2): `key` is
@@ -635,7 +726,7 @@ fn detect_tools(prefs: &crate::state::Preferences) -> Vec<DetectedTool> {
     }
     for cli in DETECTED_CLIS {
         if !crate::accounts::find_executables(cli).is_empty() {
-            out.push(DetectedTool { id: format!("cli:{cli}"), kind: "cli".to_string(), label: cli.to_string(), host: None });
+            out.push(DetectedTool { id: format!("cli:{cli}"), kind: "cli".to_string(), label: cli.to_string(), host: None, pack: None });
         }
     }
     if let Some(home) = dirs::home_dir() {
@@ -643,7 +734,7 @@ fn detect_tools(prefs: &crate::state::Preferences) -> Vec<DetectedTool> {
     }
     let comfy = COMFYUI_ADDR.parse().ok().is_some_and(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_millis(300)).is_ok());
     if comfy {
-        out.push(DetectedTool { id: "comfyui".to_string(), kind: "comfyui".to_string(), label: "ComfyUI".to_string(), host: Some(COMFYUI_ADDR.to_string()) });
+        out.push(DetectedTool { id: "comfyui".to_string(), kind: "comfyui".to_string(), label: "ComfyUI".to_string(), host: Some(COMFYUI_ADDR.to_string()), pack: None });
     }
     out
 }
@@ -1729,8 +1820,8 @@ mod tests {
         .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(home.join(".claude.json")).unwrap()).unwrap();
         let mut detected = mcp_tools(&v);
-        detected.push(DetectedTool { id: "skill:generate".into(), kind: "skill".into(), label: "generate".into(), host: None });
-        detected.push(DetectedTool { id: "cli:ffmpeg".into(), kind: "cli".into(), label: "ffmpeg".into(), host: None });
+        detected.push(DetectedTool { id: "skill:generate".into(), kind: "skill".into(), label: "generate".into(), host: None, pack: None });
+        detected.push(DetectedTool { id: "cli:ffmpeg".into(), kind: "cli".into(), label: "ffmpeg".into(), host: None, pack: None });
         let chosen = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
         let hosts = generator_hosts(&detected, &chosen(&["mcp:fal", "mcp:local", "cli:ffmpeg"]), &[]);
@@ -1838,5 +1929,57 @@ mod tests {
         let got = install_hive(&mut d, "main", "ws", sample(), vec![svc("web", "x", "/p")], "Ship", None).unwrap();
         assert_eq!(got.workspace.stack.len(), 1);
         assert!(got.before.stack.is_empty(), "undo restores the stack too");
+    }
+
+    #[test]
+    fn a_skills_pack_comes_from_its_package_or_its_description_tag() {
+        let fm = |body: &str| format!("---\n{body}\n---\n# Body (notpack)\n");
+        // gstack's convention: a trailing "(word)" on the description, quoted or not.
+        assert_eq!(pack_from_frontmatter(&fm("name: qa\ndescription: Fix bugs. (gstack)")), Some("gstack".into()));
+        assert_eq!(pack_from_frontmatter(&fm("description: \"Drive a browser: open, click. (gstack)\"")), Some("gstack".into()));
+        assert_eq!(pack_from_frontmatter(&fm("description: |\n  Two lines\n  of text (gstack)\nname: x")), Some("gstack".into()));
+        // metadata.package wins, with -skill / -skills dropped.
+        assert_eq!(pack_from_frontmatter(&fm("description: Langsys (thing)\nmetadata:\n  package: langsys-skill\n  version: 0.3.0")), Some("langsys".into()));
+        assert_eq!(pack_from_frontmatter(&fm("metadata:\n  package: \"acme-skills\"")), Some("acme".into()));
+        // No tag: parentheses mid-sentence, a phrase, or nothing.
+        assert_eq!(pack_from_frontmatter(&fm("description: Uses (SvelteKit) a lot.")), None);
+        assert_eq!(pack_from_frontmatter(&fm("description: Big app (SvelteKit, shadcn)")), None);
+        assert_eq!(pack_from_frontmatter(&fm("description: plain")), None);
+        // Only the first block counts, and a file without one has none.
+        assert_eq!(pack_from_frontmatter("# Title\ndescription: x (gstack)\n"), None);
+    }
+
+    #[test]
+    fn skill_tools_mark_packs_of_two_or_more() {
+        let dir = std::env::temp_dir().join(format!("hive-skills-{}", uuid::Uuid::new_v4().simple()));
+        let skill = |name: &str, front: &str| {
+            let d = dir.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), format!("---\nname: {name}\n{front}\n---\nbody\n")).unwrap();
+        };
+        skill("qa", "description: QA. (gstack)");
+        skill("review", "description: Review. (gstack)");
+        skill("langsys", "description: L.\nmetadata:\n  package: langsys-skill");
+        skill("solo", "description: Alone. (lonely)");
+        skill("plain", "description: Nothing.");
+        // Long body: only the bounded head is read, and the frontmatter is in it.
+        std::fs::create_dir_all(dir.join("big")).unwrap();
+        std::fs::write(dir.join("big").join("SKILL.md"), format!("---\ndescription: Big. (gstack)\n---\n{}", "x".repeat(100_000))).unwrap();
+        std::fs::create_dir_all(dir.join("noskill")).unwrap();
+
+        let got: Vec<(String, Option<String>)> = skill_tools(&dir).into_iter().map(|t| (t.label, t.pack)).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            got,
+            vec![
+                ("big".into(), Some("gstack".into())),
+                ("langsys".into(), None),
+                ("plain".into(), None),
+                ("qa".into(), Some("gstack".into())),
+                ("review".into(), Some("gstack".into())),
+                ("solo".into(), None),
+            ],
+            "a pack of one (langsys, lonely) is no pack"
+        );
     }
 }
