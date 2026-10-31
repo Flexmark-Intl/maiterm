@@ -833,6 +833,7 @@ async fn the_queens_host_grant_applies_at_once_and_answers_the_sandbox_blocker()
     rig.caller.hive.status = crate::hive::record::STATUS_ACTIVE.into();
     rig.data.write().windows[0].workspaces[0].hive.as_mut().unwrap().status = crate::hive::record::STATUS_ACTIVE.into();
     let host = "docs.maiterm-test.invalid";
+    crate::hive::change::TEST_PUBLIC.lock().unwrap().push(host.to_string());
     let b = TaskBlocker { kind: "action".into(), question: format!("The sandbox refused host {host}"), context: None, ..decision("2026-10-24T10:00:00Z", &[]) };
     rig.set_blocker(Some(b.clone()));
     rig.route(PromptView::from_blocker(&rig.worker.task_id, &b), 1).await.unwrap();

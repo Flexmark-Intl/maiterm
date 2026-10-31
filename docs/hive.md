@@ -1119,9 +1119,12 @@ permission from the queen overseeing all work"). The blocker routes to her, neve
 the human. She allows a host with `hiveChangeSettings {add_hosts, reason}`, which applies at
 once whatever the Settings checkpoint, only when the worker's task needs it (a registry, docs, an
 API the work talks to), and refuses anything unrelated or exfiltration-shaped with new
-instructions. Rust holds the hard limits whoever asks: never a repo remote's host, localhost,
-loopback names, LAN or private addresses, a port (maiTerm's included), or past
-`MAX_WORKER_HOSTS`, and a reason is required. The grant is written to the settings log and the
+instructions. Rust holds the hard limits whoever asks: never a repo remote's host (nor a name
+under it, a wildcard over it, or its registrable domain: `ssh.github.com:443` is GitHub's push
+endpoint; an ssh alias remote is resolved with `ssh -G`, and one that won't resolve makes every
+forge ungrantable), localhost, loopback names, LAN or private addresses, a port (maiTerm's
+included), or past `MAX_WORKER_HOSTS`, and a reason is required. Her grant also needs a name that
+resolves now; the human's own may add one that doesn't yet. The grant is written to the settings log and the
 decision log (category `hosts`, by the queen), the human gets a notice saying it can be undone in
 Hive settings, and maiTerm answers each open sandbox blocker the grant covers as hers, telling
 the worker the host reaches it from its next launch (`hiveRestartWorker` relaunches it, resuming

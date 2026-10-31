@@ -441,13 +441,35 @@ impl WorkerContext {
 pub fn hive_remote_hosts(hive: &Hive) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for f in hive.git_folders() {
-        for host in remote_urls(Path::new(&f.path)).iter().filter_map(|u| url_host(u)) {
-            if !out.contains(&host) {
-                out.push(host);
+        for url in remote_urls(Path::new(&f.path)) {
+            let Some(host) = url_host(&url) else { continue };
+            // An ssh remote may name an alias from ~/.ssh/config (`gh:owner/repo`): the host it
+            // really reaches is what a grant must not cover (the review, 2026-10-31).
+            let ssh = !url.contains("://") || url.to_ascii_lowercase().starts_with("ssh://") || url.to_ascii_lowercase().starts_with("git+ssh://");
+            let real = if ssh { ssh_hostname(&host) } else { None };
+            for h in std::iter::once(host).chain(real) {
+                if !out.contains(&h) {
+                    out.push(h);
+                }
             }
         }
     }
     out
+}
+
+/// What ssh resolves `alias` to (`ssh -G`, which reads the config and connects nowhere), when it
+/// differs. None when ssh isn't there or says nothing new.
+fn ssh_hostname(alias: &str) -> Option<String> {
+    if alias.starts_with('-') {
+        return None;
+    }
+    let out = std::process::Command::new("ssh").args(["-G", "--", alias]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let name = text.lines().find_map(|l| l.strip_prefix("hostname ")).map(|h| h.trim().to_ascii_lowercase())?;
+    (!name.is_empty() && name != alias).then_some(name)
 }
 
 /// Every fetch and push url of a repo's remotes. None at all is git's exit 1.
