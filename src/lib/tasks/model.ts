@@ -491,6 +491,15 @@ export function answerBlocker(task: Task, answer: BlockerAnswer): AnswerResult {
       message: `[maiTerm] The human answered your question on ${ref}.\nQuestion: ${b.question}\nAnswer: ${said}${choice ? comment : ''}${close}`,
     };
   }
+  // Words with an action are an answer, not a "done": "no, can't" read as done told the agent
+  // the thing had happened. Only the bare Done button says it was done.
+  if (b.kind === 'action' && text) {
+    return {
+      ok: true,
+      note: `Answered by the human: ${text}`,
+      message: `[maiTerm] The human answered what ${ref} was waiting for. They did not say it was done.\nYou asked: ${b.question}\nThe human answered: ${text}${close}`,
+    };
+  }
   const did = b.kind === 'action' ? 'Done by the human' : 'Cleared by the human';
   return {
     ok: true,

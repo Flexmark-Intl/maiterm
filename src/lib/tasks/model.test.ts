@@ -130,6 +130,16 @@ describe('a blocker says what a Blocked task is waiting for', () => {
       if (r.ok) expect(r.message).toContain('The human has done what');
     });
 
+    it('reads words given with an action as an answer, never as done', () => {
+      const act = withBlocker({ kind: 'action', question: 'Set allowLocalBinding to true' });
+      const r = answerBlocker(act, { asked_at: at, text: 'no, can’t' });
+      expect(r).toMatchObject({ ok: true, note: 'Answered by the human: no, can’t' });
+      if (r.ok) {
+        expect(r.message).toContain('The human answered: no, can’t');
+        expect(r.message).not.toContain('has done');
+      }
+    });
+
     it('refuses a task that has moved on', () => {
       expect(answerBlocker({ ...decision, status: 'active' }, { asked_at: at, option: 0 })).toMatchObject({ ok: false, reason: 'no_blocker' });
     });
