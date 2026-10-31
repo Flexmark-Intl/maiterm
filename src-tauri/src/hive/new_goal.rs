@@ -611,11 +611,33 @@ pub fn in_progress(root: &Path) -> bool {
     IN_PROGRESS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|r| r == root)
 }
 
-/// `tab_id` is a Hive's queen and that Hive is taking a new goal: no follow-up may be added to her
-/// tab (`add_tab_follow_up`), since the record's save clears them with the old goal.
-pub fn queen_follow_up_refusal(data: &crate::state::AppData, tab_id: &str) -> bool {
+/// Follow-ups a delivery recently took off a tab (tab id, follow-up id, when): one whose typing
+/// failed is put back with `add_tab_follow_up`, which is no new follow-up.
+static RECENTLY_TAKEN: std::sync::Mutex<Vec<(String, String, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+const TAKEN_FOR: std::time::Duration = std::time::Duration::from_secs(600);
+const TAKEN_MAX: usize = 200;
+
+/// `take_tab_follow_up` took `follow_up_id` off `tab_id`.
+pub fn note_taken(tab_id: &str, follow_up_id: &str) {
+    let mut v = RECENTLY_TAKEN.lock().unwrap_or_else(|e| e.into_inner());
+    v.retain(|(_, _, at)| at.elapsed() < TAKEN_FOR);
+    v.push((tab_id.to_string(), follow_up_id.to_string(), std::time::Instant::now()));
+    let over = v.len().saturating_sub(TAKEN_MAX);
+    v.drain(..over);
+}
+
+fn recently_taken(tab_id: &str, follow_up_id: &str) -> bool {
+    RECENTLY_TAKEN.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(t, f, at)| t == tab_id && f == follow_up_id && at.elapsed() < TAKEN_FOR)
+}
+
+/// `tab_id` is a Hive's queen and that Hive is taking a new goal: no NEW follow-up may be added to
+/// her tab (`add_tab_follow_up`), since the record's save clears them with the old goal. One a
+/// delivery took from her tab and puts back after a failed typing is let through: a New goal that
+/// then fails must keep it, and one that succeeds clears it with the rest.
+pub fn queen_follow_up_refusal(data: &crate::state::AppData, tab_id: &str, follow_up_id: &str) -> bool {
     let Some((ws, tab)) = super::find_hive_tab(data, tab_id) else { return false };
     tab.hive_role.as_deref() == Some(super::ROLE_COORDINATOR)
+        && !recently_taken(tab_id, follow_up_id)
         && ws.hive.as_ref().and_then(|h| super::paths::hive_root(&h.id)).is_some_and(|root| in_progress(&root))
 }
 

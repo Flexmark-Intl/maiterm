@@ -615,10 +615,14 @@ fn a_second_spawn_of_a_title_numbered_past_an_old_goal_is_refused() {
 fn no_follow_up_reaches_the_queen_while_a_new_goal_runs() {
     let rig = Rig::new("fu", STATUS_DONE);
     let root = crate::hive::paths::hive_root(&rig.caller.hive.id).unwrap();
-    assert!(!queen_follow_up_refusal(&rig.data.read(), "coord"));
+    let (new, back) = (uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string());
+    assert!(!queen_follow_up_refusal(&rig.data.read(), "coord", &new));
+    // A delivery took one just before the marker, and puts it back when its typing fails.
+    note_taken("coord", &back);
     let marker = InProgress::take(&root);
-    assert!(queen_follow_up_refusal(&rig.data.read(), "coord"));
-    assert!(!queen_follow_up_refusal(&rig.data.read(), "w1"), "only the queen's tab");
+    assert!(queen_follow_up_refusal(&rig.data.read(), "coord", &new), "a new one is refused");
+    assert!(!queen_follow_up_refusal(&rig.data.read(), "coord", &back), "the put-back goes through");
+    assert!(!queen_follow_up_refusal(&rig.data.read(), "w1", &new), "only the queen's tab");
     drop(marker);
-    assert!(!queen_follow_up_refusal(&rig.data.read(), "coord"));
+    assert!(!queen_follow_up_refusal(&rig.data.read(), "coord", &new));
 }
