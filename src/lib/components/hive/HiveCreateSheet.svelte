@@ -28,7 +28,7 @@
   import { importVerdict, sameService, sharesByDefault, type RunningElsewhere, type StackOffer } from '$lib/stack/model';
   import { normalizeTitle } from '$lib/tasks/model';
   import { hiveCommitFirst, hiveDetectFolder, hiveDetectTools, hivePreflight, hiveTrustRepo, suggestStack, type StackSuggestion } from '$lib/tauri/commands';
-  import type { HiveDetectedTool, HivePreflight, HiveSpec, Service } from '$lib/tauri/types';
+  import type { HiveDetectedTool, HiveFolderInfo, HivePreflight, HiveSpec, Service } from '$lib/tauri/types';
   import { createDrafts } from '$lib/hive/createDraft';
   import { charCount, folderName, MAX_BRIEF, MAX_BRIEF_FILES, MAX_INSTRUCTIONS, slugify, validateAbout, validateCap, validateFolders, validateSpec } from '$lib/hive/model';
   import { MAX_CAP } from '$lib/hive/change';
@@ -404,18 +404,25 @@
     if (committing !== null) return;
     committing = f.key;
     commitError = null;
-    try {
-      const info = await hiveCommitFirst(f.path);
+    const apply = (info: HiveFolderInfo) => {
+      // The row as it is now: what was typed into it while git ran stays.
+      const now = folders.find((x) => x.key === f.key);
+      if (!now) return;
       patch(f.key, {
-        uncommitted: info.unborn,
+        uncommitted: info.kind === 'git' && info.unborn,
         detectedBase: info.base,
-        base: f.base.trim() ? f.base : (info.base ?? ''),
-        setup: f.setup.trim() ? f.setup : (info.setup ?? ''),
+        base: now.base.trim() ? now.base : (info.base ?? ''),
+        setup: now.setup.trim() ? now.setup : (info.setup ?? ''),
         trusted: info.trusted,
       });
+    };
+    try {
+      apply(await hiveCommitFirst(f.path));
     } catch (e) {
       commitError = { key: f.key, text: String(e).replace(/^Error: /, '') };
       logError(`hive: committing ${f.path} failed: ${e}`);
+      // It may have been committed some other way meanwhile: the row follows the folder.
+      hiveDetectFolder(f.path).then(apply).catch(() => {});
     } finally {
       committing = null;
     }

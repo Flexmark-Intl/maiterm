@@ -68,6 +68,11 @@ pub fn start_repo(path: &Path, branch: &str) -> Result<bool, String> {
     if !info.empty {
         return Err(format!("{} has files but no commit, and only an empty folder is started as a new project", info.path));
     }
+    // Empty means the index too: an orphan made with `checkout --orphan` keeps the old index, and
+    // checking Base out over it would leave every file of Base showing as deleted.
+    if info.kind == KIND_GIT && !run(git_in(real).args(["ls-files"]), QUERY_TIMEOUT)?.is_empty() {
+        return Err(format!("{} has files staged but none on disk and no commit, so it isn't started as a new project", info.path));
+    }
     if info.kind == KIND_GIT && run(git_in(real).args(["rev-parse", "--verify", "--quiet"]).arg(format!("refs/heads/{branch}")), QUERY_TIMEOUT).is_ok() {
         run(git_in(real).args(["checkout", "-q", branch]), QUERY_TIMEOUT).map_err(|e| format!("{}: couldn't check out {branch}: {e}", info.path))?;
         log::info!("hive: checked out {branch} in the empty orphan checkout {}", info.path);
@@ -98,19 +103,35 @@ pub fn start_repo(path: &Path, branch: &str) -> Result<bool, String> {
 
 /// The sheet's Commit these files (§3.6): a repo with files and no commit gets them as its first
 /// commit, everything `.gitignore` doesn't exclude, so its workers' copies have them. The human's
-/// click on that folder's row; never anything else. Refuses a repo with a commit. Blocks on git.
+/// click on that folder's row; never anything else. A repo that has a commit by now (the human
+/// committed it themselves) is done already. Runs with a checkout's time limit: a big untracked
+/// tree takes a minute to add. Blocks on git.
 pub fn commit_first(path: &Path) -> Result<(), String> {
     let info = detect_folder(path, &[]);
     let real = Path::new(&info.path);
-    if info.kind != KIND_GIT || !info.unborn {
-        return Err(format!("{} isn't a repository waiting for its first commit", info.path));
+    if info.kind != KIND_GIT {
+        return Err(format!("{} isn't the top folder of a git repository", info.path));
     }
-    run(git_in(real).args(["add", "-A"]), QUERY_TIMEOUT).map_err(|e| format!("{}: couldn't add its files: {e}", info.path))?;
-    run(
-        git_in(real).args(super::land::git::identity(real)).args(["-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Start the project"]),
-        QUERY_TIMEOUT,
-    )
-    .map_err(|e| format!("{}: couldn't make its first commit: {e}", info.path))?;
+    if !info.unborn {
+        return Ok(());
+    }
+    // A git killed at the time limit leaves its `index.lock`, which would refuse every later git
+    // in the human's repo: one that wasn't there before is ours, and goes.
+    let lock = run(git_in(real).args(["rev-parse", "--git-path", "index.lock"]), QUERY_TIMEOUT).map(|p| real.join(p)).ok();
+    let had_lock = lock.as_ref().is_some_and(|l| l.exists());
+    let res = run(git_in(real).args(["add", "-A"]), WORKTREE_TIMEOUT).map_err(|e| format!("{}: couldn't add its files: {e}", info.path)).and_then(|_| {
+        run(
+            git_in(real).args(super::land::git::identity(real)).args(["-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Start the project"]),
+            WORKTREE_TIMEOUT,
+        )
+        .map_err(|e| format!("{}: couldn't make its first commit: {e}", info.path))
+    });
+    if res.is_err() && !had_lock {
+        if let Some(l) = lock.filter(|l| l.exists()) {
+            let _ = fs::remove_file(&l);
+        }
+    }
+    res?;
     log::info!("hive: committed {}'s files as its first commit, at the human's click", info.path);
     Ok(())
 }
@@ -717,7 +738,17 @@ mod tests {
         assert!(!start_repo(&r, "main").unwrap());
         assert_eq!(git(&r, &["symbolic-ref", "--short", "HEAD"]), "main");
         assert_eq!(git(&r, &["rev-list", "--count", "main"]), "1", "main untouched");
+        // `checkout --orphan` keeps the index: with the files gone from disk the folder looks
+        // empty, but checking Base out would show all of Base deleted. Refused, untouched.
+        git(&r, &["checkout", "-q", "--orphan", "kept-index"]);
+        fs::write(r.join("c.txt"), "c").unwrap();
+        git(&r, &["add", "c.txt"]);
+        fs::remove_file(r.join("c.txt")).unwrap();
+        assert!(detect_folder(&r, &[]).empty && detect_folder(&r, &[]).unborn);
+        assert!(start_repo(&r, "main").unwrap_err().contains("staged"));
+        assert_eq!(git(&r, &["symbolic-ref", "--short", "HEAD"]), "kept-index");
         // A Base that doesn't exist yet is a new root of its own, on no branch's history.
+        git(&r, &["rm", "-q", "-r", "--cached", "--ignore-unmatch", "."]);
         git(&r, &["switch", "-q", "--orphan", "scratch"]);
         assert!(start_repo(&r, "fresh").unwrap());
         assert_eq!((git(&r, &["rev-list", "--count", "fresh"]), git(&r, &["rev-list", "--count", "main"])), ("1".into(), "1".into()));
@@ -738,7 +769,8 @@ mod tests {
         commit_first(&r).unwrap();
         assert_eq!(git(&r, &["ls-tree", "-r", "--name-only", "HEAD"]), ".gitignore\napp.js");
         assert!(!detect_folder(&r, &[]).unborn);
-        assert!(commit_first(&r).unwrap_err().contains("isn't a repository waiting"), "only once");
+        commit_first(&r).unwrap();
+        assert_eq!(git(&r, &["rev-list", "--count", "HEAD"]), "1", "committed already: done, no second commit");
         let _ = fs::remove_dir_all(&base);
     }
 }
