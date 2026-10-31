@@ -1320,7 +1320,12 @@ group in a line with a `cd`, a bare `cd name` (CDPATH could send it elsewhere), 
 line can reassign `HOME`), `env -C`, and a worker's git sharing a line with `eval`, `source`, `.`
 or `exec` (a quoted `cd` the gate can't see). A `$VAR`, `$(…)` or `~` in `-C` or `cd` is refused
 with "the gate can't expand $W: write the folder's path out" (the review of 2026-10-31 found the
-symlink, failed-`cd`, `HOME` and `eval` cases). A command substitution now leaves a marker in its word: it was
+symlink, failed-`cd`, `HOME` and `eval` cases). Past those, one blunt rule rather than a patch per
+trick (the final review): a worker's line that names git anywhere, quoted or nested included, and
+holds `eval`, `source`, `.`, `exec`, `trap`, `builtin`, `command`, `pushd`/`popd`, `xargs`, `find
+-exec`, `env` with a command, a shell with `-c` anywhere in its args, or a command word held in a
+variable or a substitution, is refused whole (`gate::hides_code`). It refuses some harmless lines,
+by design. A command substitution now leaves a marker in its word: it was
 an empty word, so `git -C "$(echo /etc)"` resolved to the cwd.
 
 **Land checks can be batched** (a merge queue, like GitHub's or bors). Land checks are the

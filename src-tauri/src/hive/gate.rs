@@ -541,6 +541,60 @@ fn cd_target(args: &[String], cur: &Here) -> Here {
     }
 }
 
+const HIDDEN_CODE_REFUSAL: &str = "Run git as a plain command: `cd <folder> && git …` or `git -C <folder> …`, with nothing that runs \
+     other code on the same line (eval, source, exec, trap, a shell's -c, xargs, find -exec, env, pushd, a command held in a variable).";
+
+/// Whether the raw text names git as a word anywhere: in quotes, substitutions and `-c` strings
+/// too (`/usr/bin/git`, `git-upload-pack`), not inside another word (`digit`, `github`).
+fn mentions_git(raw: &str) -> bool {
+    let b = raw.as_bytes();
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    raw.match_indices("git").any(|(i, _)| (i == 0 || !(word(b[i - 1]) || b[i - 1] == b'-')) && b.get(i + 3).is_none_or(|&c| !word(c)))
+}
+
+/// Whether any command in the line (or a substitution in it) can move the shell or run code the
+/// gate can't read: eval, source, `.`, exec, trap, builtin, command, pushd, popd, xargs, find
+/// -exec, env with a command, a shell with `-c` anywhere in its args, or a command word held in a
+/// variable or a substitution.
+fn hides_code(lexed: &Lexed, depth: usize) -> bool {
+    if depth > MAX_DEPTH {
+        return true;
+    }
+    let dynamic = |w: &str| w.starts_with('$') || w.contains(SUBST) || w.contains('`');
+    let wrappers = ["nohup", "time", "nice", "timeout", "sudo", "doas", "caffeinate", "stdbuf", "unbuffer"];
+    for seg in &lexed.segments {
+        let mut i = 0;
+        while i < seg.len() {
+            let w = seg[i].as_str();
+            if is_assignment(w) || KEYWORDS.contains(&w) {
+                i += 1;
+                continue;
+            }
+            if dynamic(w) {
+                return true;
+            }
+            let args = &seg[i + 1..];
+            match program(w) {
+                "eval" | "source" | "." | "exec" | "trap" | "builtin" | "command" | "pushd" | "popd" | "xargs" => return true,
+                "find" if args.iter().any(|a| matches!(a.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir")) => return true,
+                "env" if args.iter().any(|a| !a.starts_with('-') && !is_assignment(a)) => return true,
+                p if SHELLS.contains(&p) && args.iter().any(|a| a == "-Command" || a.strip_prefix('-').is_some_and(|f| !f.starts_with('-') && f.contains('c'))) => return true,
+                p if wrappers.contains(&p) => {
+                    // The wrapped command is the next word that isn't an option (or a duration).
+                    i += 1;
+                    while i < seg.len() && (seg[i].starts_with('-') || seg[i].chars().next().is_some_and(|c| c.is_ascii_digit())) {
+                        i += 1;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            break;
+        }
+    }
+    lexed.nested.iter().any(|n| hides_code(&lex(n), depth + 1))
+}
+
 fn check_command(cmd: &str, cwd: Option<&Path>, scope: &GateScope, depth: usize) -> Result<(), String> {
     if depth > MAX_DEPTH {
         return Err("This command nests too deeply for maiTerm to check, so it is blocked.".to_string());
@@ -549,15 +603,11 @@ fn check_command(cmd: &str, cwd: Option<&Path>, scope: &GateScope, depth: usize)
     // A substitution's folder isn't followed through the line's `cd`s: with one in the line, a
     // git inside `$(…)` needs an absolute `-C`.
     let moves = lexed.segments.iter().flatten().any(|w| is_cd(w));
-    // `eval 'cd /tmp'; git status`: a quoted `cd` (or a sourced script's) moves the shell where
-    // the gate can't see. A worker's git shares a line with none of them.
-    if scope.contained {
-        let hides = |w: &String| matches!(program(w), "eval" | "source" | "." | "exec");
-        let mut firsts = lexed.segments.iter().filter_map(|s| s.iter().find(|w| !is_assignment(w) && !KEYWORDS.contains(&w.as_str())));
-        let has_git = lexed.segments.iter().flatten().any(|w| program(w) == "git");
-        if has_git && firsts.any(hides) {
-            return Err("git can\u{2019}t share a line with eval, source, `.` or exec: they can move the shell where maiTerm can\u{2019}t see. Run git in a call of its own.".to_string());
-        }
+    // One blunt rule rather than one patch per shell trick (the final review, 2026-10-31): a
+    // worker's line that mentions git anywhere, quoted or nested, and holds anything that can
+    // move the shell or run code the gate can't read, is refused whole.
+    if depth == 0 && scope.contained && mentions_git(cmd) && hides_code(&lexed, 0) {
+        return Err(HIDDEN_CODE_REFUSAL.to_string());
     }
     for inner in &lexed.nested {
         check_command(inner, if moves { None } else { cwd }, scope, depth + 1)?;
@@ -1204,9 +1254,12 @@ mod tests {
         let deciders: [fn(&Fx, &str) -> GateDecision; 2] = [bash, wbash];
         for decide in deciders {
             assert!(matches!(decide(&f, "c=pu; git ${c}sh"), GateDecision::Deny(_)));
-            assert_eq!(decide(&f, "c=pu; g=git; $g ${c}sh"), GateDecision::Allow);
             assert_eq!(decide(&f, "echo Z2l0IHB1c2g= | base64 -d | sh"), GateDecision::Allow);
         }
+        // A command word in a variable is refused a worker when git is named (the final review);
+        // the coordinator's shell is its human's.
+        assert_eq!(bash(&f, "c=pu; g=git; $g ${c}sh"), GateDecision::Allow);
+        assert!(matches!(wbash(&f, "c=pu; g=git; $g ${c}sh"), GateDecision::Deny(_)));
         let _ = fs::remove_dir_all(&f.base);
     }
 
@@ -1367,9 +1420,35 @@ mod tests {
                 GateDecision::Allow => panic!("should refuse: {cmd}"),
             }
         }
-        // A quoted `cd` the gate can't see.
-        for cmd in ["eval 'cd /tmp'; git status", "source ./env.sh && git status", ". ./env.sh; git log", "exec git status"] {
-            assert!(matches!(wbash(&f, cmd), GateDecision::Deny(r) if r.contains("eval, source")), "{cmd}");
+        // A quoted `cd` the gate can't see, and every other way to run code it can't read: one
+        // blunt rule (the final review), whatever the trick.
+        for cmd in [
+            "eval 'cd /tmp'; git status".to_string(),
+            "source ./env.sh && git status".into(),
+            ". ./env.sh; git log".into(),
+            "exec git status".into(),
+            format!("builtin eval 'cd {out}'; git status"),
+            format!("command eval 'cd {out}'; git status"),
+            format!("eval 'cd {out}'; eval 'git status'"),
+            format!("eval 'cd {out}'; bash -c 'git status'"),
+            format!("eval 'cd {out}'; echo $(git status)"),
+            "source ./mv.sh; sh -c 'git status'".into(),
+            format!("c=cd; $c {out}; git status"),
+            format!("trap 'cd {out}' DEBUG; git status"),
+            format!("bash -O extglob -c 'git -C {out} status'"),
+            format!("pushd {out}; git status"),
+            "ls | xargs git add".into(),
+            "find . -name x -exec git add {} ;".into(),
+            "env git status".into(),
+            "nohup eval 'cd /tmp' ; git status".into(),
+            "echo `eval cd /tmp` ; git log".into(),
+            "$(echo git) status".into(),
+        ] {
+            assert!(matches!(wbash(&f, &cmd), GateDecision::Deny(r) if r.contains("Run git as a plain command")), "{cmd}");
+        }
+        // Without git in the line, the rule doesn't apply; nor to `digit` or `github`.
+        for cmd in ["eval 'echo hi'", "find . -name x -exec rm {} ;", "env FOO=1 npm test", "sh -c 'echo digit github.com'"] {
+            assert_eq!(wbash(&f, cmd), GateDecision::Allow, "{cmd}");
         }
         assert_eq!(bash(&f, "eval 'cd /tmp'; git status"), GateDecision::Allow, "the coordinator's shell is its human's");
         // The cwd itself places a relative -C.
@@ -1622,7 +1701,8 @@ mod tests {
         ] {
             assert!(denied(wbash(&f, &cmd)), "{cmd}");
         }
-        assert_eq!(wbash(&f, &format!("bash -c \"cd '{wt}' && git status\"")), GateDecision::Allow);
+        // The blunt rule (the final review) refuses git through any shell's -c, harmless or not.
+        assert!(denied(wbash(&f, &format!("bash -c \"cd '{wt}' && git status\""))));
         let _ = fs::remove_dir_all(&f.base);
     }
 }
