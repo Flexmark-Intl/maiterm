@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { HiveDetectedTool } from '$lib/tauri/types';
 import {
   BUILTIN, clampDefault, MAX_BUDGET, defaultsFromWizard, defaultToolIds, EMPTY_HIVE_DEFAULTS, fullPacks, groupTools, knownTools, normalizeHiveDefaults,
-  pickedItems, summarizeTools, toggleGroup, togglePack, toolMatches, wizardStart,
+  packsToStore, pickedItems, summarizeTools, toggleGroup, togglePack, toolMatches, wizardStart,
 } from './defaults';
 import { MAX_CAP } from './change';
 
@@ -176,5 +176,18 @@ describe('review fixes', () => {
     const d = defaultsFromWizard({ ...crew, cap: 4, budgetDollars: 10, tools: [], packs: [] }, was, null);
     expect(d.tools).toEqual(['comfyui', 'cli:ffmpeg']);
     expect(d.packs).toEqual(['gstack']);
+  });
+});
+
+describe('packsToStore', () => {
+  const qa = { ...tool('skill:qa', 'skill', 'qa'), pack: 'gstack' };
+  const ls = { ...tool('skill:langsys', 'skill', 'langsys'), pack: 'langsys' };
+  it('keeps a stored pack with no detected member across an unrelated click', () => {
+    // gstack mid-reinstall: none of its members detected; ffmpeg ticked.
+    expect(packsToStore(new Set(['cli:ffmpeg']), [tool('cli:ffmpeg', 'cli', 'ffmpeg'), ls], ['gstack', 'langsys'])).toEqual(['gstack']);
+  });
+  it('a detected pack follows the picks', () => {
+    expect(packsToStore(new Set(['skill:qa']), [qa], [])).toEqual(['gstack']);
+    expect(packsToStore(new Set(), [qa], ['gstack'])).toEqual([]);
   });
 });

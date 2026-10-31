@@ -520,7 +520,42 @@ fn skill_tools(skills_dir: &Path) -> Vec<DetectedTool> {
         .filter(|n| !n.starts_with('.'))
         .collect();
     names.sort();
-    let packs: Vec<Option<String>> = names.iter().map(|n| skill_pack(&skills_dir.join(n).join("SKILL.md"))).collect();
+    // 1. What each skill declares (frontmatter).
+    let mut packs: Vec<Option<String>> = names.iter().map(|n| skill_pack(&skills_dir.join(n).join("SKILL.md"))).collect();
+    let mut declared: HashSet<String> = packs.iter().flatten().cloned().collect();
+    // 2. A pack's own repo installed as a skill dir named after it (gstack's `gstack/`) holds a
+    //    folder for each member: a skill D with subfolders named like other skills is a pack D,
+    //    and those skills (unless they declare another pack) and D itself are its members. Not
+    //    every member carries the description tag, so this is what catches the rest.
+    let index: HashMap<&str, usize> = names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+    for (d, dir_name) in names.iter().enumerate() {
+        let subdirs: Vec<usize> = std::fs::read_dir(skills_dir.join(dir_name))
+            .into_iter()
+            .flatten()
+            .flatten()
+            // Followed: gstack's own folder links some members (connect-chrome) to another.
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().to_str().and_then(|s| index.get(s).copied()))
+            .filter(|&i| i != d)
+            .collect();
+        if subdirs.is_empty() {
+            continue;
+        }
+        declared.insert(dir_name.clone());
+        for i in subdirs.into_iter().chain([d]) {
+            if packs[i].as_deref().is_none_or(|p| p == dir_name) {
+                packs[i] = Some(dir_name.clone());
+            }
+        }
+    }
+    // 3. An unpacked skill named `<pack>-…` joins that pack (langsys-doctor, langsys-scan), but
+    //    only a pack something declared: a shared prefix alone never makes one.
+    for (i, n) in names.iter().enumerate() {
+        if packs[i].is_some() {
+            continue;
+        }
+        packs[i] = declared.iter().filter(|p| n.len() > p.len() + 1 && n.starts_with(p.as_str()) && n.as_bytes()[p.len()] == b'-').max_by_key(|p| p.len()).cloned();
+    }
     // A pack of one is just a skill.
     let mut count: HashMap<&str, usize> = HashMap::new();
     for p in packs.iter().flatten() {
@@ -1981,5 +2016,69 @@ mod tests {
             ],
             "a pack of one (langsys, lonely) is no pack"
         );
+    }
+
+    #[test]
+    fn skill_tools_find_untagged_members_by_pack_folder_and_name_prefix() {
+        let dir = std::env::temp_dir().join(format!("hive-skills-{}", uuid::Uuid::new_v4().simple()));
+        let skill = |name: &str, front: &str| {
+            let d = dir.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), format!("---\nname: {name}\n{front}\n---\nbody\n")).unwrap();
+        };
+        // gstack's repo is installed as the skill `gstack`, holding a folder per member.
+        skill("gstack", "description: Router. (gstack)");
+        skill("qa", "description: QA. (gstack)");
+        skill("learn", "description: Untagged member.");
+        skill("setup-deploy", "description: Untagged member.");
+        skill("theirs", "description: Another pack's. (other)");
+        skill("other-thing", "description: The other pack's second. (other)");
+        for sub in ["qa", "learn", "setup-deploy", "theirs", "bin", "docs"] {
+            std::fs::create_dir_all(dir.join("gstack").join(sub)).unwrap();
+        }
+        // A member linked to another member's folder, as gstack's connect-chrome is.
+        skill("connect-chrome", "description: No tag.");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("learn", dir.join("gstack").join("connect-chrome")).unwrap();
+        // langsys: one declares the package, the others only share its name.
+        skill("langsys", "description: L.\nmetadata:\n  package: langsys-skill");
+        skill("langsys-doctor", "description: D.");
+        skill("langsys-scan", "description: S.");
+        // A shared prefix with no declared pack is not a pack.
+        skill("plan-ceo", "description: x");
+        skill("plan-eng", "description: y");
+        // gstack-upgrade: no folder in gstack/, no tag, but the gstack- prefix.
+        skill("gstack-upgrade", "description: z");
+
+        let got: std::collections::BTreeMap<String, Option<String>> = skill_tools(&dir).into_iter().map(|t| (t.label, t.pack)).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        let pack = |n: &str| got[n].as_deref();
+        for n in ["gstack", "qa", "learn", "setup-deploy", "gstack-upgrade"] {
+            assert_eq!(pack(n), Some("gstack"), "{n}");
+        }
+        #[cfg(unix)]
+        assert_eq!(pack("connect-chrome"), Some("gstack"), "a linked member folder counts");
+        assert_eq!(pack("theirs"), Some("other"), "an explicit pack wins over the folder");
+        assert_eq!(pack("other-thing"), Some("other"));
+        for n in ["langsys", "langsys-doctor", "langsys-scan"] {
+            assert_eq!(pack(n), Some("langsys"), "{n}");
+        }
+        assert_eq!(pack("plan-ceo"), None);
+        assert_eq!(pack("plan-eng"), None);
+    }
+
+    /// Prints the packs found in the real ~/.claude/skills (read-only):
+    /// `cargo test --lib real_skill_packs -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_skill_packs() {
+        let home = dirs::home_dir().unwrap();
+        let mut by: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for t in skill_tools(&home.join(".claude").join("skills")) {
+            by.entry(t.pack.unwrap_or_else(|| "(none)".into())).or_default().push(t.label);
+        }
+        for (p, m) in by {
+            println!("{p}: {} — {}", m.len(), m.join(", "));
+        }
     }
 }

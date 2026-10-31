@@ -8,7 +8,7 @@
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { hiveDetectTools } from '$lib/tauri/commands';
   import type { HiveDefaults, HiveDetectedTool } from '$lib/tauri/types';
-  import { BUILTIN, clampDefault, fullPacks, HIVE_EFFORTS, HIVE_MODELS, MAX_BUDGET, wizardStart } from '$lib/hive/defaults';
+  import { BUILTIN, clampDefault, packsToStore, HIVE_EFFORTS, HIVE_MODELS, MAX_BUDGET, wizardStart } from '$lib/hive/defaults';
   import { MAX_CAP } from '$lib/hive/change';
   import { MAX_INSTRUCTIONS, charCount } from '$lib/hive/model';
   import HiveToolPicker from './HiveToolPicker.svelte';
@@ -95,7 +95,7 @@
       <p class="hint">Nothing detected: no MCP servers, ffmpeg, ImageMagick, SoX, Blender, skills or ComfyUI.</p>
     {:else}
       <!-- A pack picked whole is stored by name too, so a skill it adds later comes with it. -->
-      <HiveToolPicker {tools} {picked} onchange={(next) => void save({ tools: [...next], packs: fullPacks(next, tools!) })} />
+      <HiveToolPicker {tools} {picked} onchange={(next) => void save({ tools: [...next], packs: packsToStore(next, tools!, d.packs) })} />
     {/if}
     {#if missing.length}
       <p class="hint">

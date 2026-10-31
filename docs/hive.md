@@ -129,7 +129,9 @@ dropped silently. With default tools, the Tools step shows them as one line ("Fr
 ffmpeg, Figma, frontend-design (+4 more)") with **Change** behind it; otherwise, and after Change,
 the same grouped, filterable picker as Preferences (`HiveToolPicker.svelte`). A **skill pack**
 (two or more skills sharing SKILL.md `metadata.package`, or a trailing `(word)` on the
-description, as gstack's 54 do: `DetectedTool.pack`, `create::skill_pack`) is one row there, "gstack
+description, as most of gstack's do; untagged members are found by the pack's own skill folder holding
+a folder per member, and by a `<pack>-` name prefix on a declared pack: `DetectedTool.pack`,
+`create::skill_tools`) is one row there, "gstack
 — 54 skills", whose checkbox picks every member and whose arrow lists them; a filter matching a
 member opens it. Ids stay per skill (nothing downstream knows packs); a pack picked whole in
 Preferences is also stored by name (`hive_defaults.packs`), so a skill the pack adds later is

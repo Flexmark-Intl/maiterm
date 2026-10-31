@@ -106,6 +106,14 @@ export function defaultToolIds(d: Pick<WizardStart, 'tools' | 'packs'>, detected
   return knownTools([...d.tools, ...members], detected);
 }
 
+/** The packs to store after a change in a picker: those picked whole now, plus every stored
+ *  pack none of whose members is detected right now (gstack mid-reinstall), which no picker
+ *  could show and so no click can have meant to drop. */
+export function packsToStore(picked: ReadonlySet<string>, detected: readonly HiveDetectedTool[], stored: readonly string[]): string[] {
+  const seen = new Set(detected.map((t) => t.pack).filter((p): p is string => !!p));
+  return [...new Set([...fullPacks(picked, detected), ...stored.filter((p) => !seen.has(p))])].sort();
+}
+
 /** The packs every detected member of which is picked: what Preferences stores as `packs`. */
 export function fullPacks(picked: ReadonlySet<string>, detected: readonly HiveDetectedTool[]): string[] {
   const byPack = new Map<string, boolean>();
