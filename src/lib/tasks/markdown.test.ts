@@ -38,6 +38,10 @@ describe('renderTaskMarkdown', () => {
     expect(renderTaskMarkdown('<img src=x onerror="alert(1)">', [task])).not.toContain('<img');
   });
 
+  it('stays inert when a bare tag precedes an unclosed one', () => {
+    expect(renderTaskMarkdown('Before <code> <meta http-equiv=refresh content="0;url=x" ', [task])).not.toMatch(/<meta/i);
+  });
+
   it('ignores slot characters the agent wrote itself', () => {
     expect(renderTaskMarkdown('a\uE0000\uE001b', [task])).toContain('a0b');
   });

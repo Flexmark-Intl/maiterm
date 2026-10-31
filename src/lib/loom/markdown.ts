@@ -17,6 +17,13 @@ const SAFE_HREF = /^(https?:|mailto:)/i;
 
 const renderer = new Renderer();
 renderer.html = ({ text }: Tokens.HTML | Tokens.Tag) => escapeHtml(text);
+// After an inline <pre>, <code>, <kbd> or <script>, marked flags the text that follows as already
+// escaped and emits it verbatim, on the assumption that the tag went out as HTML. Ours never does,
+// so the flag is always wrong here: left alone, a bare `<code> <meta ...` is a live tag.
+const defaultText = Renderer.prototype.text;
+renderer.text = function (this: Renderer, token: Tokens.Text | Tokens.Escape) {
+  return defaultText.call(this, { ...token, escaped: false } as Tokens.Text);
+};
 renderer.image = ({ href, text }: Tokens.Image) =>
   `<span class="md-img" data-src="${escapeHtml(href ?? '')}">${escapeHtml(text || 'image')}</span>`;
 renderer.link = function (this: Renderer, { href, title, tokens }: Tokens.Link) {
