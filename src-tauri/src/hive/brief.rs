@@ -98,7 +98,12 @@ const MEMORY_RULE: &str = "maiTerm keeps MEMORY.md\u{2019}s index from each memo
 /// never do, and where the rest is. A worker's need its record (`worker`), which names its
 /// brief; without one it gets only what every Hive agent is told.
 pub fn invariant_rules(hive: &Hive, role: &str, paths: &HivePaths, worker: Option<&WorkerRecord>) -> String {
-    let goal = shell_safe(&hive.goal, GOAL_IN_RULES);
+    // A goal that already ends a sentence gets no second period ("…portal..", 2026-10-31).
+    let goal = {
+        let g = shell_safe(&hive.goal, GOAL_IN_RULES);
+        let g = g.trim_end_matches('.').to_string();
+        if g.ends_with(['!', '?', '…']) { g } else { format!("{g}.") }
+    };
     // Paths verbatim: a path changed to be echo-safe would name a folder that isn't there.
     let home = paths.coordinator_home().to_string_lossy().to_string();
     let memory = paths.memory().to_string_lossy().to_string();
@@ -107,7 +112,7 @@ pub fn invariant_rules(hive: &Hive, role: &str, paths: &HivePaths, worker: Optio
     if let Some(w) = worker.filter(|w| role == ROLE_WORKER && w.is_reviewer()) {
         out.push_str(&format!(
             "You are worker {} ({}) in a maiTerm Hive: a REVIEWER of another worker\u{2019}s result. The Hive\u{2019}s goal: \
-             {goal}. Before anything else, read {}: it names the work, the commits you review and what done means. Check \
+             {goal} Before anything else, read {}: it names the work, the commits you review and what done means. Check \
              it, never fix it: what you change in your copies never reaches the builder. Run queued commands with hiveRun, \
              never in your shell. Answer once with hiveVerdict: pass, or fail with each issue as expected, actual, evidence, \
              fix and files. Anything you couldn\u{2019}t check is a fail, with the gap as the issue. Never hiveReport, never \
@@ -122,7 +127,7 @@ pub fn invariant_rules(hive: &Hive, role: &str, paths: &HivePaths, worker: Optio
     if let Some(w) = worker.filter(|_| role == ROLE_WORKER) {
         // The title is the coordinator's words: made echo-safe and capped like the goal.
         out.push_str(&format!(
-            "You are worker {} ({}) in a maiTerm Hive, in the {} role. The Hive\u{2019}s goal: {goal}. Before anything else, \
+            "You are worker {} ({}) in a maiTerm Hive, in the {} role. The Hive\u{2019}s goal: {goal} Before anything else, \
              read {}: it holds your task, your role, your folders and your human\u{2019}s rules. You write only in \
              your own worktrees and your scratch folder ({}); commit your work on your branch as you go. When you need a \
              decision or something you can\u{2019}t do, block your task with a blocker: it goes to your coordinator, not to \
@@ -143,7 +148,7 @@ pub fn invariant_rules(hive: &Hive, role: &str, paths: &HivePaths, worker: Optio
     }
     if role == ROLE_COORDINATOR {
         out.push_str(&format!(
-            "You are the coordinator of a maiTerm Hive. Its goal: {goal}. You plan, start workers, review, land and curate; \
+            "You are the coordinator of a maiTerm Hive. Its goal: {goal} You plan, start workers, review, land and curate; \
              you do not do the work yourself beyond small reads to plan. Before anything else, read {brief}: it holds the \
              project brief, the folders and your human\u{2019}s rules. Your home ({home}) is your working folder. Shared \
              memory is {memory}: read MEMORY.md there at start, and write memory files rather than editing the index. \
@@ -154,7 +159,7 @@ pub fn invariant_rules(hive: &Hive, role: &str, paths: &HivePaths, worker: Optio
              hiveFinish. ",
         ));
     } else {
-        out.push_str(&format!("You are an agent in a maiTerm Hive. Its goal: {goal}. "));
+        out.push_str(&format!("You are an agent in a maiTerm Hive. Its goal: {goal} "));
     }
     out.push_str(
         "No agent in a Hive pushes, changes git remotes or merges pull requests: maiTerm refuses those, and only \
@@ -845,6 +850,19 @@ mod tests {
         assert!(q.contains("never tell a worker to load a skill"), "{q}");
         assert!(q.contains("hiveChangeSettings {add_hosts, reason} only when the worker\u{2019}s task needs it"), "{q}");
         assert!(q.contains("A worker\u{2019}s **action** blocker") && !q.contains("only your human can do it"), "{q}");
+    }
+
+    /// "The Hive's goal: Fully functional EWS Partners app/portal.." (2026-10-31): one period.
+    #[test]
+    fn a_goal_that_ends_a_sentence_gets_no_second_period() {
+        let (mut h, p, w) = crate::hive::launch::tests::sample_worker_hive();
+        for (goal, shown) in [("Ship the portal.", "Ship the portal. "), ("Ship the portal", "Ship the portal. "), ("Is it done?", "Is it done? ")] {
+            h.goal = goal.into();
+            for (role, worker) in [(ROLE_COORDINATOR, None), (ROLE_WORKER, Some(&w)), (ROLE_WORKER, None)] {
+                let r = invariant_rules(&h, role, &p, worker);
+                assert!(r.contains(&format!("goal: {shown}")) && !r.contains(".."), "{goal} for {role}: {r}");
+            }
+        }
     }
 
     #[test]
