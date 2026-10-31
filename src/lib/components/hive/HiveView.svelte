@@ -43,7 +43,11 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { hiveLiveWorkerTabs, hivePause, hiveResume, hiveWorkers } from '$lib/tauri/commands';
+  import { hiveLiveWorkerTabs, hiveNewGoalPreview, hivePause, hiveResume, hiveWorkers } from '$lib/tauri/commands';
+  import type { HiveNewGoalPreview } from '$lib/tauri/types';
+  import HiveNewGoalSheet from './HiveNewGoalSheet.svelte';
+  import HivePendingCommits from './HivePendingCommits.svelte';
+  import { chapterLine, goalNumberLabel, newGoalOffered, pendingHeadline, pendingKey, showPendingLayer } from '$lib/hive/newGoal';
   import HiveSettingsModal from './HiveSettingsModal.svelte';
   import { hiveFailureNotice } from '$lib/agents/turnFailure';
   import { boardGone, pausedLabel, throttleTip } from '$lib/hive/model';
@@ -430,11 +434,65 @@
     const r = moreBtn?.getBoundingClientRect();
     if (r) moreMenu = { x: r.right - 180, y: r.bottom + 4 };
   }
-  const moreItems: MenuItem[] = [
+  const moreItems: MenuItem[] = $derived([
+    ...(newGoalOffered(hive?.status) ? [{ label: 'New goal…', action: () => (newGoalOpen = true) }] : []),
+    ...(hive?.chapters?.length ? [{ label: 'Earlier goals', action: () => (chaptersOpen = true) }] : []),
     { label: 'Land log', action: () => (landLog = { taskId: null }) },
     { label: '', action: () => {}, separator: true },
     { label: 'Delete Hive…', action: () => (deleteOpen = true) },
-  ];
+  ]);
+
+  // ── New goal (docs/hive.md §11.5): on a Done or paused Hive. Commits not landed hold it, and the
+  // layer over the workers says so. Read when the board changes (its own refresh: the worker
+  // event, task writes, the status), never on a timer, and at most once every few seconds. ──
+  let newGoalOpen = $state(false);
+  let chaptersOpen = $state(false);
+  const goalNumber = $derived(goalNumberLabel(hive));
+  let goalPreview = $state<HiveNewGoalPreview | null>(null);
+  let previewSeq = 0;
+  let previewTimer: ReturnType<typeof setTimeout> | null = null;
+  let previewAt = 0;
+  const PREVIEW_MIN_GAP = 3000;
+  function refreshPreview() {
+    if (previewTimer) return;
+    previewTimer = setTimeout(() => {
+      previewTimer = null;
+      previewAt = Date.now();
+      const id = workspaceId;
+      const mine = ++previewSeq;
+      hiveNewGoalPreview(id)
+        .then((p) => { if (mine === previewSeq && id === workspaceId) goalPreview = p; })
+        .catch((e) => logInfo(`hive: new-goal preview of ${id.slice(0, 8)} not read: ${e}`));
+    }, Math.max(0, previewAt + PREVIEW_MIN_GAP - Date.now()));
+  }
+  $effect(() => {
+    void board;
+    const offered = newGoalOffered(hive?.status);
+    untrack(() => {
+      if (offered) refreshPreview();
+      else {
+        ++previewSeq;
+        goalPreview = null;
+      }
+    });
+  });
+  const pendingShown = $derived(showPendingLayer(hive?.status, goalPreview) && !offBoard);
+  /** Collapsed to a banner by the human; opens again when the pending set changes. */
+  let pendingCollapsedFor = $state<string | null>(null);
+  const pendingSig = $derived(goalPreview ? pendingKey(goalPreview.unlanded) : '');
+  const pendingCollapsed = $derived(boardMode === 'rail' || pendingCollapsedFor === pendingSig);
+  /** The layer covers the board's box only, measured within `.cols`. */
+  let layerBox = $state<{ l: number; t: number; w: number; h: number } | null>(null);
+  $effect(() => {
+    const el = boardEl;
+    if (!el || !pendingShown) return;
+    const measure = () => { layerBox = { l: el.offsetLeft, t: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight }; };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    if (colsEl) ro.observe(colsEl);
+    return () => ro.disconnect();
+  });
   /** A failed turn's notice (hive/turn_failure.rs), by tab: until a turn of that agent ends well. */
   const failureOf = (tabId: string | null | undefined) => (tabId ? board?.turn_failures?.[tabId] ?? null : null);
   const coordFailure = $derived(failureOf(coordId));
@@ -763,6 +821,7 @@
       unlisten?.();
       hiveFeed.detach(feedFor);
       if (fetchTimer) clearTimeout(fetchTimer);
+      if (previewTimer) clearTimeout(previewTimer);
       if (flashTimer) clearTimeout(flashTimer);
       window.removeEventListener(HIVE_OPEN_COLUMN, onOpen);
       window.removeEventListener(HIVE_KEY, onKey);
@@ -773,6 +832,14 @@
   });
 </script>
 
+{#snippet newGoalButton()}
+  <Tooltip text={goalPreview?.unlanded.length
+    ? `Give this Hive a new goal. ${pendingHeadline(goalPreview.unlanded)}: they need landing first`
+    : 'Give this Hive a new goal: workers stop, a fresh Queen starts here, and the gallery, settings, folders and memory stay'}>
+    <button type="button" class="btn" onclick={() => (newGoalOpen = true)}><Icon name="plus" size={11} />New goal</button>
+  </Tooltip>
+{/snippet}
+
 <!-- Escape bubbling out of the columns (§4.6); every control inside keeps its own keys. -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="hive" onkeydown={onKeydown}>
@@ -780,7 +847,16 @@
     <div class="top">
       <div class="title">
         <h2>{ws?.name ?? ''}</h2>
-        {#if hive?.goal}<p class="goal">{hive.goal}</p>{/if}
+        {#if hive?.goal}
+          <p class="goal">
+            {#if goalNumber}
+              <Tooltip text="Show this Hive's earlier goals">
+                <button type="button" class="goal-n" aria-expanded={chaptersOpen} onclick={() => (chaptersOpen = !chaptersOpen)}>{goalNumber}</button>
+              </Tooltip>
+            {/if}
+            {hive.goal}
+          </p>
+        {/if}
       </div>
       <div class="controls">
         {#if workers}
@@ -820,6 +896,7 @@
             <Tooltip text="The queen's report: each criterion's receipts, what landed, final assets, spend, what it decided alone">
               <button type="button" class="btn primary" onclick={() => (reportOpen = true)}>Report</button>
             </Tooltip>
+            {@render newGoalButton()}
           {:else if hive.status === 'paused'}
             <Tooltip text={pausedLabel(hive.paused_by)}>
               <span class="status paused"><span class="pulse" aria-hidden="true"></span>{hive.paused_by === 'human' ? 'Paused by you' : 'Paused'}</span>
@@ -827,6 +904,7 @@
             <Tooltip text={hive.paused_by === 'human' ? 'Start workers again' : "Start workers again: you've dealt with what paused it"}>
               <button type="button" class="btn primary" disabled={resuming} onclick={() => void resume()}><Icon name="resume" size={11} />Resume</button>
             </Tooltip>
+            {@render newGoalButton()}
           {:else}
             <span class="status running"><span class="pulse" aria-hidden="true"></span>Running</span>
             <Tooltip text="No worker starts or relaunches until you resume it; running agents finish their turns">
@@ -837,7 +915,7 @@
             <Icon name="settings" size={13} />
           </IconButton>
           <span bind:this={moreBtn}>
-            <IconButton tooltip="Land log, Delete Hive" aria-haspopup="menu" onclick={openMore}><Icon name="more" size={13} /></IconButton>
+            <IconButton tooltip={newGoalOffered(hive.status) ? 'New goal, land log, Delete Hive' : 'Land log, Delete Hive'} aria-haspopup="menu" onclick={openMore}><Icon name="more" size={13} /></IconButton>
           </span>
         {/if}
       </div>
@@ -957,6 +1035,27 @@
         <span class="dim">No completion criteria yet: the queen sets them.</span>
       {/if}
     </div>
+  {/if}
+  {#if chaptersOpen && hive?.chapters?.length}
+    <div class="criteria-panel chapters" aria-label="Earlier goals">
+      <div class="chapters-head">
+        <span class="dim">Earlier goals</span>
+        <IconButton tooltip="Hide the earlier goals" onclick={() => (chaptersOpen = false)}><Icon name="close" size={10} /></IconButton>
+      </div>
+      <ol>
+        {#each hive.chapters as c, i (i)}
+          {@const line = chapterLine(c, i + 1)}
+          <li>
+            <span class="ch-title">{line.title}</span>
+            <span class="dim"> · {line.meta}</span>
+            {#if line.summary}<span class="ch-sum">{line.summary}</span>{/if}
+          </li>
+        {/each}
+      </ol>
+    </div>
+  {/if}
+  {#if newGoalOpen && hive}
+    <HiveNewGoalSheet {workspaceId} name={ws?.name ?? ''} onclose={() => (newGoalOpen = false)} />
   {/if}
   {#if settingsOpen && hive}
     <HiveSettingsModal
@@ -1145,6 +1244,28 @@
         </div>
       {/if}
     </section>
+    {#if pendingShown && goalPreview && layerBox}
+      <!-- New goal is held by these (§11.5): a layer over the workers' board, never over the queen.
+           Collapsed, it's a banner at the board's foot; on a rail it's always that. -->
+      <div class="pending-layer" class:collapsed={pendingCollapsed} style="left: {layerBox.l}px; top: {layerBox.t}px; width: {layerBox.w}px; height: {layerBox.h}px">
+        {#if pendingCollapsed}
+          <div class="pending-banner" role="status">
+            <span class="pb-dot" aria-hidden="true"></span>
+            <span class="pb-text">{pendingHeadline(goalPreview.unlanded)}: a new goal needs them landed first</span>
+            {#if boardMode !== 'rail'}
+              <button type="button" class="pb-show" onclick={() => (pendingCollapsedFor = null)}>Show</button>
+            {/if}
+          </div>
+        {:else}
+          <div class="pending-card">
+            <div class="pc-close">
+              <IconButton tooltip="Collapse to a banner, so the board can be read" onclick={() => (pendingCollapsedFor = pendingSig)}><Icon name="collapse-all" size={12} /></IconButton>
+            </div>
+            <HivePendingCommits {workspaceId} unlanded={goalPreview.unlanded} />
+          </div>
+        {/if}
+      </div>
+    {/if}
     {#if showMemory}
       <HiveMemoryView {workspaceId} />
     {/if}
@@ -1311,7 +1432,26 @@
   .criteria-panel ol { margin: 0; padding-left: 20px; }
   .criteria-panel li { overflow-wrap: anywhere; }
   .criteria-panel .dim { color: var(--fg-dim); }
-  .cols { flex: 1; min-height: 0; display: flex; min-width: 0; overflow: hidden; }
+  .cols { position: relative; flex: 1; min-height: 0; display: flex; min-width: 0; overflow: hidden; }
+  /* New goal's pending commits (§11.5): a translucent layer over the board's box, the cards still
+     showing through; collapsed, a banner at its foot that leaves the board to click. */
+  .pending-layer { position: absolute; z-index: 5; display: flex; align-items: flex-start; justify-content: center; padding: 28px 16px 16px; box-sizing: border-box; overflow-y: auto; background: color-mix(in srgb, var(--bg-dark) 72%, transparent); backdrop-filter: blur(2px); }
+  .pending-layer.collapsed { align-items: flex-end; padding: 0 10px 10px; overflow: visible; background: none; backdrop-filter: none; pointer-events: none; }
+  .pending-card { position: relative; width: 100%; max-width: 520px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--yellow) 60%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--yellow) 6%, var(--bg-medium)); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45); box-sizing: border-box; }
+  .pc-close { position: absolute; top: 8px; right: 8px; }
+  .pending-banner { pointer-events: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; width: 100%; padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--yellow) 60%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--yellow) 10%, var(--bg-medium)); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35); box-sizing: border-box; font-size: 12px; color: var(--fg); }
+  .pb-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--yellow); }
+  .pb-text { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
+  .pb-show { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
+  .pb-show:hover { text-decoration: underline; }
+  .pb-show:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+  .goal-n { margin-right: 6px; padding: 0 5px; border: 1px solid var(--bg-light); border-radius: 3px; background: none; color: var(--fg-dim); font: inherit; font-size: 11px; cursor: pointer; }
+  .goal-n:hover { color: var(--fg); border-color: var(--fg-dim); }
+  .goal-n:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .chapters-head { display: flex; align-items: center; justify-content: space-between; }
+  .chapters li { margin-bottom: 4px; }
+  .ch-title { color: var(--fg); }
+  .ch-sum { display: block; color: var(--fg-dim); font-size: 11.5px; line-height: 1.4; }
   .coord { flex: none; display: flex; flex-direction: column; min-height: 0; min-width: 0; max-width: calc(100% - 264px); transition: box-shadow 0.3s; }
   .coord > :global(.convo) { flex: 1; }
   .coord.flash { box-shadow: inset 0 0 0 1px var(--accent); }
