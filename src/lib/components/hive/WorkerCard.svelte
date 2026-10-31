@@ -13,7 +13,7 @@
 <script lang="ts">
   import Tooltip from '$lib/components/Tooltip.svelte';
   import Icon from '$lib/components/Icon.svelte';
-  import { reviewLine, stateLine, type CardState } from '$lib/hive/cards';
+  import { reviewLine, roleLabel, stateLine, type CardState } from '$lib/hive/cards';
   import { cardTopRow, galleryUrl } from '$lib/hive/gallery';
   import type { Activity, contextGauge } from '$lib/hive/activity';
   import type { HiveTurnFailure, HiveWorkerCard } from '$lib/tauri/types';
@@ -29,6 +29,8 @@
     diff: { text: string; tip: string };
     /** The agent's own model name once it has replied, else the one the Hive routed it to. */
     model: string;
+    /** Its effort, the Hive's worker default when it has none of its own. */
+    effort?: string;
     ctx: ReturnType<typeof contextGauge>;
     compact?: boolean;
     focused?: boolean;
@@ -39,7 +41,7 @@
     /** Its click: the event says whether Shift was held (open beside, §4.1). */
     onopen: (e: MouseEvent) => void;
   }
-  let { card, state, note, runtime, age, activity, diff, model, ctx, compact = false, focused = false, hiveId = '', failure = null, onopen }: Props = $props();
+  let { card, state, note, runtime, age, activity, diff, model, effort = '', ctx, compact = false, focused = false, hiveId = '', failure = null, onopen }: Props = $props();
 
   const top = $derived(hiveId ? cardTopRow(card, diff.text) : diff.text ? 'diff' : null);
 
@@ -54,6 +56,9 @@
   const railLine = $derived(activity.tone === 'none' || activity.tone === 'idle' ? label : activity.text);
   // §7.7: what a reviewer reviews, or how a builder's reviews stand.
   const review = $derived(reviewLine(card));
+  // Its role from the catalogue (docs/hive.md §7.7), as people say it: "ui-reviewer" → "UI reviewer".
+  const roleName = $derived(roleLabel(card.role));
+  const modelLine = $derived([runtime, model, effort && `${effort} effort`].filter(Boolean).join(' · '));
 </script>
 
 <button
@@ -117,7 +122,7 @@
       </span>
     {/if}
     <span class="row">
-      <span class="m">{runtime} · {model}</span>
+      <span class="m">{#if roleName}<span class="role">{roleName}</span>{/if}{modelLine}</span>
       {#if ctx}
         <Tooltip text={ctx.tip}>
           <span class="ctx" data-tone={ctx.tone}>ctx {ctx.pct}%<i><s style="width: {ctx.pct}%"></s></i></span>
@@ -200,6 +205,7 @@
   .thumb .wave { width: 90%; height: 70%; background: var(--accent); -webkit-mask: var(--wave) center / 100% 100% no-repeat; mask: var(--wave) center / 100% 100% no-repeat; }
   .row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; min-width: 0; }
   .m { font-size: 10.5px; color: var(--fg-dim); overflow-wrap: anywhere; min-width: 0; }
+  .role { color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 3px; padding: 0 4px; margin-right: 6px; }
   .diff { font-size: 10.5px; color: var(--fg-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .ctx { --t: var(--green); display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--fg-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .ctx[data-tone='warn'] { --t: var(--orange, #ff9e64); }

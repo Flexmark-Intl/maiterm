@@ -232,7 +232,10 @@
         runtime: tab?.runtime ?? 'claude',
         activity: activityLine(onScreenAgent(worker.phase, agent, tabFields) ?? undefined, now, hiveFeed.sticky(tab?.id)),
         diff: formatDiffStat(hiveFeed.diffStat(worker.task_id)),
-        model: meta?.model || worker.model,
+        // A worker's own model/effort are empty when it takes the Hive's worker default at launch
+        // (hive/tools.rs): show that default, never a blank.
+        model: meta?.model || worker.model || hive?.models.worker.model || '',
+        effort: worker.effort || hive?.models.worker.effort || '',
         ctx: contextGauge(meta, tab ? overlordStore.checkpointThresholdFor(tab.id, meta?.contextLimit) : null),
         node: {
           taskId: worker.task_id,
@@ -1215,6 +1218,7 @@
                     activity={c.activity}
                     diff={c.diff}
                     model={c.model}
+                    effort={c.effort}
                     ctx={c.ctx}
                     failure={failureOf(c.worker.tab_id)}
                     focused={fit.shown.includes(c.worker.task_id) && focusedKey === c.worker.task_id}

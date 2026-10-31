@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { cardAge, cardState, isRetired, landLine, latestNote, onScreenAgent, pushHeld, retiredLine, reviewLine, sortCards, stateLine, STATE_ORDER, waves } from './cards';
+import { cardAge, cardState, isRetired, landLine, latestNote, onScreenAgent, pushHeld, retiredLine, reviewLine, roleLabel, sortCards, stateLine, STATE_ORDER, waves } from './cards';
+
+describe('roleLabel', () => {
+  it('spells catalogue roles as people say them', () => {
+    expect(roleLabel('ui-reviewer')).toBe('UI reviewer');
+    expect(roleLabel('api-tester')).toBe('API tester');
+    expect(roleLabel('frontend')).toBe('Frontend');
+    expect(roleLabel('art-director')).toBe('Art director');
+    expect(roleLabel('')).toBe('');
+    expect(roleLabel(undefined)).toBe('');
+  });
+});
 import type { HiveWorkerCard, TaskBlocker } from '$lib/tauri/types';
 
 const worker = (over: Partial<HiveWorkerCard> = {}): HiveWorkerCard => ({

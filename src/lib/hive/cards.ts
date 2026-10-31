@@ -86,6 +86,19 @@ export function retiredLine(w: Pick<HiveWorkerCard, 'phase' | 'retired' | 'undon
   return why ? `Retired · ${why}` : 'Retired';
 }
 
+/** Acronyms in role names (resources/hive/roles/*.md), kept upper case. */
+const ROLE_ACRONYMS = new Set(['ui', 'api']);
+
+/** A role from the catalogue as people say it: "ui-reviewer" → "UI reviewer", "api-tester" →
+ *  "API tester". Empty for none; an unknown role is spelled the same way. */
+export function roleLabel(role: string | null | undefined): string {
+  const words = (role ?? '').trim().split(/[-_\s]+/).filter(Boolean);
+  if (!words.length) return '';
+  return words
+    .map((w, i) => (ROLE_ACRONYMS.has(w.toLowerCase()) ? w.toUpperCase() : i === 0 ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w.toLowerCase()))
+    .join(' ');
+}
+
 /** A card's review line (§7.7): a reviewer names what it reviews; a builder its reviews so far.
  *  `urgent` while an escalation waits on the coordinator's `hiveResolve`. */
 export function reviewLine(w: Pick<HiveWorkerCard, 'reviews' | 'review'>): { text: string; urgent: boolean } | null {
