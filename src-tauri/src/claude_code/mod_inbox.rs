@@ -75,6 +75,9 @@ struct Inbox {
     prompts: u64,
     /// Started offers and whether their prompt ran, for `deliver` to collect.
     results: VecDeque<(String, bool)>,
+    /// Claude dropped a submitted prompt, and drops every one until a prompt is typed (the next
+    /// `UserPromptSubmit`): until then prompts are typed, or held for a draft, not offered.
+    dropping: bool,
     wake: Arc<Notify>,
 }
 
@@ -87,6 +90,7 @@ impl Inbox {
             unstarted: Vec::new(),
             prompts: 0,
             results: VecDeque::new(),
+            dropping: false,
             wake: Arc::new(Notify::new()),
         }
     }
@@ -145,6 +149,7 @@ impl ModInbox {
             // its to report.
             if !inbox.is_live(now) {
                 inbox.unstarted.clear();
+                inbox.dropping = false;
             }
             inbox.last_poll = now;
             if let Some(o) = hand_out(inbox) {
@@ -199,7 +204,13 @@ impl ModInbox {
     pub fn prompt_submitted(&self, tab_id: &str) {
         if let Some(inbox) = self.tabs.lock().get_mut(tab_id) {
             inbox.prompts += 1;
+            inbox.dropping = false;
         }
+    }
+
+    /// Claude is dropping this tab's submitted prompts (`Inbox::dropping`).
+    pub fn dropping(&self, tab_id: &str) -> bool {
+        self.tabs.lock().get(tab_id).is_some_and(|i| i.dropping)
     }
 
     /// A prompt the mod submitted for this tab is still waiting in Claude for its turn.
@@ -261,7 +272,10 @@ impl ModInbox {
                 if let Some(pos) = inbox.results.iter().position(|(i, _)| *i == id) {
                     let (_, ran) = inbox.results.remove(pos).expect("found above");
                     if !ran {
-                        log::warn!("[inbox] Claude dropped the prompt the mod submitted for tab {tab_id} (no UserPromptSubmit; after an interrupt it drops them until a prompt is typed) — typing it instead");
+                        // Not offered again until a prompt runs: the caller types this one, or
+                        // holds it for a draft in the box, which then holds it as for any tab.
+                        inbox.dropping = true;
+                        log::warn!("[inbox] Claude dropped the prompt the mod submitted for tab {tab_id} (no UserPromptSubmit; after an interrupt it drops them until a prompt is typed) — prompts are typed until one runs");
                     }
                     return ran;
                 }
@@ -298,8 +312,14 @@ fn hand_out(inbox: &mut Inbox) -> Option<Polled> {
 /// or a typed prompt would overtake it.
 ///
 /// Only for text that may be offered at all (`offerable`).
+///
+/// Never while Claude is dropping the tab's submitted prompts (`ModInbox::dropping`): an offer
+/// would be acked and lost, and a message held for a draft re-offered every second to the same
+/// end. Then the tab is served as one without a mod.
 pub fn takes_now(app: &AppState, tab_id: &str) -> bool {
-    app.mod_inbox.is_live(tab_id) && (agent_between_turns(app, tab_id) || app.mod_inbox.has_unstarted(tab_id))
+    app.mod_inbox.is_live(tab_id)
+        && !app.mod_inbox.dropping(tab_id)
+        && (agent_between_turns(app, tab_id) || app.mod_inbox.has_unstarted(tab_id))
 }
 
 /// Whether `text` can go to a mod at all. Not a slash command: a submitted prompt is the model's
@@ -402,6 +422,10 @@ mod tests {
         inbox.started("tab", &id);
         assert!(!delivering.await.unwrap());
         assert!(!inbox.has_unstarted("tab"), "a dropped prompt must not pull later ones onto the mod");
+        assert!(inbox.dropping("tab"), "nothing is offered until a prompt runs");
+        // The prompt typed in its place runs, and re-arms Claude's submits.
+        inbox.prompt_submitted("tab");
+        assert!(!inbox.dropping("tab"));
     }
 
     #[tokio::test]

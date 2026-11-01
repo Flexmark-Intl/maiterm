@@ -1843,8 +1843,10 @@ function createOverlordStore() {
             ? `${n} repl${n === 1 ? 'y' : 'ies'} from tabs you drove`
             : `${n} Overlord item${n === 1 ? '' : 's'} pending`;
           try {
-            await deliverPrompt(tab.id, inst.ptyId, `${what} — call listEscalations.`);
-            unNudged.clear();
+            // Held for a draft: the next tick nudges again.
+            if (await deliverPrompt(tab.id, inst.ptyId, `${what} — call listEscalations.`, () => noDraft(tab.id, true))) {
+              unNudged.clear();
+            }
           } catch (e) {
             logError(`overlord: wake nudge failed: ${e}`);
           }
@@ -1975,7 +1977,10 @@ function createOverlordStore() {
         const inst = terminalsStore.get(tab.id);
         if (!inst) { primedAgents.delete(primeId); continue; }
         try {
-          await deliverPrompt(tab.id, inst.ptyId, buildDoctrine());
+          if (!(await deliverPrompt(tab.id, inst.ptyId, buildDoctrine(), () => noDraft(tab.id, true)))) {
+            primedAgents.delete(primeId); // held for a draft: a later tick primes it
+            continue;
+          }
           await setVariable(tab.id, OVERLORD_PRIMED_VAR, key);
           logInfo(`overlord: primed agent tab ${tab.id.slice(0, 8)} with doctrine ${key}`);
         } catch (e) {
@@ -3989,7 +3994,9 @@ function createOverlordStore() {
         const lastOut = terminalsStore.getLastOutputAt(tabId) ?? 0;
         if (Date.now() - lastOut < 3000) { skipped++; continue; }
         try {
-          await deliverPrompt(tabId, inst.ptyId, TRACK_REQUEST_TEXT);
+          if (!(await deliverPrompt(tabId, inst.ptyId, TRACK_REQUEST_TEXT, () => noDraft(tabId, true)))) {
+            skipped++; continue; // the human has a draft in the box
+          }
         } catch (e) {
           logError(`overlord: track-request inject failed for ${tabId.slice(0, 8)}: ${e}`);
           skipped++; continue;
