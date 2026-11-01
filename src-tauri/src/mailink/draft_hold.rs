@@ -125,9 +125,14 @@ pub(crate) fn wake_typed(tab_id: &str, msg_ids: &[String]) {
             }
         }
     }
-    let known: Vec<String> = OUTCOMES.lock().get(tab_id).map(|v| v.iter().map(|o| o.0.clone()).collect()).unwrap_or_default();
-    for msg_id in msg_ids.iter().filter(|id| !known.contains(id)) {
-        record(tab_id, &Held { msg_id: msg_id.clone(), paths: Vec::new(), text: String::new(), what: "Hive wake", desktop: false }, "typed", None);
+    // Checked and recorded under one lock: two details built at once must not both record it.
+    let now = super::now_ms();
+    let mut all = OUTCOMES.lock();
+    let v = all.entry(tab_id.to_string()).or_default();
+    for msg_id in msg_ids {
+        if !v.iter().any(|o| &o.0 == msg_id) {
+            v.push((msg_id.clone(), "typed", now, None));
+        }
     }
 }
 
