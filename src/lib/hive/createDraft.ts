@@ -11,6 +11,24 @@ const drafts = new Map<string, unknown>();
  *  (`proposeHive`, docs/hive.md §3.7). Taken once: what the human then types is the draft. */
 const seeds = new Map<string, HiveProposal>();
 
+/** A proposal waiting for its Done Hive's New goal sheet (`target.kind === 'new_goal'`), keyed
+ *  by that Hive's workspace: HiveView opens the sheet when it finds one, and the sheet takes it. */
+const newGoalSeeds = new Map<string, HiveProposal>();
+
+export const newGoalProposals = {
+  seed(workspaceId: string, proposal: HiveProposal): void {
+    newGoalSeeds.set(workspaceId, proposal);
+  },
+  has(workspaceId: string): boolean {
+    return newGoalSeeds.has(workspaceId);
+  },
+  take(workspaceId: string): HiveProposal | undefined {
+    const s = newGoalSeeds.get(workspaceId);
+    newGoalSeeds.delete(workspaceId);
+    return s;
+  },
+};
+
 export const createDrafts = {
   seed(workspaceId: string, proposal: HiveProposal): void {
     seeds.set(workspaceId, proposal);

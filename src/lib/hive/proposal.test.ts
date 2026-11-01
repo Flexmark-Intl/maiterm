@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { nameFromGoal, parseProposal } from './proposal';
+import { nameFromGoal, parseProposal, proposalTarget } from './proposal';
 
 const from = { tabId: 't1', label: 'planner', ownFolder: '/Users/me/app' };
 
@@ -45,5 +45,20 @@ describe('nameFromGoal', () => {
     const n = nameFromGoal('Rebuild the onboarding flow so that new users reach their first project in under a minute');
     expect(n.length).toBeLessThanOrEqual(60);
     expect(n.endsWith(' ')).toBe(false);
+  });
+});
+
+describe('proposalTarget', () => {
+  const hive = (id: string, status: string, paths: string[]) => ({ workspaceId: `w-${id}`, name: `Hive ${id}`, hive: { id, status, folders: paths.map((path) => ({ path })) } });
+
+  it('offers a new goal to a done or paused Hive working in the primary folder', () => {
+    expect(proposalTarget(['/r/app/'], [hive('a', 'done', ['/r/app'])])).toEqual({ kind: 'new_goal', workspaceId: 'w-a', hiveId: 'a', hiveName: 'Hive a' });
+    expect(proposalTarget(['/r/app'], [hive('b', 'paused', ['/r/lib', '/r/app'])])).toMatchObject({ kind: 'new_goal', hiveId: 'b' });
+  });
+
+  it('leaves an active Hive alone, and matches the primary folder only', () => {
+    expect(proposalTarget(['/r/app'], [hive('a', 'active', ['/r/app'])])).toEqual({ kind: 'new' });
+    expect(proposalTarget(['/r/web', '/r/app'], [hive('a', 'done', ['/r/app'])])).toEqual({ kind: 'new' });
+    expect(proposalTarget([], [hive('a', 'done', ['/r/app'])])).toEqual({ kind: 'new' });
   });
 });

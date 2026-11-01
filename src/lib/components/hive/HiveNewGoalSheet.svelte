@@ -5,7 +5,10 @@
    *  aren't landed: the sheet lists them with the one button that does something about it. The
    *  click is the human's authority; Rust re-checks everything.
    *  Same backdrop/panel vocabulary as HiveDeleteSheet, and the same explicit rAF focus. */
+  import { untrack } from 'svelte';
   import { open as dialogOpen } from '@tauri-apps/plugin-dialog';
+  import { newGoalProposals } from '$lib/hive/createDraft';
+  import { reviewAsNewHive } from '$lib/hive/proposeHive';
   import { error as logError } from '@tauri-apps/plugin-log';
   import { hiveNewGoal, hiveNewGoalPreview } from '$lib/tauri/commands';
   import type { HiveNewGoalPreview } from '$lib/tauri/types';
@@ -25,6 +28,19 @@
     refreshKey?: unknown;
   }
   let { workspaceId, name, onclose, refreshKey }: Props = $props();
+
+  /** An agent's proposal reviewed as this Hive's new goal (`proposeHive`, docs/hive.md §3.7):
+   *  its goal, brief and files replace the prefill once the preview answers. Taken once. */
+  const proposal = untrack(() => newGoalProposals.take(workspaceId));
+  /** The proposal's folders this Hive doesn't have: said, since New goal keeps the Hive's own. */
+  const hiveFolders = $derived(workspacesStore.workspaces.find((w) => w.id === workspaceId)?.hive?.folders ?? []);
+  const trim = (p: string) => p.replace(/[\\/]+$/, '');
+  const missingFolders = $derived(proposal ? proposal.folders.filter((f) => !hiveFolders.some((h) => trim(h.path) === trim(f))) : []);
+  function asNewHive() {
+    if (!proposal || submitting) return;
+    onclose();
+    void reviewAsNewHive(proposal);
+  }
 
   let preview = $state<HiveNewGoalPreview | null>(null);
   let readError = $state<string | null>(null);
@@ -46,9 +62,11 @@
       .then((p) => {
         if (id !== workspaceId || mine !== readSeq) return;
         preview = p;
-        goal = p.goal;
-        brief = p.brief;
-        briefFiles = [...p.brief_files];
+        goal = proposal?.goal ?? p.goal;
+        brief = proposal ? proposal.brief : p.brief;
+        // A proposal's files are the new plan's: the old goal's are kept with its chapter, and the
+        // human can attach them again.
+        briefFiles = proposal ? [...proposal.briefFiles] : [...p.brief_files];
         instructions = p.instructions;
         // The old goal, selected: typing replaces it, an arrow key keeps it to edit.
         requestAnimationFrame(() => {
@@ -154,6 +172,19 @@
     </div>
 
     <div class="body">
+      {#if proposal}
+        <section class="proposed">
+          <p>
+            Filled in from {proposal.fromLabel}'s proposal: its goal, brief and files. Nothing changes until you start
+            the new goal.{#if proposal.cap || proposal.workerModel || proposal.workerEffort} The workers' settings it
+              suggested aren't applied here; change them in Hive settings.{/if}
+          </p>
+          {#if missingFolders.length}
+            <p>This Hive doesn't have {missingFolders.join(', ')}. Add {missingFolders.length === 1 ? 'it' : 'them'} in Hive settings if the work needs {missingFolders.length === 1 ? 'it' : 'them'}.</p>
+          {/if}
+          <button type="button" class="btn" disabled={submitting} onclick={asNewHive}>Make a new Hive instead</button>
+        </section>
+      {/if}
       {#if readError}
         <p class="error" role="alert">Couldn't read the Hive: {readError}</p>
       {/if}
@@ -174,7 +205,7 @@
       <label class="field">
         <span class="label">Goal</span>
         <input bind:this={goalEl} bind:value={goal} disabled={!preview || submitting} placeholder="One line: what done looks like" />
-        <span class="hint">The current goal is filled in: type to replace it.</span>
+        <span class="hint">{proposal ? 'The proposed goal is filled in.' : 'The current goal is filled in: type to replace it.'}</span>
       </label>
       <label class="field">
         <span class="label">Project brief <span class="opt">optional</span></span>
@@ -268,6 +299,8 @@
   .body { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; padding: 14px; }
   section { display: flex; flex-direction: column; gap: 4px; }
   section.pending { padding: 10px; border: 1px solid color-mix(in srgb, var(--yellow) 55%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--yellow) 8%, var(--bg-medium)); }
+  section.proposed { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 6px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+  section.proposed p { margin: 0; color: var(--fg); overflow-wrap: anywhere; }
   section.blocked { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--red) 50%, transparent); border-radius: 6px; }
   h4 { margin: 0; color: var(--fg-dim); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
   ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 2px; }

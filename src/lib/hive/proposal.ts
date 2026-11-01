@@ -22,6 +22,31 @@ export interface HiveProposal {
   cap: number | null;
   workerModel: string | null;
   workerEffort: string | null;
+  /** What Review offers: a new Hive, or a New goal (§11.5) for a Done or paused Hive that already
+   *  works in the proposal's primary folder, rather than a second Hive on the same repo. */
+  target: ProposalTarget;
+}
+
+export type ProposalTarget = { kind: 'new' } | { kind: 'new_goal'; workspaceId: string; hiveId: string; hiveName: string };
+
+/** A workspace's Hive as `proposalTarget` reads it. */
+export interface HiveCandidate {
+  workspaceId: string;
+  name: string;
+  hive: { id: string; status: string; folders: { path: string }[] };
+}
+
+const samePath = (a: string, b: string) => a.replace(/[\\/]+$/, '') === b.replace(/[\\/]+$/, '');
+
+/** A Done or paused Hive with the proposal's primary folder among its own takes it as a New goal;
+ *  an active one is left alone (it has a goal), so that proposal stays a new Hive. */
+export function proposalTarget(folders: string[], candidates: HiveCandidate[]): ProposalTarget {
+  const primary = folders[0];
+  if (!primary) return { kind: 'new' };
+  const hit = candidates.find(
+    (c) => (c.hive.status === 'done' || c.hive.status === 'paused') && c.hive.folders.some((f) => samePath(f.path, primary)),
+  );
+  return hit ? { kind: 'new_goal', workspaceId: hit.workspaceId, hiveId: hit.hive.id, hiveName: hit.name } : { kind: 'new' };
 }
 
 /** The longest name a proposal suggests; the human can type a longer one. */
@@ -93,5 +118,6 @@ export function parseProposal(
     cap,
     workerModel: workerModel as string | null,
     workerEffort: workerEffort as string | null,
+    target: { kind: 'new' },
   };
 }

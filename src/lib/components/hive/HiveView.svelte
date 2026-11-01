@@ -46,6 +46,7 @@
   import { hiveLiveWorkerTabs, hiveNewGoalPreview, hivePause, hiveResume, hiveWorkers } from '$lib/tauri/commands';
   import type { HiveNewGoalPreview } from '$lib/tauri/types';
   import HiveNewGoalSheet from './HiveNewGoalSheet.svelte';
+  import { newGoalProposals } from '$lib/hive/createDraft';
   import HivePendingCommits from './HivePendingCommits.svelte';
   import { chapterLine, goalNumberLabel, newGoalOffered, pendingHeadline, pendingKey, showPendingLayer } from '$lib/hive/newGoal';
   import HiveSettingsModal from './HiveSettingsModal.svelte';
@@ -448,6 +449,16 @@
   // layer over the workers says so. Read when the board changes (its own refresh: the worker
   // event, task writes, the status), never on a timer, and at most once every few seconds. ──
   let newGoalOpen = $state(false);
+  let newGoalMount = $state(0);
+  // An agent's proposal the human chose to review as this Hive's new goal (`proposeHive`,
+  // docs/hive.md §3.7): waiting when this view mounts, or announced while it shows.
+  $effect(() => {
+    if (untrack(() => newGoalProposals.has(workspaceId))) newGoalOpen = true;
+    // A sheet already open is remounted (keyed) so it takes the proposal.
+    const open = (e: Event) => { if ((e as CustomEvent<string>).detail === workspaceId) { newGoalOpen = true; newGoalMount++; } };
+    window.addEventListener('hive-open-new-goal', open);
+    return () => window.removeEventListener('hive-open-new-goal', open);
+  });
   let chaptersOpen = $state(false);
   const goalNumber = $derived(goalNumberLabel(hive));
   let goalPreview = $state<HiveNewGoalPreview | null>(null);
@@ -1045,7 +1056,9 @@
     </div>
   {/if}
   {#if newGoalOpen && hive}
-    <HiveNewGoalSheet {workspaceId} refreshKey={board} name={ws?.name ?? ''} onclose={() => (newGoalOpen = false)} />
+    {#key newGoalMount}
+      <HiveNewGoalSheet {workspaceId} refreshKey={board} name={ws?.name ?? ''} onclose={() => (newGoalOpen = false)} />
+    {/key}
   {/if}
   {#if settingsOpen && hive}
     <HiveSettingsModal

@@ -407,9 +407,18 @@ agent offers, the human creates.
   detected, the proposal itself is put back instead); dismissing the toast discards it. A proposal
   opened over an open sheet replaces that sheet, which keeps its own draft. A workspace made for a
   proposal that is never created stays an ordinary one.
-- **Not built.** No phone card: the sheet's folder, trust and stack checks are desktop work. No
-  New goal offer for a Done Hive on the same repo. The agent isn't told when the human creates
-  it; the coordinator starts on its own with the brief and files.
+- **A Done or paused Hive already on that folder takes it as a New goal** (`proposalTarget`): when
+  a Hive in the window has the proposal's primary folder among its own, the request offers it
+  that Hive's next goal (§11.5) rather than a second Hive on the same repo. An active Hive is left
+  alone, so that proposal stays a new Hive. Review opens that Hive and its New goal sheet with the
+  proposal's goal, brief and files in place of the old goal's (`newGoalProposals`, taken once;
+  HiveView opens the sheet on mount or on `hive-open-new-goal`). The sheet says whose proposal it
+  is, names any proposed folder the Hive doesn't have and that suggested worker settings aren't
+  applied (both are Hive settings), and offers **Make a new Hive instead**. A Hive deleted or
+  restarted before Review gets a new Hive. `reviewProposal` is the one entry for either target.
+- **Not built yet.** The phone (an agent-request card that can stand in for the sheet; the
+  maiLink integration tab's, 2026-11-01). The agent isn't told when the human creates it; the
+  coordinator starts on its own with the brief and files.
 
 ## 4. The view
 
