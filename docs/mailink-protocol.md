@@ -1542,7 +1542,10 @@ interface AgentRequest {
   asker: { tabId: string; title: string; workspace: string };  // as it read when it asked
   kind: string;                   // mesh_enable | mesh_disable | mesh_link | mesh_unlink | tab_move
                                   // | workspace_move | tab_create | restart | bridge_connect
-                                  // | bridge_fork | bridge_disconnect (added 2026-10-12, no bump).
+                                  // | bridge_fork | bridge_disconnect (added 2026-10-12, no bump)
+                                  // | hive_propose (2026-11-01, no bump: an agent's offer of a
+                                  // Hive or a Done Hive's new goal; Approve CREATES it as the
+                                  // effects say, and those lines can be many — show them all).
                                   // Draw ANY kind from the text fields: a kind added later is not
                                   // a version bump.
   summary: string;                // one line, maiTerm's words

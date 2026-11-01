@@ -1841,7 +1841,10 @@ export interface AgentRequest {
     | 'tab_reload' | 'window_reload' | 'bridge_connect' | 'bridge_fork' | 'bridge_disconnect' | 'mcp_add'
     // A Hive's land or undo (docs/hive.md §8.1, §8.3), and its coordinator's settings change
     // (§3.4): filed and carried out by Rust, never a window.
-    | 'hive_land' | 'hive_undo' | 'hive_settings';
+    | 'hive_land' | 'hive_undo' | 'hive_settings'
+    // An ordinary agent's offer of a Hive or a Done Hive's new goal (`proposeHive`, §3.7):
+    // filed and carried out by its window (lib/hive/proposalRequest.ts).
+    | 'hive_propose';
   /** Exactly what runs on approval, built by maiTerm. */
   args: Record<string, unknown>;
   /** What the card says will happen, written by maiTerm. */

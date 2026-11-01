@@ -57,6 +57,7 @@
           : r.kind === 'hive_land' ? 'Allow this land?'
           : r.kind === 'hive_undo' ? 'Allow this undo?'
           : r.kind === 'hive_settings' ? 'Change these Hive settings?'
+          : r.kind === 'hive_propose' ? ((r.args.plan as { kind?: string } | undefined)?.kind === 'new_goal' ? 'A new goal for this Hive?' : 'Make this Hive?')
           : r.kind.startsWith('bridge') ? 'Allow this bridge change?'
             : r.kind.startsWith('mesh') ? 'Allow this mesh change?' : 'Allow this move?',
   );
@@ -77,6 +78,7 @@
             ? r.kind === 'restart' ? 'Approved. maiTerm is restarting.'
               : r.kind === 'hive_land' ? 'Approved. maiTerm lands it now, and the queen will be told.'
               : r.kind === 'hive_settings' ? 'Approved. The settings are changed, and the queen will be told.'
+              : r.kind === 'hive_propose' ? 'Opened in the sheet: nothing happens until you confirm it there.'
               : 'Approved. It is being carried out, and the agent will be told.'
             : 'Denied. The agent will be told.',
       );
@@ -101,7 +103,8 @@
     <blockquote class="reason">{r.reason}</blockquote>
   {/if}
   <div class="choices">
-    <button class="allow" disabled={busy} onclick={(e) => decide(true, e)}>Approve</button>
+    <!-- A proposal's desktop approval opens the filled-in sheet; the sheet's own button creates. -->
+    <button class="allow" disabled={busy} onclick={(e) => decide(true, e)}>{r.kind === 'hive_propose' ? 'Open in the sheet' : 'Approve'}</button>
     <button class="deny" disabled={busy} onclick={(e) => decide(false, e)}>Deny</button>
   </div>
 </div>

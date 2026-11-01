@@ -397,14 +397,16 @@ agent offers, the human creates.
   first is the Primary; default the agent's own folder), `cap`, `worker_model`, `worker_effort`.
   `lib/hive/proposal.ts` checks the shapes and limits, and Rust checks each brief file as Create
   will copy it (`hive_check_brief_files`), so the agent hears about a wrong path, not the human.
-- **What happens.** One sticky request toast per agent (a second call replaces it): "‹tab› proposes
-  a Hive: ‹name›". Clicking it makes a new workspace named for the Hive and opens the Create sheet
+- **What happens.** An agent request, kind `hive_propose` (docs/agent-requests.md), one per agent:
+  a second call ends the first (`replace_proposals`). It waits a day, not 30 minutes. It shows in
+  the Loom's Decisions and on the phone. On the desktop its button is **Open in the sheet**, which
+  makes a new workspace named for the Hive and opens the Create sheet
   there, seeded with the proposal (`createDrafts.seed`, taken once). The proposal's folders are
   detected like any the human adds, and everything it doesn't name starts from the human's Hive
   defaults. The header says whose proposal it is. A proposed folder that can't be added is named on
   the folders step, never dropped in silence (the next would quietly become the Primary). Closing
   the sheet keeps it as that workspace's draft, like any (closed while its folders are still being
-  detected, the proposal itself is put back instead); dismissing the toast discards it. A proposal
+  detected, the proposal itself is put back instead); Deny discards it. A proposal
   opened over an open sheet replaces that sheet, which keeps its own draft. A workspace made for a
   proposal that is never created stays an ordinary one.
 - **A Done or paused Hive already on that folder takes it as a New goal** (`proposalTarget`): when
@@ -416,9 +418,32 @@ agent offers, the human creates.
   is, names any proposed folder the Hive doesn't have and that suggested worker settings aren't
   applied (both are Hive settings), and offers **Make a new Hive instead**. A Hive deleted or
   restarted before Review gets a new Hive. `reviewProposal` is the one entry for either target.
-- **Not built yet.** The phone (an agent-request card that can stand in for the sheet; the
-  maiLink integration tab's, 2026-11-01). The agent isn't told when the human creates it; the
-  coordinator starts on its own with the brief and files.
+- **On the phone, Approve is the Create** (or the New goal sheet's Start), so maiLink never sends
+  the human to the desktop. maiLink can't show a sheet, so the card is the sheet's answers, filled
+  in when the request is filed (`lib/hive/proposalCard.ts`):
+  - the folders as detected, each with its kind and Base;
+  - the human's Hive defaults (`wizardStart`), with the proposal's cap and worker settings over them;
+  - the tools those defaults name (`defaultToolIds`);
+  - landing on Base, and an empty stack.
+
+  Every line is maiTerm's words. A git folder's setup is named, because it runs outside the
+  sandbox. **What an approval does to the human's folders is on the card too.** It trusts an
+  untrusted repo ("Approving also trusts ‹repo› for Claude under ‹account›…"). It commits an
+  unborn repo's files as its first commit. Either way the human's tap on a card that says so is
+  their click (§6.6). The goal and the start of the brief are the `reason`, quoted as the agent's.
+  A proposal the phone couldn't create as it stands (`validateSpec`) is refused to the agent at
+  filing.
+- **At a phone approval, the window builds the plan again first** (`carryOutHiveProposal`):
+  - **If anything moved** (a folder's trust, the defaults, the tools, the target Hive's state),
+    nothing is done. The card fails with that said, and a fresh card replaces it.
+  - **A new Hive:** maiTerm commits and trusts what the card said, makes the workspace, and
+    runs `createHive`, which switches the desktop to it, as the card says. If that fails, the
+    workspace is removed again.
+  - **A New goal:** the Hive's rules and settings are kept, and so is its memory folder
+    (`hiveNewGoal`). It is refused while `hiveNewGoalPreview` holds it, for unlanded commits or
+    another reason; the card lists those reasons when it is filed.
+
+  The asking agent is told the outcome either way.
 
 ## 4. The view
 

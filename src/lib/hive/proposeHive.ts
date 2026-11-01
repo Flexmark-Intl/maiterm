@@ -1,28 +1,21 @@
 /**
- * `proposeHive` in the caller's window (docs/hive.md §3.7). The proposal becomes a request toast
- * naming the agent; Review makes a workspace for it and opens the Create sheet there, filled in
- * (`createDrafts.seed`). Nothing else happens on the agent's say-so: the human's Create is the
- * approval (§7.3), as for any Hive.
+ * `proposeHive` in the caller's window (docs/hive.md §3.7). The proposal becomes an agent request
+ * (`hive_propose`, lib/hive/proposalRequest.ts) naming the agent, on the Loom and the phone. Open
+ * on the desktop makes a workspace for it and opens the Create sheet there, filled in
+ * (`createDrafts.seed`), and the human's Create is the approval (§7.3); a phone's Approve is that
+ * Create, made from exactly what its card showed.
  */
 
 import type { Tab } from '$lib/tauri/types';
 import { followUpRemoteHome, hiveCheckBriefFiles } from '$lib/tauri/commands';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
-import { toastStore } from '$lib/stores/toasts.svelte';
+import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
 import { isWindows } from '$lib/utils/platform';
 import { createDrafts, newGoalProposals } from './createDraft';
 import { newGoalOffered } from './newGoal';
 import { parseProposal, proposalTarget, type HiveCandidate, type HiveProposal } from './proposal';
 import { info as logInfo } from '@tauri-apps/plugin-log';
-
-const requestKey = (tabId: string) => `hive-proposal:${tabId}`;
-
-/** The toast's line about the goal: its first sentence, cut short. */
-function goalLine(goal: string): string {
-  const first = goal.split('\n')[0].trim();
-  return first.length > 140 ? `${first.slice(0, 139).trimEnd()}…` : first;
-}
 
 /** A new Hive: a workspace made for it, with the Create sheet seeded. Also the New goal sheet's
  *  "Make a new Hive instead". */
@@ -72,28 +65,24 @@ export async function proposeHive(tab: Tab, args: Record<string, unknown>): Prom
   const candidates: HiveCandidate[] = workspacesStore.workspaces.flatMap((w) => (w.hive ? [{ workspaceId: w.id, name: w.name, hive: w.hive }] : []));
   const p: HiveProposal = { ...parsed, target: proposalTarget(parsed.folders, candidates) };
   const t = p.target;
-  // One proposal per agent: a second call replaces the first's request.
-  toastStore.addRequest({
-    key: requestKey(tab.id),
-    title: t.kind === 'new_goal' ? `${p.fromLabel} proposes a new goal for ${t.hiveName}` : `${p.fromLabel} proposes a Hive: ${p.name}`,
-    body:
-      t.kind === 'new_goal'
-        ? `${goalLine(p.goal)}\n${t.hiveName} already works in ${p.folders[0]} and is waiting for a goal. Click to review it as its new goal.`
-        : `${goalLine(p.goal)}\nClick to review it in the Create sheet, in a new workspace.`,
-    action: () => void reviewProposal(p),
-  });
+  // A request card (lib/hive/proposalRequest.ts): the Loom and the phone show it. One proposal per
+  // agent: Rust ends the tab's older pending one.
+  const filed = await agentRequestsStore.fileHiveProposal(tab, p);
+  if ('error' in filed) return filed;
   return {
-    result: 'offered',
+    ...filed,
     target: t.kind === 'new_goal' ? { kind: 'new_goal', hive: t.hiveName } : { kind: 'new' },
     note:
-      t.kind === 'new_goal'
+      (t.kind === 'new_goal'
         ? `${t.hiveName}, a Hive that already works in ${p.folders[0]}, is done or paused, so your human is offered this as ` +
-          "its new goal rather than a second Hive on the same folder (they can still choose a new Hive). Review opens its " +
-          "New goal sheet filled in with your goal, brief and files; nothing changes until they confirm it, and you aren't " +
-          'told when they do. Its settings (workers at once, models) stay as they are. Calling again replaces this proposal.'
-        : 'Your human sees a request naming you. Review opens a new workspace with the Create sheet filled in from this; ' +
-          "they can change anything, and nothing is created until they press Create. You aren't told when they do: the " +
-          "Hive's coordinator starts on its own and reads the brief and files. Calling again replaces this proposal.",
+          'its new goal rather than a second Hive on the same folder (they can still choose a new Hive). On the desktop, ' +
+          'Open shows its New goal sheet filled in with your goal, brief and files, and nothing changes until they start it; ' +
+          'from their phone, Approve starts it as the card shows. Its settings (workers at once, models) stay as they are.'
+        : 'Your human sees a card naming you, in maiTerm and on their phone. On the desktop, Open makes a new workspace with ' +
+          'the Create sheet filled in from this, which they can change, and nothing is created until they press Create; from ' +
+          "their phone, Approve creates it as the card shows, with their Hive defaults. The Hive's coordinator starts on its " +
+          'own and reads the brief and files.') +
+      " You are told when they answer. Calling again replaces this proposal. Don't ask them to approve it in chat: only the card counts.",
     name: p.name,
     folders: p.folders,
     brief_files: p.briefFiles,

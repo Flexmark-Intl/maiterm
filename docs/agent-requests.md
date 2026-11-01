@@ -22,6 +22,7 @@ and "for organization and read operations it doesn't require the prompt".
 | `reloadWindow` (a window's webview reloaded, as Reload Current Window does) | never: a request |
 | `addMcpServer` (a remote MCP server maiTerm signs in to and serves to every agent, docs/mcp-proxy.md §7) | never: a request |
 | `listMcpServers` | yes: read-only |
+| `proposeHive` (a Hive made from the agent's plan, or a Done Hive's new goal, docs/hive.md §3.7; kind `hive_propose`) | never: a request. The desktop's button opens the filled-in sheet, whose Create is the approval; the phone's Approve is that Create, made from what its card shows |
 | `getRequestStatus` | yes: read-only, the caller's own requests only |
 
 **The line is "who can message whom".** The mesh is the one place the human decides which agents

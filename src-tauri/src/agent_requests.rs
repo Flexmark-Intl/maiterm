@@ -38,7 +38,7 @@ const HIVE_APPROVED_TTL_MS: u64 = 30 * 60 * 1000;
 
 /// What a request asks for. A string on the wire (never a serde enum: an unknown variant in
 /// stored state wipes it on a downgrade), checked against this list when filed.
-pub const KINDS: [&str; 17] = [
+pub const KINDS: [&str; 18] = [
     "mesh_enable",
     "mesh_disable",
     "mesh_link",
@@ -68,7 +68,17 @@ pub const KINDS: [&str; 17] = [
     // The coordinator's change of its Hive's settings (docs/hive.md §3.4): workers at once,
     // models, the hosts workers reach. Filed and carried out by Rust (`hive::change`).
     "hive_settings",
+    // An ordinary agent's offer of a Hive (`proposeHive`, docs/hive.md §3.7). Filed and carried
+    // out by its window like any request: on the desktop an approval opens the Create sheet
+    // filled in, from the phone it is the Create. Not a Hive kind: no Hive exists yet.
+    PROPOSE_KIND,
 ];
+
+/// `proposeHive`'s request (docs/hive.md §3.7).
+pub const PROPOSE_KIND: &str = "hive_propose";
+/// A proposal waits like the sticky notice it replaced: the human planned it with the agent and
+/// may come back to it in the evening.
+const PROPOSE_PENDING_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// The kinds Rust files and carries out itself: no window files one, and an approval runs in
 /// Rust (`hive::land::approval::on_approved`) instead of being handed to a window.
@@ -95,7 +105,13 @@ fn hive_closed(app: &AppHandle, r: &AgentRequest) {
 }
 
 fn pending_ttl(kind: &str) -> u64 {
-    if is_hive_kind(kind) { HIVE_PENDING_TTL_MS } else { PENDING_TTL_MS }
+    if is_hive_kind(kind) {
+        HIVE_PENDING_TTL_MS
+    } else if kind == PROPOSE_KIND {
+        PROPOSE_PENDING_TTL_MS
+    } else {
+        PENDING_TTL_MS
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -269,7 +285,29 @@ pub fn file(
         return Err("maiTerm files a Hive's land and undo requests itself".to_string());
     }
     crate::hive::refuse_request(&state.app_data.read(), kind, &args)?;
+    if kind == PROPOSE_KIND {
+        // Principle 5 (docs/hive.md §7.3): a Hive agent never starts another Hive.
+        if crate::hive::is_hive_role_tab(&state.app_data.read(), tab_id) {
+            return Err("A Hive agent can't propose a Hive.".to_string());
+        }
+        // One proposal per agent: a newer one is the one the human is asked about.
+        for r in &replace_proposals(&mut REQUESTS.lock(), tab_id, &args, now_ms()) {
+            log::info!("[requests] {} failed ({}): replaced by a newer proposal", r.kind, r.id);
+            let _ = app.emit("agent-request-settled", r);
+        }
+    }
     file_inner(app, state, tab_id, window_label, kind, args, summary, effects, reason, None)
+}
+
+/// The tab's pending proposals other than one with these exact arguments (which `file_inner`
+/// returns as the same card), ended as failed.
+fn replace_proposals(list: &mut [AgentRequest], tab_id: &str, args: &Value, now: u64) -> Vec<AgentRequest> {
+    fail_open_where(
+        list,
+        |r| r.kind == PROPOSE_KIND && r.status == "pending" && r.tab_id == tab_id && r.args != *args,
+        "replaced by a newer proposal from the same agent",
+        now,
+    )
 }
 
 /// A Hive's land or undo card (docs/hive.md §8.1, §8.3), filed by Rust from the coordinator's
@@ -728,6 +766,25 @@ mod tests {
         let mut files: Vec<&str> = callers.iter().map(|c| c.split(':').next().unwrap()).collect();
         files.sort_unstable();
         assert_eq!(files, vec!["agent_requests.rs", "mailink/mod.rs"], "{callers:?}");
+    }
+
+    #[test]
+    fn a_newer_proposal_replaces_the_agents_pending_one_and_waits_a_day() {
+        let p = |id: &str, tab: &str, goal: &str| AgentRequest {
+            id: id.into(),
+            tab_id: tab.into(),
+            kind: PROPOSE_KIND.into(),
+            args: serde_json::json!({ "goal": goal }),
+            ..req("pending", 0, None)
+        };
+        let mut l = vec![p("a", "t", "old"), p("b", "other", "theirs"), AgentRequest { kind: "restart".into(), ..p("c", "t", "x") }];
+        let gone = replace_proposals(&mut l, "t", &serde_json::json!({ "goal": "new" }), 3);
+        assert_eq!(gone.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(l.iter().map(|r| r.status.as_str()).collect::<Vec<_>>(), vec!["failed", "pending", "pending"]);
+        // The same proposal again is left for `file_inner` to return as the same card.
+        let mut l = vec![p("a", "t", "same")];
+        assert!(replace_proposals(&mut l, "t", &serde_json::json!({ "goal": "same" }), 3).is_empty());
+        assert_eq!(pending_ttl(PROPOSE_KIND), PROPOSE_PENDING_TTL_MS);
     }
 
     #[test]

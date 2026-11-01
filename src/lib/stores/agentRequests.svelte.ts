@@ -38,6 +38,8 @@ import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { isEditorDirty } from '$lib/stores/editorRegistry.svelte';
 import { parseSshTarget } from '$lib/utils/sshTarget';
 import { isServiceTab } from '$lib/workspace/hiddenTabs';
+import { carryOutHiveProposal, fileHiveProposal as fileProposal, PROPOSE_KIND } from '$lib/hive/proposalRequest';
+import type { HiveProposal } from '$lib/hive/proposal';
 
 type ToolResult = Record<string, unknown>;
 
@@ -632,6 +634,14 @@ async function addMcpServer(a: { tabId?: string; url?: string; name?: string; re
   return file(a.tabId, 'mcp_add', { name, url: url.href, auth: probe.auth }, `Add the MCP server “${shown}” (${url.origin}${url.pathname}) through maiTerm`, effects, a.reason);
 }
 
+/** `proposeHive`'s card (docs/hive.md §3.7, lib/hive/proposalRequest.ts), filed for `tab`, the
+ *  caller, already found in this window. */
+async function fileHiveProposal(tab: Tab, p: HiveProposal): Promise<ToolResult> {
+  const ws = locateTab(tab.id)?.ws.id ?? workspacesStore.activeWorkspaceId;
+  if (!ws) return { error: 'Your tab was not found in this window.' };
+  return fileProposal(tab, p, ws, (kind, args, summary, effects, reason) => file(tab.id, kind, args, summary, effects, reason));
+}
+
 // ── Carrying out an approved request ────────────────────────────────────────────────────────
 
 /** Re-check that the world still matches what the human approved, then do it. Resolves the
@@ -797,6 +807,12 @@ async function execute(r: AgentRequest): Promise<string> {
       window.location.reload();
       return 'the window is reloading';
     }
+    case PROPOSE_KIND:
+      return carryOutHiveProposal(r, async (p) => {
+        // A fresh card when what it would do moved: only while the asking agent is still here.
+        const at = locateTab(r.tab_id);
+        return at ? fileHiveProposal(at.tab, p) : { error: 'the agent that proposed it is gone' };
+      });
     case 'hive_land':
     case 'hive_undo':
     case 'hive_settings':
@@ -855,7 +871,7 @@ async function onSettled(r: AgentRequest) {
         : r.status === 'denied'
           ? `[maiTerm] The human denied your request${by}: ${r.summary}. Do not ask again unless they bring it up.`
           : r.status === 'expired'
-            ? `[maiTerm] Your request lapsed after 30 minutes without an answer from the human: ${r.summary}. Nothing was done.`
+            ? `[maiTerm] Your request lapsed after ${r.kind === PROPOSE_KIND ? 'a day' : '30 minutes'} without an answer from the human: ${r.summary}. Nothing was done.`
             : null;
   if (text && !(await overlordStore.tellTab(r.tab_id, text, 'agent-request'))) {
     logInfo(`agentRequests: could not tell ${r.tab_id.slice(0, 8)} about ${r.id} (${r.status}); getRequestStatus has it`);
@@ -908,6 +924,7 @@ function createAgentRequestsStore() {
     reloadWindow,
     listMcpServers,
     addMcpServer,
+    fileHiveProposal,
     async init() {
       const me = getCurrentWindow().label;
       unlisten = await Promise.all([

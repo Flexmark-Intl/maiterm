@@ -1386,9 +1386,11 @@ fn propose_hive_tool() -> Value {
         "name": "proposeHive",
         "description": format!(
             "Offer your human a Hive (a coordinator agent with sandboxed workers that carries a goal through to landed \
-             work) for a plan you made with them. maiTerm shows them a request; on Review it opens a new workspace with \
-             the Hive Create sheet filled in from what you pass here, which they check, change and Create. Nothing is \
-             created until they do, and you aren't told when they do. Put the plan in brief (at most {MAX_BRIEF} characters) \
+             work) for a plan you made with them. maiTerm shows them a request card, in maiTerm and on their phone. On \
+             the desktop, Open makes a new workspace with the Hive Create sheet filled in from what you pass here, which \
+             they check, change and Create; from the phone, Approve creates it as the card shows, with their Hive \
+             defaults. If a Done or paused Hive already works in your primary folder, it is offered as that Hive's new \
+             goal instead. Nothing happens until they answer, and you are told what they did. Put the plan in brief (at most {MAX_BRIEF} characters) \
              and/or attach your plan documents as brief_files (absolute paths, at most {MAX_BRIEF_FILES} files of 5 MB): \
              they're copied into the coordinator's own folder at Create, and the coordinator alone reads them. folders are \
              the project folders the Hive works in (default: your own folder). Only for a local agent tab. A second call \
