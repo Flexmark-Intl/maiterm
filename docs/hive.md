@@ -401,8 +401,12 @@ agent offers, the human creates.
   a Hive: ‹name›". Clicking it makes a new workspace named for the Hive and opens the Create sheet
   there, seeded with the proposal (`createDrafts.seed`, taken once). The proposal's folders are
   detected like any the human adds, and everything it doesn't name starts from the human's Hive
-  defaults. The header says whose proposal it is. Dismissing the toast, closing the sheet or Start
-  over discards it, and the workspace made for it stays an ordinary one.
+  defaults. The header says whose proposal it is. A proposed folder that can't be added is named on
+  the folders step, never dropped in silence (the next would quietly become the Primary). Closing
+  the sheet keeps it as that workspace's draft, like any (closed while its folders are still being
+  detected, the proposal itself is put back instead); dismissing the toast discards it. A proposal
+  opened over an open sheet replaces that sheet, which keeps its own draft. A workspace made for a
+  proposal that is never created stays an ordinary one.
 - **Not built.** No phone card: the sheet's folder, trust and stack checks are desktop work. No
   New goal offer for a Done Hive on the same repo. The agent isn't told when the human creates
   it; the coordinator starts on its own with the brief and files.

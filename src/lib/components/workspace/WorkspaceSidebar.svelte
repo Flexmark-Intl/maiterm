@@ -883,7 +883,13 @@
     <ShareExportModal workspaceId={shareExportFor} onclose={() => (shareExportFor = null)} />
   {/if}
   {#if hiveSheetFor}
-    <HiveCreateSheet workspaceId={hiveSheetFor} onclose={() => (hiveSheetFor = null)} />
+    <!-- Keyed: a proposal opened over an open sheet (`hive-open-create`) is a new sheet with its
+         own seed, never the old one's fields under the new workspace's id. The old one keeps its
+         draft as it unmounts, and its late close (a Create still finishing) closes only itself. -->
+    {#key hiveSheetFor}
+      {@const sheetFor = hiveSheetFor}
+      <HiveCreateSheet workspaceId={sheetFor} onclose={() => { if (hiveSheetFor === sheetFor) hiveSheetFor = null; }} />
+    {/key}
   {/if}
 
   {#if updaterStore.showBanner}

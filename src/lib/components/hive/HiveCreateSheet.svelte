@@ -13,7 +13,7 @@
   as one-copy and flagged (`importVerdict`). Rust re-checks every row (`import_stack`).
 -->
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { open as dialogOpen } from '@tauri-apps/plugin-dialog';
   import { error as logError } from '@tauri-apps/plugin-log';
   import Button from '$lib/components/ui/Button.svelte';
@@ -87,6 +87,13 @@
   let resumed = $state(!!saved);
   /** Who proposed what's in the sheet, until Start over. */
   let proposedBy = $state(seed?.fromLabel ?? null);
+  /** The proposal's folders are still being detected: closing now puts the proposal back
+   *  rather than keeping a draft without them, which a reopen couldn't recover. */
+  let seeding = false;
+  /** Closed or created: a later unmount (another proposal opened over this one) has nothing
+   *  left to keep. */
+  let finished = false;
+  onDestroy(() => { if (!finished) keepDraft(); });
   /** Whether the preflight's answer fills in the defaults (the Primary, the cap): a fresh open,
    *  or a Start over made before it answered. */
   let useDefaults = !saved;
@@ -154,6 +161,11 @@
   /** The furthest step reached: the rail shows a receipt for each step before it. */
   let reached = $state(saved?.reached ?? 0);
   function keepDraft() {
+    if (seeding && seed) {
+      createDrafts.clear(workspaceId);
+      createDrafts.seed(workspaceId, seed);
+      return;
+    }
     // Nothing answered yet: nothing to come back to, and the next open finds the defaults again.
     // Default rules prefilled and left alone are not an answer.
     if (name === (ws?.name ?? '') && !goal.trim() && !brief.trim() && instructions.trim() === fromDefaults.rules.trim() && !briefFiles.length && reached === 0) {
@@ -272,8 +284,18 @@
       // Trust may have changed while it was closed (Trust it, or claude run in another tab).
       else void recheckTrust();
       // A proposal's folders, in its order (the first is the Primary), instead of the default.
+      // One that can't be added is named, never dropped in silence: the next would quietly
+      // become the Primary.
       if (seed?.folders.length && folders.length === 0) {
-        for (const f of seed.folders) await addFolder(f);
+        seeding = true;
+        const failed: string[] = [];
+        for (const f of seed.folders) {
+          const why = await addFolder(f);
+          if (why) failed.push(`${f}: ${why}`);
+        }
+        seeding = false;
+        if (!folders.length && p.default_primary) await addFolder(p.default_primary);
+        if (failed.length) folderNote = `Couldn't add ${failed.length === 1 ? 'a folder' : 'folders'} from the proposal. ${failed.join(' ')}`;
       } else if (p.default_primary && folders.length === 0) await addFolder(p.default_primary);
     } catch (e) {
       loadError = String(e);
@@ -384,13 +406,14 @@
   // A draft's folders whose suggestions were still being read when it closed.
   for (const f of untrack(() => folders)) readSuggestions(f.path);
 
-  async function addFolder(path: string, at?: number) {
+  /** Why it wasn't added (also shown as the folder note), or null. */
+  async function addFolder(path: string, at?: number): Promise<string | null> {
     folderNote = null;
     try {
       const info = await hiveDetectFolder(path);
       if (folders.some((f, i) => f.path === info.path && i !== at)) {
         folderNote = `${info.path} is already in the list.`;
-        return;
+        return folderNote;
       }
       const taken = folders.filter((_, i) => i !== at).map((f) => f.name);
       // An empty folder is a new project, inside another repo or not: Create makes it one of its own.
@@ -416,8 +439,10 @@
       };
       folders = at !== undefined ? folders.map((x, i) => (i === at ? f : x)) : [...folders, f];
       readSuggestions(info.path);
+      return null;
     } catch (e) {
       folderNote = String(e);
+      return folderNote;
     }
   }
 
@@ -660,6 +685,7 @@
     };
     try {
       await createHive(workspaceId, spec);
+      finished = true;
       createDrafts.clear(workspaceId);
       onclose();
     } catch (e) {
@@ -672,6 +698,7 @@
   function close() {
     if (creating) return;
     keepDraft();
+    finished = true;
     onclose();
   }
 
