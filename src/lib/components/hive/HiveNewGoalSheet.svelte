@@ -31,7 +31,24 @@
 
   /** An agent's proposal reviewed as this Hive's new goal (`proposeHive`, docs/hive.md §3.7):
    *  its goal, brief and files replace the prefill once the preview answers. Taken once. */
-  const proposal = untrack(() => newGoalProposals.take(workspaceId));
+  let proposal = $state(untrack(() => newGoalProposals.take(workspaceId)));
+  /** One reviewed while this sheet is open is taken in place, unless a submit is running (it
+   *  waits, and HiveView drops it once the Hive has a goal again). */
+  $effect(() => {
+    const take = (e: Event) => {
+      if ((e as CustomEvent<string>).detail !== workspaceId || submitting) return;
+      const p = newGoalProposals.take(workspaceId);
+      if (!p) return;
+      proposal = p;
+      if (preview) {
+        goal = p.goal;
+        brief = p.brief;
+        briefFiles = [...p.briefFiles];
+      }
+    };
+    window.addEventListener('hive-open-new-goal', take);
+    return () => window.removeEventListener('hive-open-new-goal', take);
+  });
   /** The proposal's folders this Hive doesn't have: said, since New goal keeps the Hive's own. */
   const hiveFolders = $derived(workspacesStore.workspaces.find((w) => w.id === workspaceId)?.hive?.folders ?? []);
   const trim = (p: string) => p.replace(/[\\/]+$/, '');

@@ -449,13 +449,21 @@
   // layer over the workers says so. Read when the board changes (its own refresh: the worker
   // event, task writes, the status), never on a timer, and at most once every few seconds. ──
   let newGoalOpen = $state(false);
-  let newGoalMount = $state(0);
   // An agent's proposal the human chose to review as this Hive's new goal (`proposeHive`,
-  // docs/hive.md §3.7): waiting when this view mounts, or announced while it shows.
+  // docs/hive.md §3.7): waiting when this view mounts, or announced while it shows. Only an
+  // unclaimed one opens the sheet (an open sheet takes it in place, never remounted: that lost a
+  // submit in flight), and one for a Hive no longer waiting for a goal is dropped, never shown.
+  function openForProposal() {
+    if (!newGoalProposals.has(workspaceId)) return;
+    if (!newGoalOffered(untrack(() => hive?.status))) {
+      newGoalProposals.take(workspaceId);
+      return;
+    }
+    newGoalOpen = true;
+  }
   $effect(() => {
-    if (untrack(() => newGoalProposals.has(workspaceId))) newGoalOpen = true;
-    // A sheet already open is remounted (keyed) so it takes the proposal.
-    const open = (e: Event) => { if ((e as CustomEvent<string>).detail === workspaceId) { newGoalOpen = true; newGoalMount++; } };
+    untrack(openForProposal);
+    const open = (e: Event) => { if ((e as CustomEvent<string>).detail === workspaceId) openForProposal(); };
     window.addEventListener('hive-open-new-goal', open);
     return () => window.removeEventListener('hive-open-new-goal', open);
   });
@@ -1056,9 +1064,7 @@
     </div>
   {/if}
   {#if newGoalOpen && hive}
-    {#key newGoalMount}
-      <HiveNewGoalSheet {workspaceId} refreshKey={board} name={ws?.name ?? ''} onclose={() => (newGoalOpen = false)} />
-    {/key}
+    <HiveNewGoalSheet {workspaceId} refreshKey={board} name={ws?.name ?? ''} onclose={() => (newGoalOpen = false)} />
   {/if}
   {#if settingsOpen && hive}
     <HiveSettingsModal

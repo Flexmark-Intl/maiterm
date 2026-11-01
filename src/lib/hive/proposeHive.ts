@@ -33,14 +33,16 @@ export async function reviewAsNewHive(p: HiveProposal): Promise<void> {
   logInfo(`hive: proposal from tab ${p.fromTabId.slice(0, 8)} opened in the Create sheet on workspace ${ws.id.slice(0, 8)}`);
 }
 
-/** A New goal for the Done Hive it names: its workspace opened, and its New goal sheet seeded
- *  (HiveView opens it on mount, or on the event when it's already showing). A Hive that has
- *  since been deleted or restarted gets a new one instead. */
+/** A New goal for the Done Hive it names: its workspace opened, then its New goal sheet seeded and
+ *  announced. Seeded only after the switch, so a failed switch leaves nothing behind to open a
+ *  sheet later; HiveView opens the sheet on the event (or on mount, if it mounts after the seed),
+ *  and an open sheet takes it in place. A Hive that has since been deleted or restarted gets a new
+ *  one instead. */
 async function reviewAsNewGoal(p: HiveProposal, workspaceId: string, hiveId: string): Promise<void> {
   const hive = workspacesStore.workspaces.find((w) => w.id === workspaceId)?.hive;
   if (!hive || hive.id !== hiveId || !newGoalOffered(hive.status)) return reviewAsNewHive(p);
-  newGoalProposals.seed(workspaceId, p);
   if (workspacesStore.activeWorkspaceId !== workspaceId) await workspacesStore.setActiveWorkspace(workspaceId);
+  newGoalProposals.seed(workspaceId, p);
   window.dispatchEvent(new CustomEvent('hive-open-new-goal', { detail: workspaceId }));
   logInfo(`hive: proposal from tab ${p.fromTabId.slice(0, 8)} opened as a new goal for workspace ${workspaceId.slice(0, 8)}`);
 }
