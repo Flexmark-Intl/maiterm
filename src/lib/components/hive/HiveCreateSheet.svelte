@@ -39,9 +39,15 @@
 
   interface Props {
     workspaceId: string;
-    onclose: () => void;
+    /** Called with the workspace this sheet was opened on, so a late close (a Create finishing
+     *  after another sheet replaced this one) closes only itself. */
+    onclose: (workspaceId: string) => void;
   }
-  let { workspaceId, onclose }: Props = $props();
+  let { workspaceId: openedOn, onclose }: Props = $props();
+  /** Fixed at mount. The parent keys the sheet by workspace, and a prop read after unmount
+   *  follows the parent's current value: a Create still finishing would otherwise clear the
+   *  next sheet's draft and close it. */
+  const workspaceId = untrack(() => openedOn);
 
   interface Folder {
     key: number;
@@ -87,9 +93,10 @@
   let resumed = $state(!!saved);
   /** Who proposed what's in the sheet, until Start over. */
   let proposedBy = $state(seed?.fromLabel ?? null);
-  /** The proposal's folders are still being detected: closing now puts the proposal back
-   *  rather than keeping a draft without them, which a reopen couldn't recover. */
-  let seeding = false;
+  /** The proposal's folders aren't in yet (the preflight, then their detection): closing now
+   *  puts the proposal back rather than keeping a draft without them, which a reopen couldn't
+   *  recover. Stays set if the preflight fails, since the folders never came in. */
+  let seeding = !!seed?.folders.length;
   /** Closed or created: a later unmount (another proposal opened over this one) has nothing
    *  left to keep. */
   let finished = false;
@@ -287,7 +294,6 @@
       // One that can't be added is named, never dropped in silence: the next would quietly
       // become the Primary.
       if (seed?.folders.length && folders.length === 0) {
-        seeding = true;
         const failed: string[] = [];
         for (const f of seed.folders) {
           const why = await addFolder(f);
@@ -687,7 +693,7 @@
       await createHive(workspaceId, spec);
       finished = true;
       createDrafts.clear(workspaceId);
-      onclose();
+      onclose(workspaceId);
     } catch (e) {
       createError = String(e);
       logError(`hive: create failed: ${e}`);
@@ -699,7 +705,7 @@
     if (creating) return;
     keepDraft();
     finished = true;
-    onclose();
+    onclose(workspaceId);
   }
 
   function handleKeydown(e: KeyboardEvent) {

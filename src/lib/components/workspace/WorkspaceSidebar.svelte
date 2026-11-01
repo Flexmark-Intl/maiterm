@@ -887,8 +887,7 @@
          own seed, never the old one's fields under the new workspace's id. The old one keeps its
          draft as it unmounts, and its late close (a Create still finishing) closes only itself. -->
     {#key hiveSheetFor}
-      {@const sheetFor = hiveSheetFor}
-      <HiveCreateSheet workspaceId={sheetFor} onclose={() => { if (hiveSheetFor === sheetFor) hiveSheetFor = null; }} />
+      <HiveCreateSheet workspaceId={hiveSheetFor} onclose={(closed) => { if (hiveSheetFor === closed) hiveSheetFor = null; }} />
     {/key}
   {/if}
 
