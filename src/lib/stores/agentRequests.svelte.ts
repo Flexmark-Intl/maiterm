@@ -810,6 +810,12 @@ async function execute(r: AgentRequest): Promise<string> {
     case PROPOSE_KIND:
       return carryOutHiveProposal(r, async (p) => {
         // A fresh card when what it would do moved: only while the asking agent is still here.
+        // A newer proposal the agent filed meanwhile is the one to ask about: a refile of this
+        // older one would replace it.
+        const newer = (await commands.listAgentRequests().catch(() => [])).some(
+          (x) => x.kind === PROPOSE_KIND && x.status === 'pending' && x.tab_id === r.tab_id && x.requested_at > r.requested_at,
+        );
+        if (newer) return { error: 'a newer proposal from the same agent is waiting, so that is the card to answer' };
         const at = locateTab(r.tab_id);
         return at ? fileHiveProposal(at.tab, p) : { error: 'the agent that proposed it is gone' };
       });
@@ -866,6 +872,9 @@ async function onSettled(r: AgentRequest) {
   const text =
     r.status === 'done'
       ? `[maiTerm] The human approved your request${by} — ${r.summary} — and it is done: ${r.outcome ?? ''}.`
+      : r.status === 'failed' && !r.decided_by
+        // Ended before anyone answered it (a newer proposal replaced it): never "approved".
+        ? `[maiTerm] Your request was withdrawn before the human answered it: ${r.summary}. ${r.outcome ?? ''}`.trimEnd()
       : r.status === 'failed'
         ? `[maiTerm] The human approved your request${by} — ${r.summary} — but it could not be done: ${r.outcome ?? 'unknown error'}.`
         : r.status === 'denied'
