@@ -30,12 +30,12 @@ pub fn asks(hive: &Hive, key: &str) -> bool {
 }
 
 /// The checkpoint a prompt of this kind falls under: a doorbell or notification kind, or a
-/// routed prompt's. Compaction, completion and a finished turn follow Workers' questions (plan
+/// routed prompt's. Completion and a finished turn follow Workers' questions (plan
 /// D14). None: not a checkpoint's at all.
 pub fn for_prompt_kind(kind: &str) -> Option<&'static str> {
     match kind {
         "permission" => Some(PERMISSIONS),
-        "question" | "ask" | "blocker" | "compaction" | "completion" | "idle_done" => Some(QUESTIONS),
+        "question" | "ask" | "blocker" | "completion" | "idle_done" => Some(QUESTIONS),
         _ => None,
     }
 }
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn prompt_kinds_map_to_their_checkpoint() {
         assert_eq!(for_prompt_kind("permission"), Some(PERMISSIONS));
-        for k in ["question", "ask", "blocker", "compaction", "completion", "idle_done"] {
+        for k in ["question", "ask", "blocker", "completion", "idle_done"] {
             assert_eq!(for_prompt_kind(k), Some(QUESTIONS), "{k}");
         }
         for k in ["trust", "escalation", "script", "request", "account", ""] {

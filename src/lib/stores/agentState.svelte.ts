@@ -426,9 +426,6 @@ function createAgentStateStore() {
         // Tag the tab's runtime live so getTabRuntime (bridge adapter, resume) is right
         // even when the agent never calls initSession (e.g. Codex via the hook path).
         workspacesStore.setTabRuntimeLocal(tab_id, runtime);
-        if (source === 'compact') {
-          dispatch(getDescriptor(runtime).displayName, 'Compaction complete', 'info', { tabId: tab_id, kind: 'compaction' });
-        }
         logInfo(`Claude state: session ${session_id.slice(0, 8)} started (${source ?? 'unknown'}) → tab ${tab_id.slice(0, 8)} = ${started}`);
       });
       unlisteners.push(u1);
@@ -630,7 +627,7 @@ function createAgentStateStore() {
       // Only on the START: Codex's PostCompact arrives on this same event, and marking a tab
       // working after its compaction finished would leave it reading busy.
       const u9 = await listen<{ session_id: string; tab_id: string | null; trigger: string; runtime?: string; event?: string }>('agent-hook-pre-compact', (e) => {
-        const { session_id, tab_id, trigger, event } = e.payload;
+        const { session_id, tab_id, event } = e.payload;
         if (!tab_id) return;
         const runtime = runtimeOf(e.payload);
         if (event === 'PreCompact') {
@@ -654,7 +651,6 @@ function createAgentStateStore() {
             }
           }, COMPACT_STALE_MS));
         }
-        dispatch(getDescriptor(runtime).displayName, `Compacting conversation (${trigger})...`, 'info', { tabId: tab_id, kind: 'compaction' });
       });
       unlisteners.push(u9);
     },

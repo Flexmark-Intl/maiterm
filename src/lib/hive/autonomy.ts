@@ -16,7 +16,7 @@ export interface CheckpointRow {
 
 export const CHECKPOINT_ROWS: readonly CheckpointRow[] = [
   { key: 'plan', label: 'Plan', note: 'Which workers, how many, in what order. Ask me is "show me the plan first".' },
-  { key: 'questions', label: "Workers' questions", note: "A worker's AskUserQuestion or question blocker, and its compaction and completion notices." },
+  { key: 'questions', label: "Workers' questions", note: "A worker's AskUserQuestion or question blocker, and its completion notices." },
   { key: 'permissions', label: "Workers' permission prompts", note: 'Only a plain Yes or No: rows that save a rule or change a mode always come to you.' },
   { key: 'landing', label: 'Landing', note: 'Who calls hiveLand, within the landing mode fixed at creation.' },
   { key: 'finals', label: 'Picking finals in the gallery', note: 'Creative Hives often set this to Ask me.' },

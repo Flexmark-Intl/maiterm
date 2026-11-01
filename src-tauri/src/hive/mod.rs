@@ -483,7 +483,7 @@ pub fn owns_prompt(data: &AppData, tab_id: &str, kind: &str) -> bool {
         "permission" => prompts::coordinator_holds_kind(tab_id, prompts::KIND_PERMISSION).unwrap_or(false),
         "question" => prompts::coordinator_holds_kind(tab_id, prompts::KIND_QUESTION).unwrap_or(false),
         "ask" => prompts::coordinator_holds_kind(tab_id, prompts::KIND_BLOCKER).unwrap_or(false),
-        "compaction" | "completion" | "idle_done" => true,
+        "completion" | "idle_done" => true,
         _ => false,
     }
 }
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn only_a_workers_notices_are_the_coordinators_before_anything_is_routed() {
         let mut d = app();
-        let all = ["permission", "question", "ask", "script", "idle_done", "escalation", "request", "compaction", "completion"];
+        let all = ["permission", "question", "ask", "script", "idle_done", "escalation", "request", "completion"];
         for tab in ["coord", "plain-in-hive", "t1", "gone"] {
             for kind in all {
                 assert!(!owns_prompt(&d, tab, kind), "{tab} {kind}");
@@ -507,7 +507,7 @@ mod tests {
         for kind in ["permission", "question", "ask", "script", "escalation", "request"] {
             assert!(!owns_prompt(&d, "w1", kind), "unrouted: the human's (plan D13): {kind}");
         }
-        for kind in ["compaction", "completion", "idle_done"] {
+        for kind in ["completion", "idle_done"] {
             assert!(owns_prompt(&d, "w1", kind), "{kind}");
         }
         let hive = d.windows[0].workspaces[0].hive.as_mut().unwrap();

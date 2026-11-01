@@ -641,7 +641,7 @@ know that:
 - `isTabVisible` needs `pane.active_tab_id`, which a Hive tab never is (§5), so every Hive tab
   counts as not visible.
 - The permission dispatch has no visibility check at all.
-- AskUserQuestion and compaction dispatch for any tab that isn't visible
+- AskUserQuestion dispatches for any tab that isn't visible
   (`agentState.svelte.ts:95-100,411,460,537,632`).
 - The doorbell rings for designated tabs (`mailink/mod.rs:202,4962,6812`).
 
@@ -3736,7 +3736,7 @@ several releases a day).
      scrolling it sideways. A card has no buttons: a click sends `HIVE_OPEN_COLUMN` (with the
      task id, since a waiting worker has no tab), which focuses the card until worker columns
      arrive in step 5. `hiveOwnsPrompt` (TS: `notificationDispatch.dispatch`, fed a `kind` by
-     agentState's permission, question and compaction notices and by command completion) and
+     agentState's permission and question notices and by command completion) and
      its Rust twin `hive::owns_prompt` (`ring_devices`, which every doorbell path goes through)
      return false until step 7. Not yet: a watch script waiting doesn't count toward Needs you.
 5. The activity feed, diff stat, worker columns, raw terminal (`fixedSize`, spike 3), keyboard.
@@ -4045,7 +4045,7 @@ several releases a day).
    **7b built** (2026-10-24): checkpoints in Rust, prompt
    routing, `hiveAnswerWorker` and the decision log's first lines. `hive/checkpoints.rs` reads a
    checkpoint (a missing key is its default for the landing mode) and maps a prompt kind to one
-   (permission → permissions; question, blocker, compaction, completion and a finished turn →
+   (permission → permissions; question, blocker, completion and a finished turn →
    questions, plan D14); `hive_set_autonomy` saves the checkpoints and `settings.autonomy`
    (`prompt_timeout_secs` 60–3,600, default 300; `daily_digest`), keeps Landing at Ask me in the
    integration mode, tells the coordinator, and moves each prompt it owns under a checkpoint now

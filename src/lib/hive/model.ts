@@ -46,18 +46,18 @@ export interface HiveOpenColumnDetail {
 }
 
 /** What a notification is about, for `hiveOwnsPrompt` (docs/hive.md §4.7). */
-export type HivePromptKind = 'permission' | 'question' | 'compaction' | 'completion';
-export const HIVE_PROMPT_KINDS: readonly HivePromptKind[] = ['permission', 'question', 'compaction', 'completion'];
+export type HivePromptKind = 'permission' | 'question' | 'completion';
+export const HIVE_PROMPT_KINDS: readonly HivePromptKind[] = ['permission', 'question', 'completion'];
 /** Rust's "this worker prompt needs you" (`hive-prompt-notify`): not a `HivePromptKind`, so the
  *  gate never holds it back. */
 export const HIVE_HUMAN_KIND = 'hive-human';
 export type NotifyKind = HivePromptKind | typeof HIVE_HUMAN_KIND;
 
 /** The checkpoint a notice of `kind` falls under (Rust's `checkpoints::for_prompt_kind`):
- *  compaction and completion follow Workers' questions (plan D14). */
+ *  completion follows Workers' questions (plan D14). */
 export function checkpointFor(kind: string): 'permissions' | 'questions' | null {
   if (kind === 'permission') return 'permissions';
-  if (kind === 'question' || kind === 'compaction' || kind === 'completion') return 'questions';
+  if (kind === 'question' || kind === 'completion') return 'questions';
   return null;
 }
 
@@ -103,7 +103,7 @@ export function hiveOwnsPromptIn(
   if (!hive || !tab || tab.hive_role !== 'worker' || hive.status === 'done') return false;
   const cp = checkpointFor(kind);
   if (!cp || checkpointAsks(hive, cp)) return false;
-  if (kind === 'compaction' || kind === 'completion') return true;
+  if (kind === 'completion') return true;
   const mine = routes.filter((r) => r.tab_id === tab.id && r.kind === kind);
   return mine.every((r) => coordinatorHolds(r) || rustNotified(r));
 }

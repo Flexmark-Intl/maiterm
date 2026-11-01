@@ -192,9 +192,9 @@ describe('hiveOwnsPromptIn', () => {
     expect(hiveOwnsPromptIn(hive(), worker, HIVE_HUMAN_KIND, []), "Rust's notice is never held back").toBe(false);
   });
 
-  it('Ask me hands the kind back to the human; compaction and completion follow questions', () => {
+  it('Ask me hands the kind back to the human; completion follows questions', () => {
     const asks = hive({ checkpoints: { questions: 'ask' } });
-    for (const kind of ['question', 'compaction', 'completion']) expect(hiveOwnsPromptIn(asks, worker, kind, []), kind).toBe(false);
+    for (const kind of ['question', 'completion']) expect(hiveOwnsPromptIn(asks, worker, kind, []), kind).toBe(false);
     expect(hiveOwnsPromptIn(asks, worker, 'permission', [])).toBe(true);
     expect(hiveOwnsPromptIn(hive({ checkpoints: { permissions: 'ask' } }), worker, 'permission', [])).toBe(false);
   });

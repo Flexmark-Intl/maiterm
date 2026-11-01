@@ -259,10 +259,6 @@
                 <strong>Tab indicators</strong>
                 <span>&mdash; Pulsing dot (active/thinking), green dot (idle/waiting), lock icon (needs permission).</span>
               </div>
-              <div class="trigger-item">
-                <strong>Compaction notifications</strong>
-                <span>&mdash; Alerts during and after context compaction.</span>
-              </div>
             </div>
           </div>
         {/if}
