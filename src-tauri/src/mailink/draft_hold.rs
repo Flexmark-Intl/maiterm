@@ -101,8 +101,34 @@ pub(crate) fn new_msg_id() -> String {
 /// carries (`settle_wake`).
 static WAKE_HELD: LazyLock<Mutex<HashMap<String, Vec<(String, u64)>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Once: a detail built while the wake was still relaunching may have adopted it from disk.
 pub(crate) fn hold_for_wake(tab_id: &str, msg_id: &str) {
-    WAKE_HELD.lock().entry(tab_id.to_string()).or_default().push((msg_id.to_string(), super::now_ms()));
+    let mut all = WAKE_HELD.lock();
+    let ids = all.entry(tab_id.to_string()).or_default();
+    if !ids.iter().any(|(k, _)| k == msg_id) {
+        ids.push((msg_id.to_string(), super::now_ms()));
+    }
+}
+
+/// The coordinator's session start typed the wake carrying these sends (the owed record's
+/// `typed`, on disk, so this holds across a restart). One already recorded isn't recorded again.
+pub(crate) fn wake_typed(tab_id: &str, msg_ids: &[String]) {
+    if msg_ids.is_empty() {
+        return;
+    }
+    {
+        let mut all = WAKE_HELD.lock();
+        if let Some(ids) = all.get_mut(tab_id) {
+            ids.retain(|(k, _)| !msg_ids.contains(k));
+            if ids.is_empty() {
+                all.remove(tab_id);
+            }
+        }
+    }
+    let known: Vec<String> = OUTCOMES.lock().get(tab_id).map(|v| v.iter().map(|o| o.0.clone()).collect()).unwrap_or_default();
+    for msg_id in msg_ids.iter().filter(|id| !known.contains(id)) {
+        record(tab_id, &Held { msg_id: msg_id.clone(), paths: Vec::new(), text: String::new(), what: "Hive wake", desktop: false }, "typed", None);
+    }
 }
 
 pub(crate) fn wake_held(tab_id: &str) -> bool {

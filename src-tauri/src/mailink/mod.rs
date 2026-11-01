@@ -6638,8 +6638,13 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     // (on disk, so a restart keeps them held).
     let coordinator = crate::hive::tools::caller_for_tab(&app.app_data.read(), tab_id).filter(|c| c.tab_id == tab_id);
     if coordinator.is_some() || draft_hold::wake_held(tab_id) {
-        let owed = coordinator.map(|c| crate::hive::owed::read(&c.paths.coordinator_task()).wake.map(|w| w.msg_ids).unwrap_or_default());
-        draft_hold::settle_wake(tab_id, owed.as_deref());
+        let owed = coordinator.map(|c| crate::hive::owed::read(&c.paths.coordinator_task()));
+        // Within the hour an outcome is kept, or a pruned one would be recorded again.
+        let recent = |at: u64| now_ms().saturating_sub(at) < crate::hive::owed::TYPED_KEEP_MS;
+        let typed: Vec<String> = owed.iter().flat_map(|o| o.typed.iter().filter(|t| recent(t.at)).map(|t| t.msg_id.clone())).collect();
+        draft_hold::wake_typed(tab_id, &typed);
+        let still_owed = owed.map(|o| o.wake.map(|w| w.msg_ids).unwrap_or_default());
+        draft_hold::settle_wake(tab_id, still_owed.as_deref());
     }
     let held = draft_hold::held_for_tab(tab_id);
     if !held.is_empty() {
@@ -8488,6 +8493,15 @@ mod tests {
         // After a restart nothing is known in memory: what the owed record still carries is held.
         draft_hold::settle_wake("tab-wake-restart", Some(&["hw-r".to_string()]));
         assert_eq!(draft_hold::held_for_tab("tab-wake-restart")[0]["msg_id"], "hw-r");
+        // Typed at delivery: said once, even if a detail settled it first; a second hold is one entry.
+        draft_hold::hold_for_wake("tab-wake-typed", "hw-t");
+        draft_hold::hold_for_wake("tab-wake-typed", "hw-t");
+        assert_eq!(draft_hold::held_for_tab("tab-wake-typed").len(), 1);
+        draft_hold::wake_typed("tab-wake-typed", &["hw-t".to_string()]);
+        draft_hold::wake_typed("tab-wake-typed", &["hw-t".to_string()]);
+        draft_hold::settle_wake("tab-wake-typed", Some(&[]));
+        assert!(draft_hold::held_for_tab("tab-wake-typed").is_empty());
+        assert_eq!(draft_hold::outcomes_for_tab("tab-wake-typed").len(), 1);
         // A Hive that is gone took nothing.
         draft_hold::hold_for_wake("tab-wake-gone", "hw-c");
         draft_hold::settle_wake("tab-wake-gone", None);

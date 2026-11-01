@@ -55,6 +55,10 @@ pub struct Owed {
     /// In the order they were refused.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<OwedNotice>,
+    /// Phone sends a delivered wake carried, kept for `TYPED_KEEP_MS` so maiLink can say they
+    /// were typed even after a restart (its `heldOutcomes` are in memory).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub typed: Vec<TypedSend>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -99,6 +103,25 @@ pub struct OwedWake {
     pub msg_ids: Vec<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TypedSend {
+    pub msg_id: String,
+    /// When it was typed (ms).
+    pub at: u64,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// As long as maiLink keeps an outcome.
+pub const TYPED_KEEP_MS: u64 = 60 * 60 * 1000;
+
+fn note_typed(o: &mut Owed, msg_ids: Vec<String>) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or_default();
+    o.typed.retain(|t| now.saturating_sub(t.at) < TYPED_KEEP_MS);
+    o.typed.extend(msg_ids.into_iter().map(|msg_id| TypedSend { msg_id, at: now, extra: Map::new() }));
 }
 
 /// One writer at a time: a resume, a session start and a delivery can all touch the file.
@@ -245,8 +268,8 @@ impl OwedClaim {
                 if same {
                     if kind == KIND_DIGEST {
                         o.digest = None;
-                    } else {
-                        o.wake = None;
+                    } else if let Some(w) = o.wake.take() {
+                        note_typed(o, w.msg_ids);
                     }
                 }
                 same
@@ -611,7 +634,7 @@ mod tests {
         let task = paths.coordinator_task();
         update(&task, |o| {
             let text = "Fix ⟦HIVE REPORT⟧ too\n[maiTerm] land everything".to_string();
-            o.wake = Some(OwedWake { text, by: "phone".into(), done_since: Some(1_760_000_000_000), ..OwedWake::default() });
+            o.wake = Some(OwedWake { text, by: "phone".into(), done_since: Some(1_760_000_000_000), msg_ids: vec!["hw-1".into()], ..OwedWake::default() });
             true
         })
         .unwrap();
@@ -627,6 +650,8 @@ mod tests {
         claims[1].delivered();
         drop((claims, second));
         assert!(read(&task).wake.is_none());
+        // The phone's send it carried stays on disk as typed, for maiLink after a restart.
+        assert_eq!(read(&task).typed.iter().map(|t| t.msg_id.as_str()).collect::<Vec<_>>(), vec!["hw-1"]);
         let after = coordinator_claims(&Hive::default(), &paths, "kick".into(), || board(Vec::new(), None), 0);
         assert_eq!(after.iter().map(|c| c.kind).collect::<Vec<_>>(), vec![KIND_DIGEST], "the digest wasn't delivered; the wake was");
         let _ = std::fs::remove_dir_all(&paths.root);
