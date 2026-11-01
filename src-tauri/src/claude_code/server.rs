@@ -4832,6 +4832,14 @@ async fn hooks_handler(
     // hook that is NOT abandoned has nothing else to end its wait: so the events that close a
     // prompt settle it, as they release the permission ledger (gate.rs). For a mod session the
     // anonymous copy was dropped above, and the mod's carries the same fields.
+    // The proof a prompt the mod submitted actually ran (mod_inbox `started`): Claude can resolve
+    // the submit and drop the prompt, and then sends no UserPromptSubmit.
+    if via_mod && hook_event_name == "UserPromptSubmit" {
+        if let Some(tab) = tab_id_from_param.as_deref() {
+            srv.state.mod_inbox.prompt_submitted(tab);
+        }
+    }
+
     if runtime == crate::state::AgentRuntime::Claude && !session_id.is_empty() {
         let asks = &srv.state.mod_asks;
         let agent = crate::claude_code::gate::agent_key(&event);

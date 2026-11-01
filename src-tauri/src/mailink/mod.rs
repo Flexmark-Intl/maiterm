@@ -4162,7 +4162,10 @@ pub(crate) async fn submit_prompt(
     text: &str,
 ) -> Result<Delivered, String> {
     use crate::claude_code::mod_inbox;
-    if mod_inbox::offerable(text) && mod_inbox::takes_now(app, tab_id) && app.mod_inbox.deliver(tab_id, text).await {
+    if mod_inbox::offerable(text)
+        && mod_inbox::takes_now(app, tab_id)
+        && app.mod_inbox.deliver(tab_id, text, mod_inbox::agent_between_turns(app, tab_id)).await
+    {
         log::info!("[maiLink] prompt for tab {tab_id} → the agent ({} chars)", text.chars().count());
         return Ok(Delivered::Agent);
     }

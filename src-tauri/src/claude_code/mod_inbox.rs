@@ -40,6 +40,11 @@ const FORGET_AFTER: Duration = Duration::from_secs(600);
 /// any turn it can be queued behind. Only a report lost on a live connection runs this out; a
 /// mod that stops polling takes its prompts with it (`poll`).
 const UNSTARTED_FOR: Duration = Duration::from_secs(6 * 3600);
+/// How long `deliver` waits, after the ack, for the mod's `started` report on a prompt offered
+/// between turns. There it comes within moments: `$.prompt.submit` resolves at once.
+const START_WAIT: Duration = Duration::from_secs(3);
+/// Outcomes kept for `deliver` to collect; more only if callers stopped collecting them.
+const MAX_RESULTS: usize = 32;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Stage {
@@ -63,14 +68,27 @@ struct Inbox {
     last_poll: Instant,
     offers: VecDeque<Offer>,
     /// Acked offers whose turn hasn't started (the mod reports `started`): Claude holds them
-    /// until it is idle, so a prompt typed now would overtake them.
-    unstarted: Vec<(String, Instant)>,
+    /// until it is idle, so a prompt typed now would overtake them. Each carries `prompts` as it
+    /// stood at the ack.
+    unstarted: Vec<(String, Instant, u64)>,
+    /// `UserPromptSubmit` events the tab's mod has relayed: the proof that a prompt ran.
+    prompts: u64,
+    /// Started offers and whether their prompt ran, for `deliver` to collect.
+    results: VecDeque<(String, bool)>,
     wake: Arc<Notify>,
 }
 
 impl Inbox {
     fn new(now: Instant) -> Self {
-        Inbox { polling: 0, last_poll: now, offers: VecDeque::new(), unstarted: Vec::new(), wake: Arc::new(Notify::new()) }
+        Inbox {
+            polling: 0,
+            last_poll: now,
+            offers: VecDeque::new(),
+            unstarted: Vec::new(),
+            prompts: 0,
+            results: VecDeque::new(),
+            wake: Arc::new(Notify::new()),
+        }
     }
 
     fn is_live(&self, now: Instant) -> bool {
@@ -156,15 +174,31 @@ impl ModInbox {
         }
         o.stage = Stage::Acked;
         let inbox = tabs.get_mut(tab_id).expect("found above");
-        inbox.unstarted.push((id.to_string(), Instant::now()));
+        let seen = inbox.prompts;
+        inbox.unstarted.push((id.to_string(), Instant::now(), seen));
         true
     }
 
-    /// The turn of acked offer `id` has started (or its submit failed): it no longer waits in
-    /// Claude ahead of anything.
+    /// The mod's `$.prompt.submit` of acked offer `id` resolved (or failed): it no longer waits
+    /// in Claude ahead of anything. Whether its prompt RAN is whether a `UserPromptSubmit` came
+    /// in since the ack: the mod relays that event, and waits for maiTerm to take it, before
+    /// Claude lets the prompt start, so it always arrives before this report.
     pub fn started(&self, tab_id: &str, id: &str) {
         if let Some(inbox) = self.tabs.lock().get_mut(tab_id) {
-            inbox.unstarted.retain(|(i, _)| i != id);
+            let Some(pos) = inbox.unstarted.iter().position(|(i, _, _)| i == id) else { return };
+            let (_, _, seen) = inbox.unstarted.remove(pos);
+            let ran = inbox.prompts > seen;
+            inbox.results.push_back((id.to_string(), ran));
+            while inbox.results.len() > MAX_RESULTS {
+                inbox.results.pop_front();
+            }
+        }
+    }
+
+    /// The tab's mod relayed a `UserPromptSubmit`: a prompt ran, typed or submitted.
+    pub fn prompt_submitted(&self, tab_id: &str) {
+        if let Some(inbox) = self.tabs.lock().get_mut(tab_id) {
+            inbox.prompts += 1;
         }
     }
 
@@ -174,14 +208,21 @@ impl ModInbox {
         let mut tabs = self.tabs.lock();
         let Some(inbox) = tabs.get_mut(tab_id) else { return false };
         // A report lost on the way only keeps prompts on the mod a while longer.
-        inbox.unstarted.retain(|(_, at)| now.duration_since(*at) < UNSTARTED_FOR);
+        inbox.unstarted.retain(|(_, at, _)| now.duration_since(*at) < UNSTARTED_FOR);
         inbox.is_live(now) && !inbox.unstarted.is_empty()
     }
 
     /// Offers `text` to the tab's mod and waits for the ack. `true` once the mod has it and is
     /// submitting it; `false` when no mod is polling or none acked in time, and then the offer
     /// is retracted, so it can never be submitted after this returned.
-    pub async fn deliver(&self, tab_id: &str, text: &str) -> bool {
+    ///
+    /// `between_turns` (the agent was idle when offered): also wait for the submit to resolve,
+    /// and answer `false` when Claude dropped the prompt, so the caller types it instead. Claude
+    /// Code (2.1.316, reproduced 2026-10-31) drops every `$.prompt.submit` after a turn is
+    /// interrupted with Esc, resolving it as if it ran, until someone TYPES a prompt: so after
+    /// the phone's Stop every message went to the mod and vanished. Typing it re-arms Claude.
+    /// Mid-turn a submit waits for the turn to end, so there is nothing to wait for.
+    pub async fn deliver(&self, tab_id: &str, text: &str, between_turns: bool) -> bool {
         let id = format!("i{}", self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         {
             let now = Instant::now();
@@ -198,12 +239,35 @@ impl ModInbox {
                 let Some(pos) = inbox.offers.iter().position(|o| o.id == id) else { return false };
                 if inbox.offers[pos].stage == Stage::Acked {
                     inbox.offers.remove(pos);
-                    return true;
+                    break;
                 }
                 if Instant::now() >= deadline {
                     inbox.offers.remove(pos);
                     return false;
                 }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if !between_turns {
+            return true;
+        }
+        // No report in time: a turn began meanwhile and the prompt waits behind it, still listed
+        // as unstarted, so it counts as handed over.
+        let deadline = Instant::now() + START_WAIT;
+        loop {
+            {
+                let mut tabs = self.tabs.lock();
+                let Some(inbox) = tabs.get_mut(tab_id) else { return true };
+                if let Some(pos) = inbox.results.iter().position(|(i, _)| *i == id) {
+                    let (_, ran) = inbox.results.remove(pos).expect("found above");
+                    if !ran {
+                        log::warn!("[inbox] Claude dropped the prompt the mod submitted for tab {tab_id} (no UserPromptSubmit; after an interrupt it drops them until a prompt is typed) — typing it instead");
+                    }
+                    return ran;
+                }
+            }
+            if Instant::now() >= deadline {
+                return true;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -248,7 +312,8 @@ pub fn offerable(text: &str) -> bool {
     !t.is_empty() && !t.starts_with('/') && !t.starts_with('!')
 }
 
-fn agent_between_turns(app: &AppState, tab_id: &str) -> bool {
+/// The tab's agent is idle: not mid-turn and not at a question.
+pub(crate) fn agent_between_turns(app: &AppState, tab_id: &str) -> bool {
     let sessions = app.agent_sessions.read();
     let mut tab_sessions = sessions.values().filter(|s| s.tab_id == tab_id).peekable();
     tab_sessions.peek().is_some()
@@ -275,7 +340,7 @@ mod tests {
         let poll = parked_poll(&inbox, "tab").await;
         let delivering = {
             let inbox = inbox.clone();
-            tokio::spawn(async move { inbox.deliver("tab", "hello").await })
+            tokio::spawn(async move { inbox.deliver("tab", "hello", false).await })
         };
         let Polled::Offer { id, text } = poll.await.unwrap() else { panic!("the poll should get the offer") };
         assert_eq!(text, "hello");
@@ -291,7 +356,7 @@ mod tests {
         let poll = parked_poll(&inbox, "tab").await;
         let delivering = {
             let inbox = inbox.clone();
-            tokio::spawn(async move { inbox.deliver("tab", "hello").await })
+            tokio::spawn(async move { inbox.deliver("tab", "hello", false).await })
         };
         let Polled::Offer { id, .. } = poll.await.unwrap() else { panic!("the poll should get the offer") };
         assert!(!inbox.has_unstarted("tab"));
@@ -302,13 +367,50 @@ mod tests {
         assert!(!inbox.has_unstarted("tab"));
     }
 
+    /// Between turns the delivery waits for the submit: a `UserPromptSubmit` relayed since the
+    /// ack is the proof the prompt ran.
+    #[tokio::test]
+    async fn a_prompt_claude_ran_is_delivered() {
+        let inbox = Arc::new(ModInbox::default());
+        let poll = parked_poll(&inbox, "tab").await;
+        let delivering = {
+            let inbox = inbox.clone();
+            tokio::spawn(async move { inbox.deliver("tab", "hello", true).await })
+        };
+        let Polled::Offer { id, .. } = poll.await.unwrap() else { panic!("the poll should get the offer") };
+        assert!(inbox.ack("tab", &id));
+        inbox.prompt_submitted("tab");
+        inbox.started("tab", &id);
+        assert!(delivering.await.unwrap());
+    }
+
+    /// After an Esc interrupt Claude resolves the submit without running it: no
+    /// `UserPromptSubmit`. The delivery fails, so the caller types the prompt.
+    #[tokio::test]
+    async fn a_prompt_claude_dropped_is_not_delivered() {
+        let inbox = Arc::new(ModInbox::default());
+        // A prompt that ran before the ack doesn't count for this one.
+        let _ = inbox.poll("tab", Duration::ZERO).await;
+        inbox.prompt_submitted("tab");
+        let poll = parked_poll(&inbox, "tab").await;
+        let delivering = {
+            let inbox = inbox.clone();
+            tokio::spawn(async move { inbox.deliver("tab", "hello", true).await })
+        };
+        let Polled::Offer { id, .. } = poll.await.unwrap() else { panic!("the poll should get the offer") };
+        assert!(inbox.ack("tab", &id));
+        inbox.started("tab", &id);
+        assert!(!delivering.await.unwrap());
+        assert!(!inbox.has_unstarted("tab"), "a dropped prompt must not pull later ones onto the mod");
+    }
+
     #[tokio::test]
     async fn a_mod_polling_again_after_a_lapse_starts_with_nothing_waiting() {
         let inbox = Arc::new(ModInbox::default());
         let poll = parked_poll(&inbox, "tab").await;
         let delivering = {
             let inbox = inbox.clone();
-            tokio::spawn(async move { inbox.deliver("tab", "hello").await })
+            tokio::spawn(async move { inbox.deliver("tab", "hello", false).await })
         };
         let Polled::Offer { id, .. } = poll.await.unwrap() else { panic!("the poll should get the offer") };
         assert!(inbox.ack("tab", &id));
@@ -335,7 +437,7 @@ mod tests {
     async fn nothing_is_offered_to_a_tab_no_mod_polls() {
         let inbox = ModInbox::default();
         assert!(!inbox.is_live("tab"));
-        assert!(!inbox.deliver("tab", "hello").await);
+        assert!(!inbox.deliver("tab", "hello", false).await);
     }
 
     #[tokio::test]
@@ -345,7 +447,7 @@ mod tests {
         let started = Instant::now();
         let delivering = {
             let inbox = inbox.clone();
-            tokio::spawn(async move { inbox.deliver("tab", "hello").await })
+            tokio::spawn(async move { inbox.deliver("tab", "hello", false).await })
         };
         let Polled::Offer { id, .. } = poll.await.unwrap() else { panic!("the poll should get the offer") };
         // The reply was lost on its way to the mod: no ack comes.
@@ -360,12 +462,12 @@ mod tests {
         let _ = inbox.poll("tab", Duration::from_millis(1)).await; // the mod is listening
         let a = {
             let inbox = inbox.clone();
-            tokio::spawn(async move { inbox.deliver("tab", "first").await })
+            tokio::spawn(async move { inbox.deliver("tab", "first", false).await })
         };
         tokio::time::sleep(Duration::from_millis(10)).await;
         let b = {
             let inbox = inbox.clone();
-            tokio::spawn(async move { inbox.deliver("tab", "second").await })
+            tokio::spawn(async move { inbox.deliver("tab", "second", false).await })
         };
         tokio::time::sleep(Duration::from_millis(10)).await;
         for want in ["first", "second"] {

@@ -214,7 +214,8 @@ pub async fn submit_prompt_to_agent(state: State<'_, Arc<AppState>>, tab_id: Str
     if !crate::claude_code::mod_inbox::offerable(&text) || !crate::claude_code::mod_inbox::takes_now(&app, &tab_id) {
         return Ok(false);
     }
-    let taken = app.mod_inbox.deliver(&tab_id, &text).await;
+    let between_turns = crate::claude_code::mod_inbox::agent_between_turns(&app, &tab_id);
+    let taken = app.mod_inbox.deliver(&tab_id, &text, between_turns).await;
     if taken {
         log::info!("[overlord] prompt for tab {tab_id} → the agent ({} chars)", text.chars().count());
     }
