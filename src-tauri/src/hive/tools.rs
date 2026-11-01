@@ -137,6 +137,12 @@ pub fn refuse_agent_tool(data: &AppData, callers: &[&str], tool: &str) -> Option
         }
         return None;
     }
+    // A Hive agent never makes a Hive (principle 5): the human's Create is the envelope its
+    // coordinator works inside, and a worker's or coordinator's proposal would be one asking for
+    // a bigger one.
+    if tool == "proposeHive" && roles.iter().any(Option::is_some) {
+        return Some("proposeHive refused (reason 'hive'): a Hive agent can't propose a Hive.".to_string());
+    }
     // The Overlord is never a Hive agent: a Hive role among the callers of its tools (close,
     // archive, recover or resume the human's tabs) is one impersonating it.
     if roles.iter().any(Option::is_some) && crate::claude_code::server::OVERLORD_CALLER_TOOLS.contains(&tool) {
@@ -1908,8 +1914,15 @@ mod tests {
         };
         let (coord, plain) = (names("coord"), names("t1"));
         for t in &plain {
+            // A Hive agent never makes a Hive (principle 5): the one normal tool it isn't offered.
+            if t == "proposeHive" {
+                assert!(!coord.contains(t), "proposeHive isn't listed to a Hive agent");
+                assert!(refuse_agent_tool(&d, &["coord"], t).is_some(), "nor callable by one");
+                continue;
+            }
             assert!(coord.contains(t), "a normal tab's {t}");
         }
+        assert!(cfg!(windows) || plain.iter().any(|t| t == "proposeHive"), "an ordinary tab may propose one");
         for t in ["browserClick", "browserNavigate", "browserSnapshot", "browserScreenshot", "createService", "startService", "listTasks", "hiveSpawnWorker", "hiveLand", "galleryDeliver"] {
             assert!(coord.iter().any(|n| n == t), "{t} listed");
             assert!(refuse_agent_tool(&d, &["coord"], t).is_none(), "{t} callable");

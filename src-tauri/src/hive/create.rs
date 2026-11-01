@@ -1205,6 +1205,37 @@ pub struct HiveCreated {
     pub replace_tab: Option<Replaceable>,
 }
 
+/// One file attached to the project brief, as Create will copy it: there, a file, at most 5 MB,
+/// with a name. Its path and that name.
+fn check_brief_file(s: &str) -> Result<(PathBuf, String), String> {
+    let src = crate::share::expand_tilde(s.trim());
+    let meta = std::fs::metadata(&src).map_err(|_| format!("The attached file {} isn't there.", src.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{} isn't a file: attach files, not folders.", src.display()));
+    }
+    if meta.len() > MAX_BRIEF_FILE_BYTES {
+        return Err(format!("{} is over 5 MB: attach a smaller file, or put it in one of the Hive's folders.", src.display()));
+    }
+    let name = src.file_name().map(|n| n.to_string_lossy().to_string()).filter(|n| !n.is_empty()).ok_or_else(|| format!("{} has no file name.", src.display()))?;
+    Ok((src, name))
+}
+
+/// An agent's proposed brief files (`proposeHive`, docs/hive.md §3.7), checked as Create will
+/// check them, so the agent hears about a wrong path now rather than the human at Create.
+#[tauri::command]
+pub fn hive_check_brief_files(paths: Vec<String>) -> Result<(), String> {
+    if paths.len() > MAX_BRIEF_FILES {
+        return Err(format!("At most {MAX_BRIEF_FILES} files can be attached to the project brief."));
+    }
+    for p in &paths {
+        if !crate::share::expand_tilde(p.trim()).is_absolute() {
+            return Err(format!("{p} isn't an absolute path."));
+        }
+        check_brief_file(p)?;
+    }
+    Ok(())
+}
+
 /// The project brief's attached files, copied into the coordinator's home (`brief/`), so it reads
 /// them in its own folder as they were when the Hive was made. Their names there, in order: a
 /// name already taken gets a number before its extension.
@@ -1216,15 +1247,7 @@ pub fn copy_brief_files(sources: &[String], home: &Path) -> Result<Vec<String>, 
     std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't make the project brief's folder: {e}"))?;
     let mut names: Vec<String> = Vec::new();
     for s in sources {
-        let src = crate::share::expand_tilde(s.trim());
-        let meta = std::fs::metadata(&src).map_err(|_| format!("The attached file {} isn't there.", src.display()))?;
-        if !meta.is_file() {
-            return Err(format!("{} isn't a file: attach files, not folders.", src.display()));
-        }
-        if meta.len() > MAX_BRIEF_FILE_BYTES {
-            return Err(format!("{} is over 5 MB: attach a smaller file, or put it in one of the Hive's folders.", src.display()));
-        }
-        let name = src.file_name().map(|n| n.to_string_lossy().to_string()).filter(|n| !n.is_empty()).ok_or_else(|| format!("{} has no file name.", src.display()))?;
+        let (src, name) = check_brief_file(s)?;
         let (stem, ext) = match name.rsplit_once('.') {
             Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
             _ => (name.clone(), String::new()),
@@ -1689,6 +1712,23 @@ mod tests {
         assert_eq!(std::fs::read_to_string(home.join("brief/plan.md")).unwrap(), "first", "nothing overwritten");
         assert!(copy_brief_files(&[s(&a)], &home).unwrap_err().contains("isn't a file"));
         assert!(copy_brief_files(&[s(&a.join("gone.md"))], &home).unwrap_err().contains("isn't there"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `proposeHive` checks an agent's files as Create will copy them, and asks for full paths.
+    #[test]
+    fn a_proposals_brief_files_are_checked_as_create_checks_them() {
+        let base = std::env::temp_dir().join(format!("hive-propose-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("plan.md"), "p").unwrap();
+        let s = |p: &Path| p.to_string_lossy().to_string();
+        assert!(hive_check_brief_files(vec![]).is_ok());
+        assert!(hive_check_brief_files(vec![s(&base.join("plan.md"))]).is_ok());
+        assert!(hive_check_brief_files(vec!["plan.md".into()]).unwrap_err().contains("absolute"));
+        assert!(hive_check_brief_files(vec![s(&base)]).unwrap_err().contains("isn't a file"));
+        assert!(hive_check_brief_files(vec![s(&base.join("gone.md"))]).unwrap_err().contains("isn't there"));
+        let many = vec![s(&base.join("plan.md")); MAX_BRIEF_FILES + 1];
+        assert!(hive_check_brief_files(many).unwrap_err().contains("At most"));
         let _ = std::fs::remove_dir_all(&base);
     }
 

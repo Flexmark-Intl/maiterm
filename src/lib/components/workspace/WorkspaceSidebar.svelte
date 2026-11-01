@@ -492,6 +492,13 @@
   let shareExportFor = $state<string | null>(null);
   /** The workspace the Hive Create sheet is open for (docs/hive.md §3). */
   let hiveSheetFor = $state<string | null>(null);
+  // An agent's proposal the human chose to Review (`proposeHive`, lib/hive/proposeHive.ts) opens
+  // the sheet on the workspace made for it.
+  $effect(() => {
+    const open = (e: Event) => { hiveSheetFor = (e as CustomEvent<string>).detail; };
+    window.addEventListener('hive-open-create', open);
+    return () => window.removeEventListener('hive-open-create', open);
+  });
   /** Offered for any workspace that could become one: what stands in the way (a used tab, an
    *  archived one) is the sheet's to say and, where it can, to clear. Hiding the item left the
    *  human with no word on why it was gone. */

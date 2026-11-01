@@ -2818,6 +2818,11 @@ export async function hivePreflight(workspaceId: string, fromTabIds: string[], l
   return invoke('hive_preflight', { workspaceId, fromTabIds, liveCwds });
 }
 
+/** An agent's proposed brief files, checked as Create checks them (`proposeHive`). */
+export async function hiveCheckBriefFiles(paths: string[]): Promise<void> {
+  return invoke('hive_check_brief_files', { paths });
+}
+
 export async function hiveDetectFolder(path: string): Promise<HiveFolderInfo> {
   return invoke('hive_detect_folder', { path });
 }

@@ -382,6 +382,31 @@ to set them with `hiveChangeSettings folders` from the commands the report used
 is refused with the next step: ask the coordinator to make it the folder's land check (which makes
 it runnable, §6.8) or to have the human queue it, and meanwhile run it in its own shell.
 
+### 3.7 An agent proposes a Hive (Darryl's direction, 2026-11-01)
+
+The human often plans a project with an ordinary agent tab first, then wants that agent to hand
+the plan to a Hive. **`proposeHive`** lets it, without giving any agent the Create (§7.3): the
+agent offers, the human creates.
+
+- **Who.** Any local agent tab outside a Hive. It isn't listed to a Hive agent and Rust refuses one
+  (`refuse_agent_tool`: principle 5), and it isn't listed on Windows (`platform_refusal`). A
+  bridged ssh tab is refused in its window: its paths are on its host. It is on
+  `OWN_TAB_ONLY_TOOLS` and `PEER_ADDRESSING_TOOLS` (the request names the caller) and runs in the
+  caller's own window (`target_owner_window`).
+- **What it passes.** `goal` (required), `name`, `brief`, `brief_files`, `folders` (absolute; the
+  first is the Primary; default the agent's own folder), `cap`, `worker_model`, `worker_effort`.
+  `lib/hive/proposal.ts` checks the shapes and limits, and Rust checks each brief file as Create
+  will copy it (`hive_check_brief_files`), so the agent hears about a wrong path, not the human.
+- **What happens.** One sticky request toast per agent (a second call replaces it): "‹tab› proposes
+  a Hive: ‹name›". Clicking it makes a new workspace named for the Hive and opens the Create sheet
+  there, seeded with the proposal (`createDrafts.seed`, taken once). The proposal's folders are
+  detected like any the human adds, and everything it doesn't name starts from the human's Hive
+  defaults. The header says whose proposal it is. Dismissing the toast, closing the sheet or Start
+  over discards it, and the workspace made for it stays an ordinary one.
+- **Not built.** No phone card: the sheet's folder, trust and stack checks are desktop work. No
+  New goal offer for a Done Hive on the same repo. The agent isn't told when the human creates
+  it; the coordinator starts on its own with the brief and files.
+
 ## 4. The view
 
 ### 4.1 Layout: Miller columns
@@ -1619,7 +1644,7 @@ exists.
 
 | Action | Approval |
 |---|---|
-| Create a Hive; add folders | The human, by the sheet / settings. No tool can |
+| Create a Hive; add folders | The human, by the sheet / settings. No tool can; an agent outside a Hive may only offer a filled-in sheet (`proposeHive`, §3.7) |
 | Spawn a worker within the cap | None; the Hive is the envelope (decision §14.1) |
 | Raise the cap | The human, in Hive settings |
 | Land a worker into Base (default mode) | None: the coordinator calls `hiveLand`, and maiTerm merges behind its guards (§8). A land that changes agent or execution config is the human's (§8.1) |

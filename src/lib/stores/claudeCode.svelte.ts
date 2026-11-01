@@ -32,6 +32,7 @@ import { openBaselineDiff, openReadOnlyDiff } from '$lib/utils/openGitDiff';
 import { fileTreeStore } from '$lib/stores/fileTree.svelte';
 import { isServiceTab } from '$lib/workspace/hiddenTabs';
 import { HIVE_SUPERVISED_DETAIL } from '$lib/hive/model';
+import { proposeHive } from '$lib/hive/proposeHive';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 export interface PendingSelection {
@@ -105,6 +106,16 @@ function createClaudeCodeStore() {
         // refused it when the human turned the tools off; both act on THIS window's column, so
         // they answer only a caller whose tab is in this window (Rust's fallback when it can't
         // place the tab is the first window, which may be another).
+        // docs/hive.md §3.7: Rust routed it to the caller's window, refused it to Hive agents
+        // and checked the caller is the tab it says it is.
+        case 'proposeHive': {
+          const a = args as Record<string, unknown> & { tabId?: string };
+          const loc = a.tabId ? findTabLocation(a.tabId) : null;
+          result = loc
+            ? await proposeHive(loc.tab, a)
+            : { error: "proposeHive works only in your own tab's window, and your tab isn't open in this one." };
+          break;
+        }
         case 'getTreeSelection':
         case 'revealInTree': {
           const a = args as { tabId?: string; path?: unknown; select?: unknown };

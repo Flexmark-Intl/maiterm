@@ -1369,9 +1369,47 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
     }
     if let Some(role) = hive {
         tools.extend(crate::hive::tools::tool_definitions(role));
+    } else if !cfg!(windows) {
+        // A Hive needs Claude's sandbox, which native Windows lacks (`create::platform_refusal`).
+        tools.push(propose_hive_tool());
     }
 
     serde_json::json!({ "tools": tools })
+}
+
+/// `proposeHive` (docs/hive.md §3.7): an agent outside any Hive offers its human the Create sheet,
+/// filled in with its plan. Nothing is made until the human presses Create there, which stays the
+/// approval for everything the Hive then does (§7.3). Answered by the caller's window.
+fn propose_hive_tool() -> Value {
+    use crate::hive::create::{MAX_BRIEF, MAX_BRIEF_FILES};
+    serde_json::json!({
+        "name": "proposeHive",
+        "description": format!(
+            "Offer your human a Hive (a coordinator agent with sandboxed workers that carries a goal through to landed \
+             work) for a plan you made with them. maiTerm shows them a request; on Review it opens a new workspace with \
+             the Hive Create sheet filled in from what you pass here, which they check, change and Create. Nothing is \
+             created until they do, and you aren't told when they do. Put the plan in brief (at most {MAX_BRIEF} characters) \
+             and/or attach your plan documents as brief_files (absolute paths, at most {MAX_BRIEF_FILES} files of 5 MB): \
+             they're copied into the coordinator's own folder at Create, and the coordinator alone reads them. folders are \
+             the project folders the Hive works in (default: your own folder). Only for a local agent tab. A second call \
+             replaces your earlier proposal."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tabId": { "type": "string", "description": "Your own tab (auto-injected)" },
+                "goal": { "type": "string", "description": "What the Hive should get done, in a sentence or two" },
+                "name": { "type": "string", "description": "The Hive's name (default: from the goal)" },
+                "brief": { "type": "string", "description": "The project brief: the plan, decisions made, constraints" },
+                "brief_files": { "type": "array", "items": { "type": "string" }, "description": "Absolute paths of plan documents to attach" },
+                "folders": { "type": "array", "items": { "type": "string" }, "description": "Absolute paths of the folders it works in; the first is the primary" },
+                "cap": { "type": "integer", "description": "Workers at once (default: your human's Hive default)" },
+                "worker_model": { "type": "string", "enum": ["opus", "sonnet", "haiku"], "description": "Workers' model (default: your human's Hive default)" },
+                "worker_effort": { "type": "string", "enum": crate::hive::tools::EFFORTS, "description": "Workers' effort (default: your human's Hive default)" }
+            },
+            "required": ["goal"]
+        }
+    })
 }
 
 /// The Files tools (docs/file-tree.md §9.6): paths only, never content. The descriptions carry

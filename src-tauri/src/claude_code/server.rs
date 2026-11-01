@@ -884,7 +884,7 @@ fn target_owner_window(state: &Arc<AppState>, tool_name: &str, arguments: &Value
         // caller's own (`own_tab_only_refusal`); a `windowId` must not pick another window, or
         // an agent could read the human's selection there or move that tree.
         // `process_message` also strips `windowId` from them, so the fallback can't either.
-        "revealInTree" | "getTreeSelection" => find_window_for_tab(state, arguments.get("tabId")?.as_str()?),
+        "revealInTree" | "getTreeSelection" | "proposeHive" => find_window_for_tab(state, arguments.get("tabId")?.as_str()?),
         "moveWorkspace" | "setMesh" | "linkMeshes" | "unlinkMesh" | "createTab" => {
             let ws = arguments.get("workspace_id")?.as_str()?;
             let app_data = state.app_data.read();
@@ -2908,7 +2908,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 90] = [
+const PEER_ADDRESSING_TOOLS: [&str; 91] = [
     // A tab's auto-resume command and its trigger variables (interpolated unescaped into that
     // command, e.g. `%claudeSessionId`) run in that tab's shell at its next spawn or recover:
     // set on another tab, they plant a command there.
@@ -2920,6 +2920,8 @@ const PEER_ADDRESSING_TOOLS: [&str; 90] = [
     "revealInTree",
     "getTreeSelection",
     "getAgentFileActivity",
+    // A Hive proposal is shown to the human as "<tab> proposes a Hive" (docs/hive.md §3.7).
+    "proposeHive",
     // A mute aimed at a guessed tab silences notifications the human wants (docs/mute.md).
     "setMuted",
     // Agent requests and the moves (agent_requests.rs, docs/agent-requests.md): a request is
@@ -3041,7 +3043,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 90] = [
 /// The agent-request tools (agent_requests.rs) are here for the same reason from the other side:
 /// a request is shown to the human as "the agent in <tab> asks…", so the tab named must be the
 /// caller, and a request's status is only its own tab's to read.
-const OWN_TAB_ONLY_TOOLS: [&str; 68] = [
+const OWN_TAB_ONLY_TOOLS: [&str; 69] = [
     // What a tab's shell runs on its next spawn is that tab's own business: with any `tabId`,
     // one agent could set the command another tab replays (found by the Hive spike 15 audit,
     // 2026-10-23). The only in-repo use is an agent fixing its OWN auto-resume.
@@ -3051,6 +3053,8 @@ const OWN_TAB_ONLY_TOOLS: [&str; 68] = [
     // is not its to move or read.
     "revealInTree",
     "getTreeSelection",
+    // The proposal names its caller to the human and opens in the caller's window.
+    "proposeHive",
     "createFollowUp",
     "listFollowUps",
     "cancelFollowUp",
@@ -3867,7 +3871,7 @@ async fn process_message(
                 // revealInTree and getTreeSelection act in the caller's own window, which its
                 // tab decides (`target_owner_window`). A `windowId` (listWindows hands them out)
                 // would otherwise outrank the tab in `resolve_target_window`.
-                if matches!(tool_name.as_str(), "revealInTree" | "getTreeSelection") {
+                if matches!(tool_name.as_str(), "revealInTree" | "getTreeSelection" | "proposeHive") {
                     if let Some(obj) = arguments.as_object_mut() {
                         obj.remove("windowId");
                     }

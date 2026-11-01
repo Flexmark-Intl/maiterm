@@ -79,8 +79,14 @@
   }
   const draftFor = () => createDrafts.get<Draft>(workspaceId);
   const saved = draftFor();
+  /** An agent's proposal (`proposeHive`, docs/hive.md §3.7), when there's no draft: it fills in
+   *  the goal, brief, files, folders and crew; everything else starts from the defaults. Taken
+   *  once, so the next open is the draft the human made of it. */
+  const seed = saved ? undefined : untrack(() => createDrafts.takeSeed(workspaceId));
   /** Opened on a kept draft: the header offers Start over. */
   let resumed = $state(!!saved);
+  /** Who proposed what's in the sheet, until Start over. */
+  let proposedBy = $state(seed?.fromLabel ?? null);
   /** Whether the preflight's answer fills in the defaults (the Primary, the cap): a fresh open,
    *  or a Start over made before it answered. */
   let useDefaults = !saved;
@@ -97,24 +103,24 @@
   let loadError = $state<string | null>(null);
   let tools = $state<HiveDetectedTool[] | null>(null);
 
-  let name = $state(saved?.name || (workspacesStore.workspaces.find((w) => w.id === workspaceId)?.name ?? ''));
+  let name = $state(saved?.name || seed?.name || (workspacesStore.workspaces.find((w) => w.id === workspaceId)?.name ?? ''));
   let folders = $state<Folder[]>(saved?.folders ?? []);
   let folderKey = Math.max(0, ...(saved?.folders ?? []).map((f) => f.key));
   let folderNote = $state<string | null>(null);
-  let goal = $state(saved?.goal ?? '');
+  let goal = $state(saved?.goal ?? seed?.goal ?? '');
   let instructions = $state(saved?.instructions ?? initial.rules);
   // The project brief and its files: the queen's alone (docs/hive.md §3.5).
-  let brief = $state(saved?.brief ?? '');
-  let briefFiles = $state<string[]>(saved?.briefFiles ?? []);
+  let brief = $state(saved?.brief ?? seed?.brief ?? '');
+  let briefFiles = $state<string[]>(saved?.briefFiles ?? seed?.briefFiles ?? []);
   // Rules for every agent stay folded away until wanted: most Hives need none.
   // Default rules open them: they're already there to read.
   let rulesOpen = $state(saved?.rulesOpen ?? !!initial.rules.trim());
-  let cap = $state(saved?.cap ?? initial.cap ?? FALLBACK_CAP);
+  let cap = $state(saved?.cap ?? seed?.cap ?? initial.cap ?? FALLBACK_CAP);
   let landing = $state<'base' | 'integration'>(saved?.landing ?? 'base');
   let coordModel = $state(saved?.coordModel ?? initial.coordModel);
   let coordEffort = $state(saved?.coordEffort ?? initial.coordEffort);
-  let workerModel = $state(saved?.workerModel ?? initial.workerModel);
-  let workerEffort = $state(saved?.workerEffort ?? initial.workerEffort);
+  let workerModel = $state(saved?.workerModel ?? seed?.workerModel ?? initial.workerModel);
+  let workerEffort = $state(saved?.workerEffort ?? seed?.workerEffort ?? initial.workerEffort);
   // Ids not detected on this machine are dropped once detection answers (`knownTools`).
   let picked = $state(new Set<string>(saved?.picked ?? initial.tools));
   let budgetDollars = $state(saved?.budgetDollars ?? initial.budgetDollars);
@@ -165,6 +171,7 @@
   function startOver() {
     createDrafts.clear(workspaceId);
     resumed = false;
+    proposedBy = null;
     useDefaults = true;
     createError = null; trustError = null; folderNote = null;
     name = ws?.name ?? '';
@@ -261,10 +268,13 @@
       const p = await hivePreflight(workspaceId, ids, live);
       preflight = p;
       // A cap set in the defaults stands; otherwise Create's own.
-      if (useDefaults && fromDefaults.cap === null) cap = p.default_cap;
+      if (useDefaults && fromDefaults.cap === null && !seed?.cap) cap = p.default_cap;
       // Trust may have changed while it was closed (Trust it, or claude run in another tab).
       else void recheckTrust();
-      if (p.default_primary && folders.length === 0) await addFolder(p.default_primary);
+      // A proposal's folders, in its order (the first is the Primary), instead of the default.
+      if (seed?.folders.length && folders.length === 0) {
+        for (const f of seed.folders) await addFolder(f);
+      } else if (p.default_primary && folders.length === 0) await addFolder(p.default_primary);
     } catch (e) {
       loadError = String(e);
       logError(`hive: preflight failed: ${e}`);
@@ -677,6 +687,8 @@
       <h2 id="hive-sheet-title">Make “{ws?.name ?? ''}” a Hive</h2>
       {#if resumed}
         <span class="resumed">Picked up where you left off. <button type="button" class="link" onclick={startOver}>Start over</button></span>
+      {:else if proposedBy}
+        <span class="resumed">Filled in from {proposedBy}'s proposal. Nothing starts until you press Create.</span>
       {/if}
       <IconButton tooltip="Close" style="font-size: 1.538rem;padding:4px 8px;width:auto;height:auto" onclick={close}>&times;</IconButton>
     </div>
