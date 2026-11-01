@@ -32,19 +32,23 @@
   /** An agent's proposal reviewed as this Hive's new goal (`proposeHive`, docs/hive.md §3.7):
    *  its goal, brief and files replace the prefill once the preview answers. Taken once. */
   let proposal = $state(untrack(() => newGoalProposals.take(workspaceId)));
-  /** One reviewed while this sheet is open is taken in place, unless a submit is running (it
-   *  waits, and HiveView drops it once the Hive has a goal again). */
+  /** One reviewed while this sheet is open is taken in place. During a submit it waits for the
+   *  submit to end: refused, the sheet takes it then (the human did click Review); started, it is
+   *  discarded, since the Hive has its goal (left stored, it would fill a later New goal). */
+  function takeWaiting() {
+    const p = newGoalProposals.take(workspaceId);
+    if (!p) return;
+    proposal = p;
+    if (preview) {
+      goal = p.goal;
+      brief = p.brief;
+      briefFiles = [...p.briefFiles];
+    }
+  }
   $effect(() => {
     const take = (e: Event) => {
       if ((e as CustomEvent<string>).detail !== workspaceId || submitting) return;
-      const p = newGoalProposals.take(workspaceId);
-      if (!p) return;
-      proposal = p;
-      if (preview) {
-        goal = p.goal;
-        brief = p.brief;
-        briefFiles = [...p.briefFiles];
-      }
+      takeWaiting();
     };
     window.addEventListener('hive-open-new-goal', take);
     return () => window.removeEventListener('hive-open-new-goal', take);
@@ -152,12 +156,14 @@
         keep_memory: keepMemory,
       });
       workspacesStore.applyHiveRecord(workspaceId, hive);
+      newGoalProposals.take(workspaceId);
       toastStore.addToast(`${name || 'Hive'}: new goal`, 'The Queen is starting fresh. It will propose completion criteria for you to confirm.', 'info');
       onclose();
     } catch (e) {
       submitting = false;
       refusal = String(e).replace(/^Error: /, '');
       logError(`hive: new goal for ${workspaceId.slice(0, 8)} refused: ${e}`);
+      takeWaiting();
     }
   }
 
