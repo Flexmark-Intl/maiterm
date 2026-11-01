@@ -168,7 +168,8 @@
   /** The furthest step reached: the rail shows a receipt for each step before it. */
   let reached = $state(saved?.reached ?? 0);
   function keepDraft() {
-    if (seeding && seed) {
+    // Only while nothing is in the list: a folder already there is work the human would lose.
+    if (seeding && seed && !folders.length) {
       createDrafts.clear(workspaceId);
       createDrafts.seed(workspaceId, seed);
       return;
@@ -302,7 +303,12 @@
         seeding = false;
         if (!folders.length && p.default_primary) await addFolder(p.default_primary);
         if (failed.length) folderNote = `Couldn't add ${failed.length === 1 ? 'a folder' : 'folders'} from the proposal. ${failed.join(' ')}`;
-      } else if (p.default_primary && folders.length === 0) await addFolder(p.default_primary);
+      } else {
+        // The human added a folder before the preflight answered: theirs stand, and what they
+        // do from here is a draft like any.
+        seeding = false;
+        if (p.default_primary && folders.length === 0) await addFolder(p.default_primary);
+      }
     } catch (e) {
       loadError = String(e);
       logError(`hive: preflight failed: ${e}`);
