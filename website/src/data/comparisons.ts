@@ -75,7 +75,7 @@ export const COMPARISONS: Comparison[] = [
       {
         dimension: 'Many agents at once',
         maiterm:
-          'The design centre: one view to talk to every agent without opening its terminal, a shared kanban board, a rules-driven supervisor per window, and agent-to-agent messaging across repositories.',
+          'The design centre: one view to talk to every agent without opening its terminal, a shared kanban board, a rules-driven supervisor per window, agent-to-agent messaging across repositories, and a Hive: a coordinating agent that plans a goal and runs sandboxed Claude Code workers on their own branches.',
         theirs: 'Supported, with its own multi-agent features; oriented around Warp’s own agent.',
       },
       {

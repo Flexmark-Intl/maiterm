@@ -42,7 +42,9 @@ Services live in a **Stack** section under their workspace row. Each line carrie
 
 The workspace row itself carries a **rollup dot**, with the same batch semantics as the agent indicator: red if anything crashed, amber while anything is starting, green only when *every* auto-start service is up, and amber for a partly-up stack. A green rollup means the project is actually running, not that something in it is.
 
-Right-click a service for **Start** / **Restart**, **Stop**, **Show console**, **Edit…** and **Remove** (held while it's running — stop it first). Right-click the workspace row for **Start stack**, **Stop stack** and **Restart stack**, which walk the services in order.
+Right-click a service for **Start** / **Restart**, **Stop**, **Show console**, **Run on**, **Edit…** and **Remove** (held while it's running — stop it first).
+
+**Run on** runs a service somewhere other than its own folder: in a worktree of the repository, or on **Other branch…**. A service whose command uses `{port}` gets a port of its own per copy, so up to three copies can run side by side, each a row under the service with **Close this copy** once it's stopped. One with a fixed port runs one copy at a time, and Run on moves it. A service can also be **Use the running service from another workspace**: it's started and stopped there, and its port fills `{port:<service>}` in this workspace's commands. Right-click the workspace row for **Start stack**, **Stop stack** and **Restart stack**, which walk the services in order.
 
 ## It reads the address off the service
 

@@ -61,6 +61,7 @@ export default defineConfig({
             { label: 'Follow-ups', slug: 'features/follow-ups' },
             { label: 'Agent Bridge', slug: 'features/agent-bridge' },
             { label: 'Mesh Workspace', slug: 'features/mesh-workspace' },
+            { label: 'Hive', slug: 'features/hive' },
             { label: 'maiLink Companion', slug: 'features/mailink' },
             { label: 'Chat Threads', slug: 'features/comms' },
             { label: 'Triggers & Automation', slug: 'features/triggers' },

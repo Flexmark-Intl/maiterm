@@ -86,6 +86,19 @@ While the [Files](/features/files/) tree has focus.
 
 On Windows and Linux, copy path is `Shift+Alt+C` (`Ctrl+Shift+Alt+C` for relative), and `Delete` moves to the trash (Recycle Bin on Windows), with `Shift+Delete` to delete permanently.
 
+## Hive
+
+In a [Hive](/features/hive/)'s view.
+
+| Shortcut | Action |
+|----------|--------|
+| `Cmd+1` | The Queen |
+| `Cmd+2`–`Cmd+9` | A worker, by the badge on its card |
+| `Cmd+Shift+[` / `Cmd+Shift+]` | Previous / next column |
+| `Cmd+Shift+Y` | Next view: Board, Needs you, Gallery, Memory |
+| `Cmd+W` twice | Close the focused worker column |
+| `Esc` | Leave the composer, or close a worker column |
+
 ## Editor
 
 When an editor tab is active, these shortcuts override terminal shortcuts.

@@ -49,6 +49,7 @@ Inside each card sits that account's **SSH hosts** section, with a one-line summ
 |---|---|
 | **Use** | Makes this the account new tabs launch under — SSH tabs included, on the hosts it covers |
 | **Verify** | Reads back the identity this account currently resolves to |
+| **Sign in again** | Shown on an account that has been signed out. Signs it back in and keeps its SSH token and hosts, instead of removing it and adding it again. A sign-in that comes back as a different account is signed straight back out |
 | **Remove** | Signs the account out, deletes its directory and forgets its SSH token. If it was active, another account becomes active — and that account's SSH host settings take effect |
 | **SSH hosts → Set up…** | Mints this account's remote token — see [SSH hosts](#ssh-hosts) |
 | **Use on every SSH host** | Sends the token to every host while this account is active |

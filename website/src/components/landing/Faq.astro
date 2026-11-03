@@ -28,6 +28,10 @@ const FAQS = [
     a: 'Yes, in the tabs you hand it. With the maiTerm extension for Chrome (and other Chromium browsers), you link a tab to an agent from the extension\'s icon, and that agent can read the tab\'s console errors, its failing requests and the responses they got back, and the page itself, and can click, type, navigate and take screenshots in it — in your own signed-in session, in the background. No agent can link a tab or see your others, and each agent works only the tabs linked to it, plus a popup one of them opens for it, such as a sign-in window. The extension talks only to maiTerm on your own computer. Install it from the Chrome Web Store and turn it on in Preferences → Chrome extension.',
   },
   {
+    q: 'Can one agent run a team of agents on a bigger goal?',
+    a: 'Yes — make a workspace a Hive. You give the goal to the Queen, a Claude Code agent who plans the work in waves and starts workers on it, each in Claude Code\'s sandbox and, in a git repository, on its own branch. She answers their questions and permission prompts, has their work reviewed, and lands it back after a check you set, with a log and Undo. You confirm what done means before any worker starts, and you are asked only what she can\'t decide. Hives are Claude Code only, on macOS for now.',
+  },
+  {
     q: 'Can I see which files my agents changed?',
     a: 'Yes. The Files column (Cmd+Shift+B) is a project tree that follows the tab you\'re in, and lights a file up as an agent reads it and marks what each agent changed this turn and this session, in that agent\'s colour. Narrow it to one agent\'s turn, or compare a file with how it was before the agent\'s first edit. It is built from the agents\' own tool calls, for Claude Code and Codex: a file that changed while an agent\'s shell command ran is labelled as exactly that, not as the agent\'s edit.',
   },

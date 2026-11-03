@@ -150,10 +150,10 @@ An agent can also ask for a bridge itself, or for its bridge to close, with `bri
 |------|-------------|
 | `listTasks` | List the project's tasks, grouped by workstream — this tab's or the whole workspace, narrowed to what's *ready to start*, ranked and bounded |
 | `createTasks` | Create a batch of tasks, optionally into a named workstream |
-| `updateTasks` | Update a batch — status, title, detail, workstream, assignee, dependencies, and an appended note |
+| `updateTasks` | Update a batch — status, title, detail, workstream, assignee, dependencies, an appended note, and a [question for you](/features/tasks/#when-an-agent-stops-on-a-question) |
 | `deleteTasks` | Remove rows or whole workstreams for good — never another tab's unfinished work, nor a task something unfinished still waits on |
 
-Four batched tools over one list you and your agent both edit. Work an agent filed by mistake is normally *retracted* to Dropped, which you can reverse; deleting is for rows that should never have existed, and it is [guarded](/features/tasks/#deleting-is-guarded). See [Tasks](/features/tasks/) for the full feature; it can be switched off entirely in **Preferences → AI Agents → Task tracking**, which removes both the tools and the instruction that goes with them.
+Four batched tools over one list you and your agent both edit. A question put on a task is how an agent asks you for a decision or for something only you can do: agents are told it's the one way to ask, so you aren't notified twice for the same question by an `AskUserQuestion` as well. Work an agent filed by mistake is normally *retracted* to Dropped, which you can reverse; deleting is for rows that should never have existed, and it is [guarded](/features/tasks/#deleting-is-guarded). See [Tasks](/features/tasks/) for the full feature; it can be switched off entirely in **Preferences → AI Agents → Task tracking**, which removes both the tools and the instruction that goes with them.
 
 ### Workspace stack
 
@@ -233,7 +233,7 @@ Listed while **Preferences → Files → Enable Files** is on. See [Files](/feat
 
 ### Browser
 
-With **Preferences → Chrome extension** on, an agent gets ten `browser…` tools for the Chrome tabs you linked to it: read their console errors and failing requests (with their responses), read the page, click, type, navigate and take screenshots, signed in as you. Only you link a tab. See [Chrome Extension](/features/chrome-extension/#the-tools).
+With **Preferences → Chrome extension** on, an agent gets eleven `browser…` tools for the Chrome tabs you linked to it: read their console errors and failing requests (with their responses), read the page, click, type, navigate and take screenshots, signed in as you, and wait for text to appear or go. A Claude Code agent is told which tabs you've linked, and what each is for, with your next message. Only you link a tab. See [Chrome Extension](/features/chrome-extension/#the-tools).
 
 ### Supervision
 

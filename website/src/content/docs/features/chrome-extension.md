@@ -85,10 +85,12 @@ A tab a linked page opens joins that page's agent by itself, so a flow like "Sig
 
 Linking a tab that's already linked to another agent moves it to the one you choose.
 
+A Claude Code agent is told which tabs you've linked with your next message to it: each tab's name, its site and what you said it's for, and again whenever that changes. So "check the page" can mean the tab you linked without you naming it. It's told when none is linked any more, too. Agents in other runtimes see their tabs through `browserStatus`.
+
 When tabs have different jobs, say what each is for. Once a tab is linked, the extension's menu on that tab has a **What is this tab for?** box: "staging admin, signed in as support", say. The agent is told, and sees it beside the tab's name from then on. With two or more tabs linked, an agent has to name the tab it loads a page in, and if it loads a site that another of its tabs already has open, it's warned and told how to put the page back.
 
 :::note
-Several tabs per agent and popups joining need maiTerm 3.12.0 or later. Purpose notes need extension 0.2.3 and a maiTerm after 3.12.0. In 3.11.0 an agent has one tab, and linking another replaces it.
+Several tabs per agent and popups joining need maiTerm 3.12.0 or later. Purpose notes need extension 0.2.3 and maiTerm 3.13.0. In 3.11.0 an agent has one tab, and linking another replaces it.
 :::
 
 ## The tools
@@ -109,7 +111,7 @@ Agents in an agent tab get these while the feature is on. Every one acts on the 
 | `browserScreenshot` | What the tab shows, as an image |
 | `browserEval` | Run a JavaScript expression in the page and return its value |
 
-Clicks, typing, key presses and navigation wait for the page to settle (a page load finished and its requests quiet, up to a few seconds), so an agent can take its next step straight away instead of guessing how long to sleep. Settling needs extension 0.2.2, and `browserWaitFor` a maiTerm release after 3.12.0.
+Clicks, typing, key presses and navigation wait for the page to settle (a page load finished and its requests quiet, up to a few seconds), so an agent can take its next step straight away instead of guessing how long to sleep. Settling needs extension 0.2.2, and `browserWaitFor` maiTerm 3.13.0.
 
 Console and network records start when the agent first uses the tab, so for a bug that happens on load, the agent reloads the page first. The extension keeps the last 200 console messages and 300 requests per linked tab, in memory, and drops them when the link ends.
 
@@ -121,4 +123,4 @@ Console and network records start when the agent first uses the tab, so for a bu
 
   To stop the menu appearing on fields, turn off the password manager's in-page suggestions and keep filling from its toolbar icon or keyboard shortcut. In 1Password: open the extension's **Settings → Autofill & save**, and under **Suggestions** turn off **Show autofill suggestions when a field is selected**. Leave **Offer to fill and save logins and other items in fields** on; turning it off also stops 1Password filling at all.
 - **It acts as you.** Clicking "Delete" in a linked tab deletes, in your account. Link a tab you're happy for the agent to work in, and say what it may and may not do.
-- **Agent tabs only.** The popup lists maiTerm tabs running an agent, not shells or stack services.
+- **Agent tabs only.** The popup lists maiTerm tabs running an agent, not shells or stack services. In a [Hive](/features/hive/), it offers the Queen, labelled **Queen**, and never a sandboxed worker.

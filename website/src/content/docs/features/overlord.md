@@ -15,13 +15,13 @@ With a dozen agents running, what you lose isn't any single answer — it's trac
 
 ## Rules
 
-A rule is a **condition**, a set of **guards**, and a **sequence** of steps. The checkpoint rule that ships with it is the worked example: *when context reaches 55%, tell the agent to prepare for compaction by bringing its docs, memory, code comments and tasks up to date; when that turn ends, send `/compact`* — waiting for each step to genuinely land before sending the next, rather than firing both into a busy tab.
+A rule is a **condition**, a set of **guards**, and a **sequence** of steps. The checkpoint rule that ships with it is the worked example: *when an idle agent's context reaches 35% and 130k tokens, tell it to prepare for compaction by committing finished work, cleaning up its board rows and noting where it is; when that turn ends, send `/compact`* — waiting for each step to genuinely land before sending the next, rather than firing both into a busy tab.
 
 Conditions fire on **semantic state**, not on terminal output (that's what [triggers](/features/triggers/) are for):
 
 | Condition | Fires when |
 |-----------|-----------|
-| Context reaches *N*% | The tab's context window crosses a threshold |
+| Context reaches *N*% | The tab's context window crosses a threshold, optionally only once it also holds at least a number of tokens |
 | A commit lands | A `git commit` in that tab actually succeeded — a denied prompt, a refusing pre-commit hook and "nothing to commit" don't count |
 | Every turn ends | The agent goes from working to idle |
 | Tab goes idle for *N* min | Nothing has happened in the tab for a while |
@@ -45,15 +45,22 @@ Overlord types with **your** authority and no envelope wrapped around it — the
 
 Guards are **human-only**. The supervisor agent can propose changes to a rule's wording, timing and scope, but not to the conditions under which it may fire at all.
 
-### The three rules that ship
+### The rules that ship
 
 | Rule | What it does |
 |------|--------------|
-| **Checkpoint before compaction** | At ~55% context, have the agent update its docs, memory, code comments and [task board](/features/tasks/) to prepare for compaction, then compact — instead of hitting the auto-compact wall mid-thought. One prep step: an earlier version asked twice and cost a turn on "already done" |
+| **Checkpoint before compaction** | When an **idle** agent reaches 35% context and 130k tokens, have it commit finished work (never half-finished work), update docs, memory and code comments, clean up its own rows on the [task board](/features/tasks/) and leave a note on the task it's in the middle of saying where it is and what comes next — then compact. Claude Code and Codex tabs both get the `/compact` |
+| **Checkpoint a busy agent** | The same checkpoint for an agent that never goes idle: at 55% context and 130k tokens it interrupts the working agent, instead of letting it hit the auto-compact wall mid-thought. It shares a cooldown with the rule above, so a tab gets one checkpoint, not two |
 | **Review after commit** | After a commit lands, nudge the agent to have non-trivial work reviewed by a subagent before moving on |
 | **Keep a task list** | A tab doing sustained work with nothing on the [maiTerm board](/features/tasks/) gets nudged to record it |
 
-They behave like [triggers](/features/triggers/): seeded on first run, individually toggleable, editable in place, hideable and restorable, and auto-updated with new versions of maiTerm until you edit one — at which point your wording is frozen and left alone. If a later version retires a default you had edited, your copy stays, as a rule of your own.
+They behave like [triggers](/features/triggers/): seeded on first run, individually toggleable, editable in place, hideable and restorable, and auto-updated with new versions of maiTerm until you edit one — at which point your wording is frozen and left alone. If a later version retires a default you had edited, your copy stays, as a rule of your own. **Checkpoint a busy agent** arrived split out of **Checkpoint before compaction**, so it starts with that rule's on/off and scope, and doesn't arrive at all if you had edited or deleted it.
+
+The token floor is why the checkpoint starts earlier now without firing too soon: on a 1M-token window 35% is a lot of conversation, and on a small one the 130k floor keeps it below where Claude compacts on its own. Compaction itself no longer raises a notification, now that it happens often.
+
+### Before Claude's own idle compaction
+
+Claude Code compacts a session on its own when it has sat idle long enough for its prompt cache to lapse. In a tab running [maiTerm's mod](/features/agents/#the-maiterm-mod-claude-code), maiTerm can step in first: it holds that compaction back and runs the checkpoint instead, so the agent commits and leaves its note before its context is condensed. It does this only when Overlord is on with **Propose first** off, a checkpoint rule can run at the tab, the agent is idle, nothing else is driving the tab, its last turn was at least 50 minutes ago, and you haven't used the tab in the last minute. Otherwise, or if maiTerm doesn't answer within a few seconds, Claude compacts as it always did.
 
 There used to be a fourth, **Re-bind a running agent**, which typed `/maiterm init` into any tab whose agent was running but not connected. Agents bind themselves now, from their first request, so maiTerm no longer volunteers it. Since 3.11.0 the deck no longer types it either: an agent registers itself when it starts. The **Agent running but unbound** condition is still there for a rule of your own, and a tab stuck that way gets a card on the deck offering **Restart agent** and **Reload tab**.
 
@@ -138,7 +145,7 @@ A few things worth knowing about how it behaves:
 - **Refusals are structured and specific.** "The tab is at a permission prompt" and "a rule owns this tab right now" call for opposite responses, so the refusal names which and the agent is told not to retry the ones retrying can't fix.
 - **It answers routine prompts, and leaves the rest to you.** Approvals in service of work already underway are its to make, guided by your playbook; anything destructive or irreversible, anything touching money, credentials, production or an external party, and any question about what you actually *want* is yours. It neither answers nor repeats one of those — the prompt is already waiting for you on the board, in the Loom and on your phone.
 - **It reaches tabs the engine can't type into** — suspended, archived, in a suspended workspace, or on the far end of an SSH connection.
-- **Rule changes always ask.** `driveTab` is pre-approved because its guards are mechanical; `proposeRuleChanges` always prompts you — playbook entries included — and guards aren't proposable at all.
+- **Rule changes always ask.** `driveTab` is pre-approved because its guards are mechanical; `proposeRuleChanges` always waits for you — playbook entries included — and guards aren't proposable at all. A proposal is a card, **Allow this rule change?** (or **Allow these N rule changes?**), on the Overlord tab's corner and in the [Loom](/features/loom/#decisions)'s Decisions: tick each change you allow, then **Apply**, or **Reject all**. A rejected change isn't pitched again that session. It used to be a window-wide dialog, which an Escape pressed anywhere rejected.
 
 ### Letting the agent answer escalations
 
@@ -146,7 +153,7 @@ A few things worth knowing about how it behaves:
 
 Turned on, supervised tabs bring the decisions they'd have asked you about to the supervisor instead: they escalate and wait, rather than also prompting you. The supervisor answers each one with `driveTab`, and its card on the deck clears once it has. It asks you only when its playbook doesn't settle a consequential call — the one case where it may, because then nobody else is asking. A card stays answerable by you too: **Open tab** and answer it yourself.
 
-**The playbook** is your standing answers, one per line — *Dependency installs and lockfile updates: approve*, *Never push to main without asking me*. Edit it in **Preferences → Overlord → Overlord playbook**, shown whenever Overlord is on; the supervisor follows it when it answers routine prompts in either mode. When it does have to ask you, it can propose your answer as a new entry, which reaches you through the same approval dialog as a rule change. Nothing is added without your approval, and neither the switch nor the playbook can be changed by an agent.
+**The playbook** is your standing answers, one per line — *Dependency installs and lockfile updates: approve*, *Never push to main without asking me*. Edit it in **Preferences → Overlord → Overlord playbook**, shown whenever Overlord is on; the supervisor follows it when it answers routine prompts in either mode. When it does have to ask you, it can propose your answer as a new entry, which reaches you on the same card as a rule change. Nothing is added without your approval, and neither the switch nor the playbook can be changed by an agent.
 
 Flipping the switch re-primes the supervisor with the matching instructions. A supervised tab picks the change up when its session next starts.
 
