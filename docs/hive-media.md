@@ -302,6 +302,30 @@ so the coordinator counts generations instead.
    upstream-URL matching for proxied servers, scope-aware status, plugin detection per account
    root, and the host and worker-MCP code moved onto the catalogue. No hosts change (§9). Plus
    the result-host spike.
+
+   **Phase 1: built (2026-11-03).** Everything above except the result-host spike, which is
+   separate (no paid call was made). Where it lives and what it decided:
+   - `resources/hive/media/catalogue.json` and `hive/media.rs` (`catalogue()`, `provider()`,
+     `providers_for_native/_upstream/_skill`, `build_status`, `recommend`, `hive_media_status`).
+     Beyond §4's fields an entry carries `offer` (`recommend` | `list` | `detect_only`),
+     `subscriber_first` (D1), `recommendable`, `default_for`, `capability_notes`, `detect`
+     (`clis`, `plugins`, `port`, `apps`) and `match.skills`; a route has `command` (brew) and
+     `plugin_id`. The parse test uses `deny_unknown_fields`, so a typo is a failing test.
+   - `KNOWN_GENERATOR_HOSTS` and `SKILL_GENERATORS` are gone. `todays_five_providers_keep_exactly_their_hosts`
+     pins fal, kie, higgsfield, kling and wavespeed to their old `sandbox_hosts` and suffixes;
+     no other provider has a sandbox host.
+   - A proxied entry is recognised by `entries::origin` (our marker AND our loopback proxy path)
+     plus the registry's upstream URL (`DetectedTool.proxy`); anything else carrying the marker
+     is recognised as nothing.
+   - `hive_media_status(workspace_id?, already_pay?)` answers `{ rows, brew }`: one row per
+     capability, in catalogue order. A native MCP entry, a skill or a plugin is `installed`
+     (nothing can check it); a CLI or a running ComfyUI is `ready`. `recommended` is set only
+     while nothing usable covers the capability: a provider already tried here, then one the
+     human pays for (detected subscriber or `already_pay`), then the capability's default.
+   - **Not verified:** which fal models make music and sfx (D3). fal.ai could not be read from
+     the build sandbox, so the entry says so in `capability_notes`; check fal.ai/models before the
+     brief names a model. Remotion's marketplace source is not in the catalogue either (only
+     `plugin_id`), for phase 3 to fill from a checked source.
 2. **The panel.** "What it can make" in the Tools step, Hive settings and Preferences, read-only:
    detection, recommendations, credits lines and guides.
 3. **Setup routes and the tools change.**

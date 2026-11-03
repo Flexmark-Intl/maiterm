@@ -4455,17 +4455,19 @@ several releases a day).
    refetches on every gallery event and on a budget change. `hiveListWorkers` reports the budget
    too. Both briefs carry the budget, the spend at launch and the `Budget:` rule. Generator hosts
    (plan D2) are filled at `hive_create` from a fresh detection (`create::generator_hosts`:
-   `KNOWN_GENERATOR_HOSTS` for each chosen server it matches by url suffix or name word, plus that
-   server's own url host only when it is under a generator's suffix (follow-ups, below), the
-   `/generate` skill as Kie.ai, repo remotes and anything not a public host name dropped), edited
+   the media catalogue's `sandbox_hosts` (`resources/hive/media/catalogue.json`, `hive/media.rs`,
+   docs/hive-media.md §4; it replaced the `KNOWN_GENERATOR_HOSTS` table) for each chosen server it
+   matches by url suffix or name word, plus that server's own url host only when it is under a
+   provider's suffix (follow-ups, below), the `/generate` skill as Kie.ai, repo remotes and anything not a public host name dropped), edited
    by the human, offered again by Re-detect (`hive_detect_generator_hosts`), never re-derived at
    launch; a media worker's `allowedDomains` (a role with `generators: true`, never a reviewer)
    is the registries plus them (`settings::worker_domains`, checked again since the state file is
    plain JSON, a remote's host still left out and denied), a code worker's and a reviewer's the
    registries alone, the coordinator's `[]` (plan D20). A role with `generators: true` (image,
    video, audio, edit; never a reviewer) gets each chosen `mcp:<name>` that is a recognised
-   generator (`create::is_generator_server`: its url host or a word of its name in
-   `KNOWN_GENERATOR_HOSTS`; a stdio entry only by name) copied verbatim from the launching
+   generator (`create::is_generator_server`: its url host or a word of its name in the catalogue;
+   a stdio entry only by name; **a proxied entry (docs/mcp-proxy.md) only by the upstream URL the
+   proxy registry holds for it**, never its name or its loopback url) copied verbatim from the launching
    account's `.claude.json` into its `mcp.json` (`settings::worker_mcp_config`, fresh at every
    launch, a server the file lacks left out and logged). Any other ticked server (a github, a
    filesystem) is never copied: an MCP server runs in Claude's process, outside the sandbox and
