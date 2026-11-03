@@ -316,7 +316,19 @@ so the coordinator counts generations instead.
    - `proposeHive`'s `media`.
 5. **Stdio upstreams in the MCP proxy**, so `manual` providers become `token`.
 
-Every phase gets a subagent review. The sheets are Svelte, and every sheet change so far had
+**These are phases of the design, not a queue.** What really depends on what:
+- **Phase 1's catalogue and detection are the foundation.** Phases 2, 3 and 4 read
+  `hive_media_status` and the catalogue's routes.
+- **Independent of phase 1, and can start at once:**
+  - **phase 5** (stdio upstreams live in `mcp_proxy/`);
+  - **phase 4's agent-request plumbing** (`hiveRequestCapability`, `tool_setup`, the
+    `hive_approved` arm);
+  - **phase 3's tools change after Create** (`Hive.tools` with a §3.4 row);
+  - **the result-host spike**, once Darryl approves its spend.
+- **Phase 2's panel** needs phase 1's command shape, not its finished detection. Agree the type
+  first, and the panel can be built against it.
+
+Each piece is reviewed as it lands. The sheets are Svelte, and every sheet change so far had
 ordering bugs that only review found.
 
 ## 12. Decisions (Darryl, 2026-11-03)
