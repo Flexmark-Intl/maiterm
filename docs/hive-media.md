@@ -83,7 +83,7 @@ parse is tested as the role files are. One entry:
   "capabilities": ["video", "image", "lipsync", "upscale", "3d", "music"],
   "models_note": "Kling 4.0, Veo 3.1, Seedance 2.5, GPT Image 2, FLUX, sync.so",
   "routes": [{
-    "kind": "remote_mcp",                // remote_mcp | brew | plugin | local_app | manual
+    "kind": "remote_mcp",                // remote_mcp | stdio_mcp (phase 5) | brew | plugin | local_app | manual
     "url": "https://mcp.fal.ai/mcp-relay",
     "auth": "oauth",                     // oauth | token | none
     "credits": "api",                    // api (prepaid balance) | plan (subscription credits)
@@ -122,7 +122,8 @@ The starting entries, from the 2026-11-03 survey:
 | HeyGen | remote MCP `mcp.heygen.com/mcp/v1/` | OAuth | **plan** | lipsync, avatars |
 | Comfy Cloud | remote MCP `cloud.comfy.org/mcp` | OAuth or token | Comfy credits | local / workflows |
 | Replicate | remote MCP `mcp.replicate.com/sse` (SSE) | key pasted on their page | API | listed, not recommended: results expire after 1 h, and the proxy speaks Streamable HTTP only |
-| MiniMax, Meshy, Google genmedia | local MCP with an env key | key | API | **manual** until stdio proxying (phase 5) |
+| MiniMax, Meshy | local MCP with an env key | key | API | `stdio_mcp` from phase 5 (§12.1) |
+| Google genmedia | local MCP, needs a GCP project and a bucket | GCP | API | **manual** |
 | ComfyUI (local), Blender | detected only; guide links | none | free | local, 3d |
 | Kie.ai, Luma, Topaz, Stability | not offered (no official MCP, or no cost API) | | | detected if present, as today |
 
@@ -182,6 +183,7 @@ Each route is one button on a missing capability's recommendation card. The butt
 | `brew` | Opens a **visible maiTerm tab** running the one install command, then re-detects when it exits. With no Homebrew, the first step is Homebrew's own installer in the same tab, since it asks for the human's password. For whisper.cpp, maiTerm then downloads the default model (`ggml-base.en`) from huggingface.co into a maiTerm-owned models folder, outside any sandbox, and the brief names that path | Watches; types a password if asked |
 | `plugin` | Runs `claude plugin marketplace add …` and `claude plugin install …` in a visible tab | Watches |
 | `local_app` | Shows the download link and guide; re-detects when the window regains focus | Installs the app |
+| `stdio_mcp` (phase 5) | maiTerm runs the pinned local server itself, with the key from the keychain (§12.1); setup is the `token` setup plus Verify | Makes the key, pastes it |
 | `manual` | Shows the guide, including the config snippet with the key left as a placeholder | Everything |
 
 **Verify.** After a route finishes, maiTerm re-detects and, for an MCP server, lists its tools
@@ -192,8 +194,8 @@ as a button). It never runs a paid generation.
 
 **Phase 5: stdio upstreams in the MCP proxy** (docs/mcp-proxy.md §2 lists them as v2). maiTerm
 runs a local MCP server itself, with the key from the keychain in its environment. That moves
-MiniMax, Meshy and Google genmedia from `manual` to `token`, and keeps those keys out of
-`.claude.json`. It's the larger piece, so it comes last.
+MiniMax and Meshy from `manual` to `stdio_mcp`, and keeps those keys out of `.claude.json`.
+Specified in §12.1.
 
 ## 7. Where it appears
 
@@ -314,19 +316,25 @@ so the coordinator counts generations instead.
    - `hiveRequestCapability` + `tool_setup` requests, with every piece of plumbing §8 lists, on
      the Loom and the phone, no protocol bump;
    - `proposeHive`'s `media`.
-5. **Stdio upstreams in the MCP proxy**, so `manual` providers become `token`.
+5. **Stdio upstreams in the MCP proxy**, so MiniMax and Meshy become `stdio_mcp` (§12.1).
 
 **These are phases of the design, not a queue.** What really depends on what:
 - **Phase 1's catalogue and detection are the foundation.** Phases 2, 3 and 4 read
-  `hive_media_status` and the catalogue's routes.
+  `hive_media_status` and the catalogue's entries.
+- **First, agree two types:** `hive_media_status`'s row, and the catalogue entry (name, credits,
+  guide, routes). Agreeing them lets the rest be built alongside phase 1.
 - **Independent of phase 1, and can start at once:**
-  - **phase 5** (stdio upstreams live in `mcp_proxy/`);
-  - **phase 4's agent-request plumbing** (`hiveRequestCapability`, `tool_setup`, the
-    `hive_approved` arm);
-  - **phase 3's tools change after Create** (`Hive.tools` with a §3.4 row);
-  - **the result-host spike**, once Darryl approves its spend.
-- **Phase 2's panel** needs phase 1's command shape, not its finished detection. Agree the type
-  first, and the panel can be built against it.
+  - **Phase 5's proxy side:** the stdio transport in `mcp_proxy/`, the `ProxyServer` stdio arm,
+    the child lifecycle, the saved-list serving and the environment rules. Its catalogue route
+    needs phase 1, and its key paste needs phase 3's sheet.
+  - **Phase 4's registration:** the `tool_setup` kind, the tool's registration in the four tool
+    lists, and the `hive_approved` arm. The card's words (recommended provider, credits) wait for
+    phase 1. What approval does (open the setup sheet, add the tool once it is Ready) waits for
+    phases 1 and 3.
+  - **Phase 3's tools change after Create** (`Hive.tools`, with a §3.4 row). It offers hosts
+    through the existing `generator_hosts`, which phase 1 later moves onto the catalogue.
+  - **The result-host spike**, once Darryl approves its spend.
+- **Phase 2's panel** can be built against the two agreed types before detection is finished.
 
 Each piece is reviewed as it lands. The sheets are Svelte, and every sheet change so far had
 ordering bugs that only review found.
@@ -349,21 +357,61 @@ ordering bugs that only review found.
 Stdio upstreams in the MCP proxy (docs/mcp-proxy.md §2 "v2"), so a key-based local MCP server is
 set up like a token one. Phase 5 also brings docs/mcp-proxy.md up to date.
 
-- **Who runs it.** maiTerm starts the server as its own child process, from a catalogue `route`
+- **The record.** `ProxyServer` gains a stdio arm that holds the catalogue route id, the
+  command and the args. Today `ProxyServer.url` and `valid_url` require a URL
+  (`mcp_proxy/mod.rs`). Detection (§5) and `is_generator_server` match a stdio server **by its
+  catalogue route id**, since it has no upstream URL. Without that, a worker's `mcp.json` would
+  leave it out.
+- **Who runs it.** maiTerm starts the server as its own child process, from a catalogue route
   `{kind: "stdio_mcp", command, args, env_key}`.
-  - The command is pinned to an exact package version (`npx -y pkg@1.2.3`, `uvx pkg==1.2.3`).
-    The human's setup click is the approval to run that code as them.
-  - The process is restarted on exit with backoff, and stopped when no session has used it for
-    10 minutes.
+  - **One child per server, shared by every downstream session.** HTTP upstreams get a session
+    per agent (`mcp_proxy/mod.rs`); a stdio child has one session, so per-agent isolation is
+    given up. That is acceptable for stateless generators, and the catalogue offers only those
+    here. The proxy remaps JSON-RPC request ids so concurrent calls from different agents don't
+    collide.
+  - The command is pinned to an exact package version (`npx -y pkg@1.2.3`,
+    `uvx pkg==1.2.3`). That doesn't pin the package's dependencies: say so on the setup sheet,
+    or install it once into a maiTerm-owned folder from a lockfile and run it from there
+    (preferred where the package ships one). The human's setup click is the approval to run that
+    code as them.
+  - It is started as `watch.rs` starts a script:
+    - `env_clear`, then the login PATH (`login_path`), since a Finder-launched maiTerm has no
+      `npx` on its PATH;
+    - the key variable;
+    - nothing else of maiTerm's environment;
+    - a working directory in a maiTerm-owned folder.
+  - **Lifecycle.**
+    - The process is restarted on exit, with backoff.
+    - It is stopped when no *tool call or tool list from an agent* has reached it for
+      10 minutes. The proxy's own hourly re-list (`watch`) neither counts as use nor starts the
+      process.
+    - A stopped server answers `tools/list` from its **saved last-good list** (§4.1 "a failure
+      never removes a tool") and shows as "idle", not as an outage.
+    - The first `tools/list` happens during setup's Verify, before the entry is written into any
+      config. So no agent ever sees an empty first list, even when `npx` takes longer than the
+      proxy's 15 s wait.
   - It is served at `/mcp/x/<id>` like any proxied server. Agents never see the command or the
     key.
 - **The key.** It is pasted in the setup sheet and stored in the keychain, never on the phone
-  (§7). It is passed to the child in its environment only, never in argv. It stays out of logs,
-  errors and `Debug`, under `accounts::vault`'s rules.
-- **Sandbox.** The server runs outside every Hive sandbox, as every MCP server does (§9). Its
-  output files are downloaded by the worker from the catalogue's `result_hosts`. A server that
-  writes files locally is pointed at a maiTerm folder that `galleryAdd` accepts as an output
-  folder (docs/hive.md §10.3).
-- **Providers it unlocks.** MiniMax (speech, music, Hailuo video), Meshy (3D), and ElevenLabs
-  music and sfx if D3's check passes. Google genmedia stays `manual`, since it needs a GCP
-  project and a bucket.
+  (§7). It reaches the child in its environment only, never in argv. That environment is
+  inherited by whatever `npx` or `uvx` spawns: that is the package's own code, the same trust as
+  the click. The key stays out of logs, errors and `Debug`, under `accounts::vault`'s rules. The
+  child's **stderr is never logged or forwarded**, since a server may print its own key. Only a
+  line count and the exit status are logged.
+- **Sandbox and files.** The server runs outside every Hive sandbox, as every MCP server does
+  (§9). A server that returns URLs is handled through the catalogue's `result_hosts`.
+  - A server that writes files locally gets an output folder **outside maiTerm's data folder**,
+    `~/Library/Caches/<app_data_slug>/mcp-out/<id>`, because `check_output_folders` refuses
+    anything inside the data folder.
+  - When the human adds that tool to a Hive (Create or the tools change), that folder is added
+    to the Hive's output folders, ticked, as their edit. That is how `galleryAdd` accepts its
+    files (docs/hive.md §10.3).
+  - The folder is shared by every Hive using that server. As with any output folder, this
+    prevents accidents, not a determined agent.
+- **Providers it unlocks.**
+  - MiniMax (speech, music, Hailuo video) and Meshy (3D);
+  - ElevenLabs music and sfx, if D3's check passes.
+
+  Google genmedia stays `manual`: it needs a GCP project and a bucket, not just a key.
+- **The route list** gains `stdio_mcp`, alongside §4's kinds and with a row in §6's table. Its
+  setup is the `token` setup (open the key page, paste) followed by Verify.
