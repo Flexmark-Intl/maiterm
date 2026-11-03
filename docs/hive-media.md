@@ -1,6 +1,6 @@
 # Hive media setup: what it can make, and getting the rest
 
-Design, 2026-11-03 (Darryl's direction). Nothing here is built yet. It extends `docs/hive.md`
+Design, 2026-11-03 (Darryl's direction; decisions in §12). Nothing here is built yet. It extends `docs/hive.md`
 §3 (the Tools step), §10.3 (how agents make assets) and §14.16 (the sandbox's generator hosts).
 
 ## 1. What it is
@@ -319,16 +319,39 @@ so the coordinator counts generations instead.
 Every phase gets a subagent review. The sheets are Svelte, and every sheet change so far had
 ordering bugs that only review found.
 
-## 12. Decisions for Darryl
+## 12. Decisions (Darryl, 2026-11-03)
 
-- **D1. Default video and image route:** fal (recommended, §4), with Higgsfield, Kling and Runway
-  first for an existing subscriber, or Higgsfield as the default.
-- **D2. Installs:** a visible maiTerm tab running brew (recommended: the human sees and can stop
-  it, and Homebrew's own installer needs their password), or a silent background install.
-- **D3. Music and sound effects:** ElevenLabs' hosted MCP documents only speech. The options are:
-  - fal's music and sfx models (no extra account; checked at build);
-  - ElevenLabs' API key through phase 5;
-  - leave music and sfx out of v1.
+- **D1. The default video and image route is fal.** Higgsfield, Kling and Runway show first to
+  someone who already subscribes to them.
+- **D2. Installs run in a visible maiTerm tab.**
+- **D3. Music and sound effects come from fal's models now,** and ElevenLabs music arrives with
+  phase 5.
+  - The build checks which fal models cover music and sfx, and writes them into the catalogue.
+  - ElevenLabs' own local MCP server was archived in August 2026. So phase 5 confirms that a
+    maintained stdio server (or the official CLI) covers music and sfx before offering it.
+  - If none does, ElevenLabs stays speech-only and fal keeps music and sfx.
+- **D4. All five phases, in one Hive.**
 
-  Recommended: fal first, ElevenLabs music after phase 5.
-- **D4. Scope of the Hive:** phases 1–4 as one Hive with phase 5 later (recommended), or all five.
+### 12.1 Phase 5, specified
+
+Stdio upstreams in the MCP proxy (docs/mcp-proxy.md §2 "v2"), so a key-based local MCP server is
+set up like a token one. Phase 5 also brings docs/mcp-proxy.md up to date.
+
+- **Who runs it.** maiTerm starts the server as its own child process, from a catalogue `route`
+  `{kind: "stdio_mcp", command, args, env_key}`.
+  - The command is pinned to an exact package version (`npx -y pkg@1.2.3`, `uvx pkg==1.2.3`).
+    The human's setup click is the approval to run that code as them.
+  - The process is restarted on exit with backoff, and stopped when no session has used it for
+    10 minutes.
+  - It is served at `/mcp/x/<id>` like any proxied server. Agents never see the command or the
+    key.
+- **The key.** It is pasted in the setup sheet and stored in the keychain, never on the phone
+  (§7). It is passed to the child in its environment only, never in argv. It stays out of logs,
+  errors and `Debug`, under `accounts::vault`'s rules.
+- **Sandbox.** The server runs outside every Hive sandbox, as every MCP server does (§9). Its
+  output files are downloaded by the worker from the catalogue's `result_hosts`. A server that
+  writes files locally is pointed at a maiTerm folder that `galleryAdd` accepts as an output
+  folder (docs/hive.md §10.3).
+- **Providers it unlocks.** MiniMax (speech, music, Hailuo video), Meshy (3D), and ElevenLabs
+  music and sfx if D3's check passes. Google genmedia stays `manual`, since it needs a GCP
+  project and a bucket.
