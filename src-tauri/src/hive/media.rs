@@ -159,6 +159,19 @@ impl Provider {
         self.routes.iter().any(|r| r.kind != "manual")
     }
 
+    /// Whether `host` is under one of its `own_hosts` suffixes: the hosts the old table matched a
+    /// server by, the only ones that make its `sandbox_hosts` a worker's. `match.hosts` is wider
+    /// (kling.ai) and only recognises.
+    pub fn owns_host(&self, host: &str) -> bool {
+        let host = bare_host(host);
+        self.matches.own_hosts.iter().any(|s| suffix_of(&host, s))
+    }
+
+    /// Whether a word of `name` is one of its `match.names`.
+    pub fn named_by(&self, name: &str) -> bool {
+        name_words(name).any(|w| self.matches.names.contains(&w))
+    }
+
     /// Its first remote MCP route.
     pub fn mcp_route(&self) -> Option<&Route> {
         self.routes.iter().find(|r| r.kind == "remote_mcp")
@@ -247,8 +260,7 @@ pub fn providers_for_native(name: &str, host: Option<&str>) -> Vec<&'static Prov
 /// `own_hosts` suffix. Recognition (`match.hosts`) is wider than this on purpose; phase 1 adds no
 /// sandbox host a server's host did not already yield.
 pub fn is_sandbox_own_host(host: &str) -> bool {
-    let host = bare_host(host);
-    catalogue().providers.iter().any(|p| p.matches.own_hosts.iter().any(|s| suffix_of(&host, s)))
+    catalogue().providers.iter().any(|p| p.owns_host(host))
 }
 
 /// The providers a PROXIED server is recognised as: by the host of the upstream it dials, and by

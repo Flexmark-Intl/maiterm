@@ -322,9 +322,16 @@ so the coordinator counts generations instead.
      this launch writes: `http://127.0.0.1:<the bound port>/mcp/x/<entry name>`, no userinfo,
      query or other port) plus the registry's upstream URL (`DetectedTool.proxy`); anything else
      carrying the marker is recognised as nothing.
-   - A recognised native server's OWN url host becomes a sandbox host only under a provider's
-     `match.own_hosts` (the old table's suffixes; Kling's is `klingai.com` only). A provider new to
-     the catalogue, and `kling.ai`, are recognised but add no host.
+   - `generator_hosts` yields exactly what the old table's logic did for every native-server and
+     skill input: `generator_hosts_equals_mains_for_every_native_and_skill_input` runs both (the
+     old table and logic are copied into the test as an oracle) over a matrix of hosts and names.
+     A provider's `sandbox_hosts` and a server's own host count only through `match.own_hosts`
+     (the old suffixes; Kling's is `klingai.com` only) or a name word; `match.hosts` only
+     recognises, so `kling.ai` and the providers new to the catalogue add no host.
+   - A proxied entry has no old answer (main matched it by name). Its rule is the provider's
+     `sandbox_hosts` when the upstream's host is under an `own_hosts` suffix, nothing otherwise;
+     `a_proxied_entry_yields_only_hosts_the_old_five_had` proves that is a subset of the five
+     providers' old hosts and independent of the entry's name.
    - **Unverified:** which fal models make music and sfx (D3). The catalogue marks them so in
      `capability_notes` until the research check confirms them. Remotion's marketplace source is
      not in the catalogue (only `plugin_id`).

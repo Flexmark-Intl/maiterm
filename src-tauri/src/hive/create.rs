@@ -729,12 +729,19 @@ pub fn generator_hosts(detected: &[DetectedTool], chosen: &[String], remote_host
     for t in detected.iter().filter(|t| chosen.contains(&t.id)) {
         let host = t.host.as_deref().map(str::to_ascii_lowercase);
         let known: Vec<&media::Provider> = match (t.kind.as_str(), &t.proxy) {
-            ("mcp", Some(r)) => media::providers_for_upstream(r.upstream.as_deref()),
+            // Only a provider that owns the upstream's host: kling.ai is recognised, but the old
+            // table never gave it a sandbox host.
+            ("mcp", Some(r)) => {
+                let up = r.upstream.as_deref();
+                media::providers_for_upstream(up).into_iter().filter(|p| up.and_then(url_host).is_some_and(|h| p.owns_host(&h))).collect()
+            }
             ("mcp", None) => {
                 if let Some(h) = host.as_deref().filter(|h| media::is_sandbox_own_host(h)) {
                     push(h);
                 }
-                media::providers_for_native(&t.label, host.as_deref())
+                // By an owned host suffix or a name word, as the old table did; a host matched
+                // only through `match.hosts` (kling.ai) contributes nothing.
+                media::providers_for_native(&t.label, host.as_deref()).into_iter().filter(|p| host.as_deref().is_some_and(|h| p.owns_host(h)) || p.named_by(&t.label)).collect()
             }
             ("skill", _) => media::providers_for_skill(&t.label),
             _ => Vec::new(),
@@ -2008,33 +2015,175 @@ mod tests {
         assert!(!is_generator_server_with("fal", &other, &up, PORT), "the other flavor's entry");
     }
 
-    /// Constraint of phase 1: no input yields a sandbox host the old table did not. A recognised
-    /// native server's own host is added only under the five providers' old suffixes; a provider
-    /// new to the catalogue, and kling.ai, are recognised but add nothing.
-    #[test]
-    fn a_native_entrys_own_host_is_a_sandbox_host_only_under_the_old_suffixes() {
-        let own = |name: &str, url: &str| {
-            let v = serde_json::json!({ "mcpServers": { name: { "type": "http", "url": url } } });
-            let detected = mcp_tools_with(&v, &registry(&[]), PORT);
-            generator_hosts(&detected, &[format!("mcp:{name}")], &[])
-        };
-        for (name, url) in [
-            ("s", "https://api.elevenlabs.io/mcp"),
-            ("s", "https://mcp.runwayml.com/mcp"),
-            ("s", "https://mcp.recraft.ai/mcp"),
-            ("s", "https://mcp.replicate.com/sse"),
-            ("s", "https://mcp.example.com/mcp"),
-        ] {
-            assert!(own(name, url).is_empty(), "{url}");
+    /// `main`'s generator table and logic, copied verbatim from before the catalogue (adc59e8f):
+    /// the oracle `generator_hosts` must agree with on every native and skill input.
+    mod old {
+        use super::super::*;
+
+        pub struct KnownGenerator {
+            pub key: &'static str,
+            pub suffixes: &'static [&'static str],
+            pub hosts: &'static [&'static str],
         }
-        // kling.ai is recognised (its catalogue hosts apply) but is not an old suffix.
-        assert_eq!(own("s", "https://mcp.kling.ai/mcp"), vec!["api.klingai.com"]);
-        // The old suffixes still add the server's own host first.
-        assert_eq!(own("s", "https://mcp.fal.ai/mcp"), vec!["mcp.fal.ai", "fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
-        assert_eq!(own("s", "https://mcp.kie.ai/mcp"), vec!["mcp.kie.ai", "api.kie.ai"]);
-        assert_eq!(own("s", "https://mcp.higgsfield.ai/mcp"), vec!["mcp.higgsfield.ai", "platform.higgsfield.ai"]);
-        assert_eq!(own("s", "https://api.klingai.com/mcp"), vec!["api.klingai.com"]);
-        assert_eq!(own("s", "https://mcp.wavespeed.ai/mcp"), vec!["mcp.wavespeed.ai", "api.wavespeed.ai"]);
+
+        pub const KNOWN_GENERATOR_HOSTS: &[KnownGenerator] = &[
+            KnownGenerator { key: "fal", suffixes: &["fal.ai", "fal.run", "fal.media"], hosts: &["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"] },
+            KnownGenerator { key: "kie", suffixes: &["kie.ai"], hosts: &["api.kie.ai"] },
+            KnownGenerator { key: "higgsfield", suffixes: &["higgsfield.ai"], hosts: &["platform.higgsfield.ai"] },
+            KnownGenerator { key: "kling", suffixes: &["klingai.com"], hosts: &["api.klingai.com"] },
+            KnownGenerator { key: "wavespeed", suffixes: &["wavespeed.ai"], hosts: &["api.wavespeed.ai"] },
+        ];
+
+        pub const SKILL_GENERATORS: &[(&str, &str)] = &[("generate", "kie")];
+
+        pub fn name_words(name: &str) -> impl Iterator<Item = String> + '_ {
+            name.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(|w| w.to_ascii_lowercase())
+        }
+
+        pub fn suffix_of(host: &str, suffix: &str) -> bool {
+            host == suffix || host.ends_with(&format!(".{suffix}"))
+        }
+
+        pub fn known_mcp_generators(name: &str, host: Option<&str>) -> Vec<&'static KnownGenerator> {
+            let host = host.map(|h| {
+                let h = h.to_ascii_lowercase();
+                h.rsplit_once(':').filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit())).map_or(h.clone(), |(host, _)| host.to_string())
+            });
+            KNOWN_GENERATOR_HOSTS
+                .iter()
+                .filter(|k| host.as_deref().is_some_and(|h| k.suffixes.iter().any(|s| suffix_of(h, s))) || name_words(name).any(|w| w == k.key))
+                .collect()
+        }
+
+        pub fn generator_hosts(detected: &[DetectedTool], chosen: &[String], remote_hosts: &[String]) -> Vec<String> {
+            let mut out: Vec<String> = Vec::new();
+            let mut push = |h: &str| {
+                let bare = h.rsplit_once(':').filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit())).map_or(h, |(host, _)| host);
+                if let Ok(n) = crate::hive::gallery::budget::normalize_host(bare) {
+                    let remote = crate::hive::gallery::budget::reaches_remote(&n, remote_hosts).is_some();
+                    if !remote && !out.contains(&n) {
+                        out.push(n);
+                    }
+                }
+            };
+            for t in detected.iter().filter(|t| chosen.contains(&t.id)) {
+                let host = t.host.as_deref().map(str::to_ascii_lowercase);
+                let known: Vec<&KnownGenerator> = match t.kind.as_str() {
+                    "mcp" => {
+                        if let Some(h) = host.as_deref().filter(|h| !known_mcp_generators("", Some(h)).is_empty()) {
+                            push(h);
+                        }
+                        known_mcp_generators(&t.label, host.as_deref())
+                    }
+                    "skill" => {
+                        let key = SKILL_GENERATORS.iter().find(|(skill, _)| *skill == t.label).map(|(_, k)| *k);
+                        KNOWN_GENERATOR_HOSTS.iter().filter(|k| key == Some(k.key) || name_words(&t.label).any(|w| w == k.key)).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                for k in known {
+                    k.hosts.iter().for_each(|h| push(h));
+                }
+            }
+            out
+        }
+    }
+
+    /// Every host the matrix tries: each catalogue provider's `match.hosts` and `own_hosts`, the old
+    /// suffixes, each with and without `mcp.`/`api.`, in two cases and with a port, plus unrelated
+    /// hosts and look-alikes.
+    fn matrix_hosts() -> Vec<String> {
+        let mut bases: Vec<String> = ["fal.ai", "fal.run", "fal.media", "kie.ai", "higgsfield.ai", "klingai.com", "kling.ai", "wavespeed.ai"].iter().map(|s| s.to_string()).collect();
+        for p in &media::catalogue().providers {
+            bases.extend(p.matches.hosts.iter().chain(&p.matches.own_hosts).cloned());
+        }
+        bases.extend(["example.com", "githubcopilot.com", "fal.ai.evil.com", "notfal.ai", "evilkling.ai", "klingai.com.evil.com", "queue.fal.run", "v3.fal.media"].map(String::from));
+        let mut out = Vec::new();
+        for b in bases {
+            for prefix in ["", "mcp.", "api."] {
+                out.push(format!("{prefix}{b}"));
+            }
+            out.push(format!("MCP.{}:443", b.to_ascii_uppercase()));
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    const MATRIX_NAMES: &[&str] = &["s", "video", "fal", "kie", "higgsfield", "kling", "wavespeed", "elevenlabs", "runway", "kling-video", "my_fal_mirror", "Kie.ai", "github"];
+
+    /// Phase 1 changes NO sandbox host. Proved, not sampled: `generator_hosts` is compared with
+    /// `main`'s own table and logic (the `old` module) over a matrix of hosts × names for native
+    /// servers (stdio, with no host, included) and over skill names; they must be equal.
+    #[test]
+    fn generator_hosts_equals_mains_for_every_native_and_skill_input() {
+        let none = registry(&[]);
+        let mut hosts: Vec<Option<String>> = matrix_hosts().into_iter().map(Some).collect();
+        hosts.push(None);
+        let mut checked = 0;
+        for host in &hosts {
+            for name in MATRIX_NAMES {
+                let entry = match host {
+                    Some(h) => serde_json::json!({ "type": "http", "url": format!("https://{h}/mcp") }),
+                    None => serde_json::json!({ "command": "npx", "args": ["x"] }),
+                };
+                let name = *name;
+                let v = serde_json::json!({ "mcpServers": { name: entry } });
+                let detected = mcp_tools_with(&v, &none, PORT);
+                let chosen = vec![format!("mcp:{name}")];
+                for remote in [vec![], vec!["queue.fal.run".to_string()]] {
+                    assert_eq!(generator_hosts(&detected, &chosen, &remote), old::generator_hosts(&detected, &chosen, &remote), "native {name:?} at {host:?}, remote {remote:?}");
+                    checked += 1;
+                }
+            }
+        }
+        let mut skills: Vec<String> = ["generate", "kling-render", "Fal_tools", "wavespeed", "higgsfield", "elevenlabs", "runway", "video", "s", "kie"].iter().map(|s| s.to_string()).collect();
+        skills.extend(MATRIX_NAMES.iter().map(|s| s.to_string()));
+        for label in &skills {
+            let t = DetectedTool { id: format!("skill:{label}"), kind: "skill".into(), label: label.clone(), host: None, pack: None, proxy: None };
+            let chosen = vec![t.id.clone()];
+            assert_eq!(generator_hosts(std::slice::from_ref(&t), &chosen, &[]), old::generator_hosts(std::slice::from_ref(&t), &chosen, &[]), "skill {label:?}");
+            checked += 1;
+        }
+        assert!(checked > 1000, "the matrix is not empty: {checked}");
+        // The cases the last review found, by name: kling.ai is recognised, never a sandbox host.
+        let at = |name: &str, h: &str| {
+            let v = serde_json::json!({ "mcpServers": { name: { "type": "http", "url": format!("https://{h}/mcp") } } });
+            generator_hosts(&mcp_tools_with(&v, &none, PORT), &[format!("mcp:{name}")], &[])
+        };
+        assert!(at("s", "mcp.kling.ai").is_empty());
+        assert!(at("video", "mcp.runwayml.com").is_empty());
+        assert_eq!(at("kling-video", "mcp.kling.ai"), vec!["api.klingai.com"], "a name word still vouches, as on main");
+    }
+
+    /// A PROXIED entry: main recognised it by its NAME alone, which the brief replaces with the
+    /// registry's upstream URL, so there is no old answer to equal. The new rule yields exactly the
+    /// table hosts of the provider whose OLD suffix the upstream's host is under (never its own
+    /// host, never its loopback, never a name's), so it is always a subset of the five providers'
+    /// old hosts and is empty for kling.ai, a catalogue provider new to the table, or any other host.
+    #[test]
+    fn a_proxied_entry_yields_only_hosts_the_old_five_had() {
+        let five: Vec<&str> = old::KNOWN_GENERATOR_HOSTS.iter().flat_map(|k| k.hosts.iter().copied()).collect();
+        for host in matrix_hosts() {
+            let bare = media::bare_host(&host);
+            let expected: Vec<String> = {
+                let mut out: Vec<String> = Vec::new();
+                for k in old::KNOWN_GENERATOR_HOSTS.iter().filter(|k| k.suffixes.iter().any(|s| old::suffix_of(&bare, s))) {
+                    out.extend(k.hosts.iter().map(|h| h.to_string()));
+                }
+                out
+            };
+            for name in MATRIX_NAMES {
+                let url = format!("https://{host}/mcp");
+                let up = registry(&[("p", url.as_str())]);
+                let name = *name;
+                let v = serde_json::json!({ "mcpServers": { name: proxy_entry("p") } });
+                let detected = mcp_tools_with(&v, &up, PORT);
+                let got = generator_hosts(&detected, &[format!("mcp:{name}")], &[]);
+                assert_eq!(got, expected, "proxied {name:?} to {host}");
+                assert!(got.iter().all(|h| five.contains(&h.as_str())), "{got:?}");
+            }
+        }
     }
 
     /// The marker is trusted only over exactly this launch's proxy url: another loopback port, a

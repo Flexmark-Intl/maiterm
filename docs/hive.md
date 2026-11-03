@@ -4457,8 +4457,8 @@ several releases a day).
    (plan D2) are filled at `hive_create` from a fresh detection (`create::generator_hosts`:
    the media catalogue's `sandbox_hosts` (`resources/hive/media/catalogue.json`, `hive/media.rs`,
    docs/hive-media.md §4; it replaced the `KNOWN_GENERATOR_HOSTS` table) for each chosen server it
-   matches by url suffix or name word, plus that server's own url host only when it is under a
-   provider's `match.own_hosts` suffix (the old table's) (follow-ups, below), the `/generate` skill as Kie.ai, repo remotes and anything not a public host name dropped), edited
+   matches by a provider's `match.own_hosts` url suffix or a name word, plus that server's own url host only when it is under an
+   `own_hosts` suffix (the old table's rule, which a test checks against a copy of it; `match.hosts` only recognises) (follow-ups, below), the `/generate` skill as Kie.ai, repo remotes and anything not a public host name dropped), edited
    by the human, offered again by Re-detect (`hive_detect_generator_hosts`), never re-derived at
    launch; a media worker's `allowedDomains` (a role with `generators: true`, never a reviewer)
    is the registries plus them (`settings::worker_domains`, checked again since the state file is
