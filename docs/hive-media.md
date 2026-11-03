@@ -33,10 +33,14 @@ which tool makes video, which models it carries, what it costs, and how long res
 1. **The human sets up, maiTerm automates the clicks.** No agent signs in, pastes a key or
    installs anything. Hive agents can *ask* for a missing capability (§8), and the human's click
    starts the setup. This is the same rule as `addMcpServer` and docs/agent-requests.md.
-2. **No API key in a plaintext config.** Any key goes into the keychain through the MCP proxy's
-   token storage (docs/mcp-proxy.md §5). The recommended routes are all remote MCP servers with
-   OAuth, so most setups involve no key at all. A provider reachable only by a local MCP server
-   with an env key is listed as "manual" until the proxy grows stdio upstreams (§6, phase 5).
+2. **No API key in a plaintext config that maiTerm writes.** Any key maiTerm takes goes into the
+   keychain as the MCP proxy's bearer token (docs/mcp-proxy.md §2, stored by §5's rules). The
+   recommended routes are all remote MCP servers with OAuth, so most setups involve no key at
+   all. A provider reachable only by a local MCP server with an env key is `manual` until the
+   proxy grows stdio upstreams (phase 5). maiTerm only *shows* that guide: the human writes the
+   entry, and the guide says the key will sit in plain text in `.claude.json`, and that a Hive
+   worker given that server gets a copy of the entry in its own `mcp.json` (written 0600,
+   `settings::worker_mcp_config`).
 3. **Say which money it spends.** Several OAuth MCP servers spend the human's **subscription
    credits**, not an API balance; others use prepaid API credit. Each route says which, in
    maiTerm's words, before setup and on the capability row.
@@ -87,6 +91,7 @@ parse is tested as the role files are. One entry:
   }],
   "result_hosts": ["fal.media", "v3.fal.media", "v3b.fal.media"],
   "api_hosts": ["fal.run", "queue.fal.run", "api.fal.ai"],
+  "sandbox_hosts": ["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"],  // phase 1: exactly today's KNOWN_GENERATOR_HOSTS set (§9)
   "unverified_hosts": [],
   "retention": "7 days or longer",       // how long a result URL lives: the brief's "save at once"
   "signup_url": "https://fal.ai/login", "billing_url": "https://fal.ai/dashboard/billing",
@@ -95,6 +100,9 @@ parse is tested as the role files are. One entry:
 }
 ```
 
+**`match.hosts` keeps every suffix today's table has.** For example, Kling's entry matches both
+`klingai.com` (today's) and `kling.ai` (its MCP's host).
+
 The starting entries, from the 2026-11-03 survey:
 
 | Provider | Route | Auth | Credits | Default for |
@@ -102,7 +110,7 @@ The starting entries, from the 2026-11-03 survey:
 | **fal** | remote MCP `mcp.fal.ai/mcp-relay` | OAuth | API (prepaid), pricing tool | **video, image, lipsync, upscale, 3d** |
 | **ElevenLabs** | remote MCP `api.elevenlabs.io/v1/mcp` | OAuth | plan | **voice** (music and sfx: see D3) |
 | **Homebrew kit** | `brew install ffmpeg imagemagick sox whisper-cpp` | none | free | **finish, transcribe** |
-| **Remotion** | Claude Code plugin `remotion@remotion` | none | free | **compose** |
+| **Remotion** | Claude Code plugin `remotion@remotion` | none | free | **compose**, **coordinator only** (workers load no user plugins or skills: `--setting-sources project`, docs/hive.md §6.7 "Workers have no skills"); a worker renders through `npx remotion render` in its shell or a `hiveRun` job, with the npm registry it already has |
 | WaveSpeed | remote MCP `api.wavespeed.ai/mcp` | OAuth or token | API, `get_price` before running | alternative to fal |
 | Higgsfield | remote MCP `mcp.higgsfield.ai/mcp` | OAuth | **plan** | video and image for an existing subscriber |
 | Kling | remote MCP `kling.ai/mcp` | OAuth | **plan** | video for an existing subscriber |
@@ -144,13 +152,22 @@ recommendation for someone starting from nothing. This is decision D1.
 What it reads:
 - **The existing detection** (`detect_tools`), with CLIs added: `whisper-cli`, `ffprobe` (part of
   ffmpeg) and `brew` itself, which the install route needs.
-- **MCP proxy servers** (`mcp_proxy` registry): status and **upstream URL**. A proxied entry in
-  `.claude.json` points at `127.0.0.1/mcp/x/<id>`, so it is matched to a catalogue provider by
-  its upstream URL, never by the local one. Today `is_generator_server` vouches for a proxied
-  entry by its *name* only. It switches to the upstream URL, so a server named "fal" that points
-  elsewhere isn't trusted, and a fal server named "video" is.
-- **Native `.claude.json` entries**, matched by `match.hosts`, then `match.names` (as today).
-- **Installed Claude Code plugins** (`~/.claude/plugins`), for Remotion.
+- **MCP proxy servers** (`mcp_proxy` registry), each with:
+  - its status;
+  - its **upstream URL**;
+  - its **workspace scope**. A server scoped away from the Hive's workspace answers "not enabled
+    for this workspace", so it counts as `unreachable` for that Hive, never `ready`.
+
+  A proxied entry in `.claude.json` points at `http://127.0.0.1:<port>/mcp/x/<id>` (`<id>-dev` in
+  dev, `mcp_proxy/entries.rs`). So it is matched to a catalogue provider by its upstream URL,
+  never by the local one. Today `is_generator_server` vouches for a proxied entry by its *name*
+  only, because its 127.0.0.1 host matches no suffix. For **proxied** entries it switches to the
+  upstream URL: a proxied server named "fal" that points elsewhere isn't trusted, and a proxied
+  fal server named "video" is.
+- **Native `.claude.json` entries**: matched by `match.hosts`, then `match.names`, as today. A
+  native stdio entry still has only its name to vouch for it.
+- **Installed Claude Code plugins**, in every managed account root as MCP detection reads them
+  (`trust_roots`), not only `~/.claude/plugins`. Remotion is found here.
 - **ComfyUI** on 127.0.0.1:8188 (as today), and the Comfy Desktop app's presence.
 
 ## 6. Setup routes
@@ -160,9 +177,9 @@ Each route is one button on a missing capability's recommendation card. The butt
 
 | Route | What maiTerm does | What the human does |
 |---|---|---|
-| `remote_mcp` + `oauth` | Adds the server to the MCP proxy (docs/mcp-proxy.md §7, the human's own add path, so no request card) and opens the sign-in in the browser | Signs in; adds credit if the guide says so |
+| `remote_mcp` + `oauth` | Adds the server to the MCP proxy through the human's own add path (docs/mcp-proxy.md §7): the human clicked, so no request card, but with `mcp_add`'s checks at filing: a URL maiTerm already serves is reused, and a name a native entry holds gets a suffix. **Scope**: started from a Hive (Create sheet or Hive settings), the server is scoped to that Hive's workspace, so one fal setup doesn't load fal's tools into every Claude tab (§4.3 context cost); started from Preferences, the sheet asks "every workspace" or "Hive workspaces only". Then it opens the sign-in in the browser | Signs in; adds credit if the guide says so |
 | `remote_mcp` + `token` | Opens the provider's key page; a paste field saves the key to the keychain as the proxy's bearer token | Makes the key, pastes it |
-| `brew` | Opens a **visible maiTerm tab** running the one install command, then re-detects when it exits. With no Homebrew, the first step is Homebrew's own installer in the same tab, since it asks for the human's password | Watches; types a password if asked |
+| `brew` | Opens a **visible maiTerm tab** running the one install command, then re-detects when it exits. With no Homebrew, the first step is Homebrew's own installer in the same tab, since it asks for the human's password. For whisper.cpp, maiTerm then downloads the default model (`ggml-base.en`) from huggingface.co into a maiTerm-owned models folder, outside any sandbox, and the brief names that path | Watches; types a password if asked |
 | `plugin` | Runs `claude plugin marketplace add …` and `claude plugin install …` in a visible tab | Watches |
 | `local_app` | Shows the download link and guide; re-detects when the window regains focus | Installs the app |
 | `manual` | Shows the guide, including the config snippet with the key left as a placeholder | Everything |
@@ -186,13 +203,25 @@ MiniMax, Meshy and Google genmedia from `manual` to `token`, and keeps those key
   line ("Media: video, image ready · voice, music not set up"), so a code Hive isn't slowed.
   Whether to show it opened is an obvious-default rule in code (goal words, plain folders), not an
   AI judgment.
-- **Hive settings → Tools** for an existing Hive. A tool set up here is added to `Hive.tools`, and
-  its hosts to the gallery hosts. Workers pick it up at their next launch, as for any tools change
-  (§3.4).
+- **Hive settings → Tools** for an existing Hive. **This is new**: today `Hive.tools` is fixed at
+  Create. §3.4's table has no tools row, `hive/change.rs` never writes it, and the generator hosts
+  are human-edited and never re-derived. So phase 3 adds a tools change for the human, a window
+  command and not an agent tool. It:
+  - writes `Hive.tools`;
+  - offers the new tool's hosts, ticked, into the gallery hosts (the human's edit, as Re-detect
+    does today);
+  - sends the coordinator a framed notice;
+  - takes effect for workers at their next launch;
+  - appears as a Tools row added to §3.4.
 - **Preferences → Hive**, beside the default tools: the same panel, to set up a studio once for
   every future Hive.
-- **The phone**: the status is visible, and a setup can be started that needs no browser sign-in.
-  An OAuth sign-in waits for the Mac (docs/mcp-proxy.md §7's stated exception).
+- **The phone**: the status is visible. Only two setups can be started there:
+  - a `brew` install when Homebrew is already present (a first install asks for a password at
+    the Mac);
+  - a `plugin` install.
+
+  A key is never pasted on the phone (docs/mcp-proxy.md §8). An OAuth sign-in waits for the Mac
+  (docs/mcp-proxy.md §7's stated exception).
 
 ## 8. Agents asking for a capability
 
@@ -202,8 +231,25 @@ That report becomes a structured ask:
   request of a new kind, `tool_setup`, whose card is maiTerm's words: "The Hive *Launch video*
   needs **music**. Recommended: ElevenLabs (signs in with your ElevenLabs plan's credits). Set up…".
   The agent's `why` is quoted.
-- **Approving opens the setup sheet** on the desktop. Approving from the phone starts it there if
-  no browser step is needed; otherwise it waits for the Mac.
+- **Approving opens the setup sheet** on the desktop. Hive kinds are carried out in Rust, so
+  approval emits an event to the Hive's window, which opens the sheet. Approved from the phone,
+  only §7's phone-startable setups run; the rest wait for the Mac.
+- **One route, not two.** The coordinator also holds `addMcpServer`, which files `mcp_add`, so
+  without a rule a missing remote-MCP capability could get either card. The rule:
+  - the coordinator's brief and `addMcpServer`'s refusal for a Hive agent point it at
+    `hiveRequestCapability` for a media capability;
+  - `tool_setup` approval of a remote MCP goes through the same add (and `mcp_add`'s checks) as
+    the setup sheet.
+- **Plumbing it needs** (phase 4):
+  - The tool goes in `COORDINATOR_TOOLS` (`hive/tools.rs`, a fixed-size array),
+    `COORDINATOR_MCP_TOOLS` (`hive/settings.rs`), and `PEER_ADDRESSING_TOOLS` and
+    `OWN_TAB_ONLY_TOOLS` (`claude_code/server.rs`), as `hiveChangeSettings` does.
+  - The kind goes in `agent_requests.rs`'s kinds and `is_hive_kind`.
+  - **Trap**: `hive_approved` routes every Hive kind that isn't `change::KIND` to
+    `land::approval::on_approved`. `tool_setup` needs its own arm there, or its approval would
+    be run as a land.
+  - A new kind is drawn from the card's text fields, so it is **not** a maiLink protocol bump
+    (docs/mailink-protocol.md, agent requests); bump only if the wire changes.
 - When the capability becomes Ready, it is added to the Hive, and the coordinator gets a framed
   notice ("music is now available through elevenlabs; your workers launched from now on have it").
 - `proposeHive` (§3.7) gains an optional `media: [capability]`, so a planning agent's proposal opens
@@ -211,9 +257,16 @@ That report becomes a structured ask:
 
 ## 9. Sandbox hosts
 
-- A **proxied** server's API calls leave from maiTerm, not the worker. So the worker's
-  `allowedDomains` need only the catalogue's `result_hosts`, to download what the server returns.
-  A native or local server needs `api_hosts` too.
+- **Every MCP server runs outside the sandbox**, proxied or native, in Claude's process (docs/hive.md
+  §14.16, `settings.rs` "Generator calls run in Claude's process"). Only the worker's **shell** is
+  allowlisted. So a worker needs:
+  - `result_hosts`, to download with curl what a server returns;
+  - `api_hosts` only when its shell calls the API itself (a REST call, or the whisper model
+    fetch, which maiTerm does instead).
+- **Phase 1 changes no hosts.** Each of today's five providers keeps exactly its current set as
+  `sandbox_hosts`, so moving to the catalogue changes no behaviour. Narrowing to
+  `result_hosts` (dropping `fal.run` and `queue.fal.run` from MCP-only workers) is a separate,
+  later change, made once the result-host spike has confirmed the hosts.
 - **Unverified hosts** (WaveSpeed, Higgsfield, Runway and Kie result CDNs, among others) aren't
   guessed. The existing sandbox-block flow catches the first refusal: a blocker goes to the queen,
   who grants the host. The catalogue is then corrected from that real URL in a follow-up commit.
@@ -226,6 +279,9 @@ That report becomes a structured ask:
 
 The coordinator's and every media worker's brief replace "Tools this Hive has: mcp:fal,
 cli:ffmpeg" with a map:
+
+The server names in the map are the ones in the worker's own `mcp.json`, for example `fal-dev`
+in a dev build, never a hardcoded name.
 
 ```
 What this Hive can make, and with what:
@@ -243,14 +299,21 @@ so the coordinator counts generations instead.
 ## 11. Build order
 
 1. **Catalogue + detection.** The catalogue file, `hive/media.rs`, `hive_media_status`,
-   upstream-URL matching for proxied servers, and the host and worker-MCP code moved onto the
-   catalogue (no change in behaviour for today's five providers). Plus the result-host spike.
+   upstream-URL matching for proxied servers, scope-aware status, plugin detection per account
+   root, and the host and worker-MCP code moved onto the catalogue. No hosts change (§9). Plus
+   the result-host spike.
 2. **The panel.** "What it can make" in the Tools step, Hive settings and Preferences, read-only:
    detection, recommendations, credits lines and guides.
-3. **Setup routes.** `remote_mcp` (OAuth and token) through the proxy, `brew` and `plugin` in a
-   visible tab, verification, and adding to the Hive.
-4. **Agents.** The capability map in the briefs, `hiveRequestCapability` + `tool_setup` requests
-   (Loom and phone, a protocol bump), and `proposeHive`'s `media`.
+3. **Setup routes and the tools change.**
+   - `remote_mcp` (OAuth and token) through the proxy, scoped to the Hive;
+   - `brew` (with the whisper model) and `plugin` in a visible tab;
+   - verification;
+   - the new after-Create tools change of §7 (a §3.4 row).
+4. **Agents.**
+   - the capability map in the briefs;
+   - `hiveRequestCapability` + `tool_setup` requests, with every piece of plumbing §8 lists, on
+     the Loom and the phone, no protocol bump;
+   - `proposeHive`'s `media`.
 5. **Stdio upstreams in the MCP proxy**, so `manual` providers become `token`.
 
 Every phase gets a subagent review. The sheets are Svelte, and every sheet change so far had
