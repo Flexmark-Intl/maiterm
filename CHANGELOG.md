@@ -1,5 +1,57 @@
 # Changelog
 
+## v3.13.0
+
+Hive: give a goal to a Queen agent, and she plans the work and runs a crew of sandboxed workers on it. Plus compaction that saves your place first, and browser actions that wait for the page.
+
+### Hive
+
+- **Make a workspace a Hive** (right-click it → Make this a Hive…). A short wizard asks for the goal, the folders, the crew, their tools and any services, with your defaults filled in. Then a Queen agent plans the work, asks you to confirm what done means, and starts workers in waves to do it.
+- **Workers are sandboxed and work side by side.** In a git repository each worker gets its own copy on its own branch, and the Queen lands finished work back after a land check you or she sets, with a log and Undo. Workers can install dependencies, run the app they're building and look at it, but reach only the network hosts the Queen grants them (you can change those too).
+- **One screen for the whole Hive.** The Queen's chat, a board of workers grouped in waves with what each is doing, and any worker's chat beside it (Shift+click for two). **Needs you** gathers everything any of its agents is waiting on you for.
+- **The Queen answers her workers.** Their permission prompts, questions and blockers go to her first, and she brings you only what she can't decide. She can record your answers as precedents and cite them later, and you can take over any question she's holding.
+- **Shared memory and a gallery.** Every agent in a Hive reads and writes one memory you can read, edit and pin. Images, video, audio and documents the Hive makes go into a gallery you can filter, tag, compare and export, with how each was made.
+- **New goals for a finished Hive.** Give a Done or paused Hive another goal in the same Queen tab, or message her from your phone to wake her.
+- **An agent you planned a project with can offer it as a Hive**, or as a new goal for a finished one. The request names the agent, in the Loom and on your phone. On the desktop it opens the wizard filled in from the plan; on the phone, Approve creates it from the plan the card shows.
+- **On the phone**, each Hive agent shows its role and status, the Queen's Done report included.
+- Preferences → Hive sets the defaults for new Hives: tools, models, how many workers at once, a budget for paid generation, which chats reach your phone, pushing after each land, and rules for every agent.
+- **Hives need Claude Code 2.1.295 or newer, on macOS.** On Linux a Hive can be made, but its workers' installs, builds, served apps and land checks don't run yet. Windows has no Claude sandbox for the workers.
+
+### Compaction
+
+- **Agents save their place before compacting.** With the Overlord on, the checkpoint before compaction now has the agent commit finished work, clean up its board rows and leave a note of where it is. It runs earlier: at 35% context (and at least 130k tokens) on an idle agent, or at 55% by interrupting a busy one. It works on Codex tabs too, and, with the Overlord's propose-first mode off, it also runs before Claude's own idle compaction.
+- **Compaction no longer posts notifications**, now that it happens often.
+- **Context gauges follow the window Claude Code reports**, so 1M-context models no longer read five times too full, and the phone's model picker drops the duplicate `[1m]` entries.
+
+### Chrome extension
+
+- **Clicks, typing, key presses and navigation wait for the page to settle**, and agents can wait for text to appear or go, so they stop guessing how long to sleep. Key combinations like Shift+Tab work.
+- **Agents know which tabs you linked**: Claude Code agents are told with your next message, so "check the page" reaches your linked tab instead of another browser.
+- **Give a linked tab a purpose note.** With several tabs linked, an agent has to say which one loads a page, guided by your notes.
+- **Typing clears fields inside iframes, web components and rich-text editors**, and an address like `localhost:3000` loads without `http://`.
+
+### Asking you
+
+- **Agents ask you through the task board only.** A question they also sent another way used to notify you twice.
+- **Overlord rule changes wait for you as a card** on the Overlord tab and in the Loom's Decisions, instead of a window-wide dialog that Escape anywhere rejected.
+- **A question's explanation is formatted as written**, and every decision card's text can be selected and copied.
+- **A comment you add when answering an action blocker reaches the agent as your answer**, not as "done"; only **I've done it** with nothing typed says done.
+
+### Stack
+
+- **Run a service on another branch or in a worktree** (Run on), up to three copies of one that takes a `{port}`, or use one already running in another workspace.
+
+### Fixes
+
+- **Messages from your phone after you press Stop are no longer lost.** Claude dropped prompts sent after an interrupted turn until one was typed.
+- **Answering a question with several parts from the Loom** no longer fails when the terminal is showing a different part.
+- **Agent text shown in the Loom and chats can no longer run as HTML** after an unclosed tag, which also lost words.
+- **An agent can no longer set auto-resume or trigger variables on another agent's tab**, which could plant a command there.
+- **Accounts: Sign in again** for a signed-out account, keeping its token and ssh hosts, instead of removing and re-adding it. A good new token no longer reads as failed on Claude Code 2.1.310, and reloading an account's tabs shows progress and stops waiting on a stalled one.
+- **A long question in the Loom** scrolls in its own area instead of running off screen.
+- **Tab list menus:** arrow keys move through search results and Enter opens the highlighted tab.
+- **A code block that scrolls sideways in a chat** no longer covers the next paragraph with its scrollbar.
+
 ## v3.12.0
 
 Files: a project tree beside your terminals that shows what your agents read and change. And an agent can work in several of your Chrome tabs.
