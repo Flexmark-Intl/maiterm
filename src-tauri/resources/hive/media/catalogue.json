@@ -35,7 +35,7 @@
       "retention": "7 days or longer",
       "signup_url": "https://fal.ai/login", "billing_url": "https://fal.ai/dashboard/billing",
       "guide": ["Make a fal account (or sign in).", "Add credit: fal bills a prepaid balance.", "Back here, press Sign in."],
-      "match": { "hosts": ["fal.ai", "fal.run", "fal.media"], "names": ["fal"], "skills": [] },
+      "match": { "hosts": ["fal.ai", "fal.run", "fal.media"], "own_hosts": ["fal.ai", "fal.run", "fal.media"], "names": ["fal"], "skills": [] },
       "source_urls": ["https://fal.ai/models", "https://mcp.fal.ai/mcp-relay"]
     },
     {
@@ -113,7 +113,7 @@
       "retention": "",
       "signup_url": "https://wavespeed.ai", "billing_url": "",
       "guide": ["Make a WaveSpeed account (or sign in).", "Add credit: WaveSpeed bills a prepaid balance; get_balance shows it.", "Back here, press Sign in."],
-      "match": { "hosts": ["wavespeed.ai"], "names": ["wavespeed"], "skills": [] },
+      "match": { "hosts": ["wavespeed.ai"], "own_hosts": ["wavespeed.ai"], "names": ["wavespeed"], "skills": [] },
       "source_urls": ["https://api.wavespeed.ai/mcp"]
     },
     {
@@ -130,7 +130,7 @@
       "retention": "",
       "signup_url": "https://higgsfield.ai", "billing_url": "",
       "guide": ["Sign in to your Higgsfield account.", "Generations spend your Higgsfield plan's credits.", "Back here, press Sign in."],
-      "match": { "hosts": ["higgsfield.ai"], "names": ["higgsfield"], "skills": [] },
+      "match": { "hosts": ["higgsfield.ai"], "own_hosts": ["higgsfield.ai"], "names": ["higgsfield"], "skills": [] },
       "source_urls": ["https://mcp.higgsfield.ai/mcp"]
     },
     {
@@ -147,7 +147,7 @@
       "retention": "",
       "signup_url": "https://kling.ai", "billing_url": "",
       "guide": ["Sign in to your Kling account.", "Generations spend your Kling plan's credits.", "Back here, press Sign in."],
-      "match": { "hosts": ["klingai.com", "kling.ai"], "names": ["kling"], "skills": [] },
+      "match": { "hosts": ["klingai.com", "kling.ai"], "own_hosts": ["klingai.com"], "names": ["kling"], "skills": [] },
       "source_urls": ["https://kling.ai/mcp"]
     },
     {
@@ -351,7 +351,7 @@
       "retention": "",
       "signup_url": "", "billing_url": "",
       "guide": [],
-      "match": { "hosts": ["kie.ai"], "names": ["kie"], "skills": ["generate"] },
+      "match": { "hosts": ["kie.ai"], "own_hosts": ["kie.ai"], "names": ["kie"], "skills": ["generate"] },
       "source_urls": []
     }
   ]

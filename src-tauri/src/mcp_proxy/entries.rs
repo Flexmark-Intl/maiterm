@@ -83,18 +83,16 @@ pub enum Origin<'a> {
     Unproven,
 }
 
-pub fn origin(entry: &Value) -> Origin<'_> {
+/// `port` is the one this launch's server is bound to (`None`: it isn't running, so nothing is
+/// provable). The url must be exactly the one `claude_entry` writes for it: a different loopback
+/// port (another local server, or a previous launch's), `localhost`, userinfo (`127.0.0.1:x@evil`),
+/// a query or fragment, or another path is `Unproven`.
+pub fn origin(entry: &Value, port: Option<u16>) -> Origin<'_> {
     if claude_marker(entry).is_none() {
         return Origin::Native;
     }
     let Some(id) = claude_ours(entry) else { return Origin::Unproven };
-    let path = format!("/mcp/x/{}", entry_name(id));
-    let ok = entry.get("url").and_then(Value::as_str).is_some_and(|u| {
-        let Some(rest) = u.strip_prefix("http://") else { return false };
-        let (authority, p) = rest.split_once('/').map_or((rest, ""), |(a, p)| (a, p));
-        let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
-        matches!(host, "127.0.0.1" | "localhost") && format!("/{p}") == path
-    });
+    let ok = port.is_some_and(|p| entry.get("url").and_then(Value::as_str) == Some(&format!("http://127.0.0.1:{p}/mcp/x/{}", entry_name(id))));
     if ok {
         Origin::Ours(id)
     } else {
@@ -576,23 +574,42 @@ mod tests {
         (id.to_string(), claude_entry(9, "tok", id))
     }
 
-    /// Hive media: an entry is a proxied one only if it is provably ours (marker + our proxy path
-    /// on loopback); a marker over any other url, or the other flavor's, proves nothing.
+    /// Hive media: an entry is a proxied one only if it is provably ours (marker + exactly the url
+    /// this launch writes); a marker over any other url, or the other flavor's, proves nothing.
     #[test]
-    fn origin_trusts_a_marker_only_over_our_own_proxy_path() {
+    fn origin_trusts_a_marker_only_over_our_own_proxy_url() {
         let e = claude_entry(9, "tok", "fal");
-        assert_eq!(origin(&e), Origin::Ours("fal"));
-        assert_eq!(origin(&json!({ "type": "http", "url": "https://mcp.fal.ai/mcp" })), Origin::Native);
-        assert_eq!(origin(&json!({ "command": "npx" })), Origin::Native);
-        let mut elsewhere = e.clone();
-        elsewhere["url"] = json!("https://evil.example.com/mcp/x/fal");
-        assert_eq!(origin(&elsewhere), Origin::Unproven, "the header alone is not proof");
-        let mut other_path = e.clone();
-        other_path["url"] = json!("http://127.0.0.1:9/mcp/x/someone-else");
-        assert_eq!(origin(&other_path), Origin::Unproven);
+        assert_eq!(origin(&e, Some(9)), Origin::Ours("fal"));
+        assert_eq!(origin(&json!({ "type": "http", "url": "https://mcp.fal.ai/mcp" }), Some(9)), Origin::Native);
+        assert_eq!(origin(&json!({ "command": "npx" }), Some(9)), Origin::Native);
+        let with_url = |u: &str| {
+            let mut x = e.clone();
+            x["url"] = json!(u);
+            x
+        };
+        let name = entry_name("fal");
+        for bad in [
+            "https://evil.example.com/mcp/x/fal".to_string(),
+            "http://127.0.0.1:9/mcp/x/someone-else".to_string(),
+            // another local server
+            format!("http://127.0.0.1:55555/mcp/x/{name}"),
+            // the real host is after the `@`
+            format!("http://127.0.0.1:9@evil.example.com/mcp/x/{name}"),
+            format!("http://127.0.0.1:x@evil.example.com/mcp/x/{name}"),
+            format!("http://localhost:9/mcp/x/{name}"),
+            format!("http://127.0.0.1:9/mcp/x/{name}?a=b"),
+            format!("http://127.0.0.1:9/mcp/x/{name}#f"),
+            format!("https://127.0.0.1:9/mcp/x/{name}"),
+            format!("http://127.0.0.1:9/mcp/x/{name}/"),
+        ] {
+            assert_eq!(origin(&with_url(&bad), Some(9)), Origin::Unproven, "{bad}");
+        }
+        // A previous launch's port, and no running server at all.
+        assert_eq!(origin(&e, Some(10)), Origin::Unproven, "a stale port");
+        assert_eq!(origin(&e, None), Origin::Unproven, "no server running");
         let mut other_flavor = e.clone();
         other_flavor["headers"][MARKER] = json!("com.other.flavor/fal");
-        assert_eq!(origin(&other_flavor), Origin::Unproven);
+        assert_eq!(origin(&other_flavor, Some(9)), Origin::Unproven);
     }
 
     #[test]

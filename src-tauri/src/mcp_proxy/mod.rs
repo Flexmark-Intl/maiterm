@@ -167,6 +167,12 @@ static SERVERS: LazyLock<RwLock<Vec<ProxyServer>>> = LazyLock::new(Default::defa
 static LIVE: LazyLock<Mutex<HashMap<String, Live>>> = LazyLock::new(Default::default);
 static SAVE: Mutex<()> = Mutex::new(());
 static APP: OnceLock<(AppHandle, Arc<AppState>)> = OnceLock::new();
+
+/// The port this launch's server is bound to, which the entries written into the agents' configs
+/// name. `None` before it runs.
+pub fn live_port() -> Option<u16> {
+    APP.get().and_then(|(_, st)| *st.mcp_port.read())
+}
 static LOADED: OnceLock<()> = OnceLock::new();
 /// What the last `entries::sync` found: names a native entry holds.
 static COLLISIONS: LazyLock<Mutex<entries::Collisions>> = LazyLock::new(Default::default);

@@ -512,7 +512,7 @@ pub(super) fn url_host(url: &str) -> Option<String> {
 /// The MCP servers in one `.claude.json`'s `mcpServers`, by name. A proxied entry (ours, proven by
 /// `entries::origin`) carries the upstream the proxy registry has for it.
 pub fn mcp_tools(claude_json: &serde_json::Value) -> Vec<DetectedTool> {
-    mcp_tools_with(claude_json, &proxy_upstream)
+    mcp_tools_with(claude_json, &proxy_upstream, crate::mcp_proxy::live_port())
 }
 
 /// The url the proxy registry says server `id` dials. Reads the registry only when asked: a file
@@ -524,16 +524,16 @@ fn proxy_upstream(id: &str) -> Option<String> {
 
 /// What a `.claude.json` entry is for recognition: a proxied entry of ours (`Some(ref)`), a native
 /// one (`None`), or a marked one that is not provably ours, which reaches nothing we can name.
-fn proxy_ref(entry: &serde_json::Value, upstream: &dyn Fn(&str) -> Option<String>) -> Option<ProxyRef> {
+fn proxy_ref(entry: &serde_json::Value, upstream: &dyn Fn(&str) -> Option<String>, port: Option<u16>) -> Option<ProxyRef> {
     use crate::mcp_proxy::entries::{origin, Origin};
-    match origin(entry) {
+    match origin(entry, port) {
         Origin::Native => None,
         Origin::Ours(id) => Some(ProxyRef { id: id.to_string(), upstream: upstream(id) }),
         Origin::Unproven => Some(ProxyRef { id: String::new(), upstream: None }),
     }
 }
 
-fn mcp_tools_with(claude_json: &serde_json::Value, upstream: &dyn Fn(&str) -> Option<String>) -> Vec<DetectedTool> {
+fn mcp_tools_with(claude_json: &serde_json::Value, upstream: &dyn Fn(&str) -> Option<String>, port: Option<u16>) -> Vec<DetectedTool> {
     let Some(servers) = claude_json.get("mcpServers").and_then(|v| v.as_object()) else { return Vec::new() };
     servers
         .iter()
@@ -544,7 +544,7 @@ fn mcp_tools_with(claude_json: &serde_json::Value, upstream: &dyn Fn(&str) -> Op
             label: name.clone(),
             host: entry.get("url").and_then(|u| u.as_str()).and_then(url_host),
             pack: None,
-            proxy: proxy_ref(entry, upstream),
+            proxy: proxy_ref(entry, upstream, port),
         })
         .collect()
 }
@@ -694,11 +694,11 @@ fn pack_from_frontmatter(text: &str) -> Option<String> {
 ///   dials elsewhere is not fal, "video" that dials fal is. One carrying our marker that is not
 ///   provably ours, or whose server the registry lost, is recognised as nothing.
 pub fn is_generator_server(name: &str, entry: &serde_json::Value) -> bool {
-    is_generator_server_with(name, entry, &proxy_upstream)
+    is_generator_server_with(name, entry, &proxy_upstream, crate::mcp_proxy::live_port())
 }
 
-fn is_generator_server_with(name: &str, entry: &serde_json::Value, upstream: &dyn Fn(&str) -> Option<String>) -> bool {
-    match proxy_ref(entry, upstream) {
+fn is_generator_server_with(name: &str, entry: &serde_json::Value, upstream: &dyn Fn(&str) -> Option<String>, port: Option<u16>) -> bool {
+    match proxy_ref(entry, upstream, port) {
         Some(r) => !media::providers_for_upstream(r.upstream.as_deref()).is_empty(),
         None => {
             let host = entry.get("url").and_then(|u| u.as_str()).and_then(url_host);
@@ -731,7 +731,7 @@ pub fn generator_hosts(detected: &[DetectedTool], chosen: &[String], remote_host
         let known: Vec<&media::Provider> = match (t.kind.as_str(), &t.proxy) {
             ("mcp", Some(r)) => media::providers_for_upstream(r.upstream.as_deref()),
             ("mcp", None) => {
-                if let Some(h) = host.as_deref().filter(|h| !media::providers_for_native("", Some(h)).is_empty()) {
+                if let Some(h) = host.as_deref().filter(|h| media::is_sandbox_own_host(h)) {
                     push(h);
                 }
                 media::providers_for_native(&t.label, host.as_deref())
@@ -1928,6 +1928,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// The port this launch's server is bound to, in these tests.
+    const PORT: Option<u16> = Some(8765);
+
     /// A proxied entry as `.claude.json` holds it: loopback, our marker.
     fn proxy_entry(id: &str) -> serde_json::Value {
         serde_json::json!({
@@ -1947,10 +1950,10 @@ mod tests {
     #[test]
     fn a_proxied_server_named_fal_that_points_elsewhere_is_not_a_generator() {
         let up = registry(&[("fal", "https://mcp.example.com/mcp")]);
-        assert!(!is_generator_server_with("fal", &proxy_entry("fal"), &up));
+        assert!(!is_generator_server_with("fal", &proxy_entry("fal"), &up, PORT));
         // Nor does it add a host: the name vouches for nothing.
         let v = serde_json::json!({ "mcpServers": { "fal": proxy_entry("fal") } });
-        let detected = mcp_tools_with(&v, &up);
+        let detected = mcp_tools_with(&v, &up, PORT);
         assert_eq!(detected[0].proxy, Some(ProxyRef { id: "fal".into(), upstream: Some("https://mcp.example.com/mcp".into()) }));
         assert!(generator_hosts(&detected, &["mcp:fal".to_string()], &[]).is_empty());
     }
@@ -1959,9 +1962,9 @@ mod tests {
     #[test]
     fn a_proxied_fal_server_named_video_is_a_generator() {
         let up = registry(&[("video", "https://mcp.fal.ai/mcp-relay")]);
-        assert!(is_generator_server_with("video", &proxy_entry("video"), &up));
+        assert!(is_generator_server_with("video", &proxy_entry("video"), &up, PORT));
         let v = serde_json::json!({ "mcpServers": { "video": proxy_entry("video") } });
-        let detected = mcp_tools_with(&v, &up);
+        let detected = mcp_tools_with(&v, &up, PORT);
         // Its loopback url and fal's MCP host are not sandbox hosts: only the catalogue's.
         assert_eq!(generator_hosts(&detected, &["mcp:video".to_string()], &[]), vec!["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
     }
@@ -1971,13 +1974,13 @@ mod tests {
     fn a_native_entry_is_still_matched_by_host_then_name() {
         let up = registry(&[]);
         let url = |u: &str| serde_json::json!({ "type": "http", "url": u });
-        assert!(is_generator_server_with("whatever", &url("https://mcp.fal.ai/mcp"), &up), "by host");
-        assert!(is_generator_server_with("fal", &url("https://mcp.example.com/mcp"), &up), "by name, as today");
-        assert!(is_generator_server_with("kling-video", &url("https://mcp.kling.ai/mcp"), &up), "kling.ai and klingai.com both");
-        assert!(is_generator_server_with("x", &url("https://api.klingai.com/mcp"), &up));
-        assert!(!is_generator_server_with("github", &url("https://api.githubcopilot.com/mcp/"), &up));
+        assert!(is_generator_server_with("whatever", &url("https://mcp.fal.ai/mcp"), &up, PORT), "by host");
+        assert!(is_generator_server_with("fal", &url("https://mcp.example.com/mcp"), &up, PORT), "by name, as today");
+        assert!(is_generator_server_with("kling-video", &url("https://mcp.kling.ai/mcp"), &up, PORT), "kling.ai and klingai.com both");
+        assert!(is_generator_server_with("x", &url("https://api.klingai.com/mcp"), &up, PORT));
+        assert!(!is_generator_server_with("github", &url("https://api.githubcopilot.com/mcp/"), &up, PORT));
         // A native entry whose url merely looks like our proxy's, without the marker, is native.
-        assert!(!is_generator_server_with("proxied", &url("http://127.0.0.1:8765/mcp/x/abc"), &up));
+        assert!(!is_generator_server_with("proxied", &url("http://127.0.0.1:8765/mcp/x/abc"), &up, PORT));
     }
 
     /// Case 4: a native stdio entry has no url: only its name can vouch for it.
@@ -1985,10 +1988,10 @@ mod tests {
     fn a_native_stdio_entry_is_vouched_for_by_name_only() {
         let up = registry(&[]);
         let stdio = serde_json::json!({ "command": "npx", "args": ["-y", "some-mcp"] });
-        assert!(is_generator_server_with("kie-local", &stdio, &up));
-        assert!(is_generator_server_with("elevenlabs", &stdio, &up), "a catalogue provider new to the table");
-        assert!(!is_generator_server_with("filesystem", &stdio, &up));
-        assert!(!is_generator_server_with("proxied", &serde_json::json!({ "command": "npx", "args": ["fal-mcp"] }), &up));
+        assert!(is_generator_server_with("kie-local", &stdio, &up, PORT));
+        assert!(is_generator_server_with("elevenlabs", &stdio, &up, PORT), "a catalogue provider new to the table");
+        assert!(!is_generator_server_with("filesystem", &stdio, &up, PORT));
+        assert!(!is_generator_server_with("proxied", &serde_json::json!({ "command": "npx", "args": ["fal-mcp"] }), &up, PORT));
     }
 
     /// A marker is not proof: a copied entry that keeps the header over another url, and one whose
@@ -1996,13 +1999,62 @@ mod tests {
     #[test]
     fn a_marker_without_a_registry_server_or_our_path_proves_nothing() {
         let up = registry(&[("fal", "https://mcp.fal.ai/mcp-relay")]);
-        assert!(!is_generator_server_with("fal", &proxy_entry("gone"), &up), "the registry has no `gone`");
+        assert!(!is_generator_server_with("fal", &proxy_entry("gone"), &up, PORT), "the registry has no `gone`");
         let mut spoof = proxy_entry("fal");
         spoof["url"] = serde_json::json!("https://evil.example.com/mcp/x/fal");
-        assert!(!is_generator_server_with("fal", &spoof, &up), "the header over a foreign url");
+        assert!(!is_generator_server_with("fal", &spoof, &up, PORT), "the header over a foreign url");
         let mut other = proxy_entry("fal");
         other["headers"][crate::mcp_proxy::entries::MARKER] = serde_json::json!("com.other.flavor/fal");
-        assert!(!is_generator_server_with("fal", &other, &up), "the other flavor's entry");
+        assert!(!is_generator_server_with("fal", &other, &up, PORT), "the other flavor's entry");
+    }
+
+    /// Constraint of phase 1: no input yields a sandbox host the old table did not. A recognised
+    /// native server's own host is added only under the five providers' old suffixes; a provider
+    /// new to the catalogue, and kling.ai, are recognised but add nothing.
+    #[test]
+    fn a_native_entrys_own_host_is_a_sandbox_host_only_under_the_old_suffixes() {
+        let own = |name: &str, url: &str| {
+            let v = serde_json::json!({ "mcpServers": { name: { "type": "http", "url": url } } });
+            let detected = mcp_tools_with(&v, &registry(&[]), PORT);
+            generator_hosts(&detected, &[format!("mcp:{name}")], &[])
+        };
+        for (name, url) in [
+            ("s", "https://api.elevenlabs.io/mcp"),
+            ("s", "https://mcp.runwayml.com/mcp"),
+            ("s", "https://mcp.recraft.ai/mcp"),
+            ("s", "https://mcp.replicate.com/sse"),
+            ("s", "https://mcp.example.com/mcp"),
+        ] {
+            assert!(own(name, url).is_empty(), "{url}");
+        }
+        // kling.ai is recognised (its catalogue hosts apply) but is not an old suffix.
+        assert_eq!(own("s", "https://mcp.kling.ai/mcp"), vec!["api.klingai.com"]);
+        // The old suffixes still add the server's own host first.
+        assert_eq!(own("s", "https://mcp.fal.ai/mcp"), vec!["mcp.fal.ai", "fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
+        assert_eq!(own("s", "https://mcp.kie.ai/mcp"), vec!["mcp.kie.ai", "api.kie.ai"]);
+        assert_eq!(own("s", "https://mcp.higgsfield.ai/mcp"), vec!["mcp.higgsfield.ai", "platform.higgsfield.ai"]);
+        assert_eq!(own("s", "https://api.klingai.com/mcp"), vec!["api.klingai.com"]);
+        assert_eq!(own("s", "https://mcp.wavespeed.ai/mcp"), vec!["mcp.wavespeed.ai", "api.wavespeed.ai"]);
+    }
+
+    /// The marker is trusted only over exactly this launch's proxy url: another loopback port, a
+    /// userinfo url and a stale port are recognised as nothing, even when the registry has the id.
+    #[test]
+    fn a_marked_entry_on_another_port_or_with_userinfo_is_not_the_proxied_server() {
+        let up = registry(&[("fal", "https://mcp.fal.ai/mcp-relay")]);
+        let name = crate::mcp_proxy::entries::entry_name("fal");
+        for url in [
+            format!("http://127.0.0.1:55555/mcp/x/{name}"),
+            format!("http://127.0.0.1:x@evil.example.com/mcp/x/{name}"),
+            format!("http://localhost:8765/mcp/x/{name}"),
+        ] {
+            let mut e = proxy_entry("fal");
+            e["url"] = serde_json::json!(url);
+            assert!(!is_generator_server_with("fal", &e, &up, PORT), "{url}");
+        }
+        assert!(is_generator_server_with("fal", &proxy_entry("fal"), &up, PORT));
+        assert!(!is_generator_server_with("fal", &proxy_entry("fal"), &up, Some(9)), "a port from another launch");
+        assert!(!is_generator_server_with("fal", &proxy_entry("fal"), &up, None), "no server running");
     }
 
     fn svc(name: &str, command: &str, cwd: &str) -> Service {

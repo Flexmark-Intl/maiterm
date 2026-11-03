@@ -318,9 +318,13 @@ so the coordinator counts generations instead.
    - `KNOWN_GENERATOR_HOSTS` and `SKILL_GENERATORS` are gone.
      `todays_five_providers_keep_exactly_their_hosts` pins fal, kie, higgsfield, kling and
      wavespeed to their old `sandbox_hosts` and suffixes; no other provider has a sandbox host.
-   - A proxied entry is recognised by `mcp_proxy::entries::origin` (our marker AND our loopback
-     proxy path) plus the registry's upstream URL (`DetectedTool.proxy`); anything else carrying
-     the marker is recognised as nothing.
+   - A proxied entry is recognised by `mcp_proxy::entries::origin` (our marker AND exactly the url
+     this launch writes: `http://127.0.0.1:<the bound port>/mcp/x/<entry name>`, no userinfo,
+     query or other port) plus the registry's upstream URL (`DetectedTool.proxy`); anything else
+     carrying the marker is recognised as nothing.
+   - A recognised native server's OWN url host becomes a sandbox host only under a provider's
+     `match.own_hosts` (the old table's suffixes; Kling's is `klingai.com` only). A provider new to
+     the catalogue, and `kling.ai`, are recognised but add no host.
    - **Unverified:** which fal models make music and sfx (D3). The catalogue marks them so in
      `capability_notes` until the research check confirms them. Remotion's marketplace source is
      not in the catalogue (only `plugin_id`).

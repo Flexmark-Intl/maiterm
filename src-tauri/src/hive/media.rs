@@ -84,6 +84,10 @@ pub struct Detect {
 pub struct Match {
     /// Host suffixes of an MCP server's url (`fal.ai` matches `mcp.fal.ai`).
     pub hosts: Vec<String>,
+    /// The host suffixes under which a recognised native server's OWN url host is added to a
+    /// worker's sandbox (the five providers' old table, unchanged). Empty for a provider that is
+    /// only recognised: its server runs outside the sandbox and its host is no one's way out.
+    pub own_hosts: Vec<String>,
     /// Words of an MCP server's or skill's name (`fal` matches `fal-mirror`).
     pub names: Vec<String>,
     /// Skill names that use this provider (`/generate` picks its models on Kie.ai, §10.3).
@@ -237,6 +241,14 @@ fn host_matches(p: &Provider, host: &str) -> bool {
 pub fn providers_for_native(name: &str, host: Option<&str>) -> Vec<&'static Provider> {
     let host = host.map(bare_host);
     catalogue().providers.iter().filter(|p| host.as_deref().is_some_and(|h| host_matches(p, h)) || name_words(name).any(|w| p.matches.names.contains(&w))).collect()
+}
+
+/// Whether a native MCP server's own url host may become a worker sandbox host: it is under an
+/// `own_hosts` suffix. Recognition (`match.hosts`) is wider than this on purpose; phase 1 adds no
+/// sandbox host a server's host did not already yield.
+pub fn is_sandbox_own_host(host: &str) -> bool {
+    let host = bare_host(host);
+    catalogue().providers.iter().any(|p| p.matches.own_hosts.iter().any(|s| suffix_of(&host, s)))
 }
 
 /// The providers a PROXIED server is recognised as: by the host of the upstream it dials, and by

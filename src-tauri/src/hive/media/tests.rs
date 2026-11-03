@@ -75,6 +75,16 @@ fn todays_five_providers_keep_exactly_their_hosts() {
             assert!(p.matches.hosts.iter().any(|h| h == s), "{id} keeps matching {s}");
         }
         assert_eq!(p.matches.names, vec![id], "{id} keeps matching its name word");
+        assert_eq!(p.matches.own_hosts, suffixes, "{id}: a server's own host is a sandbox host under exactly the old suffixes");
+    }
+    // Nobody else's server host becomes a sandbox host, and kling.ai is recognised but is not one.
+    let with_own: Vec<&str> = cat().providers.iter().filter(|p| !p.matches.own_hosts.is_empty()).map(|p| p.id.as_str()).collect();
+    assert_eq!(with_own, vec!["fal", "wavespeed", "higgsfield", "kling", "kie"]);
+    for h in ["api.elevenlabs.io", "mcp.runwayml.com", "mcp.kling.ai", "mcp.example.com"] {
+        assert!(!is_sandbox_own_host(h), "{h}");
+    }
+    for h in ["mcp.fal.ai", "queue.fal.run", "api.klingai.com", "MCP.KIE.AI:443"] {
+        assert!(is_sandbox_own_host(h), "{h}");
     }
     assert!(provider("kling").unwrap().matches.hosts.iter().any(|h| h == "kling.ai"), "kling's MCP host is matched too");
     // Nobody else has a sandbox host: the survey gave none a verified one, and unknown result
