@@ -868,7 +868,7 @@ pub fn has_maiterm_server(claude_json: Option<&Value>) -> bool {
 /// A worker's `--mcp-config` (plan D1, §6.8 "only the servers it needs"): maiTerm's server, and
 /// for a role that generates (`generators: true`; never a reviewer) each MCP server the human
 /// chose for the Hive that is a recognised generator (`create::is_generator_server`: its url host
-/// or name in `KNOWN_GENERATOR_HOSTS`), its entry copied verbatim from the launching account's
+/// or name in the media catalogue; a proxied entry by its upstream), its entry copied verbatim from the launching account's
 /// `.claude.json`. Any other ticked server (a github, a filesystem) is never copied: it would run
 /// outside the sandbox and the gate with that server's whole authority.
 /// Copied fresh at every launch, so a rotated key reaches the next one. A chosen server that file

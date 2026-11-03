@@ -77,6 +77,7 @@ pub mod job_sandbox;
 pub mod land;
 pub mod launch;
 pub mod layout;
+pub mod media;
 pub mod memory;
 pub mod new_goal;
 pub mod owed;

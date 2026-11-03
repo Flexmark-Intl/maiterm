@@ -983,6 +983,34 @@ export interface HiveDetectedTool {
   /** The skill pack it came with ("gstack"), set only when two or more detected skills share it.
    *  Pickers show a pack as one row; what's stored is still each member's id. */
   pack?: string;
+  /** Set on a server maiTerm's MCP proxy serves: its registry id, and the upstream it really
+   *  dials (absent when the registry no longer has it). Recognised by that, never by its name. */
+  proxy?: { id: string; upstream?: string };
+}
+
+/** What covers a media capability (docs/hive-media.md §5). */
+export interface HiveMediaCover {
+  /** What `Hive.tools` would store (`mcp:fal`, `cli:ffmpeg`), or `plugin:<id>` / `app:<bundle>`. */
+  tool_id: string;
+  provider: string;
+  /** "ready" | "needs_sign_in" | "unreachable" | "installed" (there, but nothing could check it). */
+  state: string;
+}
+
+/** One media capability: what covers it here, and while nothing usable does, what to set up. */
+export interface HiveMediaRow {
+  capability: string;
+  covered_by: HiveMediaCover[];
+  recommended?: string;
+  alternatives: string[];
+}
+
+/** `hive_media_status`. */
+export interface HiveMediaStatus {
+  /** One row per catalogue capability, in catalogue order. */
+  rows: HiveMediaRow[];
+  /** Homebrew is installed (the `brew` route needs it). */
+  brew: boolean;
 }
 
 /** What the Make this a Hive wizard starts from (state/workspace.rs `HiveDefaults`). Empty

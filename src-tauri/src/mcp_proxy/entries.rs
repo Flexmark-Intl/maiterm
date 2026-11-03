@@ -68,6 +68,40 @@ fn claude_ours(entry: &Value) -> Option<&str> {
     ours_id(claude_marker(entry)?)
 }
 
+/// Where an `mcpServers` entry came from, for a caller that has to decide whether to trust it by
+/// what it REACHES (docs/hive-media.md §5), not by what it is called.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Origin<'a> {
+    /// No `x-maiterm-proxy` header: the human's own install.
+    Native,
+    /// Written by THIS maiTerm for server `id`, and it dials this maiTerm's `/mcp/x/<entry name>`
+    /// on loopback. The header alone is not enough: a copied entry that keeps the header but
+    /// points elsewhere would otherwise be judged by the server it claims to be.
+    Ours(&'a str),
+    /// Carries the marker but is not provably ours: the other flavor's (dev vs installed), or a
+    /// header over a url that is not our proxy path. Nothing can say what it reaches.
+    Unproven,
+}
+
+pub fn origin(entry: &Value) -> Origin<'_> {
+    if claude_marker(entry).is_none() {
+        return Origin::Native;
+    }
+    let Some(id) = claude_ours(entry) else { return Origin::Unproven };
+    let path = format!("/mcp/x/{}", entry_name(id));
+    let ok = entry.get("url").and_then(Value::as_str).is_some_and(|u| {
+        let Some(rest) = u.strip_prefix("http://") else { return false };
+        let (authority, p) = rest.split_once('/').map_or((rest, ""), |(a, p)| (a, p));
+        let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
+        matches!(host, "127.0.0.1" | "localhost") && format!("/{p}") == path
+    });
+    if ok {
+        Origin::Ours(id)
+    } else {
+        Origin::Unproven
+    }
+}
+
 /// What applying the wanted set to one runtime's config found.
 #[derive(Default, Debug, PartialEq)]
 pub struct Applied {
@@ -540,6 +574,25 @@ mod tests {
 
     fn ours(id: &str) -> (String, Value) {
         (id.to_string(), claude_entry(9, "tok", id))
+    }
+
+    /// Hive media: an entry is a proxied one only if it is provably ours (marker + our proxy path
+    /// on loopback); a marker over any other url, or the other flavor's, proves nothing.
+    #[test]
+    fn origin_trusts_a_marker_only_over_our_own_proxy_path() {
+        let e = claude_entry(9, "tok", "fal");
+        assert_eq!(origin(&e), Origin::Ours("fal"));
+        assert_eq!(origin(&json!({ "type": "http", "url": "https://mcp.fal.ai/mcp" })), Origin::Native);
+        assert_eq!(origin(&json!({ "command": "npx" })), Origin::Native);
+        let mut elsewhere = e.clone();
+        elsewhere["url"] = json!("https://evil.example.com/mcp/x/fal");
+        assert_eq!(origin(&elsewhere), Origin::Unproven, "the header alone is not proof");
+        let mut other_path = e.clone();
+        other_path["url"] = json!("http://127.0.0.1:9/mcp/x/someone-else");
+        assert_eq!(origin(&other_path), Origin::Unproven);
+        let mut other_flavor = e.clone();
+        other_flavor["headers"][MARKER] = json!("com.other.flavor/fal");
+        assert_eq!(origin(&other_flavor), Origin::Unproven);
     }
 
     #[test]

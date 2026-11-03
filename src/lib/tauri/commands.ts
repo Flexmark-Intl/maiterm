@@ -3,7 +3,7 @@ import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { StackHeldAction, StackLeaseState } from './types';
-import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HiveLiveCwd, HiveNewGoalPreview, HiveNewGoalSpec, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
+import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HiveLiveCwd, HiveMediaStatus, HiveNewGoalPreview, HiveNewGoalSpec, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
 import type { HiveMemoryFileText, HiveMemoryView } from './types';
 import type { HiveDecisionView, HivePrecedentsView } from './types';
 import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
@@ -2841,6 +2841,14 @@ export async function hiveCommitFirst(path: string): Promise<HiveFolderInfo> {
 
 export async function hiveDetectTools(): Promise<HiveDetectedTool[]> {
   return invoke('hive_detect_tools');
+}
+
+/** What the Hive can make, by capability (docs/hive-media.md §5): what covers each here and its
+ *  state, and a recommendation while nothing usable does. `workspaceId` is the Hive's workspace
+ *  (omit it in Preferences: no proxy scope applies); `alreadyPay` provider ids the human said they
+ *  subscribe to, promoted first. */
+export async function hiveMediaStatus(workspaceId?: string, alreadyPay?: string[]): Promise<HiveMediaStatus> {
+  return invoke('hive_media_status', { workspaceId: workspaceId ?? null, alreadyPay: alreadyPay ?? null });
 }
 
 /** Lay the Hive out on disk and install it, with its hidden coordinator tab, in one write. */

@@ -1232,6 +1232,7 @@ pub fn run() {
             hive::gallery::budget::hive_set_gallery_settings,
             hive::change::hive_set_settings,
             hive::create::hive_detect_generator_hosts,
+            hive::media::hive_media_status,
             hive::delete::hive_delete_preview,
             hive::delete::hive_delete,
             hive::new_goal::hive_new_goal_preview,

@@ -14,6 +14,7 @@ use tauri::State;
 
 use super::layout::{self, FolderInfo};
 use super::launch;
+use super::media;
 use super::paths::{hive_root, HivePaths};
 use super::record::{Hive, HiveFolder, HiveModels, HiveSettings, CRITERIA_NEEDED, KIND_GIT, KIND_PLAIN, LANDING_BASE, LANDING_INTEGRATION, STATUS_ACTIVE};
 use super::ROLE_COORDINATOR;
@@ -477,6 +478,20 @@ pub struct DetectedTool {
     /// share it (`skill_pack`). The pickers show a pack as one row; ids stay per skill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pack: Option<String>,
+    /// A server maiTerm's MCP proxy serves (its `.claude.json` entry carries our marker), with
+    /// the upstream it really dials. Such an entry is recognised by that upstream, never by its
+    /// name or its loopback url (docs/hive-media.md §5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyRef>,
+}
+
+/// A proxied entry's registry id and where the registry says it goes. `upstream` is `None` when
+/// the registry no longer has the server.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProxyRef {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
 }
 
 pub const DETECTED_CLIS: [&str; 4] = ["ffmpeg", "magick", "sox", "blender"];
@@ -487,15 +502,38 @@ fn is_maiterm_server(name: &str) -> bool {
     ["maiterm", "maiterm-dev", "aiterm", "aiterm-dev"].contains(&name)
 }
 
-fn url_host(url: &str) -> Option<String> {
+pub(super) fn url_host(url: &str) -> Option<String> {
     let rest = url.split_once("://")?.1;
     let authority = rest.split(['/', '?', '#']).next()?;
     let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
     (!host.is_empty()).then(|| host.to_string())
 }
 
-/// The MCP servers in one `.claude.json`'s `mcpServers`, by name.
+/// The MCP servers in one `.claude.json`'s `mcpServers`, by name. A proxied entry (ours, proven by
+/// `entries::origin`) carries the upstream the proxy registry has for it.
 pub fn mcp_tools(claude_json: &serde_json::Value) -> Vec<DetectedTool> {
+    mcp_tools_with(claude_json, &proxy_upstream)
+}
+
+/// The url the proxy registry says server `id` dials. Reads the registry only when asked: a file
+/// without a proxied entry never touches it.
+fn proxy_upstream(id: &str) -> Option<String> {
+    crate::mcp_proxy::ensure_loaded();
+    crate::mcp_proxy::get(id).map(|s| s.url)
+}
+
+/// What a `.claude.json` entry is for recognition: a proxied entry of ours (`Some(ref)`), a native
+/// one (`None`), or a marked one that is not provably ours, which reaches nothing we can name.
+fn proxy_ref(entry: &serde_json::Value, upstream: &dyn Fn(&str) -> Option<String>) -> Option<ProxyRef> {
+    use crate::mcp_proxy::entries::{origin, Origin};
+    match origin(entry) {
+        Origin::Native => None,
+        Origin::Ours(id) => Some(ProxyRef { id: id.to_string(), upstream: upstream(id) }),
+        Origin::Unproven => Some(ProxyRef { id: String::new(), upstream: None }),
+    }
+}
+
+fn mcp_tools_with(claude_json: &serde_json::Value, upstream: &dyn Fn(&str) -> Option<String>) -> Vec<DetectedTool> {
     let Some(servers) = claude_json.get("mcpServers").and_then(|v| v.as_object()) else { return Vec::new() };
     servers
         .iter()
@@ -506,6 +544,7 @@ pub fn mcp_tools(claude_json: &serde_json::Value) -> Vec<DetectedTool> {
             label: name.clone(),
             host: entry.get("url").and_then(|u| u.as_str()).and_then(url_host),
             pack: None,
+            proxy: proxy_ref(entry, upstream),
         })
         .collect()
 }
@@ -565,7 +604,7 @@ fn skill_tools(skills_dir: &Path) -> Vec<DetectedTool> {
     names
         .into_iter()
         .zip(packs)
-        .map(|(n, pack)| DetectedTool { id: format!("skill:{n}"), kind: "skill".to_string(), label: n, host: None, pack })
+        .map(|(n, pack)| DetectedTool { id: format!("skill:{n}"), kind: "skill".to_string(), label: n, host: None, pack, proxy: None })
         .collect()
 }
 
@@ -644,63 +683,38 @@ fn pack_from_frontmatter(text: &str) -> Option<String> {
     ok.then(|| word.to_string())
 }
 
-/// Hosted generators' API and media hosts, a starting point the human edits (plan D2): `key` is
-/// matched against a server's or skill's name, word by word, and `suffixes` against an MCP
-/// server's url host. Exact hosts only, so nothing depends on whether `*.` entries work.
-pub struct KnownGenerator {
-    pub key: &'static str,
-    pub suffixes: &'static [&'static str],
-    pub hosts: &'static [&'static str],
-}
-
-pub const KNOWN_GENERATOR_HOSTS: &[KnownGenerator] = &[
-    KnownGenerator { key: "fal", suffixes: &["fal.ai", "fal.run", "fal.media"], hosts: &["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"] },
-    KnownGenerator { key: "kie", suffixes: &["kie.ai"], hosts: &["api.kie.ai"] },
-    KnownGenerator { key: "higgsfield", suffixes: &["higgsfield.ai"], hosts: &["platform.higgsfield.ai"] },
-    KnownGenerator { key: "kling", suffixes: &["klingai.com"], hosts: &["api.klingai.com"] },
-    KnownGenerator { key: "wavespeed", suffixes: &["wavespeed.ai"], hosts: &["api.wavespeed.ai"] },
-];
-
-/// The `/generate` skill picks its models on Kie.ai (§10.3).
-const SKILL_GENERATORS: &[(&str, &str)] = &[("generate", "kie")];
-
-fn name_words(name: &str) -> impl Iterator<Item = String> + '_ {
-    name.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(|w| w.to_ascii_lowercase())
-}
-
-fn suffix_of(host: &str, suffix: &str) -> bool {
-    host == suffix || host.ends_with(&format!(".{suffix}"))
-}
-
-/// The table's generators an MCP server is recognised as: by a word of its name, or by its url
-/// host (lowercase, any port dropped) under one of a generator's suffixes.
-fn known_mcp_generators(name: &str, host: Option<&str>) -> Vec<&'static KnownGenerator> {
-    let host = host.map(|h| {
-        let h = h.to_ascii_lowercase();
-        h.rsplit_once(':').filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit())).map_or(h.clone(), |(host, _)| host.to_string())
-    });
-    KNOWN_GENERATOR_HOSTS
-        .iter()
-        .filter(|k| host.as_deref().is_some_and(|h| k.suffixes.iter().any(|s| suffix_of(h, s))) || name_words(name).any(|w| w == k.key))
-        .collect()
-}
-
 /// Whether an `.claude.json` MCP server entry is a generator a media worker may be handed (plan
-/// D1): recognised by its url host or its name, as `generator_hosts` recognises one. Anything
-/// else (a github, a filesystem server) runs outside the sandbox and the gate, so a worker never
-/// gets it, whatever the human ticked. A stdio entry has no url: only its name can vouch for it.
+/// D1): recognised by the media catalogue (`media::providers_for_*`). Anything else (a github, a
+/// filesystem server) runs outside the sandbox and the gate, so a worker never gets it, whatever
+/// the human ticked.
+/// - A NATIVE entry is recognised by its url host, else its name; a stdio entry has no url, so
+///   only its name can vouch for it.
+/// - A PROXIED entry (ours) points at maiTerm's own loopback, which says nothing, so it is
+///   recognised by the upstream the proxy registry has for it and never by its name: "fal" that
+///   dials elsewhere is not fal, "video" that dials fal is. One carrying our marker that is not
+///   provably ours, or whose server the registry lost, is recognised as nothing.
 pub fn is_generator_server(name: &str, entry: &serde_json::Value) -> bool {
-    let host = entry.get("url").and_then(|u| u.as_str()).and_then(url_host);
-    !known_mcp_generators(name, host.as_deref()).is_empty()
+    is_generator_server_with(name, entry, &proxy_upstream)
+}
+
+fn is_generator_server_with(name: &str, entry: &serde_json::Value, upstream: &dyn Fn(&str) -> Option<String>) -> bool {
+    match proxy_ref(entry, upstream) {
+        Some(r) => !media::providers_for_upstream(r.upstream.as_deref()).is_empty(),
+        None => {
+            let host = entry.get("url").and_then(|u| u.as_str()).and_then(url_host);
+            !media::providers_for_native(name, host.as_deref()).is_empty()
+        }
+    }
 }
 
 /// The hosts a worker's sandbox needs for the generators the human chose (§14.16, plan D2): the
-/// table's hosts for each chosen server or skill it recognises, plus a recognised server's own
-/// url host when that host is under a generator's suffix. Any other ticked server (a github, a
-/// filesystem) adds nothing: its host would become a media worker's way out, and a name alone
-/// doesn't vouch for the host it points at. Lowercased, deduplicated, anything that isn't a
-/// public host name dropped (a proxy entry's 127.0.0.1, a port), and so is a repo's remote
-/// host, which stays denied (§7.3).
+/// catalogue's `sandbox_hosts` for each chosen server or skill it recognises, plus a recognised
+/// native server's own url host. Any other ticked server (a github, a filesystem) adds nothing:
+/// its host would become a media worker's way out, and a name alone doesn't vouch for the host it
+/// points at. A proxied server adds its provider's hosts only (recognised by its upstream, §5),
+/// never its loopback or its provider's MCP host: MCP calls run outside the sandbox. Lowercased,
+/// deduplicated, anything that isn't a public host name dropped (a proxy entry's 127.0.0.1, a
+/// port), and so is a repo's remote host, which stays denied (§7.3).
 pub fn generator_hosts(detected: &[DetectedTool], chosen: &[String], remote_hosts: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |h: &str| {
@@ -714,21 +728,19 @@ pub fn generator_hosts(detected: &[DetectedTool], chosen: &[String], remote_host
     };
     for t in detected.iter().filter(|t| chosen.contains(&t.id)) {
         let host = t.host.as_deref().map(str::to_ascii_lowercase);
-        let known: Vec<&KnownGenerator> = match t.kind.as_str() {
-            "mcp" => {
-                if let Some(h) = host.as_deref().filter(|h| !known_mcp_generators("", Some(h)).is_empty()) {
+        let known: Vec<&media::Provider> = match (t.kind.as_str(), &t.proxy) {
+            ("mcp", Some(r)) => media::providers_for_upstream(r.upstream.as_deref()),
+            ("mcp", None) => {
+                if let Some(h) = host.as_deref().filter(|h| !media::providers_for_native("", Some(h)).is_empty()) {
                     push(h);
                 }
-                known_mcp_generators(&t.label, host.as_deref())
+                media::providers_for_native(&t.label, host.as_deref())
             }
-            "skill" => {
-                let key = SKILL_GENERATORS.iter().find(|(skill, _)| *skill == t.label).map(|(_, k)| *k);
-                KNOWN_GENERATOR_HOSTS.iter().filter(|k| key == Some(k.key) || name_words(&t.label).any(|w| w == k.key)).collect()
-            }
+            ("skill", _) => media::providers_for_skill(&t.label),
             _ => Vec::new(),
         };
         for k in known {
-            k.hosts.iter().for_each(|h| push(h));
+            k.sandbox_hosts.iter().for_each(|h| push(h));
         }
     }
     out
@@ -752,7 +764,7 @@ pub async fn hive_detect_generator_hosts(window: tauri::Window, state: State<'_,
     tauri::async_runtime::spawn_blocking(move || detect_generator_hosts(&hive, &prefs)).await.map_err(|e| e.to_string())
 }
 
-fn detect_tools(prefs: &crate::state::Preferences) -> Vec<DetectedTool> {
+pub(super) fn detect_tools(prefs: &crate::state::Preferences) -> Vec<DetectedTool> {
     let mut out: Vec<DetectedTool> = Vec::new();
     for root in trust_roots(prefs) {
         if let Some(v) = std::fs::read(&root).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) {
@@ -761,7 +773,7 @@ fn detect_tools(prefs: &crate::state::Preferences) -> Vec<DetectedTool> {
     }
     for cli in DETECTED_CLIS {
         if !crate::accounts::find_executables(cli).is_empty() {
-            out.push(DetectedTool { id: format!("cli:{cli}"), kind: "cli".to_string(), label: cli.to_string(), host: None, pack: None });
+            out.push(DetectedTool { id: format!("cli:{cli}"), kind: "cli".to_string(), label: cli.to_string(), host: None, pack: None, proxy: None });
         }
     }
     if let Some(home) = dirs::home_dir() {
@@ -769,7 +781,7 @@ fn detect_tools(prefs: &crate::state::Preferences) -> Vec<DetectedTool> {
     }
     let comfy = COMFYUI_ADDR.parse().ok().is_some_and(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_millis(300)).is_ok());
     if comfy {
-        out.push(DetectedTool { id: "comfyui".to_string(), kind: "comfyui".to_string(), label: "ComfyUI".to_string(), host: Some(COMFYUI_ADDR.to_string()), pack: None });
+        out.push(DetectedTool { id: "comfyui".to_string(), kind: "comfyui".to_string(), label: "ComfyUI".to_string(), host: Some(COMFYUI_ADDR.to_string()), pack: None, proxy: None });
     }
     out
 }
@@ -1895,8 +1907,8 @@ mod tests {
         .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(home.join(".claude.json")).unwrap()).unwrap();
         let mut detected = mcp_tools(&v);
-        detected.push(DetectedTool { id: "skill:generate".into(), kind: "skill".into(), label: "generate".into(), host: None, pack: None });
-        detected.push(DetectedTool { id: "cli:ffmpeg".into(), kind: "cli".into(), label: "ffmpeg".into(), host: None, pack: None });
+        detected.push(DetectedTool { id: "skill:generate".into(), kind: "skill".into(), label: "generate".into(), host: None, pack: None, proxy: None });
+        detected.push(DetectedTool { id: "cli:ffmpeg".into(), kind: "cli".into(), label: "ffmpeg".into(), host: None, pack: None, proxy: None });
         let chosen = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
         let hosts = generator_hosts(&detected, &chosen(&["mcp:fal", "mcp:local", "cli:ffmpeg"]), &[]);
@@ -1914,6 +1926,83 @@ mod tests {
         assert!(generator_hosts(&detected, &chosen(&["mcp:github", "mcp:local", "mcp:proxied"]), &[]).is_empty());
         assert_eq!(generator_hosts(&detected, &chosen(&["mcp:fal-mirror"]), &[]), vec!["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A proxied entry as `.claude.json` holds it: loopback, our marker.
+    fn proxy_entry(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "http",
+            "url": format!("http://127.0.0.1:8765/mcp/x/{}", crate::mcp_proxy::entries::entry_name(id)),
+            "headers": { crate::mcp_proxy::entries::MARKER: format!("{}/{id}", crate::state::persistence::app_data_slug()) }
+        })
+    }
+
+    /// The registry, standing in for `mcp_proxy::get`.
+    fn registry(servers: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = servers.iter().map(|(id, url)| (id.to_string(), url.to_string())).collect();
+        move |id| map.get(id).cloned()
+    }
+
+    /// Docs/hive-media.md §5, case 1: a proxied server NAMED fal that points elsewhere is not trusted.
+    #[test]
+    fn a_proxied_server_named_fal_that_points_elsewhere_is_not_a_generator() {
+        let up = registry(&[("fal", "https://mcp.example.com/mcp")]);
+        assert!(!is_generator_server_with("fal", &proxy_entry("fal"), &up));
+        // Nor does it add a host: the name vouches for nothing.
+        let v = serde_json::json!({ "mcpServers": { "fal": proxy_entry("fal") } });
+        let detected = mcp_tools_with(&v, &up);
+        assert_eq!(detected[0].proxy, Some(ProxyRef { id: "fal".into(), upstream: Some("https://mcp.example.com/mcp".into()) }));
+        assert!(generator_hosts(&detected, &["mcp:fal".to_string()], &[]).is_empty());
+    }
+
+    /// Case 2: a proxied fal server named "video" IS trusted, and brings fal's catalogue hosts.
+    #[test]
+    fn a_proxied_fal_server_named_video_is_a_generator() {
+        let up = registry(&[("video", "https://mcp.fal.ai/mcp-relay")]);
+        assert!(is_generator_server_with("video", &proxy_entry("video"), &up));
+        let v = serde_json::json!({ "mcpServers": { "video": proxy_entry("video") } });
+        let detected = mcp_tools_with(&v, &up);
+        // Its loopback url and fal's MCP host are not sandbox hosts: only the catalogue's.
+        assert_eq!(generator_hosts(&detected, &["mcp:video".to_string()], &[]), vec!["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
+    }
+
+    /// Case 3: a native entry keeps today's host-then-name matching.
+    #[test]
+    fn a_native_entry_is_still_matched_by_host_then_name() {
+        let up = registry(&[]);
+        let url = |u: &str| serde_json::json!({ "type": "http", "url": u });
+        assert!(is_generator_server_with("whatever", &url("https://mcp.fal.ai/mcp"), &up), "by host");
+        assert!(is_generator_server_with("fal", &url("https://mcp.example.com/mcp"), &up), "by name, as today");
+        assert!(is_generator_server_with("kling-video", &url("https://mcp.kling.ai/mcp"), &up), "kling.ai and klingai.com both");
+        assert!(is_generator_server_with("x", &url("https://api.klingai.com/mcp"), &up));
+        assert!(!is_generator_server_with("github", &url("https://api.githubcopilot.com/mcp/"), &up));
+        // A native entry whose url merely looks like our proxy's, without the marker, is native.
+        assert!(!is_generator_server_with("proxied", &url("http://127.0.0.1:8765/mcp/x/abc"), &up));
+    }
+
+    /// Case 4: a native stdio entry has no url: only its name can vouch for it.
+    #[test]
+    fn a_native_stdio_entry_is_vouched_for_by_name_only() {
+        let up = registry(&[]);
+        let stdio = serde_json::json!({ "command": "npx", "args": ["-y", "some-mcp"] });
+        assert!(is_generator_server_with("kie-local", &stdio, &up));
+        assert!(is_generator_server_with("elevenlabs", &stdio, &up), "a catalogue provider new to the table");
+        assert!(!is_generator_server_with("filesystem", &stdio, &up));
+        assert!(!is_generator_server_with("proxied", &serde_json::json!({ "command": "npx", "args": ["fal-mcp"] }), &up));
+    }
+
+    /// A marker is not proof: a copied entry that keeps the header over another url, and one whose
+    /// server the registry lost, are recognised as nothing, whatever they are called.
+    #[test]
+    fn a_marker_without_a_registry_server_or_our_path_proves_nothing() {
+        let up = registry(&[("fal", "https://mcp.fal.ai/mcp-relay")]);
+        assert!(!is_generator_server_with("fal", &proxy_entry("gone"), &up), "the registry has no `gone`");
+        let mut spoof = proxy_entry("fal");
+        spoof["url"] = serde_json::json!("https://evil.example.com/mcp/x/fal");
+        assert!(!is_generator_server_with("fal", &spoof, &up), "the header over a foreign url");
+        let mut other = proxy_entry("fal");
+        other["headers"][crate::mcp_proxy::entries::MARKER] = serde_json::json!("com.other.flavor/fal");
+        assert!(!is_generator_server_with("fal", &other, &up), "the other flavor's entry");
     }
 
     fn svc(name: &str, command: &str, cwd: &str) -> Service {
