@@ -988,31 +988,6 @@ export interface HiveDetectedTool {
   proxy?: { id: string; upstream?: string };
 }
 
-/** What covers a media capability (docs/hive-media.md §5). */
-export interface HiveMediaCover {
-  /** What `Hive.tools` would store (`mcp:fal`, `cli:ffmpeg`), or `plugin:<id>` / `app:<bundle>`. */
-  tool_id: string;
-  provider: string;
-  /** "ready" | "needs_sign_in" | "unreachable" | "installed" (there, but nothing could check it). */
-  state: string;
-}
-
-/** One media capability: what covers it here, and while nothing usable does, what to set up. */
-export interface HiveMediaRow {
-  capability: string;
-  covered_by: HiveMediaCover[];
-  recommended?: string;
-  alternatives: string[];
-}
-
-/** `hive_media_status`. */
-export interface HiveMediaStatus {
-  /** One row per catalogue capability, in catalogue order. */
-  rows: HiveMediaRow[];
-  /** Homebrew is installed (the `brew` route needs it). */
-  brew: boolean;
-}
-
 /** What the Make this a Hive wizard starts from (state/workspace.rs `HiveDefaults`). Empty
  *  strings and null mean the built-in default; `lib/hive/defaults.ts` resolves them. */
 export interface HiveDefaults {
