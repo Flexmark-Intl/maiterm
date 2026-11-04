@@ -186,6 +186,11 @@ describe('a blocker says what a Blocked task is waiting for', () => {
       expect(refused({ kind: 'decision', question: 'Pick (1) Redis or (2) Postgres' })).toContain('options');
     });
 
+    it('keeps a question that only calls functions', () => {
+      expect(ok({ kind: 'decision', question: 'Should foo(a) call bar(b) first?' }).question).toContain('foo(a)');
+      expect(ok({ kind: 'decision', question: 'Is `x(i)` the same as y (2)?' }).question).toContain('x(i)');
+    });
+
     it('refuses a question over the length limit, and keeps ordinary ones', () => {
       expect(refused({ kind: 'external', question: 'x'.repeat(201) })).toContain('context');
       expect(ok({ kind: 'decision', question: 'Deploy the relay to production now? (it is Friday)' }).question).toContain('Friday');

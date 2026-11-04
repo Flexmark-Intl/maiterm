@@ -75,8 +75,17 @@
   const ticked = $derived(
     ticks.askedAt === b?.asked_at ? ticks.set : (b?.options ?? []).flatMap((o, i) => (o.recommended ? [i] : [])),
   );
-  function toggle(i: number) {
+  /** A tick takes the same two guards as typing: a question that just appeared may have replaced
+   *  the one being ticked, its options in a new order, and a double-click's second click can land
+   *  on the card that slid up under it. */
+  function toggle(e: MouseEvent, i: number) {
     if (!b) return;
+    if (isFresh() || secondClick(e)) {
+      // A checkbox's click default is the toggle: preventing it leaves the box as it was.
+      e.preventDefault();
+      if (isFresh()) onnote?.('The agent just changed its question. Read it again before ticking.');
+      return;
+    }
     const cur = ticked;
     ticks = { askedAt: b.asked_at, set: cur.includes(i) ? cur.filter((x) => x !== i) : [...cur, i].sort((x, y) => x - y) };
   }
@@ -189,7 +198,7 @@
       <div class="opts" role="group" aria-label="Choose any">
         {#each b.options as o, i (i)}
           <label class="opt tick" class:on={ticked.includes(i)} class:off={sending || held}>
-            <input type="checkbox" checked={ticked.includes(i)} disabled={sending || held} onchange={() => toggle(i)} />
+            <input type="checkbox" checked={ticked.includes(i)} disabled={sending || held} onclick={(e) => toggle(e, i)} />
             <span class="body">
               <b><TaskText text={o.label} of={task.id} />{#if o.recommended}<em>recommended</em>{/if}</b>
               {#if o.detail}<span><TaskText text={o.detail} of={task.id} /></span>{/if}

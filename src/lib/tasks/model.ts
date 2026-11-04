@@ -276,7 +276,7 @@ const BLOCKER_TEXT_MAX = 2000;
 export const BLOCKER_QUESTION_MAX = 200;
 /** A question that enumerates its own choices — "(a) … (b) …", "(1) … (2) …" — is doing the
  *  options' job. */
-const ENUMERATED_CHOICES = /\(\s*(?:a|1|i)\s*\)[\s\S]*\(\s*(?:b|2|ii)\s*\)/i;
+const ENUMERATED_CHOICES = [/(?<![\w`])\(a\)[\s\S]*(?<![\w`])\(b\)/i, /(?<![\w`])\(1\)[\s\S]*(?<![\w`])\(2\)/, /(?<![\w`])\(i\)[\s\S]*(?<![\w`])\(ii\)/i];
 
 /** Drop a blocker that no longer describes the task: it lives only while the stored lane is
  *  `blocked`. Every commit applies this, so moving a row out of Blocked by any route (panel,
@@ -375,7 +375,7 @@ export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Da
   }
   // The question is the card's headline. Agents put everything in it — choices, the
   // recommendation, caveats — and the human got one bold paragraph and a bare text box.
-  if (kind === 'decision' && ENUMERATED_CHOICES.test(question)) {
+  if (kind === 'decision' && ENUMERATED_CHOICES.some((re) => re.test(question))) {
     return {
       ok: false,
       detail:
