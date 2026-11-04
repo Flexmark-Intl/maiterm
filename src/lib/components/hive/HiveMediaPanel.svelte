@@ -73,10 +73,20 @@
     return () => latest.cancel();
   });
 
-  /** Re-detect and Retry stay focusable while a fetch runs (aria-disabled, not disabled), so a
-   *  keyboard user isn't dropped out of the page mid-fetch; a click then does nothing. */
+  let redetectBtn = $state<HTMLButtonElement | null>(null);
+
+  /** Re-detect stays focusable while a fetch runs (aria-disabled, not disabled), so a keyboard user
+   *  isn't dropped out of the page mid-fetch; a click then does nothing. */
   function redetect() {
     if (!loading) void load();
+  }
+
+  /** Retry sits in the error block, which a new fetch replaces, so a focused Retry would vanish and
+   *  focus would fall to the page. Focus moves to the head's Re-detect button, which stays mounted,
+   *  before the fetch starts. */
+  function retry() {
+    redetectBtn?.focus();
+    redetect();
   }
 
   function tick(id: string) {
@@ -176,7 +186,7 @@
       <svg class="chev" class:open width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 7 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
       <span class="title">{open ? 'What it can make' : line}</span>
     </button>
-    <button type="button" class="link" onclick={redetect} aria-disabled={loading} aria-label="Re-detect what this Mac can make">Re-detect</button>
+    <button type="button" class="link" bind:this={redetectBtn} onclick={redetect} aria-disabled={loading} aria-label="Re-detect what this Mac can make">Re-detect</button>
   </div>
 
   {#if open}
@@ -187,7 +197,7 @@
         <div class="error" role="alert">
           <p>Couldn't check what this Mac can make.</p>
           <p class="dim detail">{failure}</p>
-          <button type="button" class="link" onclick={redetect} aria-disabled={loading}>Retry</button>
+          <button type="button" class="link" onclick={retry}>Retry</button>
         </div>
       {:else if empty}
         <p class="dim">No media capabilities to show.</p>
