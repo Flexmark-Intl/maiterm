@@ -2016,7 +2016,7 @@ mod tests {
     }
 
     /// `main`'s generator table and logic, copied verbatim from before the catalogue (adc59e8f):
-    /// the oracle `generator_hosts` must agree with (as a set of hosts) on every native and skill input.
+    /// the oracle `generator_hosts` must agree with (the same hosts, order aside) on every native and skill input.
     mod old {
         use super::super::*;
 

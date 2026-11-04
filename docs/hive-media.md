@@ -322,7 +322,7 @@ so the coordinator counts generations instead.
      this launch writes: `http://127.0.0.1:<the bound port>/mcp/x/<entry name>`, no userinfo,
      query or other port) plus the registry's upstream URL (`DetectedTool.proxy`); anything else
      carrying the marker is recognised as nothing.
-   - `generator_hosts` yields exactly what the old table's logic did for every native-server and
+   - `generator_hosts` yields exactly the hosts (order aside) the old table's logic did for every native-server and
      skill input: `generator_hosts_equals_mains_for_every_native_and_skill_input` runs both (the
      old table and logic are copied into the test as an oracle) over a matrix of hosts and names.
      A provider's `sandbox_hosts` and a server's own host count only through `match.own_hosts`
