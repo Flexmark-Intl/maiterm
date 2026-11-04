@@ -125,6 +125,10 @@ pub struct Provider {
     pub default_for: Vec<String>,
     #[serde(default)]
     pub models_note: String,
+    /// A models line per capability, for a provider whose models differ by capability (fal's video
+    /// models are not its music models). The panel shows it under that capability, else `models_note`.
+    #[serde(default)]
+    pub capability_models: HashMap<String, String>,
     /// A note per capability, for a claim that holds for one only (or isn't verified yet).
     #[serde(default)]
     pub capability_notes: HashMap<String, String>,
@@ -194,7 +198,7 @@ pub fn parse(text: &str) -> Result<Catalogue, String> {
         if !seen.insert(p.id.as_str()) {
             return Err(format!("provider {} appears twice", p.id));
         }
-        for cap in p.capabilities.iter().chain(&p.default_for).chain(p.capability_notes.keys()).chain(p.detect.clis.iter().flat_map(|c| &c.capabilities)) {
+        for cap in p.capabilities.iter().chain(&p.default_for).chain(p.capability_notes.keys()).chain(p.capability_models.keys()).chain(p.detect.clis.iter().flat_map(|c| &c.capabilities)) {
             if !c.capabilities.iter().any(|k| &k.id == cap) {
                 return Err(format!("provider {} names unknown capability {cap}", p.id));
             }

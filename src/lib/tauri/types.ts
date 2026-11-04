@@ -1032,6 +1032,9 @@ export interface HiveMediaProvider {
   name: string;
   capabilities: string[];
   models_note: string;
+  /** A models line per capability id, for a provider whose models differ by capability: a card
+   *  under capability C shows `capability_models[C]` when present, else `models_note`. */
+  capability_models: Record<string, string>;
   /** What a job spends: "api" | "plan" | "free" | "plan_or_wallet" | "comfy_credits", or "". */
   credits: string;
   /** The main route: "remote_mcp" | "brew" | "plugin" | "local_app" | "manual", or "". */

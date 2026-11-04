@@ -13,12 +13,14 @@ import type { HiveMediaCapability, HiveMediaCatalogue, HiveMediaProvider, HiveMe
 const STATE_LABELS = new Map<string, string>([
   ['ready', 'Ready'],
   ['needs_sign_in', 'Needs sign-in'],
-  ['unreachable', 'Not enabled for this workspace'],
+  ['unreachable', 'Not reachable'],
   ['installed', 'Installed'],
 ]);
 
 /** A cover's state in maiTerm's words. A state a later Rust build adds is "Found": there, but
- *  nothing says it works. */
+ *  nothing says it works. "Not reachable" names no cause: Rust maps a disabled server, one scoped
+ *  away from the workspace, an upstream error and an upstream that is down to it, and Preferences
+ *  (no workspace) judges no scope. */
 export function stateLabel(state: string): string {
   return STATE_LABELS.get(state) ?? 'Found';
 }
@@ -51,6 +53,14 @@ export function creditsLine(provider: Pick<HiveMediaProvider, 'name' | 'credits'
     default:
       return null;
   }
+}
+
+/** The models line for a provider's card under `capability`: the provider's own line for that
+ *  capability when the catalogue has one, else its general `models_note`. A fal card under Music
+ *  must not list the video models. "" when there is neither. */
+export function modelsLine(provider: Pick<HiveMediaProvider, 'models_note' | 'capability_models'>, capability: string): string {
+  const own = provider.capability_models?.[capability]?.trim();
+  return own || provider.models_note;
 }
 
 /** `mcp:fal-mirror` → `fal-mirror`, `cli:ffmpeg` → `ffmpeg`, `comfyui` → `comfyui`: the tool as

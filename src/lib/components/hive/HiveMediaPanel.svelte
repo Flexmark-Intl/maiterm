@@ -19,7 +19,7 @@
   import { warn as logWarn } from '@tauri-apps/plugin-log';
   import { hiveMediaCatalogue, hiveMediaStatus } from '$lib/tauri/commands';
   import type { HiveMediaCatalogue, HiveMediaRow } from '$lib/tauri/types';
-  import { createLatest, externalUrl, groupRows, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
+  import { createLatest, externalUrl, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
   import type { PanelRow } from '$lib/hive/media';
 
   interface Props {
@@ -143,7 +143,7 @@
             <b class="pname">{p.name}</b>
             {#if done}<span class="tag warn">{done}</span>{:else}<span class="tag">Recommended</span>{/if}
           </div>
-          {#if p.models_note}<p class="dim">{p.models_note}</p>{/if}
+          {#if modelsLine(p, r.capability)}<p class="dim">{modelsLine(p, r.capability)}</p>{/if}
           {#if p.creditsLine}<p class="credits">{p.creditsLine}</p>{/if}
           {#if note}<p class="unv">{note}</p>{/if}
           {#if p.guide.length}

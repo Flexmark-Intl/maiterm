@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createLatest, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
+import { createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
 import type { HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
 
 const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvider => ({
@@ -7,6 +7,7 @@ const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvi
   name: id,
   capabilities: [],
   models_note: '',
+  capability_models: {},
   credits: 'api',
   route_kind: 'remote_mcp',
   auth: 'oauth',
@@ -45,7 +46,7 @@ describe('stateLabel', () => {
   it('says the four states in maiTerm\'s words', () => {
     expect(stateLabel('ready')).toBe('Ready');
     expect(stateLabel('needs_sign_in')).toBe('Needs sign-in');
-    expect(stateLabel('unreachable')).toBe('Not enabled for this workspace');
+    expect(stateLabel('unreachable')).toBe('Not reachable');
     expect(stateLabel('installed')).toBe('Installed');
   });
   it('never throws on a state Rust adds later', () => {
@@ -362,5 +363,21 @@ describe('recommendedSetupNote', () => {
     expect(recommendedSetupNote({ recommended: rec, covers: [cover('fal', 'unreachable')] })).toBeNull();
     expect(recommendedSetupNote({ recommended: rec, covers: [cover('higgsfield', 'installed')] })).toBeNull();
     expect(recommendedSetupNote({ recommended: null, covers: [cover('higgsfield', 'unreachable')] })).toBeNull();
+  });
+});
+
+describe('modelsLine', () => {
+  const fal = prov('fal', { models_note: 'All the models', capability_models: { video: 'Kling 4.0', music: ' Music models ' } });
+  it("uses the capability's own line when there is one", () => {
+    expect(modelsLine(fal, 'video')).toBe('Kling 4.0');
+    expect(modelsLine(fal, 'music')).toBe('Music models');
+  });
+  it('falls back to models_note for a capability with no line, or an empty one', () => {
+    expect(modelsLine(fal, 'image')).toBe('All the models');
+    expect(modelsLine({ ...fal, capability_models: { video: '  ' } }, 'video')).toBe('All the models');
+  });
+  it('tolerates a provider without the map and without a note', () => {
+    expect(modelsLine({ models_note: 'x' } as never, 'video')).toBe('x');
+    expect(modelsLine(prov('wavespeed'), 'video')).toBe('');
   });
 });

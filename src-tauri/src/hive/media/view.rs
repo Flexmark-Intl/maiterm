@@ -9,6 +9,8 @@
 //! Every kind is a String (`route_kind`, `auth`, `credits`), never an enum: the catalogue grows
 //! kinds, and an older panel must show an unknown one rather than fail to parse.
 
+use std::collections::HashMap;
+
 use serde::Serialize;
 
 use super::{catalogue, Provider};
@@ -31,6 +33,8 @@ pub struct ProviderView {
     pub name: String,
     pub capabilities: Vec<String>,
     pub models_note: String,
+    /// A models line per capability id; the panel prefers it to `models_note` under that capability.
+    pub capability_models: HashMap<String, String>,
     /// What a job spends, from the provider's main route: `api` | `plan` | `free` | `plan_or_wallet`
     /// | `comfy_credits`, or "" for a provider with no route. The wording is the UI's
     /// (`creditsLine`), in maiTerm's words, never the provider's.
@@ -86,6 +90,7 @@ fn provider_view(p: &Provider) -> ProviderView {
         name: p.name.clone(),
         capabilities: p.capabilities.clone(),
         models_note: p.models_note.clone(),
+        capability_models: p.capability_models.clone(),
         credits: route.map(|r| r.credits.clone()).unwrap_or_default(),
         route_kind: route.map(|r| r.kind.clone()).unwrap_or_default(),
         auth: route.map(|r| r.auth.clone()).unwrap_or_default(),
@@ -175,9 +180,23 @@ mod tests {
         let fal = p(&v, "fal");
         assert!(fal.unverified, "fal's music and sfx models are marked UNVERIFIED");
         assert_eq!(fal.unverified_capabilities, ["music", "sfx"], "in the provider's own capability order");
-        assert!(p(&v, "bfl").unverified, "its route's path is unverified");
+        assert!(!p(&v, "bfl").unverified, "bfl's endpoint was confirmed on 2026-11-03");
         assert!(!p(&v, "homebrew-kit").unverified);
         assert!(p(&v, "homebrew-kit").unverified_capabilities.is_empty());
+    }
+
+    #[test]
+    fn fal_has_a_models_line_per_capability_and_others_have_none() {
+        let v = view();
+        let fal = p(&v, "fal");
+        assert_eq!(fal.capability_models.get("video").map(String::as_str), Some("Kling 4.0, Veo 3.1, Seedance 2.5"));
+        assert_eq!(fal.capability_models.get("image").map(String::as_str), Some("GPT Image 2, FLUX, Nano Banana Pro"));
+        assert_eq!(fal.capability_models.get("lipsync").map(String::as_str), Some("sync.so"));
+        assert_eq!(fal.capability_models.len(), 7);
+        for cap in fal.capability_models.keys() {
+            assert!(fal.capabilities.contains(cap), "{cap}");
+        }
+        assert!(p(&v, "higgsfield").capability_models.is_empty());
     }
 
     #[test]
@@ -198,6 +217,7 @@ mod tests {
         for k in ["capabilities", "guide", "unverified_capabilities"] {
             assert!(fal[k].is_array(), "{k}");
         }
+        assert!(fal["capability_models"].is_object());
         for k in ["subscriber", "unverified"] {
             assert!(fal[k].is_boolean(), "{k}");
         }
