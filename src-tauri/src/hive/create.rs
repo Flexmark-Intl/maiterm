@@ -2016,7 +2016,7 @@ mod tests {
     }
 
     /// `main`'s generator table and logic, copied verbatim from before the catalogue (adc59e8f):
-    /// the oracle `generator_hosts` must agree with on every native and skill input.
+    /// the oracle `generator_hosts` must agree with (as a set of hosts) on every native and skill input.
     mod old {
         use super::super::*;
 
@@ -2110,6 +2110,14 @@ mod tests {
         out
     }
 
+    /// The hosts as a set: an allowlist has no order, and the catalogue lists providers in its own
+    /// order where the old table listed the five in another, so the same hosts can come out in a
+    /// different sequence. Duplicates would still show.
+    fn same_hosts(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
     const MATRIX_NAMES: &[&str] = &["s", "video", "fal", "kie", "higgsfield", "kling", "wavespeed", "elevenlabs", "runway", "kling-video", "my_fal_mirror", "Kie.ai", "github"];
 
     /// Phase 1 changes NO sandbox host. Proved, not sampled: `generator_hosts` is compared with
@@ -2132,7 +2140,7 @@ mod tests {
                 let detected = mcp_tools_with(&v, &none, PORT);
                 let chosen = vec![format!("mcp:{name}")];
                 for remote in [vec![], vec!["queue.fal.run".to_string()]] {
-                    assert_eq!(generator_hosts(&detected, &chosen, &remote), old::generator_hosts(&detected, &chosen, &remote), "native {name:?} at {host:?}, remote {remote:?}");
+                    assert_eq!(same_hosts(generator_hosts(&detected, &chosen, &remote)), same_hosts(old::generator_hosts(&detected, &chosen, &remote)), "native {name:?} at {host:?}, remote {remote:?}");
                     checked += 1;
                 }
             }
@@ -2142,7 +2150,7 @@ mod tests {
         for label in &skills {
             let t = DetectedTool { id: format!("skill:{label}"), kind: "skill".into(), label: label.clone(), host: None, pack: None, proxy: None };
             let chosen = vec![t.id.clone()];
-            assert_eq!(generator_hosts(std::slice::from_ref(&t), &chosen, &[]), old::generator_hosts(std::slice::from_ref(&t), &chosen, &[]), "skill {label:?}");
+            assert_eq!(same_hosts(generator_hosts(std::slice::from_ref(&t), &chosen, &[])), same_hosts(old::generator_hosts(std::slice::from_ref(&t), &chosen, &[])), "skill {label:?}");
             checked += 1;
         }
         assert!(checked > 1000, "the matrix is not empty: {checked}");
