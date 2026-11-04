@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { creditsLine, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, summaryLine, toolLabel } from './media';
+import { createLatest, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
 import type { HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
 
 const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvider => ({
@@ -257,5 +257,79 @@ describe('shouldStartOpen', () => {
   });
   it('decided: a code word beside a media word opens', () => {
     expect(shouldStartOpen('Fix the video player bug', [git])).toBe(true);
+  });
+});
+
+describe('subscriberProviders', () => {
+  it('lists the subscriber providers in catalogue order', () => {
+    expect(subscriberProviders(catalogue).map((p) => p.id)).toEqual(['higgsfield']);
+    expect(subscriberProviders({ capabilities: [], providers: [] })).toEqual([]);
+  });
+});
+
+describe('toggleId', () => {
+  it('adds, removes, and never mutates', () => {
+    const a = ['kling'];
+    expect(toggleId(a, 'runway')).toEqual(['kling', 'runway']);
+    expect(toggleId(['kling', 'runway'], 'kling')).toEqual(['runway']);
+    expect(a).toEqual(['kling']);
+  });
+});
+
+describe('unverifiedNote', () => {
+  const base = { unverified: false, unverified_capabilities: [] as string[], checked: '2026-11-03' };
+  it('is null for a confirmed provider', () => {
+    expect(unverifiedNote(base)).toBeNull();
+    expect(unverifiedNote(base, 'video')).toBeNull();
+  });
+  it('dates a provider flagged as a whole', () => {
+    expect(unverifiedNote({ ...base, unverified: true })).toBe('unverified as of 2026-11-03');
+  });
+  it('flags only the capability named', () => {
+    const p = { ...base, unverified_capabilities: ['music'] };
+    expect(unverifiedNote(p, 'music')).toBe('unverified as of 2026-11-03');
+    expect(unverifiedNote(p, 'video')).toBeNull();
+    expect(unverifiedNote(p)).toBeNull();
+  });
+  it('says plain "unverified" with no date', () => {
+    expect(unverifiedNote({ ...base, unverified: true, checked: '' })).toBe('unverified');
+  });
+});
+
+describe('externalUrl', () => {
+  it('passes http(s) and refuses anything else', () => {
+    expect(externalUrl('https://fal.ai/login')).toBe('https://fal.ai/login');
+    expect(externalUrl('http://localhost:8188')).toBe('http://localhost:8188/');
+    expect(externalUrl('javascript:alert(1)')).toBeNull();
+    expect(externalUrl('file:///etc/passwd')).toBeNull();
+    expect(externalUrl('not a url')).toBeNull();
+    expect(externalUrl('')).toBeNull();
+  });
+});
+
+describe('createLatest', () => {
+  it('marks an earlier request stale once a later one starts', () => {
+    const l = createLatest();
+    const first = l.next();
+    expect(first()).toBe(false);
+    const second = l.next();
+    expect(first()).toBe(true);
+    expect(second()).toBe(false);
+  });
+  it('marks everything stale after cancel', () => {
+    const l = createLatest();
+    const r = l.next();
+    l.cancel();
+    expect(r()).toBe(true);
+  });
+});
+
+describe('stateTone', () => {
+  it('draws ready as ok, blocked states as warn, the rest neutral', () => {
+    expect(stateTone('ready')).toBe('ok');
+    expect(stateTone('needs_sign_in')).toBe('warn');
+    expect(stateTone('unreachable')).toBe('warn');
+    expect(stateTone('installed')).toBe('neutral');
+    expect(stateTone('something_new')).toBe('neutral');
   });
 });

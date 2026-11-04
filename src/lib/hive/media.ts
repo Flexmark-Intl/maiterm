@@ -23,6 +23,14 @@ export function stateLabel(state: string): string {
   return STATE_LABELS.get(state) ?? 'Found';
 }
 
+/** How a cover's state is drawn: "ok" (ready), "warn" (there but not usable yet: needs a sign-in,
+ *  or not enabled for this workspace) or "neutral" (installed, or a state this build doesn't know). */
+export function stateTone(state: string): 'ok' | 'warn' | 'neutral' {
+  if (state === 'ready') return 'ok';
+  if (state === 'needs_sign_in' || state === 'unreachable') return 'warn';
+  return 'neutral';
+}
+
 /** What a job spends, in maiTerm's words (§2.3), never the provider's. `null` for a kind this
  *  build does not know (and for a provider with no route): the line is left out, not guessed. */
 export function creditsLine(provider: Pick<HiveMediaProvider, 'name' | 'credits' | 'quote_tool'>): string | null {
@@ -146,6 +154,53 @@ export function summaryLine(groups: PanelGroups): string {
   if (ready.length) parts.push(`${names(ready)} ready`);
   if (missing.length) parts.push(`${names(missing)} not set up`);
   return parts.length ? `Media: ${parts.join(' · ')}` : 'Media: nothing to show';
+}
+
+// ─── The panel's small helpers ──────────────────────────────────────────────
+
+/** The providers "I already pay for…" lists: the catalogue's `subscriber: true` ones, in its order. */
+export function subscriberProviders(catalogue: HiveMediaCatalogue): HiveMediaProvider[] {
+  return catalogue.providers.filter((p) => p.subscriber);
+}
+
+/** `ids` with `id` added, or removed when it is there. A new array, never a mutation. */
+export function toggleId(ids: readonly string[], id: string): string[] {
+  return ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id];
+}
+
+/** "unverified as of 2026-11-03" for a fact the catalogue has not confirmed from a real job: the
+ *  provider as a whole, or (given `capability`) that one capability's claim. Null when confirmed. */
+export function unverifiedNote(provider: Pick<HiveMediaProvider, 'unverified' | 'unverified_capabilities' | 'checked'>, capability?: string): string | null {
+  const flagged = provider.unverified || (capability !== undefined && provider.unverified_capabilities.includes(capability));
+  if (!flagged) return null;
+  return provider.checked ? `unverified as of ${provider.checked}` : 'unverified';
+}
+
+/** A catalogue link that is safe to hand to the system browser: http(s) only, else null. */
+export function externalUrl(url: string): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Guards an async fetch against a newer one and against unmount. `next()` starts a request and
+ *  returns its `stale()` check: true once a later `next()` or `cancel()` has happened, so a slow
+ *  first answer can't overwrite a newer one and nothing is set after the component is gone. */
+export function createLatest(): { next: () => () => boolean; cancel: () => void } {
+  let seq = 0;
+  return {
+    next() {
+      const mine = ++seq;
+      return () => mine !== seq;
+    },
+    cancel() {
+      seq++;
+    },
+  };
 }
 
 // ─── Whether the panel starts open ──────────────────────────────────────────
