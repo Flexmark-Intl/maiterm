@@ -996,8 +996,8 @@ export interface HiveDetectedTool {
 export interface HiveMediaCover {
   tool_id: string;
   provider: string;
-  /** "ready" | "needs_sign_in" | "unreachable" | "installed". A String on the wire: treat an
-   *  unknown one as "installed". */
+  /** "ready" | "needs_sign_in" | "unreachable" | "installed". A String on the wire: an unknown
+   *  one is present but unconfirmed (`stateLabel` in lib/hive/media.ts says "Found"). */
   state: string;
 }
 
@@ -1010,6 +1010,57 @@ export interface HiveMediaRow {
   covered_by: HiveMediaCover[];
   recommended: string | null;
   alternatives: string[];
+}
+
+/** A media capability as the panel names it (`hive_media_catalogue`), in display order. */
+export interface HiveMediaCapability {
+  /** The catalogue id `HiveMediaRow.capability` uses ("video", "image", ...). */
+  id: string;
+  /** "Video", "Images", "Finishing". */
+  label: string;
+  means: string;
+  /** One of the common five the first page shows; the rest sit under "More". */
+  common: boolean;
+}
+
+/** A media provider's display facts (`hive_media_catalogue`). Every kind is a String on the wire:
+ *  treat an unknown one as "nothing to say", never an error. The credits line is maiTerm's words
+ *  (`creditsLine` in lib/hive/media.ts), built from `credits` and `quote_tool`. */
+export interface HiveMediaProvider {
+  /** A `HiveMediaRow.recommended` / `alternatives` / `HiveMediaCover.provider` id. */
+  id: string;
+  name: string;
+  capabilities: string[];
+  models_note: string;
+  /** What a job spends: "api" | "plan" | "free" | "plan_or_wallet" | "comfy_credits", or "". */
+  credits: string;
+  /** The main route: "remote_mcp" | "brew" | "plugin" | "local_app" | "manual", or "". */
+  route_kind: string;
+  /** "oauth" | "token" | "none", or "". */
+  auth: string;
+  /** A tool that prices a job before it runs; "" when there is none. */
+  quote_tool: string;
+  /** How long a result URL lives; "" when unknown. */
+  retention: string;
+  signup_url: string;
+  billing_url: string;
+  /** The steps only the human can do. */
+  guide: string[];
+  /** Shown first to someone who already pays for it. */
+  subscriber: boolean;
+  /** When its facts were last checked, "YYYY-MM-DD". */
+  checked: string;
+  /** Something about it is not confirmed from a real job (a host, its route, a model claim). */
+  unverified: boolean;
+  /** The capabilities whose claim for this provider is unverified. */
+  unverified_capabilities: string[];
+}
+
+/** The media catalogue as the panel draws it (`hive_media_catalogue`). */
+export interface HiveMediaCatalogue {
+  /** In display order. */
+  capabilities: HiveMediaCapability[];
+  providers: HiveMediaProvider[];
 }
 
 /** What the Make this a Hive wizard starts from (state/workspace.rs `HiveDefaults`). Empty

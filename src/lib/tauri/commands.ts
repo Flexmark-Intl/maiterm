@@ -3,7 +3,7 @@ import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { StackHeldAction, StackLeaseState } from './types';
-import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HiveLiveCwd, HiveMediaRow, HiveNewGoalPreview, HiveNewGoalSpec, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
+import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HiveLiveCwd, HiveMediaCatalogue, HiveMediaRow, HiveNewGoalPreview, HiveNewGoalSpec, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
 import type { HiveMemoryFileText, HiveMemoryView } from './types';
 import type { HiveDecisionView, HivePrecedentsView } from './types';
 import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
@@ -2850,6 +2850,12 @@ export async function hiveDetectTools(): Promise<HiveDetectedTool[]> {
  *  (Higgsfield, Kling, Runway) among them is recommended first, with fal behind it. */
 export async function hiveMediaStatus(workspaceId: string | null = null, alreadyPayFor: string[] = []): Promise<HiveMediaRow[]> {
   return invoke('hive_media_status', { workspaceId, alreadyPayFor });
+}
+
+/** The media catalogue as the panel draws it (docs/hive-media.md §7): capabilities in display order
+ *  and each provider's display facts, which `hiveMediaStatus` rows (ids only) join against. */
+export async function hiveMediaCatalogue(): Promise<HiveMediaCatalogue> {
+  return invoke('hive_media_catalogue');
 }
 
 /** Lay the Hive out on disk and install it, with its hidden coordinator tab, in one write. */

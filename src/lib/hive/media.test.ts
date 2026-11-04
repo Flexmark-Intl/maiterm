@@ -1,0 +1,261 @@
+import { describe, expect, it } from 'vitest';
+import { creditsLine, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, summaryLine, toolLabel } from './media';
+import type { HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
+
+const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvider => ({
+  id,
+  name: id,
+  capabilities: [],
+  models_note: '',
+  credits: 'api',
+  route_kind: 'remote_mcp',
+  auth: 'oauth',
+  quote_tool: '',
+  retention: '',
+  signup_url: '',
+  billing_url: '',
+  guide: [],
+  subscriber: false,
+  checked: '2026-11-03',
+  unverified: false,
+  unverified_capabilities: [],
+  ...over,
+});
+
+const catalogue: HiveMediaCatalogue = {
+  capabilities: [
+    { id: 'video', label: 'Video', means: 'Text or image to video', common: true },
+    { id: 'image', label: 'Images', means: 'Text to image', common: true },
+    { id: 'voice', label: 'Voice', means: 'Text to speech', common: true },
+    { id: 'music', label: 'Music', means: 'Music', common: true },
+    { id: 'finish', label: 'Finishing', means: 'Cut, convert, mix', common: true },
+    { id: 'lipsync', label: 'Lipsync', means: 'Talking avatars', common: false },
+  ],
+  providers: [
+    prov('fal', { name: 'fal', quote_tool: 'get_pricing' }),
+    prov('higgsfield', { name: 'Higgsfield', credits: 'plan', subscriber: true }),
+    prov('elevenlabs', { name: 'ElevenLabs', credits: 'plan' }),
+    prov('homebrew-kit', { name: 'Homebrew kit', credits: 'free', route_kind: 'brew', auth: 'none' }),
+  ],
+};
+
+const row = (capability: string, over: Partial<HiveMediaRow> = {}): HiveMediaRow => ({ capability, covered_by: [], recommended: null, alternatives: [], ...over });
+
+describe('stateLabel', () => {
+  it('says the four states in maiTerm\'s words', () => {
+    expect(stateLabel('ready')).toBe('Ready');
+    expect(stateLabel('needs_sign_in')).toBe('Needs sign-in');
+    expect(stateLabel('unreachable')).toBe('Not enabled for this workspace');
+    expect(stateLabel('installed')).toBe('Installed');
+  });
+  it('never throws on a state Rust adds later', () => {
+    expect(stateLabel('hibernating')).toBe('Found');
+    expect(stateLabel('')).toBe('Found');
+    expect(stateLabel('constructor')).toBe('Found');
+    expect(stateLabel('__proto__')).toBe('Found');
+  });
+});
+
+describe('creditsLine', () => {
+  it('api is prepaid credit, with the pricing tool when there is one', () => {
+    expect(creditsLine({ name: 'fal', credits: 'api', quote_tool: '' })).toBe('Prepaid API credit');
+    expect(creditsLine({ name: 'fal', credits: 'api', quote_tool: 'get_pricing' })).toBe('Prepaid API credit · prices a job before running it');
+  });
+  it('plan spends the named plan\'s credits', () => {
+    expect(creditsLine({ name: 'Higgsfield', credits: 'plan', quote_tool: '' })).toBe("Spends your Higgsfield plan's credits");
+    expect(creditsLine({ name: 'Runway', credits: 'plan', quote_tool: 'q' })).toBe("Spends your Runway plan's credits · prices a job before running it");
+  });
+  it('free and none are free', () => {
+    expect(creditsLine({ name: 'x', credits: 'free', quote_tool: '' })).toBe('Free');
+    expect(creditsLine({ name: 'x', credits: 'none', quote_tool: '' })).toBe('Free');
+  });
+  it('still says the money for the two odd kinds the catalogue holds', () => {
+    expect(creditsLine({ name: 'Hedra', credits: 'plan_or_wallet', quote_tool: '' })).toBe("Spends your Hedra plan's credits or wallet balance");
+    expect(creditsLine({ name: 'Comfy Cloud', credits: 'comfy_credits', quote_tool: '' })).toBe('Spends your Comfy Cloud credits');
+  });
+  it('omits a kind it does not know, and a provider with no route', () => {
+    expect(creditsLine({ name: 'x', credits: 'barter', quote_tool: 'q' })).toBeNull();
+    expect(creditsLine({ name: 'x', credits: '', quote_tool: '' })).toBeNull();
+  });
+});
+
+describe('toolLabel', () => {
+  it('drops the kind prefix', () => {
+    expect(toolLabel('mcp:fal-mirror')).toBe('fal-mirror');
+    expect(toolLabel('cli:ffmpeg')).toBe('ffmpeg');
+    expect(toolLabel('plugin:remotion@remotion')).toBe('remotion@remotion');
+    expect(toolLabel('comfyui')).toBe('comfyui');
+    expect(toolLabel('mcp:')).toBe('mcp:');
+  });
+});
+
+describe('groupRows', () => {
+  const rows: HiveMediaRow[] = [
+    row('video', { recommended: 'fal', alternatives: ['higgsfield'] }),
+    row('image', { covered_by: [{ tool_id: 'mcp:fal', provider: 'fal', state: 'ready' }] }),
+    row('voice', { covered_by: [{ tool_id: 'mcp:eleven', provider: 'elevenlabs', state: 'needs_sign_in' }], recommended: 'elevenlabs' }),
+    row('music'),
+    row('finish', { covered_by: [{ tool_id: 'cli:ffmpeg', provider: 'homebrew-kit', state: 'ready' }] }),
+    row('lipsync', { recommended: 'fal' }),
+  ];
+
+  it('splits the common five from More, in catalogue order', () => {
+    const g = groupRows(rows, catalogue);
+    expect(g.common.map((r) => r.capability)).toEqual(['video', 'image', 'voice', 'music', 'finish']);
+    expect(g.more.map((r) => r.capability)).toEqual(['lipsync']);
+  });
+
+  it('puts rows in the catalogue\'s order even when Rust sent them in another', () => {
+    const g = groupRows([...rows].reverse(), catalogue);
+    expect(g.common.map((r) => r.capability)).toEqual(['video', 'image', 'voice', 'music', 'finish']);
+  });
+
+  it('joins a cover with its provider name and state label', () => {
+    const g = groupRows(rows, catalogue);
+    const voice = g.common[2];
+    expect(voice.label).toBe('Voice');
+    expect(voice.means).toBe('Text to speech');
+    expect(voice.covers).toEqual([
+      { toolId: 'mcp:eleven', toolLabel: 'eleven', providerId: 'elevenlabs', providerName: 'ElevenLabs', state: 'needs_sign_in', stateLabel: 'Needs sign-in' },
+    ]);
+    expect(voice.ready).toBe(false);
+    expect(g.common[1].ready).toBe(true);
+  });
+
+  it('joins the recommendation and alternatives with their credits lines', () => {
+    const video = groupRows(rows, catalogue).common[0];
+    expect(video.recommended?.name).toBe('fal');
+    expect(video.recommended?.creditsLine).toBe('Prepaid API credit · prices a job before running it');
+    expect(video.alternatives.map((a) => [a.id, a.creditsLine, a.subscriber])).toEqual([['higgsfield', "Spends your Higgsfield plan's credits", true]]);
+    expect(groupRows(rows, catalogue).common[3].recommended).toBeNull();
+  });
+
+  it('is only ready for a ready cover, not a sign-in or an unreachable one', () => {
+    const g = groupRows(
+      [row('video', { covered_by: [{ tool_id: 'mcp:a', provider: 'fal', state: 'unreachable' }, { tool_id: 'mcp:b', provider: 'fal', state: 'installed' }] })],
+      catalogue,
+    );
+    expect(g.common[0].ready).toBe(false);
+  });
+
+  it('survives what a newer Rust build sends: an unknown provider, state and capability', () => {
+    const g = groupRows(
+      [
+        row('video', { covered_by: [{ tool_id: 'mcp:mystery', provider: 'mystery', state: 'dozing' }], recommended: 'mystery', alternatives: ['mystery', 'fal'] }),
+        row('hologram', { recommended: 'fal' }),
+      ],
+      catalogue,
+    );
+    const video = g.common[0];
+    expect(video.covers[0]).toMatchObject({ providerName: 'mystery', stateLabel: 'Found' });
+    expect(video.recommended).toBeNull();
+    expect(video.alternatives.map((a) => a.id)).toEqual(['fal']);
+    expect(g.more.map((r) => [r.capability, r.label, r.common])).toEqual([['hologram', 'hologram', false]]);
+  });
+
+  it('answers empty groups for no rows', () => {
+    expect(groupRows([], catalogue)).toEqual({ common: [], more: [] });
+  });
+});
+
+describe('summaryLine', () => {
+  const ready = (cap: string): HiveMediaRow => row(cap, { covered_by: [{ tool_id: 'mcp:x', provider: 'fal', state: 'ready' }] });
+  it('folds the common five to a line', () => {
+    const g = groupRows([ready('video'), ready('image'), row('voice'), row('music'), row('finish', { covered_by: [{ tool_id: 'cli:ffmpeg', provider: 'homebrew-kit', state: 'needs_sign_in' }] })], catalogue);
+    expect(summaryLine(g)).toBe('Media: video, image ready · voice, music, finish not set up');
+  });
+  it('says only what is true when all or none are ready', () => {
+    expect(summaryLine(groupRows(['video', 'image', 'voice', 'music', 'finish'].map(ready), catalogue))).toBe('Media: video, image, voice, music, finish ready');
+    expect(summaryLine(groupRows(['video', 'image', 'voice', 'music', 'finish'].map((c) => row(c)), catalogue))).toBe('Media: video, image, voice, music, finish not set up');
+  });
+  it('ignores More', () => {
+    const g = groupRows([ready('video'), ready('lipsync')], catalogue);
+    expect(summaryLine(g)).toBe('Media: video ready');
+  });
+  it('has a line even with nothing to show', () => {
+    expect(summaryLine({ common: [], more: [] })).toBe('Media: nothing to show');
+  });
+});
+
+describe('goalNamesMedia', () => {
+  it.each([
+    'Make a 30 second video for the launch',
+    'Design a LOGO and a thumbnail',
+    'Record a voiceover and a voice-over take',
+    'Compose a soundtrack with sound effects',
+    'Add sfx and a podcast intro',
+    'Generate imagery for the landing page',
+    'Render the 3D scene',
+    'Make 3D models',
+    'Four ads for the campaign',
+    'Animate the mascot: a short animation',
+    'Photos, pictures and illustrations',
+    'Cut a trailer',
+    'Make an ad',
+  ])('names media: %s', (goal) => {
+    expect(goalNamesMedia(goal)).toBe(true);
+  });
+
+  it.each([
+    'Fix the login redirect',
+    'Add pagination to the users table',
+    'Advance the schedule and add a header',
+    'Upgrade the dependencies, adding retries',
+    'Refactor the mail broadcast module',
+    'Improve test coverage',
+    'Reduce re-render churn in the sidebar',
+    'Stop the component from re-rendering on every keypress',
+    'Fix the imagemagick path',
+    '',
+  ])('does not: %s', (goal) => {
+    expect(goalNamesMedia(goal)).toBe(false);
+  });
+
+  it('matches whole words, not parts of them', () => {
+    expect(goalNamesMedia('The word is imaginary')).toBe(false);
+    expect(goalNamesMedia('radio dispatch')).toBe(false);
+    expect(goalNamesMedia('ad-hoc script')).toBe(true); // a hyphen is a word boundary: "ad" is a word here
+  });
+
+  it('is case-insensitive', () => {
+    expect(goalNamesMedia('VIDEO')).toBe(true);
+    expect(goalNamesMedia('Imagery')).toBe(true);
+  });
+
+  it('still catches a render of media beside the code word', () => {
+    expect(goalNamesMedia('re-render the video')).toBe(true);
+    expect(goalNamesMedia('Render a poster, not a re-render')).toBe(true);
+  });
+});
+
+describe('shouldStartOpen', () => {
+  const git = { kind: 'git' };
+  const plain = { kind: 'plain' };
+
+  it('opens when the goal names media, even in a repo', () => {
+    expect(shouldStartOpen('Make a promo video', [git])).toBe(true);
+  });
+  it('opens when a capability was asked for up front', () => {
+    expect(shouldStartOpen('Refactor the parser', [git], ['video'])).toBe(true);
+  });
+  it('stays folded for a code goal in a repo', () => {
+    expect(shouldStartOpen('Fix the login redirect', [git])).toBe(false);
+    expect(shouldStartOpen('Fix the login redirect', [git, plain])).toBe(false);
+    expect(shouldStartOpen('Fix the login redirect', [git], [])).toBe(false);
+  });
+  it('opens when no folder is a repo', () => {
+    expect(shouldStartOpen('Tidy the notes', [plain])).toBe(true);
+    expect(shouldStartOpen('Tidy the notes', [plain, plain])).toBe(true);
+    expect(shouldStartOpen('Tidy the notes', [])).toBe(true);
+  });
+  it('treats a folder kind it does not know as not a repo', () => {
+    expect(shouldStartOpen('Tidy', [{ kind: 'svn' }])).toBe(true);
+  });
+  it('opens for "imagery" and folds for a UI re-render in a repo', () => {
+    expect(shouldStartOpen('Improve the imagery', [git])).toBe(true);
+    expect(shouldStartOpen('Cut the re-render cost of the table', [git])).toBe(false);
+  });
+  it('decided: a code word beside a media word opens', () => {
+    expect(shouldStartOpen('Fix the video player bug', [git])).toBe(true);
+  });
+});
