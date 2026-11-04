@@ -347,11 +347,15 @@ describe('stateTone', () => {
 describe('recommendedSetupNote', () => {
   const cover = (providerId: string, state: string) => ({ toolId: `mcp:${providerId}`, toolLabel: providerId, providerId, providerName: providerId, state, stateLabel: state });
   const rec = { id: 'higgsfield' } as never;
-  it('says a recommended provider scoped away from the workspace is set up but not enabled here', () => {
-    expect(recommendedSetupNote({ recommended: rec, covers: [cover('higgsfield', 'unreachable')] })).toBe('Set up, but not enabled for this workspace');
+  it('says an unreachable recommended provider is set up but not reachable, naming no cause', () => {
+    expect(recommendedSetupNote({ recommended: rec, covers: [cover('higgsfield', 'unreachable')] })).toBe('Set up, but not reachable from here: check Preferences → MCP servers');
   });
   it('says one waiting for a sign-in is set up and needs it', () => {
     expect(recommendedSetupNote({ recommended: rec, covers: [cover('higgsfield', 'needs_sign_in')] })).toBe('Set up, needs sign-in');
+  });
+  it('lets the sign-in win when the provider has covers in both states, in either order', () => {
+    expect(recommendedSetupNote({ recommended: rec, covers: [cover('higgsfield', 'needs_sign_in'), cover('higgsfield', 'unreachable')] })).toBe('Set up, needs sign-in');
+    expect(recommendedSetupNote({ recommended: rec, covers: [cover('higgsfield', 'unreachable'), cover('higgsfield', 'needs_sign_in')] })).toBe('Set up, needs sign-in');
   });
   it('is null when the recommendation is not on the row, or its cover is in another state', () => {
     expect(recommendedSetupNote({ recommended: rec, covers: [] })).toBeNull();

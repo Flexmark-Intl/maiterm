@@ -160,17 +160,20 @@ export function summaryLine(groups: PanelGroups): string {
 
 /** What the recommended provider's card says when the provider is already on this row's covers but
  *  can't be used yet: a subscriber provider ("I already pay for…") is promoted even while its
- *  server is scoped away from this workspace or waiting for a sign-in, and a card that said "set
- *  this up" then would send the human to do what is already done. Null when the recommendation
- *  is not on the row at all (it really is still to set up) or its cover is in another state.
- *  With two covers for it, the first in the state list's order wins. */
+ *  server can't be reached or is waiting for a sign-in, and a card that said "Recommended" then
+ *  would read like something still to set up.
+ *
+ *  "unreachable" is Rust's one state for several causes (the server is disabled, scoped away from
+ *  the workspace, in error, or its upstream is down; with no workspace, scope is never judged), so
+ *  its words claim none of them. Null when the recommendation is not on the row, or its cover is in
+ *  another state. With covers in both states, the sign-in wins: it is the one the human can act on. */
 export function recommendedSetupNote(row: Pick<PanelRow, 'covers' | 'recommended'>): string | null {
   const id = row.recommended?.id;
   if (!id) return null;
-  const mine = row.covers.filter((c) => c.providerId === id);
-  const first = mine.find((c) => c.state === 'unreachable' || c.state === 'needs_sign_in');
-  if (!first) return null;
-  return first.state === 'unreachable' ? 'Set up, but not enabled for this workspace' : 'Set up, needs sign-in';
+  const states = row.covers.filter((c) => c.providerId === id).map((c) => c.state);
+  if (states.includes('needs_sign_in')) return 'Set up, needs sign-in';
+  if (states.includes('unreachable')) return 'Set up, but not reachable from here: check Preferences → MCP servers';
+  return null;
 }
 
 /** The providers "I already pay for…" lists: the catalogue's `subscriber: true` ones, in its order. */

@@ -73,6 +73,12 @@
     return () => latest.cancel();
   });
 
+  /** Re-detect and Retry stay focusable while a fetch runs (aria-disabled, not disabled), so a
+   *  keyboard user isn't dropped out of the page mid-fetch; a click then does nothing. */
+  function redetect() {
+    if (!loading) void load();
+  }
+
   function tick(id: string) {
     pay = toggleId(pay, id);
     void load();
@@ -130,7 +136,7 @@
           {#if p.models_note}<p class="dim">{p.models_note}</p>{/if}
           {#if p.creditsLine}<p class="credits">{p.creditsLine}</p>{/if}
           {#if note}<p class="unv">{note}</p>{/if}
-          {#if p.guide.length && !done}
+          {#if p.guide.length}
             <ol class="guide">
               {#each p.guide as step, i (i)}<li>{step}</li>{/each}
             </ol>
@@ -166,11 +172,11 @@
 
 <div class="panel">
   <div class="head">
-    <button type="button" class="toggle" aria-expanded={open} aria-controls={bodyId} onclick={() => (open = !open)}>
+    <button type="button" class="toggle" aria-expanded={open} aria-controls={open ? bodyId : undefined} onclick={() => (open = !open)}>
       <svg class="chev" class:open width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 7 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
       <span class="title">{open ? 'What it can make' : line}</span>
     </button>
-    <button type="button" class="link" onclick={() => void load()} disabled={loading} aria-label="Re-detect what this Mac can make">Re-detect</button>
+    <button type="button" class="link" onclick={redetect} aria-disabled={loading} aria-label="Re-detect what this Mac can make">Re-detect</button>
   </div>
 
   {#if open}
@@ -181,7 +187,7 @@
         <div class="error" role="alert">
           <p>Couldn't check what this Mac can make.</p>
           <p class="dim detail">{failure}</p>
-          <button type="button" class="link" onclick={() => void load()} disabled={loading}>Retry</button>
+          <button type="button" class="link" onclick={redetect} aria-disabled={loading}>Retry</button>
         </div>
       {:else if empty}
         <p class="dim">No media capabilities to show.</p>
@@ -205,7 +211,7 @@
         {/each}
 
         {#if groups.more.length}
-          <button type="button" class="more" aria-expanded={moreOpen} aria-controls={moreId} onclick={() => (moreOpen = !moreOpen)}>
+          <button type="button" class="more" aria-expanded={moreOpen} aria-controls={moreOpen ? moreId : undefined} onclick={() => (moreOpen = !moreOpen)}>
             <svg class="chev" class:open={moreOpen} width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 7 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
             More ({groups.more.length})
           </button>
@@ -231,8 +237,8 @@
   .chev { flex: none; align-self: center; color: var(--fg-dim); transition: transform 0.15s; }
   .chev.open { transform: rotate(90deg); }
   .link { flex: none; background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; font-size: 0.846rem; }
-  .link:hover:not(:disabled) { text-decoration: underline; }
-  .link:disabled { color: var(--fg-dim); cursor: default; }
+  .link:hover:not([aria-disabled='true']) { text-decoration: underline; }
+  .link[aria-disabled='true'] { color: var(--fg-dim); cursor: default; }
   .link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 
   .body { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
