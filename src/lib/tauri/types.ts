@@ -990,6 +990,28 @@ export interface HiveDetectedTool {
   proxy?: { id: string; upstream?: string };
 }
 
+/** One tool that covers a media capability (hive/media/status.rs `Cover`, docs/hive-media.md §5).
+ *  `tool_id` is what `Hive.tools` stores (`mcp:<entry name>`, `cli:ffmpeg`, `plugin:<id>`,
+ *  `comfyui`); `provider` is a catalogue provider id. */
+export interface HiveMediaCover {
+  tool_id: string;
+  provider: string;
+  /** "ready" | "needs_sign_in" | "unreachable" | "installed". A String on the wire: treat an
+   *  unknown one as "installed". */
+  state: string;
+}
+
+/** One row of `hive_media_status`: what covers a capability, and what to set up when nothing is
+ *  ready. `recommended` and `alternatives` are catalogue provider ids; both are empty when
+ *  something covering the capability is "ready". */
+export interface HiveMediaRow {
+  /** A catalogue capability id ("video", "image", "voice", "music", "finish", ...). */
+  capability: string;
+  covered_by: HiveMediaCover[];
+  recommended: string | null;
+  alternatives: string[];
+}
+
 /** What the Make this a Hive wizard starts from (state/workspace.rs `HiveDefaults`). Empty
  *  strings and null mean the built-in default; `lib/hive/defaults.ts` resolves them. */
 export interface HiveDefaults {

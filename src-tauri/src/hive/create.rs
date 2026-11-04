@@ -494,7 +494,9 @@ pub struct ProxyRef {
     pub upstream: Option<String>,
 }
 
-pub const DETECTED_CLIS: [&str; 4] = ["ffmpeg", "magick", "sox", "blender"];
+/// `ffprobe` ships with ffmpeg, `whisper-cli` is whisper.cpp's, and `brew` is not something a Hive
+/// makes with: the media setup's install route needs it (docs/hive-media.md §5).
+pub const DETECTED_CLIS: [&str; 7] = ["ffmpeg", "ffprobe", "magick", "sox", "whisper-cli", "blender", "brew"];
 pub const COMFYUI_ADDR: &str = "127.0.0.1:8188";
 
 /// maiTerm's own server isn't a tool the Hive makes things with: every agent gets it.

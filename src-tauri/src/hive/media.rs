@@ -285,5 +285,7 @@ pub fn providers_for_skill(skill: &str) -> Vec<&'static Provider> {
     catalogue().providers.iter().filter(|p| p.matches.skills.iter().any(|s| s == skill) || name_words(skill).any(|w| p.matches.names.contains(&w))).collect()
 }
 
+pub mod status;
+
 #[cfg(test)]
 mod tests;

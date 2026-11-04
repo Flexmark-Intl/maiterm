@@ -3,7 +3,7 @@ import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { StackHeldAction, StackLeaseState } from './types';
-import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HiveLiveCwd, HiveNewGoalPreview, HiveNewGoalSpec, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
+import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HiveLiveCwd, HiveMediaRow, HiveNewGoalPreview, HiveNewGoalSpec, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
 import type { HiveMemoryFileText, HiveMemoryView } from './types';
 import type { HiveDecisionView, HivePrecedentsView } from './types';
 import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
@@ -2841,6 +2841,15 @@ export async function hiveCommitFirst(path: string): Promise<HiveFolderInfo> {
 
 export async function hiveDetectTools(): Promise<HiveDetectedTool[]> {
   return invoke('hive_detect_tools');
+}
+
+/** What this Mac already has for each media capability, and what to set up for one nothing covers
+ *  (docs/hive-media.md §5): one row per catalogue capability, in catalogue order. `workspaceId` is a
+ *  Hive's workspace (an MCP proxy server scoped away from it is "unreachable"), or null for
+ *  Preferences. `alreadyPayFor` is provider ids the human says they pay for: a subscriber provider
+ *  (Higgsfield, Kling, Runway) among them is recommended first, with fal behind it. */
+export async function hiveMediaStatus(workspaceId: string | null = null, alreadyPayFor: string[] = []): Promise<HiveMediaRow[]> {
+  return invoke('hive_media_status', { workspaceId, alreadyPayFor });
 }
 
 /** Lay the Hive out on disk and install it, with its hidden coordinator tab, in one write. */
