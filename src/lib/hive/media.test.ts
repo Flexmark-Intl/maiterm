@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createLatest, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
+import { createLatest, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
 import type { HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
 
 const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvider => ({
@@ -192,6 +192,16 @@ describe('goalNamesMedia', () => {
     'Photos, pictures and illustrations',
     'Cut a trailer',
     'Make an ad',
+    'Make a movie',
+    'Write a song',
+    'Animated explainer',
+    'Narrate the tutorial',
+    'Make a GIF',
+    'Cut a film, a reel and a clip',
+    'Dub the clip into French; it was dubbed twice',
+    'Design a poster and a banner',
+    'Animate the logo',
+    'Narrated walkthrough',
   ])('names media: %s', (goal) => {
     expect(goalNamesMedia(goal)).toBe(true);
   });
@@ -331,5 +341,22 @@ describe('stateTone', () => {
     expect(stateTone('unreachable')).toBe('warn');
     expect(stateTone('installed')).toBe('neutral');
     expect(stateTone('something_new')).toBe('neutral');
+  });
+});
+
+describe('recommendedSetupNote', () => {
+  const cover = (providerId: string, state: string) => ({ toolId: `mcp:${providerId}`, toolLabel: providerId, providerId, providerName: providerId, state, stateLabel: state });
+  const rec = { id: 'higgsfield' } as never;
+  it('says a recommended provider scoped away from the workspace is set up but not enabled here', () => {
+    expect(recommendedSetupNote({ recommended: rec, covers: [cover('higgsfield', 'unreachable')] })).toBe('Set up, but not enabled for this workspace');
+  });
+  it('says one waiting for a sign-in is set up and needs it', () => {
+    expect(recommendedSetupNote({ recommended: rec, covers: [cover('higgsfield', 'needs_sign_in')] })).toBe('Set up, needs sign-in');
+  });
+  it('is null when the recommendation is not on the row, or its cover is in another state', () => {
+    expect(recommendedSetupNote({ recommended: rec, covers: [] })).toBeNull();
+    expect(recommendedSetupNote({ recommended: rec, covers: [cover('fal', 'unreachable')] })).toBeNull();
+    expect(recommendedSetupNote({ recommended: rec, covers: [cover('higgsfield', 'installed')] })).toBeNull();
+    expect(recommendedSetupNote({ recommended: null, covers: [cover('higgsfield', 'unreachable')] })).toBeNull();
   });
 });

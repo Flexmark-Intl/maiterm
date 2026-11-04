@@ -158,6 +158,21 @@ export function summaryLine(groups: PanelGroups): string {
 
 // ─── The panel's small helpers ──────────────────────────────────────────────
 
+/** What the recommended provider's card says when the provider is already on this row's covers but
+ *  can't be used yet: a subscriber provider ("I already pay for…") is promoted even while its
+ *  server is scoped away from this workspace or waiting for a sign-in, and a card that said "set
+ *  this up" then would send the human to do what is already done. Null when the recommendation
+ *  is not on the row at all (it really is still to set up) or its cover is in another state.
+ *  With two covers for it, the first in the state list's order wins. */
+export function recommendedSetupNote(row: Pick<PanelRow, 'covers' | 'recommended'>): string | null {
+  const id = row.recommended?.id;
+  if (!id) return null;
+  const mine = row.covers.filter((c) => c.providerId === id);
+  const first = mine.find((c) => c.state === 'unreachable' || c.state === 'needs_sign_in');
+  if (!first) return null;
+  return first.state === 'unreachable' ? 'Set up, but not enabled for this workspace' : 'Set up, needs sign-in';
+}
+
 /** The providers "I already pay for…" lists: the catalogue's `subscriber: true` ones, in its order. */
 export function subscriberProviders(catalogue: HiveMediaCatalogue): HiveMediaProvider[] {
   return catalogue.providers.filter((p) => p.subscriber);
@@ -233,6 +248,17 @@ const MEDIA_WORDS = [
   'render',
   'thumbnail',
   'trailer',
+  'movie',
+  'film',
+  'song',
+  'gif',
+  'poster',
+  'banner',
+  'reel',
+  'clip',
+  'dub(?:b(?:ed|ing))?',
+  'animat(?:e|ed|es|ing)',
+  'narrat(?:e|ed|es|ing)',
   'ad',
 ];
 

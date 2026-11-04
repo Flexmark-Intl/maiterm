@@ -19,7 +19,7 @@
   import { warn as logWarn } from '@tauri-apps/plugin-log';
   import { hiveMediaCatalogue, hiveMediaStatus } from '$lib/tauri/commands';
   import type { HiveMediaCatalogue, HiveMediaRow } from '$lib/tauri/types';
-  import { createLatest, externalUrl, groupRows, stateTone, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
+  import { createLatest, externalUrl, groupRows, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
   import type { PanelRow } from '$lib/hive/media';
 
   interface Props {
@@ -121,15 +121,16 @@
       {#if r.recommended}
         {@const p = r.recommended}
         {@const note = unverifiedNote(p, r.capability)}
+        {@const done = recommendedSetupNote(r)}
         <div class="card">
           <div class="card-head">
             <b class="pname">{p.name}</b>
-            <span class="tag">Recommended</span>
+            {#if done}<span class="tag warn">{done}</span>{:else}<span class="tag">Recommended</span>{/if}
           </div>
           {#if p.models_note}<p class="dim">{p.models_note}</p>{/if}
           {#if p.creditsLine}<p class="credits">{p.creditsLine}</p>{/if}
           {#if note}<p class="unv">{note}</p>{/if}
-          {#if p.guide.length}
+          {#if p.guide.length && !done}
             <ol class="guide">
               {#each p.guide as step, i (i)}<li>{step}</li>{/each}
             </ol>
@@ -261,7 +262,8 @@
   .card p { margin: 0; }
   .card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
   .pname { font-weight: 600; color: var(--fg); overflow-wrap: anywhere; }
-  .tag { font-size: 0.769rem; color: var(--accent); }
+  .tag { font-size: 0.769rem; color: var(--accent); overflow-wrap: anywhere; }
+  .tag.warn { color: var(--yellow); }
   .credits { font-size: 0.846rem; color: var(--fg); overflow-wrap: anywhere; }
   .unv { font-size: 0.769rem; font-style: italic; color: var(--fg-dim); overflow-wrap: anywhere; }
   .guide { margin: 2px 0; padding-left: 20px; font-size: 0.846rem; color: var(--fg); overflow-wrap: anywhere; }
