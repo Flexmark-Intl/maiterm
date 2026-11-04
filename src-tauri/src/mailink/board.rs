@@ -137,20 +137,55 @@ fn task_view(t: &Task, ws: &Workspace, effective: &str, tab_title: Option<&str>,
     })
 }
 
+/// v0.26: a pick-several decision goes out with `pick: "many"` and its choices in `picks`, and
+/// `options` EMPTY. An older phone doesn't know `pick`, and would offer the options as single
+/// taps: one tap would answer "do only this one" to a question that asked which of several to do.
+/// With `options` empty it offers a free-text answer instead, and `context` carries the choices
+/// as a list so it can still be answered in words. A 0.26 phone renders `pickContext` (the
+/// agent's own context) and `picks` as checkboxes, and answers with `options: [i, …]`.
 fn blocker_view(b: &crate::state::workspace::TaskBlocker, named: &dyn Fn(&str) -> String) -> Value {
+    let options: Vec<Value> = b
+        .options
+        .iter()
+        .map(|o| {
+            json!({
+                "label": named(&o.label),
+                "detail": o.detail.as_deref().map(named),
+                "recommended": o.recommended,
+            })
+        })
+        .collect();
+    let context = b.context.as_deref().map(named);
+    let many = b.picks_many();
     json!({
         "kind": b.kind,
         "question": named(&b.question),
-        "context": b.context.as_deref().map(named),
-        "options": b.options.iter().map(|o| json!({
-            "label": named(&o.label),
-            "detail": o.detail.as_deref().map(named),
-            "recommended": o.recommended,
-        })).collect::<Vec<_>>(),
+        "context": if many { Some(pick_many_fallback(context.as_deref(), b, named)) } else { context.clone() },
+        "options": if many { Vec::new() } else { options.clone() },
+        "pick": if many { "many" } else { "one" },
+        "picks": if many { options } else { Vec::new() },
+        "pickContext": if many { context } else { None },
         "command": b.command,
         "askedAt": b.asked_at,
         "askedBy": b.asked_by,
     })
+}
+
+/// What an older phone shows for a pick-several question: the agent's context, then the choices
+/// as a list it can answer in words.
+fn pick_many_fallback(context: Option<&str>, b: &crate::state::workspace::TaskBlocker, named: &dyn Fn(&str) -> String) -> String {
+    let mut s = context.map(|c| format!("{c}\n\n")).unwrap_or_default();
+    s.push_str("Choose any of these, and answer with which to do:\n");
+    for o in &b.options {
+        s.push_str(&format!("\n- **{}**", named(&o.label)));
+        if let Some(d) = &o.detail {
+            s.push_str(&format!(" — {}", named(d)));
+        }
+        if o.recommended {
+            s.push_str(" (recommended)");
+        }
+    }
+    s
 }
 
 /// `text` with every task of `tasks` it names by id (or a 6+ character prefix of one) replaced
@@ -776,6 +811,40 @@ mod tests {
     use crate::state::workspace::Tab;
     use crate::state::AgentRuntime;
 
+    /// v0.26: an older phone must never be handed a pick-several question's options as taps.
+    #[test]
+    fn a_pick_several_question_reaches_an_older_phone_as_words() {
+        use crate::state::workspace::{BlockerOption, TaskBlocker};
+        let opt = |l: &str, r: bool| BlockerOption { label: l.into(), detail: Some(format!("{l} costs")), recommended: r };
+        let mut b = TaskBlocker {
+            kind: "decision".into(),
+            question: "Which changes should I make?".into(),
+            context: Some("Found two problems.".into()),
+            options: vec![opt("Reword", true), opt("Lazy-load", false)],
+            command: None,
+            pick: Some("many".into()),
+            asked_at: "t".into(),
+            asked_by: "agent".into(),
+        };
+        let same = |s: &str| s.to_string();
+        let v = blocker_view(&b, &same);
+        assert_eq!(v["options"], json!([]), "no taps for a phone that can't tick");
+        assert_eq!(v["pick"], "many");
+        assert_eq!(v["picks"][1]["label"], "Lazy-load");
+        assert_eq!(v["pickContext"], "Found two problems.");
+        let ctx = v["context"].as_str().unwrap();
+        assert!(ctx.starts_with("Found two problems.\n\n"), "{ctx}");
+        assert!(ctx.contains("- **Reword** — Reword costs (recommended)"), "{ctx}");
+        assert!(ctx.contains("- **Lazy-load** — Lazy-load costs"), "{ctx}");
+
+        b.pick = None;
+        let v = blocker_view(&b, &same);
+        assert_eq!(v["pick"], "one");
+        assert_eq!(v["options"].as_array().unwrap().len(), 2);
+        assert_eq!(v["picks"], json!([]));
+        assert_eq!(v["context"], "Found two problems.");
+    }
+
     fn task(id: &str, title: &str, tab: Option<&str>, stream: Option<&str>) -> Task {
         Task {
             id: id.into(),
@@ -801,6 +870,7 @@ mod tests {
             context: None,
             options: vec![crate::state::workspace::BlockerOption { label: "Yes".into(), detail: None, recommended: true }],
             command: None,
+            pick: None,
             asked_at: asked_at.into(),
             asked_by: "agent".into(),
         }

@@ -4,6 +4,20 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.26 changelog** (2026-11-02). Additive: **pick-several decisions** (maiTerm docs/tasks.md
+> §3.1.1). An agent's decision can let the human tick any of its options, where one answer
+> covers them all ("which of these three changes should I make?").
+> - **`MaitermTask.blocker.pick`** is `"one"` (every question before) or `"many"`. A `many`
+>   question carries its choices in **`picks`** and the agent's own context in **`pickContext`**;
+>   render `picks` as checkboxes, pre-ticked where `recommended`, with one Send.
+> - **Its `options` is `[]`, and its `context` ends with the choices as a list.** The phone sends
+>   no version, so this is how a pre-0.26 client stays correct: it offers a free-text answer
+>   (which `/answer` takes) instead of single taps, each of which would answer "do only this one".
+>   A 0.26 client reads `pickContext`, never `context`, for a `many` question.
+> - **`POST /tasks/{id}/answer` takes `options: number[]`**, indexes into `picks` (`[]` = none of
+>   them). `option` on a `many` question, `options` on a `one` question, an index out of range or
+>   a repeated one are refusals (`accepted:false`). The agent is told every choice as done or not.
+>
 > **v0.25 changelog** (2026-10-25). Additive: **Hive tabs as a Hive** (maiTerm docs/hive.md
 > §11.4, §16 step 9d).
 > - **`Chat.hive` / `ChatDetail.hive`** (§4.3 `ChatHive`): on a Hive agent's tab, which Hive it
@@ -1249,6 +1263,15 @@ interface MaitermTask {
     context: string | null;
     options: { label: string; detail: string | null; recommended: boolean }[];  // decision only; [] = free text
     command: string | null;         // action only: the exact command the human has to run
+    // 0.26. 'many': the human ticks any of `picks` and one answer covers them all
+    // (POST /answer with `options: [i, …]`). On a 'many' question `options` is [] and `context`
+    // ends with the choices as a markdown list, so a pre-0.26 client offers a free-text answer
+    // and never a single tap that would read "do only this one". A 0.26 client renders
+    // `pickContext` (the agent's own context, null when it gave none) and `picks` as
+    // checkboxes, pre-ticking the `recommended` ones.
+    pick: 'one' | 'many';
+    picks: { label: string; detail: string | null; recommended: boolean }[];  // [] unless 'many'
+    pickContext: string | null;     // null unless 'many'
     askedAt: string;                // ISO; the stale guard for /answer — send it back verbatim
     askedBy: 'human' | 'agent' | 'overlord';
   } | null;
@@ -2381,7 +2404,7 @@ interface OutstandingDirective {
 | `POST /tasks` | `{ tabId, workstream?: string, tasks: [{ title, detail?, status?: TaskLane, assign?: boolean }] }` | `{ tasks: MaitermTask[] }` — one row per spec |
 | `POST /tasks/{id}` | `{ status?, title?, detail?: string\|null, tabId?: string\|null, workstreamId?: string\|null }` | `{ tasks: [MaitermTask] }` |
 | `POST /tasks/{id}/start` | `{}` | `{ accepted, confirmed, result?: { started, told, task } }` — see below |
-| `POST /tasks/{id}/answer` | `{ askedAt: string, option?: number, text?: string }` (0.13) | `{ accepted, confirmed, reason?, result?: { answered: true, told, task } }` — see below |
+| `POST /tasks/{id}/answer` | `{ askedAt: string, option?: number, options?: number[], text?: string }` (0.13; `options` 0.26: the ticked `picks` of a `pick:"many"` question, `[]` for none of them; refused on a pick-one question, as `option` is on a pick-several one; `text` alone answers either) | `{ accepted, confirmed, reason?, result?: { answered: true, told, task } }` — see below |
 | `POST /tasks/{id}/dismiss` | `{ askedAt: string }` (0.17) | `{ accepted, confirmed, reason?, result?: { dismissed: true, task } }` — "Already handled in the tab": the blocker is cleared and the task goes back to Active with the note "Handled in the tab by the human". NOTHING is typed to the agent. Any blocker kind (`decision`, `action`, `external`), as on the desktop's card. Refusals as for `/answer` (stale `askedAt`, no longer blocked), `reason` verbatim |
 
 **Answering a blocker (0.13).** `POST /tasks/{id}/answer` is the phone's "prompt me": the human
@@ -2530,6 +2553,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.23` | adds agent requests (§4.4): `GET /requests`, `POST /requests/{id}/approve` and `/deny`, the WS `requests` frame, `Chat.requestsWaiting`, and the doorbell kind `request` |
 | `0.24` | adds `pendingPrompt.owner` (`"coordinator"`) on a Hive worker's prompt its coordinator holds, served `respondable:false` with `options:[]` (a question's `questions` become `text`) until the coordinator's timeout; `/respond` answers `reason:"coordinator"` for it |
 | `0.25` | adds `Chat.hive` / `ChatDetail.hive` (`ChatHive`, `null` off a Hive); `POST /message` to a Done Hive's coordinator wakes it (`status:"held"`, `reason:"hive_wake"`, `woke:"hive"`; `403` for the dev token); `unreachable` reasons `hive` and `hive_done` from `/message` and `/wake` |
+| `0.26` | adds pick-several decisions: `MaitermTask.blocker.pick` (`one` / `many`), `picks` and `pickContext`; a `many` question is served with `options: []` and its choices listed in `context`, so an older client answers it in words; `POST /tasks/{id}/answer` takes `options: number[]` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

@@ -874,6 +874,7 @@ mod tests {
             context: Some("Both are\nin the stack.".into()),
             options: options.iter().map(|(l, r)| BlockerOption { label: l.to_string(), detail: None, recommended: *r }).collect(),
             command: None,
+            pick: None,
             asked_at: asked_at.into(),
             asked_by: "agent".into(),
         }

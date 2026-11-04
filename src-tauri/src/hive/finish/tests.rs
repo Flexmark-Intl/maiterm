@@ -428,7 +428,7 @@ async fn an_undo_under_way_or_a_waiting_card_refuses() {
 #[tokio::test]
 async fn an_open_question_to_the_human_refuses() {
     let rig = Rig::new("blocker");
-    let blocker = TaskBlocker { kind: "decision".into(), question: "Ship it?".into(), context: None, options: Vec::new(), command: None, asked_at: "now".into(), asked_by: "agent".into() };
+    let blocker = TaskBlocker { kind: "decision".into(), question: "Ship it?".into(), context: None, options: Vec::new(), command: None, pick: None, asked_at: "now".into(), asked_by: "agent".into() };
     {
         let mut d = rig.data.write();
         let ws = &mut d.windows[0].workspaces[0];

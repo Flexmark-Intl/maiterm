@@ -797,10 +797,25 @@ pub struct TaskBlocker {
     /// For an action: the exact command the human has to run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// "many" when the human may tick several of `options` (one Send answers them all), absent
+    /// for the ordinary pick-one (docs/tasks.md §3.1.1). A String kind, never an enum: an older
+    /// build loading an unknown variant would load empty state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pick: Option<String>,
     pub asked_at: String,
     /// Same vocabulary as `TaskNote::by`.
     pub asked_by: String,
 }
+
+impl TaskBlocker {
+    /// Whether the human may pick several options at once.
+    pub fn picks_many(&self) -> bool {
+        self.kind == "decision" && self.pick.as_deref() == Some(BLOCKER_PICK_MANY) && !self.options.is_empty()
+    }
+}
+
+/// `TaskBlocker::pick` for a decision whose options the human ticks several of.
+pub const BLOCKER_PICK_MANY: &str = "many";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlockerOption {
@@ -2941,6 +2956,7 @@ mod task_tests {
                     .map(|i| super::BlockerOption { label: format!("o{i}"), detail: None, recommended: false })
                     .collect(),
                 command: None,
+                pick: None,
                 asked_at: "2026-09-27T00:00:00Z".into(),
                 asked_by: "agent".into(),
             }),

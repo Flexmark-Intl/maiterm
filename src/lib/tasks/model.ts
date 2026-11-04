@@ -271,6 +271,12 @@ export const BLOCKER_KINDS: BlockerKind[] = ['decision', 'action', 'external'];
 /** Most choices a decision may offer. MUST match `BLOCKER_OPTION_CAP` in state/workspace.rs. */
 export const BLOCKER_OPTION_CAP = 6;
 const BLOCKER_TEXT_MAX = 2000;
+/** Longest a blocker's question may be. It is the card's headline, read in a glance on a
+ *  desktop card and a phone notification; the explanation belongs in `context`. */
+export const BLOCKER_QUESTION_MAX = 200;
+/** A question that enumerates its own choices — "(a) … (b) …", "(1) … (2) …" — is doing the
+ *  options' job. */
+const ENUMERATED_CHOICES = /\(\s*(?:a|1|i)\s*\)[\s\S]*\(\s*(?:b|2|ii)\s*\)/i;
 
 /** Drop a blocker that no longer describes the task: it lives only while the stored lane is
  *  `blocked`. Every commit applies this, so moving a row out of Blocked by any route (panel,
@@ -289,6 +295,7 @@ export interface BlockerInput {
   context?: string | null;
   options?: { label?: string; detail?: string | null; recommended?: boolean }[];
   command?: string | null;
+  pick?: string | null;
 }
 
 /** Rows maiTerm files the human's own questions on, on a Hive coordinator's tab
@@ -366,6 +373,26 @@ export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Da
   if ([question, context ?? '', command ?? ''].some((s) => s.length > BLOCKER_TEXT_MAX)) {
     return { ok: false, detail: `Keep blocker text under ${BLOCKER_TEXT_MAX} characters; put the long version in the task's detail.` };
   }
+  // The question is the card's headline. Agents put everything in it — choices, the
+  // recommendation, caveats — and the human got one bold paragraph and a bare text box.
+  if (kind === 'decision' && ENUMERATED_CHOICES.test(question)) {
+    return {
+      ok: false,
+      detail:
+        'blocker.question lists its own choices. Ask one short question, and give each choice as an entry in options ' +
+        '(label: the choice, detail: what it costs, recommended: true on the ones you recommend). If the human may pick ' +
+        'several of them, set pick: "many".',
+    };
+  }
+  if (question.length > BLOCKER_QUESTION_MAX) {
+    return {
+      ok: false,
+      detail:
+        `blocker.question is ${question.length} characters; keep it to one sentence under ${BLOCKER_QUESTION_MAX}. ` +
+        'Put what you found and what each choice costs in context' +
+        (kind === 'decision' ? ', and the choices themselves in options.' : '.'),
+    };
+  }
   const options: BlockerOption[] = (raw.options ?? []).map((o) => ({
     label: o?.label?.trim() ?? '',
     ...(o?.detail?.trim() ? { detail: o.detail.trim() } : {}),
@@ -381,6 +408,13 @@ export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Da
   if (command && kind !== 'action') {
     return { ok: false, detail: 'Only an action blocker takes a command.' };
   }
+  const pick = raw.pick ?? null;
+  if (pick !== null && pick !== 'one' && pick !== 'many') {
+    return { ok: false, detail: 'blocker.pick is "one" (the default) or "many".' };
+  }
+  if (pick === 'many' && (kind !== 'decision' || options.length < 2)) {
+    return { ok: false, detail: 'pick: "many" needs a decision blocker with at least two options to tick.' };
+  }
   return {
     ok: true,
     blocker: {
@@ -389,6 +423,7 @@ export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Da
       ...(context ? { context } : {}),
       ...(options.length ? { options } : {}),
       ...(command ? { command } : {}),
+      ...(pick === 'many' ? { pick: 'many' as const } : {}),
       asked_at: now,
       asked_by: by,
     },
@@ -441,6 +476,8 @@ export interface BlockerAnswer {
   asked_at: string;
   /** Index into a decision's options. */
   option?: number;
+  /** The options ticked on a `pick: 'many'` decision; `[]` is "none of them". */
+  options?: number[];
   /** Free text: the answer itself for a decision without options, or a comment. */
   text?: string;
 }
@@ -448,6 +485,25 @@ export interface BlockerAnswer {
 export type AnswerResult =
   | { ok: true; note: string; message: string }
   | { ok: false; reason: 'no_blocker' | 'stale' | 'bad_answer'; detail: string };
+
+/** Whether the human may tick several of a blocker's options. Mirrors `TaskBlocker::picks_many`. */
+export function picksMany(b: Pick<TaskBlocker, 'kind' | 'pick' | 'options'>): boolean {
+  return b.kind === 'decision' && b.pick === 'many' && !!b.options?.length;
+}
+
+/** A pick-several answer in words: every option is named as chosen or not, so the agent never
+ *  has to infer the ones the human left unticked. */
+export function pickedLines(labels: string[], picked: number[]): { note: string; message: string } {
+  const yes = labels.filter((_, i) => picked.includes(i));
+  const no = labels.filter((_, i) => !picked.includes(i));
+  const list = (xs: string[]) => xs.map((x) => `\n- ${x}`).join('');
+  return {
+    note: yes.length ? `do ${yes.join('; ')}${no.length ? `. Not: ${no.join('; ')}` : ''}` : `none of them (${no.join('; ')})`,
+    message: yes.length
+      ? `Do these:${list(yes)}${no.length ? `\nNot these:${list(no)}` : ''}`
+      : `None of them. Not these:${list(no)}`,
+  };
+}
 
 /**
  * Turn the human's answer into the log line and the message typed to the agent. Pure; the
@@ -467,6 +523,27 @@ export function answerBlocker(task: Task, answer: BlockerAnswer): AnswerResult {
   }
   const text = answer.text?.trim() ?? '';
   const opts = b.options ?? [];
+  const many = picksMany(b);
+  const ref = `task "${task.title}" (id ${task.id})`;
+  const close = `\n\nThe task is back in Active. Carry on from here, and close it with updateTasks (task id ${task.id}) when it is done.`;
+  if (many && answer.option !== undefined) {
+    return { ok: false, reason: 'bad_answer', detail: 'This question takes several picks: tick the ones to do.' };
+  }
+  if (!many && answer.options !== undefined) {
+    return { ok: false, reason: 'bad_answer', detail: 'This question takes one choice.' };
+  }
+  if (many && answer.options !== undefined) {
+    const picked = answer.options;
+    if (!picked.every((i) => Number.isInteger(i) && !!opts[i]) || new Set(picked).size !== picked.length) {
+      return { ok: false, reason: 'bad_answer', detail: 'That option is not one of the choices offered.' };
+    }
+    const lines = pickedLines(opts.map((o) => o.label), picked);
+    return {
+      ok: true,
+      note: `Decided: ${lines.note}${text ? ` (${text})` : ''}`,
+      message: `[maiTerm] The human answered your question on ${ref}.\nQuestion: ${b.question}\n${lines.message}${text ? `\nThey added: ${text}` : ''}${close}`,
+    };
+  }
   let choice: string | null = null;
   if (answer.option !== undefined) {
     if (b.kind !== 'decision' || !Number.isInteger(answer.option) || !opts[answer.option]) {
@@ -475,14 +552,12 @@ export function answerBlocker(task: Task, answer: BlockerAnswer): AnswerResult {
     choice = opts[answer.option].label;
   }
   if (b.kind === 'decision' && !choice && !text) {
-    return { ok: false, reason: 'bad_answer', detail: opts.length ? 'Pick one of the options, or write an answer.' : 'Write an answer.' };
+    return { ok: false, reason: 'bad_answer', detail: many ? 'Tick the ones to do, or write an answer.' : opts.length ? 'Pick one of the options, or write an answer.' : 'Write an answer.' };
   }
 
-  const ref = `task "${task.title}" (id ${task.id})`;
   const comment = text ? `\n${text}` : '';
-  // The task may have been adopted from the runtime's own todo list when the question was set
-  // (claudeCode handleUpdateTasks), and then only the agent closes it: say so.
-  const close = `\n\nThe task is back in Active. Carry on from here, and close it with updateTasks (task id ${task.id}) when it is done.`;
+  // `close`: the task may have been adopted from the runtime's own todo list when the question
+  // was set (claudeCode handleUpdateTasks), and then only the agent closes it: say so.
   if (b.kind === 'decision') {
     const said = choice ?? text;
     return {

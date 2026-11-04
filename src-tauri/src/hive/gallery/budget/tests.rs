@@ -279,6 +279,7 @@ fn an_agent_made_budget_row_does_not_stop_the_human_being_asked() {
         context: None,
         options: Vec::new(),
         command: None,
+        pick: None,
         asked_at: "t0".into(),
         asked_by: "agent".into(),
     };

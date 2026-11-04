@@ -383,6 +383,7 @@ pub fn criteria_blocker(goal: &str, criteria: &[String], asked_at: &str) -> Task
             BlockerOption { label: CRITERIA_CHANGE.into(), detail: Some("answer with what to change".into()), recommended: false },
         ],
         command: None,
+        pick: None,
         asked_at: asked_at.into(),
         asked_by: "agent".into(),
     }

@@ -533,7 +533,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.25";
+const PROTOCOL_VERSION: &str = "0.26";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -815,6 +815,9 @@ struct TaskAnswerBody {
     /// question could land on one the agent asked after the phone last refreshed.
     asked_at: String,
     option: Option<u32>,
+    /// v0.26: the options ticked on a `pick: "many"` question (indexes into its `picks`); `[]`
+    /// is "none of them". Refused on a pick-one question, and `option` on a pick-several one.
+    options: Option<Vec<u32>>,
     text: Option<String>,
 }
 
@@ -832,7 +835,7 @@ async fn post_task_answer(
 ) -> Result<Json<Value>, StatusCode> {
     authorize_human(&s, &headers)?;
     let window = board::window_for_task(&s.app, &task_id).ok_or(StatusCode::NOT_FOUND)?;
-    let args = json!({ "id": task_id, "askedAt": body.asked_at, "option": body.option, "text": body.text });
+    let args = json!({ "id": task_id, "askedAt": body.asked_at, "option": body.option, "options": body.options, "text": body.text });
     let mut out = overlord_act(&s, &window, "tasks.answer", args).await;
     log_task_write("answer", &task_id, &out);
     attach_confirmed_row(&s, &task_id, &mut out);
