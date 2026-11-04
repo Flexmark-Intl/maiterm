@@ -694,6 +694,7 @@ pub fn file_pause_blocker(ws: &mut Workspace, coordinator: Option<&str>, limit: 
         context: Some(format!("Claude said: \"{}\". {}", quote_limit(limit), cause.explain())),
         options: Vec::new(),
         command: None,
+        pick: None,
         asked_at: now.into(),
         asked_by: "agent".into(),
     };
@@ -1455,6 +1456,7 @@ mod tests {
             context: None,
             options: Vec::new(),
             command: None,
+            pick: None,
             asked_at: "t0".into(),
             asked_by: "agent".into(),
         };

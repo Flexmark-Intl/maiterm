@@ -456,6 +456,8 @@ export interface TaskBlocker {
   options?: BlockerOption[];
   /** For an action: the exact command the human has to run. */
   command?: string | null;
+  /** 'many': the human ticks any of `options` and one Send answers them all. Absent: pick one. */
+  pick?: 'many' | null;
   asked_at: string;
   asked_by: TaskNote['by'];
 }

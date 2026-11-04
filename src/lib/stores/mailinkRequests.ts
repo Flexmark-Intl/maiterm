@@ -66,14 +66,19 @@ export async function handleMailinkRequest(req: MailinkRequest): Promise<void> {
         // no freshness pause of its own, so askedAt is its whole stale guard, and required.
         const opt = (req.args ?? {}).option;
         const text = (req.args ?? {}).text;
+        // v0.26: the options ticked on a pick-several question.
+        const many = (req.args ?? {}).options;
         if (typeof a.id !== 'string' || typeof a.askedAt !== 'string') {
           result = { error: 'id and askedAt are required' };
         } else if (opt !== undefined && opt !== null && typeof opt !== 'number') {
           result = { error: 'option must be a number' };
+        } else if (many !== undefined && many !== null && !(Array.isArray(many) && many.every((i) => typeof i === 'number'))) {
+          result = { error: 'options must be an array of numbers' };
         } else {
           const r = await overlordStore.answerBlocker(a.id, {
             asked_at: a.askedAt,
             option: typeof opt === 'number' ? opt : undefined,
+            options: Array.isArray(many) ? (many as number[]) : undefined,
             text: typeof text === 'string' ? text : undefined,
           });
           // A refusal (stale, no longer blocked, a bad option) is the §13.4 envelope's

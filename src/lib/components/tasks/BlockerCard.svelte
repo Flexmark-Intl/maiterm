@@ -12,7 +12,7 @@
   import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
   import { coordinatorHolds, withCoordinatorText } from '$lib/hive/model';
   import { blockerDrafts } from '$lib/stores/waiting.svelte';
-  import { BLOCKER_LABEL } from '$lib/tasks/model';
+  import { BLOCKER_LABEL, picksMany } from '$lib/tasks/model';
   import { fmtAge } from '$lib/overlord/format';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import TaskMarkdown from './TaskMarkdown.svelte';
@@ -67,6 +67,29 @@
 
   let sending = $state(false);
 
+  /** A pick-several question (`pick: 'many'`): its options are checkboxes and one Send answers
+   *  them all. The ticks belong to the question they were made under, like the draft: a re-ask
+   *  starts again from the agent's recommended ones. */
+  const many = $derived(b ? picksMany(b) : false);
+  let ticks = $state<{ askedAt: string; set: number[] }>({ askedAt: '', set: [] });
+  const ticked = $derived(
+    ticks.askedAt === b?.asked_at ? ticks.set : (b?.options ?? []).flatMap((o, i) => (o.recommended ? [i] : [])),
+  );
+  /** A tick takes the same two guards as typing: a question that just appeared may have replaced
+   *  the one being ticked, its options in a new order, and a double-click's second click can land
+   *  on the card that slid up under it. */
+  function toggle(e: MouseEvent, i: number) {
+    if (!b) return;
+    if (isFresh() || secondClick(e)) {
+      // A checkbox's click default is the toggle: preventing it leaves the box as it was.
+      e.preventDefault();
+      if (isFresh()) onnote?.('The agent just changed its question. Read it again before ticking.');
+      return;
+    }
+    const cur = ticked;
+    ticks = { askedAt: b.asked_at, set: cur.includes(i) ? cur.filter((x) => x !== i) : [...cur, i].sort((x, y) => x - y) };
+  }
+
   /** The Hive route of a worker's question, and whether its coordinator holds it alone. */
   const route = $derived(b ? hivePrompts.blockerOwner(task.id, b.asked_at) : null);
   const held = $derived(coordinatorHolds(route));
@@ -102,7 +125,9 @@
    *  drops it. */
   async function answer(option: number | undefined) {
     if (!b || sending) return;
-    if (!draftText.trim() && isFresh()) {
+    // The ticks on a pick-several question are pre-set from the agent's recommendations, so a
+    // Send is never only the human's own words: it answers whatever is showing.
+    if ((many || !draftText.trim()) && isFresh()) {
       onnote?.('The agent just changed its question. Read it again before answering.');
       return;
     }
@@ -113,7 +138,12 @@
     // and its props are gone after it.
     const taskId = task.id;
     try {
-      const r = await overlordStore.answerBlocker(taskId, { asked_at: askedAt, option, text: draftText });
+      const r = await overlordStore.answerBlocker(taskId, {
+        asked_at: askedAt,
+        option,
+        ...(many ? { options: [...ticked] } : {}),
+        text: draftText,
+      });
       if (!r.answered) {
         onnote?.(r.detail ?? 'Could not answer.');
         return;
@@ -164,7 +194,19 @@
     {#if held}<span class="with">{withCoordinatorText(route?.due_ms, clock)}</span>{/if}
     <span class="q"><TaskText text={b.question} of={task.id} /></span>
     {#if b.context}<div class="ctx"><TaskMarkdown text={b.context} of={task.id} /></div>{/if}
-    {#if b.options?.length}
+    {#if many && b.options?.length}
+      <div class="opts" role="group" aria-label="Choose any">
+        {#each b.options as o, i (i)}
+          <label class="opt tick" class:on={ticked.includes(i)} class:off={sending || held}>
+            <input type="checkbox" checked={ticked.includes(i)} disabled={sending || held} onclick={(e) => toggle(e, i)} />
+            <span class="body">
+              <b><TaskText text={o.label} of={task.id} />{#if o.recommended}<em>recommended</em>{/if}</b>
+              {#if o.detail}<span><TaskText text={o.detail} of={task.id} /></span>{/if}
+            </span>
+          </label>
+        {/each}
+      </div>
+    {:else if b.options?.length}
       <div class="opts">
         {#each b.options as o, i (i)}
           <button class="opt" disabled={sending || held} onclick={(e) => { if (!secondClick(e)) answer(i); }}>
@@ -179,9 +221,11 @@
     <div class="answer">
       <input
         id="blocker-answer-{task.id}"
-        placeholder={b.kind === 'decision'
-          ? b.options?.length ? 'Or write an answer…' : 'Your answer…'
-          : 'Add a comment (optional)…'}
+        placeholder={many
+          ? 'Add a comment (optional)…'
+          : b.kind === 'decision'
+            ? b.options?.length ? 'Or write an answer…' : 'Your answer…'
+            : 'Add a comment (optional)…'}
         value={draftText}
         oninput={(e) => {
           // Typing into a question that just appeared: it may have replaced the one being
@@ -194,10 +238,14 @@
           setDraft({ askedAt: b.asked_at, text: e.currentTarget.value });
         }}
         onkeydown={(e) => {
-          if (e.key === 'Enter' && (b.kind !== 'decision' || draftText.trim())) answer(undefined);
+          if (e.key === 'Enter' && (many || b.kind !== 'decision' || draftText.trim())) answer(undefined);
         }}
       />
-      {#if b.kind === 'decision'}
+      {#if many}
+        <Tooltip text={ticked.length ? `Do the ${ticked.length} ticked, not the rest` : 'None of them'}>
+          <button class="send" disabled={sending} onclick={(e) => { if (!secondClick(e)) answer(undefined); }}>{ticked.length ? 'Send' : 'Send: none'}</button>
+        </Tooltip>
+      {:else if b.kind === 'decision'}
         <button class="send" disabled={sending || !draftText.trim()} onclick={(e) => { if (!secondClick(e)) answer(undefined); }}>Send</button>
       {:else}
         <button class="send" disabled={sending} onclick={(e) => { if (!secondClick(e)) answer(undefined); }}>{b.kind === 'action' ? "I've done it" : 'It arrived'}</button>
@@ -275,6 +323,13 @@
   .opt:hover:not(:disabled), .opt:focus-visible { border-color: var(--kind); }
   .opt em { margin-left: 6px; color: var(--kind); font-style: normal; font-size: 9.5px; font-weight: 400; }
   .opt span { color: var(--fg-dim); }
+  .opt.tick { flex-direction: row; align-items: flex-start; gap: 7px; }
+  .opt.tick input { margin: 2px 0 0; accent-color: var(--kind); flex: none; cursor: inherit; }
+  .opt.tick .body { display: flex; flex-direction: column; gap: 1px; min-width: 0; color: var(--fg); }
+  .opt.tick .body > span { color: var(--fg-dim); }
+  .opt.tick.on { border-color: color-mix(in srgb, var(--kind) 60%, var(--bg-light)); }
+  .opt.tick.off { opacity: 0.4; cursor: default; }
+  .opt.tick:hover:not(.off), .opt.tick:focus-within { border-color: var(--kind); }
   .cmd {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 10.5px;

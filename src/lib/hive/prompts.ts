@@ -5,7 +5,7 @@
 
 import { hiveBlockerAnswered } from '$lib/tauri/commands';
 import type { HiveBlockerAnswerArg, HivePromptNotice, HivePromptRoute, TaskBlocker } from '$lib/tauri/types';
-import type { BlockerAnswer } from '$lib/tasks/model';
+import { pickedLines, type BlockerAnswer } from '$lib/tasks/model';
 import type { ToastSource } from '$lib/stores/toasts.svelte';
 import { HIVE_HUMAN_KIND } from './model';
 
@@ -66,8 +66,14 @@ export function handleNotice(n: HivePromptNotice, timeoutSecs: number, dispatch:
 
 /** The arguments for `hive_blocker_answered`: the chosen option's label, and the words. */
 export function blockerAnswerArg(blocker: TaskBlocker, answer: BlockerAnswer): HiveBlockerAnswerArg {
+  const text = answer.text?.trim() ?? '';
+  // A pick-several answer has no one label: the decision log records it in words.
+  if (answer.options !== undefined) {
+    const picked = pickedLines((blocker.options ?? []).map((o) => o.label), answer.options).note;
+    return { option: null, text: text ? `${picked} (${text})` : picked };
+  }
   const label = answer.option !== undefined ? (blocker.options?.[answer.option]?.label ?? null) : null;
-  return { option: label, text: answer.text?.trim() ?? '' };
+  return { option: label, text };
 }
 
 type Logger = (msg: string) => void;

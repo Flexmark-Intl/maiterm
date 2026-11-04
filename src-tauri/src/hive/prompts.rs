@@ -506,6 +506,9 @@ fn frame_body(view: &PromptView) -> String {
                     let opts: Vec<String> =
                         b.options.iter().map(|o| format!("{}{}", one_line(&o.label, 120), if o.recommended { " (the worker recommends it)" } else { "" })).collect();
                     s.push_str(&format!("Options: {}\n", opts.join(" · ")));
+                    if b.picks_many() {
+                        s.push_str("It takes several: answer in words with which of these to do and which not.\n");
+                    }
                 }
             }
         }
@@ -924,7 +927,8 @@ pub(crate) fn check_answer(view: &PromptView, args: &Value) -> Result<Checked, S
             if a.chars().count() > MAX_ANSWER {
                 return Err(format!("Keep the answer under {MAX_ANSWER} characters."));
             }
-            if view.options.is_empty() {
+            // A pick-several question has no single label to match: the answer says which to do.
+            if view.options.is_empty() || view.blocker.as_ref().is_some_and(|b| b.picks_many()) {
                 return Ok(Checked::Blocker(a.to_string()));
             }
             view.options

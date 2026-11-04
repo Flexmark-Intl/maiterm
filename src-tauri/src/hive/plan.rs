@@ -226,6 +226,7 @@ pub fn plan_blocker(goal: &str, a: &ProposeArgs, asked_at: &str) -> TaskBlocker 
             BlockerOption { label: ANSWER_CHANGE.into(), detail: Some("answer with what to change".into()), recommended: false },
         ],
         command: None,
+        pick: None,
         asked_at: asked_at.into(),
         asked_by: "agent".into(),
     }

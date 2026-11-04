@@ -323,7 +323,7 @@ decisions queue, and Focus), and it will be the phone's "prompt me".
 ```
 Task.blocker: Option<TaskBlocker>
 TaskBlocker { kind, question, context?, options[{label, detail?, recommended?}], command?,
-              asked_at, asked_by }
+              pick?, asked_at, asked_by }      // pick: "many" — §3.1.1
 ```
 
 `context` renders as markdown on every surface (`TaskMarkdown.svelte`, through the transcript
@@ -401,6 +401,39 @@ the tab by the human", and **nothing is typed to the agent**, which already has 
 Same `asked_at` stale guard, and BlockerCard gives it the same two click guards as an answer,
 since it closes whatever question is showing. The phone has no dismiss yet (it would be a wire
 change).
+
+### 3.1.1 Pick-several decisions, and the question as a headline (2026-11-02)
+
+Agents asked "which of these should I do?" by cramming everything into `question`: "(a) reword
+the question …; (b) lazy-load the reviews …; (c) leave the catalog … Recommended: (a) and (b)".
+The card showed one bold paragraph and a bare text box. Single-choice `options` couldn't say
+"several of these", which is why the agents gave up on them.
+
+**`pick: "many"`** (`TaskBlocker.pick`, a String kind, absent = pick one) makes a decision's
+options checkboxes with one Send. `BlockerCard` pre-ticks the `recommended` ones. The ticks
+belong to the question they were made under, like the draft: a re-ask starts again from the
+agent's recommendations. Because the ticks are pre-set, Send is refused while the question is
+fresh even with a comment typed (§3.1's 1.5 s guard). The answer (`answerBlocker` with
+`options: number[]`, `[]` = none) names **every** option as done or not ("Do these: … / Not
+these: …"), so the agent never infers what an unticked box meant. Words alone still answer it.
+`pick: "many"` is refused unless it's a decision with at least two options. Several separate
+cards stay the right tool for unrelated decisions on different tasks. For one change set they
+mean three answers typed into the tab and three chances to notify the human, which is what
+"one question, one notification" exists to stop.
+
+The phone (maiLink 0.26) gets `pick`, `picks` and `pickContext`, with `options` emptied and the
+choices listed in `context`, so a phone too old to tick answers in words instead of with one tap
+that means "only this one". A Hive coordinator answers a worker's pick-several question in
+words too (`hive/prompts.rs`), and the decision log records the answer as text.
+
+**`parseBlocker` refuses a question doing another field's job**:
+- a decision question that enumerates its own choices (`(a) … (b)`, `(1) … (2)`), pointing at
+  `options` and `pick: "many"`;
+- any question over `BLOCKER_QUESTION_MAX` (200) characters, pointing at `context`.
+
+A refusal costs the agent a turn, and it then asks properly; nothing it asked is lost. The rules
+apply only to what agents file: Rust's own blockers (Hive budget, pause and plan questions) don't
+go through `parseBlocker`.
 
 ## 4. Workstreams
 

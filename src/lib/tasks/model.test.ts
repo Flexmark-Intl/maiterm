@@ -143,6 +143,65 @@ describe('a blocker says what a Blocked task is waiting for', () => {
     it('refuses a task that has moved on', () => {
       expect(answerBlocker({ ...decision, status: 'active' }, { asked_at: at, option: 0 })).toMatchObject({ ok: false, reason: 'no_blocker' });
     });
+
+    describe('a pick-several decision', () => {
+      const several = withBlocker({
+        kind: 'decision',
+        question: 'Which of these landing-page changes should I make?',
+        pick: 'many',
+        options: [{ label: 'Reword the question', recommended: true }, { label: 'Lazy-load reviews', recommended: true }, { label: 'Edit the catalog' }],
+      });
+
+      it('names every option as done or not', () => {
+        const r = answerBlocker(several, { asked_at: at, options: [0, 1], text: 'keep the old copy in git' });
+        expect(r).toMatchObject({ ok: true, note: 'Decided: do Reword the question; Lazy-load reviews. Not: Edit the catalog (keep the old copy in git)' });
+        if (r.ok) {
+          expect(r.message).toContain('Do these:\n- Reword the question\n- Lazy-load reviews\nNot these:\n- Edit the catalog');
+          expect(r.message).toContain('They added: keep the old copy in git');
+        }
+      });
+
+      it('takes none of them as an answer', () => {
+        const r = answerBlocker(several, { asked_at: at, options: [] });
+        expect(r).toMatchObject({ ok: true });
+        if (r.ok) expect(r.message).toContain('None of them.');
+      });
+
+      it('takes words alone (an older phone answers so)', () => {
+        expect(answerBlocker(several, { asked_at: at, text: 'only the first' })).toMatchObject({ ok: true, note: 'Decided: only the first' });
+      });
+
+      it('refuses a single pick, a bad index, a repeat, and several picks on a pick-one question', () => {
+        expect(answerBlocker(several, { asked_at: at, option: 0 })).toMatchObject({ ok: false, reason: 'bad_answer' });
+        expect(answerBlocker(several, { asked_at: at, options: [3] })).toMatchObject({ ok: false, reason: 'bad_answer' });
+        expect(answerBlocker(several, { asked_at: at, options: [0, 0] })).toMatchObject({ ok: false, reason: 'bad_answer' });
+        expect(answerBlocker(decision, { asked_at: at, options: [0] })).toMatchObject({ ok: false, reason: 'bad_answer' });
+      });
+    });
+  });
+
+  describe('a question that does the other fields’ job is refused', () => {
+    it('refuses a decision question that lists its own choices', () => {
+      expect(refused({ kind: 'decision', question: 'Which? (a) reword it; (b) lazy-load the reviews' })).toContain('options');
+      expect(refused({ kind: 'decision', question: 'Pick (1) Redis or (2) Postgres' })).toContain('options');
+    });
+
+    it('keeps a question that only calls functions', () => {
+      expect(ok({ kind: 'decision', question: 'Should foo(a) call bar(b) first?' }).question).toContain('foo(a)');
+      expect(ok({ kind: 'decision', question: 'Is `x(i)` the same as y (2)?' }).question).toContain('x(i)');
+    });
+
+    it('refuses a question over the length limit, and keeps ordinary ones', () => {
+      expect(refused({ kind: 'external', question: 'x'.repeat(201) })).toContain('context');
+      expect(ok({ kind: 'decision', question: 'Deploy the relay to production now? (it is Friday)' }).question).toContain('Friday');
+    });
+
+    it('takes pick: many only on a decision with two or more options', () => {
+      expect(ok({ kind: 'decision', question: 'Which?', pick: 'many', options: [{ label: 'A' }, { label: 'B' }] }).pick).toBe('many');
+      expect(ok({ kind: 'decision', question: 'Which?', pick: 'one', options: [{ label: 'A' }, { label: 'B' }] }).pick).toBeUndefined();
+      expect(refused({ kind: 'decision', question: 'Which?', pick: 'many', options: [{ label: 'A' }] })).toContain('two options');
+      expect(refused({ kind: 'decision', question: 'Which?', pick: 'some' })).toContain('"many"');
+    });
   });
 
   it('lives only in the blocked lane', () => {
