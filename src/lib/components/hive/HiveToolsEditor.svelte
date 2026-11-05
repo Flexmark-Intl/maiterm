@@ -28,16 +28,33 @@
   /** This Mac's tools, without setup plumbing; null until detection answers. */
   let detected = $state<HiveDetectedTool[] | null>(null);
   let detectFailed = $state(false);
-  hiveDetectTools()
-    .then((found) => {
-      if (alive) detected = pickerTools(found);
-    })
-    .catch((e) => {
-      if (!alive) return;
-      detected = [];
-      detectFailed = true;
-      logError(`hive settings: tool detection failed: ${e}`);
-    });
+  /** Detection's newest request: an older answer never writes over a newer list. */
+  let detectSeq = 0;
+  function detect() {
+    const mine = ++detectSeq;
+    hiveDetectTools()
+      .then((found) => {
+        if (!alive || mine !== detectSeq) return;
+        detected = pickerTools(found);
+        detectFailed = false;
+      })
+      .catch((e) => {
+        if (!alive || mine !== detectSeq) return;
+        logError(`hive settings: tool detection failed: ${e}`);
+        // A failed re-detection keeps the list it had; only a first failure leaves none.
+        if (detected !== null) return;
+        detected = [];
+        detectFailed = true;
+      });
+  }
+  detect();
+
+  /** Detect again: the media panel above set something up (docs/hive-media.md §6). A tool that
+   *  became ready appears in the picker as one the human can add; nothing is added to the Hive's
+   *  tools, and the picks are left as they are: Save is the human's. */
+  export function redetect() {
+    detect();
+  }
 
   /** Seeded once, from the Hive as the sheet opened; Cancel and Save seed it again. */
   let picked = $state(seedPicked(untrack(() => hive.tools)));

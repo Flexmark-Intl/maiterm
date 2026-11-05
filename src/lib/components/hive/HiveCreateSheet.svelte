@@ -37,7 +37,7 @@
   import { defaultsFromWizard, defaultToolIds, FALLBACK_CAP, fullPacks, HIVE_EFFORTS, HIVE_MODELS, knownTools, pickedItems, summarizeTools, wizardStart } from '$lib/hive/defaults';
   import HiveToolPicker from './HiveToolPicker.svelte';
   import HiveMediaPanel from './HiveMediaPanel.svelte';
-  import { isSetupOnly, pickerTools, shouldStartOpen } from '$lib/hive/media';
+  import { flippedIds, isSetupOnly, picksAfterRedetect, pickerTools, shouldStartOpen } from '$lib/hive/media';
 
   interface Props {
     workspaceId: string;
@@ -102,7 +102,9 @@
   /** Closed or created: a later unmount (another proposal opened over this one) has nothing
    *  left to keep. */
   let finished = false;
-  onDestroy(() => { if (!finished) keepDraft(); });
+  /** Gone: nothing that answers later (a detection) writes into it. */
+  let unmounted = false;
+  onDestroy(() => { unmounted = true; if (!finished) keepDraft(); });
   /** Whether the preflight's answer fills in the defaults (the Primary, the cap): a fresh open,
    *  or a Start over made before it answered. */
   let useDefaults = !saved;
@@ -203,6 +205,7 @@
     cap = d.cap ?? preflight?.default_cap ?? FALLBACK_CAP; landing = 'base';
     coordModel = d.coordModel; coordEffort = d.coordEffort; workerModel = d.workerModel; workerEffort = d.workerEffort;
     picked = new Set(tools ? defaultToolIds(d, tools) : d.tools.filter((id) => !isSetupOnly(id)));
+    touched = new Set();
     budgetDollars = d.budgetDollars; pushAfterLand = d.pushAfterLand; phone = d.phone;
     toolsOpen = false; savedDefaults = false;
     step = 0; reached = 0;
@@ -358,17 +361,46 @@
     }
   }
 
-  hiveDetectTools()
-    .then((found) => {
-      // Setup plumbing (cli:brew) is detected for hive_media_status but is never a worker's tool.
-      const t = pickerTools(found);
-      tools = t;
-      // A default (or a draft's pick) this machine no longer has is dropped, silently: Create
-      // sends only what the queen can really use. Defaults also bring every current member of
-      // a pack picked whole, a skill added to it since included.
-      picked = new Set(useDefaults ? defaultToolIds(fromDefaults, t) : knownTools(picked, t));
-    })
-    .catch((e) => { tools = []; toolsFailed = true; picked = new Set(); logError(`hive: tool detection failed: ${e}`); });
+  /** Tool ids the human ticked or unticked in the picker: a setup never ticks one of these
+   *  (`picksAfterRedetect`). Start over forgets them. */
+  let touched = new Set<string>();
+  function pickTools(next: Set<string>) {
+    for (const id of flippedIds(picked, next)) touched.add(id);
+    picked = next;
+  }
+  /** Detection's newest request: an older answer (the first detection, overtaken by a setup's) is
+   *  dropped rather than written over a newer list. */
+  let detectSeq = 0;
+
+  /** Detect this Mac's tools. `ready` is null for the first detection; after a setup in the media
+   *  panel it is what the setup newly made ready, which is ticked unless the human chose otherwise. */
+  function detectTools(ready: string[] | null) {
+    const mine = ++detectSeq;
+    hiveDetectTools()
+      .then((found) => {
+        if (unmounted || mine !== detectSeq) return;
+        // Setup plumbing (cli:brew) is detected for hive_media_status but is never a worker's tool.
+        const t = pickerTools(found);
+        // The first answer: a default (or a draft's pick) this machine no longer has is dropped,
+        // silently: Create sends only what the queen can really use. Defaults also bring every
+        // current member of a pack picked whole, a skill added to it since included. (A setup's
+        // detection that answers first is the first answer too.)
+        const base = tools === null ? new Set(useDefaults ? defaultToolIds(fromDefaults, t) : knownTools(picked, t)) : picked;
+        tools = t;
+        toolsFailed = false;
+        picked = picksAfterRedetect(base, t, ready ?? [], touched);
+      })
+      .catch((e) => {
+        if (unmounted || mine !== detectSeq) return;
+        logError(`hive: tool detection failed: ${e}`);
+        // A failed re-detection keeps the list it had; only a first failure leaves none.
+        if (tools !== null) return;
+        tools = [];
+        toolsFailed = true;
+        picked = new Set();
+      });
+  }
+  detectTools(null);
   /** Detection failed: Save as my defaults keeps every default tool rather than clear them. */
   let toolsFailed = $state(false);
 
@@ -941,7 +973,7 @@
                The panel reads startOpen once, at mount, and mounts only while this step shows, so the
                goal and folders it reads are the ones the human just left (or a restored draft's). The
                one place it is computed. Phase 4 passes a proposal's `media` here as the third argument. -->
-          <HiveMediaPanel {workspaceId} startOpen={shouldStartOpen(goal, folders)} />
+          <HiveMediaPanel {workspaceId} startOpen={shouldStartOpen(goal, folders)} onchanged={detectTools} />
           <div class="field">
             <span class="label">Tools</span>
             {#if tools === null}
@@ -956,7 +988,7 @@
                   <button type="button" class="link" onclick={() => (toolsOpen = true)}>Change</button>
                 </p>
               {:else}
-                <HiveToolPicker {tools} {picked} onchange={(next) => (picked = next)} />
+                <HiveToolPicker {tools} {picked} onchange={pickTools} />
               {/if}
             {/if}
           </div>

@@ -1,7 +1,9 @@
 <!--
   "What it can make" (docs/hive-media.md §7): what this Mac already covers for each media
   capability, and for one nothing ready covers, the provider to set up and the steps only the
-  human can do. Read-only in this phase: no setup buttons, and it emits nothing.
+  human can do. Each card's "Set up <provider>" (and each alternative's "Set up") opens
+  HiveMediaSetupSheet, which does the setup; the panel fetches again when the sheet says
+  something changed, and tells its parent only through `onchanged`.
 
   Placed by the Create sheet's Tools step, Hive settings and Preferences → Hive. Props:
     workspaceId  the Hive's workspace (the Create sheet's, about to become one, or Hive settings'),
@@ -10,6 +12,9 @@
                  install tab in it.
     startOpen    the caller's `shouldStartOpen()`; read ONCE at mount. After that the human's
                  choice wins, whatever the parent does.
+    onchanged    optional: after the setup sheet changed something and the panel fetched again,
+                 with the tool ids that fetch newly calls ready. The Create sheet and Hive settings
+                 detect their tools again on it (event-driven: never a poll).
 
   Ordering: every fetch takes a `createLatest()` ticket and checks it after each await, so a slow
   first answer can't overwrite a newer one and nothing is set after unmount. All joining and
@@ -22,14 +27,15 @@
   import { warn as logWarn } from '@tauri-apps/plugin-log';
   import { hiveMediaCatalogue, hiveMediaStatus } from '$lib/tauri/commands';
   import type { HiveMediaCatalogue, HiveMediaRow } from '$lib/tauri/types';
-  import { compactLine, createLatest, externalUrl, coverNames, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
+  import { compactLine, createLatest, newlyReady, readyToolIds, externalUrl, coverNames, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
   import type { PanelProvider, PanelRow } from '$lib/hive/media';
 
   interface Props {
     workspaceId: string | null;
     startOpen: boolean;
+    onchanged?: (newlyReady: string[]) => void;
   }
-  let { workspaceId, startOpen }: Props = $props();
+  let { workspaceId, startOpen, onchanged }: Props = $props();
 
   const uid = $props.id();
   const bodyId = `${uid}-body`;
@@ -58,8 +64,10 @@
   const line = $derived(failure ? "Media: couldn't check" : groups ? summaryLine(groups) : 'Media: checking…');
   const empty = $derived(!!groups && groups.common.length + groups.more.length === 0);
 
-  async function load() {
+  /** Fetch again; true when this fetch's answer is the one shown (not overtaken, not unmounted). */
+  async function load(): Promise<boolean> {
     const stale = latest.next();
+    const tell = onchanged;
     // Props and state are read here, before the first await: nothing reads them after unmount.
     const ws = workspaceId;
     const paying = [...pay];
@@ -68,14 +76,22 @@
     failure = null;
     try {
       const [cat, status] = await Promise.all([known ?? hiveMediaCatalogue(), hiveMediaStatus(ws, paying)]);
-      if (stale()) return;
+      if (stale()) return false;
       catalogue = cat;
       rows = status;
     } catch (e) {
-      if (stale()) return;
+      if (stale()) return false;
       failure = String(e);
     }
-    if (!stale()) loading = false;
+    if (stale()) return false;
+    loading = false;
+    if (failure !== null) return false;
+    if (owed !== null) {
+      const before = owed;
+      owed = null;
+      tell?.(newlyReady(before, readyToolIds(rows)));
+    }
+    return true;
   }
 
   onMount(() => {
@@ -118,8 +134,12 @@
     void nextTick().then(() => requestAnimationFrame(() => (opener?.isConnected ? opener : redetectBtn)?.focus()));
   }
 
-  /** The sheet changed something on this Mac: fetch again (a newer fetch wins, as Re-detect's). */
+  /** The sheet changed something on this Mac: the parent is owed a notice, with what was ready
+   *  before, and the panel fetches again. Whichever fetch lands next pays it (a Re-detect or a tick
+   *  may overtake this one), so the notice is never lost to a newer fetch. */
+  let owed: string[] | null = null;
   function setupChanged() {
+    if (owed === null) owed = readyToolIds(rows);
     void load();
   }
 

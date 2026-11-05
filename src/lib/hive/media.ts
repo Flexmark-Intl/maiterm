@@ -354,3 +354,42 @@ export function shouldStartOpen(goal: string, folders: { kind: string }[], media
   if (goalNamesMedia(goal)) return true;
   return !folders.some((f) => f.kind === 'git');
 }
+
+// ─── After a setup: what became ready, and the picks that follow ────────────
+
+/** The tool ids `rows` call ready (a cover in state "ready"), each once. */
+export function readyToolIds(rows: readonly HiveMediaRow[] | null): string[] {
+  if (!rows) return [];
+  return [...new Set(rows.flatMap((r) => r.covered_by.filter((c) => c.state === 'ready').map((c) => c.tool_id)))];
+}
+
+/** The tools ready in `after` that weren't in `before`: what a setup just made usable. */
+export function newlyReady(before: readonly string[], after: readonly string[]): string[] {
+  const had = new Set(before);
+  return after.filter((id) => !had.has(id));
+}
+
+/** The Create sheet's picks after detection runs again because a setup changed this Mac
+ *  (docs/hive-media.md §6). The picks still detected stay as they are, as at first detection
+ *  (`knownTools`: a tool that is gone can't be sent). A tool the setup just made ready is ticked,
+ *  as a media tool the human set up for this Hive, unless the human has ticked or unticked it
+ *  themselves (`touched`): their choice is never overridden. Setup plumbing (`cli:brew`) and a
+ *  ready tool detection doesn't list are never ticked. A new Set, never a mutation. */
+export function picksAfterRedetect(
+  picked: ReadonlySet<string>,
+  detected: readonly Pick<HiveDetectedTool, 'id'>[],
+  ready: readonly string[],
+  touched: ReadonlySet<string>,
+): Set<string> {
+  const have = new Set(detected.map((t) => t.id));
+  const next = new Set([...picked].filter((id) => have.has(id)));
+  for (const id of ready) {
+    if (have.has(id) && !touched.has(id) && !isSetupOnly(id)) next.add(id);
+  }
+  return next;
+}
+
+/** The ids whose tick a picker change flipped: what the human chose, for `picksAfterRedetect`. */
+export function flippedIds(before: ReadonlySet<string>, after: ReadonlySet<string>): string[] {
+  return [...[...before].filter((id) => !after.has(id)), ...[...after].filter((id) => !before.has(id))];
+}

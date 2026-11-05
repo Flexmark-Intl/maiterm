@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compactLine, coverNames, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
+import { compactLine, coverNames, flippedIds, newlyReady, picksAfterRedetect, readyToolIds, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
 import type { HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
 
 const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvider => ({
@@ -438,5 +438,38 @@ describe('compactLine', () => {
   it('a covered row that is not ready keeps its covers and offers Details when a provider is recommended', () => {
     const c = compactLine({ covers: [cover('needs_sign_in')], ready: false, recommended: { ...rec, creditsLine: null } });
     expect(c).toMatchObject({ covered: true, status: '', suggested: null, details: true, detailsLabel: 'Details: fal' });
+  });
+});
+
+describe('after a setup', () => {
+  const row = (capability: string, covers: [string, string][]): HiveMediaRow => ({ capability, covered_by: covers.map(([tool_id, state]) => ({ tool_id, provider: 'p', state })), recommended: null, alternatives: [] });
+  const det = (...ids: string[]) => ids.map((id) => ({ id }));
+
+  it('reads the ready tools once each, and what a setup newly made ready', () => {
+    const rows = [row('video', [['mcp:fal', 'ready'], ['mcp:kling', 'needs_sign_in']]), row('image', [['mcp:fal', 'ready']])];
+    expect(readyToolIds(rows)).toEqual(['mcp:fal']);
+    expect(readyToolIds(null)).toEqual([]);
+    expect(newlyReady(['cli:ffmpeg'], ['cli:ffmpeg', 'mcp:fal'])).toEqual(['mcp:fal']);
+  });
+
+  it('ticks a tool the setup made ready', () => {
+    const next = picksAfterRedetect(new Set(['cli:ffmpeg']), det('cli:ffmpeg', 'mcp:fal'), ['mcp:fal'], new Set());
+    expect([...next].sort()).toEqual(['cli:ffmpeg', 'mcp:fal']);
+  });
+
+  it('never overrides the human: a tool they unticked stays unticked, one they ticked stays ticked', () => {
+    const unticked = picksAfterRedetect(new Set(['cli:ffmpeg']), det('cli:ffmpeg', 'mcp:fal'), ['mcp:fal'], new Set(['mcp:fal']));
+    expect([...unticked]).toEqual(['cli:ffmpeg']);
+    const kept = picksAfterRedetect(new Set(['cli:sox']), det('cli:sox'), [], new Set(['cli:sox']));
+    expect([...kept]).toEqual(['cli:sox']);
+  });
+
+  it('leaves alone tools that were already ready, drops a pick no longer detected, and never ticks plumbing', () => {
+    const next = picksAfterRedetect(new Set(['cli:gone']), det('mcp:old', 'cli:brew'), ['cli:brew', 'mcp:missing'], new Set());
+    expect([...next]).toEqual([]);
+  });
+
+  it('says which ticks a picker change flipped', () => {
+    expect(flippedIds(new Set(['a', 'b']), new Set(['b', 'c'])).sort()).toEqual(['a', 'c']);
   });
 });

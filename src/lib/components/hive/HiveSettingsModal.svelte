@@ -24,6 +24,8 @@
 
   let { hive, workspaceId, name, onclose, onworkers, onautonomy, onqueue, onbudget }: Props = $props();
   let panelEl = $state<HTMLDivElement | null>(null);
+  /** The tools editor, to detect again when the media panel's setup sheet changed something. */
+  let toolsEditor = $state<ReturnType<typeof HiveToolsEditor> | null>(null);
 
   $effect(() => {
     const id = requestAnimationFrame(() => panelEl?.querySelector<HTMLElement>('button')?.focus());
@@ -87,8 +89,8 @@
         <h4>Tools</h4>
         <p class="why scope">On this Mac: what's set up here, not what this Hive's workers get. They get the tools below.</p>
         {#key workspaceId}
-          <HiveMediaPanel {workspaceId} startOpen={mediaStartOpen} />
-          <HiveToolsEditor {hive} {workspaceId} />
+          <HiveMediaPanel {workspaceId} startOpen={mediaStartOpen} onchanged={() => toolsEditor?.redetect()} />
+          <HiveToolsEditor bind:this={toolsEditor} {hive} {workspaceId} />
         {/key}
       </section>
 
