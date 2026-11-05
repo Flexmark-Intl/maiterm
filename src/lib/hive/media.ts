@@ -196,10 +196,15 @@ export function toggleId(ids: readonly string[], id: string): string[] {
   return ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id];
 }
 
-/** "unverified as of 2026-11-03" for a fact the catalogue has not confirmed from a real job: the
- *  provider as a whole, or (given `capability`) that one capability's claim. Null when confirmed. */
+/** "unverified as of 2026-11-03" for a fact the catalogue has not confirmed from a real job. Given
+ *  `capability`, a provider whose unverified claims are listed per capability (`unverified_capabilities`
+ *  non-empty) is flagged only for those: fal's video models are confirmed though its music models are
+ *  not, and Rust sets `unverified` for the provider whenever that list is non-empty. A provider with
+ *  no such list is flagged for every capability when `unverified` (a host or its note). Null when
+ *  confirmed. */
 export function unverifiedNote(provider: Pick<HiveMediaProvider, 'unverified' | 'unverified_capabilities' | 'checked'>, capability?: string): string | null {
-  const flagged = provider.unverified || (capability !== undefined && provider.unverified_capabilities.includes(capability));
+  const perCapability = capability !== undefined && provider.unverified_capabilities.length > 0;
+  const flagged = perCapability ? provider.unverified_capabilities.includes(capability) : provider.unverified;
   if (!flagged) return null;
   return provider.checked ? `unverified as of ${provider.checked}` : 'unverified';
 }

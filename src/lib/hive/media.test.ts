@@ -302,6 +302,16 @@ describe('unverifiedNote', () => {
     expect(unverifiedNote(p, 'video')).toBeNull();
     expect(unverifiedNote(p)).toBeNull();
   });
+  it("flags fal's music and sfx cards only, not its confirmed video, image, lipsync, upscale or 3d", () => {
+    const fal = { unverified: true, unverified_capabilities: ['music', 'sfx'], checked: '2026-11-03' };
+    for (const cap of ['video', 'image', 'lipsync', 'upscale', '3d']) expect(unverifiedNote(fal, cap)).toBeNull();
+    expect(unverifiedNote(fal, 'music')).toBe('unverified as of 2026-11-03');
+    expect(unverifiedNote(fal, 'sfx')).toBe('unverified as of 2026-11-03');
+  });
+  it('flags every capability of a provider unverified as a whole (no per-capability list)', () => {
+    const p = { unverified: true, unverified_capabilities: [] as string[], checked: '2026-11-03' };
+    expect(unverifiedNote(p, 'video')).toBe('unverified as of 2026-11-03');
+  });
   it('says plain "unverified" with no date', () => {
     expect(unverifiedNote({ ...base, unverified: true, checked: '' })).toBe('unverified');
   });
