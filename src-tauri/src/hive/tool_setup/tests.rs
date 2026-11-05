@@ -369,6 +369,31 @@ fn a_card_names_the_hosts_it_brings_and_what_the_phone_can_start() {
     assert!(card("Make it", &hive, "music", &none, &here(true), &[]).unwrap_err().contains("no provider it can set up for music"));
 }
 
+#[tokio::test]
+async fn a_plugin_maiterm_cant_install_is_never_carded_as_an_install() {
+    // Remotion's plugin has no confirmed marketplace, so the install planner refuses it.
+    let p = media::provider("remotion").unwrap();
+    let refused = crate::hive::media::install::plan_for(p, &here(true)).unwrap_err();
+    assert!(refused.contains("Follow Remotion's guide"), "{refused}");
+    let rig = Rig::new(&[]);
+    let c = card("Make it", &rig.hive(), "compose", &row_of(&bare_rows(), "compose"), &here(true), &[]).unwrap();
+    assert_eq!(c.provider_id, "remotion");
+    assert!(!c.effects[0].contains("maiTerm installs"), "{:?}", c.effects);
+    assert_eq!(c.effects[0], format!("Approving opens Remotion\u{2019}s setup sheet in this Hive\u{2019}s window on the Mac, where you install it by hand: {refused}"));
+    assert_eq!(c.effects[1], "Approved from your phone, it waits for you at the Mac.");
+
+    // From the phone nothing starts, and the outcome says why it waits.
+    rig.win.st().install_ok = true;
+    let r = rig.request(args_for(&rig, "compose", "remotion"), "phone");
+    let a = approved_in(&rig.ctx(), &rig.caller, &r, &here(true)).await;
+    assert!(rig.win.st().installs.is_empty());
+    assert_eq!(
+        a.outcome,
+        "Approved, waiting for the Mac: maiTerm can\u{2019}t install Remotion from here, so you install it at the Mac by following Remotion\u{2019}s guide. Its setup sheet is open there."
+    );
+    assert_eq!(a.payload.unwrap()["waiting_for_mac"], true);
+}
+
 #[test]
 fn a_hive_agents_add_mcp_server_for_a_media_provider_points_at_the_ask() {
     let e = refuse_mcp_add("https://mcp.fal.ai/mcp-relay").expect("fal is a media provider");

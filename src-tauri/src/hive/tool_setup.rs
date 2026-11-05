@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use super::create::{generator_hosts, url_host, DetectedTool};
 use super::deliver::one_line;
 use super::gallery::budget::{normalize_host, reaches_remote};
-use super::media::install::{phone_startable, Here, InstallStarted};
+use super::media::install::{phone_startable, plan_for, Here, InstallStarted};
 use super::media::status::{MediaRow, READY};
 use super::media::{self, Provider};
 use super::record::{Hive, STATUS_DONE};
@@ -162,10 +162,24 @@ pub fn credits_line(p: &Provider) -> String {
     }
 }
 
+/// Why maiTerm can't install `p` itself when its setup is a Homebrew or plugin install that
+/// `install::plan_for` refuses here (a plugin with no confirmed marketplace, no Homebrew to run):
+/// the human installs it by hand from the provider's guide.
+fn by_hand(p: &Provider, here: &Here) -> Option<String> {
+    let route = p.mcp_route().or_else(|| p.routes.first())?;
+    if route.kind != "brew" && route.kind != "plugin" {
+        return None;
+    }
+    plan_for(p, here).err()
+}
+
 /// What the setup sheet does for `p`, said before the human approves.
 fn what_setup_does(p: &Provider, here: &Here) -> String {
     let route = p.mcp_route().or_else(|| p.routes.first());
     let name = &p.name;
+    if let Some(e) = by_hand(p, here) {
+        return format!("Approving opens {name}\u{2019}s setup sheet in this Hive\u{2019}s window on the Mac, where you install it by hand: {e}");
+    }
     let how = match route.map(|r| (r.kind.as_str(), r.auth.as_str())) {
         Some(("remote_mcp", "token")) => format!(
             "you paste a key from {name} there (never on the phone); maiTerm keeps it in the keychain and serves {name} through its \
@@ -555,6 +569,9 @@ pub(crate) struct Approved {
 
 /// Why the setup waits for the Mac, from the provider's route.
 fn mac_reason(p: &Provider, here: &Here) -> String {
+    if by_hand(p, here).is_some() {
+        return format!("maiTerm can\u{2019}t install {name} from here, so you install it at the Mac by following {name}\u{2019}s guide", name = p.name);
+    }
     let route = p.mcp_route().or_else(|| p.routes.first());
     match route.map(|r| (r.kind.as_str(), r.auth.as_str())) {
         Some(("remote_mcp", "token")) => format!("a key from {} is pasted at the Mac, never on the phone", p.name),
