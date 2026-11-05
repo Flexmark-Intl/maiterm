@@ -12,7 +12,7 @@
   or its tasks change, diff stats and meta are pushed (hiveFeed), and the rest (lane, blocker,
   note, agent state and the activity line) comes live from the stores. A card's newest assets come
   with its record, refetched when the gallery changes (§4.3). The header's top row is the name and goal,
-  the crew strip (one segment per worker in its card's colour), the status (Running, Paused, or
+  the crew strip (one segment per worker in its card's colour), the status (what an active Hive is doing: Working, Waiting on you, Stalled? or Idle; Paused; or
   while done its Done time and Report, §11.4), Pause or Resume, Settings, and a ⋯ menu with the
   land log and Delete. Notices (throttled, usage limit, a land undone since Done, a suspect repo)
   get a line of their own. The bar under them holds the views and the readouts: slots, budget,
@@ -97,7 +97,7 @@
   import { modSymbol } from '$lib/utils/platform';
   import { HIVE_OPEN_COLUMN, takePendingHiveOpen, type HiveOpenColumnDetail } from '$lib/hive/model';
   import { cardAge, cardState, latestNote, onScreenAgent, sortCards, STATE_LABEL, STATE_ORDER, waves, type CardStateName } from '$lib/hive/cards';
-  import { activityLine, contextGauge, formatDiffStat } from '$lib/hive/activity';
+  import { activityLine, agentWorks, contextGauge, formatDiffStat, hivePulse, landWorks, quietActivity } from '$lib/hive/activity';
   import { strings, type Box, type HiveString } from '$lib/hive/strings';
 
   interface Props {
@@ -229,9 +229,14 @@
       return {
         worker,
         state,
+        // The header's Working counts the agent and the land, never the card's state name.
+        busy: agentWorks(onScreenAgent(worker.phase, agent, tabFields)) || (worker.phase === 'landing' && landWorks(worker.land?.state)),
         note: latestNote(task),
         runtime: tab?.runtime ?? 'claude',
-        activity: activityLine(onScreenAgent(worker.phase, agent, tabFields) ?? undefined, now, hiveFeed.sticky(tab?.id)),
+        // An idle running worker says what it waits on, and past 10 minutes with nothing on its
+        // way that it may be stuck (a Needs-you card already says what it waits on).
+        activity: (state.state === 'idle' ? quietActivity(worker.phase, worker.open_runs ?? 0, onScreenAgent(worker.phase, agent, tabFields) ?? undefined, now) : null)
+          ?? activityLine(onScreenAgent(worker.phase, agent, tabFields) ?? undefined, now, hiveFeed.sticky(tab?.id)),
         diff: formatDiffStat(hiveFeed.diffStat(worker.task_id)),
         // A worker's own model/effort are empty when it takes the Hive's worker default at launch
         // (hive/tools.rs): show that default, never a blank.
@@ -261,6 +266,29 @@
     requests: agentRequestsStore.pending,
   }));
   const needsCount = $derived(needsYouCount(needs));
+
+  // The header's pill for an active Hive (activity.ts `hivePulse`): what is happening now. A
+  // green "Running" whenever the Hive was on made two stalls look like work.
+  const quietCards = $derived(cards.filter((c) => c.activity.tone === 'stalled'));
+  const busyAgents = $derived(cards.filter((c) => c.busy).length + (coordId && agentWorks(agentStateStore.getState(coordId)) ? 1 : 0));
+  const openRuns = $derived(cards.reduce((n, c) => n + (c.worker.open_runs ?? 0), 0));
+  const pulse = $derived(hivePulse({ busyAgents, openRuns, needs: needsCount, stalled: quietCards.length }));
+  const pulseLabel = $derived(
+    pulse === 'working' ? 'Working' : pulse === 'needs_you' ? 'Waiting on you' : pulse === 'stalled' ? 'Stalled?' : 'Idle',
+  );
+  const pulseTip = $derived.by(() => {
+    const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
+    if (pulse === 'working') {
+      const parts = [busyAgents ? `${busyAgents} at work (agents and lands)` : '', openRuns ? `${plural(openRuns, 'run')} going` : ''].filter(Boolean);
+      return `${parts.join(', ')}. Pause stops new workers; running agents finish their turns.`;
+    }
+    if (pulse === 'needs_you') return 'Nothing is working: the Hive waits on your answer under Needs you.';
+    if (pulse === 'stalled') {
+      const who = quietCards.map((c) => `#${c.worker.badge}`).join(', ');
+      return `Nothing is working and no run is going. ${who} ${quietCards.length === 1 ? 'has' : 'have'} been quiet over 10 minutes without reporting, which may mean waiting on something that won't come. maiTerm tells the queen; open the worker's column to see where it stopped.`;
+    }
+    return 'Nothing is working right now and nothing waits on you.';
+  });
   function openAsker(a: HiveAsker, e: MouseEvent) {
     if (a.taskId) openCard(a.taskId, a.tabId, e);
     else open({ workspaceId, tabId: a.tabId });
@@ -422,7 +450,10 @@
   });
   const workers = $derived(board?.workers.length ?? 0);
   /** The header's crew strip: one segment per worker, in the board's state order. */
-  const crew = $derived(cards.map((c) => c.state.state).sort((a, b) => STATE_ORDER[a] - STATE_ORDER[b]));
+  // A quiet worker (idle past 10 minutes with nothing on its way) reads apart from a plain idle one.
+  const crew = $derived(
+    [...cards].sort((a, b) => STATE_ORDER[a.state.state] - STATE_ORDER[b.state.state]).map((c) => (c.activity.tone === 'stalled' ? 'quiet' : c.state.state)),
+  );
   const room = $derived(board?.headroom ?? null);
   /** Slot pips only while they fit at a glance; past that the numbers say it. */
   const PIP_MAX = 10;
@@ -915,7 +946,9 @@
             </Tooltip>
             {@render newGoalButton()}
           {:else}
-            <span class="status running"><span class="pulse" aria-hidden="true"></span>Running</span>
+            <Tooltip text={pulseTip}>
+              <span class="status {pulse}" role="status">{#if pulse === 'working'}<span class="pulse" aria-hidden="true"></span>{:else if pulse === 'stalled'}<Icon name="warning" size={11} />{/if}{pulseLabel}</span>
+            </Tooltip>
             <Tooltip text="No worker starts or relaunches until you resume it; running agents finish their turns">
               <button type="button" class="btn" disabled={resuming} onclick={() => void pause()}><Icon name="pause" size={11} />Pause</button>
             </Tooltip>
@@ -1370,6 +1403,7 @@
   .seg[data-state='starting'], .seg[data-state='landing'] { background: color-mix(in srgb, var(--accent) 75%, transparent); }
   .seg[data-state='needs_you'] { background: var(--orange, #ff9e64); }
   .seg[data-state='blocked'] { background: var(--yellow); }
+  .seg[data-state='quiet'] { background: transparent; box-shadow: inset 0 0 0 1.5px var(--yellow); }
   .seg[data-state='failed'] { background: var(--red); }
   .seg[data-state='reported'] { background: color-mix(in srgb, var(--accent) 35%, transparent); box-shadow: inset 0 0 0 1px var(--accent); }
   .seg[data-state='idle'], .seg[data-state='suspended'], .seg[data-state='stopped'] { background: transparent; box-shadow: inset 0 0 0 1px var(--fg-dim); }
@@ -1378,8 +1412,12 @@
 
   .status { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 11px; font-size: 11.5px; font-weight: 500; white-space: nowrap; }
   .status .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-  .status.running { color: var(--green); background: color-mix(in srgb, var(--green) 12%, transparent); }
-  .status.running .pulse { animation: breathe 2.4s ease-in-out infinite; }
+  /* An active Hive's pill says what is happening (`hivePulse`): only real work pulses. */
+  .status.working { color: var(--green); background: color-mix(in srgb, var(--green) 12%, transparent); }
+  .status.working .pulse { animation: breathe 2.4s ease-in-out infinite; }
+  .status.needs_you { color: var(--orange, #ff9e64); background: color-mix(in srgb, var(--orange, #ff9e64) 12%, transparent); }
+  .status.stalled { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--yellow) 45%, transparent); }
+  .status.idle { color: var(--fg-dim); background: color-mix(in srgb, var(--fg-dim) 12%, transparent); }
   .status.paused { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 13%, transparent); }
   .status.done { color: var(--green); background: color-mix(in srgb, var(--green) 12%, transparent); }
   @keyframes breathe { 50% { opacity: 0.35; } }
@@ -1516,7 +1554,7 @@
   .role { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 3px; padding: 0 4px; }
   @media (prefers-reduced-motion: reduce) {
     .coord { transition: none; }
-    .edge.run, .edge.wait, .status.running .pulse { animation: none; }
+    .edge.run, .edge.wait, .status.working .pulse { animation: none; }
     .chev { transition: none; }
   }
 </style>

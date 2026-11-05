@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activityLine, contextGauge, formatDiffStat, STICKY_MS, stickyStep, toolLine } from './activity';
+import { activityLine, agentWorks, landWorks, contextGauge, formatDiffStat, hivePulse, QUIET_MS, quietActivity, STICKY_MS, stickyStep, toolLine } from './activity';
 import type { HiveDiffStat } from '$lib/tauri/types';
 
 const NOW = Date.parse('2026-10-24T12:00:00Z');
@@ -155,5 +155,54 @@ describe('contextGauge', () => {
     expect(contextGauge({ contextPct: 18, contextUsed: 36_000, contextLimit: 200_000 }, 60)?.tip).toBe('Context 18% used (36k of 200k tokens)');
     expect(contextGauge({}, 60)).toBeNull();
     expect(contextGauge(null, 60)).toBeNull();
+  });
+});
+
+describe('quietActivity', () => {
+  const idle = (minutesAgo: number) => ({ state: 'idle' as const, idleSince: NOW - minutesAgo * 60_000 });
+
+  it('says a running worker waits on its own run, without alarm', () => {
+    expect(quietActivity('running', 1, idle(30), NOW)).toEqual({ text: 'Waiting on its run · 30m', tone: 'busy' });
+    expect(quietActivity('running', 2, idle(0), NOW)).toEqual({ text: 'Waiting on 2 runs', tone: 'busy' });
+  });
+
+  // The live stall: a reviewer idle 19 h, its run result lost, the card a dim "Idle".
+  it('flags a running worker quiet past ten minutes with nothing on its way', () => {
+    expect(quietActivity('running', 0, idle(19 * 60), NOW)).toEqual({ text: 'Quiet · 19h · no report', tone: 'stalled' });
+    expect(quietActivity('running', 0, { state: 'idle', idleSince: NOW - QUIET_MS }, NOW)?.tone).toBe('stalled');
+    expect(quietActivity('running', 0, idle(9), NOW)).toBeNull();
+    expect(quietActivity('running', 0, { state: 'idle' }, NOW)).toBeNull();
+  });
+
+  it('leaves busy agents and other phases to the plain line', () => {
+    expect(quietActivity('running', 0, { state: 'active', idleSince: undefined }, NOW)).toBeNull();
+    expect(quietActivity('reported', 0, idle(60), NOW)).toBeNull();
+    expect(quietActivity('running', 0, undefined, NOW)).toBeNull();
+  });
+});
+
+describe('hivePulse', () => {
+  const p = (o: Partial<{ busyAgents: number; openRuns: number; needs: number; stalled: number }>) => hivePulse({ busyAgents: 0, openRuns: 0, needs: 0, stalled: 0, ...o });
+  it('reads Working only while an agent or a run actually works', () => {
+    expect(p({ busyAgents: 1 })).toBe('working');
+    expect(p({ openRuns: 1, stalled: 1 })).toBe('working');
+    expect(p({ needs: 1, stalled: 1 })).toBe('needs_you');
+    expect(p({ stalled: 1 })).toBe('stalled');
+    expect(p({})).toBe('idle');
+  });
+});
+
+describe('agentWorks and landWorks', () => {
+  it('counts an active agent, never one asking the human', () => {
+    expect(agentWorks({ state: 'active' })).toBe(true);
+    expect(agentWorks({ state: 'active', toolName: 'Bash' })).toBe(true);
+    expect(agentWorks({ state: 'active', toolName: 'AskUserQuestion' })).toBe(false);
+    expect(agentWorks({ state: 'idle' })).toBe(false);
+    expect(agentWorks({ state: 'permission' })).toBe(false);
+    expect(agentWorks(null)).toBe(false);
+  });
+  it('counts a land maiTerm is carrying out, not one waiting on the human', () => {
+    for (const s of ['locking', 'checking', 'advancing', 'queued_batch']) expect(landWorks(s)).toBe(true);
+    for (const s of ['held', 'awaiting_human', null, undefined]) expect(landWorks(s)).toBe(false);
   });
 });

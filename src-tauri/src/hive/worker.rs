@@ -344,8 +344,20 @@ pub struct PendingRun {
     /// The command while it is open; the message to type once it is a result.
     pub text: String,
     pub at: String,
+    /// A served app or a service copy: long-lived, so nothing the worker waits on. The board and
+    /// the quiet check count only the runs that aren't (`PendingRun::awaited`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub server: bool,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+impl PendingRun {
+    /// Its result is on its way to a worker that waits on it: an open run that isn't a server, or
+    /// a result not yet typed.
+    pub fn awaited(&self) -> bool {
+        self.state == RUN_RESULT || (self.state == RUN_OPEN && !self.server)
+    }
 }
 
 /// A worker's task folder. Task ids come from the task list, which is hand-editable, and this

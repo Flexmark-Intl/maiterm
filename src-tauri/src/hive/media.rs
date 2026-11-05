@@ -300,6 +300,7 @@ pub fn providers_for_skill(skill: &str) -> Vec<&'static Provider> {
 
 pub mod install;
 pub mod status;
+pub mod verify;
 pub mod view;
 pub mod whisper;
 

@@ -492,6 +492,7 @@ mod tests {
             review: None,
             land: None,
             assets: Vec::new(),
+            open_runs: 0,
         }
     }
 
