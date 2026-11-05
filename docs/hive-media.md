@@ -317,15 +317,17 @@ so the coordinator counts generations instead.
    the result-host spike.
 
    **Phase 1, catalogue half: built (2026-11-03).** The catalogue, its loader, the host and
-   worker-MCP code moved onto it, and proxied-entry matching by upstream URL. Not built yet:
-   `hive_media_status`, the extra CLIs, plugin and Comfy Desktop detection, and the result-host
-   spike (a separate worker takes the status on top of this). Where it lives:
+   worker-MCP code moved onto it, and proxied-entry matching by upstream URL. The status half is
+   built too: `hive_media_status` (`hive/media/status.rs`), the extra CLIs (`ffprobe`,
+   `whisper-cli` and `brew`, in `DETECTED_CLIS`, `hive/create.rs`), plugin detection per Claude
+   config root (`plugin_hits`), and ComfyUI and Comfy Desktop detection (`comfy_hits`). Not built
+   yet: the result-host spike. Where the catalogue half lives:
    - `resources/hive/media/catalogue.json` and `hive/media.rs`: `catalogue()`, `provider(id)`,
      `capability(id)`, `common_capabilities()`, `providers_for_host(host)`,
      `providers_for_upstream(url)`, `providers_for_native(name, host)`, `providers_for_skill(name)`.
      Beyond §4's fields an entry carries `offer` (`recommend` | `list` | `detect_only`),
      `subscriber_first` (D1), `recommendable`, `default_for`, `capability_notes`, `detect`
-     (`clis`, `plugins`, `port`, `apps`: data for the status, nothing reads it yet) and
+     (`clis`, `plugins`, `port`, `apps`: the recipes `hive_media_status` reads) and
      `match.skills`; a route has `command` (brew) and `plugin_id`. The parse test uses
      `deny_unknown_fields`, so a typo is a failing test.
    - `KNOWN_GENERATOR_HOSTS` and `SKILL_GENERATORS` are gone.
