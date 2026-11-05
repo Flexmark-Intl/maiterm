@@ -16,9 +16,9 @@
  */
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import * as commands from '$lib/tauri/commands';
+import { entryName, sameServerUrl, SERVER_NAME_RE, startSignIn, suggestServerName } from '$lib/mcp/addServer';
 import type { AgentRequest, MoveTargetWindow, Tab, Workspace } from '$lib/tauri/types';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -549,13 +549,6 @@ async function listMcpServers(): Promise<ToolResult> {
   };
 }
 
-/** A server name from the URL's host, as the Preferences pane suggests one. */
-function nameFromUrl(u: URL): string {
-  const labels = u.hostname.split('.').filter((l) => !['mcp', 'api', 'www'].includes(l));
-  const pick = labels.length > 1 ? labels[labels.length - 2] : labels[0] ?? '';
-  return pick.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/^-+/, '').slice(0, 40);
-}
-
 async function addMcpServer(a: { tabId?: string; url?: string; name?: string; reason?: string }): Promise<ToolResult> {
   if (!a.tabId) return { error: 'No tab identity: run /maiterm init.' };
   let url: URL;
@@ -575,18 +568,18 @@ async function addMcpServer(a: { tabId?: string; url?: string; name?: string; re
     return { error: 'The URL looks like it carries a key or token. Don’t propose it: tell the human they can add it themselves in maiTerm → Preferences → MCP servers, or install it directly.' };
   }
   if (url.search) return { error: 'Propose the plain endpoint, without a query string.' };
-  const name = (a.name ?? '').trim() || nameFromUrl(url);
-  if (!/^[a-z0-9][a-z0-9_-]{0,39}$/.test(name)) return { error: `"${name}" can't be a server name: 1–40 lowercase letters, digits, - or _.` };
+  const name = (a.name ?? '').trim() || suggestServerName(url.href);
+  if (!SERVER_NAME_RE.test(name)) return { error: `"${name}" can't be a server name: 1–40 lowercase letters, digits, - or _.` };
   const existing = await commands.mcpServersList();
   if (existing.some((s) => s.id === name)) return { error: `maiTerm already has an MCP server named ${name}. listMcpServers shows it.` };
   // A name the human's own entry holds is never written over, so the server would quietly not
   // reach that runtime: ask for another name instead.
-  const shownName = import.meta.env.DEV ? `${name}-dev` : name;
+  const shownName = entryName(name, import.meta.env.DEV);
   const native = await commands.mcpNativeNames().catch(() => [] as string[]);
   if (native.includes(shownName)) {
     return { error: `The human already has an MCP server of their own named “${shownName}”. Pass a different name.` };
   }
-  if (existing.some((s) => s.url.replace(/\/+$/, '') === url.href.replace(/\/+$/, ''))) {
+  if (existing.some((s) => sameServerUrl(s.url, url.href))) {
     return { error: 'maiTerm already serves that URL. listMcpServers shows it.' };
   }
   let probe: commands.McpProbe;
@@ -758,7 +751,7 @@ async function execute(r: AgentRequest): Promise<string> {
         // From the phone the human isn't at this Mac: a browser opening here would wait unseen.
         if (r.decided_by === 'phone') return `${as}; it waits for the human to sign in on their Mac (Preferences → MCP servers). Its tools fail until then`;
         try {
-          await shellOpen(await commands.mcpServerSignIn(v.id));
+          await startSignIn(v.id);
           return `${as}; the human is signing in in their browser. Its tools fail until they finish`;
         } catch (e) {
           return `${as}, but the sign-in didn't start (${e}); the human can sign in from Preferences → MCP servers`;

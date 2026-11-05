@@ -11,6 +11,8 @@ const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvi
   credits: 'api',
   route_kind: 'remote_mcp',
   auth: 'oauth',
+  route_url: '',
+  installable: false,
   quote_tool: '',
   retention: '',
   signup_url: '',

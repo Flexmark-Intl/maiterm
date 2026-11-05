@@ -9,10 +9,10 @@
    *  learns of it through the status event. */
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
-  import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import Button from '$lib/components/ui/Button.svelte';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
   import * as commands from '$lib/tauri/commands';
+  import { SERVER_NAME_RE, startSignIn, suggestServerName } from '$lib/mcp/addServer';
   import type { McpProbe, McpServerView } from '$lib/tauri/commands';
   import type { MoveTargetWindow } from '$lib/tauri/types';
 
@@ -60,19 +60,6 @@
     return () => offs.forEach((p) => p.then((off) => off()));
   });
 
-  /** A name from the URL's host: mcp.linear.app → linear, api.githubcopilot.com → githubcopilot. */
-  function suggestName(u: string): string {
-    try {
-      const host = new URL(u).hostname;
-      if (/^[\d.]+$/.test(host) || host === 'localhost') return 'local';
-      const labels = host.split('.').filter((l) => !['mcp', 'api', 'www'].includes(l));
-      const pick = labels.length > 1 ? labels[labels.length - 2] : labels[0] ?? '';
-      return pick.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/^-+/, '').slice(0, 40);
-    } catch {
-      return '';
-    }
-  }
-
   /** Which check is current: a probe can take many seconds, and one that answers after the URL
    *  was edited (or after a newer check) describes another URL, so it is dropped. Otherwise a
    *  server could be added with the auth of the URL typed before it, its token sent there. */
@@ -89,7 +76,7 @@
       const p = await commands.mcpServerProbe(target);
       if (seq !== probeSeq || url.trim() !== target) return;
       probe = p;
-      if (!nameTouched) name = suggestName(target);
+      if (!nameTouched) name = suggestServerName(target);
     } catch (e) {
       if (seq === probeSeq) feedback = { id: null, text: String(e), error: true };
     } finally {
@@ -130,8 +117,7 @@
     busyId = s.id;
     feedback = null;
     try {
-      const authUrl = await commands.mcpServerSignIn(s.id);
-      await shellOpen(authUrl);
+      await startSignIn(s.id);
       feedback = { id: s.id, text: 'Finish signing in in your browser. This updates when you’re done.', error: false };
     } catch (e) {
       feedback = { id: s.id, text: String(e), error: true };
@@ -191,7 +177,7 @@
   }
 
   const canAdd = $derived(
-    !!probe && /^[a-z0-9][a-z0-9_-]{0,39}$/.test(name.trim()) &&
+    !!probe && SERVER_NAME_RE.test(name.trim()) &&
       ((probe.auth === 'token' || (probe.auth === 'oauth' && useToken)) ? token.trim().length > 0
         : probe.auth === 'oauth' && !probe.can_register ? clientId.trim().length > 0
         : true),
