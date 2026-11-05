@@ -127,7 +127,12 @@ Unset fields (empty, null) are the built-ins below (`lib/hive/defaults.ts` `wiza
 rules prefill the field and open it. A default tool not detected on this machine any more is
 dropped silently. With default tools, the Tools step shows them as one line ("From your defaults:
 ffmpeg, Figma, frontend-design (+4 more)") with **Change** behind it; otherwise, and after Change,
-the same grouped, filterable picker as Preferences (`HiveToolPicker.svelte`). A **skill pack**
+the same grouped, filterable picker as Preferences (`HiveToolPicker.svelte`). Above the picker the
+step shows **What it can make** (`HiveMediaPanel.svelte`): what this Mac already covers for
+video, image, voice and the rest, and what to set up for a capability nothing covers. It is
+read-only, opens by itself only for a goal that names media or a Hive with no git folder, and
+never changes the picks. Hive settings has the same panel in a read-only Tools section, and
+Preferences → Hive a folded one (docs/hive-media.md §7). A **skill pack**
 (two or more skills sharing SKILL.md `metadata.package`, or a trailing `(word)` on the
 description, as most of gstack's do; untagged members are found by the pack's own skill folder holding
 a folder per member, and by a `<pack>-` name prefix on a declared pack: `DetectedTool.pack`,

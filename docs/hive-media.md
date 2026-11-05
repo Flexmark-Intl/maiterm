@@ -201,10 +201,19 @@ Specified in §12.1.
 
 - **The Create sheet's Tools step**: a **What it can make** panel above the existing picker, which
   stays for everything else (code tools, skill packs). Detected media tools are ticked as today.
-  For a Hive whose goal names no media and whose folders are code, the panel starts folded to one
-  line ("Media: video, image ready · voice, music not set up"), so a code Hive isn't slowed.
-  Whether to show it opened is an obvious-default rule in code (goal words, plain folders), not an
-  AI judgment.
+  The panel starts folded to one line ("Media: video, image ready · voice, music not set up") for
+  a Hive whose goal names no media and that has a git folder, so a code Hive isn't slowed. It starts
+  open when the goal names media, when a capability was asked for up front, or when no folder is
+  a git repo. That is an obvious-default rule in code (`shouldStartOpen`: goal words, folder
+  kinds), not an AI judgment, and it is read once, when the panel mounts: after that the human's
+  fold wins.
+  - **Open, it is compact**: a dim line saying it only reads, then one line per capability (its
+    tool and state chips, or "Not set up" with "Suggested: <provider>"). A capability nothing
+    ready covers has a button ("How to set up X", or "Details: X" when something covers it but
+    isn't usable yet); the recommendation's card sits behind it. "I already pay for…" follows the
+    common five, and the rest are under "More (n)".
+  - **The card** holds that capability's models line, the credits line (§2.3), an "unverified as
+    of <date>" note, the guide, Sign up and Billing links, and the alternatives.
 - **Hive settings → Tools** for an existing Hive. **This is new**: today `Hive.tools` is fixed at
   Create. §3.4's table has no tools row, `hive/change.rs` never writes it, and the generator hosts
   are human-edited and never re-derived. So phase 3 adds a tools change for the human, a window
@@ -215,8 +224,10 @@ Specified in §12.1.
   - sends the coordinator a framed notice;
   - takes effect for workers at their next launch;
   - appears as a Tools row added to §3.4.
-- **Preferences → Hive**, beside the default tools: the same panel, to set up a studio once for
-  every future Hive.
+- **Preferences → Hive**, above the default tools: the same panel, to set up a studio once for
+  every future Hive. It is always folded here, under the note "On this Mac, for any Hive": open it
+  is tall enough to push the defaults off the first screen. It has no workspace, so it judges no
+  MCP server's scope.
 - **The phone**: the status is visible. Only two setups can be started there:
   - a `brew` install when Homebrew is already present (a first install asks for a password at
     the Mac);
@@ -342,6 +353,35 @@ so the coordinator counts generations instead.
      not in the catalogue (only `plugin_id`).
 2. **The panel.** "What it can make" in the Tools step, Hive settings and Preferences, read-only:
    detection, recommendations, credits lines and guides.
+
+   **Phase 2: built (2026-11-05).** Read-only: no setup button, and the panel emits nothing. Where
+   it lives:
+   - `components/hive/HiveMediaPanel.svelte`, with every join and wording as pure functions in
+     `lib/hive/media.ts` (`groupRows`, `summaryLine`, `shouldStartOpen`, `creditsLine`,
+     `modelsLine`, `unverifiedNote`, `compactLine`, `coverNames`, `pickerTools`, `isSetupOnly`).
+     It reads two commands: `hive_media_status` (ids only) and `hive_media_catalogue`
+     (`hive/media/view.rs`: the display facts, with no hosts, detection recipes or source URLs),
+     and Re-detect fetches again.
+   - **Three placements**, all §7's panel:
+     - the Create sheet's Tools step (`HiveCreateSheet.svelte`), above the picker, open by
+       `shouldStartOpen`; the picker's hint is now "Tick what this Hive's workers may use.";
+     - Hive settings (`HiveSettingsModal.svelte`), a read-only Tools section with a "Workers get:"
+       line, and the Tools row gone from "Fixed at creation";
+     - Preferences → Hive (`HiveDefaultsSection.svelte`), folded, under "On this Mac, for any
+       Hive".
+   - **The open form is compact** (§7): one line per capability, the card behind a per-row button,
+     a dim line at the top saying opening a card adds nothing to the Hive.
+   - **`cli:brew` is setup plumbing.** Status needs to see Homebrew, but no worker makes media with
+     it, so it is hidden from every tool picker (`pickerTools`) and shed from saved defaults
+     (`normalizeHiveDefaults`, `defaultsPicked`).
+   - **The catalogue gained** `capability_models` (a models line per capability, so a fal card
+     under Music doesn't list the video models; `modelsLine` prefers it to `models_note`) and a
+     route's `balance_tool`, which the panel doesn't show: phase 3's verify step reads it.
+   - **Unverified is read from model notes only.** A provider is flagged unverified (as of its
+     `checked` date) from its `models_note` or an UNVERIFIED `capability_notes` entry, and per
+     capability when it has such notes. `unverified_hosts` never flags it: an unconfirmed result
+     host is a sandbox matter (§9).
+   - **Not built: the Hive settings tools change** (phase 3). The panel there only reads.
 3. **Setup routes and the tools change.**
    - `remote_mcp` (OAuth and token) through the proxy, scoped to the Hive;
    - `brew` (with the whisper model) and `plugin` in a visible tab;
