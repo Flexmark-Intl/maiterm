@@ -276,6 +276,9 @@ pub struct MoveTargetWorkspace {
     /// (agent_requests.rs): a window cannot see another window's workspaces otherwise.
     pub bridge_all: bool,
     pub mesh_group: Option<String>,
+    /// It is a Hive's workspace: the media setup sheet scopes an MCP server to "Hive workspaces
+    /// only" from Preferences (docs/hive-media.md §6), across every window.
+    pub hive: bool,
 }
 
 /// Every app window (not Preferences/Help) with its workspaces, in window order.
@@ -300,6 +303,7 @@ pub fn list_move_targets(window: tauri::Window, state: State<'_, Arc<AppState>>)
                     name: ws.name.clone(),
                     bridge_all: ws.bridge_all,
                     mesh_group: ws.mesh_group.clone(),
+                    hive: ws.hive.is_some(),
                 })
                 .collect(),
         })

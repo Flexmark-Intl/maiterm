@@ -135,13 +135,29 @@ static LAST_FOCUSED_WINDOW: parking_lot::RwLock<Option<String>> = parking_lot::R
 /// were last in, then to a lone window, and only then admit we don't know.
 /// Returns whether a window was found.
 pub(crate) fn emit_to_focused_window(app_handle: &tauri::AppHandle, event: &str) -> bool {
+    match focused_app_window(app_handle) {
+        Some(label) => {
+            let _ = app_handle.emit_to(label.as_str(), event, ());
+            true
+        }
+        None => {
+            log::warn!("Menu event '{event}': no focused terminal window");
+            false
+        }
+    }
+}
+
+/// The terminal window something with no window of its own (a menu click, Preferences) means:
+/// the focused one, else the one last focused, else a lone one, else None. Never Preferences or
+/// Help.
+pub(crate) fn focused_app_window(app_handle: &tauri::AppHandle) -> Option<String> {
     let windows: Vec<_> = app_handle
         .webview_windows()
         .into_iter()
         .filter(|(label, _)| label != "preferences" && label != "help")
         .collect();
     let last_focused = LAST_FOCUSED_WINDOW.read().clone();
-    let target = windows
+    windows
         .iter()
         .find(|(_, win)| win.is_focused().unwrap_or(false))
         .or_else(|| {
@@ -149,20 +165,8 @@ pub(crate) fn emit_to_focused_window(app_handle: &tauri::AppHandle, event: &str)
                 .as_ref()
                 .and_then(|label| windows.iter().find(|(l, _)| l == label))
         })
-        .or_else(|| windows.first().filter(|_| windows.len() == 1));
-    match target {
-        Some((label, _)) => {
-            let _ = app_handle.emit_to(label.as_str(), event, ());
-            true
-        }
-        None => {
-            log::warn!(
-                "Menu event '{event}': no focused window among {} candidates",
-                windows.len()
-            );
-            false
-        }
-    }
+        .or_else(|| windows.first().filter(|_| windows.len() == 1))
+        .map(|(label, _)| label.clone())
 }
 
 /// Chrome launched this binary as the browser link's native-messaging host

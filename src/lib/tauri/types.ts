@@ -1061,6 +1061,12 @@ export interface HiveMediaProvider {
   route_kind: string;
   /** "oauth" | "token" | "none", or "". */
   auth: string;
+  /** The main route's URL for the setup sheet: a `remote_mcp` endpoint (what the MCP add path
+   *  takes) or a `local_app` download page; "" for any other kind. */
+  route_url: string;
+  /** maiTerm can run its install (`hiveMediaInstall`): a brew route, or a plugin route with a
+   *  confirmed marketplace. False for Remotion today: its sheet shows the guide. */
+  installable: boolean;
   /** A tool that prices a job before it runs; "" when there is none. */
   quote_tool: string;
   /** How long a result URL lives; "" when unknown. */
@@ -1989,7 +1995,8 @@ export interface MoveTargetWindow {
   active_workspace_name: string | null;
   is_current: boolean;
   /** Never the Overlord workspace. */
-  workspaces: { id: string; name: string; bridge_all: boolean; mesh_group: string | null }[];
+  /** `hive`: it is a Hive's workspace (the media setup sheet's "Hive workspaces only" scope). */
+  workspaces: { id: string; name: string; bridge_all: boolean; mesh_group: string | null; hive: boolean }[];
 }
 
 /** An agent's request only the human can approve (src-tauri/src/agent_requests.rs). */

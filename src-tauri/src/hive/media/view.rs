@@ -4,7 +4,8 @@
 //! (name, credits line inputs, guide, links). This derives them from `media.rs`, so the UI never
 //! parses `catalogue.json` itself. The catalogue holds no secret, and this exposes only what the
 //! panel shows: not the hosts (§9's sandbox hosts are no one's business in the UI), not the
-//! detection recipes, not `source_urls`.
+//! detection recipes, not `source_urls`. The setup sheet (§6) also reads the main route's own URL
+//! (an MCP endpoint to add, or an app's download page) and whether maiTerm can install it.
 //!
 //! Every kind is a String (`route_kind`, `auth`, `credits`), never an enum: the catalogue grows
 //! kinds, and an older panel must show an unknown one rather than fail to parse.
@@ -43,6 +44,14 @@ pub struct ProviderView {
     pub route_kind: String,
     /// The main route's sign-in: `oauth` | `token` | `none`, or "".
     pub auth: String,
+    /// Where the main route points, for the setup sheet (docs/hive-media.md §6): a `remote_mcp`
+    /// route's endpoint (what the human's MCP add path takes) or a `local_app` route's download
+    /// page. "" for any other kind. Never a host list: those stay out of the UI.
+    pub route_url: String,
+    /// maiTerm can run this provider's install (`hive_media_install`): a `brew` route with its
+    /// line, or a `plugin` route with a confirmed `marketplace`. False for Remotion today, whose
+    /// sheet shows its guide instead of a button that would be refused.
+    pub installable: bool,
     /// A tool that prices a job before it runs, if the main route has one ("" when none).
     pub quote_tool: String,
     /// How long a result URL lives, if known: the brief's "save at once".
@@ -77,8 +86,20 @@ fn main_route(p: &Provider) -> Option<&super::Route> {
     p.mcp_route().or_else(|| p.routes.first())
 }
 
+/// Whether `install::plan_for` would accept the route's own facts (Homebrew's presence aside,
+/// which the install handles itself): a `brew` route with its line, a `plugin` route with its id
+/// and a confirmed marketplace.
+fn installable(r: &super::Route) -> bool {
+    match r.kind.as_str() {
+        "brew" => r.command.as_deref().is_some_and(|c| !c.trim().is_empty()),
+        "plugin" => r.plugin_id.as_deref().is_some_and(|c| !c.trim().is_empty()) && r.marketplace.as_deref().is_some_and(|m| !m.trim().is_empty()),
+        _ => false,
+    }
+}
+
 fn provider_view(p: &Provider) -> ProviderView {
     let route = main_route(p);
+    let route_url = route.filter(|r| matches!(r.kind.as_str(), "remote_mcp" | "local_app")).map(|r| r.url.clone()).unwrap_or_default();
     let mut unverified_capabilities: Vec<String> = p
         .capability_notes
         .iter()
@@ -97,6 +118,8 @@ fn provider_view(p: &Provider) -> ProviderView {
         credits: route.map(|r| r.credits.clone()).unwrap_or_default(),
         route_kind: route.map(|r| r.kind.clone()).unwrap_or_default(),
         auth: route.map(|r| r.auth.clone()).unwrap_or_default(),
+        route_url,
+        installable: route.is_some_and(installable),
         quote_tool: route.and_then(|r| r.quote_tool.clone()).unwrap_or_default(),
         retention: p.retention.clone(),
         signup_url: p.signup_url.clone(),
@@ -258,5 +281,21 @@ mod tests {
         for k in ["sandbox_hosts", "api_hosts", "result_hosts", "unverified_hosts", "source_urls", "detect", "match"] {
             assert!(!text.contains(&format!("\"{k}\"")), "{k}");
         }
+    }
+
+    #[test]
+    fn the_setup_sheet_gets_the_route_url_and_whether_it_installs() {
+        let v = view();
+        let fal = p(&v, "fal");
+        assert_eq!((fal.route_url.as_str(), fal.installable), ("https://mcp.fal.ai/mcp-relay", false));
+        let kit = p(&v, "homebrew-kit");
+        assert_eq!((kit.route_url.as_str(), kit.installable), ("", true));
+        // No confirmed marketplace source: the install would be refused, so the sheet shows the guide.
+        let remotion = p(&v, "remotion");
+        assert_eq!((remotion.route_kind.as_str(), remotion.installable), ("plugin", false));
+        let comfy = p(&v, "comfyui");
+        assert_eq!((comfy.route_kind.as_str(), comfy.route_url.as_str()), ("local_app", "https://www.comfy.org/download"));
+        // A manual route points nowhere the sheet would act on.
+        assert_eq!(p(&v, "minimax").route_url, "");
     }
 }

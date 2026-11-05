@@ -418,9 +418,21 @@ pub struct InstallStarted {
 
 /// Install `provider_id` (a catalogue `brew` or `plugin` route) in a visible terminal tab of the
 /// calling window. The line comes from the catalogue alone. Answers once the line is typed;
-/// `hive-media-install-finished` follows when it exits.
+/// `hive-media-install-finished` follows when it exits, to the calling window.
+///
+/// `avoid_workspace_id`: a workspace the tab must not open in. The Create sheet passes the
+/// workspace it is making into a Hive: it isn't a Hive yet, so the window's own rule (never a
+/// Hive's workspace) would let the install tab land in it.
+///
+/// Preferences has no terminal tabs, so a call from it opens the tab in the terminal window the
+/// human was last in; the finished event still comes back to Preferences, whose sheet listens.
 #[tauri::command]
-pub async fn hive_media_install(window: tauri::Window, state: tauri::State<'_, Arc<AppState>>, provider_id: String) -> Result<InstallStarted, String> {
+pub async fn hive_media_install(
+    window: tauri::Window,
+    state: tauri::State<'_, Arc<AppState>>,
+    provider_id: String,
+    avoid_workspace_id: Option<String>,
+) -> Result<InstallStarted, String> {
     let prefs = state.app_data.read().preferences.clone();
     let here = tauri::async_runtime::spawn_blocking(move || Here::detect(&prefs)).await.map_err(|e| e.to_string())?;
     let plan = plan(&provider_id, &here)?;
@@ -429,17 +441,25 @@ pub async fn hive_media_install(window: tauri::Window, state: tauri::State<'_, A
     HANDLE.get_or_init(|| handle.clone());
     let id = uuid::Uuid::new_v4().to_string();
     installs().begin(&id, &plan, window.label()).map_err(|e| format!("{name}: {e}"))?;
+    let tab_window = match tab_window_for(window.label(), || crate::focused_app_window(&handle)) {
+        Some(w) => w,
+        None => {
+            installs().forget(&id);
+            return Err("Open a maiTerm window first: the install runs in one of its tabs.".to_string());
+        }
+    };
     let args = json!({
         "install_id": id,
         "provider_id": plan.provider_id,
         "title": format!("Install {name}"),
         "line": plan.line,
+        "avoid_workspace_id": avoid_workspace_id,
     });
     let outcome = crate::mailink::rpc::request_on(
         state.inner(),
         Some(&handle),
         crate::hive::rpc::EVENT,
-        window.label(),
+        &tab_window,
         crate::hive::rpc::VERB_MEDIA_INSTALL,
         args,
         crate::hive::rpc::JOB_START_TIMEOUT,
@@ -463,6 +483,16 @@ pub async fn hive_media_install(window: tauri::Window, state: tauri::State<'_, A
             log::warn!("hive media: install of {} not started: {e}", plan.provider_id);
             Err(e)
         }
+    }
+}
+
+/// The window whose tab runs the install: the caller, unless it is Preferences or Help (no
+/// terminal tabs, and no `hive-frontend-request` listener), then the app window `fallback` names.
+pub fn tab_window_for(caller: &str, fallback: impl FnOnce() -> Option<String>) -> Option<String> {
+    if caller == "preferences" || caller == "help" {
+        fallback()
+    } else {
+        Some(caller.to_string())
     }
 }
 

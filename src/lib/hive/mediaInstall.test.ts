@@ -50,6 +50,10 @@ describe('installWorkspace', () => {
     expect(installWorkspace(ws as never, 'h')?.id).toBe('ok');
     expect(installWorkspace(ws.slice(0, 3) as never, 'h')).toBeNull();
   });
+  it('never picks the workspace it is told to avoid, active or not', () => {
+    expect(installWorkspace(workspaces as never, 'b', 'b')?.id).toBe('a');
+    expect(installWorkspace([plain('only')] as never, 'only', 'only')).toBeNull();
+  });
 });
 
 describe('startMediaInstall', () => {
@@ -79,6 +83,11 @@ describe('startMediaInstall', () => {
     expect(createWorkspace).toHaveBeenCalledWith('Setup');
     expect(setActiveWorkspace).toHaveBeenCalledWith('h');
     expect(createTab.mock.calls[0][0]).toBe('ws-setup');
+  });
+
+  it('keeps the tab out of the Create sheet\'s workspace, which is about to become a Hive', async () => {
+    await startMediaInstall({ ...args, avoid_workspace_id: 'b' });
+    expect(createTab.mock.calls[0][0]).toBe('a');
   });
 
   it('refuses a line with a line break or missing fields', async () => {

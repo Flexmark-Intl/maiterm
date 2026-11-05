@@ -8,7 +8,8 @@
  * Rust reads the exit itself from OSC 133 and emits `hive-media-install-finished`.
  *
  * The tab goes in a workspace that takes a terminal tab: the active one unless it is a Hive (whose
- * workspace takes no new tabs), the Overlord's or suspended, else the first such workspace in this
+ * workspace takes no new tabs), the Overlord's, suspended or the `avoid_workspace_id` the sheet
+ * passed (the Create sheet's, about to become a Hive), else the first such workspace in this
  * window, else a new "Setup" one. The tab becomes its pane's active tab; the window's view isn't
  * switched (the setup sheet may `navigateToTab(tab_id)`).
  */
@@ -26,15 +27,18 @@ export function takesInstallTab(ws: Workspace): boolean {
   return !ws.hive && !ws.overlord && !ws.suspended && ws.panes.length > 0;
 }
 
-/** The workspace an install's tab opens in, by the module's rule, or null when none takes it. */
-export function installWorkspace(workspaces: Workspace[], activeId: string | null): Workspace | null {
+/** The workspace an install's tab opens in, by the module's rule, or null when none takes it.
+ *  `avoid` is never picked: the Create sheet's workspace, about to become a Hive (it isn't one yet,
+ *  so `takesInstallTab` alone would take it). */
+export function installWorkspace(workspaces: Workspace[], activeId: string | null, avoid: string | null = null): Workspace | null {
+  const takes = (w: Workspace) => w.id !== avoid && takesInstallTab(w);
   const active = workspaces.find((w) => w.id === activeId);
-  if (active && takesInstallTab(active)) return active;
-  return workspaces.find(takesInstallTab) ?? null;
+  if (active && takes(active)) return active;
+  return workspaces.find(takes) ?? null;
 }
 
-async function targetWorkspace(): Promise<Workspace> {
-  const found = installWorkspace(workspacesStore.workspaces, workspacesStore.activeWorkspaceId);
+async function targetWorkspace(avoid: string | null): Promise<Workspace> {
+  const found = installWorkspace(workspacesStore.workspaces, workspacesStore.activeWorkspaceId, avoid);
   if (found) return found;
   // Every workspace here is a Hive, the Overlord's or suspended: a new one, without moving the human.
   const previous = workspacesStore.activeWorkspaceId;
@@ -44,11 +48,12 @@ async function targetWorkspace(): Promise<Workspace> {
 }
 
 export async function startMediaInstall(a: Record<string, unknown>): Promise<unknown> {
-  const { install_id: installId, provider_id: providerId, title, line } = a;
+  const { install_id: installId, provider_id: providerId, title, line, avoid_workspace_id: avoidRaw } = a;
   if (typeof installId !== 'string' || typeof providerId !== 'string' || typeof title !== 'string' || typeof line !== 'string' || !line || line.includes('\n')) {
     return { error: 'install_id, provider_id, title and a one-line command are required' };
   }
-  const ws = await targetWorkspace();
+  const avoid = typeof avoidRaw === 'string' && avoidRaw ? avoidRaw : null;
+  const ws = await targetWorkspace(avoid);
   const paneId = ws.active_pane_id ?? ws.panes[0]?.id;
   if (!paneId) return { error: 'The workspace for the install has no pane.' };
   // A known place, never inherited: the active tab may be an ssh session, and this runs HERE.

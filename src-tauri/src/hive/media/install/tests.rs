@@ -254,3 +254,10 @@ fn only_a_good_plugin_install_resyncs_before_it_is_announced() {
     let (i, done) = s.osc("pty-b", 'D', Some(0)).unwrap();
     assert!(!resync_before_announcing(&i, &done));
 }
+
+#[test]
+fn an_install_from_preferences_opens_its_tab_in_an_app_window() {
+    assert_eq!(tab_window_for("main", || Some("other".into())).as_deref(), Some("main"));
+    assert_eq!(tab_window_for("preferences", || Some("main".into())).as_deref(), Some("main"));
+    assert_eq!(tab_window_for("help", || None), None);
+}

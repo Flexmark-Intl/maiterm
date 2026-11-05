@@ -2868,9 +2868,11 @@ export async function hiveMediaCatalogue(): Promise<HiveMediaCatalogue> {
  *  (`HiveMediaInstallFinished`) BEFORE calling: a fast failure can end before this resolves.
  *  Rejects, in plain words, for an unknown provider, a route that isn't brew or plugin, a plugin
  *  whose marketplace source isn't confirmed (point at the guide), the same provider already
- *  installing, or a shell that never reached its prompt. */
-export async function hiveMediaInstall(providerId: string): Promise<HiveMediaInstallStarted> {
-  return invoke('hive_media_install', { providerId });
+ *  installing, or a shell that never reached its prompt. `avoidWorkspaceId`: a workspace the tab
+ *  must not open in (the Create sheet's, which is about to become a Hive). Called from
+ *  Preferences, the tab opens in the terminal window the human was last in. */
+export async function hiveMediaInstall(providerId: string, avoidWorkspaceId: string | null = null): Promise<HiveMediaInstallStarted> {
+  return invoke('hive_media_install', { providerId, avoidWorkspaceId });
 }
 
 /** The window's half of `hiveMediaInstall` (`hive/mediaInstall.ts`): its tab's shell is at its
