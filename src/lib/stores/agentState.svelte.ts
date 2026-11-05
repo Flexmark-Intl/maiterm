@@ -1,3 +1,5 @@
+import { untrack } from 'svelte';
+import { SvelteMap } from 'svelte/reactivity';
 import { countedListen as listen } from '$lib/utils/listenCounter';
 import { info as logInfo } from '@tauri-apps/plugin-log';
 import { setVariable, handleEnableAutoResume } from './triggers.svelte';
@@ -110,9 +112,64 @@ function isTabVisible(tabId: string): boolean {
   return (!!pane && pane.id === ws.active_pane_id) || hiveView.tabColumnOpen(tabId);
 }
 
+/**
+ * tabId → session, reactive PER TAB: a reader of one tab (`getState(tabId)`, the tab dot, a
+ * workspace's rollup) re-runs only when that tab's entry changes. It used to be a plain Map
+ * replaced wholesale on every change, which re-ran every reader of every tab's state on every
+ * hook event — two per tool call — and in a window of ~360 tabs that was most of the main
+ * thread while a few agents worked (2026-11-05).
+ *
+ * A bare SvelteMap only gets that for tabs that HAVE a session. Looking up a tab with none
+ * subscribes to the map's version, which moves whenever any tab gains or loses a session (and,
+ * in Svelte's SvelteMap, on most updates too), so every shell tab's reader re-ran whenever any
+ * agent started, resumed or ended. So every tab of this window holds a key — `null` until it
+ * has a session, and `null` again after — and a lookup always lands on its own key. `seed`
+ * keeps the keys in step with the window's tabs; a tab not (yet) seeded still reads correctly,
+ * through the version. Everything outside this class sees an ordinary map of live sessions.
+ */
+class SessionTable {
+  #map = new SvelteMap<string, AgentTabSession | null>();
+
+  get(tabId: string): AgentTabSession | undefined {
+    return this.#map.get(tabId) ?? undefined;
+  }
+
+  has(tabId: string): boolean {
+    return this.#map.get(tabId) != null;
+  }
+
+  set(tabId: string, session: AgentTabSession) {
+    this.#map.set(tabId, session);
+  }
+
+  /** Ends a tab's session but keeps its key, so its readers stay subscribed to it alone. */
+  delete(tabId: string) {
+    if (this.#map.get(tabId) != null) this.#map.set(tabId, null);
+  }
+
+  get size(): number {
+    let n = 0;
+    for (const v of this.#map.values()) if (v) n++;
+    return n;
+  }
+
+  *[Symbol.iterator](): IterableIterator<[string, AgentTabSession]> {
+    for (const [k, v] of this.#map) if (v) yield [k, v];
+  }
+
+  /** Hold a key for each of `tabIds`, and drop the empty keys of tabs no longer listed. A
+   *  live session is never dropped here: hook events reach every window, so the table also
+   *  carries other windows' agents, which removeSession ends. Call untracked. */
+  seed(tabIds: ReadonlySet<string>) {
+    for (const id of tabIds) if (!this.#map.has(id)) this.#map.set(id, null);
+    const gone = [...this.#map].filter(([id, v]) => v === null && !tabIds.has(id)).map(([id]) => id);
+    for (const id of gone) this.#map.delete(id);
+  }
+}
+
 function createAgentStateStore() {
-  // tabId → session info
-  let sessions = $state<Map<string, AgentTabSession>>(new Map());
+  const sessions = new SessionTable();
+  let stopSeeding: (() => void) | null = null;
   const unlisteners: (() => void)[] = [];
   // tabId → timeout handle for stale tool detection
   /** How long a compaction may run with no event before the tab is presumed back at its
@@ -165,7 +222,6 @@ function createAgentStateStore() {
   function markReadInternal(tabId: string) {
     const s = sessions.get(tabId);
     if (!s || s.state !== 'idle' || s.read) return;
-    sessions = new Map(sessions);
     sessions.set(tabId, { ...s, read: true });
   }
 
@@ -184,7 +240,6 @@ function createAgentStateStore() {
     const idleSince = state !== 'idle' ? undefined : sameIdleStretch ? current?.idleSince : Date.now();
     // Only SessionStart reports the folder; every later state change of the same session keeps it.
     const cwd = current?.sessionId === sessionId ? current.cwd : undefined;
-    sessions = new Map(sessions);
     sessions.set(tabId, { runtime, sessionId, state, toolName, toolDetail, read, updatedAt, idleSince, cwd });
 
     // Propagate permission state to activityStore tab state so workspace sidebar shows alert.
@@ -207,7 +262,6 @@ function createAgentStateStore() {
           // setState writes a fresh record, so any later event drops this again.
           const after = sessions.get(tabId);
           if (after) {
-            sessions = new Map(sessions);
             sessions.set(tabId, { ...after, staleTool: toolName, staleToolDetail: toolDetail });
           }
           setVariable(tabId, 'claudeAction', '');
@@ -235,7 +289,6 @@ function createAgentStateStore() {
     clearStaleTimer(tabId);
     clearAsks(tabId);
     answered.delete(tabId);
-    sessions = new Map(sessions);
     sessions.delete(tabId);
     // Clean up tab state if session ended while in permission state
     if (was.state === 'permission') {
@@ -388,7 +441,19 @@ function createAgentStateStore() {
     },
 
     async init() {
-      const u1 = await listen<{ session_id: string; tab_id: string; source?: string; runtime?: string; cwd?: unknown }>('agent-hook-session-start', (e) => {
+      // One key per tab of this window (see SessionTable). Reads only the tab ids, so it
+      // re-runs when tabs are added, removed or moved — never on an agent's own events.
+      stopSeeding ??= $effect.root(() => {
+        $effect(() => {
+          const ids = new Set<string>();
+          for (const ws of workspacesStore.workspaces)
+            for (const pane of ws.panes)
+              for (const tab of pane.tabs) ids.add(tab.id);
+          untrack(() => sessions.seed(ids));
+        });
+      });
+
+      const u1 =await listen<{ session_id: string; tab_id: string; source?: string; runtime?: string; cwd?: unknown }>('agent-hook-session-start', (e) => {
         const { session_id, tab_id, source, cwd } = e.payload;
         if (!tab_id) return;
         const runtime = runtimeOf(e.payload);
@@ -415,7 +480,6 @@ function createAgentStateStore() {
         if (typeof cwd === 'string' && cwd) {
           const s = sessions.get(tab_id);
           if (s && s.cwd !== cwd) {
-            sessions = new Map(sessions);
             sessions.set(tab_id, { ...s, cwd });
           }
         }
@@ -454,7 +518,6 @@ function createAgentStateStore() {
           // setState writes a fresh record, so the next state change drops it again.
           const after = sessions.get(tab_id);
           if (after && (after.failure ?? null) !== (failure ?? null)) {
-            sessions = new Map(sessions);
             sessions.set(tab_id, { ...after, failure: failure ?? undefined });
           }
         }
@@ -656,6 +719,8 @@ function createAgentStateStore() {
     },
 
     destroy() {
+      stopSeeding?.();
+      stopSeeding = null;
       for (const u of unlisteners) u();
       unlisteners.length = 0;
       for (const timer of staleTimers.values()) clearTimeout(timer);

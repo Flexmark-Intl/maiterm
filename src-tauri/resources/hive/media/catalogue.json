@@ -75,7 +75,7 @@
         "clis": [
           { "bin": "ffmpeg", "capabilities": ["finish"] },
           { "bin": "ffprobe", "capabilities": ["finish"] },
-          { "bin": "magick", "capabilities": ["finish"] },
+          { "bin": "magick", "name": "ImageMagick", "capabilities": ["finish"] },
           { "bin": "sox", "capabilities": ["finish"] },
           { "bin": "whisper-cli", "capabilities": ["transcribe"] }
         ]

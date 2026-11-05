@@ -22,6 +22,10 @@ export interface HiveProposal {
   cap: number | null;
   workerModel: string | null;
   workerEffort: string | null;
+  /** Capability ids (hive/media.rs catalogue) the plan needs made: the Create sheet opens "What it
+   *  can make" with these rows open (docs/hive-media.md §8). Checked by Rust before it is set
+   *  (`hive_media_check_requested`); `parseProposal` leaves it as asked. Read with `?? []`. */
+  media?: string[];
   /** What Review offers: a new Hive, or a New goal (§11.5) for a Done or paused Hive that already
    *  works in the proposal's primary folder, rather than a second Hive on the same repo. */
   target: ProposalTarget;
@@ -106,6 +110,8 @@ export function parseProposal(
   if (workerModel && typeof workerModel === 'object') return workerModel.error;
   const workerEffort = pick(args.worker_effort, HIVE_EFFORTS, 'worker_effort');
   if (workerEffort && typeof workerEffort === 'object') return workerEffort.error;
+  const media = strings(args.media, 'media');
+  if (typeof media === 'string') return media.replace('a list of paths', 'a list of capability ids');
   const name = typeof args.name === 'string' && args.name.trim() ? args.name.trim().slice(0, NAME_MAX) : nameFromGoal(goal);
   return {
     fromTabId: from.tabId,
@@ -118,6 +124,7 @@ export function parseProposal(
     cap,
     workerModel: workerModel as string | null,
     workerEffort: workerEffort as string | null,
+    media,
     target: { kind: 'new' },
   };
 }

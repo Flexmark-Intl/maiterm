@@ -355,6 +355,29 @@ export function shouldStartOpen(goal: string, folders: { kind: string }[], media
   return !folders.some((f) => f.kind === 'git');
 }
 
+/** A proposal's `media` as the panel and the sheet keep it (`proposeHive`, docs/hive-media.md §8):
+ *  the ids asked for, each once. An id the catalogue doesn't hold matches no row. */
+export function requestedCapabilities(requested: readonly string[] | undefined): string[] {
+  return [...new Set(requested ?? [])];
+}
+
+/** The rows of the panel's main list for a proposal's `media`: the common rows in catalogue order,
+ *  then each asked-for row that lives under "More", in the order asked, so it is seen without
+ *  opening More (which never opens by itself). `more` is what is left. Nothing asked: the groups
+ *  as they are. */
+export function placeRequested(groups: PanelGroups, requested: readonly string[]): { main: PanelRow[]; more: PanelRow[] } {
+  const asked = requestedCapabilities(requested);
+  const lifted = asked.flatMap((id) => groups.more.filter((r) => r.capability === id));
+  return { main: [...groups.common, ...lifted], more: groups.more.filter((r) => !lifted.includes(r)) };
+}
+
+/** Capability ids as the human reads them in the panel: the catalogue's label, or the id itself for
+ *  one the catalogue doesn't hold. */
+export function capabilityLabels(ids: readonly string[], capabilities: readonly { id: string; label: string }[]): string[] {
+  const label = new Map(capabilities.map((c) => [c.id, c.label]));
+  return ids.map((id) => label.get(id) ?? id);
+}
+
 // ─── After a setup: what became ready, and the picks that follow ────────────
 
 /** The tool ids `rows` call ready (a cover in state "ready"), each once. */

@@ -11,6 +11,7 @@
   import { CanvasAddon } from '@xterm/addon-canvas';
   import { Unicode11Addon } from '@xterm/addon-unicode11';
   import '@xterm/xterm/css/xterm.css';
+  import { isSpinnerTick } from '$lib/utils/titleSpinner';
   import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, getPtyForegroundJob, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection, setTerminalVisible, refreshTerminalFrame, getTerminalRecentText, bindRemoteAccount, folderExists, sshArgsOf, REMOTE_CLAUDE_MOD_ENV } from '$lib/tauri/commands';
   import { noteFallback } from '$lib/stores/relocate.svelte';
   import type { TerminalFrame, FrameMeta, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
@@ -687,6 +688,7 @@
 
     // OSC event listeners from Rust
     let lastPersistedTitle = '';
+    let lastProbedTitle = '';
     let commandStartedAt = 0;
     const MIN_COMPLETION_MS = 2000;
 
@@ -713,7 +715,18 @@
       // but don't provide a remote shell to bridge into, and one-shot remote
       // commands (`ssh host 'cmd'`) which exit before the tunnel is ready —
       // their env-var injection would land in the local shell.
-      if (preferencesStore.claudeCodeIde && preferencesStore.claudeCodeIdeSsh) {
+      // A spinner tick is not a foreground change: an agent animating the status glyph at the
+      // front of its title (Claude's ◐/◑ about once a second while it works) is the same program
+      // still drawing. Each probe is a full `ps` sweep behind one lock, and a window of working
+      // agents queued ~20 of them at once (2026-11-05). Only a tick is skipped — an IDENTICAL
+      // repeat still probes, since a prompt redraw re-sending its title is how a too-early
+      // first probe gets retried (see below). Nor is a tick skipped while this tab is in ssh
+      // without a working bridge: a failed bridge setup is retried only from this handler, and
+      // a remote agent working on one topic may send nothing but ticks for minutes.
+      const bridgeUp = getBridgeStatus(tabId) === 'connected' || getBridgeStatus(tabId) === 'pending';
+      const spinnerTick = isSpinnerTick(lastProbedTitle, title) && !(sshForeground && !bridgeUp);
+      lastProbedTitle = title;
+      if (preferencesStore.claudeCodeIde && preferencesStore.claudeCodeIdeSsh && !spinnerTick) {
         // FRESH probe (bypasses the backend's 800ms process-snapshot cache). A
         // manually typed `ssh` has no poll behind it — unlike the restore/clone path
         // below — so this title event is the ONE detection opportunity. Answering it

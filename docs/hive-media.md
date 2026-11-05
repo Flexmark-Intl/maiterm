@@ -439,7 +439,15 @@ That report becomes a structured ask:
 - When the capability becomes Ready, it is added to the Hive, and the coordinator gets a framed
   notice ("music is now available through elevenlabs; your workers launched from now on have it").
 - `proposeHive` (§3.7) gains an optional `media: [capability]`, so a planning agent's proposal opens
-  the sheet with those capabilities' panel unfolded.
+  the sheet with those capabilities' panel unfolded. **Built 2026-11-05.** Rust checks the ids
+  against the catalogue (`media::check_requested`: unknown dropped and named in the tool's answer,
+  deduplicated, capped at the number of capabilities); the Create sheet passes them to
+  `shouldStartOpen`'s third argument and to the panel's `requested` prop (read once at mount):
+  the panel starts open, each asked-for row is tagged "Asked for", and one under "More" is listed
+  in the main list (`placeRequested`), so no card or More opens by itself and the Tools picker
+  stays on screen. The panel's first mount spends the seed (`onseeded`). The card names the
+  capabilities by their catalogue labels (`capabilityLabels`) and says the phone's Approve sets
+  none up. No maiLink protocol change: the proposal rides in the request's `args`.
 
 **The Rust side: built (2026-11-05), `hive/tool_setup.rs`.** The Loom card and the sheet's opening
 are the window's, on this contract.
@@ -553,6 +561,45 @@ The budget rule (§10.3) is unchanged. The map adds **quote before spending** wh
 provider has a quote tool. For plan-credit providers it says the budget can't see those credits,
 so the coordinator counts generations instead.
 
+**Built (2026-11-05).** `hive/media/map.rs` draws the map; `brief.rs` puts it in the coordinator's
+brief and in the brief of every media role (`roles::MEDIA_ROLES`: image, video, audio, edit,
+art-director), reviewers included. What it does beyond the example above:
+- **Real catalogue facts.** fal's line carries every capability the catalogue gives it, music and
+  sfx included since D3 was verified, so with fal and ElevenLabs nothing common is "Not set up".
+  A provider's capabilities are listed in catalogue order, and lines are ordered by their first.
+- **One line per MCP server; programs grouped.** A server's line holds all its capabilities.
+  Programs (`detect.clis`) are grouped by capability, and capabilities with the same programs
+  share a line. A program's display name comes from the catalogue (`CliProbe.name`:
+  `magick` is ImageMagick).
+- **Names from the reader's own config.** A worker's servers come from its own `mcp.json`
+  (`settings::worker_mcp_config`, computed once at launch and passed to the brief), the
+  coordinator's from the account `.claude.json` it launches under. A server is recognised by
+  `create::generator_providers`, the same rules as `is_generator_server`.
+- **Money.** `api` is "Prepaid API credit."; `plan`, `plan_or_wallet` and `comfy_credits` name
+  the human's credits and add the counting rule (the coordinator gives each worker a number of
+  generations; a worker makes no more than its brief allows); `free` is "Free."; `quote_tool`
+  adds "Price a job with <tool> before running it." A provider with `result_hosts` or a
+  `retention` gets the download-at-once line.
+- **Coordinator only:** a `plugin:` tool (Remotion), a `skill:` the catalogue recognises (Kie.ai's
+  `/generate`) and local ComfyUI (a worker's localhost is closed), each said to be the
+  coordinator's alone. They count as covering their capabilities for the coordinator only, so
+  its "Not set up" never sends it after them. A worker can't use them, so its "Not set up" still
+  lists those capabilities and it reports the gap to its coordinator instead of substituting. Every other tool (a code MCP server, an unrecognised skill) follows as
+  "Other tools this Hive has", by id, as the old line listed it.
+- **A worker without generators** (a reviewer, the art director) is told which capabilities other
+  workers make with which provider, and that it can't run it; those capabilities are not "Not
+  set up" for it.
+- **A Hive with no media tool at all** (a code Hive) gives its coordinator one line instead of
+  the map: "This Hive has no media tools. If the goal needs images, video, voice or music, ask
+  with hiveRequestCapability; never substitute." A five-capability "Not set up" list would invite
+  needless requests (the coordinator's decision, 2026-11-05). One media tool, a program included,
+  brings the full map back.
+- **"Not set up"** lists the common capabilities (`common_capabilities()`) nothing in the Hive
+  covers. The coordinator is pointed at `hiveRequestCapability`; a worker is told to stop and
+  report it to its coordinator (the tool is the coordinator's, §8).
+- **Code roles** keep the old "Tools this Hive has" line unchanged, and no worker's map names a
+  plugin or a skill.
+
 ## 11. Build order
 
 1. **Catalogue + detection.** The catalogue file, `hive/media.rs`, `hive_media_status`,
@@ -638,11 +685,11 @@ so the coordinator counts generations instead.
    - verification (built 2026-11-05: §6, "Verify: built");
    - the new after-Create tools change of §7 (a §3.4 row): **built 2026-11-05** (`hive/tool_change.rs`).
 4. **Agents.**
-   - the capability map in the briefs;
+   - the capability map in the briefs: **built 2026-11-05** (§10, `hive/media/map.rs`);
    - `hiveRequestCapability` + `tool_setup` requests, with every piece of plumbing §8 lists, on
      the Loom and the phone, no protocol bump. **The Rust side is built (2026-11-05, §8)**; the
      Loom card and the window's opening of the sheet on `hive-tool-setup-approved` aren't yet;
-   - `proposeHive`'s `media`.
+   - `proposeHive`'s `media` (**built 2026-11-05**, §8).
 5. **Stdio upstreams in the MCP proxy**, so MiniMax and Meshy become `stdio_mcp` (§12.1).
 
 **These are phases of the design, not a queue.** What really depends on what:

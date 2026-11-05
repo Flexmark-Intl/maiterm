@@ -696,15 +696,25 @@ fn pack_from_frontmatter(text: &str) -> Option<String> {
 ///   dials elsewhere is not fal, "video" that dials fal is. One carrying our marker that is not
 ///   provably ours, or whose server the registry lost, is recognised as nothing.
 pub fn is_generator_server(name: &str, entry: &serde_json::Value) -> bool {
-    is_generator_server_with(name, entry, &proxy_upstream, crate::mcp_proxy::live_port())
+    !generator_providers(name, entry).is_empty()
+}
+
+/// The catalogue providers an MCP server entry is recognised as, by `is_generator_server`'s rules:
+/// what the brief's capability map (`media::map`) names the server as.
+pub fn generator_providers(name: &str, entry: &serde_json::Value) -> Vec<&'static media::Provider> {
+    generator_providers_with(name, entry, &proxy_upstream, crate::mcp_proxy::live_port())
 }
 
 fn is_generator_server_with(name: &str, entry: &serde_json::Value, upstream: &dyn Fn(&str) -> Option<String>, port: Option<u16>) -> bool {
+    !generator_providers_with(name, entry, upstream, port).is_empty()
+}
+
+fn generator_providers_with(name: &str, entry: &serde_json::Value, upstream: &dyn Fn(&str) -> Option<String>, port: Option<u16>) -> Vec<&'static media::Provider> {
     match proxy_ref(entry, upstream, port) {
-        Some(r) => !media::providers_for_upstream(r.upstream.as_deref()).is_empty(),
+        Some(r) => media::providers_for_upstream(r.upstream.as_deref()),
         None => {
             let host = entry.get("url").and_then(|u| u.as_str()).and_then(url_host);
-            !media::providers_for_native(name, host.as_deref()).is_empty()
+            media::providers_for_native(name, host.as_deref())
         }
     }
 }

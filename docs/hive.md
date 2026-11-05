@@ -415,6 +415,15 @@ agent offers, the human creates.
   first is the Primary; default the agent's own folder), `cap`, `worker_model`, `worker_effort`.
   `lib/hive/proposal.ts` checks the shapes and limits, and Rust checks each brief file as Create
   will copy it (`hive_check_brief_files`), so the agent hears about a wrong path, not the human.
+  **`media`** (optional, built 2026-11-05, docs/hive-media.md §8) is a list of media capability
+  ids. The catalogue judges it (`hive_media_check_requested`, `media::check_requested`): unknown
+  ids are dropped and named in the answer (`media_note`), repeats count once, and the list is
+  capped at the number of capabilities. The Create sheet then opens its Tools step's "What it can
+  make" panel, tags those rows "Asked for" and lists one that lives under More in the main list
+  (no card opens, and More never opens by itself: open cards pushed the Tools picker off the
+  screen). The seed is spent by the panel's first mount, so Back then Next shows no tags and
+  re-opens nothing; a kept draft keeps the ids for the next time the sheet opens. A new-goal
+  target ignores it: that sheet has no media panel.
 - **What happens.** An agent request, kind `hive_propose` (docs/agent-requests.md), one per agent:
   a second call ends the first (`replace_proposals`). It waits a day, not 30 minutes. It shows in
   the Loom's Decisions and on the phone. On the desktop its button is **Open in the sheet**, which
@@ -1160,7 +1169,11 @@ can't be denied either: Claude writes its cwd file there, and denying it breaks 
 worker launches with `--setting-sources project` (a reviewer `local`), so none load: a live
 worker told it had `skill:langsys` and `skill:browse` got "Unknown skill" for both, after its
 queen told it to load one. A worker's brief lists the Hive's tools without skills and says it has
-none; the queen's says skills are hers alone and their substance goes in a spawn brief. Giving
+none; the queen's says skills are hers alone and their substance goes in a spawn brief. The
+queen's brief and every media worker's carry the **capability map** (docs/hive-media.md §10,
+`hive/media/map.rs`) instead of the raw ids: what the Hive can make, with which server (named as
+the reader's own MCP config names it), what it spends and how long its results last, and what
+isn't set up. A code role's brief keeps the "Tools this Hive has" line. Giving
 workers skills (a copy under their own settings) is open.
 
 **Localhost** is closed by default (measured, spike 10). Two settings open it, and both open
@@ -2511,8 +2524,8 @@ Collection { id, name, asset_ids (ordered), cover? }
 ### 10.3 How agents make and file assets
 
 **Making** is whatever the Hive's agents can really run. The sheet's **Tools** row (§3) detects
-these, in this order (decided 2026-10-23), and the brief carries the same list, so the
-coordinator plans with real tools:
+these, in this order (decided 2026-10-23), and the brief carries them as a capability map
+(docs/hive-media.md §10), so the coordinator plans with real tools:
 
 | Kind | Detected how | Examples |
 |---|---|---|

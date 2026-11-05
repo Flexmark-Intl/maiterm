@@ -46,6 +46,9 @@ export interface NewHivePlan {
   /** Sorted ids, and their labels in the same order. */
   tools: string[];
   toolLabels: string[];
+  /** The proposal's media capabilities by the label the sheet shows, in the proposal's order;
+   *  absent when none was asked for. */
+  mediaLabels?: string[];
   /** The managed account trust is recorded for, or null for Claude's own config. */
   trustAccount: string | null;
 }
@@ -152,6 +155,7 @@ export function proposalEffects(p: HiveProposal, plan: ProposalPlan): string[] {
     ...setups,
     `Up to ${plural(plan.cap, `${MODEL(plan.workerModel)} worker`)} at once (${plan.workerEffort} effort); the queen is ${MODEL(plan.coordModel)} (${plan.coordEffort} effort).`,
     plan.toolLabels.length ? `Tools: ${listed(plan.toolLabels)}.` : 'No tools beyond the agents’ own.',
+    ...(p.media?.length ? [`Media the agent expects to need: ${listed(plan.mediaLabels?.length === p.media.length ? plan.mediaLabels : p.media)}. Approving from the phone sets none up; on the desktop the Create sheet opens “What it can make” and tags them “Asked for”.`] : []),
     `Budget $${(plan.budgetCents / 100).toFixed(plan.budgetCents % 100 ? 2 : 0)}. Work lands on Base${plan.pushAfterLand ? ' and is pushed' : ', not pushed'}.`,
     ...files,
     ...(plan.rules.trim() ? ['Rules for every agent: your default rules.'] : []),

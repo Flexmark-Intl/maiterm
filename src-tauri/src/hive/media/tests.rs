@@ -208,3 +208,43 @@ fn lookups_by_id_capability_and_host() {
     assert!(providers_for_host("example.com").is_empty());
     assert!(provider("fal").unwrap().covers("music") && !provider("fal").unwrap().covers("voice"));
 }
+
+// ─── proposeHive's `media` (docs/hive-media.md §8) ──────────────────────────
+
+fn ids(xs: &[&str]) -> Vec<String> {
+    xs.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn a_requested_media_list_keeps_known_ids_in_order() {
+    let r = check_requested(&ids(&["music", "video"]));
+    assert_eq!(r.capabilities, ids(&["music", "video"]));
+    assert!(r.dropped.is_empty());
+    assert_eq!(check_requested(&[]), RequestedMedia::default());
+}
+
+#[test]
+fn a_requested_media_list_drops_unknown_ids_and_names_them() {
+    let r = check_requested(&ids(&["video", "hologram", " music ", "", "Video", "hologram"]));
+    assert_eq!(r.capabilities, ids(&["video", "music"]), "surrounding space is trimmed, ids are exact");
+    assert_eq!(r.dropped, ids(&["hologram", "Video"]),"each unknown once, in the order met");
+}
+
+#[test]
+fn a_requested_media_list_counts_a_repeat_once() {
+    let r = check_requested(&ids(&["image", "image", "voice", "image"]));
+    assert_eq!(r.capabilities, ids(&["image", "voice"]));
+}
+
+#[test]
+fn a_requested_media_list_is_capped_at_the_number_of_capabilities() {
+    let all: Vec<String> = cat().capabilities.iter().map(|c| c.id.clone()).collect();
+    let mut asked = all.clone();
+    asked.extend(all.iter().cycle().take(40).cloned());
+    asked.extend((0..100).map(|i| format!("nope{i}-{}", "x".repeat(200))));
+    let r = check_requested(&asked);
+    assert_eq!(r.capabilities, all, "every capability once, never more than the catalogue has");
+    assert_eq!(r.capabilities.len(), cat().capabilities.len());
+    assert_eq!(r.dropped.len(), cat().capabilities.len(), "the dropped list is bounded too");
+    assert!(r.dropped.iter().all(|d| d.chars().count() <= 40), "a long id is shortened in the note");
+}

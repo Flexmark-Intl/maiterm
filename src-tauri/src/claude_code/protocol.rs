@@ -1383,6 +1383,13 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
 /// approval for everything the Hive then does (§7.3). Answered by the caller's window.
 fn propose_hive_tool() -> Value {
     use crate::hive::create::{MAX_BRIEF, MAX_BRIEF_FILES};
+    let ids: Vec<&str> = crate::hive::media::catalogue().capabilities.iter().map(|c| c.id.as_str()).collect();
+    let media_description = format!(
+        "Media the goal needs made (optional), by capability id: {}. The Create sheet then opens its \"What it can make\" \
+         panel with those capabilities' rows open, so your human sees what this Mac can make and what to set up. \
+         Unknown ids are dropped and named in the answer.",
+        ids.join(", ")
+    );
     serde_json::json!({
         "name": "proposeHive",
         "description": format!(
@@ -1407,6 +1414,7 @@ fn propose_hive_tool() -> Value {
                 "brief_files": { "type": "array", "items": { "type": "string" }, "description": "Absolute paths of plan documents to attach" },
                 "folders": { "type": "array", "items": { "type": "string" }, "description": "Absolute paths of the folders it works in; the first is the primary" },
                 "cap": { "type": "integer", "description": "Workers at once (default: your human's Hive default)" },
+                "media": { "type": "array", "items": { "type": "string" }, "description": media_description },
                 "worker_model": { "type": "string", "enum": ["opus", "sonnet", "haiku"], "description": "Workers' model (default: your human's Hive default)" },
                 "worker_effort": { "type": "string", "enum": crate::hive::tools::EFFORTS, "description": "Workers' effort (default: your human's Hive default)" }
             },
@@ -1716,6 +1724,25 @@ mod tests {
 
     fn names(gates: ToolGates) -> Vec<String> {
         tool_list_response(gates)["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn propose_hive_takes_an_optional_media_list_that_names_the_catalogue_ids() {
+        let tool = propose_hive_tool();
+        let media = &tool["inputSchema"]["properties"]["media"];
+        assert_eq!(media["type"], "array");
+        assert_eq!(media["items"]["type"], "string");
+        assert!(
+            !tool["inputSchema"]["required"].as_array().unwrap().iter().any(|r| r == "media"),
+            "media is optional"
+        );
+        let description = media["description"].as_str().unwrap();
+        let caps = &crate::hive::media::catalogue().capabilities;
+        assert!(!caps.is_empty());
+        for c in caps {
+            assert!(description.contains(&c.id), "the description names {}", c.id);
+        }
+        assert!(description.contains("Unknown ids are dropped"), "the agent is told what happens to a wrong id");
     }
 
     const FILES: [&str; 3] = ["revealInTree", "getTreeSelection", "getAgentFileActivity"];

@@ -37,7 +37,7 @@
   import { defaultsFromWizard, defaultToolIds, FALLBACK_CAP, fullPacks, HIVE_EFFORTS, HIVE_MODELS, knownTools, pickedItems, summarizeTools, wizardStart } from '$lib/hive/defaults';
   import HiveToolPicker from './HiveToolPicker.svelte';
   import HiveMediaPanel from './HiveMediaPanel.svelte';
-  import { createPickTracker, createSetupWatch, flippedIds, isSetupOnly, pickerTools, setupTicks, shouldStartOpen } from '$lib/hive/media';
+  import { createPickTracker, createSetupWatch, flippedIds, isSetupOnly, pickerTools, requestedCapabilities, setupTicks, shouldStartOpen } from '$lib/hive/media';
   import { watchSetupEnds } from '$lib/hive/mediaWatch';
 
   interface Props {
@@ -84,6 +84,8 @@
     coordModel: string; coordEffort: string; workerModel: string; workerEffort: string;
     picked: string[]; budgetDollars: number; pushAfterLand: boolean; phone: 'coordinator' | 'all' | 'none';
     suggestions: Record<string, StackSuggestion[] | null>; shareChoice: Record<string, boolean>;
+    /** The capabilities the agent's proposal asked for (docs/hive-media.md §8), kept so a reopened sheet still opens them. */
+    media?: string[];
     picks: Record<string, { on: boolean; command: string }>; step: number; reached: number;
   }
   const draftFor = () => createDrafts.get<Draft>(workspaceId);
@@ -92,6 +94,14 @@
    *  the goal, brief, files, folders and crew; everything else starts from the defaults. Taken
    *  once, so the next open is the draft the human made of it. */
   const seed = saved ? undefined : untrack(() => createDrafts.takeSeed(workspaceId));
+  /** The capabilities the proposal asked for, or the kept draft's: the Tools step opens the media
+   *  panel open and tags these rows "Asked for". Start over empties it. */
+  const askedMedia = requestedCapabilities(saved?.media ?? seed?.media);
+  let requestedMedia = $state(askedMedia);
+  /** What the panel is handed: `requestedMedia` until the panel has mounted once, then nothing. The
+   *  panel's first mount spends it (`onseeded`), so Back, then Next, shows no tags and opens
+   *  nothing again. `requestedMedia` stays what the kept draft records. */
+  let mediaSeed = $state([...askedMedia]);
   /** Opened on a kept draft: the header offers Start over. */
   let resumed = $state(!!saved);
   /** Who proposed what's in the sheet, until Start over. */
@@ -190,13 +200,15 @@
     createDrafts.set<Draft>(workspaceId, $state.snapshot({
       // Kept only as edited: a rename of the workspace meanwhile otherwise wins.
       name: name === ws?.name ? '' : name, goal, instructions, brief, briefFiles, rulesOpen, folders, cap, landing, coordModel, coordEffort, workerModel, workerEffort,
-      picked: [...picked], budgetDollars, pushAfterLand, phone, suggestions: read, shareChoice, picks, step, reached,
+      picked: [...picked], budgetDollars, pushAfterLand, phone, suggestions: read, shareChoice, picks, step, reached, media: requestedMedia,
     }) as Draft);
   }
   function startOver() {
     createDrafts.clear(workspaceId);
     resumed = false;
     proposedBy = null;
+    requestedMedia = [];
+    mediaSeed = [];
     useDefaults = true;
     createError = null; trustError = null; folderNote = null;
     name = ws?.name ?? '';
@@ -1005,8 +1017,9 @@
           <!-- "What it can make" (docs/hive-media.md §7): read-only, above the picker, which it never touches.
                The panel reads startOpen once, at mount, and mounts only while this step shows, so the
                goal and folders it reads are the ones the human just left (or a restored draft's). The
-               one place it is computed. Phase 4 passes a proposal's `media` here as the third argument. -->
-          <HiveMediaPanel bind:this={mediaPanel} {workspaceId} startOpen={shouldStartOpen(goal, folders)} onchanged={detectFromSetups} onstarted={(st) => setupWatch.started(st)} />
+               one place it is computed. A proposal's `media` is its third argument and is also handed over as
+               `requested`: the panel tags those rows, and its first mount spends the seed (`onseeded`). -->
+          <HiveMediaPanel bind:this={mediaPanel} {workspaceId} startOpen={shouldStartOpen(goal, folders, mediaSeed)} requested={mediaSeed} onseeded={() => (mediaSeed = [])} onchanged={detectFromSetups} onstarted={(st) => setupWatch.started(st)} />
           <div class="field">
             <span class="label">Tools</span>
             {#if tools === null}
