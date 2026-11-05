@@ -337,13 +337,19 @@ pub fn rows(hits: &[Hit], pays_for: &[String]) -> Vec<MediaRow> {
 /// The whole status: reads this Mac, then `rows`. Blocks (ports, files, executables): call it off
 /// the main thread. `workspace` is a Hive's workspace id, or `None` for Preferences.
 pub fn status(prefs: &crate::state::Preferences, workspace: Option<&str>, pays_for: &[String]) -> Vec<MediaRow> {
+    rows(&hits(prefs, workspace), pays_for)
+}
+
+/// Every source's hits on this Mac: what `status` turns into rows, and what Verify re-detects
+/// (`verify.rs`). Blocks: call it off the main thread.
+pub fn hits(prefs: &crate::state::Preferences, workspace: Option<&str>) -> Vec<Hit> {
     let detected = crate::hive::create::detect_tools(prefs);
     let mut hits = cli_hits(&detected);
     hits.extend(proxy_hits(&proxy_inputs(), workspace));
     hits.extend(native_hits(&detected));
     hits.extend(plugin_hits(&plugin_roots(prefs)));
     hits.extend(comfy_hits(&detected, &app_dirs()));
-    rows(&hits, pays_for)
+    hits
 }
 
 /// The Tools step's media panel and Preferences → Hive: one row per capability. `workspace_id` is

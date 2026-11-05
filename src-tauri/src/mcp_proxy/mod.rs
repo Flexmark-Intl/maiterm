@@ -801,6 +801,74 @@ async fn call(server: &ProxyServer, sid: Option<&str>, rid: Value, params: Value
     fail(rid, Status::new("unreachable", "the server kept ending the session"))
 }
 
+/// One `tools/call` made by maiTerm itself rather than an agent: Hive media's Verify step reading
+/// a balance or a price (docs/hive-media.md §6). WHICH tools may be called this way is the
+/// caller's rule (`hive::media::verify::CHECK_TOOLS`); this only carries the call. It runs on a
+/// session of its own, ended afterwards, and never reads or writes the saved tool list (§4.1).
+/// A refused credential is recorded exactly as an agent's refused call is, so the server's status
+/// says what the check found; any other failure leaves the status alone and is the caller's to
+/// put into words.
+pub async fn call_once(id: &str, params: Value) -> Result<Value, UpErr> {
+    let server = get(id).ok_or_else(|| UpErr::Protocol(format!("no MCP server named {id}")))?;
+    let refused = |server: &ProxyServer, st: Status| {
+        set_calls_refused(&server.id, true);
+        set_status(&server.id, st);
+    };
+    let mut auth = match bearer(&server).await {
+        Ok(a) => a,
+        Err(why) => {
+            refused(&server, needs_sign_in(&server, &why));
+            return Err(UpErr::Unauthorized { challenge: None });
+        }
+    };
+    let up = Upstream::new(&server.url);
+    for attempt in 0..2 {
+        let result = async {
+            let session = up.initialize(auth.as_deref()).await?;
+            let r = up.call_tool(auth.as_deref(), &session, params.clone()).await;
+            up.end(auth.as_deref(), &session).await;
+            r
+        }
+        .await;
+        match result {
+            Ok((v, _)) => {
+                set_calls_refused(&server.id, false);
+                if status(&server.id).state == "needs_sign_in" {
+                    set_status(&server.id, Status::new("connected", ""));
+                }
+                return Ok(v);
+            }
+            // A 401 ran nothing upstream, so one retry after a refresh is safe.
+            Err(UpErr::Unauthorized { .. }) if attempt == 0 && server.auth == AUTH_OAUTH => match oauth::access_token(&server, auth.as_deref()).await {
+                Ok(fresh) => auth = Some(fresh),
+                Err(why) => {
+                    refused(&server, needs_sign_in(&server, &why));
+                    return Err(UpErr::Unauthorized { challenge: None });
+                }
+            },
+            Err(e) => {
+                if matches!(e, UpErr::Unauthorized { .. } | UpErr::Forbidden { .. }) {
+                    if server.auth != AUTH_OAUTH {
+                        forget_cached_cred(&server.id);
+                    }
+                    refused(&server, status_for(&server, &e));
+                }
+                return Err(e);
+            }
+        }
+    }
+    Err(UpErr::Unauthorized { challenge: None })
+}
+
+/// Put a server into the registry as if it had been loaded, for tests elsewhere in the crate.
+#[cfg(test)]
+pub(crate) fn insert_for_test(server: ProxyServer) {
+    ensure_loaded();
+    let mut list = SERVERS.write();
+    list.retain(|s| s.id != server.id);
+    list.push(server);
+}
+
 /// Open a downstream `GET` stream: `None` for an unknown server (404).
 pub fn downstream_stream(path: &str) -> Option<mpsc::UnboundedReceiver<String>> {
     let id = get(id_from_path(path)?)?.id;
@@ -1222,6 +1290,32 @@ mod tests {
         assert!(same_url("https://mcp.linear.app:443/mcp", "https://mcp.linear.app/mcp"));
         assert!(!same_url("https://x.example/mcp/A", "https://x.example/mcp/a"));
         assert!(!same_url("https://x.example/mcp", "http://x.example/mcp"));
+    }
+
+    /// docs/mcp-proxy.md §4.1, for the two reads Hive media's Verify makes: a list read that fails
+    /// and a one-off call that fails both leave the saved tool list exactly as it was. The upstream
+    /// is a closed loopback port, so nothing leaves this machine.
+    #[tokio::test]
+    async fn a_failed_read_or_check_call_keeps_the_saved_list() {
+        let saved = Catalog { tools: vec![json!({ "name": "get_pricing" }), json!({ "name": "generate" })], server_info: json!({ "name": "stub" }), instructions: None, fetched_at: 7 };
+        let id = format!("verify-stub-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        insert_for_test(ProxyServer {
+            id: id.clone(),
+            url: "http://127.0.0.1:1/mcp".into(),
+            auth: AUTH_NONE.into(),
+            enabled: true,
+            workspaces: vec![],
+            catalog: Some(saved.clone()),
+            oauth: None,
+            added_at: 0,
+            added_by: "test".into(),
+        });
+        assert!(refresh(&id).await.is_err(), "nothing listens on port 1");
+        assert!(call_once(&id, json!({ "name": "get_pricing", "arguments": {} })).await.is_err());
+        let after = get(&id).unwrap().catalog.unwrap();
+        assert_eq!(after, saved, "a failure never removes a tool or rewrites the list");
+        assert_ne!(status(&id).state, "connected");
+        SERVERS.write().retain(|s| s.id != id);
     }
 
     #[test]

@@ -1066,6 +1066,20 @@ export interface HiveMediaCatalogue {
   providers: HiveMediaProvider[];
 }
 
+/** What `hive_media_verify` found for one provider (docs/hive-media.md §6, "Verify"). `state` is a
+ *  String: "ready" | "needs_sign_in" | "needs_credit" | "unreachable" | "error", or "installed" for
+ *  something present that maiTerm can't check (a plugin switched off, an app not running, the
+ *  human's own MCP entry). `message` is the sentence to show, already in maiTerm's words. */
+export interface HiveMediaVerifyResult {
+  state: string;
+  message: string;
+  /** Where to fix it, for a button (the provider's billing page on "needs_credit"). Only ever
+   *  http(s); open it with the app's external-link opener. */
+  link: string | null;
+  /** How many tools the proxied server listed, when its list was read. */
+  tool_count: number | null;
+}
+
 /** What the Make this a Hive wizard starts from (state/workspace.rs `HiveDefaults`). Empty
  *  strings and null mean the built-in default; `lib/hive/defaults.ts` resolves them. */
 export interface HiveDefaults {

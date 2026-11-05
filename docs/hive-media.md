@@ -192,6 +192,36 @@ fal `get_pricing`, WaveSpeed `get_balance`. The row turns **Ready**, or shows th
 words ("Signed in, but fal answered 402: add credit at fal.ai/dashboard/billing", with the link
 as a button). It never runs a paid generation.
 
+**Verify: built (2026-11-05), `hive/media/verify.rs`.** `hive_media_verify(workspace_id?,
+provider_id) → { state, message, link?, tool_count? }`, TS `hiveMediaVerify(workspaceId,
+providerId)`. `state` is a String: `ready` | `needs_sign_in` | `needs_credit` | `unreachable` |
+`error`, plus `installed` for something present that maiTerm can't check (a plugin switched off,
+an app not running, the human's own MCP entry). For a provider served through the proxy (picked by
+its upstream URL, preferring a server that is on and in the Hive's scope), in order:
+- **On and in scope** for the Hive's workspace, else `unreachable` with what to change in
+  Preferences → MCP servers.
+- **The entry reaches agents.** The proxied entry must be written, provably ours
+  (`entries::origin`), in `~/.claude.json` and every managed Claude account root that has a
+  `.claude.json`. This catches phase 1's gap: with Claude Code IDE integration off, no entry is
+  written and `hive_media_status` (which reads the registry) still says `ready`; Verify says
+  `unreachable` and names the switch. A native entry holding the name, a stale port or a missing
+  root are said in plain words too.
+- **The tools list** through the proxy's own `refresh` (free). A failed read leaves the saved list
+  as it was (docs/mcp-proxy.md §4.1).
+- **The check call**, through `mcp_proxy::call_once` (its own session, never touching the saved
+  list). Only `verify::CHECK_TOOLS` is ever called: fal `get_pricing`, WaveSpeed `get_balance`,
+  BFL `get_credits`, Recraft `get_user`, Meshy `meshy_check_balance`. WaveSpeed's `get_price`
+  needs a job's arguments and is never called. Arguments are only the ones the tool's schema
+  requires, from a hard-coded harmless value (fal: one model's price), its `default` or its first
+  `enum`; a required argument with none of those means no call.
+- **Words.** A 401 or 403 is `needs_sign_in`. A 402, or a tool answering that the account is out
+  of credit, is `needs_credit`, with `link` set to the catalogue's `billing_url` (http(s) only).
+  Arguments the server rejects (`-32602`) are maiTerm's guess failing, so the result stays `ready`
+  and says the account wasn't read.
+
+Any other provider is re-detected with `status::hits` (the same sources as `hive_media_status`):
+the Homebrew kit is `ready` only with every program it lists, and names the missing ones.
+
 **Phase 5: stdio upstreams in the MCP proxy** (docs/mcp-proxy.md §2 lists them as v2). maiTerm
 runs a local MCP server itself, with the key from the keychain in its environment. That moves
 MiniMax and Meshy from `manual` to `stdio_mcp`, and keeps those keys out of `.claude.json`.
@@ -345,7 +375,7 @@ so the coordinator counts generations instead.
 3. **Setup routes and the tools change.**
    - `remote_mcp` (OAuth and token) through the proxy, scoped to the Hive;
    - `brew` (with the whisper model) and `plugin` in a visible tab;
-   - verification;
+   - verification (built 2026-11-05: §6, "Verify: built");
    - the new after-Create tools change of §7 (a §3.4 row).
 4. **Agents.**
    - the capability map in the briefs;
