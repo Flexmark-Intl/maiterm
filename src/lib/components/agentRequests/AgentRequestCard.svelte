@@ -1,6 +1,8 @@
 <!--
   An agent's request only the human can approve (docs/agent-requests.md): a mesh change, a move
-  that changes a tab's mesh, or restarting maiTerm. The Decisions queue draws one per request.
+  that changes a tab's mesh, restarting maiTerm, or one of a Hive's (a land, a settings change, a
+  media ask: `tool_setup`, whose approval opens the setup sheet in the Hive, lib/hive/toolSetup.ts).
+  The Decisions queue draws one per request.
 
   The question and its consequences are maiTerm's own words, built from maiTerm's state when the
   request was filed; only the reason is the agent's, and it is shown as a quote. The approval is
@@ -11,6 +13,7 @@
   import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
   import { workspacesStore, tabDisplayName } from '$lib/stores/workspaces.svelte';
   import type { AgentRequest } from '$lib/tauri/types';
+  import { APPROVED_NOTE as TOOL_SETUP_APPROVED_NOTE } from '$lib/hive/toolSetup';
 
   interface Props {
     request: AgentRequest;
@@ -57,6 +60,7 @@
           : r.kind === 'hive_land' ? 'Allow this land?'
           : r.kind === 'hive_undo' ? 'Allow this undo?'
           : r.kind === 'hive_settings' ? 'Change these Hive settings?'
+          : r.kind === 'tool_setup' ? 'Set up a tool for this Hive?'
           : r.kind === 'hive_propose' ? ((r.args.plan as { kind?: string } | undefined)?.kind === 'new_goal' ? 'A new goal for this Hive?' : 'Make this Hive?')
           : r.kind.startsWith('bridge') ? 'Allow this bridge change?'
             : r.kind.startsWith('mesh') ? 'Allow this mesh change?' : 'Allow this move?',
@@ -78,6 +82,7 @@
             ? r.kind === 'restart' ? 'Approved. maiTerm is restarting.'
               : r.kind === 'hive_land' ? 'Approved. maiTerm lands it now, and the queen will be told.'
               : r.kind === 'hive_settings' ? 'Approved. The settings are changed, and the queen will be told.'
+              : r.kind === 'tool_setup' ? TOOL_SETUP_APPROVED_NOTE
               : r.kind === 'hive_propose' ? 'Opened in the sheet: nothing happens until you confirm it there.'
               : 'Approved. It is being carried out, and the agent will be told.'
             : 'Denied. The agent will be told.',

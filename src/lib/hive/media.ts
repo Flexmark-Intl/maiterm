@@ -130,7 +130,8 @@ export interface PanelGroups {
   more: PanelRow[];
 }
 
-function panelProvider(p: HiveMediaProvider): PanelProvider {
+/** A catalogue provider as the panel draws it (its credits line). */
+export function panelProvider(p: HiveMediaProvider): PanelProvider {
   return { ...p, creditsLine: creditsLine(p) };
 }
 

@@ -11,6 +11,7 @@
   import { watchSetupEnds } from '$lib/hive/mediaWatch';
   import HiveMediaPanel from './HiveMediaPanel.svelte';
   import HiveToolsEditor from './HiveToolsEditor.svelte';
+  import type { SetupSeed } from '$lib/hive/toolSetup';
 
   interface Props {
     hive: Hive;
@@ -22,9 +23,12 @@
     onautonomy: () => void;
     onqueue: () => void;
     onbudget: () => void;
+    /** Optional: an approved media ask's setup sheet to open at mount (docs/hive-media.md §8,
+     *  lib/hive/toolSetup.ts). The parent keys this sheet by it, so it is read once. */
+    setup?: SetupSeed | null;
   }
 
-  let { hive, workspaceId, name, onclose, onworkers, onautonomy, onqueue, onbudget }: Props = $props();
+  let { hive, workspaceId, name, onclose, onworkers, onautonomy, onqueue, onbudget, setup = null }: Props = $props();
   let panelEl = $state<HTMLDivElement | null>(null);
   /** The tools editor, to detect again when the media panel's setup sheet changed something. */
   let toolsEditor = $state<ReturnType<typeof HiveToolsEditor> | null>(null);
@@ -50,7 +54,7 @@
   const folders = $derived(folderLines(hive));
   /** Handed to the panel, which reads it once when it mounts (so the human's fold wins after that);
    *  the panel is keyed by workspace below, so a different Hive mounts it afresh with its own value. */
-  const mediaStartOpen = $derived(shouldStartOpen(hive.goal, hive.folders));
+  const mediaStartOpen = $derived(!!setup || shouldStartOpen(hive.goal, hive.folders));
 
   /** Each editable section replaces this sheet. */
   function go(open: () => void) {
@@ -103,7 +107,7 @@
         <h4>Tools</h4>
         <p class="why scope">On this Mac: what's set up here, not what this Hive's workers get. They get the tools below.</p>
         {#key workspaceId}
-          <HiveMediaPanel bind:this={mediaPanel} {workspaceId} startOpen={mediaStartOpen} onchanged={() => toolsEditor?.redetect()} onstarted={(st) => setupWatch.started(st)} />
+          <HiveMediaPanel bind:this={mediaPanel} {workspaceId} startOpen={mediaStartOpen} {setup} onchanged={() => toolsEditor?.redetect()} onstarted={(st) => setupWatch.started(st)} />
           <HiveToolsEditor bind:this={toolsEditor} {hive} {workspaceId} />
         {/key}
       </section>

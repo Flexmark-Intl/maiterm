@@ -24,6 +24,10 @@
     onstarted    optional, passed to the setup sheet: the install tab or server a step started.
                  The parent that outlives the panel watches for its end (createSetupWatch); the
                  panel listens for nothing app-wide itself.
+    setup        optional: an approved media ask's sheet to open (docs/hive-media.md §8, Hive
+                 settings only). Read ONCE at mount; spent by the first fetch that answers, which
+                 opens that provider's sheet as its "Set up" button would (same baseline, same
+                 `onstarted`), with the install Rust already started from the phone, if any.
 
   Ordering: every fetch takes a `createLatest()` ticket and checks it after each await, so a slow
   first answer can't overwrite a newer one and nothing is set after unmount. All joining and
@@ -35,7 +39,8 @@
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import { warn as logWarn } from '@tauri-apps/plugin-log';
   import { hiveMediaCatalogue, hiveMediaStatus } from '$lib/tauri/commands';
-  import type { HiveMediaCatalogue, HiveMediaRow } from '$lib/tauri/types';
+  import type { HiveMediaCatalogue, HiveMediaInstallFinished, HiveMediaInstallStarted, HiveMediaRow } from '$lib/tauri/types';
+  import { seededSetup, type SetupSeed } from '$lib/hive/toolSetup';
   import { compactLine, createLatest, placeRequested, readyToolIds, requestedCapabilities, externalUrl, coverNames, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
   import type { PanelProvider, PanelRow, SetupStarted } from '$lib/hive/media';
 
@@ -46,8 +51,9 @@
     onseeded?: () => void;
     onchanged?: () => void;
     onstarted?: (s: SetupStarted) => void;
+    setup?: SetupSeed | null;
   }
-  let { workspaceId, startOpen, requested, onseeded, onchanged, onstarted }: Props = $props();
+  let { workspaceId, startOpen, requested, onseeded, onchanged, onstarted, setup: setupSeed = null }: Props = $props();
 
   const uid = $props.id();
   const bodyId = `${uid}-body`;
@@ -70,8 +76,12 @@
 
   /** The open setup sheet, a new object per opening (the sheet is keyed by it, so each opening
    *  mounts a fresh one with its own seeds), and the button that opened it, for focus on close. */
-  let setup = $state<{ provider: PanelProvider; capability: string; readyBefore: string[] } | null>(null);
+  let setup = $state<{ provider: PanelProvider; capability: string; readyBefore: string[]; install?: HiveMediaInstallStarted | null; finished?: HiveMediaInstallFinished | null } | null>(null);
   let setupOpener: HTMLElement | null = null;
+  /** The approved ask's sheet, until the first fetch opens it. */
+  let seed = untrack(() => setupSeed);
+  /** Why the approved ask's sheet couldn't open, shown above the rows. */
+  let seedError = $state<string | null>(null);
 
   const groups = $derived(rows && catalogue ? groupRows(rows, catalogue) : null);
   const placed = $derived(groups ? placeRequested(groups, asked) : { main: [] as PanelRow[], more: [] as PanelRow[] });
@@ -92,6 +102,7 @@
       if (stale()) return;
       catalogue = cat;
       rows = status;
+      if (seed) openSeeded(seed, status, cat);
     } catch (e) {
       if (stale()) return;
       failure = String(e);
@@ -124,6 +135,22 @@
   function tick(id: string) {
     pay = toggleId(pay, id);
     void load();
+  }
+
+  /** The approved ask's sheet, as its row's "Set up" would open it: its card shown, More opened
+   *  when the row lives there, the same baseline. Spent once, whatever the outcome. */
+  function openSeeded(s: SetupSeed, status: HiveMediaRow[], cat: HiveMediaCatalogue) {
+    seed = null;
+    const got = seededSetup(status, cat, s);
+    if ('error' in got) {
+      seedError = got.error;
+      return;
+    }
+    open = true;
+    if (!cardsOpen.includes(got.capability)) cardsOpen = [...cardsOpen, got.capability];
+    // `placed` reads the rows just set.
+    if (!placed.main.some((r) => r.capability === got.capability)) moreOpen = true;
+    setup = { provider: got.provider, capability: got.label, readyBefore: got.readyBefore, install: s.install, finished: s.finished };
   }
 
   function openSetup(e: MouseEvent, provider: PanelProvider, capability: string) {
@@ -280,6 +307,7 @@
         <p class="dim">No media capabilities to show.</p>
       {:else if groups}
         {#if loading}<p class="dim" role="status">Checking…</p>{/if}
+        {#if seedError}<p class="seed-error" role="alert">{seedError} Set it up from its row below instead.</p>{/if}
 
         <p class="dim">What this Mac can already make. Opening a card doesn't add anything to the Hive.</p>
 
@@ -319,7 +347,7 @@
 
 {#if setup}
   {#key setup}
-    <HiveMediaSetupSheet provider={setup.provider} capabilityLabel={setup.capability} {workspaceId} onclose={closeSetup} onchanged={setupChanged} {onstarted} readyBefore={setup.readyBefore} />
+    <HiveMediaSetupSheet provider={setup.provider} capabilityLabel={setup.capability} {workspaceId} onclose={closeSetup} onchanged={setupChanged} {onstarted} readyBefore={setup.readyBefore} install={setup.install ?? null} installFinished={setup.finished ?? null} />
   {/key}
 {/if}
 
@@ -341,6 +369,7 @@
   .error { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; font-size: 0.923rem; color: var(--fg); }
   .error p { margin: 0; overflow-wrap: anywhere; }
   .detail { font-size: 0.808rem; }
+  .seed-error { margin: 0; font-size: 0.846rem; color: var(--yellow); overflow-wrap: anywhere; }
 
   .pay { margin: 0; padding: 6px 8px; display: flex; flex-wrap: wrap; gap: 4px 14px; border: 1px solid var(--bg-light); border-radius: 5px; min-width: 0; }
   .pay legend { padding: 0 4px; font-size: 0.808rem; color: var(--fg-dim); }

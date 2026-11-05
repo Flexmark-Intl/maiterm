@@ -2022,9 +2022,9 @@ export interface AgentRequest {
   window_label: string;
   kind: 'mesh_enable' | 'mesh_disable' | 'mesh_link' | 'mesh_unlink' | 'tab_move' | 'workspace_move' | 'tab_create' | 'restart'
     | 'tab_reload' | 'window_reload' | 'bridge_connect' | 'bridge_fork' | 'bridge_disconnect' | 'mcp_add'
-    // A Hive's land or undo (docs/hive.md §8.1, §8.3), and its coordinator's settings change
-    // (§3.4): filed and carried out by Rust, never a window.
-    | 'hive_land' | 'hive_undo' | 'hive_settings'
+    // A Hive's land or undo (docs/hive.md §8.1, §8.3), its coordinator's settings change (§3.4)
+    // and media ask (docs/hive-media.md §8): filed and carried out by Rust, never a window.
+    | 'hive_land' | 'hive_undo' | 'hive_settings' | 'tool_setup'
     // An ordinary agent's offer of a Hive or a Done Hive's new goal (`proposeHive`, §3.7):
     // filed and carried out by its window (lib/hive/proposalRequest.ts).
     | 'hive_propose';

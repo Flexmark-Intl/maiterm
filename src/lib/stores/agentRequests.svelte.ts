@@ -815,6 +815,7 @@ async function execute(r: AgentRequest): Promise<string> {
     case 'hive_land':
     case 'hive_undo':
     case 'hive_settings':
+    case 'tool_setup':
       // Never handed to a window (windowCarriesOut); Rust carries it out.
       throw new Error('a Hive’s request is carried out by maiTerm itself');
   }

@@ -15,6 +15,10 @@
                      when the sheet has closed.
     onstarted        optional: the install tab or server a step started, reported even after a
                      close, so a parent that outlives the panel hears its end (lib/hive/mediaWatch.ts).
+    install          optional: an install Rust already started for this provider (an approved
+                     media ask from the phone, docs/hive-media.md §8). The sheet shows its tab as if
+                     its own Install had started it, and never offers a second one while it runs.
+    installFinished  optional: that install's end, heard before the sheet opened.
 
   Ordering: `alive` goes false at unmount, and every await is followed by a check of it before
   anything is written into the sheet, so an event or answer arriving after the sheet closed writes
@@ -52,6 +56,8 @@
     /** The tools ready when the panel opened this sheet: passed through on `onstarted`, the
      *  baseline that tells what this setup made ready. */
     readyBefore?: string[];
+    install?: HiveMediaInstallStarted | null;
+    installFinished?: HiveMediaInstallFinished | null;
   }
   let props: Props = $props();
 
@@ -63,6 +69,8 @@
   const changed = untrack(() => props.onchanged);
   const reportStarted = untrack(() => props.onstarted);
   const readyBefore = untrack(() => [...(props.readyBefore ?? [])]);
+  const preStarted = untrack(() => props.install ?? null);
+  const preFinished = untrack(() => props.installFinished ?? null);
 
   const uid = $props.id();
   const titleId = `${uid}-title`;
@@ -96,7 +104,7 @@
   let key = $state('');
 
   // Install
-  let started = $state<HiveMediaInstallStarted | null>(null);
+  let started = $state<HiveMediaInstallStarted | null>(preStarted);
   let endLine = $state<string | null>(null);
   let model = $state<HiveMediaModelStatus | null>(null);
 
@@ -148,6 +156,7 @@
     // already running with no Download). The later tab and server reports add what to watch; the
     // first start's baseline wins.
     reportStarted?.({ provider_id: p.id, ready_before: readyBefore });
+    if (preStarted) adoptInstall(preStarted, preFinished);
     if (speech) keep<HiveMediaModelStatus>('hive-media-model-progress', (m) => (model = m));
     if (action === 'app') window.addEventListener('focus', onWindowFocus);
   });
@@ -467,6 +476,20 @@
         holdFocus();
       }
     }
+  }
+
+  /** An install Rust started before this sheet opened: its end is heard here as if Install had
+   *  started it, and the parent's watch learns its tab, so the tick and Ready flow is the same. An
+   *  end that came before the sheet opened is shown at once. */
+  function adoptInstall(s: HiveMediaInstallStarted, finished: HiveMediaInstallFinished | null) {
+    reportStarted?.({ provider_id: p.id, tab_id: s.tab_id, ready_before: readyBefore });
+    if (finished && finished.tab_id === s.tab_id) {
+      onFinished(finished);
+      return;
+    }
+    keep<HiveMediaInstallFinished>('hive-media-install-finished', (f) => {
+      if (f.provider_id === p.id && f.tab_id === started?.tab_id) onFinished(f);
+    });
   }
 
   async function showTab() {

@@ -50,6 +50,8 @@
   import HivePendingCommits from './HivePendingCommits.svelte';
   import { chapterLine, goalNumberLabel, newGoalOffered, pendingHeadline, pendingKey, showPendingLayer } from '$lib/hive/newGoal';
   import HiveSettingsModal from './HiveSettingsModal.svelte';
+  import { hiveToolSetup } from '$lib/stores/hiveToolSetup.svelte';
+  import { HIVE_OPEN_TOOL_SETUP, type SetupSeed } from '$lib/hive/toolSetup';
   import { hiveFailureNotice } from '$lib/agents/turnFailure';
   import { boardGone, pausedLabel, throttleTip } from '$lib/hive/model';
   import { doneLabel, doneStaleTip } from '$lib/hive/finish';
@@ -134,6 +136,17 @@
   let resuming = $state(false);
   /** Hive settings (§4.1): the editable sheets, and what was fixed at Create. */
   let settingsOpen = $state(false);
+  /** An approved media ask's setup sheet (docs/hive-media.md §8): Hive settings opens with its
+   *  media panel seeded to open that sheet. A new object per opening, so the sheet mounts afresh. */
+  let toolSetupSeed = $state<SetupSeed | null>(null);
+  function openToolSetup(o: SetupSeed) {
+    toolSetupSeed = { capability: o.capability, providerId: o.providerId, install: o.install, finished: o.finished };
+    settingsOpen = true;
+  }
+  function closeSettings() {
+    settingsOpen = false;
+    toolSetupSeed = null;
+  }
   /** The header's Pause (§11.2): no worker starts or relaunches; running agents finish. */
   async function pause() {
     if (resuming) return;
@@ -863,6 +876,15 @@
       hiveGallery.openDetail(workspaceId, d.assetId);
     };
     window.addEventListener(HIVE_OPEN_ASSET, onAsset);
+    // An approved media ask for this Hive (hiveToolSetup): waiting at mount, or arriving later.
+    const waitingSetup = hiveToolSetup.take(workspaceId);
+    if (waitingSetup) openToolSetup(waitingSetup);
+    const onToolSetup = (e: Event) => {
+      if ((e as CustomEvent<string>).detail !== workspaceId) return;
+      const o = hiveToolSetup.take(workspaceId);
+      if (o) openToolSetup(o);
+    };
+    window.addEventListener(HIVE_OPEN_TOOL_SETUP, onToolSetup);
     // Sent to this window only (`emit_to`), so another window's Hive never refetches here.
     let unlisten: (() => void) | undefined;
     let gone = false;
@@ -881,6 +903,7 @@
       window.removeEventListener(HIVE_OPEN_COLUMN, onOpen);
       window.removeEventListener(HIVE_KEY, onKey);
       window.removeEventListener(HIVE_OPEN_ASSET, onAsset);
+      window.removeEventListener(HIVE_OPEN_TOOL_SETUP, onToolSetup);
       hiveGallery.detach(feedFor, galleryToken);
       disarmClose();
     };
@@ -1120,16 +1143,20 @@
     <HiveNewGoalSheet {workspaceId} refreshKey={board} name={ws?.name ?? ''} onclose={() => (newGoalOpen = false)} />
   {/if}
   {#if settingsOpen && hive}
-    <HiveSettingsModal
-      {hive}
-      {workspaceId}
-      name={ws?.name ?? ''}
-      onclose={() => (settingsOpen = false)}
-      onworkers={() => (workersOpen = true)}
-      onautonomy={() => (autonomyOpen = true)}
-      onqueue={() => (queueOpen = true)}
-      onbudget={() => (budgetOpen = true)}
-    />
+    <!-- Keyed by the seed: a second approved ask while settings is open mounts a fresh sheet. -->
+    {#key toolSetupSeed}
+      <HiveSettingsModal
+        {hive}
+        {workspaceId}
+        name={ws?.name ?? ''}
+        setup={toolSetupSeed}
+        onclose={closeSettings}
+        onworkers={() => (workersOpen = true)}
+        onautonomy={() => (autonomyOpen = true)}
+        onqueue={() => (queueOpen = true)}
+        onbudget={() => (budgetOpen = true)}
+      />
+    {/key}
   {/if}
   {#if reportOpen && hive}
     <FinishReportModal {workspaceId} onclose={() => (reportOpen = false)} />
