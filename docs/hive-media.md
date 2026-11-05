@@ -520,6 +520,43 @@ are the window's, on this contract.
 - **No maiLink change.** The phone draws the card from `summary`, `effects` and `reason`, and the
   outcome is the approve reply's existing `detail` (docs/mailink-protocol.md §4.4).
 
+**The window side: built (2026-11-05).** The card on the Loom and the phone, and the sheet's
+opening, on the contract above.
+- **The card** is `AgentRequestCard`, as every other request's: heading "Set up a tool for this
+  Hive?", then Rust's `summary` and `effects`, and the agent's `why` only as the quoted reason. The
+  card guards (nothing in its first 1.5 s, no second click) are the card's own. Approving says
+  "Approved. Its setup sheet opens in the Hive: nothing is set up until you do it there. The queen
+  will be told." The phone draws the same three fields, so no wire change.
+- **A Hive request in the window.** `tool_setup` is in `isHiveRequest` (`lib/hive/requests.ts`)
+  and the `AgentRequest.kind` union: the window never carries it out, never types the coordinator
+  an outcome of its own (Rust's ⟦HIVE TOOLS⟧ is the one notice), and announces the Rust-filed card
+  once, like `hive_settings`.
+- **Opening the sheet** (`stores/hiveToolSetup.svelte.ts`, pure half `lib/hive/toolSetup.ts`). A
+  window-level listener for `hive-tool-setup-approved` (this window's target only, payload checked
+  by `parseApproved`) queues an opening, one per Hive, the newest. It opens at once when the window
+  has focus (a desktop approval always has), else on the window's **next focus**: a phone approval
+  never pulls a window forward or switches its workspace while the human is elsewhere. Opening
+  brings the Hive's workspace forward and dispatches a window event; `HiveView` takes the opening
+  (at mount, or on the event) and opens Hive settings keyed by it, whose `HiveMediaPanel` gets the
+  `setup` seed. The panel spends it on its first fetch that answers: that row's card shown (More
+  opened if it lives there) and the sheet mounted exactly as its "Set up" button would mount it,
+  with the same `readyBefore` baseline and `onstarted`, so Hive settings' own `createSetupWatch`
+  and the tools editor's re-detect see its end. A provider the row no longer offers still opens; an
+  id the catalogue doesn't know is said above the rows, never guessed (`seededSetup`).
+- **A phone-started install** (`install` set): the sheet adopts it (`install` and `installFinished`
+  seeds): its tab and line are shown as if its own Install had started them, its end is heard, and
+  the watch learns its tab, so no second install is offered. An end that came while the opening
+  waited for focus is held on the opening and shown at once.
+- **Missed approvals.** A window reloading when the event came finds it in the request list (Rust
+  keeps a settled request an hour) at init and at its first focus: a `tool_setup` it filed, done,
+  approved, in one of its Hives, not yet opened (`missedOpenings`). Openings already shown are kept
+  in sessionStorage, which survives a reload, so none opens twice. One whose install Rust started
+  from the phone isn't recovered: the request doesn't name its tab, and a sheet without it would
+  offer a second install; that setup goes on by itself and Hive settings → Tools reaches its sheet.
+- **One try per opening.** An opening no Hive view took within 3 s (the workspace couldn't be
+  shown) is dropped and logged, never retried on every focus; a suspended Hive gets none. Hive
+  settings → Tools still sets it up, and Rust still adds the tools once it works.
+
 ## 9. Sandbox hosts
 
 - **Every MCP server runs outside the sandbox**, proxied or native, in Claude's process (docs/hive.md
@@ -687,8 +724,8 @@ art-director), reviewers included. What it does beyond the example above:
 4. **Agents.**
    - the capability map in the briefs: **built 2026-11-05** (§10, `hive/media/map.rs`);
    - `hiveRequestCapability` + `tool_setup` requests, with every piece of plumbing §8 lists, on
-     the Loom and the phone, no protocol bump. **The Rust side is built (2026-11-05, §8)**; the
-     Loom card and the window's opening of the sheet on `hive-tool-setup-approved` aren't yet;
+     the Loom and the phone, no protocol bump. **Built 2026-11-05 (§8)**: the Rust side, and the
+     window side (the card, and the sheet opening on `hive-tool-setup-approved`);
    - `proposeHive`'s `media` (**built 2026-11-05**, §8).
 5. **Stdio upstreams in the MCP proxy**, so MiniMax and Meshy become `stdio_mcp` (§12.1).
 
