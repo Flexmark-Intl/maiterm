@@ -271,6 +271,9 @@ pub fn add_human_file(g: &Gallery, path: &Path) -> Result<Asset, String> {
         made_by: MadeBy::human(),
         source_path: src.canonical.to_string_lossy().to_string(),
         thumb: THUMB_PENDING.to_string(),
+        // The human's own reference, whatever it's called: the guess is for workers' evidence,
+        // and a macOS screenshot ("Screenshot 2026-…") would vanish from For you on its drop.
+        purpose: PURPOSE_DELIVERABLE.to_string(),
         ..NewAsset::default()
     });
     inserted.inspect_err(|_| g.discard_file(&stored.file))

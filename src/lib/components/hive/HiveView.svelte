@@ -500,6 +500,21 @@
   });
   let chaptersOpen = $state(false);
   const goalNumber = $derived(goalNumberLabel(hive));
+  // The goal can run to a paragraph: the header shows its first line, and More opens the rest.
+  // `goalClipped` is measured only while closed (open, nothing is clipped to measure).
+  let goalOpen = $state(false);
+  let goalClipped = $state(false);
+  let goalEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const el = goalEl;
+    void hive?.goal; // a new goal at the same width resizes nothing: re-measure on the text too
+    if (!el || goalOpen) return;
+    const measure = () => (goalClipped = el.scrollHeight > el.clientHeight + 1);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
   let goalPreview = $state<HiveNewGoalPreview | null>(null);
   let previewSeq = 0;
   let previewTimer: ReturnType<typeof setTimeout> | null = null;
@@ -888,14 +903,19 @@
       <div class="title">
         <h2>{ws?.name ?? ''}</h2>
         {#if hive?.goal}
-          <p class="goal">
-            {#if goalNumber}
-              <Tooltip text="Show this Hive's earlier goals">
-                <button type="button" class="goal-n" aria-expanded={chaptersOpen} onclick={() => (chaptersOpen = !chaptersOpen)}>{goalNumber}</button>
-              </Tooltip>
+          <div class="goal-row">
+            <p class="goal" class:open={goalOpen} bind:this={goalEl}>
+              {#if goalNumber}
+                <Tooltip text="Show this Hive's earlier goals">
+                  <button type="button" class="goal-n" aria-expanded={chaptersOpen} onclick={() => (chaptersOpen = !chaptersOpen)}>{goalNumber}</button>
+                </Tooltip>
+              {/if}
+              {hive.goal}
+            </p>
+            {#if goalClipped || goalOpen}
+              <button type="button" class="goal-more" aria-expanded={goalOpen} onclick={() => (goalOpen = !goalOpen)}>{goalOpen ? 'Less' : 'More'}</button>
             {/if}
-            {hive.goal}
-          </p>
+          </div>
         {/if}
       </div>
       <div class="controls">
@@ -1392,7 +1412,13 @@
   .top { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 24px; }
   .title { min-width: 0; flex: 1 1 260px; }
   .title h2 { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.25; letter-spacing: -0.005em; color: var(--fg); overflow-wrap: anywhere; }
-  .goal { margin: 3px 0 0; font-size: 12.5px; line-height: 1.4; color: var(--fg-dim); max-width: 72ch; overflow-wrap: anywhere; }
+  .goal-row { display: flex; align-items: baseline; gap: 8px; margin-top: 3px; max-width: 80ch; }
+  .goal { flex: 0 1 auto; min-width: 0; margin: 0; font-size: 12.5px; line-height: 1.4; color: var(--fg-dim); overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; line-clamp: 1; overflow: hidden; }
+  .goal.open { display: block; overflow: visible; max-height: 30vh; overflow-y: auto; }
+  .goal-more { flex: none; padding: 0; border: none; background: none; color: var(--accent); font: inherit; font-size: 11.5px; cursor: pointer; }
+  .goal-more:hover { text-decoration: underline; }
+  .goal-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
   .controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px 10px; min-width: 0; }
 
   /* The crew strip: one segment per worker in its card's colour, the Hive at a glance. */

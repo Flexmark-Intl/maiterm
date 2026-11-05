@@ -53,6 +53,11 @@ export function extendTo(selection: readonly string[], id: string): string[] {
   return [...selection.filter((s) => s !== id), id];
 }
 
+/** Move to Proof unless every row already is proof, which moves them back to For you. */
+export function nextPurpose(rows: readonly { purpose?: string }[]): 'deliverable' | 'proof' {
+  return rows.length > 0 && rows.every((r) => r.purpose === 'proof') ? 'deliverable' : 'proof';
+}
+
 /** F on the selection: all starred unstars them, otherwise stars them all. */
 export function nextStar(rows: readonly { starred: boolean }[]): boolean {
   return !(rows.length > 0 && rows.every((r) => r.starred));
@@ -73,6 +78,7 @@ export type SelectionAction =
   | 'final'
   | 'rejected'
   | 'clearStatus'
+  | 'purpose'
   | 'iterate'
   | 'send'
   | 'collect'
@@ -95,6 +101,7 @@ export interface SelectionEntry {
 }
 
 export interface MenuRow {
+  purpose?: string;
   starred: boolean;
   status: string;
   tags: string[];
@@ -130,6 +137,7 @@ export function selectionMenu(rows: readonly MenuRow[], revealLabel: string): Se
     out.push({ action: s, label: nextStatus(rows, s) ? set : unset, shortcut: key });
   }
   if (rows.some((r) => r.status)) out.push({ action: 'clearStatus', label: 'Clear status' });
+  out.push({ action: 'purpose', label: nextPurpose(rows) === 'proof' ? 'Move to Proof' : 'Move to For you' });
   out.push(sep);
   if (one) out.push({ action: 'iterate', label: 'Iterate with the queen', disabled: anyTrashed });
   out.push({ action: 'send', label: 'Send to worker', submenu: 'workers', disabled: anyTrashed });

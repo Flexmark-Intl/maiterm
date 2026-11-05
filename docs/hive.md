@@ -2483,11 +2483,21 @@ Asset {
   recipe?: { tool, model?, prompt?, negative?, seed?, params?: json, source_url?, cost_usd? },
   parents: [asset id],          // what it was derived from: a variant, an edit, an upscale, a cut
   status: "" | "picked" | "final" | "rejected",
+  purpose: "deliverable" | "proof",
   starred, tags: [string], collections: [collection id],
 }
 Collection { id, name, asset_ids (ordered), cover? }
 ```
 
+- **Purpose** (2026-11-05, Darryl's call): why it was filed. A **deliverable** is what the Hive
+  made for its human; **proof** is a worker's evidence (screenshots of its app, test reports,
+  working notes), filed because a done report needs receipts. A code or setup Hive's proof
+  buried a media Hive's renders, and the kind tabs can't separate them (a screenshot is an
+  image), nor should collections (they are the human's and the Queen's picked groups). Workers
+  say it on `galleryAdd`; left out, `guess_purpose` decides: a file from `hiveScreenshot`'s
+  folder, a title with "screenshot", or a Markdown/text/log/JSON file is proof, the rest a
+  deliverable. Assets filed before the field (and any an older build files) get the same guess
+  when the index next opens. Proof still counts as a receipt.
 - **Immutable.** An asset's file never changes. An edit, an upscale or a re-cut is a **new asset
   whose parent is the old one**, and that lineage is how variations stack. The store's files are
   written read-only, so an agent that tries to edit one in place gets an error rather than
@@ -2538,10 +2548,10 @@ The agent then files the result.
 
 | Tool | Does |
 |---|---|
-| `galleryAdd {path?, title, kind?, recipe?, parents?, tags?, collection?, caption?}` | Files one asset (or several, as a list). `task_id` and `made_by` come from the caller's identity, never from arguments. Answers with the asset id. With no `path`, records a spend only (above) |
-| `galleryList {kind?, made_by?, task?, collection?, status?, tag?, query?, limit?}` | Assets as data, newest first |
+| `galleryAdd {path?, title, kind?, purpose?, recipe?, parents?, tags?, collection?, caption?}` | Files one asset (or several, as a list). `task_id` and `made_by` come from the caller's identity, never from arguments. Answers with the asset id. With no `path`, records a spend only (above) |
+| `galleryList {kind?, purpose?, made_by?, task?, collection?, status?, tag?, query?, limit?}` | Assets as data, newest first |
 | `galleryGet {id}` | One asset with its recipe and lineage, and the stored file's path, to use as an input |
-| `galleryTag {id, tags?, status?, starred?}` | Workers may tag and star; `final` and `rejected` are the coordinator's and the human's |
+| `galleryTag {id, tags?, status?, starred?, purpose?}` | Workers may tag, star and set a purpose; `final` and `rejected` are the coordinator's and the human's |
 | `galleryCollect {collection, add?, remove?, order?}` | Coordinator: build and order collections ("Storyboard v2", "Shortlist") |
 | `galleryDeliver {assets \| collection, folder, names?}` | Coordinator: §10.6 |
 
@@ -2581,7 +2591,9 @@ left.
 ```
 
 **The grid.** A masonry layout that keeps each asset's aspect ratio (images and video), with a
-size slider. It's virtualized, because a media Hive reaches thousands of assets. Kind tabs,
+size slider. It's virtualized, because a media Hive reaches thousands of assets. First comes
+the purpose switch, **For you** (the default: deliverables), **Proof** or **All**, a view like the
+kind tabs that Clear all keeps; the selection's menu moves assets between them. Then kind tabs,
 search, Group, Variants and Size run across the top; under them the filters (Made by, Task,
 Status, Starred, Tags, Collection, Trash) sit on one wrapping row, and the ones in force show as
 removable chips with Clear all. Search covers titles, prompts and tags. **Group by** None, Task,

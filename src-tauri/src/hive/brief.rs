@@ -684,7 +684,9 @@ pub fn worker_brief_md(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, task_br
          goes in the gallery with `galleryAdd`, **with the recipe that made it** (tool, model, prompt, seed, settings): a \
          result without its recipe can't be iterated on. Render into your scratch folder first; a generator that answers \
          with a URL is downloaded there first, then filed. A variant, an edit or an upscale names what it came from in \
-         `parents`. `galleryList` and `galleryGet` give an asset's stored path to use as an input; the stored file is \
+         `parents`. Give each its `purpose`: `deliverable` for what your human asked you to make, `proof` for your own \
+         evidence (screenshots of your app, test reports, notes), which the gallery keeps out of their way and still counts \
+         as a receipt. `galleryList` and `galleryGet` give an asset's stored path to use as an input; the stored file is \
          read-only. You may tag, star and mark assets picked; final and rejected aren't yours.\n\
          - Report with `hiveReport`: `status` done, blocked or failed, a `summary`, and for done the `receipts` maiTerm \
          checks: `commits` (shas on your branch), `files` (paths in your folders), `assets` (gallery ids `galleryAdd` gave \

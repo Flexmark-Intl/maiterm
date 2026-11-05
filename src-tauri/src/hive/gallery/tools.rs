@@ -102,7 +102,8 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
             "recipe": recipe,
             "parents": { "type": "array", "items": { "type": "string" }, "description": "Asset ids it was made from: a variant, an edit, an upscale, a cut" },
             "tags": { "type": "array", "items": { "type": "string" } },
-            "collection": { "type": "string", "description": "A collection (name or id) it joins" }
+            "collection": { "type": "string", "description": "A collection (name or id) it joins" },
+            "purpose": { "type": "string", "enum": PURPOSES, "description": PURPOSE_HELP }
         },
         "required": ["title"]
     });
@@ -124,7 +125,8 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
              there first. A path is taken only from your own folders (scratch, worktrees, your temp folder) or an output \
              folder your human listed. Filing the same bytes again for the same task answers the asset already there. \
              Every paid render is recorded with recipe.cost_usd, kept or not: a discarded or failed one is a galleryAdd \
-             with no path. The answer gives each asset's id and its stored path, to use as an input, and the Hive's spend \
+             with no path. Say each asset's purpose: deliverable (made for your human) or proof (screenshots of your app, \
+             reports, notes). The answer gives each asset's id and its stored path, to use as an input, and the Hive's spend \
              against its budget: over means stop paid generation now (maiTerm has asked your human). {collection_rule}"
         ),
         "inputSchema": { "type": "object", "properties": add_props, "required": [] }
@@ -145,6 +147,7 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
                 "task": { "type": ["string", "number"], "description": "A worker (badge or name) or a task id" },
                 "collection": { "type": "string", "description": "Name or id" },
                 "status": { "type": "string", "enum": STATUSES },
+                "purpose": { "type": "string", "enum": PURPOSES },
                 "tag": { "type": "string" },
                 "starred": { "type": "boolean" },
                 "query": { "type": "string" },
@@ -171,7 +174,7 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
     };
     let tag = json!({
         "name": TAG,
-        "description": format!("Tag, untag, star or set the status of assets. Tags are added and removed, never replaced. {status_rule}"),
+        "description": format!("Tag, untag, star or set the status or purpose of assets. Tags are added and removed, never replaced. {status_rule}"),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -181,7 +184,8 @@ pub fn tool_definitions(role: &str) -> Vec<Value> {
                 "tags": { "type": "array", "items": { "type": "string" }, "description": "Tags to add" },
                 "untag": { "type": "array", "items": { "type": "string" }, "description": "Tags to remove" },
                 "status": { "type": "string", "enum": STATUSES },
-                "starred": { "type": "boolean" }
+                "starred": { "type": "boolean" },
+                "purpose": { "type": "string", "enum": PURPOSES, "description": PURPOSE_HELP }
             },
             "required": []
         }
@@ -414,6 +418,8 @@ fn tags(v: &Value, k: &str) -> Result<Vec<String>, String> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct AddItem {
     pub path: Option<String>,
+    /// None: maiTerm guesses (`model::guess_purpose`).
+    pub purpose: Option<String>,
     pub title: String,
     pub kind: Option<String>,
     pub caption: Option<String>,
@@ -423,7 +429,20 @@ pub(crate) struct AddItem {
     pub collection: Option<String>,
 }
 
-const ITEM_FIELDS: [&str; 8] = ["path", "title", "kind", "caption", "recipe", "parents", "tags", "collection"];
+const ITEM_FIELDS: [&str; 9] = ["path", "title", "kind", "caption", "recipe", "parents", "tags", "collection", "purpose"];
+
+/// What `purpose` means, on galleryAdd and galleryTag.
+const PURPOSE_HELP: &str = "deliverable: made for your human (renders, cuts, the documents they asked for); the gallery \
+    shows these. proof: your evidence (screenshots of your app, test reports, working notes), kept behind the gallery's \
+    Proof switch and still a receipt. Left out, maiTerm guesses: screenshots and text documents are proof";
+
+fn purpose_arg(v: &Value) -> Result<Option<String>, String> {
+    match v.get("purpose") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(p)) if PURPOSES.contains(&p.trim()) => Ok(Some(p.trim().to_string())),
+        Some(_) => Err("purpose is deliverable or proof.".to_string()),
+    }
+}
 
 pub(crate) fn parse_add(args: &Value) -> Result<Vec<AddItem>, String> {
     match args.get("items") {
@@ -459,7 +478,7 @@ fn parse_item(v: &Value) -> Result<AddItem, String> {
     if collection.as_deref().is_some_and(|c| too_long(c, MAX_COLLECTION) || c.chars().any(char::is_control)) {
         return Err(format!("A collection is named in one line of at most {MAX_COLLECTION} characters."));
     }
-    Ok(AddItem { path: opt_str(v, "path")?, title, kind, caption, recipe: parse_recipe(v.get("recipe"))?, parents, tags: tags(v, "tags")?, collection })
+    Ok(AddItem { path: opt_str(v, "path")?, purpose: purpose_arg(v)?, title, kind, caption, recipe: parse_recipe(v.get("recipe"))?, parents, tags: tags(v, "tags")?, collection })
 }
 
 fn parse_recipe(v: Option<&Value>) -> Result<Option<Recipe>, String> {
@@ -605,6 +624,7 @@ fn file_item(g: &Gallery, f: &Filer, it: &AddItem) -> Result<Filed, String> {
             tags: it.tags.clone(),
             collection,
             thumb: THUMB_PENDING.to_string(),
+            purpose: it.purpose.clone().unwrap_or_default(),
             ..NewAsset::default()
         })
     });
@@ -656,7 +676,7 @@ async fn add<W: HiveWindow>(ctx: &Ctx<'_, W>, gc: &GalleryCaller, g: Arc<Gallery
             .enumerate()
             .map(|(i, r)| match r {
                 Ok(Filed::Asset { asset, duplicate, spend }) => {
-                    let mut v = json!({ "id": asset.id, "path": g.file_path(asset), "kind": asset.kind, "title": asset.title });
+                    let mut v = json!({ "id": asset.id, "path": g.file_path(asset), "kind": asset.kind, "title": asset.title, "purpose": asset.purpose });
                     if *duplicate {
                         v["duplicate"] = json!(true);
                     }
@@ -748,6 +768,7 @@ pub(crate) fn list_filter(args: &Value, workers: &[WorkerRecord]) -> Result<Opti
         Some(Value::String(s)) if STATUSES.contains(&s.trim()) => Some(s.trim().to_string()),
         Some(_) => return Err("status is \"\", picked, final or rejected.".to_string()),
     };
+    f.purpose = purpose_arg(args)?;
     f.tag = opt_str(args, "tag")?;
     f.starred = match args.get("starred") {
         None | Some(Value::Null) => None,
@@ -772,6 +793,7 @@ fn row_json(g: &Gallery, r: &AssetRow) -> Value {
         "title": r.title,
         "kind": r.kind,
         "status": r.status,
+        "purpose": if r.purpose.is_empty() { PURPOSE_DELIVERABLE } else { r.purpose.as_str() },
         "starred": r.starred,
         "tags": r.tags,
         "by": by_label(&r.made_by),
@@ -1005,9 +1027,10 @@ async fn tag<W: HiveWindow>(ctx: &Ctx<'_, W>, gc: &GalleryCaller, g: Arc<Gallery
             Some(Value::Bool(b)) => Some(*b),
             Some(_) => return Err("starred is true or false.".to_string()),
         },
+        purpose: purpose_arg(args)?,
     };
-    if change.tags.is_empty() && change.untag.is_empty() && change.status.is_none() && change.starred.is_none() {
-        return Err("Nothing to change: give tags, untag, status or starred.".to_string());
+    if change.tags.is_empty() && change.untag.is_empty() && change.status.is_none() && change.starred.is_none() && change.purpose.is_none() {
+        return Err("Nothing to change: give tags, untag, status, starred or purpose.".to_string());
     }
     let (role, hive, paths) = (gc.role, gc.caller.hive.clone(), gc.caller.paths.clone());
     let (after, decided, recommended) = blocking(move || {

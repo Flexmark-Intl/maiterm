@@ -10,6 +10,7 @@ import {
   listedSelection,
   selectionMenu,
   selectionTags,
+  nextPurpose,
   nextStar,
   nextStatus,
   selectMode,
@@ -119,7 +120,7 @@ describe('a drop onto a composer', () => {
 });
 
 describe('the selection menu', () => {
-  const row = (o: Partial<{ starred: boolean; status: string; tags: string[]; deleted_at: string | null }> = {}) => ({ starred: false, status: '', tags: [], deleted_at: null, ...o });
+  const row = (o: Partial<{ purpose: string; starred: boolean; status: string; tags: string[]; deleted_at: string | null }> = {}) => ({ starred: false, status: '', tags: [], deleted_at: null, ...o });
   const actions = (m: ReturnType<typeof selectionMenu>) => m.filter((e) => !e.separator).map((e) => e.action);
 
   it('is empty with nothing selected', () => {
@@ -128,8 +129,17 @@ describe('the selection menu', () => {
 
   it('offers one asset its own actions and no Compare', () => {
     const m = selectionMenu([row()], 'Reveal in Finder');
-    expect(actions(m)).toEqual(['open', 'star', 'picked', 'final', 'rejected', 'iterate', 'send', 'collect', 'tag', 'export', 'reveal', 'copyPath', 'trash']);
+    expect(actions(m)).toEqual(['open', 'star', 'picked', 'final', 'rejected', 'purpose', 'iterate', 'send', 'collect', 'tag', 'export', 'reveal', 'copyPath', 'trash']);
     expect(m.find((e) => e.action === 'reveal')?.label).toBe('Reveal in Finder');
+  });
+
+  it('moves a selection to Proof, and back to For you once all of it is proof', () => {
+    const label = (rows: { purpose?: string }[]) => selectionMenu(rows.map((r) => row(r)), 'R').find((e) => e.action === 'purpose')?.label;
+    expect(label([{ purpose: 'deliverable' }])).toBe('Move to Proof');
+    expect(label([{ purpose: 'proof' }, { purpose: '' }])).toBe('Move to Proof');
+    expect(label([{ purpose: 'proof' }, { purpose: 'proof' }])).toBe('Move to For you');
+    expect(nextPurpose([{ purpose: 'proof' }])).toBe('deliverable');
+    expect(nextPurpose([])).toBe('proof');
   });
 
   it('offers several the bulk actions and Compare up to four', () => {
