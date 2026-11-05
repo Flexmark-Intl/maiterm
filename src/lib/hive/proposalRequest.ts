@@ -14,6 +14,7 @@ import {
   hiveCommitFirst,
   hiveDetectFolder,
   hiveDetectTools,
+  hiveMediaCatalogue,
   hiveNewGoal,
   hiveNewGoalPreview,
   hivePreflight,
@@ -23,7 +24,7 @@ import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { info as logInfo, error as logError } from '@tauri-apps/plugin-log';
 import { defaultToolIds, FALLBACK_CAP, wizardStart } from './defaults';
-import { pickerTools } from './media';
+import { capabilityLabels, pickerTools } from './media';
 import { folderName, validateSpec } from './model';
 import { newGoalOffered } from './newGoal';
 import { proposalTarget, type HiveCandidate, type HiveProposal } from './proposal';
@@ -88,6 +89,7 @@ async function newHivePlan(p: HiveProposal, workspaceId: string): Promise<NewHiv
   const detected = pickerTools(await hiveDetectTools().catch(() => []));
   const tools = defaultToolIds(d, detected).sort();
   const label = new Map(detected.map((t) => [t.id, t.label]));
+  const media = p.media ?? [];
   return {
     kind: 'new',
     folders,
@@ -104,6 +106,9 @@ async function newHivePlan(p: HiveProposal, workspaceId: string): Promise<NewHiv
     tools,
     toolLabels: tools.map((id) => label.get(id) ?? id),
     trustAccount: pre.trust_account ?? null,
+    // The media rows as the sheet names them, for the card's line. Present only when media was
+    // asked for, so a plan without it compares equal to one stored without it.
+    ...(media.length ? { mediaLabels: capabilityLabels(media, (await hiveMediaCatalogue().catch(() => null))?.capabilities ?? []) } : {}),
   };
 }
 

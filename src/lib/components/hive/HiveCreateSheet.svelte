@@ -37,7 +37,7 @@
   import { defaultsFromWizard, defaultToolIds, FALLBACK_CAP, fullPacks, HIVE_EFFORTS, HIVE_MODELS, knownTools, pickedItems, summarizeTools, wizardStart } from '$lib/hive/defaults';
   import HiveToolPicker from './HiveToolPicker.svelte';
   import HiveMediaPanel from './HiveMediaPanel.svelte';
-  import { createPickTracker, createSetupWatch, flippedIds, isSetupOnly, openCapabilitySeed, pickerTools, setupTicks, shouldStartOpen } from '$lib/hive/media';
+  import { createPickTracker, createSetupWatch, flippedIds, isSetupOnly, pickerTools, requestedCapabilities, setupTicks, shouldStartOpen } from '$lib/hive/media';
   import { watchSetupEnds } from '$lib/hive/mediaWatch';
 
   interface Props {
@@ -95,8 +95,13 @@
    *  once, so the next open is the draft the human made of it. */
   const seed = saved ? undefined : untrack(() => createDrafts.takeSeed(workspaceId));
   /** The capabilities the proposal asked for, or the kept draft's: the Tools step opens the media
-   *  panel with these rows open. The panel reads it once at mount; Start over empties it. */
-  let requestedMedia = $state(openCapabilitySeed(saved?.media ?? seed?.media));
+   *  panel open and tags these rows "Asked for". Start over empties it. */
+  const askedMedia = requestedCapabilities(saved?.media ?? seed?.media);
+  let requestedMedia = $state(askedMedia);
+  /** What the panel is handed: `requestedMedia` until the panel has mounted once, then nothing. The
+   *  panel's first mount spends it (`onseeded`), so Back, then Next, shows no tags and opens
+   *  nothing again. `requestedMedia` stays what the kept draft records. */
+  let mediaSeed = $state([...askedMedia]);
   /** Opened on a kept draft: the header offers Start over. */
   let resumed = $state(!!saved);
   /** Who proposed what's in the sheet, until Start over. */
@@ -203,6 +208,7 @@
     resumed = false;
     proposedBy = null;
     requestedMedia = [];
+    mediaSeed = [];
     useDefaults = true;
     createError = null; trustError = null; folderNote = null;
     name = ws?.name ?? '';
@@ -1011,8 +1017,9 @@
           <!-- "What it can make" (docs/hive-media.md §7): read-only, above the picker, which it never touches.
                The panel reads startOpen once, at mount, and mounts only while this step shows, so the
                goal and folders it reads are the ones the human just left (or a restored draft's). The
-               one place it is computed. A proposal's `media` is its third argument, and the same ids open those rows. -->
-          <HiveMediaPanel bind:this={mediaPanel} {workspaceId} startOpen={shouldStartOpen(goal, folders, requestedMedia)} openCapabilities={requestedMedia} onchanged={detectFromSetups} onstarted={(st) => setupWatch.started(st)} />
+               one place it is computed. A proposal's `media` is its third argument and is also handed over as
+               `requested`: the panel tags those rows, and its first mount spends the seed (`onseeded`). -->
+          <HiveMediaPanel bind:this={mediaPanel} {workspaceId} startOpen={shouldStartOpen(goal, folders, mediaSeed)} requested={mediaSeed} onseeded={() => (mediaSeed = [])} onchanged={detectFromSetups} onstarted={(st) => setupWatch.started(st)} />
           <div class="field">
             <span class="label">Tools</span>
             {#if tools === null}

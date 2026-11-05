@@ -12,10 +12,13 @@
                  install tab in it.
     startOpen    the caller's `shouldStartOpen()`; read ONCE at mount. After that the human's
                  choice wins, whatever the parent does.
-    openCapabilities  optional: capability ids whose card starts open (a proposal's `media`,
-                 docs/hive-media.md §8); read ONCE at mount, like startOpen. One under "More" opens
-                 More too, once, when the first answer arrives.
-    onchanged    optional: something a setup sheet did may have changed this Mac. It carries no
+    requested    optional: capability ids a planning agent's proposal asked for (docs/hive-media.md
+                 §8). Read ONCE at mount. Each such row gets an "Asked for" tag, and one that lives
+                 under "More" is listed in the main list instead, so More never opens by itself.
+                 No card opens: this only shows which rows were asked for.
+    onseeded     optional: called once at mount, after `requested` was read. The caller drops its
+                 seed there, so a remount (Back, then Next) shows no tags and re-opens nothing.
+    onchanged   optional: something a setup sheet did may have changed this Mac. It carries no
                  ids: the panel decides no ticks. The Create sheet and Hive settings read the status
                  themselves and detect their tools again on it (event-driven: never a poll).
     onstarted    optional, passed to the setup sheet: the install tab or server a step started.
@@ -33,17 +36,18 @@
   import { warn as logWarn } from '@tauri-apps/plugin-log';
   import { hiveMediaCatalogue, hiveMediaStatus } from '$lib/tauri/commands';
   import type { HiveMediaCatalogue, HiveMediaRow } from '$lib/tauri/types';
-  import { compactLine, createLatest, openCapabilitySeed, seedNeedsMore, readyToolIds, externalUrl, coverNames, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
+  import { compactLine, createLatest, placeRequested, readyToolIds, requestedCapabilities, externalUrl, coverNames, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
   import type { PanelProvider, PanelRow, SetupStarted } from '$lib/hive/media';
 
   interface Props {
     workspaceId: string | null;
     startOpen: boolean;
-    openCapabilities?: string[];
+    requested?: string[];
+    onseeded?: () => void;
     onchanged?: () => void;
     onstarted?: (s: SetupStarted) => void;
   }
-  let { workspaceId, startOpen, openCapabilities, onchanged, onstarted }: Props = $props();
+  let { workspaceId, startOpen, requested, onseeded, onchanged, onstarted }: Props = $props();
 
   const uid = $props.id();
   const bodyId = `${uid}-body`;
@@ -51,11 +55,10 @@
 
   let open = $state(untrack(() => startOpen));
   let moreOpen = $state(false);
+  /** The capabilities a proposal asked for, read once: tagged, and lifted out of More. */
+  const asked = untrack(() => requestedCapabilities(requested));
   /** Capability ids whose full card is open. Local to the panel, never persisted. */
-  let cardsOpen = $state<string[]>(untrack(() => openCapabilitySeed(openCapabilities)));
-  /** The capabilities the seed asked for that haven't been placed yet: the first answer decides
-   *  whether More opens, then this is spent. */
-  let seedPending = untrack(() => openCapabilitySeed(openCapabilities));
+  let cardsOpen = $state<string[]>([]);
   let rows = $state<HiveMediaRow[] | null>(null);
   let catalogue = $state<HiveMediaCatalogue | null>(null);
   let loading = $state(true);
@@ -71,6 +74,7 @@
   let setupOpener: HTMLElement | null = null;
 
   const groups = $derived(rows && catalogue ? groupRows(rows, catalogue) : null);
+  const placed = $derived(groups ? placeRequested(groups, asked) : { main: [] as PanelRow[], more: [] as PanelRow[] });
   const subscribers = $derived(catalogue ? subscriberProviders(catalogue) : []);
   const line = $derived(failure ? "Media: couldn't check" : groups ? summaryLine(groups) : 'Media: checking…');
   const empty = $derived(!!groups && groups.common.length + groups.more.length === 0);
@@ -88,10 +92,6 @@
       if (stale()) return;
       catalogue = cat;
       rows = status;
-      if (seedPending.length) {
-        if (seedNeedsMore(seedPending, groupRows(status, cat))) moreOpen = true;
-        seedPending = [];
-      }
     } catch (e) {
       if (stale()) return;
       failure = String(e);
@@ -101,6 +101,7 @@
 
   onMount(() => {
     void load();
+    onseeded?.();
     return () => latest.cancel();
   });
 
@@ -184,6 +185,7 @@
     <div class="line">
       <h4 id="{uid}-{r.capability}">{r.label}</h4>
       <div class="sum">
+        {#if asked.includes(r.capability)}<span class="tag asked">Asked for</span>{/if}
         {#if r.covers.length}
           <ul class="covers">
             {#each r.covers as cv (cv.toolId)}
@@ -281,7 +283,7 @@
 
         <p class="dim">What this Mac can already make. Opening a card doesn't add anything to the Hive.</p>
 
-        {#each groups.common as r (r.capability)}
+        {#each placed.main as r (r.capability)}
           {@render capRow(r)}
         {/each}
 
@@ -297,14 +299,14 @@
           </fieldset>
         {/if}
 
-        {#if groups.more.length}
+        {#if placed.more.length}
           <button type="button" class="more" aria-expanded={moreOpen} aria-controls={moreOpen ? moreId : undefined} onclick={() => (moreOpen = !moreOpen)}>
             <svg class="chev" class:open={moreOpen} width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 7 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            More ({groups.more.length})
+            More ({placed.more.length})
           </button>
           {#if moreOpen}
             <div class="more-body" id={moreId}>
-              {#each groups.more as r (r.capability)}
+              {#each placed.more as r (r.capability)}
                 {@render capRow(r)}
               {/each}
             </div>

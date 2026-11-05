@@ -442,9 +442,12 @@ That report becomes a structured ask:
   the sheet with those capabilities' panel unfolded. **Built 2026-11-05.** Rust checks the ids
   against the catalogue (`media::check_requested`: unknown dropped and named in the tool's answer,
   deduplicated, capped at the number of capabilities); the Create sheet passes them to
-  `shouldStartOpen`'s third argument and to the panel's `openCapabilities` prop (read once at
-  mount; a capability under "More" opens More once). The card says the phone's Approve sets none
-  up. No maiLink protocol change: the proposal rides in the request's `args`.
+  `shouldStartOpen`'s third argument and to the panel's `requested` prop (read once at mount):
+  the panel starts open, each asked-for row is tagged "Asked for", and one under "More" is listed
+  in the main list (`placeRequested`), so no card or More opens by itself and the Tools picker
+  stays on screen. The panel's first mount spends the seed (`onseeded`). The card names the
+  capabilities by their catalogue labels (`capabilityLabels`) and says the phone's Approve sets
+  none up. No maiLink protocol change: the proposal rides in the request's `args`.
 
 ## 9. Sandbox hosts
 

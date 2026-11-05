@@ -51,8 +51,13 @@ describe('a proposal card', () => {
 
   it('names the media the agent expects to need, and says the phone sets none up', () => {
     expect(proposalEffects(proposal, plan).some((l) => l.startsWith('Media the agent expects'))).toBe(false);
-    const fx = proposalEffects({ ...proposal, media: ['video', 'music'] }, plan);
-    expect(fx.find((l) => l.startsWith('Media the agent expects to need: video, music.'))).toContain('Approving from the phone sets none up');
+    const fx = proposalEffects({ ...proposal, media: ['video', 'finish'] }, { ...plan, mediaLabels: ['Video', 'Finishing'] });
+    expect(fx.find((l) => l.startsWith('Media the agent expects to need: Video, Finishing.'))).toContain('Approving from the phone sets none up');
+  });
+
+  it('falls back to the ids when the labels are missing or do not match the list', () => {
+    expect(proposalEffects({ ...proposal, media: ['sfx', 'compose'] }, plan).some((l) => l.startsWith('Media the agent expects to need: sfx, compose.'))).toBe(true);
+    expect(proposalEffects({ ...proposal, media: ['sfx'] }, { ...plan, mediaLabels: ['Sound effects', 'Extra'] }).some((l) => l.startsWith('Media the agent expects to need: sfx.'))).toBe(true);
   });
 
   it('names a first commit it makes', () => {

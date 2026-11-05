@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compactLine, coverNames, createPickTracker, createSetupWatch, setupTicks, flippedIds, newlyReady, picksAfterRedetect, readyToolIds, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, openCapabilitySeed, seedNeedsMore, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
+import { compactLine, coverNames, createPickTracker, createSetupWatch, setupTicks, flippedIds, newlyReady, picksAfterRedetect, readyToolIds, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, placeRequested, requestedCapabilities, capabilityLabels, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
 import type { HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
 
 const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvider => ({
@@ -286,27 +286,49 @@ describe('shouldStartOpen with a proposal’s media', () => {
   });
 });
 
-describe('openCapabilitySeed', () => {
+describe('requestedCapabilities', () => {
   it('is the asked ids, each once, in order', () => {
-    expect(openCapabilitySeed(['music', 'video', 'music'])).toEqual(['music', 'video']);
+    expect(requestedCapabilities(['music', 'video', 'music'])).toEqual(['music', 'video']);
   });
 
   it('is empty when nothing was asked, and never the caller’s own array', () => {
-    expect(openCapabilitySeed(undefined)).toEqual([]);
-    expect(openCapabilitySeed([])).toEqual([]);
+    expect(requestedCapabilities(undefined)).toEqual([]);
+    expect(requestedCapabilities([])).toEqual([]);
     const asked = ['video'];
-    expect(openCapabilitySeed(asked)).not.toBe(asked);
+    expect(requestedCapabilities(asked)).not.toBe(asked);
   });
 });
 
-describe('seedNeedsMore', () => {
-  const g = groupRows([row('video'), row('lipsync')], catalogue);
+describe('placeRequested', () => {
+  const g = groupRows([row('video'), row('image'), row('voice'), row('music'), row('finish'), row('lipsync'), row('upscale')], {
+    ...catalogue,
+    capabilities: [...catalogue.capabilities, { id: 'upscale', label: 'Upscaling', means: 'Bigger', common: false }],
+  });
+  const ids = (rs: { capability: string }[]) => rs.map((r) => r.capability);
 
-  it('opens More only for an asked-for capability that sits there', () => {
-    expect(seedNeedsMore(['lipsync'], g)).toBe(true);
-    expect(seedNeedsMore(['video', 'lipsync'], g)).toBe(true);
-    expect(seedNeedsMore(['video'], g)).toBe(false);
-    expect(seedNeedsMore([], g)).toBe(false);
+  it('leaves the groups as they are when nothing was asked', () => {
+    const p = placeRequested(g, []);
+    expect(ids(p.main)).toEqual(['video', 'image', 'voice', 'music', 'finish']);
+    expect(ids(p.more)).toEqual(['lipsync', 'upscale']);
+  });
+
+  it('keeps a common capability where it is and lifts a More one after the common rows', () => {
+    const p = placeRequested(g, ['music', 'voice', 'lipsync']);
+    expect(ids(p.main)).toEqual(['video', 'image', 'voice', 'music', 'finish', 'lipsync']);
+    expect(ids(p.more)).toEqual(['upscale']);
+  });
+
+  it('lifts several in the order asked, drops repeats and ignores an id with no row', () => {
+    const p = placeRequested(g, ['upscale', 'lipsync', 'upscale', 'hologram']);
+    expect(ids(p.main)).toEqual(['video', 'image', 'voice', 'music', 'finish', 'upscale', 'lipsync']);
+    expect(p.more).toEqual([]);
+  });
+});
+
+describe('capabilityLabels', () => {
+  it('names each capability as the panel does, and falls back to the id', () => {
+    expect(capabilityLabels(['finish', 'lipsync', 'hologram'], catalogue.capabilities)).toEqual(['Finishing', 'Lipsync', 'hologram']);
+    expect(capabilityLabels([], catalogue.capabilities)).toEqual([]);
   });
 });
 

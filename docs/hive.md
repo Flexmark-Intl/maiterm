@@ -419,7 +419,10 @@ agent offers, the human creates.
   ids. The catalogue judges it (`hive_media_check_requested`, `media::check_requested`): unknown
   ids are dropped and named in the answer (`media_note`), repeats count once, and the list is
   capped at the number of capabilities. The Create sheet then opens its Tools step's "What it can
-  make" panel with those rows open (§3.7's seed carries it; a kept draft keeps it). A new-goal
+  make" panel, tags those rows "Asked for" and lists one that lives under More in the main list
+  (no card opens, and More never opens by itself: open cards pushed the Tools picker off the
+  screen). The seed is spent by the panel's first mount, so Back then Next shows no tags and
+  re-opens nothing; a kept draft keeps the ids for the next time the sheet opens. A new-goal
   target ignores it: that sheet has no media panel.
 - **What happens.** An agent request, kind `hive_propose` (docs/agent-requests.md), one per agent:
   a second call ends the first (`replace_proposals`). It waits a day, not 30 minutes. It shows in
