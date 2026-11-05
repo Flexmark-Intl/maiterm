@@ -1163,6 +1163,8 @@ export interface HiveWorkerCard {
   land?: HiveLandView | null;
   /** Its task's newest assets out of the trash: shown across the card's top in place of the diff (§4.3). */
   assets?: GalleryChip[];
+  /** Its queued runs not yet ended: an idle card reads "Waiting on its run" (activity.ts). */
+  open_runs?: number;
 }
 
 /** hive/land/mod.rs `LandView`: a land as its card shows it. */

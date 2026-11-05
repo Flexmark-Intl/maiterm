@@ -66,6 +66,7 @@
   class:compact
   class:needs={state.state === 'needs_you'}
   class:urgent={state.urgent}
+  class:quiet={activity.tone === 'stalled'}
   class:focused
   data-state={state.state}
   data-hive-task={card.task_id}
@@ -192,6 +193,9 @@
   /* The activity line: what the agent is doing right now, from its hooks (§4.4). */
   .act { font-size: 11.5px; line-height: 1.35; color: var(--fg); opacity: 0.9; overflow-wrap: anywhere; }
   .act[data-tone='wait'] { color: var(--needs); opacity: 1; }
+  /* Idle past 10 minutes with nothing on its way (activity.ts `quietActivity`): may be stuck. */
+  .act[data-tone='stalled'] { color: var(--yellow); opacity: 1; }
+  .quiet .dot { border-color: var(--yellow); }
   .act[data-tone='idle'], .act[data-tone='state'] { color: var(--fg-dim); opacity: 1; }
   .compact .act { font-size: 11px; padding-left: 15px; }
   .rev { font-size: 11px; color: var(--fg-dim); overflow-wrap: anywhere; }

@@ -646,6 +646,7 @@ pub async fn job_ended(app: &Arc<AppState>, handle: &AppHandle, job: &Job, tail:
         if let Err(e) = blocking(move || forget_open(&d, &ids)).await {
             log::warn!("hive: run {} left open in its worker's record: {e}", job.id);
         }
+        super::rpc::emit_workers_changed(handle, &job.window, &job.workspace_id);
         return;
     }
     let (d, id, text) = (dir.clone(), job.id.clone(), result_message(job, tail));
@@ -653,6 +654,9 @@ pub async fn job_ended(app: &Arc<AppState>, handle: &AppHandle, job: &Job, tail:
         log::warn!("hive: run {}'s result not recorded, so its worker won't hear it: {e}", job.id);
         return;
     }
+    // No longer open: its card stops reading "Waiting on its run" (the queue's own emit can come
+    // before this record).
+    super::rpc::emit_workers_changed(handle, &job.window, &job.workspace_id);
     let wait_until = job.enqueued_at + INLINE_WAIT.as_millis() as i64 + 750;
     let now = super::fuses::now_ms();
     if now < wait_until {
@@ -820,6 +824,8 @@ pub(crate) async fn run_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, a
         log::warn!("hive {}: {} not recorded as open for {}: {e}", caller.hive.id, job.id, worker_label(&w));
     }
     log::info!("hive {}: {} queued {} ({})", caller.hive.id, worker_label(&w), job.id, job.argv.join(" "));
+    // Its card counts the open run (`WorkerCard.open_runs`).
+    ctx.window.workers_changed(&caller.workspace_id);
 
     // A short run answers here; its result is taken so it isn't typed as well.
     let deadline = tokio::time::Instant::now() + INLINE_WAIT;
