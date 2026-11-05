@@ -40,7 +40,8 @@ export function agentWorks(s: Pick<AgentTabSession, 'state' | 'toolName'> | null
 }
 
 /** A land maiTerm is carrying out (locking, its check running, advancing, batched): work in
- *  progress. Held and awaiting_human wait on the human, and Needs you counts those. */
+ *  progress. Not awaiting_human (its request is in Needs you), nor held (it waits on the queen
+ *  calling hiveLand again). */
 export function landWorks(state: string | null | undefined): boolean {
   return state === 'locking' || state === 'checking' || state === 'advancing' || state === 'queued_batch';
 }
