@@ -219,8 +219,9 @@ pub fn map(input: &MapInput) -> Map {
         entries.push((cap_index(caps[0]), vec![format!("{}: {}.", caps.join(", "), progs.join(", "))]));
     }
 
-    // The coordinator's own: plugins, skills and local ComfyUI, which no worker has. They count
-    // as covered for both readers, so "Not set up" never lists what the Hive has.
+    // The coordinator's own: plugins, skills and local ComfyUI, which no worker has. They count as
+    // covered for the coordinator only: a worker can't use them, so its "Not set up" still lists
+    // their capabilities and sends it to its coordinator rather than to a substitute.
     for id in tools {
         let found: Vec<(&'static Provider, String)> = if let Some(plugin) = id.strip_prefix("plugin:") {
             catalogue().providers.iter().filter(|p| p.detect.plugins.iter().any(|x| x == plugin)).map(|p| (p, format!("your Claude Code plugin {}", shown(plugin)))).collect()
@@ -233,8 +234,8 @@ pub fn map(input: &MapInput) -> Map {
         };
         for (p, how) in found {
             let caps = in_order(p.capabilities.iter().map(String::as_str));
-            covered.extend(&caps);
             if reader == Reader::Coordinator {
+                covered.extend(&caps);
                 entries.push((caps.first().map_or(usize::MAX, |c| cap_index(c)), vec![format!("{}: {}, {how} (yours only: workers don't have it).", caps.join(", "), p.name)]));
                 if !out.listed.contains(id) {
                     out.listed.push(id.clone());

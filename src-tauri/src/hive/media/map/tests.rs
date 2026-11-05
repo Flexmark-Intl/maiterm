@@ -91,7 +91,8 @@ fn a_plan_credit_provider_says_generations_are_counted() {
 }
 
 /// A worker loads no plugins or skills: they are the coordinator's only, and never on a worker's
-/// map. They still cover their capabilities, so "Not set up" doesn't send anyone after them.
+/// map. They cover their capabilities for the coordinator, who can use them; a worker's "Not set
+/// up" still lists those capabilities, so it reports the gap instead of substituting.
 #[test]
 fn no_plugin_or_skill_reaches_a_workers_map() {
     let t = tools(&["plugin:remotion@remotion", "skill:generate", "comfyui", "cli:ffmpeg"]);
@@ -101,6 +102,7 @@ fn no_plugin_or_skill_reaches_a_workers_map() {
     }
     let m = map(&MapInput { reader: Reader::Worker, tools: &t, own: &[], hive: &[] });
     assert_eq!(m.listed, vec!["cli:ffmpeg".to_string()]);
+    assert!(w.contains("  - Not set up: video, image, voice, music. If your task needs it, stop and report it to your coordinator"), "{w}");
 
     let c = render(Reader::Coordinator, &t, &[], &[]);
     assert!(c.contains("  - compose: Remotion, your Claude Code plugin remotion@remotion (yours only: workers don't have it).\n"), "{c}");
@@ -145,4 +147,19 @@ fn a_coordinator_with_no_media_tool_gets_one_line() {
     let full = render(Reader::Coordinator, &with_sox, &[], &[]);
     assert!(full.starts_with("- What this Hive can make, and with what:\n  - finish: sox.\n"), "{full}");
     assert!(full.contains("  - Not set up: video, image, voice, music. If the goal needs it, ask with hiveRequestCapability"), "{full}");
+}
+
+/// A worker of a Hive whose only media tools are the coordinator's (a skill, a plugin, local
+/// ComfyUI) is told every common capability is missing for it, and none of those tools is named.
+#[test]
+fn a_worker_is_not_covered_by_the_coordinators_own_tools() {
+    let t = tools(&["skill:generate", "plugin:remotion@remotion", "comfyui"]);
+    let w = render(Reader::Worker, &t, &[], &[]);
+    assert_eq!(
+        w,
+        "- What this Hive can make, and with what:\n  - Not set up: video, image, voice, music, finish. If your task needs it, stop and report it to your coordinator; never substitute.\n"
+    );
+    for word in ["Remotion", "remotion", "skill", "generate", "Kie", "plugin", "ComfyUI", "comfyui"] {
+        assert!(!w.contains(word), "{word} in a worker's map: {w}");
+    }
 }

@@ -503,8 +503,9 @@ art-director), reviewers included. What it does beyond the example above:
   `retention` gets the download-at-once line.
 - **Coordinator only:** a `plugin:` tool (Remotion), a `skill:` the catalogue recognises (Kie.ai's
   `/generate`) and local ComfyUI (a worker's localhost is closed), each said to be the
-  coordinator's alone. They still count as covering their capabilities, so "Not set up" never
-  sends anyone after them. Every other tool (a code MCP server, an unrecognised skill) follows as
+  coordinator's alone. They count as covering their capabilities for the coordinator only, so
+  its "Not set up" never sends it after them. A worker can't use them, so its "Not set up" still
+  lists those capabilities and it reports the gap to its coordinator instead of substituting. Every other tool (a code MCP server, an unrecognised skill) follows as
   "Other tools this Hive has", by id, as the old line listed it.
 - **A worker without generators** (a reviewer, the art director) is told which capabilities other
   workers make with which provider, and that it can't run it; those capabilities are not "Not
