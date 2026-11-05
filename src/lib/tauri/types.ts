@@ -1091,6 +1091,14 @@ export interface HiveMediaProvider {
   unverified_capabilities: string[];
 }
 
+/** `proposeHive`'s `media` list as the catalogue judged it (`hive_media_check_requested`). */
+export interface HiveRequestedMedia {
+  /** Known capability ids, each once. */
+  capabilities: string[];
+  /** Ids that aren't capabilities, shortened. */
+  dropped: string[];
+}
+
 /** The media catalogue as the panel draws it (`hive_media_catalogue`). */
 export interface HiveMediaCatalogue {
   /** In display order. */

@@ -3,7 +3,7 @@ import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { StackHeldAction, StackLeaseState } from './types';
-import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HiveLiveCwd, HiveMediaCatalogue, HiveMediaRow, HiveMediaVerifyResult, HiveNewGoalPreview, HiveNewGoalSpec, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
+import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HiveLiveCwd, HiveMediaCatalogue, HiveMediaRow, HiveRequestedMedia, HiveMediaVerifyResult, HiveNewGoalPreview, HiveNewGoalSpec, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
 import type { HiveMemoryFileText, HiveMemoryView } from './types';
 import type { HiveDecisionView, HivePrecedentsView } from './types';
 import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
@@ -2857,6 +2857,12 @@ export async function hiveMediaStatus(workspaceId: string | null = null, already
  *  and each provider's display facts, which `hiveMediaStatus` rows (ids only) join against. */
 export async function hiveMediaCatalogue(): Promise<HiveMediaCatalogue> {
   return invoke('hive_media_catalogue');
+}
+
+/** `proposeHive`'s `media` list checked against the catalogue (docs/hive-media.md §8): the known
+ *  capability ids, each once, and the ids that were dropped. */
+export async function hiveMediaCheckRequested(ids: string[]): Promise<HiveRequestedMedia> {
+  return invoke('hive_media_check_requested', { ids });
 }
 
 /** Install a media provider whose catalogue route is `brew` or `plugin` (docs/hive-media.md §6): a

@@ -439,7 +439,12 @@ That report becomes a structured ask:
 - When the capability becomes Ready, it is added to the Hive, and the coordinator gets a framed
   notice ("music is now available through elevenlabs; your workers launched from now on have it").
 - `proposeHive` (§3.7) gains an optional `media: [capability]`, so a planning agent's proposal opens
-  the sheet with those capabilities' panel unfolded.
+  the sheet with those capabilities' panel unfolded. **Built 2026-11-05.** Rust checks the ids
+  against the catalogue (`media::check_requested`: unknown dropped and named in the tool's answer,
+  deduplicated, capped at the number of capabilities); the Create sheet passes them to
+  `shouldStartOpen`'s third argument and to the panel's `openCapabilities` prop (read once at
+  mount; a capability under "More" opens More once). The card says the phone's Approve sets none
+  up. No maiLink protocol change: the proposal rides in the request's `args`.
 
 ## 9. Sandbox hosts
 
@@ -570,7 +575,7 @@ so the coordinator counts generations instead.
    - the capability map in the briefs;
    - `hiveRequestCapability` + `tool_setup` requests, with every piece of plumbing §8 lists, on
      the Loom and the phone, no protocol bump;
-   - `proposeHive`'s `media`.
+   - `proposeHive`'s `media` (**built 2026-11-05**, §8).
 5. **Stdio upstreams in the MCP proxy**, so MiniMax and Meshy become `stdio_mcp` (§12.1).
 
 **These are phases of the design, not a queue.** What really depends on what:

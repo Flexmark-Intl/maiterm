@@ -1383,6 +1383,13 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
 /// approval for everything the Hive then does (§7.3). Answered by the caller's window.
 fn propose_hive_tool() -> Value {
     use crate::hive::create::{MAX_BRIEF, MAX_BRIEF_FILES};
+    let ids: Vec<&str> = crate::hive::media::catalogue().capabilities.iter().map(|c| c.id.as_str()).collect();
+    let media_description = format!(
+        "Media the goal needs made (optional), by capability id: {}. The Create sheet then opens its \"What it can make\" \
+         panel with those capabilities' rows open, so your human sees what this Mac can make and what to set up. \
+         Unknown ids are dropped and named in the answer.",
+        ids.join(", ")
+    );
     serde_json::json!({
         "name": "proposeHive",
         "description": format!(
@@ -1407,6 +1414,7 @@ fn propose_hive_tool() -> Value {
                 "brief_files": { "type": "array", "items": { "type": "string" }, "description": "Absolute paths of plan documents to attach" },
                 "folders": { "type": "array", "items": { "type": "string" }, "description": "Absolute paths of the folders it works in; the first is the primary" },
                 "cap": { "type": "integer", "description": "Workers at once (default: your human's Hive default)" },
+                "media": { "type": "array", "items": { "type": "string" }, "description": media_description },
                 "worker_model": { "type": "string", "enum": ["opus", "sonnet", "haiku"], "description": "Workers' model (default: your human's Hive default)" },
                 "worker_effort": { "type": "string", "enum": crate::hive::tools::EFFORTS, "description": "Workers' effort (default: your human's Hive default)" }
             },

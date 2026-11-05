@@ -355,6 +355,18 @@ export function shouldStartOpen(goal: string, folders: { kind: string }[], media
   return !folders.some((f) => f.kind === 'git');
 }
 
+/** The capability rows the panel opens at mount for a proposal's `media` (`proposeHive`, docs/
+ *  hive-media.md §8): the ids asked for, each once. An id the catalogue doesn't hold matches no
+ *  row and opens nothing. */
+export function openCapabilitySeed(requested: readonly string[] | undefined): string[] {
+  return [...new Set(requested ?? [])];
+}
+
+/** Whether any asked-for capability sits under "More", which then starts open so its row is seen. */
+export function seedNeedsMore(requested: readonly string[], groups: Pick<PanelGroups, 'more'>): boolean {
+  return groups.more.some((r) => requested.includes(r.capability));
+}
+
 // ─── After a setup: what became ready, and the picks that follow ────────────
 
 /** The tool ids `rows` call ready (a cover in state "ready"), each once. */

@@ -7,7 +7,7 @@
  */
 
 import type { Tab } from '$lib/tauri/types';
-import { followUpRemoteHome, hiveCheckBriefFiles } from '$lib/tauri/commands';
+import { followUpRemoteHome, hiveCheckBriefFiles, hiveMediaCheckRequested } from '$lib/tauri/commands';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
@@ -15,7 +15,7 @@ import { isWindows } from '$lib/utils/platform';
 import { createDrafts, newGoalProposals } from './createDraft';
 import { newGoalOffered } from './newGoal';
 import { parseProposal, proposalTarget, type HiveCandidate, type HiveProposal } from './proposal';
-import { info as logInfo } from '@tauri-apps/plugin-log';
+import { info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 
 /** A new Hive: a workspace made for it, with the Create sheet seeded. Also the New goal sheet's
  *  "Make a new Hive instead". */
@@ -62,8 +62,22 @@ export async function proposeHive(tab: Tab, args: Record<string, unknown>): Prom
   } catch (e) {
     return { error: String(e) };
   }
+  // The catalogue judges the media ids (hive/media.rs): unknown ones are dropped and named in the
+  // answer, repeats count once. A catalogue that can't be asked is not a reason to refuse the plan.
+  let dropped: string[] = [];
+  let media: string[] = [];
+  if (parsed.media?.length) {
+    try {
+      const checked = await hiveMediaCheckRequested(parsed.media);
+      media = checked.capabilities;
+      dropped = checked.dropped;
+    } catch (e) {
+      logWarn(`hive: couldn't check a proposal's media list: ${e}`);
+      dropped = parsed.media;
+    }
+  }
   const candidates: HiveCandidate[] = workspacesStore.workspaces.flatMap((w) => (w.hive ? [{ workspaceId: w.id, name: w.name, hive: w.hive }] : []));
-  const p: HiveProposal = { ...parsed, target: proposalTarget(parsed.folders, candidates) };
+  const p: HiveProposal = { ...parsed, media, target: proposalTarget(parsed.folders, candidates) };
   const t = p.target;
   // A request card (lib/hive/proposalRequest.ts): the Loom and the phone show it. One proposal per
   // agent: Rust ends the tab's older pending one.
@@ -86,5 +100,7 @@ export async function proposeHive(tab: Tab, args: Record<string, unknown>): Prom
     name: p.name,
     folders: p.folders,
     brief_files: p.briefFiles,
+    ...(media.length ? { media } : {}),
+    ...(dropped.length ? { media_dropped: dropped, media_note: `Not media capabilities, so left out: ${dropped.join(', ')}.` } : {}),
   };
 }

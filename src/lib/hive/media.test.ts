@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compactLine, coverNames, createPickTracker, createSetupWatch, setupTicks, flippedIds, newlyReady, picksAfterRedetect, readyToolIds, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
+import { compactLine, coverNames, createPickTracker, createSetupWatch, setupTicks, flippedIds, newlyReady, picksAfterRedetect, readyToolIds, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, openCapabilitySeed, seedNeedsMore, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
 import type { HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
 
 const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvider => ({
@@ -270,6 +270,43 @@ describe('shouldStartOpen', () => {
   });
   it('decided: a code word beside a media word opens', () => {
     expect(shouldStartOpen('Fix the video player bug', [git])).toBe(true);
+  });
+});
+
+describe('shouldStartOpen with a proposal’s media', () => {
+  const git = { kind: 'git' };
+
+  it('opens a code goal in a repo once any capability is asked for', () => {
+    expect(shouldStartOpen('Fix the login redirect', [git], ['music'])).toBe(true);
+    expect(shouldStartOpen('Fix the login redirect', [git], ['music', 'video'])).toBe(true);
+  });
+
+  it('stays folded for an empty list, as before', () => {
+    expect(shouldStartOpen('Fix the login redirect', [git], [])).toBe(false);
+  });
+});
+
+describe('openCapabilitySeed', () => {
+  it('is the asked ids, each once, in order', () => {
+    expect(openCapabilitySeed(['music', 'video', 'music'])).toEqual(['music', 'video']);
+  });
+
+  it('is empty when nothing was asked, and never the caller’s own array', () => {
+    expect(openCapabilitySeed(undefined)).toEqual([]);
+    expect(openCapabilitySeed([])).toEqual([]);
+    const asked = ['video'];
+    expect(openCapabilitySeed(asked)).not.toBe(asked);
+  });
+});
+
+describe('seedNeedsMore', () => {
+  const g = groupRows([row('video'), row('lipsync')], catalogue);
+
+  it('opens More only for an asked-for capability that sits there', () => {
+    expect(seedNeedsMore(['lipsync'], g)).toBe(true);
+    expect(seedNeedsMore(['video', 'lipsync'], g)).toBe(true);
+    expect(seedNeedsMore(['video'], g)).toBe(false);
+    expect(seedNeedsMore([], g)).toBe(false);
   });
 });
 

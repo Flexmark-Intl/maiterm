@@ -148,6 +148,13 @@ pub fn hive_media_catalogue() -> CatalogueView {
     view()
 }
 
+/// `proposeHive`'s `media` list, checked against the catalogue (docs/hive-media.md §8): the window
+/// that answers the tool asks, so the ids are judged by the one catalogue, never by a copy in the UI.
+#[tauri::command]
+pub fn hive_media_check_requested(ids: Vec<String>) -> super::RequestedMedia {
+    super::check_requested(&ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

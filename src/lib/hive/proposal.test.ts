@@ -25,6 +25,13 @@ describe('parseProposal', () => {
     expect(p).toMatchObject({ folders: ['/b', '/a'], briefFiles: ['/p/plan.md'] });
   });
 
+  it('takes an optional media list of strings, and refuses any other shape', () => {
+    expect(parseProposal({ goal: 'x' }, from)).toMatchObject({ media: [] });
+    expect(parseProposal({ goal: 'x', media: [' video ', 'music', 'video', ''] }, from)).toMatchObject({ media: ['video', 'music'] });
+    expect(parseProposal({ goal: 'x', media: 'video' }, from)).toMatch(/media must be a list of capability ids/);
+    expect(parseProposal({ goal: 'x', media: [3] }, from)).toMatch(/media must be a list of capability ids/);
+  });
+
   it('checks the cap, model and effort', () => {
     expect(parseProposal({ goal: 'x', cap: 0 }, from)).toMatch(/cap/);
     expect(parseProposal({ goal: 'x', cap: 2.5 }, from)).toMatch(/cap/);

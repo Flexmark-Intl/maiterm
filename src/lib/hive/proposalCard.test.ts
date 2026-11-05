@@ -49,6 +49,12 @@ describe('a proposal card', () => {
     expect(fx.filter((l) => l.includes('trusts')).length).toBe(1);
   });
 
+  it('names the media the agent expects to need, and says the phone sets none up', () => {
+    expect(proposalEffects(proposal, plan).some((l) => l.startsWith('Media the agent expects'))).toBe(false);
+    const fx = proposalEffects({ ...proposal, media: ['video', 'music'] }, plan);
+    expect(fx.find((l) => l.startsWith('Media the agent expects to need: video, music.'))).toContain('Approving from the phone sets none up');
+  });
+
   it('names a first commit it makes', () => {
     const fx = proposalEffects(proposal, { ...plan, folders: [{ ...plan.folders[0], uncommitted: true }] });
     expect(fx.some((l) => l.startsWith('Approving also commits the files in /Users/me/site'))).toBe(true);

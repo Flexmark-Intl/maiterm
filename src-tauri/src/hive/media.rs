@@ -236,6 +236,42 @@ pub fn capability(id: &str) -> Option<&'static Capability> {
     catalogue().capabilities.iter().find(|c| c.id == id)
 }
 
+/// What a planning agent asked for with `proposeHive`'s `media` (docs/hive-media.md §8):
+/// the catalogue capabilities it names, and the ids that aren't capabilities.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct RequestedMedia {
+    /// Known capability ids, each once, in the order asked, at most one per catalogue capability.
+    pub capabilities: Vec<String>,
+    /// Ids that aren't capabilities, each once, for the tool's answer to name (shortened, and at
+    /// most as many as there are capabilities: an agent's list is not unbounded text).
+    pub dropped: Vec<String>,
+}
+
+/// Check a requested `media` list against the catalogue: unknown ids are dropped (and reported),
+/// repeats count once, and the result is capped at the number of capabilities.
+pub fn check_requested(ids: &[String]) -> RequestedMedia {
+    let cat = catalogue();
+    let max = cat.capabilities.len();
+    let mut out = RequestedMedia::default();
+    for raw in ids {
+        let id = raw.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if cat.capabilities.iter().any(|c| c.id == id) {
+            if out.capabilities.len() < max && !out.capabilities.iter().any(|c| c == id) {
+                out.capabilities.push(id.to_string());
+            }
+        } else if out.dropped.len() < max {
+            let shown: String = id.chars().take(40).collect();
+            if !out.dropped.contains(&shown) {
+                out.dropped.push(shown);
+            }
+        }
+    }
+    out
+}
+
 /// The capabilities the first page shows (video, image, voice, music, finish), in catalogue order.
 pub fn common_capabilities() -> impl Iterator<Item = &'static Capability> {
     catalogue().capabilities.iter().filter(|c| c.common)

@@ -12,6 +12,9 @@
                  install tab in it.
     startOpen    the caller's `shouldStartOpen()`; read ONCE at mount. After that the human's
                  choice wins, whatever the parent does.
+    openCapabilities  optional: capability ids whose card starts open (a proposal's `media`,
+                 docs/hive-media.md §8); read ONCE at mount, like startOpen. One under "More" opens
+                 More too, once, when the first answer arrives.
     onchanged    optional: something a setup sheet did may have changed this Mac. It carries no
                  ids: the panel decides no ticks. The Create sheet and Hive settings read the status
                  themselves and detect their tools again on it (event-driven: never a poll).
@@ -30,16 +33,17 @@
   import { warn as logWarn } from '@tauri-apps/plugin-log';
   import { hiveMediaCatalogue, hiveMediaStatus } from '$lib/tauri/commands';
   import type { HiveMediaCatalogue, HiveMediaRow } from '$lib/tauri/types';
-  import { compactLine, createLatest, readyToolIds, externalUrl, coverNames, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
+  import { compactLine, createLatest, openCapabilitySeed, seedNeedsMore, readyToolIds, externalUrl, coverNames, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
   import type { PanelProvider, PanelRow, SetupStarted } from '$lib/hive/media';
 
   interface Props {
     workspaceId: string | null;
     startOpen: boolean;
+    openCapabilities?: string[];
     onchanged?: () => void;
     onstarted?: (s: SetupStarted) => void;
   }
-  let { workspaceId, startOpen, onchanged, onstarted }: Props = $props();
+  let { workspaceId, startOpen, openCapabilities, onchanged, onstarted }: Props = $props();
 
   const uid = $props.id();
   const bodyId = `${uid}-body`;
@@ -48,7 +52,10 @@
   let open = $state(untrack(() => startOpen));
   let moreOpen = $state(false);
   /** Capability ids whose full card is open. Local to the panel, never persisted. */
-  let cardsOpen = $state<string[]>([]);
+  let cardsOpen = $state<string[]>(untrack(() => openCapabilitySeed(openCapabilities)));
+  /** The capabilities the seed asked for that haven't been placed yet: the first answer decides
+   *  whether More opens, then this is spent. */
+  let seedPending = untrack(() => openCapabilitySeed(openCapabilities));
   let rows = $state<HiveMediaRow[] | null>(null);
   let catalogue = $state<HiveMediaCatalogue | null>(null);
   let loading = $state(true);
@@ -81,6 +88,10 @@
       if (stale()) return;
       catalogue = cat;
       rows = status;
+      if (seedPending.length) {
+        if (seedNeedsMore(seedPending, groupRows(status, cat))) moreOpen = true;
+        seedPending = [];
+      }
     } catch (e) {
       if (stale()) return;
       failure = String(e);

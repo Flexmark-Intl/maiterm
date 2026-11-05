@@ -1213,6 +1213,7 @@ pub fn run() {
             hive::media::status::hive_media_status,
             hive::media::verify::hive_media_verify,
             hive::media::view::hive_media_catalogue,
+            hive::media::view::hive_media_check_requested,
             hive::media::install::hive_media_install,
             hive::media::install::hive_media_install_arm,
             hive::media::whisper::hive_media_whisper_model_path,

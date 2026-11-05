@@ -415,6 +415,12 @@ agent offers, the human creates.
   first is the Primary; default the agent's own folder), `cap`, `worker_model`, `worker_effort`.
   `lib/hive/proposal.ts` checks the shapes and limits, and Rust checks each brief file as Create
   will copy it (`hive_check_brief_files`), so the agent hears about a wrong path, not the human.
+  **`media`** (optional, built 2026-11-05, docs/hive-media.md §8) is a list of media capability
+  ids. The catalogue judges it (`hive_media_check_requested`, `media::check_requested`): unknown
+  ids are dropped and named in the answer (`media_note`), repeats count once, and the list is
+  capped at the number of capabilities. The Create sheet then opens its Tools step's "What it can
+  make" panel with those rows open (§3.7's seed carries it; a kept draft keeps it). A new-goal
+  target ignores it: that sheet has no media panel.
 - **What happens.** An agent request, kind `hive_propose` (docs/agent-requests.md), one per agent:
   a second call ends the first (`replace_proposals`). It waits a day, not 30 minutes. It shows in
   the Loom's Decisions and on the phone. On the desktop its button is **Open in the sheet**, which
