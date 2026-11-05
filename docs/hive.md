@@ -1160,7 +1160,11 @@ can't be denied either: Claude writes its cwd file there, and denying it breaks 
 worker launches with `--setting-sources project` (a reviewer `local`), so none load: a live
 worker told it had `skill:langsys` and `skill:browse` got "Unknown skill" for both, after its
 queen told it to load one. A worker's brief lists the Hive's tools without skills and says it has
-none; the queen's says skills are hers alone and their substance goes in a spawn brief. Giving
+none; the queen's says skills are hers alone and their substance goes in a spawn brief. The
+queen's brief and every media worker's carry the **capability map** (docs/hive-media.md §10,
+`hive/media/map.rs`) instead of the raw ids: what the Hive can make, with which server (named as
+the reader's own MCP config names it), what it spends and how long its results last, and what
+isn't set up. A code role's brief keeps the "Tools this Hive has" line. Giving
 workers skills (a copy under their own settings) is open.
 
 **Localhost** is closed by default (measured, spike 10). Two settings open it, and both open
@@ -2510,8 +2514,8 @@ Collection { id, name, asset_ids (ordered), cover? }
 ### 10.3 How agents make and file assets
 
 **Making** is whatever the Hive's agents can really run. The sheet's **Tools** row (§3) detects
-these, in this order (decided 2026-10-23), and the brief carries the same list, so the
-coordinator plans with real tools:
+these, in this order (decided 2026-10-23), and the brief carries them as a capability map
+(docs/hive-media.md §10), so the coordinator plans with real tools:
 
 | Kind | Detected how | Examples |
 |---|---|---|
