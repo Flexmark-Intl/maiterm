@@ -127,7 +127,12 @@ Unset fields (empty, null) are the built-ins below (`lib/hive/defaults.ts` `wiza
 rules prefill the field and open it. A default tool not detected on this machine any more is
 dropped silently. With default tools, the Tools step shows them as one line ("From your defaults:
 ffmpeg, Figma, frontend-design (+4 more)") with **Change** behind it; otherwise, and after Change,
-the same grouped, filterable picker as Preferences (`HiveToolPicker.svelte`). A **skill pack**
+the same grouped, filterable picker as Preferences (`HiveToolPicker.svelte`). Above the picker the
+step shows **What it can make** (`HiveMediaPanel.svelte`): what this Mac already covers for
+video, image, voice and the rest, and what to set up for a capability nothing covers. It is
+read-only, opens by itself only for a goal that names media or a Hive with no git folder, and
+never changes the picks. Hive settings has the same panel in a read-only Tools section, and
+Preferences → Hive a folded one (docs/hive-media.md §7). A **skill pack**
 (two or more skills sharing SKILL.md `metadata.package`, or a trailing `(word)` on the
 description, as most of gstack's do; untagged members are found by the pack's own skill folder holding
 a folder per member, and by a `<pack>-` name prefix on a declared pack: `DetectedTool.pack`,
@@ -4700,7 +4705,18 @@ several releases a day).
    its own is open or has a result on its way, and no prompt of its is routed. A paused Hive defers
    the check rather than ending it. A Stop whose `background_tasks` or `session_crons` aren't empty
    doesn't arm it, because the session wakes itself. Memory only: after a restart the relaunch's
-   SessionStart arms it again. *Delete:* the memory folder
+   SessionStart arms it again. *On the board:* the header's pill for an active Hive used to pulse a
+   green "Running" whenever the Hive was on, so both stalls looked like work. It now says what is
+   happening (`activity.ts` `hivePulse`):
+   - **Working** pulses only while an agent is busy or a run is open.
+   - **Waiting on you** when nothing works but something waits on the human.
+   - **Stalled?** names the quiet workers.
+   - **Idle** otherwise.
+
+   An idle running worker's card says "Waiting on its run" while a run of its own is open
+   (`WorkerCard.open_runs`, refreshed when a run is queued and when it ends). Past 10 minutes with
+   nothing on its way, the card reads an amber "Quiet · 19h · no report" (`quietActivity`), and its
+   crew segment is outlined amber. *Delete:* the memory folder
    is work and stays in place under the Hive's folder unless its own box is ticked, and the sheet
    lists what goes (the decision log, run history, this Hive's precedents, the other logs, launch
    records, the coordinator's home). *Header:* Pause (`hive_pause`, `Hive.paused_by = "human"`; no

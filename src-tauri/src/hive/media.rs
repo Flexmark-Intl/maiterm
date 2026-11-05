@@ -294,6 +294,7 @@ pub fn providers_for_skill(skill: &str) -> Vec<&'static Provider> {
 }
 
 pub mod status;
+pub mod verify;
 pub mod view;
 
 #[cfg(test)]

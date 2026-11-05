@@ -20,7 +20,7 @@ use tauri::AppHandle;
 
 use super::deliver::one_line;
 use super::tools::{blocking, worker_label};
-use super::worker::{self, WorkerRecord, PHASE_RUNNING, RUN_OPEN, RUN_RESULT};
+use super::worker::{self, WorkerRecord, PHASE_RUNNING};
 use crate::state::AppState;
 
 /// How long a worker's tab stays quiet before its coordinator is told.
@@ -60,7 +60,7 @@ fn generation(tab: &str) -> u64 {
 /// coordinator to decide what is the human's), and no run of its own is open or has a result on
 /// its way. Whether its Hive is active is the caller's: a paused one defers the check.
 pub fn stalled(w: &WorkerRecord, task_blocked: bool) -> bool {
-    w.phase == PHASE_RUNNING && !task_blocked && !w.pending_runs.iter().any(|r| r.state == RUN_OPEN || r.state == RUN_RESULT)
+    w.phase == PHASE_RUNNING && !task_blocked && !w.pending_runs.iter().any(|r| r.awaited())
 }
 
 /// The Stop says the session wakes itself: background work or a scheduled wakeup (Claude's own
@@ -141,7 +141,7 @@ pub fn seen(state: &Arc<AppState>, handle: &AppHandle, tab_id: &str, event_name:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hive::worker::PendingRun;
+    use crate::hive::worker::{PendingRun, RUN_OPEN, RUN_RESULT};
 
     fn w(phase: &str, runs: &[&str]) -> WorkerRecord {
         WorkerRecord {
@@ -158,6 +158,10 @@ mod tests {
         assert!(!stalled(&w(PHASE_RUNNING, &[RUN_OPEN]), false), "its run will report");
         assert!(!stalled(&w(PHASE_RUNNING, &[RUN_RESULT]), false), "its result is on its way");
         assert!(!stalled(&w(PHASE_RUNNING, &[]), true), "its task's blocker will be answered");
+        // A served app or service copy runs for hours and reports nothing the worker waits on.
+        let mut serving = w(PHASE_RUNNING, &[RUN_OPEN]);
+        serving.pending_runs[0].server = true;
+        assert!(stalled(&serving, false), "a server is no run it waits on");
         for p in [worker::PHASE_REPORTED, worker::PHASE_BLOCKED, worker::PHASE_LANDING, worker::PHASE_RETIRED, worker::PHASE_WAITING] {
             assert!(!stalled(&w(p, &[]), false), "{p}");
         }

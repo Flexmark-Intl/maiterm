@@ -8,7 +8,51 @@ import type { HiveDiffStat, HiveShortstat } from '$lib/tauri/types';
 
 export interface Activity {
   text: string;
-  tone: 'busy' | 'wait' | 'idle' | 'none';
+  /** `stalled`: a running worker idle past `QUIET_MS` with nothing on its way (`quietActivity`). */
+  tone: 'busy' | 'wait' | 'idle' | 'stalled' | 'none';
+}
+
+/** How long a running worker may sit idle before its card says it may be stuck: the same 10
+ *  minutes after which maiTerm tells the queen (`hive/quiet.rs`). */
+export const QUIET_MS = 10 * 60_000;
+
+/** An idle worker that is still `running` is waiting on something, and the card says what. A run
+ *  of its own is on its way, so the card says so and isn't alarming. With none, past `QUIET_MS` it
+ *  may be waiting on something that won't come: two stalls looked like work because an idle
+ *  card read only a dim "Idle". Null leaves the plain activity line. The card's state (a
+ *  blocker reads Needs you) is the caller's to check first. */
+export function quietActivity(phase: string, openRuns: number, s: Pick<AgentTabSession, 'state' | 'idleSince'> | undefined, now: number): Activity | null {
+  if (phase !== 'running' || s?.state !== 'idle') return null;
+  const age = s.idleSince ? ago(now - s.idleSince) : '';
+  if (openRuns > 0) {
+    const what = openRuns === 1 ? 'its run' : `${openRuns} runs`;
+    return { text: age ? `Waiting on ${what} · ${age}` : `Waiting on ${what}`, tone: 'busy' };
+  }
+  if (!s.idleSince || now - s.idleSince < QUIET_MS) return null;
+  return { text: `Quiet · ${age} · no report`, tone: 'stalled' };
+}
+
+/** An agent at work: active and not holding a question for the human (that one waits on them,
+ *  and Needs you counts it). Read off the agent, never the card's state name: a worker with a
+ *  blocked sub-task reads Needs you, and one landing reads Landing, while its agent works on. */
+export function agentWorks(s: Pick<AgentTabSession, 'state' | 'toolName'> | null | undefined): boolean {
+  return s?.state === 'active' && s.toolName !== 'AskUserQuestion';
+}
+
+/** A land maiTerm is carrying out (locking, its check running, advancing, batched): work in
+ *  progress. Not awaiting_human (its request is in Needs you), nor held (it waits on the queen
+ *  calling hiveLand again). */
+export function landWorks(state: string | null | undefined): boolean {
+  return state === 'locking' || state === 'checking' || state === 'advancing' || state === 'queued_batch';
+}
+
+/** The header's pill for an active Hive: what is actually happening, not only that it may run.
+ *  `Running` used to pulse green whenever the Hive was on, so a stalled Hive looked busy. */
+export type HivePulse = 'working' | 'needs_you' | 'stalled' | 'idle';
+export function hivePulse(o: { busyAgents: number; openRuns: number; needs: number; stalled: number }): HivePulse {
+  if (o.busyAgents > 0 || o.openRuns > 0) return 'working';
+  if (o.needs > 0) return 'needs_you';
+  return o.stalled > 0 ? 'stalled' : 'idle';
 }
 
 type Session = Pick<AgentTabSession, 'state' | 'toolName' | 'toolDetail' | 'idleSince'> &

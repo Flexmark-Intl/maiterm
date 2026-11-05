@@ -3,7 +3,7 @@ import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentMarkAbs, Baseline, BaselineStat, DeleteTicket, DirReq, FileOp, LedgerEntry, OpResult, OpenAck, PlaceHints, StatInfo, TabTurn, TreeEnvelope, TreePlace, TreeSearchResult } from './types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { StackHeldAction, StackLeaseState } from './types';
-import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HiveLiveCwd, HiveMediaCatalogue, HiveMediaRow, HiveNewGoalPreview, HiveNewGoalSpec, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
+import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult, HiveDetectedTool, HiveDiffStat, HiveFolderInfo, HiveLandLog, HiveLiveCwd, HiveMediaCatalogue, HiveMediaRow, HiveMediaVerifyResult, HiveNewGoalPreview, HiveNewGoalSpec, HivePreflight, HiveSpec, HiveUndoPreview, RunQueueSettings } from './types';
 import type { HiveMemoryFileText, HiveMemoryView } from './types';
 import type { HiveDecisionView, HivePrecedentsView } from './types';
 import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
@@ -2856,6 +2856,15 @@ export async function hiveMediaStatus(workspaceId: string | null = null, already
  *  and each provider's display facts, which `hiveMediaStatus` rows (ids only) join against. */
 export async function hiveMediaCatalogue(): Promise<HiveMediaCatalogue> {
   return invoke('hive_media_catalogue');
+}
+
+/** The setup sheet's Verify (docs/hive-media.md §6): re-detect `providerId` (a catalogue provider
+ *  id) and, for a server maiTerm proxies, check its entry reaches agents and is in scope for
+ *  `workspaceId` (a Hive's workspace, or null from Preferences), list its tools, and call its
+ *  balance or pricing tool where it has one. Free: it never runs a generation. Re-read
+ *  `hiveMediaStatus` afterwards for the panel's rows. */
+export async function hiveMediaVerify(workspaceId: string | null, providerId: string): Promise<HiveMediaVerifyResult> {
+  return invoke('hive_media_verify', { workspaceId, providerId });
 }
 
 /** Lay the Hive out on disk and install it, with its hidden coordinator tab, in one write. */

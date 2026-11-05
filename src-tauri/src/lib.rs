@@ -1207,6 +1207,7 @@ pub fn run() {
             hive::create::hive_commit_first,
             hive::create::hive_detect_tools,
             hive::media::status::hive_media_status,
+            hive::media::verify::hive_media_verify,
             hive::media::view::hive_media_catalogue,
             hive::create::hive_create,
             hive::create::hive_check_brief_files,
