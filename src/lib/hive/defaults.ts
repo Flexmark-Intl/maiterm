@@ -51,7 +51,9 @@ export const EMPTY_HIVE_DEFAULTS: HiveDefaults = {
 export function normalizeHiveDefaults(raw: Partial<HiveDefaults> | null | undefined): HiveDefaults {
   const r = raw ?? {};
   return {
-    tools: Array.isArray(r.tools) ? r.tools.filter((t): t is string => typeof t === 'string') : [],
+    // A setup-only program (cli:brew) saved while the picker offered it is shed on load, so no reader
+    // of the store (the wizard, Preferences, a proposal) can carry it, and the next write drops it from disk.
+    tools: Array.isArray(r.tools) ? r.tools.filter((t): t is string => typeof t === 'string' && !isSetupOnly(t)) : [],
     packs: Array.isArray(r.packs) ? r.packs.filter((t): t is string => typeof t === 'string') : [],
     coordinator_model: r.coordinator_model ?? '',
     coordinator_effort: r.coordinator_effort ?? '',
@@ -98,6 +100,14 @@ export function wizardStart(d: HiveDefaults): WizardStart {
     tools: [...new Set(d.tools)],
     packs: [...new Set(d.packs)],
   };
+}
+
+/** The picks Preferences → Hive shows ticked: the stored ids (never a setup-only one) plus every
+ *  detected member of a stored pack. What a toggle in the picker starts from, so it can't write a
+ *  stale cli:brew back. */
+export function defaultsPicked(d: Pick<WizardStart, 'tools' | 'packs'>, detected: readonly HiveDetectedTool[]): Set<string> {
+  const members = detected.filter((t) => t.pack && d.packs.includes(t.pack)).map((t) => t.id);
+  return new Set([...d.tools.filter((id) => !isSetupOnly(id)), ...members]);
 }
 
 /** The default tool ids this machine has: the stored ids plus every current member of a stored

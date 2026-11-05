@@ -8,7 +8,7 @@
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { hiveDetectTools } from '$lib/tauri/commands';
   import type { HiveDefaults, HiveDetectedTool } from '$lib/tauri/types';
-  import { BUILTIN, clampDefault, packsToStore, HIVE_EFFORTS, HIVE_MODELS, MAX_BUDGET, wizardStart } from '$lib/hive/defaults';
+  import { BUILTIN, clampDefault, defaultsPicked, packsToStore, HIVE_EFFORTS, HIVE_MODELS, MAX_BUDGET, wizardStart } from '$lib/hive/defaults';
   import { MAX_CAP } from '$lib/hive/change';
   import { isSetupOnly, pickerTools } from '$lib/hive/media';
   import { MAX_INSTRUCTIONS, charCount } from '$lib/hive/model';
@@ -22,7 +22,7 @@
   hiveDetectTools().then((t) => (tools = pickerTools(t))).catch((e) => { tools = []; logError(`hive defaults: tool detection failed: ${e}`); });
 
   // A stored pack counts its members detected since as picked, as the wizard does.
-  const picked = $derived(new Set([...d.tools.filter((id) => !isSetupOnly(id)), ...(tools ?? []).filter((t) => t.pack && d.packs.includes(t.pack)).map((t) => t.id)]));
+  const picked = $derived(defaultsPicked(d, tools ?? []));
   /** Saved picks this computer doesn't have: kept (they may come back), and said. */
   const missing = $derived(tools ? d.tools.filter((id) => !isSetupOnly(id) && !tools!.some((t) => t.id === id)) : []);
 

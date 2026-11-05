@@ -23,6 +23,7 @@ import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { info as logInfo, error as logError } from '@tauri-apps/plugin-log';
 import { defaultToolIds, FALLBACK_CAP, wizardStart } from './defaults';
+import { pickerTools } from './media';
 import { folderName, validateSpec } from './model';
 import { newGoalOffered } from './newGoal';
 import { proposalTarget, type HiveCandidate, type HiveProposal } from './proposal';
@@ -84,7 +85,7 @@ async function newHivePlan(p: HiveProposal, workspaceId: string): Promise<NewHiv
   const pre = await hivePreflight(workspaceId, [], []);
   if (!pre.platform_ok) throw new Error("A Hive needs Claude's sandbox, which native Windows doesn't have.");
   if (!pre.claude_ok) throw new Error(pre.claude_detail ?? 'Claude Code 2.1.295 or newer is needed for a Hive.');
-  const detected = await hiveDetectTools().catch(() => []);
+  const detected = pickerTools(await hiveDetectTools().catch(() => []));
   const tools = defaultToolIds(d, detected).sort();
   const label = new Map(detected.map((t) => [t.id, t.label]));
   return {

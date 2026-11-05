@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { HiveDetectedTool } from '$lib/tauri/types';
 import {
-  BUILTIN, clampDefault, MAX_BUDGET, defaultsFromWizard, defaultToolIds, EMPTY_HIVE_DEFAULTS, fullPacks, groupTools, knownTools, normalizeHiveDefaults,
+  BUILTIN, clampDefault, defaultsPicked, MAX_BUDGET, defaultsFromWizard, defaultToolIds, EMPTY_HIVE_DEFAULTS, fullPacks, groupTools, knownTools, normalizeHiveDefaults,
   packsToStore, pickedItems, summarizeTools, toggleGroup, togglePack, toolMatches, wizardStart,
 } from './defaults';
 import { MAX_CAP } from './change';
@@ -74,6 +74,27 @@ describe('defaultsFromWizard and setup-only tools', () => {
   });
   it('sheds it when detection failed too', () => {
     expect(defaultsFromWizard(w, was, null).tools).toEqual(['cli:ffmpeg', 'mcp:comfy-away']);
+  });
+});
+
+describe('defaultsPicked', () => {
+  const t = (id: string, pack?: string) => ({ id, kind: id.split(':')[0], label: id, host: null, pack });
+  const stored = { tools: ['cli:brew', 'cli:ffmpeg'], packs: ['gstack'] };
+  it('leaves a stale cli:brew out and adds the detected members of a stored pack', () => {
+    expect([...defaultsPicked(stored, [t('skill:a', 'gstack'), t('skill:b', 'other')])]).toEqual(['cli:ffmpeg', 'skill:a']);
+  });
+  it('unticking the only real pick leaves nothing to save', () => {
+    const picked = defaultsPicked({ tools: ['cli:brew', 'cli:ffmpeg'], packs: [] }, []);
+    // What the picker's flip() does with it: copy, then remove the clicked id. That is what Preferences saves.
+    const next = new Set(picked);
+    next.delete('cli:ffmpeg');
+    expect([...next]).toEqual([]);
+  });
+});
+
+describe('normalizeHiveDefaults and setup-only tools', () => {
+  it('sheds a stale cli:brew, so every reader of the store is clean', () => {
+    expect(normalizeHiveDefaults({ tools: ['cli:brew', 'cli:ffmpeg'] }).tools).toEqual(['cli:ffmpeg']);
   });
 });
 
