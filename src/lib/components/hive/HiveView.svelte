@@ -507,6 +507,7 @@
   let goalEl = $state<HTMLElement | null>(null);
   $effect(() => {
     const el = goalEl;
+    void hive?.goal; // a new goal at the same width resizes nothing: re-measure on the text too
     if (!el || goalOpen) return;
     const measure = () => (goalClipped = el.scrollHeight > el.clientHeight + 1);
     measure();
