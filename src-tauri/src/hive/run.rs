@@ -443,7 +443,14 @@ pub(crate) async fn deliver_pending(app: &Arc<AppState>, handle: &AppHandle, pat
     }
     let n = deliver_results_with(dir, |text| {
         let (app, handle, tab) = (app.clone(), handle.clone(), tab.clone());
-        async move { super::deliver::deliver(&app, &handle, &tab, &text, "Hive run").await }
+        async move {
+            // A Pause that began after the check above: refused, so it's put back on disk
+            // rather than handed to the memory-only hold.
+            if super::deliver::paused_by_human(&app, &tab).is_some() {
+                return Sent::Refused("your human has paused this Hive".to_string());
+            }
+            super::deliver::deliver(&app, &handle, &tab, &text, "Hive run").await
+        }
     })
     .await;
     if n > 0 {
@@ -459,8 +466,9 @@ pub(crate) async fn deliver_after_resume(app: &Arc<AppState>, handle: &AppHandle
     let paths = HivePaths::new(root);
     let p = paths.clone();
     let Ok(workers) = blocking(move || Ok(worker::list_workers(&p))).await else { return };
+    // In the release turn, as what the Pause held: two pastes into one worker at once merge.
     for w in workers.into_iter().filter(|w| w.pending_runs.iter().any(|r| r.state == RUN_RESULT)) {
-        deliver_pending(app, handle, &paths, &w.task_id).await;
+        super::deliver::after_release(hive_id, deliver_pending(app, handle, &paths, &w.task_id)).await;
     }
 }
 

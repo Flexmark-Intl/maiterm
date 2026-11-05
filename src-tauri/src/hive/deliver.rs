@@ -108,6 +108,11 @@ async fn in_release_turn<T>(hive_id: &str, gap: Duration, f: impl std::future::F
     out
 }
 
+/// `f` in `hive_id`'s release turn after a Resume, one at a time with what the Pause held.
+pub(crate) async fn after_release<T>(hive_id: &str, f: impl std::future::Future<Output = T>) -> T {
+    in_release_turn(hive_id, RELEASE_GAP, f).await
+}
+
 /// The human's Resume of `hive_id`: the resume notice (`notice`, the coordinator's delivery)
 /// goes in its turn first, and only then is the Pause's hold lifted, so what it held follows it
 /// one at a time (`in_release_turn`), never alongside it.
