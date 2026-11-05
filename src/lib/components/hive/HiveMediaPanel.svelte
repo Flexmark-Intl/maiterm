@@ -60,7 +60,7 @@
 
   /** The open setup sheet, a new object per opening (the sheet is keyed by it, so each opening
    *  mounts a fresh one with its own seeds), and the button that opened it, for focus on close. */
-  let setup = $state<{ provider: PanelProvider; capability: string } | null>(null);
+  let setup = $state<{ provider: PanelProvider; capability: string; readyBefore: string[] } | null>(null);
   let setupOpener: HTMLElement | null = null;
 
   const groups = $derived(rows && catalogue ? groupRows(rows, catalogue) : null);
@@ -126,7 +126,8 @@
 
   function openSetup(e: MouseEvent, provider: PanelProvider, capability: string) {
     setupOpener = e.currentTarget as HTMLElement;
-    setup = { provider, capability };
+    // The baseline the setup is judged against: what was ready when the human opened it.
+    setup = { provider, capability, readyBefore: readyToolIds(rows) };
   }
 
   /** Focus goes back to the button that opened the sheet, or to Re-detect when a re-fetch took that
@@ -147,6 +148,12 @@
   function setupChanged() {
     if (owed === null) owed = readyToolIds(rows);
     void load();
+  }
+
+  /** The parent heard the end of a step this panel's sheet started (an install or a sign-in that
+   *  ended after the sheet closed): fetch again so the rows show it, and pay the owed notice. */
+  export function refresh() {
+    setupChanged();
   }
 
   async function go(url: string) {
@@ -310,7 +317,7 @@
 
 {#if setup}
   {#key setup}
-    <HiveMediaSetupSheet provider={setup.provider} capabilityLabel={setup.capability} {workspaceId} onclose={closeSetup} onchanged={setupChanged} {onstarted} />
+    <HiveMediaSetupSheet provider={setup.provider} capabilityLabel={setup.capability} {workspaceId} onclose={closeSetup} onchanged={setupChanged} {onstarted} readyBefore={setup.readyBefore} />
   {/key}
 {/if}
 

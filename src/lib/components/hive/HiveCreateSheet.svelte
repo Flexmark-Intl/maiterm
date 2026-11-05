@@ -415,10 +415,18 @@
 
   /** What this sheet's media panel set up, watched for this sheet's whole life (docs/hive-media.md
    *  §6): the panel unmounts at Next, and an install can exit minutes later, at Stack or Review.
-   *  Only the ends of steps its own setup sheets started count. On one, the status names what
-   *  those providers made ready, and detection runs again with it. */
+   *  Only the ends of steps its own setup sheets started count. One path detects per end:
+   *  - the panel is mounted (Tools step): it fetches again (`refresh`), so its rows show the end,
+   *    and its `onchanged` runs detection with what that fetch newly calls ready;
+   *  - it isn't (another step): the status names what those providers made ready since their
+   *    setup started (`readyFrom`), and detection runs with it. */
   const setupWatch = createSetupWatch();
+  let mediaPanel = $state<ReturnType<typeof HiveMediaPanel> | null>(null);
   const stopWatch = watchSetupEnds(setupWatch, () => {
+    if (mediaPanel) {
+      mediaPanel.refresh();
+      return;
+    }
     hiveMediaStatus(workspaceId)
       .then((rows) => {
         if (!unmounted) detectTools(setupWatch.readyFrom(rows));
@@ -1001,7 +1009,7 @@
                The panel reads startOpen once, at mount, and mounts only while this step shows, so the
                goal and folders it reads are the ones the human just left (or a restored draft's). The
                one place it is computed. Phase 4 passes a proposal's `media` here as the third argument. -->
-          <HiveMediaPanel {workspaceId} startOpen={shouldStartOpen(goal, folders)} onchanged={detectTools} onstarted={(st) => setupWatch.started(st)} />
+          <HiveMediaPanel bind:this={mediaPanel} {workspaceId} startOpen={shouldStartOpen(goal, folders)} onchanged={detectTools} onstarted={(st) => setupWatch.started(st)} />
           <div class="field">
             <span class="label">Tools</span>
             {#if tools === null}

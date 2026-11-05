@@ -227,14 +227,18 @@ After that fetch the panel calls its parent's `onchanged` with the tools it newl
 reports itself when it lands, and closing the sheet fetches again.
 
 Steps that end after the sheet, or the whole panel, is gone are heard by the parent that outlives
-the panel. The sheet reports what it started (`onstarted {provider_id, tab_id?, server_id?}`: the
-install's tab once `hiveMediaInstall` answers, the server once it is added or reused), the panel
-passes it up, and the Create sheet and Hive settings each keep a `createSetupWatch` for their whole
+the panel. The sheet reports what it started (`onstarted {provider_id, tab_id?, server_id?, ready_before}`:
+the install's tab once `hiveMediaInstall` answers, the server once it is added or reused, and the
+tools that were ready when the panel opened the sheet), the panel passes it up, and the Create sheet and Hive settings each keep a `createSetupWatch` for their whole
 mount (`lib/hive/mediaWatch.ts` holds its listeners). It answers `hive-media-install-finished` only
 for those tab ids and `mcp-proxy-status` `connected` only for those servers, once each, so another
 window's install or an unrelated reconnect is ignored; the panel itself listens for nothing
-app-wide. On its own end the Create sheet reads the status and detects again with the ready tools
-of the providers set up there; Hive settings' tools editor detects again. The scenario this is for:
+app-wide. One path detects per end. With the panel mounted, the parent calls its `refresh()`: the
+rows show the end, and the panel's `onchanged` carries what that fetch newly calls ready. Without
+it (the Create sheet on another step), the Create sheet reads the status and detects with
+`readyFrom`: the ready covers of the providers set up there, less the baseline of each provider's
+first start, so setting up the Homebrew kit for whisper-cli doesn't tick the ffmpeg that was already
+there; Hive settings' tools editor detects again. The scenario this is for:
 on the Tools step, Set up the Homebrew kit, close the sheet, press Next to Stack (the panel
 unmounts), the install exits 0: the Create sheet's watcher re-detects, whisper-cli is ticked, and
 Review lists it before Create. The Create sheet detects its tools again and ticks a newly ready one unless

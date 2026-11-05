@@ -514,7 +514,7 @@ describe('createSetupWatch', () => {
 
   it("ignores another window's or provider's install, and answers its own once", () => {
     const w = createSetupWatch();
-    w.started({ provider_id: 'homebrew-kit', tab_id: 't1' });
+    w.started({ provider_id: 'homebrew-kit', tab_id: 't1', ready_before: [] });
     expect(w.installEnded({ tab_id: 't-other-window' })).toBe(false);
     expect(w.installEnded({ tab_id: 't1' })).toBe(true);
     expect(w.installEnded({ tab_id: 't1' })).toBe(false);
@@ -522,7 +522,7 @@ describe('createSetupWatch', () => {
 
   it('hears only its own server connect, once', () => {
     const w = createSetupWatch();
-    w.started({ provider_id: 'fal', server_id: 'fal-2' });
+    w.started({ provider_id: 'fal', server_id: 'fal-2', ready_before: [] });
     expect(w.serverStatus({ id: 'linear', status: { state: 'connected' } })).toBe(false);
     expect(w.serverStatus({ id: 'fal-2', status: { state: 'needs_sign_in' } })).toBe(false);
     expect(w.serverStatus({ id: 'fal-2', status: { state: 'connected' } })).toBe(true);
@@ -536,7 +536,7 @@ describe('createSetupWatch', () => {
     const tr = createPickTracker(() => new Set(['cli:ffmpeg']));
     const det = (...ids: string[]) => ids.map((id) => ({ id, kind: 'cli', label: id, host: null }));
     expect([...tr.answered(new Set(), det('cli:ffmpeg', 'mcp:fal'), new Set())]).toEqual(['cli:ffmpeg']);
-    w.started({ provider_id: 'homebrew-kit', tab_id: 't1' });
+    w.started({ provider_id: 'homebrew-kit', tab_id: 't1', ready_before: [] });
     expect(w.installEnded({ tab_id: 't1' })).toBe(true);
     // Status after the install: whisper is ready through the kit; fal is ready too, set up elsewhere.
     const rows = [row('transcribe', [['cli:whisper-cli', 'homebrew-kit', 'ready']]), row('video', [['mcp:fal', 'fal', 'ready']])];
@@ -544,4 +544,62 @@ describe('createSetupWatch', () => {
     const picked = tr.answered(new Set(['cli:ffmpeg']), det('cli:ffmpeg', 'cli:whisper-cli', 'mcp:fal'), new Set());
     expect([...picked].sort()).toEqual(['cli:ffmpeg', 'cli:whisper-cli']);
   });
+
+  const kitRows = (whisper: string) => [
+    row('finish', [['cli:ffmpeg', 'homebrew-kit', 'ready'], ['cli:ffprobe', 'homebrew-kit', 'ready'], ['cli:sox', 'homebrew-kit', 'ready']]),
+    row('transcribe', [['cli:whisper-cli', 'homebrew-kit', whisper]]),
+  ];
+  const detAll = (...ids: string[]) => ids.map((id) => ({ id, kind: 'cli', label: id, host: null }));
+
+  it('ticks only what the setup made ready: not the kit programs that were already there', () => {
+    const w = createSetupWatch();
+    const before = readyToolIds(kitRows('missing'));
+    expect(before.sort()).toEqual(['cli:ffmpeg', 'cli:ffprobe', 'cli:sox']);
+    w.started({ provider_id: 'homebrew-kit', tab_id: 't1', ready_before: before });
+    expect(w.readyFrom(kitRows('ready'))).toEqual(['cli:whisper-cli']);
+    // Defaults empty: only whisper-cli is ticked.
+    const tr = createPickTracker(() => new Set());
+    expect([...tr.answered(new Set(), detAll('cli:ffmpeg'), new Set())]).toEqual([]);
+    tr.notice(w.readyFrom(kitRows('ready')));
+    expect([...tr.answered(new Set(), detAll('cli:ffmpeg', 'cli:ffprobe', 'cli:sox', 'cli:whisper-cli'), new Set())]).toEqual(['cli:whisper-cli']);
+  });
+
+  it('keeps a tool that was ready before and in the first picks ticked', () => {
+    const w = createSetupWatch();
+    w.started({ provider_id: 'homebrew-kit', tab_id: 't1', ready_before: readyToolIds(kitRows('missing')) });
+    const tr = createPickTracker(() => new Set(['cli:ffmpeg']));
+    expect([...tr.answered(new Set(), detAll('cli:ffmpeg'), new Set())]).toEqual(['cli:ffmpeg']);
+    tr.notice(w.readyFrom(kitRows('ready')));
+    const picked = tr.answered(new Set(['cli:ffmpeg']), detAll('cli:ffmpeg', 'cli:ffprobe', 'cli:sox', 'cli:whisper-cli'), new Set());
+    expect([...picked].sort()).toEqual(['cli:ffmpeg', 'cli:whisper-cli']);
+  });
+
+  it('keeps a baseline per provider, from its first start', () => {
+    const w = createSetupWatch();
+    w.started({ provider_id: 'homebrew-kit', tab_id: 't1', ready_before: ['cli:ffmpeg'] });
+    w.started({ provider_id: 'fal', server_id: 'fal-2', ready_before: ['cli:ffmpeg', 'mcp:fal-old'] });
+    // A second start of the kit, after whisper was ready, does not move its baseline.
+    w.started({ provider_id: 'homebrew-kit', tab_id: 't2', ready_before: ['cli:ffmpeg', 'cli:whisper-cli'] });
+    const rows = [
+      row('finish', [['cli:ffmpeg', 'homebrew-kit', 'ready']]),
+      row('transcribe', [['cli:whisper-cli', 'homebrew-kit', 'ready']]),
+      row('video', [['mcp:fal-old', 'fal', 'ready'], ['mcp:fal-2', 'fal', 'ready'], ['mcp:kling', 'kling', 'ready']]),
+    ];
+    expect(w.readyFrom(rows).sort()).toEqual(['cli:whisper-cli', 'mcp:fal-2']);
+  });
+
+  it('with the panel mounted: its refresh notices whisper-cli once, and only one detection ticks', () => {
+    // The Create sheet's watcher hears the install end and calls panel.refresh() (no detection of
+    // its own). The refresh owes the ready set of its stale rows, fetches, and notices the difference.
+    const owed = readyToolIds(kitRows('missing'));
+    const after = kitRows('ready');
+    expect(readyToolIds(after).filter((c) => c === 'cli:whisper-cli')).toHaveLength(1);
+    const noticed = newlyReady(owed, readyToolIds(after));
+    expect(noticed).toEqual(['cli:whisper-cli']);
+    const tr = createPickTracker(() => new Set());
+    tr.answered(new Set(), detAll('cli:ffmpeg'), new Set());
+    tr.notice(noticed);
+    expect([...tr.answered(new Set(), detAll('cli:ffmpeg', 'cli:whisper-cli'), new Set())]).toEqual(['cli:whisper-cli']);
+  });
 });
+

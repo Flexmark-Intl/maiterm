@@ -432,6 +432,9 @@ export interface SetupStarted {
   provider_id: string;
   tab_id?: string | null;
   server_id?: string | null;
+  /** The tools ready when the sheet was opened (the panel's `readyToolIds(rows)` then): the
+   *  baseline that tells what the setup made ready from what was there already. */
+  ready_before: string[];
 }
 
 /** The bookkeeping of a parent that outlives the media panel (the Create sheet, Hive settings):
@@ -439,14 +442,15 @@ export interface SetupStarted {
  *  install that exits in another window, another panel's install, or a server that reconnects for
  *  any other reason is not this Hive's setup and is ignored. Each started id answers once: its end
  *  removes it. `readyFrom` names the tools a setup made ready, from a status fetch: the ready covers
- *  of the providers set up here. Pure: the listeners are `lib/hive/mediaWatch.ts`. */
+ *  of the providers set up here, less the baseline taken when each was first started. Pure: the listeners are `lib/hive/mediaWatch.ts`. */
 export function createSetupWatch() {
   const tabs = new Set<string>();
   const servers = new Set<string>();
-  const providers = new Set<string>();
+  /** Each provider set up here, with the baseline of its FIRST start. */
+  const baselines = new Map<string, Set<string>>();
   return {
     started(s: SetupStarted) {
-      providers.add(s.provider_id);
+      if (!baselines.has(s.provider_id)) baselines.set(s.provider_id, new Set(s.ready_before));
       if (s.tab_id) tabs.add(s.tab_id);
       if (s.server_id) servers.add(s.server_id);
     },
@@ -458,9 +462,12 @@ export function createSetupWatch() {
     serverStatus(e: { id: string; status?: { state?: string } | null }): boolean {
       return e.status?.state === 'connected' && servers.delete(e.id);
     },
-    /** The ready tools of the providers set up here, from `hive_media_status` rows. */
+    /** What the setups here made ready, from `hive_media_status` rows: the ready covers of the
+     *  providers set up here that weren't ready when their first setup started. ffmpeg, already
+     *  there before the Homebrew kit was set up for whisper-cli, is not among them. */
     readyFrom(rows: readonly HiveMediaRow[]): string[] {
-      return [...new Set(rows.flatMap((r) => r.covered_by.filter((c) => c.state === 'ready' && providers.has(c.provider)).map((c) => c.tool_id)))];
+      const ids = rows.flatMap((r) => r.covered_by.filter((c) => c.state === 'ready' && baselines.get(c.provider)?.has(c.tool_id) === false).map((c) => c.tool_id));
+      return [...new Set(ids)];
     },
   };
 }

@@ -30,9 +30,17 @@
   let toolsEditor = $state<ReturnType<typeof HiveToolsEditor> | null>(null);
 
   /** The ends of steps this sheet's media panel started (an install, a sign-in), heard for the
-   *  sheet's whole life, filtered to its own: the tools editor detects again on one. */
+   *  sheet's whole life, filtered to its own. One path per end: the panel fetches again
+   *  (`refresh`) and its `onchanged` has the tools editor detect again; without a panel, the
+   *  editor detects again itself. */
   const setupWatch = createSetupWatch();
-  onDestroy(watchSetupEnds(setupWatch, () => toolsEditor?.redetect()));
+  let mediaPanel = $state<ReturnType<typeof HiveMediaPanel> | null>(null);
+  onDestroy(
+    watchSetupEnds(setupWatch, () => {
+      if (mediaPanel) mediaPanel.refresh();
+      else toolsEditor?.redetect();
+    }),
+  );
 
   $effect(() => {
     const id = requestAnimationFrame(() => panelEl?.querySelector<HTMLElement>('button')?.focus());
@@ -96,7 +104,7 @@
         <h4>Tools</h4>
         <p class="why scope">On this Mac: what's set up here, not what this Hive's workers get. They get the tools below.</p>
         {#key workspaceId}
-          <HiveMediaPanel {workspaceId} startOpen={mediaStartOpen} onchanged={() => toolsEditor?.redetect()} onstarted={(st) => setupWatch.started(st)} />
+          <HiveMediaPanel bind:this={mediaPanel} {workspaceId} startOpen={mediaStartOpen} onchanged={() => toolsEditor?.redetect()} onstarted={(st) => setupWatch.started(st)} />
           <HiveToolsEditor bind:this={toolsEditor} {hive} {workspaceId} />
         {/key}
       </section>

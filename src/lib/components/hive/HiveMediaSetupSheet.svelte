@@ -49,6 +49,9 @@
     /** Optional: what this sheet started whose end it may not live to see (an install's tab, a
      *  server it added or reused), for a parent that outlives it to watch. */
     onstarted?: (s: SetupStarted) => void;
+    /** The tools ready when the panel opened this sheet: passed through on `onstarted`, the
+     *  baseline that tells what this setup made ready. */
+    readyBefore?: string[];
   }
   let props: Props = $props();
 
@@ -59,6 +62,7 @@
   const close = untrack(() => props.onclose);
   const changed = untrack(() => props.onchanged);
   const reportStarted = untrack(() => props.onstarted);
+  const readyBefore = untrack(() => [...(props.readyBefore ?? [])]);
 
   const uid = $props.id();
   const titleId = `${uid}-title`;
@@ -253,7 +257,7 @@
         await commands.mcpServerSetToken(s.id, token);
       }
       // The write landed: say so whether or not the sheet is still open (the panel outlives it).
-      reportStarted?.({ provider_id: p.id, server_id: s.id });
+      reportStarted?.({ provider_id: p.id, server_id: s.id, ready_before: readyBefore });
       if (scope || token !== undefined) changed();
       return s;
     }
@@ -262,7 +266,7 @@
     const s = await commands.mcpServerAdd(got.add, url, auth, { token: token ?? null });
     if (scope.length) await commands.mcpServerSetWorkspaces(s.id, scope);
     // The write landed: say so whether or not the sheet is still open (the panel outlives it).
-    reportStarted?.({ provider_id: p.id, server_id: s.id });
+    reportStarted?.({ provider_id: p.id, server_id: s.id, ready_before: readyBefore });
     changed();
     return s;
   }
@@ -439,7 +443,7 @@
       offs.push(off);
       const s = await commands.hiveMediaInstall(p.id, ws);
       // Reported even after a close: the install runs on in its tab.
-      reportStarted?.({ provider_id: p.id, tab_id: s.tab_id });
+      reportStarted?.({ provider_id: p.id, tab_id: s.tab_id, ready_before: readyBefore });
       if (!alive) return;
       started = s;
       tabId = s.tab_id;
