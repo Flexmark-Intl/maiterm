@@ -1069,6 +1069,7 @@
   {#if settingsOpen && hive}
     <HiveSettingsModal
       {hive}
+      {workspaceId}
       name={ws?.name ?? ''}
       onclose={() => (settingsOpen = false)}
       onworkers={() => (workersOpen = true)}
