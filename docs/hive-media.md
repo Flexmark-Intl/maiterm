@@ -182,6 +182,46 @@ What it reads:
 Each route is one button on a missing capability's recommendation card. The button opens a small
 **setup sheet**: the guide's steps, the credits line, and the action.
 
+**The setup sheet: built (2026-11-05).** `components/hive/HiveMediaSetupSheet.svelte`, its
+decisions as pure functions in `lib/hive/mediaSetup.ts`. "Set up <provider>" sits on each
+recommendation card of the panel (§7) and "Set up" beside each alternative, in all three
+placements. What it does per route:
+- **`remote_mcp`**: the human's add path, shared with Preferences → MCP servers and an approved
+  `mcp_add` (`lib/mcp/addServer.ts`). A URL maiTerm already serves is reused (`sameServerUrl`,
+  `mcp_proxy::same_url`'s rules); a new server is named after the provider id, suffixed (`fal-2`)
+  past another server's id or a name a native entry holds as agents would see it. **Scope** is set
+  right after the add, whether or not the sheet is still open: from a Hive (`workspaceId` set:
+  Create sheet or Hive settings) only that workspace; from Preferences the human picks "Hive
+  workspaces only" (the Hive workspaces there are now, every window: `list_move_targets` carries a
+  `hive` flag) or "Every workspace", and with no Hive yet only the second. A reused server limited
+  to other workspaces gains the Hive's; one offered everywhere, or one reused from Preferences,
+  keeps its scope.
+  - `oauth`: the probe runs first. A server that can't register maiTerm points at Preferences (it
+    needs a client id); one that asks for a key turns the sheet into the `token` form; then the
+    sign-in opens in the browser (http(s) only). Verify runs by itself on the
+    `mcp-proxy-status` that says the server is connected, or on the human's Verify. The button
+    reads "Sign in", as the guides say.
+  - `token`: the provider's page, a password field, `mcp_server_add` with the token (or
+    `mcp_server_set_token` on a reused token server), then Verify. The field is emptied on success;
+    the key is never logged, toasted or put in a URL.
+- **`brew` / `plugin`**: listens for `hive-media-install-finished` first, then
+  `hiveMediaInstall(provider, avoidWorkspaceId)`. The workspace the sheet was opened for is never
+  the tab's (the Create sheet's isn't a Hive yet, so the window's own rule would take it). From
+  Preferences, Rust opens the tab in the terminal window the human was last in
+  (`focused_app_window`); the event still comes back to Preferences. "Running in a tab: <line>"
+  with Show the tab (not from Preferences), Verify on the event, Re-detect when the shell can't
+  report its exit, Run it again after a failure. A Homebrew kit with `transcribe` shows the speech
+  model's progress and a retry. A plugin with no confirmed source (Remotion) gets no install
+  button: its guide describes a tab maiTerm won't open, so the sheet says the steps are the
+  human's (`guideFor`) and offers Verify.
+- **`local_app`**: the download page; Verify runs whenever the window comes back to the front.
+- **`manual`** and any kind this build doesn't know: the guide, and Verify.
+
+Verify's answer is the sheet's state line (`verifyView`: Ready, Needs sign-in, Needs credit, Not
+reachable, Installed, Didn't work), with the billing page as a button. The sheet never runs a
+generation, starts nothing from the phone and adds no maiLink route; after any step that may have
+changed this Mac, the panel re-fetches.
+
 | Route | What maiTerm does | What the human does |
 |---|---|---|
 | `remote_mcp` + `oauth` | Adds the server to the MCP proxy through the human's own add path (docs/mcp-proxy.md §7): the human clicked, so no request card, but with `mcp_add`'s checks at filing: a URL maiTerm already serves is reused, and a name a native entry holds gets a suffix. **Scope**: started from a Hive (Create sheet or Hive settings), the server is scoped to that Hive's workspace, so one fal setup doesn't load fal's tools into every Claude tab (§4.3 context cost); started from Preferences, the sheet asks "every workspace" or "Hive workspaces only". Then it opens the sign-in in the browser | Signs in; adds credit if the guide says so |
@@ -192,8 +232,8 @@ Each route is one button on a missing capability's recommendation card. The butt
 | `stdio_mcp` (phase 5) | maiTerm runs the pinned local server itself, with the key from the keychain (§12.1); setup is the `token` setup plus Verify | Makes the key, pastes it |
 | `manual` | Shows the guide, including the config snippet with the key left as a placeholder | Everything |
 
-**`brew` and `plugin`: built (2026-11-05).** The backend and the window's half. The setup sheet
-on top of them is still to come. Where they live: `hive/media/install.rs`, `hive/media/whisper.rs`
+**`brew` and `plugin`: built (2026-11-05).** The backend and the window's half, and the setup sheet
+on top of them (above). Where they live: `hive/media/install.rs`, `hive/media/whisper.rs`
 and `src/lib/hive/mediaInstall.ts`.
 - **The line** (`install::plan`) comes from the catalogue route alone. The sheet sends a provider
   id, never a command, and every word is checked against a narrow alphabet. The pieces:
@@ -486,11 +526,14 @@ so the coordinator counts generations instead.
      `checked` date) from its `models_note` or an UNVERIFIED `capability_notes` entry, and per
      capability when it has such notes. `unverified_hosts` never flags it: an unconfirmed result
      host is a sandbox matter (§9).
-   - **Not built: the Hive settings tools change** (phase 3). The panel there only reads.
+   - **The Hive settings tools change** came in phase 3 (§7, `hive/tool_change.rs`,
+     `HiveToolsEditor.svelte`, below the panel in Hive settings' Tools section). The panel itself
+     gained its "Set up" buttons with the setup sheet (§6).
 3. **Setup routes and the tools change.**
    - `remote_mcp` (OAuth and token) through the proxy, scoped to the Hive;
    - `brew` (with the whisper model) and `plugin` in a visible tab (backend and window half built
-     2026-11-05, §6; the sheet is to come);
+     2026-11-05, §6), and the setup sheet over every route: **built 2026-11-05** (§6, "The setup
+     sheet");
    - verification (built 2026-11-05: §6, "Verify: built");
    - the new after-Create tools change of §7 (a §3.4 row): **built 2026-11-05** (`hive/tool_change.rs`).
 4. **Agents.**

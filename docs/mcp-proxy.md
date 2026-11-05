@@ -233,6 +233,13 @@ so that section changes with it.
   "no sign-in needed", "OAuth via linear.app", or "needs a token". Then Sign in or Save.
 - Each server also has **Sign in again**, **Remove**, and **Move to maiTerm** on a native
   duplicate.
+- **The Hive media setup sheet** (docs/hive-media.md §6) adds a provider's server through the same
+  path, from the human's click: the name suggestion, the URL comparison and the sign-in opener are
+  one module (`lib/mcp/addServer.ts`) shared by this pane, an approved `mcp_add` and the sheet. The
+  sheet applies `mcp_add`'s checks at filing rather than refusing: it reuses a server for a URL
+  maiTerm already serves, and suffixes a name a native entry holds (`fal-2`). It then scopes the
+  server (a Hive's own workspace, or the human's choice from Preferences). The sign-in, here and
+  there, opens only an http(s) page.
 
 **An agent can propose a server but never add one.** Agents get two tools on maiTerm's own
 server:
