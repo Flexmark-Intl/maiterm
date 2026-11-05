@@ -1,6 +1,7 @@
 /** The Hive settings sheet's read-only half (docs/hive.md §3.2, §4.1): what was fixed at Create,
  *  as a human reads it. What can change has its own sheet (workers and access, autonomy, run
- *  queue, budget). */
+ *  queue, budget). Tools are not a row here: they can change after Create, and the sheet's own
+ *  Tools section shows them. */
 
 import type { Hive } from '$lib/tauri/types';
 
@@ -20,7 +21,6 @@ export function fixedRows(hive: Hive, name: string): SettingRow[] {
       value: hive.landing_mode === 'integration' ? `Integration branch hive/${hive.slug}, you approve each land` : 'Land to Base',
       note: 'Fixed at creation: it is a branch topology. A different mode means a new Hive.',
     },
-    { label: 'Tools', value: hive.tools.length ? hive.tools.join(', ') : 'None' },
   ];
   // Kept off at Create: its coordinator was made off the phone. Otherwise it's in Workers and access.
   if (hive.settings?.keep_off_phone) rows.push({ label: 'On the phone', value: 'Kept off: no agent of this Hive is a chat on the phone' });
