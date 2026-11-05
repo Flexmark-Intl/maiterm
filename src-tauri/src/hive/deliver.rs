@@ -80,7 +80,7 @@ static PAUSE_HOLDS: LazyLock<Mutex<HashMap<String, Arc<Notify>>>> = LazyLock::ne
 
 /// The Hive `tab` belongs to, while its human has paused it. Not a usage-limit or account pause:
 /// those stop starts only, and their notices must reach the coordinator.
-fn paused_by_human(app: &AppState, tab: &str) -> Option<String> {
+pub(crate) fn paused_by_human(app: &AppState, tab: &str) -> Option<String> {
     let data = app.app_data.read();
     let (ws, _) = super::find_hive_tab(&data, tab)?;
     let h = ws.hive.as_ref()?;
@@ -106,6 +106,11 @@ async fn in_release_turn<T>(hive_id: &str, gap: Duration, f: impl std::future::F
     let out = f.await;
     tokio::time::sleep(gap).await;
     out
+}
+
+/// `f` in `hive_id`'s release turn after a Resume, one at a time with what the Pause held.
+pub(crate) async fn after_release<T>(hive_id: &str, f: impl std::future::Future<Output = T>) -> T {
+    in_release_turn(hive_id, RELEASE_GAP, f).await
 }
 
 /// The human's Resume of `hive_id`: the resume notice (`notice`, the coordinator's delivery)

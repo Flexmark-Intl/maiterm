@@ -91,6 +91,7 @@ pub mod prompts;
 #[cfg(all(test, unix))]
 mod probe;
 pub mod queue;
+pub mod quiet;
 pub mod record;
 pub mod registry_proxy;
 pub(crate) mod report;

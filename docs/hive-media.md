@@ -334,8 +334,11 @@ so the coordinator counts generations instead.
      `sandbox_hosts` when the upstream's host is under an `own_hosts` suffix, nothing otherwise;
      `a_proxied_entry_yields_only_hosts_the_old_five_had` proves that is a subset of the five
      providers' old hosts and independent of the entry's name.
-   - **Unverified:** which fal models make music and sfx (D3). The catalogue marks them so in
-     `capability_notes` until the research check confirms them. Remotion's marketplace source is
+   - **Verified 2026-11-04:** fal's music and sfx models (D3), from the model pages named in
+     fal's `source_urls`; their UNVERIFIED `capability_notes` are gone. The same pass added the
+     result hosts it found to `unverified_hosts` (BFL's `delivery.*.bfl.ai`, Runway, Meshy,
+     Comfy Cloud: none is a sandbox host) and a route's optional `balance_tool` (a balance
+     reader, which prices nothing, unlike `quote_tool`). Remotion's marketplace source is
      not in the catalogue (only `plugin_id`).
 2. **The panel.** "What it can make" in the Tools step, Hive settings and Preferences, read-only:
    detection, recommendations, credits lines and guides.

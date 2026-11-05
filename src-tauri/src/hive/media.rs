@@ -49,6 +49,10 @@ pub struct Route {
     /// A tool that prices a job before it runs, if the provider has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote_tool: Option<String>,
+    /// A tool that reads the account's balance, if the provider has one. It prices nothing: the
+    /// panel does not show it, and phase 3's verify step is its reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance_tool: Option<String>,
     /// `brew`: the one install line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,

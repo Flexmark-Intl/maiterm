@@ -55,8 +55,11 @@ pub struct ProviderView {
     pub subscriber: bool,
     /// When its facts were last checked (a date, `YYYY-MM-DD`): providers change monthly (§2.5).
     pub checked: String,
-    /// Something about it nobody has confirmed from a real job: a host, its route, or a model
-    /// claim. The panel marks it so; `unverified_capabilities` says which capabilities.
+    /// A claim about what it makes nobody has confirmed: its models note, or a capability note
+    /// marked UNVERIFIED. The panel marks it so; `unverified_capabilities` says which
+    /// capabilities. An unconfirmed result host (`unverified_hosts`) is a sandbox matter that the
+    /// sandbox-block flow settles (docs/hive-media.md §9), not a doubt about the models, so it
+    /// never sets this.
     pub unverified: bool,
     /// Capabilities whose claim for this provider is marked UNVERIFIED in its notes.
     pub unverified_capabilities: Vec<String>,
@@ -84,7 +87,7 @@ fn provider_view(p: &Provider) -> ProviderView {
         .collect();
     // HashMap order is not display order: follow the provider's own capability list.
     unverified_capabilities.sort_by_key(|c| p.capabilities.iter().position(|k| k == c).unwrap_or(usize::MAX));
-    let unverified = !p.unverified_hosts.is_empty() || p.models_note.to_ascii_lowercase().contains("unverified") || !unverified_capabilities.is_empty();
+    let unverified = p.models_note.to_ascii_lowercase().contains("unverified") || !unverified_capabilities.is_empty();
     ProviderView {
         id: p.id.clone(),
         name: p.name.clone(),
@@ -164,6 +167,9 @@ mod tests {
         assert!(!fal.subscriber);
         let hf = p(&v, "higgsfield");
         assert_eq!((hf.credits.as_str(), hf.quote_tool.as_str()), ("plan", ""));
+        // A balance reader prices nothing, so the panel's "prices a job" line never claims it.
+        assert_eq!(p(&v, "bfl").quote_tool, "");
+        assert_eq!(p(&v, "wavespeed").quote_tool, "get_price");
         assert!(hf.subscriber, "D1: Higgsfield shows first to someone who already subscribes");
     }
 
@@ -175,12 +181,31 @@ mod tests {
     }
 
     #[test]
-    fn unverified_is_flagged_for_a_note_a_route_or_a_host() {
+    fn unverified_is_flagged_for_a_models_note_or_a_capability_note_but_not_a_host() {
         let v = view();
+        // A note starting UNVERIFIED flags its capability, in the provider's own capability order.
+        let mut noted = catalogue().providers.iter().find(|p| p.id == "fal").unwrap().clone();
+        noted.capability_notes.insert("sfx".into(), "UNVERIFIED: x".into());
+        noted.capability_notes.insert("music".into(), "unverified: y".into());
+        noted.capability_notes.insert("video".into(), "Kling only.".into());
+        let nv = provider_view(&noted);
+        assert!(nv.unverified);
+        assert_eq!(nv.unverified_capabilities, ["music", "sfx"]);
+        // fal's music and sfx were verified on 2026-11-04: nothing of fal's is flagged.
         let fal = p(&v, "fal");
-        assert!(fal.unverified, "fal's music and sfx models are marked UNVERIFIED");
-        assert_eq!(fal.unverified_capabilities, ["music", "sfx"], "in the provider's own capability order");
-        assert!(!p(&v, "bfl").unverified, "bfl's endpoint was confirmed on 2026-11-03");
+        assert!(!fal.unverified && fal.unverified_capabilities.is_empty());
+        // A result host nobody has seen in a real job is a sandbox matter, not a doubt about the
+        // provider's models: it is kept in the catalogue and out of the panel.
+        for id in ["bfl", "runway", "meshy", "comfy-cloud"] {
+            assert!(!catalogue().providers.iter().find(|q| q.id == id).unwrap().unverified_hosts.is_empty(), "{id} still lists its host");
+            assert!(!p(&v, id).unverified, "{id}: an unverified host does not flag the provider");
+            assert!(p(&v, id).unverified_capabilities.is_empty(), "{id}");
+        }
+        let mut hosted = catalogue().providers.iter().find(|q| q.id == "bfl").unwrap().clone();
+        hosted.capability_notes.clear();
+        assert!(!provider_view(&hosted).unverified, "hosts alone never flag");
+        hosted.models_note = "UNVERIFIED: which models.".into();
+        assert!(provider_view(&hosted).unverified, "a models note still does");
         assert!(!p(&v, "homebrew-kit").unverified);
         assert!(p(&v, "homebrew-kit").unverified_capabilities.is_empty());
     }
@@ -192,6 +217,8 @@ mod tests {
         assert_eq!(fal.capability_models.get("video").map(String::as_str), Some("Kling 4.0, Veo 3.1, Seedance 2.5"));
         assert_eq!(fal.capability_models.get("image").map(String::as_str), Some("GPT Image 2, FLUX, Nano Banana Pro"));
         assert_eq!(fal.capability_models.get("lipsync").map(String::as_str), Some("sync.so"));
+        assert_eq!(fal.capability_models.get("music").map(String::as_str), Some("Lyria 3 and 3.5, ElevenLabs Music, MiniMax Music, Stable Audio"));
+        assert_eq!(fal.capability_models.get("sfx").map(String::as_str), Some("ElevenLabs Sound Effects, Mirelo SFX, Stable Audio SFX"));
         assert_eq!(fal.capability_models.len(), 7);
         for cap in fal.capability_models.keys() {
             assert!(fal.capabilities.contains(cap), "{cap}");

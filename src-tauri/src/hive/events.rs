@@ -90,6 +90,8 @@ pub fn observed(state: &Arc<AppState>, handle: &AppHandle, tab_id: &str, event_n
     if event_name == "Stop" {
         super::turn_failure::turn_completed(state, handle, tab_id);
     }
+    // A worker whose turn ended and stays quiet with nothing on its way: its coordinator is told.
+    super::quiet::seen(state, handle, tab_id, event_name, event);
     let actions = feed_actions(event_name, event.get("tool_name").and_then(Value::as_str));
     if actions.is_empty() {
         return;

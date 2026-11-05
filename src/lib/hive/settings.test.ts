@@ -19,6 +19,8 @@ describe('Hive settings, read-only half', () => {
     const get = (l: string) => rows.find((r) => r.label === l)!;
     expect(get('Name').value).toBe('Ship');
     expect(rows.find((r) => r.label === 'Workers at once'), 'editable now: Workers and access').toBeUndefined();
+    expect(rows.find((r) => r.label === 'Tools'), "shown in the sheet's Tools section, and changeable after Create").toBeUndefined();
+    expect(fixedRows(hive({ tools: ['mcp:fal-mirror'] }), 'Ship').find((r) => r.label === 'Tools')).toBeUndefined();
     expect(get('Landing').value).toBe('Land to Base');
     expect(get('Landing').note).toMatch(/new Hive/);
     expect(rows.find((r) => r.label === 'On the phone'), 'chosen in Workers and access').toBeUndefined();
