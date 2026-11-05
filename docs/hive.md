@@ -265,6 +265,19 @@ Slots readout):
 | Hosts every builder may reach (`settings.worker_hosts`) | Both | Each worker's next launch. Added to `allowedDomains` after the registries (`settings::worker_domains`); never a repo remote's host; never given to reviewers |
 | Push after land | The human only | The next land |
 | Workers on the phone (`settings.workers_on_phone`) | The human only | Workers started from now on |
+| Tools (`Hive.tools`), and the generator hosts the added tools need | The human only, in Hive settings → Tools (`hive/tool_change.rs`); never an agent tool | Each worker's next launch, and the coordinator's brief at its next launch. The launch builder reads the record fresh every time, so nothing caches it. A running worker keeps the tools it started with |
+
+**Tools change in Hive settings → Tools** (docs/hive-media.md §7), a window command
+(`hive_set_tools`, with `hive_tools_change_preview` before Save). Every id is checked against a fresh
+detection. A newly added one must be on this Mac now, and one the Hive already has may stay though
+detection no longer finds it. A setup-only program (`cli:brew`) is refused. The hosts offered are
+`create::generator_hosts` for the newly added tools only, which are the catalogue's `sandbox_hosts` and a
+recognised server's own host, never `unverified_hosts` or `result_hosts`. Only the ones the human
+leaves ticked join `settings.gallery.generator_hosts`, checked like Budget and generation's own edit
+and looked up like any added host. A removed tool's hosts stay until the human removes them there.
+The change is a line in `logs/settings.jsonl`, and the coordinator gets one framed notice of what was
+added and removed. No change hands a worker a skill or a plugin: skills load from user settings a
+worker never reads, and no plugin is a detected tool.
 
 **The coordinator asks with `hiveChangeSettings`.** Under the **Settings** checkpoint (§7.4), whose
 default is **Ask me** (the only checkpoint that starts there), that files a `hive_settings` agent

@@ -205,16 +205,21 @@ Specified in §12.1.
   line ("Media: video, image ready · voice, music not set up"), so a code Hive isn't slowed.
   Whether to show it opened is an obvious-default rule in code (goal words, plain folders), not an
   AI judgment.
-- **Hive settings → Tools** for an existing Hive. **This is new**: today `Hive.tools` is fixed at
-  Create. §3.4's table has no tools row, `hive/change.rs` never writes it, and the generator hosts
-  are human-edited and never re-derived. So phase 3 adds a tools change for the human, a window
-  command and not an agent tool. It:
-  - writes `Hive.tools`;
-  - offers the new tool's hosts, ticked, into the gallery hosts (the human's edit, as Re-detect
-    does today);
+- **Hive settings → Tools** for an existing Hive. **Built in phase 3 (2026-11-05)**:
+  `hive/tool_change.rs`, `HiveToolsEditor.svelte`. Before it, `Hive.tools` was fixed at Create.
+  It is a tools change for the human, a window command (`hive_set_tools`) and not an agent tool.
+  It:
+  - writes `Hive.tools`, every id checked against a fresh detection, with `cli:brew` and anything
+    this Mac lacks refused;
+  - offers the new tools' hosts, ticked, into the gallery hosts (the human's edit, as Re-detect
+    does). They come from `generator_hosts` for the added tools only, shown before Save by
+    `hive_tools_change_preview`;
   - sends the coordinator a framed notice;
   - takes effect for workers at their next launch;
-  - appears as a Tools row added to §3.4.
+  - is the Tools row in docs/hive.md §3.4.
+
+  A dim "On this Mac" note above the media panel says the panel shows this computer's setup, not
+  the Hive's grant.
 - **Preferences → Hive**, beside the default tools: the same panel, to set up a studio once for
   every future Hive.
 - **The phone**: the status is visible. Only two setups can be started there:
@@ -346,7 +351,7 @@ so the coordinator counts generations instead.
    - `remote_mcp` (OAuth and token) through the proxy, scoped to the Hive;
    - `brew` (with the whisper model) and `plugin` in a visible tab;
    - verification;
-   - the new after-Create tools change of §7 (a §3.4 row).
+   - the new after-Create tools change of §7 (a §3.4 row): **built 2026-11-05** (`hive/tool_change.rs`).
 4. **Agents.**
    - the capability map in the briefs;
    - `hiveRequestCapability` + `tool_setup` requests, with every piece of plumbing §8 lists, on
