@@ -23,6 +23,7 @@ and "for organization and read operations it doesn't require the prompt".
 | `addMcpServer` (a remote MCP server maiTerm signs in to and serves to every agent, docs/mcp-proxy.md §7) | never: a request |
 | `listMcpServers` | yes: read-only |
 | `proposeHive` (a Hive made from the agent's plan, or a Done Hive's new goal, docs/hive.md §3.7; kind `hive_propose`) | never: a request. The desktop's button opens the filled-in sheet, whose Create is the approval; the phone's Approve is that Create, made from what its card shows |
+| `hiveRequestCapability` (a Hive coordinator's ask for a media capability its Hive lacks, docs/hive-media.md §8; kind `tool_setup`) | never: a request. Rust files it and carries it out: approval opens the setup sheet in the Hive's window, and the capability joins the Hive once it works |
 | `getRequestStatus` | yes: read-only, the caller's own requests only |
 
 **The line is "who can message whom".** The mesh is the one place the human decides which agents
@@ -189,6 +190,13 @@ an inferred identity. The ones that file requests, and `getRequestStatus`, are a
 **A Hive's settings change** (`hive_settings`, docs/hive.md §3.4) is Rust-filed the same way from
 the coordinator's `hiveChangeSettings` and carried out by `hive::change` on approval; a newer one
 stands alone, limited to five waiting like any tab's.
+
+**A Hive's media ask** (`tool_setup`, docs/hive-media.md §8) is Rust-filed from the coordinator's
+`hiveRequestCapability`, limited to five waiting like `hive_settings`. Its approval is carried out
+by `hive::tool_setup`: it emits `hive-tool-setup-approved` to the Hive's window, which opens the
+setup sheet, and settles at once with what happens next. `decide` routes each Hive kind by name
+(`hive_route`), and a Hive kind it doesn't know is settled failed rather than run as a land. An
+`mcp_add` from a Hive agent for a media provider's URL is refused, pointing at the ask.
 
 **A Hive's land** (`hive_land`; `hive_undo` reserved) takes a different path (docs/hive.md §8.1,
 §8.3, `hive/land/approval.rs`). Rust files it itself (`file_hive`) from the coordinator's tab, and

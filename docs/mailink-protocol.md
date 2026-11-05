@@ -1568,7 +1568,10 @@ interface AgentRequest {
                                   // | bridge_fork | bridge_disconnect (added 2026-10-12, no bump)
                                   // | hive_propose (2026-11-01, no bump: an agent's offer of a
                                   // Hive or a Done Hive's new goal; Approve CREATES it as the
-                                  // effects say, and those lines can be many — show them all).
+                                  // effects say, and those lines can be many — show them all)
+                                  // | tool_setup (2026-11-05, no bump: a Hive coordinator's ask for
+                                  // a media capability; the approve reply's `detail` says whether
+                                  // the setup started or waits for the Mac).
                                   // Draw ANY kind from the text fields: a kind added later is not
                                   // a version bump.
   summary: string;                // one line, maiTerm's words

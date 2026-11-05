@@ -441,6 +441,77 @@ That report becomes a structured ask:
 - `proposeHive` (§3.7) gains an optional `media: [capability]`, so a planning agent's proposal opens
   the sheet with those capabilities' panel unfolded.
 
+**The Rust side: built (2026-11-05), `hive/tool_setup.rs`.** The Loom card and the sheet's opening
+are the window's, on this contract.
+- **The tool.** `hiveRequestCapability {capability, why}`, in `COORDINATOR_TOOLS`,
+  `COORDINATOR_MCP_TOOLS` (so every worker's settings deny it), `PEER_ADDRESSING_TOOLS` and
+  `OWN_TAB_ONLY_TOOLS`. `capability` is a catalogue capability id; `why` is required, and goes
+  through `one_line` (`frame_escape`) into the card's `reason`, its only place.
+- **Refused at filing**, in words the coordinator reads:
+  - an unknown capability, or no `why`;
+  - a capability with a `ready` cover in the Hive's workspace's `hive_media_status`. If that tool
+    is among the Hive's tools, "already Ready for this Hive"; if not, it is Ready on this Mac and
+    adding it is the human's tools change (Hive settings → Tools), so it is no setup;
+  - no recommendation (only a `manual` guide);
+  - an open ask for the same Hive and capability: a card pending or approved, or an approved
+    setup not yet Ready (watched, below).
+- **The request.** Kind `tool_setup` (`agent_requests::KINDS`, `is_hive_kind`), filed by Rust
+  (`file_hive`) from the coordinator's tab, limited to five pending like `hive_settings`, 24 h to
+  answer. `args`: `{hive_id, workspace_id, capability, provider_id, hosts}`, every one maiTerm's.
+  `summary`: "The Hive “Make it” needs voice (text to speech, voice design). Recommended:
+  ElevenLabs (spends your ElevenLabs plan’s credits). Set up…". `effects`, in order:
+  1. what the setup sheet does on the Mac (sign in, paste a key there and never on the phone, the
+     brew line, Homebrew's installer first, the plugin);
+  2. what the phone may do ("the install starts on the Mac at once" or "it waits for you at the
+     Mac");
+  3. what happens once it works, naming the hosts it brings (the provider's `sandbox_hosts` when
+     its MCP host is its own, less the gallery's and any repo remote's): "Approving allows those
+     hosts";
+  4. the alternatives, when there are any.
+
+  No secret is on it: every word comes from the catalogue.
+- **The trap is closed.** `hive_approved` routes by `hive_route`: `hive_settings`, `tool_setup`,
+  `hive_land`/`hive_undo`, and any other Hive kind is settled failed ("this build of maiTerm
+  can’t carry out a … request"), never landed.
+- **Approval** (desktop or phone) emits **`hive-tool-setup-approved`** to the Hive's window:
+  `{request_id, workspace_id, hive_id, capability, provider_id, by: "desktop"|"phone", install:
+  null | {tab_id, command_shown, watches_exit}, waiting_for_mac: bool}`. The window opens the
+  setup sheet for `provider_id`. When `install` is set, Rust has already started it (from the
+  phone), so the sheet shows that tab, never a second install. The request settles `done` at
+  once, its outcome saying what happens next. That outcome is the phone's approve `detail`:
+  - "Approved: ElevenLabs’s setup sheet is open in the Hive’s window. voice joins the Hive once it
+    works." (desktop);
+  - "Approved: Homebrew kit is installing in a tab on the Mac (`…`)." (phone, phone-startable);
+  - "Approved, waiting for the Mac: signing in to ElevenLabs happens in a browser at the Mac. Its
+    setup sheet is open there." (phone, anything else).
+
+  Phone-startable is `install::phone_startable`: `plan_for` succeeds without Homebrew's installer.
+  Those start through `install::start`, the same path as `hive_media_install`, in the Hive's
+  window. Rust never adds an MCP server here: a remote MCP is added by the sheet, through the
+  human's add path and `mcp_add`'s checks. A denial or a lapse tells the coordinator.
+- **When Ready.** An approved ask is watched in memory until its capability has a `ready` cover
+  for the Hive (a day at most, after which it may be asked again). There is no polling. These
+  re-check it (`tool_setup::recheck_soon`):
+  - an install's exit (`install::ended`);
+  - a proxy server going `connected` (`mcp_proxy::set_status`);
+  - a Verify that answers `ready`;
+  - a `hive_media_status` read for the workspace that already shows it Ready (`on_status`).
+
+  Then the ready covers of the named provider (else any ready cover) that detection has as tools
+  join `Hive.tools` through `tool_change::write_tools`, the same write as Hive settings → Tools,
+  logged as the human's approval. The coordinator gets `⟦HIVE TOOLS · music⟧ music is now
+  available through elevenlabs; your workers launched from now on have it.`, with the tools and
+  hosts added and the running workers to relaunch. The human gets a `hive-settings-changed`
+  notice. A plugin joins no tool list: the notice says the coordinator's session loads it.
+- **Hosts stay the human's tick.** The hosts the card named are the only ones added: the approval
+  is the tick for them. Any other host the added tools would bring (a native entry's own host)
+  is named in the human's notice and left for Hive settings → Budget and generation.
+- **One route.** `file()` refuses an `mcp_add` from a Hive agent whose URL a catalogue provider
+  serves (`refuse_mcp_add`), pointing at `hiveRequestCapability`. The coordinator's brief says
+  the same.
+- **No maiLink change.** The phone draws the card from `summary`, `effects` and `reason`, and the
+  outcome is the approve reply's existing `detail` (docs/mailink-protocol.md §4.4).
+
 ## 9. Sandbox hosts
 
 - **Every MCP server runs outside the sandbox**, proxied or native, in Claude's process (docs/hive.md
@@ -569,7 +640,8 @@ so the coordinator counts generations instead.
 4. **Agents.**
    - the capability map in the briefs;
    - `hiveRequestCapability` + `tool_setup` requests, with every piece of plumbing §8 lists, on
-     the Loom and the phone, no protocol bump;
+     the Loom and the phone, no protocol bump. **The Rust side is built (2026-11-05, §8)**; the
+     Loom card and the window's opening of the sheet on `hive-tool-setup-approved` aren't yet;
    - `proposeHive`'s `media`.
 5. **Stdio upstreams in the MCP proxy**, so MiniMax and Meshy become `stdio_mcp` (§12.1).
 
