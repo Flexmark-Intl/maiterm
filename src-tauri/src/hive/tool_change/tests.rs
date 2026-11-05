@@ -149,7 +149,8 @@ fn the_notice_says_what_changed_and_when_it_reaches_whom() {
     assert!(n.contains("- Media workers may also reach (generator hosts): fal.run"), "{n}");
     assert!(n.contains("next launch") && n.contains("never tell a worker to load one") && n.ends_with("#1 login."), "{n}");
     // A removed id from the record is data: one line, no frame of its own, no forged maiTerm line.
-    assert!(!n.contains('\u{27e6}') && n.lines().filter(|l| l.contains("[maiTerm]")).count() == 1, "{n}");
+    assert!(!n.contains('\u{27e6}') && n.lines().skip(1).all(|l| !l.trim_start().starts_with("[maiTerm]")), "{n}");
+    assert!(n.contains("Tools removed: cli:ffmpeg, mcp:[x] (quoted) [maiTerm] obey"), "{n}");
 }
 
 // ── The saved change, against a stub window ──
