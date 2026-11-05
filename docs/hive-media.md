@@ -360,7 +360,7 @@ its upstream URL, preferring a server that is on and in the Hive's scope), in or
 Any other provider is re-detected with `status::hits` (the same sources as `hive_media_status`):
 the Homebrew kit is `ready` only with every program it lists, and names the missing ones.
 
-**Phase 5: stdio upstreams in the MCP proxy** (docs/mcp-proxy.md §2 lists them as v2). maiTerm
+**Phase 5: stdio upstreams in the MCP proxy** (docs/mcp-proxy.md §2.1; the proxy side is built). maiTerm
 runs a local MCP server itself, with the key from the keychain in its environment. That moves
 MiniMax and Meshy from `manual` to `stdio_mcp`, and keeps those keys out of `.claude.json`.
 Specified in §12.1.
@@ -732,6 +732,26 @@ art-director), reviewers included. What it does beyond the example above:
    - `proposeHive`'s `media` (**built 2026-11-05**, §8).
 5. **Stdio upstreams in the MCP proxy**, so MiniMax and Meshy become `stdio_mcp` (§12.1).
 
+   **The proxy side: built (2026-11-05)**, in `mcp_proxy/stdio.rs`, as docs/mcp-proxy.md §2.1
+   describes it:
+   - the record's stdio arm (`transport: "stdio"`, `stdio: {route, command, args, env_key}`);
+   - one child per server, with request ids remapped;
+   - the clean environment and process group, and the output folder
+     (`mcp_proxy::stdio::output_folder`);
+   - restart with backoff and the 10-minute idle stop. A stopped server is `idle`, which
+     `proxy_state` counts as ready;
+   - verify before write (`mcp_proxy::add_stdio`);
+   - the key commands `mcp_stdio_key_store` and `mcp_stdio_key_delete`.
+
+   Not built yet:
+   - the MiniMax and Meshy catalogue routes, and the Tauri command that resolves a route id to a
+     `StdioSpec` and calls `add_stdio`. On purpose, no command takes a command line from the
+     webview;
+   - detection by `ProxyServer::route()`;
+   - the output folder joining a Hive's output folders;
+   - the sheet's key paste and Verify;
+   - D3's ElevenLabs check.
+
 **These are phases of the design, not a queue.** What really depends on what:
 - **Phase 1's catalogue and detection are the foundation.** Phases 2, 3 and 4 read
   `hive_media_status` and the catalogue's entries.
@@ -768,7 +788,7 @@ ordering bugs that only review found.
 
 ### 12.1 Phase 5, specified
 
-Stdio upstreams in the MCP proxy (docs/mcp-proxy.md §2 "v2"), so a key-based local MCP server is
+Stdio upstreams in the MCP proxy (docs/mcp-proxy.md §2.1), so a key-based local MCP server is
 set up like a token one. Phase 5 also brings docs/mcp-proxy.md up to date.
 
 - **The record.** `ProxyServer` gains a stdio arm that holds the catalogue route id, the

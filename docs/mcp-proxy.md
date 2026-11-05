@@ -39,8 +39,8 @@ beyond the tunnel and remote config maiTerm already writes (§6).
 
 ## 2. Scope of v1
 
-- **Upstream transport:** Streamable HTTP. Every server probed uses it. stdio upstreams (`npx …`)
-  are v2. They would serve cross-AI sharing, but they hold no sign-in to protect.
+- **Upstream transport:** Streamable HTTP. Every server probed uses it. Stdio upstreams (`npx …`)
+  came with Hive media's phase 5 (2026-11-05), for local servers that need a key: §2.1.
 - **Upstream auth:**
   - none, e.g. mcp.svelte.dev;
   - a pasted bearer token (an API key or personal access token), stored in the keychain;
@@ -52,6 +52,84 @@ beyond the tunnel and remote config maiTerm already writes (§6).
     Remote Codex config is still baked per port (codex-integration-review C1), so it waits too.
 - **Capabilities passed through:** `tools/*`. Resources and prompts are v2. The upstream's
   `instructions` from `initialize` are passed through.
+
+### 2.1 Stdio upstreams (built 2026-11-05)
+
+A local MCP server that needs only a key (MiniMax, Meshy: docs/hive-media.md §12.1) is run by
+maiTerm itself and served at `/mcp/x/<id>` like any other proxied server. Agents never see its
+command or its key. The code is `mcp_proxy/stdio.rs`.
+
+**The record.** `ProxyServer.transport` is a string, `http` (the default, left out of the file, so
+an http record reads and writes exactly as before) or `stdio`. A stdio server carries
+`stdio: {route, command, args, env_key}`:
+- `route` is the catalogue route it was set up from, which detection matches it by;
+- `env_key` is the NAME of the variable the key goes in, never the key.
+Its `url` is `stdio:<route>`, which `valid_url` would refuse and which is never dialled. An older
+build reads that url, fails to reach it, and keeps serving the saved list with failing calls. If
+it saves the file, it drops the fields it doesn't know, and the server must be removed and added
+again. Its `auth` is `key` (or `none` for a route without a key), so an older build never finds a
+bearer token for it.
+
+**The child.** There is one child per server, shared by every downstream session.
+- That gives up per-agent isolation, which is acceptable for the stateless generators the
+  catalogue offers.
+- maiTerm numbers every request it sends to the child, so concurrent calls from different agents
+  never collide. An agent's own JSON-RPC id never reaches the child; its answer goes back under
+  it.
+- Framing is newline-delimited JSON-RPC. A line that isn't JSON (a package's banner) is skipped,
+  and a request the child makes is answered: `ping` with `{}`, anything else with -32601.
+- `initialize` and `notifications/initialized` are sent once per child, and its `initialize`
+  result is the catalog's `serverInfo` and `instructions`.
+- A `notifications/tools/list_changed` from the child re-reads the list, and a change goes out to
+  every downstream stream as §4.2 says.
+- It is started as `watch.rs` starts a script: `env_clear`, then the login PATH (`login_path`),
+  then the key variable, and nothing else of maiTerm's environment (no HOME, no `MAITERM_*`). It
+  gets its own process group, killed whole when it stops.
+- Its working directory is `<OS cache dir>/<app_data_slug>/mcp-out/<id>`
+  (`stdio::output_folder`), never inside maiTerm's data folder.
+
+**Lifecycle.**
+- **Restart.** A child that exits is restarted with backoff (1 s doubling to 60 s, back to 1 s
+  after a child that stayed up a minute), as long as an agent used it in the last 10 minutes.
+  Calls in flight when it exits answer `isError` with a sentence, and every tool stays listed.
+- **Idle stop.** A child that no agent has sent a `tools/call` or `tools/list` for 10 minutes is
+  stopped, unless a call is still running.
+- **What doesn't count as use.** The proxy's own hourly re-list and a child's `list_changed` read
+  only a running child: neither counts as use, and neither starts a stopped one. A child started
+  by Verify, a human's Refresh or a balance check lives 10 minutes from its start.
+- **A stopped server is `idle`.** That is not an outage, and Hive media counts it as ready. It
+  answers `tools/list` from its saved list without starting. A tool call starts it, within 120 s.
+- **A failure never removes a tool (§4.1).** A start or call that fails answers `isError` with a
+  sentence.
+
+**Verify before write** (`add_stdio`). The setup flow stores the key first, then adds the server,
+in this order:
+1. Start the child, waiting up to 180 s for `initialize`, since `npx` and `uvx` download the
+   package the first time.
+2. Read its first `tools/list`.
+3. Only then save the server, with that list as its catalog and its workspace scope already set,
+   and write its entries into the agents' configs.
+
+So no agent ever sees it with an empty list. If Verify fails, nothing is saved or written and
+the child is gone. **The key is left in the keychain**, so a retry needs no second paste, and
+`mcp_stdio_key_delete` removes it when the setup is abandoned.
+
+**The key.**
+- **Where it lives.** It is kept in the keychain under §5's rules (`secrets::store_env_key`, item
+  `<id>#key` under the `.mcp` service). It is read at spawn and dropped once the child has it,
+  and it reaches the child only through its environment.
+- **Where it never appears:** argv, a log line, an error, a status, `Debug` output, `.claude.json`,
+  the Codex config, `mcp-servers.json`, or any Tauri event or command return. A route that puts
+  the key on its command line is refused at add.
+- **The child's stderr is never logged or forwarded**, since a server may print its own key. It is
+  drained, and only its line count and the exit status are logged. A child's own JSON-RPC error
+  goes back to the agent whose call it answers, but its words never reach a status, which is
+  logged and sent to the frontend.
+- **Who can set it.** Only the human, at the Mac: `mcp_stdio_key_store` (the setup sheet's paste),
+  never a maiLink route or an agent tool. Replacing the key stops the child, so the next call
+  starts it with the new one.
+- **Removing the server** stops its child, deletes its key and removes its entries. Its output
+  folder stays: it holds what the server made.
 
 ## 3. One server entry per proxied MCP
 
@@ -309,7 +387,8 @@ candidate).
 4. Preferences → MCP servers.
 5. `listMcpServers` / `addMcpServer` + the `mcp_add` request kind and card.
 6. ssh hosts (Claude).
-7. v2: Gemini registrar, stdio upstreams, resources/prompts, CIMD, remote Codex.
+7. v2: Gemini registrar, resources/prompts, CIMD, remote Codex. (Stdio upstreams were built
+   2026-11-05 for Hive media, §2.1.)
 
 **Status 2026-10-13:** steps 1–6 built and reviewed (each step's review found real defects, all
 fixed; last commit 03ff26e6). Not yet deployed. Verified on dev:
