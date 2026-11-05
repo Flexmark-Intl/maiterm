@@ -227,7 +227,7 @@ fn a_requested_media_list_keeps_known_ids_in_order() {
 fn a_requested_media_list_drops_unknown_ids_and_names_them() {
     let r = check_requested(&ids(&["video", "hologram", " music ", "", "Video", "hologram"]));
     assert_eq!(r.capabilities, ids(&["video", "music"]), "surrounding space is trimmed, ids are exact");
-    assert_eq!(r.dropped, ids(&["Video", "hologram"]), "each unknown once, in the order met");
+    assert_eq!(r.dropped, ids(&["hologram", "Video"]),"each unknown once, in the order met");
 }
 
 #[test]
