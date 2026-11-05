@@ -110,7 +110,18 @@ export const GROUPS: { key: GroupBy; label: string }[] = [
   { key: 'collection', label: 'Collection' },
 ];
 
+/** What the grid shows by why it was filed (§10.2): what the Hive made for the human (the
+ *  default), the workers' proof (screenshots, reports, notes), or both. A view switch like the
+ *  kind tabs, never a filter chip, and Clear all keeps it. */
+export type GalleryPurpose = 'deliverable' | 'proof' | '';
+export const PURPOSE_TABS: { key: GalleryPurpose; label: string; tip: string }[] = [
+  { key: 'deliverable', label: 'For you', tip: 'What the workers made for you' },
+  { key: 'proof', label: 'Proof', tip: 'The workers\u2019 evidence: screenshots of their app, test reports, notes' },
+  { key: '', label: 'All', tip: 'Everything in the gallery' },
+];
+
 export interface GalleryQuery {
+  purpose: GalleryPurpose;
   kind: string;
   /** '' anyone; 'coordinator' | 'human'; or `task:<id>` for a worker. */
   madeBy: string;
@@ -123,11 +134,12 @@ export interface GalleryQuery {
   trash: boolean;
 }
 
-export const defaultQuery = (): GalleryQuery => ({ kind: '', madeBy: '', task: '', status: '', starred: false, tag: '', collection: '', search: '', trash: false });
+export const defaultQuery = (): GalleryQuery => ({ purpose: 'deliverable', kind: '', madeBy: '', task: '', status: '', starred: false, tag: '', collection: '', search: '', trash: false });
 
 /** `status` '' is any; 'none' is assets with no status (Rust's ""). */
 export function filterToQuery(q: GalleryQuery): GalleryListFilter {
   const f: GalleryListFilter = {};
+  if (q.purpose) f.purpose = q.purpose;
   if (q.kind) f.kind = q.kind;
   if (q.madeBy.startsWith('task:')) {
     f.made_by = 'worker';
@@ -149,7 +161,7 @@ export function filterToQuery(q: GalleryQuery): GalleryListFilter {
   return f;
 }
 
-export const isFiltered = (q: GalleryQuery) => JSON.stringify({ ...q, kind: '' }) !== JSON.stringify({ ...defaultQuery() });
+export const isFiltered = (q: GalleryQuery) => JSON.stringify({ ...q, kind: '', purpose: 'deliverable' }) !== JSON.stringify({ ...defaultQuery() });
 
 /** One active filter as the bar shows it: a removable chip, and what removing it changes. */
 export interface FilterChip {
@@ -193,8 +205,8 @@ export function activeFilterChips(q: GalleryQuery, names: FilterNames = {}): Fil
   return out;
 }
 
-/** Clear all: every filter and the search back to none, the kind tab kept. */
-export const clearedQuery = (q: GalleryQuery): GalleryQuery => ({ ...defaultQuery(), kind: q.kind });
+/** Clear all: every filter and the search back to none, the kind tab and the purpose kept. */
+export const clearedQuery = (q: GalleryQuery): GalleryQuery => ({ ...defaultQuery(), kind: q.kind, purpose: q.purpose });
 
 // ── Variants and groups ──
 

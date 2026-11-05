@@ -54,7 +54,7 @@
   import type { GalleryTagChange, HiveWorkerCard } from '$lib/tauri/types';
   import { hiveGallery, SIZE_MAX, SIZE_MIN } from '$lib/stores/hiveGallery.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
-  import { foldVariants, galleryKey, GROUPS, groupRows, isFiltered, KIND_TABS, neighbor, type GalleryQuery, type GroupBy } from '$lib/hive/gallery';
+  import { foldVariants, galleryKey, GROUPS, groupRows, isFiltered, KIND_TABS, neighbor, PURPOSE_TABS, type GalleryQuery, type GroupBy } from '$lib/hive/gallery';
   import {
     compareSet,
     COMPARE_MAX,
@@ -65,6 +65,7 @@
     extendTo,
     iterateText,
     listedSelection,
+    nextPurpose,
     nextStar,
     nextStatus,
     selectionMenu,
@@ -385,6 +386,8 @@
         }
         case 'clearStatus':
           return () => tag(ids, { status: '' });
+        case 'purpose':
+          return () => tag(ids, { purpose: nextPurpose(mrows) });
         case 'iterate':
           return () => iterate(ids[0]);
         case 'tag':
@@ -749,6 +752,13 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 <section class="gallery" class:drag-over={dragOver} data-gallery bind:this={root} tabindex="-1" aria-label="Gallery" onkeydown={onKeydown}>
   <div class="top">
+    <div class="kinds purposes" role="tablist" aria-label="Show">
+      {#each PURPOSE_TABS as p (p.key)}
+        <Tooltip text={p.tip}>
+          <button type="button" role="tab" aria-selected={ui.query.purpose === p.key} class:on={ui.query.purpose === p.key} onmousedown={noFocus} onclick={() => hiveGallery.setQuery(workspaceId, { purpose: p.key })}>{p.label}</button>
+        </Tooltip>
+      {/each}
+    </div>
     <div class="kinds" role="tablist" aria-label="Kind">
       {#each KIND_TABS as k (k.key)}
         <button type="button" role="tab" aria-selected={ui.query.kind === k.key} class:on={ui.query.kind === k.key} onmousedown={noFocus} onclick={() => hiveGallery.setQuery(workspaceId, { kind: k.key })}>{k.label}</button>
@@ -950,6 +960,9 @@
   .kinds button { background: none; border: none; border-bottom: 2px solid transparent; padding: 2px 6px; color: var(--fg-dim); font: inherit; font-size: 12px; cursor: pointer; }
   .kinds button.on { color: var(--fg); border-bottom-color: var(--accent); }
   .kinds button:hover { color: var(--fg); }
+  /* For you / Proof / All: which assets, before which kind; ruled off from the kind tabs. */
+  .purposes { padding-right: 8px; border-right: 1px solid var(--bg-light); }
+  .purposes button.on { font-weight: 600; }
   .search { flex: 1 1 180px; min-width: 120px; height: 24px; box-sizing: border-box; background: var(--bg-medium); border: 1px solid var(--bg-light); border-radius: 6px; color: var(--fg); font: inherit; font-size: 12px; padding: 0 8px; }
   .search:focus { outline: none; border-color: var(--accent); }
   .view { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }

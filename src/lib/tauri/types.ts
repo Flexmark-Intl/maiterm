@@ -673,6 +673,8 @@ export interface GalleryAssetRow {
   children: number;
   /** "" | "picked" | "final" | "rejected". */
   status: string;
+  /** "deliverable" | "proof" (docs/hive.md §10.2); "" from an older build reads as a deliverable. */
+  purpose?: string;
   starred: boolean;
   tags: string[];
   collections: string[];
@@ -722,6 +724,8 @@ export interface GalleryListFilter {
   task_id?: string | null;
   collection?: string | null;
   status?: string | null;
+  /** "deliverable" (an older build's "" included) | "proof". */
+  purpose?: string | null;
   tag?: string | null;
   starred?: boolean | null;
   query?: string | null;
@@ -742,6 +746,8 @@ export interface GalleryTagChange {
   /** "" | "picked" | "final" | "rejected". */
   status?: string | null;
   starred?: boolean | null;
+  /** "deliverable" | "proof". */
+  purpose?: string | null;
 }
 
 /** hive/gallery/model.rs `CollectChange`: one collection built, by id or name. */

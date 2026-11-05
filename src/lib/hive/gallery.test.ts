@@ -15,6 +15,7 @@ import {
   galleryKey,
   galleryUrl,
   groupRows,
+  isFiltered,
   masonry,
   neighbor,
   picture,
@@ -180,8 +181,11 @@ describe('foldVariants', () => {
 
 describe('the query', () => {
   it('maps the rail to what Rust filters by', () => {
-    expect(filterToQuery(defaultQuery())).toEqual({});
-    expect(filterToQuery({ ...defaultQuery(), kind: 'video', madeBy: 'task:t-1', status: 'none', starred: true, search: '  warm  ', trash: true })).toEqual({
+    // The default shows what was made for the human; All narrows nothing.
+    expect(filterToQuery(defaultQuery())).toEqual({ purpose: 'deliverable' });
+    expect(filterToQuery({ ...defaultQuery(), purpose: '' })).toEqual({});
+    expect(filterToQuery({ ...defaultQuery(), purpose: 'proof', kind: 'video', madeBy: 'task:t-1', status: 'none', starred: true, search: '  warm  ', trash: true })).toEqual({
+      purpose: 'proof',
       kind: 'video',
       made_by: 'worker',
       task_id: 't-1',
@@ -194,6 +198,13 @@ describe('the query', () => {
     // A worker under Made by and another task can match nothing.
     expect(filterToQuery({ ...defaultQuery(), madeBy: 'task:t-1', task: 't-2' }).task_id).not.toMatch(/^t-/);
     expect(filterToQuery({ ...defaultQuery(), madeBy: 'task:t-1', task: 't-1' }).task_id).toBe('t-1');
+  });
+
+  it('keeps the purpose a view, like the kind: no chip, not a filter, kept by Clear all', () => {
+    const q = { ...defaultQuery(), purpose: 'proof' as const, kind: 'image', tag: 'warm' };
+    expect(activeFilterChips(q).map((c) => c.key)).toEqual(['tag']);
+    expect(clearedQuery(q)).toEqual({ ...defaultQuery(), purpose: 'proof', kind: 'image' });
+    expect(isFiltered({ ...defaultQuery(), purpose: '' })).toBe(false);
   });
 });
 

@@ -18,6 +18,28 @@ pub const STATUS_FINAL: &str = "final";
 pub const STATUS_REJECTED: &str = "rejected";
 pub const STATUSES: [&str; 4] = [STATUS_NONE, STATUS_PICKED, STATUS_FINAL, STATUS_REJECTED];
 
+/// Why an asset was filed (2026-11-05): `deliverable` is what the Hive made for its human, and
+/// the gallery shows it by default; `proof` is a worker's evidence (screenshots of its app, test
+/// reports, working notes), behind the gallery's Proof switch. `""` is a row an older build
+/// filed, read as a deliverable until the index's next open guesses it (`guess_purpose`).
+pub const PURPOSE_DELIVERABLE: &str = "deliverable";
+pub const PURPOSE_PROOF: &str = "proof";
+pub const PURPOSES: [&str; 2] = [PURPOSE_DELIVERABLE, PURPOSE_PROOF];
+
+/// The purpose an asset filed without one most likely has: a screenshot (`hiveScreenshot`'s
+/// folder, or one titled so) or a text document (notes, reports, logs) is proof; the rest is a
+/// deliverable. A worker making documents for its human says `deliverable` itself.
+pub fn guess_purpose(file: &str, title: &str, source_path: &str) -> &'static str {
+    let ext = file.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    let shot_dir = source_path.replace('\\', "/").contains("/screenshots/");
+    let text = matches!(ext.as_str(), "md" | "markdown" | "txt" | "log" | "json");
+    if shot_dir || text || title.to_lowercase().contains("screenshot") {
+        PURPOSE_PROOF
+    } else {
+        PURPOSE_DELIVERABLE
+    }
+}
+
 pub const THUMB_PENDING: &str = "pending";
 pub const THUMB_READY: &str = "ready";
 pub const THUMB_NONE: &str = "none";
@@ -99,6 +121,8 @@ pub struct Asset {
     pub children: u32,
     /// `""` | `"picked"` | `"final"` | `"rejected"`.
     pub status: String,
+    /// `"deliverable"` | `"proof"`; `""` from an older build.
+    pub purpose: String,
     pub starred: bool,
     pub tags: Vec<String>,
     pub collections: Vec<String>,
@@ -142,6 +166,7 @@ pub struct AssetRow {
     pub parents: Vec<String>,
     pub children: u32,
     pub status: String,
+    pub purpose: String,
     pub starred: bool,
     pub tags: Vec<String>,
     pub collections: Vec<String>,
@@ -173,6 +198,7 @@ impl From<&Asset> for AssetRow {
             parents: a.parents.clone(),
             children: a.children,
             status: a.status.clone(),
+            purpose: a.purpose.clone(),
             starred: a.starred,
             tags: a.tags.clone(),
             collections: a.collections.clone(),
@@ -237,6 +263,8 @@ pub struct NewAsset {
     pub collection: Option<String>,
     /// Empty means `"pending"`.
     pub thumb: String,
+    /// Empty means `guess_purpose`'s.
+    pub purpose: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -260,6 +288,8 @@ pub struct ListFilter {
     /// A collection id or name.
     pub collection: Option<String>,
     pub status: Option<String>,
+    /// `deliverable` also matches an older build's `""`.
+    pub purpose: Option<String>,
     pub tag: Option<String>,
     pub starred: Option<bool>,
     /// Matched as a substring of the title, the recipe's prompt and the tags (plan D17).
@@ -278,6 +308,7 @@ pub struct TagChange {
     pub untag: Vec<String>,
     pub status: Option<String>,
     pub starred: Option<bool>,
+    pub purpose: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -360,6 +391,16 @@ mod tests {
         assert_eq!(usd_to_micros(0.003), 3_000);
         assert_eq!(usd_to_micros(10.4), 10_400_000);
         assert_eq!(normalize_tag("  Hero\u{1f}Shot "), "heroshot");
+    }
+
+    #[test]
+    fn screenshots_and_text_documents_are_guessed_proof() {
+        assert_eq!(guess_purpose("a-1.png", "Login page", "/h/scratch/w/screenshots/login.png"), PURPOSE_PROOF);
+        assert_eq!(guess_purpose("a-1.png", "Settings Screenshot", "/h/scratch/w/shot.png"), PURPOSE_PROOF);
+        assert_eq!(guess_purpose("a-1.MD", "Setup notes", "/h/scratch/w/notes.md"), PURPOSE_PROOF);
+        assert_eq!(guess_purpose("a-1.png", "Hero render", "/h/scratch/w/renders/hero.png"), PURPOSE_DELIVERABLE);
+        assert_eq!(guess_purpose("a-1.pdf", "Deck", "/h/scratch/w/deck.pdf"), PURPOSE_DELIVERABLE);
+        assert_eq!(guess_purpose("a-1", "", ""), PURPOSE_DELIVERABLE);
     }
 
     #[test]

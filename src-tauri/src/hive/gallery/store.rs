@@ -96,7 +96,8 @@ const SELECT_ASSET: &str = "
             WHERE p.parent_id = a.id AND c.deleted_at IS NULL AND c.purged = 0),
         (SELECT group_concat(t.tag, char(31) ORDER BY t.tag) FROM asset_tags t WHERE t.asset_id = a.id),
         (SELECT group_concat(ci.collection_id, ',' ORDER BY c.rowid) FROM collection_items ci
-            JOIN collections c ON c.id = ci.collection_id WHERE ci.asset_id = a.id)
+            JOIN collections c ON c.id = ci.collection_id WHERE ci.asset_id = a.id),
+        a.purpose
     FROM assets a";
 
 const ORDER_NEWEST: &str = " ORDER BY a.created_ms DESC, a.rowid DESC";
@@ -146,6 +147,7 @@ fn read_asset(r: &Row) -> rusqlite::Result<Asset> {
         children: u32::try_from(r.get::<_, i64>(28)?).unwrap_or(0),
         tags: split(r.get(29)?, '\u{1f}'),
         collections: split(r.get(30)?, ','),
+        purpose: r.get(31)?,
     })
 }
 
@@ -208,6 +210,30 @@ fn remove_stored(p: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Gives every row without a purpose `guess_purpose`'s: the assets filed before purposes, once,
+/// and any an older build filed since. A failure leaves them deliverables, which they read as.
+fn guess_unset_purposes(conn: &Connection, gallery_dir: &Path) {
+    let rows: Vec<(String, String, String, String)> = match conn
+        .prepare("SELECT id, file, title, source_path FROM assets WHERE purpose = ''")
+        .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect())
+    {
+        Ok(r) => r,
+        Err(e) => return log::warn!("gallery {}: purposes not guessed: {e}", gallery_dir.display()),
+    };
+    if rows.is_empty() {
+        return;
+    }
+    let mut proof = 0;
+    for (id, file, title, source) in &rows {
+        let p = guess_purpose(file, title, source);
+        proof += usize::from(p == PURPOSE_PROOF);
+        if let Err(e) = conn.execute("UPDATE assets SET purpose = ?2 WHERE id = ?1 AND purpose = ''", params![id, p]) {
+            return log::warn!("gallery {}: purposes not guessed: {e}", gallery_dir.display());
+        }
+    }
+    log::info!("gallery {}: guessed the purpose of {} asset(s), {proof} as proof", gallery_dir.display(), rows.len());
+}
+
 pub struct Gallery {
     root: PathBuf,
     conn: Mutex<Connection>,
@@ -236,6 +262,8 @@ impl Gallery {
         .map_err(err)?;
         conn.execute_batch(SCHEMA).map_err(err)?;
         // Additive migrations go here, each an `ALTER TABLE … ADD COLUMN` whose error is ignored.
+        let _ = conn.execute("ALTER TABLE assets ADD COLUMN purpose TEXT NOT NULL DEFAULT ''", []);
+        guess_unset_purposes(&conn, gallery_dir);
         conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?1)", [SCHEMA_VERSION.to_string()]).map_err(err)?;
         let stamped: Option<String> = conn.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).optional().map_err(err)?;
         if let Some(v) = stamped.and_then(|v| v.parse::<i64>().ok()).filter(|v| *v > SCHEMA_VERSION) {
@@ -285,6 +313,10 @@ impl Gallery {
         let cost = a.recipe.as_ref().and_then(|r| r.cost_usd).map(usd_to_micros).unwrap_or(0);
         let thumb = if a.thumb.is_empty() { THUMB_PENDING } else { a.thumb.as_str() };
         let kind = if a.kind.is_empty() { KIND_OTHER } else { a.kind.as_str() };
+        let purpose = if a.purpose.is_empty() { guess_purpose(&a.file, &a.title, &a.source_path) } else { a.purpose.as_str() };
+        if !PURPOSES.contains(&purpose) {
+            return Err(format!("\"{purpose}\" isn't a purpose: deliverable or proof."));
+        }
         let (at, ms) = now();
         let mut conn = self.conn.lock();
         let tx = conn.transaction().map_err(err)?;
@@ -298,8 +330,8 @@ impl Gallery {
         tx.execute(
             "INSERT INTO assets (id, kind, file, mime, bytes, sha256, width, height, duration_ms, title, caption,
                 made_by_kind, made_by_tab, made_by_role, made_by_title, made_by_badge, task_id, source_path, recipe,
-                cost_micros, status, starred, thumb, extras, created_at, created_ms, deleted_at, purged)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, '', 0, ?21, '{}', ?22, ?23, NULL, 0)",
+                cost_micros, status, starred, thumb, extras, created_at, created_ms, deleted_at, purged, purpose)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, '', 0, ?21, '{}', ?22, ?23, NULL, 0, ?24)",
             params![
                 a.id,
                 kind,
@@ -324,6 +356,7 @@ impl Gallery {
                 thumb,
                 at,
                 ms,
+                purpose,
             ],
         )
         .map_err(err)?;
@@ -431,6 +464,12 @@ impl Gallery {
             wh.push("a.status = ?");
             args.push(s.trim().to_string().into());
         }
+        if let Some(p) = some(&f.purpose) {
+            // An older build's row has none, and reads as a deliverable until the next open guesses it.
+            wh.push("(a.purpose = ? OR (? = 'deliverable' AND a.purpose = ''))");
+            args.push(p.clone().into());
+            args.push(p.into());
+        }
         if let Some(t) = some(&f.tag).map(|t| normalize_tag(&t)) {
             wh.push("EXISTS (SELECT 1 FROM asset_tags t WHERE t.asset_id = a.id AND t.tag = ?)");
             args.push(t.into());
@@ -490,6 +529,9 @@ impl Gallery {
                 return Err(format!("\"{s}\" isn't a status: \"\", picked, final or rejected."));
             }
         }
+        if let Some(p) = c.purpose.as_deref().filter(|p| !PURPOSES.contains(p)) {
+            return Err(format!("\"{p}\" isn't a purpose: deliverable or proof."));
+        }
         let (add, untag) = (normalized_tags(&c.tags), normalized_tags(&c.untag));
         let mut conn = self.conn.lock();
         let tx = conn.transaction().map_err(err)?;
@@ -510,6 +552,9 @@ impl Gallery {
             }
             if let Some(s) = c.starred {
                 tx.execute("UPDATE assets SET starred = ?2 WHERE id = ?1", params![id, s as i64]).map_err(err)?;
+            }
+            if let Some(p) = c.purpose.as_deref() {
+                tx.execute("UPDATE assets SET purpose = ?2 WHERE id = ?1", params![id, p]).map_err(err)?;
             }
         }
         tx.commit().map_err(err)?;
@@ -906,6 +951,45 @@ mod tests {
     }
 
     #[test]
+    fn purposes_are_given_or_guessed_listed_changed_and_older_rows_guessed_on_open() {
+        let s = scratch();
+        let render = add(&s, "hero render", Some("t1"));
+        let shot = add(&s, "Login screenshot", Some("t1"));
+        let mut notes = new("setup notes", Some("t1"));
+        notes.file = format!("{}.md", notes.id);
+        fs::write(s.g.files_dir().join(&notes.file), b"# notes").unwrap();
+        let notes = s.g.insert_asset(notes).unwrap();
+        let mut doc = new("the brief they asked for", Some("t1"));
+        doc.file = format!("{}.md", doc.id);
+        doc.purpose = PURPOSE_DELIVERABLE.into();
+        fs::write(s.g.files_dir().join(&doc.file), b"# doc").unwrap();
+        let doc = s.g.insert_asset(doc).unwrap();
+        assert_eq!(
+            [&render, &shot, &notes, &doc].map(|a| a.purpose.as_str()),
+            [PURPOSE_DELIVERABLE, PURPOSE_PROOF, PURPOSE_PROOF, PURPOSE_DELIVERABLE]
+        );
+        let mut bad = new("x", None);
+        bad.purpose = "evidence".into();
+        assert!(s.g.insert_asset(bad).unwrap_err().contains("deliverable or proof"));
+
+        let by = |p: &str| ids(&s.g.list(&ListFilter { purpose: Some(p.into()), ..Default::default() }).unwrap());
+        assert_eq!(by(PURPOSE_PROOF), vec!["setup notes", "Login screenshot"]);
+        assert_eq!(by(PURPOSE_DELIVERABLE), vec!["the brief they asked for", "hero render"]);
+
+        s.g.tag(std::slice::from_ref(&shot.id), &TagChange { purpose: Some(PURPOSE_DELIVERABLE.into()), ..TagChange::default() }).unwrap();
+        assert_eq!(by(PURPOSE_PROOF), vec!["setup notes"]);
+        assert!(s.g.tag(std::slice::from_ref(&shot.id), &TagChange { purpose: Some("x".into()), ..TagChange::default() }).is_err());
+
+        // Rows filed before purposes (or by an older build) have none: a deliverable until the
+        // next open guesses them, and a purpose already set is never re-guessed.
+        s.g.conn.lock().execute("UPDATE assets SET purpose = '' WHERE id IN (?1, ?2)", params![notes.id, render.id]).unwrap();
+        assert_eq!(by(PURPOSE_DELIVERABLE).len(), 4);
+        let g = Gallery::open(&s.base.join("gallery")).unwrap();
+        let p = |id: &str| g.get(id).unwrap().unwrap().purpose;
+        assert_eq!((p(&notes.id), p(&render.id), p(&shot.id)), (PURPOSE_PROOF.to_string(), PURPOSE_DELIVERABLE.to_string(), PURPOSE_DELIVERABLE.to_string()));
+    }
+
+    #[test]
     fn an_index_a_newer_build_stamped_and_widened_still_opens_lists_and_files() {
         let s = scratch();
         add(&s, "old", Some("t1"));
@@ -1040,7 +1124,7 @@ mod tests {
         let out = s.g.tag(&both, &TagChange { tags: vec!["Hero".into(), "warm".into()], ..TagChange::default() }).unwrap();
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|x| x.tags == vec!["hero", "warm"]));
-        let out = s.g.tag(std::slice::from_ref(&a.id), &TagChange { tags: vec!["cool".into()], untag: vec!["WARM".into()], status: Some(STATUS_FINAL.into()), starred: Some(true) }).unwrap();
+        let out = s.g.tag(std::slice::from_ref(&a.id), &TagChange { tags: vec!["cool".into()], untag: vec!["WARM".into()], status: Some(STATUS_FINAL.into()), starred: Some(true), purpose: None }).unwrap();
         assert_eq!(out[0].tags, vec!["cool", "hero"]);
         assert_eq!((out[0].status.as_str(), out[0].starred), (STATUS_FINAL, true));
         assert!(s.g.tag(std::slice::from_ref(&a.id), &TagChange { status: Some("best".into()), ..TagChange::default() }).is_err());
