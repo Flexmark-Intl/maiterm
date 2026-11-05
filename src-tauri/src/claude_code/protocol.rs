@@ -1726,6 +1726,25 @@ mod tests {
         tool_list_response(gates)["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
     }
 
+    #[test]
+    fn propose_hive_takes_an_optional_media_list_that_names_the_catalogue_ids() {
+        let tool = propose_hive_tool();
+        let media = &tool["inputSchema"]["properties"]["media"];
+        assert_eq!(media["type"], "array");
+        assert_eq!(media["items"]["type"], "string");
+        assert!(
+            !tool["inputSchema"]["required"].as_array().unwrap().iter().any(|r| r == "media"),
+            "media is optional"
+        );
+        let description = media["description"].as_str().unwrap();
+        let caps = &crate::hive::media::catalogue().capabilities;
+        assert!(!caps.is_empty());
+        for c in caps {
+            assert!(description.contains(&c.id), "the description names {}", c.id);
+        }
+        assert!(description.contains("Unknown ids are dropped"), "the agent is told what happens to a wrong id");
+    }
+
     const FILES: [&str; 3] = ["revealInTree", "getTreeSelection", "getAgentFileActivity"];
 
     #[test]

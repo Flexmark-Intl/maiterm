@@ -66,6 +66,9 @@ export async function proposeHive(tab: Tab, args: Record<string, unknown>): Prom
   // answer, repeats count once. A catalogue that can't be asked is not a reason to refuse the plan.
   let dropped: string[] = [];
   let media: string[] = [];
+  // When the catalogue can't be asked, the ids are neither accepted nor called wrong, and none is
+  // echoed back: Rust's check is what bounds and shortens an agent's list.
+  let mediaUnchecked = false;
   if (parsed.media?.length) {
     try {
       const checked = await hiveMediaCheckRequested(parsed.media);
@@ -73,7 +76,7 @@ export async function proposeHive(tab: Tab, args: Record<string, unknown>): Prom
       dropped = checked.dropped;
     } catch (e) {
       logWarn(`hive: couldn't check a proposal's media list: ${e}`);
-      dropped = parsed.media;
+      mediaUnchecked = true;
     }
   }
   const candidates: HiveCandidate[] = workspacesStore.workspaces.flatMap((w) => (w.hive ? [{ workspaceId: w.id, name: w.name, hive: w.hive }] : []));
@@ -101,6 +104,7 @@ export async function proposeHive(tab: Tab, args: Record<string, unknown>): Prom
     folders: p.folders,
     brief_files: p.briefFiles,
     ...(media.length ? { media } : {}),
+    ...(mediaUnchecked ? { media_note: "The media list couldn't be checked against the catalogue, so it was not applied; your human can still open “What it can make” in the sheet." } : {}),
     ...(dropped.length ? { media_dropped: dropped, media_note: `Not media capabilities, so left out: ${dropped.join(', ')}.` } : {}),
   };
 }

@@ -95,8 +95,8 @@
    *  once, so the next open is the draft the human made of it. */
   const seed = saved ? undefined : untrack(() => createDrafts.takeSeed(workspaceId));
   /** The capabilities the proposal asked for, or the kept draft's: the Tools step opens the media
-   *  panel with these rows open. Plain, not state: the panel reads it once at mount; Start over empties it. */
-  let requestedMedia = openCapabilitySeed(saved?.media ?? seed?.media);
+   *  panel with these rows open. The panel reads it once at mount; Start over empties it. */
+  let requestedMedia = $state(openCapabilitySeed(saved?.media ?? seed?.media));
   /** Opened on a kept draft: the header offers Start over. */
   let resumed = $state(!!saved);
   /** Who proposed what's in the sheet, until Start over. */
