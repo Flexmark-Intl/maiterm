@@ -6,7 +6,7 @@
   at their next launch. The pure half is lib/hive/toolsChange.ts.
 -->
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
   import type { Hive, HiveDetectedTool, HiveToolsPreview } from '$lib/tauri/types';
   import { hiveDetectTools, hiveSetTools, hiveToolsChangePreview } from '$lib/tauri/commands';
@@ -49,6 +49,18 @@
   let saveError = $state<string | null>(null);
   let savedNote = $state<string | null>(null);
 
+  /** The controls focus moves to when the one just used goes away: a keyboard user stays in the
+   *  sheet, where Tab and the backdrop's Escape still work. */
+  let changeBtn = $state<HTMLButtonElement | null>(null);
+  let editorEl = $state<HTMLDivElement | null>(null);
+  let saveMoreBtn = $state<HTMLButtonElement | null>(null);
+  let confirmBtn = $state<HTMLButtonElement | null>(null);
+  function focusAfter(get: () => HTMLElement | null | undefined) {
+    void tick().then(() => {
+      if (alive) get()?.focus();
+    });
+  }
+
   const known = $derived(detected ?? []);
   const label = (id: string) => labelOf(id, known);
   const summary = $derived(hive.tools.length ? hive.tools.map(label).join(', ') : 'none');
@@ -88,7 +100,7 @@
           if (!alive || mine !== seq) return;
           preview = null;
           previewFor = '';
-          previewError = String(e).replace(/^Error: /, '');
+          previewError = `Couldn't check the change: ${String(e).replace(/^Error: /, '')}`;
         });
     }, 200);
     return () => clearTimeout(t);
@@ -120,6 +132,7 @@
     saveError = null;
     savedNote = null;
     editing = true;
+    focusAfter(() => editorEl?.querySelector<HTMLElement>('input, button'));
   }
   function cancel() {
     picked = seedPicked(hive.tools);
@@ -127,6 +140,15 @@
     confirming = false;
     saveError = null;
     editing = false;
+    focusAfter(() => changeBtn);
+  }
+  function askConfirm() {
+    confirming = true;
+    focusAfter(() => confirmBtn);
+  }
+  function back() {
+    confirming = false;
+    focusAfter(() => saveMoreBtn);
   }
 
   async function save() {
@@ -146,10 +168,12 @@
       savedNote = r.coordinator_told
         ? 'Saved. The queen was told; workers get the new tools at their next launch.'
         : 'Saved. Workers get the new tools at their next launch. The queen couldn’t be told now: tell her yourself.';
+      focusAfter(() => changeBtn);
     } catch (e) {
       if (!alive) return;
       saveError = `Couldn't save the tools: ${String(e).replace(/^Error: /, '')}`;
       logError(`hive settings: tools change failed: ${e}`);
+      focusAfter(() => confirmBtn);
     } finally {
       if (alive) saving = false;
     }
@@ -161,15 +185,16 @@
     <span class="why">This Hive’s tools:</span>
     <span>{summary}</span>
     {#if !editing}
-      <button type="button" class="link" disabled={detected === null || detectFailed} onclick={start}>Change…</button>
+      <button type="button" class="link" bind:this={changeBtn} disabled={detected === null || detectFailed} onclick={start}>Change…</button>
     {/if}
   </p>
   {#if detectFailed}
     <p class="why">Couldn’t detect this Mac’s tools, so they can’t change now.</p>
   {/if}
-  {#if savedNote}<p class="ok">{savedNote}</p>{/if}
+  {#if savedNote}<p class="ok" role="status">{savedNote}</p>{/if}
 
   {#if editing && detected}
+    <div class="editor" bind:this={editorEl}>
     <p class="why">Workers get what’s ticked at their next launch; a running worker keeps what it started with. Skills reach the queen only.</p>
     <HiveToolPicker tools={detected} {picked} onchange={setPicked} />
 
@@ -186,7 +211,7 @@
       </div>
     {/if}
 
-    {#if previewError}<p class="err">{previewError}</p>{/if}
+    {#if previewError}<p class="err" role="alert">{previewError}</p>{/if}
 
     {#if ready && preview && preview.hosts_offered.length}
       <div class="block">
@@ -201,28 +226,30 @@
       </div>
     {/if}
 
-    {#if saveError}<p class="err">{saveError}</p>{/if}
+    {#if saveError}<p class="err" role="alert">{saveError}</p>{/if}
 
     {#if confirming && ready && preview}
       <div class="confirm" role="group" aria-label="Confirm the tools change">
         <span>{confirmLine(preview.added, preview.removed, ticked.length, label)} The queen is told.</span>
+        {#if preview.removed.length}<span class="why">Hosts stay until you remove them in Budget and generation.</span>{/if}
         <div class="actions">
-          <button type="button" class="btn primary" disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save tools'}</button>
-          <button type="button" class="btn" disabled={saving} onclick={() => (confirming = false)}>Back</button>
+          <button type="button" class="btn primary" bind:this={confirmBtn} disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save tools'}</button>
+          <button type="button" class="btn" disabled={saving} onclick={back}>Back</button>
         </div>
       </div>
     {:else}
       <div class="actions">
-        <button type="button" class="btn primary" disabled={!ready} onclick={() => (confirming = true)}>Save…</button>
+        <button type="button" class="btn primary" bind:this={saveMoreBtn} disabled={!ready} onclick={askConfirm}>Save…</button>
         <button type="button" class="btn" onclick={cancel}>Cancel</button>
         {#if !changed}<span class="why">Nothing changed yet.</span>{/if}
       </div>
     {/if}
+    </div>
   {/if}
 </div>
 
 <style>
-  .tools { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .tools, .editor { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
   .line { margin: 0; color: var(--fg); font-size: 0.8rem; line-height: 1.4; overflow-wrap: anywhere; display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: baseline; }
   .why { color: var(--fg-dim); font-size: 0.75rem; overflow-wrap: anywhere; margin: 0; }
   .ok { color: var(--fg); font-size: 0.75rem; margin: 0; overflow-wrap: anywhere; }

@@ -43,6 +43,15 @@ pub fn is_setup_only(id: &str) -> bool {
 /// How long a tool id may be, as shown in a refusal or a notice.
 const SHOWN_ID: usize = 80;
 
+/// A tool as a refusal names it to the human: its detected label, else its id without the kind
+/// prefix (`mcp:elevenlabs` is "elevenlabs"), as the sheet shows it (`labelOf` in
+/// src/lib/hive/toolsChange.ts). One line, escaped.
+pub fn tool_name(id: &str, detected: &[DetectedTool]) -> String {
+    let label = detected.iter().find(|t| t.id == id).map(|t| t.label.trim()).filter(|l| !l.is_empty());
+    let bare = id.split_once(':').map(|(_, rest)| rest).filter(|r| !r.is_empty()).unwrap_or(id);
+    one_line(label.unwrap_or(bare), SHOWN_ID)
+}
+
 /// What a tools change would do, before it is saved: the sheet shows it, the offered hosts ticked.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct ToolsPreview {
@@ -83,13 +92,13 @@ pub fn preview(hive: &Hive, detected: &[DetectedTool], tools: &[String], remote_
     for id in tools.iter().map(|t| t.trim()).filter(|t| !t.is_empty()) {
         if is_setup_only(id) {
             return Err(format!(
-                "{} is what maiTerm sets media providers up with, not a tool a Hive makes things with.",
-                one_line(id, SHOWN_ID)
+                "\u{201c}{}\u{201d} is what maiTerm sets media providers up with, not a tool a Hive makes things with.",
+                tool_name(id, detected)
             ));
         }
         let had = hive.tools.iter().any(|t| t == id);
         if !had && !detected.iter().any(|t| t.id == id) {
-            return Err(format!("This Mac has no tool {}: set it up, then open Hive settings again.", one_line(id, SHOWN_ID)));
+            return Err(format!("This Mac has no tool called \u{201c}{}\u{201d}: set it up, then open Hive settings again.", tool_name(id, detected)));
         }
         if !next.iter().any(|t| t == id) {
             next.push(id.to_string());
