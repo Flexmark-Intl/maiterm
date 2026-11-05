@@ -36,6 +36,8 @@
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { defaultsFromWizard, defaultToolIds, FALLBACK_CAP, fullPacks, HIVE_EFFORTS, HIVE_MODELS, knownTools, pickedItems, summarizeTools, wizardStart } from '$lib/hive/defaults';
   import HiveToolPicker from './HiveToolPicker.svelte';
+  import HiveMediaPanel from './HiveMediaPanel.svelte';
+  import { shouldStartOpen } from '$lib/hive/media';
 
   interface Props {
     workspaceId: string;
@@ -933,6 +935,11 @@
           </fieldset>
 
         {:else if current.key === 'tools'}
+          <!-- "What it can make" (docs/hive-media.md §7): read-only, above the picker, which it never touches.
+               The panel reads startOpen once, at mount, and mounts only while this step shows, so the
+               goal and folders it reads are the ones the human just left (or a restored draft's). The
+               one place it is computed. Phase 4 passes a proposal's `media` here as the third argument. -->
+          <HiveMediaPanel {workspaceId} startOpen={shouldStartOpen(goal, folders)} />
           <div class="field">
             <span class="label">Tools</span>
             {#if tools === null}
