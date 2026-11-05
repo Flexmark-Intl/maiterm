@@ -37,7 +37,7 @@
   import { defaultsFromWizard, defaultToolIds, FALLBACK_CAP, fullPacks, HIVE_EFFORTS, HIVE_MODELS, knownTools, pickedItems, summarizeTools, wizardStart } from '$lib/hive/defaults';
   import HiveToolPicker from './HiveToolPicker.svelte';
   import HiveMediaPanel from './HiveMediaPanel.svelte';
-  import { shouldStartOpen } from '$lib/hive/media';
+  import { pickerTools, shouldStartOpen } from '$lib/hive/media';
 
   interface Props {
     workspaceId: string;
@@ -359,7 +359,9 @@
   }
 
   hiveDetectTools()
-    .then((t) => {
+    .then((found) => {
+      // Setup plumbing (cli:brew) is detected for hive_media_status but is never a worker's tool.
+      const t = pickerTools(found);
       tools = t;
       // A default (or a draft's pick) this machine no longer has is dropped, silently: Create
       // sends only what the queen can really use. Defaults also bring every current member of

@@ -6,7 +6,7 @@
  *  and says something neutral rather than throwing. Subscriber promotion ("I already pay for…")
  *  is Rust's (`already_pay_for`); nothing here reorders a row's recommendation. */
 
-import type { HiveMediaCapability, HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
+import type { HiveDetectedTool, HiveMediaCapability, HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
 
 // ─── Labels ─────────────────────────────────────────────────────────────────
 
@@ -68,6 +68,23 @@ export function modelsLine(provider: Pick<HiveMediaProvider, 'models_note' | 'ca
 export function toolLabel(toolId: string): string {
   const i = toolId.indexOf(':');
   return i >= 0 && i < toolId.length - 1 ? toolId.slice(i + 1) : toolId;
+}
+
+/** The cover line's two names: the tool and, beside it, the provider it belongs to. When they are
+ *  the same word ("fal" and "fal", "ideogram" and "Ideogram") it is said once, as the provider
+ *  names it. `by` is null then. */
+export function coverNames(cover: Pick<PanelCover, 'toolLabel' | 'providerName'>): { tool: string; by: string | null } {
+  return cover.toolLabel.toLowerCase() === cover.providerName.toLowerCase() ? { tool: cover.providerName, by: null } : { tool: cover.toolLabel, by: cover.providerName };
+}
+
+/** Programs maiTerm detects only as plumbing for setting providers up. `cli:brew` installs the
+ *  stdio providers' helpers (hive_media_status needs to see it); it is not something a worker makes
+ *  media with, so the Tools step's picker, and with it the picks and the Review receipt, never list it. */
+const SETUP_ONLY_TOOLS = new Set(['cli:brew']);
+
+/** `detected` without the setup-only programs: what the picker offers. Detection itself keeps them. */
+export function pickerTools<T extends Pick<HiveDetectedTool, 'id'>>(detected: readonly T[]): T[] {
+  return detected.filter((t) => !SETUP_ONLY_TOOLS.has(t.id));
 }
 
 // ─── Joining a status row with the catalogue ────────────────────────────────

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
+import { coverNames, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
 import type { HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
 
 const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvider => ({
@@ -389,5 +389,26 @@ describe('modelsLine', () => {
   it('tolerates a provider without the map and without a note', () => {
     expect(modelsLine({ models_note: 'x' } as never, 'video')).toBe('x');
     expect(modelsLine(prov('wavespeed'), 'video')).toBe('');
+  });
+});
+
+describe('coverNames', () => {
+  it('says a name once when the tool and the provider are the same word, in any case', () => {
+    expect(coverNames({ toolLabel: 'fal', providerName: 'fal' })).toEqual({ tool: 'fal', by: null });
+    expect(coverNames({ toolLabel: 'ideogram', providerName: 'Ideogram' })).toEqual({ tool: 'Ideogram', by: null });
+  });
+  it('keeps both when they differ', () => {
+    expect(coverNames({ toolLabel: 'fal-mirror', providerName: 'fal' })).toEqual({ tool: 'fal-mirror', by: 'fal' });
+  });
+});
+
+describe('pickerTools', () => {
+  const t = (id: string) => ({ id, kind: id.split(':')[0], label: id, host: null });
+  it('leaves cli:brew out and keeps everything else, in order', () => {
+    expect(pickerTools([t('cli:ffmpeg'), t('cli:brew'), t('mcp:fal')]).map((x) => x.id)).toEqual(['cli:ffmpeg', 'mcp:fal']);
+  });
+  it('does not touch a tool that merely mentions brew, and takes an empty list', () => {
+    expect(pickerTools([t('mcp:brew-kit')]).map((x) => x.id)).toEqual(['mcp:brew-kit']);
+    expect(pickerTools([])).toEqual([]);
   });
 });

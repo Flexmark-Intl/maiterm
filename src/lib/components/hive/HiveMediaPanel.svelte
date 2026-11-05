@@ -19,7 +19,7 @@
   import { warn as logWarn } from '@tauri-apps/plugin-log';
   import { hiveMediaCatalogue, hiveMediaStatus } from '$lib/tauri/commands';
   import type { HiveMediaCatalogue, HiveMediaRow } from '$lib/tauri/types';
-  import { createLatest, externalUrl, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
+  import { createLatest, externalUrl, coverNames, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
   import type { PanelRow } from '$lib/hive/media';
 
   interface Props {
@@ -124,9 +124,10 @@
     {#if r.covers.length}
       <ul class="covers">
         {#each r.covers as c (c.toolId)}
+          {@const names = coverNames(c)}
           <li>
-            <span class="tool">{c.toolLabel}</span>
-            <span class="by">{c.providerName}</span>
+            <span class="tool">{names.tool}</span>
+            {#if names.by}<span class="by">{names.by}</span>{/if}
             <span class="state {stateTone(c.state)}">{c.stateLabel}</span>
           </li>
         {/each}
