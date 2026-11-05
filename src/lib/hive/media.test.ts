@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compactLine, coverNames, flippedIds, newlyReady, picksAfterRedetect, readyToolIds, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
+import { compactLine, coverNames, createPickTracker, flippedIds, newlyReady, picksAfterRedetect, readyToolIds, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
 import type { HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
 
 const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvider => ({
@@ -471,5 +471,40 @@ describe('after a setup', () => {
 
   it('says which ticks a picker change flipped', () => {
     expect(flippedIds(new Set(['a', 'b']), new Set(['b', 'c'])).sort()).toEqual(['a', 'c']);
+  });
+});
+
+describe('createPickTracker', () => {
+  const det = (...ids: string[]) => ids.map((id) => ({ id, kind: 'mcp', label: id, host: null }));
+  const defaults = (t: readonly { id: string }[]) => new Set(['cli:ffmpeg', 'cli:gone'].filter((id) => t.some((x) => x.id === id)));
+
+  it('keeps an earlier notice when a later, empty one overtakes it', () => {
+    const tr = createPickTracker(defaults);
+    tr.notice([]);
+    expect([...tr.answered(new Set(), det('cli:ffmpeg'), new Set())]).toEqual(['cli:ffmpeg']);
+    // Two overlapping notices: fal became ready, then a second Verify found nothing new.
+    tr.notice(['mcp:fal']);
+    tr.notice([]);
+    // Only the newest request's answer is applied, and it still ticks fal.
+    const next = tr.answered(new Set(['cli:ffmpeg']), det('cli:ffmpeg', 'mcp:fal'), new Set());
+    expect([...next].sort()).toEqual(['cli:ffmpeg', 'mcp:fal']);
+    // Consumed: a later answer doesn't tick it again after the human unticks it.
+    expect([...tr.answered(new Set(['cli:ffmpeg']), det('cli:ffmpeg', 'mcp:fal'), new Set())]).toEqual(['cli:ffmpeg']);
+  });
+
+  it('applies the first-detection rule to the first answer that succeeds, after a failure', () => {
+    const tr = createPickTracker(defaults);
+    // The first detection failed (nothing applied), then a setup made fal ready.
+    expect(tr.applied).toBe(false);
+    tr.notice(['mcp:fal']);
+    const next = tr.answered(new Set(), det('cli:ffmpeg', 'mcp:fal'), new Set());
+    expect([...next].sort()).toEqual(['cli:ffmpeg', 'mcp:fal']);
+    expect(tr.applied).toBe(true);
+  });
+
+  it('never ticks what the human flipped', () => {
+    const tr = createPickTracker(() => new Set());
+    tr.notice(['mcp:fal']);
+    expect([...tr.answered(new Set(), det('mcp:fal'), new Set(['mcp:fal']))]).toEqual([]);
   });
 });

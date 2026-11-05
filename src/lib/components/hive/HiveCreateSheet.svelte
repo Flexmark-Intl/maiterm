@@ -37,7 +37,7 @@
   import { defaultsFromWizard, defaultToolIds, FALLBACK_CAP, fullPacks, HIVE_EFFORTS, HIVE_MODELS, knownTools, pickedItems, summarizeTools, wizardStart } from '$lib/hive/defaults';
   import HiveToolPicker from './HiveToolPicker.svelte';
   import HiveMediaPanel from './HiveMediaPanel.svelte';
-  import { flippedIds, isSetupOnly, picksAfterRedetect, pickerTools, shouldStartOpen } from '$lib/hive/media';
+  import { createPickTracker, flippedIds, isSetupOnly, pickerTools, shouldStartOpen } from '$lib/hive/media';
 
   interface Props {
     workspaceId: string;
@@ -206,6 +206,7 @@
     coordModel = d.coordModel; coordEffort = d.coordEffort; workerModel = d.workerModel; workerEffort = d.workerEffort;
     picked = new Set(tools ? defaultToolIds(d, tools) : d.tools.filter((id) => !isSetupOnly(id)));
     touched = new Set();
+    seedPicks = null;
     budgetDollars = d.budgetDollars; pushAfterLand = d.pushAfterLand; phone = d.phone;
     toolsOpen = false; savedDefaults = false;
     step = 0; reached = 0;
@@ -369,32 +370,41 @@
     picked = next;
   }
   /** Detection's newest request: an older answer (the first detection, overtaken by a setup's) is
-   *  dropped rather than written over a newer list. */
+   *  dropped rather than written over a newer list. Its setup notice isn't: the tracker keeps every
+   *  notice's ready tools until an answer is applied. */
   let detectSeq = 0;
+  /** The picks a draft or the defaults start from, read by the first answer that succeeds (a failed
+   *  first detection empties `picked`, so it is kept here). Start over resets it. */
+  let seedPicks: Set<string> | null = null;
+  const pickTracker = createPickTracker(
+    // The first answer: a default (or a draft's pick) this machine no longer has is dropped,
+    // silently: Create sends only what the queen can really use. Defaults also bring every current
+    // member of a pack picked whole, a skill added to it since included.
+    (t) => new Set(useDefaults ? defaultToolIds(fromDefaults, t) : knownTools(seedPicks ?? picked, t)),
+  );
 
   /** Detect this Mac's tools. `ready` is null for the first detection; after a setup in the media
    *  panel it is what the setup newly made ready, which is ticked unless the human chose otherwise. */
   function detectTools(ready: string[] | null) {
+    pickTracker.notice(ready ?? []);
     const mine = ++detectSeq;
     hiveDetectTools()
       .then((found) => {
         if (unmounted || mine !== detectSeq) return;
         // Setup plumbing (cli:brew) is detected for hive_media_status but is never a worker's tool.
         const t = pickerTools(found);
-        // The first answer: a default (or a draft's pick) this machine no longer has is dropped,
-        // silently: Create sends only what the queen can really use. Defaults also bring every
-        // current member of a pack picked whole, a skill added to it since included. (A setup's
-        // detection that answers first is the first answer too.)
-        const base = tools === null ? new Set(useDefaults ? defaultToolIds(fromDefaults, t) : knownTools(picked, t)) : picked;
+        picked = pickTracker.answered(picked, t, touched);
+        seedPicks = null;
         tools = t;
         toolsFailed = false;
-        picked = picksAfterRedetect(base, t, ready ?? [], touched);
       })
       .catch((e) => {
         if (unmounted || mine !== detectSeq) return;
         logError(`hive: tool detection failed: ${e}`);
-        // A failed re-detection keeps the list it had; only a first failure leaves none.
-        if (tools !== null) return;
+        // A failed re-detection keeps the list it had; a failure before any success leaves none,
+        // and keeps the draft's or defaults' picks aside for the first answer that succeeds.
+        if (pickTracker.applied) return;
+        if (seedPicks === null) seedPicks = new Set(picked);
         tools = [];
         toolsFailed = true;
         picked = new Set();

@@ -223,10 +223,14 @@ generation, starts nothing from the phone and adds no maiLink route; after any s
 changed this Mac, the panel re-fetches.
 
 After that fetch the panel calls its parent's `onchanged` with the tools it newly calls ready
-(owed until a fetch lands, so a Re-detect that overtakes it doesn't lose it). The Create sheet
-detects its tools again and ticks a newly ready one unless the human ticked or unticked it
-themselves (`picksAfterRedetect`); Hive settings' tools editor detects again and shows it as a
-tool to add, never adding it to `Hive.tools` without the human's Save. No polling.
+(owed until a fetch lands, so a Re-detect that overtakes it doesn't lose it). Steps that end after
+the sheet closed still get there: a server write reports itself when it lands, closing the sheet
+fetches again, and a panel that opened a sheet hears `hive-media-install-finished` and a server's
+`connected` itself. The Create sheet detects its tools again and ticks a newly ready one unless
+the human ticked or unticked it themselves (`createPickTracker`: every notice's tools are kept
+until an answer is applied, and the first answer that succeeds, even after a failed first
+detection, starts from the defaults or the draft); Hive settings' tools editor detects again and
+shows it as a tool to add, never adding it to `Hive.tools` without the human's Save. No polling.
 
 | Route | What maiTerm does | What the human does |
 |---|---|---|

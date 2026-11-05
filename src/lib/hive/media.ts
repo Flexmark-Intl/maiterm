@@ -393,3 +393,35 @@ export function picksAfterRedetect(
 export function flippedIds(before: ReadonlySet<string>, after: ReadonlySet<string>): string[] {
   return [...[...before].filter((id) => !after.has(id)), ...[...after].filter((id) => !before.has(id))];
 }
+
+/** The Create sheet's detections and the picks each one leaves (docs/hive-media.md §6).
+ *
+ *  - Every setup notice's newly ready ids are KEPT until a detection's answer is applied: only the
+ *    newest request's answer is applied, and a later notice with nothing new (a second Verify, a
+ *    window refocus) must not drop an earlier one's tool.
+ *  - The first answer that SUCCEEDS is the first answer: `first` (the defaults, or a draft's picks)
+ *    decides its base even after a failed first detection, so a setup's re-detection never starts
+ *    from the empty picks a failure left.
+ *  Pure: the component owns sequencing (which answer is the newest) and unmount. */
+export function createPickTracker(first: (detected: readonly HiveDetectedTool[]) => Set<string>) {
+  let applied = false;
+  const pending = new Set<string>();
+  return {
+    /** A setup newly made these ready: tick them at the next applied answer. */
+    notice(ready: readonly string[]) {
+      for (const id of ready) pending.add(id);
+    },
+    /** A detection answered and is the newest: the picks it leaves. Consumes the pending ids. */
+    answered(picked: ReadonlySet<string>, detected: readonly HiveDetectedTool[], touched: ReadonlySet<string>): Set<string> {
+      const base = applied ? picked : first(detected);
+      applied = true;
+      const next = picksAfterRedetect(base, detected, [...pending], touched);
+      pending.clear();
+      return next;
+    },
+    /** Some detection has succeeded. */
+    get applied() {
+      return applied;
+    },
+  };
+}

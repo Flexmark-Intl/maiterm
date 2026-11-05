@@ -22,6 +22,7 @@
 -->
 <script lang="ts">
   import { onMount, tick as nextTick, untrack } from 'svelte';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import HiveMediaSetupSheet from './HiveMediaSetupSheet.svelte';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import { warn as logWarn } from '@tauri-apps/plugin-log';
@@ -94,9 +95,31 @@
     return true;
   }
 
+  /** A setup sheet was opened here. Its install or sign-in can end after the human closed it (an
+   *  install takes minutes, and the sheet points at its tab), when the sheet's own listeners are
+   *  gone: the panel then hears the end itself, fetches again and tells its parent. */
+  let setupStarted = false;
+
   onMount(() => {
     void load();
-    return () => latest.cancel();
+    let mounted = true;
+    const offs: UnlistenFn[] = [];
+    const keep = <T,>(event: string, on: (payload: T) => void) => {
+      listen<T>(event, (e) => {
+        if (mounted && setupStarted) on(e.payload);
+      })
+        .then((off) => (mounted ? offs.push(off) : off()))
+        .catch((e) => void logWarn(`[HiveMediaPanel] ${event}: not listening: ${String(e)}`));
+    };
+    keep('hive-media-install-finished', () => setupChanged());
+    keep<{ status?: { state?: string } }>('mcp-proxy-status', (p) => {
+      if (p.status?.state === 'connected') setupChanged();
+    });
+    return () => {
+      mounted = false;
+      latest.cancel();
+      for (const off of offs.splice(0)) off();
+    };
   });
 
   let redetectBtn = $state<HTMLButtonElement | null>(null);
@@ -122,13 +145,16 @@
 
   function openSetup(e: MouseEvent, provider: PanelProvider, capability: string) {
     setupOpener = e.currentTarget as HTMLElement;
+    setupStarted = true;
     setup = { provider, capability };
   }
 
   /** Focus goes back to the button that opened the sheet, or to Re-detect when a re-fetch took that
-   *  button away (the capability became ready). */
+   *  button away (the capability became ready). Closing fetches again and tells the parent: a step
+   *  in flight at the close (an add, a key save) may have landed with nobody left to say so. */
   function closeSetup() {
     setup = null;
+    setupChanged();
     const opener = setupOpener;
     setupOpener = null;
     void nextTick().then(() => requestAnimationFrame(() => (opener?.isConnected ? opener : redetectBtn)?.focus()));

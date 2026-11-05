@@ -11,7 +11,9 @@
                      Preferences the sheet asks. An install tab never opens in it.
     onclose          the human closed the sheet.
     onchanged        something on this Mac may have changed (a server added, an install ended, a
-                     Verify ran): the panel re-fetches.
+                     Verify ran): the panel re-fetches. Called after a server write lands even
+                     when the sheet has closed; an install or sign-in that ends after the close is
+                     heard by the panel itself.
 
   Ordering: `alive` goes false at unmount, and every await is followed by a check of it before
   anything is written into the sheet, so an event or answer arriving after the sheet closed writes
@@ -245,12 +247,16 @@
         if (s.auth !== 'token') throw new Error(`maiTerm already serves ${p.name} as “${s.entry_name}” with a ${s.auth === 'oauth' ? 'sign-in' : 'connection that needs no key'}. Change it in Preferences → MCP servers.`);
         await commands.mcpServerSetToken(s.id, token);
       }
+      // The write landed: say so whether or not the sheet is still open (the panel outlives it).
+      if (scope || token !== undefined) changed();
       return s;
     }
     const scope = newServerScope(ws, scopeChoice, hiveWorkspaces);
     if (scope === null) throw new Error('There is no Hive yet. Choose Every workspace, or set this up from a Hive.');
     const s = await commands.mcpServerAdd(got.add, url, auth, { token: token ?? null });
     if (scope.length) await commands.mcpServerSetWorkspaces(s.id, scope);
+    // The write landed: say so whether or not the sheet is still open (the panel outlives it).
+    changed();
     return s;
   }
 
@@ -287,7 +293,6 @@
       const s = await ensureServer('oauth');
       if (!alive || !s) return;
       serverId = s.id;
-      changed();
       if (s.status.state === 'connected') {
         note = { text: `maiTerm already serves ${p.name} as “${s.entry_name}”. Checking it works…`, error: false };
         await runVerify();
