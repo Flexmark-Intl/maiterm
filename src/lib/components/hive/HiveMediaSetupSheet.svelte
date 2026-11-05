@@ -185,9 +185,17 @@
 
   // ─── Verify ───────────────────────────────────────────────────────────────
 
+  /** A Verify asked for while one runs (the connected event during the human's own Verify, an
+   *  install's end) is not dropped: it runs once more after, so the last answer is the newest. */
+  let verifyAgain = false;
+
   async function runVerify() {
-    if (verifying) return;
+    if (verifying) {
+      verifyAgain = true;
+      return;
+    }
     verifying = true;
+    verifyAgain = false;
     try {
       const r = await commands.hiveMediaVerify(ws, p.id);
       if (!alive) return;
@@ -201,10 +209,13 @@
     } finally {
       if (alive) verifying = false;
     }
-    if (alive) {
-      changed();
-      holdFocus();
+    if (!alive) return;
+    if (verifyAgain) {
+      verifyAgain = false;
+      return runVerify();
     }
+    changed();
+    holdFocus();
   }
 
   // ─── MCP: the human's add path ────────────────────────────────────────────
@@ -250,16 +261,9 @@
     note = null;
     result = null;
     try {
-      // Reusing a server that already works: nothing to sign in to.
+      // A server maiTerm already serves for this URL needs no probe: what to do is read off the
+      // server itself below. `reused` (from the mount's read) is only a hint; ensureServer reads again.
       const existing = reused;
-      if (existing && existing.status.state === 'connected') {
-        const s = await ensureServer('oauth');
-        if (!alive || !s) return;
-        serverId = s.id;
-        note = { text: `maiTerm already serves ${p.name} as “${s.entry_name}”. Checking it works…`, error: false };
-        await runVerify();
-        return;
-      }
       if (!existing) {
         const probe = await commands.mcpServerProbe(url);
         if (!alive) return;
@@ -284,6 +288,22 @@
       if (!alive || !s) return;
       serverId = s.id;
       changed();
+      if (s.status.state === 'connected') {
+        note = { text: `maiTerm already serves ${p.name} as “${s.entry_name}”. Checking it works…`, error: false };
+        await runVerify();
+        return;
+      }
+      // Reused, and added with a key or with nothing: a sign-in would be refused.
+      if (s.auth === 'token') {
+        action = 'mcp_token';
+        note = { text: `maiTerm serves ${p.name} as “${s.entry_name}” with a key. Paste a new one below.`, error: false };
+        return;
+      }
+      if (s.auth === 'none') {
+        note = { text: `maiTerm serves ${p.name} as “${s.entry_name}”; it needs no sign-in. Checking it works…`, error: false };
+        await runVerify();
+        return;
+      }
       await startSignIn(s.id);
       if (!alive) return;
       waitingForSignIn = true;
@@ -367,8 +387,19 @@
 
   function onFinished(f: HiveMediaInstallFinished) {
     endLine = installEndLine(f);
-    if (f.model_download) model = { model: 'ggml-base.en', state: 'downloading', path: null, done: 0, total: null, error: null };
+    // Rust starts the download after this event, and sends no progress when the model is already
+    // there: ask for its state (which joins a running download) rather than guess "downloading".
+    if (f.model_download) void readModel();
     void runVerify();
+  }
+
+  async function readModel() {
+    try {
+      const m = await commands.hiveMediaWhisperModelDownload();
+      if (alive) model = m;
+    } catch (e) {
+      fail(e);
+    }
   }
 
   async function install() {
@@ -433,8 +464,34 @@
 
   // ─── The sheet ────────────────────────────────────────────────────────────
 
+  /** Tab wraps inside the sheet: behind it sit the Create sheet's or Preferences' own controls,
+   *  where an Escape would close that instead, and a Space would flip a pick nobody can see. */
+  function trapTab(e: KeyboardEvent) {
+    if (!sheetEl) return;
+    const items = [...sheetEl.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])')].filter(
+      (el) => !el.hasAttribute('disabled') && el.offsetParent !== null,
+    );
+    if (items.length === 0) {
+      e.preventDefault();
+      sheetEl.focus();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const at = document.activeElement;
+    if (e.shiftKey && (at === first || at === sheetEl)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && at === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
   function onKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
+    if (e.key === 'Tab') {
+      trapTab(e);
+    } else if (e.key === 'Escape') {
       e.stopPropagation();
       e.preventDefault();
       close();
