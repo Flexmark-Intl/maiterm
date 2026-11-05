@@ -69,7 +69,13 @@ pub struct MapInput<'a> {
 pub struct Map {
     pub lines: Vec<String>,
     pub listed: Vec<String>,
+    /// The coordinator of a Hive with no media tool at all: one line, not a five-capability
+    /// "Not set up" list that would invite needless requests.
+    pub no_media: bool,
 }
+
+/// What a coordinator whose Hive has no media tool is told, in place of the map.
+pub const NO_MEDIA: &str = "This Hive has no media tools. If the goal needs images, video, voice or music, ask with hiveRequestCapability; never substitute.";
 
 const SHOWN_NAME: usize = 80;
 
@@ -237,6 +243,11 @@ pub fn map(input: &MapInput) -> Map {
         }
     }
 
+    if covered.is_empty() && reader == Reader::Coordinator {
+        out.lines = vec![NO_MEDIA.to_string()];
+        out.no_media = true;
+        return out;
+    }
     entries.sort_by_key(|(k, _)| *k);
     out.lines = entries.into_iter().flat_map(|(_, l)| l).collect();
 
@@ -252,7 +263,11 @@ pub fn map(input: &MapInput) -> Map {
 }
 
 /// The map as a brief's bullet: the heading, then each line one level in.
+/// A coordinator whose Hive has no media tool gets the one line instead.
 pub fn bullet(m: &Map) -> String {
+    if m.no_media {
+        return format!("- {NO_MEDIA}\n");
+    }
     let mut s = String::from("- What this Hive can make, and with what:\n");
     for l in &m.lines {
         match l.strip_prefix("  ") {

@@ -895,6 +895,12 @@ mod tests {
         assert!(q.contains("  - Not set up: voice. If the goal needs it, ask with hiveRequestCapability; never substitute.\n"), "{q}");
         assert!(q.contains("- Other tools this Hive has: mcp:langsys. A tool that isn\u{2019}t listed isn\u{2019}t there.\n"), "{q}");
         assert!(!q.contains("- Tools this Hive has"), "{q}");
+
+        // A code-only Hive: one line, then its tools by id as before.
+        h.tools = vec!["mcp:langsys".into()];
+        let q = brief_md(&h, &p, &PrecedentCounts::default(), McpConfigs { account: Some(&account), own: None });
+        assert!(q.contains("- This Hive has no media tools. If the goal needs images, video, voice or music, ask with hiveRequestCapability; never substitute.\n- Other tools this Hive has: mcp:langsys."), "{q}");
+        assert!(!q.contains("What this Hive can make") && !q.contains("Not set up"), "{q}");
     }
 
     /// The first real use: workers couldn't install dependencies. The brief says the setup ran

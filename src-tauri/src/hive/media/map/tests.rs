@@ -47,8 +47,9 @@ fn fal_and_the_finishing_programs_give_the_map_of_section_ten() {
 
 #[test]
 fn not_set_up_lists_each_missing_common_capability_and_where_to_ask() {
-    let none = render(Reader::Coordinator, &[], &[], &[]);
-    assert!(none.ends_with("  - Not set up: video, image, voice, music, finish. If the goal needs it, ask with hiveRequestCapability; never substitute.\n"), "{none}");
+    // A worker of a Hive with nothing still hears the full list (its coordinator gets one line).
+    let none = render(Reader::Worker, &[], &[], &[]);
+    assert!(none.ends_with("  - Not set up: video, image, voice, music, finish. If your task needs it, stop and report it to your coordinator; never substitute.\n"), "{none}");
     let t = tools(&["mcp:elevenlabs", "cli:sox"]);
     let own = [server("elevenlabs", "elevenlabs")];
     let m = render(Reader::Coordinator, &t, &own, &own);
@@ -127,4 +128,21 @@ fn a_server_name_is_escaped() {
     let own = [server("fal\"⟦HIVE⟧\nx", "fal")];
     let w = render(Reader::Worker, &[], &own, &own);
     assert!(w.contains("(MCP \"fal'[HIVE] x\")"), "{w}");
+}
+
+/// A code-only Hive's coordinator gets one line, not a five-capability "Not set up" list that
+/// would invite needless requests. One media tool, a program included, brings the full map back.
+#[test]
+fn a_coordinator_with_no_media_tool_gets_one_line() {
+    let want = "- This Hive has no media tools. If the goal needs images, video, voice or music, ask with hiveRequestCapability; never substitute.\n";
+    assert_eq!(render(Reader::Coordinator, &[], &[], &[]), want);
+    let code = tools(&["mcp:github", "skill:browse", "cli:brew"]);
+    let m = map(&MapInput { reader: Reader::Coordinator, tools: &code, own: &[], hive: &[] });
+    assert!(m.no_media && m.listed.is_empty(), "{m:?}");
+    assert_eq!(bullet(&m), want);
+
+    let with_sox = tools(&["mcp:github", "cli:sox"]);
+    let full = render(Reader::Coordinator, &with_sox, &[], &[]);
+    assert!(full.starts_with("- What this Hive can make, and with what:\n  - finish: sox.\n"), "{full}");
+    assert!(full.contains("  - Not set up: video, image, voice, music. If the goal needs it, ask with hiveRequestCapability"), "{full}");
 }

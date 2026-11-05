@@ -509,6 +509,11 @@ art-director), reviewers included. What it does beyond the example above:
 - **A worker without generators** (a reviewer, the art director) is told which capabilities other
   workers make with which provider, and that it can't run it; those capabilities are not "Not
   set up" for it.
+- **A Hive with no media tool at all** (a code Hive) gives its coordinator one line instead of
+  the map: "This Hive has no media tools. If the goal needs images, video, voice or music, ask
+  with hiveRequestCapability; never substitute." A five-capability "Not set up" list would invite
+  needless requests (the coordinator's decision, 2026-11-05). One media tool, a program included,
+  brings the full map back.
 - **"Not set up"** lists the common capabilities (`common_capabilities()`) nothing in the Hive
   covers. The coordinator is pointed at `hiveRequestCapability`; a worker is told to stop and
   report it to its coordinator (the tool is the coordinator's, §8).
