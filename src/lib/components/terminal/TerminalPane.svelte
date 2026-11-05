@@ -720,8 +720,11 @@
       // still drawing. Each probe is a full `ps` sweep behind one lock, and a window of working
       // agents queued ~20 of them at once (2026-11-05). Only a tick is skipped — an IDENTICAL
       // repeat still probes, since a prompt redraw re-sending its title is how a too-early
-      // first probe gets retried (see below).
-      const spinnerTick = isSpinnerTick(lastProbedTitle, title);
+      // first probe gets retried (see below). Nor is a tick skipped while this tab is in ssh
+      // without a working bridge: a failed bridge setup is retried only from this handler, and
+      // a remote agent working on one topic may send nothing but ticks for minutes.
+      const bridgeUp = getBridgeStatus(tabId) === 'connected' || getBridgeStatus(tabId) === 'pending';
+      const spinnerTick = isSpinnerTick(lastProbedTitle, title) && !(sshForeground && !bridgeUp);
       lastProbedTitle = title;
       if (preferencesStore.claudeCodeIde && preferencesStore.claudeCodeIdeSsh && !spinnerTick) {
         // FRESH probe (bypasses the backend's 800ms process-snapshot cache). A
