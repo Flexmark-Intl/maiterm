@@ -4676,7 +4676,15 @@ several releases a day).
    (`PauseCause::Account`), and a running worker goes `failed` with that reason: nothing can burn a
    spawn on the dead account until the human resumes. The Create sheet warns, without blocking,
    when `claude auth status --json` for the account the agents will run under answers
-   `loggedIn: false` (a token or key it can't vouch for warns nothing). *Delete:* the memory folder
+   `loggedIn: false` (a token or key it can't vouch for warns nothing). *A quiet worker*
+   (2026-11-05, `hive/quiet.rs`): the coordinator wakes only when maiTerm types into it, so a worker
+   that ended its turn waiting for something that never came stalled the whole Hive (a reviewer
+   and its coordinator sat 19 h). A worker's Stop or SessionStart arms a 10-minute check that any
+   later activity event cancels (`Notification` doesn't count: Claude's idle nudge follows every
+   Stop). It tells the coordinator once per quiet spell, quoting `last_assistant_message`. It only
+   tells when the worker is still `running`, no run of its own is open or has a result on its way,
+   no prompt of its is routed, and the Hive is active. Memory only: after a restart the relaunch's
+   SessionStart arms it again. *Delete:* the memory folder
    is work and stays in place under the Hive's folder unless its own box is ticked, and the sheet
    lists what goes (the decision log, run history, this Hive's precedents, the other logs, launch
    records, the coordinator's home). *Header:* Pause (`hive_pause`, `Hive.paused_by = "human"`; no
