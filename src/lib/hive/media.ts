@@ -209,6 +209,33 @@ export function recommendedSetupNote(row: Pick<PanelRow, 'covers' | 'recommended
   return null;
 }
 
+/** What a capability's compact row says (the panel's open form): a covered row lists its covers
+ *  (drawn with their state chips); an uncovered one says "Not set up" and, when there is a
+ *  recommendation, "Suggested: <name>". `details` is whether a full card sits behind the row's
+ *  disclosure: only for a row nothing ready covers that has a provider to set up. */
+export interface CompactLine {
+  covered: boolean;
+  /** "Not set up" for an uncovered row, else "". */
+  status: string;
+  suggested: string | null;
+  details: boolean;
+  /** The disclosure button's words; "" when `details` is false. */
+  detailsLabel: string;
+}
+
+export function compactLine(row: Pick<PanelRow, 'covers' | 'ready' | 'recommended'>): CompactLine {
+  const covered = row.covers.length > 0;
+  const details = !row.ready && row.recommended !== null;
+  const name = row.recommended?.name ?? null;
+  return {
+    covered,
+    status: covered ? '' : 'Not set up',
+    suggested: !covered && name ? `Suggested: ${name}` : null,
+    details,
+    detailsLabel: !details ? '' : covered ? `Details: ${name}` : `How to set up ${name}`,
+  };
+}
+
 /** The providers "I already pay for…" lists: the catalogue's `subscriber: true` ones, in its order. */
 export function subscriberProviders(catalogue: HiveMediaCatalogue): HiveMediaProvider[] {
   return catalogue.providers.filter((p) => p.subscriber);

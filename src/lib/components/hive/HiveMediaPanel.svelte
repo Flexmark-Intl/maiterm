@@ -19,7 +19,7 @@
   import { warn as logWarn } from '@tauri-apps/plugin-log';
   import { hiveMediaCatalogue, hiveMediaStatus } from '$lib/tauri/commands';
   import type { HiveMediaCatalogue, HiveMediaRow } from '$lib/tauri/types';
-  import { createLatest, externalUrl, coverNames, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
+  import { compactLine, createLatest, externalUrl, coverNames, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
   import type { PanelRow } from '$lib/hive/media';
 
   interface Props {
@@ -34,6 +34,8 @@
 
   let open = $state(untrack(() => startOpen));
   let moreOpen = $state(false);
+  /** Capability ids whose full card is open. Local to the panel, never persisted. */
+  let cardsOpen = $state<string[]>([]);
   let rows = $state<HiveMediaRow[] | null>(null);
   let catalogue = $state<HiveMediaCatalogue | null>(null);
   let loading = $state(true);
@@ -115,68 +117,76 @@
 {/snippet}
 
 {#snippet capRow(r: PanelRow)}
+  {@const c = compactLine(r)}
+  {@const cardId = `${uid}-card-${r.capability}`}
+  {@const showCard = c.details && cardsOpen.includes(r.capability)}
   <section class="cap" aria-labelledby="{uid}-{r.capability}">
-    <div class="cap-head">
+    <div class="line">
       <h4 id="{uid}-{r.capability}">{r.label}</h4>
-      {#if r.means}<span class="means">{r.means}</span>{/if}
+      <div class="sum">
+        {#if r.covers.length}
+          <ul class="covers">
+            {#each r.covers as cv (cv.toolId)}
+              {@const names = coverNames(cv)}
+              <li>
+                <span class="tool">{names.tool}</span>
+                {#if names.by}<span class="by">{names.by}</span>{/if}
+                <span class="state {stateTone(cv.state)}">{cv.stateLabel}</span>
+              </li>
+            {/each}
+          </ul>
+        {:else}
+          <span class="none">{c.status}</span>
+          {#if c.suggested}<span class="by">{c.suggested}</span>{/if}
+        {/if}
+      </div>
+      {#if c.details}
+        <button type="button" class="disc" aria-expanded={showCard} aria-controls={showCard ? cardId : undefined} onclick={() => (cardsOpen = toggleId(cardsOpen, r.capability))}>
+          <svg class="chev" class:open={showCard} width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 7 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          {c.detailsLabel}
+        </button>
+      {/if}
     </div>
 
-    {#if r.covers.length}
-      <ul class="covers">
-        {#each r.covers as c (c.toolId)}
-          {@const names = coverNames(c)}
-          <li>
-            <span class="tool">{names.tool}</span>
-            {#if names.by}<span class="by">{names.by}</span>{/if}
-            <span class="state {stateTone(c.state)}">{c.stateLabel}</span>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-
-    {#if !r.ready}
-      {#if r.recommended}
-        {@const p = r.recommended}
-        {@const note = unverifiedNote(p, r.capability)}
-        {@const done = recommendedSetupNote(r)}
-        <div class="card">
-          <div class="card-head">
-            <b class="pname">{p.name}</b>
-            {#if done}<span class="tag warn">{done}</span>{:else}<span class="tag">Recommended</span>{/if}
-          </div>
-          {#if modelsLine(p, r.capability)}<p class="dim">{modelsLine(p, r.capability)}</p>{/if}
-          {#if p.creditsLine}<p class="credits">{p.creditsLine}</p>{/if}
-          {#if note}<p class="unv">{note}</p>{/if}
-          {#if p.guide.length}
-            <ol class="guide">
-              {#each p.guide as step, i (i)}<li>{step}</li>{/each}
-            </ol>
-          {/if}
-          {#if externalUrl(p.signup_url) || externalUrl(p.billing_url)}
-            <p class="links">
-              {@render link('Sign up', p.signup_url)}
-              {@render link('Billing', p.billing_url)}
-            </p>
-          {/if}
-          {#if r.alternatives.length}
-            <div class="alts">
-              <span class="alts-label">Other options</span>
-              <ul>
-                {#each r.alternatives as a (a.id)}
-                  {@const anote = unverifiedNote(a, r.capability)}
-                  <li>
-                    <span class="pname">{a.name}</span>
-                    {#if a.creditsLine}<span class="dim">· {a.creditsLine}</span>{/if}
-                    {#if anote}<span class="unv">· {anote}</span>{/if}
-                  </li>
-                {/each}
-              </ul>
-            </div>
-          {/if}
+    {#if showCard && r.recommended}
+      {@const p = r.recommended}
+      {@const note = unverifiedNote(p, r.capability)}
+      {@const done = recommendedSetupNote(r)}
+      <div class="card" id={cardId}>
+        <div class="card-head">
+          <b class="pname">{p.name}</b>
+          {#if done}<span class="tag warn">{done}</span>{:else}<span class="tag">Recommended</span>{/if}
         </div>
-      {:else if !r.covers.length}
-        <p class="dim">Nothing on this Mac covers this yet.</p>
-      {/if}
+        {#if modelsLine(p, r.capability)}<p class="dim">{modelsLine(p, r.capability)}</p>{/if}
+        {#if p.creditsLine}<p class="credits">{p.creditsLine}</p>{/if}
+        {#if note}<p class="unv">{note}</p>{/if}
+        {#if p.guide.length}
+          <ol class="guide">
+            {#each p.guide as step, i (i)}<li>{step}</li>{/each}
+          </ol>
+        {/if}
+        {#if externalUrl(p.signup_url) || externalUrl(p.billing_url)}
+          <p class="links">
+            {@render link('Sign up', p.signup_url)}
+            {@render link('Billing', p.billing_url)}
+          </p>
+        {/if}
+        {#if r.alternatives.length}
+          <div class="alts">
+            <span class="alts-label">Other options</span>
+            <ul>
+              {#each r.alternatives as a (a.id)}
+                {@const anote = unverifiedNote(a, r.capability)}
+                <li>
+                  <span class="pname">{a.name}</span>
+                  {#if a.creditsLine}<span class="dim">· {a.creditsLine}</span>{/if}
+                  {#if anote}<span class="unv">· {anote}</span>{/if}
+                </li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+      </div>
     {/if}
   </section>
 {/snippet}
@@ -205,6 +215,12 @@
       {:else if groups}
         {#if loading}<p class="dim" role="status">Checking…</p>{/if}
 
+        <p class="dim">What this Mac can already make. Opening a card doesn't add anything to the Hive.</p>
+
+        {#each groups.common as r (r.capability)}
+          {@render capRow(r)}
+        {/each}
+
         {#if subscribers.length}
           <fieldset class="pay">
             <legend>I already pay for…</legend>
@@ -216,10 +232,6 @@
             {/each}
           </fieldset>
         {/if}
-
-        {#each groups.common as r (r.capability)}
-          {@render capRow(r)}
-        {/each}
 
         {#if groups.more.length}
           <button type="button" class="more" aria-expanded={moreOpen} aria-controls={moreOpen ? moreId : undefined} onclick={() => (moreOpen = !moreOpen)}>
@@ -252,7 +264,7 @@
   .link[aria-disabled='true'] { color: var(--fg-dim); cursor: default; }
   .link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 
-  .body { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
   .dim { margin: 0; font-size: 0.846rem; color: var(--fg-dim); overflow-wrap: anywhere; }
   .error { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; font-size: 0.923rem; color: var(--fg); }
   .error p { margin: 0; overflow-wrap: anywhere; }
@@ -263,11 +275,16 @@
   .tickrow { display: inline-flex; align-items: center; gap: 6px; font-size: 0.923rem; color: var(--fg); cursor: pointer; }
   .tickrow input { accent-color: var(--accent); }
 
-  .cap { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding-top: 8px; border-top: 1px solid var(--bg-light); }
-  .cap-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+  .cap { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding-top: 6px; border-top: 1px solid var(--bg-light); }
+  .line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; min-width: 0; }
+  .cap h4 { flex: 0 0 5.5em; }
+  .sum { flex: 1 1 12em; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; font-size: 0.846rem; }
+  .none { color: var(--fg-dim); }
+  .disc { flex: none; display: inline-flex; align-items: baseline; gap: 5px; padding: 0; background: none; border: none; color: var(--accent); font: inherit; font-size: 0.846rem; cursor: pointer; text-align: left; }
+  .disc:hover { text-decoration: underline; }
+  .disc:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
   .cap h4 { margin: 0; font-size: 0.923rem; font-weight: 600; color: var(--fg); overflow-wrap: anywhere; }
-  .means { font-size: 0.808rem; color: var(--fg-dim); overflow-wrap: anywhere; }
-  .covers { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+  .covers { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .covers li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font-size: 0.846rem; min-width: 0; }
   .tool { color: var(--fg); overflow-wrap: anywhere; }
   .by { color: var(--fg-dim); overflow-wrap: anywhere; }

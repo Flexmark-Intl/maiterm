@@ -949,7 +949,7 @@
             {:else if tools.length === 0}
               <p class="hint">Nothing detected: no MCP servers, ffmpeg, ImageMagick, SoX, Blender, skills or ComfyUI.</p>
             {:else}
-              <span class="hint">Tells the queen what it can really make things with.</span>
+              <span class="hint">Tick what this Hive's workers may use.</span>
               {#if toolsSummary}
                 <p class="summary">
                   From your defaults: {summarizeTools(pickedWords)}

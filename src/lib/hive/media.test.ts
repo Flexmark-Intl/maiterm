@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { coverNames, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
+import { compactLine, coverNames, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
 import type { HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
 
 const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvider => ({
@@ -418,5 +418,23 @@ describe('isSetupOnly', () => {
     expect(isSetupOnly('cli:brew')).toBe(true);
     expect(isSetupOnly('cli:ffmpeg')).toBe(false);
     expect(isSetupOnly('mcp:brew-kit')).toBe(false);
+  });
+});
+
+describe('compactLine', () => {
+  const rec = prov('fal', { name: 'fal' });
+  const cover = (state: string) => ({ toolId: 'mcp:fal', toolLabel: 'fal', providerId: 'fal', providerName: 'fal', state, stateLabel: state });
+  it('a ready row has covers to list, no status, no suggestion and nothing behind a disclosure', () => {
+    expect(compactLine({ covers: [cover('ready')], ready: true, recommended: null })).toEqual({ covered: true, status: '', suggested: null, details: false, detailsLabel: '' });
+  });
+  it('an uncovered row says Not set up and suggests the recommendation, with a how-to behind it', () => {
+    expect(compactLine({ covers: [], ready: false, recommended: { ...rec, creditsLine: null } })).toEqual({ covered: false, status: 'Not set up', suggested: 'Suggested: fal', details: true, detailsLabel: 'How to set up fal' });
+  });
+  it('an uncovered row with no recommendation says only Not set up, with nothing to open', () => {
+    expect(compactLine({ covers: [], ready: false, recommended: null })).toEqual({ covered: false, status: 'Not set up', suggested: null, details: false, detailsLabel: '' });
+  });
+  it('a covered row that is not ready keeps its covers and offers Details when a provider is recommended', () => {
+    const c = compactLine({ covers: [cover('needs_sign_in')], ready: false, recommended: { ...rec, creditsLine: null } });
+    expect(c).toMatchObject({ covered: true, status: '', suggested: null, details: true, detailsLabel: 'Details: fal' });
   });
 });
