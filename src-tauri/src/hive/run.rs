@@ -434,6 +434,13 @@ pub(crate) async fn deliver_pending(app: &Arc<AppState>, handle: &AppHandle, pat
         return 0;
     }
     let Some(tab) = w.tab_id.clone().filter(|t| super::is_hive_role_tab(&app.app_data.read(), t)) else { return 0 };
+    // Paused by the human: the results stay on disk, not in the Pause's memory-only hold, which a
+    // restart drops (a reviewer's `cargo test` result was lost that way and it sat idle for 19 h).
+    // The Resume delivers them (`deliver_after_resume`), as does a session start after it.
+    if super::deliver::paused_by_human(app, &tab).is_some() {
+        log::info!("hive: run results for worker {} kept until the human resumes the Hive", worker_label(&w));
+        return 0;
+    }
     let n = deliver_results_with(dir, |text| {
         let (app, handle, tab) = (app.clone(), handle.clone(), tab.clone());
         async move { super::deliver::deliver(&app, &handle, &tab, &text, "Hive run").await }
@@ -443,6 +450,18 @@ pub(crate) async fn deliver_pending(app: &Arc<AppState>, handle: &AppHandle, pat
         log::info!("hive: {n} run result(s) to worker {}", worker_label(&w));
     }
     n
+}
+
+/// The human resumed `hive_id`: every result `deliver_pending` kept on disk through the Pause
+/// goes now, after the resume notice (`deliver::resume_then_release`).
+pub(crate) async fn deliver_after_resume(app: &Arc<AppState>, handle: &AppHandle, hive_id: &str) {
+    let Some(root) = super::paths::hive_root(hive_id) else { return };
+    let paths = HivePaths::new(root);
+    let p = paths.clone();
+    let Ok(workers) = blocking(move || Ok(worker::list_workers(&p))).await else { return };
+    for w in workers.into_iter().filter(|w| w.pending_runs.iter().any(|r| r.state == RUN_RESULT)) {
+        deliver_pending(app, handle, &paths, &w.task_id).await;
+    }
 }
 
 /// A worker's session started: whatever it is owed (a result its crash missed, a restart's

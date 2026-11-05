@@ -80,7 +80,7 @@ static PAUSE_HOLDS: LazyLock<Mutex<HashMap<String, Arc<Notify>>>> = LazyLock::ne
 
 /// The Hive `tab` belongs to, while its human has paused it. Not a usage-limit or account pause:
 /// those stop starts only, and their notices must reach the coordinator.
-fn paused_by_human(app: &AppState, tab: &str) -> Option<String> {
+pub(crate) fn paused_by_human(app: &AppState, tab: &str) -> Option<String> {
     let data = app.app_data.read();
     let (ws, _) = super::find_hive_tab(&data, tab)?;
     let h = ws.hive.as_ref()?;

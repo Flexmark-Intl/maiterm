@@ -977,6 +977,7 @@ pub async fn hive_resume(
             }
         };
         super::deliver::resume_then_release(&hive_id, notice).await;
+        super::run::deliver_after_resume(&st, &handle, &hive_id).await;
     });
     // Workers that waited out the pause launch now, where their dependencies allow.
     super::waiters::poll_soon(state.inner().clone(), app, workspace_id);

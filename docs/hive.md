@@ -4682,7 +4682,10 @@ several releases a day).
    records, the coordinator's home). *Header:* Pause (`hive_pause`, `Hive.paused_by = "human"`; no
    worker starts or relaunches, running agents finish, the coordinator is told; every Hive delivery
    to its agents is held in memory until Resume (`deliver::end_pause_hold`), all but the pause notice
-   itself, and the resume notice goes first; a usage-limit or account pause holds nothing, so its
+   itself, and the resume notice goes first. A worker's run results are the exception: they stay
+   on disk in its `pending_runs` while paused and go out at Resume (`run::deliver_after_resume`),
+   because a restart while paused drops what memory held (2026-11-04: a reviewer never got its
+   `cargo test` result and sat idle 19 h); a usage-limit or account pause holds nothing, so its
    notices still reach the coordinator. A second pause cause doesn't relabel an open account pause)
    beside Resume, and Settings: the autonomy, run queue and
    budget sheets, and read-only what was fixed at Create. `Hive.paused_by` (String) words the
