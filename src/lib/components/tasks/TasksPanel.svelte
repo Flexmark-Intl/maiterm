@@ -484,6 +484,7 @@
             {@const depBlocked = hasUnmetDeps(t, all, workspacesStore.parkedTaskIds)}
             <li class="task" class:done={t.status === 'done'} class:parked={isParked(t.status)} class:dropped={isDropped(t.status)}>
               <div class="task-main">
+                <div class="status-col">
                 <Tooltip text={isDropped(t.status)
                   ? 'Dropped — retracted, not finished. Nothing waiting on it counts it as done. Use ↑ to put it back in play.'
                   : depBlocked
@@ -497,6 +498,12 @@
                     {STATUS_LABEL[eff]}
                   </button>
                 </Tooltip>
+                <!-- Age since the row was created: on a long board it tells the
+                     week-old leftovers from what was raised this morning. -->
+                <Tooltip text="Created {new Date(t.created_at).toLocaleString()}">
+                  <span class="age">{fmtAge(t.created_at)}</span>
+                </Tooltip>
+                </div>
 
                 {#if editingId === t.id}
                   <!-- svelte-ignore a11y_autofocus -->
@@ -890,6 +897,18 @@
      out — without this the pill gets squeezed by a long title instead of the title
      wrapping. */
   .task-main > :global(.tooltip-wrapper) { flex-shrink: 0; }
+  .status-col {
+    align-items: center;
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    gap: 2px;
+  }
+  .age {
+    color: var(--fg-dim);
+    font-size: 9px;
+    font-variant-numeric: tabular-nums;
+  }
 
   .status {
     background: none;
