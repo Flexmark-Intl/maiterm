@@ -640,7 +640,9 @@ pub fn claude_new_enough() -> Result<(), String> {
 
 /// Everything a launch writes, from the current Hive and record: the settings file, the MCP
 /// config and the brief. Pure of trust and version checks, which `prepare_launch` does first.
-pub fn write_launch_files(hive: &Hive, paths: &HivePaths, record: &LaunchRecord, hooks: &super::settings::HookEnv) -> Result<(), String> {
+/// `claude_json` is the launching account's `.claude.json`: the coordinator's own MCP servers,
+/// which its brief's capability map names (docs/hive-media.md §10).
+pub fn write_launch_files(hive: &Hive, paths: &HivePaths, record: &LaunchRecord, hooks: &super::settings::HookEnv, claude_json: Option<&serde_json::Value>) -> Result<(), String> {
     let settings = super::settings::hive_settings_json(hive, record, paths, hooks)?;
     write_json(Path::new(&record.settings_path), &settings)?;
     if !record.mcp_config_path.is_empty() {
@@ -648,7 +650,7 @@ pub fn write_launch_files(hive: &Hive, paths: &HivePaths, record: &LaunchRecord,
     }
     if record.role == ROLE_COORDINATOR {
         let counts = super::precedents::counts(paths);
-        write_bytes(&paths.coordinator_brief(), super::brief::brief_md(hive, paths, &counts).as_bytes())?;
+        write_bytes(&paths.coordinator_brief(), super::brief::brief_md(hive, paths, &counts, super::brief::McpConfigs { account: claude_json, own: None }).as_bytes())?;
     }
     Ok(())
 }
@@ -669,10 +671,11 @@ pub fn write_worker_launch_files(
 ) -> Result<(), String> {
     let settings = super::settings::worker_settings_json(hive, record, w, paths, ctx, hooks)?;
     write_json(Path::new(&record.settings_path), &settings)?;
-    write_private_json(Path::new(&record.mcp_config_path), &super::settings::worker_mcp_config(hive, w, claude_json))?;
+    let mcp = super::settings::worker_mcp_config(hive, w, claude_json);
+    write_private_json(Path::new(&record.mcp_config_path), &mcp)?;
     let builder = w.reviews.as_deref().and_then(|id| super::worker::task_dir(paths, id).ok()).and_then(|d| super::worker::read_worker(&d).ok());
     let inputs = super::gallery::tools::brief_inputs(&hive.id, paths, &w.inputs);
-    write_bytes(&paths.worker_brief(&w.slug), super::brief::worker_brief_md(hive, paths, w, task_brief, builder.as_ref(), &inputs).as_bytes())
+    write_bytes(&paths.worker_brief(&w.slug), super::brief::worker_brief_md(hive, paths, w, task_brief, builder.as_ref(), &inputs, super::brief::McpConfigs { account: claude_json, own: Some(&mcp) }).as_bytes())
 }
 
 const NO_CLAUDE_YET: &str = "Claude Code hasn't run under the account this Hive's agents use, so there's nowhere to record folder \
@@ -943,7 +946,7 @@ fn prepare_coordinator(hive: &Hive, paths: &HivePaths, prefs: &crate::state::Pre
     ensure_trust(&launch_json, paths, &paths.coordinator_home())?;
 
     let hooks = super::settings::HookEnv::current()?;
-    write_launch_files(hive, paths, &record, &hooks)?;
+    write_launch_files(hive, paths, &record, &hooks, claude_json.as_ref())?;
     // Only a session of the current goal: a New goal starts a fresh one in the same tab (§11.5).
     let resume = last_session_in(&task, hive.chapter());
     let args = hive_launch_args(&record, resume.as_deref());

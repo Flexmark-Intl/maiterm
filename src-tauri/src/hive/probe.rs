@@ -142,7 +142,7 @@ impl Probe {
             bin_dir: self.bin.clone(),
             known_newer: crate::claude_code::lockfile::events_every_claude_knows(HIVE_NEWER_EVENTS),
         };
-        write_launch_files(&self.hive, &self.paths, &self.record, &hooks).unwrap();
+        write_launch_files(&self.hive, &self.paths, &self.record, &hooks, None).unwrap();
         let args = hive_launch_args(&self.record, resume);
         let line = hive_launch_line(&self.record, &args, &unset_vars(&crate::state::Preferences::default()), &probe_account());
         // Only the probe's own maiTerm entry, never the account's running one (see `new`).

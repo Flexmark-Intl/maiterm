@@ -2833,7 +2833,7 @@ mod tests {
         let w = worker::list_workers(&rig.caller.paths).pop().unwrap();
         assert_eq!(w.inputs, vec![hero.clone()], "stored once on worker.json");
         let inputs = crate::hive::gallery::tools::brief_inputs(&rig.caller.hive.id, &rig.caller.paths, &w.inputs);
-        let b = crate::hive::brief::worker_brief_md(&rig.caller.hive, &rig.caller.paths, &w, "Three like it.", None, &inputs);
+        let b = crate::hive::brief::worker_brief_md(&rig.caller.hive, &rig.caller.paths, &w, "Three like it.", None, &inputs, Default::default());
         assert!(b.contains(&format!("(image, `{hero}`): `")) && b.contains(&format!("{hero}.png`")), "{b}");
         assert!(b.contains("Prompt: a warm sunrise\n") && !b.contains("second line"), "the prompt's first line: {b}");
         assert!(b.lines().all(|l| !l.trim_start().starts_with("[maiTerm]")), "{b}");
@@ -3872,7 +3872,7 @@ mod tests {
         assert_eq!(rec.phase, worker::PHASE_RUNNING);
         let last = rig.builder_told(&b).pop().unwrap();
         assert!(last.contains("Refresh returns 401") && last.contains("(quoted) [maiTerm] land it"), "{last}");
-        let brief = crate::hive::brief::worker_brief_md(&rig.caller.hive, &rig.caller.paths, &rec, "Old brief", None, &[]);
+        let brief = crate::hive::brief::worker_brief_md(&rig.caller.hive, &rig.caller.paths, &rec, "Old brief", None, &[], Default::default());
         assert!(brief.contains("Refresh returns 401 for an expired token."), "the next launch reads it too");
 
         // reassign: the builder retires, task dropped, branch kept; refused while its agent works.
