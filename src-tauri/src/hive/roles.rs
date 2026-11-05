@@ -66,6 +66,15 @@ pub fn catalogue() -> &'static [Role] {
     })
 }
 
+/// The roles that make or judge media: their briefs carry the capability map
+/// (docs/hive-media.md §10) in place of the raw tools line. The makers are the roles with
+/// `generators`; the art director judges their work and needs to know what made it.
+pub const MEDIA_ROLES: [&str; 5] = ["image", "video", "audio", "edit", "art-director"];
+
+pub fn is_media(name: &str) -> bool {
+    MEDIA_ROLES.contains(&name)
+}
+
 pub fn role(name: &str) -> Option<&'static Role> {
     catalogue().iter().find(|r| r.name == name)
 }
@@ -167,5 +176,16 @@ mod tests {
     fn only_the_media_roles_get_the_generators() {
         let with: Vec<&str> = catalogue().iter().filter(|r| r.generators).map(|r| r.name.as_str()).collect();
         assert_eq!(with, vec!["image", "video", "audio", "edit"]);
+    }
+
+    #[test]
+    fn every_maker_is_a_media_role_and_every_media_role_ships() {
+        for r in catalogue().iter().filter(|r| r.generators) {
+            assert!(is_media(&r.name), "{} generates, so its brief needs the capability map", r.name);
+        }
+        for name in MEDIA_ROLES {
+            assert!(role(name).is_some(), "{name}");
+        }
+        assert!(!is_media("backend") && !is_media("code-reviewer"));
     }
 }

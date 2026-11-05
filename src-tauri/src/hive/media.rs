@@ -71,6 +71,9 @@ pub struct Route {
 #[serde(deny_unknown_fields)]
 pub struct CliProbe {
     pub bin: String,
+    /// How a brief names the program, when that isn't its binary (`magick` is ImageMagick).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub capabilities: Vec<String>,
 }
 
@@ -299,6 +302,7 @@ pub fn providers_for_skill(skill: &str) -> Vec<&'static Provider> {
 }
 
 pub mod install;
+pub mod map;
 pub mod status;
 pub mod verify;
 pub mod view;
