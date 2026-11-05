@@ -227,9 +227,10 @@ carries no ids: the panel decides no ticks. A server write reports itself when i
 the sheet fetches again.
 
 **One rule for what a setup ticks, the parent's.** The sheet reports what it started
-(`onstarted {provider_id, tab_id?, server_id?, ready_before}`: the install's tab once
-`hiveMediaInstall` answers, the server once it is added or reused, a local app at its Download, and
-the tools that were ready when the panel opened the sheet), the panel passes it up, and the Create
+(`onstarted {provider_id, tab_id?, server_id?, ready_before}`: every setup as soon as its sheet
+opens, with the tools that were ready then as its baseline; then
+the install's tab once `hiveMediaInstall` answers and the server once it is added or reused, to
+watch for their end; the first start's baseline wins), the panel passes it up, and the Create
 sheet and Hive settings each keep a `createSetupWatch` for their whole mount (`lib/hive/mediaWatch.ts`
 holds its listeners). It answers `hive-media-install-finished` only for those tab ids and
 `mcp-proxy-status` `connected` only for those servers, once each, so another window's install or an

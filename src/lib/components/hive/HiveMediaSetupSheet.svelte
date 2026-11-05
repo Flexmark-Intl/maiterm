@@ -139,6 +139,11 @@
         }
       });
     }
+    // Every setup starts when its sheet opens: the parent's watch gets the baseline before any Verify
+    // here can find the tool ready (a guide-only route the human sets up in a terminal, an app
+    // already running with no Download). The later tab and server reports add what to watch; the
+    // first start's baseline wins.
+    reportStarted?.({ provider_id: p.id, ready_before: readyBefore });
     if (speech) keep<HiveMediaModelStatus>('hive-media-model-progress', (m) => (model = m));
     if (action === 'app') window.addEventListener('focus', onWindowFocus);
   });

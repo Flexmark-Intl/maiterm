@@ -641,5 +641,34 @@ describe('createSetupWatch', () => {
     w.started({ provider_id: 'homebrew-kit', tab_id: 't1', ready_before: [] });
     expect(await setupTicks(w, () => Promise.reject(new Error('down')))).toEqual([]);
   });
+
+  it('a guide route started at the sheet opening ticks what its Verify finds ready', async () => {
+    const w = createSetupWatch();
+    // Remotion: no confirmed plugin source, so the sheet shows the guide; it reports its start on open.
+    w.started({ provider_id: 'remotion', ready_before: [] });
+    const rows = [row('compose', [['plugin:remotion@remotion', 'remotion', 'installed']])];
+    expect(await setupTicks(w, statusOf(rows))).toEqual([]);
+    // The human installs it in a terminal as the guide says, then presses Verify.
+    const ready = [row('compose', [['plugin:remotion@remotion', 'remotion', 'ready']])];
+    expect(await setupTicks(w, statusOf(ready))).toEqual(['plugin:remotion@remotion']);
+  });
+
+  it('a local app the human starts, then Verifies without Download, is ticked', async () => {
+    const w = createSetupWatch();
+    // The sheet opened with ComfyUI not running; no Download press, no tab, no server.
+    w.started({ provider_id: 'comfyui', ready_before: ['cli:ffmpeg'] });
+    const rows = [row('local', [['comfyui', 'comfyui', 'ready']]), row('finish', [['cli:ffmpeg', 'homebrew-kit', 'ready']])];
+    expect(await setupTicks(w, statusOf(rows))).toEqual(['comfyui']);
+  });
+
+  it('a sheet opened and closed with nothing new ready ticks nothing', async () => {
+    const w = createSetupWatch();
+    const before = readyToolIds(kitRows('missing'));
+    w.started({ provider_id: 'homebrew-kit', ready_before: before });
+    expect(await setupTicks(w, statusOf(kitRows('missing')))).toEqual([]);
+    // A later report (an install's tab) doesn't move the first start's baseline.
+    w.started({ provider_id: 'homebrew-kit', tab_id: 't1', ready_before: readyToolIds(kitRows('ready')) });
+    expect(await setupTicks(w, statusOf(kitRows('ready')))).toEqual(['cli:whisper-cli']);
+  });
 });
 
