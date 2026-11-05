@@ -135,7 +135,12 @@
     }
   });
 
+  // Only while open. The picker is mounted for the life of the window, and reading
+  // `visibleCandidates` here unconditionally kept `candidates` live while it was closed: a walk
+  // of every tab in the window (with a runtime and bridge lookup per tab) on every agent-state,
+  // tab or title change. At ~360 tabs that was the bulk of every hook event's cost (2026-11-05).
   $effect(() => {
+    if (!open) return;
     if (selectedIndex >= visibleCandidates.length) selectedIndex = Math.max(0, visibleCandidates.length - 1);
   });
 
