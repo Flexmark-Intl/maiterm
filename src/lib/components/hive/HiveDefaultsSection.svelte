@@ -85,10 +85,12 @@
   <p class="desc">The Make this a Hive wizard starts from these. Each Hive can still change them.</p>
   {#if saveError}<p class="error" role="alert">{saveError}</p>{/if}
 
-  <!-- Read-only (docs/hive-media.md §7). No workspace yet, so nothing is judged against one. -->
+  <!-- Read-only (docs/hive-media.md §7). No workspace yet, so nothing is judged against one.
+       Folded: open it is ~1300px tall and would push the defaults this page is for off the first
+       screen; the one-line summary stays, and the human opens it. -->
   <div class="block">
     <h4 class="label media-heading">What Hives can make on this Mac</h4>
-    <HiveMediaPanel workspaceId={null} startOpen={true} />
+    <HiveMediaPanel workspaceId={null} startOpen={false} />
   </div>
 
   <div class="block">
