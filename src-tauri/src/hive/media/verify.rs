@@ -155,10 +155,20 @@ impl Failure {
     }
 }
 
+/// A tool list that read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Listed {
+    pub tools: Vec<Value>,
+    /// The proxy holds an earlier refused call against this server (an agent's 401/403, or a
+    /// check's). Listing worked; whether calls do is for the check call to say, and a check that
+    /// succeeds clears it.
+    pub calls_refused: bool,
+}
+
 /// How Verify reaches a proxied server. The real one is the MCP proxy (`ProxyProbe`); tests stub it.
 pub trait Probe: Sync {
     /// Read the server's tool list now: the tools, or why not.
-    fn list(&self, id: &str) -> impl Future<Output = Result<Vec<Value>, Failure>> + Send;
+    fn list(&self, id: &str) -> impl Future<Output = Result<Listed, Failure>> + Send;
     /// Call one tool. Only `run_check` calls this, after the allowlist.
     fn call(&self, id: &str, tool: &str, args: Value) -> impl Future<Output = Result<Value, Failure>> + Send;
 }
@@ -168,13 +178,15 @@ pub trait Probe: Sync {
 pub struct ProxyProbe;
 
 impl Probe for ProxyProbe {
-    async fn list(&self, id: &str) -> Result<Vec<Value>, Failure> {
+    async fn list(&self, id: &str) -> Result<Listed, Failure> {
         let read = crate::mcp_proxy::refresh(id).await;
         let st = crate::mcp_proxy::status(id);
         match read {
-            // The list reads, but the server refuses calls: that is a sign-in, not readiness.
-            Ok(_) if st.state == "needs_sign_in" => Err(Failure { state: NEEDS_SIGN_IN.into(), http: None, rpc: None, detail: st.detail }),
-            Ok(_) => Ok(crate::mcp_proxy::get(id).and_then(|s| s.catalog).map(|c| c.tools).unwrap_or_default()),
+            // A good read reports `needs_sign_in` only while an earlier call stays refused.
+            Ok(_) => Ok(Listed {
+                tools: crate::mcp_proxy::get(id).and_then(|s| s.catalog).map(|c| c.tools).unwrap_or_default(),
+                calls_refused: st.state == "needs_sign_in",
+            }),
             Err(why) => {
                 let detail = if st.detail.is_empty() { why } else { st.detail };
                 let state = match st.state.as_str() {
@@ -320,18 +332,27 @@ pub fn pick_server<'a>(servers: &'a [ProxyInput], p: &Provider, workspace: Optio
 
 // ─── Into words ─────────────────────────────────────────────────────────────
 
-/// `text` holds `code` as a whole number, not inside a longer one.
-fn has_code(text: &str, code: &str) -> bool {
-    text.match_indices(code).any(|(i, _)| {
-        let before = text[..i].chars().next_back().is_none_or(|c| !c.is_ascii_digit());
-        let after = text[i + code.len()..].chars().next().is_none_or(|c| !c.is_ascii_digit());
-        before && after
+/// `text` states the HTTP status `code` as a status: a token of its own (no letter or digit on
+/// either side, so never inside a request id like `9c1e402f` or a name like `flux-v402`) that
+/// follows `HTTP`, `status`, `code` or `error` (`HTTP 402`, `"status": 402`, `error 402`), or
+/// comes before its reason phrase (`402 Payment Required`).
+fn has_code(text: &str, code: &str, reason: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.match_indices(code).any(|(i, _)| {
+        let (before, after) = (&t[..i], &t[i + code.len()..]);
+        let alone = before.chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric()) && after.chars().next().is_none_or(|c| !c.is_ascii_alphanumeric());
+        let lead = before.trim_end_matches([' ', ':', '"', '\'', '=']);
+        alone && (["http", "status", "status code", "status_code", "statuscode", "code", "error"].iter().any(|w| lead.ends_with(w)) || after.trim_start().starts_with(reason))
     })
+}
+
+fn says_402(text: &str) -> bool {
+    has_code(text, "402", "payment required")
 }
 
 fn says_no_credit(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
-    has_code(&t, "402")
+    says_402(&t)
         || ["payment required", "insufficient credit", "insufficient balance", "insufficient funds", "out of credit", "not enough credit", "no credits", "exhausted balance", "balance is too low"]
             .iter()
             .any(|w| t.contains(w))
@@ -339,7 +360,7 @@ fn says_no_credit(text: &str) -> bool {
 
 fn says_signed_out(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
-    has_code(&t, "401") || ["unauthorized", "unauthenticated", "invalid api key", "invalid token", "not signed in", "not logged in"].iter().any(|w| t.contains(w))
+    has_code(&t, "401", "unauthorized") || ["unauthorized", "unauthenticated", "invalid api key", "invalid token", "not signed in", "not logged in"].iter().any(|w| t.contains(w))
 }
 
 /// At most 160 characters of a server's own words.
@@ -370,8 +391,10 @@ fn needs_credit(p: &Provider, saw_402: bool) -> VerifyResult {
 /// A read or call that failed, `during` saying which ("listing its tools", "its balance check").
 pub fn failed(p: &Provider, f: &Failure, during: &str) -> VerifyResult {
     let name = &p.name;
-    if f.http == Some(402) || says_no_credit(&f.detail) {
-        return needs_credit(p, f.http == Some(402) || has_code(&f.detail, "402"));
+    // An HTTP status is the server's own answer: a 500 whose body happens to mention credit is
+    // still a 500. Words decide only where no status does (a JSON-RPC error).
+    if f.http == Some(402) || f.http.is_none() && says_no_credit(&f.detail) {
+        return needs_credit(p, f.http == Some(402) || says_402(&f.detail));
     }
     match f.state.as_str() {
         NEEDS_SIGN_IN => {
@@ -396,7 +419,7 @@ pub fn after_check(p: &Provider, count: usize, check: &CheckTool, answer: Result
         Ok(v) => {
             let text = result_text(&v);
             if says_no_credit(&text) {
-                needs_credit(p, has_code(&text, "402"))
+                needs_credit(p, says_402(&text))
             } else if says_signed_out(&text) {
                 VerifyResult::new(NEEDS_SIGN_IN, format!("{name} refused its {what}: sign in to {name} again."))
             } else {
@@ -420,8 +443,8 @@ pub async fn verify_mcp<P: Probe>(probe: &P, p: &Provider, s: &ProxyInput, works
     if let Some(stop) = gate(p, s, workspace, reach) {
         return stop;
     }
-    let tools = match probe.list(&s.id).await {
-        Ok(t) => t,
+    let Listed { tools, calls_refused } = match probe.list(&s.id).await {
+        Ok(l) => l,
         Err(f) => return failed(p, &f, "listing its tools"),
     };
     let count = tools.len();
@@ -429,6 +452,11 @@ pub async fn verify_mcp<P: Probe>(probe: &P, p: &Provider, s: &ProxyInput, works
         VerifyResult::new(ERROR, format!("{} answered, but lists no tools. Sign in again, or check \"{}\" in Preferences → MCP servers.", p.name, entry_name(&s.id)))
     } else {
         match plan_check(p, &tools) {
+            // Nothing to call that would show calls work again, so the earlier refusal stands.
+            None if calls_refused => VerifyResult::new(
+                NEEDS_SIGN_IN,
+                format!("{} lists its {count} tools but refused a tool call: sign in to {} again.", p.name, p.name),
+            ),
             None => VerifyResult::new(READY, format!("{} is ready: {count} tools.", p.name)),
             Some((check, args)) => match run_check(probe, p, &s.id, check.name, args).await {
                 Ok(answer) => after_check(p, count, check, answer),

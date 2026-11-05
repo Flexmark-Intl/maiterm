@@ -9,6 +9,8 @@ const FAL: &str = "https://mcp.fal.ai/mcp-relay";
 /// A stub upstream: answers a list and (optionally) a call as told, and records every call.
 struct Stub {
     list: Result<Vec<Value>, Failure>,
+    /// An earlier refused call is on record (`Listed.calls_refused`).
+    refused: bool,
     call: Option<Result<Value, Failure>>,
     lists: Mutex<usize>,
     calls: Mutex<Vec<(String, Value)>>,
@@ -16,7 +18,7 @@ struct Stub {
 
 impl Stub {
     fn new(list: Result<Vec<Value>, Failure>, call: Option<Result<Value, Failure>>) -> Self {
-        Self { list, call, lists: Mutex::new(0), calls: Mutex::new(Vec::new()) }
+        Self { list, refused: false, call, lists: Mutex::new(0), calls: Mutex::new(Vec::new()) }
     }
     fn called(&self) -> Vec<String> {
         self.calls.lock().iter().map(|(n, _)| n.clone()).collect()
@@ -24,9 +26,9 @@ impl Stub {
 }
 
 impl Probe for Stub {
-    async fn list(&self, _id: &str) -> Result<Vec<Value>, Failure> {
+    async fn list(&self, _id: &str) -> Result<Listed, Failure> {
         *self.lists.lock() += 1;
-        self.list.clone()
+        self.list.clone().map(|tools| Listed { tools, calls_refused: self.refused })
     }
     async fn call(&self, _id: &str, tool: &str, args: Value) -> Result<Value, Failure> {
         self.calls.lock().push((tool.to_string(), args));
@@ -171,10 +173,71 @@ fn the_billing_link_is_only_ever_http() {
 }
 
 #[test]
-fn a_code_counts_only_as_a_whole_number() {
-    assert!(says_no_credit("HTTP 402"));
-    assert!(!says_no_credit("listed 4021 models"));
+fn a_code_counts_only_as_a_status_not_inside_an_id_or_a_name() {
+    for yes in ["HTTP 402", "fal API error 402: Payment Required", "402 Payment Required", "{\"status\": 402}", "status code 402"] {
+        assert!(says_no_credit(yes), "{yes}");
+    }
+    for no in [
+        "listed 4021 models",
+        "HTTP 500: internal error (request id 9c1e402f-77ab-4c1d-b0e2-3a5d1f8e6b21)",
+        "error -32603: upstream failed, trace d1e402ff",
+        "Endpoint fal-ai/flux-v402 not found",
+        "request 17-402-88 failed",
+    ] {
+        assert!(!says_no_credit(no), "{no}");
+    }
+    assert!(says_signed_out("HTTP 401"));
     assert!(!says_signed_out("job 14012 done"));
+    assert!(!says_signed_out("job a401bc failed"));
+}
+
+#[tokio::test]
+async fn an_unrelated_error_keeps_its_own_state_whatever_ids_it_carries() {
+    // A 5xx whose body holds a request id with "402" in it is a 5xx.
+    let body = "internal error (request id 9c1e402f-77ab-4c1d-b0e2-3a5d1f8e6b21)";
+    let stub = Stub::new(Ok(fal_tools()), Some(Err(http(500, body))));
+    let r = verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await;
+    assert_eq!((r.state.as_str(), r.link.as_deref()), (UNREACHABLE, None), "{}", r.message);
+    let stub = Stub::new(Err(http(503, body)), None);
+    assert_eq!(verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await.state, UNREACHABLE);
+    // A 5xx that mentions credit is still the 5xx it says it is.
+    let stub = Stub::new(Ok(fal_tools()), Some(Err(http(500, "billing service down: insufficient balance check failed"))));
+    assert_eq!(verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await.state, UNREACHABLE);
+    // A JSON-RPC error with a hex trace id.
+    let rpc = Failure::from_up(&UpErr::Rpc { code: -32603, message: "upstream failed, trace d1e402ff".into(), data: None });
+    let stub = Stub::new(Ok(fal_tools()), Some(Err(rpc)));
+    assert_eq!(verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await.state, ERROR);
+    // Tool error texts holding a hex id or a model name with the digits in it.
+    for text in ["Job a401bc0e failed", "Endpoint fal-ai/flux-v402 not found", "trace 7e402a: try later"] {
+        let stub = Stub::new(Ok(fal_tools()), Some(Ok(error_result(text))));
+        let r = verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await;
+        assert_eq!((r.state.as_str(), r.link.as_deref()), (ERROR, None), "{text}: {}", r.message);
+    }
+}
+
+// ─── An earlier refused call ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_list_that_reads_while_a_call_was_refused_lets_the_check_decide() {
+    // An agent's call was refused earlier; the human fixed the account. The list reads, the free
+    // check answers: ready (and the real proxy's call_once clears the refusal).
+    let mut stub = Stub::new(Ok(fal_tools()), Some(Ok(ok_result("{\"prices\": []}"))));
+    stub.refused = true;
+    let r = verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await;
+    assert_eq!((r.state.as_str(), r.tool_count), (READY, Some(3)), "{}", r.message);
+    assert_eq!(stub.called(), vec!["get_pricing"]);
+    // Still refused: the check says so, about the call, not the list.
+    let mut stub = Stub::new(Ok(fal_tools()), Some(Err(Failure::from_up(&UpErr::Forbidden { challenge: None }))));
+    stub.refused = true;
+    let r = verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await;
+    assert_eq!((r.state.as_str(), r.tool_count), (NEEDS_SIGN_IN, Some(3)));
+    assert!(!r.message.contains("listing"), "{}", r.message);
+    // No check tool to try: the refusal stands, in words about tool calls, with the count kept.
+    let mut stub = Stub::new(Ok(vec![json!({ "name": "text_to_speech" })]), None);
+    stub.refused = true;
+    let r = verify_mcp(&stub, provider("elevenlabs").unwrap(), &server("elevenlabs", "https://api.elevenlabs.io/v1/mcp"), None, &reach_ok("elevenlabs")).await;
+    assert_eq!((r.state.as_str(), r.tool_count), (NEEDS_SIGN_IN, Some(1)));
+    assert_eq!(r.message, "ElevenLabs lists its 1 tools but refused a tool call: sign in to ElevenLabs again.");
 }
 
 // ─── Reaching agents ────────────────────────────────────────────────────────
