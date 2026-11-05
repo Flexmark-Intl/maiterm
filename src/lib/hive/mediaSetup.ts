@@ -51,14 +51,34 @@ export function canVerify(p: Pick<HiveMediaProvider, 'route_kind'>): boolean {
 export function guideFor(p: Pick<HiveMediaProvider, 'name' | 'route_kind' | 'guide'>, action: SetupAction): { steps: string[]; lead: string | null } {
   if (action === 'guide' && p.route_kind === 'plugin') {
     return {
-      steps: [],
-      lead: `maiTerm can't install ${p.name} yet: no source for its Claude Code plugin is confirmed. If you have one, add it in a terminal with “claude plugin marketplace add”, install the plugin, then press Verify.`,
+      steps: [`Install ${p.name}'s Claude Code plugin yourself, in a terminal.`, 'Come back and press Verify.'],
+      lead: `${p.name} can't be installed from here yet.`,
     };
   }
   if (action === 'guide' && p.route_kind === 'brew') {
     return { steps: [], lead: `maiTerm can't run this Homebrew install. Install it in a terminal yourself, then press Verify.` };
   }
   return { steps: p.guide, lead: action === 'guide' ? `maiTerm can't set ${p.name} up for you: the steps are yours. Press Verify when they're done.` : null };
+}
+
+/** Whether Verify is the sheet's primary button: when it is the only way forward. A guide-only
+ *  route or a local app (the human does the setup elsewhere), an install that has started (running
+ *  or finished), and a browser sign-in that has opened (from then on "Sign in again" is secondary,
+ *  also after Verify answered, e.g. "Needs credit"). Otherwise the route's own action is the primary
+ *  and Verify is secondary. */
+export function verifyIsPrimary(action: SetupAction, s: { installStarted: boolean; signInOpened: boolean }): boolean {
+  if (action === 'guide' || action === 'app') return true;
+  if (action === 'install') return s.installStarted;
+  if (action === 'mcp_oauth') return s.signInOpened;
+  return false;
+}
+
+/** The speech model's download as a fraction for a progress bar: null unless it is downloading and
+ *  its size is known. */
+export function speechModelProgress(m: Pick<HiveMediaModelStatus, 'state' | 'done' | 'total'>): { done: number; total: number; percent: number } | null {
+  if (m.state !== 'downloading' || !m.total || m.total <= 0) return null;
+  const done = Math.min(Math.max(m.done, 0), m.total);
+  return { done, total: m.total, percent: Math.round((done / m.total) * 100) };
 }
 
 /** A Homebrew route that brings whisper.cpp: maiTerm downloads its speech model after it. */

@@ -4,7 +4,7 @@ import type { McpServerView } from '$lib/tauri/commands';
 vi.mock('@tauri-apps/plugin-shell', () => ({ open: vi.fn() }));
 vi.mock('$lib/tauri/commands', () => ({ mcpServerSignIn: vi.fn() }));
 
-const { bringsSpeechModel, canVerify, guideFor, installEndLine, newServerScope, reusedServerScope, scopeSentence, serverPlan, setupAction, speechModelLine, verifyView } = await import('./mediaSetup');
+const { bringsSpeechModel, canVerify, guideFor, installEndLine, newServerScope, reusedServerScope, scopeSentence, serverPlan, setupAction, speechModelLine, speechModelProgress, verifyIsPrimary, verifyView } = await import('./mediaSetup');
 
 const route = (route_kind: string, auth = 'none', route_url = '', installable = false) => ({ route_kind, auth, route_url, installable });
 
@@ -36,8 +36,10 @@ describe('setupAction', () => {
   it('never shows a guide that promises an install maiTerm will refuse', () => {
     const remotion = { name: 'Remotion', route_kind: 'plugin', guide: ['maiTerm opens a tab and installs the Remotion plugin for Claude Code.'] };
     const g = guideFor(remotion, 'guide');
-    expect(g.steps).toEqual([]);
-    expect(g.lead).toContain("can't install Remotion yet");
+    expect(g).toEqual({
+      lead: "Remotion can't be installed from here yet.",
+      steps: ["Install Remotion's Claude Code plugin yourself, in a terminal.", 'Come back and press Verify.'],
+    });
     expect(guideFor(remotion, 'install')).toEqual({ steps: remotion.guide, lead: null });
     const minimax = { name: 'MiniMax', route_kind: 'manual', guide: ['Make a MiniMax account and an API key.'] };
     expect(guideFor(minimax, 'guide').steps).toEqual(minimax.guide);
@@ -116,5 +118,23 @@ describe('installEndLine and speechModelLine', () => {
     expect(speechModelLine({ state: 'downloading', done: 50_000_000, total: 147_964_211, error: null })).toEqual({ text: 'Downloading the speech model: 50 MB of 148 MB', retry: false, busy: true });
     expect(speechModelLine({ state: 'failed', done: 0, total: null, error: 'the hash did not match' })).toMatchObject({ retry: true, text: "The speech model didn't download: the hash did not match" });
     expect(speechModelLine({ state: 'ready', done: 1, total: 1, error: null }).retry).toBe(false);
+  });
+});
+
+describe('verifyIsPrimary and speechModelProgress', () => {
+  it('makes Verify the primary only when it is the way forward', () => {
+    const idle = { installStarted: false, signInOpened: false };
+    expect(verifyIsPrimary('guide', idle)).toBe(true);
+    expect(verifyIsPrimary('app', idle)).toBe(true);
+    expect(verifyIsPrimary('install', idle)).toBe(false);
+    expect(verifyIsPrimary('install', { ...idle, installStarted: true })).toBe(true);
+    expect(verifyIsPrimary('mcp_oauth', idle)).toBe(false);
+    expect(verifyIsPrimary('mcp_oauth', { ...idle, signInOpened: true })).toBe(true);
+    expect(verifyIsPrimary('mcp_token', idle)).toBe(false);
+  });
+  it('gives a bar only for a download of known size', () => {
+    expect(speechModelProgress({ state: 'downloading', done: 74_000_000, total: 148_000_000 })).toEqual({ done: 74_000_000, total: 148_000_000, percent: 50 });
+    expect(speechModelProgress({ state: 'downloading', done: 5, total: null })).toBeNull();
+    expect(speechModelProgress({ state: 'ready', done: 1, total: 1 })).toBeNull();
   });
 });

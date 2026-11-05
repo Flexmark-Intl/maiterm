@@ -36,7 +36,7 @@
   import { externalUrl, unverifiedNote } from '$lib/hive/media';
   import { startSignIn } from '$lib/mcp/addServer';
   import {
-    bringsSpeechModel, canVerify, guideFor, installEndLine, newServerScope, reusedServerScope, scopeSentence, serverPlan, setupAction, speechModelLine, verifyView,
+    bringsSpeechModel, canVerify, guideFor, installEndLine, speechModelProgress, verifyIsPrimary, newServerScope, reusedServerScope, scopeSentence, serverPlan, setupAction, speechModelLine, verifyView,
     type ScopeChoice, type SetupAction, type VerifyView,
   } from '$lib/hive/mediaSetup';
 
@@ -106,6 +106,10 @@
   const reused = $derived(plan && 'reuse' in plan ? plan.reuse : null);
   const hiveCount = $derived(hiveWorkspaces.length);
   const modelLine = $derived(model ? speechModelLine(model) : null);
+  const modelProgress = $derived(model ? speechModelProgress(model) : null);
+  /** A sign-in has opened for the server this sheet added or reused (it may since have finished). */
+  const signInOpened = $derived(waitingForSignIn || serverId !== null);
+  const verifyPrimary = $derived(verifyIsPrimary(action, { installStarted: started !== null, signInOpened }));
   const signupUrl = externalUrl(p.signup_url);
   const billingUrl = externalUrl(p.billing_url);
   const appUrl = setupAction(p) === 'app' ? externalUrl(url) : null;
@@ -544,6 +548,7 @@
     {#if p.creditsLine}<p class="credits">{p.creditsLine}</p>{/if}
     {#if unverified}<p class="unv">{unverified}</p>{/if}
 
+    {#if action === 'guide' && guide.lead}<p class="lead">{guide.lead}</p>{/if}
     {#if guide.steps.length}
       <ol class="guide">
         {#each guide.steps as step, i (i)}<li>{step}</li>{/each}
@@ -583,7 +588,7 @@
 
       {#if action === 'mcp_oauth'}
         <div class="row">
-          <Button variant="primary" aria-disabled={busy} onclick={signInFlow}>{busy ? 'Working…' : serverId ? 'Sign in again' : reused?.status.state === 'connected' ? 'Use it' : 'Sign in'}</Button>
+          <Button variant={signInOpened ? 'secondary' : 'primary'} aria-disabled={busy} onclick={signInFlow}>{busy ? 'Working…' : serverId ? 'Sign in again' : reused?.status.state === 'connected' ? 'Use it' : 'Sign in'}</Button>
         </div>
       {:else if action === 'mcp_open'}
         <div class="row"><Button variant="primary" aria-disabled={busy} onclick={addOpen}>{busy ? 'Working…' : reused ? 'Use it' : `Add ${p.name}`}</Button></div>
@@ -606,27 +611,30 @@
           </p>
           {#if ws}<button type="button" class="link" onclick={showTab}>Show the tab</button>{:else}<p class="dim">It’s in your maiTerm window.</p>{/if}
           {#if endLine}
-            <p class="dim" role="status">{endLine}</p>
+            <p class="state-line" role="status">{endLine}</p>
             {#if result?.tone !== 'ok'}<div class="row"><Button variant="secondary" aria-disabled={busy} onclick={install}>Run it again</Button></div>{/if}
           {/if}
           {#if !started.watches_exit && !endLine}
-            <p class="dim">maiTerm can’t see this shell finish. Press Re-detect when it’s done.</p>
+            <p class="state-line">maiTerm can’t see this shell finish. Press Re-detect when it’s done.</p>
           {/if}
         {:else}
           <div class="row"><Button variant="primary" aria-disabled={busy} onclick={install}>{busy ? 'Opening a tab…' : `Install ${p.name}`}</Button></div>
           <p class="dim">It runs in a terminal tab you can watch{ws ? ', outside this Hive' : ''}.</p>
         {/if}
         {#if modelLine}
-          <div class="row" role="status">
-            <span class="dim" class:bad={modelLine.retry}>{modelLine.text}</span>
-            {#if modelLine.retry}<button type="button" class="link" onclick={retryModel}>Try again</button>{/if}
+          <div class="model" role="status">
+            <span class="state-line model-text" class:bad={modelLine.retry}>{modelLine.text}</span>
+            {#if modelProgress}
+              <span class="bar" role="progressbar" aria-label="Speech model download" aria-valuemin={0} aria-valuemax={modelProgress.total} aria-valuenow={modelProgress.done}>
+                <span class="fill" style:width="{modelProgress.percent}%"></span>
+              </span>
+            {/if}
+            {#if modelLine.retry}<button type="button" class="link try" onclick={retryModel}>Try again</button>{/if}
           </div>
         {/if}
       {:else if action === 'app'}
         {#if appUrl}<div class="row"><Button variant="primary" onclick={downloadApp}>Download {p.name}</Button></div>{/if}
-        <p class="dim">maiTerm checks again when you come back to this window.</p>
-      {:else if guide.lead}
-        <p class="dim">{guide.lead}</p>
+        <p class="state-line">maiTerm checks again when you come back to this window.</p>
       {/if}
     </div>
 
@@ -638,13 +646,13 @@
       <div class="result" role="status">
         <span class="state {result.tone}">{result.label}</span>
         <span class="msg">{result.message}</span>
-        {#if result.link}<button type="button" class="link" onclick={() => open(result?.link ?? null)}>{result.linkLabel}</button>{/if}
+        {#if result.link}<div class="result-act"><Button variant="secondary" onclick={() => open(result?.link ?? null)}>{result.linkLabel}</Button></div>{/if}
       </div>
     {/if}
 
     <div class="foot">
       {#if canVerify(p)}
-        <Button variant="ghost" aria-disabled={verifying} onclick={() => { if (!verifying) void runVerify(); }}>
+        <Button variant={verifyPrimary ? 'primary' : 'secondary'} aria-disabled={verifying} onclick={() => { if (!verifying) void runVerify(); }}>
           {verifying ? 'Checking…' : action === 'install' && started && !started.watches_exit ? 'Re-detect' : 'Verify'}
         </Button>
       {/if}
@@ -658,6 +666,8 @@
   .sheet { box-sizing: border-box; display: flex; flex-direction: column; gap: 8px; width: min(480px, 100%); min-width: 0; padding: 14px 16px; background: var(--bg-medium); color: var(--fg); border: 1px solid var(--bg-light); border-radius: 8px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4); }
   .sheet:focus { outline: none; }
   .sheet :global(.btn[aria-disabled='true']) { opacity: 0.5; cursor: default; }
+  /* A secondary button here is an action to read, not a hint: Verify, Run it again, the key page. */
+  .sheet :global(.btn.secondary) { color: var(--fg); }
   .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; min-width: 0; }
   h3 { margin: 0; font-size: 1.077rem; font-weight: 600; overflow-wrap: anywhere; }
   .for { flex: 1; font-size: 0.846rem; color: var(--fg-dim); overflow-wrap: anywhere; }
@@ -671,6 +681,14 @@
   .links, .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; min-width: 0; }
   .act { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid var(--bg-light); min-width: 0; }
   .dim { font-size: 0.846rem; color: var(--fg-dim); }
+  .state-line { font-size: 0.846rem; color: var(--fg); overflow-wrap: anywhere; }
+  .lead { font-size: 0.923rem; color: var(--fg); }
+  .model { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .model-text { flex: 1 1 auto; min-width: 0; }
+  .bar { flex: 0 0 72px; height: 4px; border-radius: 2px; background: var(--bg-light); overflow: hidden; }
+  .fill { display: block; height: 100%; background: var(--accent); }
+  .try { flex: none; }
+  .result-act { flex-basis: 100%; display: flex; }
   .url, code { font-family: var(--font-mono, monospace); font-size: 0.808rem; overflow-wrap: anywhere; }
   .running { font-size: 0.923rem; }
   .running code { color: var(--fg); background: var(--bg-dark); padding: 1px 4px; border-radius: 3px; }
