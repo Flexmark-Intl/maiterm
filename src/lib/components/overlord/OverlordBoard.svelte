@@ -127,6 +127,12 @@
    *  telemetry; the per-agent view is the Loom's Focus (docs/loom.md). */
   const fleet = $derived.by<FleetUnit[]>(() => {
     void now;
+    // Nothing while the deck isn't on screen. The board tab stays mounted for the life of the
+    // window (the portal pattern), and this walks every supervised tab and reads each one's
+    // agent state, so it re-ran on every hook event of every agent: two passes over ~270
+    // tabs per tool call, unseen, in a window of ~360 tabs (2026-11-05). Showing the deck
+    // computes it once.
+    if (!visible) return [];
     const units: FleetUnit[] = [];
     for (const ws of boardWorkspaces) {
       if (ws.suspended) continue;
@@ -158,6 +164,7 @@
    */
   const supervisorBlocked = $derived.by<FleetUnit | null>(() => {
     void now;
+    if (!visible) return null; // see `fleet`
     const ws = workspacesStore.workspaces.find((w) => w.overlord);
     if (!ws) return null;
     for (const pane of ws.panes) {
