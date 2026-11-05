@@ -211,11 +211,12 @@ fn remove_stored(p: &Path) -> std::io::Result<()> {
 }
 
 /// Gives every row without a purpose `guess_purpose`'s: the assets filed before purposes, once,
-/// and any an older build filed since. A failure leaves them deliverables, which they read as.
+/// and any an older build filed since. The human's own drops are deliverables, never guessed.
+/// A failure leaves them deliverables, which they read as.
 fn guess_unset_purposes(conn: &Connection, gallery_dir: &Path) {
-    let rows: Vec<(String, String, String, String)> = match conn
-        .prepare("SELECT id, file, title, source_path FROM assets WHERE purpose = ''")
-        .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect())
+    let rows: Vec<(String, String, String, String, String)> = match conn
+        .prepare("SELECT id, file, title, source_path, made_by_kind FROM assets WHERE purpose = ''")
+        .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?.collect())
     {
         Ok(r) => r,
         Err(e) => return log::warn!("gallery {}: purposes not guessed: {e}", gallery_dir.display()),
@@ -224,8 +225,8 @@ fn guess_unset_purposes(conn: &Connection, gallery_dir: &Path) {
         return;
     }
     let mut proof = 0;
-    for (id, file, title, source) in &rows {
-        let p = guess_purpose(file, title, source);
+    for (id, file, title, source, by) in &rows {
+        let p = if by == BY_HUMAN { PURPOSE_DELIVERABLE } else { guess_purpose(file, title, source) };
         proof += usize::from(p == PURPOSE_PROOF);
         if let Err(e) = conn.execute("UPDATE assets SET purpose = ?2 WHERE id = ?1 AND purpose = ''", params![id, p]) {
             return log::warn!("gallery {}: purposes not guessed: {e}", gallery_dir.display());
@@ -982,11 +983,17 @@ mod tests {
 
         // Rows filed before purposes (or by an older build) have none: a deliverable until the
         // next open guesses them, and a purpose already set is never re-guessed.
-        s.g.conn.lock().execute("UPDATE assets SET purpose = '' WHERE id IN (?1, ?2)", params![notes.id, render.id]).unwrap();
-        assert_eq!(by(PURPOSE_DELIVERABLE).len(), 4);
+        let mut mine = new("Screenshot 2026-11-05 at 11.23.05", None);
+        mine.made_by = MadeBy::human();
+        mine.purpose = PURPOSE_DELIVERABLE.into();
+        fs::write(s.g.files_dir().join(&mine.file), b"png").unwrap();
+        let mine = s.g.insert_asset(mine).unwrap();
+        s.g.conn.lock().execute("UPDATE assets SET purpose = '' WHERE id IN (?1, ?2, ?3)", params![notes.id, render.id, mine.id]).unwrap();
+        assert_eq!(by(PURPOSE_DELIVERABLE).len(), 5);
         let g = Gallery::open(&s.base.join("gallery")).unwrap();
         let p = |id: &str| g.get(id).unwrap().unwrap().purpose;
         assert_eq!((p(&notes.id), p(&render.id), p(&shot.id)), (PURPOSE_PROOF.to_string(), PURPOSE_DELIVERABLE.to_string(), PURPOSE_DELIVERABLE.to_string()));
+        assert_eq!(p(&mine.id), PURPOSE_DELIVERABLE, "a human's drop is never guessed proof, whatever its name");
     }
 
     #[test]

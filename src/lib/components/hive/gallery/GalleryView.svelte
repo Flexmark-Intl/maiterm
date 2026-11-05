@@ -860,6 +860,13 @@
       <div class="empty">
         {#if isFiltered(ui.query) || ui.query.kind}
           <b>Nothing matches</b><span>Clear a filter or the search to see more.</span>
+        {:else if ui.query.purpose}
+          <!-- Only one side of the purpose switch is empty: the gallery may hold the other. -->
+          <b>{ui.query.purpose === 'proof' ? 'No proof filed' : 'Nothing made for you yet'}</b>
+          <span>{ui.query.purpose === 'proof'
+            ? 'Screenshots of the workers\u2019 app, test reports and notes land here.'
+            : 'What the workers make for you lands here. Their screenshots, reports and notes are under Proof.'}</span>
+          <button type="button" class="show-all" onmousedown={noFocus} onclick={() => hiveGallery.setQuery(workspaceId, { purpose: '' })}>Show everything</button>
         {:else}
           <b>Nothing filed yet</b>
           <span>What the agents make lands here as they file it, newest first. Drop files here to add your own references.</span>
@@ -963,6 +970,9 @@
   /* For you / Proof / All: which assets, before which kind; ruled off from the kind tabs. */
   .purposes { padding-right: 8px; border-right: 1px solid var(--bg-light); }
   .purposes button.on { font-weight: 600; }
+  .show-all { margin-top: 6px; padding: 3px 10px; border: 1px solid var(--bg-light); border-radius: 4px; background: none; color: var(--fg); font: inherit; font-size: 12px; cursor: pointer; }
+  .show-all:hover { border-color: var(--fg-dim); }
+  .show-all:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .search { flex: 1 1 180px; min-width: 120px; height: 24px; box-sizing: border-box; background: var(--bg-medium); border: 1px solid var(--bg-light); border-radius: 6px; color: var(--fg); font: inherit; font-size: 12px; padding: 0 8px; }
   .search:focus { outline: none; border-color: var(--accent); }
   .view { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
