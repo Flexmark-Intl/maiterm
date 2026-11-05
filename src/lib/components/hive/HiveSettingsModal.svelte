@@ -5,9 +5,13 @@
    *  and the same explicit rAF focus (Svelte's `autofocus` is not focus). */
   import type { Hive } from '$lib/tauri/types';
   import { fixedRows, folderLines } from '$lib/hive/settings';
+  import { shouldStartOpen } from '$lib/hive/media';
+  import HiveMediaPanel from './HiveMediaPanel.svelte';
 
   interface Props {
     hive: Hive;
+    /** The Hive's workspace: the media panel judges MCP server scope against it (`Hive.id` is not it). */
+    workspaceId: string;
     name: string;
     onclose: () => void;
     onworkers: () => void;
@@ -16,7 +20,7 @@
     onbudget: () => void;
   }
 
-  let { hive, name, onclose, onworkers, onautonomy, onqueue, onbudget }: Props = $props();
+  let { hive, workspaceId, name, onclose, onworkers, onautonomy, onqueue, onbudget }: Props = $props();
   let panelEl = $state<HTMLDivElement | null>(null);
 
   $effect(() => {
@@ -26,6 +30,9 @@
 
   const rows = $derived(fixedRows(hive, name));
   const folders = $derived(folderLines(hive));
+  /** Handed to the panel, which reads it once when it mounts (so the human's fold wins after that);
+   *  the panel is keyed by workspace below, so a different Hive mounts it afresh with its own value. */
+  const mediaStartOpen = $derived(shouldStartOpen(hive.goal, hive.folders));
 
   /** Each editable section replaces this sheet. */
   function go(open: () => void) {
@@ -72,6 +79,17 @@
             <dd>{r.value}{#if r.note}<span class="why">{r.note}</span>{/if}</dd>
           {/each}
         </dl>
+      </section>
+
+      <section>
+        <h4>Tools</h4>
+        {#key workspaceId}
+          <HiveMediaPanel {workspaceId} startOpen={mediaStartOpen} />
+        {/key}
+        <p class="tools-line">
+          <span class="why">Workers get:</span>
+          {hive.tools.length ? hive.tools.join(', ') : 'no tools'}
+        </p>
       </section>
 
       <section>
@@ -141,6 +159,7 @@
   ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 4px; }
   li { color: var(--fg); font-size: 0.8rem; display: flex; flex-direction: column; gap: 1px; overflow-wrap: anywhere; }
   code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.75rem; color: var(--fg-dim); overflow-wrap: anywhere; }
+  .tools-line { margin: 0; color: var(--fg); font-size: 0.8rem; line-height: 1.4; overflow-wrap: anywhere; }
   .who { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 6px; }
   .instr { margin: 0; font-family: inherit; font-size: 0.8rem; color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12em; overflow-y: auto; }
   .footer { align-items: center; border-top: 1px solid var(--bg-light); display: flex; justify-content: flex-end; padding: 10px 14px; }

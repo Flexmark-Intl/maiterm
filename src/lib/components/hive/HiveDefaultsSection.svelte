@@ -13,6 +13,7 @@
   import { isSetupOnly, pickerTools } from '$lib/hive/media';
   import { MAX_INSTRUCTIONS, charCount } from '$lib/hive/model';
   import HiveToolPicker from './HiveToolPicker.svelte';
+  import HiveMediaPanel from './HiveMediaPanel.svelte';
 
   const d = $derived(preferencesStore.hiveDefaults);
   /** What the wizard will show: an unset field reads as its built-in. */
@@ -84,6 +85,14 @@
   <h3 class="heading">Defaults for new Hives</h3>
   <p class="desc">The Make this a Hive wizard starts from these. Each Hive can still change them.</p>
   {#if saveError}<p class="error" role="alert">{saveError}</p>{/if}
+
+  <!-- Read-only (docs/hive-media.md §7). No workspace yet, so nothing is judged against one.
+       Folded: open it is ~1300px tall and would push the defaults this page is for off the first
+       screen; the one-line summary stays, and the human opens it. -->
+  <div class="block">
+    <p class="hint media-note">On this Mac, for any Hive</p>
+    <HiveMediaPanel workspaceId={null} startOpen={false} />
+  </div>
 
   <div class="block">
     <div class="copy">
@@ -206,6 +215,7 @@
   .row { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
   .copy { min-width: 0; flex: 1; }
   .label { font-size: 1rem; color: var(--fg); }
+  .media-note { margin: 0; }
   .hint { font-size: 0.846rem; color: var(--fg-dim); line-height: 1.5; margin: 3px 0 0; overflow-wrap: anywhere; max-width: 62ch; }
   .error { margin: 0; font-size: 0.923rem; color: var(--red, #f7768e); overflow-wrap: anywhere; }
   .count { align-self: flex-end; font-variant-numeric: tabular-nums; margin: 0; }

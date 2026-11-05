@@ -4676,13 +4676,27 @@ several releases a day).
    (`PauseCause::Account`), and a running worker goes `failed` with that reason: nothing can burn a
    spawn on the dead account until the human resumes. The Create sheet warns, without blocking,
    when `claude auth status --json` for the account the agents will run under answers
-   `loggedIn: false` (a token or key it can't vouch for warns nothing). *Delete:* the memory folder
+   `loggedIn: false` (a token or key it can't vouch for warns nothing). *A quiet worker*
+   (2026-11-05, `hive/quiet.rs`): the coordinator wakes only when maiTerm types into it, so a worker
+   that ended its turn waiting for something that never came stalled the whole Hive (a reviewer
+   and its coordinator sat 19 h). A worker's Stop or SessionStart arms a 10-minute check that any
+   later activity event cancels (`Notification` doesn't count: Claude's idle nudge follows every
+   Stop). It tells the coordinator once per quiet spell, quoting `last_assistant_message`. It only
+   tells when the worker is still `running`, its task has no blocker (a question keeps a worker
+   `running`, and a nudge would invite the coordinator to decide what is the human's), no run of
+   its own is open or has a result on its way, and no prompt of its is routed. A paused Hive defers
+   the check rather than ending it. A Stop whose `background_tasks` or `session_crons` aren't empty
+   doesn't arm it, because the session wakes itself. Memory only: after a restart the relaunch's
+   SessionStart arms it again. *Delete:* the memory folder
    is work and stays in place under the Hive's folder unless its own box is ticked, and the sheet
    lists what goes (the decision log, run history, this Hive's precedents, the other logs, launch
    records, the coordinator's home). *Header:* Pause (`hive_pause`, `Hive.paused_by = "human"`; no
    worker starts or relaunches, running agents finish, the coordinator is told; every Hive delivery
    to its agents is held in memory until Resume (`deliver::end_pause_hold`), all but the pause notice
-   itself, and the resume notice goes first; a usage-limit or account pause holds nothing, so its
+   itself, and the resume notice goes first. A worker's run results are the exception: they stay
+   on disk in its `pending_runs` while paused and go out at Resume (`run::deliver_after_resume`),
+   because a restart while paused drops what memory held (2026-11-04: a reviewer never got its
+   `cargo test` result and sat idle 19 h); a usage-limit or account pause holds nothing, so its
    notices still reach the coordinator. A second pause cause doesn't relabel an open account pause)
    beside Resume, and Settings: the autonomy, run queue and
    budget sheets, and read-only what was fixed at Create. `Hive.paused_by` (String) words the
