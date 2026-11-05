@@ -334,14 +334,17 @@ pub fn pick_server<'a>(servers: &'a [ProxyInput], p: &Provider, workspace: Optio
 
 /// `text` states the HTTP status `code` as a status: a token of its own (no letter or digit on
 /// either side, so never inside a request id like `9c1e402f` or a name like `flux-v402`) that
-/// follows `HTTP`, `status`, `code` or `error` (`HTTP 402`, `"status": 402`, `error 402`), or
-/// comes before its reason phrase (`402 Payment Required`).
+/// follows `HTTP` (with or without a version: `HTTP/1.1 402`, `HTTP/2 402`), `status`, `code` or
+/// `error` (`"status": 402`, `error 402`), or comes before its reason phrase (`402 Payment Required`).
 fn has_code(text: &str, code: &str, reason: &str) -> bool {
     let t = text.to_ascii_lowercase();
     t.match_indices(code).any(|(i, _)| {
         let (before, after) = (&t[..i], &t[i + code.len()..]);
         let alone = before.chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric()) && after.chars().next().is_none_or(|c| !c.is_ascii_alphanumeric());
         let lead = before.trim_end_matches([' ', ':', '"', '\'', '=']);
+        // `http/1.1` and `http/2` are `http`.
+        let lead = lead.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+        let lead = lead.strip_suffix("http/").map_or(lead, |rest| &lead[..rest.len() + 4]);
         alone && (["http", "status", "status code", "status_code", "statuscode", "code", "error"].iter().any(|w| lead.ends_with(w)) || after.trim_start().starts_with(reason))
     })
 }
@@ -415,7 +418,7 @@ fn result_text(v: &Value) -> String {
 pub fn after_check(p: &Provider, count: usize, check: &CheckTool, answer: Result<Value, Failure>) -> VerifyResult {
     let (name, what) = (&p.name, check.what);
     match answer {
-        Ok(v) if v.get("isError").and_then(Value::as_bool) != Some(true) => VerifyResult::new(READY, format!("{name} is ready: {count} tools, and its {what} answered.")),
+        Ok(v) if v.get("isError").and_then(Value::as_bool) != Some(true) => VerifyResult::new(READY, format!("{name} is ready: {}, and its {what} answered.", n_tools(count))),
         Ok(v) => {
             let text = result_text(&v);
             if says_no_credit(&text) {
@@ -425,17 +428,32 @@ pub fn after_check(p: &Provider, count: usize, check: &CheckTool, answer: Result
             } else {
                 VerifyResult::new(
                     ERROR,
-                    format!("{name}'s {what} answered with an error: {}. Its {count} tools are listed, but maiTerm can't confirm the account until that check passes.", excerpt(&text)),
+                    format!("{name}'s {what} answered with an error: {}. Its {} listed, but maiTerm can't confirm the account until that check passes.", excerpt(&text), listed(count)),
                 )
             }
         }
         // The server didn't take maiTerm's arguments (or no longer has the tool): that is
         // maiTerm's guess failing, not the account. The list already answered.
         Err(f) if !says_no_credit(&f.detail) && matches!(f.rpc, Some(-32602 | -32601)) => {
-            VerifyResult::new(READY, format!("{name} is ready: {count} tools. Its {what} didn't take maiTerm's arguments, so the account itself wasn't read."))
+            VerifyResult::new(READY, format!("{name} is ready: {}. Its {what} didn't take maiTerm's arguments, so the account itself wasn't read.", n_tools(count)))
         }
         Err(f) => failed(p, &f, &format!("running its {what}")),
     }
+}
+
+/// "1 tool", "3 tools".
+fn n_tools(n: usize) -> String {
+    format!("{n} tool{}", if n == 1 { "" } else { "s" })
+}
+
+/// "1 tool is", "3 tools are".
+fn listed(n: usize) -> String {
+    format!("{} {}", n_tools(n), if n == 1 { "is" } else { "are" })
+}
+
+/// An earlier refused call that nothing since has shown to work.
+fn still_refused(p: &Provider, count: usize) -> VerifyResult {
+    VerifyResult::new(NEEDS_SIGN_IN, format!("{} lists its {} but refused a tool call: sign in to {} again.", p.name, n_tools(count), p.name))
 }
 
 /// Verify a proxied server for `p`.
@@ -453,12 +471,13 @@ pub async fn verify_mcp<P: Probe>(probe: &P, p: &Provider, s: &ProxyInput, works
     } else {
         match plan_check(p, &tools) {
             // Nothing to call that would show calls work again, so the earlier refusal stands.
-            None if calls_refused => VerifyResult::new(
-                NEEDS_SIGN_IN,
-                format!("{} lists its {count} tools but refused a tool call: sign in to {} again.", p.name, p.name),
-            ),
-            None => VerifyResult::new(READY, format!("{} is ready: {count} tools.", p.name)),
+            None if calls_refused => still_refused(p, count),
+            None => VerifyResult::new(READY, format!("{} is ready: {}.", p.name, n_tools(count))),
             Some((check, args)) => match run_check(probe, p, &s.id, check.name, args).await {
+                // The server rejected maiTerm's arguments: that clears no refusal in the proxy
+                // (`call_once` clears it only on an answer), so the status the panel reads next
+                // still says sign in, and so does Verify.
+                Ok(Err(f)) if calls_refused && matches!(f.rpc, Some(-32602 | -32601)) => still_refused(p, count),
                 Ok(answer) => after_check(p, count, check, answer),
                 // Unreachable through `plan_check`, which only plans allowlisted tools.
                 Err(why) => VerifyResult::new(ERROR, why),

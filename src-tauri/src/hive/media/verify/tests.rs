@@ -174,7 +174,7 @@ fn the_billing_link_is_only_ever_http() {
 
 #[test]
 fn a_code_counts_only_as_a_status_not_inside_an_id_or_a_name() {
-    for yes in ["HTTP 402", "fal API error 402: Payment Required", "402 Payment Required", "{\"status\": 402}", "status code 402"] {
+    for yes in ["HTTP 402", "HTTP/1.1 402", "HTTP/2 402", "upstream answered HTTP/1.1 402", "fal API error 402: Payment Required", "402 Payment Required", "{\"status\": 402}", "status code 402"] {
         assert!(says_no_credit(yes), "{yes}");
     }
     for no in [
@@ -183,12 +183,21 @@ fn a_code_counts_only_as_a_status_not_inside_an_id_or_a_name() {
         "error -32603: upstream failed, trace d1e402ff",
         "Endpoint fal-ai/flux-v402 not found",
         "request 17-402-88 failed",
+        "$4.02 per image",
+        "$402 for 100 videos",
+        "{\"prices\": [{\"endpoint\": \"fal-ai/flux/dev\", \"price\": 402}]}",
+        "Status codes: 400, 401, 402, 403",
+        "job 0x402ab done",
     ] {
         assert!(!says_no_credit(no), "{no}");
     }
     assert!(says_signed_out("HTTP 401"));
+    assert!(says_signed_out("HTTP/1.1 401"));
+    assert!(!says_no_credit("version 1.1 402"), "digits and dots count only after http/");
     assert!(!says_signed_out("job 14012 done"));
     assert!(!says_signed_out("job a401bc failed"));
+    assert!(!says_signed_out("Status codes: 400, 401, 402, 403"));
+    assert!(!says_signed_out("$4.01 per second"));
 }
 
 #[tokio::test]
@@ -232,12 +241,22 @@ async fn a_list_that_reads_while_a_call_was_refused_lets_the_check_decide() {
     let r = verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await;
     assert_eq!((r.state.as_str(), r.tool_count), (NEEDS_SIGN_IN, Some(3)));
     assert!(!r.message.contains("listing"), "{}", r.message);
+    // The check rejects maiTerm's arguments: nothing proved calls work, so the proxy still says
+    // sign in, and Verify agrees with the panel.
+    for code in [-32602, -32601] {
+        let rejected = Failure::from_up(&UpErr::Rpc { code, message: "invalid params".into(), data: None });
+        let mut stub = Stub::new(Ok(fal_tools()), Some(Err(rejected)));
+        stub.refused = true;
+        let r = verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await;
+        assert_eq!((r.state.as_str(), r.tool_count), (NEEDS_SIGN_IN, Some(3)), "{code}: {}", r.message);
+        assert_eq!(r.message, "fal lists its 3 tools but refused a tool call: sign in to fal again.");
+    }
     // No check tool to try: the refusal stands, in words about tool calls, with the count kept.
     let mut stub = Stub::new(Ok(vec![json!({ "name": "text_to_speech" })]), None);
     stub.refused = true;
     let r = verify_mcp(&stub, provider("elevenlabs").unwrap(), &server("elevenlabs", "https://api.elevenlabs.io/v1/mcp"), None, &reach_ok("elevenlabs")).await;
     assert_eq!((r.state.as_str(), r.tool_count), (NEEDS_SIGN_IN, Some(1)));
-    assert_eq!(r.message, "ElevenLabs lists its 1 tools but refused a tool call: sign in to ElevenLabs again.");
+    assert_eq!(r.message, "ElevenLabs lists its 1 tool but refused a tool call: sign in to ElevenLabs again.");
 }
 
 // ─── Reaching agents ────────────────────────────────────────────────────────
@@ -434,4 +453,79 @@ fn a_provider_maiterm_doesnt_proxy_is_verified_by_detection() {
     assert!(r.message.contains("switched off"), "{}", r.message);
     // Another provider's hit is not this one's.
     assert_eq!(verify_local(remotion, &[hit("cli:ffmpeg", "homebrew-kit", READY)]).state, UNREACHABLE);
+}
+
+#[tokio::test]
+async fn one_tool_is_one_tool() {
+    let eleven = provider("elevenlabs").unwrap();
+    let one = |list: Vec<Value>, call: Option<Result<Value, Failure>>| Stub::new(Ok(list), call);
+    let stub = one(vec![json!({ "name": "text_to_speech" })], None);
+    let r = verify_mcp(&stub, eleven, &server("elevenlabs", "https://api.elevenlabs.io/v1/mcp"), None, &reach_ok("elevenlabs")).await;
+    assert_eq!(r.message, "ElevenLabs is ready: 1 tool.");
+    let pricing = || vec![fal_tools()[1].clone()];
+    let stub = one(pricing(), Some(Ok(ok_result("ok"))));
+    assert_eq!(verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await.message, "fal is ready: 1 tool, and its pricing check answered.");
+    let stub = one(pricing(), Some(Ok(error_result("something odd"))));
+    let m = verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await.message;
+    assert!(m.contains("Its 1 tool is listed,"), "{m}");
+    let rejected = Failure::from_up(&UpErr::Rpc { code: -32602, message: "invalid params".into(), data: None });
+    let stub = one(pricing(), Some(Err(rejected)));
+    assert!(verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await.message.starts_with("fal is ready: 1 tool. "));
+    // And the plural.
+    let stub = one(fal_tools(), Some(Ok(error_result("something odd"))));
+    let m = verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await.message;
+    assert!(m.contains("Its 3 tools are listed,"), "{m}");
+}
+
+/// Verify says ready only where the panel's next `hiveMediaStatus` says ready too.
+/// - MCP: the gate passed (on, in scope: `status::proxy_state` judges the same two), and the
+///   proxy's status after Verify is `connected`. That holds when the list read with no refusal
+///   on record (`refresh` sets `connected`), and when a refusal was on record only if the check
+///   call ANSWERED (`call_once`'s Ok arm clears the refusal and sets `connected`; an isError
+///   result is still an answer). Every other answer leaves `needs_sign_in`, so it must not be ready.
+/// - Not proxied: `verify_local` reads the same hits `status::rows` does.
+#[tokio::test]
+async fn ready_only_where_the_panels_next_status_is_ready() {
+    let rpc = |code| Failure::from_up(&UpErr::Rpc { code, message: "bad".into(), data: None });
+    let answers: Vec<(&str, Result<Value, Failure>)> = vec![
+        ("answered", Ok(ok_result("ok"))),
+        ("tool error", Ok(error_result("something odd"))),
+        ("-32602", Err(rpc(-32602))),
+        ("-32601", Err(rpc(-32601))),
+        ("-32603", Err(rpc(-32603))),
+        ("401", Err(Failure::from_up(&UpErr::Unauthorized { challenge: None }))),
+        ("403", Err(Failure::from_up(&UpErr::Forbidden { challenge: None }))),
+        ("500", Err(http(500, ""))),
+        ("net", Err(Failure::from_up(&UpErr::Net("timed out".into())))),
+    ];
+    for (what, answer) in answers {
+        let mut stub = Stub::new(Ok(fal_tools()), Some(answer));
+        stub.refused = true;
+        let r = verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await;
+        // Only an answer clears the refusal in the proxy (call_once's Ok arm).
+        assert_eq!(r.state == READY, what == "answered", "refused, then {what}: {} ({})", r.state, r.message);
+    }
+    // A server the panel calls unreachable (off, or scoped away) is never ready here.
+    let mut off = server("fal", FAL);
+    off.enabled = false;
+    let mut scoped = server("fal", FAL);
+    scoped.workspaces = vec!["other".into()];
+    for (s, ws) in [(off, None), (scoped, Some("hive-ws"))] {
+        assert_eq!(status::proxy_state(&s, ws), UNREACHABLE);
+        let stub = Stub::new(Ok(fal_tools()), Some(Ok(ok_result("ok"))));
+        assert_ne!(verify_mcp(&stub, fal(), &s, ws, &reach_ok("fal")).await.state, READY);
+    }
+    // Not proxied: ready exactly when the rows show a ready cover from that provider.
+    let kit = provider("homebrew-kit").unwrap();
+    let cli = |b: &str| crate::hive::create::DetectedTool { id: format!("cli:{b}"), kind: "cli".into(), label: b.into(), host: None, pack: None, proxy: None };
+    let detected: Vec<_> = ["ffmpeg", "ffprobe", "magick", "sox", "whisper-cli"].iter().map(|b| cli(b)).collect();
+    for found in [&detected[..], &detected[..2], &[][..]] {
+        let hits = &status::cli_hits(found)[..];
+        let ready_here = verify_local(kit, hits).state == READY;
+        let rows = status::rows(hits, &[]);
+        let all_rows_ready = ["finish", "transcribe"].iter().all(|c| {
+            rows.iter().find(|r| r.capability == *c).unwrap().covered_by.iter().any(|cv| cv.provider == "homebrew-kit" && cv.state == READY)
+        });
+        assert_eq!(ready_here, all_rows_ready, "{} programs", found.len());
+    }
 }
