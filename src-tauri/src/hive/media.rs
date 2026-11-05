@@ -59,6 +59,11 @@ pub struct Route {
     /// `plugin`: the Claude Code plugin id, `name@marketplace`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_id: Option<String>,
+    /// `plugin`: what `claude plugin marketplace add` takes for that marketplace (`owner/repo`
+    /// or a URL). Only a source someone has confirmed: a plugin route without one is refused by
+    /// the install (`install::plan`), which points the human at the guide instead of guessing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marketplace: Option<String>,
 }
 
 /// A command-line tool whose presence covers some capabilities.
@@ -293,8 +298,10 @@ pub fn providers_for_skill(skill: &str) -> Vec<&'static Provider> {
     catalogue().providers.iter().filter(|p| p.matches.skills.iter().any(|s| s == skill) || name_words(skill).any(|w| p.matches.names.contains(&w))).collect()
 }
 
+pub mod install;
 pub mod status;
 pub mod view;
+pub mod whisper;
 
 #[cfg(test)]
 mod tests;

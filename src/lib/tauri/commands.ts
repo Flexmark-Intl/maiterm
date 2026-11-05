@@ -9,6 +9,7 @@ import type { HiveDecisionView, HivePrecedentsView } from './types';
 import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
 import type { GallerySettingsChange, HiveSettingsChange } from './types';
 import type { HiveFinishRecord } from './types';
+import type { HiveMediaInstallStarted, HiveMediaModelStatus } from './types';
 import type {
   GalleryAddResult,
   GalleryAssetDetail,
@@ -2856,6 +2857,38 @@ export async function hiveMediaStatus(workspaceId: string | null = null, already
  *  and each provider's display facts, which `hiveMediaStatus` rows (ids only) join against. */
 export async function hiveMediaCatalogue(): Promise<HiveMediaCatalogue> {
   return invoke('hive_media_catalogue');
+}
+
+/** Install a media provider whose catalogue route is `brew` or `plugin` (docs/hive-media.md §6): a
+ *  visible terminal tab opens in this window (a workspace that takes tabs: not a Hive's) and the
+ *  route's one line is typed at its shell prompt, built in Rust from the catalogue alone. With no
+ *  Homebrew, Homebrew's own installer comes first in the same line (it asks for the human's
+ *  password). A plugin installs into the human's own Claude config root, never a Hive worker's.
+ *  Resolves once the line is typed. Listen for `hive-media-install-finished`
+ *  (`HiveMediaInstallFinished`) BEFORE calling: a fast failure can end before this resolves.
+ *  Rejects, in plain words, for an unknown provider, a route that isn't brew or plugin, a plugin
+ *  whose marketplace source isn't confirmed (point at the guide), the same provider already
+ *  installing, or a shell that never reached its prompt. */
+export async function hiveMediaInstall(providerId: string): Promise<HiveMediaInstallStarted> {
+  return invoke('hive_media_install', { providerId });
+}
+
+/** The window's half of `hiveMediaInstall` (`hive/mediaInstall.ts`): its tab's shell is at its
+ *  prompt and the line is about to be typed. Not for the sheet. */
+export async function hiveMediaInstallArm(installId: string, tabId: string, ptyId: string): Promise<void> {
+  return invoke('hive_media_install_arm', { installId, tabId, ptyId });
+}
+
+/** Where whisper.cpp's default model is, once maiTerm has downloaded and verified it; null before. */
+export async function hiveMediaWhisperModelPath(): Promise<string | null> {
+  return invoke('hive_media_whisper_model_path');
+}
+
+/** The whisper model's state, starting its download (or resuming a failed one) when it is neither
+ *  there nor on its way. It starts by itself after a Homebrew kit install that exits 0; this is
+ *  the sheet's retry. Progress: `hive-media-model-progress` (`HiveMediaModelStatus`). */
+export async function hiveMediaWhisperModelDownload(): Promise<HiveMediaModelStatus> {
+  return invoke('hive_media_whisper_model_download');
 }
 
 /** Lay the Hive out on disk and install it, with its hidden coordinator tab, in one write. */

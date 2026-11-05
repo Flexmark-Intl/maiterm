@@ -1154,6 +1154,31 @@ function createStackStore() {
     return { accepted: true, confirmed, tab_id: tab.id, pty_id: ptyId };
   }
 
+  /** `line` typed into a plain shell through the guard a service start uses: its first prompt
+   *  (OSC 133 A), settled there with nothing begun since. A shell with no OSC 133 falls back to
+   *  the tty-foreground probe (no external job holds the terminal). `arm` runs just before the
+   *  write; a throw from it refuses, and nothing is typed. Answers whether the shell has OSC 133
+   *  (so its exit can be read) and whether its B for the line arrived (docs/hive-media.md §6). */
+  async function typeAtPrompt(ptyId: string, line: string, arm: () => Promise<void>): Promise<{ integration: boolean; began: boolean } | { error: string }> {
+    const integration = await waitForFact(ptyId, (x) => x.lastPromptAt !== null, FIRST_PROMPT_WAIT_MS);
+    if (integration) {
+      const settled = (x: ShellFacts) => x.lastPromptAt !== null && (x.lastBeginAt === null || x.lastPromptAt >= x.lastBeginAt) && Date.now() - x.lastPromptAt >= PROMPT_SETTLE_MS;
+      if (!(await waitForFact(ptyId, settled, 4000))) return { error: 'the shell is mid-command' };
+    } else if ((await probeForeground(ptyId))?.shell_at_prompt !== true) {
+      return { error: 'the shell is not at its prompt' };
+    }
+    try {
+      await arm();
+    } catch (e) {
+      return { error: String(e) };
+    }
+    const writeAt = Date.now();
+    await commands.writeTerminal(ptyId, Array.from(new TextEncoder().encode(line + '\n')));
+    if (!integration) return { integration, began: false };
+    const began = await waitForFact(ptyId, (x) => x.lastBeginAt !== null && x.lastBeginAt >= writeAt, BEGIN_WAIT_MS);
+    return { integration, began };
+  }
+
   /** A job's row and runtime go: its tab is closed, or was never kept. */
   function forgetJob(jobId: string) {
     jobRows.delete(jobId);
@@ -1588,6 +1613,8 @@ function createStackStore() {
     stopJob,
     cleanupJobs,
     forgetJob,
+    // A media install's line in a plain tab (`hive/mediaInstall.ts`).
+    typeAtPrompt,
 
     /** Every `auto_start` service's own folder, serially, in list order. */
     async startStack(workspaceId: string): Promise<void> {

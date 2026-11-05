@@ -546,6 +546,8 @@ pub fn spawn_pty(
         // A Hive job whose shell is gone will never send its D: it ends now, whatever closed it
         // (docs/hive.md §6.8). One map lookup for a PTY that runs no job.
         crate::hive::queue::on_pty_closed(&pty_id_owned);
+        // A media install typed into this tab ends with it (docs/hive-media.md §6).
+        crate::hive::media::install::on_pty_closed(&pty_id_owned);
         // A Hive worker whose terminal died mid-task has crashed (docs/hive.md §11.3).
         if exited {
             crate::hive::events::pty_exited(&state_clone, &exit_app, &tab_id_owned);
@@ -691,6 +693,8 @@ pub fn spawn_pty(
                                 // A Hive job's begin and exit are read here, in Rust (docs/hive.md
                                 // §6.8): one map lookup for a PTY that runs no job.
                                 crate::hive::queue::on_osc133(&pty_id_clone, cmd, exit_code);
+                                // A media install's exit is read the same way (docs/hive-media.md §6).
+                                crate::hive::media::install::on_osc133(&pty_id_clone, cmd, exit_code);
                                 // A command finished: the Files tree's git decorations for the
                                 // shell's folder are due (docs/file-tree.md §7.2). Raised here,
                                 // where the frontend's own 133 D comes from, so it costs no IPC

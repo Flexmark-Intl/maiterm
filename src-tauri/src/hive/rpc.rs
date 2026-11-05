@@ -42,6 +42,10 @@ pub(crate) const VERB_JOB_START: &str = "stack.job.start";
 pub(crate) const VERB_JOB_STOP: &str = "stack.job.stop";
 /// A worker's finished job tabs closed: its next job is starting, or it retired.
 pub(crate) const VERB_JOB_CLEANUP: &str = "stack.job.cleanup";
+/// A media install's visible terminal tab made in the calling window and its catalogue line typed
+/// through the stack's prompt guard (docs/hive-media.md §6, `media::install`). Answered once
+/// typed; the exit is read in Rust from OSC 133.
+pub(crate) const VERB_MEDIA_INSTALL: &str = "media.install.start";
 /// A job start's window waits out the stack's own guard (mount, first prompt, settle, the B)
 /// before it answers, so it gets longer than `TIMEOUT`.
 pub(crate) const JOB_START_TIMEOUT: Duration = Duration::from_secs(90);

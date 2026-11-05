@@ -17,6 +17,7 @@ import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { followUpsStore } from '$lib/stores/followUps.svelte';
 import { stackStore } from '$lib/stores/stack.svelte';
+import { startMediaInstall } from '$lib/hive/mediaInstall';
 import { appendNote, TASK_STATUSES } from '$lib/tasks/model';
 import type { Service, Tab, Task, TaskBlocker, TaskStatus, Workstream } from '$lib/tauri/types';
 import { error as logError } from '@tauri-apps/plugin-log';
@@ -237,6 +238,9 @@ export async function handleHiveRequest(req: HiveRequest): Promise<void> {
         break;
       case 'stack.job.cleanup':
         result = await jobCleanup(args);
+        break;
+      case 'media.install.start':
+        result = await startMediaInstall(args);
         break;
       default:
         result = { error: `Unknown Hive request: ${verb}` };

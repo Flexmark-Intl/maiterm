@@ -1066,6 +1066,51 @@ export interface HiveMediaCatalogue {
   providers: HiveMediaProvider[];
 }
 
+/** What `hiveMediaInstall` answers (docs/hive-media.md §6, hive/media/install.rs `InstallStarted`). */
+export interface HiveMediaInstallStarted {
+  /** The visible terminal tab the install line was typed into (`navigateToTab` shows it). */
+  tab_id: string;
+  /** The line exactly as typed: the catalogue's command, with Homebrew's installer first when
+   *  there was no Homebrew. Holds no secret. */
+  command_shown: string;
+  /** `hive-media-install-finished` will come for it. False when the tab's shell has no OSC 133
+   *  integration: its exit can't be read, so the sheet offers its own Re-detect. */
+  watches_exit: boolean;
+}
+
+/** `hive-media-install-finished`, to the window that started the install, when its line exits or
+ *  its tab's shell ends first. Re-detect (`hiveMediaStatus`) on it: `ok` only says when, the
+ *  status is the truth. */
+export interface HiveMediaInstallFinished {
+  provider_id: string;
+  tab_id: string;
+  /** The line exited 0. */
+  ok: boolean;
+  /** The shell's exit code; null when the tab's shell went away first. */
+  exit_code: number | null;
+  /** "exited" | "closed". A String on the wire. */
+  ended: string;
+  /** maiTerm now downloads whisper.cpp's model: `hive-media-model-progress` events follow. */
+  model_download: boolean;
+}
+
+/** whisper.cpp's default model (`ggml-base.en`) as maiTerm holds it (hive/media/whisper.rs
+ *  `ModelStatus`): what `hiveMediaWhisperModelDownload` answers and every
+ *  `hive-media-model-progress` event (to every window) carries. */
+export interface HiveMediaModelStatus {
+  /** "ggml-base.en". */
+  model: string;
+  /** "ready" | "downloading" | "missing" | "failed". A String on the wire. */
+  state: string;
+  /** Set when ready: `<app data>/models/whisper/ggml-base.en.bin`. */
+  path: string | null;
+  /** Bytes so far, and the published size when huggingface.co gave one. */
+  done: number;
+  total: number | null;
+  /** Why the last download failed, in plain words. */
+  error: string | null;
+}
+
 /** What the Make this a Hive wizard starts from (state/workspace.rs `HiveDefaults`). Empty
  *  strings and null mean the built-in default; `lib/hive/defaults.ts` resolves them. */
 export interface HiveDefaults {
