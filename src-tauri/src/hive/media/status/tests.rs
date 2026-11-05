@@ -56,7 +56,7 @@ fn detection_looks_for_the_three_new_programs() {
 #[test]
 fn a_proxy_servers_state_follows_its_status_and_its_scope() {
     let fal = "https://mcp.fal.ai/mcp-relay";
-    for (status, want) in [("connected", READY), ("needs_sign_in", NEEDS_SIGN_IN), ("unreachable", UNREACHABLE), ("error", UNREACHABLE), ("disabled", UNREACHABLE), ("connecting", INSTALLED)] {
+    for (status, want) in [("connected", READY), ("idle", READY), ("needs_sign_in", NEEDS_SIGN_IN), ("unreachable", UNREACHABLE), ("error", UNREACHABLE), ("disabled", UNREACHABLE), ("connecting", INSTALLED)] {
         assert_eq!(proxy_state(&server("fal", fal, status), None), want, "{status}");
     }
     let mut off = server("fal", fal, "connected");

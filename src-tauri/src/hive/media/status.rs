@@ -121,7 +121,9 @@ pub fn proxy_state(s: &ProxyInput, workspace: Option<&str>) -> &'static str {
         }
     }
     match s.status.as_str() {
-        "connected" => READY,
+        // A stdio server whose child is stopped after its idle time: verified, and started by
+        // the first call (docs/hive-media.md §12.1).
+        "connected" | "idle" => READY,
         "needs_sign_in" => NEEDS_SIGN_IN,
         "unreachable" | "error" | "disabled" => UNREACHABLE,
         // `connecting`, or a state a later build adds: present, not confirmed.

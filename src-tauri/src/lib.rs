@@ -1119,6 +1119,8 @@ pub fn run() {
             mcp_proxy::mcp_server_probe,
             mcp_proxy::mcp_server_sign_in,
             mcp_proxy::mcp_native_names,
+            mcp_proxy::mcp_stdio_key_store,
+            mcp_proxy::mcp_stdio_key_delete,
             commands::window::move_tab_to_window,
             commands::window::set_window_name,
             commands::window::save_window_geometry,

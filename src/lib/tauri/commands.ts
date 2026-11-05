@@ -2657,7 +2657,7 @@ export interface McpServerStatus {
 export interface McpServerView {
   id: string;
   url: string;
-  /** `none` | `token` | `oauth` */
+  /** `none` | `token` | `oauth` | `key` (a stdio server whose child gets a key) */
   auth: string;
   enabled: boolean;
   /** Empty: every workspace. */
@@ -2673,6 +2673,10 @@ export interface McpServerView {
   collisions: string[];
   /** Entries of the human's own reaching the same URL: "Claude: linear-native". */
   duplicates: string[];
+  /** `http` | `stdio` (docs/mcp-proxy.md §2.1). A stdio server's `url` is `stdio:<route>`. */
+  transport: string;
+  /** stdio: the catalogue route it was set up from. */
+  route: string | null;
 }
 
 export interface McpProbe {
@@ -2713,6 +2717,18 @@ export async function mcpServerRemove(id: string): Promise<void> {
 
 export async function mcpServerSetToken(id: string, token: string): Promise<void> {
   return invoke('mcp_server_set_token', { id, token });
+}
+
+/** Store the key a stdio server's child gets in its environment (the setup sheet's paste, before
+ *  Verify adds the server, or to replace its key). Only the human's own input: nothing an agent or
+ *  the phone sent. The key never comes back out of Rust. */
+export async function mcpStdioKeyStore(id: string, key: string): Promise<void> {
+  return invoke('mcp_stdio_key_store', { id, key });
+}
+
+/** Forget the key of a stdio setup that was abandoned. Refused while a server uses it. */
+export async function mcpStdioKeyDelete(id: string): Promise<void> {
+  return invoke('mcp_stdio_key_delete', { id });
 }
 
 export async function mcpServerSetEnabled(id: string, enabled: boolean): Promise<McpServerView> {

@@ -77,7 +77,7 @@ describe('scope', () => {
 });
 
 const server = (id: string, url: string): McpServerView => ({
-  id, url, auth: 'oauth', enabled: true, workspaces: [], status: { state: 'connected', detail: '', since: 0 }, tools: [], fetched_at: null, added_at: 0, added_by: 'human', entry_name: id, collisions: [], duplicates: [],
+  id, url, auth: 'oauth', enabled: true, workspaces: [], status: { state: 'connected', detail: '', since: 0 }, tools: [], fetched_at: null, added_at: 0, added_by: 'human', entry_name: id, collisions: [], duplicates: [], transport: 'http', route: null,
 });
 
 describe('serverPlan', () => {

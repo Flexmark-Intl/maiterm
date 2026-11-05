@@ -561,7 +561,7 @@ fn clean(bytes: &[u8], max_chars: usize, tail: bool) -> String {
 
 /// The user's login PATH, read once. maiTerm launched from the Finder has only the system PATH,
 /// and a watch script calling `gh` or `jq` needs what the user's own terminal has.
-async fn login_path() -> String {
+pub(crate) async fn login_path() -> String {
     static PATH: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
     PATH.get_or_init(|| async {
         const FALLBACK: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";

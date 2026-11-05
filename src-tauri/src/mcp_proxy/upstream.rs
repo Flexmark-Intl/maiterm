@@ -281,7 +281,7 @@ async fn read_stream_until(mut resp: reqwest::Response, want: Option<&Value>) ->
     }
 }
 
-fn result_of(resp: Value) -> Result<Value, UpErr> {
+pub(super) fn result_of(resp: Value) -> Result<Value, UpErr> {
     if let Some(err) = resp.get("error") {
         return Err(UpErr::Rpc {
             code: err.get("code").and_then(Value::as_i64).unwrap_or(-32603),

@@ -6,7 +6,7 @@
 //! in a log line, an error or a `Debug` print. One keychain item per server, keyed by its id,
 //! holding a small JSON document.
 
-use crate::accounts::vault::{map_err, VaultError};
+use crate::accounts::vault::{map_err, Secret, VaultError};
 use crate::state::persistence::app_data_slug;
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +54,15 @@ fn service() -> String {
     format!("{}.mcp", app_data_slug())
 }
 
+#[cfg(test)]
+fn entry_check(server_id: &str) -> Result<(), VaultError> {
+    if server_id.is_empty() {
+        return Err(VaultError::Failed { op: "address", detail: "empty server id".into() });
+    }
+    Ok(())
+}
+
+#[cfg_attr(test, allow(dead_code))]
 fn entry(server_id: &str) -> Result<keyring::Entry, VaultError> {
     if server_id.is_empty() {
         return Err(VaultError::Failed { op: "address", detail: "empty server id".into() });
@@ -66,12 +75,26 @@ pub fn store(server_id: &str, cred: &Cred) -> Result<(), VaultError> {
         return Err(VaultError::Failed { op: "store", detail: "an empty token".into() });
     }
     let doc = serde_json::to_string(cred).map_err(|_| VaultError::Failed { op: "store", detail: "could not encode".into() })?;
+    #[cfg(test)]
+    {
+        entry_check(server_id)?;
+        test_keys().lock().insert(server_id.to_string(), Secret::new(doc));
+        Ok(())
+    }
+    #[cfg(not(test))]
     entry(server_id)?.set_password(&doc).map_err(map_err("store"))
 }
 
 /// `Ok(None)` when nothing is stored, which is ordinary (a server that needs no sign-in).
 pub fn read(server_id: &str) -> Result<Option<Cred>, VaultError> {
-    match entry(server_id)?.get_password() {
+    #[cfg(test)]
+    let got: Result<String, keyring::Error> = {
+        entry_check(server_id)?;
+        test_keys().lock().get(server_id).map(|s| s.expose().to_string()).ok_or(keyring::Error::NoEntry)
+    };
+    #[cfg(not(test))]
+    let got = entry(server_id)?.get_password();
+    match got {
         Ok(doc) => serde_json::from_str(&doc)
             .map(Some)
             .map_err(|_| VaultError::Failed { op: "read", detail: "the stored credential is unreadable".into() }),
@@ -82,15 +105,95 @@ pub fn read(server_id: &str) -> Result<Option<Cred>, VaultError> {
 
 /// Idempotent. **This revokes nothing**: it stops maiTerm using the credential.
 pub fn delete(server_id: &str) -> Result<(), VaultError> {
-    match entry(server_id)?.delete_credential() {
+    #[cfg(test)]
+    let gone: Result<(), keyring::Error> = {
+        entry_check(server_id)?;
+        test_keys().lock().remove(server_id).map(|_| ()).ok_or(keyring::Error::NoEntry)
+    };
+    #[cfg(not(test))]
+    let gone = entry(server_id)?.delete_credential();
+    match gone {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(map_err("delete")(e)),
     }
 }
 
+// ─── A stdio server's key (docs/mcp-proxy.md §2.1) ────────────────────────
+
+/// Where a stdio server's key is kept: its own item, never the server id's. An older build reads
+/// the id's item as a bearer token for any auth it doesn't know, and must find nothing there.
+fn key_item(server_id: &str) -> String {
+    format!("{server_id}#key")
+}
+
+/// Store (or replace) the key a stdio server's child gets in its environment. Trimmed by
+/// `Secret::new`, so what is checked is what is stored.
+pub fn store_env_key(server_id: &str, key: &Secret) -> Result<(), VaultError> {
+    if key.expose().is_empty() {
+        return Err(VaultError::Failed { op: "store", detail: "an empty key".into() });
+    }
+    if key.expose().chars().any(|c| c.is_control()) {
+        return Err(VaultError::Failed { op: "store", detail: "a key with a line break or control character in it".into() });
+    }
+    #[cfg(test)]
+    {
+        entry_check(server_id)?;
+        test_keys().lock().insert(key_item(server_id), key.clone());
+        Ok(())
+    }
+    #[cfg(not(test))]
+    entry(&key_item(server_id))?.set_password(key.expose()).map_err(map_err("store"))
+}
+
+/// `Ok(None)` when no key is stored.
+pub fn read_env_key(server_id: &str) -> Result<Option<Secret>, VaultError> {
+    #[cfg(test)]
+    {
+        Ok(test_keys().lock().get(&key_item(server_id)).cloned())
+    }
+    #[cfg(not(test))]
+    match entry(&key_item(server_id))?.get_password() {
+        Ok(v) => Ok(Some(Secret::new(v))),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(map_err("read")(e)),
+    }
+}
+
+/// Idempotent. Revokes nothing: the provider still honours the key until the human revokes it.
+pub fn delete_env_key(server_id: &str) -> Result<(), VaultError> {
+    #[cfg(test)]
+    {
+        test_keys().lock().remove(&key_item(server_id));
+        Ok(())
+    }
+    #[cfg(not(test))]
+    delete(&key_item(server_id))
+}
+
+/// Tests never touch the real keychain (an unsigned test binary can raise a prompt, and a CI box
+/// has none): every item of this module lives here instead.
+#[cfg(test)]
+fn test_keys() -> &'static parking_lot::Mutex<std::collections::HashMap<String, Secret>> {
+    static KEYS: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashMap<String, Secret>>> = std::sync::OnceLock::new();
+    KEYS.get_or_init(Default::default)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_key_is_kept_apart_from_the_servers_own_item_and_refuses_line_breaks() {
+        assert_eq!(key_item("minimax"), "minimax#key");
+        assert!(store_env_key("k-test", &Secret::new("")).is_err());
+        let e = store_env_key("k-test", &Secret::new("VALUE-1\nVALUE-2")).unwrap_err();
+        assert!(!e.to_string().contains("VALUE-"), "{e}");
+        store_env_key("k-test", &Secret::new("  VALUE-K \n")).unwrap();
+        assert_eq!(read_env_key("k-test").unwrap().unwrap().expose(), "VALUE-K");
+        delete_env_key("k-test").unwrap();
+        assert!(read_env_key("k-test").unwrap().is_none());
+        delete_env_key("k-test").unwrap();
+    }
 
     #[test]
     fn a_cred_never_prints_its_tokens() {

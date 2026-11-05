@@ -422,6 +422,8 @@ async fn a_failed_verify_leaves_the_proxys_saved_list_unchanged() {
         oauth: None,
         added_at: 0,
         added_by: "test".into(),
+        transport: crate::mcp_proxy::stdio::TRANSPORT_HTTP.into(),
+        stdio: None,
     });
     let r = verify_mcp(&ProxyProbe, fal(), &server(&id, "http://127.0.0.1:1/mcp"), None, &reach_ok(&id)).await;
     assert_ne!(r.state, READY, "{}", r.message);

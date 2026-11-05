@@ -21,6 +21,7 @@
 pub mod entries;
 pub mod oauth;
 pub mod secrets;
+pub mod stdio;
 pub mod upstream;
 
 use crate::state::AppState;
@@ -34,6 +35,7 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
+use stdio::StdioSpec;
 use upstream::{Session, UpErr, Upstream};
 
 /// `ProxyServer::auth` values. Strings, never a serde enum: an unknown variant in stored state
@@ -41,6 +43,11 @@ use upstream::{Session, UpErr, Upstream};
 pub const AUTH_NONE: &str = "none";
 pub const AUTH_TOKEN: &str = "token";
 pub const AUTH_OAUTH: &str = "oauth";
+/// A stdio server whose child gets a key in its environment (§2.1).
+pub const AUTH_KEY: &str = "key";
+/// The state of a stdio server whose child is stopped: not an outage, and its saved list is
+/// served (docs/hive-media.md §12.1).
+pub const STATE_IDLE: &str = "idle";
 
 /// How often a server's list is re-read when nothing announced a change.
 const REFRESH_EVERY: Duration = Duration::from_secs(60 * 60);
@@ -75,10 +82,37 @@ pub struct ProxyServer {
     /// `human`, or `agent request <id>` when an agent proposed it and the human approved.
     #[serde(default)]
     pub added_by: String,
+    /// `http` | `stdio` (`stdio::TRANSPORT_*`). A string, and left out of the file for `http`, so
+    /// every http record reads and writes exactly as before.
+    #[serde(default = "http_transport", skip_serializing_if = "is_http")]
+    pub transport: String,
+    /// stdio only: how maiTerm starts the server (§2.1). `url` is then `stdio:<route>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdio: Option<StdioSpec>,
+}
+
+impl ProxyServer {
+    /// A server maiTerm runs as its own child process, rather than one it dials.
+    pub fn is_stdio(&self) -> bool {
+        self.transport == stdio::TRANSPORT_STDIO
+    }
+
+    /// The catalogue route a stdio server was set up from: what detection matches it by.
+    pub fn route(&self) -> Option<&str> {
+        self.stdio.as_ref().filter(|_| self.is_stdio()).map(|s| s.route.as_str())
+    }
 }
 
 fn yes() -> bool {
     true
+}
+
+fn http_transport() -> String {
+    stdio::TRANSPORT_HTTP.to_string()
+}
+
+fn is_http(t: &String) -> bool {
+    t == stdio::TRANSPORT_HTTP
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -210,6 +244,10 @@ fn now_ms() -> u64 {
 }
 
 fn store_path() -> Option<PathBuf> {
+    // Tests never write the real data folder.
+    #[cfg(test)]
+    return Some(std::env::temp_dir().join(format!("maiterm-test-mcp-servers-{}.json", std::process::id())));
+    #[cfg(not(test))]
     crate::state::persistence::app_data_dir().map(|p| p.join("mcp-servers.json"))
 }
 
@@ -269,7 +307,15 @@ pub fn status(id: &str) -> Status {
     if get(id).is_some_and(|s| !s.enabled) {
         return Status::new("disabled", "");
     }
-    LIVE.lock().get(id).and_then(|l| l.status.clone()).unwrap_or_else(|| Status::new("connecting", ""))
+    let stdio = get(id).is_some_and(|s| s.is_stdio());
+    LIVE.lock().get(id).and_then(|l| l.status.clone()).unwrap_or_else(|| {
+        // A stdio server nobody has used since maiTerm started has no child: idle, not an outage.
+        if stdio && stdio::running(id).is_none() {
+            Status::new(STATE_IDLE, "")
+        } else {
+            Status::new("connecting", "")
+        }
+    })
 }
 
 /// Record a server's health. An outage starting, or ending, is told to the frontend once.
@@ -350,6 +396,7 @@ fn needs_sign_in(server: &ProxyServer, why: &str) -> Status {
     Status::new("needs_sign_in", match server.auth.as_str() {
         AUTH_NONE => format!("the server asks for a sign-in ({why})"),
         AUTH_TOKEN => format!("the token was refused or is missing ({why})"),
+        AUTH_KEY => format!("the key is missing or was refused ({why})"),
         _ => format!("sign in again ({why})"),
     })
 }
@@ -382,6 +429,10 @@ fn call_failure_text(server: &ProxyServer, st: &Status) -> String {
 /// Read the server's tool list now. Returns whether it changed. A changed list is persisted and
 /// announced; a failure leaves the stored list as it was.
 pub async fn refresh(id: &str) -> Result<bool, String> {
+    // A stdio server is started for this read: it is asked for on purpose (Refresh, Verify).
+    if get(id).is_some_and(|s| s.is_stdio()) {
+        return refresh_stdio(id, true).await;
+    }
     let turn = REFRESHING.lock().entry(id.to_string()).or_default().clone();
     let _turn = turn.lock().await;
     // Read after waiting: the comparison below must be against the newest stored list.
@@ -424,12 +475,20 @@ pub async fn refresh(id: &str) -> Result<bool, String> {
             return Err(e.to_string());
         }
     };
-    let next = Catalog {
+    store_catalog(id, &server, catalog_from(&session.init, tools))
+}
+
+fn catalog_from(init: &Value, tools: Vec<Value>) -> Catalog {
+    Catalog {
         tools,
-        server_info: session.init.get("serverInfo").cloned().unwrap_or(Value::Null),
-        instructions: session.init.get("instructions").and_then(Value::as_str).map(str::to_string),
+        server_info: init.get("serverInfo").cloned().unwrap_or(Value::Null),
+        instructions: init.get("instructions").and_then(Value::as_str).map(str::to_string),
         fetched_at: now_ms(),
-    };
+    }
+}
+
+/// A list that was read: persisted, the status set, and a change announced.
+fn store_catalog(id: &str, server: &ProxyServer, next: Catalog) -> Result<bool, String> {
     let changed = !server.catalog.as_ref().is_some_and(|c| c.same_as(&next));
     let count = next.tools.len();
     update(id, |s| s.catalog = Some(next))?;
@@ -446,6 +505,48 @@ pub async fn refresh(id: &str) -> Result<bool, String> {
     Ok(changed)
 }
 
+/// Read a stdio server's list from its child. `start`: start the child for it (a read asked for
+/// on purpose). Without it, a stopped child stays stopped: the hourly re-list and a child's own
+/// `list_changed` read only what is running. Neither counts as an agent's use.
+async fn refresh_stdio(id: &str, start: bool) -> Result<bool, String> {
+    let turn = REFRESHING.lock().entry(id.to_string()).or_default().clone();
+    let _turn = turn.lock().await;
+    let server = get(id).ok_or_else(|| format!("no MCP server named {id}"))?;
+    let r = if start {
+        match stdio::ensure(&server, stdio::START_WAIT).await {
+            Ok(r) => r,
+            Err(e) => {
+                let st = stdio_status(&server, &e);
+                let why = st.detail.clone();
+                set_status(id, st);
+                return Err(why);
+            }
+        }
+    } else {
+        stdio::running(id).ok_or("its server is idle")?
+    };
+    match r.list_tools().await {
+        Ok(tools) => {
+            let init = r.init.lock().clone();
+            store_catalog(id, &server, catalog_from(&init, tools))
+        }
+        Err(e) => {
+            let st = stdio::status_for(&e);
+            let why = st.detail.clone();
+            set_status(id, st);
+            Err(why)
+        }
+    }
+}
+
+/// What a stdio start failure means, in the status's words.
+fn stdio_status(server: &ProxyServer, e: &stdio::StartErr) -> Status {
+    match e {
+        stdio::StartErr::NoKey(why) => needs_sign_in(server, why),
+        stdio::StartErr::Up(e) => stdio::status_for(e),
+    }
+}
+
 fn announce_list_changed(id: &str) {
     let note = json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" }).to_string();
     if let Some(l) = LIVE.lock().get_mut(id) {
@@ -460,6 +561,9 @@ fn announce_list_changed(id: &str) {
 /// its `GET` stream, and an hourly re-read either way. Runs until the server is removed or
 /// disabled (the handle is aborted).
 async fn watch(id: String) {
+    if get(&id).is_some_and(|s| s.is_stdio()) {
+        return watch_stdio(id).await;
+    }
     let mut backoff = Duration::from_secs(30);
     loop {
         sweep_idle(&id);
@@ -516,6 +620,18 @@ async fn watch(id: String) {
     }
 }
 
+/// A stdio server's hourly re-list, of a RUNNING child only: it neither starts a stopped child
+/// nor counts as use (§12.1). Changes the child announces are read as they come (`stdio`).
+async fn watch_stdio(id: String) {
+    loop {
+        tokio::time::sleep(REFRESH_EVERY).await;
+        sweep_idle(&id);
+        if stdio::running(&id).is_some() {
+            let _ = refresh_stdio(&id, false).await;
+        }
+    }
+}
+
 fn start_watcher(id: &str) {
     if tokio::runtime::Handle::try_current().is_err() {
         // Called from Tauri's synchronous setup: run on its async runtime.
@@ -549,7 +665,8 @@ fn sweep_idle(id: &str) {
     if stale.is_empty() {
         return;
     }
-    let Some(server) = get(id) else { return };
+    // A stdio server's downstream sessions hold no upstream session of their own.
+    let Some(server) = get(id).filter(|s| !s.is_stdio()) else { return };
     tokio::spawn(async move {
         let auth = bearer(&server).await.ok().flatten();
         let up = Upstream::new(&server.url);
@@ -667,6 +784,11 @@ pub async fn downstream_post(path: &str, sid: Option<&str>, tab: Option<&str>, b
             if !server.enabled || !in_scope(&server, tab) {
                 return DownReply::result(rid, json!({ "tools": [] }));
             }
+            // An agent's list keeps a stdio child up, but never starts a stopped one: the saved
+            // list is the answer either way.
+            if server.is_stdio() {
+                stdio::note_agent_use(id);
+            }
             let mut catalog = server.catalog.clone();
             if catalog.is_none() {
                 // Never read yet (just added, or the upstream has been down since): try once.
@@ -683,6 +805,9 @@ pub async fn downstream_post(path: &str, sid: Option<&str>, tab: Option<&str>, b
             if !server.enabled || !in_scope(&server, tab) {
                 let text = format!("The {} MCP server is not enabled for this workspace in maiTerm.", server.id);
                 return DownReply::result(rid, json!({ "content": [{ "type": "text", "text": text }], "isError": true }));
+            }
+            if server.is_stdio() {
+                return call_stdio(&server, rid, params).await;
             }
             call(&server, sid, rid, params).await
         }
@@ -805,6 +930,33 @@ async fn call(server: &ProxyServer, sid: Option<&str>, rid: Value, params: Value
     fail(rid, Status::new("unreachable", "the server kept ending the session"))
 }
 
+/// Forward a `tools/call` to a stdio server's child, starting it if it is stopped. Every agent
+/// shares the one child; the request carries maiTerm's own id, and the answer goes back under the
+/// agent's (`rid`).
+async fn call_stdio(server: &ProxyServer, rid: Value, params: Value) -> DownReply {
+    stdio::note_agent_use(&server.id);
+    let fail = |rid: Value, st: Status| {
+        let text = call_failure_text(server, &st);
+        set_status(&server.id, st);
+        DownReply::result(rid, json!({ "content": [{ "type": "text", "text": text }], "isError": true }))
+    };
+    let r = match stdio::ensure(server, stdio::START_WAIT).await {
+        Ok(r) => r,
+        Err(e) => return fail(rid, stdio_status(server, &e)),
+    };
+    match r.call_tool(params).await {
+        Ok(result) => {
+            if status(&server.id).state != "connected" {
+                set_status(&server.id, Status::new("connected", ""));
+            }
+            DownReply::result(rid, result)
+        }
+        // The server's own JSON-RPC error goes back to the agent that asked, as it was sent.
+        Err(UpErr::Rpc { code, message, data }) => DownReply::error(rid, code, message, data),
+        Err(e) => fail(rid, stdio::status_for(&e)),
+    }
+}
+
 /// One `tools/call` made by maiTerm itself rather than an agent: Hive media's Verify step reading
 /// a balance or a price (docs/hive-media.md §6). WHICH tools may be called this way is the
 /// caller's rule (`hive::media::verify::CHECK_TOOLS`); this only carries the call. It runs on a
@@ -814,6 +966,19 @@ async fn call(server: &ProxyServer, sid: Option<&str>, rid: Value, params: Value
 /// put into words.
 pub async fn call_once(id: &str, params: Value) -> Result<Value, UpErr> {
     let server = get(id).ok_or_else(|| UpErr::Protocol(format!("no MCP server named {id}")))?;
+    if server.is_stdio() {
+        // Not an agent's use: a child started for it stops after `stdio::IDLE`.
+        let r = match stdio::ensure(&server, stdio::START_WAIT).await {
+            Ok(r) => r,
+            Err(e) => {
+                let st = stdio_status(&server, &e);
+                let unauthorized = st.state == "needs_sign_in";
+                set_status(id, st.clone());
+                return Err(if unauthorized { UpErr::Unauthorized { challenge: None } } else { UpErr::Net(st.detail) });
+            }
+        };
+        return r.call_tool(params).await;
+    }
     let refused = |server: &ProxyServer, st: Status| {
         set_calls_refused(&server.id, true);
         set_status(&server.id, st);
@@ -886,7 +1051,7 @@ pub fn downstream_stream(path: &str) -> Option<mpsc::UnboundedReceiver<String>> 
 pub fn downstream_end(path: &str, sid: &str) {
     let Some(id) = id_from_path(path) else { return };
     let removed = LIVE.lock().get_mut(id).and_then(|l| l.down.remove(sid));
-    let (Some(d), Some(server)) = (removed, get(id)) else { return };
+    let (Some(d), Some(server)) = (removed, get(id).filter(|s| !s.is_stdio())) else { return };
     tokio::spawn(async move {
         if let Some(s) = d.upstream.lock().await.take() {
             let auth = bearer(&server).await.ok().flatten();
@@ -975,6 +1140,7 @@ pub fn add(id: &str, url: &str, auth: &str, opts: AddOptions, added_by: &str) ->
     for key in [id.to_string(), format!("{id}#client")] {
         let _ = secrets::delete(&key);
     }
+    let _ = secrets::delete_env_key(id);
     // An agent's proposal never adds a second server for a URL maiTerm already serves: that would
     // put every tool in every session twice. Checked here, at the moment of adding, because the
     // request can be approved after the same URL was added another way. The human may do it on
@@ -1016,6 +1182,8 @@ pub fn add(id: &str, url: &str, auth: &str, opts: AddOptions, added_by: &str) ->
         oauth: oauth_plan,
         added_at: now_ms(),
         added_by: added_by.to_string(),
+        transport: stdio::TRANSPORT_HTTP.into(),
+        stdio: None,
     };
     SERVERS.write().push(server.clone());
     save()?;
@@ -1026,8 +1194,11 @@ pub fn add(id: &str, url: &str, auth: &str, opts: AddOptions, added_by: &str) ->
 }
 
 pub fn remove(id: &str) -> Result<(), String> {
-    let server_url_for_cleanup = get(id).ok_or_else(|| format!("no MCP server named {id}"))?.url;
+    let removed = get(id).ok_or_else(|| format!("no MCP server named {id}"))?;
+    let server_url_for_cleanup = removed.url.clone();
     stop_watcher(id);
+    // A stdio server's child goes with it, its whole process group.
+    stdio::forget(id);
     oauth::forget(id);
     let live = LIVE.lock().remove(id);
     SERVERS.write().retain(|s| s.id != id);
@@ -1038,6 +1209,9 @@ pub fn remove(id: &str) -> Result<(), String> {
             log::warn!("[mcp-proxy] {id}: removed, but a keychain item stays: {e}");
         }
     }
+    if let Err(e) = secrets::delete_env_key(id) {
+        log::warn!("[mcp-proxy] {id}: removed, but its key stays in the keychain: {e}");
+    }
     // Agents still connected learn the list is gone the same way they learn of any change,
     // and the upstream sessions they held are ended.
     if let Some(l) = live {
@@ -1047,7 +1221,7 @@ pub fn remove(id: &str) -> Result<(), String> {
         let auth = l.cred.map(|c| c.access_token);
         let url = server_url_for_cleanup.clone();
         let downs: Vec<Arc<DownSession>> = l.down.into_values().collect();
-        if !downs.is_empty() && tokio::runtime::Handle::try_current().is_ok() {
+        if !downs.is_empty() && !removed.is_stdio() && tokio::runtime::Handle::try_current().is_ok() {
             tokio::spawn(async move {
                 let up = Upstream::new(&url);
                 for d in downs {
@@ -1064,7 +1238,7 @@ pub fn remove(id: &str) -> Result<(), String> {
 
 pub fn set_token(id: &str, token: &str) -> Result<(), String> {
     let server = get(id).ok_or_else(|| format!("no MCP server named {id}"))?;
-    if server.auth != AUTH_TOKEN {
+    if server.auth != AUTH_TOKEN || server.is_stdio() {
         return Err(format!("{id} does not use a pasted token"));
     }
     secrets::store(id, &secrets::Cred { access_token: token.trim().to_string(), ..Default::default() }).map_err(|e| e.to_string())?;
@@ -1077,12 +1251,143 @@ pub fn set_token(id: &str, token: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ─── Stdio servers: verify before write, and the key ────────────────────────
+
+/// Ids being verified now: one setup per name at a time.
+static VERIFYING: LazyLock<Mutex<std::collections::HashSet<String>>> = LazyLock::new(Default::default);
+
+/// Add a stdio server, VERIFIED FIRST (docs/hive-media.md §12.1): its child is started and its
+/// first `tools/list` read before the server is saved or any agent config is written, so no agent
+/// ever sees it with an empty list. Its key, if the route has one, must already be in the keychain
+/// (`set_key`), and is left there when Verify fails so the human can retry without pasting it
+/// again; `delete_key` takes it away when the setup is abandoned.
+///
+/// `workspaces` scopes it as `set_workspaces` does (empty: every workspace), and is applied
+/// before the entries are written. `spec` must come from a catalogue route, never from text a
+/// webview or an agent supplied: it is a command maiTerm runs as the human.
+///
+/// The first start of an `npx`/`uvx` package downloads it: `stdio::VERIFY_WAIT` is the bound.
+#[allow(dead_code)] // the setup sheet's command (catalogue route → spec) is phase 5's second half
+pub async fn add_stdio(id: &str, spec: StdioSpec, workspaces: Vec<String>, added_by: &str) -> Result<ProxyServer, String> {
+    add_stdio_with(id, spec, workspaces, added_by, stdio::VERIFY_WAIT).await
+}
+
+async fn add_stdio_with(id: &str, spec: StdioSpec, workspaces: Vec<String>, added_by: &str, wait: Duration) -> Result<ProxyServer, String> {
+    valid_id(id)?;
+    spec.validate()?;
+    ensure_loaded();
+    if get(id).is_some() {
+        return Err(format!("maiTerm already has an MCP server named {id}"));
+    }
+    struct Verifying(String);
+    impl Drop for Verifying {
+        fn drop(&mut self) {
+            VERIFYING.lock().remove(&self.0);
+        }
+    }
+    if !VERIFYING.lock().insert(id.to_string()) {
+        return Err(format!("{id} is already being set up"));
+    }
+    let _verifying = Verifying(id.to_string());
+    if spec.env_key.is_some() {
+        let key_id = id.to_string();
+        let key = blocking(move || secrets::read_env_key(&key_id).map_err(|e| e.to_string())).await?;
+        let Some(key) = key else { return Err("store the server's key first".into()) };
+        // The key reaches the child in its environment only. A route that put it on the command
+        // line would show it to every process on this computer.
+        if spec.command.contains(key.expose()) || spec.args.iter().any(|a| a.contains(key.expose())) {
+            return Err("the key must not be on the server's command line".into());
+        }
+    }
+    LIVE.lock().remove(id);
+    let mut server = ProxyServer {
+        id: id.to_string(),
+        url: spec.url(),
+        auth: if spec.env_key.is_some() { AUTH_KEY } else { AUTH_NONE }.to_string(),
+        enabled: true,
+        workspaces,
+        catalog: None,
+        oauth: None,
+        added_at: now_ms(),
+        added_by: added_by.to_string(),
+        transport: stdio::TRANSPORT_STDIO.into(),
+        stdio: Some(spec),
+    };
+    let failed = |id: &str, why: String| {
+        stdio::forget(id);
+        LIVE.lock().remove(id);
+        log::warn!("[mcp-proxy] {id}: Verify failed, nothing written ({why})");
+        Err(format!("maiTerm could not set up {id}: {why}"))
+    };
+    let r = match stdio::ensure(&server, wait).await {
+        Ok(r) => r,
+        Err(e) => return failed(id, stdio_status(&server, &e).detail),
+    };
+    let tools = match r.list_tools().await {
+        Ok(t) => t,
+        Err(e) => return failed(id, stdio::status_for(&e).detail),
+    };
+    let count = tools.len();
+    let init = r.init.lock().clone();
+    server.catalog = Some(catalog_from(&init, tools));
+    {
+        let mut list = SERVERS.write();
+        if list.iter().any(|s| s.id == id) {
+            drop(list);
+            return failed(id, "a server of that name was added meanwhile".into());
+        }
+        list.push(server.clone());
+    }
+    if let Err(e) = save() {
+        SERVERS.write().retain(|s| s.id != id);
+        return failed(id, e);
+    }
+    set_status(id, Status::new("connected", format!("{count} tools")));
+    log::info!("[mcp-proxy] added {id} (stdio, {}) by {added_by}: {count} tools", server.route().unwrap_or(""));
+    start_watcher(id);
+    sync_entries();
+    Ok(server)
+}
+
+/// Store the key for stdio server `id`, before it is added (the setup sheet's paste, then Verify)
+/// or to replace a key it has. Only ever from the human's own input on the Mac: never a maiLink
+/// route, never an agent tool. A running child has the old key in its environment, so it is
+/// stopped, and the next call starts it with this one.
+pub fn set_key(id: &str, key: &str) -> Result<(), String> {
+    valid_id(id)?;
+    let existing = get(id);
+    if let Some(s) = &existing {
+        if !s.is_stdio() || s.stdio.as_ref().is_none_or(|sp| sp.env_key.is_none()) {
+            return Err(format!("{id} doesn't take a key"));
+        }
+    }
+    secrets::store_env_key(id, &crate::accounts::vault::Secret::new(key)).map_err(|e| e.to_string())?;
+    if existing.is_some() {
+        stdio::stop(id);
+        set_calls_refused(id, false);
+        set_status(id, Status::new(STATE_IDLE, "key replaced"));
+    }
+    log::info!("[mcp-proxy] {id}: key stored");
+    Ok(())
+}
+
+/// Delete a stored key whose setup was abandoned. A server that uses it keeps it: removing the
+/// server deletes it (`remove`).
+pub fn delete_key(id: &str) -> Result<(), String> {
+    valid_id(id)?;
+    if get(id).is_some_and(|s| s.is_stdio() && s.stdio.as_ref().is_some_and(|sp| sp.env_key.is_some())) {
+        return Err(format!("{id} uses this key: remove the server to delete it"));
+    }
+    secrets::delete_env_key(id).map_err(|e| e.to_string())
+}
+
 pub fn set_enabled(id: &str, enabled: bool) -> Result<ProxyServer, String> {
     let s = update(id, |s| s.enabled = enabled)?;
     if enabled {
         start_watcher(id);
     } else {
         stop_watcher(id);
+        stdio::stop(id);
     }
     sync_entries();
     announce_list_changed(id);
@@ -1116,6 +1421,11 @@ pub struct ServerView {
     pub collisions: Vec<String>,
     /// Native entries reaching the same URL ("Claude: linear-native"): every tool twice.
     pub duplicates: Vec<String>,
+    /// `http` | `stdio`.
+    pub transport: String,
+    /// stdio: the catalogue route it was set up from. Never its command or key: agents read
+    /// this view (`listMcpServers`).
+    pub route: Option<String>,
 }
 
 pub fn view(s: &ProxyServer) -> ServerView {
@@ -1147,7 +1457,9 @@ pub fn view(s: &ProxyServer) -> ServerView {
         added_by: s.added_by.clone(),
         entry_name: entries::entry_name(&s.id),
         collisions,
-        duplicates: entries::native_duplicates(&s.url),
+        duplicates: if s.is_stdio() { vec![] } else { entries::native_duplicates(&s.url) },
+        transport: s.transport.clone(),
+        route: s.route().map(str::to_string),
     }
 }
 
@@ -1224,6 +1536,19 @@ pub async fn mcp_server_remove(id: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn mcp_server_set_token(id: String, token: String) -> Result<(), String> {
     blocking(move || set_token(&id, &token)).await
+}
+
+/// The setup sheet's key paste for a stdio server (docs/hive-media.md §12.1). Returns nothing: the
+/// key never comes back out of Rust.
+#[tauri::command]
+pub async fn mcp_stdio_key_store(id: String, key: String) -> Result<(), String> {
+    blocking(move || set_key(&id, &key)).await
+}
+
+/// The setup sheet abandoned: forget the key it stored.
+#[tauri::command]
+pub async fn mcp_stdio_key_delete(id: String) -> Result<(), String> {
+    blocking(move || delete_key(&id)).await
 }
 
 #[tauri::command]
@@ -1313,6 +1638,8 @@ mod tests {
             oauth: None,
             added_at: 0,
             added_by: "test".into(),
+            transport: stdio::TRANSPORT_HTTP.into(),
+            stdio: None,
         });
         assert!(refresh(&id).await.is_err(), "nothing listens on port 1");
         assert!(call_once(&id, json!({ "name": "get_pricing", "arguments": {} })).await.is_err());
