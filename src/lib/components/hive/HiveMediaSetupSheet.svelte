@@ -12,8 +12,9 @@
     onclose          the human closed the sheet.
     onchanged        something on this Mac may have changed (a server added, an install ended, a
                      Verify ran): the panel re-fetches. Called after a server write lands even
-                     when the sheet has closed; an install or sign-in that ends after the close is
-                     heard by the panel itself.
+                     when the sheet has closed.
+    onstarted        optional: the install tab or server a step started, reported even after a
+                     close, so a parent that outlives the panel hears its end (lib/hive/mediaWatch.ts).
 
   Ordering: `alive` goes false at unmount, and every await is followed by a check of it before
   anything is written into the sheet, so an event or answer arriving after the sheet closed writes
@@ -31,7 +32,7 @@
   import * as commands from '$lib/tauri/commands';
   import type { McpServerView } from '$lib/tauri/commands';
   import type { HiveMediaInstallFinished, HiveMediaInstallStarted, HiveMediaModelStatus, MoveTargetWindow } from '$lib/tauri/types';
-  import type { PanelProvider } from '$lib/hive/media';
+  import type { PanelProvider, SetupStarted } from '$lib/hive/media';
   import { externalUrl, unverifiedNote } from '$lib/hive/media';
   import { startSignIn } from '$lib/mcp/addServer';
   import {
@@ -45,6 +46,9 @@
     workspaceId: string | null;
     onclose: () => void;
     onchanged: () => void;
+    /** Optional: what this sheet started whose end it may not live to see (an install's tab, a
+     *  server it added or reused), for a parent that outlives it to watch. */
+    onstarted?: (s: SetupStarted) => void;
   }
   let props: Props = $props();
 
@@ -54,6 +58,7 @@
   const ws = untrack(() => props.workspaceId);
   const close = untrack(() => props.onclose);
   const changed = untrack(() => props.onchanged);
+  const reportStarted = untrack(() => props.onstarted);
 
   const uid = $props.id();
   const titleId = `${uid}-title`;
@@ -248,6 +253,7 @@
         await commands.mcpServerSetToken(s.id, token);
       }
       // The write landed: say so whether or not the sheet is still open (the panel outlives it).
+      reportStarted?.({ provider_id: p.id, server_id: s.id });
       if (scope || token !== undefined) changed();
       return s;
     }
@@ -256,6 +262,7 @@
     const s = await commands.mcpServerAdd(got.add, url, auth, { token: token ?? null });
     if (scope.length) await commands.mcpServerSetWorkspaces(s.id, scope);
     // The write landed: say so whether or not the sheet is still open (the panel outlives it).
+    reportStarted?.({ provider_id: p.id, server_id: s.id });
     changed();
     return s;
   }
@@ -431,6 +438,8 @@
       }
       offs.push(off);
       const s = await commands.hiveMediaInstall(p.id, ws);
+      // Reported even after a close: the install runs on in its tab.
+      reportStarted?.({ provider_id: p.id, tab_id: s.tab_id });
       if (!alive) return;
       started = s;
       tabId = s.tab_id;

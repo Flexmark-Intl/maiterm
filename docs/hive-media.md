@@ -223,10 +223,21 @@ generation, starts nothing from the phone and adds no maiLink route; after any s
 changed this Mac, the panel re-fetches.
 
 After that fetch the panel calls its parent's `onchanged` with the tools it newly calls ready
-(owed until a fetch lands, so a Re-detect that overtakes it doesn't lose it). Steps that end after
-the sheet closed still get there: a server write reports itself when it lands, closing the sheet
-fetches again, and a panel that opened a sheet hears `hive-media-install-finished` and a server's
-`connected` itself. The Create sheet detects its tools again and ticks a newly ready one unless
+(owed until a fetch lands, so a Re-detect that overtakes it doesn't lose it). A server write
+reports itself when it lands, and closing the sheet fetches again.
+
+Steps that end after the sheet, or the whole panel, is gone are heard by the parent that outlives
+the panel. The sheet reports what it started (`onstarted {provider_id, tab_id?, server_id?}`: the
+install's tab once `hiveMediaInstall` answers, the server once it is added or reused), the panel
+passes it up, and the Create sheet and Hive settings each keep a `createSetupWatch` for their whole
+mount (`lib/hive/mediaWatch.ts` holds its listeners). It answers `hive-media-install-finished` only
+for those tab ids and `mcp-proxy-status` `connected` only for those servers, once each, so another
+window's install or an unrelated reconnect is ignored; the panel itself listens for nothing
+app-wide. On its own end the Create sheet reads the status and detects again with the ready tools
+of the providers set up there; Hive settings' tools editor detects again. The scenario this is for:
+on the Tools step, Set up the Homebrew kit, close the sheet, press Next to Stack (the panel
+unmounts), the install exits 0: the Create sheet's watcher re-detects, whisper-cli is ticked, and
+Review lists it before Create. The Create sheet detects its tools again and ticks a newly ready one unless
 the human ticked or unticked it themselves (`createPickTracker`: every notice's tools are kept
 until an answer is applied, and the first answer that succeeds, even after a failed first
 detection, starts from the defaults or the draft); Hive settings' tools editor detects again and

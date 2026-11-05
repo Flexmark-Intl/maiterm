@@ -15,6 +15,9 @@
     onchanged    optional: after the setup sheet changed something and the panel fetched again,
                  with the tool ids that fetch newly calls ready. The Create sheet and Hive settings
                  detect their tools again on it (event-driven: never a poll).
+    onstarted    optional, passed to the setup sheet: the install tab or server a step started.
+                 The parent that outlives the panel watches for its end (createSetupWatch); the
+                 panel listens for nothing app-wide itself.
 
   Ordering: every fetch takes a `createLatest()` ticket and checks it after each await, so a slow
   first answer can't overwrite a newer one and nothing is set after unmount. All joining and
@@ -22,21 +25,21 @@
 -->
 <script lang="ts">
   import { onMount, tick as nextTick, untrack } from 'svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import HiveMediaSetupSheet from './HiveMediaSetupSheet.svelte';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import { warn as logWarn } from '@tauri-apps/plugin-log';
   import { hiveMediaCatalogue, hiveMediaStatus } from '$lib/tauri/commands';
   import type { HiveMediaCatalogue, HiveMediaRow } from '$lib/tauri/types';
   import { compactLine, createLatest, newlyReady, readyToolIds, externalUrl, coverNames, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
-  import type { PanelProvider, PanelRow } from '$lib/hive/media';
+  import type { PanelProvider, PanelRow, SetupStarted } from '$lib/hive/media';
 
   interface Props {
     workspaceId: string | null;
     startOpen: boolean;
     onchanged?: (newlyReady: string[]) => void;
+    onstarted?: (s: SetupStarted) => void;
   }
-  let { workspaceId, startOpen, onchanged }: Props = $props();
+  let { workspaceId, startOpen, onchanged, onstarted }: Props = $props();
 
   const uid = $props.id();
   const bodyId = `${uid}-body`;
@@ -95,31 +98,9 @@
     return true;
   }
 
-  /** A setup sheet was opened here. Its install or sign-in can end after the human closed it (an
-   *  install takes minutes, and the sheet points at its tab), when the sheet's own listeners are
-   *  gone: the panel then hears the end itself, fetches again and tells its parent. */
-  let setupStarted = false;
-
   onMount(() => {
     void load();
-    let mounted = true;
-    const offs: UnlistenFn[] = [];
-    const keep = <T,>(event: string, on: (payload: T) => void) => {
-      listen<T>(event, (e) => {
-        if (mounted && setupStarted) on(e.payload);
-      })
-        .then((off) => (mounted ? offs.push(off) : off()))
-        .catch((e) => void logWarn(`[HiveMediaPanel] ${event}: not listening: ${String(e)}`));
-    };
-    keep('hive-media-install-finished', () => setupChanged());
-    keep<{ status?: { state?: string } }>('mcp-proxy-status', (p) => {
-      if (p.status?.state === 'connected') setupChanged();
-    });
-    return () => {
-      mounted = false;
-      latest.cancel();
-      for (const off of offs.splice(0)) off();
-    };
+    return () => latest.cancel();
   });
 
   let redetectBtn = $state<HTMLButtonElement | null>(null);
@@ -145,7 +126,6 @@
 
   function openSetup(e: MouseEvent, provider: PanelProvider, capability: string) {
     setupOpener = e.currentTarget as HTMLElement;
-    setupStarted = true;
     setup = { provider, capability };
   }
 
@@ -330,7 +310,7 @@
 
 {#if setup}
   {#key setup}
-    <HiveMediaSetupSheet provider={setup.provider} capabilityLabel={setup.capability} {workspaceId} onclose={closeSetup} onchanged={setupChanged} />
+    <HiveMediaSetupSheet provider={setup.provider} capabilityLabel={setup.capability} {workspaceId} onclose={closeSetup} onchanged={setupChanged} {onstarted} />
   {/key}
 {/if}
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compactLine, coverNames, createPickTracker, flippedIds, newlyReady, picksAfterRedetect, readyToolIds, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
+import { compactLine, coverNames, createPickTracker, createSetupWatch, flippedIds, newlyReady, picksAfterRedetect, readyToolIds, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
 import type { HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
 
 const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvider => ({
@@ -506,5 +506,42 @@ describe('createPickTracker', () => {
     const tr = createPickTracker(() => new Set());
     tr.notice(['mcp:fal']);
     expect([...tr.answered(new Set(), det('mcp:fal'), new Set(['mcp:fal']))]).toEqual([]);
+  });
+});
+
+describe('createSetupWatch', () => {
+  const row = (capability: string, covers: [string, string, string][]): HiveMediaRow => ({ capability, covered_by: covers.map(([tool_id, provider, state]) => ({ tool_id, provider, state })), recommended: null, alternatives: [] });
+
+  it("ignores another window's or provider's install, and answers its own once", () => {
+    const w = createSetupWatch();
+    w.started({ provider_id: 'homebrew-kit', tab_id: 't1' });
+    expect(w.installEnded({ tab_id: 't-other-window' })).toBe(false);
+    expect(w.installEnded({ tab_id: 't1' })).toBe(true);
+    expect(w.installEnded({ tab_id: 't1' })).toBe(false);
+  });
+
+  it('hears only its own server connect, once', () => {
+    const w = createSetupWatch();
+    w.started({ provider_id: 'fal', server_id: 'fal-2' });
+    expect(w.serverStatus({ id: 'linear', status: { state: 'connected' } })).toBe(false);
+    expect(w.serverStatus({ id: 'fal-2', status: { state: 'needs_sign_in' } })).toBe(false);
+    expect(w.serverStatus({ id: 'fal-2', status: { state: 'connected' } })).toBe(true);
+    expect(w.serverStatus({ id: 'fal-2', status: { state: 'connected' } })).toBe(false);
+  });
+
+  it('with the tracker: an install that ends after the panel is gone ticks its tool, and only its tool', () => {
+    // The Create sheet's flow: Set up the kit, close the sheet, Next to Stack (the panel unmounts),
+    // the install exits 0 in its tab. The sheet's own watcher hears it and re-detects.
+    const w = createSetupWatch();
+    const tr = createPickTracker(() => new Set(['cli:ffmpeg']));
+    const det = (...ids: string[]) => ids.map((id) => ({ id, kind: 'cli', label: id, host: null }));
+    expect([...tr.answered(new Set(), det('cli:ffmpeg', 'mcp:fal'), new Set())]).toEqual(['cli:ffmpeg']);
+    w.started({ provider_id: 'homebrew-kit', tab_id: 't1' });
+    expect(w.installEnded({ tab_id: 't1' })).toBe(true);
+    // Status after the install: whisper is ready through the kit; fal is ready too, set up elsewhere.
+    const rows = [row('transcribe', [['cli:whisper-cli', 'homebrew-kit', 'ready']]), row('video', [['mcp:fal', 'fal', 'ready']])];
+    tr.notice(w.readyFrom(rows));
+    const picked = tr.answered(new Set(['cli:ffmpeg']), det('cli:ffmpeg', 'cli:whisper-cli', 'mcp:fal'), new Set());
+    expect([...picked].sort()).toEqual(['cli:ffmpeg', 'cli:whisper-cli']);
   });
 });

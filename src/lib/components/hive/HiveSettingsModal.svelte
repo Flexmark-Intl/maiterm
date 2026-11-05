@@ -6,7 +6,9 @@
    *  and the same explicit rAF focus (Svelte's `autofocus` is not focus). */
   import type { Hive } from '$lib/tauri/types';
   import { fixedRows, folderLines } from '$lib/hive/settings';
-  import { shouldStartOpen } from '$lib/hive/media';
+  import { onDestroy } from 'svelte';
+  import { createSetupWatch, shouldStartOpen } from '$lib/hive/media';
+  import { watchSetupEnds } from '$lib/hive/mediaWatch';
   import HiveMediaPanel from './HiveMediaPanel.svelte';
   import HiveToolsEditor from './HiveToolsEditor.svelte';
 
@@ -26,6 +28,11 @@
   let panelEl = $state<HTMLDivElement | null>(null);
   /** The tools editor, to detect again when the media panel's setup sheet changed something. */
   let toolsEditor = $state<ReturnType<typeof HiveToolsEditor> | null>(null);
+
+  /** The ends of steps this sheet's media panel started (an install, a sign-in), heard for the
+   *  sheet's whole life, filtered to its own: the tools editor detects again on one. */
+  const setupWatch = createSetupWatch();
+  onDestroy(watchSetupEnds(setupWatch, () => toolsEditor?.redetect()));
 
   $effect(() => {
     const id = requestAnimationFrame(() => panelEl?.querySelector<HTMLElement>('button')?.focus());
@@ -89,7 +96,7 @@
         <h4>Tools</h4>
         <p class="why scope">On this Mac: what's set up here, not what this Hive's workers get. They get the tools below.</p>
         {#key workspaceId}
-          <HiveMediaPanel {workspaceId} startOpen={mediaStartOpen} onchanged={() => toolsEditor?.redetect()} />
+          <HiveMediaPanel {workspaceId} startOpen={mediaStartOpen} onchanged={() => toolsEditor?.redetect()} onstarted={(st) => setupWatch.started(st)} />
           <HiveToolsEditor bind:this={toolsEditor} {hive} {workspaceId} />
         {/key}
       </section>

@@ -425,3 +425,44 @@ export function createPickTracker(first: (detected: readonly HiveDetectedTool[])
     },
   };
 }
+
+/** What a setup sheet started (`onstarted`): its provider, and the install tab or the MCP server
+ *  whose end the sheet can't outlive. */
+export interface SetupStarted {
+  provider_id: string;
+  tab_id?: string | null;
+  server_id?: string | null;
+}
+
+/** The bookkeeping of a parent that outlives the media panel (the Create sheet, Hive settings):
+ *  which install tabs and MCP servers its panel's sheets started, so it hears only THEIR end. An
+ *  install that exits in another window, another panel's install, or a server that reconnects for
+ *  any other reason is not this Hive's setup and is ignored. Each started id answers once: its end
+ *  removes it. `readyFrom` names the tools a setup made ready, from a status fetch: the ready covers
+ *  of the providers set up here. Pure: the listeners are `lib/hive/mediaWatch.ts`. */
+export function createSetupWatch() {
+  const tabs = new Set<string>();
+  const servers = new Set<string>();
+  const providers = new Set<string>();
+  return {
+    started(s: SetupStarted) {
+      providers.add(s.provider_id);
+      if (s.tab_id) tabs.add(s.tab_id);
+      if (s.server_id) servers.add(s.server_id);
+    },
+    /** `hive-media-install-finished`: true, once, for an install a sheet here started. */
+    installEnded(e: { tab_id: string }): boolean {
+      return tabs.delete(e.tab_id);
+    },
+    /** `mcp-proxy-status`: true, once, when a server a sheet here added or reused is connected. */
+    serverStatus(e: { id: string; status?: { state?: string } | null }): boolean {
+      return e.status?.state === 'connected' && servers.delete(e.id);
+    },
+    /** The ready tools of the providers set up here, from `hive_media_status` rows. */
+    readyFrom(rows: readonly HiveMediaRow[]): string[] {
+      return [...new Set(rows.flatMap((r) => r.covered_by.filter((c) => c.state === 'ready' && providers.has(c.provider)).map((c) => c.tool_id)))];
+    },
+  };
+}
+
+export type SetupWatch = ReturnType<typeof createSetupWatch>;
