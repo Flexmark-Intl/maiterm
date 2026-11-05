@@ -89,8 +89,8 @@
        Folded: open it is ~1300px tall and would push the defaults this page is for off the first
        screen; the one-line summary stays, and the human opens it. -->
   <div class="block">
-    <h4 class="label media-heading">What Hives can make on this Mac</h4>
     <HiveMediaPanel workspaceId={null} startOpen={false} />
+    <p class="hint media-note">On this Mac, for any Hive</p>
   </div>
 
   <div class="block">
@@ -214,7 +214,7 @@
   .row { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
   .copy { min-width: 0; flex: 1; }
   .label { font-size: 1rem; color: var(--fg); }
-  .media-heading { margin: 0; font-weight: 400; overflow-wrap: anywhere; }
+  .media-note { margin: 0; }
   .hint { font-size: 0.846rem; color: var(--fg-dim); line-height: 1.5; margin: 3px 0 0; overflow-wrap: anywhere; max-width: 62ch; }
   .error { margin: 0; font-size: 0.923rem; color: var(--red, #f7768e); overflow-wrap: anywhere; }
   .count { align-self: flex-end; font-variant-numeric: tabular-nums; margin: 0; }
