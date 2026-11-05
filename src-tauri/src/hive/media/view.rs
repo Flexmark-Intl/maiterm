@@ -55,8 +55,11 @@ pub struct ProviderView {
     pub subscriber: bool,
     /// When its facts were last checked (a date, `YYYY-MM-DD`): providers change monthly (§2.5).
     pub checked: String,
-    /// Something about it nobody has confirmed from a real job: a host, its route, or a model
-    /// claim. The panel marks it so; `unverified_capabilities` says which capabilities.
+    /// A claim about what it makes nobody has confirmed: its models note, or a capability note
+    /// marked UNVERIFIED. The panel marks it so; `unverified_capabilities` says which
+    /// capabilities. An unconfirmed result host (`unverified_hosts`) is a sandbox matter that the
+    /// sandbox-block flow settles (docs/hive-media.md §9), not a doubt about the models, so it
+    /// never sets this.
     pub unverified: bool,
     /// Capabilities whose claim for this provider is marked UNVERIFIED in its notes.
     pub unverified_capabilities: Vec<String>,
@@ -84,7 +87,7 @@ fn provider_view(p: &Provider) -> ProviderView {
         .collect();
     // HashMap order is not display order: follow the provider's own capability list.
     unverified_capabilities.sort_by_key(|c| p.capabilities.iter().position(|k| k == c).unwrap_or(usize::MAX));
-    let unverified = !p.unverified_hosts.is_empty() || p.models_note.to_ascii_lowercase().contains("unverified") || !unverified_capabilities.is_empty();
+    let unverified = p.models_note.to_ascii_lowercase().contains("unverified") || !unverified_capabilities.is_empty();
     ProviderView {
         id: p.id.clone(),
         name: p.name.clone(),
@@ -178,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn unverified_is_flagged_for_a_note_a_route_or_a_host() {
+    fn unverified_is_flagged_for_a_models_note_or_a_capability_note_but_not_a_host() {
         let v = view();
         // A note starting UNVERIFIED flags its capability, in the provider's own capability order.
         let mut noted = catalogue().providers.iter().find(|p| p.id == "fal").unwrap().clone();
@@ -191,11 +194,18 @@ mod tests {
         // fal's music and sfx were verified on 2026-11-04: nothing of fal's is flagged.
         let fal = p(&v, "fal");
         assert!(!fal.unverified && fal.unverified_capabilities.is_empty());
-        // A host nobody has seen in a real job flags the provider, not a capability.
+        // A result host nobody has seen in a real job is a sandbox matter, not a doubt about the
+        // provider's models: it is kept in the catalogue and out of the panel.
         for id in ["bfl", "runway", "meshy", "comfy-cloud"] {
-            assert!(p(&v, id).unverified, "{id} lists a result host nobody has confirmed");
+            assert!(!catalogue().providers.iter().find(|q| q.id == id).unwrap().unverified_hosts.is_empty(), "{id} still lists its host");
+            assert!(!p(&v, id).unverified, "{id}: an unverified host does not flag the provider");
             assert!(p(&v, id).unverified_capabilities.is_empty(), "{id}");
         }
+        let mut hosted = catalogue().providers.iter().find(|q| q.id == "bfl").unwrap().clone();
+        hosted.capability_notes.clear();
+        assert!(!provider_view(&hosted).unverified, "hosts alone never flag");
+        hosted.models_note = "UNVERIFIED: which models.".into();
+        assert!(provider_view(&hosted).unverified, "a models note still does");
         assert!(!p(&v, "homebrew-kit").unverified);
         assert!(p(&v, "homebrew-kit").unverified_capabilities.is_empty());
     }

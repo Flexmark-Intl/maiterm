@@ -109,7 +109,7 @@
       "source_urls": []
     },
     {
-      "id": "wavespeed", "name": "WaveSpeed", "checked": "2026-11-03",
+      "id": "wavespeed", "name": "WaveSpeed", "checked": "2026-11-04",
       "offer": "list",
       "capabilities": ["video", "image"],
       "default_for": [],
@@ -164,7 +164,7 @@
       "source_urls": ["https://kling.ai/mcp"]
     },
     {
-      "id": "runway", "name": "Runway", "checked": "2026-11-03",
+      "id": "runway", "name": "Runway", "checked": "2026-11-04",
       "offer": "list", "subscriber_first": true,
       "capabilities": ["video"],
       "default_for": [],
@@ -181,7 +181,7 @@
       "source_urls": ["https://mcp.runwayml.com/mcp"]
     },
     {
-      "id": "recraft", "name": "Recraft", "checked": "2026-11-03",
+      "id": "recraft", "name": "Recraft", "checked": "2026-11-04",
       "offer": "list",
       "capabilities": ["design"],
       "default_for": ["design"],
@@ -209,7 +209,7 @@
       "source_urls": ["https://mcp.ideogram.ai/mcp"]
     },
     {
-      "id": "bfl", "name": "Black Forest Labs (FLUX)", "checked": "2026-11-03",
+      "id": "bfl", "name": "Black Forest Labs (FLUX)", "checked": "2026-11-04",
       "offer": "list",
       "capabilities": ["image"],
       "default_for": [],
@@ -254,7 +254,7 @@
       "source_urls": ["https://mcp.heygen.com/mcp/v1/"]
     },
     {
-      "id": "comfy-cloud", "name": "Comfy Cloud", "checked": "2026-11-03",
+      "id": "comfy-cloud", "name": "Comfy Cloud", "checked": "2026-11-04",
       "offer": "list",
       "capabilities": ["local"],
       "default_for": [],
@@ -299,7 +299,7 @@
       "source_urls": []
     },
     {
-      "id": "meshy", "name": "Meshy", "checked": "2026-11-03",
+      "id": "meshy", "name": "Meshy", "checked": "2026-11-04",
       "offer": "list",
       "capabilities": ["3d"],
       "default_for": [],

@@ -110,7 +110,9 @@ fn todays_five_providers_keep_exactly_their_hosts() {
 #[test]
 fn fal_music_and_sfx_are_verified_and_name_their_models() {
     let fal = provider("fal").unwrap();
-    assert_eq!(fal.checked, "2026-11-04");
+    for id in ["fal", "bfl", "runway", "meshy", "comfy-cloud", "wavespeed", "recraft"] {
+        assert_eq!(provider(id).unwrap().checked, "2026-11-04", "{id}: its facts changed in the 2026-11-04 pass");
+    }
     assert!(fal.capability_notes.is_empty(), "no UNVERIFIED note is left on fal: {:?}", fal.capability_notes);
     assert_eq!(fal.capability_models.get("music").map(String::as_str), Some("Lyria 3 and 3.5, ElevenLabs Music, MiniMax Music, Stable Audio"));
     assert_eq!(fal.capability_models.get("sfx").map(String::as_str), Some("ElevenLabs Sound Effects, Mirelo SFX, Stable Audio SFX"));
