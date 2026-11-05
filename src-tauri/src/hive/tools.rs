@@ -1473,6 +1473,8 @@ pub struct WorkerCard {
     pub land: Option<super::land::LandView>,
     /// Its task's newest assets out of the trash: the card's top row in place of the diff (§4.3).
     pub assets: Vec<super::gallery::view::AssetChip>,
+    /// Its queued runs not yet ended: an idle card reads "Waiting on its run", not "Quiet".
+    pub open_runs: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -1570,6 +1572,7 @@ pub(crate) fn board_view(hive: &Hive, paths: &HivePaths, fuses: &Fuses, now: i64
             // Landed too: its card says a push that was held (§8.5).
             land: w.land.as_ref().filter(|_| matches!(w.phase.as_str(), worker::PHASE_LANDING | worker::PHASE_LANDED)).map(super::land::LandView::of),
             assets: gallery.as_deref().map(|g| super::gallery::view::card_assets(g, &w.task_id)).unwrap_or_default(),
+            open_runs: w.pending_runs.iter().filter(|r| r.state == worker::RUN_OPEN).count(),
         })
         .collect();
     let h = fuses.headroom(hive, &live, now);
