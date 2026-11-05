@@ -125,14 +125,19 @@
   /** The supervised agent tabs, most in need first: busy rituals, then permission, then
    *  pressure, then staleness, highest context within each. Feeds the triage queue and the
    *  telemetry; the per-agent view is the Loom's Focus (docs/loom.md). */
+  // Not recomputed while the deck isn't on screen. The board tab stays mounted for the life of
+  // the window (the portal pattern), and `fleet` walks every supervised tab and reads each
+  // one's agent state, so it re-ran on every hook event of every agent: two passes over ~270
+  // tabs per tool call, unseen, in a window of ~360 tabs (2026-11-05). Showing the deck
+  // recomputes it once. While hidden it holds its LAST value rather than emptying: the hidden
+  // deck keeps its layout (opacity, not display:none), and a list that shrank behind it would
+  // clamp the Triage view's scroll position.
+  let lastFleet: FleetUnit[] = [];
+  let lastSupervisorBlocked: FleetUnit | null = null;
+
   const fleet = $derived.by<FleetUnit[]>(() => {
     void now;
-    // Nothing while the deck isn't on screen. The board tab stays mounted for the life of the
-    // window (the portal pattern), and this walks every supervised tab and reads each one's
-    // agent state, so it re-ran on every hook event of every agent: two passes over ~270
-    // tabs per tool call, unseen, in a window of ~360 tabs (2026-11-05). Showing the deck
-    // computes it once.
-    if (!visible) return [];
+    if (!visible) return lastFleet;
     const units: FleetUnit[] = [];
     for (const ws of boardWorkspaces) {
       if (ws.suspended) continue;
@@ -145,7 +150,8 @@
     }
     const rank = (u: FleetUnit) =>
       (u.ritual ? 0 : u.state === 'permission' ? 1 : (u.pct ?? 0) >= pressurePct(u.tab.id) ? 2 : u.state === 'dormant' ? 4 : 3);
-    return units.sort((a, b) => rank(a) - rank(b) || (b.pct ?? 0) - (a.pct ?? 0));
+    lastFleet = units.sort((a, b) => rank(a) - rank(b) || (b.pct ?? 0) - (a.pct ?? 0));
+    return lastFleet;
   });
 
   /**
@@ -164,14 +170,16 @@
    */
   const supervisorBlocked = $derived.by<FleetUnit | null>(() => {
     void now;
-    if (!visible) return null; // see `fleet`
+    if (!visible) return lastSupervisorBlocked; // see `fleet`
+    lastSupervisorBlocked = null;
     const ws = workspacesStore.workspaces.find((w) => w.overlord);
     if (!ws) return null;
     for (const pane of ws.panes) {
       for (const tab of pane.tabs) {
         if ((tab.tab_type ?? 'terminal') !== 'terminal' || !tab.runtime) continue;
         if (claudeStateStore.getState(tab.id)?.state !== 'permission') continue;
-        return unitFor(tab, ws);
+        lastSupervisorBlocked = unitFor(tab, ws);
+        return lastSupervisorBlocked;
       }
     }
     return null;
