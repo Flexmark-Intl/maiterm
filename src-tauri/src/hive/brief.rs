@@ -537,6 +537,11 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts) -> Str
          substitute or mock it.\n",
     );
     b.push_str(
+        "- A media capability this Hive lacks (video, image, voice, music\u{2026}: a worker reports a generator missing) is asked \
+         for with hiveRequestCapability {capability, why}: your human gets a card with the provider maiTerm recommends, sets it \
+         up, and maiTerm adds it to this Hive\u{2019}s tools and tells you. Never addMcpServer for a media provider.\n",
+    );
+    b.push_str(
         "- A host a worker\u{2019}s sandbox refused comes to you as its action blocker (\u{201c}The sandbox refused host \
          \u{2026}\u{201d}), not to your human. Allow it with hiveChangeSettings {add_hosts, reason} only when the worker\u{2019}s task \
          needs it: a package registry, docs, an API the work talks to. Refuse anything unrelated to its task or that could \

@@ -36,7 +36,7 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The Hive tools built so far: what `tools/list` offers each role and the handler answers.
 /// The rest of the coordinator's (settings' `COORDINATOR_MCP_TOOLS`) are refused as not yet here.
-pub const COORDINATOR_TOOLS: [&str; 18] = [
+pub const COORDINATOR_TOOLS: [&str; 19] = [
     "hiveSpawnWorker",
     "hiveListWorkers",
     "hiveMessageWorker",
@@ -55,6 +55,7 @@ pub const COORDINATOR_TOOLS: [&str; 18] = [
     "hiveFinish",
     "hiveChangeSettings",
     "hiveApproveServe",
+    "hiveRequestCapability",
 ];
 /// Every worker is offered all of them; Rust refuses `hiveReport` to a reviewer and `hiveVerdict`
 /// to a builder (`review`).
@@ -315,6 +316,7 @@ fn hive_tool_definitions(role: &str) -> Vec<Value> {
         super::finish::finish_tool_definition(&tab_id),
         super::change::tool_definition(&tab_id),
         super::serve::approve_tool_definition(&tab_id),
+        super::tool_setup::tool_definition(&tab_id),
     ]
 }
 
@@ -476,6 +478,7 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         "hiveSetCriteria" => super::finish::set_criteria_tool(&ctx, &caller, args).await,
         "hiveFinish" => super::finish::finish_tool(&ctx, &caller, args).await,
         "hiveChangeSettings" => super::change::change_tool(&ctx, &caller, args).await,
+        "hiveRequestCapability" => super::tool_setup::request_tool(&ctx, &caller, args).await,
         t =>Err(format!("{t} isn't available in this build of maiTerm yet.")),
     };
     // A worker's phase changed: a freed slot or a failed dependency is news to the waiters.

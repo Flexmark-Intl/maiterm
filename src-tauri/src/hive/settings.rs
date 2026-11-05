@@ -123,6 +123,7 @@ pub const COORDINATOR_MCP_TOOLS: &[&str] = &[
     "hiveRecordPrecedent",
     "hiveProposePlan",
     "hiveApproveServe",
+    "hiveRequestCapability",
     "galleryList",
     "galleryGet",
     "galleryCollect",

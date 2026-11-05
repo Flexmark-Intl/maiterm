@@ -560,6 +560,9 @@ pub async fn hive_media_verify(
         None => verify_local(p, &hits),
     };
     log::info!("[hive-media] verify {}: {}", p.id, out.state);
+    if out.state == "ready" {
+        crate::hive::tool_setup::recheck_soon();
+    }
     Ok(out)
 }
 

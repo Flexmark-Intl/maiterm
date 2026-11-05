@@ -38,7 +38,7 @@ const HIVE_APPROVED_TTL_MS: u64 = 30 * 60 * 1000;
 
 /// What a request asks for. A string on the wire (never a serde enum: an unknown variant in
 /// stored state wipes it on a downgrade), checked against this list when filed.
-pub const KINDS: [&str; 18] = [
+pub const KINDS: [&str; 19] = [
     "mesh_enable",
     "mesh_disable",
     "mesh_link",
@@ -68,6 +68,10 @@ pub const KINDS: [&str; 18] = [
     // The coordinator's change of its Hive's settings (docs/hive.md §3.4): workers at once,
     // models, the hosts workers reach. Filed and carried out by Rust (`hive::change`).
     "hive_settings",
+    // The coordinator's ask for a media capability its Hive lacks (`hiveRequestCapability`,
+    // docs/hive-media.md §8). Filed by Rust (`hive::tool_setup`); approving it opens the setup
+    // sheet in the Hive's window, and the capability joins the Hive once it is Ready.
+    crate::hive::tool_setup::KIND,
     // An ordinary agent's offer of a Hive (`proposeHive`, docs/hive.md §3.7). Filed and carried
     // out by its window like any request: on the desktop an approval opens the Create sheet
     // filled in, from the phone it is the Create. Not a Hive kind: no Hive exists yet.
@@ -83,24 +87,48 @@ const PROPOSE_PENDING_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 /// The kinds Rust files and carries out itself: no window files one, and an approval runs in
 /// Rust (`hive::land::approval::on_approved`) instead of being handed to a window.
 pub fn is_hive_kind(kind: &str) -> bool {
-    matches!(kind, "hive_land" | "hive_undo" | "hive_settings")
+    matches!(kind, "hive_land" | "hive_undo" | "hive_settings" | crate::hive::tool_setup::KIND)
+}
+
+/// Which module carries out a Hive kind. Every kind is named: a Hive kind this build doesn't
+/// route is refused, never run as a land (a `tool_setup` approval once fell through to one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HiveRoute {
+    Settings,
+    ToolSetup,
+    Land,
+    Unknown,
+}
+
+fn hive_route(kind: &str) -> HiveRoute {
+    match kind {
+        crate::hive::change::KIND => HiveRoute::Settings,
+        crate::hive::tool_setup::KIND => HiveRoute::ToolSetup,
+        "hive_land" | "hive_undo" => HiveRoute::Land,
+        _ => HiveRoute::Unknown,
+    }
 }
 
 /// An approved Hive request, carried out in Rust by the module that filed it.
 fn hive_approved(app: &AppHandle, r: &AgentRequest) {
-    if r.kind == crate::hive::change::KIND {
-        crate::hive::change::on_approved(app, r);
-    } else {
-        crate::hive::land::approval::on_approved(app, r);
+    match hive_route(&r.kind) {
+        HiveRoute::Settings => crate::hive::change::on_approved(app, r),
+        HiveRoute::ToolSetup => crate::hive::tool_setup::on_approved(app, r),
+        HiveRoute::Land => crate::hive::land::approval::on_approved(app, r),
+        HiveRoute::Unknown => {
+            log::warn!("[requests] {} approved, but this build carries out no such Hive request ({})", r.kind, r.id);
+            settle(app, &r.id, false, format!("this build of maiTerm can\u{2019}t carry out a {} request", r.kind));
+        }
     }
 }
 
 /// A Hive request denied or lapsed: the module that filed it tells the coordinator.
 fn hive_closed(app: &AppHandle, r: &AgentRequest) {
-    if r.kind == crate::hive::change::KIND {
-        crate::hive::change::on_closed(app, r);
-    } else {
-        crate::hive::land::approval::on_closed(app, r);
+    match hive_route(&r.kind) {
+        HiveRoute::Settings => crate::hive::change::on_closed(app, r),
+        HiveRoute::ToolSetup => crate::hive::tool_setup::on_closed(app, r),
+        HiveRoute::Land => crate::hive::land::approval::on_closed(app, r),
+        HiveRoute::Unknown => {}
     }
 }
 
@@ -285,6 +313,13 @@ pub fn file(
         return Err("maiTerm files a Hive's land and undo requests itself".to_string());
     }
     crate::hive::refuse_request(&state.app_data.read(), kind, &args)?;
+    // One route for a media capability (docs/hive-media.md §8): a Hive agent asks for it with
+    // hiveRequestCapability, whose approval runs the setup sheet's own add.
+    if kind == "mcp_add" && crate::hive::is_hive_role_tab(&state.app_data.read(), tab_id) {
+        if let Some(e) = crate::hive::tool_setup::refuse_mcp_add(args.get("url").and_then(Value::as_str).unwrap_or_default()) {
+            return Err(e);
+        }
+    }
     if kind == PROPOSE_KIND {
         // Principle 5 (docs/hive.md §7.3): a Hive agent never starts another Hive.
         if crate::hive::is_hive_role_tab(&state.app_data.read(), tab_id) {
@@ -391,7 +426,7 @@ fn file_inner(
     }
     // A Hive's lands are one per worker, each already through its coordinator: not a flood. Its
     // settings changes are the coordinator's own asks, each its own card: limited like any tab's.
-    if (!is_hive_kind(kind) || kind == crate::hive::change::KIND) && list.iter().filter(|r| r.status == "pending" && r.tab_id == tab_id).count() >= MAX_PENDING_PER_TAB {
+    if (!is_hive_kind(kind) || kind == crate::hive::change::KIND || kind == crate::hive::tool_setup::KIND) && list.iter().filter(|r| r.status == "pending" && r.tab_id == tab_id).count() >= MAX_PENDING_PER_TAB {
         return Err(format!(
             "this tab already has {MAX_PENDING_PER_TAB} requests waiting for the human; wait for those to be answered"
         ));
@@ -477,6 +512,11 @@ pub fn list() -> Vec<AgentRequest> {
     };
     flush_lapsed();
     out
+}
+
+/// The requests of `kind` still open (pending, or approved and not yet settled).
+pub fn open_of_kind(kind: &str) -> Vec<AgentRequest> {
+    list().into_iter().filter(|r| r.kind == kind && (r.status == "pending" || r.status == "approved")).collect()
 }
 
 pub fn get(id: &str) -> Option<AgentRequest> {
@@ -785,6 +825,24 @@ mod tests {
         let mut l = vec![p("a", "t", "same")];
         assert!(replace_proposals(&mut l, "t", &serde_json::json!({ "goal": "same" }), 3).is_empty());
         assert_eq!(pending_ttl(PROPOSE_KIND), PROPOSE_PENDING_TTL_MS);
+    }
+
+    /// The trap (docs/hive-media.md §8): every Hive kind but the settings change used to be run
+    /// as a land. A `tool_setup` approval has its own arm, and a Hive kind no arm names is
+    /// refused rather than landed.
+    #[test]
+    fn a_tool_setup_approval_is_never_run_as_a_land() {
+        assert_eq!(hive_route(crate::hive::tool_setup::KIND), HiveRoute::ToolSetup);
+        assert_eq!(hive_route(crate::hive::change::KIND), HiveRoute::Settings);
+        assert_eq!(hive_route("hive_land"), HiveRoute::Land);
+        assert_eq!(hive_route("hive_undo"), HiveRoute::Land);
+        assert_eq!(hive_route("hive_something_later"), HiveRoute::Unknown, "a future Hive kind isn't a land");
+        assert!(is_hive_kind(crate::hive::tool_setup::KIND) && KINDS.contains(&crate::hive::tool_setup::KIND));
+        // Every Hive kind in the list has a route of its own.
+        for k in KINDS.iter().filter(|k| is_hive_kind(k)) {
+            assert_ne!(hive_route(k), HiveRoute::Unknown, "{k}");
+        }
+        assert_eq!(pending_ttl(crate::hive::tool_setup::KIND), HIVE_PENDING_TTL_MS);
     }
 
     #[test]

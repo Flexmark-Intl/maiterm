@@ -107,6 +107,7 @@ pub mod settings;
 #[cfg(all(test, unix))]
 mod spike15;
 pub mod tool_change;
+pub mod tool_setup;
 pub mod tools;
 pub mod trust;
 pub mod turn_failure;

@@ -139,6 +139,19 @@ pub(crate) trait HiveWindow: Clone + Send + Sync + 'static {
     /// Something that frees or adds a slot happened outside a tool call's own poll (a raised
     /// cap): the waiting workers are looked at again. A test polls itself.
     fn poll_waiters(&self, _workspace_id: &str) {}
+    /// The open (pending or approved) requests of `kind`, as `(id, args)`: what a new
+    /// `tool_setup` card would duplicate (`hive::tool_setup`). A test window has its own.
+    fn open_requests(&self, kind: &str) -> Vec<(String, Value)> {
+        crate::agent_requests::open_of_kind(kind).into_iter().map(|r| (r.id, r.args)).collect()
+    }
+    /// An approved `tool_setup` card: the Hive's window opens the setup sheet
+    /// (`hive-tool-setup-approved`, docs/hive-media.md §8).
+    fn tool_setup_approved(&self, _payload: Value) {}
+    /// A phone-approved `brew` or `plugin` setup started without the Mac (`media::install::start`),
+    /// its tab in this window.
+    fn start_install(&self, _provider_id: &str) -> impl Future<Output = Result<crate::hive::media::install::InstallStarted, String>> + Send {
+        async { Err("This window can't open an install tab".to_string()) }
+    }
 }
 
 /// A Hive's card for the human, as Rust builds it: every word maiTerm's but `reason`.
@@ -384,6 +397,18 @@ impl HiveWindow for AppWindow {
 
     fn poll_waiters(&self, workspace_id: &str) {
         super::waiters::poll_soon(self.app.clone(), self.handle.clone(), workspace_id.to_string());
+    }
+
+    fn tool_setup_approved(&self, payload: Value) {
+        use tauri::Emitter;
+        if let Err(e) = self.handle.emit_to(self.label.as_str(), super::tool_setup::APPROVED_EVENT, payload) {
+            log::warn!("hive: {} not sent to window {}: {e}", super::tool_setup::APPROVED_EVENT, self.label);
+        }
+    }
+
+    fn start_install(&self, provider_id: &str) -> impl Future<Output = Result<crate::hive::media::install::InstallStarted, String>> + Send {
+        let (this, provider_id) = (self.clone(), provider_id.to_string());
+        async move { crate::hive::media::install::start(&this.app, &this.handle, &this.label, Some(this.label.clone()), &provider_id, None).await }
     }
 }
 

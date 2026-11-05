@@ -293,6 +293,10 @@ fn set_status(id: &str, next: Status) {
     if let Some((app, _)) = APP.get() {
         let _ = app.emit("mcp-proxy-status", json!({ "id": id, "status": next, "was_outage": was_out }));
     }
+    // A server signed in: an approved `tool_setup` ask may be Ready now (docs/hive-media.md §8).
+    if next.state == "connected" {
+        crate::hive::tool_setup::recheck_soon();
+    }
 }
 
 // ─── Credentials ────────────────────────────────────────────────────────────

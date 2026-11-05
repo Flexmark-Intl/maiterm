@@ -2908,7 +2908,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 91] = [
+const PEER_ADDRESSING_TOOLS: [&str; 92] = [
     // A tab's auto-resume command and its trigger variables (interpolated unescaped into that
     // command, e.g. `%claudeSessionId`) run in that tab's shell at its next spawn or recover:
     // set on another tab, they plant a command there.
@@ -3018,6 +3018,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 91] = [
     "hiveFinish",
     "hiveSetCriteria",
     "hiveChangeSettings",
+    "hiveRequestCapability",
     "hiveAnswerWorker",
     "hiveRunPriority",
     "hivePrecedents",
@@ -3043,7 +3044,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 91] = [
 /// The agent-request tools (agent_requests.rs) are here for the same reason from the other side:
 /// a request is shown to the human as "the agent in <tab> asks…", so the tab named must be the
 /// caller, and a request's status is only its own tab's to read.
-const OWN_TAB_ONLY_TOOLS: [&str; 69] = [
+const OWN_TAB_ONLY_TOOLS: [&str; 70] = [
     // What a tab's shell runs on its next spawn is that tab's own business: with any `tabId`,
     // one agent could set the command another tab replays (found by the Hive spike 15 audit,
     // 2026-10-23). The only in-repo use is an agent fixing its OWN auto-resume.
@@ -3097,6 +3098,7 @@ const OWN_TAB_ONLY_TOOLS: [&str; 69] = [
     "hiveFinish",
     "hiveSetCriteria",
     "hiveChangeSettings",
+    "hiveRequestCapability",
     "hiveAnswerWorker",
     "hiveRunPriority",
     "hivePrecedents",
@@ -6545,6 +6547,16 @@ mod tests {
         assert_eq!(super::follow_up_when(&approved, false), passes);
         let met = FollowUpDue { met_at: Some("2026-09-30T10:00:00Z".into()), ..due("service_ready") };
         assert_eq!(super::follow_up_when(&met, false), "due now");
+    }
+
+    /// docs/hive-media.md §8: the coordinator's ask for a capability files a card in its own
+    /// name, so it is on both lists, as `hiveChangeSettings` is.
+    #[test]
+    fn the_capability_ask_needs_a_stated_identity_of_its_own_tab() {
+        for tool in ["hiveChangeSettings", crate::hive::tool_setup::TOOL] {
+            assert!(PEER_ADDRESSING_TOOLS.contains(&tool), "{tool}");
+            assert!(OWN_TAB_ONLY_TOOLS.contains(&tool), "{tool}");
+        }
     }
 
     #[test]

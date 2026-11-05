@@ -369,7 +369,15 @@ pub async fn hive_media_status(
         data.preferences.clone()
     };
     let pays_for = already_pay_for.unwrap_or_default();
-    tauri::async_runtime::spawn_blocking(move || status(&prefs, workspace_id.as_deref(), &pays_for)).await.map_err(|e| e.to_string())
+    let rows = tauri::async_runtime::spawn_blocking({
+        let ws = workspace_id.clone();
+        move || status(&prefs, ws.as_deref(), &pays_for)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    // The panel re-reads after every setup step: a watched ask it shows Ready is finished now.
+    crate::hive::tool_setup::on_status(workspace_id.as_deref(), &rows);
+    Ok(rows)
 }
 
 #[cfg(test)]
