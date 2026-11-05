@@ -164,6 +164,9 @@ mod tests {
         assert!(!fal.subscriber);
         let hf = p(&v, "higgsfield");
         assert_eq!((hf.credits.as_str(), hf.quote_tool.as_str()), ("plan", ""));
+        // A balance reader prices nothing, so the panel's "prices a job" line never claims it.
+        assert_eq!(p(&v, "bfl").quote_tool, "");
+        assert_eq!(p(&v, "wavespeed").quote_tool, "get_price");
         assert!(hf.subscriber, "D1: Higgsfield shows first to someone who already subscribes");
     }
 
@@ -177,10 +180,22 @@ mod tests {
     #[test]
     fn unverified_is_flagged_for_a_note_a_route_or_a_host() {
         let v = view();
+        // A note starting UNVERIFIED flags its capability, in the provider's own capability order.
+        let mut noted = catalogue().providers.iter().find(|p| p.id == "fal").unwrap().clone();
+        noted.capability_notes.insert("sfx".into(), "UNVERIFIED: x".into());
+        noted.capability_notes.insert("music".into(), "unverified: y".into());
+        noted.capability_notes.insert("video".into(), "Kling only.".into());
+        let nv = provider_view(&noted);
+        assert!(nv.unverified);
+        assert_eq!(nv.unverified_capabilities, ["music", "sfx"]);
+        // fal's music and sfx were verified on 2026-11-04: nothing of fal's is flagged.
         let fal = p(&v, "fal");
-        assert!(fal.unverified, "fal's music and sfx models are marked UNVERIFIED");
-        assert_eq!(fal.unverified_capabilities, ["music", "sfx"], "in the provider's own capability order");
-        assert!(!p(&v, "bfl").unverified, "bfl's endpoint was confirmed on 2026-11-03");
+        assert!(!fal.unverified && fal.unverified_capabilities.is_empty());
+        // A host nobody has seen in a real job flags the provider, not a capability.
+        for id in ["bfl", "runway", "meshy", "comfy-cloud"] {
+            assert!(p(&v, id).unverified, "{id} lists a result host nobody has confirmed");
+            assert!(p(&v, id).unverified_capabilities.is_empty(), "{id}");
+        }
         assert!(!p(&v, "homebrew-kit").unverified);
         assert!(p(&v, "homebrew-kit").unverified_capabilities.is_empty());
     }
@@ -192,6 +207,8 @@ mod tests {
         assert_eq!(fal.capability_models.get("video").map(String::as_str), Some("Kling 4.0, Veo 3.1, Seedance 2.5"));
         assert_eq!(fal.capability_models.get("image").map(String::as_str), Some("GPT Image 2, FLUX, Nano Banana Pro"));
         assert_eq!(fal.capability_models.get("lipsync").map(String::as_str), Some("sync.so"));
+        assert_eq!(fal.capability_models.get("music").map(String::as_str), Some("Lyria 3 and 3.5, ElevenLabs Music, MiniMax Music, Stable Audio"));
+        assert_eq!(fal.capability_models.get("sfx").map(String::as_str), Some("ElevenLabs Sound Effects, Mirelo SFX, Stable Audio SFX"));
         assert_eq!(fal.capability_models.len(), 7);
         for cap in fal.capability_models.keys() {
             assert!(fal.capabilities.contains(cap), "{cap}");

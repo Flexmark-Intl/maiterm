@@ -12,7 +12,7 @@ fn the_shipped_catalogue_parses_and_is_dated() {
     let common: Vec<&str> = c.capabilities.iter().filter(|c| c.common).map(|c| c.id.as_str()).collect();
     assert_eq!(common, vec!["video", "image", "voice", "music", "finish"], "the common five, first");
     for p in &c.providers {
-        assert_eq!(p.checked, "2026-11-03", "{}: facts are dated", p.id);
+        assert!(["2026-11-03", "2026-11-04"].contains(&p.checked.as_str()), "{}: facts are dated, got {}", p.id, p.checked);
         assert!(["recommend", "list", "detect_only"].contains(&p.offer.as_str()), "{}: offer {}", p.id, p.offer);
         for r in &p.routes {
             assert!(["remote_mcp", "brew", "plugin", "local_app", "manual"].contains(&r.kind.as_str()), "{}: route {}", p.id, r.kind);
@@ -27,6 +27,17 @@ fn the_shipped_catalogue_parses_and_is_dated() {
         // A host nobody has confirmed is never also a sandbox host.
         assert!(p.unverified_hosts.iter().all(|h| !p.sandbox_hosts.contains(h)), "{}", p.id);
     }
+}
+
+/// The panel prints `name` then `means`: a meaning that only repeats the name reads "Music Music".
+#[test]
+fn every_capability_means_more_than_its_name() {
+    for k in &cat().capabilities {
+        let (name, means) = (k.name.to_ascii_lowercase(), k.means.to_ascii_lowercase());
+        assert!(!means.trim().is_empty() && means != name && !means.starts_with(&format!("{name},")) && !means.starts_with(&format!("{name} ")), "{}: {:?} repeats {:?}", k.id, k.means, k.name);
+    }
+    assert_eq!(capability("music").unwrap().means, "Songs and background tracks");
+    assert_eq!(capability("sfx").unwrap().means, "Short sounds like footsteps or clicks");
 }
 
 #[test]
@@ -93,6 +104,75 @@ fn todays_five_providers_keep_exactly_their_hosts() {
     assert_eq!(sandboxed, vec!["fal", "wavespeed", "higgsfield", "kling", "kie"]);
     // The /generate skill still picks its models on Kie.ai.
     assert_eq!(providers_for_skill("generate").iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["kie"]);
+}
+
+/// Folded in on 2026-11-04 from a research pass over the providers' docs.
+#[test]
+fn fal_music_and_sfx_are_verified_and_name_their_models() {
+    let fal = provider("fal").unwrap();
+    assert_eq!(fal.checked, "2026-11-04");
+    assert!(fal.capability_notes.is_empty(), "no UNVERIFIED note is left on fal: {:?}", fal.capability_notes);
+    assert_eq!(fal.capability_models.get("music").map(String::as_str), Some("Lyria 3 and 3.5, ElevenLabs Music, MiniMax Music, Stable Audio"));
+    assert_eq!(fal.capability_models.get("sfx").map(String::as_str), Some("ElevenLabs Sound Effects, Mirelo SFX, Stable Audio SFX"));
+    for u in [
+        "https://fal.ai/models/google/lyria-3.5",
+        "https://fal.ai/models/fal-ai/lyria3",
+        "https://fal.ai/models/elevenlabs/music/v2.5",
+        "https://fal.ai/models/elevenlabs/sound-effects/v3",
+    ] {
+        assert!(fal.source_urls.iter().any(|s| s == u), "{u}");
+    }
+    assert!(fal.result_hosts.iter().any(|h| h == "v3b.fal.media"), "documented result host");
+    // Result hosts are informational: the sandbox's set is still exactly phase 1's.
+    assert_eq!(fal.sandbox_hosts, ["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
+    // ElevenLabs stays voice only: its remote MCP documents speech and agents.
+    assert_eq!(provider("elevenlabs").unwrap().capabilities, vec!["voice"]);
+}
+
+#[test]
+fn result_hosts_nobody_has_confirmed_wait_in_unverified_hosts_and_never_reach_a_sandbox() {
+    for (id, host, retention) in [
+        ("bfl", "delivery.*.bfl.ai", ""),
+        ("runway", "dnznrvs05pmza.cloudfront.net", ""),
+        ("meshy", "assets.meshy.ai", "3 days"),
+        ("comfy-cloud", "storage.googleapis.com", ""),
+    ] {
+        let p = provider(id).unwrap();
+        assert_eq!(p.unverified_hosts, vec![host], "{id}");
+        assert!(p.sandbox_hosts.is_empty(), "{id}: an unverified host is no sandbox host");
+        assert!(p.result_hosts.is_empty(), "{id}: nor a confirmed result host");
+        assert_eq!(p.retention, retention, "{id}");
+    }
+    // A pattern is not a host: no wildcard sits where a host is compared literally.
+    for p in &cat().providers {
+        for h in p.result_hosts.iter().chain(&p.sandbox_hosts).chain(&p.api_hosts) {
+            assert!(!h.contains('*'), "{}: {h}", p.id);
+        }
+    }
+}
+
+#[test]
+fn quote_and_balance_tools_are_named_on_the_route() {
+    let route = |id: &str| provider(id).unwrap().routes[0].clone();
+    assert_eq!(route("fal").quote_tool.as_deref(), Some("get_pricing"));
+    assert_eq!(route("wavespeed").quote_tool.as_deref(), Some("get_price"));
+    // get_credits and get_user read a balance: they price no job, so they are not quote tools.
+    for (id, tool) in [("wavespeed", "get_balance"), ("bfl", "get_credits"), ("recraft", "get_user"), ("meshy", "meshy_check_balance")] {
+        assert_eq!(route(id).balance_tool.as_deref(), Some(tool), "{id}");
+    }
+    for id in ["bfl", "recraft", "meshy"] {
+        assert_eq!(route(id).quote_tool, None, "{id}");
+    }
+    assert!(provider("fal").unwrap().routes[0].balance_tool.is_none());
+}
+
+#[test]
+fn oauth_stays_the_route_auth_where_a_token_also_works() {
+    for id in ["wavespeed", "comfy-cloud"] {
+        let p = provider(id).unwrap();
+        assert_eq!(p.routes[0].auth, "oauth", "{id}");
+        assert!(p.capability_notes.values().any(|n| n.contains("API key")), "{id}: the token alternative is noted");
+    }
 }
 
 #[test]

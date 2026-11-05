@@ -1,24 +1,24 @@
 {
   "version": 1,
-  "checked": "2026-11-03",
+  "checked": "2026-11-04",
   "capabilities": [
     { "id": "video", "name": "Video", "means": "Text or image to video", "common": true },
     { "id": "image", "name": "Images", "means": "Text to image, image editing", "common": true },
     { "id": "voice", "name": "Voice", "means": "Text to speech, voice design", "common": true },
-    { "id": "music", "name": "Music", "means": "Music", "common": true },
+    { "id": "music", "name": "Music", "means": "Songs and background tracks", "common": true },
     { "id": "finish", "name": "Finishing", "means": "Cut, convert, mix, check", "common": true },
     { "id": "design", "name": "Design", "means": "Vectors, logos, typography", "common": false },
-    { "id": "sfx", "name": "Sound effects", "means": "Sound effects", "common": false },
-    { "id": "lipsync", "name": "Lipsync", "means": "Lipsync, talking avatars", "common": false },
+    { "id": "sfx", "name": "Sound effects", "means": "Short sounds like footsteps or clicks", "common": false },
+    { "id": "lipsync", "name": "Lipsync", "means": "Mouths matched to a voice, talking avatars", "common": false },
     { "id": "upscale", "name": "Upscaling", "means": "Image or video upscaling", "common": false },
-    { "id": "3d", "name": "3D", "means": "3D models", "common": false },
+    { "id": "3d", "name": "3D", "means": "Objects and characters as 3D models", "common": false },
     { "id": "transcribe", "name": "Transcription", "means": "Speech to text, captions", "common": false },
     { "id": "compose", "name": "Motion graphics", "means": "Titles, motion graphics, programmatic edits", "common": false },
-    { "id": "local", "name": "On this Mac", "means": "Generation on this Mac", "common": false }
+    { "id": "local", "name": "On this Mac", "means": "Image and video workflows run through ComfyUI", "common": false }
   ],
   "providers": [
     {
-      "id": "fal", "name": "fal", "checked": "2026-11-03",
+      "id": "fal", "name": "fal", "checked": "2026-11-04",
       "offer": "recommend",
       "capabilities": ["video", "image", "lipsync", "upscale", "3d", "music", "sfx"],
       "default_for": ["video", "image", "lipsync", "upscale", "3d", "music", "sfx"],
@@ -29,12 +29,8 @@
         "lipsync": "sync.so",
         "upscale": "Image and video upscalers",
         "3d": "Image-to-3D models",
-        "music": "Music models (which ones not yet confirmed)",
-        "sfx": "Sound-effect models (which ones not yet confirmed)"
-      },
-      "capability_notes": {
-        "music": "UNVERIFIED: which fal models make music was not checked (fal.ai could not be reached from the build sandbox on 2026-11-03); the survey names Lyria via fal. Check fal.ai/models before the brief names a model.",
-        "sfx": "UNVERIFIED: which fal models make sound effects was not checked (fal.ai could not be reached from the build sandbox on 2026-11-03). Check fal.ai/models before the brief names a model."
+        "music": "Lyria 3 and 3.5, ElevenLabs Music, MiniMax Music, Stable Audio",
+        "sfx": "ElevenLabs Sound Effects, Mirelo SFX, Stable Audio SFX"
       },
       "routes": [{ "kind": "remote_mcp", "url": "https://mcp.fal.ai/mcp-relay", "auth": "oauth", "credits": "api", "quote_tool": "get_pricing" }],
       "result_hosts": ["fal.media", "v3.fal.media", "v3b.fal.media"],
@@ -45,7 +41,11 @@
       "signup_url": "https://fal.ai/login", "billing_url": "https://fal.ai/dashboard/billing",
       "guide": ["Make a fal account (or sign in).", "Add credit: fal bills a prepaid balance.", "Back here, press Sign in."],
       "match": { "hosts": ["fal.ai", "fal.run", "fal.media"], "own_hosts": ["fal.ai", "fal.run", "fal.media"], "names": ["fal"], "skills": [] },
-      "source_urls": ["https://fal.ai/models", "https://mcp.fal.ai/mcp-relay"]
+      "source_urls": [
+        "https://fal.ai/models", "https://mcp.fal.ai/mcp-relay",
+        "https://fal.ai/models/google/lyria-3.5", "https://fal.ai/models/fal-ai/lyria3",
+        "https://fal.ai/models/elevenlabs/music/v2.5", "https://fal.ai/models/elevenlabs/sound-effects/v3"
+      ]
     },
     {
       "id": "elevenlabs", "name": "ElevenLabs", "checked": "2026-11-03",
@@ -114,7 +114,11 @@
       "capabilities": ["video", "image"],
       "default_for": [],
       "models_note": "",
-      "routes": [{ "kind": "remote_mcp", "url": "https://api.wavespeed.ai/mcp", "auth": "oauth", "credits": "api", "quote_tool": "get_price" }],
+      "routes": [{ "kind": "remote_mcp", "url": "https://api.wavespeed.ai/mcp", "auth": "oauth", "credits": "api", "quote_tool": "get_price", "balance_tool": "get_balance" }],
+      "capability_notes": {
+        "video": "Also takes an API key instead of the OAuth sign-in; maiTerm sets up the OAuth route.",
+        "image": "Also takes an API key instead of the OAuth sign-in; maiTerm sets up the OAuth route."
+      },
       "result_hosts": [],
       "api_hosts": ["api.wavespeed.ai"],
       "sandbox_hosts": ["api.wavespeed.ai"],
@@ -169,7 +173,7 @@
       "result_hosts": [],
       "api_hosts": [],
       "sandbox_hosts": [],
-      "unverified_hosts": [],
+      "unverified_hosts": ["dnznrvs05pmza.cloudfront.net"],
       "retention": "",
       "signup_url": "https://runwayml.com", "billing_url": "",
       "guide": ["Sign in to your Runway account (Pro or Max).", "Generations spend your Runway plan's credits.", "Back here, press Sign in."],
@@ -182,7 +186,7 @@
       "capabilities": ["design"],
       "default_for": ["design"],
       "models_note": "",
-      "routes": [{ "kind": "remote_mcp", "url": "https://mcp.recraft.ai/mcp", "auth": "oauth", "credits": "plan" }],
+      "routes": [{ "kind": "remote_mcp", "url": "https://mcp.recraft.ai/mcp", "auth": "oauth", "credits": "plan", "balance_tool": "get_user" }],
       "result_hosts": [], "api_hosts": [], "sandbox_hosts": [], "unverified_hosts": [],
       "retention": "",
       "signup_url": "https://www.recraft.ai", "billing_url": "",
@@ -210,8 +214,11 @@
       "capabilities": ["image"],
       "default_for": [],
       "models_note": "FLUX image models.",
-      "routes": [{ "kind": "remote_mcp", "url": "https://mcp.bfl.ai", "auth": "oauth", "credits": "api" }],
-      "result_hosts": [], "api_hosts": [], "sandbox_hosts": [], "unverified_hosts": [],
+      "routes": [{ "kind": "remote_mcp", "url": "https://mcp.bfl.ai", "auth": "oauth", "credits": "api", "balance_tool": "get_credits" }],
+      "capability_notes": {
+        "image": "Result URLs are delivery.<region>.bfl.ai (documented). The catalogue holds no wildcard host, so the pattern waits in unverified_hosts until a job names a real one."
+      },
+      "result_hosts": [], "api_hosts": [], "sandbox_hosts": [], "unverified_hosts": ["delivery.*.bfl.ai"],
       "retention": "",
       "signup_url": "https://bfl.ai", "billing_url": "",
       "guide": ["Make a Black Forest Labs account (or sign in).", "Add credit: BFL bills a prepaid API balance.", "Back here, press Sign in."],
@@ -253,7 +260,10 @@
       "default_for": [],
       "models_note": "ComfyUI workflows in the cloud.",
       "routes": [{ "kind": "remote_mcp", "url": "https://cloud.comfy.org/mcp", "auth": "oauth", "credits": "comfy_credits" }],
-      "result_hosts": [], "api_hosts": [], "sandbox_hosts": [], "unverified_hosts": [],
+      "capability_notes": {
+        "local": "Also takes an API key instead of the OAuth sign-in; maiTerm sets up the OAuth route. Results redirect to Google Cloud Storage signed URLs, so the host is storage.googleapis.com."
+      },
+      "result_hosts": [], "api_hosts": [], "sandbox_hosts": [], "unverified_hosts": ["storage.googleapis.com"],
       "retention": "",
       "signup_url": "https://www.comfy.org", "billing_url": "",
       "guide": ["Make a Comfy Cloud account (or sign in).", "Runs spend your Comfy credits.", "Back here, press Sign in."],
@@ -294,9 +304,9 @@
       "capabilities": ["3d"],
       "default_for": [],
       "models_note": "3D models. Needs an API key and a local server you set up yourself, for now.",
-      "routes": [{ "kind": "manual", "auth": "token", "credits": "api" }],
-      "result_hosts": [], "api_hosts": [], "sandbox_hosts": [], "unverified_hosts": [],
-      "retention": "",
+      "routes": [{ "kind": "manual", "auth": "token", "credits": "api", "balance_tool": "meshy_check_balance" }],
+      "result_hosts": [], "api_hosts": [], "sandbox_hosts": [], "unverified_hosts": ["assets.meshy.ai"],
+      "retention": "3 days",
       "signup_url": "", "billing_url": "",
       "guide": ["Make a Meshy account and an API key.", "Add the local MCP server to your Claude config yourself: the key sits in plain text in .claude.json, and a Hive worker given the server gets a copy of the entry in its own mcp.json (0600)."],
       "match": { "hosts": [], "names": ["meshy"], "skills": [] },
