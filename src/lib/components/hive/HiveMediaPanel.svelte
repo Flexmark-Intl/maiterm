@@ -4,8 +4,10 @@
   human can do. Read-only in this phase: no setup buttons, and it emits nothing.
 
   Placed by the Create sheet's Tools step, Hive settings and Preferences → Hive. Props:
-    workspaceId  the Hive's workspace (null in Preferences and before Create); an MCP proxy server
-                 scoped away from it is "not enabled for this workspace".
+    workspaceId  the Hive's workspace (the Create sheet's, about to become one, or Hive settings'),
+                 null in Preferences; an MCP proxy server scoped away from it is "not enabled for
+                 this workspace". The setup sheet scopes a server it adds to it, and never opens an
+                 install tab in it.
     startOpen    the caller's `shouldStartOpen()`; read ONCE at mount. After that the human's
                  choice wins, whatever the parent does.
 
@@ -14,13 +16,14 @@
   wording is lib/hive/media.ts.
 -->
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick as nextTick, untrack } from 'svelte';
+  import HiveMediaSetupSheet from './HiveMediaSetupSheet.svelte';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import { warn as logWarn } from '@tauri-apps/plugin-log';
   import { hiveMediaCatalogue, hiveMediaStatus } from '$lib/tauri/commands';
   import type { HiveMediaCatalogue, HiveMediaRow } from '$lib/tauri/types';
   import { compactLine, createLatest, externalUrl, coverNames, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
-  import type { PanelRow } from '$lib/hive/media';
+  import type { PanelProvider, PanelRow } from '$lib/hive/media';
 
   interface Props {
     workspaceId: string | null;
@@ -44,6 +47,11 @@
   let pay = $state<string[]>([]);
 
   const latest = createLatest();
+
+  /** The open setup sheet, a new object per opening (the sheet is keyed by it, so each opening
+   *  mounts a fresh one with its own seeds), and the button that opened it, for focus on close. */
+  let setup = $state<{ provider: PanelProvider; capability: string } | null>(null);
+  let setupOpener: HTMLElement | null = null;
 
   const groups = $derived(rows && catalogue ? groupRows(rows, catalogue) : null);
   const subscribers = $derived(catalogue ? subscriberProviders(catalogue) : []);
@@ -93,6 +101,25 @@
 
   function tick(id: string) {
     pay = toggleId(pay, id);
+    void load();
+  }
+
+  function openSetup(e: MouseEvent, provider: PanelProvider, capability: string) {
+    setupOpener = e.currentTarget as HTMLElement;
+    setup = { provider, capability };
+  }
+
+  /** Focus goes back to the button that opened the sheet, or to Re-detect when a re-fetch took that
+   *  button away (the capability became ready). */
+  function closeSetup() {
+    setup = null;
+    const opener = setupOpener;
+    setupOpener = null;
+    void nextTick().then(() => requestAnimationFrame(() => (opener?.isConnected ? opener : redetectBtn)?.focus()));
+  }
+
+  /** The sheet changed something on this Mac: fetch again (a newer fetch wins, as Re-detect's). */
+  function setupChanged() {
     void load();
   }
 
@@ -171,6 +198,9 @@
             {@render link('Billing', p.billing_url)}
           </p>
         {/if}
+        <div class="setup-row">
+          <button type="button" class="setup" onclick={(e) => openSetup(e, p, r.label)}>Set up {p.name}</button>
+        </div>
         {#if r.alternatives.length}
           <div class="alts">
             <span class="alts-label">Other options</span>
@@ -181,6 +211,7 @@
                   <span class="pname">{a.name}</span>
                   {#if a.creditsLine}<span class="dim">· {a.creditsLine}</span>{/if}
                   {#if anote}<span class="unv">· {anote}</span>{/if}
+                  <button type="button" class="link" aria-label="Set up {a.name}" onclick={(e) => openSetup(e, a, r.label)}>Set up</button>
                 </li>
               {/each}
             </ul>
@@ -251,6 +282,12 @@
   {/if}
 </div>
 
+{#if setup}
+  {#key setup}
+    <HiveMediaSetupSheet provider={setup.provider} capabilityLabel={setup.capability} {workspaceId} onclose={closeSetup} onchanged={setupChanged} />
+  {/key}
+{/if}
+
 <style>
   .panel { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 8px 10px; background: var(--bg-medium); border: 1px solid var(--bg-light); border-radius: 6px; }
   .head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
@@ -306,10 +343,14 @@
   .ext { color: var(--accent); text-decoration: none; }
   .ext:hover { text-decoration: underline; }
   .ext:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+  .setup-row { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 2px; }
+  .setup { padding: 4px 12px; background: var(--accent); color: var(--bg-dark); border: none; border-radius: 5px; font: inherit; font-size: 0.846rem; font-weight: 600; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
+  .setup:hover { filter: brightness(1.1); }
+  .setup:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .alts { display: flex; flex-direction: column; gap: 2px; padding-top: 4px; border-top: 1px dashed var(--bg-light); }
   .alts-label { font-size: 0.769rem; color: var(--fg-dim); }
   .alts ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-  .alts li { font-size: 0.846rem; overflow-wrap: anywhere; }
+  .alts li { font-size: 0.846rem; overflow-wrap: anywhere; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; }
   .alts .pname { font-weight: 500; }
 
   .more { display: flex; align-items: baseline; gap: 6px; align-self: flex-start; padding: 2px 0; background: none; border: none; color: var(--fg-dim); font: inherit; font-size: 0.846rem; cursor: pointer; }

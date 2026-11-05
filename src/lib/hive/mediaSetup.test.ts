@@ -4,7 +4,7 @@ import type { McpServerView } from '$lib/tauri/commands';
 vi.mock('@tauri-apps/plugin-shell', () => ({ open: vi.fn() }));
 vi.mock('$lib/tauri/commands', () => ({ mcpServerSignIn: vi.fn() }));
 
-const { bringsSpeechModel, canVerify, installEndLine, newServerScope, reusedServerScope, scopeSentence, serverPlan, setupAction, speechModelLine, verifyView } = await import('./mediaSetup');
+const { bringsSpeechModel, canVerify, guideFor, installEndLine, newServerScope, reusedServerScope, scopeSentence, serverPlan, setupAction, speechModelLine, verifyView } = await import('./mediaSetup');
 
 const route = (route_kind: string, auth = 'none', route_url = '', installable = false) => ({ route_kind, auth, route_url, installable });
 
@@ -28,9 +28,20 @@ describe('setupAction', () => {
     expect(setupAction(route('stdio_mcp', 'token'))).toBe('guide');
     expect(setupAction(route(''))).toBe('guide');
   });
-  it('verifies anything but a guide', () => {
-    expect(canVerify('guide')).toBe(false);
-    expect(canVerify('app')).toBe(true);
+  it('verifies any provider with a route, a guide-only one included', () => {
+    expect(canVerify({ route_kind: 'manual' })).toBe(true);
+    expect(canVerify({ route_kind: 'local_app' })).toBe(true);
+    expect(canVerify({ route_kind: '' })).toBe(false);
+  });
+  it('never shows a guide that promises an install maiTerm will refuse', () => {
+    const remotion = { name: 'Remotion', route_kind: 'plugin', guide: ['maiTerm opens a tab and installs the Remotion plugin for Claude Code.'] };
+    const g = guideFor(remotion, 'guide');
+    expect(g.steps).toEqual([]);
+    expect(g.lead).toContain("can't install Remotion yet");
+    expect(guideFor(remotion, 'install')).toEqual({ steps: remotion.guide, lead: null });
+    const minimax = { name: 'MiniMax', route_kind: 'manual', guide: ['Make a MiniMax account and an API key.'] };
+    expect(guideFor(minimax, 'guide').steps).toEqual(minimax.guide);
+    expect(guideFor(minimax, 'guide').lead).toContain('the steps are yours');
   });
   it('knows a Homebrew kit that brings whisper.cpp', () => {
     expect(bringsSpeechModel({ route_kind: 'brew', capabilities: ['finish', 'transcribe'] })).toBe(true);

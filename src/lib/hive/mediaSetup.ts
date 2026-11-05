@@ -38,9 +38,27 @@ export function setupAction(p: Pick<HiveMediaProvider, 'route_kind' | 'auth' | '
   }
 }
 
-/** Whether a Verify means anything for the action: a guide-only provider has nothing maiTerm set up. */
-export function canVerify(action: SetupAction): boolean {
-  return action !== 'guide';
+/** Whether Verify means anything: every provider with a route can be re-detected, a guide-only
+ *  one too (the human followed the guide; Verify then finds what they set up). Only a provider with
+ *  no route at all has nothing to look for. */
+export function canVerify(p: Pick<HiveMediaProvider, 'route_kind'>): boolean {
+  return p.route_kind !== '';
+}
+
+/** What the sheet shows above its action: the catalogue's guide, unless the guide describes an
+ *  install maiTerm can't run (a plugin with no confirmed source, Remotion today: its guide says
+ *  "maiTerm opens a tab"). Then the steps are the human's, said in maiTerm's words. */
+export function guideFor(p: Pick<HiveMediaProvider, 'name' | 'route_kind' | 'guide'>, action: SetupAction): { steps: string[]; lead: string | null } {
+  if (action === 'guide' && p.route_kind === 'plugin') {
+    return {
+      steps: [],
+      lead: `maiTerm can't install ${p.name} yet: no source for its Claude Code plugin is confirmed. If you have one, add it in a terminal with “claude plugin marketplace add”, install the plugin, then press Verify.`,
+    };
+  }
+  if (action === 'guide' && p.route_kind === 'brew') {
+    return { steps: [], lead: `maiTerm can't run this Homebrew install. Install it in a terminal yourself, then press Verify.` };
+  }
+  return { steps: p.guide, lead: action === 'guide' ? `maiTerm can't set ${p.name} up for you: the steps are yours. Press Verify when they're done.` : null };
 }
 
 /** A Homebrew route that brings whisper.cpp: maiTerm downloads its speech model after it. */
