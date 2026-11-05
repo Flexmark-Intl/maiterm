@@ -63,8 +63,9 @@ pub fn tool_definition(tab_id: &Value) -> Value {
         "description": format!(
             "Ask your human for a media capability this Hive lacks (a worker reported a tool missing, or the plan needs one). \
              maiTerm files a card in its own words naming the provider it recommends for this Mac and what that spends; your why \
-             is quoted on it. Approving opens the setup sheet on the Mac (approved from the phone, a Homebrew or plugin install \
-             starts at once and anything that signs in waits for the Mac). Once the capability works, maiTerm adds it to this \
+             is quoted on it. Approving opens the setup sheet on the Mac. Approved from the phone, a Homebrew or plugin install \
+             starts at once only when maiTerm can install that provider there; anything else (a sign-in, a key, an install \
+             maiTerm can\u{2019}t do) waits for your human at the Mac, and the card says which. Once the capability works, maiTerm adds it to this \
              Hive\u{2019}s tools and tells you: workers launched from then on have it, running ones don\u{2019}t. Refused for a \
              capability the Hive already has Ready, and while an ask for it is open. For a media provider use this, never \
              addMcpServer. Capabilities: {}.",
