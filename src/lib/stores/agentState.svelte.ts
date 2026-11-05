@@ -1,3 +1,4 @@
+import { SvelteMap } from 'svelte/reactivity';
 import { countedListen as listen } from '$lib/utils/listenCounter';
 import { info as logInfo } from '@tauri-apps/plugin-log';
 import { setVariable, handleEnableAutoResume } from './triggers.svelte';
@@ -111,8 +112,12 @@ function isTabVisible(tabId: string): boolean {
 }
 
 function createAgentStateStore() {
-  // tabId → session info
-  let sessions = $state<Map<string, AgentTabSession>>(new Map());
+  // tabId → session info. A SvelteMap, so a reader of ONE tab (`getState(tabId)`, the tab
+  // dot, a workspace's rollup) re-runs only when THAT tab's entry changes. It used to be a
+  // plain Map replaced wholesale on every change, which re-ran every reader of every tab's
+  // state on every hook event — two per tool call — and in a window of ~360 tabs that was
+  // most of the main thread while a few agents worked (2026-11-05).
+  const sessions = new SvelteMap<string, AgentTabSession>();
   const unlisteners: (() => void)[] = [];
   // tabId → timeout handle for stale tool detection
   /** How long a compaction may run with no event before the tab is presumed back at its
@@ -165,7 +170,6 @@ function createAgentStateStore() {
   function markReadInternal(tabId: string) {
     const s = sessions.get(tabId);
     if (!s || s.state !== 'idle' || s.read) return;
-    sessions = new Map(sessions);
     sessions.set(tabId, { ...s, read: true });
   }
 
@@ -184,7 +188,6 @@ function createAgentStateStore() {
     const idleSince = state !== 'idle' ? undefined : sameIdleStretch ? current?.idleSince : Date.now();
     // Only SessionStart reports the folder; every later state change of the same session keeps it.
     const cwd = current?.sessionId === sessionId ? current.cwd : undefined;
-    sessions = new Map(sessions);
     sessions.set(tabId, { runtime, sessionId, state, toolName, toolDetail, read, updatedAt, idleSince, cwd });
 
     // Propagate permission state to activityStore tab state so workspace sidebar shows alert.
@@ -207,7 +210,6 @@ function createAgentStateStore() {
           // setState writes a fresh record, so any later event drops this again.
           const after = sessions.get(tabId);
           if (after) {
-            sessions = new Map(sessions);
             sessions.set(tabId, { ...after, staleTool: toolName, staleToolDetail: toolDetail });
           }
           setVariable(tabId, 'claudeAction', '');
@@ -235,7 +237,6 @@ function createAgentStateStore() {
     clearStaleTimer(tabId);
     clearAsks(tabId);
     answered.delete(tabId);
-    sessions = new Map(sessions);
     sessions.delete(tabId);
     // Clean up tab state if session ended while in permission state
     if (was.state === 'permission') {
@@ -415,7 +416,6 @@ function createAgentStateStore() {
         if (typeof cwd === 'string' && cwd) {
           const s = sessions.get(tab_id);
           if (s && s.cwd !== cwd) {
-            sessions = new Map(sessions);
             sessions.set(tab_id, { ...s, cwd });
           }
         }
@@ -454,7 +454,6 @@ function createAgentStateStore() {
           // setState writes a fresh record, so the next state change drops it again.
           const after = sessions.get(tab_id);
           if (after && (after.failure ?? null) !== (failure ?? null)) {
-            sessions = new Map(sessions);
             sessions.set(tab_id, { ...after, failure: failure ?? undefined });
           }
         }
