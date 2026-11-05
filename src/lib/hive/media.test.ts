@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compactLine, coverNames, createPickTracker, createSetupWatch, flippedIds, newlyReady, picksAfterRedetect, readyToolIds, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
+import { compactLine, coverNames, createPickTracker, createSetupWatch, setupTicks, flippedIds, newlyReady, picksAfterRedetect, readyToolIds, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
 import type { HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
 
 const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvider => ({
@@ -588,18 +588,58 @@ describe('createSetupWatch', () => {
     expect(w.readyFrom(rows).sort()).toEqual(['cli:whisper-cli', 'mcp:fal-2']);
   });
 
-  it('with the panel mounted: its refresh notices whisper-cli once, and only one detection ticks', () => {
-    // The Create sheet's watcher hears the install end and calls panel.refresh() (no detection of
-    // its own). The refresh owes the ready set of its stale rows, fetches, and notices the difference.
-    const owed = readyToolIds(kitRows('missing'));
-    const after = kitRows('ready');
-    expect(readyToolIds(after).filter((c) => c === 'cli:whisper-cli')).toHaveLength(1);
-    const noticed = newlyReady(owed, readyToolIds(after));
-    expect(noticed).toEqual(['cli:whisper-cli']);
+
+  // The parent's one rule (setupTicks), through the sequences that broke the panel's own notice.
+  // The panel's fetches only change what it shows: the parent reads the status itself.
+  const statusOf = (rows: HiveMediaRow[]) => () => Promise.resolve(rows);
+
+  it("an intermediate Re-detect that already shows whisper-cli ready doesn't lose its tick", async () => {
+    const w = createSetupWatch();
+    const before = readyToolIds(kitRows('missing'));
+    w.started({ provider_id: 'homebrew-kit', tab_id: 't1', ready_before: before });
+    // Mid-install, the panel's Re-detect lands with whisper-cli on PATH already: it ticks nothing.
+    const panelRows = kitRows('ready');
+    expect(readyToolIds(panelRows)).toContain('cli:whisper-cli');
+    // The line exits: the parent's own read.
+    expect(w.installEnded({ tab_id: 't1' })).toBe(true);
+    expect(await setupTicks(w, statusOf(kitRows('ready')))).toEqual(['cli:whisper-cli']);
+  });
+
+  it('a tool something unrelated made ready in the meantime is not ticked', async () => {
+    const w = createSetupWatch();
+    w.started({ provider_id: 'homebrew-kit', tab_id: 't1', ready_before: readyToolIds(kitRows('missing')) });
+    const withFal = [...kitRows('ready'), row('video', [['mcp:fal', 'fal', 'ready']])];
+    expect(await setupTicks(w, statusOf(withFal))).toEqual(['cli:whisper-cli']);
+  });
+
+  it('the panel unmounted mid-fetch (Next pressed) loses nothing: the parent reads and ticks', async () => {
+    const w = createSetupWatch();
+    w.started({ provider_id: 'homebrew-kit', tab_id: 't1', ready_before: readyToolIds(kitRows('missing')) });
+    expect(w.installEnded({ tab_id: 't1' })).toBe(true);
+    // No panel at all in this path; the tracker ticks what the parent noticed.
     const tr = createPickTracker(() => new Set());
-    tr.answered(new Set(), detAll('cli:ffmpeg'), new Set());
-    tr.notice(noticed);
-    expect([...tr.answered(new Set(), detAll('cli:ffmpeg', 'cli:whisper-cli'), new Set())]).toEqual(['cli:whisper-cli']);
+    tr.answered(new Set(), detAll('cli:ffmpeg', 'cli:ffprobe', 'cli:sox'), new Set());
+    tr.notice(await setupTicks(w, statusOf(kitRows('ready'))));
+    expect([...tr.answered(new Set(), detAll('cli:ffmpeg', 'cli:ffprobe', 'cli:sox', 'cli:whisper-cli'), new Set())]).toEqual(['cli:whisper-cli']);
+  });
+
+  it("#54's case: ffmpeg, ffprobe and sox ready before, empty defaults: only whisper-cli, and a duplicate run ticks nothing more", async () => {
+    const w = createSetupWatch();
+    w.started({ provider_id: 'homebrew-kit', tab_id: 't1', ready_before: readyToolIds(kitRows('missing')) });
+    const tr = createPickTracker(() => new Set());
+    tr.answered(new Set(), detAll('cli:ffmpeg', 'cli:ffprobe', 'cli:sox'), new Set());
+    // The watcher's end and the open sheet's Verify both run the rule: duplicates are harmless.
+    tr.notice(await setupTicks(w, statusOf(kitRows('ready'))));
+    const once = tr.answered(new Set(), detAll('cli:ffmpeg', 'cli:ffprobe', 'cli:sox', 'cli:whisper-cli'), new Set());
+    expect([...once]).toEqual(['cli:whisper-cli']);
+    tr.notice(await setupTicks(w, statusOf(kitRows('ready'))));
+    expect([...tr.answered(once, detAll('cli:ffmpeg', 'cli:ffprobe', 'cli:sox', 'cli:whisper-cli'), new Set())]).toEqual(['cli:whisper-cli']);
+  });
+
+  it('a failed status read notices nothing', async () => {
+    const w = createSetupWatch();
+    w.started({ provider_id: 'homebrew-kit', tab_id: 't1', ready_before: [] });
+    expect(await setupTicks(w, () => Promise.reject(new Error('down')))).toEqual([]);
   });
 });
 

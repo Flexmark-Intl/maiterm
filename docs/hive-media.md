@@ -222,30 +222,34 @@ reachable, Installed, Didn't work), with the billing page as a button. The sheet
 generation, starts nothing from the phone and adds no maiLink route; after any step that may have
 changed this Mac, the panel re-fetches.
 
-After that fetch the panel calls its parent's `onchanged` with the tools it newly calls ready
-(owed until a fetch lands, so a Re-detect that overtakes it doesn't lose it). A server write
-reports itself when it lands, and closing the sheet fetches again.
+After any step that may have changed this Mac the panel calls its parent's `onchanged()`, which
+carries no ids: the panel decides no ticks. A server write reports itself when it lands, and closing
+the sheet fetches again.
 
-Steps that end after the sheet, or the whole panel, is gone are heard by the parent that outlives
-the panel. The sheet reports what it started (`onstarted {provider_id, tab_id?, server_id?, ready_before}`:
-the install's tab once `hiveMediaInstall` answers, the server once it is added or reused, and the
-tools that were ready when the panel opened the sheet), the panel passes it up, and the Create sheet and Hive settings each keep a `createSetupWatch` for their whole
-mount (`lib/hive/mediaWatch.ts` holds its listeners). It answers `hive-media-install-finished` only
-for those tab ids and `mcp-proxy-status` `connected` only for those servers, once each, so another
-window's install or an unrelated reconnect is ignored; the panel itself listens for nothing
-app-wide. One path detects per end. With the panel mounted, the parent calls its `refresh()`: the
-rows show the end, and the panel's `onchanged` carries what that fetch newly calls ready. Without
-it (the Create sheet on another step), the Create sheet reads the status and detects with
-`readyFrom`: the ready covers of the providers set up there, less the baseline of each provider's
-first start, so setting up the Homebrew kit for whisper-cli doesn't tick the ffmpeg that was already
-there; Hive settings' tools editor detects again. The scenario this is for:
-on the Tools step, Set up the Homebrew kit, close the sheet, press Next to Stack (the panel
-unmounts), the install exits 0: the Create sheet's watcher re-detects, whisper-cli is ticked, and
-Review lists it before Create. The Create sheet detects its tools again and ticks a newly ready one unless
-the human ticked or unticked it themselves (`createPickTracker`: every notice's tools are kept
-until an answer is applied, and the first answer that succeeds, even after a failed first
-detection, starts from the defaults or the draft); Hive settings' tools editor detects again and
-shows it as a tool to add, never adding it to `Hive.tools` without the human's Save. No polling.
+**One rule for what a setup ticks, the parent's.** The sheet reports what it started
+(`onstarted {provider_id, tab_id?, server_id?, ready_before}`: the install's tab once
+`hiveMediaInstall` answers, the server once it is added or reused, a local app at its Download, and
+the tools that were ready when the panel opened the sheet), the panel passes it up, and the Create
+sheet and Hive settings each keep a `createSetupWatch` for their whole mount (`lib/hive/mediaWatch.ts`
+holds its listeners). It answers `hive-media-install-finished` only for those tab ids and
+`mcp-proxy-status` `connected` only for those servers, once each, so another window's install or an
+unrelated reconnect is ignored; the panel itself listens for nothing app-wide. On a watched end
+(mounted panel or not) and on the panel's `onchanged`, the Create sheet runs `detectFromSetups`:
+it reads the status itself and detects again with `setupTicks` = `readyFrom` (the ready covers of
+the providers set up there, less the baseline of each provider's first start). So setting up the
+Homebrew kit for whisper-cli doesn't tick the ffmpeg already there, a fal signed in elsewhere
+meanwhile isn't ticked, a Re-detect in between changes nothing, and a Next that unmounts the panel
+mid-fetch loses nothing. The panel's `refresh()` only re-fetches its rows so they show the end.
+Hive settings' tools editor detects again on the same events and ticks nothing. A tick is never
+forced over the human's: a tool they ticked or unticked themselves is left as it is
+(`createPickTracker`: every notice's tools are kept until an answer is applied, and the first
+answer that succeeds, even after a failed first detection, starts from the defaults or the draft).
+
+Two runs for one end (the watcher, and an open sheet's Verify after the install) can happen; they
+are harmless, since the baseline and the tracker tick nothing twice and detection keeps only the
+newest answer. The scenario this is for: on the Tools step, Set up the Homebrew kit, close the
+sheet, press Next to Stack (the panel unmounts), the install exits 0: the Create sheet's watcher
+reads the status, whisper-cli is ticked, and Review lists it before Create. No polling.
 
 | Route | What maiTerm does | What the human does |
 |---|---|---|

@@ -30,15 +30,14 @@
   let toolsEditor = $state<ReturnType<typeof HiveToolsEditor> | null>(null);
 
   /** The ends of steps this sheet's media panel started (an install, a sign-in), heard for the
-   *  sheet's whole life, filtered to its own. One path per end: the panel fetches again
-   *  (`refresh`) and its `onchanged` has the tools editor detect again; without a panel, the
-   *  editor detects again itself. */
+   *  sheet's whole life, filtered to its own. The editor detects again on every one (it ticks
+   *  nothing: Save is the human's), and the panel's rows, when it is there, show the end too. */
   const setupWatch = createSetupWatch();
   let mediaPanel = $state<ReturnType<typeof HiveMediaPanel> | null>(null);
   onDestroy(
     watchSetupEnds(setupWatch, () => {
-      if (mediaPanel) mediaPanel.refresh();
-      else toolsEditor?.redetect();
+      mediaPanel?.refresh();
+      toolsEditor?.redetect();
     }),
   );
 

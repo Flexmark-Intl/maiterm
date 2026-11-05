@@ -37,7 +37,7 @@
   import { defaultsFromWizard, defaultToolIds, FALLBACK_CAP, fullPacks, HIVE_EFFORTS, HIVE_MODELS, knownTools, pickedItems, summarizeTools, wizardStart } from '$lib/hive/defaults';
   import HiveToolPicker from './HiveToolPicker.svelte';
   import HiveMediaPanel from './HiveMediaPanel.svelte';
-  import { createPickTracker, createSetupWatch, flippedIds, isSetupOnly, pickerTools, shouldStartOpen } from '$lib/hive/media';
+  import { createPickTracker, createSetupWatch, flippedIds, isSetupOnly, pickerTools, setupTicks, shouldStartOpen } from '$lib/hive/media';
   import { watchSetupEnds } from '$lib/hive/mediaWatch';
 
   interface Props {
@@ -415,26 +415,23 @@
 
   /** What this sheet's media panel set up, watched for this sheet's whole life (docs/hive-media.md
    *  §6): the panel unmounts at Next, and an install can exit minutes later, at Stack or Review.
-   *  Only the ends of steps its own setup sheets started count. One path detects per end:
-   *  - the panel is mounted (Tools step): it fetches again (`refresh`), so its rows show the end,
-   *    and its `onchanged` runs detection with what that fetch newly calls ready;
-   *  - it isn't (another step): the status names what those providers made ready since their
-   *    setup started (`readyFrom`), and detection runs with it. */
+   *  Only the ends of steps its own setup sheets started count. */
   const setupWatch = createSetupWatch();
   let mediaPanel = $state<ReturnType<typeof HiveMediaPanel> | null>(null);
+
+  /** The one rule for setup ticks: read the status here, tick what the setups here made ready since
+   *  they started (`setupTicks`), detect again. Run on every watched end, mounted panel or not, and
+   *  on the panel's `onchanged`. Two runs for one end (the watcher and an open sheet's Verify) are
+   *  harmless: the baseline and the tracker tick nothing twice, and detection keeps the newest. */
+  function detectFromSetups() {
+    void setupTicks(setupWatch, () => hiveMediaStatus(workspaceId)).then((ids) => {
+      if (!unmounted) detectTools(ids);
+    });
+  }
   const stopWatch = watchSetupEnds(setupWatch, () => {
-    if (mediaPanel) {
-      mediaPanel.refresh();
-      return;
-    }
-    hiveMediaStatus(workspaceId)
-      .then((rows) => {
-        if (!unmounted) detectTools(setupWatch.readyFrom(rows));
-      })
-      .catch((e) => {
-        logError(`hive: media status after a setup failed: ${e}`);
-        if (!unmounted) detectTools([]);
-      });
+    // The panel's rows, when it is there, show the end too; display only.
+    mediaPanel?.refresh();
+    detectFromSetups();
   });
   onDestroy(stopWatch);
   /** Detection failed: Save as my defaults keeps every default tool rather than clear them. */
@@ -1009,7 +1006,7 @@
                The panel reads startOpen once, at mount, and mounts only while this step shows, so the
                goal and folders it reads are the ones the human just left (or a restored draft's). The
                one place it is computed. Phase 4 passes a proposal's `media` here as the third argument. -->
-          <HiveMediaPanel bind:this={mediaPanel} {workspaceId} startOpen={shouldStartOpen(goal, folders)} onchanged={detectTools} onstarted={(st) => setupWatch.started(st)} />
+          <HiveMediaPanel bind:this={mediaPanel} {workspaceId} startOpen={shouldStartOpen(goal, folders)} onchanged={detectFromSetups} onstarted={(st) => setupWatch.started(st)} />
           <div class="field">
             <span class="label">Tools</span>
             {#if tools === null}

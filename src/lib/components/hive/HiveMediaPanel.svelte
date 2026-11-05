@@ -12,9 +12,9 @@
                  install tab in it.
     startOpen    the caller's `shouldStartOpen()`; read ONCE at mount. After that the human's
                  choice wins, whatever the parent does.
-    onchanged    optional: after the setup sheet changed something and the panel fetched again,
-                 with the tool ids that fetch newly calls ready. The Create sheet and Hive settings
-                 detect their tools again on it (event-driven: never a poll).
+    onchanged    optional: something a setup sheet did may have changed this Mac. It carries no
+                 ids: the panel decides no ticks. The Create sheet and Hive settings read the status
+                 themselves and detect their tools again on it (event-driven: never a poll).
     onstarted    optional, passed to the setup sheet: the install tab or server a step started.
                  The parent that outlives the panel watches for its end (createSetupWatch); the
                  panel listens for nothing app-wide itself.
@@ -30,13 +30,13 @@
   import { warn as logWarn } from '@tauri-apps/plugin-log';
   import { hiveMediaCatalogue, hiveMediaStatus } from '$lib/tauri/commands';
   import type { HiveMediaCatalogue, HiveMediaRow } from '$lib/tauri/types';
-  import { compactLine, createLatest, newlyReady, readyToolIds, externalUrl, coverNames, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
+  import { compactLine, createLatest, readyToolIds, externalUrl, coverNames, groupRows, modelsLine, stateTone, recommendedSetupNote, subscriberProviders, summaryLine, toggleId, unverifiedNote } from '$lib/hive/media';
   import type { PanelProvider, PanelRow, SetupStarted } from '$lib/hive/media';
 
   interface Props {
     workspaceId: string | null;
     startOpen: boolean;
-    onchanged?: (newlyReady: string[]) => void;
+    onchanged?: () => void;
     onstarted?: (s: SetupStarted) => void;
   }
   let { workspaceId, startOpen, onchanged, onstarted }: Props = $props();
@@ -68,10 +68,8 @@
   const line = $derived(failure ? "Media: couldn't check" : groups ? summaryLine(groups) : 'Media: checking…');
   const empty = $derived(!!groups && groups.common.length + groups.more.length === 0);
 
-  /** Fetch again; true when this fetch's answer is the one shown (not overtaken, not unmounted). */
-  async function load(): Promise<boolean> {
+  async function load() {
     const stale = latest.next();
-    const tell = onchanged;
     // Props and state are read here, before the first await: nothing reads them after unmount.
     const ws = workspaceId;
     const paying = [...pay];
@@ -80,22 +78,14 @@
     failure = null;
     try {
       const [cat, status] = await Promise.all([known ?? hiveMediaCatalogue(), hiveMediaStatus(ws, paying)]);
-      if (stale()) return false;
+      if (stale()) return;
       catalogue = cat;
       rows = status;
     } catch (e) {
-      if (stale()) return false;
+      if (stale()) return;
       failure = String(e);
     }
-    if (stale()) return false;
-    loading = false;
-    if (failure !== null) return false;
-    if (owed !== null) {
-      const before = owed;
-      owed = null;
-      tell?.(newlyReady(before, readyToolIds(rows)));
-    }
-    return true;
+    if (!stale()) loading = false;
   }
 
   onMount(() => {
@@ -141,19 +131,18 @@
     void nextTick().then(() => requestAnimationFrame(() => (opener?.isConnected ? opener : redetectBtn)?.focus()));
   }
 
-  /** The sheet changed something on this Mac: the parent is owed a notice, with what was ready
-   *  before, and the panel fetches again. Whichever fetch lands next pays it (a Re-detect or a tick
-   *  may overtake this one), so the notice is never lost to a newer fetch. */
-  let owed: string[] | null = null;
+  /** The sheet may have changed something on this Mac: fetch again for the display, and tell the
+   *  parent at once. The parent reads the status itself and decides the ticks
+   *  (`setupTicks`), so nothing here waits on this fetch, and an unmount mid-fetch loses nothing. */
   function setupChanged() {
-    if (owed === null) owed = readyToolIds(rows);
     void load();
+    onchanged?.();
   }
 
-  /** The parent heard the end of a step this panel's sheet started (an install or a sign-in that
-   *  ended after the sheet closed): fetch again so the rows show it, and pay the owed notice. */
+  /** The parent heard the end of a step this panel's sheet started: fetch again so the rows show
+   *  it. Display only: it tells nobody (the parent already owns that end). */
   export function refresh() {
-    setupChanged();
+    void load();
   }
 
   async function go(url: string) {

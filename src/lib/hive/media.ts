@@ -473,3 +473,16 @@ export function createSetupWatch() {
 }
 
 export type SetupWatch = ReturnType<typeof createSetupWatch>;
+
+/** The one rule for what a setup ticks (docs/hive-media.md §6), run by the parent that owns the
+ *  watch (the Create sheet): read the status fresh, then `readyFrom` it. Whatever the panel showed or
+ *  fetched in between (a Re-detect, an "I already pay for…" tick) and whether it is still mounted
+ *  don't matter: the baseline is the setup's start, and the rows are this call's own. A failed read
+ *  notices nothing (detection still runs, with nothing to tick). */
+export async function setupTicks(watch: SetupWatch, fetchStatus: () => Promise<HiveMediaRow[]>): Promise<string[]> {
+  try {
+    return watch.readyFrom(await fetchStatus());
+  } catch {
+    return [];
+  }
+}

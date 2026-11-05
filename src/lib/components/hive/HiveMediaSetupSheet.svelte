@@ -467,6 +467,13 @@
     await navigateToTab(id).catch((e) => fail(e));
   }
 
+  /** A local app is set up outside maiTerm, so its start is the download: the parent's watch
+   *  learns the provider and its baseline, and ticks the app if a later Verify finds it ready. */
+  function downloadApp() {
+    reportStarted?.({ provider_id: p.id, ready_before: readyBefore });
+    void open(appUrl);
+  }
+
   async function retryModel() {
     if (busy) return;
     busy = true;
@@ -611,7 +618,7 @@
           </div>
         {/if}
       {:else if action === 'app'}
-        {#if appUrl}<div class="row"><Button variant="primary" onclick={() => open(appUrl)}>Download {p.name}</Button></div>{/if}
+        {#if appUrl}<div class="row"><Button variant="primary" onclick={downloadApp}>Download {p.name}</Button></div>{/if}
         <p class="dim">maiTerm checks again when you come back to this window.</p>
       {:else if guide.lead}
         <p class="dim">{guide.lead}</p>
