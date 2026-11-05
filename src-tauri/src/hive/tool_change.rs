@@ -203,6 +203,34 @@ pub(crate) async fn set_tools<W: HiveWindow>(
     tools: &[String],
     add_hosts: &[String],
 ) -> Result<HiveToolsChange, String> {
+    let (hive, c) = write_tools(ctx, caller, detected, remote_hosts, tools, add_hosts).await?;
+    log_line(caller, "human", &change_lines(&c), None);
+    let p = caller.paths.clone();
+    let workers = super::tools::blocking(move || Ok(super::worker::list_workers(&p))).await.unwrap_or_default();
+    let text = notice(&c, running_on_old(&workers).as_deref());
+    let coordinator_told = match super::tools::coordinator_tab(ctx.data, caller) {
+        Some(tab) => {
+            let sent = ctx.window.deliver(&tab, text, "Hive tools").await;
+            log::info!("hive {}: tools notice to the coordinator: {}", caller.hive.id, sent.describe());
+            matches!(sent, super::deliver::Sent::Delivered)
+        }
+        None => false,
+    };
+    Ok(HiveToolsChange { hive, added: c.preview.added, removed: c.preview.removed, hosts_added: c.hosts_added, coordinator_told })
+}
+
+/// A tools change checked against the record as it is under the write lock, and saved: the one
+/// write behind Hive settings → Tools and an approved `tool_setup` card (`hive::tool_setup`),
+/// which each log it and tell the coordinator in their own words. A host is saved only if it was
+/// looked up first (`refuse_private_hosts`).
+pub(crate) async fn write_tools<W: HiveWindow>(
+    ctx: &Ctx<'_, W>,
+    caller: &Caller,
+    detected: &[DetectedTool],
+    remote_hosts: &[String],
+    tools: &[String],
+    add_hosts: &[String],
+) -> Result<(Hive, Checked), String> {
     let current = super::autonomy::current_hive(ctx, caller).ok_or("This Hive is gone.")?;
     // Refused before any lookup: the lookups only run for hosts that would be saved.
     let first = check(&current, detected, tools, add_hosts, remote_hosts)?;
@@ -220,19 +248,7 @@ pub(crate) async fn set_tools<W: HiveWindow>(
         });
     })?;
     let c = outcome?;
-    log_line(caller, "human", &change_lines(&c), None);
-    let p = caller.paths.clone();
-    let workers = super::tools::blocking(move || Ok(super::worker::list_workers(&p))).await.unwrap_or_default();
-    let text = notice(&c, running_on_old(&workers).as_deref());
-    let coordinator_told = match super::tools::coordinator_tab(ctx.data, caller) {
-        Some(tab) => {
-            let sent = ctx.window.deliver(&tab, text, "Hive tools").await;
-            log::info!("hive {}: tools notice to the coordinator: {}", caller.hive.id, sent.describe());
-            matches!(sent, super::deliver::Sent::Delivered)
-        }
-        None => false,
-    };
-    Ok(HiveToolsChange { hive, added: c.preview.added, removed: c.preview.removed, hosts_added: c.hosts_added, coordinator_told })
+    Ok((hive, c))
 }
 
 /// The window's own Hive in `workspace_id`, with a fresh detection and its remotes. Blocks

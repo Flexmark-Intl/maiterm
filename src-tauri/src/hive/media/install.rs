@@ -382,6 +382,8 @@ fn ended(i: Install, done: InstallFinished) {
         if done.model_download {
             super::whisper::start_default(handle.clone());
         }
+        // An approved `tool_setup` ask waiting on this install is looked at again.
+        crate::hive::tool_setup::recheck_soon();
     };
     if !resync_first {
         announce();
@@ -433,15 +435,38 @@ pub async fn hive_media_install(
     provider_id: String,
     avoid_workspace_id: Option<String>,
 ) -> Result<InstallStarted, String> {
+    let handle = window.app_handle().clone();
+    let tab_window = tab_window_for(window.label(), || crate::focused_app_window(&handle));
+    start(state.inner(), &handle, window.label(), tab_window, &provider_id, avoid_workspace_id).await
+}
+
+/// Whether an approval from the phone may start `p`'s setup without the Mac (docs/hive-media.md
+/// §7): a `brew` install when Homebrew is already here (a first install asks for the human's
+/// password at the Mac), or a `plugin` install with a confirmed source. Anything else waits.
+pub fn phone_startable(p: &Provider, here: &Here) -> bool {
+    plan_for(p, here).is_ok_and(|plan| !plan.installs_homebrew)
+}
+
+/// Start `provider_id`'s install: the line from the catalogue alone, typed into a new tab of
+/// `tab_window` (None: no window to open it in). `hive-media-install-finished` goes to
+/// `event_window` when it exits. The setup sheet's command and an approved `tool_setup` card
+/// from the phone (`hive::tool_setup`, into the Hive's own window) both start here.
+pub async fn start(
+    state: &Arc<AppState>,
+    handle: &AppHandle,
+    event_window: &str,
+    tab_window: Option<String>,
+    provider_id: &str,
+    avoid_workspace_id: Option<String>,
+) -> Result<InstallStarted, String> {
     let prefs = state.app_data.read().preferences.clone();
     let here = tauri::async_runtime::spawn_blocking(move || Here::detect(&prefs)).await.map_err(|e| e.to_string())?;
-    let plan = plan(&provider_id, &here)?;
-    let name = provider(&provider_id).map_or(provider_id.clone(), |p| p.name.clone());
-    let handle = window.app_handle().clone();
+    let plan = plan(provider_id, &here)?;
+    let name = provider(provider_id).map_or(provider_id.to_string(), |p| p.name.clone());
     HANDLE.get_or_init(|| handle.clone());
     let id = uuid::Uuid::new_v4().to_string();
-    installs().begin(&id, &plan, window.label()).map_err(|e| format!("{name}: {e}"))?;
-    let tab_window = match tab_window_for(window.label(), || crate::focused_app_window(&handle)) {
+    installs().begin(&id, &plan, event_window).map_err(|e| format!("{name}: {e}"))?;
+    let tab_window = match tab_window {
         Some(w) => w,
         None => {
             installs().forget(&id);
@@ -456,8 +481,8 @@ pub async fn hive_media_install(
         "avoid_workspace_id": avoid_workspace_id,
     });
     let outcome = crate::mailink::rpc::request_on(
-        state.inner(),
-        Some(&handle),
+        state,
+        Some(handle),
         crate::hive::rpc::EVENT,
         &tab_window,
         crate::hive::rpc::VERB_MEDIA_INSTALL,
