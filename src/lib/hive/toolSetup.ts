@@ -114,6 +114,10 @@ export function createOpeningQueue() {
       for (const o of byWs.values()) if (!best || o.at > best.at) best = o;
       return best;
     },
+    /** The opening waiting for a workspace, left in place. */
+    peek(workspaceId: string): ToolSetupOpening | null {
+      return byWs.get(workspaceId) ?? null;
+    },
     /** Taken once, by the Hive view of its workspace. */
     take(workspaceId: string): ToolSetupOpening | null {
       const o = byWs.get(workspaceId) ?? null;

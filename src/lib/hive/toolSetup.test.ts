@@ -118,6 +118,8 @@ describe('the opening queue', () => {
     q.add(o('b', 3));
     expect(q.size).toBe(2);
     expect(q.next()?.workspaceId).toBe('b');
+    expect(q.peek('a')?.at).toBe(2);
+    expect(q.size).toBe(2);
     expect(q.take('a')?.at).toBe(2);
     expect(q.take('a')).toBeNull();
     expect(q.next()?.workspaceId).toBe('b');

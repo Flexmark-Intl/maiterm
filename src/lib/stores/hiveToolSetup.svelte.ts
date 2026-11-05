@@ -26,6 +26,8 @@ import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { APPROVED_EVENT, HIVE_OPEN_TOOL_SETUP, createOpeningQueue, missedOpenings, openingFrom, parseApproved, type ToolSetupOpening } from '$lib/hive/toolSetup';
 
 const OPENED_KEY = 'maiterm.hive.toolSetupOpened';
+/** How long a flushed opening waits for its Hive view to take it. */
+const TAKE_WITHIN_MS = 3000;
 
 function readOpened(): Set<string> {
   try {
@@ -54,7 +56,7 @@ function createHiveToolSetupStore() {
   let recovered = false;
   let flushing = false;
 
-  const inThisWindow = (workspaceId: string) => workspacesStore.workspaces.some((w) => w.id === workspaceId && !!w.hive);
+  const inThisWindow = (workspaceId: string) => workspacesStore.workspaces.some((w) => w.id === workspaceId && !!w.hive && !w.suspended);
 
   function queueOpening(o: ToolSetupOpening) {
     if (opened.has(o.requestId)) return;
@@ -89,13 +91,21 @@ function createHiveToolSetupStore() {
       const o = queue.next();
       if (!o) return;
       if (!inThisWindow(o.workspaceId)) {
-        // The Hive was deleted or moved meanwhile: nothing to open here.
+        // The Hive was deleted, moved or suspended meanwhile: nothing to open here.
         queue.take(o.workspaceId);
         return;
       }
       if (workspacesStore.activeWorkspaceId !== o.workspaceId) await workspacesStore.setActiveWorkspace(o.workspaceId);
       // A Hive view already showing hears this; a freshly mounted one takes it at mount.
       window.dispatchEvent(new CustomEvent<string>(HIVE_OPEN_TOOL_SETUP, { detail: o.workspaceId }));
+      // One try per opening: an opening no view took (the workspace couldn't be shown) is dropped
+      // rather than pulling the window to that workspace on every focus. Hive settings → Tools
+      // still reaches its sheet, and Rust still adds the tools once it works.
+      setTimeout(() => {
+        if (queue.peek(o.workspaceId)?.requestId !== o.requestId) return;
+        queue.take(o.workspaceId);
+        void logWarn(`hive: tool setup ${o.requestId}'s sheet wasn't opened: its Hive view didn't show`);
+      }, TAKE_WITHIN_MS);
     } catch (e) {
       logError(`hive: tool setup sheet not opened: ${e}`);
     } finally {
