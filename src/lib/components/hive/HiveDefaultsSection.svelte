@@ -89,8 +89,8 @@
        Folded: open it is ~1300px tall and would push the defaults this page is for off the first
        screen; the one-line summary stays, and the human opens it. -->
   <div class="block">
-    <HiveMediaPanel workspaceId={null} startOpen={false} />
     <p class="hint media-note">On this Mac, for any Hive</p>
+    <HiveMediaPanel workspaceId={null} startOpen={false} />
   </div>
 
   <div class="block">
