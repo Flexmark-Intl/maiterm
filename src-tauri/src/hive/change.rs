@@ -311,7 +311,7 @@ fn write<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, c: &SettingsChange, b
     Ok((hive, outcome?))
 }
 
-fn log_line(caller: &Caller, by: &str, lines: &[String], reason: Option<&str>) {
+pub(super) fn log_line(caller: &Caller, by: &str, lines: &[String], reason: Option<&str>) {
     let line = json!({ "v": 1, "at": crate::mailink::board::iso_now(), "by": by, "changes": lines, "reason": reason });
     if let Err(e) = super::queue::append_line(&caller.paths.settings_log(), &line) {
         log::warn!("hive {}: settings changed but not logged: {e}", caller.hive.id);
@@ -336,6 +336,12 @@ fn relaunch_sentence(c: &SettingsChange, workers: &[super::worker::WorkerRecord]
     if !needs_worker_relaunch(c) {
         return None;
     }
+    running_on_old(workers)
+}
+
+/// The running workers a next-launch change hasn't reached yet, and what to do: None when none
+/// is running. A tools change (`tool_change`) says it too.
+pub(super) fn running_on_old(workers: &[super::worker::WorkerRecord]) -> Option<String> {
     let live: Vec<String> = workers.iter().filter(|w| w.is_live()).map(super::tools::worker_label).collect();
     if live.is_empty() {
         return None;
@@ -408,7 +414,7 @@ pub(crate) async fn refuse_private_hosts(hosts: &[String], must_resolve: bool, r
 }
 
 /// The remotes given as IP addresses: a name that answers one reaches the remote (the final review).
-fn ip_remotes(remote_hosts: &[String]) -> Vec<std::net::IpAddr> {
+pub(super) fn ip_remotes(remote_hosts: &[String]) -> Vec<std::net::IpAddr> {
     remote_hosts.iter().filter_map(|r| r.trim_start_matches(super::gallery::budget::UNRESOLVED_ALIAS).parse().ok()).collect()
 }
 
