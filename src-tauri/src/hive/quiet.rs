@@ -55,10 +55,27 @@ fn generation(tab: &str) -> u64 {
 }
 
 /// Whether a quiet worker is stalled rather than waiting on something that will come: it is still
-/// `running` (not reported, blocked on the human, landing…), no run of its own is open or has a
-/// result on its way, and its Hive is active (a paused Hive holds what reaches it).
-pub fn stalled(w: &WorkerRecord, hive_status: &str) -> bool {
-    w.phase == PHASE_RUNNING && hive_status == super::record::STATUS_ACTIVE && !w.pending_runs.iter().any(|r| r.state == RUN_OPEN || r.state == RUN_RESULT)
+/// `running` (not reported, landing…), its task carries no blocker (a question to the human or
+/// the coordinator keeps it `running`: the answer is on its way, and a nudge would invite the
+/// coordinator to decide what is the human's), and no run of its own is open or has a result on
+/// its way. Whether its Hive is active is the caller's: a paused one defers the check.
+pub fn stalled(w: &WorkerRecord, task_blocked: bool) -> bool {
+    w.phase == PHASE_RUNNING && !task_blocked && !w.pending_runs.iter().any(|r| r.state == RUN_OPEN || r.state == RUN_RESULT)
+}
+
+/// The Stop says the session wakes itself: background work or a scheduled wakeup (Claude's own
+/// fields, 2.1.318: "session is paused waiting for background work to wake it").
+fn wakes_itself(event: &Value) -> bool {
+    ["background_tasks", "session_crons"].iter().any(|k| event.get(*k).and_then(Value::as_array).is_some_and(|a| !a.is_empty()))
+}
+
+/// The worker's task row has a blocker, as the state has it now.
+fn task_blocked(state: &AppState, caller: &super::tools::Caller, task_id: &str) -> bool {
+    let d = state.app_data.read();
+    d.window(&caller.label)
+        .and_then(|w| w.workspaces.iter().find(|ws| ws.id == caller.workspace_id))
+        .and_then(|ws| ws.tasks.iter().find(|t| t.id == task_id))
+        .is_some_and(|t| t.blocker.is_some())
 }
 
 /// To the coordinator.
@@ -85,20 +102,29 @@ pub fn seen(state: &Arc<AppState>, handle: &AppHandle, tab_id: &str, event_name:
         return;
     }
     let armed = bump(tab_id);
-    if !arms(event_name) {
+    if !arms(event_name) || wakes_itself(event) {
         return;
     }
     let last_words = event.get("last_assistant_message").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(|t| one_line(t, 300));
     let (state, handle, tab) = (state.clone(), handle.clone(), tab_id.to_string());
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(QUIET).await;
-        if generation(&tab) != armed || super::prompts::has_screen_routes(&tab) {
-            return;
-        }
-        let Some(caller) = super::tools::caller_for_tab(&state.app_data.read(), &tab) else { return };
-        let (paths, t) = (caller.paths.clone(), tab.clone());
-        let Ok(Some(w)) = blocking(move || Ok(worker::worker_for_tab(&paths, &t))).await else { return };
-        if !stalled(&w, &caller.hive.status) {
+        // A paused Hive defers the check, not ends it: nothing may reach the worker at Resume.
+        let (caller, w) = loop {
+            tokio::time::sleep(QUIET).await;
+            if generation(&tab) != armed || super::prompts::has_screen_routes(&tab) {
+                return;
+            }
+            let Some(caller) = super::tools::caller_for_tab(&state.app_data.read(), &tab) else { return };
+            match caller.hive.status.as_str() {
+                super::record::STATUS_ACTIVE => {}
+                super::fuses::STATUS_PAUSED => continue,
+                _ => return,
+            }
+            let (paths, t) = (caller.paths.clone(), tab.clone());
+            let Ok(Some(w)) = blocking(move || Ok(worker::worker_for_tab(&paths, &t))).await else { return };
+            break (caller, w);
+        };
+        if !stalled(&w, task_blocked(&state, &caller, &w.task_id)) {
             return;
         }
         // Told once per quiet spell: the next activity starts a new one.
@@ -128,14 +154,23 @@ mod tests {
     /// The live stall: a running reviewer, its `cargo test` result lost, nothing on its way.
     #[test]
     fn a_running_worker_with_nothing_coming_is_stalled() {
-        assert!(stalled(&w(PHASE_RUNNING, &[]), "active"));
-        assert!(!stalled(&w(PHASE_RUNNING, &[RUN_OPEN]), "active"), "its run will report");
-        assert!(!stalled(&w(PHASE_RUNNING, &[RUN_RESULT]), "active"), "its result is on its way");
-        assert!(!stalled(&w(PHASE_RUNNING, &[]), "paused"), "the pause holds what reaches it");
-        assert!(!stalled(&w(PHASE_RUNNING, &[]), "done"));
+        assert!(stalled(&w(PHASE_RUNNING, &[]), false));
+        assert!(!stalled(&w(PHASE_RUNNING, &[RUN_OPEN]), false), "its run will report");
+        assert!(!stalled(&w(PHASE_RUNNING, &[RUN_RESULT]), false), "its result is on its way");
+        assert!(!stalled(&w(PHASE_RUNNING, &[]), true), "its task's blocker will be answered");
         for p in [worker::PHASE_REPORTED, worker::PHASE_BLOCKED, worker::PHASE_LANDING, worker::PHASE_RETIRED, worker::PHASE_WAITING] {
-            assert!(!stalled(&w(p, &[]), "active"), "{p}");
+            assert!(!stalled(&w(p, &[]), false), "{p}");
         }
+    }
+
+    /// Claude's Stop says when background work or a scheduled wakeup will wake the session.
+    #[test]
+    fn a_session_that_wakes_itself_isnt_armed() {
+        use serde_json::json;
+        assert!(wakes_itself(&json!({ "background_tasks": [{ "id": "b1" }] })));
+        assert!(wakes_itself(&json!({ "session_crons": [{ "id": "c1" }] })));
+        assert!(!wakes_itself(&json!({ "background_tasks": [], "session_crons": [] })));
+        assert!(!wakes_itself(&json!({})), "an older Claude sends neither");
     }
 
     #[test]

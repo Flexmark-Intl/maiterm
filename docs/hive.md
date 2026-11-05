@@ -4682,8 +4682,11 @@ several releases a day).
    and its coordinator sat 19 h). A worker's Stop or SessionStart arms a 10-minute check that any
    later activity event cancels (`Notification` doesn't count: Claude's idle nudge follows every
    Stop). It tells the coordinator once per quiet spell, quoting `last_assistant_message`. It only
-   tells when the worker is still `running`, no run of its own is open or has a result on its way,
-   no prompt of its is routed, and the Hive is active. Memory only: after a restart the relaunch's
+   tells when the worker is still `running`, its task has no blocker (a question keeps a worker
+   `running`, and a nudge would invite the coordinator to decide what is the human's), no run of
+   its own is open or has a result on its way, and no prompt of its is routed. A paused Hive defers
+   the check rather than ending it. A Stop whose `background_tasks` or `session_crons` aren't empty
+   doesn't arm it, because the session wakes itself. Memory only: after a restart the relaunch's
    SessionStart arms it again. *Delete:* the memory folder
    is work and stays in place under the Hive's folder unless its own box is ticked, and the sheet
    lists what goes (the decision log, run history, this Hive's precedents, the other logs, launch
