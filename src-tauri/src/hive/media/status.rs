@@ -164,21 +164,20 @@ pub fn native_hits(detected: &[DetectedTool]) -> Vec<Hit> {
 
 // ─── Claude Code plugins ────────────────────────────────────────────────────
 
-/// Every Claude config root a Hive's agents may launch under: the user's own and each managed
-/// Claude account's (docs/login.md §5.4), the plugins of any of which are the human's.
-/// `trust_roots` is not this: it names only the ONE root a new Hive launches under.
+/// The Claude config root whose plugins the coordinator really loads: the one it launches under
+/// (`install::coordinator_config_root`). That is the active managed Claude account's root, read through
+/// its links to `~/.claude` (and an unlinked real `plugins` folder in it is what it loads), else
+/// the human's exported `CLAUDE_CONFIG_DIR`, else `~/.claude`. It is the root
+/// `install::plugin_root` installs into, so install, verify and launch can't disagree. A plugin
+/// found anywhere else (an account switched off, an exported root a managed account shadows) is
+/// not the coordinator's, so it is not reported. Workers load no user plugin at all.
 pub fn plugin_roots(prefs: &crate::state::Preferences) -> Vec<PathBuf> {
-    let mut roots: Vec<PathBuf> = Vec::new();
-    let user = crate::accounts::user_claude_root().map(Path::to_path_buf).or_else(|| dirs::home_dir().map(|h| h.join(".claude")));
-    roots.extend(user);
-    for a in prefs.managed_accounts.iter().filter(|a| a.runtime == crate::accounts::Runtime::Claude.slug()) {
-        if let Some(r) = crate::accounts::account_root(crate::accounts::Runtime::Claude, &a.id) {
-            if !roots.contains(&r) {
-                roots.push(r);
-            }
-        }
-    }
-    roots
+    plugin_roots_for(prefs, crate::accounts::user_claude_root(), dirs::home_dir().as_deref())
+}
+
+/// `plugin_roots` with the human's exported root and home given.
+pub fn plugin_roots_for(prefs: &crate::state::Preferences, users_own: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+    crate::hive::media::install::coordinator_config_root(prefs, users_own, home).into_iter().collect()
 }
 
 /// The plugins one config root has installed, as `(id, enabled)`. Claude Code records them in

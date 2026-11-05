@@ -184,18 +184,97 @@ fn remotion_is_found_in_any_roots_plugins_not_only_the_users() {
     let _ = std::fs::remove_dir_all(&account);
 }
 
+/// Managed Claude accounts set up, enabled and one active, under an id no machine has a root for.
+fn managed_claude_on() -> (crate::state::Preferences, PathBuf) {
+    let id = format!("test-{}", uuid::Uuid::new_v4().simple());
+    let mut p = crate::state::Preferences { accounts_setup_complete: true, accounts_enabled: true, ..Default::default() };
+    p.managed_accounts = vec![serde_json::from_value(serde_json::json!({ "id": id, "runtime": "claude", "label": "Work" })).unwrap()];
+    p.active_account_ids.insert("claude".into(), id.clone());
+    (p, crate::accounts::account_root(crate::accounts::Runtime::Claude, &id).unwrap())
+}
+
+/// A config root with Remotion installed at user scope.
+fn root_with_remotion(tag: &str) -> PathBuf {
+    let root = temp(tag);
+    let install = root.join("plugins").join("cache").join("remotion");
+    std::fs::create_dir_all(&install).unwrap();
+    write_plugins(&root, &plugin_json(&install, &root.join("nowhere")));
+    root
+}
+
+fn found(prefs: &crate::state::Preferences, users_own: &Path, home: &Path) -> bool {
+    plugin_hits(&plugin_roots_for(prefs, Some(users_own), Some(home))).iter().any(|h| h.cover.provider == "remotion")
+}
+
 #[test]
-fn plugin_roots_name_every_managed_claude_account() {
-    let mut prefs = crate::state::Preferences::default();
-    let account = |id: &str, runtime: &str| -> crate::state::ManagedAccount { serde_json::from_value(serde_json::json!({ "id": id, "runtime": runtime, "label": id })).unwrap() };
-    prefs.managed_accounts = vec![account("a1", "claude"), account("a2", "claude"), account("c1", "codex")];
-    let roots = plugin_roots(&prefs);
-    for id in ["a1", "a2"] {
-        let want = crate::accounts::account_root(crate::accounts::Runtime::Claude, id).unwrap();
-        assert!(roots.contains(&want), "{id}: {roots:?}");
+fn a_plugin_is_found_only_in_the_root_the_coordinator_loads() {
+    // `x` is the human's exported CLAUDE_CONFIG_DIR, `home` holds ~/.claude: Remotion in one each.
+    let x = root_with_remotion("exported-x");
+    let home = temp("home");
+    let dot_claude = home.join(".claude");
+    std::fs::create_dir_all(&dot_claude).unwrap();
+    let empty_x = temp("empty-x");
+    let plugin_home = temp("plugin-home");
+    let install = plugin_home.join(".claude").join("plugins").join("cache").join("remotion");
+    std::fs::create_dir_all(&install).unwrap();
+    write_plugins(&plugin_home.join(".claude"), &plugin_json(&install, &plugin_home.join("nowhere")));
+
+    // 1. Managed on, plus an exported /x: the coordinator loads the account's root (linked to
+    //    ~/.claude), so a plugin only in /x is not found.
+    let (on, account) = managed_claude_on();
+    assert_eq!(plugin_roots_for(&on, Some(&x), Some(&home)), vec![account.clone()]);
+    assert!(!found(&on, &x, &home), "a plugin only in the exported root is no coordinator's");
+
+    // 2. Managed off, with /x: /x alone. Found there; a plugin only in ~/.claude is not.
+    let off = crate::state::Preferences::default();
+    assert_eq!(plugin_roots_for(&off, Some(&x), Some(&home)), vec![x.clone()]);
+    assert!(found(&off, &x, &home));
+    assert!(!found(&off, &empty_x, &plugin_home), "a plugin only in ~/.claude, with /x exported");
+
+    // 3. Set up but switched off (or none active), with /x: as off, the account's root unread.
+    let (mut disabled, _) = managed_claude_on();
+    disabled.accounts_enabled = false;
+    let (mut none_active, _) = managed_claude_on();
+    none_active.active_account_ids.clear();
+    for prefs in [&disabled, &none_active] {
+        assert_eq!(plugin_roots_for(prefs, Some(&x), Some(&home)), vec![x.clone()]);
+        assert!(found(prefs, &x, &home));
+        assert!(!found(prefs, &empty_x, &plugin_home));
     }
-    assert!(!roots.iter().any(|r| r.ends_with("c1")), "a Codex account has no Claude plugins");
-    assert!(roots.len() >= 3 || dirs::home_dir().is_none(), "the user's own root is first: {roots:?}");
+
+    // Nothing exported, nothing managed: ~/.claude.
+    assert_eq!(plugin_roots_for(&off, None, Some(&plugin_home)), vec![plugin_home.join(".claude")]);
+    assert!(plugin_hits(&plugin_roots_for(&off, None, Some(&plugin_home))).iter().any(|h| h.cover.provider == "remotion"));
+
+    for d in [x, home, empty_x, plugin_home] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+#[test]
+fn launch_status_and_install_name_the_same_root() {
+    let x = Path::new("/x");
+    let home = Path::new("/home/me");
+    let (on, account) = managed_claude_on();
+    let (mut disabled, _) = managed_claude_on();
+    disabled.accounts_enabled = false;
+    let off = crate::state::Preferences::default();
+    for (prefs, users_own) in [(&on, Some(x)), (&on, None), (&off, Some(x)), (&off, None), (&disabled, Some(x)), (&disabled, None)] {
+        let coordinator = crate::hive::media::install::coordinator_config_root(prefs, users_own, Some(home));
+        // Launch: the same root, wherever launch names one.
+        let launch = crate::hive::launch::config_root_for(prefs, users_own);
+        assert_eq!(coordinator, launch.clone().or_else(|| Some(home.join(".claude"))), "{users_own:?}");
+        // Status: that root alone.
+        assert_eq!(plugin_roots_for(prefs, users_own, Some(home)), coordinator.clone().into_iter().collect::<Vec<_>>());
+        // Install: that root, or ~/.claude (env -u) where it is a managed root linking there or
+        // the default itself.
+        let install = crate::hive::media::install::plugin_root(prefs, users_own);
+        if coordinator.as_ref() == Some(&account) {
+            assert_eq!(install, None, "a managed root is written through to ~/.claude");
+        } else {
+            assert_eq!(install.unwrap_or_else(|| home.join(".claude")), coordinator.clone().unwrap(), "{users_own:?}");
+        }
+    }
 }
 
 // ─── ComfyUI ────────────────────────────────────────────────────────────────

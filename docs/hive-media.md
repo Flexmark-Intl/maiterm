@@ -167,8 +167,14 @@ What it reads:
   fal server named "video" is.
 - **Native `.claude.json` entries**: matched by `match.hosts`, then `match.names`, as today. A
   native stdio entry still has only its name to vouch for it.
-- **Installed Claude Code plugins**, in every managed account root as MCP detection reads them
-  (`trust_roots`), not only `~/.claude/plugins`. Remotion is found here.
+- **Installed Claude Code plugins**, in the one Claude config root the coordinator loads
+  (`install::coordinator_config_root`, built on `launch::config_root_for`). That is the active
+  managed Claude account's root, read through its links to `~/.claude`, else the human's
+  exported `CLAUDE_CONFIG_DIR`, else `~/.claude`. A plugin anywhere else isn't reported: in an
+  exported root a managed account shadows, or in a root of an account that is switched off or
+  not active. The coordinator never loads those, and workers load no user plugin at all. Install
+  writes to the same root (`install::plugin_root`), so install, Verify and launch can't
+  disagree. Remotion is found here.
 - **ComfyUI** on 127.0.0.1:8188 (as today), and the Comfy Desktop app's presence.
 
 ## 6. Setup routes
@@ -198,8 +204,9 @@ and `src/lib/hive/mediaInstall.ts`.
     Linuxbrew), since the tab's shell has no `brew` on its PATH yet.
   - `plugin`: `env -u CLAUDE_CONFIG_DIR claude plugin marketplace add <marketplace>; … claude
     plugin install <plugin_id>`, or `env CLAUDE_CONFIG_DIR=<root>` in place of `env -u`. It
-    installs into the root the coordinator loads (`install::plugin_root`), whatever account the
-    tab spawned under:
+    installs into the root the coordinator loads (`install::coordinator_config_root`, the root
+    §5's plugin detection reads, through `install::plugin_root`), whatever account the tab
+    spawned under:
     - With a managed Claude account active, that is `~/.claude`, even when the human also
       exported a `CLAUDE_CONFIG_DIR`. The coordinator launches under the managed root, whose
       `plugins` and `settings.json` link back to `~/.claude`, never to the exported root. The

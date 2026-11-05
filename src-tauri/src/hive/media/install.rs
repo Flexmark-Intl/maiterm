@@ -72,18 +72,27 @@ impl Here {
     }
 }
 
-/// The root a plugin must install into for the coordinator to load it (`None`: `~/.claude`).
-/// A managed Claude account wins the coordinator's launch (`launch::config_root_for`), and its
-/// root links `plugins` and `settings.json` to `~/.claude`, never to a `CLAUDE_CONFIG_DIR` the
-/// human exported: so with one active, `~/.claude`. Without one, the human's exported root
-/// (`users_own`), which plain tabs and the coordinator both use.
+/// The Claude config root the coordinator loads: the active managed Claude account's root, else
+/// the human's exported `CLAUDE_CONFIG_DIR` (`users_own`), else `<home>/.claude`. The one rule
+/// launch (`launch::config_root_for`, which this extends with the default), status
+/// (`status::plugin_roots`) and install (`plugin_root`) all read, so they can't disagree.
+pub fn coordinator_config_root(prefs: &crate::state::Preferences, users_own: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    crate::hive::launch::config_root_for(prefs, users_own).or_else(|| home.map(|h| h.join(".claude")))
+}
+
+/// The root a plugin installs into for the coordinator to load it (`None`: `~/.claude`, by
+/// `env -u CLAUDE_CONFIG_DIR`): `coordinator_config_root`, except that a managed account's root
+/// is written through to `~/.claude`, where its `plugins` and `settings.json` link (accounts
+/// `cfg("plugins")`). Writing into the account root itself would make a real `plugins` folder
+/// there when the link is missing, which the next reconcile renames aside.
 pub fn plugin_root(prefs: &crate::state::Preferences, users_own: Option<&Path>) -> Option<PathBuf> {
-    let managed = crate::accounts::active_accounts(prefs).iter().any(|(rt, _)| *rt == crate::accounts::Runtime::Claude);
-    if managed {
-        None
-    } else {
-        users_own.map(Path::to_path_buf)
-    }
+    let root = coordinator_config_root(prefs, users_own, None)?;
+    let managed = crate::accounts::active_accounts(prefs)
+        .into_iter()
+        .filter(|(rt, _)| *rt == crate::accounts::Runtime::Claude)
+        .filter_map(|(rt, id)| crate::accounts::account_root(rt, &id))
+        .any(|r| r == root);
+    (!managed).then_some(root)
 }
 
 /// Homebrew's default prefix: `/opt/homebrew` on Apple silicon, `/usr/local` on an Intel Mac,
