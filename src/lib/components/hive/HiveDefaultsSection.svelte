@@ -10,6 +10,7 @@
   import type { HiveDefaults, HiveDetectedTool } from '$lib/tauri/types';
   import { BUILTIN, clampDefault, packsToStore, HIVE_EFFORTS, HIVE_MODELS, MAX_BUDGET, wizardStart } from '$lib/hive/defaults';
   import { MAX_CAP } from '$lib/hive/change';
+  import { pickerTools } from '$lib/hive/media';
   import { MAX_INSTRUCTIONS, charCount } from '$lib/hive/model';
   import HiveToolPicker from './HiveToolPicker.svelte';
 
@@ -18,7 +19,7 @@
   const start = $derived(wizardStart(d));
 
   let tools = $state<HiveDetectedTool[] | null>(null);
-  hiveDetectTools().then((t) => (tools = t)).catch((e) => { tools = []; logError(`hive defaults: tool detection failed: ${e}`); });
+  hiveDetectTools().then((t) => (tools = pickerTools(t))).catch((e) => { tools = []; logError(`hive defaults: tool detection failed: ${e}`); });
 
   // A stored pack counts its members detected since as picked, as the wizard does.
   const picked = $derived(new Set([...d.tools, ...(tools ?? []).filter((t) => t.pack && d.packs.includes(t.pack)).map((t) => t.id)]));
