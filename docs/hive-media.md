@@ -186,6 +186,55 @@ Each route is one button on a missing capability's recommendation card. The butt
 | `stdio_mcp` (phase 5) | maiTerm runs the pinned local server itself, with the key from the keychain (§12.1); setup is the `token` setup plus Verify | Makes the key, pastes it |
 | `manual` | Shows the guide, including the config snippet with the key left as a placeholder | Everything |
 
+**`brew` and `plugin`: built (2026-11-05).** The backend and the window's half. The setup sheet
+on top of them is still to come. Where they live: `hive/media/install.rs`, `hive/media/whisper.rs`
+and `src/lib/hive/mediaInstall.ts`.
+- **The line** (`install::plan`) comes from the catalogue route alone. The sheet sends a provider
+  id, never a command, and every word is checked against a narrow alphabet. The pieces:
+  - `brew`: the route's `brew install …`, and nothing else is accepted. It calls the `brew`
+    found on this machine by its full path.
+  - No Homebrew: Homebrew's own installer (`/bin/bash -c "$(curl … install.sh)"`) runs first,
+    then `&&` and the new `brew` by its default prefix (`/opt/homebrew`, `/usr/local` or
+    Linuxbrew), since the tab's shell has no `brew` on its PATH yet.
+  - `plugin`: `env CLAUDE_CONFIG_DIR=<the human's own root> claude plugin marketplace add
+    <marketplace>; … claude plugin install <plugin_id>`, or `env -u CLAUDE_CONFIG_DIR` for
+    `~/.claude`. It installs into the human's root whatever account the tab spawned under: a
+    managed root reaches it through its symlinked `plugins`, re-linked by
+    `accounts::resync_roots` after a success. Workers launch with `--setting-sources project`, so
+    no worker loads it.
+  - A route's `marketplace` field (optional) is the source `marketplace add` takes. **Remotion
+    has none**: no source is confirmed (neither remotion-dev repo has a `marketplace.json`). So
+    its install is refused, in plain words that point at its guide, until one is.
+  - Refused: an unknown provider, a provider with no `brew` or `plugin` route, Windows, and the
+    same provider while it is already installing.
+- **The tab.** `hive_media_install` sends `media.install.start` to the calling window
+  (`hive-frontend-request`). The window opens a plain strip tab on THIS machine, never inherited
+  from an ssh tab. It goes in the active workspace unless that is a Hive, the Overlord's or
+  suspended, then the first workspace that takes one, then a new "Setup" workspace without
+  switching to it. The window waits for the shell at a settled prompt (`stackStore.typeAtPrompt`:
+  OSC 133 A with nothing begun since, or the tty-foreground probe for a shell without
+  integration), arms the install in Rust, and types the line. It isn't an agent tab, so the
+  agent-input guards don't apply. A refused arm (Rust gave up) closes the tab and nothing is
+  typed.
+- **The end.** The PTY reader hands every OSC 133 mark to `install::on_osc133`. The first B
+  after the arm begins the line, and the D after it is its exit. Then
+  `hive-media-install-finished {provider_id, tab_id, ok, exit_code, ended: exited|closed,
+  model_download}` goes to the window, and the sheet re-detects. There is no polling. A tab whose
+  shell ends first answers `closed`. A shell with no OSC 133 answers `watches_exit: false`, so
+  the sheet re-detects on the human's word.
+- **whisper.cpp's model.** After a Homebrew kit line that includes `whisper-cpp` exits 0,
+  maiTerm downloads `ggml-base.en` from huggingface.co into `<app data>/models/whisper/`
+  (`app_data_dir()`).
+  - Idempotent: a model with its verified record (`ggml-base.en.bin.json`) at the right size
+    makes no request.
+  - Resumable: `.part` plus a record of which file it is part of, continued with a Range. A part
+    of a different file, a server ignoring the Range, or a refused range starts over.
+  - Verified against the size and SHA-256 huggingface.co publishes on the redirect
+    (`X-Linked-Size`, `X-Linked-Etag`). A mismatch deletes the part.
+  - Progress: `hive-media-model-progress` (`ModelStatus`) to every window.
+  - `hive_media_whisper_model_path` names the file for the brief; it is null until the model is
+    verified. `hive_media_whisper_model_download` is the sheet's retry.
+
 **Verify.** After a route finishes, maiTerm re-detects and, for an MCP server, lists its tools
 through the proxy (free). Where the provider has a balance or pricing tool, it calls that too:
 fal `get_pricing`, WaveSpeed `get_balance`. The row turns **Ready**, or shows the error in plain
@@ -344,7 +393,8 @@ so the coordinator counts generations instead.
    detection, recommendations, credits lines and guides.
 3. **Setup routes and the tools change.**
    - `remote_mcp` (OAuth and token) through the proxy, scoped to the Hive;
-   - `brew` (with the whisper model) and `plugin` in a visible tab;
+   - `brew` (with the whisper model) and `plugin` in a visible tab (backend and window half built
+     2026-11-05, §6; the sheet is to come);
    - verification;
    - the new after-Create tools change of §7 (a §3.4 row).
 4. **Agents.**
