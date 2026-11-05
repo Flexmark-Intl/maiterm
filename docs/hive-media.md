@@ -312,16 +312,21 @@ Specified in §12.1.
     common five, and the rest are under "More (n)".
   - **The card** holds that capability's models line, the credits line (§2.3), an "unverified as
     of <date>" note, the guide, Sign up and Billing links, and the alternatives.
-- **Hive settings → Tools** for an existing Hive. **This is new**: today `Hive.tools` is fixed at
-  Create. §3.4's table has no tools row, `hive/change.rs` never writes it, and the generator hosts
-  are human-edited and never re-derived. So phase 3 adds a tools change for the human, a window
-  command and not an agent tool. It:
-  - writes `Hive.tools`;
-  - offers the new tool's hosts, ticked, into the gallery hosts (the human's edit, as Re-detect
-    does today);
+- **Hive settings → Tools** for an existing Hive. **Built in phase 3 (2026-11-05)**:
+  `hive/tool_change.rs`, `HiveToolsEditor.svelte`. Before it, `Hive.tools` was fixed at Create.
+  It is a tools change for the human, a window command (`hive_set_tools`) and not an agent tool.
+  It:
+  - writes `Hive.tools`, every id checked against a fresh detection, with `cli:brew` and anything
+    this Mac lacks refused;
+  - offers the new tools' hosts, ticked, into the gallery hosts (the human's edit, as Re-detect
+    does). They come from `generator_hosts` for the added tools only, shown before Save by
+    `hive_tools_change_preview`;
   - sends the coordinator a framed notice;
   - takes effect for workers at their next launch;
-  - appears as a Tools row added to §3.4.
+  - is the Tools row in docs/hive.md §3.4.
+
+  A dim "On this Mac" note above the media panel says the panel shows this computer's setup, not
+  the Hive's grant.
 - **Preferences → Hive**, above the default tools: the same panel, to set up a studio once for
   every future Hive. It is always folded here, under the note "On this Mac, for any Hive": open it
   is tall enough to push the defaults off the first screen. It has no workspace, so it judges no
@@ -487,7 +492,7 @@ so the coordinator counts generations instead.
    - `brew` (with the whisper model) and `plugin` in a visible tab (backend and window half built
      2026-11-05, §6; the sheet is to come);
    - verification (built 2026-11-05: §6, "Verify: built");
-   - the new after-Create tools change of §7 (a §3.4 row).
+   - the new after-Create tools change of §7 (a §3.4 row): **built 2026-11-05** (`hive/tool_change.rs`).
 4. **Agents.**
    - the capability map in the briefs;
    - `hiveRequestCapability` + `tool_setup` requests, with every piece of plumbing §8 lists, on

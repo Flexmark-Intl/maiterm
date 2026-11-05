@@ -1,12 +1,14 @@
 <script lang="ts">
   /** Hive settings from the header (docs/hive.md §4.1, §3.2): what can change opens its own sheet
-   *  (workers and access, autonomy, run queue, budget and generation), and what was fixed at Create is shown
+   *  (workers and access, autonomy, run queue, budget and generation) or, for the tools, changes in
+   *  place (§3.4, `HiveToolsEditor`), and what was fixed at Create is shown
    *  read-only, with why where it isn't obvious. Same backdrop/panel vocabulary as RunQueueModal,
    *  and the same explicit rAF focus (Svelte's `autofocus` is not focus). */
   import type { Hive } from '$lib/tauri/types';
   import { fixedRows, folderLines } from '$lib/hive/settings';
   import { shouldStartOpen } from '$lib/hive/media';
   import HiveMediaPanel from './HiveMediaPanel.svelte';
+  import HiveToolsEditor from './HiveToolsEditor.svelte';
 
   interface Props {
     hive: Hive;
@@ -83,13 +85,11 @@
 
       <section>
         <h4>Tools</h4>
+        <p class="why scope">On this Mac: what's set up here, not what this Hive's workers get. They get the tools below.</p>
         {#key workspaceId}
           <HiveMediaPanel {workspaceId} startOpen={mediaStartOpen} />
+          <HiveToolsEditor {hive} {workspaceId} />
         {/key}
-        <p class="tools-line">
-          <span class="why">Workers get:</span>
-          {hive.tools.length ? hive.tools.join(', ') : 'no tools'}
-        </p>
       </section>
 
       <section>
@@ -159,7 +159,7 @@
   ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 4px; }
   li { color: var(--fg); font-size: 0.8rem; display: flex; flex-direction: column; gap: 1px; overflow-wrap: anywhere; }
   code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.75rem; color: var(--fg-dim); overflow-wrap: anywhere; }
-  .tools-line { margin: 0; color: var(--fg); font-size: 0.8rem; line-height: 1.4; overflow-wrap: anywhere; }
+  .scope { margin: 0; }
   .who { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 6px; }
   .instr { margin: 0; font-family: inherit; font-size: 0.8rem; color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12em; overflow-y: auto; }
   .footer { align-items: center; border-top: 1px solid var(--bg-light); display: flex; justify-content: flex-end; padding: 10px 14px; }

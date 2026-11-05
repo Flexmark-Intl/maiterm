@@ -106,6 +106,7 @@ pub mod settings;
 // Spike 15's acceptance test, over scratch git repos and Unix paths.
 #[cfg(all(test, unix))]
 mod spike15;
+pub mod tool_change;
 pub mod tools;
 pub mod trust;
 pub mod turn_failure;

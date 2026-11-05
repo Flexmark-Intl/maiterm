@@ -1238,6 +1238,8 @@ pub fn run() {
             hive::gallery::commands::gallery_recommendations,
             hive::gallery::budget::hive_set_gallery_settings,
             hive::change::hive_set_settings,
+            hive::tool_change::hive_set_tools,
+            hive::tool_change::hive_tools_change_preview,
             hive::create::hive_detect_generator_hosts,
             hive::delete::hive_delete_preview,
             hive::delete::hive_delete,

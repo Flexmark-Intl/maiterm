@@ -7,7 +7,7 @@ import type { Hive, HiveBoard, HiveCreated, HiveDeletePreview, HiveDeleteResult,
 import type { HiveMemoryFileText, HiveMemoryView } from './types';
 import type { HiveDecisionView, HivePrecedentsView } from './types';
 import type { AutonomySettings, HiveBlockerAnswerArg, HivePromptRoute, TaskBlocker } from './types';
-import type { GallerySettingsChange, HiveSettingsChange } from './types';
+import type { GallerySettingsChange, HiveSettingsChange, HiveToolsChange, HiveToolsPreview } from './types';
 import type { HiveFinishRecord } from './types';
 import type { HiveMediaInstallStarted, HiveMediaModelStatus } from './types';
 import type {
@@ -2975,6 +2975,19 @@ export async function hiveSetAutonomy(workspaceId: string, checkpoints: Record<s
 /** Hive settings → Workers and access (docs/hive.md §3.4): the human's change; the coordinator is told. */
 export async function hiveSetSettings(workspaceId: string, change: HiveSettingsChange): Promise<Hive> {
   return invoke('hive_set_settings', { workspaceId, change });
+}
+
+/** Hive settings → Tools (docs/hive.md §3.4): what `tools` would add and remove, and the generator
+ *  hosts the added ones need. Nothing is saved. */
+export async function hiveToolsChangePreview(workspaceId: string, tools: string[]): Promise<HiveToolsPreview> {
+  return invoke('hive_tools_change_preview', { workspaceId, tools });
+}
+
+/** Hive settings → Tools → Save: the human's change, checked again in Rust against a fresh
+ *  detection. `addHosts` are the offered hosts left ticked. The coordinator is told; workers get it
+ *  at their next launch. */
+export async function hiveSetTools(workspaceId: string, tools: string[], addHosts: string[]): Promise<HiveToolsChange> {
+  return invoke('hive_set_tools', { workspaceId, tools, addHosts });
 }
 
 export async function hiveSetGallerySettings(workspaceId: string, settings: GallerySettingsChange): Promise<Hive> {

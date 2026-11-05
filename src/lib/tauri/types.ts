@@ -902,6 +902,26 @@ export interface HiveSpec {
   workers_on_phone: boolean;
 }
 
+/** hive/tool_change.rs `ToolsPreview`: what a Hive settings → Tools change would do. */
+export interface HiveToolsPreview {
+  /** The tools as they would be saved. */
+  tools: string[];
+  added: string[];
+  removed: string[];
+  /** Generator hosts the added tools need that the gallery doesn't have: offered ticked. */
+  hosts_offered: string[];
+}
+
+/** hive/tool_change.rs `HiveToolsChange`: a tools change saved. */
+export interface HiveToolsChange {
+  hive: Hive;
+  added: string[];
+  removed: string[];
+  hosts_added: string[];
+  /** The coordinator's notice was delivered. */
+  coordinator_told: boolean;
+}
+
 /** hive/change.rs `SettingsChange` (docs/hive.md §3.4): only what changes is named. */
 export interface HiveSettingsChange {
   cap?: number;
