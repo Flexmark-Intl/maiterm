@@ -84,6 +84,47 @@ fn the_plugin_line_installs_into_the_humans_own_root() {
     );
 }
 
+fn managed_claude_on() -> crate::state::Preferences {
+    let mut p = crate::state::Preferences { accounts_setup_complete: true, accounts_enabled: true, ..Default::default() };
+    p.managed_accounts.push(crate::state::ManagedAccount {
+        id: "acct-1".into(),
+        runtime: "claude".into(),
+        label: "Work".into(),
+        email: None,
+        org_id: None,
+        org_name: None,
+        plan: None,
+        created_at: 0,
+        last_verified_at: None,
+        remote_hosts: vec![],
+        token_minted_at: None,
+        remote_all_hosts: false,
+    });
+    p.active_account_ids.insert("claude".into(), "acct-1".into());
+    p
+}
+
+#[test]
+fn with_a_managed_account_on_a_plugin_goes_to_the_root_its_links_point_at() {
+    // The human exported CLAUDE_CONFIG_DIR=/x AND a managed Claude account is active: the
+    // coordinator launches under the managed root, whose `plugins` and `settings.json` link to
+    // ~/.claude, not /x. So the install goes to ~/.claude.
+    let exported = Path::new("/x");
+    assert_eq!(plugin_root(&managed_claude_on(), Some(exported)), None);
+    let here_now = Here { claude_root: plugin_root(&managed_claude_on(), Some(exported)), ..here(None) };
+    let line = plan_for(&remotion_with("remotion-dev/remotion"), &here_now).unwrap().line;
+    assert!(line.starts_with("env -u CLAUDE_CONFIG_DIR claude plugin marketplace add") && !line.contains("/x"), "{line}");
+
+    // Without a managed account, the exported root is the coordinator's (and plain tabs').
+    let off = crate::state::Preferences::default();
+    assert_eq!(plugin_root(&off, Some(exported)), Some(PathBuf::from("/x")));
+    assert_eq!(plugin_root(&off, None), None);
+    // Set up but switched off: not managed.
+    let mut disabled = managed_claude_on();
+    disabled.accounts_enabled = false;
+    assert_eq!(plugin_root(&disabled, Some(exported)), Some(PathBuf::from("/x")));
+}
+
 #[test]
 fn a_plugin_install_never_reaches_a_hive_worker() {
     // Coordinator only (docs/hive-media.md §4): the line names the human's root and nothing of a

@@ -196,12 +196,17 @@ and `src/lib/hive/mediaInstall.ts`.
   - No Homebrew: Homebrew's own installer (`/bin/bash -c "$(curl … install.sh)"`) runs first,
     then `&&` and the new `brew` by its default prefix (`/opt/homebrew`, `/usr/local` or
     Linuxbrew), since the tab's shell has no `brew` on its PATH yet.
-  - `plugin`: `env CLAUDE_CONFIG_DIR=<the human's own root> claude plugin marketplace add
-    <marketplace>; … claude plugin install <plugin_id>`, or `env -u CLAUDE_CONFIG_DIR` for
-    `~/.claude`. It installs into the human's root whatever account the tab spawned under: a
-    managed root reaches it through its symlinked `plugins`, re-linked by
-    `accounts::resync_roots` after a success. Workers launch with `--setting-sources project`, so
-    no worker loads it.
+  - `plugin`: `env -u CLAUDE_CONFIG_DIR claude plugin marketplace add <marketplace>; … claude
+    plugin install <plugin_id>`, or `env CLAUDE_CONFIG_DIR=<root>` in place of `env -u`. It
+    installs into the root the coordinator loads (`install::plugin_root`), whatever account the
+    tab spawned under:
+    - With a managed Claude account active, that is `~/.claude`, even when the human also
+      exported a `CLAUDE_CONFIG_DIR`. The coordinator launches under the managed root, whose
+      `plugins` and `settings.json` link back to `~/.claude`, never to the exported root. The
+      links are re-made by `accounts::resync_roots` after a success.
+    - Without one, it is the human's exported `CLAUDE_CONFIG_DIR`, else `~/.claude`.
+
+    Workers launch with `--setting-sources project`, so no worker loads it.
   - A route's `marketplace` field (optional) is the source `marketplace add` takes. **Remotion
     has none**: no source is confirmed (neither remotion-dev repo has a `marketplace.json`). So
     its install is refused, in plain words that point at its guide, until one is.
@@ -225,12 +230,19 @@ and `src/lib/hive/mediaInstall.ts`.
 - **whisper.cpp's model.** After a Homebrew kit line that includes `whisper-cpp` exits 0,
   maiTerm downloads `ggml-base.en` from huggingface.co into `<app data>/models/whisper/`
   (`app_data_dir()`).
-  - Idempotent: a model with its verified record (`ggml-base.en.bin.json`) at the right size
-    makes no request.
+  - Pinned: its size (147964211 bytes) and SHA-256 (`a03779c8…6d002`) are constants
+    (`whisper::MODEL_SIZE`, `MODEL_SHA256`). They were read from huggingface.co on 2026-11-05.
+  - Idempotent: a model whose verified record (`ggml-base.en.bin.json`) names the pin, at that
+    size, makes no request.
   - Resumable: `.part` plus a record of which file it is part of, continued with a Range. A part
     of a different file, a server ignoring the Range, or a refused range starts over.
-  - Verified against the size and SHA-256 huggingface.co publishes on the redirect
-    (`X-Linked-Size`, `X-Linked-Etag`). A mismatch deletes the part.
+  - The `resolve` URL answers a 302 to its CDN (`us.aws.cdn.hf.co`) with `x-linked-size` and a
+    double-quoted `x-linked-etag`. maiTerm reads those from the 302 without following it, then
+    fetches the bytes from its `location`. It runs outside every sandbox, so the CDN host needs no
+    grant.
+  - Published facts that disagree with the pin fail at once, and nothing is downloaded or kept.
+    The check holds even if huggingface.co stops publishing them: the bytes received must hash
+    to the pin, and a mismatch deletes the part.
   - Progress: `hive-media-model-progress` (`ModelStatus`) to every window.
   - `hive_media_whisper_model_path` names the file for the brief; it is null until the model is
     verified. `hive_media_whisper_model_download` is the sheet's retry.

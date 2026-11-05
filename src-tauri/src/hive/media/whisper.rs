@@ -3,16 +3,22 @@
 //! `<app data>/models/whisper/`. maiTerm runs outside every sandbox, so no Hive worker needs
 //! huggingface.co, and the brief names the path (`model_path`).
 //!
+//! - **Pinned.** The model's size and SHA-256 are constants here (`MODEL_SIZE`, `MODEL_SHA256`,
+//!   read from huggingface.co on 2026-11-05), so the file is checked even if huggingface.co stops
+//!   publishing them. Published facts that disagree with the pin fail the download, and nothing
+//!   is kept: a different file is a catalogue change, never a silent swap.
 //! - **Idempotent.** A model that is there, with the record of its verified download beside it
-//!   (`ggml-base.en.bin.json`) and the size that record says, is ready: no request is made.
+//!   (`ggml-base.en.bin.json`) naming the pinned size and hash, is ready: no request is made.
 //! - **Resumable.** Bytes go to `ggml-base.en.bin.part`, beside a record of what it is a part of
-//!   (the size and hash huggingface.co published). A later run asks for the rest with a Range; a
+//!   (the pinned size and hash). A later run asks for the rest with a Range; a
 //!   server that sends the whole file instead, a part of a different file, or a refused range
 //!   starts over. A failed run keeps its part for the next one.
 //! - **Verified.** huggingface.co publishes an LFS file's size and SHA-256 on its `resolve` URL
-//!   (`X-Linked-Size`, `X-Linked-Etag`, on the redirect to its CDN). Whatever it publishes is
-//!   checked before the part becomes the model; a mismatch deletes the part. Nothing published is
-//!   trusted over what was received: the hash is computed over the file's bytes.
+//!   (`x-linked-size`, `x-linked-etag` in double quotes, on its 302 to the CDN,
+//!   `us.aws.cdn.hf.co`). The `resolve` request is not followed, so those headers are read, and
+//!   the bytes are fetched from the 302's `location` (maiTerm runs outside every sandbox, so the
+//!   CDN host needs no grant). The hash is computed over the bytes received and must equal the
+//!   pin before the part becomes the model; a mismatch deletes the part.
 //! - **One at a time.** A second start while one runs joins it (`hive-media-model-progress`).
 //!
 //! The HTTP side is the `Fetch` trait, so the tests run on a stub with no network.
@@ -32,6 +38,22 @@ use tauri::{AppHandle, Emitter};
 pub const MODEL: &str = "ggml-base.en";
 pub const MODEL_FILE: &str = "ggml-base.en.bin";
 pub const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
+/// `ggml-base.en.bin`'s size and SHA-256, as huggingface.co published them on 2026-11-05
+/// (`x-linked-size`, `x-linked-etag` on the `resolve` URL's 302).
+pub const MODEL_SIZE: u64 = 147_964_211;
+pub const MODEL_SHA256: &str = "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002";
+
+/// What a download must be: the size and SHA-256 (lowercase hex) it is checked against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pin {
+    pub size: u64,
+    pub sha256: String,
+}
+
+/// The default model's pin.
+pub fn base_en() -> Pin {
+    Pin { size: MODEL_SIZE, sha256: MODEL_SHA256.to_string() }
+}
 /// To every window, while it downloads and when it ends: `ModelStatus`.
 pub const PROGRESS_EVENT: &str = "hive-media-model-progress";
 
@@ -46,7 +68,7 @@ pub struct Verified {
     pub size: u64,
     /// Computed over the bytes received.
     pub sha256: String,
-    /// Which of the two huggingface.co published and the download was checked against.
+    /// Checked against the pin (always, since the pin; an older record may say false).
     #[serde(default)]
     pub checked_size: bool,
     #[serde(default)]
@@ -55,7 +77,7 @@ pub struct Verified {
     pub url: String,
 }
 
-/// What a part is a part of: the published facts it was started against.
+/// What a part is a part of: the pin it was started against.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PartOf {
     size: Option<u64>,
@@ -75,17 +97,18 @@ fn write_json<T: Serialize>(p: &Path, v: &T) -> Result<(), String> {
     fs::write(p, bytes).map_err(|e| format!("writing {}: {e}", p.display()))
 }
 
-/// The model in `dir`, when a verified download put it there and it is still whole.
-pub fn ready_in(dir: &Path) -> Option<PathBuf> {
+/// The model in `dir`, when a verified download of exactly `pin` put it there and it is still
+/// whole.
+pub fn ready_in(dir: &Path, pin: &Pin) -> Option<PathBuf> {
     let file = dir.join(MODEL_FILE);
     let v: Verified = read_json(&record_of(&file))?;
     let len = fs::metadata(&file).ok().filter(|m| m.is_file())?.len();
-    (len == v.size).then_some(file)
+    (len == pin.size && v.size == pin.size && v.sha256 == pin.sha256).then_some(file)
 }
 
 /// The model's path, when it is ready. For the brief (docs/hive-media.md §10).
 pub fn model_path() -> Option<PathBuf> {
-    models_dir().and_then(|d| ready_in(&d))
+    models_dir().and_then(|d| ready_in(&d, &base_en()))
 }
 
 // ─── The HTTP side ──────────────────────────────────────────────────────────
@@ -115,20 +138,33 @@ pub trait Fetch: Send + Sync {
     fn open(&self, location: &str, from: u64) -> impl Future<Output = Result<Self::Body, String>> + Send;
 }
 
-/// The model in `dir`, downloading what is missing of it. `progress(done, total)` is called as
-/// bytes arrive.
-pub async fn ensure<F: Fetch>(dir: &Path, url: &str, fetch: &F, progress: &mut (dyn FnMut(u64, Option<u64>) + Send)) -> Result<PathBuf, String> {
-    if let Some(file) = ready_in(dir) {
+/// The model in `dir`, downloading what is missing of it and checking it against `pin`.
+/// `progress(done, total)` is called as bytes arrive.
+pub async fn ensure<F: Fetch>(dir: &Path, url: &str, pin: &Pin, fetch: &F, progress: &mut (dyn FnMut(u64, Option<u64>) + Send)) -> Result<PathBuf, String> {
+    if let Some(file) = ready_in(dir, pin) {
         return Ok(file);
     }
     fs::create_dir_all(dir).map_err(|e| format!("making {}: {e}", dir.display()))?;
-    let published = fetch.published(url).await?;
-    if published.size.is_none() && published.sha256.is_none() {
-        log::warn!("hive media: huggingface.co published neither a size nor a hash for {MODEL}; it is kept unchecked");
-    }
     let file = dir.join(MODEL_FILE);
     let part = dir.join(format!("{MODEL_FILE}.part"));
     let part_of = dir.join(format!("{MODEL_FILE}.part.json"));
+    let published = fetch.published(url).await?;
+    if published.size.is_some_and(|s| s != pin.size) || published.sha256.as_ref().is_some_and(|h| h != &pin.sha256) {
+        let _ = fs::remove_file(&part);
+        let _ = fs::remove_file(&part_of);
+        return Err(format!(
+            "huggingface.co now publishes a different {MODEL} ({} bytes, SHA-256 {}) from the one maiTerm checks against ({} bytes, SHA-256 {}). Nothing was downloaded or kept.",
+            published.size.map_or("?".to_string(), |s| s.to_string()),
+            published.sha256.as_deref().unwrap_or("?"),
+            pin.size,
+            pin.sha256,
+        ));
+    }
+    if published.size.is_none() || published.sha256.is_none() {
+        log::info!("hive media: huggingface.co didn't publish {MODEL}'s size or hash; checking against the pin alone");
+    }
+    // From here on the pin is what the bytes must be.
+    let published = Published { size: Some(pin.size), sha256: Some(pin.sha256.clone()), location: published.location };
     let want = PartOf { size: published.size, sha256: published.sha256.clone() };
 
     let same_file = read_json::<PartOf>(&part_of).is_some_and(|p| p == want);
@@ -149,13 +185,12 @@ pub async fn ensure<F: Fetch>(dir: &Path, url: &str, fetch: &F, progress: &mut (
         let _ = fs::remove_file(&part);
         let _ = fs::remove_file(&part_of);
         return Err(format!(
-            "The downloaded {MODEL} ({size} bytes, SHA-256 {sha256}) doesn't match what huggingface.co publishes ({} bytes, SHA-256 {}). It was deleted; try again.",
-            published.size.map_or("?".to_string(), |s| s.to_string()),
-            published.sha256.as_deref().unwrap_or("?"),
+            "The downloaded {MODEL} ({size} bytes, SHA-256 {sha256}) doesn't match the one maiTerm checks against ({} bytes, SHA-256 {}). It was deleted; try again.",
+            pin.size, pin.sha256,
         ));
     }
     fs::rename(&part, &file).map_err(|e| format!("moving the model into place: {e}"))?;
-    let verified = Verified { size, sha256, checked_size: published.size.is_some(), checked_sha256: published.sha256.is_some(), url: url.to_string() };
+    let verified = Verified { size, sha256, checked_size: true, checked_sha256: true, url: url.to_string() };
     write_json(&record_of(&file), &verified)?;
     let _ = fs::remove_file(&part_of);
     Ok(file)
@@ -219,6 +254,24 @@ pub fn etag_sha256(etag: &str) -> Option<String> {
     (t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())).then_some(t)
 }
 
+/// What a `resolve` HEAD's answer publishes. Header names are case-insensitive
+/// (`HeaderMap`); huggingface.co sends them lowercase over HTTP/2. A 302 (an LFS file) carries
+/// `x-linked-size` and `x-linked-etag` and points at the CDN; a 200 is the file itself.
+pub fn published_from(url: &str, status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> Result<Published, String> {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let location = if status.is_redirection() {
+        let to = header("location").ok_or("huggingface.co redirected without saying where")?;
+        reqwest::Url::parse(url).and_then(|base| base.join(&to)).map_err(|e| e.to_string())?.to_string()
+    } else if status.is_success() {
+        url.to_string()
+    } else {
+        return Err(format!("huggingface.co answered {status} for {MODEL}"));
+    };
+    let size = header("x-linked-size").or_else(|| status.is_success().then(|| header("content-length")).flatten()).and_then(|s| s.trim().parse().ok());
+    let sha256 = header("x-linked-etag").or_else(|| header("etag")).and_then(|e| etag_sha256(&e));
+    Ok(Published { size, sha256, location })
+}
+
 /// huggingface.co over reqwest.
 pub struct Hf {
     client: reqwest::Client,
@@ -259,19 +312,7 @@ impl Fetch for Hf {
             // Not followed: the facts are on the redirect itself.
             let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
             let resp = client.head(&url).send().await.map_err(|e| format!("asking huggingface.co about {MODEL}: {e}"))?;
-            let status = resp.status();
-            let header = |name: &str| resp.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
-            let location = if status.is_redirection() {
-                let to = header("location").ok_or("huggingface.co redirected without saying where")?;
-                reqwest::Url::parse(&url).and_then(|base| base.join(&to)).map_err(|e| e.to_string())?.to_string()
-            } else if status.is_success() {
-                url.clone()
-            } else {
-                return Err(format!("huggingface.co answered {status} for {MODEL}"));
-            };
-            let size = header("x-linked-size").or_else(|| status.is_success().then(|| header("content-length")).flatten()).and_then(|s| s.trim().parse().ok());
-            let sha256 = header("x-linked-etag").or_else(|| header("etag")).and_then(|e| etag_sha256(&e));
-            Ok(Published { size, sha256, location })
+            published_from(&url, resp.status(), resp.headers())
         }
     }
 
@@ -368,7 +409,7 @@ pub fn start_default(handle: AppHandle) -> ModelStatus {
             }
         };
         let result = match Hf::new() {
-            Ok(hf) => ensure(&dir, MODEL_URL, &hf, &mut progress).await,
+            Ok(hf) => ensure(&dir, MODEL_URL, &base_en(), &hf, &mut progress).await,
             Err(e) => Err(e),
         };
         let end = match result {

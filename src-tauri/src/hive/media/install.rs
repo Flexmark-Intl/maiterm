@@ -15,9 +15,11 @@
 //!   arm is the line beginning, and the D after that B is its exit: `hive-media-install-finished`
 //!   goes to the window, which re-detects. No polling. The exit code only says when to re-detect:
 //!   a line's output could print its own D, and the status the sheet reads after it is the truth.
-//! - **Plugins are coordinator-only.** A plugin installs into the human's own Claude config root
-//!   (the one plain tabs use), pinned with `env`, so a managed account's root picks it up through
-//!   its symlinked `plugins` (`accounts::resync_roots` after a success). Hive workers launch with
+//! - **Plugins are coordinator-only.** A plugin installs into the root the coordinator loads,
+//!   pinned with `env` (`plugin_root`). With a managed Claude account active that is `~/.claude`,
+//!   which every managed root's `plugins` and `settings.json` link back to (re-linked by
+//!   `accounts::resync_roots` after a success), even when the human also exported a
+//!   `CLAUDE_CONFIG_DIR`. Without one it is that exported root, else `~/.claude`. Hive workers launch with
 //!   `--setting-sources project` and load no user plugin or skill (docs/hive.md §6.7); nothing
 //!   here changes that.
 //! - **whisper.cpp.** A brew line that installs `whisper-cpp` is followed, on a clean exit, by
@@ -52,21 +54,35 @@ pub struct Here {
     pub brew: Option<PathBuf>,
     /// Where Homebrew's installer puts `brew` on this platform, if Homebrew runs here at all.
     pub installer_brew: Option<&'static str>,
-    /// The human's own Claude config root (`CLAUDE_CONFIG_DIR` they exported), or `None` for the
-    /// default `~/.claude`.
+    /// The Claude config root a plugin installs into (`plugin_root`), or `None` for the default
+    /// `~/.claude`.
     pub claude_root: Option<PathBuf>,
     /// A POSIX shell and `env`: the only place these lines run.
     pub unix: bool,
 }
 
 impl Here {
-    pub fn detect() -> Here {
+    pub fn detect(prefs: &crate::state::Preferences) -> Here {
         Here {
             brew: crate::accounts::find_executables("brew").into_iter().next(),
             installer_brew: installer_brew(),
-            claude_root: crate::accounts::user_claude_root().map(Path::to_path_buf),
+            claude_root: plugin_root(prefs, crate::accounts::user_claude_root()),
             unix: cfg!(unix),
         }
+    }
+}
+
+/// The root a plugin must install into for the coordinator to load it (`None`: `~/.claude`).
+/// A managed Claude account wins the coordinator's launch (`launch::config_root_for`), and its
+/// root links `plugins` and `settings.json` to `~/.claude`, never to a `CLAUDE_CONFIG_DIR` the
+/// human exported: so with one active, `~/.claude`. Without one, the human's exported root
+/// (`users_own`), which plain tabs and the coordinator both use.
+pub fn plugin_root(prefs: &crate::state::Preferences, users_own: Option<&Path>) -> Option<PathBuf> {
+    let managed = crate::accounts::active_accounts(prefs).iter().any(|(rt, _)| *rt == crate::accounts::Runtime::Claude);
+    if managed {
+        None
+    } else {
+        users_own.map(Path::to_path_buf)
     }
 }
 
@@ -158,8 +174,8 @@ fn plugin_plan(p: &Provider, route: &Route, here: &Here) -> Result<InstallPlan, 
     if !marketplace_ok(source) {
         return Err(format!("{}'s marketplace source in maiTerm's catalogue isn't plain: {source:?}.", p.name));
     }
-    // The human's own root, whatever account this tab spawned under: a managed root links its
-    // `plugins` back to it (accounts `cfg("plugins")`), never the other way round.
+    // The coordinator's root (`plugin_root`), whatever account this tab spawned under: a managed
+    // root links its `plugins` back to `~/.claude` (accounts `cfg("plugins")`), never the other way.
     let env = match &here.claude_root {
         Some(root) => format!("env CLAUDE_CONFIG_DIR={}", sh_word(&root.to_string_lossy())),
         None => "env -u CLAUDE_CONFIG_DIR".to_string(),
@@ -377,7 +393,8 @@ pub struct InstallStarted {
 /// `hive-media-install-finished` follows when it exits.
 #[tauri::command]
 pub async fn hive_media_install(window: tauri::Window, state: tauri::State<'_, Arc<AppState>>, provider_id: String) -> Result<InstallStarted, String> {
-    let here = tauri::async_runtime::spawn_blocking(Here::detect).await.map_err(|e| e.to_string())?;
+    let prefs = state.app_data.read().preferences.clone();
+    let here = tauri::async_runtime::spawn_blocking(move || Here::detect(&prefs)).await.map_err(|e| e.to_string())?;
     let plan = plan(&provider_id, &here)?;
     let name = provider(&provider_id).map_or(provider_id.clone(), |p| p.name.clone());
     let handle = window.app_handle().clone();
