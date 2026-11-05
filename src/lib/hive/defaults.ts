@@ -3,6 +3,7 @@
  * wizard starts from, and the grouped, filterable tool list both it and Preferences show.
  * Pure: no store, no Tauri.
  */
+import { isSetupOnly } from './media';
 import type { HiveDefaults, HiveDetectedTool } from '$lib/tauri/types';
 import { MAX_CAP } from './change';
 
@@ -145,7 +146,7 @@ export function defaultsFromWizard(
 ): HiveDefaults {
   const have = new Set((detected ?? []).map((t) => t.id));
   const havePacks = new Set((detected ?? []).map((t) => t.pack).filter((p): p is string => !!p));
-  const unseenTools = detected ? was.tools.filter((id) => !have.has(id)) : was.tools;
+  const unseenTools = (detected ? was.tools.filter((id) => !have.has(id)) : was.tools).filter((id) => !isSetupOnly(id));
   const unseenPacks = detected ? was.packs.filter((p) => !havePacks.has(p)) : was.packs;
   return {
     tools: [...new Set([...w.tools, ...unseenTools])],

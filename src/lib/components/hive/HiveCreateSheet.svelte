@@ -37,7 +37,7 @@
   import { defaultsFromWizard, defaultToolIds, FALLBACK_CAP, fullPacks, HIVE_EFFORTS, HIVE_MODELS, knownTools, pickedItems, summarizeTools, wizardStart } from '$lib/hive/defaults';
   import HiveToolPicker from './HiveToolPicker.svelte';
   import HiveMediaPanel from './HiveMediaPanel.svelte';
-  import { pickerTools, shouldStartOpen } from '$lib/hive/media';
+  import { isSetupOnly, pickerTools, shouldStartOpen } from '$lib/hive/media';
 
   interface Props {
     workspaceId: string;
@@ -138,7 +138,7 @@
   let workerModel = $state(saved?.workerModel ?? seed?.workerModel ?? initial.workerModel);
   let workerEffort = $state(saved?.workerEffort ?? seed?.workerEffort ?? initial.workerEffort);
   // Ids not detected on this machine are dropped once detection answers (`knownTools`).
-  let picked = $state(new Set<string>(saved?.picked ?? initial.tools));
+  let picked = $state(new Set<string>((saved?.picked ?? initial.tools).filter((id) => !isSetupOnly(id))));
   let budgetDollars = $state(saved?.budgetDollars ?? initial.budgetDollars);
   let pushAfterLand = $state(saved?.pushAfterLand ?? initial.pushAfterLand);
   /** The budget as Create sends it: an emptied or negative field is $0, and the receipt and the
@@ -202,7 +202,7 @@
     folders = []; suggestions = {}; shareChoice = {}; picks = {};
     cap = d.cap ?? preflight?.default_cap ?? FALLBACK_CAP; landing = 'base';
     coordModel = d.coordModel; coordEffort = d.coordEffort; workerModel = d.workerModel; workerEffort = d.workerEffort;
-    picked = new Set(tools ? defaultToolIds(d, tools) : d.tools);
+    picked = new Set(tools ? defaultToolIds(d, tools) : d.tools.filter((id) => !isSetupOnly(id)));
     budgetDollars = d.budgetDollars; pushAfterLand = d.pushAfterLand; phone = d.phone;
     toolsOpen = false; savedDefaults = false;
     step = 0; reached = 0;
@@ -692,7 +692,7 @@
         coordinator: { runtime: 'claude', model: coordModel, effort: coordEffort },
         worker: { runtime: 'claude', model: workerModel, effort: workerEffort },
       },
-      tools: [...picked],
+      tools: [...picked].filter((id) => !isSetupOnly(id)),
       budget_cents: Math.round(budget * 100),
       push_after_land: pushes,
       stack: $state.snapshot(stackRows) as Service[],

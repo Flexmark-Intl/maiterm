@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { coverNames, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
+import { coverNames, isSetupOnly, pickerTools, createLatest, modelsLine, recommendedSetupNote, creditsLine, externalUrl, goalNamesMedia, groupRows, shouldStartOpen, stateLabel, stateTone, subscriberProviders, summaryLine, toggleId, toolLabel, unverifiedNote } from './media';
 import type { HiveMediaCatalogue, HiveMediaProvider, HiveMediaRow } from '$lib/tauri/types';
 
 const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvider => ({
@@ -410,5 +410,13 @@ describe('pickerTools', () => {
   it('does not touch a tool that merely mentions brew, and takes an empty list', () => {
     expect(pickerTools([t('mcp:brew-kit')]).map((x) => x.id)).toEqual(['mcp:brew-kit']);
     expect(pickerTools([])).toEqual([]);
+  });
+});
+
+describe('isSetupOnly', () => {
+  it('names the setup-only program, exactly', () => {
+    expect(isSetupOnly('cli:brew')).toBe(true);
+    expect(isSetupOnly('cli:ffmpeg')).toBe(false);
+    expect(isSetupOnly('mcp:brew-kit')).toBe(false);
   });
 });

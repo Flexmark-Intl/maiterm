@@ -10,7 +10,7 @@
   import type { HiveDefaults, HiveDetectedTool } from '$lib/tauri/types';
   import { BUILTIN, clampDefault, packsToStore, HIVE_EFFORTS, HIVE_MODELS, MAX_BUDGET, wizardStart } from '$lib/hive/defaults';
   import { MAX_CAP } from '$lib/hive/change';
-  import { pickerTools } from '$lib/hive/media';
+  import { isSetupOnly, pickerTools } from '$lib/hive/media';
   import { MAX_INSTRUCTIONS, charCount } from '$lib/hive/model';
   import HiveToolPicker from './HiveToolPicker.svelte';
 
@@ -24,7 +24,7 @@
   // A stored pack counts its members detected since as picked, as the wizard does.
   const picked = $derived(new Set([...d.tools, ...(tools ?? []).filter((t) => t.pack && d.packs.includes(t.pack)).map((t) => t.id)]));
   /** Saved picks this computer doesn't have: kept (they may come back), and said. */
-  const missing = $derived(tools ? d.tools.filter((id) => !tools!.some((t) => t.id === id)) : []);
+  const missing = $derived(tools ? d.tools.filter((id) => !isSetupOnly(id) && !tools!.some((t) => t.id === id)) : []);
 
   /** A write that failed is rolled back by the store; this says so. */
   let saveError = $state<string | null>(null);

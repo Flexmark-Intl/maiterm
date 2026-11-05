@@ -66,6 +66,17 @@ describe('defaultsFromWizard', () => {
   });
 });
 
+describe('defaultsFromWizard and setup-only tools', () => {
+  const w = { coordModel: 'opus', coordEffort: 'high', workerModel: 'haiku', workerEffort: 'low', cap: 7, budgetDollars: 12, pushAfterLand: true, phone: 'none' as const, tools: ['cli:ffmpeg'], packs: [] };
+  const was = { ...EMPTY_HIVE_DEFAULTS, tools: ['cli:brew', 'mcp:comfy-away'] };
+  it('sheds a stale cli:brew on save, and still keeps another tool it could not see', () => {
+    expect(defaultsFromWizard(w, was, []).tools).toEqual(['cli:ffmpeg', 'mcp:comfy-away']);
+  });
+  it('sheds it when detection failed too', () => {
+    expect(defaultsFromWizard(w, was, null).tools).toEqual(['cli:ffmpeg', 'mcp:comfy-away']);
+  });
+});
+
 describe('groupTools', () => {
   it('groups in a fixed order, unknown kinds last, sorted by label', () => {
     const g = groupTools([...TOOLS, tool('mcp:airtable', 'mcp', 'airtable')]);

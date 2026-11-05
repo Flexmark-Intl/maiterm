@@ -82,9 +82,15 @@ export function coverNames(cover: Pick<PanelCover, 'toolLabel' | 'providerName'>
  *  media with, so the Tools step's picker, and with it the picks and the Review receipt, never list it. */
 const SETUP_ONLY_TOOLS = new Set(['cli:brew']);
 
+/** Whether a stored tool id is one of those programs: a default or draft saved while the picker
+ *  still offered it holds it. It is neither a missing tool nor one to keep. */
+export function isSetupOnly(id: string): boolean {
+  return SETUP_ONLY_TOOLS.has(id);
+}
+
 /** `detected` without the setup-only programs: what the picker offers. Detection itself keeps them. */
 export function pickerTools<T extends Pick<HiveDetectedTool, 'id'>>(detected: readonly T[]): T[] {
-  return detected.filter((t) => !SETUP_ONLY_TOOLS.has(t.id));
+  return detected.filter((t) => !isSetupOnly(t.id));
 }
 
 // ─── Joining a status row with the catalogue ────────────────────────────────
