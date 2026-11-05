@@ -135,6 +135,58 @@ describe('the opening queue', () => {
   });
 });
 
+describe('one try per opening', () => {
+  const o = (ws: string, id: string, at: number, over: Partial<ToolSetupOpening> = {}): ToolSetupOpening => ({ ...openingFrom(parseApproved(payload({ workspace_id: ws, request_id: id }))!, at), ...over });
+  const done = (id: string, capability: string) => req({ id, decided_by: 'phone', args: { hive_id: 'h', workspace_id: 'ws', capability, provider_id: 'elevenlabs', hosts: [] } });
+
+  it('a replaced opening is spent, so a reload never revives it', () => {
+    // From the phone: voice approved, then music, for one Hive; focus opens music.
+    const q = createOpeningQueue();
+    q.add(o('ws', 'voice', 1));
+    q.add(o('ws', 'music', 2));
+    expect(q.take('ws')?.requestId).toBe('music');
+    expect([...q.spent].sort()).toEqual(['music', 'voice']);
+    // Cmd+R ten minutes later: recovery finds neither.
+    expect(missedOpenings([done('voice', 'voice'), done('music', 'music')], 'main', new Set(['ws']), q.spent, 2_000)).toEqual([]);
+  });
+
+  it('an older one arriving after a newer is spent at once, and a spent one is never queued again', () => {
+    const q = createOpeningQueue(new Set(['old']));
+    q.add(o('ws', 'old', 5));
+    expect(q.size).toBe(0);
+    q.add(o('ws', 'new', 3));
+    q.add(o('ws', 'older', 1));
+    expect(q.peek('ws')?.requestId).toBe('new');
+    expect(q.spent.has('older')).toBe(true);
+    // The same request again (the event and recovery both) stays one opening, unspent.
+    q.add(o('ws', 'new', 3));
+    expect(q.size).toBe(1);
+    expect(q.spent.has('new')).toBe(false);
+  });
+
+  it('a dropped opening and an ignored event are spent too', () => {
+    const q = createOpeningQueue();
+    q.add(o('ws', 'gone', 1));
+    q.drop('ws');
+    q.spend('suspended');
+    expect(q.size).toBe(0);
+    expect(missedOpenings([done('gone', 'voice'), done('suspended', 'music')], 'main', new Set(['ws']), q.spent, 2_000)).toEqual([]);
+  });
+
+  it('keeps the end of a taken opening’s install for the sheet that adopts it, a while', () => {
+    const q = createOpeningQueue();
+    q.add(o('ws', 'kit', 1, { install: { tab_id: 't1', command_shown: 'brew install sox', watches_exit: true } }));
+    expect(q.take('ws', 1_000)).not.toBeNull();
+    expect(q.endOf('t1', 1_000)).toBeNull();
+    // The end comes after the take, before the sheet listens.
+    const end = { provider_id: 'homebrew-kit', tab_id: 't1', ok: false, exit_code: 1, ended: 'exited', model_download: false };
+    expect(q.installEnded(end)).toBe(true);
+    expect(q.endOf('t1', 2_000)).toEqual(end);
+    expect(q.endOf('t1', 1_000 + 10 * 60 * 1000 + 1)).toBeNull();
+    expect(q.endOf('other', 2_000)).toBeNull();
+  });
+});
+
 describe('missedOpenings', () => {
   const ws = new Set(['ws']);
   const now = 2_000;

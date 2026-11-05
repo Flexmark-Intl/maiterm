@@ -99,14 +99,34 @@ export function missedOpenings(requests: readonly AgentRequest[], me: string, wo
   return out;
 }
 
+/** How long the end of a taken opening's install is kept for the sheet that adopts it. */
+const TAKEN_KEEP_MS = 10 * 60 * 1000;
+
 /** The openings waiting in a window, one per workspace (a newer ask for the same Hive replaces the
- *  older: one sheet at a time). `next` is the newest, for the window's focus to open. */
-export function createOpeningQueue() {
+ *  older: one sheet at a time). `next` is the newest, for the window's focus to open.
+ *
+ *  `spent` holds every request id this window is done with: opened (`take`), replaced by a newer
+ *  one (`add`) or dropped (`drop`). Each opening gets one try, so recovery after a reload
+ *  (`missedOpenings`) must never find any of them again; the store persists `spent`. An opening
+ *  already spent is never queued again. */
+export function createOpeningQueue(spent: Set<string> = new Set()) {
   const byWs = new Map<string, ToolSetupOpening>();
+  /** The install tabs of taken openings: their end is kept here until the sheet adopts it. */
+  const taken = new Map<string, { finished: HiveMediaInstallFinished | null; at: number }>();
   return {
+    spent,
+    /** Queued, unless already spent or older than the one waiting for its Hive. Whichever of the
+     *  two loses is spent. */
     add(o: ToolSetupOpening) {
+      if (spent.has(o.requestId)) return;
       const had = byWs.get(o.workspaceId);
-      if (!had || had.at <= o.at) byWs.set(o.workspaceId, o);
+      if (had?.requestId === o.requestId) return;
+      if (had && had.at > o.at) {
+        spent.add(o.requestId);
+        return;
+      }
+      if (had) spent.add(had.requestId);
+      byWs.set(o.workspaceId, o);
     },
     /** The newest waiting opening, left in place: the Hive view takes it. */
     next(): ToolSetupOpening | null {
@@ -118,14 +138,30 @@ export function createOpeningQueue() {
     peek(workspaceId: string): ToolSetupOpening | null {
       return byWs.get(workspaceId) ?? null;
     },
-    /** Taken once, by the Hive view of its workspace. */
-    take(workspaceId: string): ToolSetupOpening | null {
+    /** Taken once, by the Hive view of its workspace: spent, and its install's end (if any) kept
+     *  for the sheet (`endOf`). */
+    take(workspaceId: string, now = Date.now()): ToolSetupOpening | null {
       const o = byWs.get(workspaceId) ?? null;
       byWs.delete(workspaceId);
+      if (!o) return null;
+      spent.add(o.requestId);
+      for (const [tab, t] of taken) if (now - t.at > TAKEN_KEEP_MS) taken.delete(tab);
+      if (o.install) taken.set(o.install.tab_id, { finished: o.finished, at: now });
       return o;
     },
+    /** Given up on without opening (its Hive gone or suspended, or no view took it): spent. */
+    drop(workspaceId: string) {
+      const o = byWs.get(workspaceId);
+      byWs.delete(workspaceId);
+      if (o) spent.add(o.requestId);
+    },
+    /** Spent without ever being queued (an event this window ignored). */
+    spend(requestId: string) {
+      spent.add(requestId);
+    },
     /** `hive-media-install-finished` for an install Rust started from the phone, heard before the
-     *  sheet that shows it opened. True when it was one of ours. */
+     *  sheet that shows it listens: held on the waiting opening, or for a taken one until its sheet
+     *  asks (`endOf`). True when it was one of ours. */
     installEnded(f: HiveMediaInstallFinished): boolean {
       for (const o of byWs.values()) {
         if (o.install?.tab_id === f.tab_id) {
@@ -133,7 +169,14 @@ export function createOpeningQueue() {
           return true;
         }
       }
-      return false;
+      const t = taken.get(f.tab_id);
+      if (t) t.finished = f;
+      return !!t;
+    },
+    /** The end of a taken opening's install, if it came, for the sheet that adopted it. */
+    endOf(tabId: string, now = Date.now()): HiveMediaInstallFinished | null {
+      const t = taken.get(tabId);
+      return t && now - t.at <= TAKEN_KEEP_MS ? t.finished : null;
     },
     get size() {
       return byWs.size;

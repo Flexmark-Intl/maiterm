@@ -546,11 +546,14 @@ opening, on the contract above.
 - **A phone-started install** (`install` set): the sheet adopts it (`install` and `installFinished`
   seeds): its tab and line are shown as if its own Install had started them, its end is heard, and
   the watch learns its tab, so no second install is offered. An end that came while the opening
-  waited for focus is held on the opening and shown at once.
+  waited for focus is held on the opening, and one that came after the opening was taken is kept
+  by the store a while (`installEnd`); the sheet reads either only once its own listener is up, and
+  handles the end once.
 - **Missed approvals.** A window reloading when the event came finds it in the request list (Rust
   keeps a settled request an hour) at init and at its first focus: a `tool_setup` it filed, done,
-  approved, in one of its Hives, not yet opened (`missedOpenings`). Openings already shown are kept
-  in sessionStorage, which survives a reload, so none opens twice. One whose install Rust started
+  approved, in one of its Hives, not yet spent (`missedOpenings`). Every opening the window is done
+  with (opened, replaced by a newer one for its Hive, dropped, or ignored for a suspended Hive) is
+  kept in sessionStorage, which survives a reload: each gets one try, and none comes back. One whose install Rust started
   from the phone isn't recovered: the request doesn't name its tab, and a sheet without it would
   offer a second install; that setup goes on by itself and Hive settings → Tools reaches its sheet.
 - **One try per opening.** An opening no Hive view took within 3 s (the workspace couldn't be

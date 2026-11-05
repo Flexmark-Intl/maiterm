@@ -39,6 +39,7 @@
   import type { PanelProvider, SetupStarted } from '$lib/hive/media';
   import { externalUrl, unverifiedNote } from '$lib/hive/media';
   import { startSignIn } from '$lib/mcp/addServer';
+  import { hiveToolSetup } from '$lib/stores/hiveToolSetup.svelte';
   import {
     bringsSpeechModel, canVerify, guideFor, installEndLine, speechModelProgress, verifyIsPrimary, newServerScope, reusedServerScope, scopeSentence, serverPlan, setupAction, speechModelLine, verifyView,
     type ScopeChoice, type SetupAction, type VerifyView,
@@ -156,7 +157,7 @@
     // already running with no Download). The later tab and server reports add what to watch; the
     // first start's baseline wins.
     reportStarted?.({ provider_id: p.id, ready_before: readyBefore });
-    if (preStarted) adoptInstall(preStarted, preFinished);
+    if (preStarted) void adoptInstall(preStarted, preFinished);
     if (speech) keep<HiveMediaModelStatus>('hive-media-model-progress', (m) => (model = m));
     if (action === 'app') window.addEventListener('focus', onWindowFocus);
   });
@@ -479,17 +480,33 @@
   }
 
   /** An install Rust started before this sheet opened: its end is heard here as if Install had
-   *  started it, and the parent's watch learns its tab, so the tick and Ready flow is the same. An
-   *  end that came before the sheet opened is shown at once. */
-  function adoptInstall(s: HiveMediaInstallStarted, finished: HiveMediaInstallFinished | null) {
+   *  started it, and the parent's watch learns its tab, so the tick and Ready flow is the same.
+   *  As install() does with `early`: the listener is up BEFORE the end held elsewhere is read (the
+   *  seed, or the store's record of an end that came between the opening's take and now), and the
+   *  end is handled once, whichever reports it. It matches the adopted tab only: a "Run it again"
+   *  is install()'s, with its own listener. */
+  async function adoptInstall(s: HiveMediaInstallStarted, finished: HiveMediaInstallFinished | null) {
     reportStarted?.({ provider_id: p.id, tab_id: s.tab_id, ready_before: readyBefore });
-    if (finished && finished.tab_id === s.tab_id) {
-      onFinished(finished);
-      return;
+    let handled = false;
+    const end = (f: HiveMediaInstallFinished) => {
+      if (handled || !alive) return;
+      handled = true;
+      onFinished(f);
+    };
+    try {
+      const off = await listen<HiveMediaInstallFinished>('hive-media-install-finished', (e) => {
+        if (e.payload.provider_id === p.id && e.payload.tab_id === s.tab_id) end(e.payload);
+      });
+      if (!alive) {
+        off();
+        return;
+      }
+      offs.push(off);
+    } catch (e) {
+      void logWarn(`[HiveMediaSetupSheet] hive-media-install-finished: not listening: ${String(e)}`);
     }
-    keep<HiveMediaInstallFinished>('hive-media-install-finished', (f) => {
-      if (f.provider_id === p.id && f.tab_id === started?.tab_id) onFinished(f);
-    });
+    const held = finished?.tab_id === s.tab_id ? finished : hiveToolSetup.installEnd(s.tab_id);
+    if (held) end(held);
   }
 
   async function showTab() {
