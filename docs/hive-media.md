@@ -222,6 +222,12 @@ reachable, Installed, Didn't work), with the billing page as a button. The sheet
 generation, starts nothing from the phone and adds no maiLink route; after any step that may have
 changed this Mac, the panel re-fetches.
 
+After that fetch the panel calls its parent's `onchanged` with the tools it newly calls ready
+(owed until a fetch lands, so a Re-detect that overtakes it doesn't lose it). The Create sheet
+detects its tools again and ticks a newly ready one unless the human ticked or unticked it
+themselves (`picksAfterRedetect`); Hive settings' tools editor detects again and shows it as a
+tool to add, never adding it to `Hive.tools` without the human's Save. No polling.
+
 | Route | What maiTerm does | What the human does |
 |---|---|---|
 | `remote_mcp` + `oauth` | Adds the server to the MCP proxy through the human's own add path (docs/mcp-proxy.md §7): the human clicked, so no request card, but with `mcp_add`'s checks at filing: a URL maiTerm already serves is reused, and a name a native entry holds gets a suffix. **Scope**: started from a Hive (Create sheet or Hive settings), the server is scoped to that Hive's workspace, so one fal setup doesn't load fal's tools into every Claude tab (§4.3 context cost); started from Preferences, the sheet asks "every workspace" or "Hive workspaces only". Then it opens the sign-in in the browser | Signs in; adds credit if the guide says so |
