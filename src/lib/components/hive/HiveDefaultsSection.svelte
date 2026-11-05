@@ -22,7 +22,7 @@
   hiveDetectTools().then((t) => (tools = pickerTools(t))).catch((e) => { tools = []; logError(`hive defaults: tool detection failed: ${e}`); });
 
   // A stored pack counts its members detected since as picked, as the wizard does.
-  const picked = $derived(new Set([...d.tools, ...(tools ?? []).filter((t) => t.pack && d.packs.includes(t.pack)).map((t) => t.id)]));
+  const picked = $derived(new Set([...d.tools.filter((id) => !isSetupOnly(id)), ...(tools ?? []).filter((t) => t.pack && d.packs.includes(t.pack)).map((t) => t.id)]));
   /** Saved picks this computer doesn't have: kept (they may come back), and said. */
   const missing = $derived(tools ? d.tools.filter((id) => !isSetupOnly(id) && !tools!.some((t) => t.id === id)) : []);
 
