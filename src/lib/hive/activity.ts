@@ -32,6 +32,19 @@ export function quietActivity(phase: string, openRuns: number, s: Pick<AgentTabS
   return { text: `Quiet · ${age} · no report`, tone: 'stalled' };
 }
 
+/** An agent at work: active and not holding a question for the human (that one waits on them,
+ *  and Needs you counts it). Read off the agent, never the card's state name: a worker with a
+ *  blocked sub-task reads Needs you, and one landing reads Landing, while its agent works on. */
+export function agentWorks(s: Pick<AgentTabSession, 'state' | 'toolName'> | null | undefined): boolean {
+  return s?.state === 'active' && s.toolName !== 'AskUserQuestion';
+}
+
+/** A land maiTerm is carrying out (locking, its check running, advancing, batched): work in
+ *  progress. Held and awaiting_human wait on the human, and Needs you counts those. */
+export function landWorks(state: string | null | undefined): boolean {
+  return state === 'locking' || state === 'checking' || state === 'advancing' || state === 'queued_batch';
+}
+
 /** The header's pill for an active Hive: what is actually happening, not only that it may run.
  *  `Running` used to pulse green whenever the Hive was on, so a stalled Hive looked busy. */
 export type HivePulse = 'working' | 'needs_you' | 'stalled' | 'idle';

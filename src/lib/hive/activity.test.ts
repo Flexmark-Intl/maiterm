@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activityLine, contextGauge, formatDiffStat, hivePulse, QUIET_MS, quietActivity, STICKY_MS, stickyStep, toolLine } from './activity';
+import { activityLine, agentWorks, landWorks, contextGauge, formatDiffStat, hivePulse, QUIET_MS, quietActivity, STICKY_MS, stickyStep, toolLine } from './activity';
 import type { HiveDiffStat } from '$lib/tauri/types';
 
 const NOW = Date.parse('2026-10-24T12:00:00Z');
@@ -189,5 +189,20 @@ describe('hivePulse', () => {
     expect(p({ needs: 1, stalled: 1 })).toBe('needs_you');
     expect(p({ stalled: 1 })).toBe('stalled');
     expect(p({})).toBe('idle');
+  });
+});
+
+describe('agentWorks and landWorks', () => {
+  it('counts an active agent, never one asking the human', () => {
+    expect(agentWorks({ state: 'active' })).toBe(true);
+    expect(agentWorks({ state: 'active', toolName: 'Bash' })).toBe(true);
+    expect(agentWorks({ state: 'active', toolName: 'AskUserQuestion' })).toBe(false);
+    expect(agentWorks({ state: 'idle' })).toBe(false);
+    expect(agentWorks({ state: 'permission' })).toBe(false);
+    expect(agentWorks(null)).toBe(false);
+  });
+  it('counts a land maiTerm is carrying out, not one waiting on the human', () => {
+    for (const s of ['locking', 'checking', 'advancing', 'queued_batch']) expect(landWorks(s)).toBe(true);
+    for (const s of ['held', 'awaiting_human', null, undefined]) expect(landWorks(s)).toBe(false);
   });
 });

@@ -97,7 +97,7 @@
   import { modSymbol } from '$lib/utils/platform';
   import { HIVE_OPEN_COLUMN, takePendingHiveOpen, type HiveOpenColumnDetail } from '$lib/hive/model';
   import { cardAge, cardState, latestNote, onScreenAgent, sortCards, STATE_LABEL, STATE_ORDER, waves, type CardStateName } from '$lib/hive/cards';
-  import { activityLine, contextGauge, formatDiffStat, hivePulse, quietActivity } from '$lib/hive/activity';
+  import { activityLine, agentWorks, contextGauge, formatDiffStat, hivePulse, landWorks, quietActivity } from '$lib/hive/activity';
   import { strings, type Box, type HiveString } from '$lib/hive/strings';
 
   interface Props {
@@ -229,6 +229,8 @@
       return {
         worker,
         state,
+        // The header's Working counts the agent and the land, never the card's state name.
+        busy: agentWorks(onScreenAgent(worker.phase, agent, tabFields)) || (worker.phase === 'landing' && landWorks(worker.land?.state)),
         note: latestNote(task),
         runtime: tab?.runtime ?? 'claude',
         // An idle running worker says what it waits on, and past 10 minutes with nothing on its
@@ -268,10 +270,7 @@
   // The header's pill for an active Hive (activity.ts `hivePulse`): what is happening now. A
   // green "Running" whenever the Hive was on made two stalls look like work.
   const quietCards = $derived(cards.filter((c) => c.activity.tone === 'stalled'));
-  const busyAgents = $derived(
-    cards.filter((c) => c.state.state === 'working').length
-      + (coordId && agentStateStore.getState(coordId)?.state === 'active' ? 1 : 0),
-  );
+  const busyAgents = $derived(cards.filter((c) => c.busy).length + (coordId && agentWorks(agentStateStore.getState(coordId)) ? 1 : 0));
   const openRuns = $derived(cards.reduce((n, c) => n + (c.worker.open_runs ?? 0), 0));
   const pulse = $derived(hivePulse({ busyAgents, openRuns, needs: needsCount, stalled: quietCards.length }));
   const pulseLabel = $derived(
@@ -280,7 +279,7 @@
   const pulseTip = $derived.by(() => {
     const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
     if (pulse === 'working') {
-      const parts = [busyAgents ? `${plural(busyAgents, 'agent')} working` : '', openRuns ? `${plural(openRuns, 'run')} going` : ''].filter(Boolean);
+      const parts = [busyAgents ? `${busyAgents} at work (agents and lands)` : '', openRuns ? `${plural(openRuns, 'run')} going` : ''].filter(Boolean);
       return `${parts.join(', ')}. Pause stops new workers; running agents finish their turns.`;
     }
     if (pulse === 'needs_you') return 'Nothing is working: the Hive waits on your answer under Needs you.';

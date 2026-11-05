@@ -786,7 +786,7 @@ pub(crate) async fn serve_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, state: &Arc<AppS
     let job = queue::enqueue(spec)?;
     let dir = super::worker::task_dir(&caller.paths, &w.task_id)?;
     let (d, id, cmd) = (dir.clone(), job.id.clone(), format!("serve {}", job.argv.join(" ")));
-    if let Err(e) = blocking(move || super::run::record_open(&d, &id, &cmd)).await {
+    if let Err(e) = blocking(move || super::run::record_open_server(&d, &id, &cmd)).await {
         log::warn!("hive {}: {} not recorded as open for {}: {e}", caller.hive.id, job.id, worker_label(&w));
     }
     log::info!("hive {}: {} serves {} ({})", caller.hive.id, worker_label(&w), job.id, job.argv.join(" "));

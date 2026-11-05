@@ -333,11 +333,20 @@ fn now_iso() -> String {
 
 /// The run is open: told "interrupted" after a restart if it never ends here.
 pub(crate) fn record_open(dir: &std::path::Path, job: &str, command: &str) -> Result<(), String> {
+    record_open_as(dir, job, command, false)
+}
+
+/// `record_open` for a served app or a service copy: long-lived, not a run its worker waits on.
+pub(crate) fn record_open_server(dir: &std::path::Path, job: &str, command: &str) -> Result<(), String> {
+    record_open_as(dir, job, command, true)
+}
+
+fn record_open_as(dir: &std::path::Path, job: &str, command: &str, server: bool) -> Result<(), String> {
     worker::update_worker(dir, |w| {
         if w.pending_runs.iter().any(|r| r.job == job) {
             return false;
         }
-        w.pending_runs.push(PendingRun { job: job.to_string(), state: RUN_OPEN.to_string(), text: command.to_string(), at: now_iso(), ..PendingRun::default() });
+        w.pending_runs.push(PendingRun { job: job.to_string(), state: RUN_OPEN.to_string(), text: command.to_string(), at: now_iso(), server, ..PendingRun::default() });
         true
     })
     .map(|_| ())
@@ -1060,7 +1069,7 @@ pub(crate) async fn service_verb(tool: &str, args: &Value, caller: &Caller, data
     let job = queue::enqueue(spec)?;
     let dir = worker::task_dir(&caller.paths, &w.task_id)?;
     let (d, id, cmd) = (dir, job.id.clone(), s.name.clone());
-    if let Err(e) = blocking(move || record_open(&d, &id, &cmd)).await {
+    if let Err(e) = blocking(move || record_open_server(&d, &id, &cmd)).await {
         log::warn!("hive {}: {} not recorded as open: {e}", caller.hive.id, job.id);
     }
     log::info!("hive {}: {} queued its copy of {} ({})", caller.hive.id, worker_label(&w), s.name, job.id);
