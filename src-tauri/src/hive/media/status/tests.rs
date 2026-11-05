@@ -251,6 +251,57 @@ fn a_plugin_is_found_only_in_the_root_the_coordinator_loads() {
     }
 }
 
+fn remotion_found(roots: &[PathBuf]) -> bool {
+    plugin_hits(roots).iter().any(|h| h.cover.provider == "remotion")
+}
+
+/// Remotion installed at user scope in `<home>/.claude/plugins`, as Claude Code records it.
+fn install_remotion_in_home(home: &Path) {
+    let dot = home.join(".claude");
+    let install = dot.join("plugins").join("cache").join("remotion");
+    std::fs::create_dir_all(&install).unwrap();
+    write_plugins(&dot, &plugin_json(&install, &home.join("nowhere")));
+}
+
+#[test]
+fn a_plugin_is_found_through_a_managed_roots_plugins_link() {
+    let claude = crate::accounts::Runtime::Claude.profile();
+
+    // ~/.claude/plugins holds Remotion; a managed-style root built by the real reconcile links it.
+    let home = temp("link-home");
+    install_remotion_in_home(&home);
+    let account = temp("link-account");
+    crate::accounts::reconcile_at(claude, &account, &home).unwrap();
+    assert!(std::fs::symlink_metadata(account.join("plugins")).unwrap().file_type().is_symlink(), "plugins is a link");
+    assert!(remotion_found(std::slice::from_ref(&account)), "found through the link");
+
+    // Remotion only in an exported root /x: the managed root doesn't see it.
+    let bare_home = temp("bare-home");
+    std::fs::create_dir_all(bare_home.join(".claude").join("plugins")).unwrap();
+    write_plugins(&bare_home.join(".claude"), r#"{ "version": 2, "plugins": {} }"#);
+    let account_x = temp("x-account");
+    crate::accounts::reconcile_at(claude, &account_x, &bare_home).unwrap();
+    let x = root_with_remotion("only-x");
+    assert!(remotion_found(std::slice::from_ref(&x)), "it is in /x");
+    assert!(!remotion_found(std::slice::from_ref(&account_x)), "but not through the managed root");
+
+    // Fix 1's precondition: a root reconciled before ~/.claude/plugins existed has no link, so a
+    // plugin installed afterwards isn't found through it until a second reconcile.
+    let late_home = temp("late-home");
+    std::fs::create_dir_all(late_home.join(".claude")).unwrap();
+    let account_late = temp("late-account");
+    crate::accounts::reconcile_at(claude, &account_late, &late_home).unwrap();
+    assert!(std::fs::symlink_metadata(account_late.join("plugins")).is_err(), "no plugins link yet");
+    install_remotion_in_home(&late_home);
+    assert!(!remotion_found(std::slice::from_ref(&account_late)), "not found before the resync");
+    crate::accounts::reconcile_at(claude, &account_late, &late_home).unwrap();
+    assert!(remotion_found(std::slice::from_ref(&account_late)), "found after it");
+
+    for d in [home, account, bare_home, account_x, x, late_home, account_late] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
 #[test]
 fn launch_status_and_install_name_the_same_root() {
     let x = Path::new("/x");

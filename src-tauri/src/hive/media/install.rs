@@ -362,25 +362,44 @@ pub fn on_pty_closed(pty_id: &str) {
     }
 }
 
+/// Whether the account roots are resynced BEFORE `hive-media-install-finished` goes out: only
+/// after a plugin install that exited 0. A managed root reconciled before `~/.claude/plugins`
+/// existed has no `plugins` link yet (`reconcile_at` skips an absent source), and the sheet
+/// re-detects on the event, so announcing first would show the plugin missing right after a good
+/// install. A brew install and a failed plugin install are announced at once.
+pub fn resync_before_announcing(i: &Install, done: &InstallFinished) -> bool {
+    done.ok && i.kind == "plugin"
+}
+
 fn ended(i: Install, done: InstallFinished) {
     log::info!("hive media: install of {} {} (exit {:?})", i.provider_id, done.ended, done.exit_code);
     let Some(handle) = HANDLE.get() else { return };
-    if let Err(e) = handle.emit_to(i.window.as_str(), FINISHED_EVENT, &done) {
-        log::warn!("hive media: {FINISHED_EVENT} not sent: {e}");
+    let resync_first = resync_before_announcing(&i, &done);
+    let announce = move || {
+        if let Err(e) = handle.emit_to(i.window.as_str(), FINISHED_EVENT, &done) {
+            log::warn!("hive media: {FINISHED_EVENT} not sent: {e}");
+        }
+        if done.model_download {
+            super::whisper::start_default(handle.clone());
+        }
+    };
+    if !resync_first {
+        announce();
+        return;
     }
-    if done.model_download {
-        super::whisper::start_default(handle.clone());
-    }
-    if done.ok && i.kind == "plugin" {
-        // A managed account root made before the human's root had a `plugins` folder doesn't
-        // link it yet; its next spawn would, this makes it now.
-        tauri::async_runtime::spawn_blocking(|| {
-            let Some(home) = dirs::home_dir() else { return };
-            if let Err(e) = crate::accounts::resync_roots(crate::accounts::Runtime::Claude, &home) {
-                log::warn!("hive media: account roots not resynced after a plugin install: {e}");
+    // Order matters: relink every managed root to `~/.claude/plugins`, THEN announce, so the
+    // sheet's re-detect on the event already sees the plugin through the link.
+    tauri::async_runtime::spawn_blocking(move || {
+        match dirs::home_dir() {
+            Some(home) => {
+                if let Err(e) = crate::accounts::resync_roots(crate::accounts::Runtime::Claude, &home) {
+                    log::warn!("hive media: account roots not resynced after a plugin install: {e}");
+                }
             }
-        });
-    }
+            None => log::warn!("hive media: no home folder; account roots not resynced after a plugin install"),
+        }
+        announce();
+    });
 }
 
 // ─── Commands ───────────────────────────────────────────────────────────────

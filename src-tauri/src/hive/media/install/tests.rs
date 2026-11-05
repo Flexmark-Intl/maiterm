@@ -230,3 +230,27 @@ fn the_window_must_name_the_tab_it_opened() {
     assert!(started_from(&json!({ "accepted": true }), "L").is_err());
     assert!(started_from(&json!({ "tab_id": "" }), "L").is_err());
 }
+
+#[test]
+fn only_a_good_plugin_install_resyncs_before_it_is_announced() {
+    let mut s = Installs::default();
+    let plugin = InstallPlan { provider_id: "remotion".into(), kind: "plugin".into(), line: "L".into(), installs_homebrew: false, whisper_model: false };
+    for (code, want) in [(Some(0), true), (Some(1), false)] {
+        s.begin("p", &plugin, "main").unwrap();
+        s.arm("p", "t", "pty-p").unwrap();
+        s.osc("pty-p", 'B', None);
+        let (i, done) = s.osc("pty-p", 'D', code).unwrap();
+        assert_eq!(resync_before_announcing(&i, &done), want, "plugin exit {code:?}");
+    }
+    // A plugin tab closed before its exit: announced at once.
+    s.begin("p", &plugin, "main").unwrap();
+    s.arm("p", "t", "pty-p").unwrap();
+    let (i, done) = s.pty_closed("pty-p").unwrap();
+    assert!(!resync_before_announcing(&i, &done));
+    // A brew install, even a good one: announced at once.
+    s.begin("b", &brew_plan(), "main").unwrap();
+    s.arm("b", "t", "pty-b").unwrap();
+    s.osc("pty-b", 'B', None);
+    let (i, done) = s.osc("pty-b", 'D', Some(0)).unwrap();
+    assert!(!resync_before_announcing(&i, &done));
+}
