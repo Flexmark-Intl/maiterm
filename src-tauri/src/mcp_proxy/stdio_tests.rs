@@ -279,6 +279,24 @@ async fn a_server_that_needs_a_key_is_not_started_without_one() {
     assert!(running(&id).is_none());
 }
 
+/// A key too short to be a whole one is refused before it is stored, so nothing starts with it.
+/// Were one there, taking it out of what the child sends would mangle every answer.
+#[tokio::test]
+async fn a_short_key_is_refused_and_nothing_starts() {
+    let id = fresh_id("short");
+    let err = proxy::set_key(&id, "ul").unwrap_err();
+    assert!(err.contains("whole key") && !err.contains("\"ul\""), "{err}");
+    assert!(proxy::set_key(&id, "VALUE-15-chars!").is_err(), "15 characters");
+    assert!(crate::mcp_proxy::secrets::read_env_key(&id).unwrap().is_none(), "nothing stored");
+    let err = proxy::add_stdio_with(&id, spec_for(script("fake.sh", FAKE)), vec![], "test", Duration::from_secs(5)).await.unwrap_err();
+    assert!(err.contains("key first"), "{err}");
+    assert!(running(&id).is_none() && proxy::get(&id).is_none(), "nothing started");
+    let mut v = json!({ "result": { "tools": [{ "name": "ul" }] } });
+    let before = v.clone();
+    scrub(&mut v, "ul");
+    assert_eq!(v, before, "a short key changes nothing");
+}
+
 #[tokio::test]
 async fn a_key_on_the_command_line_is_refused() {
     let id = fresh_id("argv");
@@ -487,7 +505,7 @@ async fn a_key_belongs_only_to_a_stdio_server_that_takes_one() {
     let id = added("k").await;
     assert!(proxy::delete_key(&id).is_err(), "a server using its key keeps it");
     // Replacing it stops the child, so the next start has the new one.
-    proxy::set_key(&id, "VALUE-another").unwrap();
+    proxy::set_key(&id, "VALUE-another-key-5e21").unwrap();
     assert!(running(&id).is_none());
     assert!(proxy::set_token(&id, "x").is_err(), "not a token server");
     proxy::remove(&id).unwrap();
@@ -567,8 +585,9 @@ async fn a_key_the_child_echoes_is_taken_out_of_everything_it_sends() {
     proxy::remove(&id).unwrap();
 }
 
-/// Stop `id`'s child, start it again from an agent's call with a 2 s handshake, and run `act`
-/// half a second into it. The call's answer and the starting child's pid.
+/// Stop `id`'s child, start it again from an agent's call with a 2 s handshake, queue a second
+/// agent's call behind that start, and run `act` half a second into it. Both calls must fail and
+/// no other child may start: the first call's answer and the starting child's pid.
 async fn mid_start(id: &str, act: impl FnOnce()) -> (Value, i32) {
     let dir = output_folder(id).unwrap();
     stop(id);
@@ -581,10 +600,20 @@ async fn mid_start(id: &str, act: impl FnOnce()) -> (Value, i32) {
     });
     eventually("the child to start", || std::fs::read_to_string(&pidfile).is_ok_and(|p| p.ends_with('\n'))).await;
     let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+    // Accepted while the server was still up, waiting behind the first call's start.
+    let queued = tokio::spawn({
+        let id = id.to_string();
+        async move { post(&id, "s2", json!(2), "tools/call", json!({ "name": "pid", "arguments": {} })).await }
+    });
     tokio::time::sleep(Duration::from_millis(500)).await;
     act();
+    let queued = queued.await.unwrap();
+    let first = call.await.unwrap();
+    assert_eq!(queued["result"]["isError"], true, "the queued call started a child: {queued}");
+    assert!(running(id).is_none(), "a child is running after the stop");
+    assert_eq!(std::fs::read_to_string(&pidfile).unwrap().trim(), pid.to_string(), "another child was started");
     let _ = std::fs::remove_file(dir.join("slowstart"));
-    (call.await.unwrap(), pid)
+    (first, pid)
 }
 
 fn gone(pid: i32) -> bool {
@@ -605,7 +634,7 @@ async fn a_stop_during_a_start_leaves_no_child() {
     assert!(!SLOTS.lock().contains_key(&id), "no slot left for it");
 
     let id = added("rekey").await;
-    let (v, pid) = mid_start(&id, || proxy::set_key(&id, "VALUE-a-new-key").unwrap()).await;
+    let (v, pid) = mid_start(&id, || proxy::set_key(&id, "VALUE-a-new-key-77c0a1").unwrap()).await;
     assert_eq!(v["result"]["isError"], true, "{v}");
     eventually("the child with the old key to be gone", || gone(pid)).await;
     assert!(running(&id).is_none());

@@ -103,7 +103,8 @@ bearer token for it.
   stops, and every child is stopped when the app quits (`stdio::stop_all`, from
   `run_shutdown_cleanup`), since nothing else ends a group outside maiTerm's.
 - A stop (a removal, a new key, a disable, the quit) kills a child still in its handshake too, and
-  a start that a stop overlapped keeps no child: a removed server never comes back up, and a child
+  a start that a stop overlapped keeps no child, including one an agent's call was waiting to
+  make behind another's start: a removed server never comes back up, and a child
   never keeps an old key.
 - A caller that leaves (an agent that disconnects drops its call) leaves nothing waiting, so a
   call nobody waits for never holds off the idle stop.
@@ -155,8 +156,10 @@ the child is gone. **The key is left in the keychain**, so a retry needs no seco
   logged and sent to the frontend, nor a call maiTerm makes itself (`call_once`, Verify's balance
   check), which gets only the error's code.
 - **Who can set it.** Only the human, at the Mac: `mcp_stdio_key_store` (the setup sheet's paste),
-  never a maiLink route or an agent tool. Replacing the key stops the child, so the next call
-  starts it with the new one.
+  never a maiLink route or an agent tool. A key under 16 characters is refused ("that doesn't
+  look like a whole key"), and none is started with: taking a short one out of what the child
+  sends would mangle every answer. Replacing the key stops the child, so the next call starts it
+  with the new one.
 - **Removing the server** stops its child, deletes its key and removes its entries. Its output
   folder stays: it holds what the server made.
 

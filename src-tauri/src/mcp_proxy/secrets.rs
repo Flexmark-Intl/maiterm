@@ -126,11 +126,16 @@ fn key_item(server_id: &str) -> String {
     format!("{server_id}#key")
 }
 
+/// The shortest key a stdio server takes. Every API key a catalogue route uses is longer, and a
+/// short one would make `stdio::scrub` take that text out of everything the child sends ("ul"
+/// out of every "result"), and turn up by chance in a command line.
+pub const MIN_KEY_LEN: usize = 16;
+
 /// Store (or replace) the key a stdio server's child gets in its environment. Trimmed by
 /// `Secret::new`, so what is checked is what is stored.
 pub fn store_env_key(server_id: &str, key: &Secret) -> Result<(), VaultError> {
-    if key.expose().is_empty() {
-        return Err(VaultError::Failed { op: "store", detail: "an empty key".into() });
+    if key.expose().chars().count() < MIN_KEY_LEN {
+        return Err(VaultError::Failed { op: "store", detail: "that doesn't look like a whole key".into() });
     }
     if key.expose().chars().any(|c| c.is_control()) {
         return Err(VaultError::Failed { op: "store", detail: "a key with a line break or control character in it".into() });
@@ -186,10 +191,13 @@ mod tests {
     fn a_key_is_kept_apart_from_the_servers_own_item_and_refuses_line_breaks() {
         assert_eq!(key_item("minimax"), "minimax#key");
         assert!(store_env_key("k-test", &Secret::new("")).is_err());
+        let e = store_env_key("k-test", &Secret::new("VALUE-short")).unwrap_err();
+        assert!(e.to_string().contains("whole key") && !e.to_string().contains("VALUE-"), "{e}");
+        assert!(read_env_key("k-test").unwrap().is_none(), "a short key is not stored");
         let e = store_env_key("k-test", &Secret::new("VALUE-1\nVALUE-2")).unwrap_err();
         assert!(!e.to_string().contains("VALUE-"), "{e}");
-        store_env_key("k-test", &Secret::new("  VALUE-K \n")).unwrap();
-        assert_eq!(read_env_key("k-test").unwrap().unwrap().expose(), "VALUE-K");
+        store_env_key("k-test", &Secret::new("  VALUE-K-0123456789 \n")).unwrap();
+        assert_eq!(read_env_key("k-test").unwrap().unwrap().expose(), "VALUE-K-0123456789");
         delete_env_key("k-test").unwrap();
         assert!(read_env_key("k-test").unwrap().is_none());
         delete_env_key("k-test").unwrap();

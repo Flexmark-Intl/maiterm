@@ -201,9 +201,11 @@ pub(super) struct Running {
 /// What stands where the child wrote its own key.
 pub const KEY_REMOVED: &str = "[key removed]";
 
-/// Replace every occurrence of `key` in `v`'s strings (and object keys) with `KEY_REMOVED`.
+/// Replace every occurrence of `key` in `v`'s strings (and object keys) with `KEY_REMOVED`. A key
+/// shorter than `secrets::MIN_KEY_LEN` is never stored or started with; were one here, taking it
+/// out would mangle every answer, so nothing is done.
 fn scrub(v: &mut Value, key: &str) {
-    if key.is_empty() {
+    if key.chars().count() < super::secrets::MIN_KEY_LEN {
         return;
     }
     match v {
@@ -392,11 +394,17 @@ fn stopped_while_starting() -> StartErr {
 /// The running child, started if it isn't (one start at a time per server).
 pub(super) async fn ensure(server: &ProxyServer, wait: Duration, why: Start) -> Result<Arc<Running>, StartErr> {
     let s = slot(&server.id);
+    // Read BEFORE waiting for the gate: a stop (a disable, a removal, a new key) that lands while
+    // this caller waits behind another's start fails this caller too, rather than letting it
+    // start a child afterwards for a server that was stopped meanwhile.
+    let generation = s.generation.load(Ordering::SeqCst);
     let _gate = s.gate.lock().await;
+    if s.generation.load(Ordering::SeqCst) != generation {
+        return Err(stopped_while_starting());
+    }
     if let Some(r) = s.running.lock().clone().filter(|r| r.is_alive()) {
         return Ok(r);
     }
-    let generation = s.generation.load(Ordering::SeqCst);
     let spawned = spawn(server, wait, generation, &s).await;
     *s.starting.lock() = None;
     let r = match spawned {
@@ -536,6 +544,10 @@ pub(super) async fn plan(server: &ProxyServer) -> Result<Plan, StartErr> {
             Some((name.clone(), read.ok_or_else(|| StartErr::NoKey("no key stored".into()))?))
         }
     };
+    // Stored before keys had a minimum: refused, never started with.
+    if key.as_ref().is_some_and(|(_, k)| k.expose().chars().count() < super::secrets::MIN_KEY_LEN) {
+        return Err(StartErr::NoKey("the stored key doesn't look like a whole key".into()));
+    }
     // A key replaced since the route was added could be one its command line or settings hold.
     if key.as_ref().is_some_and(|(_, k)| spec.carries(k.expose())) {
         return Err(StartErr::NoKey("the stored key is on its command line or in its settings".into()));
