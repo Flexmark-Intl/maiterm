@@ -829,17 +829,27 @@ art-director), reviewers included. What it does beyond the example above:
    made and the file truncated) and `file_path`, `file_paths`, `reference_file_paths` (read any
    image). A warning in the brief doesn't stop a sandboxed worker or an injected prompt, so the
    proxy enforces the route's `arg_rules` (`mcp_proxy::stdio::ArgRule`, Strings: `relative_dir`,
-   `not_true`, `inside_output`, `url_or_inside_output`, `refuse_tool`) on every `tools/call`,
+   `not_true`, `inside_output`, `url_or_inside_output`, `save_inside_output`, `name_part`,
+   `one_of`, `refuse_tool`) on every `tools/call`,
    an agent's (`call_stdio`) or maiTerm's own (`call_once`), BEFORE anything starts or reaches the
    child; a refused call answers `isError` with the folder to use. `inside_output` resolves the
    path against the output folder (the child's working folder), refuses `~` and `..`, and checks
    the real path of its deepest existing part, so a symlink out is refused too. The rules are
    saved with the server and joined with the catalogue route's current ones (`arg_rules_of`).
    MiniMax: `output_directory` relative, `is_url` only false, `voice_clone.file` inside, a
-   `first_frame_image` that isn't an http(s) or `data:` URL inside, `play_audio` refused. Meshy:
-   `save_to` and the three file arguments inside. Meshy's `.env` (dotenv reads one from its
-   working folder, never overriding what is set) can't move the key: `MESHY_API_HOST` and
-   `TRANSPORT` are pinned in its route; MiniMax's settings are all pinned.
+   `first_frame_image` that isn't an http(s) or `data:` URL inside, `play_audio` refused. MiniMax
+   also builds each file's NAME from an argument (`t2a_<text[:10]>_<date>.<format>`), so a `/` there
+   would walk out of the folder: `name_part` refuses a `/`, `\` or NUL in the first 10 characters
+   of `text_to_audio.text`, `voice_clone.text`, `voice_design.preview_text` and
+   `text_to_image.prompt`, and anywhere in `query_video_generation.task_id` (the whole id is used);
+   `text_to_audio.format` is `one_of` mp3, pcm, flac, wav. Meshy: the three file arguments inside,
+   and `save_to` is `save_inside_output`: inside, no part starting with `.`, and not under
+   `meshy_output/` (its own index). Meshy's working folder is its output folder, where its dotenv
+   reads a `.env` at every start (never overriding what is set): no save can be one, and its route
+   pins `MESHY_API_HOST` and `TRANSPORT` and clears (to "", the only value a route may give them)
+   `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, their lowercase forms, `NODE_TLS_REJECT_UNAUTHORIZED`
+   and `NODE_OPTIONS`. MiniMax's settings are all pinned, and its python-dotenv looks for a `.env`
+   from its own package's folder upwards (uv's cache), not in its working folder.
 
 **These are phases of the design, not a queue.** What really depends on what:
 - **Phase 1's catalogue and detection are the foundation.** Phases 2, 3 and 4 read

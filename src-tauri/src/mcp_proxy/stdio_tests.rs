@@ -731,7 +731,7 @@ async fn quitting_stops_every_child_running_or_starting() {
 // ─── Argument rules: a path stays inside the output folder ──────────────────
 
 fn rule(tool: &str, arg: &str, rule: &str) -> ArgRule {
-    ArgRule { tool: tool.into(), arg: arg.into(), rule: rule.into() }
+    ArgRule { tool: tool.into(), arg: arg.into(), rule: rule.into(), head: 0, values: vec![] }
 }
 
 fn call(tool: &str, args: Value) -> Value {
@@ -888,5 +888,108 @@ async fn a_server_moves_to_another_route_of_its_own_provider_only() {
     assert_eq!(proxy::get(&id).unwrap().route(), Some("minimax-mainland"), "saved");
     assert_eq!(proxy::status(&id).state, STATE_IDLE, "stopped, not started: the next call starts it on the new route");
     assert!(running(&id).is_none(), "no child");
+    proxy::remove(&id).unwrap();
+}
+
+// ─── File names built from text, a format, and saves that aren't a .env ─────
+
+fn rule_with(tool: &str, arg: &str, r: &str, head: usize, values: &[&str]) -> ArgRule {
+    ArgRule { tool: tool.into(), arg: arg.into(), rule: r.into(), head, values: values.iter().map(|v| v.to_string()).collect() }
+}
+
+/// MiniMax names a file `t2a_<text[:10]>_<date>.<format>` inside `output_directory`: a `/` in the
+/// first ten characters, or a format that isn't one of its four, would walk out of the folder.
+/// The reviewer's probes, each refused, through the catalogue's own rules.
+#[test]
+fn minimaxs_file_names_cant_walk_out_of_its_folder() {
+    let id = fresh_id("names");
+    let mm = proxy::spec_for_route("minimax").unwrap().arg_rules;
+    assert_eq!(proxy::spec_for_route("minimax-mainland").unwrap().arg_rules, mm);
+    let refused = |tool: &str, args: Value| refuse_args(&id, &mm, &call(tool, args));
+    assert!(refused("text_to_audio", json!({ "text": "/../../../", "output_directory": "t2a_" })).is_some());
+    assert!(refused("text_to_audio", json!({ "text": "ab\\..\\..\\x" })).is_some());
+    assert!(refused("voice_design", json!({ "prompt": "p", "preview_text": "/../../../" })).is_some());
+    assert!(refused("voice_clone", json!({ "voice_id": "v", "file": "in.wav", "text": "x/../../.." })).is_some());
+    assert!(refused("text_to_image", json!({ "prompt": "/../../." })).is_some());
+    assert!(refused("query_video_generation", json!({ "task_id": "123/../../../x" })).is_some());
+    for bad in ["/../../x", "mp3/../..", "MP3", "exe", ""] {
+        assert!(refused("text_to_audio", json!({ "text": "hello", "format": bad })).is_some(), "format {bad:?}");
+    }
+    // What a real job sends goes through, a `/` past the part that becomes the name included.
+    for f in ["mp3", "pcm", "flac", "wav"] {
+        assert!(refused("text_to_audio", json!({ "text": "Hello there, 1/2 of it", "format": f })).is_none(), "{f}");
+    }
+    assert!(refused("text_to_audio", json!({ "text": "Hello .. world" })).is_none(), "dots without a slash stay one name");
+    assert!(refused("text_to_image", json!({ "prompt": "a red fox in snow, 35mm/f2" })).is_none());
+    assert!(refused("query_video_generation", json!({ "task_id": "106916112212032" })).is_none());
+    assert!(refused("text_to_audio", json!({ "text": 5 })).is_some(), "not text: refused");
+    let _ = std::fs::remove_dir_all(output_folder(&id).unwrap());
+}
+
+/// Meshy's working folder is its output folder, where its dotenv reads a `.env` at every start
+/// and it keeps its own index under `meshy_output/`: a save is neither.
+#[test]
+fn meshys_save_is_never_a_dotfile_or_its_own_index() {
+    let id = fresh_id("saves");
+    let meshy = proxy::spec_for_route("meshy").unwrap().arg_rules;
+    let out = output_folder(&id).unwrap();
+    std::fs::create_dir_all(out.join("meshy_output")).unwrap();
+    let save = |to: &str| refuse_args(&id, &meshy, &call("meshy_download_model", json!({ "task_id": "t", "save_to": to })));
+    let abs = |rel: &str| out.join(rel).to_string_lossy().to_string();
+    for bad in [
+        ".env".to_string(),
+        "./.env".to_string(),
+        abs(".env"),
+        "models/.env".to_string(),
+        ".hidden/a.glb".to_string(),
+        "meshy_output/history.json".to_string(),
+        abs("meshy_output/history.json"),
+        "meshy_output/x/model.glb".to_string(),
+        ".".to_string(),
+        "/Users/x/.zshrc".to_string(),
+    ] {
+        assert!(save(&bad).is_some(), "{bad}");
+    }
+    for ok in ["model.glb".to_string(), "models/cat.v2.glb".to_string(), abs("models/a.glb")] {
+        assert!(save(&ok).is_none(), "{ok}");
+    }
+    // Reading is another rule: an input image under meshy_output/ may be read.
+    assert!(refuse_args(&id, &meshy, &call("meshy_image_to_3d", json!({ "file_path": "meshy_output/a.png" }))).is_none());
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn the_new_rules_and_cleared_settings_are_checked_with_the_spec() {
+    let ok = spec_for("/x".into());
+    let rule_ok = |r: ArgRule| StdioSpec { arg_rules: vec![r], ..ok.clone() }.validate();
+    assert!(rule_ok(rule_with("t", "format", RULE_ONE_OF, 0, &["mp3"])).is_ok());
+    assert!(rule_ok(rule_with("t", "format", RULE_ONE_OF, 0, &[])).is_err(), "one_of lists its values");
+    assert!(rule_ok(rule_with("t", "format", RULE_ONE_OF, 0, &["../x"])).is_err());
+    assert!(rule_ok(rule_with("t", "text", RULE_NAME_PART, 10, &[])).is_ok());
+    assert!(rule_ok(rule_with("", "save_to", RULE_SAVE_INSIDE_OUTPUT, 0, &["meshy_output"])).is_ok());
+    assert!(rule_ok(rule_with("", "save_to", RULE_SAVE_INSIDE_OUTPUT, 0, &["a/b"])).is_err());
+    let env = |n: &str, v: &str| {
+        let mut s = ok.clone();
+        s.env.insert(n.into(), v.into());
+        s.validate()
+    };
+    for n in ["HTTPS_PROXY", "https_proxy", "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_OPTIONS"] {
+        assert!(env(n, "").is_ok(), "{n} cleared");
+        assert!(env(n, "http://evil.example:8080").is_err(), "{n} given a value");
+    }
+}
+
+/// A cleared setting reaches the child as set-and-empty, which is what keeps a `.env` from it.
+#[tokio::test]
+async fn a_cleared_setting_reaches_the_child_set_and_empty() {
+    capture_logs();
+    let id = fresh_id("cleared");
+    proxy::set_key(&id, KEY).unwrap();
+    let mut spec = spec_for(script("fake.sh", FAKE));
+    spec.env.insert("HTTPS_PROXY".into(), String::new());
+    spec.env.insert("NODE_OPTIONS".into(), String::new());
+    proxy::add_stdio_with(&id, spec, vec![], "test", Duration::from_secs(20)).await.unwrap();
+    let names = call_text(&id, "env").await;
+    assert!(names.split(' ').any(|n| n == "HTTPS_PROXY") && names.split(' ').any(|n| n == "NODE_OPTIONS"), "{names}");
     proxy::remove(&id).unwrap();
 }

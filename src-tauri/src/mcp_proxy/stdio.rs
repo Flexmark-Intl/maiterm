@@ -96,6 +96,17 @@ pub struct ArgRule {
     #[serde(default)]
     pub arg: String,
     pub rule: String,
+    /// `name_part`: how many leading characters become part of a file name (0: all of it).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub head: usize,
+    /// `one_of`: the values allowed. `save_inside_output`: top folders (relative to the output
+    /// folder) a save may not go under, the server's own bookkeeping (Meshy's `meshy_output`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// The tool is never called through the proxy.
@@ -109,7 +120,18 @@ pub const RULE_NOT_TRUE: &str = "not_true";
 pub const RULE_INSIDE_OUTPUT: &str = "inside_output";
 /// As `inside_output`, or an `http://`, `https://` or `data:` URL the provider's API fetches.
 pub const RULE_URL_OR_INSIDE_OUTPUT: &str = "url_or_inside_output";
-const RULES: [&str; 5] = [RULE_REFUSE_TOOL, RULE_RELATIVE_DIR, RULE_NOT_TRUE, RULE_INSIDE_OUTPUT, RULE_URL_OR_INSIDE_OUTPUT];
+/// Where a file is SAVED: as `inside_output`, and no part of the path starts with `.` (a save is
+/// never a `.env` the server's dotenv would read at its next start) or sits under one of
+/// `values` (the server's own index files).
+pub const RULE_SAVE_INSIDE_OUTPUT: &str = "save_inside_output";
+/// Text whose first `head` characters (0: all) become part of a file name the server writes
+/// (MiniMax's `t2a_<text[:10]>_<date>.mp3`): no `/`, `\` or NUL there, so the name can't walk out
+/// of its folder.
+pub const RULE_NAME_PART: &str = "name_part";
+/// Absent, or exactly one of `values` (MiniMax's `format`, a file's extension).
+pub const RULE_ONE_OF: &str = "one_of";
+const RULES: [&str; 8] =
+    [RULE_REFUSE_TOOL, RULE_RELATIVE_DIR, RULE_NOT_TRUE, RULE_INSIDE_OUTPUT, RULE_URL_OR_INSIDE_OUTPUT, RULE_SAVE_INSIDE_OUTPUT, RULE_NAME_PART, RULE_ONE_OF];
 
 fn name_shaped(n: &str) -> bool {
     !n.is_empty() && n.len() <= 64 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -129,6 +151,12 @@ impl ArgRule {
             }
         } else if !name_shaped(&self.arg) {
             return Err(format!("{} names the argument it checks", self.rule));
+        }
+        if self.rule == RULE_ONE_OF && (self.values.is_empty() || !self.values.iter().all(|v| name_shaped(v))) {
+            return Err("one_of lists the values it allows".into());
+        }
+        if self.rule == RULE_SAVE_INSIDE_OUTPUT && !self.values.iter().all(|v| name_shaped(v)) {
+            return Err("save_inside_output's values are top folder names".into());
         }
         Ok(())
     }
@@ -168,8 +196,36 @@ pub fn path_inside(s: &str, output: &std::path::Path) -> bool {
     }
 }
 
+/// A save's path: inside `output`, no part starting with `.`, and not under a `reserved` top folder.
+fn save_inside(s: &str, output: &std::path::Path, reserved: &[String]) -> bool {
+    use std::path::Component;
+    if !path_inside(s, output) {
+        return false;
+    }
+    let p = std::path::Path::new(s);
+    // Relative to the output folder, as the child (whose working folder it is) reads it.
+    let rel: PathBuf = if p.is_absolute() {
+        let root = std::fs::canonicalize(output).unwrap_or_else(|_| output.to_path_buf());
+        match p.strip_prefix(output).or_else(|_| p.strip_prefix(&root)) {
+            Ok(r) => r.to_path_buf(),
+            // Inside only through a symlinked prefix: judge every part instead.
+            Err(_) => p.to_path_buf(),
+        }
+    } else {
+        p.to_path_buf()
+    };
+    let parts: Vec<String> = rel.components().filter_map(|c| match c {
+        Component::Normal(n) => Some(n.to_string_lossy().to_string()),
+        _ => None,
+    }).collect();
+    let dotted = parts.iter().any(|n| n.starts_with('.'));
+    let under_reserved = parts.first().is_some_and(|top| reserved.iter().any(|r| r == top));
+    !p.as_os_str().is_empty() && !dotted && !under_reserved && !parts.is_empty()
+}
+
 /// Why `value` breaks `rule`, or `None`.
-fn broken(rule: &str, value: &Value, output: &std::path::Path) -> Option<&'static str> {
+fn broken(r: &ArgRule, value: &Value, output: &std::path::Path) -> Option<&'static str> {
+    let rule = r.rule.as_str();
     let paths = |v: &Value, url_ok: bool| -> Option<&'static str> {
         let one = |s: &str| {
             if url_ok && ["http://", "https://", "data:"].iter().any(|p| s.starts_with(p)) {
@@ -196,6 +252,18 @@ fn broken(rule: &str, value: &Value, output: &std::path::Path) -> Option<&'stati
         RULE_NOT_TRUE => (*value != Value::Bool(false)).then_some("a value maiTerm doesn't allow (only false)"),
         RULE_INSIDE_OUTPUT => paths(value, false),
         RULE_URL_OR_INSIDE_OUTPUT => paths(value, true),
+        RULE_SAVE_INSIDE_OUTPUT => {
+            let ok = value.as_str().is_some_and(|s| save_inside(s, output, &r.values));
+            (!ok).then_some("a save outside the server's output folder, a hidden (dot) file, or one of the server's own files")
+        }
+        RULE_NAME_PART => {
+            let ok = value.as_str().is_some_and(|s| {
+                let head: String = if r.head == 0 { s.to_string() } else { s.chars().take(r.head).collect() };
+                !head.contains(['/', '\\', '\0'])
+            });
+            (!ok).then_some(if r.head == 0 { "a / or \\ that would become part of a file's path" } else { "a / or \\ near its start, which becomes part of a file's name" })
+        }
+        RULE_ONE_OF => (!value.as_str().is_some_and(|s| r.values.iter().any(|v| v == s))).then_some("a value maiTerm doesn't allow"),
         _ => Some("an argument maiTerm can't check"),
     }
 }
@@ -217,7 +285,7 @@ pub fn refuse_args(id: &str, rules: &[ArgRule], params: &Value) -> Option<String
             let _ = std::fs::create_dir_all(&o);
             output = Some(o);
         }
-        if let Some(why) = broken(&r.rule, v, output.as_deref().unwrap_or(std::path::Path::new(""))) {
+        if let Some(why) = broken(r, v, output.as_deref().unwrap_or(std::path::Path::new(""))) {
             let folder = output.as_deref().map(|o| o.display().to_string()).unwrap_or_default();
             return Some(format!(
                 "maiTerm refused {tool}'s {}: {why}. The {id} server runs outside every sandbox, so its files stay in {folder}; use a path there (or leave {} out).",
@@ -244,6 +312,9 @@ const FORBIDDEN_ENV: [&str; 27] = [
 /// PYTHONSTARTUP), npm's, uv's and pip's own settings, the dynamic loaders', Java's and XDG's.
 const FORBIDDEN_ENV_PREFIX: [&str; 11] =
     ["DYLD_", "LD_", "NODE_", "PYTHON", "NPM_CONFIG_", "UV_", "PIP_", "JAVA_", "_JAVA_", "XDG_", "MALLOC"];
+/// Settings a route may pin to "" (and to nothing else), though the child may not be given them.
+const CLEARABLE_ENV: [&str; 8] =
+    ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_OPTIONS"];
 /// What a key variable's name ends in: `^[A-Z][A-Z0-9_]*_(API_KEY|KEY|TOKEN|SECRET)$`.
 const KEY_SUFFIX: [&str; 3] = ["_KEY", "_TOKEN", "_SECRET"];
 
@@ -291,6 +362,15 @@ impl StdioSpec {
             r.validate()?;
         }
         for (name, value) in &self.env {
+            // Cleared to "" so a `.env` the child's dotenv reads can't set it (dotenv never
+            // overrides a variable that is set): the proxy variables a request library honours,
+            // and Node's TLS and option switches. Only ever cleared, never given a value.
+            if CLEARABLE_ENV.contains(&name.as_str()) {
+                if !value.is_empty() {
+                    return Err(format!("{name} can only be cleared"));
+                }
+                continue;
+            }
             if !env_name_shaped(name) {
                 return Err("a setting's variable is 1–64 capital letters, digits or _".into());
             }

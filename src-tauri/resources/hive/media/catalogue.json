@@ -308,7 +308,13 @@
             { "arg": "is_url", "rule": "not_true" },
             { "tool": "voice_clone", "arg": "file", "rule": "inside_output" },
             { "tool": "generate_video", "arg": "first_frame_image", "rule": "url_or_inside_output" },
-            { "tool": "play_audio", "rule": "refuse_tool" }
+            { "tool": "play_audio", "rule": "refuse_tool" },
+            { "tool": "text_to_audio", "arg": "text", "rule": "name_part", "head": 10 },
+            { "tool": "voice_clone", "arg": "text", "rule": "name_part", "head": 10 },
+            { "tool": "voice_design", "arg": "preview_text", "rule": "name_part", "head": 10 },
+            { "tool": "text_to_image", "arg": "prompt", "rule": "name_part", "head": 10 },
+            { "tool": "query_video_generation", "arg": "task_id", "rule": "name_part" },
+            { "tool": "text_to_audio", "arg": "format", "rule": "one_of", "values": ["mp3", "pcm", "flac", "wav"] }
           ],
           "key_url": "https://www.minimax.io/platform/user-center/basic-information/interface-key",
           "results_note": "MiniMax saves each result as a file in its output folder and answers with the file's path: galleryAdd it from there. Leave output_directory out, or give a relative folder: maiTerm refuses a path outside the output folder, and play_audio."
@@ -325,7 +331,13 @@
             { "arg": "is_url", "rule": "not_true" },
             { "tool": "voice_clone", "arg": "file", "rule": "inside_output" },
             { "tool": "generate_video", "arg": "first_frame_image", "rule": "url_or_inside_output" },
-            { "tool": "play_audio", "rule": "refuse_tool" }
+            { "tool": "play_audio", "rule": "refuse_tool" },
+            { "tool": "text_to_audio", "arg": "text", "rule": "name_part", "head": 10 },
+            { "tool": "voice_clone", "arg": "text", "rule": "name_part", "head": 10 },
+            { "tool": "voice_design", "arg": "preview_text", "rule": "name_part", "head": 10 },
+            { "tool": "text_to_image", "arg": "prompt", "rule": "name_part", "head": 10 },
+            { "tool": "query_video_generation", "arg": "task_id", "rule": "name_part" },
+            { "tool": "text_to_audio", "arg": "format", "rule": "one_of", "values": ["mp3", "pcm", "flac", "wav"] }
           ],
           "key_url": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
           "results_note": "MiniMax saves each result as a file in its output folder and answers with the file's path: galleryAdd it from there. Leave output_directory out, or give a relative folder: maiTerm refuses a path outside the output folder, and play_audio."
@@ -354,9 +366,13 @@
           "command": "npx", "args": ["-y", "@meshy-ai/meshy-mcp-server@0.6.7"],
           "auth": "token", "credits": "api",
           "env_key": "MESHY_API_KEY",
-          "env": { "MESHY_API_HOST": "https://api.meshy.ai", "TRANSPORT": "stdio" },
+          "env": {
+            "MESHY_API_HOST": "https://api.meshy.ai", "TRANSPORT": "stdio",
+            "HTTP_PROXY": "", "HTTPS_PROXY": "", "ALL_PROXY": "", "http_proxy": "", "https_proxy": "", "all_proxy": "",
+            "NODE_TLS_REJECT_UNAUTHORIZED": "", "NODE_OPTIONS": ""
+          },
           "arg_rules": [
-            { "arg": "save_to", "rule": "inside_output" },
+            { "arg": "save_to", "rule": "save_inside_output", "values": ["meshy_output"] },
             { "arg": "file_path", "rule": "inside_output" },
             { "arg": "file_paths", "rule": "inside_output" },
             { "arg": "reference_file_paths", "rule": "inside_output" }

@@ -290,11 +290,28 @@ fn minimax_and_meshy_are_stdio_routes_maiterm_runs_with_a_key() {
     assert_eq!(spec("meshy").env.get("TRANSPORT").map(String::as_str), Some("stdio"));
     // Every path or URL argument the two packages take is ruled (docs/hive-media.md §12.1).
     let ruled = |id: &str| spec(id).arg_rules.iter().map(|r| format!("{}:{}:{}", r.tool, r.arg, r.rule)).collect::<Vec<_>>();
-    assert_eq!(ruled("meshy"), ids(&[":save_to:inside_output", ":file_path:inside_output", ":file_paths:inside_output", ":reference_file_paths:inside_output"]));
+    assert_eq!(ruled("meshy"), ids(&[":save_to:save_inside_output", ":file_path:inside_output", ":file_paths:inside_output", ":reference_file_paths:inside_output"]));
     assert_eq!(
         ruled("minimax"),
-        ids(&[":output_directory:relative_dir", ":is_url:not_true", "voice_clone:file:inside_output", "generate_video:first_frame_image:url_or_inside_output", "play_audio::refuse_tool"])
+        ids(&[
+            ":output_directory:relative_dir",
+            ":is_url:not_true",
+            "voice_clone:file:inside_output",
+            "generate_video:first_frame_image:url_or_inside_output",
+            "play_audio::refuse_tool",
+            "text_to_audio:text:name_part",
+            "voice_clone:text:name_part",
+            "voice_design:preview_text:name_part",
+            "text_to_image:prompt:name_part",
+            "query_video_generation:task_id:name_part",
+            "text_to_audio:format:one_of",
+        ])
     );
+    assert_eq!(spec("minimax-mainland").arg_rules, spec("minimax").arg_rules, "both regions' servers, the same rules");
+    // A `.env` the child's dotenv reads can't set what a request library or Node honours.
+    for clear in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_OPTIONS"] {
+        assert_eq!(spec("meshy").env.get(clear).map(String::as_str), Some(""), "{clear} pinned empty");
+    }
     // MiniMax writes files under its output folder (local mode), and a key is good on one host only.
     for (id, host) in [("minimax", "https://api.minimax.io"), ("minimax-mainland", "https://api.minimaxi.com")] {
         let env = spec(id).env;
