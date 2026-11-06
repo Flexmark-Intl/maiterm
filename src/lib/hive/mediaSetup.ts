@@ -71,11 +71,13 @@ export function guideFor(p: Pick<HiveMediaProvider, 'name' | 'route_kind' | 'gui
  *  or finished), and a browser sign-in that has opened (from then on "Sign in again" is secondary,
  *  also after Verify answered, e.g. "Needs credit"). Otherwise the route's own action is the primary
  *  and Verify is secondary. */
-export function verifyIsPrimary(action: SetupAction, s: { installStarted: boolean; signInOpened: boolean; stdioAdded?: boolean }): boolean {
+export function verifyIsPrimary(action: SetupAction, s: { installStarted: boolean; signInOpened: boolean; stdioAdded?: boolean; stdioRepasting?: boolean }): boolean {
   if (action === 'guide' || action === 'app') return true;
   if (action === 'install') return s.installStarted;
   if (action === 'mcp_oauth') return s.signInOpened;
-  if (action === 'mcp_stdio') return s.stdioAdded ?? false;
+  // Once the server is added Verify is the way forward, unless Verify refused the key: then saving a
+  // new key (perhaps for the other account) is, and Verify would only re-check the old one.
+  if (action === 'mcp_stdio') return (s.stdioAdded ?? false) && !(s.stdioRepasting ?? false);
   return false;
 }
 
@@ -163,11 +165,13 @@ export interface VerifyView {
 }
 
 /** Verify's answer as the sheet's row shows it. A state a later Rust build adds reads "Checked",
- *  neutral, with its message: nothing says it works. */
-export function verifyView(r: HiveMediaVerifyResult): VerifyView {
+ *  neutral, with its message: nothing says it works. `keyRoute`: the provider takes a pasted key
+ *  (a local server, or a remote one with a token), which has no sign-in, so a refusal reads
+ *  "Key refused". */
+export function verifyView(r: HiveMediaVerifyResult, opts: { keyRoute?: boolean } = {}): VerifyView {
   const tone = r.state === 'ready' ? 'ok' : r.state === 'error' ? 'bad' : r.state === 'needs_sign_in' || r.state === 'needs_credit' || r.state === 'unreachable' ? 'warn' : 'neutral';
   return {
-    label: VERIFY_LABELS.get(r.state) ?? 'Checked',
+    label: r.state === 'needs_sign_in' && opts.keyRoute ? 'Key refused' : (VERIFY_LABELS.get(r.state) ?? 'Checked'),
     tone,
     message: r.message,
     link: r.link ? externalUrl(r.link) : null,

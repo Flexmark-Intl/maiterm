@@ -105,6 +105,12 @@ describe('verifyView', () => {
     expect(verifyView({ state: 'ready', message: 'ok', link: null, tool_count: 3 }).tone).toBe('ok');
     expect(verifyView({ state: 'error', message: 'x', link: null, tool_count: null }).label).toBe("Didn't work");
   });
+  it('calls a refused key a refused key: a key route has no sign-in', () => {
+    const refused = { state: 'needs_sign_in', message: 'MiniMax refused the key (401)…', link: null, tool_count: 8 };
+    expect(verifyView(refused, { keyRoute: true })).toMatchObject({ label: 'Key refused', tone: 'warn' });
+    expect(verifyView(refused).label).toBe('Needs sign-in');
+    expect(verifyView({ ...refused, state: 'ready' }, { keyRoute: true }).label).toBe('Ready');
+  });
   it('never hands a non-web link to a button, and reads an unknown state as unconfirmed', () => {
     expect(verifyView({ state: 'needs_credit', message: '', link: 'file:///x', tool_count: null }).link).toBeNull();
     expect(verifyView({ state: 'quota', message: 'm', link: null, tool_count: null })).toMatchObject({ label: 'Checked', tone: 'neutral' });
@@ -137,6 +143,8 @@ describe('verifyIsPrimary and speechModelProgress', () => {
     // A local server: Save key is the way forward until the server is added.
     expect(verifyIsPrimary('mcp_stdio', idle)).toBe(false);
     expect(verifyIsPrimary('mcp_stdio', { ...idle, stdioAdded: true })).toBe(true);
+    // Verify refused the key: Save (a new key, perhaps another account's) is the next step.
+    expect(verifyIsPrimary('mcp_stdio', { ...idle, stdioAdded: true, stdioRepasting: true })).toBe(false);
   });
   it('gives a bar only for a download of known size', () => {
     expect(speechModelProgress({ state: 'downloading', done: 74_000_000, total: 148_000_000 })).toEqual({ done: 74_000_000, total: 148_000_000, percent: 50 });

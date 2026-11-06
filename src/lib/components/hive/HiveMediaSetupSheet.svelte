@@ -132,7 +132,10 @@
     },
     (st) => {
       stdio = st;
-      if (st.error) note = { text: st.error, error: true };
+      // A failed start's reason and a removal's confirmation are said inside the stdio block, next
+      // to what they are about (above Try again / Remove, above the paste); the rest in the note.
+      if (st.stage === 'failed' || (st.stage === 'key' && !st.error)) note = null;
+      else if (st.error) note = { text: st.error, error: true };
       else if (st.note) note = { text: st.note, error: false };
     },
   );
@@ -163,10 +166,22 @@
   const modelProgress = $derived(model ? speechModelProgress(model) : null);
   /** A sign-in has opened for the server this sheet added or reused (it may since have finished). */
   const signInOpened = $derived(waitingForSignIn || serverId !== null);
-  const verifyPrimary = $derived(verifyIsPrimary(action, { installStarted: started !== null, signInOpened, stdioAdded: stdio.stage === 'added' }));
+  /** Verify refused the key and the paste is back: Save is the next step, not Verify. */
+  const stdioRepasting = $derived(stdio.stage === 'added' && stdioPasting);
+  const verifyPrimary = $derived(verifyIsPrimary(action, { installStarted: started !== null, signInOpened, stdioAdded: stdio.stage === 'added', stdioRepasting }));
   const signupUrl = externalUrl(p.signup_url);
   /** Where the key is made: the chosen route's own page (a region's), else the provider's. */
   const keyUrl = $derived(externalUrl(route?.key_url ?? '') ?? signupUrl);
+  /** The key button names the site it opens when the provider has several accounts (MiniMax's
+   *  minimax.io and platform.minimaxi.com), so the choice above it and the page match. */
+  const keySite = $derived.by(() => {
+    if (stdioRoutes.length < 2 || !keyUrl) return p.name;
+    try {
+      return new URL(keyUrl).host.replace(/^www\./, '');
+    } catch {
+      return p.name;
+    }
+  });
   const billingUrl = externalUrl(p.billing_url);
   const appUrl = setupAction(p) === 'app' ? externalUrl(url) : null;
 
@@ -187,7 +202,17 @@
   let raf = 0;
   onMount(() => {
     // The action first; a guide-only sheet has none, so its first button (Sign up, or Close).
-    raf = requestAnimationFrame(() => (sheetEl?.querySelector<HTMLElement>('.act button') ?? sheetEl?.querySelector<HTMLElement>('.links button, .foot button'))?.focus());
+    // A local server's sheet is a paste: its key field, so the human can paste at once.
+    raf = requestAnimationFrame(() => {
+      if (action === 'mcp_stdio') {
+        // Already moved on (a step started before this frame): the stage's own focus rule holds.
+        if (sheetEl?.contains(document.activeElement)) return;
+        // Without scrolling: the heading stays in view as the sheet opens.
+        (document.getElementById(keyId) ?? sheetEl)?.focus({ preventScroll: true });
+        return;
+      }
+      (sheetEl?.querySelector<HTMLElement>('.act button') ?? sheetEl?.querySelector<HTMLElement>('.links button, .foot button'))?.focus();
+    });
     if (isMcp) {
       void loadServers();
       keep<{ id: string; status: { state: string } }>('mcp-proxy-status', (s) => {
@@ -207,6 +232,40 @@
     if (preStarted) void adoptInstall(preStarted, preFinished);
     if (speech) keep<HiveMediaModelStatus>('hive-media-model-progress', (m) => (model = m));
     if (action === 'app') window.addEventListener('focus', onWindowFocus);
+  });
+
+  // The stdio arm's focus at each stage: the key field when the paste comes back (a refused
+  // Verify, a removed key), Try again after a failed start, and the sheet itself while a step runs
+  // (the field it was in is gone), so Escape and Tab stay in the sheet throughout.
+  let wasPasting = untrack(() => stdioPasting);
+  $effect(() => {
+    const pasting = stdioPasting;
+    const stage = stdio.stage;
+    untrack(() => {
+      if (pasting && !wasPasting) {
+        requestAnimationFrame(() => {
+          if (alive) document.getElementById(keyId)?.focus();
+        });
+      } else if (stage === 'failed') {
+        requestAnimationFrame(() => {
+          if (alive) sheetEl?.querySelector<HTMLElement>('.stdio-retry button')?.focus();
+        });
+      } else if (stage === 'storing' || stage === 'starting' || stage === 'verifying' || stage === 'removing') {
+        holdFocus();
+      }
+      wasPasting = pasting;
+    });
+  });
+
+  // How long the first start has run, so the wait doesn't look frozen.
+  let startedAt = 0;
+  let elapsed = $state(0);
+  $effect(() => {
+    if (stdio.stage !== 'starting') return;
+    startedAt = Date.now();
+    elapsed = 0;
+    const t = setInterval(() => (elapsed = Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(t);
   });
 
   onDestroy(() => {
@@ -277,7 +336,7 @@
     try {
       const r = await commands.hiveMediaVerify(ws, p.id);
       if (!alive) return;
-      result = verifyView(r);
+      result = verifyView(r, { keyRoute: action === 'mcp_stdio' || action === 'mcp_token' });
       // "Checking it works…" is answered now; an error note stays.
       if (note && !note.error) note = null;
       if (r.state === 'ready') waitingForSignIn = false;
@@ -698,7 +757,8 @@
     {#if unverified}<p class="unv">{unverified}</p>{/if}
 
     {#if action === 'guide' && guide.lead}<p class="lead">{guide.lead}</p>{/if}
-    {#if guide.steps.length}
+    <!-- Re-pasting after a refused Verify, the steps are done: the paste and its choices fit without them. -->
+    {#if guide.steps.length && !stdioRepasting}
       <ol class="guide">
         {#each guide.steps as step, i (i)}<li>{step}</li>{/each}
       </ol>
@@ -740,6 +800,7 @@
                 <span>{r.label || r.id}</span>
               </label>
             {/each}
+            <p class="dim">A key works only for the account you choose here.</p>
           </fieldset>
         {:else if stdioRoutes.length > 1}
           <!-- Once the key is on its way, the account is fixed: said, not a disabled control. -->
@@ -754,26 +815,32 @@
           {@render scopeLine()}
         {/if}
         {#if stdioPasting}
-          {#if stdio.stage === 'added'}<p class="state-line">Paste the key again{stdioRoutes.length > 1 ? ', for the account it belongs to' : ''}.</p>{/if}
-          {#if keyUrl}<div class="row"><Button variant="secondary" onclick={() => open(keyUrl)}>Open {p.name} to make a key</Button></div>{/if}
+          {#if stdioRepasting}
+            <p class="state-line">Verify re-checks the key already saved. {stdioRoutes.length > 1 ? 'To use another account, choose it and paste its key.' : 'To use another key, paste it here.'}</p>
+          {:else if stdio.stage === 'key' && stdio.note}
+            <p class="state-line" role="status">{stdio.note}</p>
+          {/if}
+          {#if keyUrl}<div class="row"><Button variant="secondary" onclick={() => open(keyUrl)}>Open {keySite} to make a key</Button></div>{/if}
           <form class="key" onsubmit={saveStdioKey}>
             <label for={keyId}>Paste the key</label>
             <div class="row">
               <input id={keyId} type="password" bind:value={key} autocomplete="off" spellcheck="false" />
-              <Button variant="primary" type="submit" aria-disabled={busy || stdioBusy || !keySendable(key)}>{busy || stdio.stage === 'storing' ? 'Saving…' : stdioReused ? 'Save key' : 'Save key and start'}</Button>
+              <Button variant="primary" type="submit" aria-disabled={busy || stdioBusy || !keySendable(key)}>{#if busy || stdio.stage === 'storing'}<span class="spin" aria-hidden="true"></span>Saving…{:else}{stdioReused ? 'Save key' : 'Save key and start'}{/if}</Button>
             </div>
             {#if hint}<p class="hint" role="status">{hint}</p>{/if}
             <p class="dim">It goes to your keychain and reaches {p.name}’s server only in its environment: never an agent’s config, a log or a command line.</p>
           </form>
         {:else if stdio.stage === 'starting'}
-          <p class="state-line" role="status">Starting {p.name}. Its first start downloads it, which can take a minute or more…</p>
+          <p class="state-line busy-line" role="status"><span class="spin" aria-hidden="true"></span>Starting {p.name}… {elapsed} s</p>
         {:else if stdio.stage === 'failed'}
+          {#if stdio.error}<p class="note bad" role="alert">{stdio.error}</p>{/if}
+          <p class="state-line">{stdio.keyFor && !stdioReused ? 'Your key is saved in your keychain. Try again reuses it; Remove deletes it.' : 'Your key is saved. Try again reuses it.'}</p>
           <div class="row">
-            <Button variant="secondary" onclick={retryStdio}>Try again</Button>
-            {#if !stdioReused && stdio.keyFor}<Button variant="secondary" onclick={removeStdioKey}>Remove the stored key</Button>{/if}
+            <span class="stdio-retry"><Button variant="primary" onclick={retryStdio}>Try again</Button></span>
+            {#if !stdioReused && stdio.keyFor}<span class="danger"><Button variant="ghost" onclick={removeStdioKey}>Remove the stored key</Button></span>{/if}
           </div>
         {:else if stdio.stage === 'removing'}
-          <p class="state-line" role="status">Removing the stored key…</p>
+          <p class="state-line busy-line" role="status"><span class="spin" aria-hidden="true"></span>Removing the stored key…</p>
         {/if}
       {/if}
 
@@ -852,7 +919,7 @@
 
     <div class="foot">
       {#if canVerify(p)}
-        <Button variant={verifyPrimary ? 'primary' : 'secondary'} aria-disabled={verifying} onclick={() => { if (!verifying) void runVerify(); }}>
+        <Button variant={verifyPrimary ? 'primary' : 'secondary'} aria-disabled={verifying || stdioBusy} onclick={() => { if (!verifying && !stdioBusy) void runVerify(); }}>
           {verifying ? 'Checking…' : action === 'install' && started && !started.watches_exit ? 'Re-detect' : 'Verify'}
         </Button>
       {/if}
@@ -862,8 +929,10 @@
 </div>
 
 <style>
-  .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4); display: flex; justify-content: center; align-items: flex-start; padding: 12vh 16px 16px; z-index: 1100; overflow-y: auto; }
-  .sheet { box-sizing: border-box; display: flex; flex-direction: column; gap: 8px; width: min(480px, 100%); min-width: 0; padding: 14px 16px; background: var(--bg-medium); color: var(--fg); border: 1px solid var(--bg-light); border-radius: 8px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4); }
+  .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4); display: flex; justify-content: center; align-items: flex-start; padding: min(8vh, 40px) 16px 16px; z-index: 1100; overflow-y: auto; }
+  /* Never taller than the window: the sheet scrolls inside and its footer (Verify, Close) stays in
+     view, whatever the stage and however many choices (Preferences adds the scope fieldset). */
+  .sheet { box-sizing: border-box; display: flex; flex-direction: column; gap: 8px; width: min(480px, 100%); min-width: 0; max-height: calc(100vh - min(8vh, 40px) - 16px); overflow-y: auto; scroll-padding-bottom: 56px; padding: 14px 16px 0; background: var(--bg-medium); color: var(--fg); border: 1px solid var(--bg-light); border-radius: 8px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4); }
   .sheet:focus { outline: none; }
   .sheet :global(.btn[aria-disabled='true']) { opacity: 0.5; cursor: default; }
   /* A secondary button here is an action to read, not a hint: Verify, Run it again, the key page. */
@@ -912,5 +981,11 @@
   .state.ok { color: var(--green); border-color: var(--green); }
   .state.warn { color: var(--yellow); border-color: var(--yellow); }
   .state.bad { color: var(--red); border-color: var(--red); }
-  .foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; padding-top: 4px; }
+  .foot { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; padding: 6px 0 14px; background: var(--bg-medium); }
+  .busy-line { display: flex; align-items: center; gap: 8px; }
+  .spin { display: inline-block; flex: none; width: 12px; height: 12px; margin-right: 6px; vertical-align: -2px; border: 2px solid var(--bg-light); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  .busy-line .spin { margin-right: 0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation-duration: 2.4s; } }
+  .danger :global(.btn) { color: var(--red); }
 </style>
