@@ -320,7 +320,7 @@ You can also paste images from your clipboard (Cmd+V) into an agent session. mai
 
 For Claude Code, maiTerm installs a skill that gives your agent fast slash-command access to the most common tools — `/maiterm notes`, `/maiterm tabs`, `/maiterm diag`, and more — without making it hunt through every MCP tool. It's written on launch and removed on exit, and it works the same way over SSH on bridged remote hosts. Codex gets an equivalent `maiterm` prompt written to `~/.codex/prompts/`.
 
-It also ships a recommended **status line** for Claude Code. Run `/maiterm statusline` and your agent installs a compact status line showing host · cwd · git branch · model · reasoning effort · context usage. The installer renders a live colored preview first, only writes to `~/.claude/statusline-command.sh` and your settings (it's idempotent — safe to re-run), and tells you if `jq` is missing instead of leaving a broken line. It works on local sessions and on SSH-bridged hosts.
+It also ships a recommended **status line** for Claude Code. Run `/maiterm-statusline` (not Claude Code's own `/statusline`, which copies your shell prompt) and your agent installs a compact status line showing host · cwd · git branch · model · reasoning effort · context usage. The installer renders a live colored preview first, only writes to `~/.claude/statusline-command.sh` and your settings (it's idempotent — safe to re-run), and tells you if `jq` is missing instead of leaving a broken line. It works on local sessions and on SSH-bridged hosts.
 
 ## Dev/Production Isolation
 
