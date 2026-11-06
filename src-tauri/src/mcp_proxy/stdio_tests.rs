@@ -1,7 +1,9 @@
 //! Stdio upstreams against a fake stdio MCP server: a POSIX sh script written by the tests, so
 //! nothing here downloads or runs a package. It prints its key to stderr (which must never reach
 //! a log), a banner to stdout (which must be skipped), and answers `initialize`, `tools/list` and a
-//! few tools that report what the child sees: its environment, argv, pid and folder.
+//! few tools that report what the child sees: its environment, argv, pid and folder. Some echo
+//! its key back (which must never get past the proxy), and one never answers. It writes its pid
+//! to `pid.txt` in its folder, and takes 2 s to start while a `slowstart` file is there.
 
 use crate::mcp_proxy::{self as proxy, entries, AUTH_KEY, STATE_IDLE};
 use super::*;
@@ -14,6 +16,8 @@ const KEY_VAR: &str = "FAKE_MCP_KEY";
 
 const FAKE: &str = r#"
 reply() { printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"%s"}]}}\n' "$1" "$2"; }
+printf '%s\n' "$$" > pid.txt
+[ -f slowstart ] && sleep 2
 printf 'fake server booting\n'
 printf 'my key is %s\n' "$FAKE_MCP_KEY" >&2
 printf 'a second stderr line\n' >&2
@@ -25,12 +29,16 @@ while IFS= read -r line; do
     *'"method":"tools/list"'*)
       extra=''
       [ -f grown ] && extra=',{"name":"extra","inputSchema":{"type":"object"}}'
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"fast","inputSchema":{"type":"object"}},{"name":"slow","inputSchema":{"type":"object"}}%s]}}\n' "$id" "$extra" ;;
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"fast","description":"signed in as %s","inputSchema":{"type":"object"}},{"name":"slow","inputSchema":{"type":"object"}}%s]}}\n' "$id" "$FAKE_MCP_KEY" "$extra" ;;
     *'"method":"tools/call"'*)
       case "$line" in
         *'"name":"slow"'*) ( sleep 1; reply "$id" slow ) & ;;
         *'"name":"fast"'*) reply "$id" fast ;;
         *'"name":"env"'*) reply "$id" "$(env | sed 's/=.*//' | sort | tr '\n' ' ')|$(pwd)" ;;
+        *'"name":"settings"'*) reply "$id" "$FAKE_MCP_HOST|$FAKE_MCP_OUT" ;;
+        *'"name":"leak"'*) printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"invalid api key %s","data":{"sent":"%s"}}}\n' "$id" "$FAKE_MCP_KEY" "$FAKE_MCP_KEY" ;;
+        *'"name":"leakresult"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"isError":true,"content":[{"type":"text","text":"key %s was refused"}]}}\n' "$id" "$FAKE_MCP_KEY" ;;
+        *'"name":"hang"'*) : ;;
         *'"name":"argv"'*) reply "$id" "$0 $*" ;;
         *'"name":"pid"'*) reply "$id" "$$" ;;
         *'"name":"die"'*) exit 3 ;;
@@ -49,8 +57,16 @@ fn script(name: &str, body: &str) -> String {
     path.to_string_lossy().into_owned()
 }
 
+const HOST: &str = "https://api.fake.test";
+
 fn spec_for(path: String) -> StdioSpec {
-    StdioSpec { route: "test/fake".into(), command: "/bin/sh".into(), args: vec![path], env_key: Some(KEY_VAR.into()) }
+    let env = [("FAKE_MCP_HOST", HOST), ("FAKE_MCP_OUT", OUTPUT_PLACEHOLDER)].map(|(n, v)| (n.to_string(), v.to_string()));
+    StdioSpec { route: "test/fake".into(), command: "/bin/sh".into(), args: vec![path], env_key: Some(KEY_VAR.into()), env: env.into() }
+}
+
+/// The idle sweep, for this test's server only: another test's sweep never stops it.
+fn sweep(id: &str) {
+    stop_idle_for_test(id, now_ms(), IDLE);
 }
 
 fn fresh_id(prefix: &str) -> String {
@@ -157,6 +173,9 @@ fn a_stdio_record_round_trips_and_holds_no_key() {
     assert_eq!(v["transport"], "stdio");
     assert_eq!(v["url"], "stdio:test/fake", "an older build reads a url it never dials");
     assert_eq!(v["stdio"]["env_key"], KEY_VAR);
+    assert_eq!(v["stdio"]["env"]["FAKE_MCP_OUT"], "{output}", "the placeholder is saved, not the folder");
+    let bare = StdioSpec { env: Default::default(), ..spec.clone() };
+    assert!(serde_json::to_value(&bare).unwrap().get("env").is_none(), "no settings, no field");
     let back: ProxyServer = serde_json::from_value(v.clone()).unwrap();
     assert!(back.is_stdio());
     assert_eq!(back.stdio, Some(spec));
@@ -177,10 +196,28 @@ fn a_spec_is_checked_before_anything_runs() {
     assert!(with(&|s| s.command = " ".into()).is_err());
     assert!(with(&|s| s.route = "has space".into()).is_err());
     assert!(with(&|s| s.args.push("a\nb".into())).is_err());
-    for bad in ["PATH", "NODE_OPTIONS", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD", "lower", "1X", ""] {
-        assert!(with(&|s| s.env_key = Some(bad.into())).is_err(), "{bad}");
+    // A key variable is named like one, and is none of the variables that steer the child.
+    for good in ["MINIMAX_API_KEY", "MESHY_API_KEY", "FAKE_MCP_KEY", "A_TOKEN", "X1_SECRET"] {
+        assert!(with(&|s| s.env_key = Some(good.into())).is_ok(), "{good}");
+    }
+    let steering = [
+        "PATH", "HOME", "TMPDIR", "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "PYTHONPATH",
+        "PYTHONHOME", "PYTHONSTARTUP", "BASH_ENV", "ENV", "PERL5OPT", "RUBYOPT", "JAVA_TOOL_OPTIONS",
+        "SSL_CERT_FILE", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NPM_CONFIG_REGISTRY", "UV_INDEX_URL",
+        "PIP_INDEX_URL", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD",
+    ];
+    // Shaped like keys, but read by npm, uv or node themselves: refused by the denylist.
+    let keyish_steering = ["NODE_AUTH_TOKEN", "NPM_CONFIG__AUTH_TOKEN", "UV_PUBLISH_TOKEN", "PIP_KEY", "DYLD_KEY"];
+    for bad in steering.iter().chain(&keyish_steering).chain(&["MINIMAX_API_HOST", "_KEY", "KEY", "lower_key", "1X_KEY", ""]) {
+        assert!(with(&|s| s.env_key = Some(bad.to_string())).is_err(), "key {bad}");
     }
     assert!(with(&|s| s.env_key = None).is_ok());
+    // A fixed setting is none of those either, nor the key's own variable.
+    for bad in steering.iter().chain(&["npm_config_registry", "Http_Proxy", KEY_VAR, "has space", ""]) {
+        assert!(with(&|s| { s.env.insert(bad.to_string(), "x".into()); }).is_err(), "setting {bad}");
+    }
+    assert!(with(&|s| { s.env.insert("MINIMAX_API_HOST".into(), "a\nb".into()); }).is_err(), "a line break in a value");
+    assert!(with(&|s| { s.env.insert("MINIMAX_MCP_BASE_PATH".into(), "{output}".into()); }).is_ok());
 }
 
 #[test]
@@ -251,6 +288,11 @@ async fn a_key_on_the_command_line_is_refused() {
     let err = proxy::add_stdio_with(&id, spec, vec![], "test", Duration::from_secs(5)).await.unwrap_err();
     assert!(!err.contains(KEY), "{err}");
     assert!(running(&id).is_none());
+    let mut spec = spec_for(script("fake.sh", FAKE));
+    spec.env.insert("FAKE_MCP_HOST".into(), format!("https://{KEY}@api.fake.test"));
+    let err = proxy::add_stdio_with(&id, spec, vec![], "test", Duration::from_secs(5)).await.unwrap_err();
+    assert!(err.contains("settings") && !err.contains(KEY), "{err}");
+    assert!(running(&id).is_none());
     proxy::delete_key(&id).unwrap();
 }
 
@@ -276,19 +318,25 @@ async fn concurrent_calls_from_two_agents_never_cross() {
     proxy::remove(&id).unwrap();
 }
 
+/// The login PATH, the key, the route's fixed settings (`{output}` expanded), and nothing else.
 #[tokio::test]
-async fn the_child_gets_the_login_path_and_its_key_and_nothing_else() {
+async fn the_child_gets_the_login_path_its_key_and_its_settings_and_nothing_else() {
     let id = added("env").await;
     let text = call_text(&id, "env").await;
     let (names, cwd) = text.split_once('|').unwrap();
     let names: Vec<&str> = names.split_whitespace().collect();
-    assert!(names.contains(&"PATH") && names.contains(&KEY_VAR), "{names:?}");
-    // What sh itself sets is all there is beyond the two.
+    let given = ["PATH", KEY_VAR, "FAKE_MCP_HOST", "FAKE_MCP_OUT"];
+    for g in given {
+        assert!(names.contains(&g), "{g} missing: {names:?}");
+    }
+    // What sh itself sets is all there is beyond those.
     for n in &names {
-        assert!(["PATH", KEY_VAR, "PWD", "SHLVL", "_", "OLDPWD"].contains(n), "maiTerm's environment leaked: {n}");
+        assert!(given.contains(n) || ["PWD", "SHLVL", "_", "OLDPWD"].contains(n), "maiTerm's environment leaked: {n}");
     }
     let want = output_folder(&id).unwrap();
     assert_eq!(std::fs::canonicalize(cwd).unwrap(), std::fs::canonicalize(&want).unwrap());
+    let settings = call_text(&id, "settings").await;
+    assert_eq!(settings, format!("{HOST}|{}", want.display()), "the placeholder is the output folder");
     proxy::remove(&id).unwrap();
 }
 
@@ -348,7 +396,7 @@ async fn an_idle_server_stops_answers_from_its_saved_list_and_a_call_starts_it()
     let id = added("idle").await;
     let pid = call_text(&id, "pid").await;
     age_for_test(&id, IDLE + Duration::from_secs(1));
-    stop_idle(now_ms(), IDLE);
+    sweep(&id);
     assert!(running(&id).is_none(), "stopped");
     assert_eq!(proxy::status(&id).state, STATE_IDLE);
     assert!(!proxy::status(&id).is_outage());
@@ -374,10 +422,10 @@ async fn only_an_agents_list_or_call_counts_as_use() {
     assert_eq!(last_use_for_test(&id), aged, "and is not use");
     let _ = post(&id, "s1", json!(1), "tools/list", json!({})).await;
     assert!(last_use_for_test(&id) > aged, "an agent's list is");
-    stop_idle(now_ms(), IDLE);
+    sweep(&id);
     assert!(running(&id).is_some(), "used just now");
     age_for_test(&id, IDLE + Duration::from_secs(1));
-    stop_idle(now_ms(), IDLE);
+    sweep(&id);
     assert!(running(&id).is_none());
     proxy::remove(&id).unwrap();
 }
@@ -459,4 +507,140 @@ async fn a_key_belongs_only_to_a_stdio_server_that_takes_one() {
     });
     assert!(proxy::set_key(&http, KEY).is_err(), "an http server takes no key");
     proxy::SERVERS.write().retain(|s| s.id != http);
+}
+
+/// A restart is not use: a child that keeps failing is restarted only until `IDLE` after an
+/// agent last used it, not for as long as the app runs.
+#[tokio::test]
+async fn a_restart_is_not_counted_as_use() {
+    let id = added("ru").await;
+    age_for_test(&id, IDLE - Duration::from_secs(120));
+    let aged = last_use_for_test(&id);
+    let old = running(&id).unwrap();
+    // Straight to the child, as no agent: its exit is what restarts it.
+    let _ = old.call_tool(json!({ "name": "die", "arguments": {} })).await;
+    eventually("the restart", || running(&id).is_some_and(|r| !Arc::ptr_eq(&r, &old))).await;
+    assert_eq!(last_use_for_test(&id), aged, "the restart moved the idle clock");
+    proxy::remove(&id).unwrap();
+}
+
+/// A caller that gives up (an agent that disconnects drops its call) leaves nothing waiting, so
+/// the idle stop still stops the child.
+#[tokio::test]
+async fn a_dropped_call_leaves_nothing_waiting() {
+    let id = added("drop").await;
+    let r = running(&id).unwrap();
+    let call = r.call_tool(json!({ "name": "hang", "arguments": {} }));
+    assert!(tokio::time::timeout(Duration::from_millis(300), call).await.is_err(), "it never answers");
+    assert!(r.pending.lock().is_empty(), "a dropped call is not waited for");
+    age_for_test(&id, IDLE + Duration::from_secs(1));
+    sweep(&id);
+    assert!(running(&id).is_none(), "stopped when idle");
+    proxy::remove(&id).unwrap();
+}
+
+/// The key a child echoes back (in an error, a result, a tool's description) is taken out of
+/// everything it sends: what Verify reads, what an agent gets, the saved list, the file.
+#[tokio::test]
+async fn a_key_the_child_echoes_is_taken_out_of_everything_it_sends() {
+    let id = added("echo").await;
+    // Verify's door (`call_once`): its words reach the webview, so only the code goes out.
+    let e = proxy::call_once(&id, json!({ "name": "leak", "arguments": {} })).await.unwrap_err();
+    let words = format!("{e} {e:?}");
+    assert!(!words.contains(KEY) && !words.contains("invalid api key"), "{words}");
+    assert!(matches!(e, UpErr::Rpc { code: -32000, .. }), "{words}");
+    let v = proxy::call_once(&id, json!({ "name": "leakresult", "arguments": {} })).await.unwrap();
+    assert!(!v.to_string().contains(KEY) && v.to_string().contains(KEY_REMOVED), "{v}");
+    // The agent that called gets the server's own words, without the key.
+    let v = post(&id, "s1", json!(2), "tools/call", json!({ "name": "leak", "arguments": {} })).await;
+    assert_eq!(v["error"]["code"], -32000);
+    assert!(v["error"]["message"].as_str().unwrap().contains("invalid api key"), "{v}");
+    assert!(!v.to_string().contains(KEY), "{v}");
+    let v = post(&id, "s1", json!(3), "tools/call", json!({ "name": "leakresult", "arguments": {} })).await;
+    assert!(!v.to_string().contains(KEY), "{v}");
+    // A description that held it is listed and saved without it.
+    let listed = post(&id, "s1", json!(4), "tools/list", json!({})).await;
+    assert!(!listed.to_string().contains(KEY) && listed.to_string().contains(KEY_REMOVED), "{listed}");
+    assert!(!std::fs::read_to_string(proxy::store_path().unwrap()).unwrap().contains(KEY));
+    assert!(!proxy::status(&id).detail.contains(KEY));
+    assert!(!logs().contains(KEY));
+    proxy::remove(&id).unwrap();
+}
+
+/// Stop `id`'s child, start it again from an agent's call with a 2 s handshake, and run `act`
+/// half a second into it. The call's answer and the starting child's pid.
+async fn mid_start(id: &str, act: impl FnOnce()) -> (Value, i32) {
+    let dir = output_folder(id).unwrap();
+    stop(id);
+    let pidfile = dir.join("pid.txt");
+    let _ = std::fs::remove_file(&pidfile);
+    std::fs::write(dir.join("slowstart"), "").unwrap();
+    let call = tokio::spawn({
+        let id = id.to_string();
+        async move { post(&id, "s1", json!(1), "tools/call", json!({ "name": "fast", "arguments": {} })).await }
+    });
+    eventually("the child to start", || std::fs::read_to_string(&pidfile).is_ok_and(|p| p.ends_with('\n'))).await;
+    let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    act();
+    let _ = std::fs::remove_file(dir.join("slowstart"));
+    (call.await.unwrap(), pid)
+}
+
+fn gone(pid: i32) -> bool {
+    // SAFETY: probing a pid with signal 0 sends nothing.
+    unsafe { libc::kill(pid, 0) != 0 }
+}
+
+/// A removal, a new key or a disable while an agent's call is starting the child: the child that
+/// was starting is killed, never kept (with the old key, or for a server that is gone).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stop_during_a_start_leaves_no_child() {
+    let id = added("orph").await;
+    let (v, pid) = mid_start(&id, || proxy::remove(&id).unwrap()).await;
+    assert_eq!(v["result"]["isError"], true, "{v}");
+    eventually("the removed server's child to be gone", || gone(pid)).await;
+    assert!(running(&id).is_none());
+    assert!(!SLOTS.lock().contains_key(&id), "no slot left for it");
+
+    let id = added("rekey").await;
+    let (v, pid) = mid_start(&id, || proxy::set_key(&id, "VALUE-a-new-key").unwrap()).await;
+    assert_eq!(v["result"]["isError"], true, "{v}");
+    eventually("the child with the old key to be gone", || gone(pid)).await;
+    assert!(running(&id).is_none());
+    let next: i32 = call_text(&id, "pid").await.parse().unwrap();
+    assert_ne!(next, pid, "the next call starts a new child");
+    proxy::remove(&id).unwrap();
+
+    let id = added("off").await;
+    let (v, pid) = mid_start(&id, || {
+        proxy::set_enabled(&id, false).unwrap();
+    })
+    .await;
+    assert_eq!(v["result"]["isError"], true, "{v}");
+    eventually("the disabled server's child to be gone", || gone(pid)).await;
+    assert!(running(&id).is_none());
+    proxy::remove(&id).unwrap();
+}
+
+/// At the app's quit every child goes, the running and the starting alike: each is in a process
+/// group of its own, which nothing else ends. (`stop_all` is this over every server; a test that
+/// ran it would stop the other tests' children.)
+#[cfg(unix)]
+#[tokio::test]
+async fn quitting_stops_every_child_running_or_starting() {
+    let up = added("quit").await;
+    let up_pid: i32 = call_text(&up, "pid").await.parse().unwrap();
+    let starting = added("quit").await;
+    let (v, starting_pid) = mid_start(&starting, || {
+        assert_eq!(stop_for_test(&[up.as_str(), starting.as_str()]), 2);
+    })
+    .await;
+    assert_eq!(v["result"]["isError"], true, "{v}");
+    eventually("the running child to be gone", || gone(up_pid)).await;
+    eventually("the starting child to be gone", || gone(starting_pid)).await;
+    assert!(running(&up).is_none() && running(&starting).is_none());
+    proxy::remove(&up).unwrap();
+    proxy::remove(&starting).unwrap();
 }

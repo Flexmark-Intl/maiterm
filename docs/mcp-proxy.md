@@ -61,9 +61,24 @@ command or its key. The code is `mcp_proxy/stdio.rs`.
 
 **The record.** `ProxyServer.transport` is a string, `http` (the default, left out of the file, so
 an http record reads and writes exactly as before) or `stdio`. A stdio server carries
-`stdio: {route, command, args, env_key}`:
+`stdio: {route, command, args, env_key, env}`:
 - `route` is the catalogue route it was set up from, which detection matches it by;
-- `env_key` is the NAME of the variable the key goes in, never the key.
+- `env_key` is the NAME of the variable the key goes in, never the key. It must match
+  `^[A-Z][A-Z0-9_]*_(API_KEY|KEY|TOKEN|SECRET)$` (`MINIMAX_API_KEY`, `MESHY_API_KEY`);
+- `env` is the route's fixed, non-secret settings besides the key (MiniMax's
+  `MINIMAX_API_HOST`, `MINIMAX_MCP_BASE_PATH`, `MINIMAX_API_RESOURCE_MODE`), left out of the file
+  when empty. It comes from the catalogue only, never from a webview or an agent. In a value,
+  `{output}` stands for the server's output folder and is expanded in Rust at each start; the
+  placeholder, not the folder, is saved. A setting may not be the key's variable, and no value
+  may hold the key.
+- Neither the key's variable nor a setting may be one that steers the child or its launcher, as a
+  backstop to the rule above: `PATH`, `HOME`, `TMPDIR`, the shells' (`ENV`, `BASH_ENV`, `IFS`,
+  `CDPATH`, `ZDOTDIR`), the proxies and trust stores (`HTTP(S)_PROXY`, `ALL_PROXY`,
+  `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`), the interpreters' (`PERL5OPT`, `RUBYOPT`,
+  `JAVA_TOOL_OPTIONS`), and anything starting `NODE_`, `PYTHON`, `NPM_CONFIG_`, `UV_`, `PIP_`,
+  `DYLD_`, `LD_`, `JAVA_`, `XDG_` or `MALLOC`, compared without regard to case
+  (`stdio::forbidden_env`). A key in `HOME`, say, would make npm write it to disk as a folder
+  name inside the output folder.
 Its `url` is `stdio:<route>`, which `valid_url` would refuse and which is never dialled. An older
 build reads that url, fails to reach it, and keeps serving the saved list with failing calls. If
 it saves the file, it drops the fields it doesn't know, and the server must be removed and added
@@ -83,8 +98,15 @@ bearer token for it.
 - A `notifications/tools/list_changed` from the child re-reads the list, and a change goes out to
   every downstream stream as §4.2 says.
 - It is started as `watch.rs` starts a script: `env_clear`, then the login PATH (`login_path`),
-  then the key variable, and nothing else of maiTerm's environment (no HOME, no `MAITERM_*`). It
-  gets its own process group, killed whole when it stops.
+  then the key variable, then the route's fixed settings, and nothing else of maiTerm's
+  environment (no HOME, no `MAITERM_*`). It gets its own process group, killed whole when it
+  stops, and every child is stopped when the app quits (`stdio::stop_all`, from
+  `run_shutdown_cleanup`), since nothing else ends a group outside maiTerm's.
+- A stop (a removal, a new key, a disable, the quit) kills a child still in its handshake too, and
+  a start that a stop overlapped keeps no child: a removed server never comes back up, and a child
+  never keeps an old key.
+- A caller that leaves (an agent that disconnects drops its call) leaves nothing waiting, so a
+  call nobody waits for never holds off the idle stop.
 - Its working directory is `<OS cache dir>/<app_data_slug>/mcp-out/<id>`
   (`stdio::output_folder`), never inside maiTerm's data folder.
 
@@ -95,8 +117,10 @@ bearer token for it.
 - **Idle stop.** A child that no agent has sent a `tools/call` or `tools/list` for 10 minutes is
   stopped, unless a call is still running.
 - **What doesn't count as use.** The proxy's own hourly re-list and a child's `list_changed` read
-  only a running child: neither counts as use, and neither starts a stopped one. A child started
-  by Verify, a human's Refresh or a balance check lives 10 minutes from its start.
+  only a running child: neither counts as use, and neither starts a stopped one. A restart isn't
+  use either, so a child that keeps failing stops being restarted 10 minutes after an agent last
+  used it. A child started by Verify, a human's Refresh or a balance check lives 10 minutes from
+  its start.
 - **A stopped server is `idle`.** That is not an outage, and Hive media counts it as ready. It
   answers `tools/list` from its saved list without starting. A tool call starts it, within 120 s.
 - **A failure never removes a tool (§4.1).** A start or call that fails answers `isError` with a
@@ -116,15 +140,20 @@ the child is gone. **The key is left in the keychain**, so a retry needs no seco
 
 **The key.**
 - **Where it lives.** It is kept in the keychain under §5's rules (`secrets::store_env_key`, item
-  `<id>#key` under the `.mcp` service). It is read at spawn and dropped once the child has it,
-  and it reaches the child only through its environment.
+  `<id>#key` under the `.mcp` service). It is read at spawn and reaches the child only through its
+  environment. The child's record keeps it for one purpose: **everything the child sends has the
+  key replaced with `[key removed]`** before it goes anywhere (`stdio::scrub`): an error's message
+  and data, a result's text, a tool's description in the saved list. A server that echoes its key
+  can't send it to an agent, a status, Verify or the file.
 - **Where it never appears:** argv, a log line, an error, a status, `Debug` output, `.claude.json`,
   the Codex config, `mcp-servers.json`, or any Tauri event or command return. A route that puts
-  the key on its command line is refused at add.
+  the key on its command line or in a setting is refused at add, and a child whose replaced key
+  turns out to be in one is not started.
 - **The child's stderr is never logged or forwarded**, since a server may print its own key. It is
   drained, and only its line count and the exit status are logged. A child's own JSON-RPC error
   goes back to the agent whose call it answers, but its words never reach a status, which is
-  logged and sent to the frontend.
+  logged and sent to the frontend, nor a call maiTerm makes itself (`call_once`, Verify's balance
+  check), which gets only the error's code.
 - **Who can set it.** Only the human, at the Mac: `mcp_stdio_key_store` (the setup sheet's paste),
   never a maiLink route or an agent tool. Replacing the key stops the child, so the next call
   starts it with the new one.

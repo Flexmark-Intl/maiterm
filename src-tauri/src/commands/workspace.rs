@@ -125,6 +125,10 @@ pub fn run_shutdown_cleanup(state: &Arc<AppState>) {
     // Kill all SSH MCP tunnels
     crate::commands::ssh_tunnel::kill_all_tunnels(state);
 
+    // Stdio MCP servers run in process groups of their own, outside maiTerm's, each with its key
+    // in its environment: nothing else ends them (docs/mcp-proxy.md §2.1).
+    crate::mcp_proxy::stdio::stop_all();
+
     // Kill all remaining PTYs so their threads can exit cleanly
     let pty_ids: Vec<String> = state.pty_registry.read().keys().cloned().collect();
     for id in &pty_ids {

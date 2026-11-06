@@ -513,7 +513,7 @@ async fn refresh_stdio(id: &str, start: bool) -> Result<bool, String> {
     let _turn = turn.lock().await;
     let server = get(id).ok_or_else(|| format!("no MCP server named {id}"))?;
     let r = if start {
-        match stdio::ensure(&server, stdio::START_WAIT).await {
+        match stdio::ensure(&server, stdio::START_WAIT, stdio::Start::Asked).await {
             Ok(r) => r,
             Err(e) => {
                 let st = stdio_status(&server, &e);
@@ -940,7 +940,7 @@ async fn call_stdio(server: &ProxyServer, rid: Value, params: Value) -> DownRepl
         set_status(&server.id, st);
         DownReply::result(rid, json!({ "content": [{ "type": "text", "text": text }], "isError": true }))
     };
-    let r = match stdio::ensure(server, stdio::START_WAIT).await {
+    let r = match stdio::ensure(server, stdio::START_WAIT, stdio::Start::Asked).await {
         Ok(r) => r,
         Err(e) => return fail(rid, stdio_status(server, &e)),
     };
@@ -968,7 +968,7 @@ pub async fn call_once(id: &str, params: Value) -> Result<Value, UpErr> {
     let server = get(id).ok_or_else(|| UpErr::Protocol(format!("no MCP server named {id}")))?;
     if server.is_stdio() {
         // Not an agent's use: a child started for it stops after `stdio::IDLE`.
-        let r = match stdio::ensure(&server, stdio::START_WAIT).await {
+        let r = match stdio::ensure(&server, stdio::START_WAIT, stdio::Start::Asked).await {
             Ok(r) => r,
             Err(e) => {
                 let st = stdio_status(&server, &e);
@@ -977,7 +977,12 @@ pub async fn call_once(id: &str, params: Value) -> Result<Value, UpErr> {
                 return Err(if unauthorized { UpErr::Unauthorized { challenge: None } } else { UpErr::Net(st.detail) });
             }
         };
-        return r.call_tool(params).await;
+        // What this answers reaches the webview (Verify's words), so the child's own error words
+        // stay here: only its code goes out. Its key is already taken out of what it sent.
+        return r.call_tool(params).await.map_err(|e| match e {
+            UpErr::Rpc { code, .. } => UpErr::Rpc { code, message: format!("its server answered with error {code}"), data: None },
+            other => other,
+        });
     }
     let refused = |server: &ProxyServer, st: Status| {
         set_calls_refused(&server.id, true);
@@ -1294,9 +1299,10 @@ async fn add_stdio_with(id: &str, spec: StdioSpec, workspaces: Vec<String>, adde
         let key = blocking(move || secrets::read_env_key(&key_id).map_err(|e| e.to_string())).await?;
         let Some(key) = key else { return Err("store the server's key first".into()) };
         // The key reaches the child in its environment only. A route that put it on the command
-        // line would show it to every process on this computer.
-        if spec.command.contains(key.expose()) || spec.args.iter().any(|a| a.contains(key.expose())) {
-            return Err("the key must not be on the server's command line".into());
+        // line would show it to every process on this computer; one in a fixed setting would be
+        // saved in mcp-servers.json.
+        if spec.carries(key.expose()) {
+            return Err("the key must not be on the server's command line or in its settings".into());
         }
     }
     LIVE.lock().remove(id);
@@ -1319,7 +1325,7 @@ async fn add_stdio_with(id: &str, spec: StdioSpec, workspaces: Vec<String>, adde
         log::warn!("[mcp-proxy] {id}: Verify failed, nothing written ({why})");
         Err(format!("maiTerm could not set up {id}: {why}"))
     };
-    let r = match stdio::ensure(&server, wait).await {
+    let r = match stdio::ensure(&server, wait, stdio::Start::Asked).await {
         Ok(r) => r,
         Err(e) => return failed(id, stdio_status(&server, &e).detail),
     };
