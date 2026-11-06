@@ -2083,6 +2083,7 @@ export interface SshTunnelInfo {
 
 export interface MaitermSkillScripts {
   skill_md: string;
+  statusline_skill_md: string;
   setup_statusline: string;
   statusline_command: string;
   /** The maiterm-tab mod's files: [path inside its folder, contents]. */

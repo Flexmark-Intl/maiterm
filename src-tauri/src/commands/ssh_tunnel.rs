@@ -942,12 +942,13 @@ pub fn get_remote_bridge_env(
     })
 }
 
-/// The `/maiterm statusline` helper scripts, served from the same bundled
+/// The `/maiterm` and `/maiterm-statusline` skills, served from the same bundled
 /// source the local install uses. The frontend embeds these in the remote
-/// (SSH) skill setup so `/maiterm statusline` works on remote hosts too.
+/// (SSH) skill setup so both work on remote hosts too.
 #[derive(serde::Serialize)]
 pub struct MaitermSkillScripts {
     pub skill_md: String,
+    pub statusline_skill_md: String,
     pub setup_statusline: String,
     pub statusline_command: String,
     /// The maiterm-tab mod's files, (path inside its folder, contents), for the remote copy
@@ -963,6 +964,7 @@ pub fn get_maiterm_skill_scripts() -> MaitermSkillScripts {
     MaitermSkillScripts {
         mcp_proxy: crate::mcp_proxy::entries::remote(),
         skill_md: crate::claude_code::lockfile::MAITERM_SKILL_MD.to_string(),
+        statusline_skill_md: crate::claude_code::lockfile::STATUSLINE_SKILL_MD.to_string(),
         setup_statusline: crate::claude_code::lockfile::STATUSLINE_SETUP_SCRIPT.to_string(),
         statusline_command: crate::claude_code::lockfile::STATUSLINE_PAYLOAD_SCRIPT.to_string(),
         claude_mod: crate::claude_code::claude_mod::files()

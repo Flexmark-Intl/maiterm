@@ -743,16 +743,20 @@ function buildSetupScript(
     // (get_maiterm_skill_scripts), identical to the local install — no drift.
     scripts.skill_md +
     'SKILLEOF',
-    // Bundle the /maiterm statusline helper scripts on the remote too, so
-    // `/maiterm statusline` works in remote (SSH-bridged) Claude sessions.
-    'mkdir -p ~/.claude/skills/maiterm/bin',
-    "cat > ~/.claude/skills/maiterm/bin/setup-statusline.sh << 'MAITERMSETUPEOF'",
+    // The /maiterm-statusline skill and its helper scripts, so it works in remote
+    // (SSH-bridged) Claude sessions too. The scripts used to live in maiterm/bin/.
+    'rm -rf ~/.claude/skills/maiterm/bin',
+    'mkdir -p ~/.claude/skills/maiterm-statusline/bin',
+    "cat > ~/.claude/skills/maiterm-statusline/SKILL.md << 'MAITERMSLSKILLEOF'\n" +
+    scripts.statusline_skill_md +
+    'MAITERMSLSKILLEOF',
+    "cat > ~/.claude/skills/maiterm-statusline/bin/setup-statusline.sh << 'MAITERMSETUPEOF'",
     scripts.setup_statusline,
     'MAITERMSETUPEOF',
-    "cat > ~/.claude/skills/maiterm/bin/statusline-command.sh << 'MAITERMPAYLOADEOF'",
+    "cat > ~/.claude/skills/maiterm-statusline/bin/statusline-command.sh << 'MAITERMPAYLOADEOF'",
     scripts.statusline_command,
     'MAITERMPAYLOADEOF',
-    'chmod +x ~/.claude/skills/maiterm/bin/setup-statusline.sh ~/.claude/skills/maiterm/bin/statusline-command.sh',
+    'chmod +x ~/.claude/skills/maiterm-statusline/bin/setup-statusline.sh ~/.claude/skills/maiterm-statusline/bin/statusline-command.sh',
     ...claudeModFiles(scripts.claude_mod),
   ];
 

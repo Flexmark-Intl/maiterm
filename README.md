@@ -120,7 +120,7 @@ Triggers watch your terminal output for patterns — Claude asking a question, a
 - **Agent Bridge** — bridge two running Claude sessions so they talk to each other directly (`sendToBridgedAgent` / `getBridgedAgent`); fork-into-split or link existing tabs, async messaging with maiTerm-stamped identities, persists across restarts
 - **SSH MCP bridge** — reverse SSH tunnel (`-R 0:localhost:port`) exposes local IDE tools to remote Claude Code; ControlMaster mux support, bridge status indicator
 - **Auto-discovery** — writes lock file to `~/.claude/ide/` and registers in `~/.claude.json` for automatic connection
-- **`/maiterm` skill** — auto-installed Claude Code skill for fast slash-command access to maiTerm tools (`/maiterm notes`, `/maiterm tabs`, `/maiterm diag`, …); `/maiterm statusline` installs a recommended status line (host · cwd · branch · model · effort · context %), local and over SSH
+- **`/maiterm` skill** — auto-installed Claude Code skill for fast slash-command access to maiTerm tools (`/maiterm notes`, `/maiterm tabs`, `/maiterm diag`, …); `/maiterm-statusline` installs a recommended status line (host · cwd · branch · model · effort · context %), local and over SSH
 - **Dev/prod isolation** — dev builds register as `aiterm-dev` with display name "maiTermDev"
 
 ### Trigger System

@@ -5,7 +5,7 @@
 # job in one shot (render example → copy script → merge settings.json) with no
 # prompts. It NEVER installs jq itself — if jq is missing it prints the exact
 # command for the detected package manager and exits 3 so the caller (the
-# /maiterm statusline skill) can offer to run it interactively.
+# /maiterm-statusline skill) can offer to run it interactively.
 #
 # Exit codes:
 #   0  installed

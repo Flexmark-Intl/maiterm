@@ -1,13 +1,19 @@
 use std::fs;
 use std::path::PathBuf;
 
-/// Helper scripts for the `/maiterm statusline` subcommand, bundled into the
+/// The `/maiterm-statusline` skill: its SKILL.md and helper scripts, bundled into the
 /// binary at build time from the canonical sources in `src-tauri/resources/`.
 /// Shared with the remote (SSH) install path via `get_maiterm_skill_scripts`.
+///
+/// It is its own skill, not only a `/maiterm statusline` subcommand, so that typing
+/// "statusline" suggests it: people typed `/statusline` and got Claude Code's built-in,
+/// which copies the shell prompt and leaves out branch, model, effort and context.
+pub const STATUSLINE_SKILL_MD: &str =
+    include_str!("../../resources/maiterm-statusline-skill/SKILL.md");
 pub const STATUSLINE_SETUP_SCRIPT: &str =
-    include_str!("../../resources/maiterm-skill/bin/setup-statusline.sh");
+    include_str!("../../resources/maiterm-statusline-skill/bin/setup-statusline.sh");
 pub const STATUSLINE_PAYLOAD_SCRIPT: &str =
-    include_str!("../../resources/maiterm-skill/bin/statusline-command.sh");
+    include_str!("../../resources/maiterm-statusline-skill/bin/statusline-command.sh");
 
 /// The `/maiterm` skill body (SKILL.md). Single canonical source bundled at build
 /// time and shared with the remote (SSH) install via `get_maiterm_skill_scripts`,
@@ -1136,6 +1142,11 @@ fn maiterm_skill_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("skills").join("maiterm"))
 }
 
+/// Directory for the /maiterm-statusline skill: ~/.claude/skills/maiterm-statusline/
+fn statusline_skill_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".claude").join("skills").join("maiterm-statusline"))
+}
+
 /// Legacy pre-rebrand skill dir (~/.claude/skills/aiterm/). Removed on
 /// startup and exit so users don't keep a stale duplicate /aiterm command.
 fn legacy_aiterm_skill_dir() -> Option<PathBuf> {
@@ -1170,8 +1181,17 @@ fn write_aiterm_skill() -> Result<(), String> {
     fs::write(&path, skill).map_err(|e| format!("Failed to write skill: {}", e))?;
     log::info!("Wrote /maiterm skill at {:?}", path);
 
-    // Bundle the helper scripts for `/maiterm statusline` into bin/.
-    let bin_dir = dir.join("bin");
+    // The statusline scripts used to live in maiterm/bin/; they moved to their own skill.
+    let old_bin = dir.join("bin");
+    if old_bin.exists() {
+        let _ = fs::remove_dir_all(&old_bin);
+    }
+
+    let sl_dir = statusline_skill_dir().ok_or("Could not determine home directory")?;
+    fs::create_dir_all(&sl_dir).map_err(|e| format!("Failed to create skill dir: {}", e))?;
+    fs::write(sl_dir.join("SKILL.md"), STATUSLINE_SKILL_MD)
+        .map_err(|e| format!("Failed to write statusline skill: {}", e))?;
+    let bin_dir = sl_dir.join("bin");
     fs::create_dir_all(&bin_dir).map_err(|e| format!("Failed to create skill bin dir: {}", e))?;
     write_executable(
         &bin_dir.join("setup-statusline.sh"),
@@ -1197,15 +1217,15 @@ fn write_executable(path: &std::path::Path, contents: &str) -> Result<(), String
     Ok(())
 }
 
-/// Remove the /maiterm skill directory (and any legacy /aiterm one).
+/// Remove the /maiterm and /maiterm-statusline skill directories (and any legacy /aiterm one).
 fn remove_aiterm_skill() {
     remove_legacy_aiterm_skill();
-    if let Some(dir) = maiterm_skill_dir() {
+    for dir in [maiterm_skill_dir(), statusline_skill_dir()].into_iter().flatten() {
         if dir.exists() {
             if let Err(e) = fs::remove_dir_all(&dir) {
-                log::warn!("Failed to remove maiterm skill dir: {}", e);
+                log::warn!("Failed to remove skill dir {:?}: {}", dir, e);
             } else {
-                log::info!("Removed /maiterm skill");
+                log::info!("Removed skill {:?}", dir);
             }
         }
     }
