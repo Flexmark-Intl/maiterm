@@ -993,3 +993,28 @@ async fn a_cleared_setting_reaches_the_child_set_and_empty() {
     assert!(names.split(' ').any(|n| n == "HTTPS_PROXY") && names.split(' ').any(|n| n == "NODE_OPTIONS"), "{names}");
     proxy::remove(&id).unwrap();
 }
+
+/// The output folder sits on a case-insensitive volume (APFS also folds `ſ` to `s`), so Meshy's
+/// index folder is judged by what is on disk, never by spelling: every spelling that reaches
+/// `meshy_output/` is refused, through the catalogue's real Meshy rules.
+#[test]
+fn a_save_into_meshys_index_is_refused_whatever_its_spelling() {
+    let id = fresh_id("folded");
+    let meshy = proxy::spec_for_route("meshy").unwrap().arg_rules;
+    let out = output_folder(&id).unwrap();
+    std::fs::create_dir_all(&out).unwrap();
+    let save = |to: &str| refuse_args(&id, &meshy, &call("meshy_download_model", json!({ "task_id": "t", "save_to": to })));
+    // The index folder need not exist yet: the check makes it, then compares.
+    assert!(save("meshy_output/history.json").is_some());
+    assert!(out.join("meshy_output").is_dir(), "made so it can be compared with");
+    std::fs::write(out.join("meshy_output/history.json"), b"[]").unwrap();
+    let abs_folded = out.join("MESHY_Output").join("history.json").to_string_lossy().to_string();
+    for bad in ["MESHY_OUTPUT/history.json", "Meshy_Output/history.json", "meshy_OUTPUT/x/metadata.json", "me\u{17f}hy_output/history.json", abs_folded.as_str(), "MESHY_OUTPUT", "Meshy_Output/new/model.glb"] {
+        assert!(save(bad).is_some(), "{bad}");
+    }
+    for ok in ["models/robot.glb", "robot.glb", "meshy_outputs/robot.glb", "my_meshy_output/robot.glb"] {
+        assert!(save(ok).is_none(), "{ok}");
+    }
+    assert_eq!(std::fs::read(out.join("meshy_output/history.json")).unwrap(), b"[]", "a check never writes the index");
+    let _ = std::fs::remove_dir_all(&out);
+}

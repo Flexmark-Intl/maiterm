@@ -843,8 +843,12 @@ art-director), reviewers included. What it does beyond the example above:
    of `text_to_audio.text`, `voice_clone.text`, `voice_design.preview_text` and
    `text_to_image.prompt`, and anywhere in `query_video_generation.task_id` (the whole id is used);
    `text_to_audio.format` is `one_of` mp3, pcm, flac, wav. Meshy: the three file arguments inside,
-   and `save_to` is `save_inside_output`: inside, no part starting with `.`, and not under
-   `meshy_output/` (its own index). Meshy's working folder is its output folder, where its dotenv
+   and `save_to` is `save_inside_output`: inside, no part starting with `.`, and not into
+   `meshy_output/` (its own index), judged by what is on disk rather than by spelling: the folder
+   is made if missing, and the save's deepest existing part is resolved and compared with it as
+   path components and by file identity, since the output folder sits on a case-insensitive volume
+   (`MESHY_OUTPUT/` and `meſhy_output/` are the same folder there). The dot rule needs no disk: it
+   refuses any part starting with `.`, whatever its case. Meshy's working folder is its output folder, where its dotenv
    reads a `.env` at every start (never overriding what is set): no save can be one, and its route
    pins `MESHY_API_HOST` and `TRANSPORT` and clears (to "", the only value a route may give them)
    `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, their lowercase forms, `NODE_TLS_REJECT_UNAUTHORIZED`

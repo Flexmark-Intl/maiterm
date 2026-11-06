@@ -196,21 +196,59 @@ pub fn path_inside(s: &str, output: &std::path::Path) -> bool {
     }
 }
 
-/// A save's path: inside `output`, no part starting with `.`, and not under a `reserved` top folder.
+/// `s` as the child would reach it: its deepest existing part's real path (symlinks resolved, and
+/// on a case-insensitive volume the on-disk spelling), with the parts that don't exist yet after
+/// it. `None` when nothing of it resolves.
+fn resolved(s: &str, output: &std::path::Path) -> Option<(PathBuf, PathBuf)> {
+    let raw = std::path::Path::new(s);
+    let full = if raw.is_absolute() { raw.to_path_buf() } else { output.join(raw) };
+    let mut existing = full.as_path();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(existing) {
+            let mut whole = real.clone();
+            for part in rest.iter().rev() {
+                whole.push(part);
+            }
+            return Some((real, whole));
+        }
+        let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else { return None };
+        rest.push(name.to_os_string());
+        existing = parent;
+    }
+}
+
+/// Whether `path` (an existing real path) is `dir` or inside it, judged by what is on disk: as
+/// path components against `dir`'s real path, and by file identity (device and inode) of `path`
+/// and each folder above it, so no spelling the volume folds to the same folder
+/// (`MESHY_OUTPUT`, `meſhy_output`) gets past.
+fn same_or_under(path: &std::path::Path, dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(real_dir) = std::fs::canonicalize(dir) else { return true };
+    if path.starts_with(&real_dir) {
+        return true;
+    }
+    let Ok(id) = std::fs::metadata(&real_dir).map(|m| (m.dev(), m.ino())) else { return true };
+    path.ancestors().any(|a| std::fs::metadata(a).is_ok_and(|m| (m.dev(), m.ino()) == id))
+}
+
+/// A save's path: inside `output`, no part starting with `.`, and not into a `reserved` folder
+/// (relative to `output`), judged by identity on disk rather than by spelling: the output folder
+/// sits on a case-insensitive volume, so `MESHY_OUTPUT/history.json` IS `meshy_output/history.json`.
+/// Each reserved folder is made first if missing, so there is something on disk to compare with.
 fn save_inside(s: &str, output: &std::path::Path, reserved: &[String]) -> bool {
     use std::path::Component;
     if !path_inside(s, output) {
         return false;
     }
     let p = std::path::Path::new(s);
-    // Relative to the output folder, as the child (whose working folder it is) reads it.
+    // Spelling-based on purpose, and enough: ANY part starting with "." is refused, so `.ENV`,
+    // `.Env` and every other spelling of a dotfile is caught without asking the disk.
+    // Relative to the output folder, as the child (whose working folder it is) reads it; a path
+    // inside only through a symlinked prefix is judged on every part.
     let rel: PathBuf = if p.is_absolute() {
         let root = std::fs::canonicalize(output).unwrap_or_else(|_| output.to_path_buf());
-        match p.strip_prefix(output).or_else(|_| p.strip_prefix(&root)) {
-            Ok(r) => r.to_path_buf(),
-            // Inside only through a symlinked prefix: judge every part instead.
-            Err(_) => p.to_path_buf(),
-        }
+        p.strip_prefix(output).or_else(|_| p.strip_prefix(&root)).map_or_else(|_| p.to_path_buf(), |r| r.to_path_buf())
     } else {
         p.to_path_buf()
     };
@@ -218,9 +256,17 @@ fn save_inside(s: &str, output: &std::path::Path, reserved: &[String]) -> bool {
         Component::Normal(n) => Some(n.to_string_lossy().to_string()),
         _ => None,
     }).collect();
-    let dotted = parts.iter().any(|n| n.starts_with('.'));
-    let under_reserved = parts.first().is_some_and(|top| reserved.iter().any(|r| r == top));
-    !p.as_os_str().is_empty() && !dotted && !under_reserved && !parts.is_empty()
+    if parts.is_empty() || parts.iter().any(|n| n.starts_with('.')) {
+        return false;
+    }
+    let Some((real, _)) = resolved(s, output) else { return false };
+    for r in reserved {
+        let dir = output.join(r);
+        if std::fs::create_dir_all(&dir).is_err() || same_or_under(&real, &dir) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Why `value` breaks `rule`, or `None`.
