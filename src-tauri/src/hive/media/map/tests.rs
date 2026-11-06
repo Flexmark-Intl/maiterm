@@ -163,3 +163,17 @@ fn a_worker_is_not_covered_by_the_coordinators_own_tools() {
         assert!(!w.contains(word), "{word} in a worker's map: {w}");
     }
 }
+
+/// Phase 5: a server maiTerm runs itself saves files into its output folder, and a worker's shell
+/// can't reach its result URLs: the map says where the files are, never "download each".
+#[test]
+fn a_local_servers_line_says_where_its_files_land() {
+    let t = tools(&["mcp:meshy", "mcp:minimax"]);
+    let own = [server("meshy", "meshy"), server("minimax", "minimax")];
+    let m = render(Reader::Worker, &t, &own, &own);
+    assert!(m.contains("3d: Meshy (MCP \"meshy\"). Prepaid API credit.\n"), "{m}");
+    assert!(m.contains("    Save each finished model with meshy_download_model, which writes it into Meshy's output folder"), "{m}");
+    assert!(m.contains("video, image, voice: MiniMax (MCP \"minimax\"). Prepaid API credit.\n"), "{m}");
+    assert!(m.contains("    MiniMax saves each result as a file in its output folder"), "{m}");
+    assert!(!m.contains("download each"), "{m}");
+}

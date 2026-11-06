@@ -25,7 +25,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::status::{self, Hit, ProxyInput, INSTALLED, NEEDS_SIGN_IN, READY, UNREACHABLE};
-use super::{provider, providers_for_upstream, Provider};
+use super::{provider, providers_for_proxied, Provider};
 use crate::mcp_proxy::entries::{entry_name, origin, Origin};
 use crate::mcp_proxy::upstream::UpErr;
 
@@ -63,6 +63,9 @@ pub struct CheckTool {
     pub what: &'static str,
     /// Values for arguments the tool requires (only those its schema requires are sent).
     hints: fn() -> Value,
+    /// A tool that reports its failures as ordinary text rather than `isError` (MiniMax's answer
+    /// "Failed to list voices: API Error: …"): an answer starting so failed.
+    pub failed_prefix: Option<&'static str>,
 }
 
 fn no_hints() -> Value {
@@ -78,12 +81,16 @@ fn fal_hints() -> Value {
 /// The allowlist. A tool not here is never called by Verify, whatever the catalogue's
 /// `quote_tool` or `balance_tool` names (WaveSpeed's `get_price` included: it prices a job's
 /// arguments, which Verify has none of).
+///
+/// MiniMax's `list_voices` lists the account's voices (`/v1/get_voice`): free, and it needs a key
+/// the API accepts for the host the route sets. MiniMax has no balance tool.
 pub const CHECK_TOOLS: &[CheckTool] = &[
-    CheckTool { provider: "fal", name: "get_pricing", what: "pricing check", hints: fal_hints },
-    CheckTool { provider: "wavespeed", name: "get_balance", what: "balance check", hints: no_hints },
-    CheckTool { provider: "bfl", name: "get_credits", what: "credit check", hints: no_hints },
-    CheckTool { provider: "recraft", name: "get_user", what: "account check", hints: no_hints },
-    CheckTool { provider: "meshy", name: "meshy_check_balance", what: "balance check", hints: no_hints },
+    CheckTool { provider: "fal", name: "get_pricing", what: "pricing check", hints: fal_hints, failed_prefix: None },
+    CheckTool { provider: "wavespeed", name: "get_balance", what: "balance check", hints: no_hints, failed_prefix: None },
+    CheckTool { provider: "bfl", name: "get_credits", what: "credit check", hints: no_hints, failed_prefix: None },
+    CheckTool { provider: "recraft", name: "get_user", what: "account check", hints: no_hints, failed_prefix: None },
+    CheckTool { provider: "meshy", name: "meshy_check_balance", what: "balance check", hints: no_hints, failed_prefix: None },
+    CheckTool { provider: "minimax", name: "list_voices", what: "account check", hints: no_hints, failed_prefix: Some("Failed") },
 ];
 
 /// The allowlisted check `name` for `provider`, or why Verify refuses to call it.
@@ -114,9 +121,10 @@ pub fn check_args(schema: Option<&Value>, hints: &Value) -> Option<Value> {
 }
 
 /// Which check to run on a server that listed `tools`: the provider's balance tool, else its
-/// pricing tool, as long as it is allowlisted, listed, and its arguments can be filled.
+/// pricing tool, else its account check (`check_tool`), as long as it is allowlisted, listed, and
+/// its arguments can be filled.
 pub fn plan_check(p: &Provider, tools: &[Value]) -> Option<(&'static CheckTool, Value)> {
-    let named = p.routes.iter().flat_map(|r| [r.balance_tool.as_deref(), r.quote_tool.as_deref()]).flatten();
+    let named = p.routes.iter().flat_map(|r| [r.balance_tool.as_deref(), r.quote_tool.as_deref(), r.check_tool.as_deref()]).flatten();
     for name in named {
         let Ok(check) = check_tool(&p.id, name) else { continue };
         let Some(tool) = tools.iter().find(|t| t.get("name").and_then(Value::as_str) == Some(name)) else { continue };
@@ -326,7 +334,7 @@ pub fn gate(p: &Provider, s: &ProxyInput, workspace: Option<&str>, reach: &Reach
 /// The proxied server Verify checks for `p`: the first one recognised as `p` by its upstream (never
 /// its name) that is on and in scope, else the first that is on, else the first.
 pub fn pick_server<'a>(servers: &'a [ProxyInput], p: &Provider, workspace: Option<&str>) -> Option<&'a ProxyInput> {
-    let mine: Vec<&ProxyInput> = servers.iter().filter(|s| providers_for_upstream(Some(&s.url)).iter().any(|q| q.id == p.id)).collect();
+    let mine: Vec<&ProxyInput> = servers.iter().filter(|s| providers_for_proxied(Some(&s.url)).iter().any(|q| q.id == p.id)).collect();
     mine.iter().find(|s| s.enabled && in_scope(s, workspace)).or_else(|| mine.iter().find(|s| s.enabled)).or_else(|| mine.first()).copied()
 }
 
@@ -363,7 +371,38 @@ fn says_no_credit(text: &str) -> bool {
 
 fn says_signed_out(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
-    has_code(&t, "401", "unauthorized") || ["unauthorized", "unauthenticated", "invalid api key", "invalid token", "not signed in", "not logged in"].iter().any(|w| t.contains(w))
+    has_code(&t, "401", "unauthorized")
+        // Meshy: "Authentication failed: the Meshy API rejected MESHY_API_KEY (401)". MiniMax:
+        // "…, please check your API key and API host." (its code 1004).
+        || ["unauthorized", "unauthenticated", "invalid api key", "invalid token", "not signed in", "not logged in", "authentication failed", "check your api key"]
+            .iter()
+            .any(|w| t.contains(w))
+}
+
+/// A provider whose server maiTerm runs itself with a key (`stdio_mcp`): there is no sign-in, so
+/// the words for a refusal are about the key.
+fn takes_key(p: &Provider) -> bool {
+    p.stdio_routes().any(|r| r.env_key.is_some())
+}
+
+/// What to do about a refused key. A provider with several routes (MiniMax: a global and a
+/// mainland China account) is refused a right key on the wrong one.
+fn fix_key(p: &Provider) -> String {
+    let name = &p.name;
+    if p.stdio_routes().count() > 1 {
+        format!("check that the key is for the account you chose in {name}'s setup sheet, or paste a new one there")
+    } else {
+        format!("paste a new {name} key in its setup sheet")
+    }
+}
+
+/// What to do about a refused call: a new key, or a sign-in.
+fn fix_sign_in(p: &Provider) -> String {
+    if takes_key(p) {
+        fix_key(p)
+    } else {
+        format!("sign in to {} again", p.name)
+    }
 }
 
 /// At most 160 characters of a server's own words.
@@ -402,7 +441,11 @@ pub fn failed(p: &Provider, f: &Failure, during: &str) -> VerifyResult {
     match f.state.as_str() {
         NEEDS_SIGN_IN => {
             let code = f.http.map(|c| format!(" ({c})")).unwrap_or_default();
-            VerifyResult::new(NEEDS_SIGN_IN, format!("{name} refused maiTerm's sign-in{code} while {during}: sign in to {name} again."))
+            if takes_key(p) {
+                VerifyResult::new(NEEDS_SIGN_IN, format!("{name} refused the key{code} while {during}: {}.", fix_key(p)))
+            } else {
+                VerifyResult::new(NEEDS_SIGN_IN, format!("{name} refused maiTerm's sign-in{code} while {during}: sign in to {name} again."))
+            }
         }
         UNREACHABLE => VerifyResult::new(UNREACHABLE, format!("maiTerm couldn't reach {name} while {during} ({}). Check the connection and verify again.", excerpt(&f.detail))),
         _ => VerifyResult::new(ERROR, format!("{name} answered {during} with something maiTerm couldn't use ({}).", excerpt(&f.detail))),
@@ -417,14 +460,17 @@ fn result_text(v: &Value) -> String {
 /// What a check call's answer means for a server that listed `count` tools.
 pub fn after_check(p: &Provider, count: usize, check: &CheckTool, answer: Result<Value, Failure>) -> VerifyResult {
     let (name, what) = (&p.name, check.what);
+    let failed_text = |v: &Value| check.failed_prefix.is_some_and(|f| result_text(v).trim_start().starts_with(f));
     match answer {
-        Ok(v) if v.get("isError").and_then(Value::as_bool) != Some(true) => VerifyResult::new(READY, format!("{name} is ready: {}, and its {what} answered.", n_tools(count))),
+        Ok(v) if v.get("isError").and_then(Value::as_bool) != Some(true) && !failed_text(&v) => {
+            VerifyResult::new(READY, format!("{name} is ready: {}, and its {what} answered.", n_tools(count)))
+        }
         Ok(v) => {
             let text = result_text(&v);
             if says_no_credit(&text) {
                 needs_credit(p, says_402(&text))
             } else if says_signed_out(&text) {
-                VerifyResult::new(NEEDS_SIGN_IN, format!("{name} refused its {what}: sign in to {name} again."))
+                VerifyResult::new(NEEDS_SIGN_IN, format!("{name} refused its {what}: {}.", fix_sign_in(p)))
             } else {
                 VerifyResult::new(
                     ERROR,
@@ -453,7 +499,7 @@ fn listed(n: usize) -> String {
 
 /// An earlier refused call that nothing since has shown to work.
 fn still_refused(p: &Provider, count: usize) -> VerifyResult {
-    VerifyResult::new(NEEDS_SIGN_IN, format!("{} lists its {} but refused a tool call: sign in to {} again.", p.name, n_tools(count), p.name))
+    VerifyResult::new(NEEDS_SIGN_IN, format!("{} lists its {} but refused a tool call: {}.", p.name, n_tools(count), fix_sign_in(p)))
 }
 
 /// Verify a proxied server for `p`.
@@ -467,7 +513,8 @@ pub async fn verify_mcp<P: Probe>(probe: &P, p: &Provider, s: &ProxyInput, works
     };
     let count = tools.len();
     let mut out = if count == 0 {
-        VerifyResult::new(ERROR, format!("{} answered, but lists no tools. Sign in again, or check \"{}\" in Preferences → MCP servers.", p.name, entry_name(&s.id)))
+        let first = if takes_key(p) { "Check its key" } else { "Sign in again" };
+        VerifyResult::new(ERROR, format!("{} answered, but lists no tools. {first}, or check \"{}\" in Preferences → MCP servers.", p.name, entry_name(&s.id)))
     } else {
         match plan_check(p, &tools) {
             // Nothing to call that would show calls work again, so the earlier refusal stands.

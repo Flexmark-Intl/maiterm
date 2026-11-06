@@ -189,6 +189,15 @@ fn what_setup_does(p: &Provider, here: &Here) -> String {
         Some(("remote_mcp", _)) => {
             format!("you sign in with {name} in your browser, and maiTerm serves it through its MCP proxy to this Hive\u{2019}s workspace only")
         }
+        Some(("stdio_mcp", _)) => {
+            let shown = route.and_then(|r| r.stdio_spec()).map(|s| std::iter::once(s.command).chain(s.args).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+            format!(
+                "you paste a key from {name} there (never on the phone); maiTerm keeps it in the keychain and runs {name}\u{2019}s local \
+                 server (`{}`) itself, outside every sandbox, serving it through its MCP proxy to this Hive\u{2019}s workspace only. Its \
+                 first start downloads the package, which can take a minute or more",
+                one_line(&shown, 200)
+            )
+        }
         Some(("brew", _)) => {
             let line = route.and_then(|r| r.command.as_deref()).unwrap_or("brew install");
             let first = if here.brew.is_none() { "Homebrew\u{2019}s own installer runs first and asks for your password, then " } else { "" };
@@ -241,6 +250,11 @@ pub fn card(hive_name: &str, hive: &Hive, cap: &str, row: &MediaRow, here: &Here
     let plugin = p.routes.iter().all(|r| r.kind == "plugin");
     effects.push(if plugin {
         format!("Once it works, this Hive\u{2019}s coordinator has {cap} from its next launch.")
+    } else if hosts.is_empty() && p.stdio_routes().next().is_some() {
+        format!(
+            "Once it works, maiTerm adds it to this Hive\u{2019}s tools, and the folder its server saves files in to this Hive\u{2019}s \
+             output folders, so galleryAdd takes them: workers launched after that have {cap}. Approving allows that folder."
+        )
     } else if hosts.is_empty() {
         format!("Once it works, maiTerm adds it to this Hive\u{2019}s tools: workers launched after that have {cap}.")
     } else {
@@ -491,6 +505,7 @@ pub(crate) async fn ready_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w
     let through = through.unwrap_or_else(|| w.provider_id.clone());
     let name = media::provider(&through).map_or(through.clone(), |p| p.name.clone());
     let mut hosts_added = Vec::new();
+    let mut folders_added: Vec<String> = Vec::new();
     let mut hosts_left = Vec::new();
     if !add.is_empty() {
         let mut tools = hive.tools.clone();
@@ -498,10 +513,14 @@ pub(crate) async fn ready_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w
         let have: Vec<String> = hive.settings.gallery.generator_hosts.iter().filter_map(|h| normalize_host(h).ok()).collect();
         let offered: Vec<String> = generator_hosts(detected, &add, remote_hosts).into_iter().filter(|h| !have.contains(h)).collect();
         let (ticked, left): (Vec<String>, Vec<String>) = offered.into_iter().partition(|h| w.hosts.contains(h));
-        match super::tool_change::write_tools(ctx, caller, detected, remote_hosts, &tools, &ticked).await {
+        // A local server's output folder: the card said it joins the Hive's output folders, so
+        // approving it is the human's tick (docs/hive-media.md §12.1).
+        let folders = super::create::tool_output_folders(detected, &add);
+        match super::tool_change::write_tools(ctx, caller, detected, remote_hosts, &tools, &ticked, &folders).await {
             Ok((_, c)) => {
                 super::change::log_line(caller, &format!("human (approved the queen\u{2019}s ask for {cap})"), &super::tool_change::change_lines(&c), Some(&w.why));
                 hosts_added = c.hosts_added;
+                folders_added = c.folders_added;
                 hosts_left = left;
             }
             Err(e) => {
@@ -531,6 +550,9 @@ pub(crate) async fn ready_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, w
     }
     if !hosts_added.is_empty() {
         text.push_str(&format!("\n- Media workers may also reach: {}", hosts_added.join(", ")));
+    }
+    if !folders_added.is_empty() {
+        text.push_str(&format!("\n- galleryAdd also takes files from: {}", folders_added.iter().map(|f| one_line(f, 200)).collect::<Vec<_>>().join(", ")));
     }
     let p = caller.paths.clone();
     let workers = super::tools::blocking(move || Ok(super::worker::list_workers(&p))).await.unwrap_or_default();
@@ -575,7 +597,7 @@ fn mac_reason(p: &Provider, here: &Here) -> String {
     }
     let route = p.mcp_route().or_else(|| p.routes.first());
     match route.map(|r| (r.kind.as_str(), r.auth.as_str())) {
-        Some(("remote_mcp", "token")) => format!("a key from {} is pasted at the Mac, never on the phone", p.name),
+        Some(("remote_mcp" | "stdio_mcp", "token")) => format!("a key from {} is pasted at the Mac, never on the phone", p.name),
         Some(("remote_mcp", _)) => format!("signing in to {} happens in a browser at the Mac", p.name),
         Some(("brew", _)) if here.brew.is_none() => "Homebrew\u{2019}s installer asks for your password at the Mac".to_string(),
         _ => format!("{}\u{2019}s setup steps are done at the Mac", p.name),

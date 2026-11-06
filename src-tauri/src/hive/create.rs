@@ -485,8 +485,8 @@ pub struct DetectedTool {
     pub proxy: Option<ProxyRef>,
 }
 
-/// A proxied entry's registry id and where the registry says it goes. `upstream` is `None` when
-/// the registry no longer has the server.
+/// A proxied entry's registry id and where the registry says it goes (`stdio:<route>` for a
+/// stdio server). `upstream` is `None` when the registry no longer has the server.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProxyRef {
     pub id: String,
@@ -517,11 +517,12 @@ pub fn mcp_tools(claude_json: &serde_json::Value) -> Vec<DetectedTool> {
     mcp_tools_with(claude_json, &proxy_upstream, crate::mcp_proxy::live_port())
 }
 
-/// The url the proxy registry says server `id` dials. Reads the registry only when asked: a file
-/// without a proxied entry never touches it.
+/// What the proxy registry says server `id` reaches (`ProxyServer::upstream_of`): the url it
+/// dials, or `stdio:<route>` for a server maiTerm runs itself, recognised by its catalogue route.
+/// Reads the registry only when asked: a file without a proxied entry never touches it.
 fn proxy_upstream(id: &str) -> Option<String> {
     crate::mcp_proxy::ensure_loaded();
-    crate::mcp_proxy::get(id).map(|s| s.url)
+    crate::mcp_proxy::get(id).map(|s| s.upstream_of())
 }
 
 /// What a `.claude.json` entry is for recognition: a proxied entry of ours (`Some(ref)`), a native
@@ -711,7 +712,7 @@ fn is_generator_server_with(name: &str, entry: &serde_json::Value, upstream: &dy
 
 fn generator_providers_with(name: &str, entry: &serde_json::Value, upstream: &dyn Fn(&str) -> Option<String>, port: Option<u16>) -> Vec<&'static media::Provider> {
     match proxy_ref(entry, upstream, port) {
-        Some(r) => media::providers_for_upstream(r.upstream.as_deref()),
+        Some(r) => media::providers_for_proxied(r.upstream.as_deref()),
         None => {
             let host = entry.get("url").and_then(|u| u.as_str()).and_then(url_host);
             media::providers_for_native(name, host.as_deref())
@@ -745,7 +746,7 @@ pub fn generator_hosts(detected: &[DetectedTool], chosen: &[String], remote_host
             // table never gave it a sandbox host.
             ("mcp", Some(r)) => {
                 let up = r.upstream.as_deref();
-                media::providers_for_upstream(up).into_iter().filter(|p| up.and_then(url_host).is_some_and(|h| p.owns_host(&h))).collect()
+                media::providers_for_proxied(up).into_iter().filter(|p| up.and_then(url_host).is_some_and(|h| p.owns_host(&h))).collect()
             }
             ("mcp", None) => {
                 if let Some(h) = host.as_deref().filter(|h| media::is_sandbox_own_host(h)) {
@@ -760,6 +761,32 @@ pub fn generator_hosts(detected: &[DetectedTool], chosen: &[String], remote_host
         };
         for k in known {
             k.sandbox_hosts.iter().for_each(|h| push(h));
+        }
+    }
+    out
+}
+
+/// The output folders the chosen tools write their files into (docs/hive-media.md §12.1): a
+/// proxied server maiTerm runs itself (`stdio:<route>` of a catalogue route) works in
+/// `mcp_proxy::stdio::output_folder`, outside maiTerm's data folder, and a Hive given it lists that
+/// folder so `galleryAdd` takes its files (docs/hive.md §10.3). Made if missing (a server set up on
+/// this Mac has made it already), canonical, each once. Nothing for any other tool. Blocks: the disk.
+pub fn tool_output_folders(detected: &[DetectedTool], chosen: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in detected.iter().filter(|t| chosen.contains(&t.id) && t.kind == "mcp") {
+        let Some(r) = &t.proxy else { continue };
+        let stdio = r.upstream.as_deref().and_then(|u| u.strip_prefix(crate::mcp_proxy::stdio::STDIO_URL_PREFIX)).is_some_and(|route| media::stdio_route(route).is_some());
+        if !stdio || r.id.is_empty() {
+            continue;
+        }
+        let Some(dir) = crate::mcp_proxy::stdio::output_folder(&r.id) else { continue };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            log::warn!("hive: {}'s output folder: {}", r.id, e.kind());
+            continue;
+        }
+        let c = crate::share::canon(&dir).to_string_lossy().to_string();
+        if !out.contains(&c) {
+            out.push(c);
         }
     }
     out
@@ -1334,7 +1361,11 @@ pub async fn hive_create(
         hive.settings.run_queue = super::queue::detect_commands(&hive.folders);
         // Its generators' hosts, fixed here and edited by the human, never re-derived at launch: a
         // server added to a config file later must not widen a sandbox on its own (plan D2).
-        hive.settings.gallery.generator_hosts = detect_generator_hosts(&hive, &prefs);
+        let detected = detect_tools(&prefs);
+        hive.settings.gallery.generator_hosts = generator_hosts(&detected, &hive.tools, &super::settings::hive_remote_hosts(&hive));
+        // A local server's output folder joins the human's output folders: picking the tool is
+        // their edit, as its hosts are (docs/hive-media.md §12.1).
+        hive.settings.gallery.output_folders = tool_output_folders(&detected, &hive.tools);
         layout::validate(&hive)?;
         let root = hive_root(&hive.id).ok_or("Couldn't find the app data folder")?;
         layout::create_layout(&root, &hive).inspect_err(|_| {
@@ -1986,6 +2017,51 @@ mod tests {
         let detected = mcp_tools_with(&v, &up, PORT);
         // Its loopback url and fal's MCP host are not sandbox hosts: only the catalogue's.
         assert_eq!(generator_hosts(&detected, &["mcp:video".to_string()], &[]), vec!["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
+    }
+
+    /// Phase 5: a server maiTerm runs itself is recognised by its catalogue route (what the
+    /// registry gives it as `stdio:<route>`), so a worker's mcp.json includes it; it adds no
+    /// sandbox host (its server runs outside every sandbox), and its output folder is the Hive's
+    /// to list.
+    #[test]
+    fn a_proxied_stdio_server_is_a_generator_by_its_route_and_brings_its_output_folder() {
+        let up = registry(&[("3d", "stdio:meshy"), ("stray", "stdio:nope"), ("fal", "https://mcp.fal.ai/mcp-relay")]);
+        assert!(is_generator_server_with("3d", &proxy_entry("3d"), &up, PORT), "recognised by its route, whatever its name");
+        assert_eq!(generator_providers_with("3d", &proxy_entry("3d"), &up, PORT)[0].id, "meshy");
+        assert!(!is_generator_server_with("stray", &proxy_entry("stray"), &up, PORT), "a route the catalogue doesn't have is nothing");
+        // Named like a provider, but no route: nothing.
+        assert!(!is_generator_server_with("meshy", &proxy_entry("meshy"), &registry(&[("meshy", "")]), PORT));
+        let v = serde_json::json!({ "mcpServers": { "3d": proxy_entry("3d"), "stray": proxy_entry("stray"), "fal": proxy_entry("fal") } });
+        let detected = mcp_tools_with(&v, &up, PORT);
+        let all = ["mcp:3d", "mcp:stray", "mcp:fal"].map(String::from).to_vec();
+        assert!(generator_hosts(&detected, &["mcp:3d".to_string()], &[]).is_empty(), "no sandbox host for a local server");
+        let folders = tool_output_folders(&detected, &all);
+        let want = crate::share::canon(&crate::mcp_proxy::stdio::output_folder("3d").unwrap()).to_string_lossy().to_string();
+        assert_eq!(folders, vec![want.clone()], "only the stdio server's, by its registry id");
+        assert!(std::path::Path::new(&want).is_dir(), "made if missing");
+        assert!(tool_output_folders(&detected, &["mcp:fal".to_string()]).is_empty());
+        assert!(tool_output_folders(&detected, &[]).is_empty(), "nothing chosen, nothing listed");
+        let _ = std::fs::remove_dir_all(&want);
+    }
+
+    /// The folder a local server writes into sits outside maiTerm's data folder, so Budget and
+    /// generation's check takes it: in the cache folder, beside the data folder, never in it.
+    #[test]
+    fn a_stdio_output_folder_passes_the_output_folder_check() {
+        let tmp = std::env::temp_dir().join(format!("maiterm-outcheck-{}", std::process::id()));
+        let app_data = tmp.join("Application Support").join("com.aiterm.app");
+        let hive_root = app_data.join("hive").join("h1");
+        let out = tmp.join("Caches").join("com.aiterm.app").join("mcp-out").join("meshy");
+        std::fs::create_dir_all(&hive_root).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let got = super::super::gallery::budget::check_output_folders(&[out.to_string_lossy().to_string()], &hive_root, Some(&app_data)).unwrap();
+        assert_eq!(got.len(), 1);
+        // And the real folders are laid out so: the OS cache folder is not the data folder.
+        if let (Some(cache), Some(data)) = (dirs::cache_dir(), crate::state::persistence::app_data_dir()) {
+            let real = cache.join(crate::state::persistence::app_data_slug()).join("mcp-out").join("x");
+            assert!(app_data_refusal(&real, &data).is_none(), "{} vs {}", real.display(), data.display());
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Case 3: a native entry keeps today's host-then-name matching.

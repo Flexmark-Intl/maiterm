@@ -337,16 +337,37 @@ fn the_server_checked_is_recognised_by_its_upstream_and_prefers_one_in_scope() {
 // ─── The allowlist ──────────────────────────────────────────────────────────
 
 #[test]
-fn the_allowlist_is_exactly_the_five_checks_and_refuses_anything_else() {
+fn the_allowlist_is_exactly_the_six_checks_and_refuses_anything_else() {
     let names: Vec<(&str, &str)> = CHECK_TOOLS.iter().map(|c| (c.provider, c.name)).collect();
-    assert_eq!(names, vec![("fal", "get_pricing"), ("wavespeed", "get_balance"), ("bfl", "get_credits"), ("recraft", "get_user"), ("meshy", "meshy_check_balance")]);
-    for (p, name) in [("fal", "generate_video"), ("fal", "submit_job"), ("fal", "get_balance"), ("wavespeed", "get_price"), ("wavespeed", "text_to_video"), ("recraft", "generate_image"), ("kling", "get_user"), ("fal", "")] {
+    assert_eq!(
+        names,
+        vec![("fal", "get_pricing"), ("wavespeed", "get_balance"), ("bfl", "get_credits"), ("recraft", "get_user"), ("meshy", "meshy_check_balance"), ("minimax", "list_voices")]
+    );
+    for (p, name) in [
+        ("fal", "generate_video"),
+        ("fal", "submit_job"),
+        ("fal", "get_balance"),
+        ("wavespeed", "get_price"),
+        ("wavespeed", "text_to_video"),
+        ("recraft", "generate_image"),
+        ("kling", "get_user"),
+        ("fal", ""),
+        ("minimax", "text_to_audio"),
+        ("minimax", "voice_clone"),
+        ("minimax", "play_audio"),
+        ("meshy", "meshy_text_to_3d"),
+    ] {
         assert!(check_tool(p, name).is_err(), "{p}/{name} must be refused");
     }
     // Each allowlisted tool is one its provider's catalogue route names, so the two can't drift.
     for c in CHECK_TOOLS {
         let p = provider(c.provider).unwrap_or_else(|| panic!("{} isn't in the catalogue", c.provider));
-        assert!(p.routes.iter().any(|r| r.balance_tool.as_deref() == Some(c.name) || r.quote_tool.as_deref() == Some(c.name)), "{}/{}", c.provider, c.name);
+        assert!(
+            p.routes.iter().any(|r| [r.balance_tool.as_deref(), r.quote_tool.as_deref(), r.check_tool.as_deref()].contains(&Some(c.name))),
+            "{}/{}",
+            c.provider,
+            c.name
+        );
     }
 }
 
@@ -530,4 +551,88 @@ async fn ready_only_where_the_panels_next_status_is_ready() {
         });
         assert_eq!(ready_here, all_rows_ready, "{} programs", found.len());
     }
+}
+
+// ─── Phase 5: servers maiTerm runs itself with a key ────────────────────────
+
+fn minimax_tools() -> Vec<Value> {
+    vec![
+        json!({ "name": "text_to_audio", "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] } }),
+        json!({ "name": "list_voices", "inputSchema": { "type": "object", "properties": { "voice_type": { "type": "string", "default": "all" } } } }),
+        json!({ "name": "play_audio" }),
+    ]
+}
+
+fn meshy_tools() -> Vec<Value> {
+    vec![
+        json!({ "name": "meshy_text_to_3d", "inputSchema": { "type": "object", "properties": { "prompt": { "type": "string" } }, "required": ["prompt"] } }),
+        json!({ "name": "meshy_check_balance", "inputSchema": { "type": "object", "properties": { "response_format": { "type": "string" } } } }),
+    ]
+}
+
+#[test]
+fn a_stdio_server_is_the_one_verified_for_its_provider_by_its_route() {
+    let servers = vec![server("meshy", "stdio:meshy"), server("mm", "stdio:minimax-mainland"), server("fal", FAL)];
+    assert_eq!(pick_server(&servers, provider("meshy").unwrap(), None).map(|s| s.id.as_str()), Some("meshy"));
+    assert_eq!(pick_server(&servers, provider("minimax").unwrap(), None).map(|s| s.id.as_str()), Some("mm"));
+    // Its name is nothing: a server called "meshy" that dials elsewhere isn't Meshy.
+    assert!(pick_server(&[server("meshy", FAL)], provider("meshy").unwrap(), None).is_none());
+}
+
+#[tokio::test]
+async fn meshy_is_ready_when_its_balance_check_answers_and_only_that_tool_is_called() {
+    let meshy = provider("meshy").unwrap();
+    let stub = Stub::new(Ok(meshy_tools()), Some(Ok(ok_result("{ \"balance\": 120 }"))));
+    let r = verify_mcp(&stub, meshy, &server("meshy", "stdio:meshy"), None, &reach_ok("meshy")).await;
+    assert_eq!(r.state, READY, "{r:?}");
+    assert_eq!(stub.called(), vec!["meshy_check_balance"]);
+    assert_eq!(stub.calls.lock()[0].1, json!({}), "only required arguments, and it has none");
+}
+
+#[tokio::test]
+async fn a_refused_meshy_key_says_paste_a_new_key_not_sign_in() {
+    let meshy = provider("meshy").unwrap();
+    let text = "Error: Authentication failed: the Meshy API rejected MESHY_API_KEY (401). The key is mistyped, revoked or expired.";
+    let stub = Stub::new(Ok(meshy_tools()), Some(Ok(error_result(text))));
+    let r = verify_mcp(&stub, meshy, &server("meshy", "stdio:meshy"), None, &reach_ok("meshy")).await;
+    assert_eq!(r.state, NEEDS_SIGN_IN, "{r:?}");
+    assert!(r.message.contains("paste a new Meshy key"), "{}", r.message);
+    assert!(!r.message.contains("sign in"), "a key server has no sign-in: {}", r.message);
+    // Out of credit: Meshy's 402, with its billing page.
+    let stub = Stub::new(Ok(meshy_tools()), Some(Ok(error_result("Error: Payment required (402). Insufficient credits."))));
+    let r = verify_mcp(&stub, meshy, &server("meshy", "stdio:meshy"), None, &reach_ok("meshy")).await;
+    assert_eq!(r.state, NEEDS_CREDIT);
+    assert_eq!(r.link.as_deref(), Some("https://www.meshy.ai/pricing"));
+}
+
+/// MiniMax's tools answer a failure as ordinary text ("Failed to list voices: …"), never isError:
+/// read as a pass, a wrong key would show Ready.
+#[tokio::test]
+async fn minimax_s_failure_text_is_a_failure_and_a_wrong_key_points_at_the_region() {
+    let mm = provider("minimax").unwrap();
+    let ok = Stub::new(Ok(minimax_tools()), Some(Ok(ok_result("Success. System Voices: [...], Voice Cloning Voices: []"))));
+    let r = verify_mcp(&ok, mm, &server("minimax", "stdio:minimax"), None, &reach_ok("minimax")).await;
+    assert_eq!(r.state, READY, "{r:?}");
+    assert_eq!(ok.called(), vec!["list_voices"], "the free account check, never a generation");
+
+    let text = "Failed to list voices: API Error: login fail: Please carry the API secret key in the 'Authorization' field of the request header, please check your API key and API host.Trace-Id: abc";
+    let bad = Stub::new(Ok(minimax_tools()), Some(Ok(ok_result(text))));
+    let r = verify_mcp(&bad, mm, &server("minimax", "stdio:minimax"), None, &reach_ok("minimax")).await;
+    assert_eq!(r.state, NEEDS_SIGN_IN, "{r:?}");
+    assert!(r.message.contains("the account you chose"), "two routes: the key may be for the other region: {}", r.message);
+
+    let broke = Stub::new(Ok(minimax_tools()), Some(Ok(ok_result("Failed to list voices: API Error: 1008-insufficient balance"))));
+    assert_eq!(verify_mcp(&broke, mm, &server("minimax", "stdio:minimax"), None, &reach_ok("minimax")).await.state, NEEDS_CREDIT);
+
+    let other = Stub::new(Ok(minimax_tools()), Some(Ok(ok_result("Failed to list voices: API Error: 2038-real-name verification"))));
+    let r = verify_mcp(&other, mm, &server("minimax", "stdio:minimax"), None, &reach_ok("minimax")).await;
+    assert_eq!(r.state, ERROR, "{r:?}");
+}
+
+#[test]
+fn a_key_servers_refusal_words_are_about_the_key() {
+    let f = Failure { state: NEEDS_SIGN_IN.into(), http: Some(401), rpc: None, detail: "401".into() };
+    let r = failed(provider("meshy").unwrap(), &f, "listing its tools");
+    assert!(r.message.contains("refused the key (401)") && r.message.contains("paste a new Meshy key"), "{}", r.message);
+    assert!(failed(fal(), &f, "listing its tools").message.contains("sign in to fal again"));
 }

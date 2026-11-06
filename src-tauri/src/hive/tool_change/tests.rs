@@ -262,7 +262,7 @@ impl Drop for Rig {
 #[tokio::test]
 async fn the_command_writes_the_tools_adds_the_ticked_hosts_and_tells_the_queen_once() {
     let rig = Rig::new(hive());
-    let changed = set_tools(&rig.ctx(), &rig.caller, &detected(), &[], &ids(&["mcp:fal", "skill:browse"]), &ids(&["fal.run", "v3.fal.media"])).await.unwrap();
+    let changed = set_tools(&rig.ctx(), &rig.caller, &detected(), &[], &ids(&["mcp:fal", "skill:browse"]), &ids(&["fal.run", "v3.fal.media"]), &[]).await.unwrap();
     assert_eq!((changed.added.clone(), changed.removed.clone()), (ids(&["mcp:fal", "skill:browse"]), ids(&["cli:ffmpeg"])));
     assert_eq!(changed.hosts_added, ids(&["fal.run", "v3.fal.media"]), "only the ticked ones, of the five offered");
     assert!(changed.coordinator_told);
@@ -293,7 +293,7 @@ async fn a_refused_change_saves_nothing_and_tells_nobody() {
         (ids(&["mcp:fal"]), ids(&["api.example.com"])),
         (ids(&["cli:ffmpeg"]), Vec::new()),
     ] {
-        assert!(set_tools(&rig.ctx(), &rig.caller, &detected(), &[], &tools, &hosts).await.is_err(), "{tools:?} {hosts:?}");
+        assert!(set_tools(&rig.ctx(), &rig.caller, &detected(), &[], &tools, &hosts, &[]).await.is_err(), "{tools:?} {hosts:?}");
     }
     assert_eq!(rig.hive(), hive());
     assert!(rig.win.st().delivered.is_empty() && rig.win.st().hives.is_empty());
@@ -314,9 +314,81 @@ async fn the_next_worker_launch_gets_the_new_tools() {
     assert!(worker_mcp_config(&before, &image, Some(&claude_json))["mcpServers"].get("fal").is_none());
     assert!(!worker_domains(&before, &[], true, true).contains(&"fal.run".to_string()));
 
-    set_tools(&rig.ctx(), &rig.caller, &detected(), &[], &ids(&["cli:ffmpeg", "mcp:fal"]), &ids(&["fal.run"])).await.unwrap();
+    set_tools(&rig.ctx(), &rig.caller, &detected(), &[], &ids(&["cli:ffmpeg", "mcp:fal"]), &ids(&["fal.run"]), &[]).await.unwrap();
     let after = rig.hive();
     assert_eq!(worker_mcp_config(&after, &image, Some(&claude_json))["mcpServers"]["fal"], claude_json["mcpServers"]["fal"]);
     assert!(worker_domains(&after, &[], true, true).contains(&"fal.run".to_string()));
     assert!(!worker_domains(&after, &[], true, false).contains(&"fal.run".to_string()), "a worker that doesn't generate never gets it");
+}
+
+// ─── Phase 5: a local server's output folder (docs/hive-media.md §12.1) ─────
+
+/// A proxied server maiTerm runs itself from Meshy's catalogue route, under a registry id of
+/// this test's own (its output folder is per id).
+fn stdio_tool(name: &str, registry_id: &str) -> DetectedTool {
+    let proxy = Some(crate::hive::create::ProxyRef { id: registry_id.into(), upstream: Some("stdio:meshy".into()) });
+    DetectedTool { proxy, ..tool(&format!("mcp:{name}"), Some("127.0.0.1:8765")) }
+}
+
+fn folder_of(registry_id: &str) -> String {
+    crate::share::canon(&crate::mcp_proxy::stdio::output_folder(registry_id).unwrap()).to_string_lossy().to_string()
+}
+
+#[test]
+fn an_added_stdio_tool_offers_its_output_folder_and_only_that_one_is_taken() {
+    let rid = format!("meshy-{}", uuid::Uuid::new_v4().simple());
+    let mut det = detected();
+    det.push(stdio_tool("meshy", &rid));
+    let p = preview(&hive(), &det, &ids(&["cli:ffmpeg", "mcp:meshy"]), &[]).unwrap();
+    let folder = folder_of(&rid);
+    assert_eq!(p.folders_offered, vec![folder.clone()]);
+    assert!(p.hosts_offered.is_empty(), "its server runs outside every sandbox: no host");
+    // A tool without one offers none; one the gallery already lists isn't offered again.
+    assert!(preview(&hive(), &det, &ids(&["cli:ffmpeg", "mcp:fal"]), &[]).unwrap().folders_offered.is_empty());
+    let mut listed = hive();
+    listed.settings.gallery.output_folders = vec![folder.clone()];
+    assert!(preview(&listed, &det, &ids(&["cli:ffmpeg", "mcp:meshy"]), &[]).unwrap().folders_offered.is_empty());
+
+    let root = std::env::temp_dir().join(format!("hive-root-{rid}"));
+    std::fs::create_dir_all(&root).unwrap();
+    let c = check(&hive(), &det, &ids(&["cli:ffmpeg", "mcp:meshy"]), &[], &[]).unwrap();
+    assert!(c.folders_added.is_empty(), "check alone ticks nothing");
+    assert_eq!(check_folders(&hive(), &c, std::slice::from_ref(&folder), &root, None).unwrap(), vec![folder.clone()]);
+    assert!(check_folders(&hive(), &c, &[], &root, None).unwrap().is_empty(), "unticked: nothing");
+    let other = root.to_string_lossy().to_string();
+    assert!(check_folders(&hive(), &c, &[other], &root, None).unwrap_err().contains("isn\u{2019}t a folder the added tools write into"));
+    let mut full = hive();
+    full.settings.gallery.output_folders = (0..MAX_OUTPUT_FOLDERS).map(|i| format!("/x/{i}")).collect();
+    assert!(check_folders(&full, &c, std::slice::from_ref(&folder), &root, None).unwrap_err().contains("At most"));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[tokio::test]
+async fn the_ticked_output_folder_is_saved_logged_and_told() {
+    let rig = Rig::new(hive());
+    let rid = format!("meshy-{}", uuid::Uuid::new_v4().simple());
+    let mut det = detected();
+    det.push(stdio_tool("meshy", &rid));
+    let folder = folder_of(&rid);
+    let changed = set_tools(&rig.ctx(), &rig.caller, &det, &[], &ids(&["cli:ffmpeg", "mcp:meshy"]), &[], std::slice::from_ref(&folder)).await.unwrap();
+    assert_eq!(changed.folders_added, vec![folder.clone()]);
+    assert_eq!(rig.hive().settings.gallery.output_folders, vec![folder.clone()], "galleryAdd now takes its files");
+    let notice = &rig.win.st().delivered[0].1;
+    assert!(notice.contains("galleryAdd also takes files from (output folders)"), "{notice}");
+    let log = std::fs::read_to_string(rig.caller.paths.settings_log()).unwrap();
+    assert!(log.contains("output folders"), "{log}");
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[tokio::test]
+async fn an_unticked_output_folder_is_left_out() {
+    let rig = Rig::new(hive());
+    let rid = format!("meshy-{}", uuid::Uuid::new_v4().simple());
+    let mut det = detected();
+    det.push(stdio_tool("meshy", &rid));
+    let changed = set_tools(&rig.ctx(), &rig.caller, &det, &[], &ids(&["cli:ffmpeg", "mcp:meshy"]), &[], &[]).await.unwrap();
+    assert!(changed.folders_added.is_empty());
+    assert!(rig.hive().settings.gallery.output_folders.is_empty());
+    let _ = std::fs::remove_dir_all(folder_of(&rid));
 }

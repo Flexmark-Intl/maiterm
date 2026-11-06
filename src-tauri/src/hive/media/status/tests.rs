@@ -90,6 +90,20 @@ fn a_proxy_server_is_recognised_by_its_upstream_never_its_name() {
     assert_eq!(hits.len(), 1, "{hits:?}");
 }
 
+/// A server maiTerm runs itself has no upstream URL: it is recognised by its catalogue route
+/// (`stdio:<route>`, `ProxyServer::upstream_of`), and an idle one (its child stopped) is ready.
+#[test]
+fn a_stdio_server_is_recognised_by_its_route_and_idle_is_ready() {
+    let hits = proxy_hits(&[server("3d", "stdio:meshy", "idle"), server("meshy", "stdio:nope", "connected")], Some("ws"));
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].cover.provider, "meshy");
+    assert_eq!(hits[0].cover.tool_id, format!("mcp:{}", entry_name("3d")));
+    assert_eq!(hits[0].cover.state, READY);
+    let r = rows(&hits, &[]);
+    let row = r.iter().find(|r| r.capability == "3d").unwrap();
+    assert!(row.covered_by.iter().any(|c| c.provider == "meshy" && c.state == READY), "{row:?}");
+}
+
 #[test]
 fn a_proxy_server_scoped_away_is_unreachable_in_the_row_never_ready() {
     let mut fal = server("fal", "https://mcp.fal.ai/mcp-relay", "connected");
@@ -421,7 +435,8 @@ fn alternatives_are_the_other_recommendable_providers() {
     for id in ["wavespeed", "higgsfield", "kling", "runway"] {
         assert!(alts.contains(&id.to_string()), "{id}: {alts:?}");
     }
-    assert!(!alts.contains(&"minimax".to_string()), "a manual route is a guide, not an alternative");
+    assert!(!alts.contains(&"google-genmedia".to_string()), "a manual route is a guide, not an alternative");
+    assert!(alts.contains(&"minimax".to_string()), "a stdio route is set up by maiTerm: MiniMax is an alternative now");
 }
 
 #[test]

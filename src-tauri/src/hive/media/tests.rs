@@ -12,10 +12,10 @@ fn the_shipped_catalogue_parses_and_is_dated() {
     let common: Vec<&str> = c.capabilities.iter().filter(|c| c.common).map(|c| c.id.as_str()).collect();
     assert_eq!(common, vec!["video", "image", "voice", "music", "finish"], "the common five, first");
     for p in &c.providers {
-        assert!(["2026-11-03", "2026-11-04"].contains(&p.checked.as_str()), "{}: facts are dated, got {}", p.id, p.checked);
+        assert!(["2026-11-03", "2026-11-04", "2026-11-05"].contains(&p.checked.as_str()), "{}: facts are dated, got {}", p.id, p.checked);
         assert!(["recommend", "list", "detect_only"].contains(&p.offer.as_str()), "{}: offer {}", p.id, p.offer);
         for r in &p.routes {
-            assert!(["remote_mcp", "brew", "plugin", "local_app", "manual"].contains(&r.kind.as_str()), "{}: route {}", p.id, r.kind);
+            assert!(["remote_mcp", "stdio_mcp", "brew", "plugin", "local_app", "manual"].contains(&r.kind.as_str()), "{}: route {}", p.id, r.kind);
             assert!(["oauth", "token", "none"].contains(&r.auth.as_str()), "{}: auth {}", p.id, r.auth);
             if r.kind == "remote_mcp" {
                 assert!(r.url.starts_with("https://"), "{}: {}", p.id, r.url);
@@ -110,7 +110,7 @@ fn todays_five_providers_keep_exactly_their_hosts() {
 #[test]
 fn fal_music_and_sfx_are_verified_and_name_their_models() {
     let fal = provider("fal").unwrap();
-    for id in ["fal", "bfl", "runway", "meshy", "comfy-cloud", "wavespeed", "recraft"] {
+    for id in ["fal", "bfl", "runway", "comfy-cloud", "wavespeed", "recraft"] {
         assert_eq!(provider(id).unwrap().checked, "2026-11-04", "{id}: its facts changed in the 2026-11-04 pass");
     }
     assert!(fal.capability_notes.is_empty(), "no UNVERIFIED note is left on fal: {:?}", fal.capability_notes);
@@ -136,7 +136,6 @@ fn result_hosts_nobody_has_confirmed_wait_in_unverified_hosts_and_never_reach_a_
     for (id, host, retention) in [
         ("bfl", "delivery.*.bfl.ai", ""),
         ("runway", "dnznrvs05pmza.cloudfront.net", ""),
-        ("meshy", "assets.meshy.ai", "3 days"),
         ("comfy-cloud", "storage.googleapis.com", ""),
     ] {
         let p = provider(id).unwrap();
@@ -247,4 +246,120 @@ fn a_requested_media_list_is_capped_at_the_number_of_capabilities() {
     assert_eq!(r.capabilities.len(), cat().capabilities.len());
     assert_eq!(r.dropped.len(), cat().capabilities.len(), "the dropped list is bounded too");
     assert!(r.dropped.iter().all(|d| d.chars().count() <= 40), "a long id is shortened in the note");
+}
+
+// ─── Phase 5: local MCP servers maiTerm runs itself (docs/hive-media.md §12.1) ─
+
+fn route_ids(p: &Provider) -> Vec<String> {
+    p.stdio_routes().filter_map(|r| r.id.clone()).collect()
+}
+
+#[test]
+fn minimax_and_meshy_are_stdio_routes_maiterm_runs_with_a_key() {
+    let mm = provider("minimax").unwrap();
+    let meshy = provider("meshy").unwrap();
+    assert_eq!(route_ids(mm), ids(&["minimax", "minimax-mainland"]));
+    assert_eq!(route_ids(meshy), ids(&["meshy"]));
+    for p in [mm, meshy] {
+        assert!(p.routes.iter().all(|r| r.kind == STDIO_MCP), "{}: no manual route left", p.id);
+        assert!(p.has_automatic_route(), "{}: offered as an alternative now", p.id);
+        assert_eq!(p.checked, "2026-11-05");
+        assert!(p.sandbox_hosts.is_empty() && p.unverified_hosts.is_empty(), "{}: its server runs outside every sandbox", p.id);
+        for r in p.stdio_routes() {
+            let spec = r.stdio_spec().unwrap();
+            spec.validate().unwrap();
+            assert_eq!(r.auth, "token", "{}: the token setup, then Verify", p.id);
+            assert!(r.key_url.as_deref().is_some_and(|u| u.starts_with("https://")), "{}: its key page", p.id);
+            assert!(r.results_note.is_some(), "{}: the brief says where its files land", p.id);
+            // Pinned to an exact version: `pkg==1.2.3` or `pkg@1.2.3`.
+            let pinned = spec.args.iter().any(|a| {
+                let v = a.rsplit_once("==").or_else(|| a.rsplit_once('@').filter(|(pkg, _)| !pkg.is_empty())).map(|(_, v)| v).unwrap_or("");
+                v.split('.').count() == 3 && v.split('.').all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            });
+            assert!(pinned, "{}: {:?} pins its package", p.id, spec.args);
+        }
+    }
+    let spec = |id: &str| stdio_route(id).unwrap().1.stdio_spec().unwrap();
+    assert_eq!((spec("minimax").command.as_str(), spec("minimax").args.clone()), ("uvx", ids(&["minimax-mcp==0.0.19"])));
+    assert_eq!(spec("minimax").env_key.as_deref(), Some("MINIMAX_API_KEY"));
+    assert_eq!(spec("meshy").args, ids(&["-y", "@meshy-ai/meshy-mcp-server@0.6.7"]));
+    assert_eq!(spec("meshy").env_key.as_deref(), Some("MESHY_API_KEY"));
+    assert!(spec("meshy").env.is_empty(), "Meshy needs no settings: its child already works in its output folder");
+    // MiniMax writes files under its output folder (local mode), and a key is good on one host only.
+    for (id, host) in [("minimax", "https://api.minimax.io"), ("minimax-mainland", "https://api.minimaxi.com")] {
+        let env = spec(id).env;
+        assert_eq!(env.get("MINIMAX_API_HOST").map(String::as_str), Some(host), "{id}");
+        assert_eq!(env.get("MINIMAX_MCP_BASE_PATH").map(String::as_str), Some(crate::mcp_proxy::stdio::OUTPUT_PLACEHOLDER), "{id}");
+        assert_eq!(env.get("MINIMAX_API_RESOURCE_MODE").map(String::as_str), Some("local"), "{id}");
+    }
+    // What its server really has: no music tool in minimax-mcp 0.0.19.
+    assert_eq!(mm.capabilities, ids(&["video", "image", "voice"]));
+    assert!(!mm.covers("music"));
+    assert_eq!(meshy.result_hosts, ids(&["assets.meshy.ai"]));
+    assert_eq!(meshy.retention, "3 days");
+    // The checks Verify may call.
+    assert_eq!(meshy.routes[0].balance_tool.as_deref(), Some("meshy_check_balance"));
+    assert!(mm.stdio_routes().all(|r| r.check_tool.as_deref() == Some("list_voices") && r.balance_tool.is_none() && r.quote_tool.is_none()));
+}
+
+/// D3's outcome: ElevenLabs has no maintained stdio server for music or sfx (its own was archived,
+/// its CLI has no stdio MCP mode), so it stays speech-only and fal keeps music and sfx. Google
+/// genmedia needs a GCP project and a bucket, not a key: it stays a guide.
+#[test]
+fn elevenlabs_gets_no_stdio_route_and_genmedia_stays_manual() {
+    let el = provider("elevenlabs").unwrap();
+    assert_eq!(el.stdio_routes().count(), 0);
+    assert_eq!(el.capabilities, ids(&["voice"]));
+    assert!(provider("fal").unwrap().default_for.iter().any(|c| c == "music"));
+    assert!(provider("google-genmedia").unwrap().routes.iter().all(|r| r.kind == "manual"));
+}
+
+#[test]
+fn a_stdio_server_is_recognised_by_its_route_and_nothing_else() {
+    let ids_of = |v: Vec<&Provider>| v.iter().map(|p| p.id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids_of(providers_for_proxied(Some("stdio:meshy"))), vec!["meshy"]);
+    assert_eq!(ids_of(providers_for_proxied(Some("stdio:minimax-mainland"))), vec!["minimax"]);
+    assert!(providers_for_proxied(Some("stdio:fal")).is_empty(), "a route id, not a provider's name");
+    assert!(providers_for_proxied(Some("stdio:")).is_empty());
+    assert!(providers_for_proxied(Some("stdio:nope")).is_empty());
+    assert!(providers_for_proxied(None).is_empty());
+    // An http upstream is still read by its host.
+    assert_eq!(ids_of(providers_for_proxied(Some("https://mcp.fal.ai/mcp-relay"))), vec!["fal"]);
+    // A host lookup never takes a route for a URL.
+    assert!(providers_for_upstream(Some("stdio:meshy")).is_empty());
+    assert!(stdio_route("meshy").is_some_and(|(p, r)| p.id == "meshy" && r.kind == STDIO_MCP));
+    assert!(stdio_route("fal").is_none(), "a remote route has no stdio id");
+}
+
+/// A route the proxy would refuse fails here, in a test, never at a human's setup.
+#[test]
+fn a_bad_stdio_route_fails_the_catalogue_parse() {
+    let with = |route: serde_json::Value| {
+        let mut c: serde_json::Value = serde_json::from_str(FILE).unwrap();
+        let meshy = c["providers"].as_array_mut().unwrap().iter_mut().find(|p| p["id"] == "meshy").unwrap();
+        meshy["routes"] = serde_json::json!([route]);
+        parse(&c.to_string())
+    };
+    let good = serde_json::json!({ "kind": "stdio_mcp", "id": "meshy", "command": "npx", "args": ["-y", "x@1.0.0"], "auth": "token", "credits": "api", "env_key": "MESHY_API_KEY" });
+    assert!(with(good.clone()).is_ok());
+    let bad = |patch: serde_json::Value| {
+        let mut r = good.clone();
+        for (k, v) in patch.as_object().unwrap() {
+            if v.is_null() {
+                r.as_object_mut().unwrap().remove(k);
+            } else {
+                r[k] = v.clone();
+            }
+        }
+        with(r).unwrap_err()
+    };
+    assert!(bad(serde_json::json!({ "id": null })).contains("needs an id"));
+    assert!(bad(serde_json::json!({ "command": null })).contains("needs an id and a command"));
+    assert!(bad(serde_json::json!({ "env_key": "PATH" })).contains("route meshy"), "a key in PATH");
+    assert!(bad(serde_json::json!({ "env_key": "MESHY_API" })).contains("_KEY"), "not a key's name");
+    assert!(bad(serde_json::json!({ "env": { "NODE_OPTIONS": "--require /tmp/x.js" } })).contains("NODE_OPTIONS"));
+    assert!(bad(serde_json::json!({ "args": ["a\nb"] })).contains("line break"));
+    assert!(bad(serde_json::json!({ "env_key": null })).contains("names no variable"), "a key route with nowhere for the key");
+    assert!(bad(serde_json::json!({ "key_url": "http://x.example/keys" })).contains("https"));
+    assert!(bad(serde_json::json!({ "id": "minimax" })).contains("appears twice"), "route ids are unique in the catalogue");
 }

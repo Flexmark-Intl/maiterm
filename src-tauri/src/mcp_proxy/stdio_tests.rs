@@ -184,6 +184,59 @@ fn a_stdio_record_round_trips_and_holds_no_key() {
     assert!(!v.to_string().contains(KEY));
 }
 
+/// Recognition reads a stdio server by its route (`upstream_of`), never by the url it stores; an
+/// http record whose url only looks like a route is nothing.
+#[test]
+fn recognition_reads_a_stdio_server_by_its_route() {
+    let spec = StdioSpec { route: "meshy".into(), ..spec_for("/x/fake.sh".into()) };
+    let mut s = ProxyServer {
+        id: "3d".into(),
+        url: "stdio:something-else".into(),
+        auth: AUTH_KEY.into(),
+        enabled: true,
+        workspaces: vec![],
+        catalog: None,
+        oauth: None,
+        added_at: 1,
+        added_by: "human".into(),
+        transport: TRANSPORT_STDIO.into(),
+        stdio: Some(spec),
+    };
+    assert_eq!(s.upstream_of(), "stdio:meshy", "from route(), not the stored url");
+    s.stdio = None;
+    assert_eq!(s.upstream_of(), "", "a stdio record with no spec is nothing");
+    s.transport = TRANSPORT_HTTP.into();
+    assert_eq!(s.upstream_of(), "", "an http record that looks like a route is nothing");
+    s.url = "https://mcp.fal.ai/mcp-relay".into();
+    assert_eq!(s.upstream_of(), "https://mcp.fal.ai/mcp-relay");
+}
+
+/// The setup sheet's add names a catalogue route; the command line is made here, from the
+/// catalogue, and validated.
+#[test]
+fn a_route_id_resolves_to_the_catalogues_command_and_nothing_else() {
+    let meshy = proxy::spec_for_route("meshy").unwrap();
+    assert_eq!((meshy.route.as_str(), meshy.command.as_str()), ("meshy", "npx"));
+    assert_eq!(meshy.args, ["-y", "@meshy-ai/meshy-mcp-server@0.6.7"]);
+    assert_eq!(meshy.env_key.as_deref(), Some("MESHY_API_KEY"));
+    let mm = proxy::spec_for_route("minimax-mainland").unwrap();
+    assert_eq!(mm.env.get("MINIMAX_API_HOST").map(String::as_str), Some("https://api.minimaxi.com"));
+    meshy.validate().unwrap();
+    mm.validate().unwrap();
+    for bad in ["", "fal", "elevenlabs", "npx -y evil", "../meshy", "meshy;rm"] {
+        assert!(proxy::spec_for_route(bad).is_err(), "{bad:?}");
+    }
+}
+
+/// The command refuses an unknown route before anything is stored or started.
+#[tokio::test]
+async fn the_add_command_refuses_a_route_the_catalogue_doesnt_have() {
+    let id = fresh_id("noroute");
+    let err = proxy::mcp_stdio_server_add(id.clone(), "npx".into(), vec![]).await.err().unwrap();
+    assert!(err.contains("No local MCP server route named npx"), "{err}");
+    assert!(proxy::get(&id).is_none());
+}
+
 #[test]
 fn a_spec_is_checked_before_anything_runs() {
     let ok = spec_for("/x".into());

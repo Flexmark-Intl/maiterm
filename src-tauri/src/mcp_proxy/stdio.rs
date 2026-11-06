@@ -163,9 +163,12 @@ impl StdioSpec {
     /// What `ProxyServer::url` holds for a stdio server: no URL to dial, but a self-describing
     /// value an older build reads as a URL it can't reach (it never dials anything for it).
     pub fn url(&self) -> String {
-        format!("stdio:{}", self.route)
+        format!("{STDIO_URL_PREFIX}{}", self.route)
     }
 }
+
+/// What a stdio server's `url` starts with, before its route id.
+pub const STDIO_URL_PREFIX: &str = "stdio:";
 
 /// The folder a server's child works in, where a server that writes files writes them:
 /// `<OS cache dir>/<app_data_slug>/mcp-out/<id>` (`~/Library/Caches/com.aiterm.app/mcp-out/<id>`).

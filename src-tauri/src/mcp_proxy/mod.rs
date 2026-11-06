@@ -101,6 +101,18 @@ impl ProxyServer {
     pub fn route(&self) -> Option<&str> {
         self.stdio.as_ref().filter(|_| self.is_stdio()).map(|s| s.route.as_str())
     }
+
+    /// What recognition reads this server by (`media::providers_for_proxied`): a stdio server's
+    /// catalogue route, as `stdio:<route>` from `route()` (never its stored `url`), and an http
+    /// server's upstream URL. An http record whose url merely LOOKS like a route (a hand-edited
+    /// file) is recognised as nothing, and so is a stdio record with no spec.
+    pub fn upstream_of(&self) -> String {
+        match self.route() {
+            Some(r) => format!("{}{r}", stdio::STDIO_URL_PREFIX),
+            None if self.is_stdio() || self.url.starts_with(stdio::STDIO_URL_PREFIX) => String::new(),
+            None => self.url.clone(),
+        }
+    }
 }
 
 fn yes() -> bool {
@@ -1272,7 +1284,6 @@ static VERIFYING: LazyLock<Mutex<std::collections::HashSet<String>>> = LazyLock:
 /// webview or an agent supplied: it is a command maiTerm runs as the human.
 ///
 /// The first start of an `npx`/`uvx` package downloads it: `stdio::VERIFY_WAIT` is the bound.
-#[allow(dead_code)] // the setup sheet's command (catalogue route → spec) is phase 5's second half
 pub async fn add_stdio(id: &str, spec: StdioSpec, workspaces: Vec<String>, added_by: &str) -> Result<ProxyServer, String> {
     add_stdio_with(id, spec, workspaces, added_by, stdio::VERIFY_WAIT).await
 }
@@ -1555,6 +1566,25 @@ pub async fn mcp_stdio_key_store(id: String, key: String) -> Result<(), String> 
 #[tauri::command]
 pub async fn mcp_stdio_key_delete(id: String) -> Result<(), String> {
     blocking(move || delete_key(&id)).await
+}
+
+/// The command line of catalogue route `route_id`, made in Rust from the catalogue alone
+/// (`media::Route::stdio_spec`). The webview names a route; it never sends a command.
+pub fn spec_for_route(route_id: &str) -> Result<StdioSpec, String> {
+    let (p, route) = crate::hive::media::stdio_route(route_id).ok_or_else(|| format!("No local MCP server route named {route_id}"))?;
+    route.stdio_spec().ok_or_else(|| format!("{}'s route {route_id} can't be started", p.name))
+}
+
+/// The setup sheet's add for a `stdio_mcp` provider (docs/hive-media.md §12.1), after
+/// `mcp_stdio_key_store`: resolve the catalogue route to its command here, then `add_stdio`
+/// (verify, save, write the entries). The first start downloads the package (`npx`/`uvx`), so
+/// this can take minutes (`stdio::VERIFY_WAIT`). The human's click on the Mac is the approval to
+/// run that package as them: there is no maiLink route or agent tool to this.
+#[tauri::command]
+pub async fn mcp_stdio_server_add(id: String, route_id: String, workspaces: Vec<String>) -> Result<ServerView, String> {
+    let spec = spec_for_route(&route_id)?;
+    let s = add_stdio(&id, spec, workspaces, "human").await?;
+    Ok(view(&s))
 }
 
 #[tauri::command]

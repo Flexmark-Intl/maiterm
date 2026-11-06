@@ -72,6 +72,36 @@ pub struct ProviderView {
     pub unverified: bool,
     /// Capabilities whose claim for this provider is marked UNVERIFIED in its notes.
     pub unverified_capabilities: Vec<String>,
+    /// Its local MCP server routes (`stdio_mcp`), for the setup sheet's key paste: empty for every
+    /// other provider.
+    pub stdio_routes: Vec<StdioRouteView>,
+}
+
+/// A `stdio_mcp` route as the setup sheet offers it. The sheet sends back only `id`
+/// (`mcp_stdio_server_add`): Rust makes the command from the catalogue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StdioRouteView {
+    pub id: String,
+    /// How the human tells routes apart ("Global account"); "" for a provider with one.
+    pub label: String,
+    /// The page where the human makes the key, https only; "" when the catalogue has none.
+    pub key_url: String,
+    /// What maiTerm runs, as shown: the program and its arguments (`uvx minimax-mcp==0.0.19`). No
+    /// secret: the key is never on a command line.
+    pub command_shown: String,
+    /// It takes a pasted key.
+    pub takes_key: bool,
+}
+
+fn stdio_route_view(r: &super::Route) -> Option<StdioRouteView> {
+    let spec = r.stdio_spec()?;
+    Some(StdioRouteView {
+        id: spec.route.clone(),
+        label: r.label.clone().unwrap_or_default(),
+        key_url: r.key_url.clone().filter(|u| u.starts_with("https://")).unwrap_or_default(),
+        command_shown: std::iter::once(spec.command.as_str()).chain(spec.args.iter().map(String::as_str)).collect::<Vec<_>>().join(" "),
+        takes_key: spec.env_key.is_some(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -129,6 +159,7 @@ fn provider_view(p: &Provider) -> ProviderView {
         checked: p.checked.clone(),
         unverified,
         unverified_capabilities,
+        stdio_routes: p.stdio_routes().filter_map(stdio_route_view).collect(),
     }
 }
 
@@ -305,4 +336,25 @@ mod tests {
         // A manual route points nowhere the sheet would act on.
         assert_eq!(p(&v, "minimax").route_url, "");
     }
+    #[test]
+    fn the_setup_sheet_gets_a_stdio_providers_routes_and_never_their_settings() {
+        let v = view();
+        let mm = p(&v, "minimax");
+        assert_eq!((mm.route_kind.as_str(), mm.auth.as_str(), mm.route_url.as_str(), mm.installable), ("stdio_mcp", "token", "", false));
+        let ids: Vec<(&str, &str)> = mm.stdio_routes.iter().map(|r| (r.id.as_str(), r.label.as_str())).collect();
+        assert_eq!(ids, vec![("minimax", "Global account (minimax.io)"), ("minimax-mainland", "Mainland China account (minimaxi.com)")]);
+        assert_eq!(mm.stdio_routes[0].command_shown, "uvx minimax-mcp==0.0.19");
+        assert!(mm.stdio_routes.iter().all(|r| r.takes_key && r.key_url.starts_with("https://")));
+        assert_ne!(mm.stdio_routes[0].key_url, mm.stdio_routes[1].key_url, "each region has its own key page");
+        let meshy = p(&v, "meshy");
+        assert_eq!(meshy.stdio_routes.len(), 1);
+        assert_eq!(meshy.stdio_routes[0].command_shown, "npx -y @meshy-ai/meshy-mcp-server@0.6.7");
+        assert!(p(&v, "fal").stdio_routes.is_empty());
+        // The fixed settings and the key's variable stay in Rust: the sheet sends a route id only.
+        let text = serde_json::to_string(&v).unwrap();
+        for k in ["MINIMAX_API_HOST", "MINIMAX_API_KEY", "MESHY_API_KEY", "env_key", "\"env\""] {
+            assert!(!text.contains(k), "{k}");
+        }
+    }
 }
+

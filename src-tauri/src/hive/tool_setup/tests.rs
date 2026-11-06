@@ -369,6 +369,28 @@ fn a_card_names_the_hosts_it_brings_and_what_the_phone_can_start() {
     assert!(card("Make it", &hive, "music", &none, &here(true), &[]).unwrap_err().contains("no provider it can set up for music"));
 }
 
+/// A local server maiTerm runs itself: the card says a key is pasted at the Mac, what runs, that
+/// its first start downloads it, and that its output folder joins the Hive's, which approving
+/// allows. The phone never starts it.
+#[test]
+fn a_stdio_providers_card_says_key_at_the_mac_what_runs_and_its_folder() {
+    let rig = Rig::new(&[]);
+    let hive = rig.hive();
+    let row = MediaRow { capability: "3d".into(), covered_by: vec![], recommended: Some("meshy".into()), alternatives: vec![] };
+    let c = card("Make it", &hive, "3d", &row, &here(true), &[]).unwrap();
+    assert_eq!(c.provider_id, "meshy");
+    assert!(c.hosts.is_empty(), "no sandbox host: its server runs outside every sandbox");
+    let what = &c.effects[0];
+    assert!(what.contains("you paste a key from Meshy there (never on the phone)"), "{what}");
+    assert!(what.contains("runs Meshy\u{2019}s local server (`npx -y @meshy-ai/meshy-mcp-server@0.6.7`) itself, outside every sandbox"), "{what}");
+    assert!(what.contains("first start downloads the package"), "{what}");
+    assert_eq!(c.effects[1], "Approved from your phone, it waits for you at the Mac.");
+    assert!(c.effects[2].contains("the folder its server saves files in to this Hive\u{2019}s output folders") && c.effects[2].ends_with("Approving allows that folder."), "{:?}", c.effects);
+    assert!(!crate::hive::media::install::phone_startable(media::provider("meshy").unwrap(), &here(true)));
+    assert!(!crate::hive::media::install::phone_startable(media::provider("minimax").unwrap(), &here(true)));
+    assert_eq!(mac_reason(media::provider("meshy").unwrap(), &here(true)), "a key from Meshy is pasted at the Mac, never on the phone");
+}
+
 #[tokio::test]
 async fn a_plugin_maiterm_cant_install_is_never_carded_as_an_install() {
     // Remotion's plugin has no confirmed marketplace, so the install planner refuses it.

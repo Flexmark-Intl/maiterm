@@ -133,8 +133,13 @@ fn money(p: &Provider, route: &Route, reader: Reader) -> String {
     s.trim_start().to_string()
 }
 
-/// How long its results last, for a provider whose results are URLs.
+/// How its results come back: a route's own note (a server maiTerm runs itself saves files into
+/// its output folder, which `galleryAdd` accepts, while a worker's shell can't reach its result
+/// URLs), else how long its result URLs last.
 fn results(p: &Provider, reader: Reader) -> Option<String> {
+    if let Some(note) = mcp_route(p).and_then(|r| r.results_note.as_deref()).map(str::trim).filter(|n| !n.is_empty()) {
+        return Some(note.to_string());
+    }
     if p.result_hosts.is_empty() && p.retention.trim().is_empty() {
         return None;
     }

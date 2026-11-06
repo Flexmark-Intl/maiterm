@@ -24,10 +24,10 @@
 use serde::Serialize;
 
 use super::change::{ip_remotes, log_line, refuse_private_hosts, running_on_old};
-use super::create::{generator_hosts, DetectedTool};
+use super::create::{generator_hosts, tool_output_folders, DetectedTool};
 use super::deliver::one_line;
 use super::fuses::STATUS_PAUSED;
-use super::gallery::budget::{check_hosts, normalize_host, MAX_GENERATOR_HOSTS};
+use super::gallery::budget::{check_hosts, check_output_folders, normalize_host, MAX_GENERATOR_HOSTS, MAX_OUTPUT_FOLDERS};
 use super::record::{Hive, STATUS_ACTIVE, STATUS_DONE};
 use super::rpc::HiveWindow;
 use super::tools::{Caller, Ctx};
@@ -61,6 +61,10 @@ pub struct ToolsPreview {
     pub removed: Vec<String>,
     /// The generator hosts the added tools need that the gallery doesn't already have.
     pub hosts_offered: Vec<String>,
+    /// The output folders the added tools write into (a local MCP server maiTerm runs itself,
+    /// `create::tool_output_folders`) that the gallery doesn't list yet: offered ticked, so
+    /// `galleryAdd` takes their files (docs/hive.md §10.3).
+    pub folders_offered: Vec<String>,
 }
 
 /// A tools change saved: the Hive as saved and what changed.
@@ -71,6 +75,8 @@ pub struct HiveToolsChange {
     pub removed: Vec<String>,
     /// The ticked hosts, now in the gallery's generator hosts.
     pub hosts_added: Vec<String>,
+    /// The ticked output folders, now in the gallery's output folders.
+    pub folders_added: Vec<String>,
     /// Whether the coordinator's notice was delivered (false: it has no tab, or no agent took it).
     pub coordinator_told: bool,
 }
@@ -80,6 +86,8 @@ pub struct HiveToolsChange {
 pub struct Checked {
     pub preview: ToolsPreview,
     pub hosts_added: Vec<String>,
+    /// Ticked output folders (`check_folders`); `check` alone adds none.
+    pub folders_added: Vec<String>,
 }
 
 /// What `tools` would change on `hive`, or why it can't. `detected` is a fresh detection;
@@ -116,7 +124,9 @@ pub fn preview(hive: &Hive, detected: &[DetectedTool], tools: &[String], remote_
     }
     let have: Vec<String> = hive.settings.gallery.generator_hosts.iter().filter_map(|h| normalize_host(h).ok()).collect();
     let hosts_offered = generator_hosts(detected, &added, remote_hosts).into_iter().filter(|h| !have.contains(h)).collect();
-    Ok(ToolsPreview { tools: next, added, removed, hosts_offered })
+    let listed = &hive.settings.gallery.output_folders;
+    let folders_offered = tool_output_folders(detected, &added).into_iter().filter(|f| !listed.contains(f)).collect();
+    Ok(ToolsPreview { tools: next, added, removed, hosts_offered, folders_offered })
 }
 
 /// The change as it would land on `hive`: the preview, and `add_hosts` checked to be among the
@@ -146,13 +156,41 @@ pub fn check(hive: &Hive, detected: &[DetectedTool], tools: &[String], add_hosts
     if hive.settings.gallery.generator_hosts.len() + hosts_added.len() > MAX_GENERATOR_HOSTS {
         return Err(format!("At most {MAX_GENERATOR_HOSTS} generator hosts: remove some in Budget and generation first."));
     }
-    Ok(Checked { preview, hosts_added })
+    Ok(Checked { preview, hosts_added, folders_added: Vec::new() })
+}
+
+/// The output folders the human left ticked, checked: each among the folders offered (any other
+/// folder is Budget and generation's), and as Budget and generation checks a folder
+/// (`check_output_folders`: existing, outside the Hive and maiTerm's data folder), within
+/// `MAX_OUTPUT_FOLDERS` with the ones the gallery lists. A folder listed meanwhile is skipped.
+pub fn check_folders(hive: &Hive, c: &Checked, add_folders: &[String], hive_root: &std::path::Path, app_data: Option<&std::path::Path>) -> Result<Vec<String>, String> {
+    let listed = &hive.settings.gallery.output_folders;
+    let mut ticked: Vec<String> = Vec::new();
+    for f in add_folders.iter().map(|f| f.trim()).filter(|f| !f.is_empty()) {
+        if listed.iter().any(|l| l == f) || ticked.iter().any(|t| t == f) {
+            continue;
+        }
+        if !c.preview.folders_offered.iter().any(|o| o == f) {
+            return Err(format!("{} isn\u{2019}t a folder the added tools write into: add any other folder in Budget and generation.", one_line(f, 200)));
+        }
+        ticked.push(f.to_string());
+    }
+    let ticked = check_output_folders(&ticked, hive_root, app_data)?;
+    if listed.len() + ticked.len() > MAX_OUTPUT_FOLDERS {
+        return Err(format!("At most {MAX_OUTPUT_FOLDERS} output folders: remove some in Budget and generation first."));
+    }
+    Ok(ticked)
 }
 
 /// A checked change written onto the record.
 pub fn apply_to(hive: &mut Hive, c: &Checked) {
     hive.tools = c.preview.tools.clone();
     hive.settings.gallery.generator_hosts.extend(c.hosts_added.iter().cloned());
+    for f in &c.folders_added {
+        if !hive.settings.gallery.output_folders.contains(f) {
+            hive.settings.gallery.output_folders.push(f.clone());
+        }
+    }
 }
 
 /// The lines the settings log and the coordinator's notice carry, every id `one_line`d (a tool id
@@ -168,6 +206,9 @@ pub fn change_lines(c: &Checked) -> Vec<String> {
     }
     if !c.hosts_added.is_empty() {
         lines.push(format!("Media workers may also reach (generator hosts): {}", c.hosts_added.join(", ")));
+    }
+    if !c.folders_added.is_empty() {
+        lines.push(format!("galleryAdd also takes files from (output folders): {}", c.folders_added.iter().map(|f| one_line(f, 200)).collect::<Vec<_>>().join(", ")));
     }
     lines
 }
@@ -202,8 +243,9 @@ pub(crate) async fn set_tools<W: HiveWindow>(
     remote_hosts: &[String],
     tools: &[String],
     add_hosts: &[String],
+    add_folders: &[String],
 ) -> Result<HiveToolsChange, String> {
-    let (hive, c) = write_tools(ctx, caller, detected, remote_hosts, tools, add_hosts).await?;
+    let (hive, c) = write_tools(ctx, caller, detected, remote_hosts, tools, add_hosts, add_folders).await?;
     log_line(caller, "human", &change_lines(&c), None);
     let p = caller.paths.clone();
     let workers = super::tools::blocking(move || Ok(super::worker::list_workers(&p))).await.unwrap_or_default();
@@ -216,13 +258,14 @@ pub(crate) async fn set_tools<W: HiveWindow>(
         }
         None => false,
     };
-    Ok(HiveToolsChange { hive, added: c.preview.added, removed: c.preview.removed, hosts_added: c.hosts_added, coordinator_told })
+    Ok(HiveToolsChange { hive, added: c.preview.added, removed: c.preview.removed, hosts_added: c.hosts_added, folders_added: c.folders_added, coordinator_told })
 }
 
 /// A tools change checked against the record as it is under the write lock, and saved: the one
 /// write behind Hive settings → Tools and an approved `tool_setup` card (`hive::tool_setup`),
 /// which each log it and tell the coordinator in their own words. A host is saved only if it was
-/// looked up first (`refuse_private_hosts`).
+/// looked up first (`refuse_private_hosts`). `add_folders` are the offered output folders left
+/// ticked (`check_folders`).
 pub(crate) async fn write_tools<W: HiveWindow>(
     ctx: &Ctx<'_, W>,
     caller: &Caller,
@@ -230,19 +273,28 @@ pub(crate) async fn write_tools<W: HiveWindow>(
     remote_hosts: &[String],
     tools: &[String],
     add_hosts: &[String],
+    add_folders: &[String],
 ) -> Result<(Hive, Checked), String> {
     let current = super::autonomy::current_hive(ctx, caller).ok_or("This Hive is gone.")?;
     // Refused before any lookup: the lookups only run for hosts that would be saved.
     let first = check(&current, detected, tools, add_hosts, remote_hosts)?;
+    // The folders are checked on the disk before the write lock, and again against the record
+    // under it (a folder listed meanwhile is skipped there).
+    let (h0, f0, ticked, root) = (current.clone(), first.clone(), add_folders.to_vec(), caller.paths.root.clone());
+    let folders = super::tools::blocking(move || check_folders(&h0, &f0, &ticked, &root, super::create::app_data_dir().as_deref())).await?;
     // A host added by any path must not answer this computer or its network (§3.4).
     refuse_private_hosts(&first.hosts_added, false, &ip_remotes(remote_hosts)).await?;
     let mut outcome: Result<Checked, String> = Err("This Hive is gone.".to_string());
     let hive = super::finish::write_status(ctx, caller, &[STATUS_ACTIVE, STATUS_PAUSED], None, |h| {
         // Only hosts that were looked up are saved.
-        outcome = check(h, detected, tools, add_hosts, remote_hosts).and_then(|c| {
+        outcome = check(h, detected, tools, add_hosts, remote_hosts).and_then(|mut c| {
             if c.hosts_added.iter().any(|x| !first.hosts_added.contains(x)) {
                 return Err("The Hive\u{2019}s generator hosts changed meanwhile: open Hive settings again.".to_string());
             }
+            if h.settings.gallery.output_folders.len() + folders.iter().filter(|f| !h.settings.gallery.output_folders.contains(f)).count() > MAX_OUTPUT_FOLDERS {
+                return Err(format!("At most {MAX_OUTPUT_FOLDERS} output folders: remove some in Budget and generation first."));
+            }
+            c.folders_added = folders.iter().filter(|f| !h.settings.gallery.output_folders.contains(f)).cloned().collect();
             apply_to(h, &c);
             Ok(c)
         });
@@ -278,7 +330,7 @@ pub async fn hive_tools_change_preview(
 }
 
 /// Hive settings → Tools → Save (docs/hive.md §3.4): the human's change. `add_hosts` are the
-/// offered hosts the human left ticked.
+/// offered hosts the human left ticked, `add_folders` the offered output folders.
 #[tauri::command]
 pub async fn hive_set_tools(
     window: tauri::Window,
@@ -287,10 +339,11 @@ pub async fn hive_set_tools(
     workspace_id: String,
     tools: Vec<String>,
     add_hosts: Vec<String>,
+    add_folders: Option<Vec<String>>,
 ) -> Result<HiveToolsChange, String> {
     let (caller, detected, remotes) = gather(&window, state.inner(), &workspace_id).await?;
     let ctx = super::tools::app_ctx(state.inner(), &app, &caller);
-    set_tools(&ctx, &caller, &detected, &remotes, &tools, &add_hosts).await
+    set_tools(&ctx, &caller, &detected, &remotes, &tools, &add_hosts, &add_folders.unwrap_or_default()).await
 }
 
 #[cfg(test)]

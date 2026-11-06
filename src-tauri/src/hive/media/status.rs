@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::{catalogue, provider, providers_for_native, providers_for_upstream, Provider};
+use super::{catalogue, provider, providers_for_native, providers_for_proxied, Provider};
 use crate::hive::create::DetectedTool;
 
 /// `state` of a cover: it works now.
@@ -86,7 +86,8 @@ pub fn cli_hits(detected: &[DetectedTool]) -> Vec<Hit> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProxyInput {
     pub id: String,
-    /// The upstream it dials.
+    /// What it is recognised by (`ProxyServer::upstream_of`): the upstream it dials, or
+    /// `stdio:<route>` for a server maiTerm runs itself.
     pub url: String,
     pub enabled: bool,
     /// Workspaces whose tabs see its tools; empty means every workspace (`ProxyServer.workspaces`).
@@ -102,7 +103,7 @@ pub fn proxy_inputs() -> Vec<ProxyInput> {
         .into_iter()
         .map(|s| {
             let status = crate::mcp_proxy::status(&s.id).state;
-            ProxyInput { id: s.id, url: s.url, enabled: s.enabled, workspaces: s.workspaces, status }
+            ProxyInput { url: s.upstream_of(), id: s.id, enabled: s.enabled, workspaces: s.workspaces, status }
         })
         .collect()
 }
@@ -139,7 +140,7 @@ pub fn proxy_hits(servers: &[ProxyInput], workspace: Option<&str>) -> Vec<Hit> {
     for s in servers {
         let tool_id = format!("mcp:{}", crate::mcp_proxy::entries::entry_name(&s.id));
         let state = proxy_state(s, workspace);
-        for p in providers_for_upstream(Some(&s.url)) {
+        for p in providers_for_proxied(Some(&s.url)) {
             out.push(hit(&tool_id, p, state, p.capabilities.clone()));
         }
     }

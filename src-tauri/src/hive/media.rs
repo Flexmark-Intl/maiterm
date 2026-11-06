@@ -14,7 +14,7 @@
 //! A provider new to the catalogue gets `sandbox_hosts` only where a host is verified; result CDNs
 //! nobody has seen yet belong in `unverified_hosts`, never guessed into `sandbox_hosts` (§9).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -33,12 +33,21 @@ pub struct Capability {
     pub common: bool,
 }
 
-/// One way to get a provider. `kind` is `remote_mcp` | `brew` | `plugin` | `local_app` | `manual`
-/// (`stdio_mcp` arrives with phase 5).
+/// One way to get a provider. `kind` is `remote_mcp` | `stdio_mcp` | `brew` | `plugin` |
+/// `local_app` | `manual`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Route {
     pub kind: String,
+    /// `stdio_mcp`: the route's id, which a server set up from it records
+    /// (`StdioSpec::route`) and is recognised by, since it has no upstream URL (§5). Unique in
+    /// the catalogue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// `stdio_mcp`, for a provider with more than one: how the human tells them apart ("Global
+    /// account").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(default)]
     pub url: String,
     /// `oauth` | `token` | `none`.
@@ -53,9 +62,32 @@ pub struct Route {
     /// panel does not show it, and phase 3's verify step is its reader.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balance_tool: Option<String>,
-    /// `brew`: the one install line.
+    /// A free, read-only tool that proves the key works, for a provider with no balance or
+    /// pricing tool (MiniMax's `list_voices`). Verify calls it only if `verify::CHECK_TOOLS`
+    /// allows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_tool: Option<String>,
+    /// `brew`: the one install line. `stdio_mcp`: the program maiTerm starts (`npx`, `uvx`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// `stdio_mcp`: the program's arguments, the package pinned to an exact version.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// `stdio_mcp`: the NAME of the variable the key goes in (`MESHY_API_KEY`). Never a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_key: Option<String>,
+    /// `stdio_mcp`: fixed, non-secret settings (`MINIMAX_API_HOST`); `{output}` in a value is the
+    /// server's output folder (`mcp_proxy::stdio::OUTPUT_PLACEHOLDER`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Where the human makes the key a `token` route takes (`stdio_mcp`): the setup sheet's
+    /// "Open <provider> to make a key".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_url: Option<String>,
+    /// How a server on this route hands its results back, for the brief, when that isn't a URL
+    /// to download (a file in its output folder).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results_note: Option<String>,
     /// `plugin`: the Claude Code plugin id, `name@marketplace`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_id: Option<String>,
@@ -192,6 +224,32 @@ impl Provider {
     pub fn mcp_route(&self) -> Option<&Route> {
         self.routes.iter().find(|r| r.kind == "remote_mcp")
     }
+
+    /// Its local MCP server routes (`stdio_mcp`), in catalogue order.
+    pub fn stdio_routes(&self) -> impl Iterator<Item = &Route> {
+        self.routes.iter().filter(|r| r.kind == STDIO_MCP)
+    }
+}
+
+/// The route kind of a local MCP server maiTerm runs itself (docs/hive-media.md §12.1).
+pub const STDIO_MCP: &str = "stdio_mcp";
+
+impl Route {
+    /// How maiTerm starts a server set up from this route: a `stdio_mcp` route with its id and
+    /// command, else `None`. This is the only place a `StdioSpec` is made from: a command line
+    /// never comes from a webview or an agent.
+    pub fn stdio_spec(&self) -> Option<crate::mcp_proxy::stdio::StdioSpec> {
+        if self.kind != STDIO_MCP {
+            return None;
+        }
+        Some(crate::mcp_proxy::stdio::StdioSpec {
+            route: self.id.clone()?,
+            command: self.command.clone()?,
+            args: self.args.clone(),
+            env_key: self.env_key.clone(),
+            env: self.env.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -206,9 +264,27 @@ pub struct Catalogue {
 pub fn parse(text: &str) -> Result<Catalogue, String> {
     let c: Catalogue = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let mut seen = HashSet::new();
+    let mut routes = HashSet::new();
     for p in &c.providers {
         if !seen.insert(p.id.as_str()) {
             return Err(format!("provider {} appears twice", p.id));
+        }
+        // A local server is a command maiTerm runs as the human: one the proxy would refuse is a
+        // catalogue defect, caught here (and so by a test), never at a human's setup.
+        for r in p.stdio_routes() {
+            let spec = r.stdio_spec().ok_or_else(|| format!("provider {}: a stdio_mcp route needs an id and a command", p.id))?;
+            spec.validate().map_err(|e| format!("provider {}: route {}: {e}", p.id, spec.route))?;
+            if !routes.insert(spec.route.clone()) {
+                return Err(format!("route {} appears twice", spec.route));
+            }
+            if r.auth == "token" && spec.env_key.is_none() {
+                return Err(format!("provider {}: route {} takes a key but names no variable for it", p.id, spec.route));
+            }
+            if let Some(u) = &r.key_url {
+                if !u.starts_with("https://") {
+                    return Err(format!("provider {}: route {}: a key page is an https link", p.id, spec.route));
+                }
+            }
         }
         for cap in p.capabilities.iter().chain(&p.default_for).chain(p.capability_notes.keys()).chain(p.capability_models.keys()).chain(p.detect.clis.iter().flat_map(|c| &c.capabilities)) {
             if !c.capabilities.iter().any(|k| &k.id == cap) {
@@ -322,6 +398,22 @@ pub fn is_sandbox_own_host(host: &str) -> bool {
 pub fn providers_for_upstream(upstream_url: Option<&str>) -> Vec<&'static Provider> {
     let Some(host) = upstream_url.and_then(super::create::url_host) else { return Vec::new() };
     providers_for_host(&host)
+}
+
+/// The provider a catalogue `stdio_mcp` route belongs to, and the route, by the route's id: how a
+/// server maiTerm runs itself is recognised (`ProxyServer::route`), since it has no upstream URL.
+pub fn stdio_route(route_id: &str) -> Option<(&'static Provider, &'static Route)> {
+    catalogue().providers.iter().find_map(|p| p.stdio_routes().find(|r| r.id.as_deref() == Some(route_id)).map(|r| (p, r)))
+}
+
+/// The providers a proxied server is recognised as, from its registry record: a stdio server by
+/// its catalogue route (`stdio:<route>`, what `mcp_proxy::upstream_of` gives it), anything else
+/// by its upstream's host. Never by its name.
+pub fn providers_for_proxied(upstream: Option<&str>) -> Vec<&'static Provider> {
+    match upstream.and_then(|u| u.strip_prefix(crate::mcp_proxy::stdio::STDIO_URL_PREFIX)) {
+        Some(route) => stdio_route(route).map(|(p, _)| vec![p]).unwrap_or_default(),
+        None => providers_for_upstream(upstream),
+    }
 }
 
 /// The providers whose `match.hosts` has a suffix of `host` (any case, any port). No name is
