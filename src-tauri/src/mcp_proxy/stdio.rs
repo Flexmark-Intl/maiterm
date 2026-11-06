@@ -19,6 +19,11 @@
 //!   neither counts as use nor starts it (`running` vs `ensure`). A stopped server is `idle`, not
 //!   an outage, and answers `tools/list` from its saved list.
 
+// Off unix `spawn` refuses (stdio MCP servers run on macOS and Linux only), so the child
+// machinery (the plan, the readers, the restart and backoff, `Running`'s bookkeeping) is unused
+// there: allowed rather than gated piece by piece.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use super::upstream::{UpErr, PROTOCOL};
 use super::{ProxyServer, Status};
 use parking_lot::Mutex;

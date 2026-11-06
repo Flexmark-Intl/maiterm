@@ -567,7 +567,8 @@ pub fn adopt_native(id: &str, url: &str) -> Result<Vec<String>, String> {
 }
 
 /// Both runtimes' entries for server `id`, rendered, for a test elsewhere to search.
-#[cfg(test)]
+// Used only by the tests that start the fake, which are unix only.
+#[cfg(all(test, unix))]
 pub(crate) fn rendered_for_test(port: u16, auth: &str, id: &str) -> String {
     format!("{}\n{}", claude_entry(port, auth, id), codex_table(port, auth, id))
 }
