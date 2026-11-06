@@ -208,7 +208,9 @@
         // Already moved on (a step started before this frame): the stage's own focus rule holds.
         if (sheetEl?.contains(document.activeElement)) return;
         // Without scrolling: the heading stays in view as the sheet opens.
-        (document.getElementById(keyId) ?? sheetEl)?.focus({ preventScroll: true });
+        const keyEl = document.getElementById(keyId);
+        (keyEl ?? sheetEl)?.focus({ preventScroll: true });
+        clearOfFooter(keyEl);
         return;
       }
       (sheetEl?.querySelector<HTMLElement>('.act button') ?? sheetEl?.querySelector<HTMLElement>('.links button, .foot button'))?.focus();
@@ -244,7 +246,12 @@
     untrack(() => {
       if (pasting && !wasPasting) {
         requestAnimationFrame(() => {
-          if (alive) document.getElementById(keyId)?.focus();
+          if (!alive) return;
+          const keyEl = document.getElementById(keyId);
+          keyEl?.focus({ preventScroll: true });
+          // After a refused Verify its result sits just above the paste: both in view where they fit.
+          clearOfFooter(sheetEl?.querySelector<HTMLElement>('.act .result') ?? null);
+          clearOfFooter(keyEl);
         });
       } else if (stage === 'failed') {
         requestAnimationFrame(() => {
@@ -275,6 +282,19 @@
     window.removeEventListener('focus', onWindowFocus);
     for (const off of offs.splice(0)) off();
   });
+
+  /** Scroll `el`'s row (the key field with its Save button) into the sheet's view only when it is
+   *  hidden: below the sticky footer or above the top. Focus is given with preventScroll, so the
+   *  heading stays in view whenever the sheet fits, and the field is never left under the footer
+   *  when it doesn't (a narrow window, Preferences' extra choices). */
+  function clearOfFooter(el: HTMLElement | null) {
+    const target = el?.closest<HTMLElement>('.row') ?? el;
+    const foot = sheetEl?.querySelector<HTMLElement>('.foot');
+    if (!target || !sheetEl) return;
+    const r = target.getBoundingClientRect();
+    const bottomLimit = foot ? foot.getBoundingClientRect().top : sheetEl.getBoundingClientRect().bottom;
+    if (r.bottom > bottomLimit || r.top < sheetEl.getBoundingClientRect().top) target.scrollIntoView({ block: 'nearest' });
+  }
 
   /** After a step, a focused button may have gone: give the keyboard back to the sheet, so Escape
    *  and Tab keep working. */
@@ -816,6 +836,7 @@
         {/if}
         {#if stdioPasting}
           {#if stdioRepasting}
+            {@render resultBlock()}
             <p class="state-line">Verify re-checks the key already saved. {stdioRoutes.length > 1 ? 'To use another account, choose it and paste its key.' : 'To use another key, paste it here.'}</p>
           {:else if stdio.stage === 'key' && stdio.note}
             <p class="state-line" role="status">{stdio.note}</p>
@@ -831,7 +852,7 @@
             <p class="dim">It goes to your keychain and reaches {p.name}’s server only in its environment: never an agent’s config, a log or a command line.</p>
           </form>
         {:else if stdio.stage === 'starting'}
-          <p class="state-line busy-line" role="status"><span class="spin" aria-hidden="true"></span>Starting {p.name}… {elapsed} s</p>
+          <p class="state-line busy-line"><span class="spin" aria-hidden="true"></span><span role="status">Starting {p.name}…</span><span aria-hidden="true">{elapsed} s</span></p>
         {:else if stdio.stage === 'failed'}
           {#if stdio.error}<p class="note bad" role="alert">{stdio.error}</p>{/if}
           <p class="state-line">{stdio.keyFor && !stdioReused ? 'Your key is saved in your keychain. Try again reuses it; Remove deletes it.' : 'Your key is saved. Try again reuses it.'}</p>
@@ -909,13 +930,17 @@
       <p class="note" class:bad={note.error} role={note.error ? 'alert' : 'status'}>{note.text}</p>
     {/if}
 
-    {#if result}
-      <div class="result" role="status">
-        <span class="state {result.tone}">{result.label}</span>
-        <span class="msg">{result.message}</span>
-        {#if result.link}<div class="result-act"><Button variant="secondary" onclick={() => open(result?.link ?? null)}>{result.linkLabel}</Button></div>{/if}
-      </div>
-    {/if}
+    {#snippet resultBlock()}
+      {#if result}
+        <div class="result" role="status">
+          <span class="state {result.tone}">{result.label}</span>
+          <span class="msg">{result.message}</span>
+          {#if result.link}<div class="result-act"><Button variant="secondary" onclick={() => open(result?.link ?? null)}>{result.linkLabel}</Button></div>{/if}
+        </div>
+      {/if}
+    {/snippet}
+    <!-- Re-pasting after a refused Verify, the result sits above the paste, next to the field. -->
+    {#if !stdioRepasting}{@render resultBlock()}{/if}
 
     <div class="foot">
       {#if canVerify(p)}
@@ -986,6 +1011,6 @@
   .spin { display: inline-block; flex: none; width: 12px; height: 12px; margin-right: 6px; vertical-align: -2px; border: 2px solid var(--bg-light); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
   .busy-line .spin { margin-right: 0; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  @media (prefers-reduced-motion: reduce) { .spin { animation-duration: 2.4s; } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
   .danger :global(.btn) { color: var(--red); }
 </style>
