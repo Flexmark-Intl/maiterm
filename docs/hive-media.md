@@ -83,7 +83,7 @@ parse is tested as the role files are. One entry:
   "capabilities": ["video", "image", "lipsync", "upscale", "3d", "music"],
   "models_note": "Kling 4.0, Veo 3.1, Seedance 2.5, GPT Image 2, FLUX, sync.so",
   "routes": [{
-    "kind": "remote_mcp",                // remote_mcp | stdio_mcp (phase 5) | brew | plugin | local_app | manual
+    "kind": "remote_mcp",                // remote_mcp | stdio_mcp | brew | plugin | local_app | manual
     "url": "https://mcp.fal.ai/mcp-relay",
     "auth": "oauth",                     // oauth | token | none
     "credits": "api",                    // api (prepaid balance) | plan (subscription credits)
@@ -98,6 +98,23 @@ parse is tested as the role files are. One entry:
   "guide": ["Make a fal account (or sign in).", "Add credit: fal bills a prepaid balance.", "Back here, press Sign in."],
   "match": { "hosts": ["fal.ai", "fal.run", "fal.media"], "names": ["fal"] }
 }
+```
+
+A `stdio_mcp` route (phase 5, §12.1) is a local server maiTerm runs itself. Beyond `kind`, `auth`
+and `credits` it carries `id` (what a server set up from it records and is recognised by), `label`
+(for a provider with several), `command` and `args` (the package pinned to an exact version),
+`env_key` (the NAME of the key's variable), `env` (fixed settings; `{output}` is the server's output
+folder), `key_url`, an optional `check_tool` (a free read-only call Verify may make) and
+`results_note` (what the brief says about where its files land). The loader builds each one's
+`StdioSpec` (`Route::stdio_spec`) and runs the proxy's own `StdioSpec::validate` on it, so a bad
+entry (a key in `PATH`, a `NODE_OPTIONS` setting, a duplicate route id, a key route with no
+variable) fails the parse test, never a human's setup:
+
+```jsonc
+{ "kind": "stdio_mcp", "id": "meshy", "command": "npx", "args": ["-y", "@meshy-ai/meshy-mcp-server@0.6.7"],
+  "auth": "token", "credits": "api", "env_key": "MESHY_API_KEY", "balance_tool": "meshy_check_balance",
+  "key_url": "https://www.meshy.ai/developers/keys",
+  "results_note": "Save each finished model with meshy_download_model, …" }
 ```
 
 **`match.hosts` keeps every suffix today's table has.** For example, Kling's entry matches both
@@ -122,8 +139,9 @@ The starting entries, from the 2026-11-03 survey:
 | HeyGen | remote MCP `mcp.heygen.com/mcp/v1/` | OAuth | **plan** | lipsync, avatars |
 | Comfy Cloud | remote MCP `cloud.comfy.org/mcp` | OAuth or token | Comfy credits | local / workflows |
 | Replicate | remote MCP `mcp.replicate.com/sse` (SSE) | key pasted on their page | API | listed, not recommended: results expire after 1 h, and the proxy speaks Streamable HTTP only |
-| MiniMax, Meshy | local MCP with an env key | key | API | `stdio_mcp` from phase 5 (§12.1) |
-| Google genmedia | local MCP, needs a GCP project and a bucket | GCP | API | **manual** |
+| MiniMax | `stdio_mcp`: `uvx minimax-mcp==0.0.19`, a global and a mainland China route | key | API, `list_voices` checks the key | video (Hailuo), image, voice; no music tool. Files land in its output folder (`MINIMAX_API_RESOURCE_MODE=local`) |
+| Meshy | `stdio_mcp`: `npx -y @meshy-ai/meshy-mcp-server@0.6.7` | key | API, `meshy_check_balance` | 3d. Result URLs on `assets.meshy.ai` last 3 days; `meshy_download_model` saves into its output folder |
+| Google genmedia | local MCP, needs a GCP project and a bucket | GCP | API | **manual** (a key isn't enough) |
 | ComfyUI (local), Blender | detected only; guide links | none | free | local, 3d |
 | Kie.ai, Luma, Topaz, Stability | not offered (no official MCP, or no cost API) | | | detected if present, as today |
 
@@ -165,6 +183,12 @@ What it reads:
   only, because its 127.0.0.1 host matches no suffix. For **proxied** entries it switches to the
   upstream URL: a proxied server named "fal" that points elsewhere isn't trusted, and a proxied
   fal server named "video" is.
+- **Stdio servers maiTerm runs itself** have no upstream URL: they are matched by the catalogue
+  route they were set up from (`ProxyServer::route()`, read as `stdio:<route>` through
+  `ProxyServer::upstream_of` and `media::providers_for_proxied`), never by their name, and never by
+  the `stdio:` url they store. An idle one (its child stopped) is `ready`. So `hive_media_status`,
+  Verify's `pick_server` and `is_generator_server` (a worker's `mcp.json`) all see it; it adds no
+  sandbox host.
 - **Native `.claude.json` entries**: matched by `match.hosts`, then `match.names`, as today. A
   native stdio entry still has only its name to vouch for it.
 - **Installed Claude Code plugins**, in the one Claude config root the coordinator loads
@@ -214,6 +238,20 @@ placements. What it does per route:
   model's progress and a retry. A plugin with no confirmed source (Remotion) gets no install
   button: its guide describes a tab maiTerm won't open, so the sheet says the steps are the
   human's (`guideFor`) and offers Verify.
+- **`stdio_mcp`** (built 2026-11-05, `lib/hive/mediaStdio.ts`): a local server maiTerm runs itself.
+  A provider with several routes (MiniMax: global, mainland China) asks which account the key is
+  for. The sheet says what runs (`uvx minimax-mcp==0.0.19`), that it runs outside every sandbox,
+  that **the version is pinned but the package's dependencies aren't**, and that the first start
+  downloads it, which can take a minute or more. Then the key page and a password field, with a
+  hint under 16 characters (Rust refuses a shorter key, `secrets::MIN_KEY_LEN`). Save empties the
+  field FIRST, then `mcpStdioKeyStore` → `mcpStdioServerAdd(id, route_id, workspaces)` → Verify,
+  in that order (`StdioSetup`); the key is in no state, store or sessionStorage once sent. The
+  server is named after the provider (`minimax`, `minimax-2` past a taken name); one maiTerm already
+  runs from the same route is reused: its key is replaced (Rust stops its child) and it gains this
+  Hive's workspace. Scope is the remote add path's. A failed start keeps the key: **Try again**
+  needs no second paste, **Remove the stored key** calls `mcpStdioKeyDelete`. There is no webview
+  command that takes a command line: `mcp_stdio_server_add` resolves the route in Rust
+  (`mcp_proxy::spec_for_route`). The phone never starts it and never takes a key.
 - **`local_app`**: the download page; Verify runs whenever the window comes back to the front.
 - **`manual`** and any kind this build doesn't know: the guide, and Verify.
 
@@ -259,7 +297,7 @@ reads the status, whisper-cli is ticked, and Review lists it before Create. No p
 | `brew` | Opens a **visible maiTerm tab** running the one install command, then re-detects when it exits. With no Homebrew, the first step is Homebrew's own installer in the same tab, since it asks for the human's password. For whisper.cpp, maiTerm then downloads the default model (`ggml-base.en`) from huggingface.co into a maiTerm-owned models folder, outside any sandbox, and the brief names that path | Watches; types a password if asked |
 | `plugin` | Runs `claude plugin marketplace add …` and `claude plugin install …` in a visible tab | Watches |
 | `local_app` | Shows the download link and guide; re-detects when the window regains focus | Installs the app |
-| `stdio_mcp` (phase 5) | maiTerm runs the pinned local server itself, with the key from the keychain (§12.1); setup is the `token` setup plus Verify | Makes the key, pastes it |
+| `stdio_mcp` | maiTerm runs the pinned local server itself, outside every sandbox, with the key from the keychain in its environment only (§12.1). Setup is the `token` setup (key page, paste) then `mcp_stdio_server_add`, which starts it and reads its first tool list before writing anything, then Verify. Its output folder joins the Hive's output folders | Makes the key, pastes it |
 | `manual` | Shows the guide, including the config snippet with the key left as a placeholder | Everything |
 
 **`brew` and `plugin`: built (2026-11-05).** The backend and the window's half, and the setup sheet
@@ -348,11 +386,16 @@ its upstream URL, preferring a server that is on and in the Hive's scope), in or
   as it was (docs/mcp-proxy.md §4.1).
 - **The check call**, through `mcp_proxy::call_once` (its own session, never touching the saved
   list). Only `verify::CHECK_TOOLS` is ever called: fal `get_pricing`, WaveSpeed `get_balance`,
-  BFL `get_credits`, Recraft `get_user`, Meshy `meshy_check_balance`. WaveSpeed's `get_price`
+  BFL `get_credits`, Recraft `get_user`, Meshy `meshy_check_balance`, MiniMax `list_voices` (a
+  route's `check_tool`: free, and it needs a key the chosen host accepts). MiniMax answers a
+  failure as ordinary text ("Failed to list voices: …"), never `isError`, so its check names that
+  prefix (`CheckTool.failed_prefix`) and such an answer is a failure. WaveSpeed's `get_price`
   needs a job's arguments and is never called. Arguments are only the ones the tool's schema
   requires, from a hard-coded harmless value (fal: one model's price), its `default` or its first
   `enum`; a required argument with none of those means no call.
-- **Words.** A 401 or 403 is `needs_sign_in`. A 402, or a tool answering that the account is out
+- **Words.** A 401 or 403 is `needs_sign_in`; for a key server (`stdio_mcp`) the words are about the
+  key ("paste a new Meshy key in its setup sheet"; for MiniMax, check the key is for the account
+  chosen), never a sign-in. A 402, or a tool answering that the account is out
   of credit, is `needs_credit`, with `link` set to the catalogue's `billing_url` (http(s) only).
   Arguments the server rejects (`-32602`) are maiTerm's guess failing, so the result stays `ready`
   and says the account wasn't read.
@@ -360,10 +403,9 @@ its upstream URL, preferring a server that is on and in the Hive's scope), in or
 Any other provider is re-detected with `status::hits` (the same sources as `hive_media_status`):
 the Homebrew kit is `ready` only with every program it lists, and names the missing ones.
 
-**Phase 5: stdio upstreams in the MCP proxy** (docs/mcp-proxy.md §2.1; the proxy side is built). maiTerm
-runs a local MCP server itself, with the key from the keychain in its environment. That moves
-MiniMax and Meshy from `manual` to `stdio_mcp`, and keeps those keys out of `.claude.json`.
-Specified in §12.1.
+**Phase 5: stdio upstreams in the MCP proxy** (docs/mcp-proxy.md §2.1; built 2026-11-05). maiTerm
+runs a local MCP server itself, with the key from the keychain in its environment. MiniMax and Meshy
+are `stdio_mcp` routes, and their keys stay out of `.claude.json`. Specified in §12.1.
 
 ## 7. Where it appears
 
@@ -577,6 +619,13 @@ opening, on the contract above.
   who grants the host. The catalogue is then corrected from that real URL in a follow-up commit.
   Phase 1 includes a spike: one cheapest real job per default provider, logging the result URL's
   host.
+- **A stdio server maiTerm runs itself** (§12.1) gets no sandbox host either: it calls its API from
+  maiTerm's own process. Its results are files in its output folder, which joins the Hive's output
+  folders, so a worker files them with `galleryAdd` and downloads nothing. Meshy's `result_hosts`
+  (`assets.meshy.ai`) is informational: a worker saves a model with `meshy_download_model`, never
+  with curl. MiniMax runs in `local` mode (`MINIMAX_API_RESOURCE_MODE`), not `url`: its URL mode
+  answers with links on hosts nobody has confirmed, which a worker's shell couldn't fetch, while
+  local mode writes under `MINIMAX_MCP_BASE_PATH` = its output folder, which `galleryAdd` takes.
 - whisper.cpp model downloads need `huggingface.co`. maiTerm fetches the model at install time,
   outside the sandbox, so no worker needs that host.
 
@@ -634,6 +683,10 @@ art-director), reviewers included. What it does beyond the example above:
   with hiveRequestCapability; never substitute." A five-capability "Not set up" list would invite
   needless requests (the coordinator's decision, 2026-11-05). One media tool, a program included,
   brings the full map back.
+- **Where a local server's files land.** A route's `results_note` replaces the download-at-once
+  line: Meshy's says to save each model with `meshy_download_model` (into its output folder) and
+  file it from there, MiniMax's that each result is a file in its output folder whose path the tool
+  answers with, and not to give `output_directory` an absolute path.
 - **"Not set up"** lists the common capabilities (`common_capabilities()`) nothing in the Hive
   covers. The coordinator is pointed at `hiveRequestCapability`; a worker is told to stop and
   report it to its coordinator (the tool is the coordinator's, §8).
@@ -743,14 +796,33 @@ art-director), reviewers included. What it does beyond the example above:
    - verify before write (`mcp_proxy::add_stdio`);
    - the key commands `mcp_stdio_key_store` and `mcp_stdio_key_delete`.
 
-   Not built yet:
-   - the MiniMax and Meshy catalogue routes, and the Tauri command that resolves a route id to a
-     `StdioSpec` and calls `add_stdio`. On purpose, no command takes a command line from the
-     webview;
-   - detection by `ProxyServer::route()`;
-   - the output folder joining a Hive's output folders;
-   - the sheet's key paste and Verify;
-   - D3's ElevenLabs check.
+   **The rest: built (2026-11-05).**
+   - The catalogue: MiniMax (`uvx minimax-mcp==0.0.19`, a global and a mainland China route, each
+     with its own host and key page) and Meshy (`npx -y @meshy-ai/meshy-mcp-server@0.6.7`) are
+     `stdio_mcp` routes, validated by `StdioSpec::validate` when the catalogue loads (§4). Both
+     packages were read, never run: MiniMax 0.0.19 has no music tool (its capabilities are video,
+     image, voice), its `MINIMAX_API_HOST` has no default (global `https://api.minimax.io`,
+     mainland `https://api.minimaxi.com`; a key works only with its own), and its tools answer a
+     failure as text. Meshy's balance tool is `meshy_check_balance` (free, read-only), its
+     result URLs last 3 days.
+   - `mcp_stdio_server_add(id, route_id, workspaces)` resolves the route in Rust
+     (`mcp_proxy::spec_for_route`) and calls `add_stdio`. On purpose, no command takes a command
+     line from the webview.
+   - Detection, Verify and a worker's `mcp.json` match a stdio server by its route (§5).
+   - Its output folder joins a Hive's output folders: at Create, and through the tools change
+     (`folders_offered`, ticked) or an approved `tool_setup` card (docs/hive.md §3.4).
+   - Verify calls Meshy's balance and MiniMax's `list_voices` through `call_once` (§6), and words
+     a refused key as a key, never a sign-in.
+   - The `tool_setup` card says a key is pasted at the Mac (never the phone), what runs, that its
+     first start downloads it, and that its folder joins the Hive's output folders.
+   - The sheet's key paste, Try again and Remove the stored key (§6).
+   - D3's check: ElevenLabs gets no stdio route (§12).
+
+   Known gaps, left as they are: MiniMax's tools take an `output_directory`, and an absolute one
+   writes the file wherever the agent says, as the human (the server runs outside every sandbox,
+   like any MCP server). Its `play_audio` tool plays a file on this Mac's speakers. Both packages
+   load a `.env` from their working directory (python-dotenv, dotenv), which can add a setting
+   but never replace the key or a fixed setting; nothing in a worker's sandbox can write there.
 
 **These are phases of the design, not a queue.** What really depends on what:
 - **Phase 1's catalogue and detection are the foundation.** Phases 2, 3 and 4 read
@@ -784,6 +856,10 @@ ordering bugs that only review found.
   - ElevenLabs' own local MCP server was archived in August 2026. So phase 5 confirms that a
     maintained stdio server (or the official CLI) covers music and sfx before offering it.
   - If none does, ElevenLabs stays speech-only and fal keeps music and sfx.
+  - **Outcome (2026-11-05): none does.** ElevenLabs' own local server is archived, and its
+    official CLI has no stdio MCP mode. So ElevenLabs stays speech-only, fal keeps music and sfx,
+    and the catalogue has no ElevenLabs stdio route
+    (`elevenlabs_gets_no_stdio_route_and_genmedia_stays_manual`).
 - **D4. All five phases, in one Hive.**
 
 ### 12.1 Phase 5, specified
@@ -843,8 +919,8 @@ set up like a token one. Phase 5 also brings docs/mcp-proxy.md up to date.
   - The folder is shared by every Hive using that server. As with any output folder, this
     prevents accidents, not a determined agent.
 - **Providers it unlocks.**
-  - MiniMax (speech, music, Hailuo video) and Meshy (3D);
-  - ElevenLabs music and sfx, if D3's check passes.
+  - MiniMax (speech, Hailuo video and images; its server has no music tool) and Meshy (3D);
+  - ElevenLabs music and sfx, if D3's check passes. It didn't (§12 D3).
 
   Google genmedia stays `manual`: it needs a GCP project and a bucket, not just a key.
 - **The route list** gains `stdio_mcp`, alongside §4's kinds and with a row in §6's table. Its

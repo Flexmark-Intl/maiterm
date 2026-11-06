@@ -270,7 +270,7 @@ Slots readout):
 | Hosts every builder may reach (`settings.worker_hosts`) | Both | Each worker's next launch. Added to `allowedDomains` after the registries (`settings::worker_domains`); never a repo remote's host; never given to reviewers |
 | Push after land | The human only | The next land |
 | Workers on the phone (`settings.workers_on_phone`) | The human only | Workers started from now on |
-| Tools (`Hive.tools`), and the generator hosts the added tools need | The human only, in Hive settings → Tools (`hive/tool_change.rs`); never an agent tool. The coordinator may *ask* for a missing media capability (`hiveRequestCapability`, a `tool_setup` card, docs/hive-media.md §8): the human's approval sets it up, and once it is Ready its tools join through the same write, with only the hosts the card named | Each worker's next launch, and the coordinator's brief at its next launch. The launch builder reads the record fresh every time, so nothing caches it. A running worker keeps the tools it started with |
+| Tools (`Hive.tools`), and the generator hosts and output folders the added tools need | The human only, in Hive settings → Tools (`hive/tool_change.rs`); never an agent tool. The coordinator may *ask* for a missing media capability (`hiveRequestCapability`, a `tool_setup` card, docs/hive-media.md §8): the human's approval sets it up, and once it is Ready its tools join through the same write, with only the hosts the card named (and the output folder of a local server it said joins) | Each worker's next launch, and the coordinator's brief at its next launch. The launch builder reads the record fresh every time, so nothing caches it. A running worker keeps the tools it started with |
 
 **Tools change in Hive settings → Tools** (docs/hive-media.md §7), a window command
 (`hive_set_tools`, with `hive_tools_change_preview` before Save). Every id is checked against a fresh
@@ -280,7 +280,13 @@ detection no longer finds it. A setup-only program (`cli:brew`) is refused. The 
 recognised server's own host, never `unverified_hosts` or `result_hosts`. Only the ones the human
 leaves ticked join `settings.gallery.generator_hosts`, checked like Budget and generation's own edit
 and looked up like any added host. A removed tool's hosts stay until the human removes them there.
-The change is a line in `logs/settings.jsonl`, and the coordinator gets one framed notice of what was
+A local MCP server maiTerm runs itself (docs/hive-media.md §12.1: MiniMax, Meshy) writes its files
+into its own folder, `<OS cache folder>/<app data slug>/mcp-out/<server id>`, outside maiTerm's data
+folder. Adding it offers that folder too (`folders_offered`, from `create::tool_output_folders`),
+ticked: the ones left ticked join `settings.gallery.output_folders`, checked as Budget and
+generation checks a folder (`tool_change::check_folders`), so `galleryAdd` takes its files (§10.3).
+A removed tool's folder stays there too. At Create, a picked local server's folder joins at once,
+as its hosts do. The change is a line in `logs/settings.jsonl`, and the coordinator gets one framed notice of what was
 added and removed. No change hands a worker a skill or a plugin: skills load from user settings a
 worker never reads, and no plugin is a detected tool.
 
@@ -2536,7 +2542,9 @@ these, in this order (decided 2026-10-23), and the brief carries them as a capab
 
 An agent renders into its `scratch/`. A generator that answers with a URL is downloaded there
 first, and a skill that writes to a folder of its own is pointed at `scratch/` where it allows it.
-The agent then files the result.
+The agent then files the result. A local MCP server maiTerm runs itself (MiniMax, Meshy:
+docs/hive-media.md §12.1) saves into its own output folder instead, which joins the Hive's output
+folders when the tool is added (§3.4), so the agent files from there.
 
 **Paid generation spends real money**, and a Hive can run many workers at once. So a Hive has a
 **budget** (sheet and settings, in dollars; default $10):
@@ -2571,7 +2579,8 @@ The agent then files the result.
 
 **`galleryAdd` takes a path only from the caller's own folders**: its `scratch/`, its worktrees,
 the system temp directory, or an **output folder the human listed** in Hive settings for a tool
-that writes only to its own place. It's matched whole against the canonical path, with symlinks
+that writes only to its own place (a local MCP server's folder is listed when its tool is added, §3.4;
+it is shared by every Hive using that server). It's matched whole against the canonical path, with symlinks
 resolved first (the path-authorization memory: never a prefix test). The rule **prevents
 accidents**, not a determined agent: anything an agent can read it can copy into its `scratch/`
 first, and file from there. So a gallery asset is treated as no more private than the agent's
@@ -4511,7 +4520,8 @@ several releases a day).
    video, audio, edit; never a reviewer) gets each chosen `mcp:<name>` that is a recognised
    generator (`create::is_generator_server`: its url host or a word of its name in the catalogue;
    a stdio entry only by name; **a proxied entry (docs/mcp-proxy.md) only by the upstream URL the
-   proxy registry holds for it**, never its name or its loopback url) copied verbatim from the launching
+   proxy registry holds for it**, or, for a stdio server maiTerm runs itself, by the catalogue route
+   it was set up from (`ProxyServer::upstream_of`, `stdio:<route>`), never its name or its loopback url) copied verbatim from the launching
    account's `.claude.json` into its `mcp.json` (`settings::worker_mcp_config`, fresh at every
    launch, a server the file lacks left out and logged). Any other ticked server (a github, a
    filesystem) is never copied: an MCP server runs in Claude's process, outside the sandbox and

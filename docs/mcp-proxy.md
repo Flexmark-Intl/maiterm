@@ -135,6 +135,10 @@ in this order:
 3. Only then save the server, with that list as its catalog and its workspace scope already set,
    and write its entries into the agents' configs.
 
+The webview reaches this through `mcp_stdio_server_add(id, route_id, workspaces)`, which names a
+catalogue route (docs/hive-media.md §4) and has Rust make the command from it
+(`spec_for_route`): no command takes a command line from the webview or an agent.
+
 So no agent ever sees it with an empty list. If Verify fails, nothing is saved or written and
 the child is gone. **The key is left in the keychain**, so a retry needs no second paste, and
 `mcp_stdio_key_delete` removes it when the setup is abandoned.
