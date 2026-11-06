@@ -257,7 +257,8 @@ mod tests {
         assert!(!fal.unverified && fal.unverified_capabilities.is_empty());
         // A result host nobody has seen in a real job is a sandbox matter, not a doubt about the
         // provider's models: it is kept in the catalogue and out of the panel.
-        for id in ["bfl", "runway", "meshy", "comfy-cloud"] {
+        // (Meshy's assets.meshy.ai moved to its result_hosts in phase 5.)
+        for id in ["bfl", "runway", "comfy-cloud"] {
             assert!(!catalogue().providers.iter().find(|q| q.id == id).unwrap().unverified_hosts.is_empty(), "{id} still lists its host");
             assert!(!p(&v, id).unverified, "{id}: an unverified host does not flag the provider");
             assert!(p(&v, id).unverified_capabilities.is_empty(), "{id}");
