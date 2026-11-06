@@ -74,6 +74,158 @@ pub struct StdioSpec {
     /// `output_folder`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// What an agent's `tools/call` may pass (`ArgRule`), from the catalogue route. The proxy
+    /// checks every call against these, and the catalogue route's current ones, before the call
+    /// reaches the child (`refuse_args`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arg_rules: Vec<ArgRule>,
+}
+
+/// One rule on a stdio server's tool arguments (docs/hive-media.md §12.1). The server runs as the
+/// human, outside every sandbox, so an argument that names a path or a URL is a way out for an
+/// agent (or a prompt injected into one): these keep its files inside its output folder.
+/// `rule` is a String (`RULE_*`), never an enum: an older build that meets an unknown one refuses
+/// the call rather than failing to read the file.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArgRule {
+    /// The tool it applies to; "" for every tool.
+    #[serde(default)]
+    pub tool: String,
+    /// The argument it checks; "" for `refuse_tool`.
+    #[serde(default)]
+    pub arg: String,
+    pub rule: String,
+}
+
+/// The tool is never called through the proxy.
+pub const RULE_REFUSE_TOOL: &str = "refuse_tool";
+/// Absent, or a relative folder with no `~` and no `..`: under the server's base folder.
+pub const RULE_RELATIVE_DIR: &str = "relative_dir";
+/// Absent, or `false`.
+pub const RULE_NOT_TRUE: &str = "not_true";
+/// Absent, or a path (or a list of paths) inside the output folder once resolved: relative to it,
+/// no `~`, no `..`, and every existing part's real path inside it (a symlink out is refused).
+pub const RULE_INSIDE_OUTPUT: &str = "inside_output";
+/// As `inside_output`, or an `http://`, `https://` or `data:` URL the provider's API fetches.
+pub const RULE_URL_OR_INSIDE_OUTPUT: &str = "url_or_inside_output";
+const RULES: [&str; 5] = [RULE_REFUSE_TOOL, RULE_RELATIVE_DIR, RULE_NOT_TRUE, RULE_INSIDE_OUTPUT, RULE_URL_OR_INSIDE_OUTPUT];
+
+fn name_shaped(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 64 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+impl ArgRule {
+    fn validate(&self) -> Result<(), String> {
+        if !RULES.contains(&self.rule.as_str()) {
+            return Err(format!("an argument rule is one of {}", RULES.join(", ")));
+        }
+        if !self.tool.is_empty() && !name_shaped(&self.tool) {
+            return Err("an argument rule's tool is a tool's name".into());
+        }
+        if self.rule == RULE_REFUSE_TOOL {
+            if self.tool.is_empty() || !self.arg.is_empty() {
+                return Err("refuse_tool names a tool and no argument".into());
+            }
+        } else if !name_shaped(&self.arg) {
+            return Err(format!("{} names the argument it checks", self.rule));
+        }
+        Ok(())
+    }
+
+    fn applies_to(&self, tool: &str) -> bool {
+        self.tool.is_empty() || self.tool == tool
+    }
+}
+
+/// `true` when `s` names a place inside `output` (which exists): relative to it, with no `~`, no
+/// `..` and no NUL, and the real path of its deepest existing part inside `output`'s real path,
+/// so neither a lexical trick nor a symlink leads out. What doesn't exist yet can't be a symlink.
+pub fn path_inside(s: &str, output: &std::path::Path) -> bool {
+    use std::path::Component;
+    if s.trim().is_empty() || s.contains('\0') || s.starts_with('~') {
+        return false;
+    }
+    let raw = std::path::Path::new(s);
+    if raw.components().any(|c| matches!(c, Component::ParentDir)) {
+        return false;
+    }
+    let Ok(root) = std::fs::canonicalize(output) else { return false };
+    let full = if raw.is_absolute() { raw.to_path_buf() } else { output.join(raw) };
+    let mut existing = full.as_path();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(existing) {
+            let mut real = real;
+            for part in rest.iter().rev() {
+                real.push(part);
+            }
+            return real.starts_with(&root);
+        }
+        let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else { return false };
+        rest.push(name.to_os_string());
+        existing = parent;
+    }
+}
+
+/// Why `value` breaks `rule`, or `None`.
+fn broken(rule: &str, value: &Value, output: &std::path::Path) -> Option<&'static str> {
+    let paths = |v: &Value, url_ok: bool| -> Option<&'static str> {
+        let one = |s: &str| {
+            if url_ok && ["http://", "https://", "data:"].iter().any(|p| s.starts_with(p)) {
+                return true;
+            }
+            path_inside(s, output)
+        };
+        let ok = match v {
+            Value::String(s) => one(s),
+            Value::Array(a) => a.iter().all(|x| x.as_str().is_some_and(one)),
+            _ => false,
+        };
+        (!ok).then_some("a path outside the server's output folder")
+    };
+    match rule {
+        RULE_RELATIVE_DIR => {
+            let ok = value.as_str().is_some_and(|s| {
+                let p = std::path::Path::new(s);
+                !s.contains('\0') && !s.starts_with('~') && !s.starts_with('/') && !s.starts_with('\\') && !p.is_absolute()
+                    && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
+            });
+            (!ok).then_some("a folder outside the server's output folder")
+        }
+        RULE_NOT_TRUE => (*value != Value::Bool(false)).then_some("a value maiTerm doesn't allow (only false)"),
+        RULE_INSIDE_OUTPUT => paths(value, false),
+        RULE_URL_OR_INSIDE_OUTPUT => paths(value, true),
+        _ => Some("an argument maiTerm can't check"),
+    }
+}
+
+/// Why maiTerm refuses this `tools/call` on stdio server `id` (`params` as the agent sent them),
+/// checked against `rules` before anything reaches the child; `None` lets it through. An
+/// argument that is absent or null passes every rule but `refuse_tool`.
+pub fn refuse_args(id: &str, rules: &[ArgRule], params: &Value) -> Option<String> {
+    let tool = params.get("name").and_then(Value::as_str).unwrap_or("");
+    let args = params.get("arguments");
+    let mut output: Option<PathBuf> = None;
+    for r in rules.iter().filter(|r| r.applies_to(tool)) {
+        if r.rule == RULE_REFUSE_TOOL {
+            return Some(format!("maiTerm doesn't let agents call {tool} on the {id} MCP server: it reaches past the server's own folder on this computer."));
+        }
+        let Some(v) = args.and_then(|a| a.get(&r.arg)).filter(|v| !v.is_null()) else { continue };
+        if output.is_none() {
+            let Some(o) = output_folder(id) else { return Some("maiTerm can't find this server's output folder.".into()) };
+            let _ = std::fs::create_dir_all(&o);
+            output = Some(o);
+        }
+        if let Some(why) = broken(&r.rule, v, output.as_deref().unwrap_or(std::path::Path::new(""))) {
+            let folder = output.as_deref().map(|o| o.display().to_string()).unwrap_or_default();
+            return Some(format!(
+                "maiTerm refused {tool}'s {}: {why}. The {id} server runs outside every sandbox, so its files stay in {folder}; use a path there (or leave {} out).",
+                r.arg, r.arg
+            ));
+        }
+    }
+    None
 }
 
 /// The placeholder a fixed variable's value may hold for the server's output folder.
@@ -134,6 +286,9 @@ impl StdioSpec {
             if forbidden_env(name) {
                 return Err(format!("{name} can't carry a key"));
             }
+        }
+        for r in &self.arg_rules {
+            r.validate()?;
         }
         for (name, value) in &self.env {
             if !env_name_shaped(name) {

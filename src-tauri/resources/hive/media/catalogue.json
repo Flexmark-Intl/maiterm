@@ -303,8 +303,15 @@
           "env_key": "MINIMAX_API_KEY",
           "env": { "MINIMAX_API_HOST": "https://api.minimax.io", "MINIMAX_MCP_BASE_PATH": "{output}", "MINIMAX_API_RESOURCE_MODE": "local" },
           "check_tool": "list_voices",
+          "arg_rules": [
+            { "arg": "output_directory", "rule": "relative_dir" },
+            { "arg": "is_url", "rule": "not_true" },
+            { "tool": "voice_clone", "arg": "file", "rule": "inside_output" },
+            { "tool": "generate_video", "arg": "first_frame_image", "rule": "url_or_inside_output" },
+            { "tool": "play_audio", "rule": "refuse_tool" }
+          ],
           "key_url": "https://www.minimax.io/platform/user-center/basic-information/interface-key",
-          "results_note": "MiniMax saves each result as a file in its output folder and answers with the file's path: galleryAdd it from there. Don't give output_directory an absolute path, or the file lands where galleryAdd won't take it."
+          "results_note": "MiniMax saves each result as a file in its output folder and answers with the file's path: galleryAdd it from there. Leave output_directory out, or give a relative folder: maiTerm refuses a path outside the output folder, and play_audio."
         },
         {
           "kind": "stdio_mcp", "id": "minimax-mainland", "label": "Mainland China account (minimaxi.com)",
@@ -313,8 +320,15 @@
           "env_key": "MINIMAX_API_KEY",
           "env": { "MINIMAX_API_HOST": "https://api.minimaxi.com", "MINIMAX_MCP_BASE_PATH": "{output}", "MINIMAX_API_RESOURCE_MODE": "local" },
           "check_tool": "list_voices",
+          "arg_rules": [
+            { "arg": "output_directory", "rule": "relative_dir" },
+            { "arg": "is_url", "rule": "not_true" },
+            { "tool": "voice_clone", "arg": "file", "rule": "inside_output" },
+            { "tool": "generate_video", "arg": "first_frame_image", "rule": "url_or_inside_output" },
+            { "tool": "play_audio", "rule": "refuse_tool" }
+          ],
           "key_url": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
-          "results_note": "MiniMax saves each result as a file in its output folder and answers with the file's path: galleryAdd it from there. Don't give output_directory an absolute path, or the file lands where galleryAdd won't take it."
+          "results_note": "MiniMax saves each result as a file in its output folder and answers with the file's path: galleryAdd it from there. Leave output_directory out, or give a relative folder: maiTerm refuses a path outside the output folder, and play_audio."
         }
       ],
       "result_hosts": [], "api_hosts": ["api.minimax.io", "api.minimaxi.com"], "sandbox_hosts": [], "unverified_hosts": [],
@@ -340,6 +354,13 @@
           "command": "npx", "args": ["-y", "@meshy-ai/meshy-mcp-server@0.6.7"],
           "auth": "token", "credits": "api",
           "env_key": "MESHY_API_KEY",
+          "env": { "MESHY_API_HOST": "https://api.meshy.ai", "TRANSPORT": "stdio" },
+          "arg_rules": [
+            { "arg": "save_to", "rule": "inside_output" },
+            { "arg": "file_path", "rule": "inside_output" },
+            { "arg": "file_paths", "rule": "inside_output" },
+            { "arg": "reference_file_paths", "rule": "inside_output" }
+          ],
           "balance_tool": "meshy_check_balance",
           "key_url": "https://www.meshy.ai/developers/keys",
           "results_note": "Save each finished model with meshy_download_model, which writes it into Meshy's output folder (under meshy_output/): galleryAdd it from there. Its result URLs (assets.meshy.ai) last 3 days, and a worker's shell can't reach them."

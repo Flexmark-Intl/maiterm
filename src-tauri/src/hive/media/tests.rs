@@ -284,7 +284,17 @@ fn minimax_and_meshy_are_stdio_routes_maiterm_runs_with_a_key() {
     assert_eq!(spec("minimax").env_key.as_deref(), Some("MINIMAX_API_KEY"));
     assert_eq!(spec("meshy").args, ids(&["-y", "@meshy-ai/meshy-mcp-server@0.6.7"]));
     assert_eq!(spec("meshy").env_key.as_deref(), Some("MESHY_API_KEY"));
-    assert!(spec("meshy").env.is_empty(), "Meshy needs no settings: its child already works in its output folder");
+    // Meshy's host and transport are pinned, so a `.env` in its working folder (which dotenv
+    // reads, never overriding what is set) can't send its key elsewhere.
+    assert_eq!(spec("meshy").env.get("MESHY_API_HOST").map(String::as_str), Some("https://api.meshy.ai"));
+    assert_eq!(spec("meshy").env.get("TRANSPORT").map(String::as_str), Some("stdio"));
+    // Every path or URL argument the two packages take is ruled (docs/hive-media.md §12.1).
+    let ruled = |id: &str| spec(id).arg_rules.iter().map(|r| format!("{}:{}:{}", r.tool, r.arg, r.rule)).collect::<Vec<_>>();
+    assert_eq!(ruled("meshy"), ids(&[":save_to:inside_output", ":file_path:inside_output", ":file_paths:inside_output", ":reference_file_paths:inside_output"]));
+    assert_eq!(
+        ruled("minimax"),
+        ids(&[":output_directory:relative_dir", ":is_url:not_true", "voice_clone:file:inside_output", "generate_video:first_frame_image:url_or_inside_output", "play_audio::refuse_tool"])
+    );
     // MiniMax writes files under its output folder (local mode), and a key is good on one host only.
     for (id, host) in [("minimax", "https://api.minimax.io"), ("minimax-mainland", "https://api.minimaxi.com")] {
         let env = spec(id).env;

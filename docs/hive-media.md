@@ -247,8 +247,11 @@ placements. What it does per route:
   field FIRST, then `mcpStdioKeyStore` → `mcpStdioServerAdd(id, route_id, workspaces)` → Verify,
   in that order (`StdioSetup`); the key is in no state, store or sessionStorage once sent. The
   server is named after the provider (`minimax`, `minimax-2` past a taken name); one maiTerm already
-  runs from the same route is reused: its key is replaced (Rust stops its child) and it gains this
-  Hive's workspace. Scope is the remote add path's. A failed start keeps the key: **Try again**
+  runs from ANY of the provider's routes is reused: its key is replaced (Rust stops its child), it
+  is moved to the chosen route if it is on another (`mcp_stdio_server_set_route`, the other
+  region's command made from the catalogue), and it gains this Hive's workspace. So a MiniMax key
+  pasted for the wrong region is fixed from the sheet: after a Verify that isn't Ready the account
+  choice and the key field come back, and saving moves the one server rather than adding a second. Scope is the remote add path's. A failed start keeps the key: **Try again**
   needs no second paste, **Remove the stored key** calls `mcpStdioKeyDelete`. There is no webview
   command that takes a command line: `mcp_stdio_server_add` resolves the route in Rust
   (`mcp_proxy::spec_for_route`). The phone never starts it and never takes a key.
@@ -686,7 +689,7 @@ art-director), reviewers included. What it does beyond the example above:
 - **Where a local server's files land.** A route's `results_note` replaces the download-at-once
   line: Meshy's says to save each model with `meshy_download_model` (into its output folder) and
   file it from there, MiniMax's that each result is a file in its output folder whose path the tool
-  answers with, and not to give `output_directory` an absolute path.
+  answers with, and to leave `output_directory` out or relative (the proxy refuses anything else).
 - **"Not set up"** lists the common capabilities (`common_capabilities()`) nothing in the Hive
   covers. The coordinator is pointed at `hiveRequestCapability`; a worker is told to stop and
   report it to its coordinator (the tool is the coordinator's, §8).
@@ -818,11 +821,25 @@ art-director), reviewers included. What it does beyond the example above:
    - The sheet's key paste, Try again and Remove the stored key (§6).
    - D3's check: ElevenLabs gets no stdio route (§12).
 
-   Known gaps, left as they are: MiniMax's tools take an `output_directory`, and an absolute one
-   writes the file wherever the agent says, as the human (the server runs outside every sandbox,
-   like any MCP server). Its `play_audio` tool plays a file on this Mac's speakers. Both packages
-   load a `.env` from their working directory (python-dotenv, dotenv), which can add a setting
-   but never replace the key or a fixed setting; nothing in a worker's sandbox can write there.
+   **Argument rules.** Both servers run as the human, outside every sandbox, and several of their
+   tools take a path or a URL: MiniMax's `output_directory` (an absolute one, or one with `~` or
+   `..`, writes anywhere), `voice_clone`'s `file` and `generate_video`'s `first_frame_image` (read
+   any local file and upload it), `is_url` (a fetch of any URL from this Mac, localhost
+   included) and `play_audio` (plays any file); Meshy's `save_to` (any absolute path, its folders
+   made and the file truncated) and `file_path`, `file_paths`, `reference_file_paths` (read any
+   image). A warning in the brief doesn't stop a sandboxed worker or an injected prompt, so the
+   proxy enforces the route's `arg_rules` (`mcp_proxy::stdio::ArgRule`, Strings: `relative_dir`,
+   `not_true`, `inside_output`, `url_or_inside_output`, `refuse_tool`) on every `tools/call`,
+   an agent's (`call_stdio`) or maiTerm's own (`call_once`), BEFORE anything starts or reaches the
+   child; a refused call answers `isError` with the folder to use. `inside_output` resolves the
+   path against the output folder (the child's working folder), refuses `~` and `..`, and checks
+   the real path of its deepest existing part, so a symlink out is refused too. The rules are
+   saved with the server and joined with the catalogue route's current ones (`arg_rules_of`).
+   MiniMax: `output_directory` relative, `is_url` only false, `voice_clone.file` inside, a
+   `first_frame_image` that isn't an http(s) or `data:` URL inside, `play_audio` refused. Meshy:
+   `save_to` and the three file arguments inside. Meshy's `.env` (dotenv reads one from its
+   working folder, never overriding what is set) can't move the key: `MESHY_API_HOST` and
+   `TRANSPORT` are pinned in its route; MiniMax's settings are all pinned.
 
 **These are phases of the design, not a queue.** What really depends on what:
 - **Phase 1's catalogue and detection are the foundation.** Phases 2, 3 and 4 read

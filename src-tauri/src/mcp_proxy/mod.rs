@@ -945,7 +945,27 @@ async fn call(server: &ProxyServer, sid: Option<&str>, rid: Value, params: Value
 /// Forward a `tools/call` to a stdio server's child, starting it if it is stopped. Every agent
 /// shares the one child; the request carries maiTerm's own id, and the answer goes back under the
 /// agent's (`rid`).
+/// The argument rules a stdio server's calls are checked against: those saved with it and those
+/// its catalogue route has now (a rule the catalogue gains reaches a server added before it).
+pub fn arg_rules_of(server: &ProxyServer) -> Vec<stdio::ArgRule> {
+    let mut rules: Vec<stdio::ArgRule> = server.stdio.as_ref().map(|s| s.arg_rules.clone()).unwrap_or_default();
+    if let Some((_, route)) = server.route().and_then(crate::hive::media::stdio_route) {
+        for r in &route.arg_rules {
+            if !rules.contains(r) {
+                rules.push(r.clone());
+            }
+        }
+    }
+    rules
+}
+
 async fn call_stdio(server: &ProxyServer, rid: Value, params: Value) -> DownReply {
+    // Checked before anything starts or reaches the child: the server runs as the human, outside
+    // every sandbox, and a path argument would be the agent's way out (docs/hive-media.md §12.1).
+    if let Some(why) = stdio::refuse_args(&server.id, &arg_rules_of(server), &params) {
+        log::info!("[mcp-proxy] {}: refused a call's arguments", server.id);
+        return DownReply::result(rid, json!({ "content": [{ "type": "text", "text": why }], "isError": true }));
+    }
     stdio::note_agent_use(&server.id);
     let fail = |rid: Value, st: Status| {
         let text = call_failure_text(server, &st);
@@ -979,6 +999,9 @@ async fn call_stdio(server: &ProxyServer, rid: Value, params: Value) -> DownRepl
 pub async fn call_once(id: &str, params: Value) -> Result<Value, UpErr> {
     let server = get(id).ok_or_else(|| UpErr::Protocol(format!("no MCP server named {id}")))?;
     if server.is_stdio() {
+        if let Some(why) = stdio::refuse_args(&server.id, &arg_rules_of(&server), &params) {
+            return Err(UpErr::Rpc { code: -32602, message: why, data: None });
+        }
         // Not an agent's use: a child started for it stops after `stdio::IDLE`.
         let r = match stdio::ensure(&server, stdio::START_WAIT, stdio::Start::Asked).await {
             Ok(r) => r,
@@ -1388,6 +1411,39 @@ pub fn set_key(id: &str, key: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Re-point stdio server `id` at another catalogue route of the SAME provider (MiniMax's global
+/// and mainland China accounts: a key works only with its own host). The command line comes from
+/// the catalogue (`spec_for_route`), never the caller. The running child has the old route's
+/// settings, so it is stopped, and the next call (Verify's) starts it on the new route. Its saved
+/// tool list stays: it is the same package.
+pub fn set_route(id: &str, route_id: &str) -> Result<ProxyServer, String> {
+    valid_id(id)?;
+    let new = spec_for_route(route_id)?;
+    let server = get(id).ok_or_else(|| format!("no MCP server named {id}"))?;
+    let old = server.route().ok_or_else(|| format!("{id} isn't a server maiTerm runs itself"))?.to_string();
+    if old == route_id {
+        return Ok(server);
+    }
+    let provider_of = |r: &str| crate::hive::media::stdio_route(r).map(|(p, _)| p.id.clone());
+    if provider_of(&old).is_none() || provider_of(&old) != provider_of(route_id) {
+        return Err(format!("{id} can only move to another route of its own provider"));
+    }
+    if let Ok(Some(key)) = secrets::read_env_key(id) {
+        if new.carries(key.expose()) {
+            return Err("the key must not be on the server's command line or in its settings".into());
+        }
+    }
+    stdio::stop(id);
+    let s = update(id, |s| {
+        s.url = new.url();
+        s.stdio = Some(new);
+    })?;
+    set_calls_refused(id, false);
+    set_status(id, Status::new(STATE_IDLE, "route changed"));
+    log::info!("[mcp-proxy] {id}: route {old} -> {route_id}");
+    Ok(s)
+}
+
 /// Delete a stored key whose setup was abandoned. A server that uses it keeps it: removing the
 /// server deletes it (`remove`).
 pub fn delete_key(id: &str) -> Result<(), String> {
@@ -1566,6 +1622,13 @@ pub async fn mcp_stdio_key_store(id: String, key: String) -> Result<(), String> 
 #[tauri::command]
 pub async fn mcp_stdio_key_delete(id: String) -> Result<(), String> {
     blocking(move || delete_key(&id)).await
+}
+
+/// The setup sheet's account switch for a stdio server it reuses (MiniMax: global or mainland
+/// China): the route is named, the command made here from the catalogue (`set_route`).
+#[tauri::command]
+pub async fn mcp_stdio_server_set_route(id: String, route_id: String) -> Result<ServerView, String> {
+    blocking(move || set_route(&id, &route_id).map(|s| view(&s))).await
 }
 
 /// The command line of catalogue route `route_id`, made in Rust from the catalogue alone

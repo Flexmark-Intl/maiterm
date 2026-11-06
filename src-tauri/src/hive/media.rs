@@ -73,6 +73,10 @@ pub struct Route {
     /// `stdio_mcp`: the program's arguments, the package pinned to an exact version.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    /// `stdio_mcp`: what an agent's call may pass, checked by the proxy before the call reaches
+    /// the server (`mcp_proxy::stdio::ArgRule`): a path argument stays inside its output folder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arg_rules: Vec<crate::mcp_proxy::stdio::ArgRule>,
     /// `stdio_mcp`: the NAME of the variable the key goes in (`MESHY_API_KEY`). Never a key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_key: Option<String>,
@@ -248,6 +252,7 @@ impl Route {
             args: self.args.clone(),
             env_key: self.env_key.clone(),
             env: self.env.clone(),
+            arg_rules: self.arg_rules.clone(),
         })
     }
 }

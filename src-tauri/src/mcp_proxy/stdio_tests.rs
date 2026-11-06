@@ -43,6 +43,7 @@ while IFS= read -r line; do
         *'"name":"pid"'*) reply "$id" "$$" ;;
         *'"name":"die"'*) exit 3 ;;
         *'"name":"grow"'*) : > grown; printf '{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}\n'; reply "$id" grown ;;
+        *'"name":"record"'*) printf '%s\n' "$line" >> calls.txt; reply "$id" recorded ;;
         *'"name":"bad"'*) printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"bad arguments"}}\n' "$id" ;;
       esac ;;
   esac
@@ -61,7 +62,7 @@ const HOST: &str = "https://api.fake.test";
 
 fn spec_for(path: String) -> StdioSpec {
     let env = [("FAKE_MCP_HOST", HOST), ("FAKE_MCP_OUT", OUTPUT_PLACEHOLDER)].map(|(n, v)| (n.to_string(), v.to_string()));
-    StdioSpec { route: "test/fake".into(), command: "/bin/sh".into(), args: vec![path], env_key: Some(KEY_VAR.into()), env: env.into() }
+    StdioSpec { route: "test/fake".into(), command: "/bin/sh".into(), args: vec![path], env_key: Some(KEY_VAR.into()), env: env.into(), arg_rules: vec![] }
 }
 
 /// The idle sweep, for this test's server only: another test's sweep never stops it.
@@ -725,4 +726,167 @@ async fn quitting_stops_every_child_running_or_starting() {
     assert!(running(&up).is_none() && running(&starting).is_none());
     proxy::remove(&up).unwrap();
     proxy::remove(&starting).unwrap();
+}
+
+// ─── Argument rules: a path stays inside the output folder ──────────────────
+
+fn rule(tool: &str, arg: &str, rule: &str) -> ArgRule {
+    ArgRule { tool: tool.into(), arg: arg.into(), rule: rule.into() }
+}
+
+fn call(tool: &str, args: Value) -> Value {
+    json!({ "name": tool, "arguments": args })
+}
+
+/// A refused argument never reaches the child: the fake's `record` tool writes every call it gets
+/// to `calls.txt`, and only the allowed ones are there.
+#[tokio::test]
+async fn a_refused_argument_never_reaches_the_child() {
+    capture_logs();
+    let id = fresh_id("rules");
+    proxy::set_key(&id, KEY).unwrap();
+    let rules = vec![
+        rule("", "output_directory", RULE_RELATIVE_DIR),
+        rule("", "is_url", RULE_NOT_TRUE),
+        rule("record", "file", RULE_INSIDE_OUTPUT),
+        rule("record", "files", RULE_INSIDE_OUTPUT),
+        rule("record", "first_frame_image", RULE_URL_OR_INSIDE_OUTPUT),
+        rule("die", "", RULE_REFUSE_TOOL),
+    ];
+    let spec = StdioSpec { arg_rules: rules, ..spec_for(script("fake.sh", FAKE)) };
+    proxy::add_stdio_with(&id, spec, vec![], "test", Duration::from_secs(20)).await.unwrap();
+    let out = output_folder(&id).unwrap();
+    let outside = std::env::temp_dir().join(format!("maiterm-test-outside-{id}"));
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, out.join("escape")).unwrap();
+    std::fs::write(out.join("in.wav"), b"x").unwrap();
+    let inside_abs = out.join("in.wav").to_string_lossy().to_string();
+
+    let refused = [
+        json!({ "output_directory": "/tmp/x" }),
+        json!({ "output_directory": "~/Desktop" }),
+        json!({ "output_directory": "a/../../x" }),
+        json!({ "is_url": true }),
+        json!({ "is_url": "true" }),
+        json!({ "file": "/etc/passwd" }),
+        json!({ "file": "../../x.wav" }),
+        json!({ "file": "~/.zshrc" }),
+        json!({ "file": "escape/secret.wav" }),
+        json!({ "file": 7 }),
+        json!({ "files": ["in.wav", "/etc/hosts"] }),
+        json!({ "first_frame_image": "/etc/hosts" }),
+    ];
+    for args in &refused {
+        let v = post(&id, "s1", json!(1), "tools/call", call("record", args.clone())).await;
+        assert_eq!(v["result"]["isError"], true, "{args}: {v}");
+        assert!(v["result"]["content"][0]["text"].as_str().unwrap().starts_with("maiTerm refused record's"), "{v}");
+    }
+    let pid = call_text(&id, "pid").await;
+    let v = post(&id, "s1", json!(2), "tools/call", call("die", json!({}))).await;
+    assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("doesn't let agents call die"), "{v}");
+    assert_eq!(call_text(&id, "pid").await, pid, "the refused tool never ran: the child is the same one");
+
+    let allowed = [
+        json!({}),
+        json!({ "output_directory": "takes/one", "is_url": false, "file": null }),
+        json!({ "file": "in.wav" }),
+        json!({ "file": inside_abs }),
+        json!({ "file": "new/sub/out.glb" }),
+        json!({ "files": ["in.wav", "new/b.png"] }),
+        json!({ "first_frame_image": "https://cdn.example.com/a.png" }),
+    ];
+    for args in &allowed {
+        let v = post(&id, "s1", json!(3), "tools/call", call("record", args.clone())).await;
+        assert_eq!(v["result"]["content"][0]["text"], "recorded", "{args}: {v}");
+    }
+    let seen = std::fs::read_to_string(out.join("calls.txt")).unwrap();
+    assert_eq!(seen.lines().count(), allowed.len(), "only the allowed calls reached the child:\n{seen}");
+    for bad in ["/etc/passwd", "/tmp/x", "~/", "escape", "/etc/hosts", "\"is_url\":true"] {
+        assert!(!seen.contains(bad), "{bad} reached the child:\n{seen}");
+    }
+    proxy::remove(&id).unwrap();
+    let _ = std::fs::remove_dir_all(&outside);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Verify's own call (`call_once`) is held to the same rules.
+#[tokio::test]
+async fn a_call_maiterm_makes_itself_is_held_to_the_rules_too() {
+    capture_logs();
+    let id = fresh_id("rules-once");
+    proxy::set_key(&id, KEY).unwrap();
+    let spec = StdioSpec { arg_rules: vec![rule("", "save_to", RULE_INSIDE_OUTPUT)], ..spec_for(script("fake.sh", FAKE)) };
+    proxy::add_stdio_with(&id, spec, vec![], "test", Duration::from_secs(20)).await.unwrap();
+    let err = proxy::call_once(&id, call("record", json!({ "save_to": "/etc/x" }))).await.unwrap_err();
+    assert!(matches!(err, crate::mcp_proxy::upstream::UpErr::Rpc { code: -32602, .. }), "{err:?}");
+    assert!(!output_folder(&id).unwrap().join("calls.txt").exists(), "nothing reached the child");
+    proxy::remove(&id).unwrap();
+    let _ = std::fs::remove_dir_all(output_folder(&id).unwrap());
+}
+
+/// The catalogue's own rules for MiniMax and Meshy, checked without starting anything.
+#[test]
+fn the_catalogue_rules_keep_minimax_and_meshy_inside_their_folders() {
+    let id = fresh_id("cat-rules");
+    let rules_of = |route: &str| proxy::spec_for_route(route).unwrap().arg_rules;
+    let (mm, meshy) = (rules_of("minimax"), rules_of("meshy"));
+    assert_eq!(rules_of("minimax-mainland"), mm);
+    let refused = |rules: &[ArgRule], tool: &str, args: Value| refuse_args(&id, rules, &call(tool, args));
+    // MiniMax.
+    assert!(refused(&mm, "play_audio", json!({ "input_file_path": "x.mp3" })).is_some(), "play_audio is never called");
+    assert!(refused(&mm, "text_to_audio", json!({ "text": "hi", "output_directory": "/Users/x/Desktop" })).is_some());
+    assert!(refused(&mm, "text_to_image", json!({ "output_directory": "../.." })).is_some());
+    assert!(refused(&mm, "voice_clone", json!({ "voice_id": "v", "file": "https://127.0.0.1:8765/x", "is_url": true })).is_some());
+    assert!(refused(&mm, "voice_clone", json!({ "voice_id": "v", "file": "/Users/x/voice.wav" })).is_some());
+    assert!(refused(&mm, "generate_video", json!({ "prompt": "p", "first_frame_image": "/Users/x/a.jpg" })).is_some());
+    assert!(refused(&mm, "generate_video", json!({ "prompt": "p", "first_frame_image": "https://x.example/a.jpg" })).is_none());
+    assert!(refused(&mm, "text_to_audio", json!({ "text": "hi", "output_directory": "scenes/1" })).is_none());
+    assert!(refused(&mm, "list_voices", json!({})).is_none());
+    // Meshy.
+    assert!(refused(&meshy, "meshy_download_model", json!({ "task_id": "t", "save_to": "/Users/x/.zshrc" })).is_some());
+    assert!(refused(&meshy, "meshy_image_to_3d", json!({ "file_path": "/Users/x/Pictures/a.png" })).is_some());
+    assert!(refused(&meshy, "meshy_multi_image_to_3d", json!({ "file_paths": ["a.png", "/etc/hosts"] })).is_some());
+    assert!(refused(&meshy, "meshy_text_to_image", json!({ "reference_file_paths": ["~/a.png"] })).is_some());
+    assert!(refused(&meshy, "meshy_download_model", json!({ "task_id": "t", "save_to": "models/a.glb" })).is_none());
+    assert!(refused(&meshy, "meshy_check_balance", json!({})).is_none());
+    // Meshy's host is pinned, so a `.env` in its folder can't send the key elsewhere.
+    assert_eq!(proxy::spec_for_route("meshy").unwrap().env.get("MESHY_API_HOST").map(String::as_str), Some("https://api.meshy.ai"));
+    let _ = std::fs::remove_dir_all(output_folder(&id).unwrap());
+}
+
+#[test]
+fn an_argument_rule_is_checked_when_the_spec_is() {
+    let ok = spec_for("/x".into());
+    let with = |r: ArgRule| StdioSpec { arg_rules: vec![r], ..ok.clone() }.validate();
+    assert!(with(rule("", "save_to", RULE_INSIDE_OUTPUT)).is_ok());
+    assert!(with(rule("play_audio", "", RULE_REFUSE_TOOL)).is_ok());
+    assert!(with(rule("", "save_to", "anywhere")).is_err(), "an unknown rule");
+    assert!(with(rule("", "", RULE_REFUSE_TOOL)).is_err(), "refuse_tool names its tool");
+    assert!(with(rule("t", "x", RULE_REFUSE_TOOL)).is_err(), "and no argument");
+    assert!(with(rule("", "", RULE_INSIDE_OUTPUT)).is_err(), "a path rule names its argument");
+}
+
+/// A wrong-region MiniMax key is fixed by moving the same server to the other account's route:
+/// one server per provider, its command made from the catalogue, its child stopped (and nothing
+/// started here: the new route's command is a real package).
+#[tokio::test]
+async fn a_server_moves_to_another_route_of_its_own_provider_only() {
+    capture_logs();
+    let id = fresh_id("route");
+    proxy::set_key(&id, KEY).unwrap();
+    let spec = StdioSpec { route: "minimax".into(), ..spec_for(script("fake.sh", FAKE)) };
+    proxy::add_stdio_with(&id, spec, vec![], "test", Duration::from_secs(20)).await.unwrap();
+    assert!(proxy::set_route(&id, "meshy").unwrap_err().contains("its own provider"));
+    assert!(proxy::set_route(&id, "nope").unwrap_err().contains("No local MCP server route named nope"));
+    assert!(proxy::set_route(&fresh_id("absent"), "minimax-mainland").is_err());
+    let moved = proxy::set_route(&id, "minimax-mainland").unwrap();
+    assert_eq!(moved.route(), Some("minimax-mainland"));
+    assert_eq!(moved.url, "stdio:minimax-mainland");
+    assert_eq!(moved.upstream_of(), "stdio:minimax-mainland");
+    let spec = moved.stdio.clone().unwrap();
+    assert_eq!(spec, proxy::spec_for_route("minimax-mainland").unwrap(), "the catalogue's command and settings, nothing else");
+    assert_eq!(proxy::get(&id).unwrap().route(), Some("minimax-mainland"), "saved");
+    assert_eq!(proxy::status(&id).state, STATE_IDLE, "stopped, not started: the next call starts it on the new route");
+    assert!(running(&id).is_none(), "no child");
+    proxy::remove(&id).unwrap();
 }
