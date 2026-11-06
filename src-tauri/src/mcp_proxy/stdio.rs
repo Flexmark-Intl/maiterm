@@ -259,14 +259,14 @@ fn save_inside(s: &str, output: &std::path::Path, reserved: &[String]) -> bool {
     if parts.is_empty() || parts.iter().any(|n| n.starts_with('.')) {
         return false;
     }
-    let Some((real, _)) = resolved(s, output) else { return false };
-    for r in reserved {
-        let dir = output.join(r);
-        if std::fs::create_dir_all(&dir).is_err() || same_or_under(&real, &dir) {
-            return false;
-        }
+    // Made BEFORE the save is resolved: a missing folder would leave the save's deepest existing
+    // part above it, and nothing to compare with.
+    let dirs: Vec<PathBuf> = reserved.iter().map(|r| output.join(r)).collect();
+    if dirs.iter().any(|d| std::fs::create_dir_all(d).is_err()) {
+        return false;
     }
-    true
+    let Some((real, _)) = resolved(s, output) else { return false };
+    !dirs.iter().any(|d| same_or_under(&real, d))
 }
 
 /// Why `value` breaks `rule`, or `None`.
