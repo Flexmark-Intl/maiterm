@@ -221,7 +221,8 @@ fn resolved(s: &str, output: &std::path::Path) -> Option<(PathBuf, PathBuf)> {
 /// Whether `path` (an existing real path) is `dir` or inside it, judged by what is on disk: as
 /// path components against `dir`'s real path, and by file identity (device and inode) of `path`
 /// and each folder above it, so no spelling the volume folds to the same folder
-/// (`MESHY_OUTPUT`, `meſhy_output`) gets past.
+/// (`MESHY_OUTPUT`, `meſhy_output`) gets past. A `dir` canonicalize can't place refuses.
+#[cfg(unix)]
 fn same_or_under(path: &std::path::Path, dir: &std::path::Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let Ok(real_dir) = std::fs::canonicalize(dir) else { return true };
@@ -230,6 +231,17 @@ fn same_or_under(path: &std::path::Path, dir: &std::path::Path) -> bool {
     }
     let Ok(id) = std::fs::metadata(&real_dir).map(|m| (m.dev(), m.ino())) else { return true };
     path.ancestors().any(|a| std::fs::metadata(a).is_ok_and(|m| (m.dev(), m.ino()) == id))
+}
+
+/// Off unix there is no device and inode to compare (and no stdio server starts there: `spawn`
+/// refuses), so the components are compared against `dir`'s real path without regard to case,
+/// as the volume (NTFS) folds it.
+#[cfg(not(unix))]
+fn same_or_under(path: &std::path::Path, dir: &std::path::Path) -> bool {
+    let Ok(real_dir) = std::fs::canonicalize(dir) else { return true };
+    let lower = |p: &std::path::Path| p.components().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).collect::<Vec<_>>();
+    let (path, dir) = (lower(path), lower(&real_dir));
+    path.len() >= dir.len() && path[..dir.len()] == dir[..]
 }
 
 /// A save's path: inside `output`, no part starting with `.`, and not into a `reserved` folder

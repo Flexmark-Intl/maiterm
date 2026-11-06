@@ -994,9 +994,10 @@ async fn a_cleared_setting_reaches_the_child_set_and_empty() {
     proxy::remove(&id).unwrap();
 }
 
-/// The output folder sits on a case-insensitive volume (APFS also folds `ſ` to `s`), so Meshy's
-/// index folder is judged by what is on disk, never by spelling: every spelling that reaches
-/// `meshy_output/` is refused, through the catalogue's real Meshy rules.
+/// The exact spelling, the absolute path and the first save are refused everywhere. The output
+/// folder usually sits on a case-insensitive volume (APFS also folds `ſ` to `s`), where every
+/// spelling that reaches `meshy_output/` must be refused too: those are asserted only where the
+/// volume is seen to fold them, through the catalogue's real Meshy rules.
 #[test]
 fn a_save_into_meshys_index_is_refused_whatever_its_spelling() {
     let id = fresh_id("folded");
@@ -1008,9 +1009,22 @@ fn a_save_into_meshys_index_is_refused_whatever_its_spelling() {
     assert!(save("meshy_output/history.json").is_some());
     assert!(out.join("meshy_output").is_dir(), "made so it can be compared with");
     std::fs::write(out.join("meshy_output/history.json"), b"[]").unwrap();
-    let abs_folded = out.join("MESHY_Output").join("history.json").to_string_lossy().to_string();
-    for bad in ["MESHY_OUTPUT/history.json", "Meshy_Output/history.json", "meshy_OUTPUT/x/metadata.json", "me\u{17f}hy_output/history.json", abs_folded.as_str(), "MESHY_OUTPUT", "Meshy_Output/new/model.glb"] {
+    let abs = out.join("meshy_output").join("history.json").to_string_lossy().to_string();
+    for bad in ["meshy_output/history.json", "meshy_output/x/metadata.json", "meshy_output", abs.as_str()] {
         assert!(save(bad).is_some(), "{bad}");
+    }
+    // Each folded spelling is asserted only where the volume really folds it to the same folder
+    // (APFS and NTFS do case; APFS also folds the long s): on a case-sensitive volume those names
+    // are new, separate folders, and a save there is allowed.
+    let same_folder = |name: &str| std::fs::metadata(out.join(name)).is_ok();
+    if same_folder("MESHY_OUTPUT") && same_folder("Meshy_Output") && same_folder("meshy_OUTPUT") && same_folder("MESHY_Output") {
+        let abs_folded = out.join("MESHY_Output").join("history.json").to_string_lossy().to_string();
+        for bad in ["MESHY_OUTPUT/history.json", "Meshy_Output/history.json", "meshy_OUTPUT/x/metadata.json", abs_folded.as_str(), "MESHY_OUTPUT", "Meshy_Output/new/model.glb"] {
+            assert!(save(bad).is_some(), "{bad}");
+        }
+    }
+    if same_folder("me\u{17f}hy_output") {
+        assert!(save("me\u{17f}hy_output/history.json").is_some());
     }
     for ok in ["models/robot.glb", "robot.glb", "meshy_outputs/robot.glb", "my_meshy_output/robot.glb"] {
         assert!(save(ok).is_none(), "{ok}");
