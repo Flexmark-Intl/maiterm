@@ -26,6 +26,12 @@
   behind that check. Every listener is released at unmount, including one whose `listen` resolves
   after it. No secret is logged, toasted or put in a URL: the pasted key goes from its field to
   `mcpServerAdd`/`mcpServerSetToken` and the field is emptied on success.
+
+  A `stdio_mcp` provider (MiniMax, Meshy: docs/hive-media.md §12.1) is a local server maiTerm runs
+  itself. Its arm is `StdioSetup` (lib/hive/mediaStdio.ts): the key to the keychain, then the server
+  added from its catalogue route (Rust makes the command), then Verify; a failed start offers Try
+  again and Remove the stored key. Its password field is emptied BEFORE the key is sent, so the key
+  is in no state, store or sessionStorage once Save is pressed. The phone never reaches this arm.
 -->
 <script lang="ts">
   import { onDestroy, onMount, untrack } from 'svelte';
@@ -40,6 +46,7 @@
   import { externalUrl, unverifiedNote } from '$lib/hive/media';
   import { startSignIn } from '$lib/mcp/addServer';
   import { hiveToolSetup } from '$lib/stores/hiveToolSetup.svelte';
+  import { StdioSetup, defaultRoute, keyHint, keySendable, stdioPlan, type StdioState } from '$lib/hive/mediaStdio';
   import {
     bringsSpeechModel, canVerify, guideFor, installEndLine, speechModelProgress, verifyIsPrimary, newServerScope, reusedServerScope, scopeSentence, serverPlan, setupAction, speechModelLine, verifyView,
     type ScopeChoice, type SetupAction, type VerifyView,
@@ -104,22 +111,57 @@
   let waitingForSignIn = $state(false);
   let key = $state('');
 
+  // A local server maiTerm runs itself (stdio_mcp).
+  const stdioRoutes = p.stdio_routes ?? [];
+  let routeId = $state(defaultRoute(stdioRoutes)?.id ?? '');
+  let stdio = $state<StdioState>({ stage: 'key', keyFor: null, server: null, error: null, note: null });
+  const stdioSetup = new StdioSetup(
+    {
+      keyStore: commands.mcpStdioKeyStore,
+      serverAdd: commands.mcpStdioServerAdd,
+      setWorkspaces: commands.mcpServerSetWorkspaces,
+      keyDelete: commands.mcpStdioKeyDelete,
+      verify: () => runVerify(),
+      // The write landed: say so whether or not the sheet is still open (the panel outlives it).
+      landed: (s) => {
+        if (alive) serverId = s.id;
+        reportStarted?.({ provider_id: p.id, server_id: s.id, ready_before: readyBefore });
+        changed();
+      },
+    },
+    (st) => {
+      stdio = st;
+      if (st.error) note = { text: st.error, error: true };
+      else if (st.note) note = { text: st.note, error: false };
+    },
+  );
+
   // Install
   let started = $state<HiveMediaInstallStarted | null>(preStarted);
   let endLine = $state<string | null>(null);
   let model = $state<HiveMediaModelStatus | null>(null);
 
   const guide = $derived(guideFor(p, action));
-  const isMcp = $derived(action === 'mcp_oauth' || action === 'mcp_token' || action === 'mcp_open');
-  const plan = $derived(servers && isMcp ? serverPlan(servers, url, p.id, native, DEV) : null);
+  const isRemote = $derived(action === 'mcp_oauth' || action === 'mcp_token' || action === 'mcp_open');
+  const isMcp = $derived(isRemote || action === 'mcp_stdio');
+  const plan = $derived(servers && isRemote ? serverPlan(servers, url, p.id, native, DEV) : null);
   const reused = $derived(plan && 'reuse' in plan ? plan.reuse : null);
+  const route = $derived(stdioRoutes.find((r) => r.id === routeId) ?? null);
+  const sPlan = $derived(servers && action === 'mcp_stdio' && route ? stdioPlan(servers, route.id, p.id, native, DEV) : null);
+  const stdioReused = $derived(sPlan && 'reuse' in sPlan ? sPlan.reuse : null);
+  const stdioBusy = $derived(stdio.stage === 'storing' || stdio.stage === 'starting' || stdio.stage === 'verifying' || stdio.stage === 'removing');
+  const hint = $derived(keyHint(key));
+  /** The launcher the first start downloads the package with: `npx`, `uvx`. */
+  const launcher = $derived(route?.command_shown.split(' ')[0] ?? '');
   const hiveCount = $derived(hiveWorkspaces.length);
   const modelLine = $derived(model ? speechModelLine(model) : null);
   const modelProgress = $derived(model ? speechModelProgress(model) : null);
   /** A sign-in has opened for the server this sheet added or reused (it may since have finished). */
   const signInOpened = $derived(waitingForSignIn || serverId !== null);
-  const verifyPrimary = $derived(verifyIsPrimary(action, { installStarted: started !== null, signInOpened }));
+  const verifyPrimary = $derived(verifyIsPrimary(action, { installStarted: started !== null, signInOpened, stdioAdded: stdio.stage === 'added' }));
   const signupUrl = externalUrl(p.signup_url);
+  /** Where the key is made: the chosen route's own page (a region's), else the provider's. */
+  const keyUrl = $derived(externalUrl(route?.key_url ?? '') ?? signupUrl);
   const billingUrl = externalUrl(p.billing_url);
   const appUrl = setupAction(p) === 'app' ? externalUrl(url) : null;
 
@@ -164,6 +206,7 @@
 
   onDestroy(() => {
     alive = false;
+    stdioSetup.alive = false;
     cancelAnimationFrame(raf);
     window.removeEventListener('focus', onWindowFocus);
     for (const off of offs.splice(0)) off();
@@ -397,6 +440,67 @@
     }
   }
 
+  // ─── stdio: a local server maiTerm runs itself ────────────────────────────
+
+  /** Save key: the field is emptied first, so the key lives only in this call's argument. The server
+   *  list is read again at the click (the one from mount may be stale), the scope decided as the
+   *  remote add path decides it, then `StdioSetup` stores the key, adds the server and verifies. */
+  async function saveStdioKey(e: SubmitEvent) {
+    e.preventDefault();
+    const r = route;
+    if (!r || stdioBusy || busy || !keySendable(key)) return;
+    const value = key.trim();
+    key = '';
+    note = null;
+    result = null;
+    busy = true;
+    try {
+      const [list, names, windows] = await Promise.all([
+        commands.mcpServersList(),
+        commands.mcpNativeNames().catch(() => [] as string[]),
+        ws ? Promise.resolve([]) : commands.listMoveTargets().catch(() => []),
+      ]);
+      if (!alive) return;
+      servers = list;
+      native = names;
+      if (!ws) hiveWorkspaces = hiveIds(windows);
+      const got = stdioPlan(list, r.id, p.id, names, DEV);
+      if ('error' in got) throw new Error(got.error);
+      const reuse = 'reuse' in got ? got.reuse : null;
+      const scope = reuse ? [] : newServerScope(ws, scopeChoice, hiveWorkspaces);
+      if (scope === null) throw new Error('There is no Hive yet. Choose Every workspace, or set this up from a Hive.');
+      busy = false;
+      await stdioSetup.submit(value, {
+        id: reuse ? reuse.id : 'add' in got ? got.add : '',
+        routeId: r.id,
+        reuse,
+        scope,
+        reuseScope: reuse ? reusedServerScope(reuse.workspaces, ws) : null,
+      });
+    } catch (err) {
+      fail(err);
+    } finally {
+      if (alive) {
+        busy = false;
+        holdFocus();
+      }
+    }
+  }
+
+  async function retryStdio() {
+    note = null;
+    result = null;
+    await stdioSetup.retry();
+    holdFocus();
+  }
+
+  async function removeStdioKey() {
+    note = null;
+    result = null;
+    await stdioSetup.removeKey();
+    holdFocus();
+  }
+
   async function addOpen() {
     if (busy) return;
     busy = true;
@@ -594,35 +698,85 @@
         {#each guide.steps as step, i (i)}<li>{step}</li>{/each}
       </ol>
     {/if}
-    {#if (signupUrl && action !== 'mcp_token') || billingUrl}
+    {#if (signupUrl && action !== 'mcp_token' && action !== 'mcp_stdio') || billingUrl}
       <p class="links">
-        {#if signupUrl && action !== 'mcp_token'}<button type="button" class="link" onclick={() => open(signupUrl)}>Sign up</button>{/if}
+        {#if signupUrl && action !== 'mcp_token' && action !== 'mcp_stdio'}<button type="button" class="link" onclick={() => open(signupUrl)}>Sign up</button>{/if}
         {#if billingUrl}<button type="button" class="link" onclick={() => open(billingUrl)}>Billing</button>{/if}
       </p>
     {/if}
 
+    {#snippet scopeLine()}
+      {#if ws}
+        <p class="dim">{scopeSentence(ws, scopeChoice, hiveCount)}</p>
+      {:else}
+        <fieldset class="scope">
+          <legend>Which workspaces get its tools?</legend>
+          <label class="choice">
+            <input type="radio" name="{uid}-scope" value="hives" bind:group={scopeChoice} disabled={hiveCount === 0} onchange={() => (scopeTouched = true)} />
+            <span>Hive workspaces only{hiveCount === 0 ? ' (no Hive yet)' : ''}</span>
+          </label>
+          <label class="choice">
+            <input type="radio" name="{uid}-scope" value="every" bind:group={scopeChoice} onchange={() => (scopeTouched = true)} />
+            <span>Every workspace</span>
+          </label>
+          <p class="dim">{scopeSentence(null, scopeChoice, hiveCount)}</p>
+        </fieldset>
+      {/if}
+    {/snippet}
+
     <div class="act">
+      {#if action === 'mcp_stdio' && route}
+        {#if stdioRoutes.length > 1 && stdio.stage === 'key'}
+          <fieldset class="scope">
+            <legend>Which {p.name} account is the key for?</legend>
+            {#each stdioRoutes as r (r.id)}
+              <label class="choice">
+                <input type="radio" name="{uid}-route" value={r.id} bind:group={routeId} />
+                <span>{r.label || r.id}</span>
+              </label>
+            {/each}
+          </fieldset>
+        {:else if stdioRoutes.length > 1}
+          <!-- Once the key is on its way, the account is fixed: said, not a disabled control. -->
+          <p class="state-line">Account: {route.label || route.id}</p>
+        {/if}
+        <p class="state-line">
+          maiTerm runs <code>{route.command_shown}</code> on this Mac itself, outside every sandbox, and serves it to your agents. The version is pinned, but the package’s dependencies aren’t. Its first start downloads it with {launcher}, which can take a minute or more.
+        </p>
+        {#if stdioReused}
+          <p class="dim">maiTerm already runs this as “{stdioReused.entry_name}”: a new key replaces its key{ws && stdioReused.workspaces.length && !stdioReused.workspaces.includes(ws) ? ', and it is offered to this Hive too' : ''}.</p>
+        {:else}
+          {@render scopeLine()}
+        {/if}
+        {#if stdio.stage === 'key' || stdio.stage === 'storing'}
+          {#if keyUrl}<div class="row"><Button variant="secondary" onclick={() => open(keyUrl)}>Open {p.name} to make a key</Button></div>{/if}
+          <form class="key" onsubmit={saveStdioKey}>
+            <label for={keyId}>Paste the key</label>
+            <div class="row">
+              <input id={keyId} type="password" bind:value={key} autocomplete="off" spellcheck="false" />
+              <Button variant="primary" type="submit" aria-disabled={busy || stdioBusy || !keySendable(key)}>{busy || stdio.stage === 'storing' ? 'Saving…' : stdioReused ? 'Save key' : 'Save key and start'}</Button>
+            </div>
+            {#if hint}<p class="hint" role="status">{hint}</p>{/if}
+            <p class="dim">It goes to your keychain and reaches {p.name}’s server only in its environment: never an agent’s config, a log or a command line.</p>
+          </form>
+        {:else if stdio.stage === 'starting'}
+          <p class="state-line" role="status">Starting {p.name}. Its first start downloads it, which can take a minute or more…</p>
+        {:else if stdio.stage === 'failed'}
+          <div class="row">
+            <Button variant="secondary" onclick={retryStdio}>Try again</Button>
+            {#if !stdioReused && stdio.keyFor}<Button variant="secondary" onclick={removeStdioKey}>Remove the stored key</Button>{/if}
+          </div>
+        {:else if stdio.stage === 'removing'}
+          <p class="state-line" role="status">Removing the stored key…</p>
+        {/if}
+      {/if}
+
       {#if action === 'mcp_oauth' || action === 'mcp_open' || action === 'mcp_token'}
         {#if reused}
           <p class="dim">maiTerm already serves this as “{reused.entry_name}”: setting up uses that server{ws && reused.workspaces.length && !reused.workspaces.includes(ws) ? ' and offers it to this Hive too' : ''}.</p>
         {:else}
           <p class="dim">maiTerm adds {p.name}’s MCP server (<span class="url">{url}</span>) and serves it to your agents{action === 'mcp_oauth' ? ', then opens its sign-in in your browser' : ''}.</p>
-          {#if ws}
-            <p class="dim">{scopeSentence(ws, scopeChoice, hiveCount)}</p>
-          {:else}
-            <fieldset class="scope">
-              <legend>Which workspaces get its tools?</legend>
-              <label class="choice">
-                <input type="radio" name="{uid}-scope" value="hives" bind:group={scopeChoice} disabled={hiveCount === 0} onchange={() => (scopeTouched = true)} />
-                <span>Hive workspaces only{hiveCount === 0 ? ' (no Hive yet)' : ''}</span>
-              </label>
-              <label class="choice">
-                <input type="radio" name="{uid}-scope" value="every" bind:group={scopeChoice} onchange={() => (scopeTouched = true)} />
-                <span>Every workspace</span>
-              </label>
-              <p class="dim">{scopeSentence(null, scopeChoice, hiveCount)}</p>
-            </fieldset>
-          {/if}
+          {@render scopeLine()}
         {/if}
       {/if}
 
@@ -744,6 +898,7 @@
   .key input { flex: 1 1 12em; min-width: 0; padding: 5px 8px; background: var(--bg-dark); color: var(--fg); border: 1px solid var(--bg-light); border-radius: 5px; font: inherit; }
   .key input:focus { outline: none; border-color: var(--accent); }
   .note { font-size: 0.846rem; color: var(--fg); }
+  .hint { font-size: 0.808rem; color: var(--yellow); }
   .bad { color: var(--red); }
   .result { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; padding: 6px 8px; background: var(--bg-dark); border: 1px solid var(--bg-light); border-radius: 5px; font-size: 0.846rem; min-width: 0; }
   .msg { flex: 1 1 14em; min-width: 0; overflow-wrap: anywhere; }

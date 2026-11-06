@@ -916,6 +916,9 @@ export interface HiveToolsPreview {
   removed: string[];
   /** Generator hosts the added tools need that the gallery doesn't have: offered ticked. */
   hosts_offered: string[];
+  /** Output folders the added tools write into (a local MCP server maiTerm runs itself) that the
+   *  gallery doesn't list: offered ticked, so galleryAdd takes their files. */
+  folders_offered: string[];
 }
 
 /** hive/tool_change.rs `HiveToolsChange`: a tools change saved. */
@@ -924,6 +927,8 @@ export interface HiveToolsChange {
   added: string[];
   removed: string[];
   hosts_added: string[];
+  /** The ticked output folders, now in the gallery's output folders. */
+  folders_added: string[];
   /** The coordinator's notice was delivered. */
   coordinator_told: boolean;
 }
@@ -1089,6 +1094,22 @@ export interface HiveMediaProvider {
   unverified: boolean;
   /** The capabilities whose claim for this provider is unverified. */
   unverified_capabilities: string[];
+  /** Its local MCP server routes (`stdio_mcp`, docs/hive-media.md §12.1); empty for any other
+   *  provider. The sheet sends back a route id only: Rust makes the command from the catalogue. */
+  stdio_routes: HiveMediaStdioRoute[];
+}
+
+/** hive/media/view.rs `StdioRouteView`: a local MCP server route as the setup sheet offers it. */
+export interface HiveMediaStdioRoute {
+  id: string;
+  /** How the human tells routes apart ("Global account (minimax.io)"); "" with only one. */
+  label: string;
+  /** The page where the human makes the key, https only; "" when none. */
+  key_url: string;
+  /** What maiTerm runs: `uvx minimax-mcp==0.0.19`. No secret. */
+  command_shown: string;
+  /** It takes a pasted key. */
+  takes_key: boolean;
 }
 
 /** `proposeHive`'s `media` list as the catalogue judged it (`hive_media_check_requested`). */

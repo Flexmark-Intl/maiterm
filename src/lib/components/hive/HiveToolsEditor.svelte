@@ -125,6 +125,8 @@
 
   const ready = $derived(preview !== null && previewFor === nextKey && nextKey !== '');
   const ticked = $derived(preview ? tickedHosts(preview.hosts_offered, unticked) : []);
+  /** Offered output folders left ticked (a folder path and a host name never collide in `unticked`). */
+  const tickedFolders = $derived(preview ? tickedHosts(preview.folders_offered ?? [], unticked) : []);
 
   function setPicked(nextPicked: Set<string>) {
     picked = nextPicked;
@@ -173,10 +175,11 @@
     const ws = workspaceId;
     const tools = [...next];
     const hosts = [...ticked];
+    const folders = [...tickedFolders];
     saving = true;
     saveError = null;
     try {
-      const r = await hiveSetTools(ws, tools, hosts);
+      const r = await hiveSetTools(ws, tools, hosts, folders);
       if (!alive) return;
       picked = seedPicked(r.hive.tools);
       unticked = new Set();
@@ -243,11 +246,24 @@
       </div>
     {/if}
 
+    {#if ready && preview && preview.folders_offered?.length}
+      <div class="block">
+        <span class="sub">Folders the added tools save files in</span>
+        <span class="why">galleryAdd takes files from the ticked ones. They become output folders, which Budget and generation lists.</span>
+        {#each preview.folders_offered as f (f)}
+          <label class="row">
+            <input type="checkbox" checked={!unticked.has(f)} onchange={() => flipHost(f)} />
+            <code>{f}</code>
+          </label>
+        {/each}
+      </div>
+    {/if}
+
     {#if saveError}<p class="err" role="alert">{saveError}</p>{/if}
 
     {#if confirming && ready && preview}
       <div class="confirm" role="group" aria-label="Confirm the tools change">
-        <span>{confirmLine(preview.added, preview.removed, ticked.length, label)} The queen is told.</span>
+        <span>{confirmLine(preview.added, preview.removed, ticked.length, label, tickedFolders.length)} The queen is told.</span>
         {#if preview.removed.length}<span class="why">Hosts stay until you remove them in Budget and generation.</span>{/if}
         <div class="actions">
           <button type="button" class="btn primary" bind:this={confirmBtn} disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save tools'}</button>

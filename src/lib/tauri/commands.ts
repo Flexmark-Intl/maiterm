@@ -2731,6 +2731,14 @@ export async function mcpStdioKeyDelete(id: string): Promise<void> {
   return invoke('mcp_stdio_key_delete', { id });
 }
 
+/** Add a stdio server from a catalogue route (docs/hive-media.md §12.1), after its key is stored:
+ *  Rust makes the command from the catalogue, starts it, reads its first tool list and only then
+ *  saves it and writes the entries. The first start downloads the package (npx/uvx), so this can
+ *  take minutes. There is deliberately no command that takes a command line. */
+export async function mcpStdioServerAdd(id: string, routeId: string, workspaces: string[]): Promise<McpServerView> {
+  return invoke('mcp_stdio_server_add', { id, routeId, workspaces });
+}
+
 export async function mcpServerSetEnabled(id: string, enabled: boolean): Promise<McpServerView> {
   return invoke('mcp_server_set_enabled', { id, enabled });
 }
@@ -3008,10 +3016,10 @@ export async function hiveToolsChangePreview(workspaceId: string, tools: string[
 }
 
 /** Hive settings → Tools → Save: the human's change, checked again in Rust against a fresh
- *  detection. `addHosts` are the offered hosts left ticked. The coordinator is told; workers get it
- *  at their next launch. */
-export async function hiveSetTools(workspaceId: string, tools: string[], addHosts: string[]): Promise<HiveToolsChange> {
-  return invoke('hive_set_tools', { workspaceId, tools, addHosts });
+ *  detection. `addHosts` are the offered hosts left ticked, `addFolders` the offered output folders.
+ *  The coordinator is told; workers get it at their next launch. */
+export async function hiveSetTools(workspaceId: string, tools: string[], addHosts: string[], addFolders: string[] = []): Promise<HiveToolsChange> {
+  return invoke('hive_set_tools', { workspaceId, tools, addHosts, addFolders });
 }
 
 export async function hiveSetGallerySettings(workspaceId: string, settings: GallerySettingsChange): Promise<Hive> {

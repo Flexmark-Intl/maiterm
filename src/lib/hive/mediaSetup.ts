@@ -15,13 +15,18 @@ import { externalUrl } from './media';
  *  - `mcp_oauth`: add its MCP server through maiTerm, then sign in in the browser;
  *  - `mcp_token`: open its key page, paste the key (saved to the keychain as the proxy's token);
  *  - `mcp_open`: add its MCP server, which needs no sign-in;
+ *  - `mcp_stdio`: maiTerm runs its local MCP server itself: paste its key, then maiTerm adds it from
+ *    the catalogue route (lib/hive/mediaStdio.ts);
  *  - `install`: a brew or plugin install in a visible tab;
  *  - `app`: a download link, re-detected when the window comes back to the front;
  *  - `guide`: the guide only (`manual`, a plugin with no confirmed source, an unknown kind). */
-export type SetupAction = 'mcp_oauth' | 'mcp_token' | 'mcp_open' | 'install' | 'app' | 'guide';
+export type SetupAction = 'mcp_oauth' | 'mcp_token' | 'mcp_open' | 'mcp_stdio' | 'install' | 'app' | 'guide';
 
-export function setupAction(p: Pick<HiveMediaProvider, 'route_kind' | 'auth' | 'route_url' | 'installable'>): SetupAction {
+export function setupAction(p: Pick<HiveMediaProvider, 'route_kind' | 'auth' | 'route_url' | 'installable'> & { stdio_routes?: HiveMediaProvider['stdio_routes'] }): SetupAction {
   switch (p.route_kind) {
+    case 'stdio_mcp':
+      // A route this build can't name (none listed) gets the guide, never a guess.
+      return p.stdio_routes?.length ? 'mcp_stdio' : 'guide';
     case 'remote_mcp':
       if (!externalUrl(p.route_url)) return 'guide';
       if (p.auth === 'oauth') return 'mcp_oauth';
@@ -66,10 +71,11 @@ export function guideFor(p: Pick<HiveMediaProvider, 'name' | 'route_kind' | 'gui
  *  or finished), and a browser sign-in that has opened (from then on "Sign in again" is secondary,
  *  also after Verify answered, e.g. "Needs credit"). Otherwise the route's own action is the primary
  *  and Verify is secondary. */
-export function verifyIsPrimary(action: SetupAction, s: { installStarted: boolean; signInOpened: boolean }): boolean {
+export function verifyIsPrimary(action: SetupAction, s: { installStarted: boolean; signInOpened: boolean; stdioAdded?: boolean }): boolean {
   if (action === 'guide' || action === 'app') return true;
   if (action === 'install') return s.installStarted;
   if (action === 'mcp_oauth') return s.signInOpened;
+  if (action === 'mcp_stdio') return s.stdioAdded ?? false;
   return false;
 }
 

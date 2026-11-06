@@ -26,6 +26,9 @@ describe('setupAction', () => {
     expect(setupAction(route('remote_mcp', 'oauth', 'javascript:alert(1)'))).toBe('guide');
     expect(setupAction(route('remote_mcp', 'passkey', 'https://x.example/mcp'))).toBe('guide');
     expect(setupAction(route('stdio_mcp', 'token'))).toBe('guide');
+    const stdio = { id: 'meshy', label: '', key_url: 'https://www.meshy.ai/developers/keys', command_shown: 'npx -y @meshy-ai/meshy-mcp-server@0.6.7', takes_key: true };
+    expect(setupAction({ ...route('stdio_mcp', 'token'), stdio_routes: [stdio] })).toBe('mcp_stdio');
+    expect(setupAction({ ...route('stdio_mcp', 'token'), stdio_routes: [] })).toBe('guide');
     expect(setupAction(route(''))).toBe('guide');
   });
   it('verifies any provider with a route, a guide-only one included', () => {
@@ -131,6 +134,9 @@ describe('verifyIsPrimary and speechModelProgress', () => {
     expect(verifyIsPrimary('mcp_oauth', idle)).toBe(false);
     expect(verifyIsPrimary('mcp_oauth', { ...idle, signInOpened: true })).toBe(true);
     expect(verifyIsPrimary('mcp_token', idle)).toBe(false);
+    // A local server: Save key is the way forward until the server is added.
+    expect(verifyIsPrimary('mcp_stdio', idle)).toBe(false);
+    expect(verifyIsPrimary('mcp_stdio', { ...idle, stdioAdded: true })).toBe(true);
   });
   it('gives a bar only for a download of known size', () => {
     expect(speechModelProgress({ state: 'downloading', done: 74_000_000, total: 148_000_000 })).toEqual({ done: 74_000_000, total: 148_000_000, percent: 50 });

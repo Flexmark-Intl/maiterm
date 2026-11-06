@@ -48,11 +48,12 @@ export function tickedHosts(offered: readonly string[], unticked: ReadonlySet<st
 
 /** The inline confirm's sentence: "Adds fal, browse. Removes ffmpeg. Media workers may also reach
  *  2 hosts." Empty parts are left out. */
-export function confirmLine(added: readonly string[], removed: readonly string[], hosts: number, label: (id: string) => string): string {
+export function confirmLine(added: readonly string[], removed: readonly string[], hosts: number, label: (id: string) => string, folders = 0): string {
   const names = (ids: readonly string[]) => ids.map(label).join(', ');
   const parts: string[] = [];
   if (added.length) parts.push(`Adds ${names(added)}.`);
   if (removed.length) parts.push(`Removes ${names(removed)}.`);
   if (hosts) parts.push(`Media workers may also reach ${hosts} ${hosts === 1 ? 'host' : 'hosts'}.`);
+  if (folders) parts.push(`galleryAdd also takes files from ${folders === 1 ? 'one more folder' : `${folders} more folders`}.`);
   return parts.join(' ');
 }

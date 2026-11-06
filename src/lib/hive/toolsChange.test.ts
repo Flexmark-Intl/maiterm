@@ -63,4 +63,9 @@ describe('confirmLine', () => {
     expect(confirmLine([], ['mcp:gone'], 0, label)).toBe('Removes gone.');
     expect(confirmLine(['mcp:fal'], [], 1, label)).toBe('Adds fal. Media workers may also reach 1 host.');
   });
+  it('counts the output folders a local server brings', () => {
+    expect(confirmLine(['mcp:meshy'], [], 0, label, 1)).toBe('Adds meshy. galleryAdd also takes files from one more folder.');
+    expect(confirmLine(['mcp:meshy', 'mcp:minimax'], [], 0, label, 2)).toBe('Adds meshy, minimax. galleryAdd also takes files from 2 more folders.');
+    expect(confirmLine(['mcp:fal'], [], 0, label)).toBe('Adds fal.');
+  });
 });

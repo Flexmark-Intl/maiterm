@@ -23,6 +23,7 @@ const prov = (id: string, over: Partial<HiveMediaProvider> = {}): HiveMediaProvi
   checked: '2026-11-03',
   unverified: false,
   unverified_capabilities: [],
+  stdio_routes: [],
   ...over,
 });
 
