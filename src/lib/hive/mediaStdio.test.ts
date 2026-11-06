@@ -23,6 +23,7 @@ function rig(over: Partial<Deps> = {}) {
   const states: State[] = [];
   const deps: Deps = {
     keyStore: vi.fn(async (id: string, key: string) => void calls.push(`store ${id} ${key.length}`)),
+    setRoute: vi.fn(async (id: string, route: string) => (calls.push(`route ${id} ${route}`), view(id, { route }))),
     serverAdd: vi.fn(async (id: string, route: string, ws: string[]) => (calls.push(`add ${id} ${route} [${ws.join(',')}]`), view(id))),
     setWorkspaces: vi.fn(async (id: string, ws: string[]) => void calls.push(`scope ${id} [${ws.join(',')}]`)),
     keyDelete: vi.fn(async (id: string) => void calls.push(`delete ${id}`)),
@@ -133,6 +134,52 @@ describe('the stdio setup: store, add, verify', () => {
   });
 });
 
+describe('a key for the other region', () => {
+  it('moves the provider\'s one server to the chosen account, with the new key, then verifies', async () => {
+    // The global server was added with a mainland key: Verify refused it. The human picks
+    // Mainland China and pastes again: the same server is moved, never a second one added.
+    const global = view('minimax', { route: 'minimax', workspaces: ['ws-hive'] });
+    const { setup, calls, deps } = rig();
+    await setup.submit(KEY, target({ id: 'minimax', routeId: 'minimax-mainland', reuse: global, reuseScope: null }));
+    expect(calls).toEqual([`store minimax ${KEY.length}`, 'route minimax minimax-mainland', 'landed minimax', 'verify']);
+    expect(deps.serverAdd).not.toHaveBeenCalled();
+    expect(setup.state.server?.route).toBe('minimax-mainland');
+    expect(setup.state.stage).toBe('added');
+  });
+
+  it('can paste again after a Verify that said the key was refused', async () => {
+    let attempt = 0;
+    const global = view('minimax', { route: 'minimax' });
+    const { setup, calls } = rig({ verify: vi.fn(async () => void calls.push(`verify ${++attempt}`)) });
+    await setup.submit(KEY, target({ id: 'minimax', routeId: 'minimax', reuse: global }));
+    expect(setup.state.stage).toBe('added');
+    // Not busy at 'added': a second submit runs (the sheet shows the field again when Verify isn't Ready).
+    await setup.submit(KEY, target({ id: 'minimax', routeId: 'minimax-mainland', reuse: global }));
+    expect(calls).toEqual([
+      `store minimax ${KEY.length}`, 'landed minimax', 'verify 1',
+      `store minimax ${KEY.length}`, 'route minimax minimax-mainland', 'landed minimax', 'verify 2',
+    ]);
+  });
+
+  it('a refused move keeps the key and offers Try again', async () => {
+    let fail = true;
+    const global = view('minimax', { route: 'minimax' });
+    const { setup, calls } = rig({
+      setRoute: vi.fn(async (id: string, route: string) => {
+        calls.push(`route ${id} ${route}`);
+        if (fail) throw new Error('minimax can only move to another route of its own provider');
+        return view(id, { route });
+      }),
+    });
+    await setup.submit(KEY, target({ id: 'minimax', routeId: 'minimax-mainland', reuse: global }));
+    expect(setup.state).toMatchObject({ stage: 'failed', keyFor: 'minimax' });
+    fail = false;
+    await setup.retry();
+    expect(calls.filter((c) => c.startsWith('route'))).toHaveLength(2);
+    expect(setup.state.stage).toBe('added');
+  });
+});
+
 describe('the key field and the plan', () => {
   it('hints at a key too short to be whole, and only then', () => {
     expect(MIN_KEY_LEN).toBe(16);
@@ -146,9 +193,15 @@ describe('the key field and the plan', () => {
 
   it('reuses the server set up from the same route, else names a new one after the provider', () => {
     const servers = [view('fal', { transport: 'http', route: null, url: 'https://mcp.fal.ai/mcp-relay' }), view('minimax', { route: 'minimax' })];
-    expect(stdioPlan(servers, 'minimax', 'minimax', [], false)).toEqual({ reuse: servers[1] });
-    // The mainland route is another server: the name is suffixed past the global one.
-    expect(stdioPlan(servers, 'minimax-mainland', 'minimax', [], false)).toEqual({ add: 'minimax-2' });
+    const both = ['minimax', 'minimax-mainland'];
+    expect(stdioPlan(servers, 'minimax', 'minimax', [], false, both)).toEqual({ reuse: servers[1] });
+    // One server per provider: the mainland route reuses the global one (it is moved, not doubled).
+    expect(stdioPlan(servers, 'minimax-mainland', 'minimax', [], false, both)).toEqual({ reuse: servers[1] });
+    // The chosen route's own server wins over another of the provider's.
+    const two = [...servers, view('minimax-2', { route: 'minimax-mainland' })];
+    expect(stdioPlan(two, 'minimax-mainland', 'minimax', [], false, both)).toEqual({ reuse: two[2] });
+    // Another provider's server is never reused.
+    expect(stdioPlan(servers, 'meshy', 'meshy', [], false, ['meshy'])).toEqual({ add: 'meshy' });
     expect(stdioPlan(servers, 'meshy', 'meshy', [], false)).toEqual({ add: 'meshy' });
     // A native entry holding the name as agents would see it.
     expect(stdioPlan([], 'meshy', 'meshy', ['meshy-dev'], true)).toEqual({ add: 'meshy-2' });

@@ -38,10 +38,14 @@ export function defaultRoute(routes: readonly HiveMediaStdioRoute[]): HiveMediaS
 /** Reuse the server maiTerm already runs from this route, else add one under a free name. */
 export type StdioPlan = { reuse: McpServerView } | { add: string } | { error: string };
 
-/** A stdio server is the same one when it was set up from the same catalogue route; the name is
- *  the provider's id, suffixed past another server's id or a name a native entry holds. */
-export function stdioPlan(servers: readonly McpServerView[], routeId: string, providerId: string, nativeNames: readonly string[], dev: boolean): StdioPlan {
-  const served = servers.find((s) => s.transport === 'stdio' && s.route === routeId);
+/** A provider has ONE stdio server: the one set up from any of its routes (`routeIds`), the chosen
+ *  route's first. A reuse on another route is moved to the chosen one in Rust (`setRoute`), so
+ *  fixing a MiniMax key pasted for the wrong region never leaves a second, broken server behind.
+ *  A new one is named after the provider, suffixed past another server's id or a name a native
+ *  entry holds. */
+export function stdioPlan(servers: readonly McpServerView[], routeId: string, providerId: string, nativeNames: readonly string[], dev: boolean, routeIds: readonly string[] = [routeId]): StdioPlan {
+  const stdio = servers.filter((s) => s.transport === 'stdio' && s.route !== null);
+  const served = stdio.find((s) => s.route === routeId) ?? stdio.find((s) => routeIds.includes(s.route ?? ''));
   if (served) return { reuse: served };
   const name = freeServerName(providerId, servers.map((s) => s.id), nativeNames, dev);
   return name ? { add: name } : { error: 'maiTerm couldn’t find a free name for this server. Remove an unused one in Preferences → MCP servers.' };
@@ -62,6 +66,8 @@ export interface StdioTarget {
 
 export interface StdioDeps {
   keyStore(id: string, key: string): Promise<void>;
+  /** Move a reused server to another route of its provider (the other account's region). */
+  setRoute(id: string, routeId: string): Promise<McpServerView>;
   serverAdd(id: string, routeId: string, workspaces: string[]): Promise<McpServerView>;
   setWorkspaces(id: string, workspaces: string[]): Promise<unknown>;
   keyDelete(id: string): Promise<void>;
@@ -134,14 +140,14 @@ export class StdioSetup {
       return;
     }
     this.#set({ keyFor: target.id });
-    return target.reuse ? this.#reuse(target.reuse, target.reuseScope) : this.#add();
+    return target.reuse ? this.#reuse(target.reuse, target.routeId, target.reuseScope) : this.#add();
   }
 
   /** The step after the key failed with the key stored: run it again, no second paste. */
   async retry(): Promise<void> {
     const t = this.#target;
     if (this.busy || this.#s.stage !== 'failed' || !t || !this.#s.keyFor) return;
-    return t.reuse ? this.#reuse(t.reuse, t.reuseScope) : this.#add();
+    return t.reuse ? this.#reuse(t.reuse, t.routeId, t.reuseScope) : this.#add();
   }
 
   /** Forget the key this sheet stored (the setup is abandoned). Back to the paste. */
@@ -157,11 +163,14 @@ export class StdioSetup {
     }
   }
 
-  /** A server maiTerm already runs from this route: Rust stopped its child when the key was
-   *  replaced, and the next call starts it with the new one. Offered to this Hive if it wasn't. */
-  async #reuse(s: McpServerView, scope: string[] | null): Promise<void> {
+  /** The provider's server maiTerm already runs: Rust stopped its child when the key was replaced,
+   *  and the next call starts it with the new one. Moved to the chosen route if it is on another
+   *  (a key for the other region), and offered to this Hive if it wasn't. */
+  async #reuse(found: McpServerView, routeId: string, scope: string[] | null): Promise<void> {
     this.#set({ stage: 'starting', error: null, note: null });
+    let s = found;
     try {
+      if (s.route !== routeId) s = await this.#deps.setRoute(s.id, routeId);
       if (scope) await this.#deps.setWorkspaces(s.id, scope);
     } catch (e) {
       this.#set({ stage: 'failed', error: words(e) });

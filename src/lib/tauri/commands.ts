@@ -2735,6 +2735,13 @@ export async function mcpStdioKeyDelete(id: string): Promise<void> {
  *  Rust makes the command from the catalogue, starts it, reads its first tool list and only then
  *  saves it and writes the entries. The first start downloads the package (npx/uvx), so this can
  *  take minutes. There is deliberately no command that takes a command line. */
+/** Move a stdio server to another catalogue route of its own provider (MiniMax: the global or the
+ *  mainland China account, whose keys work only with their own host). Rust makes the command from
+ *  the catalogue; the child is stopped and the next call starts it on the new route. */
+export async function mcpStdioServerSetRoute(id: string, routeId: string): Promise<McpServerView> {
+  return invoke('mcp_stdio_server_set_route', { id, routeId });
+}
+
 export async function mcpStdioServerAdd(id: string, routeId: string, workspaces: string[]): Promise<McpServerView> {
   return invoke('mcp_stdio_server_add', { id, routeId, workspaces });
 }

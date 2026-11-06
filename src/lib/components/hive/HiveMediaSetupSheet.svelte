@@ -118,6 +118,7 @@
   const stdioSetup = new StdioSetup(
     {
       keyStore: commands.mcpStdioKeyStore,
+      setRoute: commands.mcpStdioServerSetRoute,
       serverAdd: commands.mcpStdioServerAdd,
       setWorkspaces: commands.mcpServerSetWorkspaces,
       keyDelete: commands.mcpStdioKeyDelete,
@@ -147,7 +148,11 @@
   const plan = $derived(servers && isRemote ? serverPlan(servers, url, p.id, native, DEV) : null);
   const reused = $derived(plan && 'reuse' in plan ? plan.reuse : null);
   const route = $derived(stdioRoutes.find((r) => r.id === routeId) ?? null);
-  const sPlan = $derived(servers && action === 'mcp_stdio' && route ? stdioPlan(servers, route.id, p.id, native, DEV) : null);
+  const routeIds = stdioRoutes.map((r) => r.id);
+  const sPlan = $derived(servers && action === 'mcp_stdio' && route ? stdioPlan(servers, route.id, p.id, native, DEV, routeIds) : null);
+  /** The key can be pasted (again): before any, and after a Verify that didn't say Ready (a key for
+   *  the other region, a revoked key), with the account choice back too. */
+  const stdioPasting = $derived(stdio.stage === 'key' || stdio.stage === 'storing' || (stdio.stage === 'added' && !verifying && result !== null && result.tone !== 'ok'));
   const stdioReused = $derived(sPlan && 'reuse' in sPlan ? sPlan.reuse : null);
   const stdioBusy = $derived(stdio.stage === 'storing' || stdio.stage === 'starting' || stdio.stage === 'verifying' || stdio.stage === 'removing');
   const hint = $derived(keyHint(key));
@@ -464,7 +469,7 @@
       servers = list;
       native = names;
       if (!ws) hiveWorkspaces = hiveIds(windows);
-      const got = stdioPlan(list, r.id, p.id, names, DEV);
+      const got = stdioPlan(list, r.id, p.id, names, DEV, routeIds);
       if ('error' in got) throw new Error(got.error);
       const reuse = 'reuse' in got ? got.reuse : null;
       const scope = reuse ? [] : newServerScope(ws, scopeChoice, hiveWorkspaces);
@@ -726,7 +731,7 @@
 
     <div class="act">
       {#if action === 'mcp_stdio' && route}
-        {#if stdioRoutes.length > 1 && stdio.stage === 'key'}
+        {#if stdioRoutes.length > 1 && stdioPasting && stdio.stage !== 'storing'}
           <fieldset class="scope">
             <legend>Which {p.name} account is the key for?</legend>
             {#each stdioRoutes as r (r.id)}
@@ -744,11 +749,12 @@
           maiTerm runs <code>{route.command_shown}</code> on this Mac itself, outside every sandbox, and serves it to your agents. The version is pinned, but the package’s dependencies aren’t. Its first start downloads it with {launcher}, which can take a minute or more.
         </p>
         {#if stdioReused}
-          <p class="dim">maiTerm already runs this as “{stdioReused.entry_name}”: a new key replaces its key{ws && stdioReused.workspaces.length && !stdioReused.workspaces.includes(ws) ? ', and it is offered to this Hive too' : ''}.</p>
+          <p class="dim">maiTerm already runs this as “{stdioReused.entry_name}”: a new key replaces its key{stdioReused.route !== route.id ? `, and it moves to ${route.label || 'this route'}` : ''}{ws && stdioReused.workspaces.length && !stdioReused.workspaces.includes(ws) ? ', and it is offered to this Hive too' : ''}.</p>
         {:else}
           {@render scopeLine()}
         {/if}
-        {#if stdio.stage === 'key' || stdio.stage === 'storing'}
+        {#if stdioPasting}
+          {#if stdio.stage === 'added'}<p class="state-line">Paste the key again{stdioRoutes.length > 1 ? ', for the account it belongs to' : ''}.</p>{/if}
           {#if keyUrl}<div class="row"><Button variant="secondary" onclick={() => open(keyUrl)}>Open {p.name} to make a key</Button></div>{/if}
           <form class="key" onsubmit={saveStdioKey}>
             <label for={keyId}>Paste the key</label>
