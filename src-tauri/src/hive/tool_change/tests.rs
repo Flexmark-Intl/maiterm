@@ -330,8 +330,13 @@ fn stdio_tool(name: &str, registry_id: &str) -> DetectedTool {
     DetectedTool { proxy, ..tool(&format!("mcp:{name}"), Some("127.0.0.1:8765")) }
 }
 
+/// The folder the product offers for `registry_id`. It exists first, as the product makes it
+/// before it names it (`create::tool_output_folders`): `canon` of a folder that isn't there is the
+/// path as given, which on a Mac is `/var/...` where the real folder is `/private/var/...`.
 fn folder_of(registry_id: &str) -> String {
-    crate::share::canon(&crate::mcp_proxy::stdio::output_folder(registry_id).unwrap()).to_string_lossy().to_string()
+    let dir = crate::mcp_proxy::stdio::output_folder(registry_id).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::share::canon(&dir).to_string_lossy().to_string()
 }
 
 #[test]
@@ -362,6 +367,39 @@ fn an_added_stdio_tool_offers_its_output_folder_and_only_that_one_is_taken() {
     assert!(check_folders(&full, &c, std::slice::from_ref(&folder), &root, None).unwrap_err().contains("At most"));
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// A folder spelled through a symlink (a Mac's `/var` and `/tmp`, a symlinked home or
+/// `~/Library`) is offered, ticked and saved in its real spelling; the same folder spelled through
+/// the link is not another folder the human may add, and the check keeps its other refusals.
+#[cfg(unix)]
+#[test]
+fn an_output_folder_behind_a_symlink_is_taken_by_its_real_path_only() {
+    let base = std::env::temp_dir().join(format!("hive-symlink-{}", uuid::Uuid::new_v4().simple()));
+    let real = base.join("real").join("mcp-out").join("meshy-x");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = base.join("link");
+    std::os::unix::fs::symlink(base.join("real"), &link).unwrap();
+    let through_link = link.join("mcp-out").join("meshy-x");
+    let offered = crate::share::canon(&through_link).to_string_lossy().to_string();
+    assert_eq!(offered, crate::share::canon(&real).to_string_lossy(), "the link is followed");
+    assert_ne!(offered, through_link.to_string_lossy(), "and the spelling differs, as it does on a Mac's /var");
+
+    let root = base.join("hive-root");
+    std::fs::create_dir_all(&root).unwrap();
+    let c = Checked {
+        preview: ToolsPreview { tools: Vec::new(), added: Vec::new(), removed: Vec::new(), hosts_offered: Vec::new(), folders_offered: vec![offered.clone()] },
+        hosts_added: Vec::new(),
+        folders_added: Vec::new(),
+    };
+    assert_eq!(check_folders(&hive(), &c, std::slice::from_ref(&offered), &root, None).unwrap(), vec![offered.clone()]);
+    let err = check_folders(&hive(), &c, &[through_link.to_string_lossy().to_string()], &root, None).unwrap_err();
+    assert!(err.contains("isn\u{2019}t a folder the added tools write into"), "{err}");
+    // Listed already under its real spelling: skipped, not added twice.
+    let mut listed = hive();
+    listed.settings.gallery.output_folders = vec![offered.clone()];
+    assert!(check_folders(&listed, &c, std::slice::from_ref(&offered), &root, None).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[tokio::test]
