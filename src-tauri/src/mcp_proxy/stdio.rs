@@ -484,6 +484,9 @@ pub(super) struct Running {
     pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     /// The child's `initialize` result: `serverInfo`, `capabilities`, `instructions`.
     pub(super) init: Mutex<Value>,
+    /// The process group it leads (`process_group(0)`). Unix only: off unix no child is started
+    /// (`spawn` refuses), so there is no group to kill.
+    #[cfg(unix)]
     pgid: Option<libc::pid_t>,
     pub(super) pid: Option<u32>,
     alive: AtomicBool,
@@ -554,6 +557,7 @@ impl Running {
     }
 
     fn kill_group(&self) {
+        #[cfg(unix)]
         if let Some(pg) = self.pgid {
             // SAFETY: signalling the process group this child leads (process_group(0)); a stale
             // id at worst names an empty group.
@@ -1086,7 +1090,8 @@ pub(super) fn status_for(e: &UpErr) -> Status {
     }
 }
 
-#[cfg(test)]
+// Used only by the tests that start the fake, which are unix only.
+#[cfg(all(test, unix))]
 pub(super) fn age_for_test(id: &str, by: Duration) {
     let s = slot(id);
     let back = now_ms().saturating_sub(by.as_millis() as u64);
@@ -1094,17 +1099,20 @@ pub(super) fn age_for_test(id: &str, by: Duration) {
 }
 
 /// The idle stop for these servers only: a test's sweep never stops another test's child.
-#[cfg(test)]
+// Used only by the tests that start the fake, which are unix only.
+#[cfg(all(test, unix))]
 pub(super) fn stop_idle_for_test(id: &str, now: u64, idle: Duration) -> Vec<String> {
     stop_idle_where(now, idle, |i| i == id)
 }
 
-#[cfg(test)]
+// Used only by the tests that start the fake, which are unix only.
+#[cfg(all(test, unix))]
 pub(super) fn stop_for_test(ids: &[&str]) -> usize {
     stop_where(|i| ids.contains(&i))
 }
 
-#[cfg(test)]
+// Used only by the tests that start the fake, which are unix only.
+#[cfg(all(test, unix))]
 pub(super) fn last_use_for_test(id: &str) -> u64 {
     slot(id).last_use.load(Ordering::SeqCst)
 }

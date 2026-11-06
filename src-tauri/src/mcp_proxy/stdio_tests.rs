@@ -5,7 +5,10 @@
 //! its key back (which must never get past the proxy), and one never answers. It writes its pid
 //! to `pid.txt` in its folder, and takes 2 s to start while a `slowstart` file is there.
 
-use crate::mcp_proxy::{self as proxy, entries, AUTH_KEY, STATE_IDLE};
+use crate::mcp_proxy::{self as proxy, AUTH_KEY};
+// Used only by the tests that start the fake (unix only, as `spawn` is).
+#[cfg(unix)]
+use crate::mcp_proxy::{entries, STATE_IDLE};
 use super::*;
 use serde_json::json;
 use std::time::Duration;
@@ -66,6 +69,7 @@ fn spec_for(path: String) -> StdioSpec {
 }
 
 /// The idle sweep, for this test's server only: another test's sweep never stops it.
+#[cfg(unix)]
 fn sweep(id: &str) {
     stop_idle_for_test(id, now_ms(), IDLE);
 }
@@ -75,11 +79,16 @@ fn fresh_id(prefix: &str) -> String {
 }
 
 // ─── Logs, captured ─────────────────────────────────────────────────────────
+// Only the tests that start the fake (unix only, as `spawn` is) read the logs.
 
+#[cfg(unix)]
 struct Capture;
+#[cfg(unix)]
 static LINES: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
+#[cfg(unix)]
 static CAPTURE: Capture = Capture;
 
+#[cfg(unix)]
 impl log::Log for Capture {
     fn enabled(&self, _: &log::Metadata) -> bool {
         true
@@ -90,6 +99,7 @@ impl log::Log for Capture {
     fn flush(&self) {}
 }
 
+#[cfg(unix)]
 fn capture_logs() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -98,11 +108,13 @@ fn capture_logs() {
     });
 }
 
+#[cfg(unix)]
 fn logs() -> String {
     LINES.lock().join("\n")
 }
 
 /// A fake server, added through the real verify-before-write path, with its key stored first.
+#[cfg(unix)]
 async fn added(prefix: &str) -> String {
     capture_logs();
     let id = fresh_id(prefix);
@@ -112,21 +124,25 @@ async fn added(prefix: &str) -> String {
 }
 
 /// One downstream JSON-RPC request, as an agent's runtime sends it, on session `sid`.
+#[cfg(unix)]
 async fn post(id: &str, sid: &str, rid: Value, method: &str, params: Value) -> Value {
     let body = json!({ "jsonrpc": "2.0", "id": rid, "method": method, "params": params }).to_string();
     let r = proxy::downstream_post(&entries::entry_name(id), Some(sid), None, &body).await;
     serde_json::from_str(&r.body.expect("a body")).unwrap()
 }
 
+#[cfg(unix)]
 async fn call_text(id: &str, tool: &str) -> String {
     let v = post(id, "s1", json!(1), "tools/call", json!({ "name": tool, "arguments": {} })).await;
     v["result"]["content"][0]["text"].as_str().unwrap_or_default().to_string()
 }
 
+#[cfg(unix)]
 fn tool_names(v: &Value) -> Vec<String> {
     v["result"]["tools"].as_array().into_iter().flatten().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()
 }
 
+#[cfg(unix)]
 async fn eventually(what: &str, mut f: impl FnMut() -> bool) {
     for _ in 0..100 {
         if f() {
@@ -285,6 +301,7 @@ fn the_output_folder_is_outside_maiterms_data_folder() {
 
 // ─── Verify before write ────────────────────────────────────────────────────
 
+#[cfg(unix)]
 #[tokio::test]
 async fn verify_reads_the_first_list_before_anything_is_written() {
     let id = added("v").await;
@@ -305,6 +322,7 @@ async fn verify_reads_the_first_list_before_anything_is_written() {
     proxy::remove(&id).unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_failed_verify_writes_nothing_and_leaves_the_key_for_a_retry() {
     capture_logs();
@@ -372,6 +390,7 @@ async fn a_key_on_the_command_line_is_refused() {
 
 /// Two agents' calls in flight at once, both with JSON-RPC id 1: the slow one is answered last,
 /// and each answer reaches its own caller under its own id.
+#[cfg(unix)]
 #[tokio::test]
 async fn concurrent_calls_from_two_agents_never_cross() {
     let id = added("ids").await;
@@ -391,6 +410,7 @@ async fn concurrent_calls_from_two_agents_never_cross() {
 }
 
 /// The login PATH, the key, the route's fixed settings (`{output}` expanded), and nothing else.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_child_gets_the_login_path_its_key_and_its_settings_and_nothing_else() {
     let id = added("env").await;
@@ -414,6 +434,7 @@ async fn the_child_gets_the_login_path_its_key_and_its_settings_and_nothing_else
 
 /// The key is in the child's environment and nowhere else: not its argv, not a log line (its
 /// stderr printed it), not the record's `Debug`, the saved file, the view or the entries.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_key_appears_nowhere_but_the_childs_environment() {
     let id = added("key").await;
@@ -438,6 +459,7 @@ async fn the_key_appears_nowhere_but_the_childs_environment() {
     proxy::remove(&id).unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_servers_own_error_goes_back_to_the_caller_as_sent() {
     let id = added("rpc").await;
@@ -447,6 +469,7 @@ async fn a_servers_own_error_goes_back_to_the_caller_as_sent() {
     proxy::remove(&id).unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_list_change_the_child_announces_is_passed_out() {
     let id = added("lc").await;
@@ -463,6 +486,7 @@ async fn a_list_change_the_child_announces_is_passed_out() {
 
 /// Unused for `IDLE`, the child stops; the server is idle (no outage), lists its saved tools
 /// without starting, and a tool call starts it again.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_idle_server_stops_answers_from_its_saved_list_and_a_call_starts_it() {
     let id = added("idle").await;
@@ -485,6 +509,7 @@ async fn an_idle_server_stops_answers_from_its_saved_list_and_a_call_starts_it()
 }
 
 /// An agent's list keeps a child alive; the proxy's own re-list doesn't.
+#[cfg(unix)]
 #[tokio::test]
 async fn only_an_agents_list_or_call_counts_as_use() {
     let id = added("use").await;
@@ -504,6 +529,7 @@ async fn only_an_agents_list_or_call_counts_as_use() {
 
 /// The child dies mid-call: the call answers `isError` with a sentence, every tool stays listed,
 /// and the child is started again.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_child_that_exits_is_restarted_and_no_tool_is_removed() {
     let id = added("rs").await;
@@ -541,6 +567,7 @@ async fn stopping_kills_the_whole_process_group() {
     proxy::remove(&id).unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn removing_the_server_stops_its_child_deletes_its_key_and_its_entry() {
     let id = added("rm").await;
@@ -554,6 +581,7 @@ async fn removing_the_server_stops_its_child_deletes_its_key_and_its_entry() {
     assert_eq!(tool_names(&v), Vec::<String>::new(), "an entry left on an ssh host is an empty server");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_key_belongs_only_to_a_stdio_server_that_takes_one() {
     let id = added("k").await;
@@ -583,6 +611,7 @@ async fn a_key_belongs_only_to_a_stdio_server_that_takes_one() {
 
 /// A restart is not use: a child that keeps failing is restarted only until `IDLE` after an
 /// agent last used it, not for as long as the app runs.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_restart_is_not_counted_as_use() {
     let id = added("ru").await;
@@ -598,6 +627,7 @@ async fn a_restart_is_not_counted_as_use() {
 
 /// A caller that gives up (an agent that disconnects drops its call) leaves nothing waiting, so
 /// the idle stop still stops the child.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_dropped_call_leaves_nothing_waiting() {
     let id = added("drop").await;
@@ -613,6 +643,7 @@ async fn a_dropped_call_leaves_nothing_waiting() {
 
 /// The key a child echoes back (in an error, a result, a tool's description) is taken out of
 /// everything it sends: what Verify reads, what an agent gets, the saved list, the file.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_key_the_child_echoes_is_taken_out_of_everything_it_sends() {
     let id = added("echo").await;
@@ -642,6 +673,7 @@ async fn a_key_the_child_echoes_is_taken_out_of_everything_it_sends() {
 /// Stop `id`'s child, start it again from an agent's call with a 2 s handshake, queue a second
 /// agent's call behind that start, and run `act` half a second into it. Both calls must fail and
 /// no other child may start: the first call's answer and the starting child's pid.
+#[cfg(unix)]
 async fn mid_start(id: &str, act: impl FnOnce()) -> (Value, i32) {
     let dir = output_folder(id).unwrap();
     stop(id);
@@ -670,6 +702,7 @@ async fn mid_start(id: &str, act: impl FnOnce()) -> (Value, i32) {
     (first, pid)
 }
 
+#[cfg(unix)]
 fn gone(pid: i32) -> bool {
     // SAFETY: probing a pid with signal 0 sends nothing.
     unsafe { libc::kill(pid, 0) != 0 }
@@ -740,6 +773,8 @@ fn call(tool: &str, args: Value) -> Value {
 
 /// A refused argument never reaches the child: the fake's `record` tool writes every call it gets
 /// to `calls.txt`, and only the allowed ones are there.
+// Starts the fake /bin/sh server, and `spawn` refuses off unix.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_refused_argument_never_reaches_the_child() {
     capture_logs();
@@ -810,6 +845,8 @@ async fn a_refused_argument_never_reaches_the_child() {
 }
 
 /// Verify's own call (`call_once`) is held to the same rules.
+// Starts the fake /bin/sh server, and `spawn` refuses off unix.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_call_maiterm_makes_itself_is_held_to_the_rules_too() {
     capture_logs();
@@ -869,6 +906,8 @@ fn an_argument_rule_is_checked_when_the_spec_is() {
 /// A wrong-region MiniMax key is fixed by moving the same server to the other account's route:
 /// one server per provider, its command made from the catalogue, its child stopped (and nothing
 /// started here: the new route's command is a real package).
+// Starts the fake /bin/sh server, and `spawn` refuses off unix.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_server_moves_to_another_route_of_its_own_provider_only() {
     capture_logs();
@@ -980,6 +1019,8 @@ fn the_new_rules_and_cleared_settings_are_checked_with_the_spec() {
 }
 
 /// A cleared setting reaches the child as set-and-empty, which is what keeps a `.env` from it.
+// Starts the fake /bin/sh server, and `spawn` refuses off unix.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_cleared_setting_reaches_the_child_set_and_empty() {
     capture_logs();
