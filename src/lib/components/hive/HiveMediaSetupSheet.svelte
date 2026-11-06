@@ -264,6 +264,32 @@
     });
   });
 
+  // A change below the key field's row can push it under the sticky footer without any focus
+  // change: the account choice (MiniMax's mainland key button wraps to two lines at 340px) and the
+  // short-key hint appearing. Each brings it back into view only if it is hidden (clearOfFooter),
+  // taking no focus, so it never fights the human.
+  let routeSeen = false;
+  $effect(() => {
+    void routeId;
+    if (!untrack(() => routeSeen)) {
+      routeSeen = true;
+      return;
+    }
+    requestAnimationFrame(() => {
+      if (alive) clearOfFooter(document.getElementById(keyId));
+    });
+  });
+  let hintShown = false;
+  $effect(() => {
+    const showing = hint !== null;
+    const appeared = showing && !untrack(() => hintShown);
+    hintShown = showing;
+    if (!appeared) return;
+    requestAnimationFrame(() => {
+      if (alive) clearOfFooter(sheetEl?.querySelector<HTMLElement>('.key .hint') ?? null);
+    });
+  });
+
   // How long the first start has run, so the wait doesn't look frozen.
   let startedAt = 0;
   let elapsed = $state(0);
