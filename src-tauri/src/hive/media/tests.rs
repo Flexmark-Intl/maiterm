@@ -62,10 +62,19 @@ fn every_provider_in_the_spec_table_is_there() {
 
 #[test]
 fn bad_files_are_refused() {
+    // A Windows checkout with autocrlf gives the file CRLF line ends, which a pattern spanning a
+    // line break never matches: compare in LF, and refuse an edit that changed nothing, so a
+    // pattern that stops matching fails here instead of passing a good file off as a bad one.
+    let lf = FILE.replace("\r\n", "\n");
+    let edit = |from: &str, to: &str| {
+        let out = lf.replacen(from, to, 1);
+        assert_ne!(out, lf, "the catalogue no longer has {from:?}");
+        out
+    };
     assert!(parse("{}").is_err());
-    assert!(parse(&FILE.replace("\"video\", \"image\", \"lipsync\"", "\"video\", \"hologram\", \"lipsync\"")).is_err(), "an unknown capability");
-    assert!(parse(&FILE.replacen("\"id\": \"elevenlabs\"", "\"id\": \"fal\"", 1)).is_err(), "a provider twice");
-    assert!(parse(&FILE.replacen("\"checked\": \"2026-11-03\",\n      \"offer\"", "\"checkd\": \"x\",\n      \"offer\"", 1)).is_err(), "a misspelt field");
+    assert!(parse(&edit("\"video\", \"image\", \"lipsync\"", "\"video\", \"hologram\", \"lipsync\"")).is_err(), "an unknown capability");
+    assert!(parse(&edit("\"id\": \"elevenlabs\"", "\"id\": \"fal\"")).is_err(), "a provider twice");
+    assert!(parse(&edit("\"checked\": \"2026-11-03\",\n      \"offer\"", "\"checkd\": \"x\",\n      \"offer\"")).is_err(), "a misspelt field");
 }
 
 /// HARD CONSTRAINT of phase 1: moving to the catalogue changes no sandbox host. These are the
