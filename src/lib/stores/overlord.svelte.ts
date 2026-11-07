@@ -3832,7 +3832,7 @@ function createOverlordStore() {
       // the human closed it, Run runs again, which is what a deliberate re-run wants.
       const runKey = `${id}|${askedAt}`;
       const prior = recentTabRuns.get(runKey);
-      if (prior && Date.now() - prior.at < TAB_RUN_REPEAT_MS && tabExists(prior.tabId)) {
+      if (prior && Date.now() - prior.at < TAB_RUN_REPEAT_MS && (!prior.tabId || tabExists(prior.tabId))) {
         const secs = Math.max(1, Math.round((Date.now() - prior.at) / 1000));
         return {
           ran: false,
@@ -3840,6 +3840,10 @@ function createOverlordStore() {
         };
       }
       const name = `Run: ${run.line.length > 40 ? `${run.line.slice(0, 39)}…` : run.line}`;
+      // Claim the question BEFORE the await: two Runs arriving together (phone and desktop) would
+      // otherwise both pass the check above. `opening` stands in for the tab until it exists.
+      const opening = { at: Date.now(), tabId: '', name };
+      recentTabRuns.set(runKey, opening);
       try {
         const tab = await workspacesStore.createTab(target.workspaceId, target.paneId, name, {
           background: from === 'phone',
@@ -3851,6 +3855,7 @@ function createOverlordStore() {
         if (from === 'phone') window.dispatchEvent(new CustomEvent('activate-tab', { detail: tab.id }));
         else if (target.workspaceId !== workspacesStore.activeWorkspaceId) void navigateToTab(tab.id);
       } catch (e) {
+        if (recentTabRuns.get(runKey) === opening) recentTabRuns.delete(runKey);
         return { ran: false, detail: `No tab could be opened to run it: ${e instanceof Error ? e.message : e}` };
       }
       const now = tasksStore.findAnywhere(id)?.task;
