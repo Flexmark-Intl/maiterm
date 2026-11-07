@@ -296,7 +296,7 @@
       {:else if b.kind === 'decision'}
         <button class="send" disabled={sending || !draftText.trim()} onclick={(e) => { if (!secondClick(e)) answer(undefined); }}>Send</button>
       {:else}
-        <button class="send" disabled={sending} onclick={(e) => { if (!secondClick(e)) answer(undefined); }}>{b.kind === 'action' ? "I've done it" : 'It arrived'}</button>
+        <button class="send" disabled={sending} onclick={(e) => { if (!secondClick(e)) answer(undefined); }}>{b.kind === 'action' ? (draftText.trim() ? 'Send' : "I've done it") : 'It arrived'}</button>
       {/if}
     </div>
     {/if}
