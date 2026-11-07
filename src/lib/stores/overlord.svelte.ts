@@ -1215,6 +1215,8 @@ function createOverlordStore() {
    *  that terminal is still open is refused instead of opening a second one. In memory only. */
   const recentTabRuns = new Map<string, { at: number; tabId: string; name: string }>();
   const TAB_RUN_REPEAT_MS = 30_000;
+  /** Run's `agent` runs being typed right now, by question, so two at once type the line once. */
+  const agentRunsInFlight = new Set<string>();
   const tabExists = (tabId: string) =>
     workspacesStore.workspaces.some((ws) => ws.panes.some((p) => p.tabs.some((t) => t.id === tabId)));
 
@@ -3796,9 +3798,17 @@ function createOverlordStore() {
       if (!run) return { ran: false, detail: 'The card has no command to run.' };
 
       if (run.place === 'agent' && carrierId) {
+        // Two Runs arriving together would both pass the blocked/askedAt check above and both
+        // type the line; the first's typing is what closes the question, so claim it meanwhile.
+        const agentKey = `${id}|${askedAt}`;
+        if (agentRunsInFlight.has(agentKey)) {
+          return { ran: false, detail: "This is being typed into the agent's tab right now." };
+        }
+        agentRunsInFlight.add(agentKey);
         const r = await commands
           .runShellLineInAgent(carrierId, run.line)
-          .catch((e): { status: 'refused'; reason: string } => ({ status: 'refused', reason: String(e) }));
+          .catch((e): { status: 'refused'; reason: string } => ({ status: 'refused', reason: String(e) }))
+          .finally(() => agentRunsInFlight.delete(agentKey));
         if (r.status !== 'typed') return { ran: false, detail: runRefusalText(r.reason) };
         // Re-read: the await let the agent re-ask, and its new question must not be closed.
         const now = tasksStore.findAnywhere(id)?.task;
@@ -3833,6 +3843,7 @@ function createOverlordStore() {
       const runKey = `${id}|${askedAt}`;
       const prior = recentTabRuns.get(runKey);
       if (prior && Date.now() - prior.at < TAB_RUN_REPEAT_MS && (!prior.tabId || tabExists(prior.tabId))) {
+        if (!prior.tabId) return { ran: false, detail: 'A terminal is opening to run this right now. Check it once it appears.' };
         const secs = Math.max(1, Math.round((Date.now() - prior.at) / 1000));
         return {
           ran: false,
