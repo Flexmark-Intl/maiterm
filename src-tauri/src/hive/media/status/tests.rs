@@ -236,8 +236,15 @@ fn a_plugin_is_found_only_in_the_root_the_coordinator_loads() {
     // 1. Managed on, plus an exported /x: the coordinator loads the account's root (linked to
     //    ~/.claude), so a plugin only in /x is not found.
     let (on, account) = managed_claude_on();
-    assert_eq!(plugin_roots_for(&on, Some(&x), Some(&home)), vec![account.clone()]);
-    assert!(!found(&on, &x, &home), "a plugin only in the exported root is no coordinator's");
+    if crate::accounts::Runtime::Claude.profile().supported {
+        assert_eq!(plugin_roots_for(&on, Some(&x), Some(&home)), vec![account.clone()]);
+        assert!(!found(&on, &x, &home), "a plugin only in the exported root is no coordinator's");
+    } else {
+        // Windows: managed Claude accounts aren't supported (accounts `CLAUDE.supported`), so no
+        // account is active and the coordinator loads the exported root, as with managed off.
+        assert_eq!(plugin_roots_for(&on, Some(&x), Some(&home)), vec![x.clone()]);
+        assert!(found(&on, &x, &home));
+    }
 
     // 2. Managed off, with /x: /x alone. Found there; a plugin only in ~/.claude is not.
     let off = crate::state::Preferences::default();

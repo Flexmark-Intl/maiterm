@@ -110,10 +110,16 @@ fn with_a_managed_account_on_a_plugin_goes_to_the_root_its_links_point_at() {
     // coordinator launches under the managed root, whose `plugins` and `settings.json` link to
     // ~/.claude, not /x. So the install goes to ~/.claude.
     let exported = Path::new("/x");
-    assert_eq!(plugin_root(&managed_claude_on(), Some(exported)), None);
-    let here_now = Here { claude_root: plugin_root(&managed_claude_on(), Some(exported)), ..here(None) };
-    let line = plan_for(&remotion_with("remotion-dev/remotion"), &here_now).unwrap().line;
-    assert!(line.starts_with("env -u CLAUDE_CONFIG_DIR claude plugin marketplace add") && !line.contains("/x"), "{line}");
+    if crate::accounts::Runtime::Claude.profile().supported {
+        assert_eq!(plugin_root(&managed_claude_on(), Some(exported)), None);
+        let here_now = Here { claude_root: plugin_root(&managed_claude_on(), Some(exported)), ..here(None) };
+        let line = plan_for(&remotion_with("remotion-dev/remotion"), &here_now).unwrap().line;
+        assert!(line.starts_with("env -u CLAUDE_CONFIG_DIR claude plugin marketplace add") && !line.contains("/x"), "{line}");
+    } else {
+        // Windows: managed Claude accounts aren't supported (accounts `CLAUDE.supported`), so no
+        // account is active whatever the prefs say, and the coordinator loads the exported root.
+        assert_eq!(plugin_root(&managed_claude_on(), Some(exported)), Some(PathBuf::from("/x")));
+    }
 
     // Without a managed account, the exported root is the coordinator's (and plain tabs').
     let off = crate::state::Preferences::default();
