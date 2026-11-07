@@ -1211,6 +1211,13 @@ function createOverlordStore() {
    * that window would merge into one prompt. A notice is not a directive: it asks for nothing
    * back, so it does NOT take the tab's outstanding slot.
    */
+  /** Run's `tab` runs by question (`taskId|askedAt`), so a repeat inside TAB_RUN_REPEAT_MS while
+   *  that terminal is still open is refused instead of opening a second one. In memory only. */
+  const recentTabRuns = new Map<string, { at: number; tabId: string; name: string }>();
+  const TAB_RUN_REPEAT_MS = 30_000;
+  const tabExists = (tabId: string) =>
+    workspacesStore.workspaces.some((ws) => ws.panes.some((p) => p.tabs.some((t) => t.id === tabId)));
+
   /** Why Run could not type a command into the agent's tab, in the human's words. */
   function runRefusalText(reason: string): string {
     switch (reason) {
@@ -3819,12 +3826,27 @@ function createOverlordStore() {
         if (ws) target = { workspaceId: ws.id, paneId: paneOf(ws).id };
       }
       if (!target) return { ran: false, detail: 'No open workspace in this window can take a new tab to run it.' };
+      // A `tab` run leaves the question open, so a repeat (a phone retrying after its reply was
+      // lost, a second device) would open a second terminal and run the command twice. Refuse a
+      // repeat of the same question while its terminal is open and recent; after that, or once
+      // the human closed it, Run runs again, which is what a deliberate re-run wants.
+      const runKey = `${id}|${askedAt}`;
+      const prior = recentTabRuns.get(runKey);
+      if (prior && Date.now() - prior.at < TAB_RUN_REPEAT_MS && tabExists(prior.tabId)) {
+        const secs = Math.max(1, Math.round((Date.now() - prior.at) / 1000));
+        return {
+          ran: false,
+          detail: `A terminal was opened to run this ${secs} s ago, in the tab "${prior.name}". Check it there; Run opens another one after ${TAB_RUN_REPEAT_MS / 1000} s.`,
+        };
+      }
       const name = `Run: ${run.line.length > 40 ? `${run.line.slice(0, 39)}…` : run.line}`;
       try {
         const tab = await workspacesStore.createTab(target.workspaceId, target.paneId, name, {
           background: from === 'phone',
           context: { cwd: place?.cwd ?? null, sshCommand: place?.sshCommand ?? null, remoteCwd: place?.remoteCwd ?? null, launchCommand: run.line },
         });
+        for (const [k, v] of recentTabRuns) if (Date.now() - v.at >= TAB_RUN_REPEAT_MS) recentTabRuns.delete(k);
+        recentTabRuns.set(runKey, { at: Date.now(), tabId: tab.id, name });
         // A background tab has no TerminalPane, so no PTY to type into, until something mounts it.
         if (from === 'phone') window.dispatchEvent(new CustomEvent('activate-tab', { detail: tab.id }));
         else if (target.workspaceId !== workspacesStore.activeWorkspaceId) void navigateToTab(tab.id);

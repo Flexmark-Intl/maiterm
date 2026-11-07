@@ -457,6 +457,10 @@ agent's tab by hand; **Run** runs it. Where depends on the command (`runPlace` i
   that can run it: not a Hive (its agents are hidden and it takes no new tabs) and not a
   suspended one (no terminal mounts there, so the command would wait, untyped, for someone to
   open the tab). The agent's own workspace first, then the one on screen, then any other.
+  Because the question stays open, a second Run on the same question within 30 s, while the
+  tab it opened is still there, is refused with a sentence naming that tab: a phone retrying
+  after its reply was lost would otherwise run the command twice. After 30 s, or once that tab
+  is closed, Run opens another.
 
 Run runs what is on screen, so it takes the card's two guards (§3.1, `BlockerCard`), and it is
 human-only like an answer: no MCP tool reaches it. The phone runs it through
