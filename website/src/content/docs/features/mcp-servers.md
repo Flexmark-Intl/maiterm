@@ -72,8 +72,10 @@ Some proposals are refused before they reach you: a URL that could carry a key (
 
 A running agent session doesn't see a newly added server. Start a new one.
 
+A [Hive](/features/hive/#setting-a-provider-up) sets media providers up through this same list: **Set up** on a remote provider adds its server here and signs you in or takes its key, and a server set up from a Hive is offered only to that Hive's workspace.
+
 ## Limits worth knowing
 
-- **Remote servers only.** v1 talks to servers over Streamable HTTP. A local server you start with a command (`npx …`) is still installed directly in each agent.
+- **Remote servers only, with two exceptions.** maiTerm talks to servers over Streamable HTTP. A local server you start with a command (`npx …`) is still installed directly in each agent, except MiniMax and Meshy: set up from [What it can make](/features/hive/#minimax-and-meshy), maiTerm runs those itself on macOS and Linux, with the key in your keychain, and serves them here like any other.
 - **Tools only.** An MCP server's resources and prompts aren't passed through yet.
 - **Claude Code and Codex on this computer, and Claude Code on SSH hosts.** Codex on SSH hosts and Gemini don't get these servers yet.

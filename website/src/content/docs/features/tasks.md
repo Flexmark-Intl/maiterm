@@ -45,8 +45,8 @@ Now an agent that stops on something only you can settle puts the question **on 
 
 | Shown as | Means | Comes with |
 |----------|-------|------------|
-| **Waiting on your decision** | You have to choose | Up to six options, one marked *recommended* — or none, for an answer in your own words |
-| **Needs you** | Only you can do it: a `sudo`, a login, a payment | The exact command, when there is one |
+| **Waiting on your decision** | You have to choose | Up to six options, the agent's recommendation marked — or none, for an answer in your own words. Some questions let you [tick several](#picking-several) |
+| **Needs you** | Only you can do it: a `sudo`, a login, a payment | The exact command, when there is one, with [**Run**](#run) |
 | **Waiting outside** | Something outside maiTerm: a review, CI, another person | The question says what |
 
 The question appears on the row in the task panel, as a coloured button that opens it on [the tab's terminal](/features/loom/#on-the-terminal), as a pill in the corner of that terminal, in the [Loom](/features/loom/)'s **Decisions** queue and Weave, and on your phone in [maiLink](/features/mailink/) (with a maiLink build that shows them), where a new question rings the phone. Answer it from any of them — pick an option or write your own, **I've done it** for an action, **It arrived** for something external — and maiTerm types your answer to the agent as a message, records it in the task's log, and moves the task back to Active. The answer goes in at once, even while the agent is mid-turn, which takes it the way it takes your own typing. It waits only while a dialog is open in the agent's tab, or while you have a draft in its input box or are typing there, and goes in as soon as that clears. If the agent changed its question between you reading it and answering, the answer is refused rather than delivered against a question you never saw.
@@ -60,6 +60,16 @@ Already dealt with it in the agent's own tab? **Dismiss** on the card — **Alre
 Agents are told you'll read their questions, options and notes without having seen their session. When one still names a task by its id, maiTerm shows that task's title in its place, on the desktop and on the phone.
 
 Moving the task out of Blocked by any other route — a drag on the board, the status chip, the agent itself — also clears the question, so nothing is left asking about work that has moved on.
+
+### Picking several
+
+When an agent asks which of several changes to make, the options come as checkboxes, with the ones it recommends already ticked, and one **Send** answers them all. The agent is told which options you chose and which you didn't, so leaving one unticked is an answer too. A question has to be a question: one that lists its own choices in its text — *(a) … (b) …* — or runs past 200 characters is refused, and the agent is told to put the choices in the options and the background in the context, where you can read them.
+
+### Run
+
+When a card for something only you can do carries a command, **Run** runs it for you. A one-line `! …` command for a Claude Code agent is typed into the agent's own tab, where Claude Code runs it as a shell command and the agent sees the output, so the question closes. That's refused rather than held while the agent is mid-turn, while a dialog is open in its tab, or while you have a draft there or are typing in it. Anything else opens a new tab beside the agent, in its folder and on its SSH host if it has one, where a `sudo` can ask for your password; press **I've done it** once it has finished. A second **Run** of the same question within 30 seconds, while its tab is still open, is refused, so a retried tap doesn't run the command twice.
+
+With a maiLink build that shows it, **Run** works from your phone too.
 
 ## An append-only log per task
 
@@ -80,6 +90,8 @@ Press `Cmd+Shift+E` — or click the lanes icon in the tab bar — to open the t
 The panel answers one question — *what am I doing here* — so it shows **this tab's work**, grouped by workstream with a count on each heading. Everything else is a pointer: the header carries collapsed counts for `N unclaimed`, `N parked`, `N done` and `N dropped`, and a closing line says how many tasks are in flight on other tabs.
 
 ![The task panel beside a terminal, showing one workstream's rows with review, active and blocked lanes and a count of finished work in the header](/screenshots/tasks-panel.webp)
+
+Under each row's status chip is how long ago the task was created, so week-old leftovers stand out from what came up this morning; hover it for the exact time.
 
 Per row you can:
 
