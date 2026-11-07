@@ -1,5 +1,36 @@
 # Changelog
 
+## v3.14.0
+
+Hives that make media: see what each one can make, and set up the providers it lacks without leaving maiTerm. Plus a Run button on action cards, decisions where you can pick several options, and a main window that stays responsive while your agents work.
+
+### Hive media
+
+- **What it can make.** The Create sheet's Tools step, Hive settings and Preferences → Hive show, for video, image, voice, music, finishing and more, which tool on this Mac already covers it and which provider to set up for the rest. It opens on its own when the goal names media.
+- **Set up a provider from that panel.** Set up opens a sheet with the one step its route needs: a sign-in for a remote server (fal, ElevenLabs and others) through maiTerm's MCP servers, a key you paste for one that takes a key, or a Homebrew install in a visible tab (ffmpeg, whisper.cpp with its speech model). Verify then checks that the Hive's agents can reach the provider, without spending. In the Create sheet, a tool it makes ready is ticked for you.
+- **MiniMax and Meshy run inside maiTerm.** Their servers run on this Mac. maiTerm keeps the key in your keychain and stops each server when it's idle. Their files go into an output folder the Hive's gallery can take. Preferences → MCP servers shows an idle one as Idle, with its tools. maiTerm checks every call, so agents can't make them write outside that folder, read other files or fetch a URL from this Mac.
+- **Change a Hive's tools after it's made**, in Hive settings → Tools. Workers get the change at their next launch, and the Queen is told.
+- **The Queen can ask for a missing capability.** She files a card naming the recommended provider, what it costs and the network hosts it adds. Approving it opens the setup sheet; from your phone, it starts a Homebrew install when Homebrew is already on the Mac, and anything else waits for you at the Mac. Agents can also suggest media when they propose a Hive.
+- **Hive briefs map what the Hive can make**, with which tool, what it spends and how long results last, so workers stop improvising substitutes.
+- **The gallery opens on what was made for you.** A worker's screenshots, test reports and notes go under Proof, and you can move anything between the two.
+
+### Hive
+
+- **The header tells you whether the Hive is doing anything:** Working, Waiting on you, Stalled? or Idle, instead of a green Running that stayed on through a stall. A worker that has been quiet for more than 10 minutes with nothing on its way is marked on its card, and the Queen is told.
+- **A run result that arrives while a Hive is paused waits on disk** until you resume it, so a restart no longer loses it.
+- **A long goal takes one line in the header**, with More to see the rest.
+
+### Asking you
+
+- **Run on action cards.** When an agent asks you to run a command, Run does it. A `! …` line runs in the agent's own Claude tab, so it sees the output. Anything else opens a new tab beside the agent, in its folder and on its host, where a sudo prompt can ask for your password. maiLink serves Run to the phone too, for a maiLink app that shows the button.
+- **Pick several options at once.** An agent can ask which of several changes to make as checkboxes, with its recommendations already ticked, and one Send. A question that lists its own choices in its text is refused, so they come as real options.
+- **The tasks panel shows each row's age** under its status.
+
+### Fixes
+
+- **The main window no longer slows down while agents work.** Every agent event used to re-check every tab's agent, the Overlord board and the Agent Bridge picker even while hidden, and a working agent's title spinner ran a process scan about once a second.
+- **Type `/maiterm-statusline` to install maiTerm's status line.** Typing `/statusline` used to bring up Claude Code's own command, which copies your shell prompt and leaves out branch, model, effort and context.
+
 ## v3.13.0
 
 Hive: give a goal to a Queen agent, and she plans the work and runs a crew of sandboxed workers on it. Plus compaction that saves your place first, and browser actions that wait for the page.

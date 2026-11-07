@@ -243,7 +243,11 @@ const EVERYTHING = [
         come to the human. Precedents are recorded by the Queen from the human's own answers.
       - Completion criteria: no worker starts until the human confirms them (finish.rs).
       - Hosts: the Queen grants them (change.rs), not the human.
-      - Windows refused (create.rs); queued jobs macOS-only (job_sandbox.rs) — hence "macOS". */}
+      - Windows refused (create.rs); queued jobs macOS-only (job_sandbox.rs) — hence "macOS".
+      - v3.14.0 media: the capabilities are the catalogue's (resources/hive/media/catalogue.json);
+        setup is a sign-in, a pasted key or a Homebrew install (lib/hive/mediaSetup.ts), and Verify
+        spends nothing (hive/media/verify.rs). Remotion and Google genmedia are guide-only — don't
+        say "every provider sets up in place". */}
   <section class="ln-band ln-band--raised" id="hive">
     <div class="ln-inner">
       <p class="ln-eyebrow">Hive</p>
@@ -280,9 +284,10 @@ const EVERYTHING = [
         <div class="ln-card">
           <h3>Not only code</h3>
           <p>
-            Every agent shares one memory you can read and edit. Images, video, audio and
-            documents the Hive makes land in a gallery you can filter, tag, compare and export,
-            with how each was made.
+            See what a Hive can make on this Mac — video, images, voice, music, 3D — and set up
+            what it lacks without leaving maiTerm: a sign-in, a key or an install, then a check
+            that spends nothing. What it makes lands in a gallery with how each piece was made,
+            and every agent shares one memory you can read and edit.
           </p>
         </div>
       </div>

@@ -16,7 +16,7 @@ Right-click an empty workspace in the sidebar — one with no tabs, or just one 
 | **Goal** | *What should this Hive get done?* The goal, a name, an optional project brief, files to attach, and rules for every agent |
 | **Folders** | *Where does the work happen?* The primary folder and any others. A git repo gets its own copies per worker; a plain folder (footage, brand assets, documents) is shared read-only. Each repo can have a **Setup** command and a **Land check** — both can wait, and the Queen can set them as the project takes shape |
 | **Crew** | *Who does the work, and how does it land?* **Workers at once**, the Queen's and the workers' models and effort, **How work lands**, **Push after each land**, and **Chats on your phone** |
-| **Tools** | *What can it make things with?* The skills and MCP servers the Hive may use, and a **Budget for paid generation** |
+| **Tools** | *What can it make things with?* [What it can make](#making-media) on this Mac, the skills and MCP servers the Hive may use, and a **Budget for paid generation** |
 | **Stack** | *Does the work need anything running?* The [stack services](/features/stack/) its workers can run on their own branches |
 | **Review** | *Ready to start* — everything at once, then **Create Hive** |
 
@@ -34,7 +34,7 @@ A Hive replaces the workspace's terminals with its own view:
 - **The board** in the middle: a card per worker, grouped in waves by what each waits on, showing its role (Frontend, UI reviewer…), model and effort, what it's doing right now, its diff and its context.
 - **Worker columns** on the right. Click a card and that worker's chat opens beside the board; click another to switch to it, or **Shift+click** to open a second beside the first. A column can also show the worker's raw terminal under its chat, if you need it.
 
-Across the top: **Board**, **Needs you**, **Gallery** and **Memory** (`Cmd+Shift+Y` switches), the Hive's status with **Pause** and **Resume**, and a bar of readouts — slots in use, budget, criteria, where work lands, autonomy and the run queue. The ⋯ menu holds **New goal…**, **Earlier goals**, **Land log** and **Delete Hive…**.
+Across the top: the goal on one line (**More** shows the rest), **Board**, **Needs you**, **Gallery** and **Memory** (`Cmd+Shift+Y` switches), the Hive's status with **Pause** and **Resume**, and a bar of readouts — slots in use, budget, criteria, where work lands, autonomy and the run queue. The ⋯ menu holds **New goal…**, **Earlier goals**, **Land log** and **Delete Hive…**.
 
 | Shortcut | Action |
 |----------|--------|
@@ -45,6 +45,14 @@ Across the top: **Board**, **Needs you**, **Gallery** and **Memory** (`Cmd+Shift
 | `Cmd+W` twice | Close the focused worker column |
 
 `Ctrl` instead of `Cmd` on Linux. The Hive's agents aren't in the tab strip: they live in this view.
+
+### Is it doing anything?
+
+While a Hive is running, its status says what is actually happening: **Working** while any of its agents is at work or a job of theirs is running, **Waiting on you** when the only thing left is something in **Needs you**, **Stalled?** when a worker has gone quiet, and **Idle** otherwise.
+
+A worker has gone quiet when its turn ended more than 10 minutes ago, nothing has happened in its tab since, and nothing it could be waiting for is on its way: no job of its own running, no question of its own waiting on you. Its card says **Quiet · … · no report**, and the Queen is told once, so a worker waiting on something that won't come doesn't hold the Hive up unnoticed. A worker whose job is still running says **Waiting on its run** instead.
+
+A job result that comes in while you have the Hive paused is kept on disk, not in memory, and goes to its worker when you **Resume**, so restarting maiTerm in between loses nothing.
 
 ### Needs you
 
@@ -80,9 +88,56 @@ Landing never touches your uncommitted work. **Land log** lists every land, undo
 
 Every agent in a Hive reads and writes one memory, so what one worker learned about the codebase the next one knows. **Memory → Files** shows it: read and edit any file, add one, delete one, and **Pin** a file to keep its line in the part of the index maiTerm never rewrites.
 
+## Making media
+
+A Hive's goal doesn't have to be code. It can make video, images, voice, music and more, with the tools this Mac already has and the providers you set up for it, without leaving maiTerm.
+
+### What it can make
+
+**What it can make** lists, for each kind of media — **Video**, **Images**, **Voice**, **Music** and **Finishing** first, then under **More**: design, sound effects, lipsync, upscaling, 3D, transcription, motion graphics and ComfyUI workflows — which tool on this Mac already covers it, or which provider maiTerm recommends for it and what that spends. **Re-detect** looks again.
+
+It's in three places: the wizard's **Tools** step, above the tool picker; **Tools** in the Hive's settings; and **Preferences → Hive**, for every Hive on this Mac. In the wizard it opens on its own when the goal names media (a video, a voiceover, a logo…) or when none of the Hive's folders is a git repository; otherwise it stays folded to one line, so a code Hive isn't slowed down.
+
+### Setting a provider up
+
+**Set up** on a row opens a sheet with the one step that provider needs, then **Verify**:
+
+| The provider | What the sheet does |
+|---|---|
+| A remote MCP server with a sign-in (fal, ElevenLabs, Runway and others) | Adds it to [maiTerm's MCP servers](/features/mcp-servers/) and opens the sign-in in your browser |
+| One that takes a key (Replicate) | Opens its key page, and keeps the key you paste in your system's credential store |
+| MiniMax and Meshy | Takes your key and runs the provider's server itself ([below](#minimax-and-meshy)) |
+| The Homebrew kit (ffmpeg, ImageMagick, SoX, whisper.cpp) | Installs it in a tab you can see — with Homebrew first if this Mac has none — and then downloads whisper.cpp's speech model |
+| An app (ComfyUI, Blender) | A download link; it's found again when you come back to the window |
+| Remotion, Google genmedia | The steps only: maiTerm can't set these up for you, and **Verify** finds them once you have |
+
+**Verify** checks that the Hive's agents can really use the provider, without spending anything: that its server is on and offered to the Hive's workspace, that its entry reaches the agents, that its tools list, and, where the provider has one, that its balance or price check answers. It never calls a tool that generates. The answer is **Ready**, **Needs sign-in**, **Needs credit**, **Not reachable** or **Didn't work**, with what to do about it.
+
+A server set up from a Hive is offered only to that Hive's workspace, so other tabs don't load its tools. From Preferences you choose **Hive workspaces only** or **Every workspace**. In the wizard, a tool a setup makes ready is ticked for the Hive.
+
+### MiniMax and Meshy
+
+MiniMax (video, images, voice) and Meshy (3D) publish their MCP servers to run on your computer, so maiTerm runs them for you: it keeps the key in your keychain, gives it to the server and to nothing else, and stops the server when it has been idle for ten minutes. The key never appears in an agent's configuration.
+
+Each server writes into an output folder of its own, which joins the Hive's output folders so the gallery can take what it makes. Both servers run outside every sandbox, so maiTerm checks every call before it reaches them: a path outside that folder is refused, and so are MiniMax's option to fetch a file from any URL and its tool that plays audio on your Mac.
+
+### Changing a Hive's tools
+
+A Hive's tools aren't fixed when you create it. **Tools** in the Hive's settings → **Change…** adds or removes them, and offers the network hosts and output folders the new ones need. Workers launched after the change get it; a worker already running keeps what it started with. The Queen is told.
+
+### When the Queen needs something it can't make
+
+If a worker reports a tool missing, or her plan needs one, the Queen asks for it. You get a card headed **Set up a tool for this Hive?** in the [Loom](/features/loom/#decisions)'s Decisions and on your phone, in maiTerm's words: the provider it recommends, what that spends and the network hosts it adds, with her reason quoted. Approve it at the Mac and the setup sheet opens in the Hive. From the phone, a Homebrew install starts at once if Homebrew is already on the Mac; anything else — a sign-in, a key — waits for you at the Mac, and the card says so. Once the provider is ready, maiTerm adds it to the Hive's tools and tells her.
+
+An agent [proposing a Hive](#an-agent-can-offer-you-a-hive) can also say what media it will need, and those rows are marked in the wizard.
+
+In a Hive with media tools, the agents' briefs map what the Hive can make, with which tool, what each spends and how long its results last, so workers use what's there instead of improvising a substitute.
+
 ## The gallery
 
-A Hive's goal doesn't have to be code. Images, video, audio and documents its agents make go into the **Gallery**, with how each was made: **Info** shows who made it, the **Recipe** and its **Lineage** — what it was made from, and what was made from it.
+Images, video, audio and documents a Hive's agents make go into the **Gallery**, with how each was made: **Info** shows who made it, the **Recipe** and its **Lineage** — what it was made from, and what was made from it.
+
+The gallery opens on **For you**: what the workers made for you. Their evidence — screenshots of the app they built, test reports, notes — is under **Proof**, and **All** shows both. **Move to Proof** and **Move to For you** fix anything filed on the wrong side; what you drop in yourself is never guessed to be proof.
 
 Filter by kind (**All**, **Images**, **Video**, **Audio**, **Docs**) and more, group it, and select assets to **Compare** side by side, **Star**, **Pick**, **Mark final** or **Reject**, tag, add to a collection, **Export…**, **Iterate with the queen** or **Send to worker**. Paid generation counts against the Hive's **Budget for paid generation**, $10 unless you set it; raising it is always your call.
 
@@ -112,5 +167,5 @@ With [maiLink](/features/mailink/), a Hive's chats come to the phone like any ot
 - **macOS.** A Hive needs Claude Code's sandbox, which native Windows doesn't have, so Windows can't make one. On Linux a Hive can be made, but the jobs workers queue — installs, builds and tests, served apps and land checks — run only on macOS in this version.
 
 :::note
-A Hive is new in maiTerm 3.13.0.
+A Hive is new in maiTerm 3.13.0. What it can make, setting providers up from it, changing a Hive's tools after it's made, and the gallery's **For you** and **Proof** are new in 3.14.0.
 :::

@@ -17,11 +17,11 @@ const FAQS = [
   },
   {
     q: 'Does maiTerm see my API keys or proxy my prompts?',
-    a: 'No. maiTerm launches the agent CLIs already installed on your machine and they keep using their own accounts, authentication and configuration. Your conversations go from that local CLI to its provider. maiTerm is not a model gateway and never asks you for a provider key. The one thing it can sit in the path of is an MCP server you choose to add in Preferences → MCP servers: then maiTerm holds that server\'s sign-in and passes your agents\' tool calls to it, without writing their arguments or results to its log.',
+    a: 'No. maiTerm launches the agent CLIs already installed on your machine and they keep using their own accounts, authentication and configuration. Your conversations go from that local CLI to its provider. maiTerm is not a model gateway and never asks you for your model provider\'s key. The one thing it can sit in the path of is an MCP server you choose to add in Preferences → MCP servers, or a media provider you set up for a Hive: then maiTerm holds that server\'s sign-in or key in your system\'s credential store and passes your agents\' tool calls to it, without writing their arguments or results to its log.',
   },
   {
     q: 'Can maiTerm manage my MCP servers?',
-    a: 'The remote ones, if you want it to. Add a server in Preferences → MCP servers and sign in once: maiTerm keeps the sign-in in your system\'s credential store, refreshes it, and serves the server to Claude Code under every account, to Codex, and to Claude Code on your SSH hosts — where, on a machine several people share, each person\'s agents use their own sign-in. A server that goes down keeps its tools instead of vanishing mid-task. It is opt-in per server, and servers you installed directly keep working untouched. Local servers started with a command, Codex over SSH and Gemini aren\'t covered yet.',
+    a: 'The remote ones, if you want it to. Add a server in Preferences → MCP servers and sign in once: maiTerm keeps the sign-in in your system\'s credential store, refreshes it, and serves the server to Claude Code under every account, to Codex, and to Claude Code on your SSH hosts — where, on a machine several people share, each person\'s agents use their own sign-in. A server that goes down keeps its tools instead of vanishing mid-task. It is opt-in per server, and servers you installed directly keep working untouched. Local servers started with a command (apart from MiniMax and Meshy, which maiTerm runs itself for a Hive), Codex over SSH and Gemini aren\'t covered yet.',
   },
   {
     q: 'Can my agent see what is going wrong in my browser?',
@@ -30,6 +30,10 @@ const FAQS = [
   {
     q: 'Can one agent run a team of agents on a bigger goal?',
     a: 'Yes — make a workspace a Hive. You give the goal to the Queen, a Claude Code agent who plans the work in waves and starts workers on it, each in Claude Code\'s sandbox and, in a git repository, on its own branch. She answers their questions and permission prompts, has their work reviewed, and lands it back after a check you set, with a log and Undo. You confirm what done means before any worker starts, and you are asked only what she can\'t decide. Hives are Claude Code only, on macOS for now.',
+  },
+  {
+    q: 'Can a Hive make video, images or audio?',
+    a: 'Yes. Before you start one, What it can make shows, for video, images, voice, music, 3D and more, which tool on your Mac already covers it and which provider to set up for the rest. Set up does it without leaving maiTerm: a sign-in for a provider\'s MCP server (fal, ElevenLabs and others), a key for MiniMax or Meshy, whose servers maiTerm runs on your Mac, or a Homebrew install of ffmpeg and whisper.cpp in a tab you can watch. Verify then checks the Hive\'s agents can reach it, without spending anything. A few, like Remotion, you install yourself from its steps. The results land in the Hive\'s gallery with how each was made, and paid generation counts against a budget you set.',
   },
   {
     q: 'Can I see which files my agents changed?',
