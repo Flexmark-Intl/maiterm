@@ -1071,6 +1071,7 @@ pub fn run() {
             commands::overlord::agent_takes_prompt,
             commands::overlord::submit_prompt_to_agent,
             commands::overlord::deliver_to_agent,
+            commands::overlord::run_shell_line_in_agent,
             commands::overlord::agent_dialog_open,
             commands::overlord::get_agent_reply_after_prompt,
             commands::overlord::agent_session_is_local,

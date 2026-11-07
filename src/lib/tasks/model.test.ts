@@ -33,6 +33,7 @@ import {
   agentTaskDeleteRefusal,
   isBudgetQuestion,
   isReservedTaskTitle,
+  runPlace,
 } from './model';
 import type { Task } from '$lib/tauri/types';
 
@@ -796,5 +797,18 @@ describe("maiTerm's own rows and a standing Budget: question are the human's", (
     expect(agentTaskDeleteRefusal({ title: 'Render the hero', blocker: blocker('budget: may I spend $4?') })).toMatch(/Budget: question/);
     expect(agentTaskDeleteRefusal({ title: 'Render the hero', blocker: blocker('Which palette?') })).toBeNull();
     expect(agentTaskDeleteRefusal({ title: 'Hive budget review', blocker: null })).toBeNull();
+  });
+});
+
+// Mirror of run_place's test in src-tauri/src/mailink/board.rs (docs/tasks.md §3.1.2).
+describe("an action card's Run sends only a one-line `!` command to a Claude agent", () => {
+  it('routes by the command and the runtime', () => {
+    expect(runPlace('! bash /tmp/r2-setup.sh', true)).toEqual({ place: 'agent', line: 'bash /tmp/r2-setup.sh' });
+    expect(runPlace('  !npm test ', true)).toEqual({ place: 'agent', line: 'npm test' });
+    expect(runPlace('sudo apt install jq', true)).toEqual({ place: 'tab', line: 'sudo apt install jq' });
+    expect(runPlace('! make', false)).toEqual({ place: 'tab', line: 'make' });
+    expect(runPlace('! cd x\nmake', true)).toEqual({ place: 'tab', line: 'cd x\nmake' });
+    expect(runPlace(' ! ', true)).toBeNull();
+    expect(runPlace(null, true)).toBeNull();
   });
 });

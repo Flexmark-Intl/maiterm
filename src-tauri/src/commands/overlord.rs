@@ -264,6 +264,32 @@ pub async fn deliver_to_agent(
     })
 }
 
+/// A blocker card's Run, agent half (docs/tasks.md §3.1.2): type `! <line>` into the tab's Claude,
+/// which runs it in shell mode and sees the output. Typed now or refused with the reason — never
+/// held (`draft_hold::shell_line_refusal`), since the human clicked and is waiting to see it run.
+/// `{status:"typed"}` or `{status:"refused", reason}`.
+#[tauri::command]
+pub async fn run_shell_line_in_agent(state: State<'_, Arc<AppState>>, tab_id: String, line: String) -> Result<Value, String> {
+    let app = state.inner().clone();
+    let line = line.trim();
+    if line.is_empty() || line.contains('\n') {
+        return Ok(serde_json::json!({ "status": "refused", "reason": "not_one_line" }));
+    }
+    let Some(pty) = crate::mailink::pty_for_tab(&app, &tab_id) else {
+        return Ok(serde_json::json!({ "status": "refused", "reason": "no_terminal" }));
+    };
+    if !crate::comms::agent_owns_terminal(&app, &pty).await {
+        return Ok(serde_json::json!({ "status": "refused", "reason": "no_agent" }));
+    }
+    let text = format!("! {line}");
+    if let Some(reason) = crate::mailink::draft_hold::shell_line_refusal(&app, &tab_id, &text) {
+        return Ok(serde_json::json!({ "status": "refused", "reason": reason }));
+    }
+    crate::mailink::inject_text(&app, &pty, &text, true).await?;
+    log::info!("[tasks] blocker command typed into tab {tab_id} as a shell-mode line");
+    Ok(serde_json::json!({ "status": "typed" }))
+}
+
 /// Is this agent session's transcript on THIS machine — i.e. could a resume typed into a local
 /// shell find it? False for a session recorded over ssh (docs/follow-ups.md §6.2).
 #[tauri::command]

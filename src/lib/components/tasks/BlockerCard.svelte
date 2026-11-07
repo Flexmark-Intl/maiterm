@@ -12,7 +12,8 @@
   import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
   import { coordinatorHolds, withCoordinatorText } from '$lib/hive/model';
   import { blockerDrafts } from '$lib/stores/waiting.svelte';
-  import { BLOCKER_LABEL, picksMany } from '$lib/tasks/model';
+  import { BLOCKER_LABEL, picksMany, runPlace } from '$lib/tasks/model';
+  import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { fmtAge } from '$lib/overlord/format';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import TaskMarkdown from './TaskMarkdown.svelte';
@@ -163,6 +164,42 @@
     }
   }
 
+  /** Where Run would run the card's command (docs/tasks.md §3.1.2): a `! …` line into the
+   *  agent's own Claude tab, anything else in a new tab beside it. */
+  const carrierIsClaude = $derived.by(() => {
+    const id = task.tab_id;
+    if (!id) return false;
+    for (const ws of workspacesStore.workspaces) for (const p of ws.panes) {
+      const t = p.tabs.find((x) => x.id === id);
+      if (t) return t.runtime === 'claude';
+    }
+    return false;
+  });
+  const run = $derived(b?.kind === 'action' ? runPlace(b.command, carrierIsClaude) : null);
+
+  /** Run the command shown on the card. It runs what is showing, so it takes the same two guards
+   *  as a click answer: a command that just appeared may have replaced the one being read. */
+  async function runCommand(e: MouseEvent) {
+    if (!b || !run || sending || secondClick(e)) return;
+    if (isFresh()) {
+      onnote?.('The agent just changed its question. Read it again before running anything.');
+      return;
+    }
+    sending = true;
+    try {
+      const r = await overlordStore.runBlockerCommand(task.id, b.asked_at);
+      onnote?.(
+        !r.ran
+          ? r.detail
+          : r.where === 'agent'
+            ? 'Typed into the agent’s tab. It sees the output, so the question is closed.'
+            : 'Running in a new tab. Click I’ve done it once it has finished.',
+      );
+    } finally {
+      sending = false;
+    }
+  }
+
   /** Close the question without answering: the human dealt with it in the agent's tab. It
    *  answers nothing, but it does close whatever question is showing, so it takes the same two
    *  guards as a click answer. */
@@ -216,7 +253,18 @@
         {/each}
       </div>
     {/if}
-    {#if b.command}<code class="cmd">{b.command}</code>{/if}
+    {#if b.command}
+      <div class="cmdrow">
+        <code class="cmd">{b.command}</code>
+        {#if run && !held}
+          <Tooltip text={run.place === 'agent'
+            ? 'Type it into the agent’s tab: it runs there and the agent sees the output'
+            : 'Open a new tab beside the agent and run it there, where it can ask you for a password'}>
+            <button class="send run" disabled={sending} onclick={runCommand}>Run</button>
+          </Tooltip>
+        {/if}
+      </div>
+    {/if}
     {#if !held}
     <div class="answer">
       <input
@@ -337,6 +385,9 @@
     padding: 3px 5px;
     border-radius: 3px;
   }
+  .cmdrow { display: flex; gap: 4px; align-items: flex-start; }
+  .cmdrow .cmd { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .cmdrow :global(.tooltip-wrapper) { flex-shrink: 0; }
   .answer { display: flex; gap: 4px; }
   .answer input {
     flex: 1;

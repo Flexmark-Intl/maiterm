@@ -14,6 +14,7 @@ import type {
 } from '$lib/tauri/types';
 import type { AgentRuntime, AgentState } from '$lib/agents/types';
 import { workspacesStore, tabDisplayName, navigateToTab } from '$lib/stores/workspaces.svelte';
+import { isStripHidden } from '$lib/workspace/hiddenTabs';
 import { resumePane } from '$lib/stores/resumeGate.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { claudeStateStore, resumeCommandFor } from '$lib/stores/agentState.svelte';
@@ -37,7 +38,7 @@ import { coordinatorHolds, engineSkips, HIVE_COORDINATOR_HOLDS, HIVE_SUPERVISED_
 import { recordHumanBlockerAnswer } from '$lib/hive/prompts';
 import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
 import { summarizeBatch, type TabBatchRow, type TabBatchResult } from '$lib/stores/tabBatch';
-import { answerBlocker as answerBlockerText, dismissBlocker as dismissBlockerCheck, appendNote, findImportedDuplicate, isInFlight, isParked, isRetired, makeTask, normalizeTitle, statusFromAgent, type BlockerAnswer, type TaskRow } from '$lib/tasks/model';
+import { answerBlocker as answerBlockerText, dismissBlocker as dismissBlockerCheck, runPlace, RAN_IN_AGENT_NOTE, appendNote, findImportedDuplicate, isInFlight, isParked, isRetired, makeTask, normalizeTitle, statusFromAgent, type BlockerAnswer, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 import { listen } from '@tauri-apps/api/event';
 
@@ -1210,6 +1211,31 @@ function createOverlordStore() {
    * that window would merge into one prompt. A notice is not a directive: it asks for nothing
    * back, so it does NOT take the tab's outstanding slot.
    */
+  /** Why Run could not type a command into the agent's tab, in the human's words. */
+  function runRefusalText(reason: string): string {
+    switch (reason) {
+      case 'busy':
+        return 'The agent is in the middle of a turn. Run it once the turn ends.';
+      case 'draft':
+        return "There's a draft in the agent's input box. Send or clear it, then Run.";
+      case 'typing':
+        return "You're typing in the agent's tab. Run again in a moment.";
+      case 'dialog':
+        return 'A dialog is open in the agent’s tab. Answer it first.';
+      case 'box_unreadable':
+        return "The agent's input box can't be read off the screen, so nothing was typed.";
+      case 'queued_behind':
+      case 'ordering':
+        return 'An earlier message is still waiting to reach the agent. Run again once it lands.';
+      case 'no_agent':
+      case 'no_terminal':
+      case 'not_claude':
+        return 'No agent is running in that tab to take it.';
+      default:
+        return `Nothing was run: ${reason}`;
+    }
+  }
+
   async function deliverHuman(tabId: string, text: string, what: string, onDropped?: () => void): Promise<boolean> {
     listenForInboxOutcomes();
     return serializeNotice(tabId, async () => {
@@ -3721,6 +3747,89 @@ function createOverlordStore() {
       }
       ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
       return { answered: true, told: await relay() };
+    },
+
+    /**
+     * The card's Run (docs/tasks.md §3.1.2): run an action blocker's command where `runPlace`
+     * says. `agent`: typed into the carrying Claude tab as `! line`, now or not at all (refused
+     * while it works, or over a draft, a dialog or the human's typing); its output reaches the
+     * agent, so the question closes as handled and nothing else is typed. `tab`: a new terminal
+     * tab beside the agent, in its folder and on its host, types the line; the question stays
+     * open for "I've done it", since only the human sees how it went.
+     *
+     * Human-only like `answerBlocker`: it runs a command with the human's authority, so no MCP
+     * tool reaches it. The phone (`POST /tasks/{id}/run`) opens the tab in the background.
+     */
+    async runBlockerCommand(
+      id: string,
+      askedAt: string,
+      from: 'desktop' | 'phone' = 'desktop',
+    ): Promise<{ ran: true; where: 'agent' | 'tab' } | { ran: false; detail: string }> {
+      const hit = tasksStore.findAnywhere(id);
+      if (!hit) return { ran: false, detail: 'No such task.' };
+      const { workspaceId, task } = hit;
+      const b = task.blocker;
+      if (!b || task.status !== 'blocked') {
+        return { ran: false, detail: 'This task is not waiting on anything. It may already have been answered or moved on.' };
+      }
+      if (b.asked_at !== askedAt) {
+        return { ran: false, detail: 'The agent has asked something new since this was shown. Read the new question first.' };
+      }
+      if (b.kind !== 'action') return { ran: false, detail: 'Only a card asking you to do something has a command to run.' };
+      if (coordinatorHolds(hivePrompts.blockerOwner(id, askedAt))) return { ran: false, detail: HIVE_COORDINATOR_HOLDS };
+      const carrierId = task.tab_id ?? null;
+      let carrier: { ws: Workspace; paneId: string; tab: Tab } | null = null;
+      for (const ws of workspacesStore.workspaces) {
+        for (const p of ws.panes) {
+          const t = p.tabs.find((x) => x.id === carrierId);
+          if (t) carrier = { ws, paneId: p.id, tab: t };
+        }
+      }
+      const run = runPlace(b.command, carrier?.tab.runtime === 'claude');
+      if (!run) return { ran: false, detail: 'The card has no command to run.' };
+
+      if (run.place === 'agent' && carrierId) {
+        const r = await commands
+          .runShellLineInAgent(carrierId, run.line)
+          .catch((e): { status: 'refused'; reason: string } => ({ status: 'refused', reason: String(e) }));
+        if (r.status !== 'typed') return { ran: false, detail: runRefusalText(r.reason) };
+        // Re-read: the await let the agent re-ask, and its new question must not be closed.
+        const now = tasksStore.findAnywhere(id)?.task;
+        if (now?.status === 'blocked' && now.blocker?.asked_at === askedAt) {
+          tasksStore.update(workspaceId, id, { status: 'active', notes: appendNote(now, `${RAN_IN_AGENT_NOTE}: ${run.line}`, 'human') });
+          bumpLive();
+        }
+        logInfo(`overlord: blocker command for ${id.slice(0, 8)} typed into its agent's tab (${from})`);
+        return { ran: true, where: 'agent' };
+      }
+
+      // Beside the agent, where it lives. A Hive's agents are hidden and its workspace takes no
+      // new tabs, so a Hive task's command opens in the workspace on screen, still at the agent's
+      // place.
+      const place = carrier ? await workspacesStore.placeOfTab(carrier.tab.id) : null;
+      const target =
+        carrier && !carrier.ws.hive && !isStripHidden(carrier.tab)
+          ? { workspaceId: carrier.ws.id, paneId: carrier.paneId }
+          : workspacesStore.activeWorkspace && workspacesStore.activePane
+            ? { workspaceId: workspacesStore.activeWorkspace.id, paneId: workspacesStore.activePane.id }
+            : null;
+      if (!target) return { ran: false, detail: 'There is no pane to open a tab in.' };
+      const name = `Run: ${run.line.length > 40 ? `${run.line.slice(0, 39)}…` : run.line}`;
+      try {
+        const tab = await workspacesStore.createTab(target.workspaceId, target.paneId, name, {
+          background: from === 'phone',
+          context: { cwd: place?.cwd ?? null, sshCommand: place?.sshCommand ?? null, remoteCwd: place?.remoteCwd ?? null, launchCommand: run.line },
+        });
+        // A background tab has no TerminalPane, so no PTY to type into, until something mounts it.
+        if (from === 'phone') window.dispatchEvent(new CustomEvent('activate-tab', { detail: tab.id }));
+        else if (target.workspaceId !== workspacesStore.activeWorkspaceId) void navigateToTab(tab.id);
+      } catch (e) {
+        return { ran: false, detail: `No tab could be opened to run it: ${e instanceof Error ? e.message : e}` };
+      }
+      const now = tasksStore.findAnywhere(id)?.task;
+      if (now) tasksStore.update(workspaceId, id, { notes: appendNote(now, `Opened a tab to run the command: ${run.line}`, 'human') });
+      logInfo(`overlord: blocker command for ${id.slice(0, 8)} opened in a new tab (${from})`);
+      return { ran: true, where: 'tab' };
     },
 
     /** Close a task's question without telling the agent (the human answered it in the tab).

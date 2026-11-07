@@ -101,6 +101,17 @@ export async function handleMailinkRequest(req: MailinkRequest): Promise<void> {
         }
         break;
       }
+      case 'tasks.run': {
+        // v0.27: the phone's Run on an action card (docs/tasks.md §3.1.2). askedAt is the stale
+        // guard, as for an answer; a tab it opens opens in the background, behind the human's work.
+        if (typeof a.id !== 'string' || typeof a.askedAt !== 'string') {
+          result = { error: 'id and askedAt are required' };
+        } else {
+          const r = await overlordStore.runBlockerCommand(a.id, a.askedAt, 'phone');
+          result = r.ran ? { ran: r.where } : { error: r.detail };
+        }
+        break;
+      }
       case 'overlord.dismissEscalation': {
         if (typeof a.id !== 'string') result = { error: 'id is required' };
         else { overlordStore.dismissEscalation(a.id); result = { ok: true }; }

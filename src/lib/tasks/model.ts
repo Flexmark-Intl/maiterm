@@ -602,6 +602,26 @@ export function dismissBlocker(task: Task, askedAt: string): { ok: true; note: s
   return { ok: true, note: DISMISSED_NOTE };
 }
 
+/** Where an action blocker's Run button runs its command (docs/tasks.md §3.1.2). Mirror of
+ *  `run_place` in src-tauri/src/mailink/board.rs — change the two together.
+ *
+ *  `! …` is the agent asking for a line in ITS session: typed into a Claude tab it runs in shell
+ *  mode where the agent runs (its ssh host too), and the agent sees the output. Anything else —
+ *  agents often leave the `!` off, interactive or not — or a `!` line for another runtime or over
+ *  several lines, runs in a new terminal tab beside the agent, where it can prompt. `null`:
+ *  nothing to run. */
+export function runPlace(command: string | null | undefined, carrierIsClaude: boolean): { place: 'agent' | 'tab'; line: string } | null {
+  const c = (command ?? '').trim();
+  const bang = c.startsWith('!');
+  const line = bang ? c.slice(1).trim() : c;
+  if (!line) return null;
+  return { place: bang && carrierIsClaude && !line.includes('\n') ? 'agent' : 'tab', line };
+}
+
+/** The log line when Run typed the command into the agent's tab: the agent saw its output, so
+ *  the question closes with this instead of an answer typed after it. */
+export const RAN_IN_AGENT_NOTE = 'Ran the command in the agent’s tab from the card';
+
 /** Map a runtime's own vocabulary onto ours (importer + MCP callers, which speak
  *  Claude's pending/in_progress/completed). Anything unrecognized lands in backlog. */
 export function statusFromAgent(status: string | undefined, blocked?: boolean): TaskStatus {

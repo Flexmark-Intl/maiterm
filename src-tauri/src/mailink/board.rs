@@ -133,8 +133,42 @@ fn task_view(t: &Task, ws: &Workspace, effective: &str, tab_title: Option<&str>,
         // there is none, per the stated-absence rule. Only ever present while `status` is
         // "blocked" (`Task::settle_blocker`). `decision` and `action` are the human's to
         // answer, through `POST /tasks/{id}/answer` with `askedAt` as the stale guard.
-        "blocker": t.blocker.as_ref().map(|b| blocker_view(b, &named)),
+        "blocker": t.blocker.as_ref().map(|b| blocker_view(b, &named, carrier_is_claude(t, ws))),
     })
+}
+
+/// The task's carrying tab runs Claude: where a blocker's `! …` command would run (`run_place`).
+fn carrier_is_claude(t: &Task, ws: &Workspace) -> bool {
+    let Some(tab_id) = t.tab_id.as_deref() else { return false };
+    ws.panes.iter().flat_map(|p| &p.tabs).any(|tab| tab.id == tab_id && tab.runtime == Some(crate::state::AgentRuntime::Claude))
+}
+
+/// Where an action blocker's Run button runs its command (docs/tasks.md §3.1.2). Mirror of
+/// `runPlace` in src/lib/tasks/model.ts — change the two together.
+///
+/// `! …` is the agent asking for a line in ITS session: typed into a Claude tab, Claude runs it in
+/// shell mode where the agent runs (its ssh host too) and sees the output (tested on Claude Code
+/// 2.1.319: a pasted `! …` enters shell mode). Anything else, or a `!` line for another runtime or
+/// over several lines, gets a new terminal tab beside the agent, where it can prompt for a
+/// password. Agents often leave the `!` off a command that needs no terminal; a tab runs that
+/// too. `None`: nothing to run.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RunPlace {
+    Agent,
+    Tab,
+}
+
+pub(crate) fn run_place(command: &str, carrier_is_claude: bool) -> Option<(RunPlace, String)> {
+    let c = command.trim();
+    let (bang, line) = match c.strip_prefix('!') {
+        Some(rest) => (true, rest.trim()),
+        None => (false, c),
+    };
+    if line.is_empty() {
+        return None;
+    }
+    let place = if bang && carrier_is_claude && !line.contains('\n') { RunPlace::Agent } else { RunPlace::Tab };
+    Some((place, line.to_string()))
 }
 
 /// v0.26: a pick-several decision goes out with `pick: "many"` and its choices in `picks`, and
@@ -143,7 +177,7 @@ fn task_view(t: &Task, ws: &Workspace, effective: &str, tab_title: Option<&str>,
 /// With `options` empty it offers a free-text answer instead, and `context` carries the choices
 /// as a list so it can still be answered in words. A 0.26 phone renders `pickContext` (the
 /// agent's own context) and `picks` as checkboxes, and answers with `options: [i, …]`.
-fn blocker_view(b: &crate::state::workspace::TaskBlocker, named: &dyn Fn(&str) -> String) -> Value {
+fn blocker_view(b: &crate::state::workspace::TaskBlocker, named: &dyn Fn(&str) -> String, claude: bool) -> Value {
     let options: Vec<Value> = b
         .options
         .iter()
@@ -166,6 +200,10 @@ fn blocker_view(b: &crate::state::workspace::TaskBlocker, named: &dyn Fn(&str) -
         "picks": if many { options } else { Vec::new() },
         "pickContext": if many { context } else { None },
         "command": b.command,
+        // v0.27: where `POST /tasks/{id}/run` runs `command` — "agent" (typed into the agent's
+        // tab as a shell-mode line; the question closes) or "tab" (a new terminal tab beside the
+        // agent on the desktop; the question stays open for "I've done it"). null: no Run.
+        "run": if b.kind == "action" { b.command.as_deref().and_then(|c| run_place(c, claude)).map(|(p, _)| if p == RunPlace::Agent { "agent" } else { "tab" }) } else { None },
         "askedAt": b.asked_at,
         "askedBy": b.asked_by,
     })
@@ -827,7 +865,7 @@ mod tests {
             asked_by: "agent".into(),
         };
         let same = |s: &str| s.to_string();
-        let v = blocker_view(&b, &same);
+        let v = blocker_view(&b, &same, true);
         assert_eq!(v["options"], json!([]), "no taps for a phone that can't tick");
         assert_eq!(v["pick"], "many");
         assert_eq!(v["picks"][1]["label"], "Lazy-load");
@@ -838,11 +876,42 @@ mod tests {
         assert!(ctx.contains("- **Lazy-load** — Lazy-load costs"), "{ctx}");
 
         b.pick = None;
-        let v = blocker_view(&b, &same);
+        let v = blocker_view(&b, &same, true);
         assert_eq!(v["pick"], "one");
         assert_eq!(v["options"].as_array().unwrap().len(), 2);
         assert_eq!(v["picks"], json!([]));
         assert_eq!(v["context"], "Found two problems.");
+        assert_eq!(v["run"], Value::Null, "a decision has nothing to run");
+    }
+
+    /// v0.27: where Run sends an action blocker's command (docs/tasks.md §3.1.2).
+    #[test]
+    fn run_place_sends_only_a_one_line_bang_command_to_a_claude_agent() {
+        let p = |c: &str, claude: bool| run_place(c, claude);
+        assert_eq!(p("! bash /tmp/r2-setup.sh", true), Some((RunPlace::Agent, "bash /tmp/r2-setup.sh".into())));
+        assert_eq!(p("  !npm test ", true), Some((RunPlace::Agent, "npm test".into())));
+        // No `!`: agents leave it off even for commands that need no terminal. A tab runs either.
+        assert_eq!(p("sudo apt install jq", true), Some((RunPlace::Tab, "sudo apt install jq".into())));
+        // Shell mode is tested on Claude only; another runtime's `!` line runs in a tab, unprefixed.
+        assert_eq!(p("! make", false), Some((RunPlace::Tab, "make".into())));
+        assert_eq!(p("! cd x\nmake", true), Some((RunPlace::Tab, "cd x\nmake".into())));
+        assert_eq!(p(" ! ", true), None);
+        assert_eq!(p("", true), None);
+
+        use crate::state::workspace::TaskBlocker;
+        let b = TaskBlocker {
+            kind: "action".into(),
+            question: "Run the setup?".into(),
+            context: None,
+            options: vec![],
+            command: Some("! bash setup.sh".into()),
+            pick: None,
+            asked_at: "t".into(),
+            asked_by: "agent".into(),
+        };
+        let same = |s: &str| s.to_string();
+        assert_eq!(blocker_view(&b, &same, true)["run"], "agent");
+        assert_eq!(blocker_view(&b, &same, false)["run"], "tab");
     }
 
     fn task(id: &str, title: &str, tab: Option<&str>, stream: Option<&str>) -> Task {

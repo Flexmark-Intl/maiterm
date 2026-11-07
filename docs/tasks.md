@@ -435,6 +435,32 @@ A refusal costs the agent a turn, and it then asks properly; nothing it asked is
 apply only to what agents file: Rust's own blockers (Hive budget, pause and plan questions) don't
 go through `parseBlocker`.
 
+### 3.1.2 Run: the card runs its command (2026-11-06)
+
+An `action` card carries the command the human has to run. The human used to copy it into the
+agent's tab by hand; **Run** runs it. Where depends on the command (`runPlace` in
+`tasks/model.ts`, `run_place` in `mailink/board.rs`: change the two together):
+
+- **`! …`, on a Claude agent's tab, one line**: the agent is asking for a line in its own
+  session. Typed there as `! line` (`run_shell_line_in_agent`), Claude runs it in shell mode,
+  where the agent runs (its ssh host too), and the agent sees the output and takes a turn on it
+  (tested on Claude Code 2.1.319, which enters shell mode on a pasted `! …`). So the question
+  closes with the note "Ran the command in the agent's tab from the card", and nothing else is
+  typed. It is typed now or refused with the reason, **never held** (`shell_line_refusal`):
+  refused mid-turn (whether Claude queues a shell-mode line typed while it works is untested),
+  over a dialog, a draft, the human's typing, or a message still waiting for the tab.
+- **Anything else**: a new terminal tab beside the agent, in its folder and on its ssh host
+  (`placeOfTerminalTab`, what Cmd+T inherits), types the line once the shell (or the ssh hop and
+  its bridge) is up. Agents often leave the `!` off, even for commands that need no terminal; a
+  tab runs those too, and it is the only place a `sudo` or a login can prompt. The agent sees
+  none of it, so the question stays open for "I've done it". A Hive agent's tab is hidden and
+  its workspace takes no new tabs, so its command opens in the workspace on screen.
+
+Run runs what is on screen, so it takes the card's two guards (§3.1, `BlockerCard`), and it is
+human-only like an answer: no MCP tool reaches it. The phone runs it through
+`POST /tasks/{id}/run` (docs/mailink-protocol.md, 0.27), served `blocker.run` so its button can
+say where; a tab it opens opens in the background.
+
 ## 4. Workstreams
 
 One agent tab is routinely asked to do two unrelated things. A **workstream** is a named

@@ -154,6 +154,57 @@ function logDroppedFollowUps(tab: Tab | undefined, how: string) {
   logWarn(`follow-ups: tab ${tab!.id.slice(0, 8)} ${how} with ${pending.length} pending, dropped: ${list}`);
 }
 
+/** Where a terminal tab lives: its local folder, and its ssh command and remote folder when it is
+ *  on a host. What a tab opened from it starts in (`createTab` inheriting from the active tab, a
+ *  blocker card's Run opening a tab beside its agent). Live PTY state first, persisted fields
+ *  after. */
+async function placeOfTerminalTab(tab: Tab): Promise<{ cwd: string | null; sshCommand: string | null; remoteCwd: string | null }> {
+  // Query live PTY info for the tab — persisted fields
+  // (restore_ssh_command etc.) may not reflect the current state yet
+  // if auto-save hasn't fired.
+  let liveSsh: string | null = null;
+  let liveCwd: string | null = null;
+  const instance = terminalsStore.instances.get(tab.id);
+  if (instance) {
+    try {
+      const info = await commands.getPtyInfo(instance.ptyId);
+      liveSsh = info.foreground_command;
+      liveCwd = info.cwd;
+    } catch { /* ignore */ }
+  }
+
+  if (tab.auto_resume_enabled && tab.auto_resume_ssh_command) {
+    // Pinned auto-resume is the source of truth — live PTY state can
+    // be misleading (e.g. ssh → sudo -i changes foreground_command to
+    // something that won't reconnect correctly).
+    return {
+      cwd: liveCwd ?? tab.last_cwd ?? null,
+      sshCommand: tab.auto_resume_ssh_command,
+      remoteCwd: tab.auto_resume_remote_cwd ?? null,
+    };
+  } else if (liveSsh) {
+    // Get remote cwd from OSC state (promptCwd) since live PTY only gives local cwd
+    const oscState = terminalsStore.getOsc(tab.id);
+    return {
+      cwd: liveCwd,
+      sshCommand: liveSsh,
+      remoteCwd: oscState?.promptCwd ?? tab.auto_resume_remote_cwd ?? tab.restore_remote_cwd ?? null,
+    };
+  } else {
+    const ssh = tab.auto_resume_ssh_command || tab.restore_ssh_command || null;
+    // For live SSH tabs the real remote cwd lives in OSC promptCwd
+    // (the PTY only reports the local cwd); fall back to persisted.
+    const oscState = ssh ? terminalsStore.getOsc(tab.id) : null;
+    return {
+      cwd: tab.last_cwd ?? liveCwd ?? null,
+      sshCommand: ssh,
+      remoteCwd: ssh
+        ? (oscState?.promptCwd ?? tab.auto_resume_remote_cwd ?? tab.restore_remote_cwd ?? null)
+        : null,
+    };
+  }
+}
+
 function createWorkspacesStore() {
   let windowId = $state<string>('');
   let windowLabel = $state<string>('');
@@ -1235,52 +1286,7 @@ function createWorkspacesStore() {
 
         let best: { cwd: string | null; sshCommand: string | null; remoteCwd: string | null } | null = null;
 
-        if (activeTab?.tab_type === 'terminal') {
-          // Query live PTY info for the active terminal — persisted fields
-          // (restore_ssh_command etc.) may not reflect the current state yet
-          // if auto-save hasn't fired.
-          let liveSsh: string | null = null;
-          let liveCwd: string | null = null;
-          const instance = activeTabId ? terminalsStore.instances.get(activeTabId) : undefined;
-          if (instance) {
-            try {
-              const info = await commands.getPtyInfo(instance.ptyId);
-              liveSsh = info.foreground_command;
-              liveCwd = info.cwd;
-            } catch { /* ignore */ }
-          }
-
-          if (activeTab.auto_resume_enabled && activeTab.auto_resume_ssh_command) {
-            // Pinned auto-resume is the source of truth — live PTY state can
-            // be misleading (e.g. ssh → sudo -i changes foreground_command to
-            // something that won't reconnect correctly).
-            best = {
-              cwd: liveCwd ?? activeTab.last_cwd ?? null,
-              sshCommand: activeTab.auto_resume_ssh_command,
-              remoteCwd: activeTab.auto_resume_remote_cwd ?? null,
-            };
-          } else if (liveSsh) {
-            // Get remote cwd from OSC state (promptCwd) since live PTY only gives local cwd
-            const oscState = terminalsStore.getOsc(activeTab.id);
-            best = {
-              cwd: liveCwd,
-              sshCommand: liveSsh,
-              remoteCwd: oscState?.promptCwd ?? activeTab.auto_resume_remote_cwd ?? activeTab.restore_remote_cwd ?? null,
-            };
-          } else {
-            const ssh = activeTab.auto_resume_ssh_command || activeTab.restore_ssh_command || null;
-            // For live SSH tabs the real remote cwd lives in OSC promptCwd
-            // (the PTY only reports the local cwd); fall back to persisted.
-            const oscState = ssh ? terminalsStore.getOsc(activeTab.id) : null;
-            best = {
-              cwd: activeTab.last_cwd ?? liveCwd ?? null,
-              sshCommand: ssh,
-              remoteCwd: ssh
-                ? (oscState?.promptCwd ?? activeTab.auto_resume_remote_cwd ?? activeTab.restore_remote_cwd ?? null)
-                : null,
-            };
-          }
-        }
+        if (activeTab?.tab_type === 'terminal') best = await placeOfTerminalTab(activeTab);
 
         // Fallback: if there's no usable previous tab (the active tab is not a
         // terminal, the pane is empty, or it's a fresh terminal that hasn't
@@ -1335,6 +1341,12 @@ function createWorkspacesStore() {
         }
       }
       return tab;
+    },
+
+    /** Where a terminal tab lives (`placeOfTerminalTab`), for opening another tab there. */
+    async placeOfTab(tabId: string) {
+      const tab = workspaces.flatMap(w => w.panes).flatMap(p => p.tabs).find(t => t.id === tabId);
+      return tab?.tab_type === 'terminal' ? placeOfTerminalTab(tab) : null;
     },
 
     async createEditorTab(workspaceId: string, paneId: string, name: string, fileInfo: EditorFileInfo, insertAfterTabId?: string) {

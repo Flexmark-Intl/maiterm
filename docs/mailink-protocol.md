@@ -4,6 +4,18 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.27 changelog** (2026-11-06). Additive: **Run on an action card** (maiTerm docs/tasks.md
+> §3.1.2). The desktop's "Needs you" card runs its command with one click; the phone gets the same.
+> - **`MaitermTask.blocker.run`** is `"agent"`, `"tab"` or `null`. `agent`: the command is a
+>   `! …` line for a Claude agent, typed into its tab, where it runs and the agent sees the output;
+>   the question then closes. `tab`: it opens in a new terminal tab beside the agent on the
+>   desktop, which can stop at a password prompt only the desktop can answer, and the question
+>   stays open for "I've done it" (`/answer`). `null`: no Run (not an action, or no command).
+>   Say which on the button ("Run in the agent's tab" / "Run on the desktop").
+> - **`POST /tasks/{id}/run`** `{ askedAt }` runs it. `result.ran` is `agent` | `tab`. An `agent`
+>   run is refused, never held, while the agent is mid-turn, has a dialog open, or there is a
+>   draft in its box or the human is typing there: `accepted:false` with the sentence as `reason`.
+>
 > **v0.26 changelog** (2026-11-02). Additive: **pick-several decisions** (maiTerm docs/tasks.md
 > §3.1.1). An agent's decision can let the human tick any of its options, where one answer
 > covers them all ("which of these three changes should I make?").
@@ -1263,6 +1275,10 @@ interface MaitermTask {
     context: string | null;
     options: { label: string; detail: string | null; recommended: boolean }[];  // decision only; [] = free text
     command: string | null;         // action only: the exact command the human has to run
+    // 0.27. Where POST /tasks/{id}/run runs `command`: 'agent' (a `! …` line typed into the
+    // agent's Claude tab; the question closes), 'tab' (a new terminal tab beside the agent on the
+    // desktop; the question stays open for "I've done it"), null (no Run).
+    run: 'agent' | 'tab' | null;
     // 0.26. 'many': the human ticks any of `picks` and one answer covers them all
     // (POST /answer with `options: [i, …]`). On a 'many' question `options` is [] and `context`
     // ends with the choices as a markdown list, so a pre-0.26 client offers a free-text answer
@@ -2409,6 +2425,7 @@ interface OutstandingDirective {
 | `POST /tasks/{id}/start` | `{}` | `{ accepted, confirmed, result?: { started, told, task } }` — see below |
 | `POST /tasks/{id}/answer` | `{ askedAt: string, option?: number, options?: number[], text?: string }` (0.13; `options` 0.26: the ticked `picks` of a `pick:"many"` question, `[]` for none of them; refused on a pick-one question, as `option` is on a pick-several one; `text` alone answers either) | `{ accepted, confirmed, reason?, result?: { answered: true, told, task } }` — see below |
 | `POST /tasks/{id}/dismiss` | `{ askedAt: string }` (0.17) | `{ accepted, confirmed, reason?, result?: { dismissed: true, task } }` — "Already handled in the tab": the blocker is cleared and the task goes back to Active with the note "Handled in the tab by the human". NOTHING is typed to the agent. Any blocker kind (`decision`, `action`, `external`), as on the desktop's card. Refusals as for `/answer` (stale `askedAt`, no longer blocked), `reason` verbatim |
+| `POST /tasks/{id}/run` | `{ askedAt: string }` (0.27) | `{ accepted, confirmed, reason?, result?: { ran: "agent" \| "tab", task } }` — the card's Run, where `blocker.run` says. `agent`: typed into the agent's tab as a shell-mode line and the task goes back to Active (the agent saw the output); refused, never held, while the agent works, has a dialog open, or has a draft or the human's typing in its box. `tab`: a new terminal tab opens beside the agent on the desktop, behind the human's work, and the task stays Blocked for `/answer`. Refusals as for `/answer` (stale `askedAt`, no longer blocked, not an action), `reason` verbatim |
 
 **Answering a blocker (0.13).** `POST /tasks/{id}/answer` is the phone's "prompt me": the human
 answers the question on a task's `blocker`. It is the same human-only verb as the desktop's answer
@@ -2557,6 +2574,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.24` | adds `pendingPrompt.owner` (`"coordinator"`) on a Hive worker's prompt its coordinator holds, served `respondable:false` with `options:[]` (a question's `questions` become `text`) until the coordinator's timeout; `/respond` answers `reason:"coordinator"` for it |
 | `0.25` | adds `Chat.hive` / `ChatDetail.hive` (`ChatHive`, `null` off a Hive); `POST /message` to a Done Hive's coordinator wakes it (`status:"held"`, `reason:"hive_wake"`, `woke:"hive"`; `403` for the dev token); `unreachable` reasons `hive` and `hive_done` from `/message` and `/wake` |
 | `0.26` | adds pick-several decisions: `MaitermTask.blocker.pick` (`one` / `many`), `picks` and `pickContext`; a `many` question is served with `options: []` and its choices listed in `context`, so an older client answers it in words; `POST /tasks/{id}/answer` takes `options: number[]` |
+| `0.27` | adds `MaitermTask.blocker.run` (`agent` / `tab` / `null`) and `POST /tasks/{id}/run` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

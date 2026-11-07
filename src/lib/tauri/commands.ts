@@ -536,6 +536,14 @@ export async function deliverToAgent(tabId: string, text: string, what: string):
   return invoke('deliver_to_agent', { tabId, text, what });
 }
 
+/** A blocker card's Run, agent half (docs/tasks.md §3.1.2): type `! <line>` into the tab's
+ *  Claude now, or refuse with the reason (`busy`, `draft`, `typing`, `dialog`, `box_unreadable`,
+ *  `queued_behind`, `ordering`, `no_agent`, `no_terminal`, `not_claude`, `not_one_line`). Never
+ *  held. */
+export async function runShellLineInAgent(tabId: string, line: string): Promise<{ status: 'typed' } | { status: 'refused'; reason: string }> {
+  return invoke('run_shell_line_in_agent', { tabId, line });
+}
+
 /** Whether Claude's workspace-trust dialog is open on this tab. Every automated path that types
  *  into a tab must ask first: an Enter there confirms "No, exit" and Claude quits. */
 export async function trustDialogOpen(tabId: string): Promise<boolean> {

@@ -380,6 +380,7 @@ fn build_router(api: ApiState) -> Router {
         // START is a separate verb from "set the lane to active", deliberately — see the handler.
         .route("/mailink/v1/tasks/{task_id}/start", post(post_task_start))
         .route("/mailink/v1/tasks/{task_id}/answer", post(post_task_answer))
+        .route("/mailink/v1/tasks/{task_id}/run", post(post_task_run))
         .route("/mailink/v1/tasks/{task_id}/dismiss", post(post_task_dismiss))
         // The Overlord engine mirror, every window (mailink/overlord.rs). Baseline on connect;
         // the WS `overlord` frame carries changes inline.
@@ -533,7 +534,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.26";
+const PROTOCOL_VERSION: &str = "0.27";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -865,6 +866,35 @@ async fn post_task_dismiss(
     let args = json!({ "id": task_id, "askedAt": body.asked_at });
     let mut out = overlord_act(&s, &window, "tasks.dismiss", args).await;
     log_task_write("dismiss", &task_id, &out);
+    attach_confirmed_row(&s, &task_id, &mut out);
+    Ok(out)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskRunBody {
+    /// The `blocker.askedAt` the human was looking at: Run must not run a command the agent
+    /// put on the card after the phone last refreshed.
+    asked_at: String,
+}
+
+/// `POST /tasks/{id}/run` (v0.27) — the card's Run: run an action blocker's `command` where its
+/// `blocker.run` says (docs/tasks.md §3.1.2, `board::run_place`). `agent`: typed into the agent's
+/// tab as a shell-mode line, refused (not held) while the agent works or the human has a draft
+/// there, and the question closes. `tab`: a new terminal tab beside the agent on the desktop, and
+/// the question stays open for the human's "I've done it". Human-only like `/answer`: it runs a
+/// command with the human's authority. Same envelope; `result.ran` is `agent` | `tab`.
+async fn post_task_run(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+    Json(body): Json<TaskRunBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize_human(&s, &headers)?;
+    let window = board::window_for_task(&s.app, &task_id).ok_or(StatusCode::NOT_FOUND)?;
+    let args = json!({ "id": task_id, "askedAt": body.asked_at, "from": "phone" });
+    let mut out = overlord_act(&s, &window, "tasks.run", args).await;
+    log_task_write("run", &task_id, &out);
     attach_confirmed_row(&s, &task_id, &mut out);
     Ok(out)
 }
