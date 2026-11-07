@@ -158,6 +158,8 @@
       case 'connecting': return 'Connecting…';
       case 'needs_sign_in': return `Needs ${s.auth === 'token' ? 'a new token' : 'a sign-in'}${st.detail ? ` — ${st.detail}` : ''}`;
       case 'unreachable': return `Unreachable${st.detail ? ` — ${st.detail}` : ''}. Its tools stay listed.`;
+      // A server maiTerm runs itself (MiniMax, Meshy) stops while unused and keeps its tools.
+      case 'idle': return `Idle · ${s.tools.length} tool${s.tools.length === 1 ? '' : 's'}. Starts when an agent uses it.`;
       case 'disabled': return 'Off';
       default: return st.detail || st.state;
     }

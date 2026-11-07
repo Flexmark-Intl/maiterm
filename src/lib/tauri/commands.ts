@@ -2657,7 +2657,7 @@ export async function pickFolder(startIn?: string | null): Promise<string | null
 
 // MCP servers through maiTerm (docs/mcp-proxy.md)
 export interface McpServerStatus {
-  /** `connecting` | `connected` | `needs_sign_in` | `unreachable` | `error` | `disabled` */
+  /** `connecting` | `connected` | `needs_sign_in` | `unreachable` | `error` | `disabled`, or `idle` for a stdio server stopped while unused */
   state: string;
   detail: string;
   since: number;
