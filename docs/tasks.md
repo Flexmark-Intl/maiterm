@@ -453,8 +453,10 @@ agent's tab by hand; **Run** runs it. Where depends on the command (`runPlace` i
   (`placeOfTerminalTab`, what Cmd+T inherits), types the line once the shell (or the ssh hop and
   its bridge) is up. Agents often leave the `!` off, even for commands that need no terminal; a
   tab runs those too, and it is the only place a `sudo` or a login can prompt. The agent sees
-  none of it, so the question stays open for "I've done it". A Hive agent's tab is hidden and
-  its workspace takes no new tabs, so its command opens in the workspace on screen.
+  none of it, so the question stays open for "I've done it". The tab opens only in a workspace
+  that can run it: not a Hive (its agents are hidden and it takes no new tabs) and not a
+  suspended one (no terminal mounts there, so the command would wait, untyped, for someone to
+  open the tab). The agent's own workspace first, then the one on screen, then any other.
 
 Run runs what is on screen, so it takes the card's two guards (§3.1, `BlockerCard`), and it is
 human-only like an answer: no MCP tool reaches it. The phone runs it through

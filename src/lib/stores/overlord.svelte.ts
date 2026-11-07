@@ -3803,17 +3803,22 @@ function createOverlordStore() {
         return { ran: true, where: 'agent' };
       }
 
-      // Beside the agent, where it lives. A Hive's agents are hidden and its workspace takes no
-      // new tabs, so a Hive task's command opens in the workspace on screen, still at the agent's
-      // place.
+      // Beside the agent, where it lives, still at the agent's place either way. Only in a
+      // workspace that can run it: a Hive takes no new tabs (its agents are hidden, and the Hive
+      // view is often the workspace on screen), and a suspended workspace mounts no terminal, so
+      // the command would sit untyped until someone opened the tab, hours later perhaps, while
+      // the phone was told it ran. Then the workspace on screen, then any other that can.
       const place = carrier ? await workspacesStore.placeOfTab(carrier.tab.id) : null;
-      const target =
-        carrier && !carrier.ws.hive && !isStripHidden(carrier.tab)
-          ? { workspaceId: carrier.ws.id, paneId: carrier.paneId }
-          : workspacesStore.activeWorkspace && workspacesStore.activePane
-            ? { workspaceId: workspacesStore.activeWorkspace.id, paneId: workspacesStore.activePane.id }
-            : null;
-      if (!target) return { ran: false, detail: 'There is no pane to open a tab in.' };
+      const runnable = (ws: Workspace | null | undefined) => !!ws && !ws.hive && !ws.suspended && ws.panes.length > 0;
+      const paneOf = (ws: Workspace) => ws.panes.find((p) => p.id === ws.active_pane_id) ?? ws.panes[0];
+      let target: { workspaceId: string; paneId: string } | null = null;
+      if (carrier && runnable(carrier.ws) && !isStripHidden(carrier.tab)) {
+        target = { workspaceId: carrier.ws.id, paneId: carrier.paneId };
+      } else {
+        const ws = [workspacesStore.activeWorkspace, ...workspacesStore.workspaces].find(runnable);
+        if (ws) target = { workspaceId: ws.id, paneId: paneOf(ws).id };
+      }
+      if (!target) return { ran: false, detail: 'No open workspace in this window can take a new tab to run it.' };
       const name = `Run: ${run.line.length > 40 ? `${run.line.slice(0, 39)}…` : run.line}`;
       try {
         const tab = await workspacesStore.createTab(target.workspaceId, target.paneId, name, {
