@@ -62,6 +62,7 @@
           : r.kind === 'hive_settings' ? 'Change these Hive settings?'
           : r.kind === 'tool_setup' ? 'Set up a tool for this Hive?'
           : r.kind === 'hive_propose' ? ((r.args.plan as { kind?: string } | undefined)?.kind === 'new_goal' ? 'A new goal for this Hive?' : 'Make this Hive?')
+          : r.kind === 'comms_post' ? 'Post this to Mattermost?'
           : r.kind.startsWith('bridge') ? 'Allow this bridge change?'
             : r.kind.startsWith('mesh') ? 'Allow this mesh change?' : 'Allow this move?',
   );

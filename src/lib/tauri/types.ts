@@ -2048,7 +2048,8 @@ export interface AgentRequest {
     | 'hive_land' | 'hive_undo' | 'hive_settings' | 'tool_setup'
     // An ordinary agent's offer of a Hive or a Done Hive's new goal (`proposeHive`, §3.7):
     // filed and carried out by its window (lib/hive/proposalRequest.ts).
-    | 'hive_propose';
+    | 'hive_propose'
+    | 'comms_post';
   /** Exactly what runs on approval, built by maiTerm. */
   args: Record<string, unknown>;
   /** What the card says will happen, written by maiTerm. */

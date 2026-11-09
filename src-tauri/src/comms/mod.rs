@@ -1782,6 +1782,8 @@ async fn summon_pickup(
         bound_at: now_ms(),
         // Summoned = a human's thread; stay mention-gated.
         deliver_all_replies: false,
+        // A person @mentioned the bot here: answering them is what they asked for.
+        outbound_needs_approval: false,
     };
     let data_clone = {
         let mut data = app.app_data.write();
@@ -2096,6 +2098,7 @@ mod tests {
             last_delivered_create_at: 4242,
             bound_at: 1,
             deliver_all_replies: false,
+            outbound_needs_approval: false,
         };
         note_released_thread(&mut tab, &binding, Some("sess-1".to_string()));
         assert_eq!(tab.comms_thread_receipts.len(), 1);

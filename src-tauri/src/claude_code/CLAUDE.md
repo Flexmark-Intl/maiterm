@@ -77,11 +77,11 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | listTopics | Mesh only: conversation topics — id, label, state, owner, participants, turn count |
 | startTopic | Mesh only: start/reuse a topic (caller becomes owner); returns the topic id |
 | completeTopic | Mesh only: owner marks a topic complete; signals participants, rejects further sends |
-| bindCommsThread | Comms (/maiterm resolve): bind this tab to a Mattermost thread by permalink; returns the thread as a [REPORT]-tagged transcript, the bot's `bot_username`, and records `Tab.comms_binding`. Backend-only |
+| bindCommsThread | Comms (/maiterm resolve): bind this tab to a Mattermost thread by permalink; returns the thread as a [REPORT]-tagged transcript, the bot's `bot_username`, and records `Tab.comms_binding`. Binds at once (reading and listening), but its first post there is a `comms_post` request (`outbound_needs_approval`). Backend-only, own-tab-only |
 | readCommsThread | Comms: re-fetch the full bound thread on demand (only @mentions of the bot are auto-injected; the rest is read-on-demand). Backend-only |
-| readCommsChannel | Comms: read a CHANNEL (URL `https://<server>/<team>/channels/<name>`, `<team>/<name>` or id) newest-activity-first, grouped into threads, paginated with `before` = previous `next_before`; or `thread` (id/permalink) for one whole thread. Read-only and unbound: no cursor, no staging, no posting, any channel the bot can read (writes stay limited to monitored channels). A URL on a host other than the configured server is refused. Pages are raw posts (replies count), so a thread straddling a boundary shows on both pages; an old thread with a new reply gets its root fetched. Result text is flagged as untrusted. Backend-only |
-| postCommsReply | Comms: post Mattermost markdown to the bound thread; `resolve: true` clears the binding after posting. Backend-only |
-| startCommsThread | Comms: open a NEW thread in one of this tab's monitored channels (agent-initiated) and bind to it; `bind: false` posts without binding. Backend-only |
+| readCommsChannel | Comms: read a CHANNEL (URL `https://<server>/<team>/channels/<name>`, `<team>/<name>` or id) newest-activity-first, grouped into threads, paginated with `before` = previous `next_before`; or `thread` (id/permalink) for one whole thread. Read-only and unbound: no cursor, no staging, no posting, any channel the bot can read (a write there is a `comms_post` request the human approves). A URL on a host other than the configured server is refused. Pages are raw posts (replies count), so a thread straddling a boundary shows on both pages; an old thread with a new reply gets its root fetched. Result text is flagged as untrusted. Backend-only |
+| postCommsReply | Comms: post Mattermost markdown in a thread; `resolve: true` clears the binding after posting. At once only in a thread the tab may post in (summoned, or first post approved); otherwise a `comms_post` request (docs/agent-requests.md): the first post in a thread the agent bound itself, or `thread` naming one it isn't bound to. Backend-only, own-tab-only |
+| startCommsThread | Comms: open a NEW thread in any channel the bot can post in, always a `comms_post` request; the approval posts it and, unless `bind: false`, binds the tab with every reply delivered. Backend-only, own-tab-only |
 | sendFilesToPhone | Send files from this machine to the human's paired maiLink phone — any type, per-path success/failure, SSH paths fetched over the bridge. Copies into the maiLink asset store; refused on an inferred identity. Backend-only |
 | unbindCommsThread | Comms: clear the tab's thread binding without posting (idempotent). Backend-only |
 | releaseDirective | Overlord agent only: stop waiting on a tab's answer to a `driveTab` directive, freeing the `outstanding` slot now instead of at the 15-minute timeout. Drops the reply watch and the tab's `directive_unacked` card; refuses `rule_owned` mid-ritual. The deck's Release button calls the same store method. docs/overlord.md §9 |
@@ -140,10 +140,18 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
   Summon candidates require `create_at` past the cursor: Mattermost's `?since=` is
   **update_at-based**, so an EDIT of an old post is re-served — without the guard, editing the
   root of a just-resolved (unbound) thread re-picked the whole thread up as fresh work.
+- **Outbound is the human's call, not monitoring's** (2026-11-09, docs/agent-requests.md
+  "Mattermost posts"). Monitoring only says who may summon a tab. A post goes out at once only
+  in a thread a person summoned the tab into or whose first post the human approved; a new
+  thread, a one-off post in an unbound thread (`postCommsReply` `thread`), and the first post in
+  a thread the agent bound itself (`CommsBinding.outbound_needs_approval`, set by
+  `bindCommsThread`, kept false by `upsert_comms_binding` once allowed) file a `comms_post`
+  request. Its approval posts the STORED message and attachment copies made at filing
+  (`carry_out_comms_post`, via the window's `comms_carry_out_request`).
 - **Agent-initiated threads**: `startCommsThread` lets the agent OPEN a thread rather than only
-  answer one — an incident it found, a heads-up, a question for the channel. Scoped to the tab's
-  `comms_monitor` channels (an agent can't post into arbitrary channels it discovers), posts a
-  root post (`create_post` with an empty root_id), and binds the tab to it unless `bind: false`.
+  answer one — an incident it found, a heads-up, a question for the channel. Any channel the bot
+  can post in, approved per post (above); the approval posts a root post (`create_post` with an
+  empty root_id), and binds the tab to it unless `bind: false`.
   Enforces the same `comms::MAX_TAB_BINDINGS` cap as summons, and seeds the binding cursor at the
   new post's `create_at` so the bot's own opener is never injected back into its session. The
   summon walk can't double-pick it either — bot-authored posts are not summon candidates.

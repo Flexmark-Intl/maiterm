@@ -111,6 +111,8 @@ requested through you.
    - a rough sense of what happens next (e.g. "I'll dig in and report back with what I find" — no fake ETAs),
    - and, on a thread you didn't open, that they must `@<bot_username>` (the value from step 1) to reach you, otherwise you won't see their messages.
 
+   On a thread you bound with bindCommsThread (step 1, not a pickup), this first post is a request: postCommsReply answers `awaiting_approval`, and your human approves it on a card in maiTerm or on their phone before anything is posted. Approving it also lets you post in that thread from then on. Start the investigation while you wait, and you are told in this session once it is posted (or denied: then post nothing there). A pickup thread needs no approval.
+
    Then investigate and fix the issue in this tab's repository. After the ack, stay SILENT on the thread — no progress updates. Exception: if you genuinely cannot proceed without more information, ask ONE concise question via postCommsReply (without the `resolve` flag), and address it explicitly to the right audience — start the message with `**@Support:**` (questions about what the customer saw/did, repro details) or `**@Dev:**` (questions about the codebase, environment, or release process) — so the humans in the channel know who should answer.
 3. **Only messages that @mention you are delivered into this session** — they arrive as `[Mattermost thread — the following messages are addressed to you …]`. Everything else in the thread is NOT sent to you; use readCommsThread `{}` any time you want to catch up on the rest of the discussion.
 

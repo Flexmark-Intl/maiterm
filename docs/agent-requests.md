@@ -24,6 +24,9 @@ and "for organization and read operations it doesn't require the prompt".
 | `listMcpServers` | yes: read-only |
 | `proposeHive` (a Hive made from the agent's plan, or a Done Hive's new goal, docs/hive.md §3.7; kind `hive_propose`) | never: a request. The desktop's button opens the filled-in sheet, whose Create is the approval; the phone's Approve is that Create, made from what its card shows |
 | `hiveRequestCapability` (a Hive coordinator's ask for a media capability its Hive lacks, docs/hive-media.md §8; kind `tool_setup`) | never: a request. Rust files it and carries it out: approval opens the setup sheet in the Hive's window, and the capability joins the Hive once it works |
+| `startCommsThread` (a new Mattermost thread in any channel the bot can post in; `bind` links the tab to it so replies come back; kind `comms_post`) | never: a request. Chat monitoring no longer allows it: monitoring only says who may summon a tab (2026-11-09) |
+| `postCommsReply` | at once in a thread the tab is bound to and allowed to post in: one a person summoned it into, or one whose first post the human approved. A request (`comms_post`) for the first post in a thread the agent bound itself (`bindCommsThread`), whose approval allows the rest, and for `thread` naming a thread the tab isn't bound to (a one-off post) |
+| `bindCommsThread` | yes: binding is reading and listening; posting there is gated as above (`CommsBinding.outbound_needs_approval`) |
 | `getRequestStatus` | yes: read-only, the caller's own requests only |
 
 **The line is "who can message whom".** The mesh is the one place the human decides which agents
@@ -114,6 +117,31 @@ human sees agents being started. How it works:
   webview holds does not: unsaved editor buffers (counted on the card for the asker's own window),
   open panels and dialogs. Reloading the asker's own window settles first and tells the agent
   nothing, as a restart does; getRequestStatus has it.
+
+**Mattermost posts** (`comms_post`, 2026-11-09, Darryl: chat monitoring "doubles as
+authentication for outbound … that second part is not good"). Monitoring a channel is now only
+how people summon a tab with @bot. What an agent may post is decided per thread:
+- **At once**: a thread a person summoned the tab into (they asked for an answer), or one whose
+  first post the human approved.
+- **Asked**: a new thread (`startCommsThread`, any channel the bot can post in), a post in a
+  thread the tab isn't bound to (`postCommsReply` with `thread`, a one-off), and the first post in
+  a thread the agent bound itself (`bindCommsThread` binds at once, to read and listen, and sets
+  `CommsBinding.outbound_needs_approval`; approving that post clears it).
+- **Two shapes for the agent**: a one-off (`bind: false`, or `thread`) passes information on and
+  nothing comes back; a link (`bind: true`, the default) binds the tab to the new thread with
+  every reply delivered, for when it needs an answer.
+- **The card shows exactly what goes out.** The message is stored in the request and shown as the
+  agent's words; attachments are copied when it is filed (`<tmp>/<slug>-comms-out/`, removed
+  after posting or after two days), so a file the agent changes afterwards is not what is posted.
+  The card names the channel and the thread's permalink, the bot it posts as, each file and its
+  size, and whether the tab is linked afterwards. It reaches the phone like any card, so whatever
+  the agent wrote is on the phone too.
+- **Carried out in Rust** from the stored arguments (`claude_code::server::carry_out_comms_post`,
+  called by the filing window through `comms_carry_out_request`); the outcome the agent is told
+  carries the post's root_id and permalink. The binding cap is checked again then: a thread
+  opened when the tab is full is posted unbound and the agent is told.
+- `bindCommsThread`, `postCommsReply` and `startCommsThread` are own-tab-only: a card names its
+  caller, and a post goes out as the tab's.
 
 ## 2. Where the approval lives
 

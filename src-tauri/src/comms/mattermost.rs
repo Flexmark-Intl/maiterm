@@ -287,6 +287,16 @@ impl MattermostClient {
         .await
     }
 
+    /// A team's URL name, for permalinks. A direct or group channel has no team; any of the
+    /// bot's teams makes a working permalink for it.
+    pub async fn team_name(&self, team_id: &str) -> Result<String, CommsError> {
+        if team_id.is_empty() {
+            return Ok(self.my_teams().await?.into_iter().next().map(|t| t.name).unwrap_or_default());
+        }
+        let team: Team = self.send(self.http.get(format!("{}/api/v4/teams/{team_id}", self.base))).await?;
+        Ok(team.name)
+    }
+
     pub async fn channel_by_id(&self, channel_id: &str) -> Result<Channel, CommsError> {
         self.send(
             self.http

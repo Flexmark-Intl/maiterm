@@ -38,7 +38,7 @@ const HIVE_APPROVED_TTL_MS: u64 = 30 * 60 * 1000;
 
 /// What a request asks for. A string on the wire (never a serde enum: an unknown variant in
 /// stored state wipes it on a downgrade), checked against this list when filed.
-pub const KINDS: [&str; 19] = [
+pub const KINDS: [&str; 20] = [
     "mesh_enable",
     "mesh_disable",
     "mesh_link",
@@ -76,6 +76,11 @@ pub const KINDS: [&str; 19] = [
     // out by its window like any request: on the desktop an approval opens the Create sheet
     // filled in, from the phone it is the Create. Not a Hive kind: no Hive exists yet.
     PROPOSE_KIND,
+    // A Mattermost post the agent may not make on its own: a new thread, a post in a thread it
+    // isn't bound to, the first post in a thread it bound itself. Filed by the comms tools
+    // (claude_code/server.rs); the filing window's approval calls `comms_carry_out_request`,
+    // which posts the stored message and the attachment copies made at filing.
+    crate::claude_code::server::COMMS_POST_KIND,
 ];
 
 /// `proposeHive`'s request (docs/hive.md §3.7).

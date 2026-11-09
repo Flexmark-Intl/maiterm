@@ -4016,6 +4016,7 @@ mod reload_carry_tests {
                 last_delivered_create_at: 1650,
                 bound_at: 1600,
                 deliver_all_replies: true,
+                outbound_needs_approval: true,
             }],
             // A reload MUST carry these: the replacement runs the same agent session, so
             // what that session has already been shown is still true of it.

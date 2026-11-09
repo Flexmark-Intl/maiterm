@@ -812,6 +812,9 @@ async function execute(r: AgentRequest): Promise<string> {
         const at = locateTab(r.tab_id);
         return at ? fileHiveProposal(at.tab, p) : { error: 'the agent that proposed it is gone' };
       });
+    case 'comms_post':
+      // Rust posts what it stored at filing; nothing here can change the message.
+      return commands.commsCarryOutRequest(r.id);
     case 'hive_land':
     case 'hive_undo':
     case 'hive_settings':

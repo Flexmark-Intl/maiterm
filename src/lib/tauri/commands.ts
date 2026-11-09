@@ -1607,6 +1607,12 @@ export async function settleAgentRequest(id: string, ok: boolean, outcome: strin
   return invoke('settle_agent_request', { id, ok, outcome });
 }
 
+/** Post an APPROVED `comms_post` request from what Rust stored when it was filed; resolves to
+ *  what the agent is told. */
+export async function commsCarryOutRequest(id: string): Promise<string> {
+  return invoke('comms_carry_out_request', { id });
+}
+
 export async function moveTabToWindow(
   sourceWorkspaceId: string,
   sourcePaneId: string,

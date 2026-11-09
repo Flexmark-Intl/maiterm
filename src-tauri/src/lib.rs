@@ -1102,6 +1102,7 @@ pub fn run() {
             agent_requests::list_agent_requests,
             agent_requests::decide_agent_request,
             agent_requests::settle_agent_request,
+            claude_code::server::comms_carry_out_request,
             commands::browser_link::browser_link_status,
             commands::browser_link::browser_link_links,
             commands::browser_link::browser_link_reveal,

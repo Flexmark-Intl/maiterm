@@ -2287,6 +2287,12 @@ pub struct CommsBinding {
     /// bot is a participant, not the owner).
     #[serde(default)]
     pub deliver_all_replies: bool,
+    /// The agent bound this thread itself (bindCommsThread), so nobody has yet agreed to its
+    /// posting there: its next postCommsReply files a `comms_post` request, and the human's
+    /// approval clears this. A summoned thread (a person @mentioned the bot) and a thread the
+    /// human approved never set it. Default false keeps bindings saved before 2026-11-09 posting.
+    #[serde(default)]
+    pub outbound_needs_approval: bool,
 }
 
 /// A paired maiLink mobile device. The bearer token is stored hashed (never raw); deleting
