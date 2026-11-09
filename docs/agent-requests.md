@@ -131,8 +131,12 @@ how people summon a tab with @bot. What an agent may post is decided per thread:
   nothing comes back; a link (`bind: true`, the default) binds the tab to the new thread with
   every reply delivered, for when it needs an answer.
 - **The card shows exactly what goes out.** The message is stored in the request and shown as the
-  agent's words; attachments are copied when it is filed (`<tmp>/<slug>-comms-out/`, removed
-  after posting or after two days), so a file the agent changes afterwards is not what is posted.
+  agent's words; attachments are copied when it is filed, with a SHA-256 of each, into
+  `<app data>/comms-out/` (0700: never a shared temp dir, where another Linux user could swap a
+  copy), so a file the agent changes afterwards is not what is posted, and a copy that no longer
+  matches its hash posts nothing. A copy is removed once its request is carried out, and any
+  copy no open request points at (denied, lapsed, lost in a restart) on the next filing or
+  carry-out.
   The card names the channel and the thread's permalink, the bot it posts as, each file and its
   size, and whether the tab is linked afterwards. It reaches the phone like any card, so whatever
   the agent wrote is on the phone too.

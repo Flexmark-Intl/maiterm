@@ -2465,42 +2465,74 @@ async fn read_agent_file(
     Ok(bytes)
 }
 
-fn outbound_root() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("{}-comms-out", crate::state::persistence::app_data_slug()))
+/// Where attachment copies wait for the human: in maiTerm's own data folder, never a shared temp
+/// dir (on Linux `/tmp` is every user's, and another user could own the folder and swap a copy).
+fn outbound_root() -> Option<std::path::PathBuf> {
+    crate::state::persistence::app_data_dir().map(|d| d.join("comms-out"))
 }
 
-/// Copy the attachments where the approval uploads them from: `[{path, name, size}]`. Copies
-/// older than two days (a card denied or lapsed long ago) are removed on the way.
-async fn stage_outbound(state: &Arc<AppState>, tab_id: &str, paths: &[String]) -> Result<Vec<Value>, Value> {
-    if paths.is_empty() {
-        return Ok(Vec::new());
-    }
-    let root = outbound_root();
-    if let Ok(entries) = std::fs::read_dir(&root) {
-        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 3600);
-        for e in entries.flatten() {
-            if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < cutoff) {
-                let _ = std::fs::remove_dir_all(e.path());
-            }
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Remove every staged folder no open `comms_post` request points at: one denied, lapsed, lost
+/// in a restart, or left by a filing that failed. Run on every filing and carry-out.
+fn sweep_outbound() {
+    let Some(root) = outbound_root() else { return };
+    let Ok(entries) = std::fs::read_dir(&root) else { return };
+    let open: std::collections::HashSet<String> = crate::agent_requests::open_of_kind(COMMS_POST_KIND)
+        .iter()
+        .filter_map(|r| r.args.get("staged_dir").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    for e in entries.flatten() {
+        if !open.contains(&e.file_name().to_string_lossy().to_string()) {
+            let _ = std::fs::remove_dir_all(e.path());
         }
     }
-    let dir = root.join(uuid::Uuid::new_v4().simple().to_string());
-    std::fs::create_dir_all(&dir).map_err(|e| serde_json::json!({ "error": format!("could not stage the attachments: {e}") }))?;
+}
+
+/// Copy the attachments where the approval uploads them from. Returns the folder's name and
+/// `[{path, name, size, sha256}]`; the hash is checked again before anything is uploaded.
+async fn stage_outbound(state: &Arc<AppState>, tab_id: &str, paths: &[String]) -> Result<(Option<String>, Vec<Value>), Value> {
+    if paths.is_empty() {
+        return Ok((None, Vec::new()));
+    }
+    let err = |e: String| serde_json::json!({ "error": format!("could not stage the attachments: {e}") });
+    let root = outbound_root().ok_or_else(|| err("no data folder".into()))?;
+    std::fs::create_dir_all(&root).map_err(|e| err(e.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700));
+    }
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let dir = root.join(&id);
+    std::fs::create_dir(&dir).map_err(|e| err(e.to_string()))?;
     let staging = crate::comms::staging_target_for_tab(state, tab_id);
     let mut out = Vec::new();
     for (i, path) in paths.iter().enumerate() {
-        let bytes = read_agent_file(&staging, path).await.inspect_err(|_| {
-            let _ = std::fs::remove_dir_all(&dir);
-        })?;
+        let staged = async {
+            let bytes = read_agent_file(&staging, path).await?;
+            let copy = dir.join(format!("{i}"));
+            std::fs::write(&copy, &bytes).map_err(|e| serde_json::json!({ "error": format!("could not stage '{path}': {e}") }))?;
+            Ok::<_, Value>((copy, bytes))
+        }
+        .await;
+        let (copy, bytes) = match staged {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(e);
+            }
+        };
         let name = std::path::Path::new(path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "attachment".to_string());
-        let copy = dir.join(format!("{i}"));
-        std::fs::write(&copy, &bytes).map_err(|e| serde_json::json!({ "error": format!("could not stage '{path}': {e}") }))?;
-        out.push(serde_json::json!({ "path": copy.to_string_lossy(), "name": name, "size": bytes.len() }));
+        out.push(serde_json::json!({ "path": copy.to_string_lossy(), "name": name, "size": bytes.len(), "sha256": sha256_hex(&bytes) }));
     }
-    Ok(out)
+    Ok((Some(id), out))
 }
 
 /// File the request: the card's words are maiTerm's, the message is shown as the agent's.
@@ -2526,9 +2558,15 @@ async fn file_comms_post(
     let team = client.team_name(&channel.team_id).await.unwrap_or_default();
     let place = channel_label(&channel);
     let bot = client.me().await.map(|u| u.username).unwrap_or_default();
-    let staged = match stage_outbound(state, tab_id, attachments).await {
+    sweep_outbound();
+    let (staged_dir, staged) = match stage_outbound(state, tab_id, attachments).await {
         Ok(s) => s,
         Err(e) => return e,
+    };
+    let drop_copies = || {
+        if let (Some(d), Some(root)) = (&staged_dir, outbound_root()) {
+            let _ = std::fs::remove_dir_all(root.join(d));
+        }
     };
 
     let mut effects = Vec::new();
@@ -2546,11 +2584,12 @@ async fn file_comms_post(
         }
         OutboundTarget::Reply { root_id, binding, resolve, .. } => {
             let link = format!("{}/{}/pl/{}", client.base_url().trim_end_matches('/'), team, root_id);
-            if *binding {
+            if *binding && *resolve {
+                effects.push("This is the agent's last post here: the tab then lets go of the thread, and replies reach it again only if someone @mentions the bot.".to_string());
+            } else if *binding {
                 effects.push("Approving also lets this agent post further replies in this thread without asking.".to_string());
-                if *resolve {
-                    effects.push("The tab then lets go of the thread: replies reach it again only if someone @mentions the bot.".to_string());
-                }
+            } else {
+                effects.push("A one-off post: the tab isn't linked to this thread, so replies don't come back to the agent.".to_string());
             }
             (
                 format!("Reply in a thread in {place}: {link}"),
@@ -2577,7 +2616,12 @@ async fn file_comms_post(
     }
     args["message"] = Value::String(message.clone());
     args["attachments"] = Value::from(staged);
-    match crate::agent_requests::file(app_handle, state, tab_id, &window, COMMS_POST_KIND, args, summary, effects, Some(message)) {
+    args["staged_dir"] = staged_dir.clone().map(Value::String).unwrap_or(Value::Null);
+    let filed = crate::agent_requests::file(app_handle, state, tab_id, &window, COMMS_POST_KIND, args, summary, effects, Some(message));
+    if filed.is_err() {
+        drop_copies();
+    }
+    match filed {
         Ok(r) => serde_json::json!({
             "status": "awaiting_approval",
             "request_id": r.id,
@@ -2611,27 +2655,14 @@ pub(crate) async fn carry_out_comms_post(
     }
     let a = &r.args;
     let s = |k: &str| a.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
-    let client = comms::client_from_prefs(state, reqwest::Client::new()).map_err(|e| e.to_string())?;
-    let channel_id = s("channel_id");
-    let staged: Vec<(String, String)> = a
-        .get("attachments")
-        .and_then(Value::as_array)
-        .map(|v| v.iter().map(|f| (f["path"].as_str().unwrap_or_default().to_string(), f["name"].as_str().unwrap_or("attachment").to_string())).collect())
-        .unwrap_or_default();
-    let mut file_ids = Vec::new();
-    for (path, name) in &staged {
-        let bytes = std::fs::read(path).map_err(|e| format!("the copy of {name} made when it was asked is gone ({e}); nothing was posted"))?;
-        file_ids.push(client.upload_file(&channel_id, name, bytes).await.map_err(|e| format!("upload of {name} failed: {e}; nothing was posted"))?);
+    let posted = post_approved(state, a).await;
+    // The copies are spent either way: a failed post is asked again, with fresh copies.
+    if let (Some(d), Some(root)) = (a.get("staged_dir").and_then(Value::as_str), outbound_root()) {
+        let _ = std::fs::remove_dir_all(root.join(d));
     }
-    if let Some(dir) = staged.first().and_then(|(p, _)| std::path::Path::new(p).parent().map(|d| d.to_path_buf())) {
-        let _ = std::fs::remove_dir_all(dir);
-    }
+    sweep_outbound();
+    let (client, channel_id, posted) = posted?;
     let reply = s("target") == "reply";
-    let root = if reply { s("root_id") } else { String::new() };
-    let posted = client
-        .create_post(&channel_id, &root, &s("message"), &file_ids)
-        .await
-        .map_err(|e| format!("Mattermost refused the post: {e}"))?;
     let tab_id = r.tab_id.as_str();
     let place = s("channel");
 
@@ -2645,9 +2676,15 @@ pub(crate) async fn carry_out_comms_post(
                 log::info!("[comms] tab {tab_id} released thread {root_id} (approved post with resolve)");
                 return Ok(format!("posted in the thread {link} ({place}), post_id {}, and the tab let go of the thread", posted.id));
             }
-            allow_posting_in(state, tab_id, &root_id, posted.create_at);
+            if allow_posting_in(state, tab_id, &root_id, posted.create_at) {
+                return Ok(format!(
+                    "posted in the thread {link} ({place}), post_id {}, root_id {root_id}. You may now post further replies there with postCommsReply without asking",
+                    posted.id
+                ));
+            }
+            // Unbound while the card waited: posted as shown, but there is nothing left to allow.
             return Ok(format!(
-                "posted in the thread {link} ({place}), post_id {}, root_id {root_id}. You may now post further replies there with postCommsReply without asking",
+                "posted in the thread {link} ({place}), post_id {}, but this tab is no longer bound to that thread, so replies don't reach you and a further post there is asked again",
                 posted.id
             ));
         }
@@ -2708,8 +2745,36 @@ pub(crate) async fn carry_out_comms_post(
     ))
 }
 
+/// Upload the copies (each checked against the hash taken when the card was made) and post the
+/// stored message. Nothing is posted unless every copy is still what the card showed.
+async fn post_approved(
+    state: &Arc<AppState>,
+    a: &Value,
+) -> Result<(crate::comms::mattermost::MattermostClient, String, crate::comms::mattermost::Post), String> {
+    let s = |k: &str| a.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+    let client = crate::comms::client_from_prefs(state, reqwest::Client::new()).map_err(|e| e.to_string())?;
+    let channel_id = s("channel_id");
+    let mut file_ids = Vec::new();
+    for f in a.get("attachments").and_then(Value::as_array).cloned().unwrap_or_default() {
+        let name = f["name"].as_str().unwrap_or("attachment").to_string();
+        let bytes = std::fs::read(f["path"].as_str().unwrap_or_default())
+            .map_err(|e| format!("the copy of {name} made when it was asked is gone ({e}); nothing was posted"))?;
+        if f["sha256"].as_str() != Some(sha256_hex(&bytes).as_str()) {
+            return Err(format!("the copy of {name} changed after the card was made, so it is not what you approved; nothing was posted"));
+        }
+        file_ids.push(client.upload_file(&channel_id, &name, bytes).await.map_err(|e| format!("upload of {name} failed: {e}; nothing was posted"))?);
+    }
+    let root = if s("target") == "reply" { s("root_id") } else { String::new() };
+    let posted = client
+        .create_post(&channel_id, &root, &s("message"), &file_ids)
+        .await
+        .map_err(|e| format!("Mattermost refused the post: {e}"))?;
+    Ok((client, channel_id, posted))
+}
+
 /// The human approved posting in this bound thread: from now on the agent posts there freely.
-fn allow_posting_in(state: &Arc<AppState>, tab_id: &str, root_id: &str, posted_at: i64) {
+/// False when the tab is no longer bound to it.
+fn allow_posting_in(state: &Arc<AppState>, tab_id: &str, root_id: &str, posted_at: i64) -> bool {
     let data_clone = {
         let mut app_data = state.app_data.write();
         let Some(b) = app_data
@@ -2721,7 +2786,7 @@ fn allow_posting_in(state: &Arc<AppState>, tab_id: &str, root_id: &str, posted_a
             .find(|t| t.id == tab_id)
             .and_then(|t| t.comms_bindings.iter_mut().find(|b| b.root_id == root_id))
         else {
-            return;
+            return false;
         };
         b.outbound_needs_approval = false;
         // Never deliver our own post back to ourselves.
@@ -2731,6 +2796,7 @@ fn allow_posting_in(state: &Arc<AppState>, tab_id: &str, root_id: &str, posted_a
     if let Err(e) = crate::state::save_state(&data_clone) {
         log::warn!("[comms] failed to persist binding change: {e}");
     }
+    true
 }
 
 #[tauri::command]
