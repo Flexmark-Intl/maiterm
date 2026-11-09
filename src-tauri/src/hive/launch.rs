@@ -504,6 +504,23 @@ fn launch_text(prefs: &crate::state::Preferences, root: Option<&Path>, setup: &s
     format!("{}{setup}{}", config_guard(root), hive_launch_line(record, args, &unset_vars_for(prefs), &account_set_for(root)))
 }
 
+/// Holds a launch's whole text, which the tab's shell sources (`typed_launch`).
+pub const LAUNCH_SCRIPT_FILE: &str = "launch.sh";
+
+/// What the tab actually types: `source` of the launch text, written to the task folder as
+/// `launch.sh`. The text itself runs past 1,024 bytes (every add-dir, unset and path in it), and
+/// a line typed before the shell's line editor is up meets the tty in canonical mode, which on
+/// macOS keeps only the first 1,024 bytes of a line (MAX_CANON): a shell slower than the 500 ms
+/// the frontend waits lost the tail, `claude` and the Enter with it, and the agent never started.
+/// `source` runs it in the same shell as typing it did (the `cd`, the guard, the setup, the env),
+/// and reads the same in bash, zsh and fish. The task folder is never a worker's to write (its
+/// settings.json lives there), and the file is rewritten on every launch.
+fn typed_launch(task: &Path, text: &str) -> Result<String, String> {
+    let script = task.join(LAUNCH_SCRIPT_FILE);
+    write_bytes(&script, format!("{text}\n").as_bytes())?;
+    Ok(format!("source {}", sh_quote(&script.to_string_lossy())))
+}
+
 static SESSIONS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn read_sessions(task_dir: &Path) -> Vec<SessionEntry> {
@@ -918,7 +935,7 @@ fn prepare_worker(hive: &Hive, paths: &HivePaths, tab_id: &str, tasks: &[crate::
     let setup = if w.setup_done { String::new() } else { first_launch_setup(hive, paths, &w)? };
     let args = hive_launch_args(&record, resume.as_deref());
     log::info!("hive {}: launching worker {} ({})", hive.id, w.slug, if resume.is_some() { "resume" } else { "new session" });
-    Ok(launch_text(prefs, root.as_deref(), &setup, &record, &args))
+    typed_launch(&task, &launch_text(prefs, root.as_deref(), &setup, &record, &args))
 }
 
 fn prepare_coordinator(hive: &Hive, paths: &HivePaths, prefs: &crate::state::Preferences) -> Result<String, String> {
@@ -951,7 +968,7 @@ fn prepare_coordinator(hive: &Hive, paths: &HivePaths, prefs: &crate::state::Pre
     let resume = last_session_in(&task, hive.chapter());
     let args = hive_launch_args(&record, resume.as_deref());
     log::info!("hive {}: launching the coordinator ({})", hive.id, if resume.is_some() { "resume" } else { "first launch of this goal" });
-    Ok(launch_text(prefs, root.as_deref(), "", &record, &args))
+    typed_launch(&task, &launch_text(prefs, root.as_deref(), "", &record, &args))
 }
 
 /// The line a Hive tab's shell runs to start (or resume) its agent. The frontend types it as
@@ -1122,6 +1139,47 @@ pub(crate) mod tests {
         let out = cmd.output().unwrap();
         let _ = fs::remove_dir_all(&dir);
         (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned(), out.status.success())
+    }
+
+    /// A user's coordinator never started: the launch text ran past 1,024 bytes, and their slower
+    /// shell got it in canonical mode, which kept exactly 1,024 (macOS MAX_CANON) and dropped the
+    /// `claude` and the Enter. What is typed now is a short `source` of the text, which runs it in
+    /// the tab's own shell: the `cd`, the env and `claude` all happen, whatever the text's length.
+    #[cfg(unix)]
+    #[test]
+    fn the_typed_line_is_short_and_sourcing_it_runs_the_whole_launch() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("typed");
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("claude");
+        fs::write(&fake, "#!/bin/sh\nprintf 'RAN:%s:%s:%s' \"$(pwd -P)\" \"$CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD\" \"$#\"\n").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let task = dir.join("tasks").join("o'brien task");
+        fs::create_dir_all(&task).unwrap();
+        let mut r = coordinator_record(&sample_hive(), &sample_paths());
+        r.cwd = dir.to_string_lossy().into_owned();
+        let args: Vec<String> = (0..40).map(|i| format!("/Users/humbertocuadra/Library/Application Support/hive/arg-{i}")).collect();
+        let text = launch_text(&crate::state::Preferences::default(), None, "", &r, &args);
+        assert!(text.len() > 2048, "the case that broke: a long launch");
+
+        let typed = typed_launch(&task, &text).unwrap();
+        assert!(typed.len() < 256 && !typed.contains('\n'), "{typed}");
+        assert_eq!(fs::read_to_string(task.join(LAUNCH_SCRIPT_FILE)).unwrap(), format!("{text}\n"));
+
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let want = format!("RAN:{}:1:{}", fs::canonicalize(&dir).unwrap().display(), args.len());
+        let mut ran = 0;
+        for shell in ["bash", "zsh"] {
+            let Ok(out) = std::process::Command::new(shell).arg("-c").arg(&typed).env("PATH", &path).env_remove(CONFIG_ENV).output() else {
+                continue; // not installed here
+            };
+            ran += 1;
+            let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && stdout == want, "{shell}: {stdout} {stderr}");
+        }
+        assert!(ran > 0, "bash or zsh is available");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The second live test: a dev maiTerm started from a prod tab carried the prod root, and the

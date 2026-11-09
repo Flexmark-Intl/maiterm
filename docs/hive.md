@@ -2794,6 +2794,12 @@ human's per-repo memory (the leak §9 exists to prevent; spike 1, §13.1). So:
     variable that would answer instead of the account's login.
   - `hive_launch_args` itself is pure. `prepare_launch` rewrites the record, the settings,
     `mcp.json` and `brief.md` before every launch.
+  - **The tab types only `source '<task folder>/launch.sh'`** (`typed_launch`, 2026-11-09). The
+    launch text itself runs past 1,024 bytes, and a line typed before the shell's line editor
+    is up meets the tty in canonical mode, where macOS keeps only the first 1,024 bytes
+    (MAX_CANON). A user whose shell started slower than the frontend's 500 ms wait lost
+    `claude` and the Enter, and the agent never started. `launch.sh` is rewritten on every
+    launch, beside `settings.json`, in a folder no worker can write.
 - **`hive_role` tabs skip the generic paths**: `handleEnableAutoResume` and the auto-resume
   template migration never touch them, so nothing writes a generic resume command over a Hive
   tab.
