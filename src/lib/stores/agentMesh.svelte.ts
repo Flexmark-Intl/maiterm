@@ -274,6 +274,10 @@ function createAgentMeshStore() {
       for (const tab of pane.tabs) {
         if ((tab.tab_type ?? 'terminal') !== 'terminal' || isServiceTab(tab) || tab.hive_role) continue; // stack services aren't agents; Hive agents talk to their coordinator
         if (!tab.runtime) continue; // never an agent → not expected in the mesh
+        // A suspended tab has no agent by design, like a suspended workspace. Counting it kept
+        // this true forever in a mesh holding old suspended agent tabs, so the readiness modal
+        // opened on every restart over a roster that was all READY (the modal hides them).
+        if (tab.suspended_at) continue;
         if (!claudeStateStore.getState(tab.id)) return true; // was an agent, not running now
       }
     }
