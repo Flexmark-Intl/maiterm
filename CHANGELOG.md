@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.14.1
+
+### Fixes
+
+- **Hive agents start even when your shell is slow to open.** A Queen or worker's launch line could be cut off before the shell was ready, and the agent never started.
+- **The mesh readiness check no longer opens after every restart** when the mesh holds agent tabs you suspended.
+- **On an action card, the button reads Send once you type a comment**, since your words go to the agent as an answer, not as "I've done it".
+
 ## v3.14.0
 
 Hives that make media: see what each one can make, and set up the providers it lacks without leaving maiTerm. Plus a Run button on action cards, decisions where you can pick several options, and a main window that stays responsive while your agents work.
