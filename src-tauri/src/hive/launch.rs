@@ -513,7 +513,8 @@ pub const LAUNCH_SCRIPT_FILE: &str = "launch.sh";
 /// macOS keeps only the first 1,024 bytes of a line (MAX_CANON): a shell slower than the 500 ms
 /// the frontend waits lost the tail, `claude` and the Enter with it, and the agent never started.
 /// `source` runs it in the same shell as typing it did (the `cd`, the guard, the setup, the env),
-/// and reads the same in bash, zsh and fish. The task folder is never a worker's to write (its
+/// and reads the same in bash, zsh and fish (`.` would serve dash too, but is deprecated in fish,
+/// a far likelier login shell than dash; dash isn't supported). The task folder is never a worker's to write (its
 /// settings.json lives there), and the file is rewritten on every launch.
 fn typed_launch(task: &Path, text: &str) -> Result<String, String> {
     let script = task.join(LAUNCH_SCRIPT_FILE);
