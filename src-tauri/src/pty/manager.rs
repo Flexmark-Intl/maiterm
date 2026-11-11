@@ -641,6 +641,7 @@ pub fn spawn_pty(
                     let data = &buf[..n];
 
                     // Process through OscInterceptor → emit OSC events
+                    let mut ssh_actions: Vec<super::ssh_watch::Action> = Vec::new();
                     let osc_events = {
                         let mut registry = state_reader.terminal_registry.write();
                         if let Some(handle) = registry.get_mut(&pty_id_clone) {
@@ -654,21 +655,8 @@ pub fn spawn_pty(
                                     _ => {}
                                 }
                                 if let OscEvent::ShellIntegration { cmd, exit_code } = event {
-                                    match cmd {
-                                        'D' => {
-                                            handle.dropped_ssh = if *exit_code == Some(255) {
-                                                handle.live_ssh.clone()
-                                            } else {
-                                                None
-                                            };
-                                        }
-                                        // maiTerm's own hooks mark a command start with B; C is
-                                        // the spec's, sent by other integrations.
-                                        'B' | 'C' => {
-                                            handle.live_ssh = None;
-                                            handle.dropped_ssh = None;
-                                        }
-                                        _ => {}
+                                    if let Some(action) = super::ssh_watch::on_shell_event(&mut handle.ssh, *cmd, *exit_code) {
+                                        ssh_actions.push(action);
                                     }
                                 }
                             }
@@ -677,6 +665,10 @@ pub fn spawn_pty(
                             vec![]
                         }
                     };
+                    // Off the registry lock: each one runs a process sweep on its own thread.
+                    for action in ssh_actions {
+                        super::ssh_watch::run(action, &state_reader, &app_handle_clone, &pty_id_clone, &tab_id_reader);
+                    }
                     for osc_event in osc_events {
                         match osc_event {
                             OscEvent::Cwd { cwd, host } => {
@@ -737,6 +729,7 @@ pub fn spawn_pty(
                                 &mut handle.term,
                                 &mut handle.prompt_end,
                                 &mut handle.prompt_unsafe,
+                                &mut handle.prompt_leftover,
                                 written,
                                 data,
                             );
@@ -1142,11 +1135,10 @@ pub fn get_pty_info(state: &Arc<AppState>, pty_id: &str) -> Result<PtyInfo, Stri
     Ok(PtyInfo { cwd, foreground_command })
 }
 
-/// Record an ssh a foreground probe saw holding this terminal (see
-/// `TerminalHandle::live_ssh`). A probe that sees none changes nothing: "at the prompt" is
-/// what a drop looks like.
+/// Record an ssh a foreground probe saw holding this terminal (see `ssh_watch`). A probe
+/// that sees none changes nothing: "at the prompt" is what a drop looks like.
 ///
-/// Deliberately does NOT clear `dropped_ssh`: probes can be served from a ps snapshot up to
+/// Deliberately does NOT clear a recorded drop: probes can be served from a ps snapshot up to
 /// 800ms old, which still shows the ssh that just died and would erase the drop recorded
 /// after it. Nothing needs this path to clear it — a reconnect is a new command, and its B
 /// does.
@@ -1154,9 +1146,7 @@ fn note_live_ssh(state: &AppState, pty_id: &str, foreground: &Option<String>) {
     let Some(cmd) = foreground else { return };
     let mut registry = state.terminal_registry.write();
     if let Some(handle) = registry.get_mut(pty_id) {
-        if handle.live_ssh.as_deref() != Some(cmd.as_str()) {
-            handle.live_ssh = Some(cmd.clone());
-        }
+        handle.ssh.note(cmd);
     }
 }
 

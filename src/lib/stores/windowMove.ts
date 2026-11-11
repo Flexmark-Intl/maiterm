@@ -198,7 +198,7 @@ async function receiveMove(payload: MoveInPayload) {
 
   terminalsStore.markMovedIn(liveTabs.map((t) => t.pty_id!));
   for (const [tabId, handoff] of Object.entries(payload.bridges)) adoptBridgeHandoff(tabId, handoff);
-  for (const [tabId, info] of Object.entries(payload.disconnects)) sshDisconnectStore.mark(tabId, info);
+  for (const [tabId, info] of Object.entries(payload.disconnects)) sshDisconnectStore.adopt(tabId, info);
   if (payload.kind === 'workspace') stackStore.holdAutoStart(payload.workspaceId);
 
   workspacesStore.applyWindowData(data);

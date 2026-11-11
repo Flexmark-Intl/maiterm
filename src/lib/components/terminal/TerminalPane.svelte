@@ -12,7 +12,7 @@
   import { Unicode11Addon } from '@xterm/addon-unicode11';
   import '@xterm/xterm/css/xterm.css';
   import { isSpinnerTick } from '$lib/utils/titleSpinner';
-  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, getPtyForegroundJob, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection, setTerminalVisible, refreshTerminalFrame, getTerminalRecentText, bindRemoteAccount, folderExists, sshArgsOf, REMOTE_CLAUDE_MOD_ENV } from '$lib/tauri/commands';
+  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, getPtyForegroundJob, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection, setTerminalVisible, refreshTerminalFrame, getTerminalRecentText, bindRemoteAccount, folderExists, REMOTE_CLAUDE_MOD_ENV } from '$lib/tauri/commands';
   import { noteFallback } from '$lib/stores/relocate.svelte';
   import type { TerminalFrame, FrameMeta, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
   import { remoteAccountExport } from '$lib/utils/remoteAccountToken';
@@ -46,7 +46,7 @@
   import { claudeStateStore, resumeCommandFor } from '$lib/stores/agentState.svelte';
   import { hiveLaunchLine } from '$lib/hive/launch';
   import { fitAndSyncAllowed, wheelScrollsSlot, HIVE_PTY_COLS, HIVE_PTY_ROWS } from '$lib/hive/fixedSize';
-  import { sshDisconnectStore } from '$lib/stores/sshDisconnect.svelte';
+  import { sshDisconnectStore, dropInfo, parseSshHost, replaySsh } from '$lib/stores/sshDisconnect.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import Button from '$lib/components/ui/Button.svelte';
 
@@ -153,15 +153,6 @@
   // Last title set while ssh was confirmed foreground — the remote (Claude) title
   // we preserve on the tab when the connection drops.
   let lastRemoteTitle: string | null = null;
-  // Exit code of the most recently completed command (from OSC 133 D;<code>).
-  // ssh returns 255 on transport failure; the local shell forwards the remote
-  // shell's own code (0, 130, …) on a clean logout.
-  let lastCommandExitCode: number | null = null;
-  // The ssh Rust saw die (exit 255) in a PTY this pane REATTACHED to — the drop itself was
-  // judged by a webview that a Reload Window threw away. Read once by `reconnectIfDropped`.
-  let reattachDroppedSsh: string | null = null;
-  // Dedup repeated drop signals (exit-code path + stderr fallback can both fire).
-  let lastDropAt = 0;
   // Tail of recent raw output so a disconnect phrase split across chunks still matches.
   let rawTail = '';
   let isAutoResume = $state(false);
@@ -518,10 +509,6 @@
     // If the tab already has a running PTY (e.g. moved between workspaces),
     // reattach to it instead of spawning a new one.
     const reattaching = !!existingPtyId;
-    // A Reload Window reattach, as opposed to a tab MOVE: only the reload seeds this set
-    // (from the backend's live PTYs), and `register` below consumes it. A move keeps its
-    // badge and waits for a click; only a reload lost the badge and needs `reconnectIfDropped`.
-    const reloadReattach = reattaching && terminalsStore.shouldReattach(existingPtyId);
     ptyId = existingPtyId || crypto.randomUUID();
 
     terminal = new Terminal({
@@ -583,6 +570,7 @@
 
     // Reconnect requests from the disconnected-tab badge in TerminalTabs.
     window.addEventListener('ssh-reconnect', handleReconnectEvent);
+    window.addEventListener('ssh-drop-detected', handleDropEvent);
 
     // Scrollback restore is deferred until after PTY spawn — Rust's
     // restoreTerminalScrollback needs the terminal handle to exist first.
@@ -667,8 +655,8 @@
       terminalsStore.markDirty(tabId);
       // Fallback SSH-drop detection for sessions *without* shell integration
       // (no OSC 133 exit code to read). Match ssh's transport-failure stderr;
-      // when shell integration is on, the exit-255 path is authoritative and we
-      // skip this per-chunk decode entirely.
+      // when shell integration is on, Rust's exit-255 judgement (`pty/ssh_watch.rs`)
+      // is authoritative and we skip this per-chunk decode entirely.
       if (trackActivity && !preferencesStore.shellIntegration && (sshForeground || hasBridge(tabId))) {
         const probe = rawTail + new TextDecoder().decode(data);
         if (SSH_DROP_RE.test(probe)) handleSshDrop('stderr');
@@ -836,7 +824,9 @@
       if (cmd === 'A') {
         activityStore.setShellState(tabId, 'prompt');
         // Remote shells also emit OSC 133 A, so verify SSH is actually gone
-        // before clearing Claude state, tearing down the bridge, or judging a drop.
+        // before clearing Claude state or tearing down the bridge. Whether the ssh
+        // DROPPED is not judged here: Rust does that for every terminal, mounted or
+        // not (`pty/ssh_watch.rs`), and reports it through `handleDropEvent`.
         if (claudeStateStore.getState(tabId) || hasBridge(tabId) || sshForeground) {
           // Fresh probe: this is the ssh-EXIT edge. A stale positive (the cache still
           // showing the ssh that just exited) leaves the old host's bridge registered
@@ -845,9 +835,6 @@
           getPtyForeground(ptyId, true).then(foregroundCmd => {
             if (!foregroundCmd) {
               // Local shell prompt — Claude/SSH session truly ended.
-              // (Confirming no foreground command also rules out a *remote*
-              // shell's OSC 133 D;255 while ssh is still running.)
-              const wasSsh = !!sshForeground;
               // Only Claude clears its dot on shell-prompt return. Non-Claude
               // runtimes (Codex/Gemini) emit their OWN OSC 133 from their TUI, so
               // prompt-return is ambiguous and would clear a live agent mid-turn —
@@ -859,20 +846,11 @@
               if (hasBridge(tabId)) {
                 disableBridge(tabId).catch(() => {});
               }
-              if (wasSsh) {
-                // ssh exits 255 only on a transport failure; a clean logout
-                // forwards the remote shell's own exit code (0, 130, …).
-                if (lastCommandExitCode === 255) {
-                  handleSshDrop('exit-255');
-                } else {
-                  sshForeground = null;
-                }
-              }
+              sshForeground = null;
             }
           }).catch(() => {});
         }
       } else if (cmd === 'D') {
-        lastCommandExitCode = exit_code ?? 0;
         const elapsed = commandStartedAt ? Date.now() - commandStartedAt : 0;
         if (elapsed >= MIN_COMPLETION_MS) {
           activityStore.setShellState(tabId, 'completed', exit_code ?? 0);
@@ -907,16 +885,10 @@
     // close the tab using the same logic as Cmd+W.
     // Output-independent SSH-drop detection.
     //
-    // Both existing paths need the terminal to SAY something: exit-255 needs the local
-    // shell's OSC 133 D, the fallback needs ssh's stderr. An idle agent tab produces
-    // neither, which is how 25 tabs dropped on 2026-09-08 with zero drops detected and
-    // no badge to click. Worse, an outage does not make ssh exit at all — it hangs until
-    // its own keepalives run out (10 minutes with the user's ~/.ssh/config), so there is
-    // nothing to detect for most of the outage.
-    //
-    // A dying bridge tunnel is a Rust process event (`child.wait()` on the `ssh -N` pid).
-    // It reaches idle tabs, carries no text to misparse in any locale, and fires ~20x
-    // sooner than the interactive session notices, because the tunnel runs a 30s budget.
+    // For a shell without shell integration, where Rust has no exit code to judge and the
+    // stderr fallback needs ssh to have SAID something — an idle agent tab says nothing.
+    // A dying bridge tunnel is a Rust process event (`child.wait()` on the `ssh -N` pid):
+    // it reaches idle tabs and carries no text to misparse in any locale.
     unlistenTunnelDown = await listen(`ssh-tunnel-down-${tabId}`, () => {
       if (destroyed || terminalsStore.shuttingDown) return;
       if (workspacesStore.isTabSuspending(tabId) || workspacesStore.isWorkspaceSuspending(workspaceId)) return;
@@ -989,7 +961,6 @@
         if (info.viewport_cols >= 10 && info.viewport_rows >= 2) {
           terminal.resize(info.viewport_cols, info.viewport_rows);
         }
-        reattachDroppedSsh = info.dropped_ssh ? cleanSshCommand(info.dropped_ssh) : null;
       } catch { /* grid unavailable — the refit below corrects it */ }
       // A Hive agent's terminal is never laid out here, so a refit could only send its running
       // agent a width change, which duplicates its scrollback.
@@ -1104,8 +1075,6 @@
 
     // Register terminal instance
     terminalsStore.register(tabId, terminal, ptyId, workspaceId, paneId);
-
-    if (reloadReattach) void reconnectIfDropped();
 
     // Restore scrollback from SQLite directly in Rust (never passes through WebView).
     // Must happen after spawn so the terminal handle exists in Rust.
@@ -1455,6 +1424,7 @@
 
     window.removeEventListener('terminal-slot-ready', handleSlotReady);
     window.removeEventListener('ssh-reconnect', handleReconnectEvent);
+    window.removeEventListener('ssh-drop-detected', handleDropEvent);
     window.removeEventListener('mousemove', onSelectionMouseMove);
     window.removeEventListener('mouseup', onSelectionMouseUp);
     stopAutoScroll();
@@ -1730,183 +1700,64 @@
   // clean logout (incl. ControlMaster mux) prints — those are ambiguous.
   const SSH_DROP_RE = /client_loop: send disconnect|closed by remote host|server \S+ not responding|Timeout, server|Write failed: Broken pipe|packet_write_wait|Connection (?:reset|timed out)|Operation timed out|ssh_dispatch_run_fatal|kex_exchange_identification: (?:read|Connection)/i;
 
-  /** Best-effort hostname from a cleaned ssh command, for display. */
-  function parseSshHost(sshCmd: string): string | null {
-    const tokens = sshArgsOf(sshCmd).split(/\s+/).filter(Boolean);
-    const withUser = tokens.find(t => t.includes('@'));
-    if (withUser) return withUser.split('@')[1] || null;
-    const host = tokens.find(t => !t.startsWith('-'));
-    return host ?? null;
-  }
-
   /**
-   * Called when an interactive ssh session ends *unexpectedly* (network drop),
-   * as distinct from a clean logout. Preserves the remote title, badges the tab
-   * for one-click reconnect, and notifies. Never runs a command on its own.
+   * An interactive ssh session ended *unexpectedly* (a network drop), as distinct from a
+   * logout. Preserves the remote title and hands the drop to the window's store, which badges
+   * the tab and reconnects it once the host answers. `sshCommand` is the one Rust saw die.
    */
-  function handleSshDrop(reason: string) {
+  function handleSshDrop(reason: string, sshCommand?: string) {
     if (destroyed || terminalsStore.shuttingDown) return;
     // Intentional teardown (suspend / archive / quit) is never a "drop".
     if (workspacesStore.isTabSuspending(tabId) || workspacesStore.isWorkspaceSuspending(workspaceId)) return;
-    if (sshDisconnectStore.isDisconnected(tabId)) return;
-    const now = Date.now();
-    if (now - lastDropAt < 10000) return; // dedup the exit-code + stderr paths
-    lastDropAt = now;
-
-    const tab = getCurrentTab();
-    const osc = terminalsStore.getOsc(tabId);
-    const remoteTitle = lastRemoteTitle ?? osc?.title ?? null;
-    const sshCommand = sshForeground?.cmd
-      ?? tab?.auto_resume_ssh_command
-      ?? tab?.restore_ssh_command
-      ?? null;
-    const host = sshForeground?.host ?? (sshCommand ? parseSshHost(sshCommand) : null);
-    const remoteCwd = osc?.promptCwd
-      ?? tab?.auto_resume_remote_cwd
-      ?? tab?.restore_remote_cwd
-      ?? null;
-
-    sshDisconnectStore.mark(tabId, { host, sshCommand, remoteCwd, title: remoteTitle, at: now });
-    // The local prompt may have already clobbered the tab name in the race
-    // before this fired — re-apply the preserved remote title.
-    if (remoteTitle && tab && !tab.custom_name && tab.name !== remoteTitle) {
-      workspacesStore.renameTab(workspaceId, paneId, tabId, remoteTitle, false);
-    }
-
-    dispatch('SSH disconnected', host ? `Connection to ${host} dropped` : 'SSH connection dropped', 'error', { tabId });
-    logInfo(`SSH drop detected for tab ${tabId} (${reason}) host=${host ?? '?'}`);
-    sshForeground = null;
-  }
-
-  /**
-   * Reload Window rebuilds the webview, not the shells, so a tab whose ssh died before
-   * the reload comes back at its LOCAL prompt with no badge — the drop was recorded in
-   * webview memory. Rust kept which ssh died (`dropped_ssh`: an interactive ssh a probe saw
-   * holding the terminal, then an exit 255 with no command since) — so the badge comes back.
-   *
-   * It reconnects unattended only when that ssh is to the host the tab auto-resumes on, so
-   * the resume command belongs to it. Unattended is safe only because
-   * `pollSshThenBridgeResume(…, true)` waits for proof the host answered before it types
-   * the resume command — see there.
-   */
-  async function reconnectIfDropped() {
-    const sshCommand = reattachDroppedSsh;
-    if (!sshCommand || sshCommand.includes('git@') || sshCommand.includes('BatchMode=yes')
-      || !isInteractiveSshSession(sshCommand)) return;
     const tab = getCurrentTab();
     if (!tab) return;
-    const fg = await getPtyForegroundJob(ptyId).catch(() => null);
-    if (destroyed || fg?.shell_at_prompt !== true) return;
-
-    const host = parseSshHost(sshCommand);
-    const resumesHere = tab.auto_resume_enabled !== false && !!tab.auto_resume_ssh_command
-      && parseSshHost(tab.auto_resume_ssh_command) === host;
-    sshDisconnectStore.mark(tabId, {
-      host,
-      sshCommand,
-      remoteCwd: resumesHere ? (tab.auto_resume_remote_cwd ?? null) : null,
-      title: tab.name || null,
-      at: Date.now(),
-    });
-    if (!resumesHere) {
-      logInfo(`SSH drop found after reload: tab ${tabId} lost its ssh to ${host ?? '?'} — badged, not auto-resumed there`);
-      return;
+    const ssh = sshCommand
+      ?? sshForeground?.cmd
+      ?? tab.auto_resume_ssh_command
+      ?? tab.restore_ssh_command
+      ?? null;
+    sshForeground = null;
+    if (!ssh) return;
+    const remoteTitle = lastRemoteTitle ?? terminalsStore.getOsc(tabId)?.title ?? null;
+    const fresh = !sshDisconnectStore.isDisconnected(tabId);
+    sshDisconnectStore.noteDrop(tabId, dropInfo(tab, ssh, remoteTitle), reason);
+    // The local prompt may have already clobbered the tab name in the race
+    // before this fired — re-apply the preserved remote title.
+    if (fresh && remoteTitle && !tab.custom_name && tab.name !== remoteTitle) {
+      workspacesStore.renameTab(workspaceId, paneId, tabId, remoteTitle, false);
     }
-    logInfo(`SSH reconnect after reload: tab ${tabId} lost its ssh to ${host ?? '?'} — queued`);
-    await sshDisconnectStore.throttle(async () => {
-      // Re-checked in the slot: the human may have clicked the badge, typed into the shell,
-      // or closed the tab while this waited behind the others.
-      if (destroyed || !sshDisconnectStore.isDisconnected(tabId)) return;
-      const now = await getPtyForegroundJob(ptyId).catch(() => null);
-      if (destroyed || now?.shell_at_prompt !== true) return;
-      await reconnectSsh(true);
-    });
+  }
+
+  /** Rust recorded a drop in this tab (`pty/ssh_watch.rs`, relayed by the store). */
+  function handleDropEvent(e: Event) {
+    const detail = (e as CustomEvent<{ tabId: string; sshCommand: string; claimed: boolean }>).detail;
+    if (detail?.tabId !== tabId || destroyed) return;
+    detail.claimed = true;
+    handleSshDrop('exit-255', detail.sshCommand);
   }
 
   /**
    * Replay the ssh command (+ auto-resume) into the still-alive local shell. `unattended`
-   * (no human watching this tab) gates the resume on a proven connection.
+   * (no human watching this tab) gates the resume on a proven connection — see `replaySsh`.
    */
-  async function reconnectSsh(unattended = false) {
-    if (destroyed) return;
-    const info = sshDisconnectStore.getInfo(tabId);
-    const tab = getCurrentTab();
-    const sshCommand = info?.sshCommand ?? tab?.auto_resume_ssh_command ?? tab?.restore_ssh_command ?? null;
-    if (!sshCommand) { logError(`reconnectSsh: no ssh command for tab ${tabId}`); return; }
-    const remoteCwd = info?.remoteCwd ?? tab?.auto_resume_remote_cwd ?? tab?.restore_remote_cwd ?? null;
-
-    // Stop preserving the (now stale) title and drop the badge — a fresh remote
-    // title will arrive once Claude restarts.
-    sshDisconnectStore.clear(tabId);
-    lastDropAt = 0;
-
-    let bakedPort: number | undefined;
-    try {
-      const bridgeEnv = await getRemoteBridgeEnv(sshCommand);
-      bakedPort = bridgeEnv?.port;
-      // Re-asked on every reconnect rather than remembered from the first connect: the handoff
-      // file is consumed by the shell that read it, and the active account may have changed
-      // while this tab was down.
-      const accountExport = await remoteAccountExport(tabId, sshCommand);
-      const cmd = buildSshCommand(sshCommand, remoteCwd, tabId, bridgeEnv, accountExport);
-      await writeTerminal(ptyId, Array.from(new TextEncoder().encode(cmd + '\n')));
-    } catch (e) {
-      logError(`reconnectSsh: failed to write ssh command: ${e}`);
-      return;
-    }
-    // maiTerm typed this ssh, so it is ours to judge: if it dies with 255 the prompt-return
-    // handler badges the tab again (`handleSshDrop`) instead of treating it as a logout.
-    sshForeground = { cmd: sshCommand, host: parseSshHost(sshCommand) };
-    await pollSshThenBridgeResume(sshCommand, bakedPort, unattended);
+  async function reconnectSsh(unattended = false, resume = true, gate?: () => Promise<string | null>): Promise<boolean> {
+    if (destroyed) return false;
+    return replaySsh(tabId, {
+      unattended,
+      resume,
+      gate,
+      isGone: () => destroyed,
+      // maiTerm typed this ssh, so the title watcher must not take it for a fresh one the
+      // human typed and inject the bridge env into it a second time.
+      onTyped: (ssh) => { sshForeground = { cmd: ssh, host: parseSshHost(ssh) }; },
+    });
   }
 
-  /**
-   * Wait for the ssh connection to come up, then enable the MCP bridge and fire
-   * the auto-resume command. Shared by initial spawn and reconnect.
-   *
-   * `requireProof`: "an ssh process is in the foreground" is NOT "ssh is connected" — an ssh
-   * to an unreachable host sits in TCP connect for ~75s, and a resume command typed then
-   * waits in the tty queue until ssh exits 255 and the LOCAL shell runs it. Unattended, that
-   * is a `claude --resume` in the wrong machine for every tab of a dead host. So there the
-   * resume is typed only once the bridge is up (its setup ssh reached the same host and ran
-   * a script there) and the interactive ssh is still the foreground job.
-   */
-  async function pollSshThenBridgeResume(sshCommand: string, bakedPort?: number, requireProof = false) {
-    const maxAttempts = 30; // 15s max
-    for (let i = 0; i < maxAttempts; i++) {
-      if (destroyed) return;
-      await new Promise(r => setTimeout(r, 500));
-      try {
-        const info = await getPtyInfo(ptyId);
-        if (info.foreground_command) break;
-      } catch { return; } // tab gone
-      if (i === maxAttempts - 1) return; // timed out
-    }
-    if (destroyed) return;
-    void bindRemoteAccount(tabId).catch(() => {}); // maiLink §14 — see the spawn poll
-    const bridged = await enableBridge(tabId, sshCommand, ptyId, false, bakedPort).catch(() => false);
-    if (destroyed) return;
-    if (requireProof) {
-      const fg = await getPtyForegroundJob(ptyId).catch(() => null);
-      if (!bridged || fg?.shell_at_prompt !== false) {
-        logInfo(`SSH reconnect: tab ${tabId} not resuming — ${bridged ? 'ssh is no longer the foreground job' : `no bridge to ${parseSshHost(sshCommand) ?? '?'}, so no proof the host answered`}`);
-        return;
-      }
-    }
-    const resumeCmd = autoResumeCommand ?? autoResumeRememberedCommand ?? null;
-    if (resumeCmd) {
-      try {
-        await writeTerminal(ptyId, Array.from(new TextEncoder().encode(interpolateShell(tabId, resumeCmd, true) + '\n')));
-      } catch (e) {
-        logError(`Failed to send auto-resume after reconnect: ${e}`);
-      }
-    }
-  }
-
+  /** The badge's click, or the store's unattended reconnect asking a mounted pane to type. */
   function handleReconnectEvent(e: Event) {
-    const detail = (e as CustomEvent<{ tabId: string }>).detail;
+    const detail = (e as CustomEvent<{ tabId: string; unattended?: boolean; resume?: boolean; gate?: () => Promise<string | null>; taken?: Promise<boolean> }>).detail;
     if (detail?.tabId !== tabId) return;
-    reconnectSsh();
+    detail.taken = reconnectSsh(detail.unattended ?? false, detail.resume ?? true, detail.gate);
   }
 
   async function gatherAutoResumeContext(): Promise<{ cwd: string | null; sshCmd: string | null; remoteCwd: string | null; pinned: boolean }> {

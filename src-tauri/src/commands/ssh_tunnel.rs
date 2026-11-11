@@ -1212,6 +1212,37 @@ pub async fn ssh_run_setup(
     Ok(())
 }
 
+/// Does this host take an ssh connection right now?
+///
+/// The gate in front of an unattended reconnect: after a drop nothing is typed into a tab
+/// until this says yes, so an outage leaves the tabs at their prompts instead of with an ssh
+/// hanging in each. Its own connection, like the setup one above — never the user's
+/// ControlMaster socket.
+///
+/// "Yes" is ssh logging in and running `true`. An exit of 255 is ssh's own failure: no route,
+/// a timeout, or a host that wants a password — and a host that wants a password is not one
+/// to reconnect to unattended either.
+#[tauri::command]
+pub async fn probe_ssh_host(ssh_args: String) -> bool {
+    let mut cmd_args: Vec<String> = ["-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-T"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    cmd_args.extend(ssh_args.split_whitespace().map(str::to_string));
+    cmd_args.push("true".to_string());
+    let run = tokio::process::Command::new("ssh")
+        .args(&cmd_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .status();
+    match tokio::time::timeout(tokio::time::Duration::from_secs(25), run).await {
+        Ok(Ok(status)) => matches!(status.code(), Some(code) if code != 255),
+        _ => false,
+    }
+}
+
 enum ForwardOutcome {
     /// The remote is listening on this port.
     Ready(u16),

@@ -30,6 +30,17 @@
 //! a continuation prompt — or a line exactly a multiple of the width long — scrolled the cursor
 //! onto the stored coordinates and read as empty. The position is still checked, as a sanity
 //! check, but the decision is "nothing drawn since".
+//!
+//! **What a dead program left on the prompt's row is not the command line.** A TUI whose ssh
+//! died stays drawn where it was, and the local prompt lands in the middle of it:
+//! `me@host$ ────────────` with the rest of an agent's input box to its right. Requiring that
+//! stretch to be BLANK read every such prompt as non-empty, so the tabs an ssh drop matters
+//! most for — agent tabs — were the ones a reconnect could never be typed into (2026-11-11).
+//! The stretch is now allowed to hold exactly what it held when a FRESH prompt (one announced
+//! by `133;A`) finished drawing: at that byte the command line is empty by construction, since
+//! readline draws type-ahead after the prompt, so those cells can only be leftovers. A prompt
+//! merely redrawn (Ctrl-L, SIGWINCH — no `133;A`) takes no new baseline, so text readline left
+//! standing beside a reprinted prompt still differs from it and still reads as not empty.
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
@@ -41,20 +52,51 @@ use alacritty_terminal::vte::ansi::Processor;
 pub const PROMPT_END: &[u8] = b"\x1b]1337;MaitermPromptEnd\x07";
 /// A command starting (maiTerm's own B, or the spec's C): the prompt it ended is gone.
 const COMMAND_BEGIN: [&[u8]; 2] = [b"\x1b]133;B\x07", b"\x1b]133;C\x07"];
+/// A new prompt is about to be drawn (PROMPT_COMMAND ran), as opposed to one being redrawn.
+const PROMPT_START: &[u8] = b"\x1b]133;A\x07";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    PromptStart,
+    PromptEnd,
+    CommandBegin,
+}
+
+/// What stood to the right of a fresh prompt when it finished drawing (see the module doc).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Leftover {
+    /// A `133;A` has been seen and its prompt has not finished drawing yet.
+    fresh: bool,
+    /// The cells right of the mark at that moment, hashed. `None`: no fresh prompt to go by.
+    tail: Option<u64>,
+}
+
+/// The cells from `col` to the end of the cursor's row, hashed.
+fn tail_hash<T: EventListener>(term: &Term<T>, col: usize) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let grid = term.grid();
+    let row = &grid[grid.cursor.point.line];
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for c in col..grid.columns() {
+        row[Column(c)].c.hash(&mut hasher);
+    }
+    hasher.finish()
+}
 
 fn cursor_at<T: EventListener>(term: &Term<T>) -> (i64, usize) {
     let grid = term.grid();
     (grid.history_size() as i64 + grid.cursor.point.line.0 as i64, grid.cursor.point.column.0)
 }
 
-/// The earliest mark at or after `from`: (index just past it, is it a prompt end).
-fn next_mark(data: &[u8], from: usize) -> Option<(usize, bool)> {
+/// The earliest mark at or after `from`: (index just past it, which mark).
+fn next_mark(data: &[u8], from: usize) -> Option<(usize, Mark)> {
     let find = |pat: &[u8]| data[from..].windows(pat.len()).position(|w| w == pat).map(|i| from + i + pat.len());
-    let mut best: Option<(usize, bool)> = find(PROMPT_END).map(|e| (e, true));
-    for pat in COMMAND_BEGIN {
+    let mut best: Option<(usize, Mark)> = find(PROMPT_END).map(|e| (e, Mark::PromptEnd));
+    let others = [(COMMAND_BEGIN[0], Mark::CommandBegin), (COMMAND_BEGIN[1], Mark::CommandBegin), (PROMPT_START, Mark::PromptStart)];
+    for (pat, mark) in others {
         if let Some(e) = find(pat) {
             if best.is_none_or(|(b, _)| e < b) {
-                best = Some((e, false));
+                best = Some((e, mark));
             }
         }
     }
@@ -77,28 +119,45 @@ pub enum PromptEnd {
 /// voiding it on ANY byte drawn after it.
 ///
 /// `written`: the PTY's input byte count as this read began. `unsafe_prompt`: the shell reported,
-/// before this prompt, that it can't be judged (echo off; vi mode).
+/// before this prompt, that it can't be judged (echo off; vi mode). `leftover`: what a fresh
+/// prompt found beside it (the module doc's last section).
 pub fn advance<T: EventListener>(
     processor: &mut Processor,
     term: &mut Term<T>,
     prompt_end: &mut Option<PromptEnd>,
     unsafe_prompt: &mut bool,
+    leftover: &mut Leftover,
     written: u64,
     data: &[u8],
 ) {
     let mut from = 0;
-    while let Some((end, is_prompt)) = next_mark(data, from) {
+    while let Some((end, mark)) = next_mark(data, from) {
         processor.advance(term, &data[from..end]);
-        *prompt_end = if !is_prompt {
-            *unsafe_prompt = false;
-            None
-        } else if std::mem::take(unsafe_prompt) {
-            Some(PromptEnd::Drawn)
-        } else {
-            let (row, col) = cursor_at(term);
-            Some(PromptEnd::Marked(row, col, written))
-        };
         from = end;
+        match mark {
+            // Not a prompt end: it neither sets the mark nor counts as drawing after one (the
+            // prompt it announces has not been drawn yet, and PS1's own mark follows it).
+            Mark::PromptStart => {
+                *leftover = Leftover { fresh: true, tail: None };
+                continue;
+            }
+            Mark::CommandBegin => {
+                *unsafe_prompt = false;
+                *leftover = Leftover::default();
+                *prompt_end = None;
+            }
+            Mark::PromptEnd => {
+                let (row, col) = cursor_at(term);
+                if std::mem::take(&mut leftover.fresh) {
+                    leftover.tail = Some(tail_hash(term, col));
+                }
+                *prompt_end = if std::mem::take(unsafe_prompt) {
+                    Some(PromptEnd::Drawn)
+                } else {
+                    Some(PromptEnd::Marked(row, col, written))
+                };
+            }
+        }
     }
     if from < data.len() && prompt_end.is_some() {
         // Something was drawn after the last mark: whatever it is, the prompt is no longer known
@@ -111,7 +170,8 @@ pub fn advance<T: EventListener>(
 /// Is the command line empty? `None` when there is no prompt to judge by (no mark yet, or a
 /// command has started since). `written`: the PTY's input byte count now — anything written
 /// since the mark (a key, a paste, the phone, a focus report) means not known to be empty.
-pub fn line_is_empty<T: EventListener>(term: &Term<T>, prompt_end: Option<PromptEnd>, written: u64) -> Option<bool> {
+/// `leftover`: what stood beside this prompt when it was first drawn.
+pub fn line_is_empty<T: EventListener>(term: &Term<T>, prompt_end: Option<PromptEnd>, written: u64, leftover: Leftover) -> Option<bool> {
     let mark = match prompt_end? {
         PromptEnd::Drawn => return Some(false),
         PromptEnd::Marked(_, _, at) if at != written => return Some(false),
@@ -125,12 +185,15 @@ pub fn line_is_empty<T: EventListener>(term: &Term<T>, prompt_end: Option<Prompt
     let grid = term.grid();
     let row = &grid[grid.cursor.point.line];
     let rest_blank = (mark.1..grid.columns()).all(|c| matches!(row[Column(c)].c, ' ' | '\0'));
-    Some(rest_blank)
+    // Not blank, but exactly what a fresh prompt found there: a dead program's leftovers.
+    Some(rest_blank || leftover.tail == Some(tail_hash(term, mark.1)))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Leftover, PromptEnd};
+    use alacritty_terminal::vte::ansi::Processor;
+    use alacritty_terminal::term::Term;
     use alacritty_terminal::event::VoidListener;
     use alacritty_terminal::term::{test::TermSize, Config};
 
@@ -139,6 +202,21 @@ mod tests {
     }
 
     const PROMPT: &[u8] = b"\x1b]133;A\x07me@host$ \x1b]1337;MaitermPromptEnd\x07";
+
+    thread_local! {
+        /// The reader keeps this on the terminal's handle; one test, one terminal, one thread.
+        static LEFT: std::cell::Cell<Leftover> = const { std::cell::Cell::new(Leftover { fresh: false, tail: None }) };
+    }
+
+    fn advance(p: &mut Processor, t: &mut Term<VoidListener>, m: &mut Option<PromptEnd>, unsafe_prompt: &mut bool, written: u64, data: &[u8]) {
+        let mut left = LEFT.get();
+        super::advance(p, t, m, unsafe_prompt, &mut left, written, data);
+        LEFT.set(left);
+    }
+
+    fn line_is_empty(t: &Term<VoidListener>, m: Option<PromptEnd>, written: u64) -> Option<bool> {
+        super::line_is_empty(t, m, written, LEFT.get())
+    }
 
     /// The reader's call with echo on and nothing written to the PTY.
     fn adv(p: &mut Processor, t: &mut Term<VoidListener>, m: &mut Option<PromptEnd>, data: &[u8]) {
@@ -274,5 +352,54 @@ mod tests {
         bytes.extend_from_slice(b"me@host$ \x1b]1337;MaitermPromptEnd\x07");
         adv(&mut p, &mut t, &mut m,&bytes);
         assert_eq!(line_is_empty(&t, m, 0), Some(true));
+    }
+
+    /// A program that died with its ssh, drawn across the rows the local prompt lands on.
+    const DEAD_TUI: &[u8] = b"\x1b[2;1H----------------------------------------\x1b[3;1H  status line  \x1b[2;1H";
+
+    #[test]
+    fn a_dead_programs_leftovers_beside_a_fresh_prompt_are_not_the_command_line() {
+        // 2026-11-11: an agent's input box stayed drawn to the right of the prompt its dropped
+        // ssh returned to, and the line never read as empty.
+        let (mut p, mut t, mut m) = term();
+        adv(&mut p, &mut t, &mut m, DEAD_TUI);
+        adv(&mut p, &mut t, &mut m, b"\x1b]133;D;255\x07\x1b]133;A\x07me@host$ \x1b]1337;MaitermPromptEnd\x07");
+        assert_eq!(line_is_empty(&t, m, 0), Some(true));
+        // Typing over the leftovers is still typing.
+        adv(&mut p, &mut t, &mut m, b"r");
+        assert_eq!(line_is_empty(&t, m, 0), Some(false));
+    }
+
+    #[test]
+    fn a_doubled_prompt_hook_still_reads_the_leftovers_right() {
+        // maiTerm's injected hook plus the installed snippet: `D A B D A`, then PS1.
+        let (mut p, mut t, mut m) = term();
+        adv(&mut p, &mut t, &mut m, DEAD_TUI);
+        adv(&mut p, &mut t, &mut m, b"\x1b]133;D;255\x07\x1b]133;A\x07\x1b]133;B\x07\x1b]133;D;0\x07\x1b]133;A\x07me@host$ \x1b]1337;MaitermPromptEnd\x07");
+        assert_eq!(line_is_empty(&t, m, 0), Some(true));
+    }
+
+    #[test]
+    fn text_standing_beside_a_merely_redrawn_prompt_is_not_a_leftover() {
+        // The case the blank check exists for: the prompt is printed again (no 133;A) and the
+        // text to its right is not. It was not there when the fresh prompt was drawn.
+        let (mut p, mut t, mut m) = term();
+        adv(&mut p, &mut t, &mut m, PROMPT);
+        adv(&mut p, &mut t, &mut m, b"rm -rf out");
+        adv(&mut p, &mut t, &mut m, b"\rme@host$ \x1b]1337;MaitermPromptEnd\x07");
+        assert_eq!(line_is_empty(&t, m, 0), Some(false));
+    }
+
+    #[test]
+    fn leftovers_are_forgotten_when_a_command_starts() {
+        let (mut p, mut t, mut m) = term();
+        adv(&mut p, &mut t, &mut m, DEAD_TUI);
+        adv(&mut p, &mut t, &mut m, b"\x1b]133;A\x07me@host$ \x1b]1337;MaitermPromptEnd\x07");
+        assert_eq!(line_is_empty(&t, m, 0), Some(true));
+        // A command runs; a prompt later printed with no 133;A before it has no baseline, so
+        // whatever stands beside it must be blank.
+        adv(&mut p, &mut t, &mut m, b"\r\n\x1b]133;B\x07");
+        adv(&mut p, &mut t, &mut m, b"\x1b[2;1Hme@host$ \x1b]1337;MaitermPromptEnd\x07");
+        assert_eq!(line_is_empty(&t, m, 0), Some(false));
     }
 }

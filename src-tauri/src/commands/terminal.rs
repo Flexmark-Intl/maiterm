@@ -104,6 +104,24 @@ pub async fn get_pty_foreground(
         .map_err(|e| format!("foreground probe failed to run: {}", e))?
 }
 
+/// Terminals whose ssh died and that still sit at the local prompt it left them at
+/// (`pty::ssh_watch`). All windows' terminals: each webview keeps its own tabs' rows.
+#[tauri::command]
+pub fn list_dropped_ssh(state: State<'_, Arc<AppState>>) -> Vec<pty::ssh_watch::DroppedSsh> {
+    pty::ssh_watch::list_dropped(&state)
+}
+
+/// maiTerm is about to type this interactive ssh into the terminal (a reconnect). Recorded now
+/// because Rust's own probe looks 1.2s after the command starts, and an ssh refused sooner than
+/// that would exit 255 with nothing to credit it to.
+#[tauri::command]
+pub fn note_typed_ssh(state: State<'_, Arc<AppState>>, pty_id: String, ssh: String) -> Result<(), String> {
+    let mut registry = state.terminal_registry.write();
+    let handle = registry.get_mut(&pty_id).ok_or("Terminal not found")?;
+    handle.ssh.set_live(&ssh);
+    Ok(())
+}
+
 /// The stack store's pre-write guard (docs/stack.md §4): is the shell at its prompt, and
 /// if not, which job holds the terminal. Same sweep, same off-the-event-loop rule as
 /// `get_pty_foreground`.
@@ -213,7 +231,7 @@ pub async fn probe_shell_line(
                     .get(&pty_id)
                     .map(|s| s.bytes_written.load(std::sync::atomic::Ordering::Relaxed));
                 let Some(written) = written else { return Ok(None) };
-                let empty = crate::terminal::prompt_line::line_is_empty(&handle.term, handle.prompt_end, written);
+                let empty = crate::terminal::prompt_line::line_is_empty(&handle.term, handle.prompt_end, written, handle.prompt_leftover);
                 return Ok(empty.map(|e| ShellLine { pid: expect_pid, len: if e { 0 } else { 1 }, shell: "bash" }));
             }
             handle.line_report = None;
@@ -417,8 +435,6 @@ pub struct ScrollInfo {
     pub total_lines: usize,
     pub viewport_rows: usize,
     pub viewport_cols: usize,
-    /// Raw ssh argv; see `TerminalHandle::dropped_ssh`.
-    pub dropped_ssh: Option<String>,
 }
 
 /// Get scrollback metadata.
@@ -434,7 +450,6 @@ pub fn get_terminal_scrollback_info(
         total_lines: handle.term.grid().total_lines(),
         viewport_rows: handle.term.screen_lines(),
         viewport_cols: handle.term.columns(),
-        dropped_ssh: handle.dropped_ssh.clone(),
     })
 }
 

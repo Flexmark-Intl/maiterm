@@ -28,6 +28,7 @@
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { followUpsStore } from '$lib/stores/followUps.svelte';
+  import { sshDisconnectStore } from '$lib/stores/sshDisconnect.svelte';
   import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
   import { browserLinkStore } from '$lib/stores/browserLink.svelte';
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
@@ -350,7 +351,11 @@
         displaysAsleep = false;
         // Bridge tunnels reaped while the displays were dark were this machine stalling,
         // not the peers dying — bring their rebuilds forward instead of waiting out backoff.
-        if (wasAsleep) retryDownBridgesNow('displays back');
+        if (wasAsleep) {
+          retryDownBridgesNow('displays back');
+          // A webview behind dark displays is throttled: Rust may hold drops it never heard of.
+          sshDisconnectStore.retryNow('displays back');
+        }
         if (currentMonitorCount === null) {
           currentMonitorCount = count;
           // First displays this window has ever seen: it launched into the dark, so
@@ -834,6 +839,9 @@
     // Follow-ups (docs/follow-ups.md): delivers this window's due ones. Idle while the
     // feature is off — it checks followUpsLive on every tick, so toggling needs no restart.
     followUpsStore.init();
+
+    // Dropped ssh sessions: the badge, and the reconnect once the host answers.
+    sshDisconnectStore.init();
 
     // Agent Bridge (hook events → cross-agent message delivery)
     agentBridgeStore.init();

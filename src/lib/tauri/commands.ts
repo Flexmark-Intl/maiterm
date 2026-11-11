@@ -2145,6 +2145,24 @@ export async function sshRunSetup(sshArgs: string, setupScript: string): Promise
   return invoke('ssh_run_setup', { sshArgs, setupScript });
 }
 
+/** Does this host take an ssh connection right now? A background connection of its own; a host
+ *  that would ask for a password counts as no. Never throws. */
+export async function probeSshHost(sshArgs: string): Promise<boolean> {
+  return invoke('probe_ssh_host', { sshArgs });
+}
+
+/** Tell Rust the command about to be typed into this terminal is an interactive ssh, so an
+ *  exit 255 is credited to it even if it dies before Rust's own probe has seen it. */
+export async function noteTypedSsh(ptyId: string, ssh: string): Promise<void> {
+  return invoke('note_typed_ssh', { ptyId, ssh });
+}
+
+/** Every terminal (all windows') whose ssh died and that still sits at the prompt it was left
+ *  at. Rust forgets a row at the terminal's next command start. */
+export async function listDroppedSsh(): Promise<{ pty_id: string; tab_id: string; ssh: string }[]> {
+  return invoke('list_dropped_ssh');
+}
+
 export async function getMaitermSkillScripts(): Promise<MaitermSkillScripts> {
   return invoke('get_maiterm_skill_scripts');
 }

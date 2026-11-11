@@ -1,4 +1,5 @@
 pub mod manager;
+pub mod ssh_watch;
 
 pub use manager::{
     get_agent_liveness, get_pty_foreground, get_pty_foreground_job, get_pty_foreground_ssh, get_pty_info, kill_pty,

@@ -58,18 +58,9 @@ pub struct TerminalHandle {
     /// because a delta's `ESC[row;1H` addresses would land on the wrong rows of
     /// a reflowed buffer and xterm clamps rows past its height onto the last one.
     pub xterm_dims: Option<(usize, usize)>,
-    /// The ssh command a foreground probe (`get_pty_info` / `get_pty_foreground`) last saw
-    /// holding this terminal. Forgotten when a command starts (OSC 133 B/C), so it only
-    /// ever names the ssh of the CURRENT command — a clean logout followed by some other
-    /// failing command can't inherit it.
-    pub live_ssh: Option<String>,
-    /// The ssh that died: set when a command finishes with 255 (ssh's transport-failure
-    /// code — a clean logout forwards the remote shell's own) while `live_ssh` names it;
-    /// cleared by the next command start (a reconnect included). Kept in
-    /// Rust because the webview that heard the drop can be rebuilt (Reload Window) while
-    /// the shell lives on; the remounted pane reconnects from this (TerminalPane
-    /// `reconnectIfDropped`). A 255 with no ssh seen is not a drop, whatever else it was.
-    pub dropped_ssh: Option<String>,
+    /// Which interactive ssh this terminal is in, and whether it just dropped
+    /// (`pty::ssh_watch`).
+    pub ssh: crate::pty::ssh_watch::SshWatch,
     /// The pid of a shell in this terminal that can report its command line (maiTerm's zsh
     /// integration announces it at startup — `probe_shell_line`). Only that exact process is
     /// ever probed: a nested shell without the integration would take the probe as input.
@@ -87,6 +78,8 @@ pub struct TerminalHandle {
     /// The bash integration reported the coming prompt can't be judged — echo off, or vi mode
     /// (`OSC 1337;MaitermPromptUnsafe`): that prompt is never read as empty.
     pub prompt_unsafe: bool,
+    /// What a fresh prompt found drawn beside it (`prompt_line::Leftover`).
+    pub prompt_leftover: crate::terminal::prompt_line::Leftover,
 }
 
 impl TerminalHandle {
@@ -185,12 +178,12 @@ pub fn create_terminal(
         frame_cache: None,
         visible: true,
         xterm_dims: None,
-        live_ssh: None,
-        dropped_ssh: None,
+        ssh: Default::default(),
         line_probe_pid: None,
         line_report: None,
         prompt_marks_pid: None,
         prompt_end: None,
         prompt_unsafe: false,
+        prompt_leftover: Default::default(),
     }
 }
