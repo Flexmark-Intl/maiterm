@@ -23,7 +23,7 @@ import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { enableBridge, isInteractiveSshSession } from '$lib/stores/sshMcpBridge.svelte';
 import { interpolateShell } from '$lib/stores/triggers.svelte';
 import { interpolateShellWith } from '$lib/triggers/shellInterpolate';
-import { remoteAccountExport } from '$lib/utils/remoteAccountToken';
+import { beginRemoteAccount, type RemoteAccountHandoff } from '$lib/utils/remoteAccountToken';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { isStripHidden } from '$lib/workspace/hiddenTabs';
 
@@ -143,16 +143,33 @@ export async function replaySsh(tabId: string, o: {
   /** Type the tab's saved resume command once connected. */
   resume: boolean;
   /**
-   * The last word before anything is typed, asked once the command is built and nothing is
-   * left to await but the write: the keys to send ahead of it, or `null` to type nothing.
-   * Everything slow (the bridge env, the account handoff's own ssh round trip) is behind it,
-   * so what it reads about the shell is still true when the write lands.
+   * May maiTerm type into this tab: the keys to send ahead of the command, or `null` to type
+   * nothing. Asked twice. First before anything is built, because building pushes the tab's
+   * account token to the host and a tab that is going to be refused must not cost a credential
+   * file there every minute it waits. Then again as the last word, with nothing left to await
+   * but the write: everything slow is behind it, so what it reads about the shell is still
+   * true when the write lands.
    */
-  gate?: () => Promise<string | null>;
+  gate?: (final: boolean) => Promise<string | null>;
   isGone?: () => boolean;
   /** The command is in the terminal: the caller's own bookkeeping for "this ssh is ours". */
   onTyped?: (sshCommand: string) => void;
 }): Promise<boolean> {
+  // One at a time per tab. The badge stays up while the command is being built (seconds, with
+  // an account handoff), and a second click — or a click during the store's own reconnect —
+  // would type a second ssh into the first one as it connects, to be run on the remote host.
+  if (replaying.has(tabId)) return false;
+  replaying.add(tabId);
+  try {
+    return await replaySshOnce(tabId, o);
+  } finally {
+    replaying.delete(tabId);
+  }
+}
+
+const replaying = new Set<string>();
+
+async function replaySshOnce(tabId: string, o: Parameters<typeof replaySsh>[1]): Promise<boolean> {
   const gone = () => o.isGone?.() ?? false;
   const tab = findTab(tabId);
   const ptyId = tab ? ptyOf(tab) : null;
@@ -162,18 +179,25 @@ export async function replaySsh(tabId: string, o: {
   if (!sshCommand) { logInfo(`SSH reconnect: no ssh command for tab ${tabId}`); return false; }
   const remoteCwd = info?.remoteCwd ?? tab.auto_resume_remote_cwd ?? tab.restore_remote_cwd ?? null;
 
+  if (o.gate && (await o.gate(false)) === null) return false;
+
   let bakedPort: number | undefined;
+  let handoff: RemoteAccountHandoff | undefined;
   try {
     const bridgeEnv = await commands.getRemoteBridgeEnv(sshCommand);
     bakedPort = bridgeEnv?.port;
     // Re-asked on every reconnect rather than remembered from the first connect: the handoff
     // file is consumed by the shell that read it, and the active account may have changed
     // while this tab was down.
-    const accountExport = await remoteAccountExport(tabId, sshCommand);
+    handoff = beginRemoteAccount(tabId, sshCommand);
+    const accountExport = await handoff.take();
     const cmd = commands.buildSshCommand(sshCommand, remoteCwd, tabId, bridgeEnv, accountExport);
-    if (gone()) return false;
-    const prefix = o.gate ? await o.gate() : '';
-    if (prefix === null || gone()) return false;
+    const prefix = gone() ? null : o.gate ? await o.gate(true) : '';
+    if (prefix === null || gone()) {
+      // Built, not typed: the token file on the host would never be read, or removed.
+      await handoff.retract();
+      return false;
+    }
     // Rust is told which ssh this is BEFORE it exists: its own probe looks 1.2s after the
     // command starts, and a reconnect refused sooner than that (sshd shedding a burst of new
     // connections) would otherwise exit 255 with nothing on record to credit it to — the tab
@@ -185,6 +209,7 @@ export async function replaySsh(tabId: string, o: {
     await commands.writeTerminal(ptyId, Array.from(new TextEncoder().encode(`${prefix}${cmd}\n`)));
   } catch (e) {
     logInfo(`SSH reconnect: failed to type the ssh command into tab ${tabId}: ${e}`);
+    await handoff?.retract();
     return false;
   }
   o.onTyped?.(sshCommand);
@@ -335,10 +360,11 @@ function createSshDisconnectStore() {
 
     let why: 'held' | 'left' = 'held';
     /**
-     * Asked by `replaySsh` with the command built and only the write left. This tab may have
-     * waited a minute behind others on its host, so nothing read before now counts.
+     * Asked by `replaySsh` before it builds the command, and again (`final`) with only the
+     * write left. This tab may have waited a minute behind others on its host, so nothing
+     * read before now counts.
      */
-    const gate = async (): Promise<string | null> => {
+    const gate = async (final: boolean): Promise<string | null> => {
       // Rust forgets a drop at the next command start, so a tab missing here is one the human
       // has used since (their own ssh, or anything else). Also true of a drop only a pane's
       // fallback saw (no shell integration): with nothing to say the line is empty, that one
@@ -357,7 +383,7 @@ function createSshDisconnectStore() {
         return null;
       }
       if (line.len > 0) return null;
-      typed.set(tabId, { at: Date.now(), fails: typed.get(tabId)?.fails ?? 0 });
+      if (final) typed.set(tabId, { at: Date.now(), fails: typed.get(tabId)?.fails ?? 0 });
       // In bash the line goes behind Ctrl-G Ctrl-U, which cancels a prefix key typed ahead
       // that the grid cannot show (docs/follow-ups.md §6.2).
       return line.shell === 'bash' ? '\x07\x15' : '';

@@ -1740,7 +1740,7 @@
    * Replay the ssh command (+ auto-resume) into the still-alive local shell. `unattended`
    * (no human watching this tab) gates the resume on a proven connection — see `replaySsh`.
    */
-  async function reconnectSsh(unattended = false, resume = true, gate?: () => Promise<string | null>): Promise<boolean> {
+  async function reconnectSsh(unattended = false, resume = true, gate?: (final: boolean) => Promise<string | null>): Promise<boolean> {
     if (destroyed) return false;
     return replaySsh(tabId, {
       unattended,
@@ -1755,7 +1755,7 @@
 
   /** The badge's click, or the store's unattended reconnect asking a mounted pane to type. */
   function handleReconnectEvent(e: Event) {
-    const detail = (e as CustomEvent<{ tabId: string; unattended?: boolean; resume?: boolean; gate?: () => Promise<string | null>; taken?: Promise<boolean> }>).detail;
+    const detail = (e as CustomEvent<{ tabId: string; unattended?: boolean; resume?: boolean; gate?: (final: boolean) => Promise<string | null>; taken?: Promise<boolean> }>).detail;
     if (detail?.tabId !== tabId) return;
     detail.taken = reconnectSsh(detail.unattended ?? false, detail.resume ?? true, detail.gate);
   }

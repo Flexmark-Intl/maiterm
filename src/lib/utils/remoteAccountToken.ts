@@ -51,6 +51,11 @@ export interface RemoteAccountHandoff {
    * the account they chose. Safe to call after `take()`, and safe to call twice.
    */
   abandon(why: string): Promise<void>;
+  /**
+   * Take the file back off the host, taken or not, and say nothing: for a command that was
+   * built and then NOT typed, so no session exists that could be running as the wrong account.
+   */
+  retract(): Promise<void>;
 }
 
 /**
@@ -106,6 +111,13 @@ export function beginRemoteAccount(
       abandoned = true;
       if (p.handle) await discardRemoteAccountToken(tabId, sshArgs, p.handle).catch(() => {});
       await announceMiss(tabId, p.account_label, p.host, why);
+    },
+
+    async retract() {
+      const p = await prep;
+      if (!p || p.status !== 'ready' || abandoned) return;
+      abandoned = true;
+      if (p.handle) await discardRemoteAccountToken(tabId, sshArgs, p.handle).catch(() => {});
     },
   };
 }

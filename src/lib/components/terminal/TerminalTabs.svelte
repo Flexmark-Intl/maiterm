@@ -14,7 +14,7 @@
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
   import { browserLinkStore } from '$lib/stores/browserLink.svelte';
-  import { sshDisconnectStore } from '$lib/stores/sshDisconnect.svelte';
+  import { sshDisconnectStore, replaySsh } from '$lib/stores/sshDisconnect.svelte';
   import { isImageFile, isPdfFile } from '$lib/utils/languageDetect';
   import Icon from '$lib/components/Icon.svelte';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
@@ -381,7 +381,11 @@
   function handleReconnect(tabId: string, e: MouseEvent) {
     e.stopPropagation();
     handleTabClick(tabId);
-    window.dispatchEvent(new CustomEvent('ssh-reconnect', { detail: { tabId } }));
+    // A mounted pane takes it. A badged tab need not have one (the store badges every dropped
+    // tab, and a pane mounts only once its tab has been opened): then the store types it.
+    const detail: { tabId: string; taken?: Promise<boolean> } = { tabId };
+    window.dispatchEvent(new CustomEvent('ssh-reconnect', { detail }));
+    if (!detail.taken) void replaySsh(tabId, { unattended: false, resume: true });
   }
 
   async function handleArchiveTab(tabId: string, e: MouseEvent) {
