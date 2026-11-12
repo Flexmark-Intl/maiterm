@@ -1,5 +1,18 @@
 # Changelog
 
+## v3.15.0
+
+SSH tabs that come back by themselves after a drop, and Mattermost posts that wait for your approval.
+
+### SSH
+
+- **Dropped ssh sessions reconnect on their own.** When a connection drops, maiTerm waits until the host answers again, then types the ssh command back in, but only at an empty prompt, never over anything you've typed or run since. An agent tab set to auto-resume on that host gets its resume command once its maiTerm bridge is back. This covers ssh tabs you haven't opened since the last launch too. A host that asks for a password, or a shell maiTerm can't read the command line of, keeps the click-to-reconnect badge.
+- **Agents on an ssh host stay connected to maiTerm after a reconnect.** The tunnel they use reclaims its old port on the host instead of moving to a new one. If the host still holds the old port, the tunnel takes it back once the host lets go, so the agents reconnect by themselves.
+
+### Mattermost
+
+- **Agents post only where you've let them.** An agent posts at once only in a thread someone summoned it into, or one whose first post you approved. Starting a new thread, posting once into another thread, or the first post in a thread an agent joined by its link (including one you sent it with `/maiterm resolve`) asks you first, with a card in the Loom's Decisions and on your phone showing the message, the channel, the bot it posts as and any attachments. Chat monitoring now only decides who can summon a tab.
+
 ## v3.14.1
 
 ### Fixes
