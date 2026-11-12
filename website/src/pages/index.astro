@@ -496,6 +496,10 @@ const EVERYTHING = [
         message whom. Extends this band rather than taking the release slot.
       - createTab is ALWAYS a request, mesh or not. It can start gemini too; this page names
         no runtimes so it doesn't outrun "Claude Code and Codex" elsewhere.
+      - comms_post (v3.15.0): startCommsThread, a one-off postCommsReply, and the first post in
+        a thread bound by permalink (bindCommsThread sets outbound_needs_approval — /maiterm
+        resolve included). Only a SUMMONED thread, or one whose first post was approved, posts
+        at once (claude_code/server.rs handle_post_comms_reply / handle_start_comms_thread).
       - Approval is only the card (Loom Decisions) or a PAIRED phone (authorize_human refuses
         the dev token). AskUserQuestion and Claude's permission dialog are not approval.
       - Pending requests lapse after 30 min (PENDING_TTL_MS). */}
@@ -507,7 +511,8 @@ const EVERYTHING = [
         Agents can see how your workspaces and meshes are laid out and move tabs and
         workspaces around, without bothering you. Anything that changes which agents can
         message each other, starts a new agent (here or on one of your SSH hosts), reloads
-        another agent's tab or a window, or restarts maiTerm is only a request: a card in the Loom and on your phone, and nothing happens until you
+        another agent's tab or a window, restarts maiTerm, or posts to Mattermost where nobody
+        summoned it is only a request: a card in the Loom and on your phone, and nothing happens until you
         click Approve.
       </p>
 
@@ -524,7 +529,7 @@ const EVERYTHING = [
           <h3>Decisions, by you</h3>
           <p>
             Making or linking a mesh, bridging two agents, a new agent tab on this machine or an
-            SSH host, a reload, a restart: each
+            SSH host, a reload, a restart, a Mattermost post nobody asked it for: each
             waits in the Loom's Decisions and on your paired phone, and lapses if nobody answers.
           </p>
         </div>
@@ -1095,8 +1100,9 @@ const EVERYTHING = [
           <h3>It can start the conversation</h3>
           <p>
             A regression it tripped over, a heads-up before a deploy, a question only a person
-            can settle — the agent opens its own thread in a channel you put on that tab's
-            list, <code>@mentions</code> whoever should see it, and stays bound for the replies.
+            can settle — the agent drafts its own thread, <code>@mentions</code> whoever should
+            see it, and stays bound for the replies. Outside a thread someone summoned it into,
+            nothing is posted until you approve the card.
           </p>
         </div>
       </div>

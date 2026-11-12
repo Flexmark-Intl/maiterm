@@ -17,7 +17,7 @@ maiTerm's terminal does its heavy lifting in Rust: alacritty_terminal handles VT
 - **Scrollback limit** — 3,000 lines per terminal by default, under **Preferences → Scrollback → Scrollback Limit** (1,000 to 10,000, or unlimited). The backend stores every row at full width, so a full 10,000-line terminal held about 40 MB and a full 3,000-line one about 13 MB — which adds up across a window of agents. Upgrading moves a setting still at the old 10,000-line default to 3,000, once; any other value is kept, and 10,000 is still there to pick again
 - **Full-session restore** — on launch, every tab that was live at last shutdown is respawned and auto-resumed, across all workspaces. Tabs come back one at a time (with a progress modal you can cancel) so the app stays responsive; a window reload reattaches to still-running terminals instead of respawning them
 - **SSH session cloning** — split an SSH session to get a second shell at the same remote CWD
-- **SSH drop recovery** — when a connection drops unexpectedly, the tab keeps its title and offers a one-click reconnect
+- **SSH drop recovery** — when a connection drops unexpectedly, the tab keeps its title and reconnects by itself once the host answers again, at an empty prompt only (see [below](#reconnect-a-dropped-ssh-session))
 - **Multi-window** — open additional windows, duplicate windows with full tab context
 - **Default shell on Windows** — **Preferences → Default Shell** picks the shell for new tabs. **Automatic** uses Git Bash when Git for Windows is installed, started as a login shell, and PowerShell when it isn't; see [Claude Code on Windows](/guides/getting-started/#claude-code-on-windows)
 - **Per-tab command history** — each tab maintains its own shell history, cloned tabs inherit it
@@ -88,9 +88,13 @@ A backup is *your* machine: importing its preferences brings your accounts and c
 
 ## Reconnect a Dropped SSH Session
 
-When an SSH session drops because of a network blip — not a clean `exit` — maiTerm notices the difference. Instead of resetting the tab to a bare local shell, it preserves the remote title and shows a **disconnected** badge in the tab bar. Click it to reconnect: maiTerm replays the same connection and drops you back into the directory you were in, so a flaky network doesn't cost you your place. A clean logout you did on purpose is left alone.
+When an SSH session drops because of a network blip — not a clean `exit` — maiTerm notices the difference. Instead of resetting the tab to a bare local shell, it preserves the remote title, shows a **disconnected** badge in the tab bar, and tells you once per host, however many tabs went with it. A clean logout you did on purpose is left alone.
 
-That holds across **Window › Reload Current Window** too. A reload rebuilds the window but keeps its shells, so after an outage every SSH tab whose connection dropped gets its **disconnected** badge back — and one whose dropped connection was to the host it auto-resumes on reconnects by itself, a few tabs at a time. Its resume command is typed only once the connection has actually reached the host, never into the local shell behind a connection that's still failing.
+Then it **reconnects the tab by itself**. It doesn't retry on a timer: it checks the host in the background, backing off from a few seconds to a minute, and types nothing into any tab until the host answers — so an outage leaves your tabs at their prompts rather than with a hanging `ssh` in each, and it keeps waiting for as long as it takes. Once the host is back, maiTerm replays the same connection into each tab, a few at a time, and drops you back into the directory you were in. An agent tab whose auto-resume is on that host gets its resume command too, but only once maiTerm's [SSH bridge](/features/agents/#ssh-mcp-bridge) has proved the connection reached the host, never into the local shell behind a connection that's still failing.
+
+It never types over you. Right before typing, maiTerm checks again that the shell is at its prompt and that the command line is empty; anything on it and the tab waits, and anything you've run in the tab since the drop — your own `ssh` included — means it's yours again and maiTerm leaves it alone. This covers every SSH tab in the window, including ones in workspaces you haven't opened since launching maiTerm, and holds across **Window › Reload Current Window**, which keeps the window's shells.
+
+The badge stays clickable, and some tabs are left to it: a shell that can't report whether its command line is empty, a host that only lets you in with a password or passphrase prompt (the background check can't answer one), and a host that keeps dropping a reconnect straight away. Click it to reconnect.
 
 ## Auto-Resume
 
