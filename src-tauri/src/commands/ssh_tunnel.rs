@@ -232,6 +232,200 @@ fn clear_dropped_tunnel(host_key: &str) {
     dropped_tunnels().lock().remove(host_key);
 }
 
+// ── Winning the port back, and serving the ones we lost ──────────────────────────────
+//
+// Waiting for the remote to reap our dropped session (above) works when the remote can see
+// the connection die. It cannot when the path between the two machines forgets the connection
+// without telling either end — a router or ISP dropping its NAT table. Our ssh times out here;
+// the remote sshd hears nothing, and keeps the listener for as long as its own TCP takes to
+// give up, which is minutes to hours. On 2026-11-12 that marched ews@nova 28630 → 28631 →
+// 28632 in two minutes and left 46 running agents on dead ports, on the first night the tabs
+// themselves reconnected unattended.
+//
+// Two answers, in order:
+//
+// 1. EVICT. While a tunnel is up we learn which remote process holds its forward (a command
+//    run over the tunnel's own socket has that sshd as its parent). When the port then comes
+//    back "taken", a fresh connection checks that the process is still that same sshd and that
+//    the port no longer answers, and ends it. The port is free a second later and nobody moves.
+//
+// 2. SERVE THE OLD PORT TOO. If we had to move anyway, the port we left is owed to the agents
+//    still holding it. The new tunnel keeps asking its own master to forward it as well, and
+//    gets it the moment the remote lets go.
+
+/// The remote sshd that holds a host's forward: its pid and its start time, the pair that
+/// makes it this process and not a later one that was handed the same pid.
+#[derive(Clone)]
+struct RemoteHolder {
+    port: u16,
+    pid: u32,
+    started: String,
+}
+
+fn remote_holders() -> &'static parking_lot::Mutex<std::collections::HashMap<String, RemoteHolder>> {
+    static HOLDERS: std::sync::OnceLock<
+        parking_lot::Mutex<std::collections::HashMap<String, RemoteHolder>>,
+    > = std::sync::OnceLock::new();
+    HOLDERS.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Ports this host's agents were left holding by a move, oldest first.
+fn owed_ports() -> &'static parking_lot::Mutex<std::collections::HashMap<String, Vec<u16>>> {
+    static OWED: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashMap<String, Vec<u16>>>> =
+        std::sync::OnceLock::new();
+    OWED.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Every owed port is a listener kept open on a range other accounts on the host draw from.
+const MAX_OWED_PORTS: usize = 6;
+
+fn owe_port(host_key: &str, port: u16) {
+    let mut owed = owed_ports().lock();
+    let ports = owed.entry(host_key.to_string()).or_default();
+    ports.retain(|p| *p != port);
+    ports.push(port);
+    if ports.len() > MAX_OWED_PORTS {
+        ports.remove(0);
+    }
+}
+
+/// The ports still owed on a host once its tunnel is up on `live_port`.
+fn owed_besides(host_key: &str, live_port: u16) -> Vec<u16> {
+    let mut owed = owed_ports().lock();
+    let Some(ports) = owed.get_mut(host_key) else { return Vec::new() };
+    ports.retain(|p| *p != live_port);
+    ports.clone()
+}
+
+/// `echo $PPID; ps -o lstart= -p $PPID`, as read back: a pid line and a start-time line.
+fn parse_remote_holder(port: u16, stdout: &str) -> Option<RemoteHolder> {
+    let mut lines = stdout.lines().map(str::trim).filter(|l| !l.is_empty());
+    let pid: u32 = lines.next()?.parse().ok()?;
+    let started = lines.next()?.split_whitespace().collect::<Vec<_>>().join(" ");
+    // It goes back into a remote command line later; a start time is letters, digits and colons.
+    let plain = !started.is_empty()
+        && started.chars().all(|c| c.is_ascii_alphanumeric() || c == ':' || c == ' ');
+    (pid > 1 && plain).then_some(RemoteHolder { port, pid, started })
+}
+
+/// The check-and-end script for a holder. `*sshd*`, not `sshd*`: a macOS `ps` prints the
+/// whole path. Prints one word: `evicted`, `live` (the port still
+/// answers, so it is somebody's working tunnel), `gone` (that process no longer exists, or is
+/// no longer that sshd) or `denied`.
+fn evict_script(holder: &RemoteHolder) -> String {
+    format!(
+        "c=$(ps -o comm= -p {pid} 2>/dev/null); s=$(ps -o lstart= -p {pid} 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'); \
+         case \"$c\" in *sshd*) ;; *) echo gone; exit 0;; esac; \
+         [ \"$s\" = '{started}' ] || {{ echo gone; exit 0; }}; \
+         curl -m 3 -s -o /dev/null http://127.0.0.1:{port}/; \
+         [ $? -eq 28 ] || {{ echo live; exit 0; }}; \
+         kill {pid} 2>/dev/null && sleep 1 && echo evicted || echo denied",
+        pid = holder.pid,
+        started = holder.started,
+        port = holder.port,
+    )
+}
+
+/// One short ssh command on its own connection or over a socket, with its stdout.
+async fn ssh_capture(prefix: Vec<String>, ssh_args: &str, tail: &[&str], secs: u64) -> Option<(bool, String)> {
+    let mut args = prefix;
+    args.extend(ssh_args.split_whitespace().map(str::to_string));
+    args.extend(tail.iter().map(|s| s.to_string()));
+    let run = tokio::process::Command::new("ssh")
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(secs), run).await.ok()?.ok()?;
+    Some((output.status.success(), String::from_utf8_lossy(&output.stdout).into_owned()))
+}
+
+fn independent_ssh_args() -> Vec<String> {
+    ["-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-T"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// End our own dead session on the remote if it is what holds `port`. True when the port
+/// should now be free.
+async fn evict_dead_holder(host_key: &str, ssh_args: &str, port: u16) -> bool {
+    let Some(holder) = remote_holders().lock().get(host_key).cloned().filter(|h| h.port == port) else {
+        log::info!("SSH tunnel: nothing recorded holds remote port {port} on {host_key} — cannot free it");
+        return false;
+    };
+    let script = evict_script(&holder);
+    let verdict = ssh_capture(independent_ssh_args(), ssh_args, &[&script], 25)
+        .await
+        .map(|(_, out)| out.trim().to_string())
+        .unwrap_or_default();
+    log::info!(
+        "SSH tunnel: remote port {port} on {host_key} is held by our earlier session (remote pid {}) — {}",
+        holder.pid,
+        match verdict.as_str() {
+            "evicted" => "it no longer answers, so it was ended and the port is free",
+            "live" => "it still answers, so it was left alone",
+            "gone" => "that process is gone, so something else holds the port",
+            "denied" => "it could not be ended",
+            _ => "the check did not run",
+        }
+    );
+    verdict == "evicted"
+}
+
+/// After a tunnel is up: learn which remote process holds it, and win back any port its
+/// agents were left on. Runs for as long as that tunnel process does.
+#[cfg(unix)]
+fn tend_tunnel(host_key: String, ssh_args: String, local_port: u16, remote_port: u16, tunnel_pid: u32) {
+    tokio::spawn(async move {
+        let Some(sock) = cm_socket_path(&host_key) else { return };
+        let sock_arg = format!("ControlPath={}", sock.display());
+
+        let probe = "echo $PPID; ps -o lstart= -p $PPID";
+        let holder = ssh_capture(mux_client_args(&host_key), &ssh_args, &[probe], 15)
+            .await
+            .and_then(|(_, out)| parse_remote_holder(remote_port, &out));
+        match holder {
+            Some(h) if is_process_alive(tunnel_pid) => {
+                remote_holders().lock().insert(host_key.clone(), h);
+            }
+            _ => log::warn!(
+                "SSH tunnel: could not learn which remote process holds port {remote_port} on \
+                 {host_key} — if this tunnel drops, the port cannot be freed and may move"
+            ),
+        }
+
+        // Owed ports: ask the master for each until it has them all or the tunnel is gone.
+        let mut bound: Vec<u16> = Vec::new();
+        loop {
+            let wanted: Vec<u16> = owed_besides(&host_key, remote_port)
+                .into_iter()
+                .filter(|p| !bound.contains(p))
+                .collect();
+            if wanted.is_empty() || !is_process_alive(tunnel_pid) {
+                return;
+            }
+            for port in wanted {
+                let spec = format!("{port}:127.0.0.1:{local_port}");
+                let prefix = vec!["-o".to_string(), sock_arg.clone(), "-O".to_string(), "forward".to_string(), "-R".to_string(), spec];
+                if matches!(ssh_capture(prefix, &ssh_args, &[], 10).await, Some((true, _))) {
+                    bound.push(port);
+                    log::info!(
+                        "SSH tunnel: {host_key} serves remote port {port} again beside {remote_port} — \
+                         agents still holding {port} can reach maiTerm"
+                    );
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn tend_tunnel(_host_key: String, _ssh_args: String, _local_port: u16, _remote_port: u16, _tunnel_pid: u32) {}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct RemotePortBook {
     /// The port this install asks for on every host.
@@ -555,7 +749,11 @@ pub async fn start_ssh_tunnel(
     let reclaim_port = lost_port.filter(|_| stranded_tabs > 0);
 
     let mut established: Option<(tokio::process::Child, u16)> = None;
-    for (listen, wait_secs) in port_attempt_plan(preferred, reclaim_port) {
+    let mut plan: std::collections::VecDeque<(Option<u16>, u64)> =
+        port_attempt_plan(preferred, reclaim_port).into();
+    // Once per connect: an eviction that did not free the port will not free it a second time.
+    let mut eviction_tried = false;
+    while let Some((listen, wait_secs)) = plan.pop_front() {
         if wait_secs > 0 {
             log::info!(
                 "SSH tunnel: remote port {} on {} is still held — waiting {}s for our dropped \
@@ -608,6 +806,14 @@ pub async fn start_ssh_tunnel(
                     listen.unwrap_or(0),
                     host_key
                 );
+                // The port agents are pinned to, held by the session we just lost: free it
+                // and ask again at once, rather than waiting on a remote that may never notice.
+                if let Some(port) = listen.filter(|p| Some(*p) == reclaim_port && !eviction_tried) {
+                    eviction_tried = true;
+                    if evict_dead_holder(&host_key, &ssh_args, port).await {
+                        plan.push_front((Some(port), 0));
+                    }
+                }
             }
         }
     }
@@ -631,8 +837,8 @@ pub async fn start_ssh_tunnel(
                 "SSH tunnel: {} came back on remote port {} instead of {} — {} tab(s) were \
                  bridged on {}, and any agent ALREADY RUNNING in them has that port baked into \
                  its environment, so its maiTerm MCP and hooks now point at a dead port and it \
-                 will report maiTerm as down. Restart those agents, or re-forward {} to the \
-                 local MCP port, to reach them again.",
+                 will report maiTerm as down until {} is served again (on macOS and Linux this \
+                 tunnel keeps trying for it).",
                 host_key,
                 remote_port,
                 prev,
@@ -640,8 +846,10 @@ pub async fn start_ssh_tunnel(
                 prev,
                 prev
             );
+            owe_port(&host_key, prev);
         }
     }
+    tend_tunnel(host_key.clone(), ssh_args.clone(), local_port, remote_port, pid);
 
     // Store the tunnel (don't store the Child — we track by PID).
     // Merge, never blind-insert: N tabs bridging the same host at once (typical right
@@ -742,6 +950,9 @@ pub async fn detach_ssh_tunnel(
     if let Some(pid) = should_kill {
         kill_process(pid);
         cleanup_cm_socket(&host_key);
+        // No tab is left on this host, so no agent of ours is left holding an old port:
+        // stop keeping listeners open on a range other installs draw from.
+        owed_ports().lock().remove(&host_key);
         log::info!("Killed SSH tunnel for {} (pid {})", host_key, pid);
     }
 
@@ -1535,6 +1746,48 @@ mod tests {
             ],
             "reclaim the stranded agents' port first, then walk from the book's: {diverged:?}"
         );
+    }
+
+    #[test]
+    fn the_remote_holder_is_read_from_real_ps_output() {
+        // As nova printed it over the tunnel's socket.
+        let h = parse_remote_holder(28632, "864560\nThu Nov 12 16:14:35 2026\n").expect("holder");
+        assert_eq!((h.port, h.pid), (28632, 864560));
+        assert_eq!(h.started, "Thu Nov 12 16:14:35 2026");
+        // A single-digit day is padded with a second space by ps; the script squeezes it too.
+        let h = parse_remote_holder(1, "77\nMon Nov  2 09:00:00 2026\n").expect("holder");
+        assert_eq!(h.started, "Mon Nov 2 09:00:00 2026");
+        // No start time (a ps without lstart), or anything that is not one, is not a holder:
+        // the start time is typed back into a remote command.
+        assert!(parse_remote_holder(1, "864560\n").is_none());
+        assert!(parse_remote_holder(1, "864560\n'; rm -rf ~ #\n").is_none());
+        assert!(parse_remote_holder(1, "ps: unknown option\n").is_none());
+    }
+
+    #[test]
+    fn the_eviction_script_is_valid_shell_and_names_only_its_holder() {
+        let holder = RemoteHolder { port: 28630, pid: 4242, started: "Thu Nov 12 16:14:35 2026".into() };
+        let script = evict_script(&holder);
+        assert!(script.contains("kill 4242 "));
+        assert!(script.contains("http://127.0.0.1:28630/"));
+        let (ok, err) = pipe_ok("sh", &["-n"], &script);
+        assert!(ok, "not valid sh: {err}");
+    }
+
+    #[test]
+    fn a_port_we_moved_off_stays_owed_until_we_are_back_on_it() {
+        let host = "test-owed@host";
+        owe_port(host, 28630);
+        owe_port(host, 28631);
+        owe_port(host, 28630); // the same port lost twice is owed once
+        assert_eq!(owed_besides(host, 28632), vec![28631, 28630]);
+        // Back on 28631: it is the tunnel's own port now, not a debt.
+        assert_eq!(owed_besides(host, 28631), vec![28630]);
+        for p in 0..10 {
+            owe_port(host, 28700 + p);
+        }
+        assert_eq!(owed_besides(host, 1).len(), MAX_OWED_PORTS);
+        owed_ports().lock().remove(host);
     }
 
     /// The signal the reclaim runs on has to be one that still EXISTS when the reconnect
