@@ -954,6 +954,11 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
     ]).as_array().unwrap().clone());
     }
 
+    // How an agent gets its own work reviewed (docs/overlord.md §9.5). Not gated on the
+    // Overlord: the review rule is what usually asks for it, but a human asking for a review
+    // gets the same brief.
+    tools.push(super::review_brief::tool_definition());
+
     // ── Overlord tools (docs/overlord.md §8, §10, §12) ──
     // replyToOverlord is for every supervised agent; the other three are for the
     // Overlord agent tab only (the frontend refuses callers outside the Overlord

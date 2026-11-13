@@ -1342,6 +1342,49 @@ from its own 30s waiter: a timed-out init reclassifies the row as **Dropped**, w
 surfaces Resume and folds the tab into *Resume all dropped*. Both surfaces reach the
 verdict independently — they share the reasoning, not state.
 
+### 9.5 Review after commit: the method is a tool, not the directive (2026-11-13)
+
+`review_after_commit` used to type the whole method in one sentence ("if that commit was
+non-trivial, spin up a subagent to review it"), which left everything that makes a review
+good to whatever brief the agent improvised. It now types one short line pointing at
+`getReviewBrief` (`src-tauri/src/claude_code/review_brief.rs`), and the method lives there:
+
+- **Typed text stays short.** It goes into the agent's input box, where a long brief is noise
+  in the human's terminal and a longer window to collide with their typing.
+- **The brief changes without a migration.** A wording change reaches every copy of the rule,
+  including one the human edited, because the rule only names the tool.
+- **It carries facts a static rule can't.** The agent passes `repo` and `head`; the tool
+  answers with the range since this tab's last review (`Tab.last_review`, carried on reload,
+  dropped by a window clone) and records the new head. The rule fires at most twice an hour
+  and an agent that commits logically makes several commits, so "review that commit" left
+  every later one unreviewed. Calling the brief again at an already-reviewed head answers
+  `skip`. maiTerm runs no git for this: an ssh tab's repo is on the host, so the agent sizes
+  and diffs the range itself.
+
+The brief's content follows what made the reviewer better in Anthropic's account of its own
+code review (claude.dev, "Solving code review at Anthropic"), minus the PR machinery:
+
+| Lesson | Where it is in the brief |
+|---|---|
+| A finding needs evidence, not a guess from a name | reviewer: file:line + a concrete failure, or it is not a finding |
+| Noise costs more when the author is an agent (a nit becomes a commit and another round) | reviewer: no style/refactor findings, at most three nits; author: confirm each finding against the code before changing anything, reject with a reason |
+| Pre-existing bugs drive endless rounds (59% of what a looping reviewer kept flagging was first-pass code) | reviewer tags `Pre-existing`; author puts those on the board instead of into the change |
+| Review has to converge | author: re-review only the fix diff, don't repeat findings, and after a second round with an Important bug, reconsider the approach instead of patching again |
+| Fix the class, not the line | reviewer names the class and lists every instance |
+| Depth by size (small changes mostly come back clean) | author sizes the range with `--shortstat`: skip trivial, one reviewer, or deep (parallel reviewers by concern + a separate verifier per Important finding) |
+| A reviewer handed the author's conclusion tends to return it | author gives fresh context: the brief unchanged, the range, and the change's intent, never why it is right |
+| Count-first summary, say plainly when clean | reviewer opens with the counts; author ends with found / confirmed / fixed / rejected / sent to the board |
+
+Not taken, deliberately: the incident-replay eval set and nightly sweeps (heavy for this user
+base), and voting by a separate pool on every finding (the deep tier verifies Important ones
+only). The counts the author reports are the cheap version of the article's noise measure;
+nothing collects them yet.
+
+`getReviewBrief` is on both identity lists (`OWN_TAB_ONLY_TOOLS`, `PEER_ADDRESSING_TOOLS`):
+it moves the caller's mark, and on a guessed tab the next review there would skip commits no
+one reviewed. It is listed whether or not the Overlord is on, since a human can ask for a
+review too.
+
 ---
 
 ## 10. Rule mutation via MCP

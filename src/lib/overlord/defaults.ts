@@ -83,10 +83,15 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
     sequence: CHECKPOINT_SEQUENCE,
   },
 
+  // The method lives in maiTerm's getReviewBrief tool (claude_code/review_brief.rs,
+  // docs/overlord.md §9.5), not here: typed text should be short, and a brief that changes in
+  // the tool reaches every copy of this rule without a migration. The tool also knows the
+  // commits since this tab's last review, which matters because this rule fires at most twice
+  // an hour and an agent that commits logically makes several.
   review_after_commit: {
     name: 'Review after commit',
     description:
-      'After a commit lands, nudge the agent to have non-trivial work reviewed by a subagent before moving on.',
+      "After a commit lands, have the agent get non-trivial work reviewed, following maiTerm's review brief, before moving on.",
     cooldown: 3600,
     when: { event: 'commit' },
     guards: {
@@ -99,7 +104,7 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
     sequence: [
       {
         kind: 'process',
-        text: 'If that commit was non-trivial, spin up a subagent to review it for correctness before moving on. If it was a trivial change, skip the review and carry on.',
+        text: "A commit landed. If it is more than a trivial change, call maiTerm's getReviewBrief tool and follow it before moving on. If it is trivial, carry on.",
         await: { until: 'turn_end' },
         timeout_seconds: 1800,
         on_timeout: 'continue',
@@ -320,6 +325,30 @@ const PREVIOUS_DEFAULT_OVERLORD_RULES: Record<string, OverlordRuleTemplate[]> = 
     },
   ],
   review_after_commit: [
+    // Until 2026-11-13: the whole method was one sentence, and it named only the newest commit.
+    {
+      name: 'Review after commit',
+      description:
+        'After a commit lands, nudge the agent to have non-trivial work reviewed by a subagent before moving on.',
+      cooldown: 3600,
+      when: { event: 'commit' },
+      guards: {
+        agent_state: ['idle', 'active'],
+        min_quiet_ms: 3000,
+        require_live_repl: true,
+        max_per_hour: 2,
+        only_if_no_outstanding: true,
+      },
+      sequence: [
+        {
+          kind: 'process',
+          text: 'If that commit was non-trivial, spin up a subagent to review it for correctness before moving on. If it was a trivial change, skip the review and carry on.',
+          await: { until: 'turn_end' },
+          timeout_seconds: 1800,
+          on_timeout: 'continue',
+        },
+      ],
+    },
     // Until 2026-10-19: idle-only.
     {
       name: 'Review after commit',

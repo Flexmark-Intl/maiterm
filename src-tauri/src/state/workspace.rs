@@ -377,6 +377,14 @@ pub struct Tab {
     /// otherwise two agents would each get every follow-up.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub follow_ups: Vec<FollowUp>,
+    /// The commit this tab's agent last had reviewed, recorded by `getReviewBrief`
+    /// (claude_code/review_brief.rs, docs/overlord.md §9.5) so the next review covers every
+    /// commit since it — the Overlord's review rule fires at most twice an hour, and an agent
+    /// that commits logically makes several. A reload carries it (whole-record copy); a
+    /// cloned window starts without one, so its first review falls back to the agent's own
+    /// account of what it committed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_review: Option<ReviewMark>,
     #[serde(default)]
     pub tab_type: TabType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -404,6 +412,17 @@ pub struct Tab {
     /// `mailink_native` instead). See docs/mailink-protocol.md.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mailink_excluded: bool,
+}
+
+/// Where a tab's last review ended (`Tab::last_review`). `repo` is the git top level as the
+/// agent reported it — a path on the ssh host for a remote tab — so a tab that moves to
+/// another repo gets no range rather than a SHA that means nothing there.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewMark {
+    pub repo: String,
+    pub head: String,
+    /// Unix seconds.
+    pub at: u64,
 }
 
 /// A prompt to deliver back into its tab's agent later (docs/follow-ups.md §3).
@@ -2543,6 +2562,7 @@ impl Tab {
             service_target: None,
             hive_role: None,
             follow_ups: Vec::new(),
+            last_review: None,
         }
     }
 
@@ -2596,6 +2616,7 @@ impl Tab {
             service_target: None,
             hive_role: None,
             follow_ups: Vec::new(),
+            last_review: None,
         }
     }
 
@@ -2649,6 +2670,7 @@ impl Tab {
             service_target: None,
             hive_role: None,
             follow_ups: Vec::new(),
+            last_review: None,
         }
     }
 }

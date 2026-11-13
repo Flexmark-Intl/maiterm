@@ -857,6 +857,8 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 // A follow-up is one agent's note about its own session. The copy is a new
                 // tab with a new agent; carrying them would deliver each one twice.
                 follow_ups: Vec::new(),
+                // The copy's agent is a new one; its first review asks it what it committed.
+                last_review: None,
                 tab_type: tab.tab_type.clone(),
                 editor_file: tab.editor_file.clone(),
                 last_cwd: tab.last_cwd.clone(),

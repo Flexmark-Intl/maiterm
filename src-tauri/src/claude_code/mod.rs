@@ -6,4 +6,5 @@ pub mod mod_asks;
 pub mod mod_inbox;
 pub mod protocol;
 pub mod registrar;
+pub mod review_brief;
 pub mod server;

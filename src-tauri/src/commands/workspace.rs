@@ -4082,6 +4082,13 @@ mod reload_carry_tests {
                 created_at: "2026-09-30T09:00:00Z".to_string(),
                 expires_at: None,
             }],
+            // The replacement resumes the same session, so its next review starts where
+            // this one's last ended.
+            last_review: Some(crate::state::workspace::ReviewMark {
+                repo: "/src".to_string(),
+                head: "abc1234".to_string(),
+                at: 1_760_000_000,
+            }),
             tab_type: TabType::Terminal,
             editor_file: None,
             diff_context: None,
