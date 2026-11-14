@@ -78,12 +78,47 @@ pub struct WatchStatus {
     /// Broken runs in a row.
     pub broken_runs: u32,
     pub running: bool,
+    /// How long the last run took, ssh included for a remote one.
+    pub last_duration_ms: Option<u64>,
+    /// Runs started in the last hour.
+    pub runs_last_hour: u32,
+    /// The mean gap between the starts of the last hour's runs — what the schedule actually
+    /// delivered, against the `every_secs` asked for. None under two runs.
+    pub mean_interval_secs: Option<u32>,
+    /// Passes (every 5 s) on which it was due but all `MAX_RUNNING` run slots were taken, since
+    /// this launch. Non-zero means other watches are delaying this one.
+    pub slot_waits: u32,
+    /// RFC 3339: when its host stopped answering, while it still doesn't. None when reachable.
+    pub unreachable_since: Option<String>,
 }
 
 #[derive(Default)]
 struct Run {
     started: Option<Instant>,
+    /// Wall-clock starts (ms) of the last hour's runs, oldest first.
+    starts: std::collections::VecDeque<i64>,
+    /// When the current unreachable streak began (ms); 0 when reachable.
+    unreachable_from: i64,
     status: WatchStatus,
+}
+
+const HOUR_MS: i64 = 60 * 60 * 1000;
+
+impl Run {
+    fn note_start(&mut self, now: i64) {
+        self.starts.push_back(now);
+        while self.starts.front().is_some_and(|t| now - t > HOUR_MS) {
+            self.starts.pop_front();
+        }
+    }
+
+    fn view(&self, now: i64) -> WatchStatus {
+        let recent: Vec<i64> = self.starts.iter().copied().filter(|t| now - t <= HOUR_MS).collect();
+        let mean = (recent.len() >= 2).then(|| {
+            ((recent[recent.len() - 1] - recent[0]) / (recent.len() as i64 - 1) / 1000) as u32
+        });
+        WatchStatus { runs_last_hour: recent.len() as u32, mean_interval_secs: mean, ..self.status.clone() }
+    }
 }
 
 fn runs() -> &'static Mutex<HashMap<String, Run>> {
@@ -92,7 +127,8 @@ fn runs() -> &'static Mutex<HashMap<String, Run>> {
 }
 
 pub fn status() -> HashMap<String, WatchStatus> {
-    runs().lock().iter().map(|(id, r)| (id.clone(), r.status.clone())).collect()
+    let now = now_ms();
+    runs().lock().iter().map(|(id, r)| (id.clone(), r.view(now))).collect()
 }
 
 /// Where a script runs, as one string: its folder on this computer ("/repo", "~/repo"), or
@@ -433,14 +469,16 @@ pub async fn watch_loop(state: Arc<AppState>, app: tauri::AppHandle) {
         let mut map = runs().lock();
         let mut running = map.values().filter(|r| r.status.running).count();
         for c in candidates {
-            if running >= MAX_RUNNING {
-                break;
-            }
             let r = map.entry(c.id.clone()).or_default();
             if r.status.running || r.started.is_some_and(|t| t.elapsed() < c.every) {
                 continue;
             }
+            if running >= MAX_RUNNING {
+                r.status.slot_waits += 1;
+                continue;
+            }
             r.started = Some(Instant::now());
+            r.note_start(now_ms());
             r.status.running = true;
             running += 1;
             let (state, app) = (state.clone(), app.clone());
@@ -450,6 +488,7 @@ pub async fn watch_loop(state: Arc<AppState>, app: tauri::AppHandle) {
 }
 
 async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidate) {
+    let began = Instant::now();
     let outcome = match (&c.host, scripts_dir()) {
         (Some(host), _) => match tunnel_args(&state, host) {
             Some((tunnel_key, ssh_args)) => remote::execute(&c, &tunnel_key, &ssh_args).await,
@@ -466,6 +505,11 @@ async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidat
         let r = map.entry(c.id.clone()).or_default();
         r.status.running = false;
         r.status.last_run_at = Some(crate::commands::workspace::iso_now());
+        r.status.last_duration_ms = Some(began.elapsed().as_millis() as u64);
+        if !matches!(outcome, Outcome::Unreachable(_)) {
+            r.unreachable_from = 0;
+            r.status.unreachable_since = None;
+        }
         match &outcome {
             Outcome::Met(out) => {
                 r.status.last_result = Some("met".into());
@@ -483,6 +527,10 @@ async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidat
                 // `broken_runs` untouched: a host that comes and goes neither breaks nor clears it.
                 r.status.last_result = Some("unreachable".into());
                 r.status.detail = Some(why.clone());
+                if r.unreachable_from == 0 {
+                    r.unreachable_from = now_ms();
+                    r.status.unreachable_since = Some(crate::commands::workspace::iso_now());
+                }
                 None
             }
             Outcome::Broken(why) => {
@@ -712,6 +760,23 @@ async fn execute(c: &Candidate, dir: &Path) -> Outcome {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_reports_the_interval_actually_achieved_over_the_last_hour() {
+        let mut r = Run::default();
+        assert_eq!(r.view(0).mean_interval_secs, None);
+        let t0 = 10 * HOUR_MS;
+        // An old run, then four 55 s apart: the old one is outside the hour and doesn't count.
+        r.note_start(t0 - 2 * HOUR_MS);
+        for i in 0..4 {
+            r.note_start(t0 + i * 55_000);
+        }
+        let v = r.view(t0 + 3 * 55_000);
+        assert_eq!(v.runs_last_hour, 4);
+        assert_eq!(v.mean_interval_secs, Some(55));
+        // An hour later with no runs, nothing is "recent".
+        assert_eq!(r.view(t0 + 3 * HOUR_MS).runs_last_hour, 0);
+    }
 
     fn candidate(script: &str, cwd: &Path, timeout: u64) -> Candidate {
         Candidate {

@@ -65,6 +65,14 @@ export interface WatchStatus {
   detail: string | null;
   broken_runs: number;
   running: boolean;
+  last_duration_ms: number | null;
+  runs_last_hour: number;
+  /** The mean gap between the last hour's run starts; null under two runs. */
+  mean_interval_secs: number | null;
+  /** 5-second passes it was due but every run slot was taken, since this launch. */
+  slot_waits: number;
+  /** When its host stopped answering, while it still doesn't. */
+  unreachable_since: string | null;
 }
 
 /** A prompt to deliver back into its tab's agent later (docs/follow-ups.md). */

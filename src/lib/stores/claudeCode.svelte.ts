@@ -1,4 +1,4 @@
-import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskBlocker, TaskStatus, Service, ServiceRestart } from '$lib/tauri/types';
+import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskBlocker, TaskStatus, Service, ServiceRestart, WatchStatus } from '$lib/tauri/types';
 import { LeaseHeldError, stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
 import { copyKey, parseCopyKey, pickCopy, refusedAgentEdits, runsManyCopies } from '$lib/stack/model';
 import { isMaitermOwnedVar } from '$lib/triggers/shellInterpolate';
@@ -292,7 +292,7 @@ function createClaudeCodeStore() {
           result = await handleCreateFollowUp(args as CreateArgs & { tabId?: string });
           break;
         case 'listFollowUps':
-          result = handleListFollowUps(args as { tabId?: string });
+          result = await handleListFollowUps(args as { tabId?: string });
           break;
         case 'cancelFollowUp':
           result = await handleCancelFollowUp(args as { tabId?: string; id?: string });
@@ -1356,10 +1356,42 @@ function createClaudeCodeStore() {
     }
   }
 
-  function handleListFollowUps(args: { tabId?: string }) {
+  /** Each watch script carries how its runs have gone (Rust, since this launch), so an agent can
+   *  see its alarm is actually running — and at what interval — instead of assuming it. */
+  async function handleListFollowUps(args: { tabId?: string }) {
     const scope = resolveFollowUpTab(args.tabId);
     if ('error' in scope) return scope;
-    return { follow_ups: followUpsStore.list(scope.tab.id) };
+    const list = followUpsStore.list(scope.tab.id);
+    const scripts = new Set((scope.tab.follow_ups ?? []).filter(f => isScriptKind(f.due.kind)).map(f => f.id));
+    if (scripts.size === 0) return { follow_ups: list };
+    let health: Record<string, WatchStatus> = {};
+    try {
+      health = await commands.followUpWatchStatus();
+    } catch {
+      // The list without health is still the list.
+    }
+    return {
+      follow_ups: list.map(v => {
+        if (!scripts.has(v.id)) return v;
+        const h = health[v.id];
+        return {
+          ...v,
+          runs: h
+            ? {
+                last_run_at: h.last_run_at,
+                last_result: h.last_result,
+                detail: h.detail,
+                broken_runs_in_a_row: h.broken_runs,
+                last_duration_ms: h.last_duration_ms,
+                runs_last_hour: h.runs_last_hour,
+                mean_interval_secs: h.mean_interval_secs,
+                waited_for_a_run_slot: h.slot_waits,
+                unreachable_since: h.unreachable_since,
+              }
+            : 'not run since maiTerm started',
+        };
+      }),
+    };
   }
 
   async function handleCancelFollowUp(args: { tabId?: string; id?: string }) {

@@ -943,7 +943,7 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
         },
         {
             "name": "listFollowUps",
-            "description": "Your pending follow-ups in this tab — including ones your human added — each with its status ('pending', 'due' = waiting for your turn to end, 'expired' = missed its expiry and won't be delivered). Check it before scheduling, so a resumed session doesn't schedule the same thing twice.",
+            "description": "Your pending follow-ups in this tab — including ones your human added — each with its status ('pending', 'due' = waiting for your turn to end, 'expired' = missed its expiry and won't be delivered). Check it before scheduling, so a resumed session doesn't schedule the same thing twice. A watch script also carries `runs`: its last run and result (with why, when broken or unreachable), how long that run took, runs in the last hour, the mean interval actually achieved, how often it waited for a free run slot, and since when its host has been unreachable — use it to confirm a watch is really running at the interval you asked for.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {
