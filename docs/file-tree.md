@@ -1427,8 +1427,18 @@ All backends feed one **coalescer thread per hub**:
 
 ### 6.3 Windows
 
-- One `ReadDirectoryChangesWatcher` per hub, recursive on the root, in one handle.
-- A buffer overflow means a rescan.
+- One ReadDirectoryChangesW handle per hub, recursive on the root, plus a NonRecursive one on
+  the root's parent (a root deleted or renamed away is silent on its own handle).
+- **Read on threads of our own (`watch/windows.rs`), not notify's `ReadDirectoryChangesWatcher`**
+  (2026-11-14). notify 7's stop closes a folder's handle and then, in an alertable wait, runs a
+  completion that was already queued, which re-arms the read on the closed handle's VALUE.
+  Windows reuses a freed value for the next handle opened, so the read lands on someone else's:
+  on a synchronous directory handle (`remove_dir_all` opens its folders that way) it blocks that
+  handle until the folder changes, which is how the Files subscription test hung Windows CI for
+  hours. Each folder's thread owns its handle, reads overlapped with an event (no completion
+  routine), and closes the handle only after `CancelIoEx` + `GetOverlappedResult` say the read is
+  over. A stop never waits on the thread: a hub can be dropped under the hub map's lock.
+- A buffer overflow means a rescan (notify 7 dropped it silently on Windows).
 - Event paths go through `share::canon`.
 - Case folding only where `relocate::case_insensitive` confirms it; NTFS is not assumed.
 

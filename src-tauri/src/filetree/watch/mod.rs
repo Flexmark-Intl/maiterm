@@ -10,7 +10,9 @@
 //!   expand. kqueue stays off (`Cargo.toml`): one fd per file is the EMFILE trap.
 //! - Linux (`inotify.rs`): ONE inotify instance for the whole app, NonRecursive watches on the
 //!   folders that are open, within a budget; past it a folder is polled while on screen.
-//! - Windows (`windows.rs`): one ReadDirectoryChangesW handle per hub, recursive on the root.
+//! - Windows (`windows.rs`): one ReadDirectoryChangesW handle per hub, recursive on the root,
+//!   read on threads of our own rather than notify's watcher, whose stop could re-arm a read on a
+//!   closed (and reused) handle and hang whoever owned it next. `rdcw.rs` reads its buffers.
 //! - Shallow roots (home, `/`, a volume root, §6.5) watch only the opened folders, so a home
 //!   directory's caches never stream events into an idle app.
 //! - Network mounts: no watcher at all (it would miss other machines' writes); `poll.rs`.
@@ -27,6 +29,8 @@ pub mod inotify;
 pub mod poll;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(any(windows, test))]
+mod rdcw;
 
 /// The raw event channel's capacity (§6).
 pub const RAW_CAPACITY: usize = 65_536;
