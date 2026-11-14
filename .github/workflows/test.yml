@@ -32,6 +32,9 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
+    # A healthy run takes 8–11 minutes. A hung test otherwise holds the runner until
+    # GitHub's 6-hour default (filetree's subscription test hung that long on 2026-11-13).
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v6
