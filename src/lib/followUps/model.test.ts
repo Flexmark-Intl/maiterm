@@ -330,6 +330,8 @@ describe('watch scripts (§5.1)', () => {
     expect(r.ok && r.followUp.expires_at).toBe(new Date(NOW + month * MIN).toISOString());
     const bad = resolveCreate({ text: 'x', when_script: { script: 'true' }, expires_in_minutes: 0 }, sctx());
     expect(bad.ok ? null : bad.reason).toBe('bad_expiry');
+    const huge = resolveCreate({ text: 'x', when_script: { script: 'true' }, expires_in_minutes: 1e12 }, sctx());
+    expect(huge.ok ? null : huge.reason).toBe('bad_expiry');
   });
 
   it('refuses what it can name: no script, a bad schedule, a long-running timeout, two triggers', () => {

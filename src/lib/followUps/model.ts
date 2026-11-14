@@ -343,8 +343,10 @@ function resolveScriptCreate(text: string, args: CreateArgs, ctx: CreateContext)
   let expiresAt: string | null = null;
   if (given(args.expires_in_minutes)) {
     const m = minutes(args.expires_in_minutes);
-    if (m == null || m <= 0) return refuse('bad_expiry', '`expires_in_minutes` must be a positive number.');
-    expiresAt = new Date(ctx.now + m * 60_000).toISOString();
+    // A Date past year 275760 is Invalid and `toISOString` throws: refuse it by name instead.
+    const exp = new Date(ctx.now + (m ?? 0) * 60_000);
+    if (m == null || m <= 0 || Number.isNaN(exp.getTime())) return refuse('bad_expiry', '`expires_in_minutes` must be a positive number (omit it for a watch that waits until it passes).');
+    expiresAt = exp.toISOString();
   }
 
   const limited = limits(ctx);
