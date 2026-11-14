@@ -760,8 +760,9 @@ art-director), reviewers included. What it does beyond the example above:
      weren't run (voice isn't set up in this Hive; lipsync needs a face video). Findings:
      - **Every result is on `v3b.fal.media`**, which fal's CDN docs also name. It was in
        `result_hosts` but not `sandbox_hosts`, so a worker's curl was refused by the sandbox
-       proxy ("host is not on the allow list") until the coordinator allowed it. It is now a
-       sandbox host. `fal.media` and `v3.fal.media` were never seen as result hosts
+       proxy ("host is not on the allow list") until the coordinator allowed it. Once it was
+       allowed, all four downloaded (HTTP/2 200, the right content type, the media checked with
+       `file` and `ffprobe`). It is now a sandbox host. `fal.media` and `v3.fal.media` were never seen as result hosts
        (`v3.fal.media` is the SDK's upload endpoint), so `result_hosts` is `v3b.fal.media` alone;
        both stay sandbox hosts, as phase 1 set them. The job queue is `queue.fal.run`.
      - **`get_pricing` requires no argument in its schema** (`endpoint_id`, a string of up to 50
