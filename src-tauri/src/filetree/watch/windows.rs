@@ -171,8 +171,10 @@ fn run(handle: Owned, done: Owned, stop: Arc<Owned>, dir: PathBuf, subtree: bool
     let mut ov = ffi::Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event: done.0 };
     let issue = |buf: &mut Vec<u32>, ov: &mut ffi::Overlapped| -> std::io::Result<()> {
         // SAFETY: `buf` and `ov` outlive the read: this function doesn't return while one is
-        // outstanding (a stop cancels it and waits for it to finish).
-        let ok = unsafe { ffi::ReadDirectoryChangesW(handle.0, buf.as_mut_ptr().cast(), BUF_BYTES as u32, subtree as i32, ffi::NOTIFY_FILTER, std::ptr::null_mut(), ov, std::ptr::null()) };
+        // outstanding (a stop cancels it and waits for it to finish). `unused` is written only
+        // by a synchronous read; given anyway, as notify did.
+        let mut unused = 0u32;
+        let ok = unsafe { ffi::ReadDirectoryChangesW(handle.0, buf.as_mut_ptr().cast(), BUF_BYTES as u32, subtree as i32, ffi::NOTIFY_FILTER, &mut unused, ov, std::ptr::null()) };
         if ok == 0 {
             Err(std::io::Error::last_os_error())
         } else {
@@ -187,10 +189,12 @@ fn run(handle: Owned, done: Owned, stop: Arc<Owned>, dir: PathBuf, subtree: bool
         return;
     }
     loop {
-        let waits = [done.0, stop.0];
+        // Stop first: with both signalled the lower index wins, so a stop isn't put off while
+        // changes keep arriving.
+        let waits = [stop.0, done.0];
         // SAFETY: two live event handles.
         let woke = unsafe { ffi::WaitForMultipleObjects(2, waits.as_ptr(), 0, ffi::INFINITE) };
-        if woke != ffi::WAIT_OBJECT_0 {
+        if woke != ffi::WAIT_OBJECT_0 + 1 {
             // Stopped (or the wait itself failed): cancel the read and wait until the kernel is
             // done with it. A read that already finished makes both calls return at once.
             let mut n = 0u32;
@@ -359,7 +363,15 @@ mod tests {
     /// forever, so a watchdog turns a hang into an abort that says so.
     #[test]
     fn dropping_a_busy_watcher_and_deleting_its_folder_never_hangs() {
+        /// Set on any exit, a panic's included: a failure must not turn into an abort later.
+        struct Finished(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Finished {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
         let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _finished = Finished(finished.clone());
         let f = finished.clone();
         std::thread::spawn(move || {
             let start = Instant::now();
@@ -388,6 +400,5 @@ mod tests {
             drop(w);
             let _ = std::fs::remove_dir_all(&tmp);
         }
-        finished.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
