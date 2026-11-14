@@ -588,7 +588,7 @@ async function addMcpServer(a: { tabId?: string; url?: string; name?: string; re
   } catch (e) {
     return { error: `maiTerm checked ${url.href} and can't add it: ${e}` };
   }
-  if (probe.auth === 'oauth' && !probe.can_register) {
+  if (probe.auth === 'oauth' && probe.registration === 'none') {
     // It takes a client id or a token only the human has: the add form is where that goes.
     return {
       error: `${url.host} doesn't let apps register themselves, so it needs a client id or a token that only the human can supply. Tell them they can add it in maiTerm → Preferences → MCP servers (or install it directly).`,

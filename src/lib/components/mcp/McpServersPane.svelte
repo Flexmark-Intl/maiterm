@@ -181,7 +181,7 @@
   const canAdd = $derived(
     !!probe && SERVER_NAME_RE.test(name.trim()) &&
       ((probe.auth === 'token' || (probe.auth === 'oauth' && useToken)) ? token.trim().length > 0
-        : probe.auth === 'oauth' && !probe.can_register ? clientId.trim().length > 0
+        : probe.auth === 'oauth' && probe.registration === 'none' ? clientId.trim().length > 0
         : true),
   );
 </script>
@@ -359,7 +359,7 @@
             <span>Token (an API key or access token from the service)</span>
             <input type="password" bind:value={token} autocomplete="off" spellcheck="false" />
           </label>
-        {:else if probe.auth === 'oauth' && !probe.can_register}
+        {:else if probe.auth === 'oauth' && probe.registration === 'none'}
           <label class="field">
             <span>Client id (from an app you registered with {probe.issuer})</span>
             <input type="text" bind:value={clientId} spellcheck="false" />

@@ -461,7 +461,7 @@
           note = { text: `${p.name} asks for a key rather than a sign-in. Make one on its page and paste it below.`, error: false };
           return;
         }
-        if (probe.auth === 'oauth' && !probe.can_register) {
+        if (probe.auth === 'oauth' && probe.registration === 'none') {
           throw new Error(`${p.name} doesn't let apps register themselves, so it needs a client id only you can make. Add ${url} in Preferences → MCP servers.`);
         }
         if (probe.auth === 'none') {
