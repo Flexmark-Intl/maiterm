@@ -16,8 +16,10 @@
 //!   itself: ssh without a terminal sends the far side no hangup when the connection drops, so
 //!   killing the local ssh would leave the script running there. A host where neither gives the
 //!   script its own group runs nothing and says so;
-//! - files untouched for 8 days are swept there (a follow-up waits at most 7, and every run
-//!   touches its own two).
+//! - files untouched for 30 days are swept there. A watch script has no expiry by default, but
+//!   every run touches its own two, so only a watch whose host was out of reach for a month
+//!   (while another watch still ran there) loses its state — and then starts fresh, as a new
+//!   one would. Was 8 days while scripts were capped at 7.
 //!
 //! What comes back is framed by a random marker, so nothing a login profile prints is read as
 //! the answer. No answer at all — no tunnel, ssh can't connect, nothing back in time — is
@@ -62,7 +64,7 @@ say() {{ printf '\n%s %s\n' "$M" "$1"; }}
 umask 077
 d="$HOME/.maiterm/watch-scripts"
 mkdir -p "$d" 2>/dev/null || {{ say "SETUP could not create $d"; exit 0; }}
-find "$d" -type f -mtime +8 -exec rm -f {{}} + </dev/null 2>/dev/null
+find "$d" -type f -mtime +30 -exec rm -f {{}} + </dev/null 2>/dev/null
 s="$d/"{id}.sh; st="$d/"{id}.state; o="$d/"{id}.out; e="$d/"{id}.err; to="$d/"{id}.timeout
 cat > "$s" <<'{eof}'
 {body}{eof}

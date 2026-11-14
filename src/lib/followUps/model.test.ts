@@ -321,7 +321,15 @@ describe('watch scripts (§5.1)', () => {
       kind: 'script', script, cwd: '/work/repo', every_secs: 60, timeout_secs: 10, label: 'test -s out/export.csv',
     });
     expect(r.followUp.due.approved).toBeUndefined(); // Rust decides
-    expect(r.followUp.expires_at).toBe(new Date(NOW + 7 * 24 * 60 * MIN).toISOString());
+    expect(r.followUp.expires_at).toBeNull(); // a watch waits until it passes
+  });
+
+  it('expires only when asked to, with no 7-day cap', () => {
+    const month = 30 * 24 * 60;
+    const r = resolveCreate({ text: 'x', when_script: { script: 'true' }, expires_in_minutes: month }, sctx());
+    expect(r.ok && r.followUp.expires_at).toBe(new Date(NOW + month * MIN).toISOString());
+    const bad = resolveCreate({ text: 'x', when_script: { script: 'true' }, expires_in_minutes: 0 }, sctx());
+    expect(bad.ok ? null : bad.reason).toBe('bad_expiry');
   });
 
   it('refuses what it can name: no script, a bad schedule, a long-running timeout, two triggers', () => {

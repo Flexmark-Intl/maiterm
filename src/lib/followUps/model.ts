@@ -287,7 +287,7 @@ function conditionExpiry(args: CreateArgs): number | Resolved {
   if (!given(args.expires_in_minutes)) return MAX_DELAY_MS;
   const m = minutes(args.expires_in_minutes);
   if (m == null || m <= 0) return refuse('bad_expiry', '`expires_in_minutes` must be a positive number.');
-  if (m * 60_000 > MAX_DELAY_MS) return refuse('bad_expiry', 'An event or script follow-up can wait at most 7 days (`expires_in_minutes` ≤ 10080).');
+  if (m * 60_000 > MAX_DELAY_MS) return refuse('bad_expiry', 'An event follow-up can wait at most 7 days (`expires_in_minutes` ≤ 10080).');
   return m * 60_000;
 }
 
@@ -337,8 +337,15 @@ function resolveScriptCreate(text: string, args: CreateArgs, ctx: CreateContext)
   const home = ctx.resolveScriptHome();
   if (!home.ok) return refuse(home.reason, home.detail);
 
-  const expiresMs = conditionExpiry(args);
-  if (typeof expiresMs !== 'number') return expiresMs;
+  // No expiry unless asked for, and no cap on one that is (§4): a watch that hasn't passed in a
+  // week is an alarm doing its job, not a forgotten note, and it can only fire on the condition
+  // its agent wrote. The 7-day cap was inherited from event triggers, never chosen for scripts.
+  let expiresAt: string | null = null;
+  if (given(args.expires_in_minutes)) {
+    const m = minutes(args.expires_in_minutes);
+    if (m == null || m <= 0) return refuse('bad_expiry', '`expires_in_minutes` must be a positive number.');
+    expiresAt = new Date(ctx.now + m * 60_000).toISOString();
+  }
 
   const limited = limits(ctx);
   if (limited) return limited;
@@ -351,7 +358,7 @@ function resolveScriptCreate(text: string, args: CreateArgs, ctx: CreateContext)
       due: { kind: home.host ? REMOTE_SCRIPT_KIND : 'script', script, cwd: home.cwd, ...(home.host ? { host: home.host } : {}), every_secs: every, timeout_secs: timeout, label },
       author: ctx.author,
       created_at: new Date(ctx.now).toISOString(),
-      expires_at: new Date(ctx.now + expiresMs).toISOString(),
+      expires_at: expiresAt,
     },
   };
 }

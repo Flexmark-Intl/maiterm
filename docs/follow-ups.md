@@ -199,7 +199,12 @@ Limits, enforced in the tool and returned as a refusal that says which one tripp
 - **At least 1 minute out.** Anything sooner is not a follow-up; it is the agent's own turn.
 - **At most 7 days out**, and the same cap is the default `expires_at` for event-triggered
   ones. Matches `CronCreate`'s recurring cap; a follow-up nobody has thought about for a week
-  is not one to act on unannounced.
+  is not one to act on unannounced. **Watch scripts are the exception (2026-11-14): no expiry
+  unless `expires_in_minutes` asks for one, and no cap on it.** The cap reached them by
+  inheritance from event triggers, never by decision, and the reason doesn't hold: a watch that
+  hasn't passed in a week is an alarm doing its job (a DDoS watch had to be renewed weekly), and
+  it can only fire on the condition its agent wrote. Approval, the 10-pending limit and the
+  broken-run report are what bound a watch, not its age.
 - **Rate: 20 created per tab per hour.** The backstop for an agent that re-arms in a tight
   loop, same role as the Overlord's `max_per_hour`.
 
@@ -308,7 +313,7 @@ createFollowUp({
     every_seconds: 60,            // 15 – 86400
     timeout_seconds: 10,          // 1 – 60
   },
-  expires_in_minutes: 1440        // the 7-day default and cap, as for event triggers
+  expires_in_minutes: 1440        // optional; none by default, no cap (§4)
 })
 ```
 
@@ -327,7 +332,7 @@ errors since the last run), and the priming line repeats it.
   - Anything else, a timeout, a signal, or a failure to start means the script is broken. After 3
     broken runs in a row, the follow-up comes due anyway, its outcome saying "it BROKE instead —
     exit 2: <stderr tail>, on 3 runs in a row — so the condition was never checked". A typo is
-    reported to the agent instead of waiting out 7 days.
+    reported to the agent instead of waiting forever.
 - **Stdout on the met run** is delivered after the note, as "Your watch script printed:" (2,000
   characters, control characters stripped like everything in the envelope). The script tells the
   agent *what* it found ("3 new files: a, b, c"), so the agent doesn't spend its first turn
