@@ -539,18 +539,19 @@ async fn once_ready_the_tool_joins_the_hive_and_the_queen_gets_a_framed_notice()
 #[tokio::test]
 async fn only_the_hosts_the_card_named_are_added_and_the_rest_are_left_to_the_human() {
     let rig = Rig::new(&[]);
-    let w = watch(&rig, "video", "fal", &["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
+    // The card names fal's catalogue sandbox hosts (v3b.fal.media since the result-host spike).
+    let w = watch(&rig, "video", "fal", &["fal.run", "queue.fal.run", "fal.media", "v3.fal.media", "v3b.fal.media"]);
     add_watch(w.clone());
     // A native fal entry: its own host comes with it, which the card didn't name.
     let detected = vec![tool("mcp:fal", Some("mcp.fal.ai"))];
     let ready = ready_row("video", vec![cover("mcp:fal", "fal", READY)]);
     let got = ready_in(&rig.ctx(), &rig.caller, &w, &ready, &detected, &[]).await;
     let Readiness::Added { hosts, .. } = got else { panic!("{got:?}") };
-    assert_eq!(hosts, vec!["fal.run".to_string(), "queue.fal.run".to_string(), "fal.media".to_string(), "v3.fal.media".to_string()]);
+    assert_eq!(hosts, vec!["fal.run".to_string(), "queue.fal.run".to_string(), "fal.media".to_string(), "v3.fal.media".to_string(), "v3b.fal.media".to_string()]);
     assert_eq!(rig.hive().settings.gallery.generator_hosts, hosts);
     let st = rig.win.st();
     assert!(st.notices[0].contains("It could also use mcp.fal.ai, which the card didn\u{2019}t name"), "{:?}", st.notices);
-    assert!(st.delivered[0].1.contains("- Media workers may also reach: fal.run, queue.fal.run, fal.media, v3.fal.media"), "{}", st.delivered[0].1);
+    assert!(st.delivered[0].1.contains("- Media workers may also reach: fal.run, queue.fal.run, fal.media, v3.fal.media, v3b.fal.media"), "{}", st.delivered[0].1);
 }
 
 #[tokio::test]
