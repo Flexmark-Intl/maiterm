@@ -189,11 +189,18 @@ async fn fal_locking_the_account_is_out_of_credit() {
         let r = verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await;
         assert_eq!((r.state.as_str(), r.link.as_deref()), (NEEDS_CREDIT, Some("https://fal.ai/dashboard/billing")), "{text}");
     }
-    // A sign-in lockout is no credit problem, on fal or anywhere else: it stays a sign-in.
+    // fal's documented credit lock comes with a 401: on fal that is still credit, not a sign-in.
+    let pricing = check_tool("fal", "get_pricing").unwrap();
+    for text in ["401 Unauthorized: account is locked", "Error 401: {\"error\": \"account is locked\"}"] {
+        let r = after_check(fal(), 3, pricing, Ok(error_result(text)));
+        assert_eq!((r.state.as_str(), r.link.as_deref()), (NEEDS_CREDIT, Some("https://fal.ai/dashboard/billing")), "fal: {text}");
+    }
+    // "Locked out" is a sign-in lockout, on fal too.
+    assert_eq!(after_check(fal(), 3, pricing, Ok(error_result("Unauthorized: user is locked out"))).state, NEEDS_SIGN_IN);
+    // Elsewhere a lock is no credit problem: it stays a sign-in.
     let recraft = provider("recraft").unwrap();
     let get_user = check_tool("recraft", "get_user").unwrap();
     for text in ["Unauthorized: user is locked out", "401 Unauthorized: account is locked"] {
-        assert_eq!(after_check(fal(), 3, check_tool("fal", "get_pricing").unwrap(), Ok(error_result(text))).state, NEEDS_SIGN_IN, "fal: {text}");
         assert_eq!(after_check(recraft, 3, get_user, Ok(error_result(text))).state, NEEDS_SIGN_IN, "recraft: {text}");
     }
     // Another provider's lock is never read as credit, whatever its words.

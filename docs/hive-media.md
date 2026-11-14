@@ -776,9 +776,11 @@ art-director), reviewers included. What it does beyond the example above:
        requests will be rejected"). Its words: "Insufficient credits. Add credits to your
        account and try again.", "Account locked — generations are paused." and
        `{"error": "account is locked"}`. They come from the docs: nobody drained an account to see
-       them. `says_no_credit` already matched "insufficient credit" and "exhausted balance"; it
-       now also matches "account is locked", "account locked" and "user is locked"
-       (`fal_locking_the_account_is_out_of_credit`).
+       them. `says_no_credit` already matched "insufficient credit" and "exhausted balance". The
+       lock phrases ("account is locked", "account locked", "user is locked") count as out of
+       credit only for fal, through `fal_says_locked` and `says_out_of_credit`, with or without
+       a 401 beside them, and never when the text says "locked out". Other providers' lock
+       wording stays a sign-in, as on main (`fal_locking_the_account_is_out_of_credit`).
      - **ElevenLabs is still unverified:** it isn't signed in, so its catalogue entry is unchanged.
 2. **The panel.** "What it can make" in the Tools step, Hive settings and Preferences, read-only:
    detection, recommendations, credits lines and guides.

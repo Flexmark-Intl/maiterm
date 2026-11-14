@@ -387,12 +387,13 @@ fn says_no_credit(text: &str) -> bool {
 /// its older API answer is "User is locked. Reason: Exhausted balance.". Matched without provoking
 /// it: nobody drained an account to see it.
 ///
-/// A lock is about credit only on fal, and only when nothing says it is a sign-in lockout ("user is
-/// locked out", "401 Unauthorized: account is locked"): every other provider's lock is left to
-/// `says_signed_out`, as before.
+/// A lock is about credit only on fal, which has no password sign-in to lock anyone out (an API
+/// key or OAuth): its documented credit lock comes as a `401` with `{"error": "account is locked"}`,
+/// so a 401 beside the words doesn't make it a sign-in. Only "locked out" does. Every other
+/// provider's lock is left to `says_signed_out`, as before.
 fn fal_says_locked(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
-    ["account is locked", "account locked", "user is locked"].iter().any(|w| t.contains(w)) && !t.contains("locked out") && !says_signed_out(&t)
+    ["account is locked", "account locked", "user is locked"].iter().any(|w| t.contains(w)) && !t.contains("locked out")
 }
 
 /// `text` says `p`'s account is out of credit, in any provider's words or in fal's own.
