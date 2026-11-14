@@ -18,7 +18,7 @@
   ],
   "providers": [
     {
-      "id": "fal", "name": "fal", "checked": "2026-11-04",
+      "id": "fal", "name": "fal", "checked": "2026-11-14",
       "offer": "recommend",
       "capabilities": ["video", "image", "lipsync", "upscale", "3d", "music", "sfx"],
       "default_for": ["video", "image", "lipsync", "upscale", "3d", "music", "sfx"],
@@ -33,9 +33,9 @@
         "sfx": "ElevenLabs Sound Effects, Mirelo SFX, Stable Audio SFX"
       },
       "routes": [{ "kind": "remote_mcp", "url": "https://mcp.fal.ai/mcp-relay", "auth": "oauth", "credits": "api", "quote_tool": "get_pricing" }],
-      "result_hosts": ["fal.media", "v3.fal.media", "v3b.fal.media"],
+      "result_hosts": ["v3b.fal.media"],
       "api_hosts": ["fal.run", "queue.fal.run", "api.fal.ai"],
-      "sandbox_hosts": ["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"],
+      "sandbox_hosts": ["fal.run", "queue.fal.run", "fal.media", "v3.fal.media", "v3b.fal.media"],
       "unverified_hosts": [],
       "retention": "7 days or longer",
       "signup_url": "https://fal.ai/login", "billing_url": "https://fal.ai/dashboard/billing",

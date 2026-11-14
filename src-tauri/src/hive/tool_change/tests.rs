@@ -40,7 +40,7 @@ fn hive() -> Hive {
     Hive { id: "h1".into(), status: STATUS_ACTIVE.into(), tools: ids(&["cli:ffmpeg"]), ..Hive::default() }
 }
 
-const FAL_HOSTS: [&str; 5] = ["mcp.fal.ai", "fal.run", "queue.fal.run", "fal.media", "v3.fal.media"];
+const FAL_HOSTS: [&str; 6] = ["mcp.fal.ai", "fal.run", "queue.fal.run", "fal.media", "v3.fal.media", "v3b.fal.media"];
 
 #[test]
 fn the_preview_names_what_is_added_and_removed_and_the_added_tools_hosts() {
@@ -53,7 +53,7 @@ fn the_preview_names_what_is_added_and_removed_and_the_added_tools_hosts() {
     // Hosts the gallery already has aren't offered again, in any spelling.
     let mut h = hive();
     h.settings.gallery.generator_hosts = ids(&["FAL.run.", "mcp.fal.ai"]);
-    assert_eq!(preview(&h, &detected(), &ids(&["mcp:fal", "cli:ffmpeg"]), &[]).unwrap().hosts_offered, ids(&["queue.fal.run", "fal.media", "v3.fal.media"]));
+    assert_eq!(preview(&h, &detected(), &ids(&["mcp:fal", "cli:ffmpeg"]), &[]).unwrap().hosts_offered, ids(&["queue.fal.run", "fal.media", "v3.fal.media", "v3b.fal.media"]));
 
     // A tool that's kept offers nothing: only a newly added one does.
     let mut had = hive();
@@ -127,7 +127,7 @@ fn only_offered_hosts_are_added_and_within_the_limits() {
     apply_to(&mut h, &c);
     assert_eq!((h.tools, h.settings.gallery.generator_hosts), (fal.clone(), ids(&["fal.run", "v3.fal.media"])));
 
-    for not_offered in ["api.example.com", "v3b.fal.media", "localhost"] {
+    for not_offered in ["api.example.com", "v4.fal.media", "localhost"] {
         assert!(check(&hive(), &detected(), &fal, &ids(&[not_offered]), &[]).is_err(), "{not_offered}");
     }
     let err = check(&hive(), &detected(), &ids(&["skill:browse", "cli:ffmpeg"]), &ids(&["fal.run"]), &[]).unwrap_err();

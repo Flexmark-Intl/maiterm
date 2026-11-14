@@ -78,11 +78,14 @@ fn bad_files_are_refused() {
 }
 
 /// HARD CONSTRAINT of phase 1: moving to the catalogue changes no sandbox host. These are the
-/// hosts `KNOWN_GENERATOR_HOSTS` held before it was deleted, and the suffixes it matched by.
+/// hosts `KNOWN_GENERATOR_HOSTS` held before it was deleted, and the suffixes it matched by, with
+/// ONE deliberate change since: fal's v3b.fal.media. The result-host spike (2026-11-14) ran four
+/// real fal jobs (image, video, music, sfx); every result came back on v3b.fal.media, and a
+/// sandboxed worker's download of it was refused until the host was allowed.
 #[test]
 fn todays_five_providers_keep_exactly_their_hosts() {
     let today: [(&str, &[&str], &[&str]); 5] = [
-        ("fal", &["fal.ai", "fal.run", "fal.media"], &["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]),
+        ("fal", &["fal.ai", "fal.run", "fal.media"], &["fal.run", "queue.fal.run", "fal.media", "v3.fal.media", "v3b.fal.media"]),
         ("kie", &["kie.ai"], &["api.kie.ai"]),
         ("higgsfield", &["higgsfield.ai"], &["platform.higgsfield.ai"]),
         ("kling", &["klingai.com"], &["api.klingai.com"]),
@@ -119,9 +122,10 @@ fn todays_five_providers_keep_exactly_their_hosts() {
 #[test]
 fn fal_music_and_sfx_are_verified_and_name_their_models() {
     let fal = provider("fal").unwrap();
-    for id in ["fal", "bfl", "runway", "comfy-cloud", "wavespeed", "recraft"] {
+    for id in ["bfl", "runway", "comfy-cloud", "wavespeed", "recraft"] {
         assert_eq!(provider(id).unwrap().checked, "2026-11-04", "{id}: its facts changed in the 2026-11-04 pass");
     }
+    assert_eq!(fal.checked, "2026-11-14", "fal: re-checked by the result-host spike");
     assert!(fal.capability_notes.is_empty(), "no UNVERIFIED note is left on fal: {:?}", fal.capability_notes);
     assert_eq!(fal.capability_models.get("music").map(String::as_str), Some("Lyria 3 and 3.5, ElevenLabs Music, MiniMax Music, Stable Audio"));
     assert_eq!(fal.capability_models.get("sfx").map(String::as_str), Some("ElevenLabs Sound Effects, Mirelo SFX, Stable Audio SFX"));
@@ -133,9 +137,13 @@ fn fal_music_and_sfx_are_verified_and_name_their_models() {
     ] {
         assert!(fal.source_urls.iter().any(|s| s == u), "{u}");
     }
-    assert!(fal.result_hosts.iter().any(|h| h == "v3b.fal.media"), "documented result host");
-    // Result hosts are informational: the sandbox's set is still exactly phase 1's.
-    assert_eq!(fal.sandbox_hosts, ["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
+    // The result-host spike (2026-11-14): all four jobs' results were on v3b.fal.media, which fal's
+    // docs name as its CDN. fal.media and v3.fal.media were never seen (v3.fal.media is the SDK's
+    // UPLOAD endpoint in fal's CDN docs), so they are no result host.
+    assert_eq!(fal.result_hosts, ["v3b.fal.media"]);
+    assert!(fal.unverified_hosts.is_empty());
+    // Phase 1's set plus the one host the spike showed a worker needs to download a result.
+    assert_eq!(fal.sandbox_hosts, ["fal.run", "queue.fal.run", "fal.media", "v3.fal.media", "v3b.fal.media"]);
     // ElevenLabs stays voice only: its remote MCP documents speech and agents.
     assert_eq!(provider("elevenlabs").unwrap().capabilities, vec!["voice"]);
 }

@@ -89,9 +89,9 @@ parse is tested as the role files are. One entry:
     "credits": "api",                    // api (prepaid balance) | plan (subscription credits)
     "quote_tool": "get_pricing"          // a tool that prices a job before it runs, if any
   }],
-  "result_hosts": ["fal.media", "v3.fal.media", "v3b.fal.media"],
+  "result_hosts": ["v3b.fal.media"],     // confirmed by the result-host spike (§11), 2026-11-14
   "api_hosts": ["fal.run", "queue.fal.run", "api.fal.ai"],
-  "sandbox_hosts": ["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"],  // phase 1: exactly today's KNOWN_GENERATOR_HOSTS set (§9)
+  "sandbox_hosts": ["fal.run", "queue.fal.run", "fal.media", "v3.fal.media", "v3b.fal.media"],  // phase 1's set (§9) + the spike's v3b.fal.media
   "unverified_hosts": [],
   "retention": "7 days or longer",       // how long a result URL lives: the brief's "save at once"
   "signup_url": "https://fal.ai/login", "billing_url": "https://fal.ai/dashboard/billing",
@@ -614,14 +614,16 @@ opening, on the contract above.
   - `api_hosts` only when its shell calls the API itself (a REST call, or the whisper model
     fetch, which maiTerm does instead).
 - **Phase 1 changes no hosts.** Each of today's five providers keeps exactly its current set as
-  `sandbox_hosts`, so moving to the catalogue changes no behaviour. Narrowing to
+  `sandbox_hosts`, so moving to the catalogue changes no behaviour. The one change since is fal's
+  `v3b.fal.media`, added by the result-host spike (§11, 2026-11-14): every fal result came back
+  there, and a sandboxed worker's download was refused until the host was allowed. Narrowing to
   `result_hosts` (dropping `fal.run` and `queue.fal.run` from MCP-only workers) is a separate,
-  later change, made once the result-host spike has confirmed the hosts.
+  later change; the spike has now confirmed fal's hosts.
 - **Unverified hosts** (WaveSpeed, Higgsfield, Runway and Kie result CDNs, among others) aren't
   guessed. The existing sandbox-block flow catches the first refusal: a blocker goes to the queen,
   who grants the host. The catalogue is then corrected from that real URL in a follow-up commit.
   Phase 1 includes a spike: one cheapest real job per default provider, logging the result URL's
-  host.
+  host. **Done for fal on 2026-11-14** (§11); ElevenLabs is still unverified (not signed in).
 - **A stdio server maiTerm runs itself** (§12.1) gets no sandbox host either: it calls its API from
   maiTerm's own process. Its results are files in its output folder, which joins the Hive's output
   folders, so a worker files them with `galleryAdd` and downloads nothing. Meshy's `result_hosts`
@@ -701,14 +703,14 @@ art-director), reviewers included. What it does beyond the example above:
 1. **Catalogue + detection.** The catalogue file, `hive/media.rs`, `hive_media_status`,
    upstream-URL matching for proxied servers, scope-aware status, plugin detection per account
    root, and the host and worker-MCP code moved onto the catalogue. No hosts change (§9). Plus
-   the result-host spike.
+   the result-host spike (done for fal, 2026-11-14: below).
 
    **Phase 1, catalogue half: built (2026-11-03).** The catalogue, its loader, the host and
    worker-MCP code moved onto it, and proxied-entry matching by upstream URL. The status half is
    built too: `hive_media_status` (`hive/media/status.rs`), the extra CLIs (`ffprobe`,
    `whisper-cli` and `brew`, in `DETECTED_CLIS`, `hive/create.rs`), plugin detection per Claude
-   config root (`plugin_hits`), and ComfyUI and Comfy Desktop detection (`comfy_hits`). Not built
-   yet: the result-host spike. Where the catalogue half lives:
+   config root (`plugin_hits`), and ComfyUI and Comfy Desktop detection (`comfy_hits`). The
+   result-host spike ran on 2026-11-14 (below). Where the catalogue half lives:
    - `resources/hive/media/catalogue.json` and `hive/media.rs`: `catalogue()`, `provider(id)`,
      `capability(id)`, `common_capabilities()`, `providers_for_host(host)`,
      `providers_for_upstream(url)`, `providers_for_native(name, host)`, `providers_for_skill(name)`.
@@ -719,7 +721,9 @@ art-director), reviewers included. What it does beyond the example above:
      `deny_unknown_fields`, so a typo is a failing test.
    - `KNOWN_GENERATOR_HOSTS` and `SKILL_GENERATORS` are gone.
      `todays_five_providers_keep_exactly_their_hosts` pins fal, kie, higgsfield, kling and
-     wavespeed to their old `sandbox_hosts` and suffixes; no other provider has a sandbox host.
+     wavespeed to their old `sandbox_hosts` and suffixes, plus fal's `v3b.fal.media` from the
+     spike (the test's `old` oracle in `hive/create.rs` carries it too); no other provider has a
+     sandbox host.
    - A proxied entry is recognised by `mcp_proxy::entries::origin` (our marker AND exactly the url
      this launch writes: `http://127.0.0.1:<the bound port>/mcp/x/<entry name>`, no userinfo,
      query or other port) plus the registry's upstream URL (`DetectedTool.proxy`); anything else
@@ -740,6 +744,41 @@ art-director), reviewers included. What it does beyond the example above:
      Comfy Cloud: none is a sandbox host) and a route's optional `balance_tool` (a balance
      reader, which prices nothing, unlike `quote_tool`). Remotion's marketplace source is
      not in the catalogue (only `plugin_id`).
+   - **Result-host spike: done for fal (2026-11-14).** Darryl approved up to $1.00. A worker on a
+     media role ran one cheapest job per capability through the proxied `fal` server, after
+     pricing each with `get_pricing` and `estimate_cost`:
+
+     | Capability | Model | Settings | Cost (rate × units) | Result host |
+     |---|---|---|---|---|
+     | image | `fal-ai/flux/schnell` | 512×512, 1 step | ≤ $0.003 | `v3b.fal.media` |
+     | video | `fal-ai/ltx-video` | 10 steps | $0.02 | `v3b.fal.media` |
+     | music | `fal-ai/ace-step` | 5 s, 10 steps | $0.001 | `v3b.fal.media` |
+     | sfx | `fal-ai/mmaudio-v2/text-to-audio` | 1 s, 10 steps | $0.001 | `v3b.fal.media` |
+
+     About $0.025 in all. fal's MCP reports no per-job charge (`search_request_history` has
+     status, duration and media, no cost), so each cost is the rate × units. Speech and lipsync
+     weren't run (voice isn't set up in this Hive; lipsync needs a face video). Findings:
+     - **Every result is on `v3b.fal.media`**, which fal's CDN docs also name. It was in
+       `result_hosts` but not `sandbox_hosts`, so a worker's curl was refused by the sandbox
+       proxy ("host is not on the allow list") until the coordinator allowed it. It is now a
+       sandbox host. `fal.media` and `v3.fal.media` were never seen as result hosts
+       (`v3.fal.media` is the SDK's upload endpoint), so `result_hosts` is `v3b.fal.media` alone;
+       both stay sandbox hosts, as phase 1 set them. The job queue is `queue.fal.run`.
+     - **`get_pricing` requires no argument in its schema** (`endpoint_id`, a string of up to 50
+       comma-separated ids, or `endpoint_ids`, an array), yet refuses `{}` with `isError` "Pass
+       endpoint_id: …". Verify sent only required arguments, so it sent `{}` and would have
+       called a signed-in account an error. `check_args` now sends a tool's hinted arguments
+       when its schema requires none of them, and fal takes both spellings at once. It answers
+       `{"prices":[{"endpoint_id","unit_price","unit","currency"}],"next_cursor","has_more"}`,
+       plus `unknown_endpoint_ids` and a `hint` for ids it doesn't know.
+     - **Out of credit, fal locks the account** (its FAQ: "your account is locked and API
+       requests will be rejected"). Its words: "Insufficient credits. Add credits to your
+       account and try again.", "Account locked — generations are paused." and
+       `{"error": "account is locked"}`. They come from the docs: nobody drained an account to see
+       them. `says_no_credit` already matched "insufficient credit" and "exhausted balance"; it
+       now also matches "account is locked", "account locked" and "user is locked"
+       (`fal_locking_the_account_is_out_of_credit`).
+     - **ElevenLabs is still unverified:** it isn't signed in, so its catalogue entry is unchanged.
 2. **The panel.** "What it can make" in the Tools step, Hive settings and Preferences, read-only:
    detection, recommendations, credits lines and guides.
 
@@ -870,7 +909,8 @@ art-director), reviewers included. What it does beyond the example above:
     phases 1 and 3.
   - **Phase 3's tools change after Create** (`Hive.tools`, with a §3.4 row). It offers hosts
     through the existing `generator_hosts`, which phase 1 later moves onto the catalogue.
-  - **The result-host spike**, once Darryl approves its spend.
+  - **The result-host spike**, once Darryl approves its spend. **Done for fal, 2026-11-14** (phase
+    1 above); ElevenLabs is still unverified (not signed in).
 - **Phase 2's panel** can be built against the two agreed types before detection is finished.
 
 Each piece is reviewed as it lands. The sheets are Svelte, and every sheet change so far had

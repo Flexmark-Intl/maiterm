@@ -345,12 +345,13 @@ fn a_card_names_the_hosts_it_brings_and_what_the_phone_can_start() {
     let mut hive = rig.hive();
     hive.settings.gallery.generator_hosts = vec!["fal.run".into()];
     // fal: its result hosts, less what the gallery has and any that reaches a repo remote's
-    // (fal.media is the remote v3.fal.media's parent, so it goes too).
+    // (fal.media is the remote v3.fal.media's parent and v3b.fal.media shares its registrable
+    // domain, so both go too).
     let c = card("Make it", &hive, "video", &row_of(&bare_rows(), "video"), &here(true), &["v3.fal.media".to_string()]).unwrap();
     assert_eq!(c.provider_id, "fal");
     assert_eq!(c.hosts, vec!["queue.fal.run".to_string()]);
     let all = card("Make it", &hive, "video", &row_of(&bare_rows(), "video"), &here(true), &[]).unwrap();
-    assert_eq!(all.hosts, vec!["queue.fal.run".to_string(), "fal.media".to_string(), "v3.fal.media".to_string()], "the gallery's fal.run left out");
+    assert_eq!(all.hosts, vec!["queue.fal.run".to_string(), "fal.media".to_string(), "v3.fal.media".to_string(), "v3b.fal.media".to_string()], "the gallery's fal.run left out");
     assert!(c.summary.contains("Recommended: fal (prepaid API credit \u{b7} prices a job before running it)"), "{}", c.summary);
     assert!(c.effects.iter().any(|e| e.contains("may also reach queue.fal.run (where") && e.ends_with("Approving allows those hosts.")), "{:?}", c.effects);
     assert!(c.effects.iter().any(|e| e.starts_with("Other ways to get video:")), "{:?}", c.effects);

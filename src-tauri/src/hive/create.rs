@@ -1962,11 +1962,11 @@ mod tests {
         let chosen = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
         let hosts = generator_hosts(&detected, &chosen(&["mcp:fal", "mcp:local", "cli:ffmpeg"]), &[]);
-        assert_eq!(hosts, vec!["mcp.fal.ai", "fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
+        assert_eq!(hosts, vec!["mcp.fal.ai", "fal.run", "queue.fal.run", "fal.media", "v3.fal.media", "v3b.fal.media"]);
         // A remote host is never a generator host, however it was found, nor any name of its
         // registrable domain (`budget::reaches_remote`, the final review).
         let hosts = generator_hosts(&detected, &chosen(&["mcp:fal"]), &["queue.fal.run".to_string()]);
-        assert_eq!(hosts, vec!["mcp.fal.ai", "fal.media", "v3.fal.media"]);
+        assert_eq!(hosts, vec!["mcp.fal.ai", "fal.media", "v3.fal.media", "v3b.fal.media"]);
         // By url suffix, by name word, the skill's table entry; a loopback proxy adds nothing.
         let hosts = generator_hosts(&detected, &chosen(&["mcp:higgs", "mcp:kling-video", "skill:generate", "mcp:proxied"]), &[]);
         assert_eq!(hosts, vec!["mcp.higgsfield.ai", "platform.higgsfield.ai", "api.klingai.com", "api.kie.ai"]);
@@ -1974,7 +1974,7 @@ mod tests {
         // A ticked server that is no generator adds nothing: a github one's host would be a
         // media worker's way out. One recognised by name alone adds the table's hosts, never its own.
         assert!(generator_hosts(&detected, &chosen(&["mcp:github", "mcp:local", "mcp:proxied"]), &[]).is_empty());
-        assert_eq!(generator_hosts(&detected, &chosen(&["mcp:fal-mirror"]), &[]), vec!["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
+        assert_eq!(generator_hosts(&detected, &chosen(&["mcp:fal-mirror"]), &[]), vec!["fal.run", "queue.fal.run", "fal.media", "v3.fal.media", "v3b.fal.media"]);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -2016,7 +2016,7 @@ mod tests {
         let v = serde_json::json!({ "mcpServers": { "video": proxy_entry("video") } });
         let detected = mcp_tools_with(&v, &up, PORT);
         // Its loopback url and fal's MCP host are not sandbox hosts: only the catalogue's.
-        assert_eq!(generator_hosts(&detected, &["mcp:video".to_string()], &[]), vec!["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"]);
+        assert_eq!(generator_hosts(&detected, &["mcp:video".to_string()], &[]), vec!["fal.run", "queue.fal.run", "fal.media", "v3.fal.media", "v3b.fal.media"]);
     }
 
     /// Phase 5: a server maiTerm runs itself is recognised by its catalogue route (what the
@@ -2114,8 +2114,10 @@ mod tests {
             pub hosts: &'static [&'static str],
         }
 
+        // fal's hosts carry ONE deliberate change since main: v3b.fal.media, where the result-host
+        // spike (2026-11-14) found every fal result, refused to a sandboxed worker until allowed.
         pub const KNOWN_GENERATOR_HOSTS: &[KnownGenerator] = &[
-            KnownGenerator { key: "fal", suffixes: &["fal.ai", "fal.run", "fal.media"], hosts: &["fal.run", "queue.fal.run", "fal.media", "v3.fal.media"] },
+            KnownGenerator { key: "fal", suffixes: &["fal.ai", "fal.run", "fal.media"], hosts: &["fal.run", "queue.fal.run", "fal.media", "v3.fal.media", "v3b.fal.media"] },
             KnownGenerator { key: "kie", suffixes: &["kie.ai"], hosts: &["api.kie.ai"] },
             KnownGenerator { key: "higgsfield", suffixes: &["higgsfield.ai"], hosts: &["platform.higgsfield.ai"] },
             KnownGenerator { key: "kling", suffixes: &["klingai.com"], hosts: &["api.klingai.com"] },
