@@ -372,18 +372,32 @@ fn says_402(text: &str) -> bool {
     has_code(text, "402", "payment required")
 }
 
+fn says_no_credit(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    says_402(&t)
+        || ["payment required", "insufficient credit", "insufficient balance", "insufficient funds", "out of credit", "not enough credit", "no credits", "exhausted balance", "balance is too low"]
+            .iter()
+            .any(|w| t.contains(w))
+}
+
 /// fal locks an account whose balance drops below its lock threshold and then rejects every
 /// request (fal docs, model-apis FAQ "What happens when my credits run out?", read in the
 /// result-host spike 2026-11-14): its words are "Insufficient credits. Add credits to your account
 /// and try again.", "Account locked — generations are paused." and `{"error": "account is locked"}`;
 /// its older API answer is "User is locked. Reason: Exhausted balance.". Matched without provoking
 /// it: nobody drained an account to see it.
-fn says_no_credit(text: &str) -> bool {
+///
+/// A lock is about credit only on fal, and only when nothing says it is a sign-in lockout ("user is
+/// locked out", "401 Unauthorized: account is locked"): every other provider's lock is left to
+/// `says_signed_out`, as before.
+fn fal_says_locked(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
-    says_402(&t)
-        || ["payment required", "insufficient credit", "insufficient balance", "insufficient funds", "out of credit", "not enough credit", "no credits", "exhausted balance", "balance is too low", "account is locked", "account locked", "user is locked"]
-            .iter()
-            .any(|w| t.contains(w))
+    ["account is locked", "account locked", "user is locked"].iter().any(|w| t.contains(w)) && !t.contains("locked out") && !says_signed_out(&t)
+}
+
+/// `text` says `p`'s account is out of credit, in any provider's words or in fal's own.
+fn says_out_of_credit(p: &Provider, text: &str) -> bool {
+    says_no_credit(text) || p.id == "fal" && fal_says_locked(text)
 }
 
 fn says_signed_out(text: &str) -> bool {
@@ -452,7 +466,7 @@ pub fn failed(p: &Provider, f: &Failure, during: &str) -> VerifyResult {
     let name = &p.name;
     // An HTTP status is the server's own answer: a 500 whose body happens to mention credit is
     // still a 500. Words decide only where no status does (a JSON-RPC error).
-    if f.http == Some(402) || f.http.is_none() && says_no_credit(&f.detail) {
+    if f.http == Some(402) || f.http.is_none() && says_out_of_credit(p, &f.detail) {
         return needs_credit(p, f.http == Some(402) || says_402(&f.detail));
     }
     match f.state.as_str() {
@@ -484,7 +498,7 @@ pub fn after_check(p: &Provider, count: usize, check: &CheckTool, answer: Result
         }
         Ok(v) => {
             let text = result_text(&v);
-            if says_no_credit(&text) {
+            if says_out_of_credit(p, &text) {
                 needs_credit(p, says_402(&text))
             } else if says_signed_out(&text) {
                 VerifyResult::new(NEEDS_SIGN_IN, format!("{name} refused its {what}: {}.", fix_sign_in(p)))
@@ -497,7 +511,7 @@ pub fn after_check(p: &Provider, count: usize, check: &CheckTool, answer: Result
         }
         // The server didn't take maiTerm's arguments (or no longer has the tool): that is
         // maiTerm's guess failing, not the account. The list already answered.
-        Err(f) if !says_no_credit(&f.detail) && matches!(f.rpc, Some(-32602 | -32601)) => {
+        Err(f) if !says_out_of_credit(p, &f.detail) && matches!(f.rpc, Some(-32602 | -32601)) => {
             VerifyResult::new(READY, format!("{name} is ready: {}. Its {what} didn't take maiTerm's arguments, so the account itself wasn't read.", n_tools(count)))
         }
         Err(f) => failed(p, &f, &format!("running its {what}")),

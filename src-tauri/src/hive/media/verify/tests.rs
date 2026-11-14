@@ -184,13 +184,23 @@ async fn fal_locking_the_account_is_out_of_credit() {
         "{\"error\": \"account is locked\"}",
         "User is locked. Reason: Exhausted balance. Top up your balance at fal.ai/dashboard/billing.",
     ] {
-        assert!(says_no_credit(text), "{text}");
+        assert!(says_out_of_credit(fal(), text), "{text}");
         let stub = Stub::new(Ok(fal_tools()), Some(Ok(error_result(text))));
         let r = verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await;
         assert_eq!((r.state.as_str(), r.link.as_deref()), (NEEDS_CREDIT, Some("https://fal.ai/dashboard/billing")), "{text}");
     }
-    // A sign-in refusal that merely mentions a lock screen stays a sign-in.
-    assert!(!says_no_credit("Unauthorized: invalid token"));
+    // A sign-in lockout is no credit problem, on fal or anywhere else: it stays a sign-in.
+    let recraft = provider("recraft").unwrap();
+    let get_user = check_tool("recraft", "get_user").unwrap();
+    for text in ["Unauthorized: user is locked out", "401 Unauthorized: account is locked"] {
+        assert_eq!(after_check(fal(), 3, check_tool("fal", "get_pricing").unwrap(), Ok(error_result(text))).state, NEEDS_SIGN_IN, "fal: {text}");
+        assert_eq!(after_check(recraft, 3, get_user, Ok(error_result(text))).state, NEEDS_SIGN_IN, "recraft: {text}");
+    }
+    // Another provider's lock is never read as credit, whatever its words.
+    for text in ["Account locked after too many failed sign-in attempts", "Account locked — generations are paused."] {
+        assert!(!says_out_of_credit(recraft, text), "{text}");
+        assert_ne!(after_check(recraft, 3, get_user, Ok(error_result(text))).state, NEEDS_CREDIT, "{text}");
+    }
 }
 
 #[test]
