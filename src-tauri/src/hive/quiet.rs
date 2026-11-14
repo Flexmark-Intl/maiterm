@@ -92,18 +92,21 @@ pub fn notice(label: &str, minutes: u64, last_words: Option<&str>) -> String {
 /// its sandbox had refused, and no launch has happened since (a sandbox reads its hosts at
 /// launch). Not while a run of its own is on its way: the relaunch stops the worker first, which
 /// ends its runs, and the result wakes it into another turn that is checked in its own time.
+/// Never a reviewer: one doesn't restart (`control::restart_refusal_for_reviewer`), so the stop
+/// the notice asks for would end its review for good.
 pub fn relaunch_owed(w: &WorkerRecord) -> bool {
-    w.phase == PHASE_RUNNING && !w.hosts_awaited.is_empty() && !w.pending_runs.iter().any(|r| r.awaited())
+    w.phase == PHASE_RUNNING && !w.is_reviewer() && !w.hosts_awaited.is_empty() && !w.pending_runs.iter().any(|r| r.awaited())
 }
 
-/// To the coordinator, once per grant.
-pub fn relaunch_notice(label: &str, hosts: &[String], last_words: Option<&str>) -> String {
+/// To the coordinator, once per grant. `serving`: an app it serves is up, which the stop ends.
+pub fn relaunch_notice(label: &str, hosts: &[String], serving: bool, last_words: Option<&str>) -> String {
     let said = last_words.map(|t| format!(" Its last words: \"{t}\".")).unwrap_or_default();
+    let served = if serving { " The stop also ends the app it is serving: tell it to start that again." } else { "" };
     format!(
         "[maiTerm] Worker {label} ended its turn and still can\u{2019}t reach {}: you allowed it, but a worker\u{2019}s sandbox \
          reads its hosts at launch, and this one hasn\u{2019}t been relaunched since.{said} If its work needs the host, relaunch \
          it now: hiveStopWorker, then hiveRestartWorker (its session resumes), then tell it with hiveMessageWorker that the \
-         host is reachable.",
+         host is reachable.{served}",
         hosts.join(", ")
     )
 }
@@ -140,7 +143,8 @@ fn tell_of_owed_relaunch(state: &Arc<AppState>, handle: &AppHandle, tab_id: &str
         let Ok(Some((w, hosts))) = owed else { return };
         log::info!("hive {}: worker {} ended its turn without the relaunch its granted hosts need ({}): telling the coordinator", caller.hive.id, worker_label(&w), hosts.join(", "));
         let ctx = super::tools::app_ctx(&state, &handle, &caller);
-        super::events::notify(&ctx, &caller, relaunch_notice(&worker_label(&w), &hosts, last_words.as_deref())).await;
+        let serving = w.pending_runs.iter().any(|r| r.server && r.state == worker::RUN_OPEN);
+        super::events::notify(&ctx, &caller, relaunch_notice(&worker_label(&w), &hosts, serving, last_words.as_deref())).await;
     });
 }
 
@@ -239,8 +243,13 @@ mod tests {
         let mut reported = w(worker::PHASE_REPORTED, &[]);
         reported.hosts_awaited = granted.hosts_awaited.clone();
         assert!(!relaunch_owed(&reported), "its coordinator has its report");
-        let n = relaunch_notice("#97 spike", &granted.hosts_awaited, Some("The download check is blocked"));
+        // A reviewer never restarts: the stop the notice asks for would end its review.
+        let mut reviewer = granted.clone();
+        reviewer.reviews = Some("t-builder".into());
+        assert!(!relaunch_owed(&reviewer));
+        let n = relaunch_notice("#97 spike", &granted.hosts_awaited, false, Some("The download check is blocked"));
         assert!(n.contains("#97 spike") && n.contains("v3b.fal.media") && n.contains("hiveRestartWorker") && n.contains("download check"), "{n}");
+        assert!(!n.contains("serving") && relaunch_notice("#1 a", &granted.hosts_awaited, true, None).contains("the app it is serving"));
         // An older build's record has no such field, and an empty one isn't written.
         let old: WorkerRecord = serde_json::from_str("{}").unwrap();
         assert!(old.hosts_awaited.is_empty());
