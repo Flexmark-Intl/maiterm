@@ -99,6 +99,8 @@ struct Run {
     starts: std::collections::VecDeque<i64>,
     /// When the current unreachable streak began (ms); 0 when reachable.
     unreachable_from: i64,
+    /// When its last run started (ms); 0 before the first.
+    last_start: i64,
     status: WatchStatus,
 }
 
@@ -106,6 +108,7 @@ const HOUR_MS: i64 = 60 * 60 * 1000;
 
 impl Run {
     fn note_start(&mut self, now: i64) {
+        self.last_start = now;
         self.starts.push_back(now);
         while self.starts.front().is_some_and(|t| now - t > HOUR_MS) {
             self.starts.pop_front();
@@ -307,6 +310,10 @@ struct Candidate {
     host: Option<String>,
     every: Duration,
     timeout: Duration,
+    /// When its previous run started, epoch seconds, as `$MAITERM_WATCH_LAST_RUN`. None on its
+    /// first run since this launch (memory only), so a gap — the Mac asleep, maiTerm restarted —
+    /// is something a script can measure.
+    last_run: Option<i64>,
 }
 
 enum Outcome {
@@ -388,6 +395,7 @@ fn collect(app_data: &AppData) -> (Vec<Candidate>, HashSet<String>) {
                     host,
                     every: Duration::from_secs(f.due.every_secs.unwrap_or(60).clamp(MIN_EVERY_SECS, MAX_EVERY_SECS) as u64),
                     timeout: Duration::from_secs(f.due.timeout_secs.unwrap_or(10).clamp(1, MAX_TIMEOUT_SECS) as u64),
+                    last_run: None,
                 });
             }
         }
@@ -450,6 +458,7 @@ pub async fn watch_loop(state: Arc<AppState>, app: tauri::AppHandle) {
                 host: None,
                 every: Duration::ZERO,
                 timeout: Duration::ZERO,
+                last_run: None,
             };
             meet(&state, &app, &c, LOST_HOST.to_string(), None);
         }
@@ -468,7 +477,7 @@ pub async fn watch_loop(state: Arc<AppState>, app: tauri::AppHandle) {
         }
         let mut map = runs().lock();
         let mut running = map.values().filter(|r| r.status.running).count();
-        for c in candidates {
+        for mut c in candidates {
             let r = map.entry(c.id.clone()).or_default();
             if r.status.running || r.started.is_some_and(|t| t.elapsed() < c.every) {
                 continue;
@@ -478,6 +487,7 @@ pub async fn watch_loop(state: Arc<AppState>, app: tauri::AppHandle) {
                 continue;
             }
             r.started = Some(Instant::now());
+            c.last_run = (r.last_start > 0).then_some(r.last_start / 1000);
             r.note_start(now_ms());
             r.status.running = true;
             running += 1;
@@ -696,6 +706,7 @@ async fn execute(c: &Candidate, dir: &Path) -> Outcome {
         .env("PATH", login_path().await)
         .env("LANG", std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
         .env("MAITERM_WATCH_STATE", &state_path)
+        .env("MAITERM_WATCH_LAST_RUN", c.last_run.map(|t| t.to_string()).unwrap_or_default())
         .env("MAITERM_TAB_ID", &c.tab_id);
     if let Some(home) = dirs::home_dir() {
         cmd.env("HOME", home);
@@ -787,6 +798,7 @@ mod tests {
             host: None,
             every: Duration::from_secs(60),
             timeout: Duration::from_secs(timeout),
+            last_run: Some(1_700_000_000),
         }
     }
 
@@ -827,7 +839,7 @@ mod tests {
         let dir = scratch();
         let c = candidate(
             "n=$(cat \"$MAITERM_WATCH_STATE\"); n=$((${n:-0}+1)); echo $n > \"$MAITERM_WATCH_STATE\"\n\
-             [ -z \"$MAITERM_TEST_LEAK\" ] || exit 3\n[ \"$n\" -ge 2 ] && { echo \"run $n\"; exit 0; }; exit 1\n",
+             [ -z \"$MAITERM_TEST_LEAK\" ] || exit 3\n[ \"$n\" -ge 2 ] && { echo \"run $n after $MAITERM_WATCH_LAST_RUN\"; exit 0; }; exit 1\n",
             &std::env::temp_dir(),
             5,
         );
@@ -836,7 +848,7 @@ mod tests {
         let second = execute(&c, &dir).await;
         cleanup(&dir);
         assert!(matches!(first, Outcome::NotYet));
-        assert!(matches!(second, Outcome::Met(ref s) if s == "run 2"), "the second run saw the first's state");
+        assert!(matches!(second, Outcome::Met(ref s) if s == "run 2 after 1700000000"), "the second run saw the first's state");
     }
 
     #[tokio::test]

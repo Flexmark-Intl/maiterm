@@ -340,7 +340,14 @@ errors since the last run), and the priming line repeats it.
 - **State between runs:** `$MAITERM_WATCH_STATE` is the path of a file the script may read and
   write. "Changed since last time" is then the script's own logic (compare, store, exit `1`), not a
   maiTerm mode. The file belongs to ONE follow-up: a re-armed script starts with an empty one, so
-  state meant to outlive a re-arm goes in a file of the agent's own.
+  state meant to outlive a re-arm goes in a file of the agent's own. Guarantees an agent may rely
+  on (stated in the tool description since 2026-11-14): always set; named by the follow-up's id,
+  so never shared with another follow-up, label or not; survives maiTerm restarting. A remote
+  host's copy is swept after 30 days untouched, which a running watch never is.
+- **`$MAITERM_WATCH_LAST_RUN`:** when this watch's previous run STARTED, Unix seconds; empty on
+  its first run since this launch (it is memory only). Nothing runs while the Mac sleeps or
+  maiTerm is down, so this is how a script measures the gap and looks back over it, as a DDoS
+  watch reading its monitor's log for pushes it missed does.
 - **Other environment:** `MAITERM_TAB_ID`.
 
 **How maiTerm runs it** (`src-tauri/src/watch.rs`). All in Rust, not the webview, because an

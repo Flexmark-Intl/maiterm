@@ -90,7 +90,7 @@ if command -v setsid >/dev/null 2>&1; then iso=setsid; else
   kill -KILL "$q" 2>/dev/null; wait "$q" 2>/dev/null
   if [ -z "$pq" ] || [ "$pq" = "$me" ]; then say "NOGROUP"; exit 0; fi
 fi
-$iso env -i HOME="$HOME" USER="${{USER:-}}" LOGNAME="${{LOGNAME:-}}" SHELL="${{SHELL:-}}" LANG="${{LANG:-C.UTF-8}}" TMPDIR="${{TMPDIR:-/tmp}}" PATH="$lp" MAITERM_WATCH_STATE="$st" MAITERM_TAB_ID={tab} {run} </dev/null >"$o" 2>"$e" &
+$iso env -i HOME="$HOME" USER="${{USER:-}}" LOGNAME="${{LOGNAME:-}}" SHELL="${{SHELL:-}}" LANG="${{LANG:-C.UTF-8}}" TMPDIR="${{TMPDIR:-/tmp}}" PATH="$lp" MAITERM_WATCH_STATE="$st" MAITERM_WATCH_LAST_RUN={last} MAITERM_TAB_ID={tab} {run} </dev/null >"$o" 2>"$e" &
 p=$!
 $iso sh -c 'sleep "$1"; : > "$2"; kill -KILL -"$3" 2>/dev/null' watchdog {t} "$to" "$p" </dev/null >/dev/null 2>&1 &
 w=$!
@@ -110,6 +110,7 @@ rm -f "$o" "$e"
         body = body,
         cwd = cwd_word(&c.cwd),
         tab = sq(&c.tab_id),
+        last = sq(&c.last_run.map(|t| t.to_string()).unwrap_or_default()),
         run = run,
         t = c.timeout.as_secs(),
         cap = OUTPUT_CAP,
@@ -220,6 +221,7 @@ mod tests {
             host: Some("me@here".into()),
             every: Duration::from_secs(60),
             timeout: Duration::from_secs(timeout),
+            last_run: Some(1_700_000_000),
         }
     }
 
@@ -255,9 +257,9 @@ mod tests {
     #[tokio::test]
     async fn exit_codes_output_and_state_cross_over() {
         let tmp = std::env::temp_dir().display().to_string();
-        let c = candidate("echo found it\necho \"$MAITERM_WATCH_STATE\" >&2\nexit 0", &tmp, 5);
+        let c = candidate("echo found it $MAITERM_WATCH_LAST_RUN\necho \"$MAITERM_WATCH_STATE\" >&2\nexit 0", &tmp, 5);
         let (o, home) = run_local(&c).await;
-        assert!(matches!(o, Outcome::Met(ref s) if s == "found it"), "{:?}", matches!(o, Outcome::Met(_)));
+        assert!(matches!(o, Outcome::Met(ref s) if s == "found it 1700000000"), "{:?}", matches!(o, Outcome::Met(_)));
         assert!(home.join(".maiterm/watch-scripts").join(format!("{}.state", c.id)).exists());
         let (o, _) = run_local(&candidate("exit 1", &tmp, 5)).await;
         assert!(matches!(o, Outcome::NotYet));
