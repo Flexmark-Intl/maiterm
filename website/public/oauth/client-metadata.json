@@ -1,0 +1,15 @@
+{
+  "client_id": "https://maiterm.dev/oauth/client-metadata.json",
+  "client_name": "maiTerm",
+  "client_uri": "https://maiterm.dev",
+  "logo_uri": "https://maiterm.dev/maiterm-icon-2.png",
+  "redirect_uris": [
+    "http://127.0.0.1/oauth/callback",
+    "http://127.0.0.1:21847/oauth/callback",
+    "http://127.0.0.1:26413/oauth/callback",
+    "http://127.0.0.1:29581/oauth/callback"
+  ],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none"
+}
