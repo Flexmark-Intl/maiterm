@@ -265,19 +265,51 @@ too. Facts were checked live on 2026-10-13.
      path-insertion form GitHub uses, then OIDC. Clerk's OIDC document lacks the
      `registration_endpoint` its RFC 8414 one has.
    - **Retry on server errors.** Higgsfield's PRM returns 502 intermittently.
-3. **Registering as a client.** In order:
-   - a client id the human supplies (GitHub has neither DCR nor CIMD);
+3. **Registering as a client.** The probe classifies the server as `registration`
+   `metadata_document`, `dynamic` or `none` (a String on the probe and in the stored plan, which
+   `oauth::plan_registration` reads; a plan saved before 2026-11-14 has no such key and reads as
+   `dynamic` or `none` by its `registration_endpoint`, so it signs in exactly as before).
+   `can_register` stays, true for the first two. A sign-in uses, in order:
+   - a client id the human supplies (GitHub has neither DCR nor CIMD). Only `none` shows the
+     client id fields;
+   - else **CIMD** (client ID metadata documents, MCP authorization 2025-11-25 /
+     draft-ietf-oauth-client-id-metadata-document) when the authorization server says
+     `client_id_metadata_document_supported: true`. The client id is
+     `https://maiterm.dev/oauth/client-metadata.json` (`oauth::CLIENT_METADATA_URL`), published
+     from `website/public/oauth/client-metadata.json`: a public client (`none`), code + refresh
+     grants. Nothing is registered or stored, and no secret exists. One document serves dev and
+     release builds: nothing in it differs between them. A test reads the website's file and checks
+     its `client_id` is its own URL and that it lists every redirect the code can use, so the two
+     can't drift. ElevenLabs (2026-11-14) offers only this: no `registration_endpoint`;
    - else DCR (`token_endpoint_auth_method: none`). The registration is saved, keyed by issuer and
      redirect URI, and redone when the redirect URI changes.
-   - CIMD (a maiterm.dev-hosted client document) is v2. The spec itself notes CIMD cannot stop
-     another local process from claiming to be maiTerm.
+
+   **CIMD comes before DCR where a server offers both.** Nothing is written on the server, the
+   client id is the same on every launch (a DCR registration names maiTerm's port, so it is redone
+   each launch), and the consent screen shows maiTerm's own name and site. The cost: a sign-in
+   needs one of the fixed ports below, and the server fetches the document from maiterm.dev at
+   sign-in. The spec itself notes CIMD cannot stop another local process from claiming to be
+   maiTerm: a loopback redirect proves nothing about the app.
 4. **The authorization request.**
    - PKCE S256, a `state` that is checked on return, and `resource` set to the PRM's `resource`
      exactly as written (servers disagree with themselves about trailing slashes and paths).
    - Scopes: the challenge's `scope`, else the PRM's `scopes_supported`, else none. Add
      `offline_access` where it is advertised.
-   - The redirect is `http://127.0.0.1:<maiTerm's MCP port>/oauth/callback` on maiTerm's existing
-     server, opened in the system browser.
+   - The redirect, for a human's client id or DCR, is
+     `http://127.0.0.1:<maiTerm's MCP port>/oauth/callback` on maiTerm's existing server (a random
+     port each launch). The authorization URL opens in the system browser.
+   - **For CIMD the redirect ports are fixed**: `21847`, `26413`, `29581` (`oauth::CIMD_PORTS`),
+     tried in that order. A metadata document has to list its redirect URIs, and although RFC 8252
+     §7.3 says a server should accept any loopback port, many CIMD servers match exactly. So the
+     document lists the port-less `http://127.0.0.1/oauth/callback` (for servers that follow
+     §7.3) AND those three. A CIMD sign-in binds the first free one for a small listener of its own
+     that serves only `/oauth/callback` (behind the same local-host guard) and stops a couple of
+     seconds after no sign-in waits on it; a second sign-in while it runs reuses it. All three
+     taken is a plain sentence naming them. The ports sit below every OS's ephemeral range (Linux
+     32768+, macOS and Windows 49152+), so an outgoing connection never holds one by chance, and
+     are spread out, so one Windows excluded-port block can't hold all three. Changing them means
+     changing the published document first: an installed maiTerm only signs in on ports the live
+     document lists.
 5. **Tokens.**
    - **Storage.** The access token, refresh token and expiry go in the OS keychain under maiTerm's
      own service name (`app_data_slug()`-scoped, `accounts::vault`'s rules: never in a log, an
@@ -382,8 +414,9 @@ server:
       `listMcpServers`. The human can add such a server themselves;
     - a name the human's own entry holds in Claude's or Codex's config (it would never be written
       there);
-    - a service that doesn't let apps register (GitHub), which needs a client id or token only
-      the human has: the agent is told to point them at the add form;
+    - a service that doesn't let apps register and takes no client metadata document (GitHub),
+      which needs a client id or token only the human has: the agent is told to point them at the
+      add form;
     - a name or URL maiTerm already serves.
   - **The trade-off, as the tool and the card put it:**
     - Through maiTerm: one sign-in shared by Claude and Codex here and Claude on your ssh hosts,
@@ -423,7 +456,8 @@ candidate).
 4. Preferences → MCP servers.
 5. `listMcpServers` / `addMcpServer` + the `mcp_add` request kind and card.
 6. ssh hosts (Claude).
-7. v2: Gemini registrar, resources/prompts, CIMD, remote Codex. (Stdio upstreams were built
+7. v2: Gemini registrar, resources/prompts, remote Codex. (CIMD was built 2026-11-14 for
+   ElevenLabs, §5.3.) (Stdio upstreams were built
    2026-11-05 for Hive media, §2.1.)
 
 **Status 2026-10-13:** steps 1–6 built and reviewed (each step's review found real defects, all

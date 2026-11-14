@@ -125,7 +125,7 @@ The starting entries, from the 2026-11-03 survey:
 | Provider | Route | Auth | Credits | Default for |
 |---|---|---|---|---|
 | **fal** | remote MCP `mcp.fal.ai/mcp-relay` | OAuth | API (prepaid), pricing tool | **video, image, lipsync, upscale, 3d** |
-| **ElevenLabs** | remote MCP `api.elevenlabs.io/v1/mcp` | OAuth | plan | **voice** (music and sfx: see D3) |
+| **ElevenLabs** | remote MCP `api.elevenlabs.io/v1/mcp` | OAuth, as maiTerm's client metadata document (no app to register: docs/mcp-proxy.md §5.3) | plan | **voice** (music and sfx: see D3) |
 | **Homebrew kit** | `brew install ffmpeg imagemagick sox whisper-cpp` | none | free | **finish, transcribe** |
 | **Remotion** | Claude Code plugin `remotion@remotion` | none | free | **compose**, **coordinator only** (workers load no user plugins or skills: `--setting-sources project`, docs/hive.md §6.7 "Workers have no skills"); a worker renders through `npx remotion render` in its shell or a `hiveRun` job, with the npm registry it already has |
 | WaveSpeed | remote MCP `api.wavespeed.ai/mcp` | OAuth or token | API, `get_price` before running | alternative to fal |
@@ -147,6 +147,17 @@ The starting entries, from the 2026-11-03 survey:
 
 Sources and the full survey: the research notes of 2026-11-03, quoted in each entry's
 `source_urls`.
+
+**The ElevenLabs route (checked 2026-11-14).** Its hosted MCP takes only an OAuth bearer token
+("One sign-in. No API keys": an API key is refused with a 401). Its protected-resource metadata
+names itself (`resource` `https://api.elevenlabs.io/v1/mcp`) and an authorization server on
+another host, `https://api.us.elevenlabs.io`, which has no `registration_endpoint` but sets
+`client_id_metadata_document_supported`. So maiTerm signs in as its client metadata document
+(`https://maiterm.dev/oauth/client-metadata.json`, docs/mcp-proxy.md §5.3) on one of the fixed
+loopback ports, and the human only presses Sign in and approves in the browser. The consent page
+is on `elevenlabs.io`. A new ElevenLabs account is asked whether it is there for ElevenCreative,
+ElevenAgents or ElevenAPI; any answer works, and the guide says ElevenAPI fits best. Scope is
+everything its resource metadata lists, as for every server with no `scope` in its challenge.
 
 **Why fal as the default rather than Higgsfield.**
 - fal signs in with OAuth and bills a prepaid API balance with a pricing API.
@@ -220,8 +231,9 @@ placements. What it does per route:
   `hive` flag) or "Every workspace", and with no Hive yet only the second. A reused server limited
   to other workspaces gains the Hive's; one offered everywhere, or one reused from Preferences,
   keeps its scope.
-  - `oauth`: the probe runs first. A server that can't register maiTerm points at Preferences (it
-    needs a client id); one that asks for a key turns the sheet into the `token` form; then the
+  - `oauth`: the probe runs first. A server whose `registration` is `none` (it neither registers
+    maiTerm nor takes maiTerm's client metadata document) points at Preferences (it needs a client
+    id); a `metadata_document` server, ElevenLabs, signs in with nothing to fill in; one that asks for a key turns the sheet into the `token` form; then the
     sign-in opens in the browser (http(s) only). Verify runs by itself on the
     `mcp-proxy-status` that says the server is connected, or on the human's Verify. The button
     reads "Sign in", as the guides say.
