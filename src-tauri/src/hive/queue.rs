@@ -1287,7 +1287,10 @@ const LOST_EXIT_AFTER: Duration = Duration::from_secs(5);
 /// shell with a broken prompt hook): ended from the marks, the fact the D only points at. Without
 /// this such a job holds its resources, and its worker, to the timeout.
 fn end_lost_exits() {
-    for id in queue().begun() {
+    // Bound first: a guard in the `for` expression would live through the loop, and the body
+    // locks the queue again.
+    let ids = queue().begun();
+    for id in ids {
         let Some(dir) = job_run_dir(&id) else { continue };
         let marks = read_marks(&dir, LOST_EXIT_AFTER);
         if marks == Marks::None {

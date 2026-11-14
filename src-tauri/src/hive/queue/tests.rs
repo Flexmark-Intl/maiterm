@@ -195,6 +195,30 @@ fn a_failed_job_ends_on_the_shells_d_0() {
     assert_eq!((ended.job.state.as_str(), ended.job.exit_code), (DONE, Some(0)));
 }
 
+/// The ticker's pass over the real queue, with a job running: it returns. Its first version held
+/// the queue's lock across the loop and locked it again inside (review of a9817e42), which would
+/// have frozen the queue, and every terminal's reader at its next prompt mark.
+#[test]
+fn the_tickers_look_for_lost_exits_returns_with_a_job_running() {
+    let hive = format!("lost-exit-{}", uuid::Uuid::new_v4());
+    let id = {
+        let mut q = queue();
+        running(&mut q, spec(&hive, "t1", "a", &[]), &format!("pty-{hive}"), T0)
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        end_lost_exits();
+        let _ = tx.send(());
+    });
+    let returned = rx.recv_timeout(Duration::from_secs(10)).is_ok();
+    // No marks on disk: the job is left running. Taken out again either way.
+    if returned {
+        assert_eq!(queue().job(&id).map(|j| j.state.clone()).as_deref(), Some(RUNNING));
+        queue().interrupt(&id, BY_TIMEOUT, "test over", T0 + 1);
+    }
+    assert!(returned, "end_lost_exits never returned: it locks the queue twice");
+}
+
 #[test]
 fn marks_are_read_from_the_run_folder_and_a_fresh_exit_mark_waits_for_its_d() {
     let dir = std::env::temp_dir().join(format!("hive-marks-{}", uuid::Uuid::new_v4()));
