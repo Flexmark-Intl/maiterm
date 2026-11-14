@@ -73,7 +73,10 @@ fn no_hints() -> Value {
 }
 
 /// fal's `get_pricing` prices model endpoints: asking the price of one model reads a table and
-/// runs nothing. Either spelling its schema may require.
+/// runs nothing. Its live schema (the result-host spike, 2026-11-14) declares both spellings and
+/// requires NEITHER, yet answers `{}` with `isError` "Pass endpoint_id: one exact endpoint ID, or
+/// up to 50 comma-separated IDs (endpoint_ids also takes an array)." Sent together, it takes both
+/// and prices the model once.
 fn fal_hints() -> Value {
     json!({ "endpoint_ids": ["fal-ai/flux/schnell"], "endpoint_id": "fal-ai/flux/schnell" })
 }
@@ -102,8 +105,10 @@ pub fn check_tool(provider: &str, name: &str) -> Result<&'static CheckTool, Stri
 }
 
 /// The arguments to send: each property the schema REQUIRES, from the hints, else its `default`,
-/// else its first `enum` value. Optional ones are left out. `None`: a required argument maiTerm
-/// has no harmless value for, so the tool isn't called.
+/// else its first `enum` value. Optional ones are left out, except the hinted ones when the schema
+/// requires none of them: a tool that declares its one argument optional and still refuses a call
+/// without it (fal's `get_pricing`) gets the hinted properties it declares. `None`: a required
+/// argument maiTerm has no harmless value for, so the tool isn't called.
 pub fn check_args(schema: Option<&Value>, hints: &Value) -> Option<Value> {
     let props = schema.and_then(|s| s.get("properties")).and_then(Value::as_object);
     let required: Vec<&str> = schema.and_then(|s| s.get("required")).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
@@ -116,6 +121,12 @@ pub fn check_args(schema: Option<&Value>, hints: &Value) -> Option<Value> {
             .or_else(|| declared.and_then(|d| d.get("default")).cloned())
             .or_else(|| declared.and_then(|d| d.get("enum")).and_then(Value::as_array).and_then(|e| e.first()).cloned())?;
         args.insert(name.to_string(), value);
+    }
+    let hinted = hints.as_object().into_iter().flatten();
+    if !hinted.clone().any(|(k, _)| args.contains_key(k)) {
+        for (k, v) in hinted.filter(|(k, _)| props.is_some_and(|p| p.contains_key(*k))) {
+            args.insert(k.clone(), v.clone());
+        }
     }
     Some(Value::Object(args))
 }
@@ -361,10 +372,16 @@ fn says_402(text: &str) -> bool {
     has_code(text, "402", "payment required")
 }
 
+/// fal locks an account whose balance drops below its lock threshold and then rejects every
+/// request (fal docs, model-apis FAQ "What happens when my credits run out?", read in the
+/// result-host spike 2026-11-14): its words are "Insufficient credits. Add credits to your account
+/// and try again.", "Account locked — generations are paused." and `{"error": "account is locked"}`;
+/// its older API answer is "User is locked. Reason: Exhausted balance.". Matched without provoking
+/// it: nobody drained an account to see it.
 fn says_no_credit(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
     says_402(&t)
-        || ["payment required", "insufficient credit", "insufficient balance", "insufficient funds", "out of credit", "not enough credit", "no credits", "exhausted balance", "balance is too low"]
+        || ["payment required", "insufficient credit", "insufficient balance", "insufficient funds", "out of credit", "not enough credit", "no credits", "exhausted balance", "balance is too low", "account is locked", "account locked", "user is locked"]
             .iter()
             .any(|w| t.contains(w))
 }

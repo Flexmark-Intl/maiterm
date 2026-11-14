@@ -66,9 +66,22 @@ fn reach_ok(id: &str) -> Reach {
 fn fal_tools() -> Vec<Value> {
     vec![
         json!({ "name": "generate_video", "inputSchema": { "type": "object", "properties": { "prompt": { "type": "string" } }, "required": ["prompt"] } }),
-        json!({ "name": "get_pricing", "inputSchema": { "type": "object", "properties": { "endpoint_ids": { "type": "array" }, "unit": { "type": "string" } }, "required": ["endpoint_ids"] } }),
+        json!({ "name": "get_pricing", "inputSchema": fal_pricing_schema() }),
         json!({ "name": "estimate_cost" }),
     ]
+}
+
+/// fal's live `get_pricing` schema, as the result-host spike read it on 2026-11-14: both spellings
+/// declared, neither required (and `{}` refused all the same).
+fn fal_pricing_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "endpoint_id": { "type": "string", "description": "One model endpoint ID, or up to 50 comma-separated endpoint IDs to compare in one request" },
+            "endpoint_ids": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 50 },
+            "user_intent": { "type": "string" }
+        }
+    })
 }
 
 fn ok_result(text: &str) -> Value {
@@ -96,8 +109,8 @@ async fn ready_when_the_entry_reaches_agents_the_tools_list_and_the_pricing_chec
     let calls = stub.calls.lock().clone();
     assert_eq!(calls.len(), 1, "one check, nothing else");
     assert_eq!(calls[0].0, "get_pricing");
-    // Only what the schema requires: the optional `unit` is left out.
-    assert_eq!(calls[0].1, json!({ "endpoint_ids": ["fal-ai/flux/schnell"] }));
+    // The endpoint, though the schema requires nothing: fal refuses `{}`. `user_intent` is left out.
+    assert_eq!(calls[0].1, json!({ "endpoint_id": "fal-ai/flux/schnell", "endpoint_ids": ["fal-ai/flux/schnell"] }));
 }
 
 #[tokio::test]
@@ -159,6 +172,25 @@ async fn a_402_means_add_credit_with_the_billing_page_as_the_link() {
     let r = verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await;
     assert_eq!(r.state, NEEDS_CREDIT);
     assert!(r.message.starts_with("Signed in, but fal says the account is out of credit"), "{}", r.message);
+}
+
+/// fal's own words for an account out of credit, from its docs (read in the result-host spike,
+/// 2026-11-14, without draining an account): it LOCKS the account.
+#[tokio::test]
+async fn fal_locking_the_account_is_out_of_credit() {
+    for text in [
+        "Insufficient credits. Add credits to your account and try again.",
+        "Account locked — generations are paused.",
+        "{\"error\": \"account is locked\"}",
+        "User is locked. Reason: Exhausted balance. Top up your balance at fal.ai/dashboard/billing.",
+    ] {
+        assert!(says_no_credit(text), "{text}");
+        let stub = Stub::new(Ok(fal_tools()), Some(Ok(error_result(text))));
+        let r = verify_mcp(&stub, fal(), &server("fal", FAL), None, &reach_ok("fal")).await;
+        assert_eq!((r.state.as_str(), r.link.as_deref()), (NEEDS_CREDIT, Some("https://fal.ai/dashboard/billing")), "{text}");
+    }
+    // A sign-in refusal that merely mentions a lock screen stays a sign-in.
+    assert!(!says_no_credit("Unauthorized: invalid token"));
 }
 
 #[test]
@@ -408,6 +440,29 @@ fn check_arguments_fill_only_what_is_required_and_harmless() {
     assert_eq!(check_args(Some(&schema), &hints), None);
     let stub_tools = vec![json!({ "name": "get_pricing", "inputSchema": schema })];
     assert!(plan_check(fal(), &stub_tools).is_none());
+}
+
+/// The result-host spike (2026-11-14) found fal's `get_pricing` requires no argument in its schema
+/// and still refuses `{}` ("Pass endpoint_id: …", `isError`). Sending only what is required sent
+/// `{}`, and Verify called a signed-in fal account an error.
+#[test]
+fn a_hinted_argument_goes_when_the_schema_requires_none_of_them() {
+    let hints = json!({ "endpoint_ids": ["a"], "endpoint_id": "a" });
+    // Both declared, neither required: both go, and fal prices the model once.
+    assert_eq!(check_args(Some(&fal_pricing_schema()), &hints), Some(json!({ "endpoint_id": "a", "endpoint_ids": ["a"] })));
+    // Only one declared: only that one.
+    let one = json!({ "properties": { "endpoint_id": {}, "user_intent": {} } });
+    assert_eq!(check_args(Some(&one), &hints), Some(json!({ "endpoint_id": "a" })));
+    // One required: the required one alone, the other spelling left out.
+    let required = json!({ "properties": { "endpoint_ids": {}, "endpoint_id": {} }, "required": ["endpoint_ids"] });
+    assert_eq!(check_args(Some(&required), &hints), Some(json!({ "endpoint_ids": ["a"] })));
+    // A tool with no hints still gets nothing it doesn't require.
+    let balance = json!({ "properties": { "currency": { "default": "USD" } } });
+    assert_eq!(check_args(Some(&balance), &json!({})), Some(json!({})));
+    // And plan_check on fal's real tool list plans the call with the endpoint.
+    let (check, args) = plan_check(fal(), &fal_tools()).expect("fal's pricing check is planned");
+    assert_eq!(check.name, "get_pricing");
+    assert_eq!(args.get("endpoint_id"), Some(&json!("fal-ai/flux/schnell")));
 }
 
 #[tokio::test]
