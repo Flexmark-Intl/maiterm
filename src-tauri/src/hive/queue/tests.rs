@@ -139,8 +139,6 @@ fn only_a_d_after_the_armed_b_is_the_exit() {
     }
     assert_eq!(q.job(&id).unwrap().state, RUNNING);
     assert!(q.holders.get("cargo").is_some_and(|v| v.contains(&id)), "it still holds cargo");
-    // A D;0 after a failed line (a background child printed it): no pass mark, not the exit.
-    assert!(q.complete(&id, Some(0), Marks::Exited, T0 + 20).is_none());
     // A pass is exit 0, whatever the D beside it says.
     let ended = q.complete(&id, Some(7), Marks::Passed, T0 + 30).unwrap();
     assert_eq!((ended.job.state.as_str(), ended.job.exit_code, ended.job.ended_at, ended.stop), (DONE, Some(0), Some(T0 + 30), false));
@@ -178,6 +176,39 @@ fn a_failing_exit_needs_no_mark_and_frees_its_resources() {
     let ended = q.complete(&a, Some(101), Marks::Exited, T0 + 5).unwrap();
     assert_eq!((ended.job.state.as_str(), ended.job.exit_code), (DONE, Some(101)));
     assert_eq!(ids(&q.schedule(T0)), vec![b]);
+}
+
+/// Every failed run hung to its timeout (253 passes and no fail in the installed app's logs,
+/// 2026-11-14): the line ends in a `touch` of the exit mark, so the shell's D after a failed job
+/// says 0, and that D;0 with no pass mark was ignored. The marks decide: it failed, code unknown.
+#[test]
+fn a_failed_job_ends_on_the_shells_d_0() {
+    let mut q = Queue::default();
+    let a = running(&mut q, spec("h1", "t1", "a", &["cargo"]), "p1", T0);
+    assert_eq!(q.begun(), vec![a.clone()]);
+    let ended = q.complete(&a, Some(0), Marks::Exited, T0 + 5).unwrap();
+    assert_eq!((ended.job.state.as_str(), ended.job.exit_code, ended.job.ended_at), (DONE, None, Some(T0 + 5)));
+    assert!(q.begun().is_empty());
+    // The ticker's reading, with no D at all, ends one the same way.
+    let b = running(&mut q, spec("h1", "t2", "b", &["cargo"]), "p2", T0);
+    let ended = q.complete(&b, None, Marks::Passed, T0 + 9).unwrap();
+    assert_eq!((ended.job.state.as_str(), ended.job.exit_code), (DONE, Some(0)));
+}
+
+#[test]
+fn marks_are_read_from_the_run_folder_and_a_fresh_exit_mark_waits_for_its_d() {
+    let dir = std::env::temp_dir().join(format!("hive-marks-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    assert_eq!(read_marks(&dir, Duration::ZERO), Marks::None);
+    std::fs::write(dir.join(crate::hive::job_sandbox::PASS_MARK), b"").unwrap();
+    assert_eq!(read_marks(&dir, Duration::ZERO), Marks::None, "a pass mark alone: the line isn't over");
+    std::fs::remove_file(dir.join(crate::hive::job_sandbox::PASS_MARK)).unwrap();
+    std::fs::write(dir.join(crate::hive::job_sandbox::EXIT_MARK), b"").unwrap();
+    assert_eq!(read_marks(&dir, Duration::ZERO), Marks::Exited);
+    assert_eq!(read_marks(&dir, Duration::from_secs(3600)), Marks::None, "the ticker leaves a fresh one to its D");
+    std::fs::write(dir.join(crate::hive::job_sandbox::PASS_MARK), b"").unwrap();
+    assert_eq!(read_marks(&dir, Duration::ZERO), Marks::Passed);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
