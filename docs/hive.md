@@ -3937,7 +3937,11 @@ several releases a day).
    Hive. A job runs in a hidden bound tab as `sandbox-exec` under a profile built from the
    worker's own write lists (loopback only to its own and leased ports, no TIOCSTI, symlinks
    resolved first), its line built in Rust with no `sh -c`. It ends only on a D after its own
-   B plus an exit mark the shell writes outside the sandbox, or when its terminal dies.
+   B plus an exit mark the shell writes outside the sandbox, or when its terminal dies. The
+   marks say how it went: the exit mark with no pass mark is a failed run, whatever the D said
+   (the line ends in a `touch`, so the shell's D after a failed job is 0; until 2026-11-14 that
+   D was ignored and every failed run hung to its timeout). The queue's ticker also ends a
+   running job whose exit mark is 5 s old with no D seen.
    Leases hold a stop or retarget behind the jobs using a copy. Memory pressure, sampled only
    while a job is queued or running, stops new starts and spawns.
    **Part 5 built** (`1aec6dda`): the worker-facing half (`hive/run.rs`). `hiveRun` refuses shell
@@ -4747,7 +4751,13 @@ several releases a day).
    its own is open or has a result on its way, and no prompt of its is routed. A paused Hive defers
    the check rather than ending it. A Stop whose `background_tasks` or `session_crons` aren't empty
    doesn't arm it, because the session wakes itself. Memory only: after a restart the relaunch's
-   SessionStart arms it again. *On the board:* the header's pill for an active Hive used to pulse a
+   SessionStart arms it again. *A granted host that never arrived* (2026-11-14): a sandbox reads
+   its hosts at launch, so a host the coordinator allows reaches a running worker only once it is
+   relaunched, and the coordinator, told to do that "at a good point", didn't. The grant records
+   the hosts on the worker (`worker.json` `hosts_awaited`, emptied by its next launch), and the
+   worker's next Stop with no run of its own on its way tells the coordinator, once, to relaunch
+   it now (`quiet::tell_of_owed_relaunch`). maiTerm doesn't relaunch it itself: a worker keeps
+   working after its sandbox blocker is filed, and a stop ends its turn and its runs. *On the board:* the header's pill for an active Hive used to pulse a
    green "Running" whenever the Hive was on, so both stalls looked like work. It now says what is
    happening (`activity.ts` `hivePulse`):
    - **Working** pulses only while an agent is busy or a run is open.
