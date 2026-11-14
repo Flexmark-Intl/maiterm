@@ -111,6 +111,66 @@ impl Drop for Fx {
     }
 }
 
+/// Turns a hang into an abort that names the step it was on. A test that waits on other
+/// threads or on the OS can otherwise hold CI until the job's own timeout with nothing in the
+/// log but libtest's "running for over 60 seconds" (the subscription test below, twice).
+struct Watchdog {
+    stage: Arc<Mutex<String>>,
+    done: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Watchdog {
+    fn start(test: &'static str, limit: Duration) -> Watchdog {
+        let stage = Arc::new(Mutex::new("starting".to_string()));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (at, over) = (stage.clone(), done.clone());
+        std::thread::Builder::new()
+            .name("test-watchdog".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                while !over.load(std::sync::atomic::Ordering::SeqCst) {
+                    if started.elapsed() >= limit {
+                        use std::io::Write;
+                        // Straight to stderr: libtest captures eprintln!, and an abort loses
+                        // what it captured.
+                        let _ = writeln!(std::io::stderr(), "{test}: still running after {limit:?}, at: {}. Aborting so the log says where.", at.lock());
+                        std::process::abort();
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            })
+            .unwrap();
+        Watchdog { stage, done }
+    }
+
+    fn at(&self, stage: &str) {
+        *self.stage.lock() = stage.to_string();
+    }
+
+    /// Declared after everything the test owns, so it drops first: a panic's unwinding then
+    /// shows as such, and the drops that follow it are still watched.
+    fn on_unwind(&self) -> OnUnwind {
+        OnUnwind(self.stage.clone())
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.done.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct OnUnwind(Arc<Mutex<String>>);
+
+impl Drop for OnUnwind {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let mut s = self.0.lock();
+            *s = format!("dropping what the test held, after a panic at: {s}");
+        }
+    }
+}
+
 fn op(kind: &str, src: &[&str]) -> FileOp {
     FileOp { kind: kind.into(), src: src.iter().map(|s| s.to_string()).collect(), ..Default::default() }
 }
@@ -654,10 +714,14 @@ fn an_op_through_a_subscription_shows_up_on_the_channel() {
             true
         }
     }
+    // Declared first, so it outlives (and watches) every drop below.
+    let dog = Watchdog::start("an_op_through_a_subscription_shows_up_on_the_channel", Duration::from_secs(30));
     let fx = Fx::new("sub");
     let ft = super::super::FileTreeState::with(Duration::from_millis(50), super::super::watch::RAW_CAPACITY, None);
     ft.set_trash_backend(Box::new(FakeTrash { bin: fx.tmp.join("bin"), refuse: false, restores: true, held: Arc::default() }));
     let rec = Arc::new(Rec::default());
+    let _unwind = dog.on_unwind();
+    dog.at("ft.open");
     let ack = ft.open("w", &fx.root.to_string_lossy(), Vec::new(), rec.clone(), Vec::new()).unwrap();
     assert!(ack.caps.writable && ack.caps.trash);
     let has = |name: &str| {
@@ -668,20 +732,33 @@ fn an_op_through_a_subscription_shows_up_on_the_channel() {
         })
     };
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    dog.at("waiting for the root's listing");
     while !rec.0.lock().iter().any(|e| matches!(&e.ev, TreeEvent::Dir { rel, last: true, .. } if rel.is_empty())) {
         assert!(std::time::Instant::now() < deadline, "the root lists");
         std::thread::sleep(Duration::from_millis(10));
     }
     let none = || Vec::new();
+    dog.at("ft.op create_file");
     let r = ft.op(ack.sub_id, &FileOp { kind: "create_file".into(), name: Some("new.ts".into()), ..Default::default() }, &none).unwrap();
     assert_eq!(r.done.len(), 1);
+    dog.at("waiting for new.ts on the channel");
     while !has("new.ts") {
         assert!(std::time::Instant::now() < deadline, "the new file arrives");
         std::thread::sleep(Duration::from_millis(10));
     }
+    dog.at("ft.prepare_delete");
     let t = ft.prepare_delete(ack.sub_id, &["new.ts".to_string()]).unwrap();
     assert_eq!((t.files, t.dirs), (1, 0));
+    dog.at("ft.op delete");
     let r = ft.op(ack.sub_id, &FileOp { kind: "delete".into(), src: vec!["new.ts".into()], token: Some(t.token), ..Default::default() }, &none).unwrap();
     assert_eq!(r.done.len(), 1);
+    dog.at("ft.close");
     ft.close(ack.sub_id);
+    // The hub's watcher stops as the state drops, and the temp folder is deleted right after:
+    // where the hang was (notify's stop re-armed a read on a handle remove_dir_all reused).
+    dog.at("dropping the FileTreeState");
+    drop(ft);
+    dog.at("dropping the fixture (remove_dir_all of its temp folder)");
+    drop(fx);
+    dog.at("done");
 }
