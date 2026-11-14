@@ -15,8 +15,8 @@
 //!   every one of its needs has room, so jobs that don't compete run in parallel.
 //! - **Order.** Higher priority first, then first queued.
 //! - **Completion.** A D counts only after the B that began the job, on the PTY the window armed
-//!   for it, and only once the shell's exit mark is beside it (a D;0 also needs the pass mark,
-//!   `job_sandbox`): the job's own output can print any OSC 133 sequence, the shell's marks it
+//!   for it, and only once the shell's exit mark is beside it (a pass also needs the pass mark,
+//!   `job_sandbox`; an exit mark the D never followed ends the job from the ticker): the job's own output can print any OSC 133 sequence, the shell's marks it
 //!   can't write. A job whose shell shows no OSC 133 is `invalid`, never a pass; one whose PTY
 //!   closes with no exit is interrupted (`on_pty_closed`), never left holding its resources.
 //! - **Memory.** Under pressure nothing new starts (`pressure`); sampled only while a job is
@@ -29,6 +29,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -576,10 +577,14 @@ impl Queue {
     }
 
     /// A D after the job's B, with what the shell left beside it. No exit mark: the line is
-    /// still running and the job printed the D, ignored. A D;0 with no pass mark is the job's
-    /// too (the shell's own exit failed and its D comes after). Otherwise the job ends, and a
-    /// pass is exit 0 whatever the D said. On an interrupted job (a ^C cuts the line before its
-    /// marks) any D only records the code and frees the PTY.
+    /// still running and the job printed the D, ignored. Otherwise the job ends: the shell writes
+    /// the exit mark only once the line is over, the pass mark before it, so the marks alone say
+    /// how it went. A pass is exit 0 whatever the D said. A fail keeps the D's code unless it is
+    /// 0: the line ends in a `touch` of the exit mark, so the shell's own D says 0 after a failed
+    /// job, and the job's code is unknown. (Until 2026-11-14 that D;0 was taken for the job's own
+    /// and ignored: no failed run ever ended before its timeout, and its worker waited on it.) On
+    /// an interrupted job (a ^C cuts the line before its marks) any D only records the code and
+    /// frees the PTY.
     pub fn complete(&mut self, id: &str, code: Option<i32>, marks: Marks, now: i64) -> Option<Ended> {
         let j = self.job_mut(id)?;
         if !j.began {
@@ -601,11 +606,7 @@ impl Queue {
                 log::warn!("hive queue: job {id} showed a D {code:?} before its line finished; not its exit");
                 return None;
             }
-            Marks::Exited if code == Some(0) => {
-                log::warn!("hive queue: job {id} showed D;0 with no pass mark; not its exit");
-                return None;
-            }
-            Marks::Exited => code,
+            Marks::Exited => code.filter(|c| *c != 0),
             Marks::Passed => Some(0),
         };
         j.state = DONE.to_string();
@@ -670,6 +671,11 @@ impl Queue {
             .filter(|j| j.state == RUNNING && j.started_at.is_some_and(|t| now - t >= (j.timeout_s as i64) * 1000))
             .map(|j| j.id.clone())
             .collect()
+    }
+
+    /// Running jobs whose line has begun: the ones whose exit mark the ticker looks for.
+    pub fn begun(&self) -> Vec<String> {
+        self.jobs.iter().filter(|j| j.state == RUNNING && j.began).map(|j| j.id.clone()).collect()
     }
 
     /// A served app was used (fetched, screenshotted): its idle clock restarts.
@@ -1242,23 +1248,58 @@ pub fn on_osc133(pty_id: &str, cmd: char, exit_code: Option<i32>) {
             // The marks are files: read them off the reader thread. The shell writes the pass
             // mark before the exit mark, so with the exit mark there the pass mark is final.
             tauri::async_runtime::spawn_blocking(move || {
-                let dir = queue().job(&job).and_then(|j| super::paths::hive_root(&j.hive_id).map(|r| HivePaths::new(r).run(&j.id)));
-                let marks = match dir {
-                    Some(d) if d.join(super::job_sandbox::EXIT_MARK).is_file() => {
-                        if d.join(super::job_sandbox::PASS_MARK).is_file() {
-                            Marks::Passed
-                        } else {
-                            Marks::Exited
-                        }
-                    }
-                    _ => Marks::None,
-                };
+                let marks = job_run_dir(&job).map_or(Marks::None, |d| read_marks(&d, Duration::ZERO));
                 let ended = queue().complete(&job, code, marks, super::fuses::now_ms());
                 if let Some(e) = ended {
                     log::info!("hive queue: {job} exited {code:?}");
                     spawn_finish(e);
                 }
             });
+        }
+    }
+}
+
+fn job_run_dir(job: &str) -> Option<PathBuf> {
+    queue().job(job).and_then(|j| super::paths::hive_root(&j.hive_id).map(|r| HivePaths::new(r).run(&j.id)))
+}
+
+/// What the shell left in a job's run folder. The exit mark counts once it is `settled` old.
+fn read_marks(dir: &Path, settled: Duration) -> Marks {
+    let exit = dir.join(super::job_sandbox::EXIT_MARK);
+    let old_enough = std::fs::metadata(&exit)
+        .ok()
+        .filter(|m| m.is_file())
+        .is_some_and(|m| settled.is_zero() || m.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age >= settled));
+    if !old_enough {
+        Marks::None
+    } else if dir.join(super::job_sandbox::PASS_MARK).is_file() {
+        Marks::Passed
+    } else {
+        Marks::Exited
+    }
+}
+
+/// How old an exit mark is before the ticker ends its job with no D seen: the shell's D follows
+/// the mark within milliseconds, and it is the D that normally ends the job.
+const LOST_EXIT_AFTER: Duration = Duration::from_secs(5);
+
+/// Running jobs whose exit mark is there but whose D never ended them (a D the reader lost, a
+/// shell with a broken prompt hook): ended from the marks, the fact the D only points at. Without
+/// this such a job holds its resources, and its worker, to the timeout.
+fn end_lost_exits() {
+    // Bound first: a guard in the `for` expression would live through the loop, and the body
+    // locks the queue again.
+    let ids = queue().begun();
+    for id in ids {
+        let Some(dir) = job_run_dir(&id) else { continue };
+        let marks = read_marks(&dir, LOST_EXIT_AFTER);
+        if marks == Marks::None {
+            continue;
+        }
+        let ended = queue().complete(&id, None, marks, super::fuses::now_ms());
+        if let Some(e) = ended {
+            log::warn!("hive queue: {id} ended from its exit mark ({marks:?}); no exit was seen from its shell");
+            spawn_finish(e);
         }
     }
 }
@@ -1314,6 +1355,7 @@ fn ensure_ticker(d: &'static Driver) {
             for e in ended {
                 spawn_finish(e);
             }
+            let _ = tauri::async_runtime::spawn_blocking(end_lost_exits).await;
             stop_exposed().await;
             schedule_and_start(d).await;
         }

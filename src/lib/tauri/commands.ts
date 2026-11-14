@@ -2716,7 +2716,11 @@ export interface McpProbe {
   auth: 'none' | 'token' | 'oauth';
   detail: string;
   issuer?: string;
+  /** True when `registration` is `dynamic` or `metadata_document`. */
   can_register: boolean;
+  /** How maiTerm gets a client id there: registers itself (`dynamic`), signs in as its published
+   * client metadata document (`metadata_document`), or needs one the human made (`none`). */
+  registration: 'dynamic' | 'metadata_document' | 'none';
   /** Entries of the human's own reaching the same URL: "Claude: linear". */
   duplicates: string[];
 }

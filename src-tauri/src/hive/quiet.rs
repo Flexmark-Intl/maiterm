@@ -88,6 +88,66 @@ pub fn notice(label: &str, minutes: u64, last_words: Option<&str>) -> String {
     )
 }
 
+/// Whether a worker whose turn just ended is owed a relaunch now: its coordinator allowed a host
+/// its sandbox had refused, and no launch has happened since (a sandbox reads its hosts at
+/// launch). Not while a run of its own is on its way: the relaunch stops the worker first, which
+/// ends its runs, and the result wakes it into another turn that is checked in its own time.
+/// Never a reviewer: one doesn't restart (`control::restart_refusal_for_reviewer`), so the stop
+/// the notice asks for would end its review for good.
+pub fn relaunch_owed(w: &WorkerRecord) -> bool {
+    w.phase == PHASE_RUNNING && !w.is_reviewer() && !w.hosts_awaited.is_empty() && !w.pending_runs.iter().any(|r| r.awaited())
+}
+
+/// To the coordinator, once per grant. `serving`: an app it serves is up, which the stop ends.
+pub fn relaunch_notice(label: &str, hosts: &[String], serving: bool, last_words: Option<&str>) -> String {
+    let said = last_words.map(|t| format!(" Its last words: \"{t}\".")).unwrap_or_default();
+    let served = if serving { " The stop also ends the app it is serving: tell it to start that again." } else { "" };
+    format!(
+        "[maiTerm] Worker {label} ended its turn and still can\u{2019}t reach {}: you allowed it, but a worker\u{2019}s sandbox \
+         reads its hosts at launch, and this one hasn\u{2019}t been relaunched since.{said} If its work needs the host, relaunch \
+         it now: hiveStopWorker, then hiveRestartWorker (its session resumes), then tell it with hiveMessageWorker that the \
+         host is reachable.{served}",
+        hosts.join(", ")
+    )
+}
+
+/// A worker's turn ended (2026-11-14: the queen allowed a host, told the worker to carry on, and
+/// never relaunched it; it ended its turn unable to reach the host and sat there). The coordinator
+/// was told at the grant to relaunch it "at a good point": this is that point, said once.
+fn tell_of_owed_relaunch(state: &Arc<AppState>, handle: &AppHandle, tab_id: &str, last_words: Option<String>) {
+    let (state, handle, tab) = (state.clone(), handle.clone(), tab_id.to_string());
+    tauri::async_runtime::spawn(async move {
+        let Some(caller) = super::tools::caller_for_tab(&state.app_data.read(), &tab) else { return };
+        // A paused Hive tells its coordinator nothing: the worker's next turn end is checked again.
+        if caller.hive.status != super::record::STATUS_ACTIVE {
+            return;
+        }
+        let paths = caller.paths.clone();
+        // Taken under the record's lock: two Stops (or two hooks reporting one) tell once.
+        let owed = blocking(move || {
+            let Some(w) = worker::worker_for_tab(&paths, &tab) else { return Ok(None) };
+            if !relaunch_owed(&w) {
+                return Ok(None);
+            }
+            let dir = worker::task_dir(&paths, &w.task_id)?;
+            let mut hosts = Vec::new();
+            let w = worker::update_worker(&dir, |w| {
+                if relaunch_owed(w) {
+                    hosts = std::mem::take(&mut w.hosts_awaited);
+                }
+                !hosts.is_empty()
+            })?;
+            Ok((!hosts.is_empty()).then_some((w, hosts)))
+        })
+        .await;
+        let Ok(Some((w, hosts))) = owed else { return };
+        log::info!("hive {}: worker {} ended its turn without the relaunch its granted hosts need ({}): telling the coordinator", caller.hive.id, worker_label(&w), hosts.join(", "));
+        let ctx = super::tools::app_ctx(&state, &handle, &caller);
+        let serving = w.pending_runs.iter().any(|r| r.server && r.state == worker::RUN_OPEN);
+        super::events::notify(&ctx, &caller, relaunch_notice(&worker_label(&w), &hosts, serving, last_words.as_deref())).await;
+    });
+}
+
 /// The hook's way in (`events::observed`), for every event of a Hive tab. Cheap off the path: a
 /// lock and, on a Stop or a start, a timer.
 pub fn seen(state: &Arc<AppState>, handle: &AppHandle, tab_id: &str, event_name: &str, event: &Value) {
@@ -106,6 +166,9 @@ pub fn seen(state: &Arc<AppState>, handle: &AppHandle, tab_id: &str, event_name:
         return;
     }
     let last_words = event.get("last_assistant_message").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(|t| one_line(t, 300));
+    if event_name == "Stop" {
+        tell_of_owed_relaunch(state, handle, tab_id, last_words.clone());
+    }
     let (state, handle, tab) = (state.clone(), handle.clone(), tab_id.to_string());
     tauri::async_runtime::spawn(async move {
         // A paused Hive defers the check, not ends it: nothing may reach the worker at Resume.
@@ -165,6 +228,32 @@ mod tests {
         for p in [worker::PHASE_REPORTED, worker::PHASE_BLOCKED, worker::PHASE_LANDING, worker::PHASE_RETIRED, worker::PHASE_WAITING] {
             assert!(!stalled(&w(p, &[]), false), "{p}");
         }
+    }
+
+    /// The live stall: the queen allowed v3b.fal.media and never relaunched the worker.
+    #[test]
+    fn a_worker_whose_granted_host_never_reached_it_is_owed_a_relaunch() {
+        let mut granted = w(PHASE_RUNNING, &[]);
+        assert!(!relaunch_owed(&granted), "nothing granted");
+        granted.hosts_awaited = vec!["v3b.fal.media".into()];
+        assert!(relaunch_owed(&granted));
+        let mut testing = w(PHASE_RUNNING, &[RUN_OPEN]);
+        testing.hosts_awaited = granted.hosts_awaited.clone();
+        assert!(!relaunch_owed(&testing), "a stop would end the run it waits on");
+        let mut reported = w(worker::PHASE_REPORTED, &[]);
+        reported.hosts_awaited = granted.hosts_awaited.clone();
+        assert!(!relaunch_owed(&reported), "its coordinator has its report");
+        // A reviewer never restarts: the stop the notice asks for would end its review.
+        let mut reviewer = granted.clone();
+        reviewer.reviews = Some("t-builder".into());
+        assert!(!relaunch_owed(&reviewer));
+        let n = relaunch_notice("#97 spike", &granted.hosts_awaited, false, Some("The download check is blocked"));
+        assert!(n.contains("#97 spike") && n.contains("v3b.fal.media") && n.contains("hiveRestartWorker") && n.contains("download check"), "{n}");
+        assert!(!n.contains("serving") && relaunch_notice("#1 a", &granted.hosts_awaited, true, None).contains("the app it is serving"));
+        // An older build's record has no such field, and an empty one isn't written.
+        let old: WorkerRecord = serde_json::from_str("{}").unwrap();
+        assert!(old.hosts_awaited.is_empty());
+        assert!(!serde_json::to_string(&old).unwrap().contains("hosts_awaited"));
     }
 
     /// Claude's Stop says when background work or a scheduled wakeup will wake the session.

@@ -72,6 +72,11 @@ pub struct WorkerRecord {
     pub last_report: Option<WorkerReport>,
     /// Sandbox refusals already turned into a blocker, so a retry doesn't file another.
     pub violations_seen: Vec<String>,
+    /// Hosts its sandbox refused that its coordinator has since allowed, which its running agent
+    /// still can't reach: a sandbox reads its hosts at launch. Emptied by the next launch
+    /// (`launch::prepare_worker`), or once the coordinator has been told it is owed (`quiet`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hosts_awaited: Vec<String>,
     /// Its queued runs not yet answered, and `⟦HIVE RUN⟧` results not yet delivered (§6.8):
     /// Rust's, keyed by job, so a reload or a restart still reaches it exactly once.
     pub pending_runs: Vec<PendingRun>,
@@ -227,6 +232,7 @@ impl Default for WorkerRecord {
             cargo_target: String::new(),
             last_report: None,
             violations_seen: Vec::new(),
+            hosts_awaited: Vec::new(),
             pending_runs: Vec::new(),
             created_at: String::new(),
             launched_at: None,

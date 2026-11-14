@@ -1106,6 +1106,25 @@ pub(crate) async fn settle_host_blockers<W: HiveWindow>(ctx: &Ctx<'_, W>, caller
             (l.answer, l.reason) = (Some(format!("Allowed {}", hosts.join(", "))), Some(one_line(reason, MAX_REASON)));
             log_line(&caller.paths, l).await;
         }
+        // Owed a relaunch: its coordinator is reminded when its turn ends without one (`quiet`).
+        if let Ok(dir) = worker::task_dir(&caller.paths, &w.task_id) {
+            let granted = hosts.clone();
+            let noted = blocking(move || {
+                worker::update_worker(&dir, |w| {
+                    let before = w.hosts_awaited.len();
+                    for h in &granted {
+                        if !w.hosts_awaited.contains(h) {
+                            w.hosts_awaited.push(h.clone());
+                        }
+                    }
+                    w.hosts_awaited.len() != before
+                })
+            })
+            .await;
+            if let Err(e) = noted {
+                log::warn!("hive {}: {}\u{2019}s granted hosts not noted: {e}", caller.hive.id, worker_name(w));
+            }
+        }
         out.push(w.clone());
     }
     if !out.is_empty() {

@@ -1207,7 +1207,7 @@ pub fn add(id: &str, url: &str, auth: &str, opts: AddOptions, added_by: &str) ->
             if let Some(secret) = opts.client_secret.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                 secrets::store(&format!("{id}#client"), &secrets::Cred { access_token: secret.to_string(), ..Default::default() }).map_err(|e| e.to_string())?;
             }
-        } else if plan.get("registration_endpoint").and_then(Value::as_str).is_none() {
+        } else if oauth::plan_registration(&plan) == oauth::REG_NONE {
             return Err("this server doesn't let apps register themselves: give a client id, or use a token".into());
         }
         oauth_plan = Some(plan);

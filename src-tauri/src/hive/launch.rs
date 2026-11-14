@@ -925,6 +925,10 @@ fn prepare_worker(hive: &Hive, paths: &HivePaths, tab_id: &str, tasks: &[crate::
     // The account the tab starts under: its generator entries, keys and all, go in mcp.json.
     let claude_json = fs::read(&launch_json).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
     write_worker_launch_files(hive, paths, &record, &w, &ctx, &brief, &hooks, claude_json.as_ref())?;
+    // The settings just written carry every host the Hive allows: this launch reaches them.
+    if !w.hosts_awaited.is_empty() {
+        w = super::worker::update_worker(&task, |w| !std::mem::take(&mut w.hosts_awaited).is_empty())?;
+    }
     // A fresh start (`hiveRestartWorker` fresh) is a new session, told its kickoff again; the
     // flag clears when that session starts.
     let resume = if w.fresh_next {

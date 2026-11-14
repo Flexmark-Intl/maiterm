@@ -13,8 +13,10 @@
 //! - **`resource` is the PRM's, exactly as written.** Servers disagree with themselves about
 //!   trailing slashes and paths.
 //! - **Registration:** a client id the human supplies (GitHub has no self-registration), else
-//!   dynamic registration as a public client. Redone when the redirect URI changes, which is every
-//!   launch: it names maiTerm's port.
+//!   maiTerm's client ID metadata document where the server takes one (ElevenLabs offers nothing
+//!   else), else dynamic registration as a public client. A dynamic registration is redone when
+//!   the redirect URI changes, which is every launch: it names maiTerm's port. The metadata
+//!   document's redirects are fixed (`CIMD_PORTS`), so that sign-in has its own listener.
 //! - **Refresh tokens rotate**, so maiTerm is their only holder: one refresh in flight per
 //!   server, and the new token is in the keychain before the new access token is used.
 
@@ -44,6 +46,24 @@ fn http() -> reqwest::Client {
         .unwrap_or_default()
 }
 
+/// maiTerm's client ID metadata document (draft-ietf-oauth-client-id-metadata-document, the MCP
+/// authorization spec 2025-11-25). The URL is the client id. The document is
+/// `website/public/oauth/client-metadata.json`, published with the site; a test reads it, so the
+/// two can't drift. Dev and release builds share it: nothing in it differs between them.
+pub const CLIENT_METADATA_URL: &str = "https://maiterm.dev/oauth/client-metadata.json";
+
+/// The loopback ports a metadata-document sign-in comes back on, tried in order. The document has
+/// to list its redirect URIs, and a server may match them exactly (RFC 8252 §7.3 says any port,
+/// but not every server does), so these are the only ports such a sign-in uses. Below every OS's
+/// ephemeral range (Linux 32768+, macOS and Windows 49152+), so an outgoing connection never holds
+/// one by chance, and spread out, so one Windows excluded-port block can't hold all three.
+pub const CIMD_PORTS: [u16; 3] = [21847, 26413, 29581];
+
+/// How a sign-in gets a client id (`Probe::registration`, the plan's `registration`).
+pub const REG_DYNAMIC: &str = "dynamic";
+pub const REG_METADATA_DOCUMENT: &str = "metadata_document";
+pub const REG_NONE: &str = "none";
+
 /// What adding a server found: whether it needs a sign-in, and how one would go.
 #[derive(Clone, Debug, Serialize, Default)]
 pub struct Probe {
@@ -54,8 +74,12 @@ pub struct Probe {
     /// The authorization server's issuer, when OAuth is offered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issuer: Option<String>,
-    /// Whether maiTerm can register itself there. False means a client id must be supplied.
+    /// Whether maiTerm gets a client id there by itself (`registration` is `dynamic` or
+    /// `metadata_document`). False means a client id must be supplied.
     pub can_register: bool,
+    /// `dynamic` (RFC 7591) | `metadata_document` (maiTerm's `CLIENT_METADATA_URL`) | `none` (the
+    /// human supplies a client id). `none` too when there is no OAuth.
+    pub registration: String,
     /// Entries of the human's own reaching the same URL ("Claude: linear"), filled by the command.
     pub duplicates: Vec<String>,
     /// What `begin` needs, stored on the server as `ProxyServer::oauth`. No secret.
@@ -235,13 +259,9 @@ pub async fn probe(server_url: &str) -> Result<Probe, String> {
     }
     let Some(prm) = prm else {
         return Ok(if refused {
-            Probe {
-                auth: super::AUTH_TOKEN.into(),
-                detail: "It asks for credentials but publishes no sign-in details. Paste a token (an API key or access token) from the service.".into(),
-                ..Default::default()
-            }
+            not_oauth(super::AUTH_TOKEN, "It asks for credentials but publishes no sign-in details. Paste a token (an API key or access token) from the service.")
         } else {
-            Probe { auth: super::AUTH_NONE.into(), detail: "No sign-in needed.".into(), ..Default::default() }
+            not_oauth(super::AUTH_NONE, "No sign-in needed.")
         });
     };
 
@@ -261,13 +281,48 @@ pub async fn probe(server_url: &str) -> Result<Probe, String> {
         }
     }
     let Some((issuer, meta)) = chosen else {
-        return Ok(Probe {
-            auth: super::AUTH_TOKEN.into(),
-            detail: "Its sign-in service doesn't offer a flow maiTerm can use. Paste a token from the service instead.".into(),
-            ..Default::default()
-        });
+        return Ok(not_oauth(super::AUTH_TOKEN, "Its sign-in service doesn't offer a flow maiTerm can use. Paste a token from the service instead."));
     };
+    Ok(oauth_probe(server_url, &challenge, &prm, issuer, &meta))
+}
 
+fn not_oauth(auth: &str, detail: &str) -> Probe {
+    Probe { auth: auth.into(), detail: detail.into(), registration: REG_NONE.into(), ..Default::default() }
+}
+
+/// How a sign-in at this authorization server gets a client id. The metadata document comes
+/// first where both are offered: nothing is written on the server, the client id is the same on
+/// every launch (a dynamic registration names maiTerm's port, so it is redone on each), and the
+/// human sees maiTerm's own name and site on the consent screen.
+fn registration_kind(meta: &Value) -> &'static str {
+    if meta.get("client_id_metadata_document_supported").and_then(Value::as_bool) == Some(true) {
+        REG_METADATA_DOCUMENT
+    } else if meta.get("registration_endpoint").and_then(Value::as_str).is_some() {
+        REG_DYNAMIC
+    } else {
+        REG_NONE
+    }
+}
+
+/// How a stored plan gets its client id. A plan saved before `registration` existed says so by
+/// its registration endpoint alone.
+pub fn plan_registration(plan: &Value) -> &str {
+    match plan.get("registration").and_then(Value::as_str) {
+        Some(k) => k,
+        None if plan.get("registration_endpoint").and_then(Value::as_str).is_some() => REG_DYNAMIC,
+        None => REG_NONE,
+    }
+}
+
+/// Does a sign-in under this plan use maiTerm's metadata document? Not when the human gave a
+/// client id: theirs wins, on the usual redirect.
+fn uses_metadata_document(plan: &Value) -> bool {
+    plan.get("manual_client_id").and_then(Value::as_str).is_none() && plan_registration(plan) == REG_METADATA_DOCUMENT
+}
+
+/// The OAuth probe once an authorization server is chosen: what the form says, and the plan
+/// `begin` uses.
+fn oauth_probe(server_url: &str, challenge: &HashMap<String, String>, prm: &Value, issuer: String, meta: &Value) -> Probe {
     // Scope, in the spec's order: the challenge, else everything the resource lists, else none.
     let mut scope: Vec<String> = match challenge.get("scope") {
         Some(s) => s.split_whitespace().map(str::to_string).collect(),
@@ -276,28 +331,31 @@ pub async fn probe(server_url: &str) -> Result<Probe, String> {
     if strs(meta.get("scopes_supported")).iter().any(|s| s == "offline_access") && !scope.iter().any(|s| s == "offline_access") {
         scope.push("offline_access".into());
     }
-    let registration = meta.get("registration_endpoint").and_then(Value::as_str).map(str::to_string);
+    let registration_endpoint = meta.get("registration_endpoint").and_then(Value::as_str).map(str::to_string);
+    let registration = registration_kind(meta);
     let host = reqwest::Url::parse(&issuer).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| issuer.clone());
     let plan = json!({
         "resource": prm.get("resource").and_then(Value::as_str).unwrap_or(server_url),
         "issuer": issuer,
         "authorization_endpoint": meta["authorization_endpoint"],
         "token_endpoint": meta["token_endpoint"],
-        "registration_endpoint": registration,
+        "registration_endpoint": registration_endpoint,
+        "registration": registration,
         "scope": if scope.is_empty() { Value::Null } else { Value::String(scope.join(" ")) },
     });
-    Ok(Probe {
+    Probe {
         auth: super::AUTH_OAUTH.into(),
-        detail: if registration.is_some() {
+        detail: if registration != REG_NONE {
             format!("Sign in with {host}.")
         } else {
             format!("Sign in with {host}. It doesn't let apps register themselves, so it needs a client id from an app you registered there, or paste a token instead.")
         },
         issuer: Some(issuer),
-        can_register: registration.is_some(),
+        can_register: registration != REG_NONE,
+        registration: registration.into(),
         plan: Some(plan),
         ..Default::default()
-    })
+    }
 }
 
 // ─── The browser round trip ────────────────────────────────────────────────
@@ -338,14 +396,19 @@ fn plan_str(server: &ProxyServer, key: &str) -> Option<String> {
     server.oauth.as_ref()?.get(key)?.as_str().map(str::to_string)
 }
 
-/// The client a sign-in uses: the human's, the stored registration when it is for exactly this
-/// redirect URI, else a new registration (RFC 7591). Writes nothing: a new registration rides in
-/// `Pending` until the sign-in completes. Returns `(client_id, client_secret, fresh)`.
+/// The client a sign-in uses: the human's, maiTerm's metadata document where the server takes
+/// one, the stored registration when it is for exactly this redirect URI, else a new registration
+/// (RFC 7591). Writes nothing: a new registration rides in `Pending` until the sign-in completes.
+/// Returns `(client_id, client_secret, fresh)`.
 async fn client_for(server: &ProxyServer, redirect_uri: &str) -> Result<(String, Option<String>, bool), String> {
     let plan = server.oauth.clone().unwrap_or(Value::Null);
     // A client id the human supplied is used as is, on any redirect.
     if let Some(id) = plan.get("manual_client_id").and_then(Value::as_str) {
         return Ok((id.to_string(), manual_client_secret(&server.id).await, false));
+    }
+    // The document's URL is the client id: a public client, nothing registered, nothing stored.
+    if uses_metadata_document(&plan) {
+        return Ok((CLIENT_METADATA_URL.to_string(), None, false));
     }
     if plan.get("redirect_uri").and_then(Value::as_str) == Some(redirect_uri) {
         if let Some(id) = plan.get("client_id").and_then(Value::as_str) {
@@ -400,8 +463,11 @@ pub async fn begin(server_id: &str) -> Result<String, String> {
     if server.auth != super::AUTH_OAUTH {
         return Err(format!("{server_id} doesn't use a sign-in"));
     }
-    let port = super::APP.get().and_then(|(_, st)| *st.mcp_port.read()).ok_or("maiTerm's server isn't running")?;
-    let redirect_uri = format!("http://127.0.0.1:{port}/oauth/callback");
+    let metadata_document = server.oauth.as_ref().is_some_and(uses_metadata_document);
+    // A metadata-document sign-in comes back on its own listener, on a port the document lists,
+    // which is bound below, with the sign-in recorded under the same lock (`callback_port`).
+    let mcp_port = if metadata_document { None } else { Some(super::APP.get().and_then(|(_, st)| *st.mcp_port.read()).ok_or("maiTerm's server isn't running")?) };
+    let redirect_uri = mcp_port.map(callback_uri).unwrap_or_default();
     let (client_id, client_secret, fresh_registration) = client_for(&server, &redirect_uri).await?;
     let server = get(server_id).ok_or("the server was removed")?;
     let authz = plan_str(&server, "authorization_endpoint").ok_or("no sign-in details stored; remove and add the server again")?;
@@ -416,6 +482,15 @@ pub async fn begin(server_id: &str) -> Result<String, String> {
     let verifier = random(64);
     let state = random(32);
     let mut url = reqwest::Url::parse(&authz).map_err(|e| format!("bad authorization endpoint: {e}"))?;
+    // Held to the end: the listener's sweep reads `PENDING` under it, so it can't stop between
+    // here and the sign-in being recorded.
+    let mut listener = CALLBACK.lock();
+    let redirect_uri = if metadata_document {
+        let issuer = plan_str(&server, "issuer").unwrap_or_default();
+        callback_uri(callback_port(&mut listener, &issuer)?)
+    } else {
+        redirect_uri
+    };
     {
         let mut q = url.query_pairs_mut();
         q.append_pair("response_type", "code")
@@ -433,8 +508,102 @@ pub async fn begin(server_id: &str) -> Result<String, String> {
     let mut pending = PENDING.lock();
     pending.retain(|_, p| now.saturating_sub(p.created) < PENDING_TTL_MS && p.server_id != server_id);
     pending.insert(state, Pending { server_id: server_id.to_string(), server_added_at: server.added_at, verifier, redirect_uri, token_endpoint, client_id, client_secret, fresh_registration, resource, created: now });
+    drop(pending);
+    drop(listener);
     log::info!("[mcp-proxy] {server_id}: sign-in started");
     Ok(url.to_string())
+}
+
+fn callback_uri(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/oauth/callback")
+}
+
+// ─── The metadata document's own callback listener ─────────────────────────
+
+/// The port of the listener metadata-document sign-ins come back to, while one runs. It serves
+/// only `/oauth/callback`, and stops once no sign-in waits on it.
+static CALLBACK: LazyLock<Mutex<Option<u16>>> = LazyLock::new(Default::default);
+
+/// How often the listener looks for sign-ins still waiting on it.
+const CALLBACK_SWEEP: Duration = Duration::from_secs(2);
+
+/// The first of `ports` that `bind` takes, with what it bound. All taken is a sentence for the
+/// human, naming the ports, since only they can free one.
+fn first_free<T>(ports: &[u16], issuer_host: &str, mut bind: impl FnMut(u16) -> std::io::Result<T>) -> Result<(u16, T), String> {
+    let mut last = None;
+    for &port in ports {
+        match bind(port) {
+            Ok(l) => return Ok((port, l)),
+            Err(e) => {
+                log::info!("[mcp-proxy] sign-in callback: port {port} is not free: {e}");
+                last = Some(e);
+            }
+        }
+    }
+    let list = ports.iter().map(u16::to_string).collect::<Vec<_>>();
+    let named = match list.split_last() {
+        Some((tail, head)) if !head.is_empty() => format!("{} or {tail}", head.join(", ")),
+        _ => list.join(""),
+    };
+    log::warn!("[mcp-proxy] sign-in callback: no port free ({})", last.map(|e| e.to_string()).unwrap_or_default());
+    Err(format!(
+        "Signing in to {issuer_host} needs one of the ports {named} on this computer, and other programs are using all of them. Quit one of those programs and sign in again."
+    ))
+}
+
+/// The port metadata-document sign-ins come back to: the running listener's, else a new
+/// listener's on the first free port of `CIMD_PORTS`. Called under `CALLBACK`, which `begin`
+/// holds until its sign-in is in `PENDING`.
+fn callback_port(running: &mut Option<u16>, issuer: &str) -> Result<u16, String> {
+    if let Some(port) = *running {
+        return Ok(port);
+    }
+    let host = reqwest::Url::parse(issuer).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| "this service".into());
+    let (port, std_listener) = first_free(&CIMD_PORTS, &host, |p| std::net::TcpListener::bind(("127.0.0.1", p)))?;
+    std_listener.set_nonblocking(true).map_err(|e| format!("maiTerm could not listen for the sign-in: {e}"))?;
+    let listener = tokio::net::TcpListener::from_std(std_listener).map_err(|e| format!("maiTerm could not listen for the sign-in: {e}"))?;
+    let app = axum::Router::new()
+        .route("/oauth/callback", axum::routing::get(callback_handler))
+        // Only requests addressed to this computer, as on maiTerm's own server.
+        .layer(axum::middleware::from_fn(crate::host_guard::require_local_host));
+    tokio::spawn(async move {
+        let stopped = async move {
+            loop {
+                tokio::time::sleep(CALLBACK_SWEEP).await;
+                let mut running = CALLBACK.lock();
+                let now = super::now_ms();
+                let waiting = PENDING.lock().values().any(|p| p.redirect_uri == callback_uri(port) && now.saturating_sub(p.created) < PENDING_TTL_MS);
+                if !waiting {
+                    // Under the lock: a `begin` after this binds a listener of its own.
+                    if *running == Some(port) {
+                        *running = None;
+                    }
+                    return;
+                }
+            }
+        };
+        if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(stopped).await {
+            log::warn!("[mcp-proxy] sign-in callback listener on {port}: {e}");
+            let mut running = CALLBACK.lock();
+            if *running == Some(port) {
+                *running = None;
+            }
+        }
+        log::info!("[mcp-proxy] sign-in callback listener on {port} stopped");
+    });
+    log::info!("[mcp-proxy] sign-in callback listening on 127.0.0.1:{port}");
+    *running = Some(port);
+    Ok(port)
+}
+
+async fn callback_handler(axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>) -> axum::response::Response {
+    let (status, html) = callback(params).await;
+    axum::response::Response::builder()
+        .status(status)
+        .header(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(axum::http::header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(html))
+        .unwrap_or_default()
 }
 
 fn merge_scopes(a: &str, b: &str) -> String {
@@ -738,5 +907,171 @@ mod tests {
     #[test]
     fn step_up_scopes_merge_without_repeats() {
         assert_eq!(merge_scopes("read write", "write admin"), "read write admin");
+    }
+
+    // ElevenLabs' documents as fetched by the coordinator on 2026-11-14 (its hosted MCP at
+    // https://api.elevenlabs.io/v1/mcp answers 401 with only `resource_metadata` in the challenge).
+    const ELEVENLABS_MCP: &str = "https://api.elevenlabs.io/v1/mcp";
+
+    fn elevenlabs_prm() -> Value {
+        json!({
+            "resource": "https://api.elevenlabs.io/v1/mcp",
+            "authorization_servers": ["https://api.us.elevenlabs.io"],
+            "scopes_supported": ["convai_read", "convai_write", "text_to_speech", "speech_history_read", "flows", "image_video_generation", "voice_generation", "ads_read", "ads_write", "user_read", "pronunciation_dictionaries_read"],
+            "bearer_methods_supported": ["header"]
+        })
+    }
+
+    fn elevenlabs_as() -> Value {
+        json!({
+            "issuer": "https://api.us.elevenlabs.io",
+            "authorization_endpoint": "https://elevenlabs.io/app/oauth/authorize",
+            "token_endpoint": "https://api.us.elevenlabs.io/v1/oauth/token",
+            "revocation_endpoint": "https://api.us.elevenlabs.io/v1/oauth/revoke",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "code_challenge_methods_supported": ["S256"],
+            "token_endpoint_auth_methods_supported": ["none", "client_secret_post", "private_key_jwt"],
+            "scopes_supported": ["convai_read", "convai_write", "text_to_speech", "speech_history_read", "flows", "image_video_generation", "voice_generation", "ads_read", "ads_write", "user_read", "pronunciation_dictionaries_read"],
+            "authorization_response_iss_parameter_supported": true,
+            "client_id_metadata_document_supported": true,
+            "token_endpoint_auth_signing_alg_values_supported": ["RS256"]
+        })
+    }
+
+    fn server_with(plan: Value) -> ProxyServer {
+        ProxyServer {
+            id: "elevenlabs".into(),
+            url: ELEVENLABS_MCP.into(),
+            auth: crate::mcp_proxy::AUTH_OAUTH.into(),
+            enabled: true,
+            workspaces: vec![],
+            catalog: None,
+            oauth: Some(plan),
+            added_at: 1,
+            added_by: "human".into(),
+            transport: crate::mcp_proxy::stdio::TRANSPORT_HTTP.into(),
+            stdio: None,
+        }
+    }
+
+    #[test]
+    fn elevenlabs_is_signable_with_the_metadata_document() {
+        let meta = elevenlabs_as();
+        assert!(usable(&meta));
+        let prm = elevenlabs_prm();
+        // Its resource is the server itself, so the foreign-metadata rule lets it through; the
+        // authorization server on another host is not what that rule judges.
+        assert!(resource_matches(prm["resource"].as_str(), &reqwest::Url::parse(ELEVENLABS_MCP).unwrap()));
+        let p = oauth_probe(ELEVENLABS_MCP, &HashMap::new(), &prm, "https://api.us.elevenlabs.io".into(), &meta);
+        assert_eq!(p.auth, crate::mcp_proxy::AUTH_OAUTH);
+        assert_eq!(p.registration, REG_METADATA_DOCUMENT);
+        assert!(p.can_register, "old callers read can_register: it must not dead-end");
+        assert_eq!(p.detail, "Sign in with api.us.elevenlabs.io.");
+        let plan = p.plan.unwrap();
+        assert_eq!(plan["registration"], REG_METADATA_DOCUMENT);
+        assert_eq!(plan["registration_endpoint"], Value::Null);
+        assert_eq!(plan["resource"], ELEVENLABS_MCP);
+        assert_eq!(plan["authorization_endpoint"], "https://elevenlabs.io/app/oauth/authorize");
+        assert_eq!(plan["token_endpoint"], "https://api.us.elevenlabs.io/v1/oauth/token");
+        // No scope in the challenge: everything the resource lists, as for every server.
+        assert_eq!(plan["scope"].as_str().unwrap().split(' ').count(), 11);
+        assert_eq!(plan_registration(&plan), REG_METADATA_DOCUMENT);
+        assert!(uses_metadata_document(&plan));
+    }
+
+    #[test]
+    fn registration_kinds_prefer_the_metadata_document() {
+        let both = json!({ "registration_endpoint": "https://as/register", "client_id_metadata_document_supported": true });
+        assert_eq!(registration_kind(&both), REG_METADATA_DOCUMENT, "nothing written on the server, same client id every launch");
+        assert_eq!(registration_kind(&json!({ "registration_endpoint": "https://as/register" })), REG_DYNAMIC);
+        assert_eq!(registration_kind(&json!({ "registration_endpoint": "https://as/register", "client_id_metadata_document_supported": false })), REG_DYNAMIC);
+        assert_eq!(registration_kind(&json!({})), REG_NONE);
+        assert_eq!(registration_kind(&json!({ "client_id_metadata_document_supported": "true" })), REG_NONE, "only a JSON true counts");
+
+        // A server with neither still dead-ends to a client id, as before.
+        let meta = json!({ "authorization_endpoint": "a", "token_endpoint": "t", "code_challenge_methods_supported": ["S256"] });
+        let p = oauth_probe("https://x/mcp", &HashMap::new(), &json!({}), "https://github.com/login/oauth".into(), &meta);
+        assert_eq!((p.registration.as_str(), p.can_register), (REG_NONE, false));
+        assert!(p.detail.contains("client id"));
+        let mut dcr = meta.clone();
+        dcr["registration_endpoint"] = "https://x/register".into();
+        let p = oauth_probe("https://x/mcp", &HashMap::new(), &json!({}), "https://x".into(), &dcr);
+        assert_eq!((p.registration.as_str(), p.can_register), (REG_DYNAMIC, true));
+        assert_eq!(p.plan.unwrap()["registration_endpoint"], "https://x/register");
+    }
+
+    #[test]
+    fn plans_saved_before_registration_existed_read_as_before() {
+        assert_eq!(plan_registration(&json!({ "registration_endpoint": "https://x/register" })), REG_DYNAMIC);
+        assert_eq!(plan_registration(&json!({ "registration_endpoint": null })), REG_NONE);
+        assert_eq!(plan_registration(&json!({})), REG_NONE);
+        // The human's client id wins over the document, on the usual redirect.
+        assert!(!uses_metadata_document(&json!({ "registration": REG_METADATA_DOCUMENT, "manual_client_id": "abc" })));
+        assert!(!uses_metadata_document(&json!({ "registration": REG_DYNAMIC })));
+    }
+
+    #[tokio::test]
+    async fn a_metadata_document_server_signs_in_as_the_document_url() {
+        // The registration endpoint is unreachable: a client_for that registered would fail.
+        let plan = json!({ "registration": REG_METADATA_DOCUMENT, "registration_endpoint": "http://127.0.0.1:9/register", "issuer": "https://api.us.elevenlabs.io" });
+        let (id, secret, fresh) = client_for(&server_with(plan), &callback_uri(CIMD_PORTS[0])).await.unwrap();
+        assert_eq!(id, CLIENT_METADATA_URL);
+        assert_eq!(secret, None, "a public client");
+        assert!(!fresh, "nothing to record as a registration");
+        // The same plan saved before `registration` existed still registers dynamically.
+        let legacy = json!({ "registration_endpoint": "http://127.0.0.1:9/register", "issuer": "https://x" });
+        let err = client_for(&server_with(legacy), "http://127.0.0.1:1234/oauth/callback").await.unwrap_err();
+        assert!(err.starts_with("registration"), "{err}");
+    }
+
+    #[test]
+    fn the_callback_port_is_the_first_free_of_the_fixed_set() {
+        let taken = |busy: &'static [u16]| {
+            move |p: u16| if busy.contains(&p) { Err(std::io::Error::from(std::io::ErrorKind::AddrInUse)) } else { Ok(p) }
+        };
+        assert_eq!(first_free(&CIMD_PORTS, "h", taken(&[])).unwrap().0, CIMD_PORTS[0]);
+        assert_eq!(first_free(&CIMD_PORTS, "h", taken(&[21847])).unwrap().0, CIMD_PORTS[1]);
+        assert_eq!(first_free(&CIMD_PORTS, "h", taken(&[21847, 26413])).unwrap().0, CIMD_PORTS[2]);
+        let mut tried = vec![];
+        let err = first_free(&CIMD_PORTS, "api.us.elevenlabs.io", |p| {
+            tried.push(p);
+            Err::<(), _>(std::io::Error::from(std::io::ErrorKind::AddrInUse))
+        })
+        .unwrap_err();
+        assert_eq!(tried, CIMD_PORTS, "only the fixed ports, in order: never a random one");
+        assert_eq!(
+            err,
+            "Signing in to api.us.elevenlabs.io needs one of the ports 21847, 26413 or 29581 on this computer, and other programs are using all of them. Quit one of those programs and sign in again."
+        );
+        // A running listener is reused, with nothing bound.
+        assert_eq!(callback_port(&mut Some(26413), "https://api.us.elevenlabs.io"), Ok(26413));
+    }
+
+    /// The document maiterm.dev publishes is the one this code signs in as: its client id is its
+    /// own URL, and it lists every redirect a sign-in may use.
+    #[test]
+    fn the_published_client_metadata_document_matches_the_code() {
+        let site = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../website/public");
+        let url = reqwest::Url::parse(CLIENT_METADATA_URL).unwrap();
+        assert_eq!(url.scheme(), "https");
+        let cname = std::fs::read_to_string(site.join("CNAME")).unwrap();
+        assert_eq!(url.host_str(), Some(cname.trim()), "served from the site's own domain");
+        let raw = std::fs::read_to_string(site.join(url.path().trim_start_matches('/'))).unwrap();
+        let doc: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(doc["client_id"], CLIENT_METADATA_URL, "the client id must equal the document's URL");
+        // One document for dev and release builds: the consent screen names the product.
+        assert_eq!(doc["client_name"], "maiTerm");
+        assert_eq!(doc["token_endpoint_auth_method"], "none");
+        assert!(doc.get("client_secret").is_none());
+        assert_eq!(strs(doc.get("response_types")), vec!["code"]);
+        let grants = strs(doc.get("grant_types"));
+        assert!(grants.contains(&"authorization_code".to_string()) && grants.contains(&"refresh_token".to_string()), "{grants:?}");
+        let redirects = strs(doc.get("redirect_uris"));
+        assert!(redirects.contains(&"http://127.0.0.1/oauth/callback".to_string()), "the port-less loopback form (RFC 8252 §7.3)");
+        for port in CIMD_PORTS {
+            assert!(redirects.contains(&callback_uri(port)), "{port} missing from {redirects:?}");
+        }
+        assert_eq!(redirects.len(), CIMD_PORTS.len() + 1, "nothing the code never uses");
     }
 }
