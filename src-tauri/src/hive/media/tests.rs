@@ -12,7 +12,7 @@ fn the_shipped_catalogue_parses_and_is_dated() {
     let common: Vec<&str> = c.capabilities.iter().filter(|c| c.common).map(|c| c.id.as_str()).collect();
     assert_eq!(common, vec!["video", "image", "voice", "music", "finish"], "the common five, first");
     for p in &c.providers {
-        assert!(["2026-11-03", "2026-11-04", "2026-11-05"].contains(&p.checked.as_str()), "{}: facts are dated, got {}", p.id, p.checked);
+        assert!(["2026-11-03", "2026-11-04", "2026-11-05", "2026-11-14"].contains(&p.checked.as_str()), "{}: facts are dated, got {}", p.id, p.checked);
         assert!(["recommend", "list", "detect_only"].contains(&p.offer.as_str()), "{}: offer {}", p.id, p.offer);
         for r in &p.routes {
             assert!(["remote_mcp", "stdio_mcp", "brew", "plugin", "local_app", "manual"].contains(&r.kind.as_str()), "{}: route {}", p.id, r.kind);

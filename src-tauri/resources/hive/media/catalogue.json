@@ -48,7 +48,7 @@
       ]
     },
     {
-      "id": "elevenlabs", "name": "ElevenLabs", "checked": "2026-11-03",
+      "id": "elevenlabs", "name": "ElevenLabs", "checked": "2026-11-14",
       "offer": "recommend",
       "capabilities": ["voice"],
       "default_for": ["voice"],
@@ -60,7 +60,7 @@
       "unverified_hosts": [],
       "retention": "",
       "signup_url": "https://elevenlabs.io/sign-up", "billing_url": "",
-      "guide": ["Make an ElevenLabs account (or sign in).", "Generations spend your ElevenLabs plan's credits.", "Back here, press Sign in."],
+      "guide": ["Make an ElevenLabs account (or sign in).", "If ElevenLabs asks whether you're here for ElevenCreative, ElevenAgents or ElevenAPI, any answer works; ElevenAPI fits best.", "Generations spend your ElevenLabs plan's credits.", "Back here, press Sign in, then approve maiTerm in the browser."],
       "match": { "hosts": ["elevenlabs.io"], "names": ["elevenlabs"], "skills": [] },
       "source_urls": ["https://api.elevenlabs.io/v1/mcp"]
     },
