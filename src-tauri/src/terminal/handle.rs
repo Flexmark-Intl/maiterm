@@ -80,6 +80,11 @@ pub struct TerminalHandle {
     pub prompt_unsafe: bool,
     /// What a fresh prompt found drawn beside it (`prompt_line::Leftover`).
     pub prompt_leftover: crate::terminal::prompt_line::Leftover,
+    /// Bumped each time PTY output has been fed into `term`, under the registry write lock,
+    /// so whoever needs the screen to show something (a key it just sent landing) waits for
+    /// the next change and reads it, instead of sleeping and hoping (`mailink/question_keys.rs`).
+    /// Dropped with the handle, which ends every wait with "the terminal closed".
+    pub screen_seq: tokio::sync::watch::Sender<u64>,
 }
 
 impl TerminalHandle {
@@ -185,5 +190,6 @@ pub fn create_terminal(
         prompt_end: None,
         prompt_unsafe: false,
         prompt_leftover: Default::default(),
+        screen_seq: tokio::sync::watch::Sender::new(0),
     }
 }

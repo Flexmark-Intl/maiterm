@@ -2241,9 +2241,15 @@ export interface WsAttentionEvent {
   - `permission` → `respondable:true` **now**. The permission `/respond`→TUI-inject path is already
     proven end-to-end on hardware (§11 doorbell finale) — converging to threads must NOT regress it.
   - `AskUserQuestion` → `respondable:true` **now** (was staged false). `drive_question_answers`
-    (`mailink/mod.rs`) drives the TUI selector by keystroke; mechanics pinned live against Claude
-    Code 2.1.x. The selector is a tab row `[Q1..Qn][Submit]`, arrow-navigable only (the shown 1..n
-    are labels, not digit keys), highlight starts at row 0:
+    (`mailink/question_keys.rs`) drives the TUI selector by keystroke; mechanics pinned live against
+    Claude Code 2.1.x. **Each key waits until the screen shows it landed** (the highlight on the
+    next row, the box ticked, the typed text in the Other row, the next question or the review
+    tab open) before the next is sent, woken by the grid's change counter
+    (`TerminalHandle::screen_seq`), never a fixed sleep; a screen that shows something else fails
+    at once and one that never repaints fails at a 10 s deadline, with nothing more sent either
+    way (`inject_failed`). The selector is a tab row `[Q1..Qn][Submit]`, navigated by arrows (2.1.325
+    also takes digits, but a digit commits in one keystroke and older builds send one of them to
+    "Chat about this"), highlight starts at row 1, checked on screen before the first key:
     - **single-select:** ↑/↓ to the row, Enter selects AND advances to the next tab.
     - **multiSelect:** Space toggles each row (live), then → advances the tab.
     - **Other free-text:** the "Type something" row (index = option_count) is a live inline input —

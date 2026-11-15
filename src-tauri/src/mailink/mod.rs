@@ -42,6 +42,7 @@ pub(crate) mod subagents;
 pub(crate) mod trust;
 pub(crate) mod permission;
 pub(crate) mod input_box;
+mod question_keys;
 pub(crate) mod tasks;
 pub(crate) mod board;
 pub(crate) mod follow_ups;
@@ -2159,7 +2160,11 @@ pub(crate) async fn respond_to_prompt(
                 return json!({ "ok": false, "reason": "selector_dirty",
                     "detail": "this ask was already injected once; its selector position is now unknown, so send the answer as a message instead" });
             }
-            if let Err(e) = drive_question_answers(app, &pty, &tool_input, answers).await {
+            let driven = match PtySelector::new(app, &pty) {
+                Ok(mut term) => question_keys::drive_question_answers(&mut term, &tool_input, answers).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = driven {
                 log::warn!("[maiLink] AskUserQuestion answer injection failed: {e}");
                 return json!({ "ok": false, "reason": "inject_failed", "detail": e });
             }
@@ -2434,9 +2439,7 @@ async fn post_queue_cancel(
         }
     };
 
-    send_key(&s.app, &pty, QUEUE_RECALL, 0)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    crate::pty::write_pty(&s.app, &pty, QUEUE_RECALL).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // The recall is observable: emptying the queue writes a `popAll` op, which the replay reads.
     let deadline =
@@ -4477,38 +4480,55 @@ pub(crate) async fn fetch_bytes_remote(
     Ok(output.stdout)
 }
 
-/// Settle delays so the TUI redraws between keystrokes (mirrors inject_text's paste settle).
-const NAV_SETTLE_MS: u64 = 130;
-const ADVANCE_SETTLE_MS: u64 = 280;
+/// How long one key may take to show on the selector's screen. Not a pause: each key waits for
+/// the terminal's own signal that output reached the grid (`TerminalHandle::screen_seq`), and this
+/// only turns a screen that never shows the key's result into a clear failure.
+const KEY_SHOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Inject one keystroke, then wait `settle_ms` so the selector repaints before the next.
-async fn send_key(app: &Arc<AppState>, pty_id: &str, bytes: &[u8], settle_ms: u64) -> Result<(), String> {
-    crate::pty::write_pty(app, pty_id, bytes)?;
-    tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
-    Ok(())
+/// A tab's PTY and grid, as `question_keys` drives them: keys go in through `write_pty`, the
+/// screen is read off the live grid, and a repaint is the grid's change counter moving.
+struct PtySelector<'a> {
+    app: &'a Arc<AppState>,
+    pty: String,
+    seq: tokio::sync::watch::Receiver<u64>,
+    deadline: tokio::time::Instant,
 }
 
-/// Type free-text into the selector's highlighted "Other" inline input (a live field). Collapsed
-/// to a single line so a stray newline can't submit early; settles like a keystroke.
-async fn send_text(app: &Arc<AppState>, pty_id: &str, text: &str) -> Result<(), String> {
-    let one_line: String = text.split(['\n', '\r']).collect::<Vec<_>>().join(" ");
-    crate::pty::write_pty(app, pty_id, one_line.as_bytes())?;
-    tokio::time::sleep(std::time::Duration::from_millis(ADVANCE_SETTLE_MS)).await;
-    Ok(())
+impl<'a> PtySelector<'a> {
+    fn new(app: &'a Arc<AppState>, pty: &str) -> Result<Self, String> {
+        let seq = app
+            .terminal_registry
+            .read()
+            .get(pty)
+            .map(|h| h.screen_seq.subscribe())
+            .ok_or("the tab has no terminal")?;
+        Ok(PtySelector { app, pty: pty.to_string(), seq, deadline: tokio::time::Instant::now() + KEY_SHOWN_DEADLINE })
+    }
 }
 
-/// Move the selector highlight from row `from` to row `to` with arrow keys. Returns `to`.
-async fn nav_to(app: &Arc<AppState>, pty_id: &str, from: usize, to: usize) -> Result<usize, String> {
-    if to > from {
-        for _ in 0..(to - from) {
-            send_key(app, pty_id, b"\x1b[B", NAV_SETTLE_MS).await?; // Down
-        }
-    } else {
-        for _ in 0..(from - to) {
-            send_key(app, pty_id, b"\x1b[A", NAV_SETTLE_MS).await?; // Up
+impl question_keys::SelectorTerm for PtySelector<'_> {
+    fn send(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.deadline = tokio::time::Instant::now() + KEY_SHOWN_DEADLINE;
+        crate::pty::write_pty(self.app, &self.pty, bytes)
+    }
+
+    fn screen(&mut self) -> String {
+        // Seen BEFORE reading: output that lands after the read moves the counter past it, so
+        // `repainted` can't sleep through the change that matters.
+        self.seq.borrow_and_update();
+        let registry = self.app.terminal_registry.read();
+        registry.get(&self.pty).map(|h| crate::terminal::render::screen_text(&h.term)).unwrap_or_default()
+    }
+
+    fn repainted(&mut self) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        async move {
+            match tokio::time::timeout_at(self.deadline, self.seq.changed()).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(_)) => Err("the terminal closed".to_string()),
+                Err(_) => Err(format!("the screen never showed it within {} s", KEY_SHOWN_DEADLINE.as_secs())),
+            }
         }
     }
-    Ok(to)
 }
 
 /// Claim the one permitted keystroke injection into a given open ask. `true` for the first call
@@ -4529,196 +4549,6 @@ fn claim_question_inject(tab_id: &str, prompt_id: &str) -> bool {
             true
         }
     }
-}
-
-/// Replay the phone's per-question answers into Claude Code's open AskUserQuestion selector by
-/// injecting keystrokes, in question order.
-///
-/// RUNTIME-FRAGILE — the selector is a TUI, not a stable API. Mechanics pinned live against
-/// Claude Code 2.1.x (docs §12.3). The form is a row of tabs [Q1..Qn][Submit]:
-///   (a) each question's highlight starts at row 0;                                      [VERIFIED]
-///   (b) the selector is arrow-only — the shown 1..n are labels, NOT digit-select keys;  [VERIFIED]
-///   (c) single-select: ↑/↓ to the row, Enter selects AND advances to the next tab;      [VERIFIED e2e]
-///   (d) multiSelect: Space toggles each row (live, no Enter), then → advances the tab;   [VERIFIED e2e]
-///   (e) a lone single-select question submits on its own Enter; every other form lands on the
-///       "Submit" tab and takes one final Enter.                                          [VERIFIED]
-///   (f) the free-text "Other" row (labelled "Type something", at index option_count) is a live
-///       inline input — navigate to it and TYPE directly (no Enter-to-open). For a single-select
-///       question, Enter then selects+advances just like a listed pick.                    [VERIFIED e2e]
-///
-/// TYPING INTO THE WRONG ROW IS DESTRUCTIVE, which is why (a) is load-bearing rather than
-/// cosmetic. Read from the 2.1.224 bundle:
-///   * The container's own onKeyDown calls `onRespondToClaude()` — which DISMISSES the ask and
-///     routes the turn to chat, discarding every answer — when the key is the digit
-///     `options.length + 2` ("Chat about this"). It is gated on NOT being focused in the Other
-///     input. So if the highlight is off by one row when the free text is typed, any digit in the
-///     operator's own text that happens to equal `option_count + 2` silently throws the ask away.
-///     That is the reported "it acted like I said Chat about this", and its intermittency is
-///     explained by needing that one particular digit.
-///   * There IS also a literal `{value:"__chat__"}` ROW below Other, but only under
-///     `tlt = useContext(InternalAccessibilityContext)` — i.e. `isScreenReaderEnabled`, which
-///     defaults false. Do not plan around that row for ordinary terminals; do not assume it is
-///     absent for a screen-reader user either.
-///   * `select:next`/`select:previous` are unbound while an input row holds focus, so once the
-///     highlight reaches Other it CANNOT be moved by arrows. A wrong position is therefore not
-///     recoverable by navigating — see `claim_question_inject` for the consequence.
-///   (g) multiSelect + Other free-text leaves via the form's OWN Submit/Next button: Down from
-///       the last row focuses it, Enter activates it. NOT Enter-then-→.        [UNVERIFIED — see below]
-///
-/// (g) was carried for months as a best guess (Enter to "commit", then → to advance) and never
-/// worked. What a device actually shows: both answers land — the box ticked, the Other row CHECKED
-/// with the typed text — and the form just never submits, the highlight still on the Other row.
-/// Typing already selects that row, so there was nothing for the Enter to commit; and both the
-/// Enter and the → were swallowed by the active text input, so the injector never left it. Nothing
-/// was corrupted; the answer was simply complete and unsubmitted, reported as `inject_failed`.
-///
-/// The exit is the form's own button. Down over Tab: both survive the input-focus filter, but Tab
-/// is ALSO the form-level question switcher and the selector does not stop its propagation.
-///
-/// (g) IS ITSELF STILL UNVERIFIED ON A DEVICE — source-derived from 2.1.240, not guessed, but the
-/// swallowed Enter proves the text input can eat a whitelisted key before the select sees it. The
-/// [VERIFIED e2e] tag above is aspirational until a real multiSelect+Other answer arrives from a
-/// phone. Marking a keystroke verified on reasoning alone is exactly how (g) went wrong the first
-/// time.
-///
-/// All mapping is resolved BEFORE any keystroke is sent, so a bad answer rejects the whole batch
-/// rather than half-answering.
-async fn drive_question_answers(
-    app: &Arc<AppState>,
-    pty_id: &str,
-    tool_input: &Value,
-    answers: &[Answer],
-) -> Result<(), String> {
-    let questions = tool_input
-        .get("questions")
-        .and_then(|v| v.as_array())
-        .ok_or("pending ask has no questions[]")?;
-    if answers.len() != questions.len() {
-        return Err(format!(
-            "answer count {} != question count {}",
-            answers.len(),
-            questions.len()
-        ));
-    }
-
-    struct Plan {
-        multi: bool,
-        option_count: usize,   // # of listed options; the "Type something" (Other) row is at this index
-        indices: Vec<usize>,   // listed-option rows to select/toggle
-        other: Option<String>, // free-text for the "Other" row, if the phone chose it
-    }
-
-    // Resolve every answer to concrete selector actions up front (fail-closed on any bad map).
-    let mut plans: Vec<Plan> = Vec::with_capacity(questions.len());
-    for (qi, (q, ans)) in questions.iter().zip(answers).enumerate() {
-        let labels: Vec<&str> = q
-            .get("options")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|o| o.get("label").and_then(|v| v.as_str()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let multi = q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false);
-
-        let mut indices = Vec::new();
-        for sel in &ans.selected {
-            match labels.iter().position(|l| l == sel) {
-                Some(idx) => indices.push(idx),
-                None => return Err(format!("question {qi}: label {sel:?} not among options")),
-            }
-        }
-        let other = ans.other.clone().filter(|s| !s.trim().is_empty());
-        if indices.is_empty() && other.is_none() {
-            return Err(format!("question {qi}: no option selected and no Other text"));
-        }
-        // single-select accepts exactly one pick total (one listed option XOR Other text).
-        if !multi && indices.len() + other.is_some() as usize > 1 {
-            return Err(format!("question {qi}: single-select received multiple picks"));
-        }
-        indices.sort_unstable();
-        indices.dedup();
-        plans.push(Plan { multi, option_count: labels.len(), indices, other });
-    }
-
-    // Inject, question by question. The form is a row of tabs [Q1..Qn][Submit]; ↑/↓ moves within
-    // a question, and the single-select Enter / a multiSelect → moves to the next tab.
-    let single_q_single_select = plans.len() == 1 && !plans[0].multi;
-    // Set when the FINAL question was committed by pressing the form's own Submit/Next button
-    // (the multiSelect+Other exit), which already submits — so the trailing Enter below must not
-    // fire a second time into whatever the form became.
-    let mut submitted_by_button = false;
-    let last_qi = plans.len() - 1;
-    for (qi, plan) in plans.iter().enumerate() {
-        let mut cur = 0usize; // highlight starts at row 0 (a)
-        if plan.multi {
-            for &idx in &plan.indices {
-                cur = nav_to(app, pty_id, cur, idx).await?;
-                send_key(app, pty_id, b" ", NAV_SETTLE_MS).await?; // Space toggles the row (live)
-            }
-            if let Some(text) = &plan.other {
-                // The "Type something" row (at option_count) is a live inline input — typing into
-                // it fills it AND selects it (updateInputValue adds `__other__` to the selected
-                // set on any non-empty value). So there is nothing to "commit".
-                cur = nav_to(app, pty_id, cur, plan.option_count).await?;
-                send_text(app, pty_id, text).await?;
-                // Leave via the form's own Submit/Next button rather than the tab arrow.
-                //
-                // OBSERVED on a device (2.1.240), from a screenshot of the stuck form: both
-                // answers land correctly — the ticked box is ticked and the Other row is CHECKED
-                // and holds the typed text — and the form simply never submits, with the
-                // highlight still on the Other row. So the old trailing `Enter, →` corrupted
-                // nothing; both keys were swallowed by the active text input and we never left
-                // it. The answer was complete, and unsubmitted.
-                //
-                // The select whitelists exactly up/down/escape/tab/return while an input row has
-                // focus, and Down from the LAST row focuses Submit/Next, after which Enter calls
-                // onSubmit. `__other__` IS last: the row array is [...options, otherInput], and
-                // the "Chat about this" line below it is a numeric-shortcut hint (options+2), not
-                // a focusable row — so Down cannot land on the dismiss-the-ask affordance. Down
-                // over Tab because Tab is also the form-level question switcher and the selector
-                // does not stop its propagation.
-                //
-                // UNVERIFIED ON A DEVICE. The whitelist says these keys reach the select, but the
-                // swallowed Enter above is evidence that the text input can consume a whitelisted
-                // key first — so this may still fail to release. It is source-derived rather than
-                // guessed, and a failure is now non-destructive (one attempt per ask, and the
-                // phone keeps the text). Do NOT mark it verified without a real multiSelect+Other
-                // answer sent from a phone.
-                send_key(app, pty_id, b"\x1b[B", NAV_SETTLE_MS).await?; // Down → focus Submit/Next
-                send_key(app, pty_id, b"\r", ADVANCE_SETTLE_MS).await?; // activate it
-                // That button IS this question's advance ("Next") or the form's submit ("Submit"
-                // on the last one), so the tab arrow below must not also fire.
-                if qi == last_qi {
-                    submitted_by_button = true;
-                }
-                continue;
-            }
-            // multiSelect toggles are live and are NOT confirmed with Enter; → advances to the
-            // next tab (the next question, or Submit after the last one). Only reachable when the
-            // highlight is on a listed row — an input row would swallow it.
-            send_key(app, pty_id, b"\x1b[C", ADVANCE_SETTLE_MS).await?;
-        } else if let Some(text) = &plan.other {
-            // single-select via the Other row: navigate to it, type the text, then Enter — which
-            // selects it and advances exactly like picking a listed option.
-            cur = nav_to(app, pty_id, cur, plan.option_count).await?;
-            send_text(app, pty_id, text).await?;
-            send_key(app, pty_id, b"\r", ADVANCE_SETTLE_MS).await?;
-        } else {
-            cur = nav_to(app, pty_id, cur, plan.indices[0]).await?;
-            send_key(app, pty_id, b"\r", ADVANCE_SETTLE_MS).await?; // Enter selects AND advances
-        }
-        let _ = cur;
-    }
-
-    // Submit. A lone single-select question submits on its own Enter above (there is no Submit
-    // tab). Every other form — multi-question, or any multiSelect — lands on the "Submit" tab,
-    // which takes one Enter. (Pinned live — docs §12.3.)
-    if !single_q_single_select && !submitted_by_button {
-        send_key(app, pty_id, b"\r", ADVANCE_SETTLE_MS).await?;
-    }
-    Ok(())
 }
 
 /// The tab's currently-open prompt, as (kind, prompt_id, runtime). Mirrors what
