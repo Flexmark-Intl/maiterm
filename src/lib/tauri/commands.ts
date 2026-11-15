@@ -508,9 +508,10 @@ export async function submitPromptToAgent(tabId: string, text: string): Promise<
 
 /** What `deliverToAgent` did. `held`: waiting for a dialog, a draft or the human's typing to
  *  clear — never for a busy agent; its outcome follows as an `agent-inbox-outcome` event keyed by
- *  `msg_id`. `refused`: nothing there can take it (`no_agent`, `no_terminal`, `type_failed`). */
+ *  `msg_id`. `pending`: handed to the agent's mod with no report yet that it ran; maiTerm types it
+ *  if Claude dropped it. `refused`: nothing there can take it (`no_agent`, `no_terminal`, `type_failed`). */
 export type AgentDelivery =
-  | { status: 'delivered'; via: 'agent' | 'keys' }
+  | { status: 'delivered'; via: 'agent' | 'keys'; pending?: boolean }
   | { status: 'held'; msg_id: string; reason: string }
   | { status: 'refused'; reason: string };
 

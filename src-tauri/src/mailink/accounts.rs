@@ -200,6 +200,13 @@ fn tabs_off_active(app: &AppState, runtime: &str) -> usize {
 /// Record how far an SSH handoff got (written by the §6 commands). Queues the `account` doorbell
 /// on a change INTO `not_applied`, outside the restart window.
 pub(crate) fn note_remote(app: &AppState, tab_id: &str, remote: RemoteRecord) {
+    note_remote_at_uptime(app, tab_id, remote, app.started_at.elapsed());
+}
+
+/// `note_remote` with how long the app has been up passed in, so a test can say "long enough"
+/// without fabricating an old `Instant` (which panics on Windows when the machine has been up
+/// for less than the age asked for).
+fn note_remote_at_uptime(app: &AppState, tab_id: &str, remote: RemoteRecord, uptime: std::time::Duration) {
     let entering_failure = {
         let mut records = app.tab_accounts.write();
         let entry = records.entry(tab_id.to_string()).or_default();
@@ -208,7 +215,7 @@ pub(crate) fn note_remote(app: &AppState, tab_id: &str, remote: RemoteRecord) {
         entry.remote = Some(remote);
         now == RemoteState::NotApplied && was != Some(RemoteState::NotApplied)
     };
-    if entering_failure && app.started_at.elapsed() >= RING_BASELINE_WINDOW {
+    if entering_failure && uptime >= RING_BASELINE_WINDOW {
         queue_ring(app, tab_id);
     }
 }
@@ -283,13 +290,13 @@ mod tests {
         RemoteRecord::new(None, RemoteState::SentUnverified, None)
     }
 
-    /// maiLink running, one window with one tab named "worker". `aged` puts the app past the
-    /// restart window.
-    fn fixture(aged: bool) -> (AppState, String) {
-        let mut app = AppState::new();
-        if aged {
-            app.started_at = std::time::Instant::now() - RING_BASELINE_WINDOW * 2;
-        }
+    /// How long the app has been up, past the restart window and inside it.
+    const UP_LONG: std::time::Duration = std::time::Duration::from_secs(RING_BASELINE_WINDOW.as_secs() * 2);
+    const UP_JUST_NOW: std::time::Duration = std::time::Duration::ZERO;
+
+    /// maiLink running, one window with one tab named "worker".
+    fn fixture() -> (AppState, String) {
+        let app = AppState::new();
         *app.mailink_info.write() = Some(("test".into(), 1));
         let tab = {
             let mut data = app.app_data.write();
@@ -309,19 +316,19 @@ mod tests {
 
     #[test]
     fn nothing_rings_inside_the_restart_window_but_the_state_still_says_so() {
-        let (app, tab) = fixture(false);
-        note_remote(&app, &tab, failed("token expired"));
+        let (app, tab) = fixture();
+        note_remote_at_uptime(&app, &tab, failed("token expired"), UP_JUST_NOW);
         assert!(app.mailink_pending_rings.lock().is_empty());
         assert_eq!(app.tab_accounts.read()[&tab].remote.as_ref().unwrap().state, RemoteState::NotApplied);
     }
 
     #[test]
     fn entering_not_applied_rings_once_content_light() {
-        let (app, tab) = fixture(true);
-        note_remote(&app, &tab, sent());
+        let (app, tab) = fixture();
+        note_remote_at_uptime(&app, &tab, sent(), UP_LONG);
         assert!(app.mailink_pending_rings.lock().is_empty(), "sent_unverified is not a failure");
-        note_remote(&app, &tab, failed("ssh refused the key"));
-        note_remote(&app, &tab, failed("again"));
+        note_remote_at_uptime(&app, &tab, failed("ssh refused the key"), UP_LONG);
+        note_remote_at_uptime(&app, &tab, failed("again"), UP_LONG);
         let q = app.mailink_pending_rings.lock();
         assert_eq!(q.len(), 1, "a repeat failure is not a transition");
         // Only the tab name and the kind — never the reason, never an account label.
@@ -330,15 +337,15 @@ mod tests {
 
     #[test]
     fn a_tab_the_phone_cannot_see_never_rings() {
-        let (app, tab) = fixture(true);
+        let (app, tab) = fixture();
         app.app_data.write().windows[0].workspaces[0].panes[0].tabs[0].mailink_excluded = true;
-        note_remote(&app, &tab, failed("x"));
+        note_remote_at_uptime(&app, &tab, failed("x"), UP_LONG);
         assert!(app.mailink_pending_rings.lock().is_empty());
     }
 
     #[test]
     fn an_unused_prep_is_downgraded_and_keeps_its_intended_account() {
-        let (app, tab) = fixture(false);
+        let (app, tab) = fixture();
         let account = Some(tab_record::AccountRef { id: "a".into(), label: "a@example.com".into() });
         let mut r = RemoteRecord::new(account.clone(), RemoteState::SentUnverified, None);
         r.handle = Some("h1".into());

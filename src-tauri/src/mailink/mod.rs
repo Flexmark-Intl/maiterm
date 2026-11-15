@@ -1391,6 +1391,11 @@ async fn post_message(
             return hold(&s);
         }
         return match submit_prompt(&s.app, &tab_id, &pty, &body.text).await {
+            // `Delivered::AgentPending` is answered `delivered` too, though it isn't confirmed:
+            // the wire has no word for "with the agent's mod, not yet run" without a protocol
+            // bump, and nothing is lost by it — maiTerm, not the phone, settles a pending prompt
+            // (a drop is typed through the hold queue, an unconfirmed one is put to the human on
+            // the desktop), and a resend from the phone could make it run twice.
             Ok(_) => Ok(Json(json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()), "woke": woke }))),
             // The mod was asked and didn't take it, and the box holds a draft.
             Err(_) if draft_hold::draft_in_box(&s.app, &tab_id) => hold(&s),
@@ -4180,8 +4185,14 @@ pub(crate) async fn inject_text(
 /// How a prompt reached the agent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Delivered {
-    /// Handed to the tab's maiterm-tab mod, which submits it (claude_code/mod_inbox.rs).
+    /// Handed to the tab's maiterm-tab mod, which submitted it, and Claude ran it
+    /// (claude_code/mod_inbox.rs).
     Agent,
+    /// Handed to the tab's maiterm-tab mod, with no confirmation that Claude ran it: no report
+    /// yet (a turn began first, or it was sent mid-turn), or one that can't say (`Unconfirmed`).
+    /// Unknown, not delivered. It must not be typed — it may run, or have run — and the inbox
+    /// settles it: a drop is typed then, and an unconfirmed one is put to the human.
+    AgentPending,
     /// Typed into the terminal and submitted with a CR.
     Keys,
 }
@@ -4198,12 +4209,19 @@ pub(crate) async fn submit_prompt(
     text: &str,
 ) -> Result<Delivered, String> {
     use crate::claude_code::mod_inbox;
-    if mod_inbox::offerable(text)
-        && mod_inbox::takes_now(app, tab_id)
-        && app.mod_inbox.deliver(tab_id, text, mod_inbox::agent_between_turns(app, tab_id)).await
-    {
-        log::info!("[maiLink] prompt for tab {tab_id} → the agent ({} chars)", text.chars().count());
-        return Ok(Delivered::Agent);
+    if mod_inbox::offerable(text) && mod_inbox::takes_now(app, tab_id) {
+        match app.mod_inbox.deliver(tab_id, text, mod_inbox::agent_between_turns(app, tab_id)).await {
+            mod_inbox::Handover::Ran => {
+                log::info!("[maiLink] prompt for tab {tab_id} → the agent ({} chars)", text.chars().count());
+                return Ok(Delivered::Agent);
+            }
+            mod_inbox::Handover::Pending | mod_inbox::Handover::Unconfirmed => {
+                log::info!("[maiLink] prompt for tab {tab_id} → the agent, not confirmed run ({} chars)", text.chars().count());
+                return Ok(Delivered::AgentPending);
+            }
+            // Nothing was submitted, or nothing ran: typed below.
+            mod_inbox::Handover::NotTaken | mod_inbox::Handover::Dropped => {}
+        }
     }
     if app.mod_inbox.is_live(tab_id) && draft_hold::draft_in_box(app, tab_id) {
         return Err("the human has a draft in the agent's input box, and the prompt can't go around it".into());

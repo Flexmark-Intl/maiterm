@@ -105,7 +105,8 @@ fn status_of(l: &AgentFiles, tab: &str, id: &str) -> String {
 }
 
 fn running_shells(l: &AgentFiles) -> Vec<String> {
-    l.inner.lock().shells.iter().filter(|s| s.running()).map(|s| s.tool_use_id.clone()).collect()
+    let now = l.clock();
+    l.inner.lock().shells.iter().filter(|s| s.running(now)).map(|s| s.tool_use_id.clone()).collect()
 }
 
 #[test]
@@ -224,9 +225,7 @@ fn a_shell_call_no_hook_ever_ends_stops_counting_after_ten_minutes() {
     let l = ledger();
     l.record(rec(&by_agent(pre("Bash", json!({ "command": "make" }), "b1", &repo()), "a1"), "t1"));
     assert!(l.sole_shell_in(Path::new(&repo()), false).is_some());
-    for s in l.inner.lock().shells.iter_mut() {
-        s.started -= SHELL_MAX;
-    }
+    l.advance_clock(SHELL_MAX);
     assert!(l.sole_shell_in(Path::new(&repo()), false).is_none());
     assert!(l.inner.lock().shells.is_empty(), "and it is dropped, so the watcher pays nothing for it");
 }
@@ -320,7 +319,7 @@ fn a_reload_moves_the_ledger_and_a_closed_tab_is_forgotten_after_a_minute() {
     assert_eq!(l.activity("new", "turn", false).unwrap().entries.len(), 1);
     l.prune(&HashSet::new());
     assert!(l.activity("new", "turn", false).is_some(), "within the grace");
-    l.age_missing(MISSING_GRACE);
+    l.advance_clock(MISSING_GRACE);
     l.prune(&HashSet::new());
     assert!(l.activity("new", "turn", false).is_none());
 }

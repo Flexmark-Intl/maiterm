@@ -207,7 +207,9 @@ pub fn agent_takes_prompt(state: State<'_, Arc<AppState>>, tab_id: String) -> bo
 }
 
 /// Hands a prompt to this tab's maiterm-tab mod to submit, when it takes one now. `false` means
-/// nothing was sent, and the caller types it under its own checks (draft included).
+/// nothing was sent or nothing ran, and the caller types it under its own checks (draft
+/// included). `true` also for one the mod holds with no report yet (`Handover::Pending`): it may
+/// still run, so it is never typed here; the inbox types it if Claude drops it.
 #[tauri::command]
 pub async fn submit_prompt_to_agent(state: State<'_, Arc<AppState>>, tab_id: String, text: String) -> Result<bool, String> {
     let app = state.inner().clone();
@@ -215,7 +217,17 @@ pub async fn submit_prompt_to_agent(state: State<'_, Arc<AppState>>, tab_id: Str
         return Ok(false);
     }
     let between_turns = crate::claude_code::mod_inbox::agent_between_turns(&app, &tab_id);
-    let taken = app.mod_inbox.deliver(&tab_id, &text, between_turns).await;
+    use crate::claude_code::mod_inbox::Handover;
+    // `true` for a pending one too: it may still run, so the caller must not type it (the inbox
+    // types it if Claude drops it).
+    let taken = match app.mod_inbox.deliver(&tab_id, &text, between_turns).await {
+        Handover::Ran => true,
+        Handover::Pending | Handover::Unconfirmed => {
+            log::info!("[overlord] prompt for tab {tab_id} → the agent, not confirmed run ({} chars)", text.chars().count());
+            return Ok(true);
+        }
+        Handover::NotTaken | Handover::Dropped => false,
+    };
     if taken {
         log::info!("[overlord] prompt for tab {tab_id} → the agent ({} chars)", text.chars().count());
     }
@@ -258,7 +270,8 @@ pub async fn deliver_to_agent(
     };
     Ok(match deliver_or_hold(&app, &app_handle, &tab_id, &text, what).await {
         Delivery::Delivered(d) => serde_json::json!({ "status": "delivered",
-            "via": if d == crate::mailink::Delivered::Agent { "agent" } else { "keys" } }),
+            "via": if d == crate::mailink::Delivered::Keys { "keys" } else { "agent" },
+            "pending": d == crate::mailink::Delivered::AgentPending }),
         Delivery::Held { msg_id, reason } => serde_json::json!({ "status": "held", "msg_id": msg_id, "reason": reason }),
         Delivery::Refused(reason) => serde_json::json!({ "status": "refused", "reason": reason }),
     })

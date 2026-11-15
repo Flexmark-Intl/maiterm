@@ -1412,16 +1412,16 @@ pub async fn ssh_is_directory(state: State<'_, Arc<AppState>>, ssh_command: Stri
     let remote_path = expand_remote_tilde(&target, &remote_path);
     let quoted = shell_quote(&remote_path);
 
-    let output = tokio::time::timeout(
+    use crate::util::proc::{self, RunError};
+    let output = proc::output_timeout_async(
+        target.ssh_async(5).arg(format!("test -d {}", quoted)),
         std::time::Duration::from_secs(5),
-        target
-            .ssh_async(5)
-            .arg(format!("test -d {}", quoted))
-            .output()
     )
     .await
-    .map_err(|_| "SSH timed out".to_string())?
-    .map_err(|e| format!("SSH failed: {}", e))?;
+    .map_err(|e| match e {
+        RunError::TimedOut => "SSH timed out".to_string(),
+        RunError::Spawn(e) | RunError::Io(e) => format!("SSH failed: {}", e),
+    })?;
 
     Ok(output.status.success())
 }
@@ -1580,16 +1580,13 @@ pub async fn ssh_list_files(
         )
     };
 
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        target
-            .ssh_async(10)
-            .arg(&cmd)
-            .output()
-    )
-    .await
-    .map_err(|_| "SSH connection timed out (15s)".to_string())?
-    .map_err(|e| format!("SSH failed: {}", e))?;
+    use crate::util::proc::{self, RunError};
+    let output = proc::output_timeout_async(target.ssh_async(10).arg(&cmd), std::time::Duration::from_secs(15))
+        .await
+        .map_err(|e| match e {
+            RunError::TimedOut => "SSH connection timed out (15s)".to_string(),
+            RunError::Spawn(e) | RunError::Io(e) => format!("SSH failed: {}", e),
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

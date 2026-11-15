@@ -2271,6 +2271,9 @@ async fn run_ssh(ssh_args: &str, script: &str, stdin_data: Option<&str>) -> Resu
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        // An early return below (a failed write to stdin) drops the child: it must not
+        // outlive that. The deadline's kill is `wait_output_timeout`'s.
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("could not run ssh: {e}"))?;
 
@@ -2293,13 +2296,15 @@ async fn run_ssh(ssh_args: &str, script: &str, stdin_data: Option<&str>) -> Resu
             .map_err(|e| format!("could not close the handoff: {e}"))?;
     }
 
-    let output = tokio::time::timeout(
-        tokio::time::Duration::from_secs(15),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| "the host did not answer within 15s".to_string())?
-    .map_err(|e| format!("ssh failed: {e}"))?;
+    // Killed and reaped at the deadline: an ssh still holding the handoff's connection open
+    // after we gave up on it is a session nobody can see or end.
+    use crate::util::proc::RunError;
+    let output = crate::util::proc::wait_output_timeout(child, std::time::Duration::from_secs(15))
+        .await
+        .map_err(|e| match e {
+            RunError::TimedOut => "the host did not answer within 15s".to_string(),
+            RunError::Spawn(e) | RunError::Io(e) => format!("ssh failed: {e}"),
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
