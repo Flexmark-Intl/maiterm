@@ -92,15 +92,7 @@ async fn cm_master_alive(host_key: &str, ssh_args: &str) -> bool {
         if !sock.exists() {
             return false;
         }
-        let mut args: Vec<String> = vec![
-            "-o".into(),
-            format!("ControlPath={}", sock.display()),
-            "-O".into(),
-            "check".into(),
-        ];
-        for arg in ssh_args.split_whitespace() {
-            args.push(arg.to_string());
-        }
+        let args = ssh_argv(vec!["-o".into(), format!("ControlPath={}", sock.display()), "-O".into(), "check".into()], ssh_args, std::iter::empty::<String>());
         let Ok(child) = tokio::process::Command::new("ssh")
             .args(&args)
             .stdin(std::process::Stdio::null())
@@ -335,11 +327,34 @@ fn evict_script(holder: &RemoteHolder) -> String {
     )
 }
 
+/// `prefix`, then a tab's connect args, then `tail`: the argv of every ssh this file makes from
+/// a stored command. `ssh_args` is shell words (`util::ssh_words`) — `-i '/Users/me/My Keys/id'`
+/// is two args; split on whitespace, it was four and ssh connected to the host `Keys/id`.
+pub(crate) fn ssh_argv<I, S>(prefix: Vec<String>, ssh_args: &str, tail: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut args = prefix;
+    args.extend(crate::util::ssh_words::split(ssh_args));
+    args.extend(tail.into_iter().map(Into::into));
+    args
+}
+
+/// `ssh <mux over host_key's tunnel> <connect args> <remote>`: the mirror's, maiLink's file
+/// copies', inline images' and remote watch scripts' ssh.
+pub(crate) fn mux_argv(host_key: &str, ssh_args: &str, remote: impl Into<String>) -> Vec<String> {
+    ssh_argv(mux_client_args(host_key), ssh_args, [remote])
+}
+
+/// `probe_ssh_host`'s argv: its own BatchMode connection running `true`.
+fn probe_argv(ssh_args: &str) -> Vec<String> {
+    ssh_argv(independent_ssh_args_with(10), ssh_args, ["true"])
+}
+
 /// One short ssh command on its own connection or over a socket, with its stdout.
 async fn ssh_capture(prefix: Vec<String>, ssh_args: &str, tail: &[&str], secs: u64) -> Option<(bool, String)> {
-    let mut args = prefix;
-    args.extend(ssh_args.split_whitespace().map(str::to_string));
-    args.extend(tail.iter().map(|s| s.to_string()));
+    let args = ssh_argv(prefix, ssh_args, tail.iter().copied());
     let child = tokio::process::Command::new("ssh")
         .args(&args)
         .stdin(std::process::Stdio::null())
@@ -353,7 +368,13 @@ async fn ssh_capture(prefix: Vec<String>, ssh_args: &str, tail: &[&str], secs: u
 }
 
 fn independent_ssh_args() -> Vec<String> {
-    ["-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-T"]
+    independent_ssh_args_with(10)
+}
+
+/// Never the user's ControlMaster, never a prompt, a bounded connect, no terminal.
+fn independent_ssh_args_with(connect_timeout: u32) -> Vec<String> {
+    let timeout = format!("ConnectTimeout={connect_timeout}");
+    ["-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "BatchMode=yes", "-o", &timeout, "-T"]
         .iter()
         .map(|s| s.to_string())
         .collect()
@@ -653,10 +674,7 @@ fn build_tunnel_args(host_key: &str, ssh_args: &str, local_port: u16, listen: Op
     cmd_args.push(format!("{}:127.0.0.1:{}", listen.unwrap_or(0), local_port));
 
     // Add the user's SSH args
-    for arg in ssh_args.split_whitespace() {
-        cmd_args.push(arg.to_string());
-    }
-    cmd_args
+    ssh_argv(cmd_args, ssh_args, std::iter::empty::<String>())
 }
 
 #[derive(serde::Serialize)]
@@ -1378,30 +1396,8 @@ pub async fn ssh_run_setup(
     if let Some(why) = ssh_bridge_refusal() {
         return Err(why);
     }
-    let mut cmd_args: Vec<String> = Vec::new();
-    // Fully independent connection — never share the user's ControlMaster socket (see
-    // start_ssh_tunnel: sharing it lets the bridge poison the user's own `ssh <host>`).
-    cmd_args.push("-o".to_string());
-    cmd_args.push("ControlMaster=no".to_string());
-    cmd_args.push("-o".to_string());
-    cmd_args.push("ControlPath=none".to_string());
-    // Batch mode — fail fast if no auth method works (no interactive prompt possible)
-    cmd_args.push("-o".to_string());
-    cmd_args.push("BatchMode=yes".to_string());
-    // Bound the connect so a dead/hung remote doesn't burn the full 30s timeout below.
-    cmd_args.push("-o".to_string());
-    cmd_args.push("ConnectTimeout=15".to_string());
-    // Don't allocate a PTY
-    cmd_args.push("-T".to_string());
-
-    for arg in ssh_args.split_whitespace() {
-        cmd_args.push(arg.to_string());
-    }
-
-    // The setup script is passed as a single command argument
-    cmd_args.push(setup_script);
-
     log::info!("SSH setup: ssh {} <script>", ssh_args);
+    let cmd_args = setup_argv(&ssh_args, setup_script);
 
     // Killed and reaped at the deadline: a setup ssh left running on a hung host is one more
     // connection per retry.
@@ -1415,7 +1411,6 @@ pub async fn ssh_run_setup(
         RunError::TimedOut => "SSH setup timed out (30s)".to_string(),
         RunError::Spawn(e) | RunError::Io(e) => format!("Failed to spawn SSH setup: {}", e),
     })?;
-
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Ignore "Connection to ... closed" messages (normal for batch SSH)
@@ -1434,6 +1429,14 @@ pub async fn ssh_run_setup(
     Ok(())
 }
 
+/// `ssh_run_setup`'s argv: a fully independent connection (never the user's ControlMaster —
+/// see start_ssh_tunnel: sharing it lets the bridge poison the user's own `ssh <host>`), batch
+/// mode so a host with no usable auth fails fast, a connect bound well inside the 30 s run
+/// deadline, no terminal; then the tab's connect args and the script as one word.
+fn setup_argv(ssh_args: &str, setup_script: String) -> Vec<String> {
+    ssh_argv(independent_ssh_args_with(15), ssh_args, [setup_script])
+}
+
 /// Does this host take an ssh connection right now?
 ///
 /// The gate in front of an unattended reconnect: after a drop nothing is typed into a tab
@@ -1446,12 +1449,7 @@ pub async fn ssh_run_setup(
 /// to reconnect to unattended either.
 #[tauri::command]
 pub async fn probe_ssh_host(ssh_args: String) -> bool {
-    let mut cmd_args: Vec<String> = ["-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-T"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    cmd_args.extend(ssh_args.split_whitespace().map(str::to_string));
-    cmd_args.push("true".to_string());
+    let cmd_args = probe_argv(&ssh_args);
     let Ok(child) = tokio::process::Command::new("ssh")
         .args(&cmd_args)
         .stdin(std::process::Stdio::null())
@@ -1599,6 +1597,74 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    /// `needle` appears in `hay` as consecutive args.
+    fn has_run(hay: &[String], needle: &[&str]) -> bool {
+        hay.windows(needle.len()).any(|w| w.iter().map(String::as_str).eq(needle.iter().copied()))
+    }
+
+    /// A tab's ssh with words a whitespace split mangles, from its argv to the argv of every ssh
+    /// maiTerm makes from it. The ssh is stood in for by a shell whose `$0` and args are exactly
+    /// an ssh's argv, waiting on its stdin, so its argv is read live and nothing connects.
+    #[cfg(unix)]
+    #[test]
+    fn hard_words_survive_from_argv_capture_to_every_ssh_maiterm_builds() {
+        use crate::util::{proc_argv, ssh_words};
+        let shell = if std::path::Path::new("/bin/bash").exists() { "/bin/bash" } else { "/bin/sh" };
+        let remote = "export MAITERM_TAB_ID=t MAITERM_AUTH=secret; cd '/srv/a b' && exec $SHELL -l";
+        for hard in ssh_words::HARD_WORDS.iter().copied().filter(|w| !w.is_empty()) {
+            let cert = format!("CertificateFile={hard}");
+            let ssh: Vec<&str> = vec!["ssh", "-t", "-o", "ControlMaster=no", "-i", hard, "-o", &cert, "ews@nova", remote];
+            let mut child = Command::new(shell)
+                .args(["-c", "read _"])
+                .args(&ssh)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .expect("spawn the stand-in");
+            let argv = proc_argv::argv(child.id());
+            let _ = child.stdin.take().map(|mut s| s.write_all(b"\n"));
+            let _ = child.wait();
+            let argv = argv.expect("argv of our own child");
+            assert_eq!(&argv[3..], ssh.as_slice(), "capture keeps every word");
+
+            // What `get_pty_foreground` hands the frontend, and what a tunnel may be keyed by.
+            let captured = ssh_words::join(&argv[3..]);
+            let args_only = ssh_words::join(&argv[4..]);
+            let connect = crate::watch::connect_args(&args_only);
+            assert_eq!(
+                ssh_words::split(&connect),
+                ["-o", "ControlMaster=no", "-i", hard, "-o", cert.as_str(), "ews@nova"],
+                "{hard:?}: {connect}"
+            );
+            let clean = crate::util::ssh_target::without_control_master(&connect);
+            assert_eq!(crate::filetree::place::host_of_command(&captured).as_deref(), Some(clean.as_str()));
+
+            let want: [&str; 2] = ["-i", hard];
+            let wcert: [&str; 2] = ["-o", &cert];
+            let every: Vec<(&str, Vec<String>)> = vec![
+                // `build_tunnel_args` ends with this same `ssh_argv`; it isn't called here
+                // because it prepares a real socket folder under the home directory.
+                ("tunnel tail", ssh_argv(vec!["-N".into()], &clean, std::iter::empty::<String>())),
+                ("probe", probe_argv(&clean)),
+                ("setup", setup_argv(&clean, "true".into())),
+                ("capture", ssh_argv(independent_ssh_args(), &clean, ["true"])),
+                ("mux", mux_argv(&clean, &clean, "sh -s")),
+                ("files helper", crate::filetree::remote::proto::ssh_args(&clean, &clean, "true")),
+            ];
+            for (who, built) in &every {
+                assert!(has_run(built, &want) && has_run(built, &wcert), "{who} {hard:?}: {built:?}");
+                assert!(built.iter().any(|a| a == "ews@nova"), "{who}: {built:?}");
+                assert!(!built.iter().any(|a| a.contains("MAITERM_AUTH")), "{who} carries no remote command");
+            }
+            // The editor's scp/ssh, read straight from the captured line.
+            let t = crate::util::ssh_target::SshTarget::parse(&captured).unwrap();
+            assert_eq!(t.dest, "ews@nova");
+            let idf = format!("IdentityFile={hard}");
+            let opts: Vec<String> = t.ssh(5).get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            assert!(has_run(&opts, &["-o", &idf]) && has_run(&opts, &wcert), "{hard:?}: {opts:?}");
+        }
+    }
 
     /// Naming the port changes what ssh says on success: there is no "Allocated port"
     /// line to read, because nothing was allocated back to us. Reading the wrong line

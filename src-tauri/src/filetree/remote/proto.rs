@@ -52,13 +52,14 @@ const DROPPED_WITH_ARG: [&str; 4] = ["-L", "-R", "-D", "-W"];
 const DROPPED: [&str; 6] = ["-N", "-f", "-M", "-n", "-t", "-T"];
 
 /// The connect args a helper (or fallback shell) uses: the tab's own, without forwards or
-/// session flags.
+/// session flags. `ssh_args` is shell words (`util::ssh_words`): `-i '/Users/me/My Keys/id'`
+/// is two args, never four.
 pub fn clean_connect_args(ssh_args: &str) -> Vec<String> {
-    let words: Vec<&str> = ssh_args.split_whitespace().collect();
+    let words = crate::util::ssh_words::split(ssh_args);
     let mut out = Vec::new();
     let mut i = 0;
     while i < words.len() {
-        let w = words[i];
+        let w = words[i].as_str();
         if DROPPED_WITH_ARG.contains(&w) {
             i += 2;
             continue;
@@ -67,7 +68,7 @@ pub fn clean_connect_args(ssh_args: &str) -> Vec<String> {
             i += 1;
             continue;
         }
-        out.push(w.to_string());
+        out.push(words[i].clone());
         i += 1;
     }
     out

@@ -1113,7 +1113,10 @@ pub fn kill_pty(state: &Arc<AppState>, pty_id: &str) -> Result<(), String> {
 #[derive(serde::Serialize, Clone)]
 pub struct PtyInfo {
     pub cwd: Option<String>,
+    /// The foreground ssh's command line as shell words (`util::ssh_words`).
     pub foreground_command: Option<String>,
+    /// `foreground_command` came from `ps`, not argv: a word with a space in it may be split.
+    pub foreground_lossy: bool,
 }
 
 /// IDs of all PTYs currently alive in the registry. Used on startup to tell a
@@ -1131,10 +1134,13 @@ pub fn get_pty_info(state: &Arc<AppState>, pty_id: &str) -> Result<PtyInfo, Stri
     drop(registry);
 
     let cwd = get_cwd_for_pid(pid);
-    let foreground_command = get_foreground_command(pid);
+    let (foreground_command, foreground_lossy) = match foreground_ssh_command(pid) {
+        Some((cmd, lossy)) => (Some(cmd), lossy),
+        None => (None, false),
+    };
     note_live_ssh(state, pty_id, &foreground_command);
 
-    Ok(PtyInfo { cwd, foreground_command })
+    Ok(PtyInfo { cwd, foreground_command, foreground_lossy })
 }
 
 /// Record an ssh a foreground probe saw holding this terminal (see `ssh_watch`). A probe
@@ -1219,7 +1225,7 @@ fn foreground_ssh(shell_pid: u32, fresh: bool) -> Option<(u32, String)> {
         return None;
     }
     let leader = rows.iter().find(|r| r.pid == shell_row.tpgid as u32)?;
-    is_ssh_command(&leader.cmd).then(|| (leader.pid, leader.cmd.clone()))
+    is_ssh_command(&leader.cmd).then(|| (leader.pid, ssh_command_line(leader).0))
 }
 
 #[cfg(not(unix))]
@@ -1707,14 +1713,36 @@ pub fn child_processes(_parent_pid: u32) -> Vec<(u32, String)> {
     Vec::new()
 }
 
-/// Get the foreground process command via ps (Unix)
+/// An ssh process's command line as shell words (`util::ssh_words`), and whether it is LOSSY.
+///
+/// Read from the process's argv, so `-i "/Users/me/My Keys/id"` stays two words: the `ps` line
+/// joins argv with spaces, and every ssh maiTerm built from it connected to the host `Keys/id`.
+/// The `ps` line is only the fallback for an argv that can't be read, and is marked lossy:
+/// it is right only while no word holds whitespace.
+#[cfg(unix)]
+fn ssh_command_line(row: &PsRow) -> (String, bool) {
+    match crate::util::proc_argv::argv(row.pid) {
+        Some(argv) => (crate::util::ssh_words::join(&argv), false),
+        None => {
+            log::debug!("pty: argv of ssh pid {} unreadable; using its lossy ps line", row.pid);
+            (row.cmd.clone(), true)
+        }
+    }
+}
+
+/// `foreground_ssh_command`'s line alone.
+fn get_foreground_command(shell_pid: u32) -> Option<String> {
+    foreground_ssh_command(shell_pid).map(|(cmd, _)| cmd)
+}
+
+/// Get the foreground ssh command (Unix), and whether it is lossy (`ssh_command_line`).
 ///
 /// We rely on the tty's foreground process group (tpgid) instead of "any ssh
 /// descendant of the shell": a subprocess that the foreground app happens to
 /// spawn (e.g. Claude running ssh as a worker for one of its Bash tool calls)
 /// must NOT make the shell look remote. Only the actual foreground job counts.
 #[cfg(unix)]
-fn get_foreground_command(shell_pid: u32) -> Option<String> {
+fn foreground_ssh_command(shell_pid: u32) -> Option<(String, bool)> {
     let rows = ps_rows_snapshot()?;
 
     let shell_row = rows.iter().find(|r| r.pid == shell_pid)?;
@@ -1734,7 +1762,7 @@ fn get_foreground_command(shell_pid: u32) -> Option<String> {
     // an app spawns under the hood share its pgid but aren't what the user is
     // interacting with.
     if is_ssh_command(&leader.cmd) {
-        Some(leader.cmd.clone())
+        Some(ssh_command_line(leader))
     } else {
         None
     }
@@ -1896,8 +1924,10 @@ fn is_ssh_wrapper_win(cmd: &[std::ffi::OsString]) -> bool {
     matches!(basename.as_str(), "scp" | "rsync" | "git" | "sftp" | "git-remote-ssh")
 }
 
+/// Windows: sysinfo's argv is the command line split as the program itself saw it, so the
+/// words are exact and never lossy.
 #[cfg(windows)]
-fn get_foreground_command(shell_pid: u32) -> Option<String> {
+fn foreground_ssh_command(shell_pid: u32) -> Option<(String, bool)> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
     let mut sys = System::new();
@@ -1918,7 +1948,7 @@ fn get_foreground_command(shell_pid: u32) -> Option<String> {
 
     // Walk tree from shell_pid, preferring SSH children
     let mut current_pid = shell_pid;
-    let mut ssh_cmd: Option<String> = None;
+    let mut ssh_cmd: Option<(String, bool)> = None;
     let mut parent_cmd: Option<Vec<std::ffi::OsString>> = None;
 
     loop {
@@ -1939,7 +1969,7 @@ fn get_foreground_command(shell_pid: u32) -> Option<String> {
                             .iter()
                             .map(|s| s.to_string_lossy().into_owned())
                             .collect();
-                        ssh_cmd = Some(cmd_str.join(" "));
+                        ssh_cmd = Some((crate::util::ssh_words::join(&cmd_str), false));
                     }
                 }
                 parent_cmd = Some(kid_cmd.clone());

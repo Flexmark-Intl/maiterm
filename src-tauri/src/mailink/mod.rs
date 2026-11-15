@@ -4414,11 +4414,7 @@ pub(crate) async fn push_bytes_remote(
     remote_path: &str,
 ) -> Result<(), String> {
     let quoted = format!("'{}'", remote_path.replace('\'', "'\\''"));
-    let mut cmd_args = crate::commands::ssh_tunnel::mux_client_args(host_key);
-    for arg in ssh_args.split_whitespace() {
-        cmd_args.push(arg.to_string());
-    }
-    cmd_args.push(format!("cat > {quoted}"));
+    let cmd_args = crate::commands::ssh_tunnel::mux_argv(host_key, ssh_args, format!("cat > {quoted}"));
 
     // kill_on_drop: a timeout below drops the child, and without it the ssh (and the remote
     // `cat` it holds open) would keep running long after the caller was told it failed.
@@ -4466,11 +4462,7 @@ pub(crate) async fn fetch_bytes_remote(
     remote_path: &str,
 ) -> Result<Vec<u8>, String> {
     let quoted = format!("'{}'", remote_path.replace('\'', "'\\''"));
-    let mut cmd_args = crate::commands::ssh_tunnel::mux_client_args(host_key);
-    for arg in ssh_args.split_whitespace() {
-        cmd_args.push(arg.to_string());
-    }
-    cmd_args.push(format!("cat < {quoted}"));
+    let cmd_args = crate::commands::ssh_tunnel::mux_argv(host_key, ssh_args, format!("cat < {quoted}"));
 
     // kill_on_drop: on a timeout the `output()` future is dropped, and with it the child — which
     // without this flag kept running, an ssh per stuck read.

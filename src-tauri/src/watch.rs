@@ -180,25 +180,26 @@ pub fn host_label(host: &str) -> String {
 const SSH_ARG_FLAGS: &str = "bceilmopBDEFIJLOPQRSwW";
 
 /// An ssh command line, read as ssh's getopt reads it.
-struct SshParse<'a> {
+struct SshParse {
     /// The words that say WHERE to connect — options and destination — without any remote
     /// command after them, and without `-t`.
-    connect: Vec<&'a str>,
-    dest: Option<&'a str>,
-    port: Option<&'a str>,
-    user: Option<&'a str>,
+    connect: Vec<String>,
+    dest: Option<String>,
+    port: Option<String>,
+    user: Option<String>,
 }
 
-fn parse_ssh(cmd: &str) -> SshParse<'_> {
-    let words: Vec<&str> = cmd.split_whitespace().collect();
+/// `cmd` is shell words (`util::ssh_words`): `-i '/Users/me/My Keys/id'` is one option.
+fn parse_ssh(cmd: &str) -> SshParse {
+    let words = crate::util::ssh_words::split(cmd);
     let mut p = SshParse { connect: Vec::new(), dest: None, port: None, user: None };
     let mut i = 0;
     while i < words.len() {
-        let w = words[i];
+        let w = words[i].as_str();
         if w == "--" {
             if p.dest.is_none() {
-                p.dest = words.get(i + 1).copied();
-                p.connect.extend(p.dest);
+                p.dest = words.get(i + 1).cloned();
+                p.connect.extend(p.dest.clone());
             }
             break;
         }
@@ -207,8 +208,8 @@ fn parse_ssh(cmd: &str) -> SshParse<'_> {
             if p.dest.is_some() {
                 break;
             }
-            p.dest = Some(w);
-            p.connect.push(w);
+            p.dest = Some(w.to_string());
+            p.connect.push(w.to_string());
             i += 1;
             continue;
         };
@@ -217,7 +218,7 @@ fn parse_ssh(cmd: &str) -> SshParse<'_> {
             i += 1;
             continue;
         }
-        p.connect.push(w);
+        p.connect.push(w.to_string());
         // A cluster (`-xCp2222`): flags until one that takes an argument, which is the rest of
         // the word or, if none, the next word.
         for (j, ch) in flags.char_indices() {
@@ -227,18 +228,18 @@ fn parse_ssh(cmd: &str) -> SshParse<'_> {
             let rest = &flags[j + ch.len_utf8()..];
             let arg = if rest.is_empty() {
                 i += 1;
-                let a = words.get(i).copied();
-                p.connect.extend(a);
+                let a = words.get(i).cloned();
+                p.connect.extend(a.clone());
                 a
             } else {
-                Some(rest)
+                Some(rest.to_string())
             };
             match (ch, arg) {
                 ('p', Some(a)) => p.port = Some(a),
                 ('l', Some(a)) => p.user = Some(a),
                 ('o', Some(a)) => match a.split_once('=') {
-                    Some((k, v)) if k.eq_ignore_ascii_case("port") => p.port = Some(v),
-                    Some((k, v)) if k.eq_ignore_ascii_case("user") => p.user = Some(v),
+                    Some((k, v)) if k.eq_ignore_ascii_case("port") => p.port = Some(v.to_string()),
+                    Some((k, v)) if k.eq_ignore_ascii_case("user") => p.user = Some(v.to_string()),
                     _ => {}
                 },
                 _ => {}
@@ -255,8 +256,11 @@ fn parse_ssh(cmd: &str) -> SshParse<'_> {
 /// command — `export … MAITERM_AUTH=…; cd … && exec $SHELL -l`. That must never be stored with a
 /// follow-up (it is a credential, and the state file is on disk) nor have a script's `sh -s`
 /// appended to it. What `due.host` holds, and what a remote run's ssh is given.
+///
+/// Shell words in, shell words out (`util::ssh_words`): a word with nothing special in it stays
+/// bare, so a key spelled before quoting (`-o Port=2222 ews@nova`) is still the same key.
 pub fn connect_args(key: &str) -> String {
-    parse_ssh(key).connect.join(" ")
+    crate::util::ssh_words::join(parse_ssh(key).connect)
 }
 
 /// A place for a human: `place` with the host's label.
@@ -945,6 +949,10 @@ mod tests {
         assert_eq!(host_label(ps), "ews@nova");
         assert_eq!(connect_args("ews@nova -J bastion uptime"), "ews@nova -J bastion");
         assert_eq!(connect_args("-x -C ews@nova"), "-x -C ews@nova");
+        // Shell words: a quoted path is one option, and stays quoted in the key.
+        let q = "-t -i '/Users/me/My Keys/id' -l ews nova 'cd /x && exec $SHELL -l'";
+        assert_eq!(connect_args(q), "-i '/Users/me/My Keys/id' -l ews nova");
+        assert_eq!(host_label(q), "ews@nova");
         assert_eq!(host_label("nova"), "nova");
         for i in 0..MAX_APPROVALS + 5 {
             remember_approval(&mut d, "/a", &i.to_string());

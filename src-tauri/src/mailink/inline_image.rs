@@ -426,9 +426,7 @@ fn remote_script(expr: &str) -> String {
 /// and with it the path — arrives on stdin, where only POSIX `sh` reads it.
 async fn fetch_remote_capped(host_key: &str, ssh_args: &str, expr: &str) -> Result<Vec<u8>, String> {
     use tokio::io::AsyncWriteExt;
-    let mut args = crate::commands::ssh_tunnel::mux_client_args(host_key);
-    args.extend(ssh_args.split_whitespace().map(str::to_string));
-    args.push("sh -s".to_string());
+    let args = crate::commands::ssh_tunnel::mux_argv(host_key, ssh_args, "sh -s");
     let mut child = tokio::process::Command::new("ssh")
         .args(&args)
         .stdin(std::process::Stdio::piped())

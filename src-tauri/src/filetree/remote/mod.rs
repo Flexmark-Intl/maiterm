@@ -98,6 +98,11 @@ impl Default for Timing {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Target {
     pub tunnel_key: String,
+    /// Shell words (`util::ssh_words`), read only through `ssh_words::split`: a word with a
+    /// space in it is quoted (`-i '/Users/me/My Keys/id' ews@nova`), so a whitespace split
+    /// connects somewhere else. The tab's command they come from is read from the ssh's argv
+    /// (`pty::manager::ssh_command_line`); only where that can't be read is it the `ps` line,
+    /// which joins argv with spaces and is right only while no word holds whitespace.
     pub ssh_args: String,
 }
 

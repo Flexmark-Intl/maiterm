@@ -168,9 +168,7 @@ pub(super) async fn execute(c: &Candidate, host: &str, ssh_args: &str) -> Outcom
         return Outcome::Broken("the script contains maiTerm's own end-of-script line".into());
     };
     // Mux over the bridge tunnel's master — never become one (mirror.rs does the same).
-    let mut args = crate::commands::ssh_tunnel::mux_client_args(host);
-    args.extend(ssh_args.split_whitespace().map(str::to_string));
-    args.push("sh -s".into());
+    let args = crate::commands::ssh_tunnel::mux_argv(host, ssh_args, "sh -s");
 
     let mut cmd = tokio::process::Command::new("ssh");
     cmd.args(&args)
