@@ -13,6 +13,7 @@ use parking_lot::Mutex;
 
 use super::git::{Decision, GitConfig, GitCore, GitProbe, GitTiming, SkipWhy, Trigger};
 use super::hub::Sink;
+use super::test_support::Probe;
 use super::types::{Envelope, GitUpdate, TreeEvent};
 use super::{FileTreeState, Slots};
 
@@ -94,14 +95,13 @@ fn applied(updates: &[GitUpdate]) -> (std::collections::BTreeMap<String, String>
 }
 
 /// The watcher starts in the background (FSEvents can take seconds); a change made before it
-/// runs is never reported.
-fn wait_for_watcher(ft: &FileTreeState, sub: u64) {
+/// runs is never reported. Once it has started, a barrier file's event coming through proves
+/// it is delivering: the file goes in the repository's own `.git`, where the tree, git and
+/// find all take it for noise.
+fn wait_for_watcher(probe: &Probe, ft: &FileTreeState, sub: u64, repo: &Path) {
     let hub = ft.hub_of(sub).unwrap();
-    // Long: with the whole suite making temp folders, fseventsd can keep a stream start
-    // waiting for tens of seconds.
-    wait_for("the watcher to start", Duration::from_secs(60), || !hub.watch_pending());
-    // FSEvents reports from the stream's start; give it a moment past that.
-    std::thread::sleep(Duration::from_millis(200));
+    probe.watching(&hub);
+    probe.barrier(&repo.join(".git"));
 }
 
 /// The git worker's next decision after the ones `skip` passes over. The deadline only turns
@@ -133,6 +133,7 @@ fn decorations_follow_the_disk_and_a_commit_clears_them() {
     let r = repo("git-e2e");
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
     ft.set_git_config(GitConfig { timing: fast_timing(), ..GitConfig::default() });
+    let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     assert!(ack.caps.git);
@@ -140,7 +141,7 @@ fn decorations_follow_the_disk_and_a_commit_clears_them() {
     let (files, _) = applied(&rec.git_updates());
     assert!(files.is_empty(), "a clean repo has no decorations: {files:?}");
     assert_eq!(rec.git_updates()[0].branch.as_ref().map(|b| b.head.as_str()), Some("main"));
-    wait_for_watcher(&ft, ack.sub_id);
+    wait_for_watcher(&probe, &ft, ack.sub_id, &r);
 
     // An edit and a new file: the watcher schedules a run (no manual refresh here).
     std::fs::write(r.join("src/lib/a.ts"), "changed\n").unwrap();
@@ -563,13 +564,14 @@ fn find_builds_its_index_on_the_first_query_and_follows_the_disk() {
     std::fs::write(r.join("src/untracked_helper.ts"), "").unwrap();
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
     ft.set_git_config(GitConfig { timing: fast_timing(), ..GitConfig::default() });
+    let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
     // The watcher first. One that starts after a build began marks that build stale (what
     // changed before it ran was never reported), so the query after `search_ready` would be
     // a rebuild: on Windows the watcher is up within the first build, elsewhere after it.
-    wait_for_watcher(&ft, ack.sub_id);
+    wait_for_watcher(&probe, &ft, ack.sub_id, &r);
 
     let first = hub.search(ack.sub_id, "helper", 500, 1, false);
     assert!(first.indexing, "the first query starts the build");
