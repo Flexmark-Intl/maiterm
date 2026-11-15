@@ -416,8 +416,10 @@ fn a_remote_place_serves_the_same_tree_events() {
     git(&t, &home, &["commit", "-qm", "first"]);
     std::fs::write(t.join("a.txt"), "a\nb\n").unwrap();
 
-    let ft = FileTreeState::with(Duration::from_millis(200), crate::filetree::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::with(Duration::from_secs(30), crate::filetree::watch::RAW_CAPACITY, None);
+    ft.hold_graces();
     ft.remotes.set_transport(Arc::new(Local { home: home.clone(), python: "python3" }), fast());
+    let graces = ft.remotes.hold_graces();
     let rec = Arc::new(Recorder::default());
     let place = format!("me@here:{}", t.display());
     let ack = ft.open_with("w", &place, vec![], rec.clone(), vec![], None).unwrap();
@@ -503,13 +505,14 @@ fn a_remote_place_serves_the_same_tree_events() {
     let again = op(FileOp { kind: "import".into(), src: vec![src], dest: Some("src".into()), ..Default::default() }, vec![]).unwrap();
     assert_eq!(again.failed[0].code, "exists");
 
-    // The view goes; the hub after its grace, then the host's helper after its own.
+    // The view goes; the hub after its grace, then the host's helper after its own. Each
+    // `end_next` waits for a grace period to start (the helper's last lease going with the
+    // hub) and ends it; one that started earlier and was overtaken by a lease ends as nothing.
     ft.close(ack.sub_id);
     drop(hub);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    ft.end_graces();
     while ft.remotes.count() > 0 {
-        assert!(Instant::now() < deadline, "the helper outlived its grace");
-        std::thread::sleep(Duration::from_millis(50));
+        graces.end_next();
     }
     for d in [&home, &t, &drop_dir] {
         let _ = std::fs::remove_dir_all(d);
@@ -606,14 +609,12 @@ fn a_kept_remote_hub_comes_back_at_once_while_its_host_is_down() {
     ft.close(ack.sub_id);
     transport.down.store(true, std::sync::atomic::Ordering::SeqCst);
     conn.kill_current();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !matches!(conn.status(), Status::Down(_)) {
-        assert!(Instant::now() < deadline, "never went down ({:?})", conn.status());
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    let started = Instant::now();
+    conn.wait_state("down", |s, _| matches!(s, Status::Down(_)));
+    // Coming back at once means no round trip to the host, which is down: no root is opened
+    // through its helper (`RemoteRoot::open` is the call that would wait on it).
+    let opened = conn.roots_opened.load(Ordering::SeqCst);
     let again = ft.open_with("w", &place, vec![], Arc::new(Recorder::default()), vec![], None).unwrap();
-    assert!(started.elapsed() < Duration::from_secs(2), "the kept hub took {:?}", started.elapsed());
+    assert_eq!(conn.roots_opened.load(Ordering::SeqCst), opened, "the kept hub waited on the host");
     assert!(Arc::ptr_eq(&hub, &ft.hub_of(again.sub_id).unwrap()), "the kept hub was handed back");
     ft.close(again.sub_id);
     let _ = std::fs::remove_dir_all(&home);
@@ -683,18 +684,10 @@ fn a_dead_helper_comes_back_and_its_roots_reattach() {
     let hub = ft.hub_of(ack.sub_id).unwrap();
     let conn = hub.remote.as_ref().unwrap().conn.clone();
     for round in 0..3 {
+        // Each start of the helper is a new epoch: a later one live is the helper come back.
+        let killed = conn.st.lock().epoch;
         conn.kill_current();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !matches!(conn.status(), Status::Down(_)) && conn.status() != Status::Connecting {
-            if conn.status() == Status::Live && Instant::now() > deadline {
-                panic!("round {round}: never went down");
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        while conn.status() != Status::Live {
-            assert!(Instant::now() < deadline, "round {round}: never came back ({:?})", conn.status());
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        conn.wait_state(&format!("round {round}: a new helper live"), |s, epoch| epoch > killed && *s == Status::Live);
     }
     // What changed while it was gone is caught by the reattach's re-listing.
     std::fs::write(t.join("while-away.txt"), "").unwrap();
@@ -891,12 +884,21 @@ sys.exit(1 if bad else 0)
 fn a_helper_leased_as_its_grace_ends_is_not_closed() {
     let home = scratch("grace");
     let rs = remotes(&home, "python3");
+    let graces = rs.hold_graces();
+    let at_lock = graces.at_lock();
+    // Its lease is let go at once: the grace period starts.
     let c = rs.conn("me@here", None);
     let map = rs.map.lock();
-    std::thread::sleep(fast().grace + Duration::from_millis(300));
+    // The grace period ends on another thread while this one holds the registry's lock.
+    let ending = std::thread::spawn({
+        let g = graces.clone();
+        move || g.end_next()
+    });
+    // It has decided nothing yet: it is about to take the lock this test holds.
+    at_lock.recv_timeout(Duration::from_secs(60)).expect("the grace period never ended");
     let lease = Lease::new(map.get("me@here").unwrap().clone());
     drop(map);
-    std::thread::sleep(Duration::from_millis(200));
+    ending.join().unwrap();
     assert_ne!(c.status(), Status::Closed, "closed under a root that had just leased it");
     assert_eq!(rs.count(), 1);
     assert!(Arc::ptr_eq(lease.conn(), &rs.conn("me@here", None)));
@@ -998,8 +1000,9 @@ fn a_first_frame_that_times_out_is_discarded_not_left_half_made() {
     let mut made = false;
     assert!(upload(&root, &file, "big.bin", &mut made).is_err(), "the first frame's answer can't come in time");
     assert!(made, "the helper made the file from a frame that went out");
+    // The discard is answered only after it ran, and the helper runs it after the put it
+    // follows (`a_discard_waits_for_the_put_it_follows`): its answer is the signal.
     ok(root.conn.call("discard", json!({ "root": root.root, "rel": "big.bin" }), &[], T));
-    std::thread::sleep(Duration::from_millis(300));
     assert!(!t.join("big.bin").exists(), "a timed-out first frame left a file behind");
     // An answer that is already refused (another writer's file) is not this import's to discard.
     std::fs::write(t.join("theirs.bin"), b"keep").unwrap();
