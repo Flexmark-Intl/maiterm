@@ -156,6 +156,24 @@ mod tests {
         assert_eq!(split(&all), HARD_WORDS, "{all}");
     }
 
+    /// The spelling both sides must give: the same table is asserted in `shellWords.test.ts`,
+    /// since a key built in TypeScript is compared with one built here.
+    #[test]
+    fn spells_every_word_as_typescript_does() {
+        let table: [(&[&str], &str); 6] = [
+            (&["-i", "/Users/me/My Keys/id", "ews@nova"], "-i '/Users/me/My Keys/id' ews@nova"),
+            (&["/Users/me/Bob's \"Keys\"/id"], r#"'/Users/me/Bob'\''s "Keys"/id'"#),
+            (&["-o", "Port=2222", "-i", "~/.ssh/k", "ews@nova"], "-o Port=2222 -i ~/.ssh/k ews@nova"),
+            (&["/Users/me/Clés/id", "-W", "%h:%p"], "/Users/me/Clés/id -W %h:%p"),
+            (&["C:\\Users\\me\\id", ""], r"'C:\Users\me\id' ''"),
+            (&["a#b", "$x", "ews@[::1]"], "'a#b' '$x' 'ews@[::1]'"),
+        ];
+        for (words, joined) in table {
+            assert_eq!(join(words), joined);
+            assert_eq!(split(joined), words);
+        }
+    }
+
     #[test]
     fn plain_words_keep_their_old_spelling() {
         // Keys, `due.host` and approvals spelled before quoting must still compare equal.

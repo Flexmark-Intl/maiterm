@@ -7,8 +7,9 @@
 //!
 //! - macOS: `sysctl` `KERN_PROCARGS2`.
 //! - Linux: `/proc/<pid>/cmdline`.
-//! - Windows: sysinfo's `cmd()`, which is the process's command line split as the C runtime
-//!   splits it (`CommandLineToArgvW`) — what the program itself saw as argv.
+//! - Windows: not here. `pty::manager`'s Windows foreground walk already holds sysinfo's
+//!   `cmd()` for every process, which is the command line split as the C runtime splits it
+//!   (`CommandLineToArgvW`) — what ssh itself saw as argv — and joins that.
 //!
 //! None when the process is gone or not ours to read; callers fall back to the `ps` line and
 //! must treat what that gives them as lossy.
@@ -80,17 +81,7 @@ fn parse_cmdline(raw: &[u8]) -> Option<Vec<String>> {
     Some(raw.split(|b| *b == 0).map(|w| String::from_utf8_lossy(w).into_owned()).collect())
 }
 
-#[cfg(windows)]
-pub fn argv(pid: u32) -> Option<Vec<String>> {
-    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-    let pid = Pid::from_u32(pid);
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always));
-    let cmd = sys.process(pid)?.cmd();
-    (!cmd.is_empty()).then(|| cmd.iter().map(|w| w.to_string_lossy().into_owned()).collect())
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 pub fn argv(_pid: u32) -> Option<Vec<String>> {
     None
 }

@@ -409,7 +409,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = dir.join("config");
         std::fs::write(&cfg, "Host *\n  RemoteCommand tmux new -A -s main\n").unwrap();
-        let connect = format!("-F {} nohost.invalid", cfg.display());
+        // Shell words, as a stored command is: the temp dir can hold a space ("Application
+        // Support"), which split on whitespace sent ssh a config named after its first half.
+        let connect = crate::util::ssh_words::join([cfg.display().to_string().as_str(), "nohost.invalid"]);
+        let connect = format!("-F {connect}");
         let run = |args: Vec<String>| {
             let out = std::process::Command::new("ssh").args(args).stdin(std::process::Stdio::null()).output().unwrap();
             String::from_utf8_lossy(&out.stderr).to_lowercase()

@@ -233,7 +233,7 @@ pub fn without_control_master(args: &str) -> String {
 }
 
 /// The args of an ssh command, without a leading ssh program (and autossh's own options).
-fn without_program(cmd: &str) -> String {
+pub(crate) fn without_program(cmd: &str) -> String {
     let all = super::ssh_words::split(cmd);
     let mut words = all.iter().map(String::as_str).peekable();
     let Some(first) = words.peek().copied() else { return String::new() };

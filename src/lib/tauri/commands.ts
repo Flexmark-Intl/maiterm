@@ -24,6 +24,7 @@ import type {
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
+import { parseWordSpans, type WordSpan } from '$lib/utils/shellWords';
 import type { AgentBridge, AgentRequest, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, FollowUp, ClaudeSetupReport, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WatchStatus, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
@@ -33,7 +34,21 @@ export async function spawnTerminal(ptyId: string, tabId: string, cols: number, 
 
 export interface PtyInfo {
   cwd: string | null;
+  /** The foreground ssh's command, as shell words (`utils/shellWords`) read from its argv. */
   foreground_command: string | null;
+  /** It came from `ps` instead (argv unreadable): a word with a space in it may be split. */
+  foreground_lossy?: boolean;
+}
+
+/** The words of `s` with their spans: shell words, or — for an old string a quote leaves
+ *  unbalanced (a lossy `ps` line naming `Bob's Keys`) — whitespace runs, as it was read before. */
+function wordSpansOf(s: string): WordSpan[] {
+  return parseWordSpans(s) ?? Array.from(s.matchAll(/\S+/g), m => ({ value: m[0], start: m.index!, end: m.index! + m[0].length }));
+}
+
+/** Kept words, in the spelling they had (the user's own quoting, `~` and all). */
+function rawOf(s: string, words: WordSpan[]): string {
+  return words.map(w => s.slice(w.start, w.end)).join(' ');
 }
 
 /**
@@ -61,11 +76,17 @@ function sshProgramOf(cmd: string): string | null {
 export function sshArgsOf(cmd: string): string {
   const program = cmd.match(SSH_PROGRAM)?.[0];
   if (!program) return cmd.trim();
-  let rest = cmd.slice(program.length).trim();
-  if (/(?:^|\/)autossh$/.test(program)) {
-    rest = rest.replace(/(?:^|\s)-M\s*\S+/g, '').replace(/(?:^|\s)-f(?=\s|$)/g, '').trim();
+  const rest = cmd.slice(program.length).trim();
+  if (!/(?:^|\/)autossh$/.test(program)) return rest;
+  // By word, never by regex over the line: `-M` inside a quoted path is not autossh's.
+  const words = wordSpansOf(rest);
+  const kept: WordSpan[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const v = words[i].value;
+    if (v === '-M') i++;
+    else if (v !== '-f' && !v.startsWith('-M')) kept.push(words[i]);
   }
-  return rest;
+  return rawOf(rest, kept);
 }
 
 /** A stored (cleaned) ssh command as the human would type it: `ssh ews@nova`, or with the
@@ -125,25 +146,32 @@ export function cleanSshCommand(cmd: string): string {
   cleaned = cleaned.replace(/\s+(?:export\s+MAITERM_TAB_ID=|\[ -r ~\/\.maiterm\/).*exec\s+\$?SHELL\s+-l\s*$/, '');
   // Pre-export form (stored commands from earlier builds, and ps output for them).
   cleaned = cleaned.replace(/\s+cd\s+.*?&&\s+exec\s+\$?SHELL\s+-l\s*$/, '');
-  // Remove only flags that buildSshCommand re-injects
-  cleaned = cleaned.replace(/\s+-t(?=\s|$)/g, '');
-  cleaned = cleaned.replace(/\s+-o\s+ControlMaster=\S+/g, '');
-  // Remove any bare ControlMaster=... leftover (malformed from previous cycles)
-  cleaned = cleaned.replace(/\s+ControlMaster=\S+/g, '');
-  // Strip the `ssh` prefix — we store just user@host with any remaining flags
-  cleaned = cleaned.replace(/^ssh\s+/, '');
-  // Deduplicate single-letter flags (e.g. -x -C -x -C → -x -C)
-  const parts = cleaned.split(/\s+/);
+  // The rest by WORD (shell words, as Rust reads it — `utils/shellWords`), never by regex over
+  // the line: `-i '/Users/me/My Keys/id'` is two words, and a `-t` inside a quoted path is not
+  // a flag. Kept words keep the spelling they came with.
+  const words = wordSpansOf(cleaned);
+  const kept: WordSpan[] = [];
   const seen = new Set<string>();
-  const deduped: string[] = [];
-  for (const part of parts) {
-    if (/^-[a-zA-Z]$/.test(part)) {
-      if (seen.has(part)) continue;
-      seen.add(part);
+  for (let i = 0; i < words.length; i++) {
+    const v = words[i].value;
+    // The `ssh` prefix — we store just user@host with any remaining flags
+    if (i === 0 && v === 'ssh') continue;
+    // Only flags that buildSshCommand re-injects
+    if (v === '-t') continue;
+    if (v === '-o' && words[i + 1]?.value.startsWith('ControlMaster=')) {
+      i++;
+      continue;
     }
-    deduped.push(part);
+    // Any bare ControlMaster=... leftover (malformed from previous cycles)
+    if (v.startsWith('ControlMaster=')) continue;
+    // Deduplicate single-letter flags (e.g. -x -C -x -C → -x -C)
+    if (/^-[a-zA-Z]$/.test(v)) {
+      if (seen.has(v)) continue;
+      seen.add(v);
+    }
+    kept.push(words[i]);
   }
-  return deduped.join(' ');
+  return rawOf(cleaned, kept);
 }
 
 /**

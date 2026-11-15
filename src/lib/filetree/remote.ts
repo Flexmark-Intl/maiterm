@@ -9,6 +9,7 @@
  * `connectArgs` keeps, read as ssh's getopt reads them (a port of `watch::parse_ssh`).
  */
 import { sshArgsOf } from '$lib/tauri/commands';
+import { joinWords, splitWords } from '$lib/utils/shellWords';
 
 /** ssh's options that take an argument (OpenSSH's getopt string), as `watch.rs` has them. */
 const SSH_ARG_FLAGS = 'bceilmopBDEFIJLOPQRSwW';
@@ -17,7 +18,8 @@ const SSH_ARG_FLAGS = 'bceilmopBDEFIJLOPQRSwW';
  *  remote command after the destination. Empty for something that names no host. */
 export function connectArgs(cmd: string | null | undefined): string {
   if (!cmd) return '';
-  const words = sshArgsOf(cmd).split(/\s+/).filter(Boolean);
+  // Shell words, as Rust reads them: `-i '/Users/me/My Keys/id'` is one option.
+  const words = splitWords(sshArgsOf(cmd));
   const out: string[] = [];
   let dest = false;
   for (let i = 0; i < words.length; i++) {
@@ -51,7 +53,7 @@ export function connectArgs(cmd: string | null | undefined): string {
       break;
     }
   }
-  return dest ? out.join(' ') : '';
+  return dest ? joinWords(out) : '';
 }
 
 /** Two ssh spellings reach the same host (and port, user and options). */

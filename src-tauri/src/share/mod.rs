@@ -556,20 +556,10 @@ fn ssh_program_len(cmd: &str) -> Option<usize> {
 }
 
 /// The ssh arguments of a stored command, without the sender's ssh program — the receiver's may
-/// be elsewhere or absent — or autossh's own `-M`/`-f` (the frontend's `sshArgsOf`).
+/// be elsewhere or absent — or autossh's own `-M`/`-f` (the frontend's `sshArgsOf`). Read as
+/// shell words (`util::ssh_words`), never split on whitespace.
 fn without_ssh_program(cmd: &str) -> String {
-    let Some(n) = ssh_program_len(cmd) else { return cmd.to_string() };
-    let autossh = cmd[..n].rsplit('/').next() == Some("autossh");
-    let mut out: Vec<&str> = Vec::new();
-    let mut words = cmd[n..].split_whitespace();
-    while let Some(w) = words.next() {
-        if autossh && w == "-M" {
-            words.next();
-        } else if !(autossh && (w == "-f" || w.starts_with("-M"))) {
-            out.push(w);
-        }
-    }
-    out.join(" ")
+    crate::util::ssh_target::without_program(cmd)
 }
 
 /// An ssh command still carrying maiTerm's injected remote command would put the sender's

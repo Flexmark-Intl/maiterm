@@ -217,6 +217,15 @@ stored command, or hands it to maiTerm's own `ssh` (the MCP bridge tunnel, remot
 file), goes through `sshArgsOf`, which drops the program and autossh's `-M`/`-f` — ssh reads `-M`
 as master mode, so `-M 0` would make `0` the host.
 
+**An ssh command is shell words, never whitespace-split.** Rust reads the foreground ssh's argv
+(`KERN_PROCARGS2` / `/proc/<pid>/cmdline`, `util/proc_argv.rs`) and joins it with
+`util/ssh_words.rs`, which quotes only a word that needs it; `ps` is the fallback, flagged
+`foreground_lossy`. So `ssh -i "/Users/me/My Keys/id" ews@nova` arrives as
+`-i '/Users/me/My Keys/id' ews@nova`. Read one through `splitWords` (`utils/shellWords.ts`) in
+TS and `ssh_words::split` in Rust, and build keys with `joinWords`/`ssh_words::join`: the two
+sides must spell a key alike, and a plain word stays bare so keys stored before quoting still
+match. Split on whitespace, that command connected every maiTerm-made ssh to the host `Keys/id`.
+
 ### Remote CWD Detection
 
 Priority: OSC 7 (if not stale) → prompt pattern heuristic.
