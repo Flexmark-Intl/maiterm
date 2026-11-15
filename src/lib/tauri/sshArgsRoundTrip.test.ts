@@ -63,7 +63,7 @@ describe('ssh args keep their words from the stored command back to the stored c
   }
 
   it('keeps a hand-typed command in the spelling its human typed', () => {
-    expect(cleanSshCommand('ssh -t -x -i "/Users/me/My Keys/id" -x ~/x ews@nova')).toBe('-x -i "/Users/me/My Keys/id" ~/x ews@nova');
+    expect(cleanSshCommand('ssh -t -x -i "/Users/me/My Keys/id" -x ~/x ews@nova')).toBe('-t -x -i "/Users/me/My Keys/id" -x ~/x ews@nova');
     // A `-t` or ControlMaster inside a quoted word is part of that word.
     expect(cleanSshCommand("ssh -i '/a -t b' -o 'SetEnv=X=-o ControlMaster=no' h")).toBe("-i '/a -t b' -o 'SetEnv=X=-o ControlMaster=no' h");
     expect(sshArgsOf("autossh -M 0 -f -i '/a -M b' h")).toBe("-i '/a -M b' h");
@@ -117,19 +117,29 @@ describe('ssh args keep their words from the stored command back to the stored c
       'ssh -i k1 -i k2 nova',
       'ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 nova',
       'ssh -p 2222 nova -p 2223',
+      'ssh -v -v nova',
+      'ssh -M -M -S ~/.ssh/cm nova',
+      'ssh -t nova',
+      'ssh -t -t nova',
+      'ssh -tt nova',
+      'ssh nova tmux attach -t main',
     ]) {
       it(`stores options after the host as typed: ${typed}`, () => {
         const stored = cleanSshCommand(typed);
         expect(stored).toBe(typed.slice('ssh '.length));
+        // The shell the line is typed into expands a `~` before ssh sees it.
+        const viaShell = stored.replace(/(^| )~\//g, `$1${process.env.HOME}/`);
         const argv = argvOf(buildSshCommand(stored, '/srv', TAB, bridge));
         const cleaned = cleanSshCommand(joinWords(argv));
-        expect(cleaned).toBe(stored);
+        expect(cleaned).toBe(viaShell);
         expect(cleaned).not.toContain('MAITERM_AUTH');
-        expect(cleanSshCommand(joinWords(wrapped(buildSshCommand(stored, '/srv', TAB, bridge))))).toBe(stored);
+        expect(cleanSshCommand(joinWords(wrapped(buildSshCommand(stored, '/srv', TAB, bridge))))).toBe(viaShell);
+        // And with no remote command, where buildSshCommand adds no `-t` of its own.
+        expect(cleanSshCommand(joinWords(argvOf(buildSshCommand(stored, null))))).toBe(viaShell);
       });
     }
-    it('still folds a repeated switch, but never in the remote command', () => {
-      expect(cleanSshCommand('ssh -x -C -x -C ews@nova')).toBe('-x -C ews@nova');
+    it('folds no switch: each one the user typed is kept', () => {
+      expect(cleanSshCommand('ssh -x -C -x -C ews@nova')).toBe('-x -C -x -C ews@nova');
       expect(cleanSshCommand('ssh -o -x -x nova')).toBe('-o -x -x nova');
       expect(cleanSshCommand('ssh -x nova ls -x -x')).toBe('-x nova ls -x -x');
     });

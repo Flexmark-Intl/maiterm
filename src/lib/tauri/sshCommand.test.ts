@@ -203,7 +203,9 @@ describe('ssh by another name', () => {
 
   it('leaves plain ssh stored bare, as before', () => {
     expect(cleanSshCommand(buildSshCommand('ews@nova', '/srv/app', TAB, bridge))).toBe('ews@nova');
-    expect(normalizeSshInput('/usr/bin/ssh -t ews@nova')).toBe('/usr/bin/ssh ews@nova');
+    // A `-t` the human typed is theirs (only buildSshCommand's own is removed).
+    expect(normalizeSshInput('/usr/bin/ssh -t ews@nova')).toBe('/usr/bin/ssh -t ews@nova');
+    expect(normalizeSshInput('/usr/bin/ssh ews@nova')).toBe('/usr/bin/ssh ews@nova');
     expect(normalizeSshInput('ews@nova')).toBe('ews@nova');
   });
 

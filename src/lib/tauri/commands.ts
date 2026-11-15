@@ -89,36 +89,6 @@ export function remoteCommandIndex(values: string[]): number {
   return values.length;
 }
 
-/**
- * Repeated single-letter SWITCHES dropped (`-x -C -x -C` → `-x -C`), as ssh's getopt reads the
- * words, and only before the remote command. A flag that takes an argument is never touched:
- * `-o A -o B`, `-L a -L b` and `-i k1 -i k2` are all meant, and dropping the second flag left its
- * argument to be read as the host (`-o X=1 Y=2 nova` connects to `y=2`).
- */
-function dedupeSwitches(words: WordSpan[]): WordSpan[] {
-  const values = words.map(w => w.value);
-  const remote = remoteCommandIndex(values);
-  const seen = new Set<string>();
-  const drop = new Set<number>();
-  for (let i = 0; i < remote; i++) {
-    const w = values[i];
-    if (w === '--') break;
-    if (!w.startsWith('-') || w === '-') continue;
-    const flags = w.slice(1);
-    const arg = [...flags].findIndex(c => SSH_ARG_FLAGS.includes(c));
-    if (arg >= 0) {
-      // Its argument is the rest of the word, or else the next word, which is never a switch.
-      if (arg === flags.length - 1) i++;
-      continue;
-    }
-    if (flags.length === 1) {
-      if (seen.has(w)) drop.add(i);
-      seen.add(w);
-    }
-  }
-  return words.filter((_, i) => !drop.has(i));
-}
-
 /** The index of the first word of maiTerm's injected remote command, or `words.length`. */
 function injectedFrom(words: WordSpan[]): number {
   for (let i = 1; i < words.length; i++) {
@@ -179,8 +149,9 @@ export function sshCommandLine(cmd: string): string {
 /**
  * Strip previously-injected flags and remote commands from an SSH command
  * retrieved from the process tree, then normalize to just the user@host
- * portion (with any non-standard flags). Strips `ssh` prefix, `-t`,
- * `-o ControlMaster=...`, and `cd ... && exec $SHELL -l` suffixes.
+ * portion (with any non-standard flags). Strips the `ssh` prefix, the `-t` and
+ * `-o ControlMaster=...` buildSshCommand puts right after the program, and maiTerm's own
+ * remote command (`… && exec $SHELL -l`). Every other word the user typed is kept as typed.
  *
  * A program other than plain `ssh` (a full path, autossh) is KEPT in front — `/usr/bin/ssh
  * ews@nova`, `autossh -M 0 ews@nova` — so a clone or reconnect runs the user's program
@@ -192,9 +163,17 @@ export function sshCommandLine(cmd: string): string {
 export function cleanSshCommand(cmd: string): string {
   const program = sshProgramOf(cmd);
   if (program) {
-    const rest = cmd.slice(program.length).trim();
+    let rest = cmd.slice(program.length).trim();
+    // autossh's own options (`-M 0`, `-f`) can come before maiTerm's flags; they are kept, and
+    // the flags after them are cleaned in the place buildSshCommand would put them.
+    let own = '';
+    if (/(?:^|\/)autossh$/.test(program)) {
+      const lead = rest.match(/^(?:(?:-M\s*\S+|-f)(?:\s+|$))*/)![0];
+      own = lead.trim();
+      rest = rest.slice(lead.length);
+    }
     const cleaned = rest ? cleanSshCommand(`ssh ${rest}`) : '';
-    return cleaned ? `${program} ${cleaned}` : program;
+    return [program, own, cleaned].filter(Boolean).join(' ');
   }
   if (!cmd.match(/^ssh\s/)) return cmd;
   // Remove our injected remote command. The MAITERM_TAB_ID forms MUST be stripped first:
@@ -231,23 +210,30 @@ export function cleanSshCommand(cmd: string): string {
   // the line: `-i '/Users/me/My Keys/id'` is two words, and a `-t` inside a quoted path is not
   // a flag. Kept words keep the spelling they came with.
   const all = wordSpansOf(cleaned);
-  const words = all.slice(0, injectedFrom(all));
-  let kept: WordSpan[] = [];
-  for (let i = 0; i < words.length; i++) {
-    const v = words[i].value;
-    // The `ssh` prefix — we store just user@host with any remaining flags
-    if (i === 0 && v === 'ssh') continue;
-    // Only flags that buildSshCommand re-injects
-    if (v === '-t') continue;
-    if (v === '-o' && words[i + 1]?.value.startsWith('ControlMaster=')) {
-      i++;
-      continue;
-    }
-    // Any bare ControlMaster=... leftover (malformed from previous cycles)
-    if (v.startsWith('ControlMaster=')) continue;
-    kept.push(words[i]);
+  const injected = injectedFrom(all);
+  const words = all.slice(0, injected);
+  // buildSshCommand adds `-t` only with a remote command of its own, so a `-t` is maiTerm's only
+  // when that command was there (whether the regexes above or `injectedFrom` found it).
+  const hadRemote = cleaned !== cmd || injected < all.length;
+  // The `ssh` prefix — we store just user@host with any remaining flags. Then only what
+  // buildSshCommand itself put there, where it puts it: right after the program, `-t` (with a
+  // remote command) and `-o ControlMaster=no` — repeated, as earlier builds let them pile up,
+  // and with any bare `ControlMaster=…` those cycles left. Nothing else: the user's own `-t`,
+  // `-t -t` or `-tt` is theirs, and a `-t` in the remote command (`tmux attach -t main`) is
+  // part of it. Nor is any user switch folded (`-v -v` is more verbose, `-M -M` asks first).
+  let i = words[0]?.value === 'ssh' ? 1 : 0;
+  let ownT = hadRemote;
+  for (;;) {
+    const at = (k: number) => words[i + k]?.value;
+    if (ownT && at(0) === '-t') {
+      // One `-t`: builds before ControlMaster typed `ssh -t host '…'`.
+      ownT = false;
+      i += 1;
+    } else if (at(0) === '-o' && at(1)?.startsWith('ControlMaster=')) i += 2;
+    else if (at(0)?.startsWith('ControlMaster=')) i += 1;
+    else break;
   }
-  kept = dedupeSwitches(kept);
+  const kept = words.slice(i);
   // Last resort: whatever spelling slipped past the above, a stored command never carries
   // maiTerm's env — it is written to disk, retyped into clones and shown on fork cards, and
   // MAITERM_AUTH is a credential. In the REMOTE COMMAND only, cut at the first word that names
