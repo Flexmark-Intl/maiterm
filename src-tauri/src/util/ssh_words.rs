@@ -112,27 +112,16 @@ fn is_bare(c: char) -> bool {
 
 /// One word, quoted only if it needs it: `'…'`, with a `'` inside written `'\''`.
 ///
-/// A backslash goes bare only in a Windows path (`C:\Users\me\.ssh\id`), which keeps the
-/// spelling it always had and cmd.exe — where `'` is not a quote — needs when a clone types it
-/// back. Anywhere else a POSIX shell would eat it (`/Users/me/a\b/id` would reach the clone's ssh
-/// as `/Users/me/ab/id`), so it is quoted.
+/// A word with a backslash is always quoted, a Windows path included (`'C:\Users\me\.ssh\id'`):
+/// bare, a POSIX shell eats it when a clone types the command back — bash, zsh, and on Windows
+/// Git Bash (the default shell there) and WSL, which turn `C:\Users\me\.ssh\id` into
+/// `C:Usersme.sshid`. Quoted, it reads the same in all of them and in PowerShell. A key stored
+/// bare before this still matches: hosts are compared by words (`watch::same_host`).
 pub fn quote(w: &str) -> Cow<'_, str> {
-    if (!w.is_empty() && w.chars().all(is_bare)) || is_windows_path(w) {
+    if !w.is_empty() && w.chars().all(is_bare) {
         return Cow::Borrowed(w);
     }
     Cow::Owned(format!("'{}'", w.replace('\'', r"'\''")))
-}
-
-/// `C:\…` with nothing a shell or `parse` acts on besides its backslashes, and not ending in one
-/// (there it would escape the space `join` puts after it).
-fn is_windows_path(w: &str) -> bool {
-    let b = w.as_bytes();
-    b.len() > 3
-        && b[0].is_ascii_alphabetic()
-        && b[1] == b':'
-        && b[2] == b'\\'
-        && !w.ends_with('\\')
-        && w.chars().all(|c| is_bare(c) || c == '\\')
 }
 
 /// Words joined so `split` reads them back exactly, and so does a POSIX shell.
@@ -146,7 +135,7 @@ where
 
 /// Words that a whitespace split mangles, and some that must stay bare.
 #[cfg(test)]
-pub(crate) const HARD_WORDS: [&str; 11] = [
+pub(crate) const HARD_WORDS: [&str; 12] = [
     "/Users/me/My Keys/id",
     "/Users/me/Bob's \"Keys\"/id",
     "/Users/me/Clés privées/id_ed25519",
@@ -156,6 +145,7 @@ pub(crate) const HARD_WORDS: [&str; 11] = [
     "two  spaces\tand a tab",
     "C:\\Users\\Me\\My Keys\\id",
     "/Users/me/a\\b/id",
+    "C:\\Users\\me\\.ssh\\id",
     "$HOME/`x`/\\",
     "",
 ];
@@ -183,9 +173,9 @@ mod tests {
             (&["/Users/me/Bob's \"Keys\"/id"], r#"'/Users/me/Bob'\''s "Keys"/id'"#),
             (&["-o", "Port=2222", "-i", "~/.ssh/k", "ews@nova"], "-o Port=2222 -i ~/.ssh/k ews@nova"),
             (&["/Users/me/Clés/id", "-W", "%h:%p"], "/Users/me/Clés/id -W %h:%p"),
-            (&["C:\\Users\\me\\id", "", "C:\\dir\\"], r"C:\Users\me\id '' 'C:\dir\'"),
+            (&["C:\\Users\\me\\id", "", "C:\\dir\\"], r"'C:\Users\me\id' '' 'C:\dir\'"),
             (&["a#b", "$x", "ews@[::1]"], "'a#b' '$x' 'ews@[::1]'"),
-            (&["/Users/me/a\\b/id", "x\\y", "C:\\x"], r"'/Users/me/a\b/id' 'x\y' C:\x"),
+            (&["/Users/me/a\\b/id", "x\\y", "C:\\x"], r"'/Users/me/a\b/id' 'x\y' 'C:\x'"),
         ];
         for (words, joined) in table {
             assert_eq!(join(words), joined);

@@ -187,12 +187,21 @@ struct SshParse {
     dest: Option<String>,
     port: Option<String>,
     user: Option<String>,
+    /// The index of the word the remote command starts at (`words.len()` when there is none).
+    remote_at: usize,
+}
+
+/// Where the remote command starts among `cmd`'s words (`parse_ssh`). The frontend's
+/// `remoteCommandIndex` is the same walk; the two are checked against one table.
+#[cfg(test)]
+pub(crate) fn remote_command_index(cmd: &str) -> usize {
+    parse_ssh(cmd).remote_at
 }
 
 /// `cmd` is shell words (`util::ssh_words`): `-i '/Users/me/My Keys/id'` is one option.
 fn parse_ssh(cmd: &str) -> SshParse {
     let words = crate::util::ssh_words::split(cmd);
-    let mut p = SshParse { connect: Vec::new(), dest: None, port: None, user: None };
+    let mut p = SshParse { connect: Vec::new(), dest: None, port: None, user: None, remote_at: words.len() };
     let mut i = 0;
     while i < words.len() {
         let w = words[i].as_str();
@@ -200,12 +209,16 @@ fn parse_ssh(cmd: &str) -> SshParse {
             if p.dest.is_none() {
                 p.dest = words.get(i + 1).cloned();
                 p.connect.extend(p.dest.clone());
+                p.remote_at = (i + 2).min(words.len());
+            } else {
+                p.remote_at = i + 1;
             }
             break;
         }
         let Some(flags) = w.strip_prefix('-').filter(|f| !f.is_empty()) else {
             // The first plain word is the destination; one after it starts the remote command.
             if p.dest.is_some() {
+                p.remote_at = i;
                 break;
             }
             p.dest = Some(w.to_string());
@@ -936,7 +949,7 @@ mod tests {
     #[test]
     fn a_host_stored_before_quoting_still_finds_its_tunnel_and_its_approval() {
         let olds = [
-            // Spelled as before (a backslash goes bare), so the tunnel matches by spelling too.
+            // Each is spelled anew (quoted); the same words, so still the same host.
             "-i C:\\Users\\me\\.ssh\\id ews@nova",
             "-J ews@[fe80::1]:22 nova",
             "-L [::1]:5432:db:5432 nova",
@@ -1006,6 +1019,28 @@ mod tests {
             f.due.host = Some(other.into());
             assert!(!same_host(other, approved));
             assert!(!follow_up_approved(&d, &f), "a script approved for nova must not run on jump: {other}");
+        }
+    }
+
+    /// The frontend's `remoteCommandIndex` asserts this same table (`REMOTE_AT` in
+    /// sshArgsRoundTrip.test.ts): both must say where the remote command starts alike, or the
+    /// frontend cuts a user's option after the host as if it were maiTerm's remote command.
+    #[test]
+    fn the_remote_command_starts_where_the_frontend_says() {
+        let table: [(&str, usize); 10] = [
+            ("ews@nova", 1),
+            ("ews@nova uptime", 1),
+            ("-p 2222 ews@nova uptime -l", 3),
+            ("ews@nova -o SetEnv=MAITERM_PROFILE=dev", 3),
+            ("ews@nova -o 'SendEnv=MAITERM_*' tmux", 3),
+            ("nova -oSendEnv=MAITERM_X -p 2222", 4),
+            ("-xCp2222 nova -t -J bastion ls", 5),
+            ("-- nova uptime", 2),
+            ("nova -- -p 1", 2),
+            ("-p 2222", 2),
+        ];
+        for (args, at) in table {
+            assert_eq!(remote_command_index(args), at, "{args}");
         }
     }
 

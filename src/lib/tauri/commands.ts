@@ -58,22 +58,35 @@ const INJECTED_TAIL = /^'?(?:export\s+MAITERM_TAB_ID=|\[ -r ~\/\.maiterm\/|cd\s)
 /** ssh's options that take an argument (OpenSSH's getopt string, as `watch.rs` has them). */
 const SSH_ARG_FLAGS = 'bceilmopBDEFIJLOPQRSwW';
 
-/** The index of the destination among ssh args, read as ssh's getopt reads them (`watch::
- *  parse_ssh`): the first plain word that isn't an option's argument. -1 if there is none. */
-function destIndex(values: string[]): number {
+/**
+ * Where the remote command starts among ssh args (no program), read as ssh's getopt reads them —
+ * the whole walk of `watch::parse_ssh`, whose index `watch::remote_command_index` must match
+ * (`REMOTE_AT` in sshArgsRoundTrip.test.ts is asserted on both sides). OpenSSH keeps reading
+ * options AFTER the destination (`ssh ews@nova -o SendEnv=X -p 2222`), so the remote command
+ * starts at the first plain word after the destination that isn't an option's argument, or
+ * after `--`. `values.length` when there is none.
+ */
+export function remoteCommandIndex(values: string[]): number {
+  let dest = false;
   for (let i = 0; i < values.length; i++) {
     const w = values[i];
-    if (w === '--') return i + 1 < values.length ? i + 1 : -1;
-    if (!w.startsWith('-') || w === '-') return i;
+    if (w === '--') return dest ? i + 1 : Math.min(i + 2, values.length);
+    if (!w.startsWith('-') || w === '-') {
+      // The first plain word is the destination; one after it starts the remote command.
+      if (dest) return i;
+      dest = true;
+      continue;
+    }
     // A cluster (`-xCp2222`): its argument is the rest of the word, or else the next word.
     const flags = w.slice(1);
+    if (/^t+$/.test(flags)) continue;
     for (let j = 0; j < flags.length; j++) {
       if (!SSH_ARG_FLAGS.includes(flags[j])) continue;
       if (j === flags.length - 1) i++;
       break;
     }
   }
-  return -1;
+  return values.length;
 }
 
 /** The index of the first word of maiTerm's injected remote command, or `words.length`. */
@@ -212,16 +225,15 @@ export function cleanSshCommand(cmd: string): string {
   }
   // Last resort: whatever spelling slipped past the above, a stored command never carries
   // maiTerm's env — it is written to disk, retyped into clones and shown on fork cards, and
-  // MAITERM_AUTH is a credential. In the REMOTE COMMAND only (after the destination), cut at
-  // the first word that names one, with an `export` before it. The user's own options before
-  // the host (`-o SendEnv=MAITERM_*`) are theirs, and cutting there would lose the host.
-  const dest = destIndex(kept.map(w => w.value));
-  if (dest >= 0) {
-    let cut = kept.findIndex((w, i) => i > dest && w.value.includes('MAITERM_'));
-    if (cut >= 0) {
-      if (cut - 1 > dest && /^'?export$/.test(kept[cut - 1].value)) cut--;
-      kept.length = cut;
-    }
+  // MAITERM_AUTH is a credential. In the REMOTE COMMAND only, cut at the first word that names
+  // one, with an `export` before it. The user's own options are theirs, before the host or after
+  // it (`ews@nova -o SendEnv=MAITERM_*`), and cutting there would lose the host, an option's
+  // argument (a dangling `-o` swallows the next remote command) or a later `-p 2222`.
+  const remote = remoteCommandIndex(kept.map(w => w.value));
+  let cut = kept.findIndex((w, i) => i >= remote && w.value.includes('MAITERM_'));
+  if (cut >= 0) {
+    if (cut - 1 >= remote && /^'?export$/.test(kept[cut - 1].value)) cut--;
+    kept.length = cut;
   }
   return rawOf(cleaned, kept);
 }

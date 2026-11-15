@@ -1,12 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { buildSshCommand, cleanSshCommand, sshArgsOf } from './commands';
+import { buildSshCommand, cleanSshCommand, remoteCommandIndex, sshArgsOf } from './commands';
 import { connectArgs, sameSshHost } from '$lib/filetree/remote';
 import { hostLabel } from '$lib/followUps/model';
 import { joinWords, splitWords } from '$lib/utils/shellWords';
 import { HARD_WORDS } from '$lib/utils/shellWords.test';
 
 const TAB = 'a1b2c3d4-5e6f-7788-99aa-bbccddeeff00';
+
+/** Where the remote command starts: the same table is asserted against `watch::parse_ssh` in
+ *  watch.rs (`remote_command_index`). */
+export const REMOTE_AT: [string, number][] = [
+  ['ews@nova', 1],
+  ['ews@nova uptime', 1],
+  ['-p 2222 ews@nova uptime -l', 3],
+  ['ews@nova -o SetEnv=MAITERM_PROFILE=dev', 3],
+  ["ews@nova -o 'SendEnv=MAITERM_*' tmux", 3],
+  ['nova -oSendEnv=MAITERM_X -p 2222', 4],
+  ['-xCp2222 nova -t -J bastion ls', 5],
+  ['-- nova uptime', 2],
+  ['nova -- -p 1', 2],
+  ['-p 2222', 2],
+];
 
 /** The argv a POSIX shell gives the program when `line` is typed into it — what Rust then reads
  *  back off the process (`KERN_PROCARGS2`, `/proc/<pid>/cmdline`). */
@@ -91,6 +106,17 @@ describe('ssh args keep their words from the stored command back to the stored c
       expect(cleanSshCommand('ssh -o SetEnv=MAITERM_PROFILE=dev ews@nova')).toBe('-o SetEnv=MAITERM_PROFILE=dev ews@nova');
       expect(cleanSshCommand("ssh -o 'SendEnv=MAITERM_*' ews@nova 'MAITERM_AUTH=x tmux'")).toBe("-o 'SendEnv=MAITERM_*' ews@nova");
     });
+    // OpenSSH reads options after the destination too: those are the user's, not a remote command.
+    for (const typed of ['ssh ews@nova -o SetEnv=MAITERM_PROFILE=dev', "ssh ews@nova -o 'SendEnv=MAITERM_*'", 'ssh nova -oSendEnv=MAITERM_X -p 2222']) {
+      it(`stores options after the host as typed: ${typed}`, () => {
+        const stored = cleanSshCommand(typed);
+        expect(stored).toBe(typed.slice('ssh '.length));
+        const argv = argvOf(buildSshCommand(stored, '/srv', TAB, bridge));
+        const cleaned = cleanSshCommand(joinWords(argv));
+        expect(cleaned).toBe(stored);
+        expect(cleaned).not.toContain('MAITERM_AUTH');
+      });
+    }
     it('never keeps a word naming maiTerm env, whatever else it looks like', () => {
       expect(cleanSshCommand("ssh ews@nova 'MAITERM_AUTH=tok-123 tmux'")).toBe('ews@nova');
       expect(cleanSshCommand('ssh ews@nova export MAITERM_PORT=1 MAITERM_AUTH=x; tmux')).toBe('ews@nova');
@@ -103,7 +129,18 @@ describe('ssh args keep their words from the stored command back to the stored c
       expect(sameSshHost(old, connectArgs(old)), old).toBe(true);
       expect(sameSshHost(old, 'ews@nova')).toBe(false);
     }
-    expect(connectArgs('-i C:\\Users\\me\\.ssh\\id ews@nova')).toBe('-i C:\\Users\\me\\.ssh\\id ews@nova');
+    expect(connectArgs('-i C:\\Users\\me\\.ssh\\id ews@nova')).toBe("-i 'C:\\Users\\me\\.ssh\\id' ews@nova");
+  });
+
+  // A Windows key path is quoted, so a POSIX shell (Git Bash, WSL) gives ssh the path itself.
+  it('gives a Windows path to ssh intact through a POSIX shell', () => {
+    const stored = joinWords(['-i', 'C:\\Users\\me\\.ssh\\id', 'ews@nova']);
+    expect(stored).toBe("-i 'C:\\Users\\me\\.ssh\\id' ews@nova");
+    expect(argvOf(buildSshCommand(stored, '/srv', TAB)).slice(4, 7)).toEqual(['-i', 'C:\\Users\\me\\.ssh\\id', 'ews@nova']);
+  });
+
+  it('finds where the remote command starts as Rust does', () => {
+    for (const [args, at] of REMOTE_AT) expect(remoteCommandIndex(splitWords(args)), args).toBe(at);
   });
 
   it('still cleans a lossy ps line, an apostrophe included', () => {

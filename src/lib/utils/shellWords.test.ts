@@ -12,6 +12,7 @@ export const HARD_WORDS = [
   'two  spaces\tand a tab',
   'C:\\Users\\Me\\My Keys\\id',
   '/Users/me/a\\b/id',
+  'C:\\Users\\me\\.ssh\\id',
   '$HOME/`x`/\\',
   '',
 ];
@@ -22,9 +23,9 @@ export const JOINED: [string[], string][] = [
   [['/Users/me/Bob\'s "Keys"/id'], `'/Users/me/Bob'\\''s "Keys"/id'`],
   [['-o', 'Port=2222', '-i', '~/.ssh/k', 'ews@nova'], '-o Port=2222 -i ~/.ssh/k ews@nova'],
   [['/Users/me/Clés/id', '-W', '%h:%p'], '/Users/me/Clés/id -W %h:%p'],
-  [['C:\\Users\\me\\id', '', 'C:\\dir\\'], "C:\\Users\\me\\id '' 'C:\\dir\\'"],
+  [['C:\\Users\\me\\id', '', 'C:\\dir\\'], "'C:\\Users\\me\\id' '' 'C:\\dir\\'"],
   [['a#b', '$x', 'ews@[::1]'], "'a#b' '$x' 'ews@[::1]'"],
-  [['/Users/me/a\\b/id', 'x\\y', 'C:\\x'], "'/Users/me/a\\b/id' 'x\\y' C:\\x"],
+  [['/Users/me/a\\b/id', 'x\\y', 'C:\\x'], "'/Users/me/a\\b/id' 'x\\y' 'C:\\x'"],
 ];
 
 describe('shell words', () => {
