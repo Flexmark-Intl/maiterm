@@ -41,7 +41,7 @@ pub enum WakeOutcome {
     /// The window was asked to relaunch it and didn't answer: the Hive stays active and the
     /// message owed, since a coordinator that did come up gets it at its start.
     Unconfirmed,
-    /// It was still running (inside `exit_coordinator`'s wait) and has the message now.
+    /// It was running and has the message now.
     Delivered,
 }
 
@@ -118,12 +118,11 @@ fn check_text(text: &str) -> Result<String, String> {
     Ok(t.to_string())
 }
 
-/// One of a wake or the coordinator's exit at a time per Hive: the phone and the desktop at once
-/// would both relaunch, and an exit's status read and signal must not straddle a wake's status
-/// flip and delivery.
+/// One wake (or New goal) at a time per Hive: the phone and the desktop at once would both
+/// relaunch.
 static WAKING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Longer than anything that holds it: a wake's relaunch request, a delivery, an exit's grace.
+/// Longer than anything that holds it: a wake's relaunch request, a delivery.
 pub(crate) const TURN_WAIT: Duration = Duration::from_secs(30);
 const TURN_POLL: Duration = Duration::from_millis(50);
 
@@ -165,29 +164,6 @@ impl Drop for Waking {
     }
 }
 
-/// Hives whose coordinator was signalled and hadn't yet given its terminal back: a wake must not
-/// type into the dying agent.
-static ENDING: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-/// `exit_coordinator`, holding the Hive's turn, after the signal went: the turn is kept until the
-/// agent has left its terminal (or `grace` ran out, which marks it ending), so a wake that waited
-/// for the turn finds a shell and relaunches.
-pub(super) async fn hold_until_ended<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, tab: &str, grace: Duration) {
-    let start = Instant::now();
-    while ctx.window.front(tab).await == Front::Job {
-        if start.elapsed() >= grace {
-            log::warn!("hive {}: the coordinator still holds its terminal after its signal", caller.hive.id);
-            let key = caller.paths.root.to_string_lossy().to_string();
-            let mut ending = ENDING.lock().unwrap_or_else(|e| e.into_inner());
-            if !ending.contains(&key) {
-                ending.push(key);
-            }
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(250).min(grace)).await;
-    }
-}
-
 /// Wakes the caller's Done Hive with the human's `text` (§11.4, plan D10–D12). `by` is
 /// `BY_DESKTOP` or `BY_PHONE`; `msg_id` is the id a phone send will be answered with, kept with
 /// the owed message so the phone sees it held, then typed. Err(`NOT_DONE`) when the Hive isn't
@@ -209,12 +185,9 @@ pub(crate) async fn wake<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text:
     let text = check_text(text)?;
     let tab = coordinator_tab(ctx.data, caller).ok_or("This Hive has no queen tab to wake.")?;
     match ctx.window.front(&tab).await {
-        Front::Job if ENDING.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) => {
-            return Err("This Hive's queen is still being ended: send this again in a moment.".to_string())
-        }
         Front::Job => return wake_running(ctx, caller, &before, &tab, &text, by).await,
         Front::Unknown => return Err("maiTerm can't tell what holds the queen's terminal, so the Hive wasn't woken. Try again in a moment.".to_string()),
-        Front::Shell | Front::NoTerminal => ENDING.lock().unwrap_or_else(|e| e.into_inner()).retain(|k| k != &key),
+        Front::Shell | Front::NoTerminal => {}
     }
 
     // Owed before the flip, so a restart between them still delivers it once the Hive runs.
@@ -273,11 +246,8 @@ pub(crate) async fn wake_with_notice<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &C
     }
     let tab = coordinator_tab(ctx.data, caller).ok_or("This Hive has no queen tab to wake.")?;
     match ctx.window.front(&tab).await {
-        Front::Job if ENDING.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) => {
-            return Err("This Hive's queen is still being ended: try again in a moment.".to_string())
-        }
         Front::Job => {
-            // Still up inside `exit_coordinator`'s wait: active keeps it, and it hears this now.
+            // She is still running: active again, and she hears this now.
             let change = save_status(ctx, caller, &[STATUS_DONE], Some(STATUS_ACTIVE), |h| h.done_at = None)?;
             return match ctx.window.deliver(&tab, text, what).await {
                 Sent::Delivered | Sent::Held(_) => {
@@ -292,7 +262,7 @@ pub(crate) async fn wake_with_notice<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &C
             };
         }
         Front::Unknown => return Err("maiTerm can't tell what holds the queen's terminal, so the Hive wasn't woken. Try again in a moment.".to_string()),
-        Front::Shell | Front::NoTerminal => ENDING.lock().unwrap_or_else(|e| e.into_inner()).retain(|k| k != &key),
+        Front::Shell | Front::NoTerminal => {}
     }
     // Owed before the flip, so a restart between them still delivers it once the Hive runs. A
     // failed wake leaves it owed: it goes out whenever the queen next starts.
@@ -357,10 +327,8 @@ async fn owe(caller: &Caller, text: String, by: &str, since: Option<i64>, joinin
     .await
 }
 
-/// The coordinator is still up (Done, and `exit_coordinator` hasn't ended it yet): the Hive goes
-/// active, which keeps it from being ended, and the message is typed now (plan D12). The caller
-/// holds the Hive's turn, so the exit can't read the status or signal in between; after a refused
-/// delivery it finds Done again and ends the agent as before.
+/// The coordinator is running (she stays up after Done): the Hive goes active and the message is
+/// typed now (plan D12). A refused delivery puts Done back.
 async fn wake_running<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, before: &Hive, tab: &str, text: &str, by: &str) -> Result<WakeOutcome, String> {
     let change = save_status(ctx, caller, &[STATUS_DONE], Some(STATUS_ACTIVE), |h| h.done_at = None)?;
     match ctx.window.deliver(tab, wake_text(before.done_at, by, text), "Hive wake").await {

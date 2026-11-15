@@ -10,9 +10,9 @@
 //! alone (plan D6).
 //!
 //! On accept the Hive goes `done`, its window stops the stack services it started and cancels its
-//! tabs' follow-ups (`hive.finish`), and the coordinator is ended once its answer has reached it
-//! (`exit_coordinator`). Every launch in a Done Hive is refused (`launch::DONE_REFUSAL`) until a
-//! message from the human wakes it (`wake`).
+//! tabs' follow-ups (`hive.finish`). The coordinator keeps running (2026-11-15), its tools limited
+//! to reads. Every launch in a Done Hive is refused (`launch::DONE_REFUSAL`) until a message from
+//! the human wakes it (`wake`).
 
 mod wake;
 pub use wake::{wake_text, WakeOutcome, BY_DESKTOP, BY_PHONE, NOT_DONE};
@@ -51,13 +51,6 @@ const MAX_DECIDED: usize = 200;
 pub const RECORD_VERSION: u32 = 1;
 pub const KIND_FINISH: &str = "finish";
 pub const BY_COORDINATOR: &str = "coordinator";
-
-/// The coordinator is ended only after its answer has reached it, and once it is idle (plan D8).
-pub const EXIT_MIN_WAIT: Duration = Duration::from_secs(3);
-pub const EXIT_POLL: Duration = Duration::from_secs(1);
-pub const EXIT_MAX_WAIT: Duration = Duration::from_secs(120);
-/// How long the exit keeps a wake waiting for the signalled agent to give its terminal back.
-const EXIT_END_GRACE: Duration = Duration::from_secs(10);
 
 // ── The record ──
 
@@ -1195,8 +1188,8 @@ pub fn finish_tool_definition(tab_id: &Value) -> Value {
     })
 }
 
-/// `hiveFinish` (§11.4): checked, recorded, Done, then the window's half. The caller ends the
-/// coordinator afterwards (`exit_coordinator`), never inside this call.
+/// `hiveFinish` (§11.4): checked, recorded, Done, then the window's half. The coordinator keeps
+/// running: a wake types into her.
 pub(crate) async fn finish_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, args: &Value) -> Result<Value, String> {
     // By folder, not id: a test's scratch Hives share ids.
     let _held = Finishing::take(&caller.paths.root.to_string_lossy()).ok_or("A hiveFinish of this Hive is already being checked.")?;
@@ -1265,52 +1258,6 @@ fn hive_tab_ids<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller) -> Vec<String>
         .and_then(|w| w.workspaces.iter().find(|ws| ws.id == caller.workspace_id))
         .map(|ws| ws.panes.iter().flat_map(|p| p.tabs.iter()).filter(|t| t.hive_role.is_some()).map(|t| t.id.clone()).collect())
         .unwrap_or_default()
-}
-
-/// Whether the coordinator is ended now: only while the Hive is still done (a wake cancels it),
-/// once it is idle or has had its time.
-pub fn should_exit(status: &str, busy: bool, waited_out: bool) -> bool {
-    status == STATUS_DONE && (!busy || waited_out)
-}
-
-/// After `hiveFinish` answered: the coordinator's agent is signalled once idle, the tab and its
-/// shell kept (plan D8). Whether a signal went.
-pub(crate) async fn exit_coordinator<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, min_wait: Duration, poll: Duration, max_wait: Duration) -> bool {
-    tokio::time::sleep(min_wait).await;
-    let start = std::time::Instant::now();
-    let key = caller.paths.root.to_string_lossy().to_string();
-    loop {
-        // Each read and the signal under the Hive's turn: a wake holds it from its status flip
-        // through its delivery (or its rollback), so neither half of one is ever seen alone.
-        let Some(_turn) = wake::Waking::take(&key) else {
-            tokio::time::sleep(poll).await;
-            continue;
-        };
-        let status = super::autonomy::current_hive(ctx, caller).map(|h| h.status).unwrap_or_default();
-        if status != STATUS_DONE {
-            log::info!("hive {}: the coordinator stays: the Hive is {status} again", caller.hive.id);
-            return false;
-        }
-        let Some(tab) = super::tools::coordinator_tab(ctx.data, caller) else { return false };
-        if should_exit(&status, ctx.window.agent_busy(&tab), start.elapsed() >= max_wait) {
-            return match ctx.window.stop_agent(&tab).await {
-                Ok(sent) => {
-                    log::info!("hive {}: coordinator {}", caller.hive.id, if sent { "ended after Done" } else { "had already exited" });
-                    if sent {
-                        // A wake waiting on the turn then finds the shell, not a dying agent.
-                        wake::hold_until_ended(ctx, caller, &tab, EXIT_END_GRACE.min(max_wait)).await;
-                    }
-                    sent
-                }
-                Err(e) => {
-                    log::warn!("hive {}: coordinator not ended after Done: {e}", caller.hive.id);
-                    false
-                }
-            };
-        }
-        drop(_turn);
-        tokio::time::sleep(poll).await;
-    }
 }
 
 /// The last report, for the Hive header's Report (plan D7).

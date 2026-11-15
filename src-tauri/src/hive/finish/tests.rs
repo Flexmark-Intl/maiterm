@@ -985,40 +985,6 @@ async fn a_failed_save_leaves_the_hive_active() {
     assert!(rig.seen.lock().unwrap().calls.is_empty(), "the window's half never ran");
 }
 
-// ── Ending the coordinator ──
-
-#[test]
-fn the_coordinator_is_ended_only_while_done_once_idle_or_out_of_time() {
-    for (status, busy, waited, exit) in [
-        (STATUS_DONE, false, false, true),
-        (STATUS_DONE, true, false, false),
-        (STATUS_DONE, true, true, true),
-        (STATUS_ACTIVE, false, false, false),
-        (STATUS_ACTIVE, true, true, false),
-        (STATUS_PAUSED, false, true, false),
-    ] {
-        assert_eq!(should_exit(status, busy, waited), exit, "{status} busy={busy} waited={waited}");
-    }
-}
-
-#[tokio::test]
-async fn a_wake_cancels_the_exit_and_an_idle_coordinator_is_signalled() {
-    let rig = Rig::new("exit");
-    let ms = Duration::from_millis;
-    rig.seen.lock().unwrap().front.insert("coord".into(), Front::Job);
-    // Woken (active again) before the wait ended: nothing is signalled.
-    assert!(!exit_coordinator(&rig.ctx(ok_save), &rig.caller, ms(1), ms(1), ms(50)).await);
-    rig.edit_hive(|h| h.status = STATUS_DONE.into());
-    // Busy past its time: signalled anyway.
-    rig.seen.lock().unwrap().busy = true;
-    assert!(exit_coordinator(&rig.ctx(ok_save), &rig.caller, ms(1), ms(5), ms(20)).await);
-    assert_eq!(rig.seen.lock().unwrap().stopped, vec!["coord"]);
-    // Idle: signalled at once; an agent already gone is no signal.
-    rig.seen.lock().unwrap().busy = false;
-    assert!(!exit_coordinator(&rig.ctx(ok_save), &rig.caller, ms(1), ms(1), ms(50)).await, "the shell has its prompt now");
-    rig.seen.lock().unwrap().front.insert("coord".into(), Front::Job);
-    assert!(exit_coordinator(&rig.ctx(ok_save), &rig.caller, ms(1), ms(1), ms(50)).await);
-}
 
 // ── Waking a Done Hive ──
 
@@ -1231,80 +1197,6 @@ async fn a_relaunch_the_window_never_answers_keeps_the_hive_awake_and_the_messag
     assert_eq!(rig.log_kinds(), vec![wake::KIND_WAKE]);
     assert_eq!(rig.seen.lock().unwrap().changed.last().map(|h| h.status.as_str()), Some(STATUS_ACTIVE));
     assert!(matches!(rig.route(true), Route::Wake(_)), "still joins while it may be starting");
-}
-
-#[tokio::test]
-async fn an_exit_never_reads_a_wake_halfway() {
-    let rig = Rig::done("wake-exit-turn");
-    let ms = Duration::from_millis;
-    rig.seen.lock().unwrap().front.insert("coord".into(), Front::Job);
-    let ctx = rig.ctx(ok_save);
-    // A wake mid-way: active saved, its delivery then refused and Done put back.
-    let turn = wake::Waking::take(&rig.caller.paths.root.to_string_lossy()).unwrap();
-    rig.edit_hive(|h| h.status = STATUS_ACTIVE.into());
-    let waking = async {
-        tokio::time::sleep(ms(40)).await;
-        rig.edit_hive(|h| h.status = STATUS_DONE.into());
-        drop(turn);
-    };
-    let (signalled, ()) = tokio::join!(exit_coordinator(&ctx, &rig.caller, ms(1), ms(1), ms(2000)), waking);
-    assert!(signalled, "Done again: the coordinator is still ended");
-    assert_eq!(rig.seen.lock().unwrap().stopped, vec!["coord"]);
-}
-
-#[tokio::test]
-async fn a_wake_during_the_exit_waits_for_the_agent_to_go_then_relaunches() {
-    let rig = Rig::done("wake-exit-race");
-    let ms = Duration::from_millis;
-    {
-        let mut s = rig.seen.lock().unwrap();
-        s.front.insert("coord".into(), Front::Job);
-        s.linger = true;
-    }
-    let ctx = rig.ctx(ok_save);
-    let signalled = || !rig.seen.lock().unwrap().stopped.is_empty();
-    let human = async {
-        while !signalled() {
-            tokio::time::sleep(ms(2)).await;
-        }
-        wake(&ctx, &rig.caller, "One more thing", BY_DESKTOP, None).await
-    };
-    // The agent leaves its terminal a moment after its signal.
-    let dying = async {
-        while !signalled() {
-            tokio::time::sleep(ms(2)).await;
-        }
-        tokio::time::sleep(ms(60)).await;
-        rig.seen.lock().unwrap().front.insert("coord".into(), Front::Shell);
-    };
-    let (exited, woke, ()) = tokio::join!(exit_coordinator(&ctx, &rig.caller, ms(1), ms(1), ms(2000)), human, dying);
-    assert!(exited);
-    assert_eq!(woke, Ok(WakeOutcome::Relaunching), "never typed into the dying agent");
-    let seen = rig.seen.lock().unwrap();
-    assert!(seen.delivered.is_empty());
-    assert_eq!(seen.calls.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), vec![rpc::VERB_RELAUNCH]);
-    drop(seen);
-    assert_eq!(rig.owed_wake().unwrap().text, "One more thing");
-    assert_eq!(rig.hive().status, STATUS_ACTIVE);
-}
-
-#[tokio::test]
-async fn an_agent_that_outlives_its_signal_is_never_typed_into() {
-    let rig = Rig::done("wake-exit-stuck");
-    let ms = Duration::from_millis;
-    {
-        let mut s = rig.seen.lock().unwrap();
-        s.front.insert("coord".into(), Front::Job);
-        s.linger = true;
-    }
-    assert!(exit_coordinator(&rig.ctx(ok_save), &rig.caller, ms(1), ms(1), ms(30)).await);
-    let e = rig.wake("hello").await.unwrap_err();
-    assert!(e.contains("still being ended"), "{e}");
-    assert!(rig.seen.lock().unwrap().delivered.is_empty());
-    assert_eq!(rig.hive().status, STATUS_DONE);
-    // Gone at last: the next wake relaunches.
-    rig.seen.lock().unwrap().front.insert("coord".into(), Front::Shell);
-    assert_eq!(rig.wake("hello").await, Ok(WakeOutcome::Relaunching));
 }
 
 /// The third live test: Done survived an Undo of the land its report relied on. The header now
