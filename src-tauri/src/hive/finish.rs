@@ -299,7 +299,7 @@ pub(crate) async fn set_criteria_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &
     // addressed. The same turn `finish_tool` takes, by folder.
     let _held = Finishing::take(&caller.paths.root.to_string_lossy()).ok_or("A hiveFinish of this Hive is being checked: set the criteria once it has answered.")?;
     if current_hive(ctx, caller)?.status == STATUS_DONE {
-        return Err("This Hive is done: its criteria stand as it finished. A message from your human wakes it.".to_string());
+        return Err(format!("This Hive is done: its criteria stand as it finished. {}", super::tools::DONE_WAKE_HINT));
     }
     let (criteria, reason) = parse_criteria(args)?;
     let list = criteria.clone();
