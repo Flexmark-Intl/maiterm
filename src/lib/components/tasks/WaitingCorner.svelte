@@ -122,15 +122,25 @@
 
   // The exception: a Run that opened a new tab took the human away mid-question (the card
   // still waits for "I've done it"). Coming back shows it again, passively — it takes no
-  // keyboard, so the hazard above doesn't apply. Only while that question is still here.
+  // keyboard, so the hazard above doesn't apply. Only while that same question (its asked_at,
+  // not just its task) is still waiting.
   untrack(() => {
-    const key = waitingStore.takeReturn(mountedTabId);
-    if (key && waiting.some((i) => i.key === key)) waitingStore.openPassive(mountedTabId, key);
+    const ret = waitingStore.takeReturn(mountedTabId);
+    if (!ret) return;
+    const task = tasksStore.findAnywhere(ret.taskId)?.task;
+    if (task?.status !== 'blocked' || task.blocker?.asked_at !== ret.askedAt) return;
+    if (!ret.extra && !waiting.some((i) => i.key === ret.taskId)) return;
+    waitingStore.openPassive(mountedTabId, ret.taskId, ret.extra ? ret.taskId : null);
   });
 
   /** BlockerCard's Run: a run in a new tab leaves this one, so ask to come back open. */
-  function onran(key: string, where: 'agent' | 'tab') {
-    if (where === 'tab') waitingStore.reopenOnReturn(mountedTabId, key);
+  function onran(item: WaitingItem, where: 'agent' | 'tab') {
+    if (where !== 'tab' || item.kind !== 'task' || !item.task.blocker) return;
+    waitingStore.reopenOnReturn(mountedTabId, {
+      taskId: item.task.id,
+      askedAt: item.task.blocker.asked_at,
+      extra: item === extra,
+    });
   }
 
   // Everything answered: show the last receipt for a moment, then go back to nothing.
@@ -163,7 +173,7 @@
             <article data-key={item.key} class:focused={item.key === opened.focus}>
               {#if item.kind === 'task'}
                 <h4>{item.task.title}</h4>
-                <BlockerCard task={item.task} variant="card" onnote={showNote} onran={(where) => onran(item.key, where)} />
+                <BlockerCard task={item.task} variant="card" onnote={showNote} onran={(where) => onran(item, where)} />
               {:else if item.kind === 'script'}
                 <ScriptApprovalCard tabId={item.approval.tabId} followUp={item.approval.followUp} {listChangedAt} onnote={showNote} />
               {:else if item.kind === 'rules'}

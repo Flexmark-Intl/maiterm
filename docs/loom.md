@@ -240,8 +240,8 @@ are the point of the component:
   the agent (found in review). One exception, which takes no keyboard: a Run that opened a new
   tab took the human away mid-question, so the card is shown again when they come back to the
   agent's tab, PASSIVELY (`waitingStore.reopenOnReturn` → `openPassive`: scrolled into view,
-  focus left on the terminal). One-shot, only while that question is still waiting, and Hide
-  forgets it.
+  focus left on the terminal). One-shot, and only while that same question (its `asked_at`)
+  is still waiting.
 - **A click moves focus into the card** (its answer field, on a frame).
 - **Hide and Escape give focus back** to where it was, or to the tab's terminal when that was
   nothing (`terminalsStore.focusTerminal`). Answering the last card removes the focused field,
