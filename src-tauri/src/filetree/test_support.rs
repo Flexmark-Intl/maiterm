@@ -5,6 +5,11 @@
 //! hub reports: its watcher started, a batch of disk events processed, its listings done.
 //! The only clock left is `HANG`, which turns a hang into a failure that names what it was
 //! waiting for; it never decides whether a test passes.
+//!
+//! What the hub reports about itself (`watching`, `idle`) is exact. What the OS reports is
+//! not: macOS FSEvents under disk load delivers changes up to 20 s late, after later ones, or
+//! never, with no flag saying so (worker #116, shared memory macos-files-watcher-silent-loss).
+//! A test that isn't about the watcher must not wait for an OS event (`barrier`).
 
 use std::cell::Cell;
 use std::path::Path;
@@ -68,16 +73,16 @@ impl Probe {
         assert!(!hub.watch_pending());
     }
 
-    /// Every change made on disk before this call has reached the hub and been processed.
+    /// The hub has processed the event for a new file written now, `ft-barrier-<uuid>` in
+    /// `dir` (a folder the hub's watcher covers). Returns the names of the files written: they
+    /// are real files, and a listing shows them. If a batch says events were lost (an
+    /// overflowing channel) before the file's own event came, a fresh file is written.
     ///
-    /// Writes a new empty file `ft-barrier-<uuid>` into `dir` (a folder the hub's watcher
-    /// covers) and waits for the batch that carries it. A watcher reports changes in the
-    /// order they happened, and the coalescer hands batches over in order, so by the time
-    /// that batch is processed every earlier change has been too, or was covered by a
-    /// re-list from the root when events were lost. If the barrier's own event was lost (an
-    /// overflowing channel), the batch that says so is followed by a fresh barrier.
-    /// Returns the names of the barrier files written: they are real files, and a listing
-    /// shows them.
+    /// **Not a barrier.** It says nothing about changes made before it: the OS doesn't report
+    /// in order. FSEvents under load can deliver an earlier change after this one, up to 20 s
+    /// late, or never, and this then hangs. Use it only where event delivery is the test's
+    /// subject (the watcher reporting a change at all), never to wait for "everything before"
+    /// in a test about something else.
     pub fn barrier(&self, dir: &Path) -> Vec<String> {
         let mut written = Vec::new();
         loop {
@@ -105,7 +110,8 @@ impl Probe {
         }
     }
 
-    /// `barrier`, then `idle`: what the disk did before this call has been listed and sent.
+    /// `barrier`, then `idle`. Its event was processed and whatever it asked to list has been
+    /// listed and sent; as `barrier` says, earlier changes may still be on their way.
     pub fn settle(&self, hub: &RootHub, dir: &Path) -> Vec<String> {
         let names = self.barrier(dir);
         self.idle(hub);

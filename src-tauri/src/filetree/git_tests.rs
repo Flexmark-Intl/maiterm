@@ -127,9 +127,8 @@ fn run_covering(rx: &std::sync::mpsc::Receiver<Decision>, what: &str, covers: u6
 }
 
 /// Every run signalled so far has finished, and the worker has nothing due: a test measures
-/// or holds runs from here. Call it after `wait_for_watcher`, whose barrier means the watcher
-/// has started (its `Open`) and has reported everything the setup wrote, so no signal is still
-/// on its way.
+/// or holds runs from here. A watcher's late report may still add a run afterwards; the
+/// covers checks tell those apart from the runs a test asks for.
 fn settle_git(core: &GitCore, rx: &std::sync::mpsc::Receiver<Decision>) {
     let signalled = core.test_signals();
     run_covering(rx, "every run signalled so far", signalled);
@@ -153,8 +152,19 @@ fn idle_without_repeats(rx: &std::sync::mpsc::Receiver<Decision>, mut covered: u
     }
 }
 
+/// Short delays, so runs come quickly. A run is never slow and never killed by the clock
+/// (`slow_run` and `timeout` are HANG): two real `git status` runs that take seconds on a
+/// loaded machine must not turn on slow mode in a test that isn't about it. The slow-mode test
+/// feeds its durations through `GitProbe::set_took` instead.
 fn fast_timing() -> GitTiming {
-    GitTiming { min_gap: Duration::from_millis(20), index_delay: Duration::from_millis(20), worktree_delay: Duration::from_millis(40), ..GitTiming::default() }
+    GitTiming {
+        min_gap: Duration::from_millis(20),
+        index_delay: Duration::from_millis(20),
+        worktree_delay: Duration::from_millis(40),
+        slow_run: HANG,
+        timeout: HANG,
+        ..GitTiming::default()
+    }
 }
 
 #[test]
@@ -300,15 +310,18 @@ fn slow_mode_trips_on_two_slow_runs_skips_worktree_edges_and_recovers() {
     let timing = fast_timing();
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
     ft.set_git_config(GitConfig { timing, probe: Some(git_probe.clone()), ..GitConfig::default() });
+    // Every run is measured as instant until the test says otherwise: the open's runs are
+    // never timed by the clock.
+    git_probe.set_took(Some(Duration::ZERO));
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
     let core = hub.git.clone().unwrap();
-    // The watcher's start signals one more run (`Open`), and it may still report the setup's
-    // own writes: both are waited for here (the barrier), so neither lands among the runs the
-    // test counts.
-    wait_for_watcher(&probe, &ft, ack.sub_id, &r);
+    // The watcher's start signals one more run (`Open`, before `WatchStarted`). A change the
+    // watcher reports late adds runs whenever it lands; `run_covering` and the covers checks
+    // count only the runs that answer the test's own signals, so those can't confuse them.
+    probe.watching(&hub);
     settle_git(&core, &rx);
     assert_ne!(rec.healths().last().map(String::as_str), Some("slow"));
 
@@ -411,13 +424,13 @@ fn signals_during_a_run_collapse_into_one_rerun() {
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
     let core = hub.git.clone().unwrap();
-    // The watcher's start signals one more run (`Open`), and it may still report the setup's
-    // own writes: both are waited for here (the barrier), so neither lands inside the held run
-    // or the rerun counted below.
-    wait_for_watcher(&probe, &ft, ack.sub_id, &r);
+    // The watcher's start signals one more run (`Open`, before `WatchStarted`). A change it
+    // reports late adds runs whenever it lands; the covers checks below tell those apart.
+    probe.watching(&hub);
     settle_git(&core, &rx);
 
     let n = stub.runs();
+    let before = core.test_signals();
     // Returns once a run is inside the stub (the FIFO opened): at least one more run started.
     let gate = stub.hold_next(|| hub.git_signal(Trigger::Manual));
     assert!(stub.runs() > n);
@@ -430,7 +443,9 @@ fn signals_during_a_run_collapse_into_one_rerun() {
     // The held run answers only the signal that started it; the very next run answers all
     // forty that came in meanwhile. Nothing after that repeats it: a later run is there only
     // for a newer signal (the real watcher may add one under load).
-    let held = decision(&rx, "the held run", |_| false);
+    // The held run is the first to answer a signal from after `before`; a run the late watcher
+    // started earlier finishes first and is passed over.
+    let held = decision(&rx, "the held run", |d| !matches!(d, Decision::Ran { covers, .. } if *covers > before));
     assert!(matches!(held, Decision::Ran { covers, .. } if covers < all), "{held:?} (signals: {all})");
     let rerun = decision(&rx, "the rerun", |_| false);
     let Decision::Ran { covers: rerun, .. } = rerun else { panic!("not a run: {rerun:?}") };

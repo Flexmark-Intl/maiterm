@@ -451,9 +451,7 @@ fn a_known_generation_is_answered_not_modified() {
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![DirReq { rel: "a".into(), known_gen: None }], rec.clone(), vec![]).unwrap();
-    // The generation the client holds: its latest listing OR delta. Windows' watcher can report the
-    // setup's own writes after the first listing (CI, 2026-10-31), moving the generation on; the
-    // test must hold the newest one, after every setup write has reached the hub and been listed.
+    // The generation the client holds: its latest listing OR delta.
     let gen_of = |rec: &Recorder, rel: &str| {
         rec.msgs.lock().iter().rev().find_map(|m| match &m.ev {
             TreeEvent::Dir { rel: r, gen, .. } | TreeEvent::Delta { rel: r, gen, .. } if r == rel => Some(*gen),
@@ -461,11 +459,14 @@ fn a_known_generation_is_answered_not_modified() {
         })
     };
     let hub = ft.hub_of(ack.sub_id).unwrap();
+    // Taken from the hub itself once nothing is being listed (the watcher's start re-lists every
+    // open folder), never by waiting on an OS event. A watcher may still report the setup's own
+    // writes later (Windows did, CI 2026-10-31; FSEvents can be 20 s late), but a re-list that
+    // finds the same entries keeps the generation, so this one stays the folder's.
     probe.watching(&hub);
-    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Dir { rel, .. } if rel == "a")).is_some());
-    // The barrier goes in the root, so "a" itself is left alone.
-    probe.settle(&hub, &root);
-    let gen = gen_of(&rec, "a").unwrap();
+    probe.idle(&hub);
+    let gen = hub.dirs.lock().get("a").map(|d| d.gen).expect("a is listed");
+    assert_eq!(gen_of(&rec, "a"), Some(gen), "the client holds what the hub has");
     drop(hub);
     // Close and come back within the grace period: the folder is answered from memory.
     ft.close(ack.sub_id);

@@ -53,7 +53,11 @@ use super::types::{DeleteTicket, FileOp, Needs, OpFail, OpItem, OpResult, RepoIn
 use crate::util::proc::RunError;
 
 /// A request's answer may take this long (a listing of a slow folder, a status run).
+#[cfg(not(test))]
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
+/// In tests only a hang reaches it: a slow helper on a loaded machine is still answering.
+#[cfg(test)]
+const CALL_TIMEOUT: Duration = crate::filetree::test_support::HANG;
 /// Files bigger than this are not sent by an import.
 const MAX_IMPORT_FILE: u64 = 256 << 20;
 
