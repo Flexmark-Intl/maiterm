@@ -101,13 +101,17 @@ export function splitWords(s: string): string[] {
 
 /** Characters a word may hold and still go bare (Rust's `is_bare`: `char::is_alphanumeric` is
  *  Unicode Alphabetic or Numeric). */
-const BARE = /^[\p{Alphabetic}\p{N}\-_./:@%+=,~\\]+$/u;
+const BARE = /^[\p{Alphabetic}\p{N}\-_./:@%+=,~]+$/u;
+
+/** `C:\…` with nothing a shell or the parser acts on besides its backslashes, and not ending in
+ *  one (Rust's `is_windows_path`). */
+const WINDOWS_PATH = /^[A-Za-z]:\\[\p{Alphabetic}\p{N}\-_./:@%+=,~\\]*[^\\]$/u;
 
 /** One word, quoted only if it needs it: `'…'`, with a `'` inside written `'\''`. A backslash
- *  goes bare unless it ends the word (Rust's `quote` says why): a Windows path keeps the spelling
- *  cmd.exe, where `'` is not a quote, needs. */
+ *  goes bare only in a Windows path, which keeps the spelling cmd.exe (where `'` is not a quote)
+ *  needs; anywhere else a POSIX shell would eat it (Rust's `quote` says more). */
 export function quoteWord(w: string): string {
-  return BARE.test(w) && !w.endsWith('\\') ? w : `'${w.replace(/'/g, "'\\''")}'`;
+  return BARE.test(w) || WINDOWS_PATH.test(w) ? w : `'${w.replace(/'/g, "'\\''")}'`;
 }
 
 /** Words joined so `splitWords` (and Rust, and a POSIX shell) reads them back exactly. */

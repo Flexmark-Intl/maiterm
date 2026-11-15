@@ -286,13 +286,21 @@ pub fn place_of(f: &FollowUp) -> Option<String> {
 /// Has a HUMAN approved this follow-up's script where it runs (`is_approved` at `place_of`)?
 /// Also under the spellings its host had before ssh args were shell words (2026-11-15): the
 /// stored `due.host` itself, and its words joined with single spaces, as `connect_args` spelled
-/// every host then. Without them an approval of `-i C:\Users\me\.ssh\id ews@nova` would stop
-/// matching the same host now spelled `-i 'C:\Users\me\.ssh\id' ews@nova`.
+/// every host then. Without them an approval of `-o SendEnv=LC_* ews@nova` would stop matching
+/// the same host now spelled `-o 'SendEnv=LC_*' ews@nova`. The old spelling counts only when it
+/// reads back as the SAME words: joined with spaces, `-i 'id -J' jump nova` (key `id -J`, host
+/// jump) spells `-i id -J jump nova` (host nova), and an approval for nova must never run on
+/// jump. A word with a space never made a working host before quoting, so nothing real is lost.
 pub fn follow_up_approved(app_data: &AppData, f: &FollowUp) -> bool {
     let (Some(cwd), Some(script)) = (f.due.cwd.as_deref(), f.due.script.as_deref()) else { return false };
     let Some(host) = f.due.host.as_deref() else { return is_approved(app_data, cwd, script) };
-    let legacy = crate::util::ssh_words::split(host).join(" ");
-    [connect_args(host), host.to_string(), legacy].iter().any(|h| is_approved(app_data, &place(Some(h), cwd), script))
+    let words = crate::util::ssh_words::split(host);
+    let legacy = words.join(" ");
+    let mut keys = vec![connect_args(host), host.to_string()];
+    if crate::util::ssh_words::split(&legacy) == words {
+        keys.push(legacy);
+    }
+    keys.iter().any(|h| is_approved(app_data, &place(Some(h), cwd), script))
 }
 
 /// The approval key: the script and the place it runs. The same script somewhere else is a
@@ -972,6 +980,32 @@ mod tests {
             f.due.script = Some("test -f done".into());
             f.due.host = Some("ews@nova".into());
             assert!(!follow_up_approved(&d, &f), "another host is still another place");
+        }
+
+        // Words that join to an approved host's spelling are still another host: the key file
+        // `id -J` and the host jump is not the key id through jump to nova.
+        let mut d = AppData::default();
+        let approved = "-i id -J jump nova";
+        remember_approval(&mut d, &place(Some(approved), "/srv"), "test -f done");
+        let mut f = FollowUp {
+            id: "f".into(),
+            text: "t".into(),
+            due: crate::state::workspace::FollowUpDue {
+                kind: REMOTE_KIND.into(),
+                host: Some(approved.into()),
+                cwd: Some("/srv".into()),
+                script: Some("test -f done".into()),
+                ..Default::default()
+            },
+            author: "agent".into(),
+            created_at: "2026-11-15T00:00:00Z".into(),
+            expires_at: None,
+        };
+        assert!(follow_up_approved(&d, &f));
+        for other in ["-i 'id -J' jump nova", "-i 'id -J' jump"] {
+            f.due.host = Some(other.into());
+            assert!(!same_host(other, approved));
+            assert!(!follow_up_approved(&d, &f), "a script approved for nova must not run on jump: {other}");
         }
     }
 

@@ -81,6 +81,16 @@ describe('ssh args keep their words from the stored command back to the stored c
       const argv = wrapped(buildSshCommand('ews@nova', '/srv', TAB, null, acct));
       expect(cleanSshCommand(joinWords(argv))).toBe('ews@nova');
     });
+    it("keeps the user's own options that name maiTerm env, and the host after them", () => {
+      for (const stored of ["-o 'SendEnv=MAITERM_*' ews@nova", '-o SetEnv=MAITERM_PROFILE=dev ews@nova']) {
+        const argv = argvOf(buildSshCommand(stored, '/srv', TAB, bridge));
+        const cleaned = cleanSshCommand(joinWords(argv));
+        expect(cleaned).toBe(stored);
+        expect(cleaned).not.toContain('MAITERM_AUTH');
+      }
+      expect(cleanSshCommand('ssh -o SetEnv=MAITERM_PROFILE=dev ews@nova')).toBe('-o SetEnv=MAITERM_PROFILE=dev ews@nova');
+      expect(cleanSshCommand("ssh -o 'SendEnv=MAITERM_*' ews@nova 'MAITERM_AUTH=x tmux'")).toBe("-o 'SendEnv=MAITERM_*' ews@nova");
+    });
     it('never keeps a word naming maiTerm env, whatever else it looks like', () => {
       expect(cleanSshCommand("ssh ews@nova 'MAITERM_AUTH=tok-123 tmux'")).toBe('ews@nova');
       expect(cleanSshCommand('ssh ews@nova export MAITERM_PORT=1 MAITERM_AUTH=x; tmux')).toBe('ews@nova');

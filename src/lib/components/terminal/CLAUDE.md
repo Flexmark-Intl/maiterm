@@ -228,7 +228,8 @@ sides must spell a key alike. Compare two hosts with `sameSshHost` / `watch::sam
 the old way (`-o SendEnv=LC_*`, now `-o 'SendEnv=LC_*'`), and approvals accept that spelling
 too (`watch::follow_up_approved`). `cleanSshCommand` finds maiTerm's remote command by word
 value, so it is stripped however ssh received it (one word, re-split by a wrapper's `$@`, or
-cmd.exe's literal quotes), and never keeps a word naming `MAITERM_`. Split on whitespace, that command connected every maiTerm-made ssh to the host `Keys/id`.
+cmd.exe's literal quotes), and never keeps a word naming `MAITERM_` after the destination
+(the user's own `-o SendEnv=MAITERM_*` before it is theirs). Split on whitespace, that command connected every maiTerm-made ssh to the host `Keys/id`.
 
 ### Remote CWD Detection
 
