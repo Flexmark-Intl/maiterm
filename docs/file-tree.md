@@ -1387,7 +1387,8 @@ enough. Three layers:
 
 All backends feed one **coalescer thread per hub**:
 - Raw events go into a bounded crossbeam channel of 65,536. On overflow the hub sets a flag that
-  forces a root-wide resync. **Events are never dropped silently.**
+  forces a root-wide resync. **Events are never dropped silently** by us. The OS can still lose
+  them unannounced (FSEvents under load, §6.1), which the edges in §6.1 recover from.
 - The window closes after **75 ms of quiet or 250 ms total**.
 - Each path is classified before any allocation-heavy work:
   1. **visible**: the parent folder is subscribed. With ≤64 events for that folder, only those names
@@ -1439,7 +1440,9 @@ All backends feed one **coalescer thread per hub**:
   - Files' own operations, which re-list their parents (`touched`).
   A pass runs on a thread of its own, and edges arriving meanwhile join the next pass, so a
   burst costs one more pass, not one per edge. A remote root has no local disk, and a network
-  mount is revalidated whole, so neither reconciles. Idle, nothing runs.
+  mount is revalidated whole, so neither reconciles. Idle, nothing runs: no edge, no pass.
+  Reconciling is not macOS code: every local root does it, and where the watcher missed
+  nothing a pass costs one stat per open folder and sends nothing.
 
 ### 6.2 Linux
 
@@ -2279,6 +2282,7 @@ fixtures, frontend budgets by `performance.now()` marks logged on the dev build.
 | Subprocesses | — | — | `CREATE_NO_WINDOW` on every git and ssh spawn |
 | ssh | CM mux when bridge on | CM mux when bridge on | no ControlMaster: one direct helper connection |
 | Network mounts | statfs fstypename → no watcher | statfs f_type → no watcher | `DRIVE_REMOTE`/UNC → no watcher |
+| Missed changes | FSEvents loses some under load, unannounced: open folders whose mtime moved are re-listed on edges (§6.1) | same edges | same edges |
 
 ## 19. Explicitly OUT of v1
 
