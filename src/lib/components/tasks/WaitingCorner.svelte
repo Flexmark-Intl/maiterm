@@ -75,6 +75,14 @@
     const o = opened;
     if (!o) return;
     void o.seq;
+    if (o.passive) {
+      // Shown again on the human's return, not by a click: bring the card into view and leave
+      // the keyboard where it is (almost always the terminal they came back to).
+      const raf = requestAnimationFrame(() => {
+        panelEl?.querySelector<HTMLElement>(`[data-key="${CSS.escape(o.focus ?? '')}"]`)?.scrollIntoView({ block: 'nearest' });
+      });
+      return () => cancelAnimationFrame(raf);
+    }
     // The body is nowhere to go back to (`hide` then gives the tab's terminal the keyboard).
     const cur = document.activeElement;
     if (!before && cur instanceof HTMLElement && cur !== document.body && !panelEl?.contains(cur)) before = cur;
@@ -96,7 +104,7 @@
     // which leaves it on the body.
     const cur = document.activeElement;
     const ours = !cur || cur === document.body || !!panelEl?.contains(cur);
-    waitingStore.close(tabId);
+    waitingStore.hide(tabId);
     if (!ours) return;
     if (back?.isConnected) back.focus({ preventScroll: true });
     else terminalsStore.focusTerminal(tabId);
@@ -111,6 +119,19 @@
   // this instance its `tabId` already reads the NEW tab, which would close that one's card.
   const mountedTabId = untrack(() => tabId);
   onDestroy(() => waitingStore.close(mountedTabId));
+
+  // The exception: a Run that opened a new tab took the human away mid-question (the card
+  // still waits for "I've done it"). Coming back shows it again, passively — it takes no
+  // keyboard, so the hazard above doesn't apply. Only while that question is still here.
+  untrack(() => {
+    const key = waitingStore.takeReturn(mountedTabId);
+    if (key && waiting.some((i) => i.key === key)) waitingStore.openPassive(mountedTabId, key);
+  });
+
+  /** BlockerCard's Run: a run in a new tab leaves this one, so ask to come back open. */
+  function onran(key: string, where: 'agent' | 'tab') {
+    if (where === 'tab') waitingStore.reopenOnReturn(mountedTabId, key);
+  }
 
   // Everything answered: show the last receipt for a moment, then go back to nothing.
   $effect(() => {
@@ -142,7 +163,7 @@
             <article data-key={item.key} class:focused={item.key === opened.focus}>
               {#if item.kind === 'task'}
                 <h4>{item.task.title}</h4>
-                <BlockerCard task={item.task} variant="card" onnote={showNote} />
+                <BlockerCard task={item.task} variant="card" onnote={showNote} onran={(where) => onran(item.key, where)} />
               {:else if item.kind === 'script'}
                 <ScriptApprovalCard tabId={item.approval.tabId} followUp={item.approval.followUp} {listChangedAt} onnote={showNote} />
               {:else if item.kind === 'rules'}

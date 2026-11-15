@@ -237,7 +237,11 @@ are the point of the component:
 - **It never opens by itself.** The terminal under it is usually focused and being typed in.
   That includes coming back to a tab: leaving it closes its card, because a card still open
   would be focused again on remount, and the next keystrokes meant for the shell would answer
-  the agent (found in review).
+  the agent (found in review). One exception, which takes no keyboard: a Run that opened a new
+  tab took the human away mid-question, so the card is shown again when they come back to the
+  agent's tab, PASSIVELY (`waitingStore.reopenOnReturn` → `openPassive`: scrolled into view,
+  focus left on the terminal). One-shot, only while that question is still waiting, and Hide
+  forgets it.
 - **A click moves focus into the card** (its answer field, on a frame).
 - **Hide and Escape give focus back** to where it was, or to the tab's terminal when that was
   nothing (`terminalsStore.focusTerminal`). Answering the last card removes the focused field,

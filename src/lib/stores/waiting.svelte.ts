@@ -74,6 +74,8 @@ export interface OpenCorner {
   extraTaskId: string | null;
   /** Bumped on every open, so a second open of a card already open still scrolls to it. */
   seq: number;
+  /** Shown again without a click (see `reopenOnReturn`): it must not take the keyboard. */
+  passive?: boolean;
 }
 
 /** What the human has typed under a question, by task id, with the `asked_at` it was typed
@@ -107,6 +109,9 @@ function createWaitingStore() {
    *  would take the keyboard without a click. */
   let open = $state<Record<string, OpenCorner>>({});
   let seq = 0;
+  /** Cards to show again, passively, the next time their tab is shown, by tab id → the item
+   *  to bring into view. Not reactive: only a corner's mount reads it. */
+  const returns = new Map<string, string>();
 
   return {
     byTab,
@@ -147,6 +152,27 @@ function createWaitingStore() {
       }
       await navigateToTab(tabId);
       this.open(tabId, focus);
+    },
+    /** The card's Run opened a new tab, which took the human away from this one mid-question
+     *  (the question stays open for "I've done it"). Show the card again when they come back,
+     *  without focus: they came back to the terminal, not to the card. One-shot. */
+    reopenOnReturn(tabId: string, key: string) {
+      returns.set(tabId, key);
+    },
+    /** A corner mounting: the item to show again passively, if any (consumed). */
+    takeReturn(tabId: string): string | null {
+      const key = returns.get(tabId) ?? null;
+      returns.delete(tabId);
+      return key;
+    },
+    openPassive(tabId: string, focus: string) {
+      open = { ...open, [tabId]: { focus, extraTaskId: null, seq: ++seq, passive: true } };
+    },
+    /** The human's Hide: also forgets a pending passive return. Leaving the tab (`close`) does
+     *  not, since that is exactly what the return is for. */
+    hide(tabId: string) {
+      returns.delete(tabId);
+      this.close(tabId);
     },
     close(tabId: string) {
       if (!(tabId in open)) return;

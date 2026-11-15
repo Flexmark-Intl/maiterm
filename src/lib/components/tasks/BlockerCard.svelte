@@ -26,9 +26,12 @@
     onnote?: (text: string) => void;
     /** 'inline' sits under a task row; 'card' is the larger decisions-queue layout. */
     variant?: 'inline' | 'card';
+    /** Run ran the card's command: in the agent's tab, or in a new tab (which the human is
+     *  now looking at instead of this card). */
+    onran?: (where: 'agent' | 'tab') => void;
   }
 
-  let { task, onnote, variant = 'inline' }: Props = $props();
+  let { task, onnote, onran, variant = 'inline' }: Props = $props();
 
   const b = $derived(task.status === 'blocked' ? task.blocker : null);
 
@@ -188,6 +191,7 @@
     sending = true;
     try {
       const r = await overlordStore.runBlockerCommand(task.id, b.asked_at);
+      if (r.ran) onran?.(r.where);
       onnote?.(
         !r.ran
           ? r.detail
