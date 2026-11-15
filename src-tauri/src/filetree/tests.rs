@@ -515,7 +515,7 @@ fn git_init_in_an_open_root_reopens_it_with_its_repository() {
     probe.watching(&old);
     git_init(&root);
     // The watcher's report of the new `.git`, handed over by the test (FSEvents may be late or
-    // lose it, §6.1).
+    // lose it, §6.1; an edge catches it then, `a_lost_git_init_reopens_on_an_edge`).
     probe.deliver(&old, &[root.join(".git")]);
     assert!(rec.msgs.lock().iter().any(|m| m.ev == TreeEvent::Reopen), "the view is told to reopen");
     // What the client does: close, open the same place again.
@@ -656,6 +656,30 @@ fn an_edge_relists_what_the_watcher_never_reported() {
     probe.reconciled(&hub, asked);
     assert!(rec.msgs.lock().iter().any(|m| m.ev == TreeEvent::RootGone));
     ft.close(ack.sub_id);
+}
+
+/// `git init` whose `.git` the watcher never reported: the command finishing is the edge, and
+/// the views reopen with the new repository (docs/file-tree.md §6.1).
+#[test]
+fn a_lost_git_init_reopens_on_an_edge() {
+    let root = temp_root("gitedge");
+    std::fs::write(root.join("a.ts"), "x").unwrap();
+    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let probe = Probe::new(&ft);
+    let rec = Arc::new(Recorder::default());
+    let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+    assert!(ack.repo.is_none());
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    probe.watching(&hub);
+    probe.idle(&hub);
+    hub.go_deaf();
+    git_init(&root);
+    let asked = hub.reconcile_asked();
+    ft.note_command_in(&root);
+    probe.reconciled(&hub, asked);
+    assert!(rec.msgs.lock().iter().any(|m| m.ev == TreeEvent::Reopen), "the view is told to reopen");
+    ft.close(ack.sub_id);
+    std::fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]

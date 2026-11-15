@@ -1075,7 +1075,13 @@ impl RootHub {
     }
 
     /// One pass: stat each open folder under `bases`, re-list those that moved. Returns them.
+    /// The root's repository is looked at first: a `.git` that appeared or went is a change of
+    /// the root's shape the watcher may also have lost, and the views reopen for it.
     fn reconcile_pass(&self, bases: &BTreeSet<String>) -> Vec<String> {
+        if !self.repo_current() {
+            self.repo_moved();
+            return Vec::new();
+        }
         let under = |rel: &str| bases.iter().any(|b| paths::is_at_or_under(rel, b));
         let open: Vec<String> = self.dirs.lock().keys().filter(|r| under(r)).cloned().collect();
         let mut relisted = Vec::new();

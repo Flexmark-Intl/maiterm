@@ -1430,7 +1430,8 @@ All backends feed one **coalescer thread per hub**:
   a file's content doesn't show in a listing. A whole-second mtime (HFS+, FAT) is trusted only
   once the clock is past its tick, since a second change within that tick wouldn't move it.
   Events still patch snapshots as before; a patched folder's mtime no longer matches, so the
-  next edge re-lists it once. The edges, all events that already exist, never a timer:
+  next edge re-lists it once. A pass first checks the root's repository: a `.git` that
+  appeared or went (a `git init` whose event was lost) reopens the views, as the event would. The edges, all events that already exist, never a timer:
   - the window regaining focus (every time, for a local root);
   - a command finishing in a terminal (OSC 133 D), for the trees showing its shell's folder;
   - an agent's shell call (Bash) ending, for its folder, and an agent's completed write, for
