@@ -499,6 +499,8 @@ agent aim a command, run by the human's click, at a session it has nothing to do
   the card's "For …" line and the second corner all ask one question: is that tab still a peer
   of whoever carries the task now? If not, the card says so, offers no Run, and Run refuses.
   At filing, `run_in` is accepted only on a row the caller carries (or takes in that update).
+  An agent that later takes the task over takes the question over with it, as with every
+  blocker: Run then tells the new carrier (if that tab is still its peer), not the filer.
 - **It follows the tab's id where that is known**, so the common cases stay usable:
   `tasksStore.remapTab` (reload) and a workspace duplicate (`clone_workspace_with_id_mapping`)
   map it to the tab's new id. A Workspace Share import maps it through the import's tab map, and

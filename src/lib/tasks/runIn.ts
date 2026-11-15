@@ -7,6 +7,10 @@
  * So the rule the human relies on is checked where it matters: the tab is still a peer (mesh
  * peer or live bridge partner) of the task's CURRENT carrier, the agent Run will tell. Anything
  * else is `stale`, and Run, the card's label and the second corner treat it as such.
+ *
+ * "The current carrier" is deliberate: an agent that takes over a blocked task takes over its
+ * question, as with every blocker (the answer is typed to the new carrier), and so this one's
+ * outcome too. The card's "For …" line stays true either way.
  */
 import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
 import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
@@ -17,7 +21,7 @@ export type RunInTarget = { ok: true; tabId: string } | { ok: false; tabId: stri
 /** Whether `target` is a tab `asker` can message: a mesh peer, or its live bridge partner. */
 export function isPeerOf(asker: string, target: string): boolean {
   if (asker === target) return false;
-  if (agentMeshStore.rosterForTab(asker).some((m) => m.tabId === target)) return true;
+  if (agentMeshStore.areMeshPeers(asker, target)) return true;
   return agentBridgeStore.isBridgedToLivePartner(asker) && agentBridgeStore.getPartnerTabId(asker) === target;
 }
 
