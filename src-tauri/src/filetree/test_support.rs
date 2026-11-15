@@ -1,0 +1,120 @@
+//! Waiting on a Files hub's own account of what it did (`HubReport`) instead of the clock.
+//!
+//! A test that sleeps "to give the watcher a moment" or "so the coalescer's window passes"
+//! and then asserts depends on how loaded the machine is. These helpers wait on events the
+//! hub reports: its watcher started, a batch of disk events processed, its listings done.
+//! The only clock left is `HANG`, which turns a hang into a failure that names what it was
+//! waiting for; it never decides whether a test passes.
+//!
+//! What the hub reports about itself (`watching`, `idle`) is exact. What the OS reports is
+//! not: macOS FSEvents under disk load delivers changes up to 20 s late, after later ones, or
+//! never, with no flag saying so (worker #116, shared memory macos-files-watcher-silent-loss).
+//! A test that isn't about the watcher must not wait for an OS event (`barrier`).
+
+use std::cell::Cell;
+use std::path::Path;
+use std::sync::mpsc::Receiver;
+use std::time::Duration;
+
+use super::hub::{HubReport, RootHub};
+use super::FileTreeState;
+
+/// How long any one wait may take before it is a hang.
+pub const HANG: Duration = Duration::from_secs(60);
+
+pub struct Probe {
+    rx: Receiver<HubReport>,
+    /// `WatchStarted` reports seen so far, by any wait.
+    started: Cell<usize>,
+    /// Batches seen so far that said events were lost.
+    lost: Cell<usize>,
+}
+
+impl Probe {
+    /// Call before opening anything: only hubs made after this report here.
+    pub fn new(ft: &FileTreeState) -> Probe {
+        Probe { rx: ft.probe_hubs(), started: Cell::new(0), lost: Cell::new(0) }
+    }
+
+    fn next(&self, what: &str) -> HubReport {
+        match self.rx.recv_timeout(HANG) {
+            Ok(r) => {
+                match &r {
+                    HubReport::WatchStarted => self.started.set(self.started.get() + 1),
+                    HubReport::Batch { lost: true, .. } => self.lost.set(self.lost.get() + 1),
+                    _ => {}
+                }
+                r
+            }
+            Err(e) => panic!("the hub reported nothing while waiting for {what} ({e})"),
+        }
+    }
+
+    /// Batches the hub processed, among those this probe has seen, that said events were lost
+    /// (an overflow, or the OS dropping events): each one re-listed what they could touch.
+    /// Counts what has arrived since the last wait too.
+    pub fn lost(&self) -> usize {
+        while let Ok(r) = self.rx.try_recv() {
+            match r {
+                HubReport::WatchStarted => self.started.set(self.started.get() + 1),
+                HubReport::Batch { lost: true, .. } => self.lost.set(self.lost.get() + 1),
+                _ => {}
+            }
+        }
+        self.lost.get()
+    }
+
+    /// The hub's watcher has started: it is watching, has asked every open folder to list
+    /// again, and has sent Health. (Watching only, for a test with one hub.)
+    pub fn watching(&self, hub: &RootHub) {
+        while self.started.get() == 0 {
+            self.next("the watcher to start");
+        }
+        assert!(!hub.watch_pending());
+    }
+
+    /// The hub has processed the event for a new file written now, `ft-barrier-<uuid>` in
+    /// `dir` (a folder the hub's watcher covers). Returns the names of the files written: they
+    /// are real files, and a listing shows them. If a batch says events were lost (an
+    /// overflowing channel) before the file's own event came, a fresh file is written.
+    ///
+    /// **Not a barrier.** It says nothing about changes made before it: the OS doesn't report
+    /// in order. FSEvents under load can deliver an earlier change after this one, up to 20 s
+    /// late, or never, and this then hangs. Use it only where event delivery is the test's
+    /// subject (the watcher reporting a change at all), never to wait for "everything before"
+    /// in a test about something else.
+    pub fn barrier(&self, dir: &Path) -> Vec<String> {
+        let mut written = Vec::new();
+        loop {
+            let name = format!("ft-barrier-{}", uuid::Uuid::new_v4());
+            std::fs::write(dir.join(&name), "").unwrap();
+            written.push(name.clone());
+            loop {
+                if let HubReport::Batch { paths, lost } = self.next("the barrier file's event") {
+                    if paths.iter().any(|p| p.file_name().is_some_and(|n| n.to_string_lossy() == name)) {
+                        return written;
+                    }
+                    if lost {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// No listing is queued or running (and the watcher has started): everything the hub
+    /// was asked to list has been listed and sent.
+    pub fn idle(&self, hub: &RootHub) {
+        while !hub.test_idle() {
+            self.next("the hub's listings to finish");
+        }
+    }
+
+    /// `barrier`, then `idle`. Its event was processed and whatever it asked to list has been
+    /// listed and sent; as `barrier` says, earlier changes may still be on their way.
+    pub fn settle(&self, hub: &RootHub, dir: &Path) -> Vec<String> {
+        let names = self.barrier(dir);
+        self.idle(hub);
+        names
+    }
+}

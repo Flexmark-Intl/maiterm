@@ -4,6 +4,17 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.28 changelog** (2026-11-15). Additive: **a command for another agent's tab** (maiTerm
+> docs/tasks.md §3.1.3). An agent may file an action card whose command is for a peer (a mesh
+> peer or its bridge partner), not for itself.
+> - **`MaitermTask.blocker.runIn`** is `{ tabId, tabTitle }` or `null`. When set, the command
+>   is FOR that tab: show "Runs in <tabTitle>" beside Run (`tabTitle` is `null` when that tab
+>   isn't designated; say "another agent's tab" then). `run` describes THAT tab: `agent` types
+>   the line into that agent, and the asking agent is told the human ran it there, which closes
+>   the question; `tab` opens beside that agent. `POST /tasks/{id}/run` is unchanged, and the
+>   desktop may refuse it with a sentence when that tab is no longer a peer of the agent that
+>   carries the task (the desktop judges this when Run is pressed; show `reason` verbatim).
+>
 > **v0.27 changelog** (2026-11-06). Additive: **Run on an action card** (maiTerm docs/tasks.md
 > §3.1.2). The desktop's "Needs you" card runs its command with one click; the phone gets the same.
 > - **`MaitermTask.blocker.run`** is `"agent"`, `"tab"` or `null`. `agent`: the command is a
@@ -1279,6 +1290,9 @@ interface MaitermTask {
     // agent's Claude tab; the question closes), 'tab' (a new terminal tab beside the agent on the
     // desktop; the question stays open for "I've done it"), null (no Run).
     run: 'agent' | 'tab' | null;
+    // 0.28. The command is FOR this other agent's tab, not the asking agent's own: `run` is about
+    // that tab. tabTitle null = a tab the phone may not see. null = for the asking agent itself.
+    runIn: { tabId: string; tabTitle: string | null } | null;
     // 0.26. 'many': the human ticks any of `picks` and one answer covers them all
     // (POST /answer with `options: [i, …]`). On a 'many' question `options` is [] and `context`
     // ends with the choices as a markdown list, so a pre-0.26 client offers a free-text answer
@@ -2581,6 +2595,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.25` | adds `Chat.hive` / `ChatDetail.hive` (`ChatHive`, `null` off a Hive); `POST /message` to a Done Hive's coordinator wakes it (`status:"held"`, `reason:"hive_wake"`, `woke:"hive"`; `403` for the dev token); `unreachable` reasons `hive` and `hive_done` from `/message` and `/wake` |
 | `0.26` | adds pick-several decisions: `MaitermTask.blocker.pick` (`one` / `many`), `picks` and `pickContext`; a `many` question is served with `options: []` and its choices listed in `context`, so an older client answers it in words; `POST /tasks/{id}/answer` takes `options: number[]` |
 | `0.27` | adds `MaitermTask.blocker.run` (`agent` / `tab` / `null`) and `POST /tasks/{id}/run` |
+| `0.28` | adds `MaitermTask.blocker.runIn` (`{ tabId, tabTitle }` / `null`): the command is for another agent's tab, and `run` describes that tab |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

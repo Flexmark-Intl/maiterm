@@ -20,6 +20,7 @@ use rand::{Rng, SeedableRng};
 use super::hub::{RootHub, Sink, STALL_MESSAGES};
 use super::ignore_cache::IgnoreStack;
 use super::list;
+use super::test_support::{Probe, HANG};
 use super::types::{DirReq, Entry, Envelope, TreeEvent};
 use super::FileTreeState;
 
@@ -247,6 +248,7 @@ fn converge(variant: Variant, seed: u64) {
     seed_tree(&root, extra, &mut rng);
     let cap = if matches!(variant, Variant::Overflow) { 4 } else { super::watch::RAW_CAPACITY };
     let ft = FileTreeState::with(Duration::from_millis(200), cap, None);
+    let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let sub = ack.sub_id;
@@ -301,18 +303,19 @@ fn converge(variant: Variant, seed: u64) {
         assert!(max_seq_unacked <= STALL_MESSAGES + 1, "a stalled subscription is sent nothing ({max_seq_unacked})");
     }
 
-    // Quiesce: the watcher's latency, the coalescer's window, the listings.
-    std::thread::sleep(Duration::from_millis(800));
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut quiet_rounds = 0;
-    while quiet_rounds < 4 {
-        assert!(Instant::now() < deadline, "{variant:?}: never went quiet");
+    // Quiesce: every change has reached the hub (the barrier) and been listed and sent (idle);
+    // then the client takes what was sent and asks for what it lacks until the hub has
+    // nothing more to send. Nothing here waits on the clock.
+    probe.watching(&hub);
+    probe.settle(&hub, &root);
+    let mut rounds = 0;
+    loop {
+        rounds += 1;
+        assert!(rounds < 1000, "{variant:?}: never went quiet");
         let got = client.pump(&rec, &hub, sub, true);
-        std::thread::sleep(Duration::from_millis(250));
-        if got == 0 && client.need_refresh.is_empty() && hub.test_idle() && rec.msgs.lock().is_empty() {
-            quiet_rounds += 1;
-        } else {
-            quiet_rounds = 0;
+        probe.idle(&hub);
+        if got == 0 && client.need_refresh.is_empty() && rec.msgs.lock().is_empty() {
+            break;
         }
     }
 
@@ -325,7 +328,28 @@ fn converge(variant: Variant, seed: u64) {
         let held = client.dirs.get(rel).unwrap_or_else(|| panic!("{variant:?}: open folder {rel:?} is not held"));
         let mine = held.1.clone();
         let fresh = list::list_dir(&root, rel, &fresh_ignore).unwrap();
-        assert_eq!(mine, fresh.entries, "{variant:?} seed {seed}: {rel:?} drifted from the disk");
+        if mine != fresh.entries {
+            // Which side is wrong, last in the message so a cut-off log still shows it.
+            let names = |v: &[Entry]| v.iter().map(|e| e.n.clone()).collect::<BTreeSet<_>>();
+            let (m, f) = (names(&mine), names(&fresh.entries));
+            let hub_snap = hub.dirs.lock().get(rel).map(|d| (d.gen, d.entries == fresh.entries));
+            let lost = probe.lost();
+            // A hub that is merely behind catches up after one more barrier; one that never
+            // heard of a change (a watcher that dropped it unflagged) stays wrong.
+            probe.settle(&hub, &root);
+            let fresh2 = list::list_dir(&root, rel, &fresh_ignore).unwrap();
+            let caught_up = hub.dirs.lock().get(rel).map(|d| (d.gen, d.entries == fresh2.entries));
+            panic!(
+                "{variant:?} seed {seed}: {rel:?} drifted from the disk. Lost batches seen: {lost}. After another barrier, hub (gen, matches disk): {caught_up:?}. Client holds gen {}, {} entries; disk {}. Missing: {:?}. Extra: {:?}. Same names, other order or flags: {}. Hub snapshot (gen, matches disk): {hub_snap:?}. Client still building: {:?}",
+                held.0,
+                mine.len(),
+                fresh.entries.len(),
+                f.difference(&m).collect::<Vec<_>>(),
+                m.difference(&f).collect::<Vec<_>>(),
+                m == f,
+                client.building.get(rel).map(|b| (b.0, b.1, b.2.len())),
+            );
+        }
     }
     for rel in client.dirs.keys() {
         let abs = if rel.is_empty() { root.clone() } else { root.join(rel) };
@@ -365,35 +389,38 @@ fn converges_across_many_seeds() {
     }
 }
 
-/// Wait until the hub's watcher, started in the background, is running.
-fn wait_watching(hub: &RootHub) {
-    let end = Instant::now() + Duration::from_secs(30);
-    while hub.watch_pending() {
-        assert!(Instant::now() < end, "the watcher never started");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
 
 #[test]
 fn a_change_arrives_as_a_delta_from_the_held_generation() {
     let root = temp_root("delta");
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
-    wait_watching(&ft.hub_of(ack.sub_id).unwrap());
-    assert!(wait_for(&rec, Duration::from_secs(5), |e| matches!(e, TreeEvent::Dir { rel, .. } if rel.is_empty())).is_some());
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    probe.watching(&hub);
+    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Dir { rel, .. } if rel.is_empty())).is_some());
     let held = rec.msgs.lock().iter().find_map(|m| match &m.ev {
         TreeEvent::Dir { rel, gen, .. } if rel.is_empty() => Some(*gen),
         _ => None,
     });
     std::fs::write(root.join("x.txt"), "").unwrap();
-    assert!(wait_for(&rec, Duration::from_secs(5), |e| matches!(e, TreeEvent::Delta { rel, from, add, .. }
+    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Delta { rel, from, add, .. }
         if rel.is_empty() && Some(*from) == held && add.iter().any(|a| a.n == "x.txt"))).is_some());
-    // Saving a file changes nothing the tree shows: no message at all.
+    // Saving a file changes nothing the tree shows: no message about it. The barrier after it
+    // proves the save reached the hub and was processed; all that may follow is the barrier's
+    // own new row.
+    probe.settle(&hub, &root);
     let before = rec.msgs.lock().len();
     std::fs::write(root.join("x.txt"), "more").unwrap();
-    std::thread::sleep(Duration::from_millis(600));
-    assert_eq!(rec.msgs.lock().len(), before);
+    let barriers = probe.settle(&hub, &root);
+    let after: Vec<TreeEvent> = rec.msgs.lock()[before..].iter().map(|m| m.ev.clone()).collect();
+    for ev in &after {
+        assert!(
+            matches!(ev, TreeEvent::Delta { rel, add, chg, del, .. } if rel.is_empty() && chg.is_empty() && del.is_empty() && add.iter().all(|a| barriers.contains(&a.n))),
+            "the save sent {ev:?}"
+        );
+    }
     ft.close(ack.sub_id);
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -421,34 +448,31 @@ fn a_known_generation_is_answered_not_modified() {
     std::fs::create_dir_all(root.join("a")).unwrap();
     std::fs::write(root.join("a/x"), "").unwrap();
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![DirReq { rel: "a".into(), known_gen: None }], rec.clone(), vec![]).unwrap();
-    // The generation the client holds: its latest listing OR delta. Windows' watcher can report the
-    // setup's own writes after the first listing (CI flake, 2026-10-31), moving the generation on;
-    // the test must hold the newest one, after the watcher has started and gone quiet.
+    // The generation the client holds: its latest listing OR delta.
     let gen_of = |rec: &Recorder, rel: &str| {
         rec.msgs.lock().iter().rev().find_map(|m| match &m.ev {
             TreeEvent::Dir { rel: r, gen, .. } | TreeEvent::Delta { rel: r, gen, .. } if r == rel => Some(*gen),
             _ => None,
         })
     };
-    wait_watching(&ft.hub_of(ack.sub_id).unwrap());
-    assert!(wait_for(&rec, Duration::from_secs(5), |e| matches!(e, TreeEvent::Dir { rel, .. } if rel == "a")).is_some());
-    let end = Instant::now() + Duration::from_secs(10);
-    let mut gen = gen_of(&rec, "a").unwrap();
-    loop {
-        std::thread::sleep(Duration::from_millis(600));
-        let now = gen_of(&rec, "a").unwrap();
-        if now == gen || Instant::now() > end {
-            break;
-        }
-        gen = now;
-    }
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    // Taken from the hub itself once nothing is being listed (the watcher's start re-lists every
+    // open folder), never by waiting on an OS event. A watcher may still report the setup's own
+    // writes later (Windows did, CI 2026-10-31; FSEvents can be 20 s late), but a re-list that
+    // finds the same entries keeps the generation, so this one stays the folder's.
+    probe.watching(&hub);
+    probe.idle(&hub);
+    let gen = hub.dirs.lock().get("a").map(|d| d.gen).expect("a is listed");
+    assert_eq!(gen_of(&rec, "a"), Some(gen), "the client holds what the hub has");
+    drop(hub);
     // Close and come back within the grace period: the folder is answered from memory.
     ft.close(ack.sub_id);
     let rec2 = Arc::new(Recorder::default());
     ft.open("w", &root.to_string_lossy(), vec![DirReq { rel: "a".into(), known_gen: Some(gen) }], rec2.clone(), vec![]).unwrap();
-    assert!(wait_for(&rec2, Duration::from_secs(5), |e| matches!(e, TreeEvent::NotModified { rel, gen: g } if rel == "a" && *g == gen)).is_some());
+    assert!(wait_for(&rec2, HANG, |e| matches!(e, TreeEvent::NotModified { rel, gen: g } if rel == "a" && *g == gen)).is_some());
     assert_eq!(ft.hub_count(), 1, "one hub per root, shared");
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -457,14 +481,15 @@ fn a_known_generation_is_answered_not_modified() {
 fn a_deleted_root_says_root_gone() {
     let root = temp_root("rootgone");
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     // The watcher must be what notices: deleted before it runs, the root is only found gone
     // when it starts, which under a loaded fseventsd is later than this test waits.
-    wait_watching(&ft.hub_of(ack.sub_id).unwrap());
-    assert!(wait_for(&rec, Duration::from_secs(5), |e| matches!(e, TreeEvent::Dir { .. })).is_some());
+    probe.watching(&ft.hub_of(ack.sub_id).unwrap());
+    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Dir { .. })).is_some());
     std::fs::remove_dir_all(&root).unwrap();
-    assert!(wait_for(&rec, Duration::from_secs(10), |e| matches!(e, TreeEvent::RootGone)).is_some());
+    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::RootGone)).is_some());
 }
 
 fn git_init(dir: &std::path::Path) {
@@ -478,14 +503,16 @@ fn git_init_in_an_open_root_reopens_it_with_its_repository() {
     // decorations for good, and a reopen within the grace period got the same hub back.
     let root = temp_root("gitinit");
     std::fs::write(root.join("a.ts"), "x").unwrap();
-    let ft = FileTreeState::with(Duration::from_millis(300), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    ft.hold_graces();
+    let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     assert!(ack.repo.is_none());
     let old = ft.hub_of(ack.sub_id).unwrap();
-    wait_watching(&old);
+    probe.watching(&old);
     git_init(&root);
-    assert!(wait_for(&rec, Duration::from_secs(10), |e| matches!(e, TreeEvent::Reopen)).is_some(), "the view is told to reopen");
+    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Reopen)).is_some(), "the view is told to reopen");
     // What the client does: close, open the same place again.
     let rec2 = Arc::new(Recorder::default());
     let again = ft.open("w", &root.to_string_lossy(), vec![], rec2, vec![]).unwrap();
@@ -495,7 +522,7 @@ fn git_init_in_an_open_root_reopens_it_with_its_repository() {
     assert!(!Arc::ptr_eq(&old, &new));
     drop((old, new));
     // The old hub's reap (its last subscriber just left) must not take its successor.
-    std::thread::sleep(Duration::from_millis(700));
+    ft.end_graces();
     assert!(ft.hub_of(again.sub_id).is_ok());
     assert_eq!(ft.hub_count(), 1);
     // In its grace period, with nobody to tell: the repository removed is caught when the
@@ -511,12 +538,13 @@ fn git_init_in_an_open_root_reopens_it_with_its_repository() {
 #[test]
 fn a_hub_is_reaped_after_its_grace() {
     let root = temp_root("reap");
-    let ft = FileTreeState::with(Duration::from_millis(100), super::watch::RAW_CAPACITY, None);
+    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    ft.hold_graces();
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     ft.close(ack.sub_id);
     assert_eq!(ft.hub_count(), 1, "kept through the grace period");
-    std::thread::sleep(Duration::from_millis(400));
+    ft.end_graces();
     assert_eq!(ft.hub_count(), 0);
     // A window closing drops what it held.
     let ack = ft.open("w2", &root.to_string_lossy(), vec![], rec, vec![]).unwrap();
@@ -581,14 +609,14 @@ fn budgets_on_a_generated_fixture() {
     let rec = Arc::new(Recorder::default());
     let t0 = Instant::now();
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
-    let first = wait_for(&rec, Duration::from_secs(10), |e| matches!(e, TreeEvent::Dir { rel, chunk: 0, .. } if rel.is_empty())).unwrap();
+    let first = wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Dir { rel, chunk: 0, .. } if rel.is_empty())).unwrap();
     let open_ms = (first - t0).as_secs_f64() * 1000.0;
     let hub = ft.hub_of(ack.sub_id).unwrap();
     let t1 = Instant::now();
     hub.expand(ack.sub_id, vec![DirReq { rel: "big".into(), known_gen: None }]);
-    let chunk = wait_for(&rec, Duration::from_secs(10), |e| matches!(e, TreeEvent::Dir { rel, chunk: 0, .. } if rel == "big")).unwrap();
+    let chunk = wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Dir { rel, chunk: 0, .. } if rel == "big")).unwrap();
     let big_ms = (chunk - t1).as_secs_f64() * 1000.0;
-    let full = wait_for(&rec, Duration::from_secs(10), |e| matches!(e, TreeEvent::Dir { rel, last: true, .. } if rel == "big"));
+    let full = wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Dir { rel, last: true, .. } if rel == "big"));
     assert!(full.is_some());
     // The floor no listing can beat: the bare directory read, measured on this machine now.
     let t2 = Instant::now();
@@ -633,13 +661,14 @@ fn idle_costs_no_coalescer_wakeups() {
     let mut rng = StdRng::seed_from_u64(9);
     seed_tree(&root, 40, &mut rng);
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
     let open: Vec<DirReq> = all_dirs(&root).into_iter().map(|rel| DirReq { rel, known_gen: None }).collect();
     hub.expand(ack.sub_id, open);
-    wait_watching(&hub);
-    std::thread::sleep(Duration::from_secs(2));
+    probe.watching(&hub);
+    probe.settle(&hub, &root);
     let before = hub.wakeups.load(std::sync::atomic::Ordering::Relaxed);
     let msgs = rec.msgs.lock().len();
     std::thread::sleep(Duration::from_secs(10));
@@ -669,18 +698,19 @@ fn a_low_inotify_budget_falls_back_to_polling_and_says_so() {
         std::fs::create_dir_all(root.join(format!("d{i}"))).unwrap();
     }
     let (ft, shared) = linux_state(Some(3));
+    let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
     hub.expand(ack.sub_id, (0..8).map(|i| DirReq { rel: format!("d{i}"), known_gen: None }).collect());
-    wait_watching(&hub);
+    probe.watching(&hub);
     let (watched, polled) = hub.watched_and_polled();
     assert!(shared.watch_count() <= 3, "{} watches over a budget of 3", shared.watch_count());
     assert!(watched <= 3 && polled >= 6, "watched {watched}, polled {polled}");
-    assert!(wait_for(&rec, Duration::from_secs(2), |e| matches!(e, TreeEvent::Health { note: Some(n), watch, .. } if n.contains("polling") && watch == "partial")).is_some());
+    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Health { note: Some(n), watch, .. } if n.contains("polling") && watch == "partial")).is_some());
     // A polled folder still converges, through the poller (the window counts as focused).
     std::fs::write(root.join("d0/new.txt"), "").unwrap();
-    assert!(wait_for(&rec, Duration::from_secs(8), |e| matches!(e, TreeEvent::Delta { rel, add, .. } if rel == "d0" && add.iter().any(|a| a.n == "new.txt"))).is_some());
+    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Delta { rel, add, .. } if rel == "d0" && add.iter().any(|a| a.n == "new.txt"))).is_some());
     ft.close(ack.sub_id);
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -694,14 +724,14 @@ fn watches_stay_within_budget_after_expanding_20k_folders() {
         std::fs::create_dir_all(root.join(format!("g{}", i / 200)).join(format!("d{i}"))).unwrap();
     }
     let (ft, shared) = linux_state(None);
+    let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
     let all: Vec<DirReq> = all_dirs(&root).into_iter().map(|rel| DirReq { rel, known_gen: None }).collect();
     hub.expand(ack.sub_id, all);
-    wait_watching(&hub);
+    probe.watching(&hub);
     assert!(shared.watch_count() <= shared.budget(), "{} watches over a budget of {}", shared.watch_count(), shared.budget());
     ft.close(ack.sub_id);
     std::fs::remove_dir_all(&root).unwrap();
 }
-

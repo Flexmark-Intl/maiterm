@@ -1393,6 +1393,17 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
                     tab_id: x.tab_id.as_ref().and_then(|id| tab_map.get(id)).cloned(),
                     blocked_by: x.blocked_by.iter().filter_map(|id| task_map.get(id)).cloned().collect(),
                     workstream_id: x.workstream_id.as_ref().and_then(|id| ws_map.get(id)).cloned(),
+                    // A card's command FOR another tab (docs/tasks.md §3.1.3) follows that tab
+                    // to its new id. A peer outside this workspace has none here: give it an id
+                    // no tab has, so Run refuses. Kept, the sender's id could name a live tab on
+                    // this machine the importing agent can't message; dropped, the command
+                    // would run in the asker's own tab, which it was never written for.
+                    blocker: x.blocker.clone().map(|mut b| {
+                        if let Some(peer) = b.run_in.take() {
+                            b.run_in = Some(tab_map.get(&peer).cloned().unwrap_or_else(new_id));
+                        }
+                        b
+                    }),
                     ..x.clone()
                 })
                 .collect();

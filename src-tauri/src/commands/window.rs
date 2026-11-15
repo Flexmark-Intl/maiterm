@@ -949,6 +949,15 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 .as_ref()
                 .and_then(|id| workstream_id_map.get(id))
                 .cloned(),
+            // A card's command for another tab (docs/tasks.md §3.1.3) follows that tab to its
+            // copy. A peer outside the workspace keeps its id: Run judges it when used, against
+            // the copy's carrier (`runInTarget`), and refuses it unless it is that tab's peer.
+            blocker: t.blocker.clone().map(|mut b| {
+                if let Some(copy) = b.run_in.as_ref().and_then(|id| tab_id_map.get(id)) {
+                    b.run_in = Some(copy.clone());
+                }
+                b
+            }),
             ..t.clone()
         })
         .collect();

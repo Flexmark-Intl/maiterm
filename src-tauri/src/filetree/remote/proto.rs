@@ -414,12 +414,12 @@ mod tests {
         let connect = crate::util::ssh_words::join([cfg.display().to_string().as_str(), "nohost.invalid"]);
         let connect = format!("-F {connect}");
         let run = |args: Vec<String>| {
-            let out = std::process::Command::new("ssh").args(args).stdin(std::process::Stdio::null()).output().unwrap();
+            let out = std::process::Command::new("ssh").args(args).current_dir(&dir).stdin(std::process::Stdio::null()).output().unwrap();
             String::from_utf8_lossy(&out.stderr).to_lowercase()
         };
         let ours = run(ssh_args("nohost.invalid", &connect, "true"));
         // Without the override this OpenSSH (7.6 or later) says exactly that and exits 255.
-        let plain = run(vec!["-F".into(), cfg.display().to_string(), "-o".into(), "BatchMode=yes".into(), "nohost.invalid".into(), "true".into()]);
+        let plain = run(["-F", "config", "-o", "BatchMode=yes", "nohost.invalid", "true"].map(String::from).to_vec());
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!ours.contains("cannot execute command-line and remote command"), "{ours}");
         if plain.contains("cannot execute command-line and remote command") {

@@ -227,6 +227,7 @@ pub fn plan_blocker(goal: &str, a: &ProposeArgs, asked_at: &str) -> TaskBlocker 
         ],
         command: None,
         pick: None,
+        run_in: None,
         asked_at: asked_at.into(),
         asked_by: "agent".into(),
     }
