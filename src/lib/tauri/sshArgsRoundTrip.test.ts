@@ -107,7 +107,17 @@ describe('ssh args keep their words from the stored command back to the stored c
       expect(cleanSshCommand("ssh -o 'SendEnv=MAITERM_*' ews@nova 'MAITERM_AUTH=x tmux'")).toBe("-o 'SendEnv=MAITERM_*' ews@nova");
     });
     // OpenSSH reads options after the destination too: those are the user's, not a remote command.
-    for (const typed of ['ssh ews@nova -o SetEnv=MAITERM_PROFILE=dev', "ssh ews@nova -o 'SendEnv=MAITERM_*'", 'ssh nova -oSendEnv=MAITERM_X -p 2222']) {
+    // And a repeated option that takes an argument is meant, every time (`-o X -o Y`).
+    for (const typed of [
+      'ssh ews@nova -o SetEnv=MAITERM_PROFILE=dev',
+      "ssh ews@nova -o 'SendEnv=MAITERM_*'",
+      'ssh nova -oSendEnv=MAITERM_X -p 2222',
+      'ssh -o A=1 ews@nova -o SetEnv=MAITERM_PROFILE=dev',
+      'ssh -L 8080:a:80 -L 9090:b:90 nova',
+      'ssh -i k1 -i k2 nova',
+      'ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 nova',
+      'ssh -p 2222 nova -p 2223',
+    ]) {
       it(`stores options after the host as typed: ${typed}`, () => {
         const stored = cleanSshCommand(typed);
         expect(stored).toBe(typed.slice('ssh '.length));
@@ -115,8 +125,14 @@ describe('ssh args keep their words from the stored command back to the stored c
         const cleaned = cleanSshCommand(joinWords(argv));
         expect(cleaned).toBe(stored);
         expect(cleaned).not.toContain('MAITERM_AUTH');
+        expect(cleanSshCommand(joinWords(wrapped(buildSshCommand(stored, '/srv', TAB, bridge))))).toBe(stored);
       });
     }
+    it('still folds a repeated switch, but never in the remote command', () => {
+      expect(cleanSshCommand('ssh -x -C -x -C ews@nova')).toBe('-x -C ews@nova');
+      expect(cleanSshCommand('ssh -o -x -x nova')).toBe('-o -x -x nova');
+      expect(cleanSshCommand('ssh -x nova ls -x -x')).toBe('-x nova ls -x -x');
+    });
     it('never keeps a word naming maiTerm env, whatever else it looks like', () => {
       expect(cleanSshCommand("ssh ews@nova 'MAITERM_AUTH=tok-123 tmux'")).toBe('ews@nova');
       expect(cleanSshCommand('ssh ews@nova export MAITERM_PORT=1 MAITERM_AUTH=x; tmux')).toBe('ews@nova');

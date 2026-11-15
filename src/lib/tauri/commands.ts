@@ -89,6 +89,36 @@ export function remoteCommandIndex(values: string[]): number {
   return values.length;
 }
 
+/**
+ * Repeated single-letter SWITCHES dropped (`-x -C -x -C` → `-x -C`), as ssh's getopt reads the
+ * words, and only before the remote command. A flag that takes an argument is never touched:
+ * `-o A -o B`, `-L a -L b` and `-i k1 -i k2` are all meant, and dropping the second flag left its
+ * argument to be read as the host (`-o X=1 Y=2 nova` connects to `y=2`).
+ */
+function dedupeSwitches(words: WordSpan[]): WordSpan[] {
+  const values = words.map(w => w.value);
+  const remote = remoteCommandIndex(values);
+  const seen = new Set<string>();
+  const drop = new Set<number>();
+  for (let i = 0; i < remote; i++) {
+    const w = values[i];
+    if (w === '--') break;
+    if (!w.startsWith('-') || w === '-') continue;
+    const flags = w.slice(1);
+    const arg = [...flags].findIndex(c => SSH_ARG_FLAGS.includes(c));
+    if (arg >= 0) {
+      // Its argument is the rest of the word, or else the next word, which is never a switch.
+      if (arg === flags.length - 1) i++;
+      continue;
+    }
+    if (flags.length === 1) {
+      if (seen.has(w)) drop.add(i);
+      seen.add(w);
+    }
+  }
+  return words.filter((_, i) => !drop.has(i));
+}
+
 /** The index of the first word of maiTerm's injected remote command, or `words.length`. */
 function injectedFrom(words: WordSpan[]): number {
   for (let i = 1; i < words.length; i++) {
@@ -202,8 +232,7 @@ export function cleanSshCommand(cmd: string): string {
   // a flag. Kept words keep the spelling they came with.
   const all = wordSpansOf(cleaned);
   const words = all.slice(0, injectedFrom(all));
-  const kept: WordSpan[] = [];
-  const seen = new Set<string>();
+  let kept: WordSpan[] = [];
   for (let i = 0; i < words.length; i++) {
     const v = words[i].value;
     // The `ssh` prefix — we store just user@host with any remaining flags
@@ -216,13 +245,9 @@ export function cleanSshCommand(cmd: string): string {
     }
     // Any bare ControlMaster=... leftover (malformed from previous cycles)
     if (v.startsWith('ControlMaster=')) continue;
-    // Deduplicate single-letter flags (e.g. -x -C -x -C → -x -C)
-    if (/^-[a-zA-Z]$/.test(v)) {
-      if (seen.has(v)) continue;
-      seen.add(v);
-    }
     kept.push(words[i]);
   }
+  kept = dedupeSwitches(kept);
   // Last resort: whatever spelling slipped past the above, a stored command never carries
   // maiTerm's env — it is written to disk, retyped into clones and shown on fork cards, and
   // MAITERM_AUTH is a credential. In the REMOTE COMMAND only, cut at the first word that names
