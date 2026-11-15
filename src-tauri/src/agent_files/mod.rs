@@ -713,11 +713,12 @@ impl AgentFiles {
         }
         self.route(out);
         // A shell call can change anything under its folder, and FSEvents can lose some of it
-        // under load without saying so: the trees showing it look again (§6.1).
+        // under load without saying so: the trees showing it look again, and git runs (§6.1).
+        // Handed to the tree's own thread: this is the hook's task, which does no disk IO.
         if !ended_in.is_empty() {
             if let Some(tree) = self.tree.upgrade() {
                 for cwd in ended_in {
-                    tree.edge_at(&cwd);
+                    tree.agent_call_done(cwd);
                 }
             }
         }

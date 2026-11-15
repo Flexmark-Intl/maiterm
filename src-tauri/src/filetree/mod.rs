@@ -95,6 +95,14 @@ impl Drop for SlotGuard<'_> {
     }
 }
 
+/// What finished, for the thread that looks at the disk for it (`FileTreeState::ended`).
+enum Ended {
+    /// A terminal's command: its shell's pid.
+    Shell(u32),
+    /// An agent's shell call: its folder.
+    Agent(PathBuf),
+}
+
 /// Which windows are focused, as Rust sees `WindowEvent::Focused`. Polling runs only for a
 /// focused window, and a long absence triggers a revalidation on return.
 #[derive(Default)]
@@ -141,7 +149,7 @@ pub struct FileTreeState {
     git_slots: Arc<Slots>,
     /// Shell pids whose command just finished (OSC 133 D), for the thread that turns each
     /// into a git signal. Started on first use.
-    commands: OnceLock<std::sync::mpsc::Sender<u32>>,
+    commands: OnceLock<std::sync::mpsc::Sender<Ended>>,
     /// The one thread every trash call runs on, started by the first trash.
     trash: OnceLock<ops::TrashWorker>,
     /// Permanent-delete tickets (`ft_prepare_delete`).
@@ -611,22 +619,39 @@ impl FileTreeState {
     }
 
     /// A command finished in a terminal (OSC 133 D), whose shell is `shell_pid`. Called on the
-    /// PTY reader's thread, so it only hands the pid on: a thread looks up the shell's folder
-    /// and tells the hubs it is in (`note_command_in`). Nothing at all happens while no tree is
-    /// open.
+    /// PTY reader's thread, so it only hands the pid on (`ended`). Nothing at all happens while
+    /// no tree is open.
     pub fn command_done(&self, shell_pid: u32) {
+        self.ended(Ended::Shell(shell_pid));
+    }
+
+    /// An agent's shell call (Bash) ended in `cwd`. Called on the hook's own task, which must
+    /// answer the hook: it only hands the folder on (`ended`), and does no disk IO at all.
+    /// Nothing happens while no tree is open.
+    pub fn agent_call_done(&self, cwd: PathBuf) {
+        self.ended(Ended::Agent(cwd));
+    }
+
+    /// Hands a finished command or call to the thread that looks at the disk for it, so a
+    /// folder on a mount that stopped answering holds up only that thread.
+    fn ended(&self, e: Ended) {
         if self.hubs.lock().is_empty() {
             return;
         }
         let tx = self.commands.get_or_init(|| {
-            let (tx, rx) = std::sync::mpsc::channel::<u32>();
+            let (tx, rx) = std::sync::mpsc::channel::<Ended>();
             let me = self.me.clone();
             let spawned = std::thread::Builder::new().name("ft-commands".into()).spawn(move || {
-                // Blocks with no timeout: a terminal that runs nothing costs nothing.
-                while let Ok(pid) = rx.recv() {
+                // Blocks with no timeout: nothing finishing costs nothing.
+                while let Ok(e) = rx.recv() {
                     let Some(state) = me.upgrade() else { return };
-                    let Some(cwd) = crate::pty::manager::cwd_of_pid(pid) else { continue };
-                    state.note_command_in(Path::new(&cwd));
+                    match e {
+                        Ended::Shell(pid) => {
+                            let Some(cwd) = crate::pty::manager::cwd_of_pid(pid) else { continue };
+                            state.done_in(Path::new(&cwd), Trigger::Command);
+                        }
+                        Ended::Agent(cwd) => state.done_in(&cwd, Trigger::Agent),
+                    }
                 }
             });
             if let Err(e) = spawned {
@@ -634,27 +659,37 @@ impl FileTreeState {
             }
             tx
         });
-        let _ = tx.send(shell_pid);
+        let _ = tx.send(e);
     }
 
-    /// A command finished with its shell in `cwd`: an edge (§6.1). Every tree showing that
-    /// folder re-lists its open folders under it whose mtime moved, and a repository's hubs
-    /// run git, so a `git commit` typed in a terminal decorates without waiting for the
-    /// watcher's trailing delay.
+    /// A command finished with its shell in `cwd`, as `command_done`'s thread reports it.
+    #[cfg(test)]
     pub fn note_command_in(&self, cwd: &Path) {
+        self.done_in(cwd, Trigger::Command);
+    }
+
+    /// A command or an agent's shell call finished in `cwd`: an edge (§6.1). Every tree showing
+    /// that folder re-lists its open folders under it whose mtime moved, and a repository's
+    /// hubs run git (`trigger`), so a `git commit` decorates without waiting for the watcher's
+    /// trailing delay and an edit whose event was lost still shows its decoration.
+    fn done_in(&self, cwd: &Path, trigger: Trigger) {
         self.edge_at(cwd);
         let cwd = crate::share::canon(cwd);
         let hubs: Vec<Arc<RootHub>> = self.hubs.lock().values().filter(|h| h.git.is_some()).cloned().collect();
         for h in hubs {
             if h.covers(&cwd) {
-                h.git_signal(Trigger::Command);
+                h.git_signal(trigger);
             }
         }
     }
 
-    /// Something may have changed at or under `path` (a command or an agent's call ended
-    /// there): every local tree showing it reconciles the open folders under it (§6.1).
+    /// Something may have changed at or under `path`: every local tree showing it reconciles
+    /// the open folders under it (§6.1). Reads the disk (the path's real spelling, and each
+    /// hub's view of it), so it runs on a thread of its own (`ended`), never a hook's task.
     pub fn edge_at(&self, path: &Path) {
+        if self.hubs.lock().is_empty() {
+            return;
+        }
         let path = crate::share::canon(path);
         let hubs: Vec<Arc<RootHub>> = self.hubs.lock().values().cloned().collect();
         for h in hubs {

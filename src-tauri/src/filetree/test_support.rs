@@ -21,6 +21,43 @@ use super::hub::{HubReport, RootHub};
 use super::watch::RawEvent;
 use super::FileTreeState;
 
+/// The name every test-delivered event's marker path starts with.
+const DELIVER_MARKER: &str = "ft-deliver-";
+
+/// Did a test hand this event over (`Probe::push`)? What a deaf hub keeps.
+pub fn delivered(ev: &RawEvent) -> bool {
+    ev.paths.iter().any(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(DELIVER_MARKER)))
+}
+
+/// A hook record as Claude sends it, for the agent edges.
+pub fn hook(event: serde_json::Value, tab: &str) -> crate::agent_files::HookRecord {
+    let name = event["hook_event_name"].as_str().unwrap().to_string();
+    let tool = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    crate::agent_files::HookRecord {
+        phase: crate::agent_files::Phase::of(&name, &event).unwrap(),
+        tab_id: tab.into(),
+        session_id: "s1".into(),
+        runtime: "claude".into(),
+        cwd: event.get("cwd").and_then(|v| v.as_str()).map(String::from),
+        host: None,
+        tool: tool.clone(),
+        tool_use_id: event.get("tool_use_id").and_then(|v| v.as_str()).map(String::from),
+        agent: crate::claude_code::gate::agent_key(&event),
+        extracted: event.get("tool_input").map(|i| crate::agent_files::extract::extract(&tool, i)).unwrap_or(crate::agent_files::extract::Extracted::Nothing),
+        existed: None,
+    }
+}
+
+/// A PreToolUse or PostToolUse event in `cwd`.
+pub fn tool_event(phase: &str, tool: &str, input: serde_json::Value, id: &str, cwd: &Path) -> serde_json::Value {
+    serde_json::json!({ "hook_event_name": phase, "session_id": "s1", "cwd": cwd.to_string_lossy(), "tool_name": tool, "tool_input": input, "tool_use_id": id, "tool_response": {} })
+}
+
+/// A UserPromptSubmit in `cwd`: the agent's turn starts.
+pub fn prompt_event(cwd: &Path) -> serde_json::Value {
+    serde_json::json!({ "hook_event_name": "UserPromptSubmit", "session_id": "s1", "cwd": cwd.to_string_lossy(), "prompt": "go" })
+}
+
 /// How long any one wait may take before it is a hang.
 pub const HANG: Duration = Duration::from_secs(60);
 

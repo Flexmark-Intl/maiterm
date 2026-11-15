@@ -20,7 +20,7 @@ use rand::{Rng, SeedableRng};
 use super::hub::{RootHub, Sink, STALL_MESSAGES};
 use super::ignore_cache::IgnoreStack;
 use super::list;
-use super::test_support::{Probe, HANG};
+use super::test_support::{hook, prompt_event, tool_event, Probe, HANG};
 use super::types::{DirReq, Entry, Envelope, TreeEvent};
 use super::FileTreeState;
 
@@ -540,29 +540,6 @@ fn git_init_in_an_open_root_reopens_it_with_its_repository() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-/// A hook record as Claude sends it, for the agent edges.
-fn hook(event: serde_json::Value, tab: &str) -> crate::agent_files::HookRecord {
-    let name = event["hook_event_name"].as_str().unwrap().to_string();
-    let tool = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    crate::agent_files::HookRecord {
-        phase: crate::agent_files::Phase::of(&name, &event).unwrap(),
-        tab_id: tab.into(),
-        session_id: "s1".into(),
-        runtime: "claude".into(),
-        cwd: event.get("cwd").and_then(|v| v.as_str()).map(String::from),
-        host: None,
-        tool: tool.clone(),
-        tool_use_id: event.get("tool_use_id").and_then(|v| v.as_str()).map(String::from),
-        agent: crate::claude_code::gate::agent_key(&event),
-        extracted: event.get("tool_input").map(|i| crate::agent_files::extract::extract(&tool, i)).unwrap_or(crate::agent_files::extract::Extracted::Nothing),
-        existed: None,
-    }
-}
-
-fn tool_event(phase: &str, tool: &str, input: serde_json::Value, id: &str, cwd: &Path) -> serde_json::Value {
-    serde_json::json!({ "hook_event_name": phase, "session_id": "s1", "cwd": cwd.to_string_lossy(), "tool_name": tool, "tool_input": input, "tool_use_id": id, "tool_response": {} })
-}
-
 /// FSEvents under load loses changes without saying so (docs/file-tree.md §6.1). A hub that
 /// heard nothing at all (`go_deaf`) still shows the disk after each kind of edge: the open
 /// folders whose mtime moved are listed again, and one that didn't move sends nothing.
@@ -613,7 +590,7 @@ fn an_edge_relists_what_the_watcher_never_reported() {
         })),
     ];
     // The Bash call's start, so its end is a call that ran (the ledger keeps local calls only).
-    ft.agents.record(hook(serde_json::json!({ "hook_event_name": "UserPromptSubmit", "session_id": "s1", "cwd": a.to_string_lossy(), "prompt": "go" }), "t1"));
+    ft.agents.record(hook(prompt_event(&a), "t1"));
     ft.agents.record(hook(tool_event("PreToolUse", "Bash", serde_json::json!({ "command": "make" }), "b1", &a), "t1"));
     for (n, (what, change, fire)) in edges.iter().enumerate() {
         let before = rec.msgs.lock().len();

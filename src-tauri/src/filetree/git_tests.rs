@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 
 use super::git::{Decision, GitConfig, GitCore, GitProbe, GitTiming, SkipWhy, Trigger};
 use super::hub::Sink;
-use super::test_support::{Probe, HANG};
+use super::test_support::{hook, prompt_event, tool_event, Probe, HANG};
 use super::types::{Envelope, GitUpdate, TreeEvent};
 use super::{FileTreeState, Slots};
 
@@ -212,6 +212,35 @@ fn decorations_follow_the_disk_and_a_commit_clears_them() {
     assert!(hub.diff_base("../etc/passwd", "HEAD").is_err());
     assert!(hub.diff_base("README.md", "--output=/tmp/x").is_err());
 
+    ft.close(ack.sub_id);
+    let _ = std::fs::remove_dir_all(&r);
+}
+
+/// An agent's shell call ending is an edge like a terminal command's: git runs, so an edit the
+/// call made in place, whose event was lost, still decorates (docs/file-tree.md §6.1).
+#[test]
+fn an_agent_bash_end_runs_git_like_a_terminal_command() {
+    let r = repo("git-agent");
+    let (git_probe, rx) = GitProbe::new();
+    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    ft.set_git_config(GitConfig { timing: fast_timing(), probe: Some(git_probe), ..GitConfig::default() });
+    let probe = Probe::new(&ft);
+    let rec = Arc::new(Recorder::default());
+    let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    probe.watching(&hub);
+    probe.idle(&hub);
+    hub.go_deaf();
+    wait_for("the first status run", HANG, || !rec.git_updates().is_empty());
+    let core = hub.git.clone().unwrap();
+    let bash = serde_json::json!({ "command": "make" });
+    ft.agents.record(hook(prompt_event(&r), "t1"));
+    ft.agents.record(hook(tool_event("PreToolUse", "Bash", bash.clone(), "b1", &r), "t1"));
+    std::fs::write(r.join("src/lib/a.ts"), "a\nmore\n").unwrap();
+    let before = core.test_signals();
+    ft.agents.record(hook(tool_event("PostToolUse", "Bash", bash, "b1", &r), "t1"));
+    run_covering(&rx, "the run the Bash end asked for", before + 1);
+    assert_eq!(applied(&rec.git_updates()).0.get("src/lib/a.ts").map(String::as_str), Some("M"));
     ft.close(ack.sub_id);
     let _ = std::fs::remove_dir_all(&r);
 }

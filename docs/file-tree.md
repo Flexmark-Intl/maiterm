@@ -1441,9 +1441,14 @@ All backends feed one **coalescer thread per hub**:
   lost) reopens the views, as the event would. The edges, all events that already exist,
   never a timer:
   - the window regaining focus (every time, for a local root);
-  - a command finishing in a terminal (OSC 133 D), for the trees showing its shell's folder;
-  - an agent's shell call (Bash) ending, for its folder, and an agent's completed write, for
-    the folder holding the file (`agent_files`);
+  - a command finishing in a terminal (OSC 133 D), for the trees showing its shell's folder,
+    which also runs git there;
+  - an agent's shell call (Bash) ending, for its folder, which also runs git there as a
+    terminal command does (`Trigger::Agent`); and an agent's completed write, for the folder
+    holding the file (`agent_files`). The hook's own task does no disk IO for either: a Bash
+    end is handed to the thread that also takes terminal commands (`FileTreeState::ended`),
+    and a write's edge runs on the ledger's dispatcher, so a folder on a mount that stopped
+    answering never holds up a hook's answer. With no tree open, nothing is done at all;
   - the repository's index or a ref moving (a checkout, pull or stash);
   - expanding a folder: a snapshot is served only while its mtime is the listed one;
   - Files' own operations, which re-list their parents (`touched`).
