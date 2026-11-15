@@ -308,7 +308,7 @@ mod tests {
     /// Every raw event until `want` holds of what arrived. The deadline only turns a hang
     /// into a failure: each event wakes the wait.
     fn until(rx: &mpsc::Receiver<RawEvent>, what: &str, want: impl Fn(&[RawEvent]) -> bool) -> Vec<RawEvent> {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + crate::filetree::test_support::HANG;
         let mut got = Vec::new();
         while !want(&got) {
             match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {

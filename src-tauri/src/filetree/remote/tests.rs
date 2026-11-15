@@ -380,7 +380,7 @@ impl Sink for Recorder {
 
 impl Recorder {
     fn wait(&self, what: &str, f: impl Fn(&TreeEvent) -> bool) -> TreeEvent {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + crate::filetree::test_support::HANG;
         loop {
             if let Some(e) = self.msgs.lock().iter().find(|m| f(&m.ev)) {
                 return e.ev.clone();
@@ -640,7 +640,7 @@ fn a_find_index_that_could_not_be_listed_says_so_and_is_tried_again() {
     let hub = ft.hub_of(ack.sub_id).unwrap();
     let mut seq = 0;
     let mut settled = |want: &dyn Fn(&crate::filetree::types::SearchResult) -> bool| {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + crate::filetree::test_support::HANG;
         loop {
             seq += 1;
             let r = hub.search(ack.sub_id, "alpha", 10, seq, false);
@@ -895,7 +895,7 @@ fn a_helper_leased_as_its_grace_ends_is_not_closed() {
         move || g.end_next()
     });
     // It has decided nothing yet: it is about to take the lock this test holds.
-    at_lock.recv_timeout(Duration::from_secs(60)).expect("the grace period never ended");
+    at_lock.recv_timeout(crate::filetree::test_support::HANG).expect("the grace period never ended");
     let lease = Lease::new(map.get("me@here").unwrap().clone());
     drop(map);
     ending.join().unwrap();
@@ -1103,7 +1103,7 @@ fn the_helper_ends_with_its_input() {
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(&proto::bootstrap()).unwrap();
     drop(stdin);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::filetree::test_support::HANG;
     loop {
         if child.try_wait().unwrap().is_some() {
             break;
