@@ -116,31 +116,30 @@ impl Drop for Fx {
 /// log but libtest's "running for over 60 seconds" (the subscription test below, twice).
 struct Watchdog {
     stage: Arc<Mutex<String>>,
-    done: Arc<std::sync::atomic::AtomicBool>,
+    /// Dropped with the watchdog: the watching thread's wait ends at once.
+    done: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl Watchdog {
     fn start(test: &'static str, limit: Duration) -> Watchdog {
         let stage = Arc::new(Mutex::new("starting".to_string()));
-        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (at, over) = (stage.clone(), done.clone());
+        let (done, over) = std::sync::mpsc::channel::<()>();
+        let at = stage.clone();
         std::thread::Builder::new()
             .name("test-watchdog".into())
             .spawn(move || {
-                let started = std::time::Instant::now();
-                while !over.load(std::sync::atomic::Ordering::SeqCst) {
-                    if started.elapsed() >= limit {
-                        use std::io::Write;
-                        // Straight to stderr: libtest captures eprintln!, and an abort loses
-                        // what it captured.
-                        let _ = writeln!(std::io::stderr(), "{test}: still running after {limit:?}, at: {}. Aborting so the log says where.", at.lock());
-                        std::process::abort();
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
+                // Ends when the test drops the watchdog (the sender goes); only a test still
+                // running at `limit` gets here by the clock.
+                if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = over.recv_timeout(limit) {
+                    use std::io::Write;
+                    // Straight to stderr: libtest captures eprintln!, and an abort loses
+                    // what it captured.
+                    let _ = writeln!(std::io::stderr(), "{test}: still running after {limit:?}, at: {}. Aborting so the log says where.", at.lock());
+                    std::process::abort();
                 }
             })
             .unwrap();
-        Watchdog { stage, done }
+        Watchdog { stage, done: Some(done) }
     }
 
     fn at(&self, stage: &str) {
@@ -156,7 +155,7 @@ impl Watchdog {
 
 impl Drop for Watchdog {
     fn drop(&mut self) {
-        self.done.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.done.take();
     }
 }
 

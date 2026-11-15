@@ -345,6 +345,23 @@ struct WatchState {
     git_watch: Option<Box<dyn Send>>,
 }
 
+/// What a hub tells a test's probe about its watcher and listings, so a test waits on the
+/// hub's own account of what it did rather than sleeping. Outside tests nothing is built or
+/// sent (`RootHub::report`).
+#[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub enum HubReport {
+    /// The watcher is running: every open folder was asked to list again and Health went out.
+    WatchStarted,
+    /// The coalescer handed a batch over and the hub has processed it: the raw paths it held,
+    /// and whether it re-listed from the root because events were lost (an overflow, or a
+    /// backend's rescan). Small changes were applied and sent by now; re-listings it asked for
+    /// may still be running (`ListingsIdle` says when they are done).
+    Batch { paths: Vec<PathBuf>, lost: bool },
+    /// The last queued or running listing finished and was sent.
+    ListingsIdle,
+}
+
 pub struct HubInit {
     pub place: String,
     pub root: PathBuf,
@@ -359,6 +376,9 @@ pub struct HubInit {
     pub agents: Arc<AgentFiles>,
     /// The root is on an ssh host (§15); `root` is then its real POSIX path there.
     pub remote: Option<Arc<RemoteRoot>>,
+    /// Tests: where the hub's `HubReport`s go.
+    #[cfg(test)]
+    pub probe: Option<std::sync::mpsc::Sender<HubReport>>,
 }
 
 pub struct RootHub {
@@ -398,6 +418,8 @@ pub struct RootHub {
     pub wakeups: Arc<AtomicU64>,
     /// Bumped by every subscribe and every reap scheduled; a reap only happens if unchanged.
     pub grace_token: AtomicU64,
+    #[cfg(test)]
+    probe: Option<Mutex<std::sync::mpsc::Sender<HubReport>>>,
 }
 
 /// The repository the root is in, found the way git finds it: the nearest `.git` at or above
@@ -513,6 +535,8 @@ impl RootHub {
             retired: AtomicBool::new(false),
             wakeups: Arc::new(AtomicU64::new(0)),
             grace_token: AtomicU64::new(0),
+            #[cfg(test)]
+            probe: init.probe.map(Mutex::new),
         });
         if let Some(r) = &remote {
             // The host's helper watches; there is nothing here for a coalescer to drain.
@@ -572,6 +596,17 @@ impl RootHub {
             self.search.note(vec![super::search::Change::Folder]);
         }
         self.broadcast_health();
+        self.report(|| HubReport::WatchStarted);
+    }
+
+    /// Tells the test probe, if there is one, what the hub did. Nothing outside tests.
+    #[inline]
+    #[cfg_attr(not(test), allow(unused_variables))]
+    pub(super) fn report(&self, r: impl FnOnce() -> HubReport) {
+        #[cfg(test)]
+        if let Some(p) = &self.probe {
+            let _ = p.lock().send(r());
+        }
     }
 
     pub fn is_gone(&self) -> bool {
@@ -1090,6 +1125,10 @@ impl RootHub {
             jobs.queue.push_back(rel.to_string());
         } else {
             jobs.inflight.remove(rel);
+            if jobs.inflight.is_empty() && jobs.queue.is_empty() {
+                drop(jobs);
+                self.report(|| HubReport::ListingsIdle);
+            }
         }
     }
 
@@ -1929,20 +1968,15 @@ mod stall_tests {
         let root = std::env::temp_dir().join(format!("ft-early-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let ft = super::super::FileTreeState::with(Duration::from_secs(30), super::super::watch::RAW_CAPACITY, None);
+        let probe = super::super::test_support::Probe::new(&ft);
         let rec = Arc::new(Recorder::default());
         let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
         let hub = ft.hub_of(ack.sub_id).unwrap();
         // The watcher first: once it runs it re-lists every folder a sub is interested in,
         // and "big", not on disk, would come back gone and drop the snapshot below. Windows
-        // starts it fast enough to land inside this test. Its start ends with a Health
-        // broadcast, the second this sub gets (the first came with the subscribe), and that is
-        // after it read the interest set, which `watch_pending` turning false is not.
-        let healths = || rec.msgs.lock().iter().filter(|m| matches!(m.ev, TreeEvent::Health { .. })).count();
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        while hub.watch_pending() || healths() < 2 {
-            assert!(std::time::Instant::now() < deadline, "the watcher never started");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        // starts it fast enough to land inside this test. `WatchStarted` is reported after
+        // it read the interest set, which `watch_pending` turning false is not.
+        probe.watching(&hub);
         // "big" is never on disk: the snapshot published below is all the hub knows of it.
         hub.subs.lock().get_mut(&ack.sub_id).unwrap().interest.insert("big".to_string());
         hub.pause(ack.sub_id, true);

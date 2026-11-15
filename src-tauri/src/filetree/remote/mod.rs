@@ -95,6 +95,11 @@ impl Default for Timing {
 
 /// Where to connect: the tunnel's own key (it names the ControlMaster socket) and the connect
 /// args (`watch::connect_args` form, never a whole command line).
+///
+/// `ssh_args` is a list of whitespace-separated words, as it is everywhere maiTerm keeps an
+/// ssh command (the tunnels, the mirror, watch scripts): the command is read back from the
+/// process table, where argv's quoting is already gone. A word holding a space (`-F "/a b/c"`)
+/// can't be carried; `proto::ssh_args` splits it into argv words itself, never through a shell.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Target {
     pub tunnel_key: String,
@@ -310,6 +315,60 @@ pub struct Conn {
     grace_token: AtomicU64,
     hello: Mutex<Option<Hello>>,
     activity: Arc<Activity>,
+    /// Tests: grace periods that end when the test says (`Remotes::hold_graces`).
+    #[cfg(test)]
+    graces: Mutex<Option<Arc<Graces>>>,
+    /// Tests: roots opened on the host through this helper (`RemoteRoot::open`, a round trip).
+    #[cfg(test)]
+    pub(crate) roots_opened: AtomicUsize,
+}
+
+/// Test seam: a helper's grace period ends when the test calls `end_next`, not by the clock,
+/// so "the helper outlived its grace" is a step the test takes rather than a sleep.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Graces {
+    held: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
+    cv: Condvar,
+    /// Told when an ending grace period is about to take the registry's lock.
+    at_lock: Mutex<Option<mpsc::Sender<()>>>,
+}
+
+#[cfg(test)]
+impl Graces {
+    fn hold(&self, end: Box<dyn FnOnce() + Send>) {
+        self.held.lock().push(end);
+        self.cv.notify_all();
+    }
+
+    /// Waits until a grace period has started (a helper's last lease went), then ends every
+    /// one that has. The deadline only turns a hang into a failure.
+    pub(crate) fn end_next(&self) {
+        let due = {
+            let mut held = self.held.lock();
+            while held.is_empty() {
+                assert!(!self.cv.wait_for(&mut held, Duration::from_secs(60)).timed_out(), "no helper's grace period started");
+            }
+            std::mem::take(&mut *held)
+        };
+        for end in due {
+            end();
+        }
+    }
+
+    /// From now on, each ending grace period sends here just before it takes the registry's
+    /// lock, where it decides.
+    pub(crate) fn at_lock(&self) -> mpsc::Receiver<()> {
+        let (tx, rx) = mpsc::channel();
+        *self.at_lock.lock() = Some(tx);
+        rx
+    }
+
+    fn reached_lock(&self) {
+        if let Some(tx) = self.at_lock.lock().as_ref() {
+            let _ = tx.send(());
+        }
+    }
 }
 
 /// A root's hold on its host's helper: the last one going starts the grace period. Taken from
@@ -465,6 +524,10 @@ impl Conn {
             grace_token: AtomicU64::new(0),
             hello: Mutex::new(None),
             activity: Arc::new(Activity::new()),
+            #[cfg(test)]
+            graces: Mutex::new(None),
+            #[cfg(test)]
+            roots_opened: AtomicUsize::new(0),
         })
     }
 
@@ -738,6 +801,18 @@ impl Conn {
         }
     }
 
+    /// Test seam: waits until `want` holds of the helper's status and epoch (each start is a
+    /// new epoch), woken by every change of status to live, down or closed. The deadline only
+    /// turns a hang into a failure.
+    #[cfg(all(test, unix))]
+    pub(crate) fn wait_state(&self, what: &str, want: impl Fn(&Status, u64) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut s = self.st.lock();
+        while !want(&s.status, s.epoch) {
+            assert!(!self.cv.wait_until(&mut s, deadline).timed_out(), "the helper never got to {what} ({:?})", s.status);
+        }
+    }
+
     fn kill_current(&self) {
         let child = self.st.lock().io.as_ref().map(|io| io.child.clone());
         if let Some(c) = child {
@@ -915,9 +990,12 @@ impl Conn {
         let token = self.grace_token.fetch_add(1, Ordering::SeqCst) + 1;
         let weak = self.me.clone();
         let grace = self.timing.grace;
-        let spawned = std::thread::Builder::new().name("ft-ssh-grace".into()).spawn(move || {
-            std::thread::sleep(grace);
+        let end = move || {
             let Some(c) = weak.upgrade() else { return };
+            #[cfg(test)]
+            if let Some(g) = c.graces.lock().clone() {
+                g.reached_lock();
+            }
             // Decided under the registry's lock, where `Remotes::lease` hands this helper out
             // and counts the lease: checked before it, a root opening at this moment got the
             // helper and then had it closed under it, for good (a closed helper never restarts).
@@ -934,6 +1012,15 @@ impl Conn {
                 }
             }
             c.close();
+        };
+        #[cfg(test)]
+        if let Some(g) = self.graces.lock().clone() {
+            g.hold(Box::new(end));
+            return;
+        }
+        let spawned = std::thread::Builder::new().name("ft-ssh-grace".into()).spawn(move || {
+            std::thread::sleep(grace);
+            end();
         });
         if let Err(e) = spawned {
             log::warn!("filetree: couldn't schedule the ssh helper's end: {e}");
@@ -1057,11 +1144,19 @@ pub struct Remotes {
     map: Arc<Registry>,
     transport: Mutex<Arc<dyn Transport>>,
     timing: Mutex<Timing>,
+    #[cfg(test)]
+    graces: Mutex<Option<Arc<Graces>>>,
 }
 
 impl Default for Remotes {
     fn default() -> Self {
-        Remotes { map: Arc::new(Mutex::new(HashMap::new())), transport: Mutex::new(Arc::new(Ssh)), timing: Mutex::new(Timing::default()) }
+        Remotes {
+            map: Arc::new(Mutex::new(HashMap::new())),
+            transport: Mutex::new(Arc::new(Ssh)),
+            timing: Mutex::new(Timing::default()),
+            #[cfg(test)]
+            graces: Mutex::new(None),
+        }
     }
 }
 
@@ -1071,6 +1166,15 @@ impl Remotes {
     pub(crate) fn set_transport(&self, t: Arc<dyn Transport>, timing: Timing) {
         *self.transport.lock() = t;
         *self.timing.lock() = timing;
+    }
+
+    /// Test seam: every helper made from now on ends its grace period only when the test says
+    /// (`Graces::end_next`).
+    #[cfg(test)]
+    pub(crate) fn hold_graces(&self) -> Arc<Graces> {
+        let g = Arc::new(Graces::default());
+        *self.graces.lock() = Some(g.clone());
+        g
     }
 
     /// A hold on the helper for `host`, made if there is none. The lease is counted before the
@@ -1087,6 +1191,10 @@ impl Remotes {
             }
         }
         let c = Conn::new(host, self.transport.lock().clone(), lookup.unwrap_or_else(direct_lookup), Arc::downgrade(&self.map), *self.timing.lock());
+        #[cfg(test)]
+        {
+            *c.graces.lock() = self.graces.lock().clone();
+        }
         map.insert(host.to_string(), c.clone());
         Lease::new(c)
     }
@@ -1150,6 +1258,8 @@ impl RemoteRoot {
     /// helper starts must not close it under this root.
     pub fn open(lease: Lease, root: &str, excludes: Vec<String>) -> Result<Arc<RemoteRoot>, String> {
         let conn = lease.conn().clone();
+        #[cfg(test)]
+        conn.roots_opened.fetch_add(1, Ordering::SeqCst);
         let (real, repo) = match conn.call("root", json!({ "root": root, "excludes": excludes }), &[], CALL_TIMEOUT) {
             Ok(f) => (f.str("real").unwrap_or(root).to_string(), f.header.get("repo").and_then(parse_repo)),
             Err(CallError::Limited) => {

@@ -305,15 +305,15 @@ mod tests {
         crate::share::canon(&t)
     }
 
-    /// Every raw event until `want` holds of what arrived, or 5 s.
+    /// Every raw event until `want` holds of what arrived. The deadline only turns a hang
+    /// into a failure: each event wakes the wait.
     fn until(rx: &mpsc::Receiver<RawEvent>, what: &str, want: impl Fn(&[RawEvent]) -> bool) -> Vec<RawEvent> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(60);
         let mut got = Vec::new();
         while !want(&got) {
-            let left = deadline.saturating_duration_since(Instant::now());
-            assert!(!left.is_zero(), "{what}: got {got:?}");
-            if let Ok(ev) = rx.recv_timeout(left.min(Duration::from_millis(100))) {
-                got.push(ev);
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(ev) => got.push(ev),
+                Err(e) => panic!("{what} ({e}): got {got:?}"),
             }
         }
         got
@@ -363,25 +363,14 @@ mod tests {
     /// forever, so a watchdog turns a hang into an abort that says so.
     #[test]
     fn dropping_a_busy_watcher_and_deleting_its_folder_never_hangs() {
-        /// Set on any exit, a panic's included: a failure must not turn into an abort later.
-        struct Finished(Arc<std::sync::atomic::AtomicBool>);
-        impl Drop for Finished {
-            fn drop(&mut self) {
-                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let _finished = Finished(finished.clone());
-        let f = finished.clone();
+        // Dropped on any exit, a panic's included, which ends the watchdog's wait at once: a
+        // failure must not turn into an abort later. Only a hang reaches the 60 s.
+        let (_finished, over) = mpsc::channel::<()>();
         std::thread::spawn(move || {
-            let start = Instant::now();
-            while !f.load(std::sync::atomic::Ordering::SeqCst) {
-                if start.elapsed() > Duration::from_secs(60) {
-                    use std::io::Write;
-                    let _ = writeln!(std::io::stderr(), "dropping_a_busy_watcher_and_deleting_its_folder_never_hangs: still running after 60 s, aborting");
-                    std::process::abort();
-                }
-                std::thread::sleep(Duration::from_millis(100));
+            if let Err(mpsc::RecvTimeoutError::Timeout) = over.recv_timeout(Duration::from_secs(60)) {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr(), "dropping_a_busy_watcher_and_deleting_its_folder_never_hangs: still running after 60 s, aborting");
+                std::process::abort();
             }
         });
         for i in 0..100 {

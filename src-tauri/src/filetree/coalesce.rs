@@ -65,7 +65,11 @@ pub(super) fn spawn(hub: Weak<RootHub>, rx: Receiver<RawEvent>, wakeups: Arc<Ato
             }
         }
         let Some(h) = hub.upgrade() else { return };
-        h.process_batch(batch);
+        #[cfg(test)]
+        let paths: Vec<std::path::PathBuf> = batch.iter().flat_map(|e| e.paths.iter().cloned()).collect();
+        let _lost = h.process_batch(batch);
+        #[cfg(test)]
+        h.report(|| super::hub::HubReport::Batch { paths, lost: _lost });
         drop(h);
         if disconnected {
             return;
@@ -232,9 +236,11 @@ impl RootHub {
         self.search.note(changes);
     }
 
-    pub(super) fn process_batch(&self, batch: Vec<RawEvent>) {
+    /// True when events were lost (an overflow, or a backend asked for a rescan): the batch
+    /// re-listed what they could have touched.
+    pub(super) fn process_batch(&self, batch: Vec<RawEvent>) -> bool {
         if self.is_gone() {
-            return;
+            return false;
         }
         let mut revalidate = BTreeSet::new();
         let mut rescan: Vec<String> = Vec::new();
@@ -253,11 +259,14 @@ impl RootHub {
         let mut worktree: Vec<String> = Vec::new();
         // Worktree paths some event said appeared, went or moved (not only "modified").
         let mut reshaped: HashSet<String> = HashSet::new();
+        let mut lost = false;
         if self.overflow.swap(false, Ordering::SeqCst) {
             log::debug!("filetree: event overflow under {}, re-listing", self.root.display());
             rescan.push(String::new());
+            lost = true;
         }
         for ev in batch {
+            lost |= ev.rescan;
             if ev.paths.is_empty() {
                 if ev.rescan {
                     rescan.push(String::new());
@@ -331,7 +340,7 @@ impl RootHub {
         }
         if root_check && !self.root.is_dir() {
             self.root_gone();
-            return;
+            return lost;
         }
         if exclude_changed {
             self.ignore.lock().invalidate_all(self.git_dir(), None);
@@ -349,7 +358,7 @@ impl RootHub {
         // hub was built for the old one, and nothing short of a new hub decorates by the new.
         if (repo_changed || (git_signal && self.repo.is_none())) && !self.repo_current() {
             self.repo_moved();
-            return;
+            return lost;
         }
         if exclude_changed {
             worktree_git = true;
@@ -404,6 +413,7 @@ impl RootHub {
         for rel in revalidate {
             self.request(&rel, None);
         }
+        lost
     }
 }
 

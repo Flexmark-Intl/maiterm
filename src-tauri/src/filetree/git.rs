@@ -92,11 +92,79 @@ pub struct GitConfig {
     pub program: OsString,
     pub enabled: bool,
     pub timing: GitTiming,
+    /// Tests: what each run is measured at, and the scheduler's decisions (`GitProbe`).
+    #[cfg(test)]
+    pub probe: Option<Arc<GitProbe>>,
 }
 
 impl Default for GitConfig {
     fn default() -> Self {
-        GitConfig { program: OsString::from("git"), enabled: true, timing: GitTiming::default() }
+        GitConfig {
+            program: OsString::from("git"),
+            enabled: true,
+            timing: GitTiming::default(),
+            #[cfg(test)]
+            probe: None,
+        }
+    }
+}
+
+/// Why `signal` dropped a trigger. Reported to a test's `GitProbe` only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipWhy {
+    /// `file_tree_git` is off.
+    Off,
+    /// The last run failed for good (git missing, an untrusted repository): only Manual runs.
+    Failed,
+    /// Slow mode: worktree, command and agent edges don't run git.
+    Slow,
+    /// A network mount: no watcher to trust, so those edges don't run git either.
+    Network,
+    /// The hub is going away.
+    Stopped,
+}
+
+/// A decision the git scheduler made, reported to a test's `GitProbe` (outside tests nothing
+/// is built or sent): a trigger it dropped and why, a run it finished and what that run was
+/// measured at, a run it had nobody to show to, and going idle with nothing due. Tests assert
+/// on these instead of sleeping and then checking that nothing happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Skipped(Trigger, SkipWhy),
+    /// A status run finished and the hub has it (and has broadcast any health change).
+    Ran { took: Duration },
+    /// A run came due with no audience: deferred until a view comes back.
+    Deferred,
+    /// A run came due with decorations off: dropped.
+    Off,
+    /// The worker is about to wait with nothing due.
+    Idle,
+}
+
+/// The test seam on a hub's git worker. `took`, when set, is what every run is measured at in
+/// place of the wall clock, so slow mode is driven by "this run took 3 s" rather than by a git
+/// that sleeps; every decision goes down the channel `new` returns.
+#[cfg(test)]
+#[derive(Debug)]
+pub struct GitProbe {
+    pub took: Mutex<Option<Duration>>,
+    decisions: Mutex<std::sync::mpsc::Sender<Decision>>,
+}
+
+#[cfg(test)]
+impl GitProbe {
+    pub fn new() -> (Arc<GitProbe>, std::sync::mpsc::Receiver<Decision>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (Arc::new(GitProbe { took: Mutex::new(None), decisions: Mutex::new(tx) }), rx)
+    }
+
+    /// Every run from now on is measured at `took`; None goes back to the wall clock.
+    pub fn set_took(&self, took: Option<Duration>) {
+        *self.took.lock() = took;
+    }
+
+    fn report(&self, d: Decision) {
+        let _ = self.decisions.lock().send(d);
     }
 }
 
@@ -420,6 +488,8 @@ pub struct GitCore {
     cv: Condvar,
     pub data: Mutex<GitData>,
     slots: Arc<Slots>,
+    #[cfg(test)]
+    probe: Option<Arc<GitProbe>>,
 }
 
 impl GitCore {
@@ -447,7 +517,29 @@ impl GitCore {
             cv: Condvar::new(),
             data: Mutex::new(GitData::default()),
             slots,
+            #[cfg(test)]
+            probe: cfg.probe.clone(),
         })
+    }
+
+    /// Tells the test probe, if there is one, what was decided. Nothing outside tests.
+    #[inline]
+    #[cfg_attr(not(test), allow(unused_variables, clippy::unused_self))]
+    fn report(&self, d: impl FnOnce() -> Decision) {
+        #[cfg(test)]
+        if let Some(p) = &self.probe {
+            p.report(d());
+        }
+    }
+
+    /// How long a run took: the wall clock's answer, or the test probe's.
+    #[inline]
+    fn measured(&self, wall: Duration) -> Duration {
+        #[cfg(test)]
+        if let Some(t) = self.probe.as_ref().and_then(|p| *p.took.lock()) {
+            return t;
+        }
+        wall
     }
 
     pub fn enabled(&self) -> bool {
@@ -480,16 +572,19 @@ impl GitCore {
     /// Ask for a status run. Cheap: a lock and maybe a notify.
     pub fn signal(self: &Arc<Self>, t: Trigger) {
         if !self.enabled() {
+            self.report(|| Decision::Skipped(t, SkipWhy::Off));
             return;
         }
         {
             let d = self.data.lock();
             if d.error.as_ref().is_some_and(Failure::permanent) && t != Trigger::Manual {
+                self.report(|| Decision::Skipped(t, SkipWhy::Failed));
                 return;
             }
             // Slow repos, and network mounts (no watcher to trust), refresh on index changes,
             // focus, a new view and the human's refresh only.
             if (d.slow || self.network) && matches!(t, Trigger::Worktree | Trigger::Command | Trigger::Agent) {
+                self.report(|| Decision::Skipped(t, if d.slow { SkipWhy::Slow } else { SkipWhy::Network }));
                 return;
             }
         }
@@ -501,6 +596,7 @@ impl GitCore {
         let now = Instant::now();
         let mut s = self.sched.lock();
         if s.stop {
+            self.report(|| Decision::Skipped(t, SkipWhy::Stopped));
             return;
         }
         let first = *s.first.get_or_insert(now);
@@ -938,7 +1034,10 @@ fn worker(core: Arc<GitCore>) {
                     return;
                 }
                 match s.due {
-                    None => core.cv.wait(&mut s),
+                    None => {
+                        core.report(|| Decision::Idle);
+                        core.cv.wait(&mut s);
+                    }
                     Some(d) => {
                         if d <= Instant::now() {
                             break;
@@ -957,10 +1056,12 @@ fn worker(core: Arc<GitCore>) {
         };
         let epoch = core.epoch();
         if !core.enabled() {
+            core.report(|| Decision::Off);
             continue;
         }
         if !hub.git_audience() {
             core.sched.lock().deferred = true;
+            core.report(|| Decision::Deferred);
             continue;
         }
         // Timed from the slot, not from before waiting for it: a fast repo queued behind two
@@ -968,9 +1069,10 @@ fn worker(core: Arc<GitCore>) {
         let (out, took) = {
             let _slot = core.slots.acquire();
             let started = Instant::now();
-            (core.run_status(), started.elapsed())
+            (core.run_status(), core.measured(started.elapsed()))
         };
         hub.git_finished(epoch, out, took);
+        core.report(|| Decision::Ran { took });
     }
 }
 

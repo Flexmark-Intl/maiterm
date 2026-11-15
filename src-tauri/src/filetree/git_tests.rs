@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use super::git::{GitConfig, GitCore, GitTiming, Trigger};
+use super::git::{Decision, GitConfig, GitCore, GitProbe, GitTiming, SkipWhy, Trigger};
 use super::hub::Sink;
+use super::test_support::Probe;
 use super::types::{Envelope, GitUpdate, TreeEvent};
 use super::{FileTreeState, Slots};
 
@@ -94,14 +95,33 @@ fn applied(updates: &[GitUpdate]) -> (std::collections::BTreeMap<String, String>
 }
 
 /// The watcher starts in the background (FSEvents can take seconds); a change made before it
-/// runs is never reported.
-fn wait_for_watcher(ft: &FileTreeState, sub: u64) {
+/// runs is never reported. Once it has started, a barrier file's event coming through proves
+/// it is delivering: the file goes in the repository's own `.git`, where the tree, git and
+/// find all take it for noise.
+fn wait_for_watcher(probe: &Probe, ft: &FileTreeState, sub: u64, repo: &Path) {
     let hub = ft.hub_of(sub).unwrap();
-    // Long: with the whole suite making temp folders, fseventsd can keep a stream start
-    // waiting for tens of seconds.
-    wait_for("the watcher to start", Duration::from_secs(60), || !hub.watch_pending());
-    // FSEvents reports from the stream's start; give it a moment past that.
-    std::thread::sleep(Duration::from_millis(200));
+    probe.watching(&hub);
+    probe.barrier(&repo.join(".git"));
+}
+
+/// The git worker's next decision after the ones `skip` passes over. The deadline only turns
+/// a hang into a failure.
+fn decision(rx: &std::sync::mpsc::Receiver<Decision>, what: &str, skip: impl Fn(&Decision) -> bool) -> Decision {
+    loop {
+        match rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(d) if skip(&d) => continue,
+            Ok(d) => return d,
+            Err(e) => panic!("no decision while waiting for {what}: {e}"),
+        }
+    }
+}
+
+/// The next finished run's measured duration, passing over idles, deferrals and skips.
+fn next_run(rx: &std::sync::mpsc::Receiver<Decision>, what: &str) -> Duration {
+    match decision(rx, what, |d| !matches!(d, Decision::Ran { .. })) {
+        Decision::Ran { took } => took,
+        d => unreachable!("{d:?}"),
+    }
 }
 
 fn fast_timing() -> GitTiming {
@@ -113,6 +133,7 @@ fn decorations_follow_the_disk_and_a_commit_clears_them() {
     let r = repo("git-e2e");
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
     ft.set_git_config(GitConfig { timing: fast_timing(), ..GitConfig::default() });
+    let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     assert!(ack.caps.git);
@@ -120,7 +141,7 @@ fn decorations_follow_the_disk_and_a_commit_clears_them() {
     let (files, _) = applied(&rec.git_updates());
     assert!(files.is_empty(), "a clean repo has no decorations: {files:?}");
     assert_eq!(rec.git_updates()[0].branch.as_ref().map(|b| b.head.as_str()), Some("main"));
-    wait_for_watcher(&ft, ack.sub_id);
+    wait_for_watcher(&probe, &ft, ack.sub_id, &r);
 
     // An edit and a new file: the watcher schedules a run (no manual refresh here).
     std::fs::write(r.join("src/lib/a.ts"), "changed\n").unwrap();
@@ -202,7 +223,8 @@ fn turning_decorations_off_clears_them_and_runs_nothing() {
     let r = repo("git-off");
     std::fs::write(r.join("README.md"), "changed\n").unwrap();
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
-    ft.set_git_config(GitConfig { timing: fast_timing(), ..GitConfig::default() });
+    let (probe, rx) = GitProbe::new();
+    ft.set_git_config(GitConfig { timing: fast_timing(), probe: Some(probe), ..GitConfig::default() });
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     wait_for("the first run", Duration::from_secs(10), || !applied(&rec.git_updates()).0.is_empty());
@@ -211,7 +233,8 @@ fn turning_decorations_off_clears_them_and_runs_nothing() {
     assert_eq!(rec.healths().last().map(String::as_str), Some("off"));
     let n = rec.git_updates().len();
     ft.hub_of(ack.sub_id).unwrap().git_signal(Trigger::Manual);
-    std::thread::sleep(Duration::from_millis(300));
+    // The signal is refused where it arrives, before anything is scheduled.
+    assert_eq!(decision(&rx, "the refused signal", |d| !matches!(d, Decision::Skipped(..))), Decision::Skipped(Trigger::Manual, SkipWhy::Off));
     assert_eq!(rec.git_updates().len(), n);
     ft.close(ack.sub_id);
     let _ = std::fs::remove_dir_all(&r);
@@ -238,70 +261,104 @@ fn a_command_finishing_in_the_repo_schedules_a_run() {
     let _ = std::fs::remove_dir_all(&r);
 }
 
-/// A `git` that records each run and takes as long as a control file says.
-#[cfg(unix)]
-fn stub_git(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
-    let log = dir.join("runs.log");
-    let delay = dir.join("delay");
-    std::fs::write(&delay, "0").unwrap();
-    let script = dir.join("git");
-    std::fs::write(
-        &script,
-        format!(
-            "#!/bin/sh\necho run >> '{}'\nsleep \"$(cat '{}')\"\nprintf '# branch.oid abc\\000# branch.head main\\000'\n",
-            log.display(),
-            delay.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    (script, log, delay)
-}
-
-#[cfg(unix)]
-fn runs(log: &Path) -> usize {
-    std::fs::read_to_string(log).map(|s| s.lines().count()).unwrap_or(0)
-}
-
-#[cfg(unix)]
+/// Slow mode end to end, with each run's duration fed through the probe: no git that sleeps,
+/// no thresholds a loaded machine can cross, and the skipped edges proven by the worker's own
+/// report rather than by waiting to see that nothing ran.
 #[test]
 fn slow_mode_trips_on_two_slow_runs_skips_worktree_edges_and_recovers() {
     let r = repo("git-slow");
-    let bin = temp_root("git-stub");
-    let (script, log, delay) = stub_git(&bin);
-    let timing = GitTiming { slow_run: Duration::from_millis(250), fast_run: Duration::from_millis(150), ..fast_timing() };
+    let (probe, rx) = GitProbe::new();
+    let timing = fast_timing();
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
-    ft.set_git_config(GitConfig { program: script.into_os_string(), enabled: true, timing });
+    ft.set_git_config(GitConfig { timing, probe: Some(probe.clone()), ..GitConfig::default() });
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
-    wait_for("the open's run", Duration::from_secs(10), || !rec.git_updates().is_empty());
+    next_run(&rx, "the open's run");
+    assert_ne!(rec.healths().last().map(String::as_str), Some("slow"));
 
-    std::fs::write(&delay, "0.4").unwrap();
-    for _ in 0..2 {
-        let n = runs(&log);
+    // Every run from here takes longer than `slow_run`; two in a row make the repo slow.
+    let slow = timing.slow_run + Duration::from_secs(1);
+    probe.set_took(Some(slow));
+    for i in 0..2 {
         hub.git_signal(Trigger::Manual);
-        wait_for("a slow run", Duration::from_secs(10), || runs(&log) > n);
-        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(next_run(&rx, &format!("slow run {i}")), slow);
     }
-    wait_for("Health to say slow", Duration::from_secs(5), || rec.healths().last().map(String::as_str) == Some("slow"));
+    // Health is broadcast before the run is reported.
+    assert_eq!(rec.healths().last().map(String::as_str), Some("slow"));
 
-    // Slow: worktree changes and finished commands no longer run git.
-    let n = runs(&log);
-    hub.git_signal(Trigger::Worktree);
-    hub.git_signal(Trigger::Command);
-    std::thread::sleep(Duration::from_millis(400));
-    assert_eq!(runs(&log), n, "a slow repo ignores worktree edges");
+    // Slow: worktree changes, finished commands and agent edits no longer run git.
+    for t in [Trigger::Worktree, Trigger::Command, Trigger::Agent] {
+        hub.git_signal(t);
+        assert_eq!(decision(&rx, "the slow-mode skip", |d| !matches!(d, Decision::Skipped(..))), Decision::Skipped(t, SkipWhy::Slow));
+    }
 
     // A fast run (on a manual refresh) ends it.
-    std::fs::write(&delay, "0").unwrap();
+    let fast = timing.fast_run / 2;
+    probe.set_took(Some(fast));
     hub.git_signal(Trigger::Manual);
-    wait_for("Health to recover", Duration::from_secs(10), || rec.healths().last().map(String::as_str) == Some("live"));
+    assert_eq!(next_run(&rx, "the fast run"), fast);
+    assert_eq!(rec.healths().last().map(String::as_str), Some("live"));
+    // And edges run git again.
+    hub.git_signal(Trigger::Worktree);
+    assert_eq!(next_run(&rx, "a worktree edge's run"), fast);
 
     ft.close(ack.sub_id);
     let _ = std::fs::remove_dir_all(&r);
-    let _ = std::fs::remove_dir_all(&bin);
+}
+
+/// A `git` that records each run and, while a `hold` file exists, doesn't answer until the
+/// test drops the gate `hold_next` returns: the run is inside git for exactly as long as the
+/// test says, with no sleeping on either side.
+#[cfg(unix)]
+struct StubGit {
+    script: PathBuf,
+    log: PathBuf,
+    hold: PathBuf,
+    fifo: PathBuf,
+}
+
+#[cfg(unix)]
+impl StubGit {
+    fn new(dir: &Path) -> StubGit {
+        use std::os::unix::fs::PermissionsExt;
+        let (log, hold, fifo, script) = (dir.join("runs.log"), dir.join("hold"), dir.join("gate"), dir.join("git"));
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo: {}", std::io::Error::last_os_error());
+        // The stub finds its files beside itself (`$0`), so no path is pasted into shell text.
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nd=$(dirname \"$0\")\necho run >> \"$d/runs.log\"\nif [ -e \"$d/hold\" ]; then read x < \"$d/gate\"; fi\nprintf '# branch.oid abc\\000# branch.head main\\000'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        StubGit { script, log, hold, fifo }
+    }
+
+    fn config(&self, probe: Arc<GitProbe>) -> GitConfig {
+        GitConfig { program: self.script.clone().into_os_string(), enabled: true, timing: fast_timing(), probe: Some(probe) }
+    }
+
+    fn runs(&self) -> usize {
+        std::fs::read_to_string(&self.log).map(|s| s.lines().count()).unwrap_or(0)
+    }
+
+    /// The next run holds: `start` asks for it, and this returns once the run is inside the
+    /// stub. The run ends when the returned gate is dropped.
+    fn hold_next(&self, start: impl FnOnce()) -> std::fs::File {
+        std::fs::write(&self.hold, "").unwrap();
+        start();
+        // Opening a FIFO to write blocks until the stub opens it to read: that is the run
+        // starting. On a thread so a run that never starts fails instead of hanging.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fifo = self.fifo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(std::fs::OpenOptions::new().write(true).open(fifo));
+        });
+        let gate = rx.recv_timeout(Duration::from_secs(60)).expect("the held run never started").unwrap();
+        std::fs::remove_file(&self.hold).unwrap();
+        gate
+    }
 }
 
 #[cfg(unix)]
@@ -309,24 +366,29 @@ fn slow_mode_trips_on_two_slow_runs_skips_worktree_edges_and_recovers() {
 fn signals_during_a_run_collapse_into_one_rerun() {
     let r = repo("git-collapse");
     let bin = temp_root("git-stub2");
-    let (script, log, delay) = stub_git(&bin);
+    let stub = StubGit::new(&bin);
+    let (probe, rx) = GitProbe::new();
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
-    ft.set_git_config(GitConfig { program: script.into_os_string(), enabled: true, timing: fast_timing() });
+    ft.set_git_config(stub.config(probe));
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
-    wait_for("the open's run", Duration::from_secs(10), || runs(&log) >= 1);
-    std::thread::sleep(Duration::from_millis(100));
-    std::fs::write(&delay, "0.3").unwrap();
-    let n = runs(&log);
-    hub.git_signal(Trigger::Manual);
-    wait_for("the run to start", Duration::from_secs(5), || runs(&log) > n);
+    next_run(&rx, "the open's run");
+    assert_eq!(decision(&rx, "the worker to go idle", |d| *d != Decision::Idle), Decision::Idle);
+
+    let n = stub.runs();
+    let gate = stub.hold_next(|| hub.git_signal(Trigger::Manual));
+    assert_eq!(stub.runs(), n + 1);
     for _ in 0..20 {
         hub.git_signal(Trigger::Manual);
         hub.git_signal(Trigger::Index);
     }
-    std::thread::sleep(Duration::from_millis(1200));
-    assert_eq!(runs(&log), n + 2, "twenty signals during one run make exactly one more run");
+    drop(gate);
+    // The held run, exactly one more, then nothing due.
+    next_run(&rx, "the held run");
+    let after: Vec<Decision> = (0..2).map(|_| decision(&rx, "the rerun, then idle", |_| false)).collect();
+    assert!(matches!(after[..], [Decision::Ran { .. }, Decision::Idle]), "{after:?}");
+    assert_eq!(stub.runs(), n + 2, "twenty signals during one run make exactly one more run");
     ft.close(ack.sub_id);
     let _ = std::fs::remove_dir_all(&r);
     let _ = std::fs::remove_dir_all(&bin);
@@ -502,19 +564,20 @@ fn find_builds_its_index_on_the_first_query_and_follows_the_disk() {
     std::fs::write(r.join("src/untracked_helper.ts"), "").unwrap();
     let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
     ft.set_git_config(GitConfig { timing: fast_timing(), ..GitConfig::default() });
+    let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
     // The watcher first. One that starts after a build began marks that build stale (what
     // changed before it ran was never reported), so the query after `search_ready` would be
     // a rebuild: on Windows the watcher is up within the first build, elsewhere after it.
-    wait_for_watcher(&ft, ack.sub_id);
+    wait_for_watcher(&probe, &ft, ack.sub_id, &r);
 
     let first = hub.search(ack.sub_id, "helper", 500, 1, false);
     assert!(first.indexing, "the first query starts the build");
     wait_for("search_ready", Duration::from_secs(10), || rec.msgs.lock().iter().any(|m| m.ev == TreeEvent::SearchReady));
     let hits = hub.search(ack.sub_id, "helper", 500, 2, false);
-    assert!(!hits.indexing);
+    assert!(!hits.indexing, "rebuilt after search_ready; lost-event batches seen: {}", probe.lost());
     assert_eq!(hits.items.first().map(|h| h.rel.as_str()), Some("src/untracked_helper.ts"), "untracked files are indexed");
     assert!(hub.search(ack.sub_id, "bundle", 500, 3, false).items.is_empty(), "ignored files are not");
 

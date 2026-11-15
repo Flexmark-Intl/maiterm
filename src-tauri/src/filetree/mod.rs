@@ -35,6 +35,8 @@ pub mod watch;
 mod tests;
 #[cfg(test)]
 mod git_tests;
+#[cfg(test)]
+mod test_support;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -147,6 +149,12 @@ pub struct FileTreeState {
     pub agents: Arc<AgentFiles>,
     /// One helper per ssh host, for remote roots (§15).
     pub(crate) remotes: remote::Remotes,
+    /// Tests: where every hub made from now on sends its `HubReport`s (`probe_hubs`).
+    #[cfg(test)]
+    hub_probe: Mutex<Option<std::sync::mpsc::Sender<hub::HubReport>>>,
+    /// Tests: reaps held until the test says the grace period is over (`hold_graces`).
+    #[cfg(test)]
+    held_reaps: Mutex<Option<Vec<Box<dyn FnOnce() + Send>>>>,
 }
 
 /// Agent sessions working on one ssh host, for a remote root's live-cwd guard: (tab id, tab
@@ -185,7 +193,35 @@ impl FileTreeState {
             tickets: ops::Tickets::default(),
             agents: AgentFiles::new(me.clone()),
             remotes: remote::Remotes::default(),
+            #[cfg(test)]
+            hub_probe: Mutex::new(None),
+            #[cfg(test)]
+            held_reaps: Mutex::new(None),
         })
+    }
+
+    /// Test seam: every hub made from now on reports what it does (`hub::HubReport`) here.
+    #[cfg(test)]
+    pub(crate) fn probe_hubs(&self) -> std::sync::mpsc::Receiver<hub::HubReport> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        *self.hub_probe.lock() = Some(tx);
+        rx
+    }
+
+    /// Test seam: a hub's grace period no longer ends by the clock; it ends when the test calls
+    /// `end_graces`, so "after its grace" is a step the test takes rather than a sleep.
+    #[cfg(test)]
+    pub(crate) fn hold_graces(&self) {
+        *self.held_reaps.lock() = Some(Vec::new());
+    }
+
+    /// Test seam: every grace period running now is over (`hold_graces`).
+    #[cfg(test)]
+    pub(crate) fn end_graces(&self) {
+        let due = self.held_reaps.lock().as_mut().map(std::mem::take).unwrap_or_default();
+        for reap in due {
+            reap();
+        }
     }
 
     /// Every hub still serving its root, for the agent dispatcher to route marks to.
@@ -393,6 +429,8 @@ impl FileTreeState {
             git_slots: self.git_slots.clone(),
             agents: self.agents.clone(),
             remote: Some(r),
+            #[cfg(test)]
+            probe: self.hub_probe.lock().clone(),
         };
         let fresh = RootHub::new(init, self.slots.clone(), self.focus.clone(), self.watch_ctx());
         let mut hubs = self.hubs.lock();
@@ -453,6 +491,8 @@ impl FileTreeState {
             git_slots: self.git_slots.clone(),
             agents: self.agents.clone(),
             remote: None,
+            #[cfg(test)]
+            probe: self.hub_probe.lock().clone(),
         };
         let fresh = RootHub::new(init, self.slots.clone(), self.focus.clone(), self.watch_ctx());
         let mut hubs = self.hubs.lock();
@@ -486,15 +526,23 @@ impl FileTreeState {
         // only this hub is reaped.
         let which = Arc::downgrade(&hub);
         drop(hub);
-        let spawned = std::thread::Builder::new().name("ft-grace".into()).spawn(move || {
-            std::thread::sleep(grace);
+        let reap = move || {
             let Some(state) = me.upgrade() else { return };
             let mut hubs = state.hubs.lock();
             if let Some(h) = hubs.get(&key) {
-                if std::ptr::eq(Arc::as_ptr(h), which.as_ptr()) &&h.grace_token.load(Ordering::SeqCst) == token && h.sub_count() == 0 {
+                if std::ptr::eq(Arc::as_ptr(h), which.as_ptr()) && h.grace_token.load(Ordering::SeqCst) == token && h.sub_count() == 0 {
                     hubs.remove(&key);
                 }
             }
+        };
+        #[cfg(test)]
+        if let Some(held) = self.held_reaps.lock().as_mut() {
+            held.push(Box::new(reap));
+            return;
+        }
+        let spawned = std::thread::Builder::new().name("ft-grace".into()).spawn(move || {
+            std::thread::sleep(grace);
+            reap();
         });
         if let Err(e) = spawned {
             log::warn!("filetree: couldn't schedule a hub's reap: {e}");
