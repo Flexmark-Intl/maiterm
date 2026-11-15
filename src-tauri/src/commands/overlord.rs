@@ -222,8 +222,8 @@ pub async fn submit_prompt_to_agent(state: State<'_, Arc<AppState>>, tab_id: Str
     // types it if Claude drops it).
     let taken = match app.mod_inbox.deliver(&tab_id, &text, between_turns).await {
         Handover::Ran => true,
-        Handover::Pending => {
-            log::info!("[overlord] prompt for tab {tab_id} → the agent, not reported run yet ({} chars)", text.chars().count());
+        Handover::Pending | Handover::Unconfirmed => {
+            log::info!("[overlord] prompt for tab {tab_id} → the agent, not confirmed run ({} chars)", text.chars().count());
             return Ok(true);
         }
         Handover::NotTaken | Handover::Dropped => false,

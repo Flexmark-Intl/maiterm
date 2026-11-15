@@ -1390,6 +1390,11 @@ async fn post_message(
             return hold(&s);
         }
         return match submit_prompt(&s.app, &tab_id, &pty, &body.text).await {
+            // `Delivered::AgentPending` is answered `delivered` too, though it isn't confirmed:
+            // the wire has no word for "with the agent's mod, not yet run" without a protocol
+            // bump, and nothing is lost by it — maiTerm, not the phone, settles a pending prompt
+            // (a drop is typed through the hold queue, an unconfirmed one is put to the human on
+            // the desktop), and a resend from the phone could make it run twice.
             Ok(_) => Ok(Json(json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()), "woke": woke }))),
             // The mod was asked and didn't take it, and the box holds a draft.
             Err(_) if draft_hold::draft_in_box(&s.app, &tab_id) => hold(&s),
@@ -4180,9 +4185,10 @@ pub(crate) enum Delivered {
     /// Handed to the tab's maiterm-tab mod, which submitted it, and Claude ran it
     /// (claude_code/mod_inbox.rs).
     Agent,
-    /// Handed to the tab's maiterm-tab mod, which is submitting it, with no report yet whether
-    /// Claude ran it (a turn began first, or it was sent mid-turn): unknown, not delivered. It
-    /// must not be typed — it may still run — and the inbox settles it: a drop is typed then.
+    /// Handed to the tab's maiterm-tab mod, with no confirmation that Claude ran it: no report
+    /// yet (a turn began first, or it was sent mid-turn), or one that can't say (`Unconfirmed`).
+    /// Unknown, not delivered. It must not be typed — it may run, or have run — and the inbox
+    /// settles it: a drop is typed then, and an unconfirmed one is put to the human.
     AgentPending,
     /// Typed into the terminal and submitted with a CR.
     Keys,
@@ -4206,8 +4212,8 @@ pub(crate) async fn submit_prompt(
                 log::info!("[maiLink] prompt for tab {tab_id} → the agent ({} chars)", text.chars().count());
                 return Ok(Delivered::Agent);
             }
-            mod_inbox::Handover::Pending => {
-                log::info!("[maiLink] prompt for tab {tab_id} → the agent, not reported run yet ({} chars)", text.chars().count());
+            mod_inbox::Handover::Pending | mod_inbox::Handover::Unconfirmed => {
+                log::info!("[maiLink] prompt for tab {tab_id} → the agent, not confirmed run ({} chars)", text.chars().count());
                 return Ok(Delivered::AgentPending);
             }
             // Nothing was submitted, or nothing ran: typed below.

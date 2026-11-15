@@ -14,11 +14,14 @@
 //! was retracted, and `deliver` reports success only for an acked one. So the prompt is submitted
 //! exactly when `deliver` said the mod has it, even if a poll's reply was lost on the way.
 //!
-//! Whether it then RAN is the mod's `started` report for that offer's id, never a clock: Claude
-//! drops submits after an Esc interrupt (`deliver`). An acked prompt is `Ran` or `Dropped` once
-//! its report is in, and `Pending` until then; a `Pending` one is settled here when its report
-//! comes, however late: a drop is handed back to be typed (`ModInbox::set_hand_back`), so it is
-//! never lost and never typed twice.
+//! Whether it then RAN is decided by identity, never by a clock or a coincidence: Claude drops
+//! submits after an Esc interrupt (`deliver`). An acked prompt's outcome is its mod's `started`
+//! report for that offer's id, read against the runs the mod relayed since the ack, each matched
+//! to an offer by its text (`prompt_submitted`): its own run → `Ran`; no run at all → `Dropped`;
+//! only runs that aren't its own → `Unconfirmed`, as either it was dropped or Claude changed its
+//! text. Until the report it is `Pending`, settled here when the report comes, however late. What
+//! the inbox settles alone goes to its sink (`ModInbox::set_settle`): a drop to be typed, an
+//! unconfirmed one to the human. So none is lost silently, and none is ever typed twice.
 //!
 //! A tab counts as served only while its mod polls: it re-polls within moments of each round,
 //! so a tab unpolled for `STALE_AFTER` has no mod listening (it exited, or its module reloaded
@@ -55,8 +58,17 @@ const START_WAIT: Duration = Duration::from_secs(3);
 /// Outcomes kept for `deliver` to collect; more only if callers stopped collecting them.
 const MAX_RESULTS: usize = 32;
 
-/// Where a prompt goes that Claude dropped after its sender stopped waiting: (tab, text).
-type HandBack = Box<dyn Fn(&str, String) + Send + Sync>;
+/// What the inbox settles alone (`ModInbox::set_settle`).
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Settled {
+    /// Claude dropped it after its `deliver` stopped waiting: nothing ran, so it is to be typed.
+    Dropped,
+    /// Its report came with prompts run since the ack, none of them identifiably this one: it
+    /// may have run or not. Never typed (it could run twice); the human is told.
+    Unconfirmed,
+}
+
+type Settle = Box<dyn Fn(&str, Settled, String) + Send + Sync>;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Stage {
@@ -83,8 +95,10 @@ struct Unstarted {
     at: Instant,
     /// `Inbox::prompts` as it stood at the ack.
     seen: u64,
+    /// A relayed run since the ack was this prompt, by its text (`ModInbox::prompt_submitted`).
+    ran: bool,
     /// A `deliver` call still waits for its report and takes the outcome. Otherwise the inbox
-    /// settles it alone: a drop is handed back (`ModInbox::set_hand_back`).
+    /// settles it alone (`ModInbox::set_settle`).
     awaited: bool,
 }
 
@@ -98,8 +112,8 @@ struct Inbox {
     unstarted: Vec<Unstarted>,
     /// `UserPromptSubmit` events the tab's mod has relayed: the proof that a prompt ran.
     prompts: u64,
-    /// Started offers a `deliver` awaits and whether their prompt ran, for it to collect.
-    results: VecDeque<(String, bool)>,
+    /// Started offers a `deliver` awaits and their outcome, for it to collect.
+    results: VecDeque<(String, Handover)>,
     /// Claude dropped a submitted prompt, and drops every one until a prompt is typed (the next
     /// `UserPromptSubmit`): until then prompts are typed, or held for a draft, not offered.
     dropping: bool,
@@ -165,13 +179,17 @@ pub enum Handover {
     /// Unknown, not delivered — but the caller must NOT type it, or it could run twice. The
     /// inbox settles it when the report comes: a drop is handed back to be typed.
     Pending,
+    /// The mod reported its submit, and prompts ran since the ack, but none was identifiably
+    /// this one (`Settled::Unconfirmed`): it may have run or been dropped. Not delivered, and
+    /// not to be typed; the inbox has told the human.
+    Unconfirmed,
 }
 
 #[derive(Default)]
 pub struct ModInbox {
     tabs: Mutex<HashMap<String, Inbox>>,
     seq: std::sync::atomic::AtomicU64,
-    hand_back: OnceLock<HandBack>,
+    settle: OnceLock<Settle>,
 }
 
 /// A `deliver` call's claim on its offer. Dropped with the call — returned, or cancelled (an
@@ -187,9 +205,10 @@ struct Claim<'a> {
 
 impl Drop for Claim<'_> {
     fn drop(&mut self) {
-        if self.armed && self.inbox.abandon(self.tab_id, self.id) == Some(false) {
-            // Its report came in just as the call went away: dropped, and nobody to type it.
-            self.inbox.hand_back_dropped(self.tab_id, self.id, self.text.to_string());
+        // Its report came in just as the call went away: dropped, and nobody to type it. (An
+        // unconfirmed one was surfaced by `started` already.)
+        if self.armed && self.inbox.abandon(self.tab_id, self.id) == Some(Handover::Dropped) {
+            self.inbox.settle_alone(self.tab_id, self.id, Settled::Dropped, self.text.to_string());
         }
     }
 }
@@ -215,20 +234,23 @@ async fn wait_for<T>(reports: &Notify, wait: Duration, mut check: impl FnMut() -
 }
 
 impl ModInbox {
-    /// Where a prompt goes that Claude dropped after its `deliver` stopped waiting (it answered
-    /// `Pending`): typed there, like any held message. Set once, at startup.
-    pub fn set_hand_back(&self, f: impl Fn(&str, String) + Send + Sync + 'static) {
-        let _ = self.hand_back.set(Box::new(f));
+    /// Where a prompt goes that the inbox settles alone (`Settled`): a drop reported after its
+    /// `deliver` stopped waiting, to be typed like any held message; an unconfirmed one, to the
+    /// human. Set once, at startup.
+    pub fn set_settle(&self, f: impl Fn(&str, Settled, String) + Send + Sync + 'static) {
+        let _ = self.settle.set(Box::new(f));
     }
 
-    fn hand_back_dropped(&self, tab_id: &str, id: &str, text: String) {
-        match self.hand_back.get() {
-            Some(f) => {
-                log::warn!("[inbox] Claude dropped prompt {id} the mod submitted for tab {tab_id}, after its sender stopped waiting — handed back to be typed");
-                f(tab_id, text);
-            }
-            None => log::error!("[inbox] Claude dropped prompt {id} the mod submitted for tab {tab_id}, and nothing takes it back: lost"),
+    fn settle_alone(&self, tab_id: &str, id: &str, how: Settled, text: String) {
+        let Some(f) = self.settle.get() else {
+            log::error!("[inbox] prompt {id} the mod submitted for tab {tab_id} settled {how:?} with nothing to take it: lost");
+            return;
+        };
+        match how {
+            Settled::Dropped => log::warn!("[inbox] Claude dropped prompt {id} the mod submitted for tab {tab_id}, after its sender stopped waiting — handed back to be typed"),
+            Settled::Unconfirmed => log::warn!("[inbox] prompt {id} the mod submitted for tab {tab_id} is unconfirmed: prompts ran since its ack, none identifiably it (dropped, or its text changed on the way) — not retyped, the human is told"),
         }
+        f(tab_id, how, text);
     }
 
     /// A mod is polling for this tab.
@@ -283,61 +305,76 @@ impl ModInbox {
         o.stage = Stage::Acked;
         let (text, awaited) = (o.text.clone(), o.awaited);
         let seen = inbox.prompts;
-        inbox.unstarted.push(Unstarted { id: id.to_string(), text, at: Instant::now(), seen, awaited });
+        inbox.unstarted.push(Unstarted { id: id.to_string(), text, at: Instant::now(), seen, ran: false, awaited });
         inbox.reports.notify_waiters();
         true
     }
 
     /// The mod's `$.prompt.submit` of acked offer `id` resolved (or failed): it no longer waits
-    /// in Claude ahead of anything. Whether its prompt RAN is whether a `UserPromptSubmit` came
-    /// in since the ack: the mod relays that event, and waits for maiTerm to take it, before
-    /// Claude lets the prompt start, so it always arrives before this report. (So a drop is
-    /// never misread as a run of THIS prompt's own; another prompt running meanwhile can make a
-    /// drop read as a run, which loses it rather than types it twice.)
+    /// in Claude ahead of anything. Whether its prompt RAN is whether one of the runs the mod
+    /// relayed since the ack was this prompt (`Unstarted::ran`, `prompt_submitted`): the mod
+    /// relays each `UserPromptSubmit`, and waits for maiTerm to take it, before Claude lets the
+    /// prompt start, so a prompt's own run always arrives before its report.
+    ///   * its own run → `Ran`;
+    ///   * no run at all since the ack → `Dropped`: certain, whatever the texts;
+    ///   * runs, none its own → `Unconfirmed`. Either Claude dropped it while another prompt ran
+    ///     (a human's, typed meanwhile), or it ran with a text that doesn't match the one sent (a
+    ///     plugin rewrote it). Neither is guessed: retyped, the second would run twice; counted
+    ///     delivered, the first would be lost without a word. So the human is told.
     ///
     /// Matched by id, whenever it comes: to the `deliver` still waiting for it, else settled
-    /// here — a drop handed back to be typed. A report for an id not waiting (unknown, already
-    /// reported, or its mod gone since) is ignored.
+    /// here (`set_settle`). A report for an id not waiting (unknown, already reported, or its mod
+    /// gone since) is ignored.
     pub fn started(&self, tab_id: &str, id: &str) {
-        let dropped = {
+        let alone = {
             let mut tabs = self.tabs.lock();
             let Some(inbox) = tabs.get_mut(tab_id) else { return };
             let Some(pos) = inbox.unstarted.iter().position(|u| u.id == id) else { return };
             let u = inbox.unstarted.remove(pos);
-            let ran = inbox.prompts > u.seen;
-            if !ran {
+            let outcome = if u.ran {
+                Handover::Ran
+            } else if inbox.prompts == u.seen {
                 // Not offered again until a prompt runs: the prompt is typed instead, or held for
-                // a draft in the box, which then holds it as for any tab.
+                // a draft in the box, which then holds it as for any tab. (Not for an unconfirmed
+                // one: a prompt has run since, which re-arms Claude's submits.)
                 inbox.dropping = true;
                 log::warn!("[inbox] Claude dropped the prompt the mod submitted for tab {tab_id} (no UserPromptSubmit; after an interrupt it drops them until a prompt is typed) — prompts are typed until one runs");
-            }
+                Handover::Dropped
+            } else {
+                Handover::Unconfirmed
+            };
             if u.awaited {
-                inbox.results.push_back((u.id, ran));
+                inbox.results.push_back((u.id.clone(), outcome));
                 while inbox.results.len() > MAX_RESULTS {
                     inbox.results.pop_front();
                 }
                 inbox.reports.notify_waiters();
-                None
-            } else if ran {
-                log::info!("[inbox] prompt {id} the mod submitted for tab {tab_id} ran");
-                None
-            } else {
-                Some(u)
+            }
+            match outcome {
+                Handover::Ran => {
+                    log::info!("[inbox] prompt {id} the mod submitted for tab {tab_id} ran");
+                    None
+                }
+                // Its waiting caller types it.
+                Handover::Dropped if u.awaited => None,
+                Handover::Dropped => Some((u, Settled::Dropped)),
+                // Told whether or not a caller waits: the caller can only not type it.
+                _ => Some((u, Settled::Unconfirmed)),
             }
         };
-        if let Some(u) = dropped {
-            self.hand_back_dropped(tab_id, &u.id, u.text);
+        if let Some((u, how)) = alone {
+            self.settle_alone(tab_id, &u.id, how, u.text);
         }
     }
 
     /// `deliver` stops waiting on offer `id`: retracted if not acked yet; its outcome if its
     /// report is already in; else left for `started` to settle alone (`None`).
-    fn abandon(&self, tab_id: &str, id: &str) -> Option<bool> {
+    fn abandon(&self, tab_id: &str, id: &str) -> Option<Handover> {
         let mut tabs = self.tabs.lock();
         let inbox = tabs.get_mut(tab_id)?;
         inbox.offers.retain(|o| o.id != id);
         if let Some(pos) = inbox.results.iter().position(|(i, _)| i == id) {
-            return inbox.results.remove(pos).map(|(_, ran)| ran);
+            return inbox.results.remove(pos).map(|(_, outcome)| outcome);
         }
         if let Some(u) = inbox.unstarted.iter_mut().find(|u| u.id == id) {
             u.awaited = false;
@@ -345,11 +382,21 @@ impl ModInbox {
         None
     }
 
-    /// The tab's mod relayed a `UserPromptSubmit`: a prompt ran, typed or submitted.
-    pub fn prompt_submitted(&self, tab_id: &str) {
+    /// The tab's mod relayed a `UserPromptSubmit`: a prompt ran, typed or submitted, with this
+    /// text (the event's `prompt`). It is the run of the oldest acked prompt not yet run whose
+    /// text is the same (`same_text`): the mod's submit can't carry an id, and this is the one
+    /// thing the event says of which prompt it was. Two acked with one text are told apart by
+    /// order, which counts right whichever ran: each run is one prompt's. (A human typing the
+    /// very same words meanwhile counts as it, which is the same message arriving.)
+    pub fn prompt_submitted(&self, tab_id: &str, prompt: Option<&str>) {
         if let Some(inbox) = self.tabs.lock().get_mut(tab_id) {
             inbox.prompts += 1;
             inbox.dropping = false;
+            let Some(prompt) = prompt else { return };
+            let ran = same_text(prompt);
+            if let Some(u) = inbox.unstarted.iter_mut().find(|u| !u.ran && same_text(&u.text) == ran) {
+                u.ran = true;
+            }
         }
     }
 
@@ -449,28 +496,30 @@ impl ModInbox {
             return Handover::Pending;
         }
 
-        let collect = || -> Option<bool> {
+        let collect = || -> Option<Handover> {
             let mut tabs = self.tabs.lock();
             let inbox = tabs.get_mut(tab_id)?;
             let pos = inbox.results.iter().position(|(i, _)| *i == id)?;
-            inbox.results.remove(pos).map(|(_, ran)| ran)
+            inbox.results.remove(pos).map(|(_, outcome)| outcome)
         };
         // Out of time, a report that came in meanwhile is still this call's; otherwise the inbox
         // takes the prompt over, all under one lock, so a report is settled exactly once.
         let outcome = match wait_for(&reports, start_wait, collect).await {
-            Some(ran) => Some(ran),
+            Some(outcome) => Some(outcome),
             None => self.abandon(tab_id, &id),
         };
         claim.armed = false;
-        match outcome {
-            Some(true) => Handover::Ran,
-            Some(false) => Handover::Dropped,
-            None => {
-                log::info!("[inbox] prompt {id} the mod submitted for tab {tab_id} has no start report yet (a turn began first?) — pending; settled when it comes");
-                Handover::Pending
-            }
-        }
+        outcome.unwrap_or_else(|| {
+            log::info!("[inbox] prompt {id} the mod submitted for tab {tab_id} has no start report yet (a turn began first?) — pending; settled when it comes");
+            Handover::Pending
+        })
     }
+}
+
+/// A prompt's text as compared with what a relayed run says it was: line endings and runs of
+/// whitespace don't count (Claude may trim the ends, or turn a CRLF into an LF), words do.
+fn same_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The oldest offer still waiting for a poll, handed out. One handed out but never acked (its
@@ -585,7 +634,7 @@ mod tests {
         };
         let Polled::Offer { id, .. } = poll.await.unwrap() else { panic!("the poll should get the offer") };
         assert!(inbox.ack("tab", &id));
-        inbox.prompt_submitted("tab");
+        inbox.prompt_submitted("tab", Some("hello"));
         inbox.started("tab", &id);
         assert_eq!(delivering.await.unwrap(), Handover::Ran);
     }
@@ -597,7 +646,7 @@ mod tests {
         let inbox = Arc::new(ModInbox::default());
         // A prompt that ran before the ack doesn't count for this one.
         let _ = inbox.poll("tab", Duration::ZERO).await;
-        inbox.prompt_submitted("tab");
+        inbox.prompt_submitted("tab", Some("hello"));
         let poll = parked_poll(&inbox, "tab").await;
         let delivering = {
             let inbox = inbox.clone();
@@ -610,7 +659,7 @@ mod tests {
         assert!(!inbox.has_unstarted("tab"), "a dropped prompt must not pull later ones onto the mod");
         assert!(inbox.dropping("tab"), "nothing is offered until a prompt runs");
         // The prompt typed in its place runs, and re-arms Claude's submits.
-        inbox.prompt_submitted("tab");
+        inbox.prompt_submitted("tab", Some("hello"));
         assert!(!inbox.dropping("tab"));
     }
 
@@ -697,14 +746,20 @@ mod tests {
 
     type Delivering<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Handover> + 'a>>;
 
-    /// A live tab whose dropped prompts are recorded rather than typed.
-    async fn listening_inbox() -> (Arc<ModInbox>, Arc<Mutex<Vec<(String, String)>>>) {
+    type Settles = Arc<Mutex<Vec<(String, String)>>>;
+
+    /// A live tab whose settled prompts are recorded rather than typed or shown: (dropped, to be
+    /// typed; unconfirmed, put to the human).
+    async fn listening_inbox() -> (Arc<ModInbox>, Settles, Settles) {
         let inbox = Arc::new(ModInbox::default());
-        let handed_back = Arc::new(Mutex::new(Vec::new()));
-        let sink = handed_back.clone();
-        inbox.set_hand_back(move |tab, text| sink.lock().push((tab.to_string(), text)));
+        let (handed_back, told) = (Settles::default(), Settles::default());
+        let (dropped, unconfirmed) = (handed_back.clone(), told.clone());
+        inbox.set_settle(move |tab, how, text| {
+            let sink = if how == Settled::Dropped { &dropped } else { &unconfirmed };
+            sink.lock().push((tab.to_string(), text));
+        });
         let _ = inbox.poll("tab", Duration::ZERO).await; // the mod is listening
-        (inbox, handed_back)
+        (inbox, handed_back, told)
     }
 
     /// Offers `text` between turns, and the mod takes and acks it. `start_wait` ZERO: the
@@ -723,7 +778,7 @@ mod tests {
     #[tokio::test]
     async fn a_drop_reported_after_the_start_wait_is_handed_back_not_counted_delivered() {
         use futures_util::FutureExt;
-        let (inbox, handed_back) = listening_inbox().await;
+        let (inbox, handed_back, told) = listening_inbox().await;
         let (mut delivering, id) = acked(&inbox, "hello", Duration::ZERO).await;
         assert_eq!(delivering.as_mut().now_or_never(), Some(Handover::Pending), "no report is not delivered");
         assert!(inbox.has_unstarted("tab"), "until its report, later prompts follow it through the mod");
@@ -737,17 +792,19 @@ mod tests {
         // A repeated report settles nothing twice: the prompt is typed once.
         inbox.started("tab", &id);
         assert_eq!(handed_back.lock().len(), 1);
+        assert!(told.lock().is_empty());
     }
 
     #[tokio::test]
     async fn a_run_reported_after_the_start_wait_is_settled_with_nothing_typed() {
         use futures_util::FutureExt;
-        let (inbox, handed_back) = listening_inbox().await;
+        let (inbox, handed_back, told) = listening_inbox().await;
         let (mut delivering, id) = acked(&inbox, "hello", Duration::ZERO).await;
         assert_eq!(delivering.as_mut().now_or_never(), Some(Handover::Pending));
-        inbox.prompt_submitted("tab");
+        inbox.prompt_submitted("tab", Some("hello"));
         inbox.started("tab", &id);
         assert!(handed_back.lock().is_empty(), "a prompt that ran is never typed again");
+        assert!(told.lock().is_empty());
         assert!(!inbox.dropping("tab"));
         assert!(!inbox.has_unstarted("tab"));
     }
@@ -756,23 +813,24 @@ mod tests {
     #[tokio::test]
     async fn a_report_before_the_delivery_looks_is_still_its_outcome() {
         use futures_util::FutureExt;
-        let (inbox, handed_back) = listening_inbox().await;
+        let (inbox, handed_back, told) = listening_inbox().await;
         let (mut delivering, id) = acked(&inbox, "hello", NEVER).await;
         inbox.started("tab", &id);
         assert_eq!(delivering.as_mut().now_or_never(), Some(Handover::Dropped), "the caller types it");
         assert!(handed_back.lock().is_empty(), "the caller types it, so it isn't handed back too");
 
         let (mut delivering, id) = acked(&inbox, "again", NEVER).await;
-        inbox.prompt_submitted("tab"); // the typed one, which re-arms Claude…
-        inbox.started("tab", &id); // …so this one counts as run
+        inbox.prompt_submitted("tab", Some("again"));
+        inbox.started("tab", &id);
         assert_eq!(delivering.as_mut().now_or_never(), Some(Handover::Ran));
+        assert!(told.lock().is_empty());
     }
 
     /// Two prompts the mod holds, reported in the other order, each matched by its own id.
     #[tokio::test]
     async fn reports_out_of_order_are_matched_by_id() {
         use futures_util::FutureExt;
-        let (inbox, handed_back) = listening_inbox().await;
+        let (inbox, handed_back, told) = listening_inbox().await;
         let (mut first, first_id) = acked(&inbox, "first", Duration::ZERO).await;
         assert_eq!(first.as_mut().now_or_never(), Some(Handover::Pending));
         let (mut second, second_id) = acked(&inbox, "second", NEVER).await;
@@ -783,6 +841,7 @@ mod tests {
         assert!(handed_back.lock().is_empty(), "the first one's report isn't in yet");
         inbox.started("tab", &first_id);
         assert_eq!(*handed_back.lock(), vec![("tab".to_string(), "first".to_string())]);
+        assert!(told.lock().is_empty());
     }
 
     /// A caller that goes away mid-wait (an HTTP request cancelled) leaves its prompt to the
@@ -790,7 +849,7 @@ mod tests {
     #[tokio::test]
     async fn a_delivery_cancelled_mid_wait_leaves_its_prompt_settled() {
         use futures_util::FutureExt;
-        let (inbox, handed_back) = listening_inbox().await;
+        let (inbox, handed_back, told) = listening_inbox().await;
 
         let mut delivering = Box::pin(inbox.deliver_within("tab", "unacked", true, NEVER, NEVER));
         assert!(delivering.as_mut().now_or_never().is_none());
@@ -810,13 +869,14 @@ mod tests {
         drop(delivering);
         assert_eq!(handed_back.lock().len(), 2);
         assert_eq!(handed_back.lock()[1].1, "report first");
+        assert!(told.lock().is_empty());
     }
 
     /// A mod gone before reporting takes the prompt's fate with it: maybe run, so never retyped.
     #[tokio::test]
     async fn a_pending_prompt_whose_mod_went_away_is_not_typed_again() {
         use futures_util::FutureExt;
-        let (inbox, handed_back) = listening_inbox().await;
+        let (inbox, handed_back, told) = listening_inbox().await;
         let (mut delivering, id) = acked(&inbox, "hello", Duration::ZERO).await;
         assert_eq!(delivering.as_mut().now_or_never(), Some(Handover::Pending));
         inbox.tabs.lock().get_mut("tab").unwrap().last_poll = Instant::now() - STALE_AFTER;
@@ -824,6 +884,74 @@ mod tests {
         inbox.started("tab", &id); // a stray report from the old one
         assert!(handed_back.lock().is_empty());
         assert!(!inbox.has_unstarted("tab"));
+        assert!(told.lock().is_empty());
+    }
+
+    /// The bug the counter had: a prompt the human typed meanwhile made a drop read as a run,
+    /// and the prompt was lost. Not identifiably run, it is unconfirmed: never typed again (it
+    /// may have run), never counted delivered, and put to the human.
+    #[tokio::test]
+    async fn a_drop_reported_after_another_prompt_ran_is_unconfirmed_not_ran() {
+        use futures_util::FutureExt;
+        let (inbox, handed_back, told) = listening_inbox().await;
+        let (mut delivering, id) = acked(&inbox, "hello", NEVER).await;
+        inbox.prompt_submitted("tab", Some("the human's own")); // interleaved
+        inbox.started("tab", &id);
+        assert_eq!(delivering.as_mut().now_or_never(), Some(Handover::Unconfirmed));
+        assert_eq!(*told.lock(), vec![("tab".to_string(), "hello".to_string())]);
+        assert!(handed_back.lock().is_empty(), "it may have run: never typed again");
+        assert!(!inbox.dropping("tab"), "the human's prompt ran, which re-arms Claude's submits");
+
+        // The same, reported after its delivery stopped waiting.
+        let (mut delivering, id) = acked(&inbox, "later", Duration::ZERO).await;
+        assert_eq!(delivering.as_mut().now_or_never(), Some(Handover::Pending));
+        inbox.prompt_submitted("tab", Some("the human's next"));
+        inbox.started("tab", &id);
+        assert_eq!(told.lock().len(), 2);
+        assert_eq!(told.lock()[1].1, "later");
+        assert!(handed_back.lock().is_empty());
+    }
+
+    /// Another prompt running beside it doesn't hide its own run.
+    #[tokio::test]
+    async fn an_interleaved_prompt_beside_its_own_run_still_reads_ran() {
+        use futures_util::FutureExt;
+        let (inbox, handed_back, told) = listening_inbox().await;
+        let (mut delivering, id) = acked(&inbox, "hello\r\nworld", NEVER).await;
+        inbox.prompt_submitted("tab", Some("the human's own"));
+        // Claude's copy of the text: line endings and the ends trimmed don't make it another.
+        inbox.prompt_submitted("tab", Some("  hello\nworld \n"));
+        inbox.started("tab", &id);
+        assert_eq!(delivering.as_mut().now_or_never(), Some(Handover::Ran));
+        assert!(handed_back.lock().is_empty() && told.lock().is_empty());
+    }
+
+    /// Two prompts with one text: each run is one prompt's, oldest first, so the count is right
+    /// whichever of them ran — and one run for two is never read as both.
+    #[tokio::test]
+    async fn the_same_text_sent_twice_counts_each_run_once() {
+        use futures_util::FutureExt;
+        let (inbox, handed_back, told) = listening_inbox().await;
+        let (mut first, first_id) = acked(&inbox, "same", Duration::ZERO).await;
+        assert_eq!(first.as_mut().now_or_never(), Some(Handover::Pending));
+        let (mut second, second_id) = acked(&inbox, "same", NEVER).await;
+        inbox.prompt_submitted("tab", Some("same"));
+        inbox.prompt_submitted("tab", Some("same"));
+        inbox.started("tab", &second_id);
+        assert_eq!(second.as_mut().now_or_never(), Some(Handover::Ran));
+        inbox.started("tab", &first_id);
+        assert!(handed_back.lock().is_empty() && told.lock().is_empty(), "both ran");
+
+        // Sent twice, run once: one is Ran, and the other can't be told from a drop beside it.
+        let (mut first, first_id) = acked(&inbox, "twice", Duration::ZERO).await;
+        assert_eq!(first.as_mut().now_or_never(), Some(Handover::Pending));
+        let (mut second, second_id) = acked(&inbox, "twice", NEVER).await;
+        inbox.prompt_submitted("tab", Some("twice"));
+        inbox.started("tab", &second_id);
+        assert_eq!(second.as_mut().now_or_never(), Some(Handover::Unconfirmed));
+        inbox.started("tab", &first_id);
+        assert_eq!(*told.lock(), vec![("tab".to_string(), "twice".to_string())]);
+        assert!(handed_back.lock().is_empty(), "one of them ran: neither is typed again");
     }
 
     #[tokio::test]

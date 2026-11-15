@@ -5231,10 +5231,11 @@ async fn hooks_handler(
     // prompt settle it, as they release the permission ledger (gate.rs). For a mod session the
     // anonymous copy was dropped above, and the mod's carries the same fields.
     // The proof a prompt the mod submitted actually ran (mod_inbox `started`): Claude can resolve
-    // the submit and drop the prompt, and then sends no UserPromptSubmit.
+    // the submit and drop the prompt, and then sends no UserPromptSubmit. Its `prompt` says which
+    // prompt ran.
     if via_mod && hook_event_name == "UserPromptSubmit" {
         if let Some(tab) = tab_id_from_param.as_deref() {
-            srv.state.mod_inbox.prompt_submitted(tab);
+            srv.state.mod_inbox.prompt_submitted(tab, event.get("prompt").and_then(|v| v.as_str()));
         }
     }
 

@@ -277,16 +277,6 @@ pub fn run() {
     let fd_limit_raise = raise_fd_limit();
 
     let app_state = Arc::new(AppState::new());
-    // A prompt the agent's mod held that Claude dropped late is typed through the hold queue
-    // (claude_code/mod_inbox.rs). Weak: the inbox lives inside the state it hands back to.
-    {
-        let state = Arc::downgrade(&app_state);
-        app_state.mod_inbox.set_hand_back(move |tab_id, text| {
-            if let Some(app) = state.upgrade() {
-                crate::mailink::draft_hold::hand_back(app, tab_id, text);
-            }
-        });
-    }
 
     // Load persisted state and run migration
     {
@@ -730,6 +720,26 @@ pub fn run() {
 
             // The Hive run queue starts jobs through its windows from here on (docs/hive.md §6.8).
             hive::queue::install(app_state.clone(), app.handle().clone());
+
+            // What the agents' mods' inbox settles alone (claude_code/mod_inbox.rs): a prompt
+            // Claude dropped after its sender stopped waiting is typed through the hold queue; one
+            // whose run can't be confirmed is put to the human. Weak: the inbox lives inside the
+            // state it hands back to.
+            {
+                let state = Arc::downgrade(&app_state);
+                let handle = app.handle().clone();
+                app_state.mod_inbox.set_settle(move |tab_id, how, text| match how {
+                    claude_code::mod_inbox::Settled::Dropped => {
+                        if let Some(app) = state.upgrade() {
+                            crate::mailink::draft_hold::hand_back(app, tab_id, text);
+                        }
+                    }
+                    claude_code::mod_inbox::Settled::Unconfirmed => {
+                        let preview: String = text.trim().chars().take(120).collect();
+                        let _ = handle.emit("agent-prompt-unconfirmed", serde_json::json!({ "tab_id": tab_id, "preview": preview }));
+                    }
+                });
+            }
             // A Hive suspended when maiTerm stopped stays parked until its resume (docs/hive.md §6.8).
             hive::queue::park_suspended(&app_state.app_data);
             // Runs open when maiTerm stopped are interrupted, and each worker hears so at its next

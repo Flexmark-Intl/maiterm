@@ -585,19 +585,29 @@ acks each offer (`&ack=<id>`: 204 go, 410 retracted) and then calls `$.prompt.su
 asUser: true })`. Delivery is take-or-retract with that ack, so a prompt is submitted exactly when
 `deliver` reported the mod has it.
 
-**Whether it RAN is the mod's `&started=<id>` report, never a clock** (2026-11-15). Claude drops
-every submit after an Esc interrupt (2.1.316), so `deliver` answers a `Handover`: `Ran` (the
-report came, with a `UserPromptSubmit` since the ack), `Dropped` (the report came without one;
-the caller types it), `NotTaken` (no ack: retracted), or `Pending` (acked, no report yet). Between
-turns it waits up to 3 s for the report, on the report's own wakeup; mid-turn it answers `Pending`
-at the ack. **`Pending` is not delivered and must not be typed**: it may still run. The inbox
-settles it when its report comes, matched by id however late: a drop is handed back to the
-draft-hold queue to be typed (`set_hand_back` → `draft_hold::hand_back`), once. A mod that goes
-away before reporting takes the prompt's fate with it: logged, never retyped (at-most-once). Until
-2026-11-15 a report past the 3 s counted as delivered, so a late drop was lost silently.
-`submit_prompt` answers `Delivered::AgentPending`, `deliver_to_agent` `pending: true`, and
-`submit_prompt_to_agent` `true` (so the frontend doesn't type it). The phone's `POST /message`
-still answers `delivered` for one: no wire change.
+**Whether it RAN is decided by identity, never a clock or a coincidence** (2026-11-15). Claude
+drops every submit after an Esc interrupt (2.1.316), so `deliver` answers a `Handover` from the
+mod's `&started=<id>` report, read against the runs the mod relayed since the ack:
+- `Ran`: one of those runs was this prompt. A `$.prompt.submit` carries no id, and the relayed
+  `UserPromptSubmit`'s `prompt` text is the only thing that says which prompt ran, so each run is
+  matched to the oldest acked prompt with the same text, whitespace-insensitive (`same_text`).
+- `Dropped`: no run at all since the ack (certain, whatever the texts); the caller types it.
+- `Unconfirmed`: runs, none its own. It was dropped beside a human's prompt, or it ran under a
+  text a plugin rewrote: either could be true, so it is neither retyped nor counted delivered,
+  and the human gets an `agent-prompt-unconfirmed` notice. A counter of runs used to read this as
+  `Ran`, so the drop was lost.
+- `NotTaken` (no ack: retracted), or `Pending` (acked, no report yet).
+
+Between turns it waits up to 3 s for the report, on the report's own wakeup; mid-turn it answers
+`Pending` at the ack. **`Pending` and `Unconfirmed` are not delivered and must not be typed**:
+the prompt may run, or have run. The inbox settles a `Pending` one when its report comes, matched
+by id however late, through its sink (`set_settle`, wired in `lib.rs` setup). A drop goes to the
+draft-hold queue to be typed, once (`draft_hold::hand_back`). An unconfirmed one goes to the human. A mod that
+goes away before reporting takes the prompt's fate with it: logged, never retyped (at-most-once).
+Until 2026-11-15 a report past the 3 s counted as delivered, so a late drop was lost silently.
+`submit_prompt` answers `Delivered::AgentPending` for both, `deliver_to_agent` `pending: true`,
+and `submit_prompt_to_agent` `true` (so the frontend doesn't type it). The phone's `POST
+/message` still answers `delivered` for one (a comment there says why): no wire change.
 
 The one rule is `mod_inbox::takes_now`: a mod is polling AND the agent is between turns. There a
 draft no longer holds anything: the mod submits around it.
