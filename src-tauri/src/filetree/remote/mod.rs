@@ -804,7 +804,7 @@ impl Conn {
     /// Test seam: waits until `want` holds of the helper's status and epoch (each start is a
     /// new epoch), woken by every change of status to live, down or closed. The deadline only
     /// turns a hang into a failure.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn wait_state(&self, what: &str, want: impl Fn(&Status, u64) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut s = self.st.lock();
