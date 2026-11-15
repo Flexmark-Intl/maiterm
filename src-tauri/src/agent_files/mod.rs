@@ -293,19 +293,23 @@ struct ShellCall {
 
 impl ShellCall {
     /// Still running as far as attribution goes: no end seen, and younger than `SHELL_MAX`.
-    fn running(&self) -> bool {
-        self.ended.is_none() && self.started.elapsed() < SHELL_MAX
+    fn running(&self, now: Instant) -> bool {
+        self.ended.is_none() && now.saturating_duration_since(self.started) < SHELL_MAX
     }
 
     /// Can still own a change the watcher reports now.
-    fn attributable(&self) -> bool {
-        self.running() || self.ended.is_some_and(|t| t.elapsed() < SHELL_TAIL)
+    fn attributable(&self, now: Instant) -> bool {
+        self.running(now) || self.ended.is_some_and(|t| now.saturating_duration_since(t) < SHELL_TAIL)
+    }
+
+    /// Kept: still running, or ended recently enough that a late batch can still name it.
+    fn kept(&self, now: Instant) -> bool {
+        self.running(now) || self.ended.is_some_and(|t| now.saturating_duration_since(t) < SHELL_TAIL * 4)
     }
 }
 
 /// End `tab_id`'s running shell calls: `agent` None for every agent's, `keep` the one starting.
-fn end_shells(shells: &mut [ShellCall], tab_id: &str, agent: Option<&str>, keep: Option<&str>) {
-    let now = Instant::now();
+fn end_shells(shells: &mut [ShellCall], tab_id: &str, agent: Option<&str>, keep: Option<&str>, now: Instant) {
     for s in shells.iter_mut().filter(|s| s.tab_id == tab_id && s.ended.is_none() && agent.is_none_or(|a| s.agent == a) && keep.is_none_or(|k| s.tool_use_id != k)) {
         s.ended = Some(now);
     }
@@ -346,6 +350,9 @@ pub struct AgentFiles {
     /// What each file held before a tab's first edit of it this turn and this session (§14).
     /// Keyed by the same tab ids, so it follows the ledger's remaps and forgets with it.
     pub baselines: Arc<baseline::Baselines>,
+    /// How far tests have moved this ledger's clock forward (`advance_clock`).
+    #[cfg(test)]
+    skew: Mutex<Duration>,
 }
 
 pub fn now_ms() -> i64 {
@@ -419,7 +426,15 @@ fn within(inner: &Path, outer: &Path, fold: bool) -> bool {
 
 impl AgentFiles {
     pub fn new(tree: Weak<FileTreeState>) -> Arc<Self> {
-        Arc::new(AgentFiles { inner: Mutex::new(Inner::default()), tree, tx: Mutex::new(None), routing: AtomicBool::new(true), baselines: baseline::Baselines::new() })
+        Arc::new(AgentFiles {
+            inner: Mutex::new(Inner::default()),
+            tree,
+            tx: Mutex::new(None),
+            routing: AtomicBool::new(true),
+            baselines: baseline::Baselines::new(),
+            #[cfg(test)]
+            skew: Mutex::new(Duration::ZERO),
+        })
     }
 
     /// The turn a PreToolUse of `session` in `tab` will be recorded in, asked before it is
@@ -447,6 +462,20 @@ impl AgentFiles {
         self.routing.load(Ordering::SeqCst)
     }
 
+    /// The clock shell calls and closed tabs are aged by. A test moves it FORWARD rather than
+    /// back-dating a timestamp: an `Instant` before the machine booted panics on Windows.
+    fn clock(&self) -> Instant {
+        #[cfg(test)]
+        return Instant::now() + *self.skew.lock();
+        #[cfg(not(test))]
+        Instant::now()
+    }
+
+    #[cfg(test)]
+    fn advance_clock(&self, by: Duration) {
+        *self.skew.lock() += by;
+    }
+
     /// `file_tree_agent_activity` changed (or is read at `ft_open`).
     pub fn set_routing(&self, on: bool) {
         self.routing.store(on, Ordering::SeqCst);
@@ -456,6 +485,7 @@ impl AgentFiles {
     /// the tab's turn as recorded (None: a second copy of a Pre, dropped).
     pub fn record(&self, rec: HookRecord) -> Option<u64> {
         let now = now_ms();
+        let at = self.clock();
         let mut out: Vec<(AgentMarkAbs, bool)> = Vec::new();
         let mut forgot: Option<String> = None;
         let mut fresh_from: Option<(String, u64)> = None;
@@ -500,7 +530,7 @@ impl AgentFiles {
                     tab.turn_span = (0, None);
                     // The old session's shell calls are over too: left running, they would keep
                     // claiming the tree's changes for a session that is gone.
-                    end_shells(&mut inner.shells, &rec.tab_id, None, None);
+                    end_shells(&mut inner.shells, &rec.tab_id, None, None, at);
                 }
                 if let Some((_, turn, span)) = back {
                     tab.turn = turn;
@@ -534,7 +564,7 @@ impl AgentFiles {
                     } else {
                         tab.end_turn(now);
                     }
-                    end_shells(&mut inner.shells, &rec.tab_id, Some(""), None);
+                    end_shells(&mut inner.shells, &rec.tab_id, Some(""), None, at);
                 }
                 Phase::Idle => {
                     // No dialog is open anywhere, so no call is waiting on a human, and an edit
@@ -543,19 +573,19 @@ impl AgentFiles {
                     // the main agent's shell calls end. The turn is over (an Esc sends no Stop).
                     tab.settle_unfinished(&rec.tab_id, None, None, false, now, &mut out);
                     tab.end_turn(now);
-                    end_shells(&mut inner.shells, &rec.tab_id, Some(""), None);
+                    end_shells(&mut inner.shells, &rec.tab_id, Some(""), None, at);
                 }
                 Phase::Interrupt => {
                     tab.settle_unfinished(&rec.tab_id, None, None, false, now, &mut out);
                     tab.end_turn(now);
-                    end_shells(&mut inner.shells, &rec.tab_id, None, None);
+                    end_shells(&mut inner.shells, &rec.tab_id, None, None, at);
                 }
                 // The session change above is all it does.
                 Phase::SessionStart => {}
                 Phase::SubagentStop => {
                     if !rec.agent.is_empty() {
                         tab.settle_unfinished(&rec.tab_id, Some(&rec.agent), None, false, now, &mut out);
-                        end_shells(&mut inner.shells, &rec.tab_id, Some(&rec.agent), None);
+                        end_shells(&mut inner.shells, &rec.tab_id, Some(&rec.agent), None, at);
                     }
                 }
                 Phase::Pre => {
@@ -567,7 +597,7 @@ impl AgentFiles {
                     if rec.runtime == "claude" {
                         if let Some(id) = rec.tool_use_id.as_deref().filter(|s| !s.is_empty()) {
                             tab.settle_unfinished(&rec.tab_id, Some(&rec.agent), Some(id), true, now, &mut out);
-                            end_shells(&mut inner.shells, &rec.tab_id, Some(&rec.agent), Some(id));
+                            end_shells(&mut inner.shells, &rec.tab_id, Some(&rec.agent), Some(id), at);
                         }
                     }
                     // A call proves a turn is running, whether or not its prompt was seen (maiTerm
@@ -615,7 +645,7 @@ impl AgentFiles {
                                     agent: rec.agent.clone(),
                                     turn: tab.turn,
                                     cwd: PathBuf::from(cwd),
-                                    started: Instant::now(),
+                                    started: at,
                                     ended: None,
                                 });
                             }
@@ -636,9 +666,8 @@ impl AgentFiles {
                                 out.push((AgentMarkAbs::from_entry(&rec.tab_id, e), !failed && is_write_op(&e.op)));
                             }
                         }
-                        let instant = Instant::now();
                         for s in inner.shells.iter_mut().filter(|s| s.tool_use_id == id && s.ended.is_none()) {
-                            s.ended = Some(instant);
+                            s.ended = Some(at);
                         }
                     }
                     // The Pre never reached us (maiTerm started mid-call, or it had no id): the
@@ -670,7 +699,7 @@ impl AgentFiles {
             }
             let turn = tab.turn;
             // Ended shell calls are kept only as long as a late batch can still name them.
-            inner.shells.retain(|s| s.running() || s.ended.is_some_and(|t| t.elapsed() < SHELL_TAIL * 4));
+            inner.shells.retain(|s| s.kept(at));
             turn
         };
         if let Some(s) = forgot {
@@ -720,15 +749,16 @@ impl AgentFiles {
     /// The shell call a tree's changes belong to: one agent tab has a shell call running (or
     /// just ended) whose folder is in the tree, or that holds the tree. Two tabs: nobody's.
     pub fn sole_shell_in(&self, root: &Path, fold: bool) -> Option<ShellRef> {
+        let now = self.clock();
         let calls: Vec<ShellCall> = {
             let mut inner = self.inner.lock();
             // Dropped here too, not only on the next hook: an idle ledger then costs the
             // watcher nothing again (§17).
-            inner.shells.retain(|s| s.running() || s.ended.is_some_and(|t| t.elapsed() < SHELL_TAIL * 4));
+            inner.shells.retain(|s| s.kept(now));
             if inner.shells.is_empty() {
                 return None;
             }
-            inner.shells.iter().filter(|s| s.attributable()).cloned().collect()
+            inner.shells.iter().filter(|s| s.attributable(now)).cloned().collect()
         };
         let mine: Vec<&ShellCall> = calls.iter().filter(|s| within(&s.cwd, root, fold) || within(root, &s.cwd, fold)).collect();
         let tabs: HashSet<&str> = mine.iter().map(|s| s.tab_id.as_str()).collect();
@@ -930,8 +960,8 @@ impl AgentFiles {
     /// Forget tabs that have been gone from every window for a minute (closed). Not at once:
     /// a reload deletes the old tab before its ledger is moved to the new id.
     pub fn prune(&self, existing: &HashSet<String>) {
+        let now = self.clock();
         let mut inner = self.inner.lock();
-        let now = Instant::now();
         let mut dead = Vec::new();
         for (id, t) in inner.tabs.iter_mut() {
             if existing.contains(id) {
@@ -950,16 +980,6 @@ impl AgentFiles {
         drop(inner);
         if !dead.is_empty() {
             self.baselines.forget(&dead);
-        }
-    }
-
-    #[cfg(test)]
-    fn age_missing(&self, by: Duration) {
-        let mut inner = self.inner.lock();
-        for t in inner.tabs.values_mut() {
-            if let Some(s) = t.missing_since.as_mut() {
-                *s -= by;
-            }
         }
     }
 }
