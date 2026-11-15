@@ -162,8 +162,12 @@ pub struct FileTreeState {
 /// name, cwd there). Asked with the host's connect args.
 pub type RemoteHolders<'a> = &'a dyn Fn(&str) -> Vec<(String, String, String)>;
 
-/// How long the resolver waits on a host's helper before keeping its first candidate.
+/// How long the resolver waits on a host's helper before keeping its first candidate. In tests
+/// only a hang reaches it: a slow helper on a loaded machine is still answering.
+#[cfg(not(test))]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+#[cfg(test)]
+const PROBE_TIMEOUT: Duration = test_support::HANG;
 
 impl FileTreeState {
     pub fn new() -> Arc<Self> {

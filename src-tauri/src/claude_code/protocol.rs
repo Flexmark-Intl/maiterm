@@ -724,7 +724,8 @@ pub fn tool_list_response(gates: ToolGates) -> Value {
             "context": { "type": "string", "description": "Two or three sentences: what you found and what each choice costs, in the same plain terms as the question. Markdown: write a list as a list." },
             "options": { "type": "array", "maxItems": 6, "description": "Decision only. The choices, each its own entry: `label` is the choice itself in a few words ('Load the reviews only when opened'), `detail` what it does or costs, and `recommended: true` on what you recommend. Omit for a free-text answer.", "items": { "type": "object", "properties": { "label": { "type": "string" }, "detail": { "type": "string" }, "recommended": { "type": "boolean" } }, "required": ["label"] } },
             "pick": { "type": "string", "enum": ["one", "many"], "description": "Decision only. 'one' (the default): the human picks one option. 'many': the options are separate changes the human may make any of — they tick the ones to do, starting from the ones you marked recommended, and the answer names every option as done or not. Use 'many' instead of asking several yes/no questions in one sentence." },
-            "command": { "type": "string", "description": "Action only: the exact command the human has to run." }
+            "command": { "type": "string", "description": "Action only: the exact command the human has to run." },
+            "run_in": { "type": "string", "description": "Action only, and only when the command is for ANOTHER agent's tab, not yours: that agent's name or handle as sendToBridgedAgent takes it (a mesh peer, or your bridge partner). The card then says it runs there, also shows on that tab, and its Run runs the command there; you are told when it ran. Omit for a command for your own tab." }
         },
         "required": ["kind", "question"]
     });

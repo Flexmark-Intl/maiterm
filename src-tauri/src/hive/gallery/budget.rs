@@ -153,6 +153,7 @@ pub fn crossing_blocker(spent: i64, budget: i64, now: &str) -> TaskBlocker {
         options: Vec::new(),
         command: None,
         pick: None,
+        run_in: None,
         asked_at: now.into(),
         asked_by: "agent".into(),
     }

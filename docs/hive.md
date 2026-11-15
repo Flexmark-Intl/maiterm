@@ -2901,12 +2901,16 @@ references through `shared_from`, §6.8), cancels the Hive tabs' follow-ups and 
 and leaves the coordinator running (2026-11-15; it used to be ended, `exit_coordinator`). A Done
 Hive has no workers, no watchers and spends nothing: an idle agent costs no tokens, and every
 Hive tool that changes anything refuses until a wake (`tools::done_refusal`). Her own Bash and
-edits are not limited: she is a normal agent tab (§7.1), and nothing types into her while Done.
+edits are not limited: she is a normal agent tab (§7.1). maiTerm's own notices still reach her
+while Done (an undo's result, a decision's override, anything `draft_hold` held), typed through
+the delivery gate as into any agent.
 
-**Waking it.** A message from the human to a Done Hive's coordinator column sets the Hive back to
-`active` and types the message into her through `deliver_to_agent`, as into any agent tab. A
-prompt the human types in her own terminal wakes it too, typing nothing (`woken_in_terminal`: a
-`UserPromptSubmit` from a Done queen within 30 s of the human's last key in that terminal). Only
+**Waking it.** A message from the human to a Done Hive's coordinator column (or the phone) sets
+the Hive back to `active` and types the message into her through `deliver_to_agent`, as into any
+agent tab. A prompt typed in her own terminal does **not** wake it (Darryl, 2026-11-15): her tab
+also takes maiTerm's notices, and a wake judged by the human's last keypress woke on those too
+(no timing tells them apart). The queen's terminal bar says so while Done, and her Done note and
+every Done refusal (`tools::DONE_WAKE_HINT`) tell her to send the human to the message box. Only
 when she isn't running (after a maiTerm restart, which launches nothing in a Done Hive, or a
 crash) is she relaunched through the launch builder (§11.1), resuming her session, with the
 message owed to that session's start. Ending her at Done was dropped because that relaunch

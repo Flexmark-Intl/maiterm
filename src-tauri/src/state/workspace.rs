@@ -821,6 +821,12 @@ pub struct TaskBlocker {
     /// build loading an unknown variant would load empty state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pick: Option<String>,
+    /// For an action: the tab the command is FOR, when that is not the asking agent's own
+    /// (docs/tasks.md §3.1.3). A tab id maiTerm resolved from a name the agent gave, and only
+    /// ever one of its mesh peers or its bridge partner. Run runs it there, and the card shows
+    /// on that tab's corner too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_in: Option<String>,
     pub asked_at: String,
     /// Same vocabulary as `TaskNote::by`.
     pub asked_by: String,
@@ -2985,6 +2991,7 @@ mod task_tests {
                     .collect(),
                 command: None,
                 pick: None,
+                run_in: None,
                 asked_at: "2026-09-27T00:00:00Z".into(),
                 asked_by: "agent".into(),
             }),

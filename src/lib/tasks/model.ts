@@ -296,6 +296,9 @@ export interface BlockerInput {
   options?: { label?: string; detail?: string | null; recommended?: boolean }[];
   command?: string | null;
   pick?: string | null;
+  /** A peer's name or handle; resolved to a tab id by the caller (`parseBlocker` only checks
+   *  it goes with an action that has a command). */
+  run_in?: string | null;
 }
 
 /** Rows maiTerm files the human's own questions on, on a Hive coordinator's tab
@@ -407,6 +410,9 @@ export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Da
   }
   if (command && kind !== 'action') {
     return { ok: false, detail: 'Only an action blocker takes a command.' };
+  }
+  if (raw.run_in?.trim() && !(kind === 'action' && command)) {
+    return { ok: false, detail: 'blocker.run_in names where an action\'s command runs, so it needs kind "action" and a command.' };
   }
   const pick = raw.pick ?? null;
   if (pick !== null && pick !== 'one' && pick !== 'many') {

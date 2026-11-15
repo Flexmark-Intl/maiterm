@@ -1839,6 +1839,34 @@ function createClaudeCodeStore() {
     };
   }
 
+  /** `blocker.run_in` → the tab id the card's command is for (docs/tasks.md §3.1.3). Only a
+   *  tab the caller can already message: a mesh peer (resolved as sendToBridgedAgent does) or
+   *  its live bridge partner. Any other tab would let an agent aim a command, run with the
+   *  human's click, at a session it has no business in. */
+  function resolveRunIn(callerTabId: string, name: string): { ok: true; tabId: string } | { ok: false; detail: string } {
+    const mesh = agentMeshStore.resolvePeer(callerTabId, name);
+    if (mesh?.ok) return { ok: true, tabId: mesh.tabId };
+    if (agentBridgeStore.isBridgedToLivePartner(callerTabId) && agentBridgeStore.matchesPartner(callerTabId, name)) {
+      const partner = agentBridgeStore.getPartnerTabId(callerTabId);
+      if (partner) return { ok: true, tabId: partner };
+    }
+    if (mesh && !mesh.ok) {
+      return { ok: false, detail: mesh.error.startsWith('Cannot send to yourself') ? 'blocker.run_in names your own tab: leave it out for a command for your own tab.' : `blocker.run_in: ${mesh.error}` };
+    }
+    return { ok: false, detail: `blocker.run_in "${name}" is not one of your mesh peers or your bridge partner, the only tabs a card's command can be for.` };
+  }
+
+  /** Parse an agent's blocker and resolve its `run_in`. */
+  function agentBlocker(raw: BlockerInput, callerTabId: string): { ok: true; blocker: TaskBlocker } | { ok: false; detail: string } {
+    const parsed = parseBlocker(raw, 'agent');
+    if (!parsed.ok) return parsed;
+    const name = raw.run_in?.trim();
+    if (!name) return parsed;
+    const target = resolveRunIn(callerTabId, name);
+    if (!target.ok) return target;
+    return { ok: true, blocker: { ...parsed.blocker, run_in: target.tabId } };
+  }
+
   // --- Agent Bridge tools ---
 
   /** Does `recipient` name one of this tab's mesh peers, by any name the mesh router resolves
@@ -2123,7 +2151,10 @@ function createClaudeCodeStore() {
     const blockers = new Map<number, TaskBlocker>();
     for (const [i, t] of inputs.entries()) {
       if (!t.blocker) continue;
-      const parsed = parseBlocker(t.blocker, 'agent');
+      const parsed = agentBlocker(t.blocker, loc.tab.id);
+      if (parsed.ok && parsed.blocker.run_in && t.assign_to_me === false) {
+        return { error: `tasks[${i}] "${t.title!.trim()}": a card whose command is for another tab (blocker.run_in) stays on the tab that asked, so it can't go on an unassigned task. Nothing was created.` };
+      }
       if (!parsed.ok) return { error: `tasks[${i}] "${t.title!.trim()}": ${parsed.detail} Nothing was created.` };
       blockers.set(i, parsed.blocker);
     }
@@ -2255,7 +2286,7 @@ function createClaudeCodeStore() {
         let blocker: Task['blocker'] | undefined;
         if (u.blocker === null) blocker = null;
         else if (u.blocker !== undefined) {
-          const parsed = parseBlocker(u.blocker, 'agent');
+          const parsed = agentBlocker(u.blocker, loc.tab.id);
           if (!parsed.ok) {
             refused.push({ id: u.id!, reason: 'bad_blocker', detail: `${parsed.detail} Nothing in this update was applied.` });
             continue;
@@ -2269,6 +2300,17 @@ function createClaudeCodeStore() {
             continue;
           }
           blocker = parsed.blocker;
+        }
+        // A new run_in is resolved against the caller, the agent that will be told: only on a
+        // row it carries (or takes in this update). Later moves of the row are judged at use
+        // (`runInTarget`, docs/tasks.md §3.1.3).
+        if (blocker?.run_in && (assignTo !== undefined ? assignTo : list[idx].tab_id) !== loc.tab.id) {
+          refused.push({
+            id: u.id!,
+            reason: 'bad_blocker',
+            detail: 'blocker.run_in names one of YOUR peers, so it goes only on a task you carry (or take with assign_to "me" in the same update). Nothing in this update was applied.',
+          });
+          continue;
         }
         const patch: Partial<Task> = { updated_at: new Date().toISOString() };
         if (assignTo !== undefined) patch.tab_id = assignTo;

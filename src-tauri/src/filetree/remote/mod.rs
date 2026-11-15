@@ -53,7 +53,11 @@ use super::types::{DeleteTicket, FileOp, Needs, OpFail, OpItem, OpResult, RepoIn
 use crate::util::proc::RunError;
 
 /// A request's answer may take this long (a listing of a slow folder, a status run).
+#[cfg(not(test))]
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
+/// In tests only a hang reaches it: a slow helper on a loaded machine is still answering.
+#[cfg(test)]
+const CALL_TIMEOUT: Duration = crate::filetree::test_support::HANG;
 /// Files bigger than this are not sent by an import.
 const MAX_IMPORT_FILE: u64 = 256 << 20;
 
@@ -347,7 +351,7 @@ impl Graces {
         let due = {
             let mut held = self.held.lock();
             while held.is_empty() {
-                assert!(!self.cv.wait_for(&mut held, Duration::from_secs(60)).timed_out(), "no helper's grace period started");
+                assert!(!self.cv.wait_for(&mut held, crate::filetree::test_support::HANG).timed_out(), "no helper's grace period started");
             }
             std::mem::take(&mut *held)
         };
@@ -806,7 +810,7 @@ impl Conn {
     /// turns a hang into a failure.
     #[cfg(all(test, unix))]
     pub(crate) fn wait_state(&self, what: &str, want: impl Fn(&Status, u64) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + crate::filetree::test_support::HANG;
         let mut s = self.st.lock();
         while !want(&s.status, s.epoch) {
             assert!(!self.cv.wait_until(&mut s, deadline).timed_out(), "the helper never got to {what} ({:?})", s.status);

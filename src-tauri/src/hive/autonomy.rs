@@ -198,6 +198,7 @@ pub fn offer_blocker(o: &Offer, asked_at: &str) -> TaskBlocker {
         ],
         command: None,
         pick: None,
+        run_in: None,
         asked_at: asked_at.into(),
         asked_by: "agent".into(),
     }

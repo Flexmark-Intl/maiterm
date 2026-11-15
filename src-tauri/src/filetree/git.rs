@@ -132,7 +132,9 @@ pub enum SkipWhy {
 pub enum Decision {
     Skipped(Trigger, SkipWhy),
     /// A status run finished and the hub has it (and has broadcast any health change).
-    Ran { took: Duration },
+    /// `covers`: how many accepted signals it answers (`GitCore::test_signals` counts them),
+    /// so a test can tell the run that answers its own signal from one already under way.
+    Ran { took: Duration, covers: u64 },
     /// A run came due with no audience: deferred until a view comes back.
     Deferred,
     /// A run came due with decorations off: dropped.
@@ -490,6 +492,9 @@ pub struct GitCore {
     slots: Arc<Slots>,
     #[cfg(test)]
     probe: Option<Arc<GitProbe>>,
+    /// Tests: signals accepted so far (each one set a run due).
+    #[cfg(test)]
+    signals: AtomicU64,
 }
 
 impl GitCore {
@@ -519,7 +524,25 @@ impl GitCore {
             slots,
             #[cfg(test)]
             probe: cfg.probe.clone(),
+            #[cfg(test)]
+            signals: AtomicU64::new(0),
         })
+    }
+
+    /// Tests: how many signals have set a run due so far. A `Decision::Ran` whose `covers`
+    /// reaches this answers all of them.
+    #[cfg(test)]
+    pub fn test_signals(&self) -> u64 {
+        self.signals.load(Ordering::SeqCst)
+    }
+
+    /// The accepted signals a run taken now answers (tests only; 0 otherwise).
+    #[inline]
+    fn signals_taken(&self) -> u64 {
+        #[cfg(test)]
+        return self.signals.load(Ordering::SeqCst);
+        #[cfg(not(test))]
+        0
     }
 
     /// Tells the test probe, if there is one, what was decided. Nothing outside tests.
@@ -612,6 +635,8 @@ impl GitCore {
         }
         s.due = Some(due);
         s.deferred = false;
+        #[cfg(test)]
+        self.signals.fetch_add(1, Ordering::SeqCst);
         if !s.thread {
             s.thread = true;
             let me = self.clone();
@@ -1026,6 +1051,7 @@ fn parse_numstat(out: &[u8], target: &str, nfc: bool) -> Option<(u32, u32)> {
 /// (its Drop stops this thread).
 fn worker(core: Arc<GitCore>) {
     loop {
+        let covers;
         {
             let mut s = core.sched.lock();
             loop {
@@ -1049,6 +1075,9 @@ fn worker(core: Arc<GitCore>) {
             s.due = None;
             s.first = None;
             s.last_start = Some(Instant::now());
+            // Under the lock `signal` counts under: every signal counted so far is answered by
+            // this run.
+            covers = core.signals_taken();
         }
         let Some(hub) = core.hub.upgrade() else {
             core.sched.lock().thread = false;
@@ -1072,7 +1101,7 @@ fn worker(core: Arc<GitCore>) {
             (core.run_status(), core.measured(started.elapsed()))
         };
         hub.git_finished(epoch, out, took);
-        core.report(|| Decision::Ran { took });
+        core.report(|| Decision::Ran { took, covers });
     }
 }
 

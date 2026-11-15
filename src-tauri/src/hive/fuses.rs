@@ -695,6 +695,7 @@ pub fn file_pause_blocker(ws: &mut Workspace, coordinator: Option<&str>, limit: 
         options: Vec::new(),
         command: None,
         pick: None,
+        run_in: None,
         asked_at: now.into(),
         asked_by: "agent".into(),
     };
@@ -1458,6 +1459,7 @@ mod tests {
             options: Vec::new(),
             command: None,
             pick: None,
+            run_in: None,
             asked_at: "t0".into(),
             asked_by: "agent".into(),
         };

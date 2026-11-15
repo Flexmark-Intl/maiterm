@@ -20,7 +20,7 @@ use rand::{Rng, SeedableRng};
 use super::hub::{RootHub, Sink, STALL_MESSAGES};
 use super::ignore_cache::IgnoreStack;
 use super::list;
-use super::test_support::Probe;
+use super::test_support::{Probe, HANG};
 use super::types::{DirReq, Entry, Envelope, TreeEvent};
 use super::FileTreeState;
 
@@ -399,13 +399,13 @@ fn a_change_arrives_as_a_delta_from_the_held_generation() {
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
     probe.watching(&hub);
-    assert!(wait_for(&rec, Duration::from_secs(5), |e| matches!(e, TreeEvent::Dir { rel, .. } if rel.is_empty())).is_some());
+    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Dir { rel, .. } if rel.is_empty())).is_some());
     let held = rec.msgs.lock().iter().find_map(|m| match &m.ev {
         TreeEvent::Dir { rel, gen, .. } if rel.is_empty() => Some(*gen),
         _ => None,
     });
     std::fs::write(root.join("x.txt"), "").unwrap();
-    assert!(wait_for(&rec, Duration::from_secs(5), |e| matches!(e, TreeEvent::Delta { rel, from, add, .. }
+    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Delta { rel, from, add, .. }
         if rel.is_empty() && Some(*from) == held && add.iter().any(|a| a.n == "x.txt"))).is_some());
     // Saving a file changes nothing the tree shows: no message about it. The barrier after it
     // proves the save reached the hub and was processed; all that may follow is the barrier's
@@ -451,9 +451,7 @@ fn a_known_generation_is_answered_not_modified() {
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![DirReq { rel: "a".into(), known_gen: None }], rec.clone(), vec![]).unwrap();
-    // The generation the client holds: its latest listing OR delta. Windows' watcher can report the
-    // setup's own writes after the first listing (CI, 2026-10-31), moving the generation on; the
-    // test must hold the newest one, after every setup write has reached the hub and been listed.
+    // The generation the client holds: its latest listing OR delta.
     let gen_of = |rec: &Recorder, rel: &str| {
         rec.msgs.lock().iter().rev().find_map(|m| match &m.ev {
             TreeEvent::Dir { rel: r, gen, .. } | TreeEvent::Delta { rel: r, gen, .. } if r == rel => Some(*gen),
@@ -461,17 +459,20 @@ fn a_known_generation_is_answered_not_modified() {
         })
     };
     let hub = ft.hub_of(ack.sub_id).unwrap();
+    // Taken from the hub itself once nothing is being listed (the watcher's start re-lists every
+    // open folder), never by waiting on an OS event. A watcher may still report the setup's own
+    // writes later (Windows did, CI 2026-10-31; FSEvents can be 20 s late), but a re-list that
+    // finds the same entries keeps the generation, so this one stays the folder's.
     probe.watching(&hub);
-    assert!(wait_for(&rec, Duration::from_secs(5), |e| matches!(e, TreeEvent::Dir { rel, .. } if rel == "a")).is_some());
-    // The barrier goes in the root, so "a" itself is left alone.
-    probe.settle(&hub, &root);
-    let gen = gen_of(&rec, "a").unwrap();
+    probe.idle(&hub);
+    let gen = hub.dirs.lock().get("a").map(|d| d.gen).expect("a is listed");
+    assert_eq!(gen_of(&rec, "a"), Some(gen), "the client holds what the hub has");
     drop(hub);
     // Close and come back within the grace period: the folder is answered from memory.
     ft.close(ack.sub_id);
     let rec2 = Arc::new(Recorder::default());
     ft.open("w", &root.to_string_lossy(), vec![DirReq { rel: "a".into(), known_gen: Some(gen) }], rec2.clone(), vec![]).unwrap();
-    assert!(wait_for(&rec2, Duration::from_secs(5), |e| matches!(e, TreeEvent::NotModified { rel, gen: g } if rel == "a" && *g == gen)).is_some());
+    assert!(wait_for(&rec2, HANG, |e| matches!(e, TreeEvent::NotModified { rel, gen: g } if rel == "a" && *g == gen)).is_some());
     assert_eq!(ft.hub_count(), 1, "one hub per root, shared");
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -486,9 +487,9 @@ fn a_deleted_root_says_root_gone() {
     // The watcher must be what notices: deleted before it runs, the root is only found gone
     // when it starts, which under a loaded fseventsd is later than this test waits.
     probe.watching(&ft.hub_of(ack.sub_id).unwrap());
-    assert!(wait_for(&rec, Duration::from_secs(5), |e| matches!(e, TreeEvent::Dir { .. })).is_some());
+    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Dir { .. })).is_some());
     std::fs::remove_dir_all(&root).unwrap();
-    assert!(wait_for(&rec, Duration::from_secs(10), |e| matches!(e, TreeEvent::RootGone)).is_some());
+    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::RootGone)).is_some());
 }
 
 fn git_init(dir: &std::path::Path) {
@@ -511,7 +512,7 @@ fn git_init_in_an_open_root_reopens_it_with_its_repository() {
     let old = ft.hub_of(ack.sub_id).unwrap();
     probe.watching(&old);
     git_init(&root);
-    assert!(wait_for(&rec, Duration::from_secs(10), |e| matches!(e, TreeEvent::Reopen)).is_some(), "the view is told to reopen");
+    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Reopen)).is_some(), "the view is told to reopen");
     // What the client does: close, open the same place again.
     let rec2 = Arc::new(Recorder::default());
     let again = ft.open("w", &root.to_string_lossy(), vec![], rec2, vec![]).unwrap();
@@ -608,14 +609,14 @@ fn budgets_on_a_generated_fixture() {
     let rec = Arc::new(Recorder::default());
     let t0 = Instant::now();
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
-    let first = wait_for(&rec, Duration::from_secs(10), |e| matches!(e, TreeEvent::Dir { rel, chunk: 0, .. } if rel.is_empty())).unwrap();
+    let first = wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Dir { rel, chunk: 0, .. } if rel.is_empty())).unwrap();
     let open_ms = (first - t0).as_secs_f64() * 1000.0;
     let hub = ft.hub_of(ack.sub_id).unwrap();
     let t1 = Instant::now();
     hub.expand(ack.sub_id, vec![DirReq { rel: "big".into(), known_gen: None }]);
-    let chunk = wait_for(&rec, Duration::from_secs(10), |e| matches!(e, TreeEvent::Dir { rel, chunk: 0, .. } if rel == "big")).unwrap();
+    let chunk = wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Dir { rel, chunk: 0, .. } if rel == "big")).unwrap();
     let big_ms = (chunk - t1).as_secs_f64() * 1000.0;
-    let full = wait_for(&rec, Duration::from_secs(10), |e| matches!(e, TreeEvent::Dir { rel, last: true, .. } if rel == "big"));
+    let full = wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Dir { rel, last: true, .. } if rel == "big"));
     assert!(full.is_some());
     // The floor no listing can beat: the bare directory read, measured on this machine now.
     let t2 = Instant::now();
@@ -706,10 +707,10 @@ fn a_low_inotify_budget_falls_back_to_polling_and_says_so() {
     let (watched, polled) = hub.watched_and_polled();
     assert!(shared.watch_count() <= 3, "{} watches over a budget of 3", shared.watch_count());
     assert!(watched <= 3 && polled >= 6, "watched {watched}, polled {polled}");
-    assert!(wait_for(&rec, Duration::from_secs(2), |e| matches!(e, TreeEvent::Health { note: Some(n), watch, .. } if n.contains("polling") && watch == "partial")).is_some());
+    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Health { note: Some(n), watch, .. } if n.contains("polling") && watch == "partial")).is_some());
     // A polled folder still converges, through the poller (the window counts as focused).
     std::fs::write(root.join("d0/new.txt"), "").unwrap();
-    assert!(wait_for(&rec, Duration::from_secs(8), |e| matches!(e, TreeEvent::Delta { rel, add, .. } if rel == "d0" && add.iter().any(|a| a.n == "new.txt"))).is_some());
+    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Delta { rel, add, .. } if rel == "d0" && add.iter().any(|a| a.n == "new.txt"))).is_some());
     ft.close(ack.sub_id);
     std::fs::remove_dir_all(&root).unwrap();
 }

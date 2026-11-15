@@ -14,6 +14,7 @@
   import { waitingStore, waitingTone, blockerDrafts, type WaitingItem } from '$lib/stores/waiting.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
+  import { tabDisplayName } from '$lib/stores/workspaces.svelte';
   import { BLOCKER_LABEL } from '$lib/tasks/model';
   import BlockerCard from './BlockerCard.svelte';
   import ScriptApprovalCard from '$lib/components/followUps/ScriptApprovalCard.svelte';
@@ -75,6 +76,14 @@
     const o = opened;
     if (!o) return;
     void o.seq;
+    if (o.passive) {
+      // Shown again on the human's return, not by a click: bring the card into view and leave
+      // the keyboard where it is (almost always the terminal they came back to).
+      const raf = requestAnimationFrame(() => {
+        panelEl?.querySelector<HTMLElement>(`[data-key="${CSS.escape(o.focus ?? '')}"]`)?.scrollIntoView({ block: 'nearest' });
+      });
+      return () => cancelAnimationFrame(raf);
+    }
     // The body is nowhere to go back to (`hide` then gives the tab's terminal the keyboard).
     const cur = document.activeElement;
     if (!before && cur instanceof HTMLElement && cur !== document.body && !panelEl?.contains(cur)) before = cur;
@@ -96,7 +105,7 @@
     // which leaves it on the body.
     const cur = document.activeElement;
     const ours = !cur || cur === document.body || !!panelEl?.contains(cur);
-    waitingStore.close(tabId);
+    waitingStore.hide(tabId);
     if (!ours) return;
     if (back?.isConnected) back.focus({ preventScroll: true });
     else terminalsStore.focusTerminal(tabId);
@@ -111,6 +120,29 @@
   // this instance its `tabId` already reads the NEW tab, which would close that one's card.
   const mountedTabId = untrack(() => tabId);
   onDestroy(() => waitingStore.close(mountedTabId));
+
+  // The exception: a Run that opened a new tab took the human away mid-question (the card
+  // still waits for "I've done it"). Coming back shows it again, passively — it takes no
+  // keyboard, so the hazard above doesn't apply. Only while that same question (its asked_at,
+  // not just its task) is still waiting.
+  untrack(() => {
+    const ret = waitingStore.takeReturn(mountedTabId);
+    if (!ret) return;
+    const task = tasksStore.findAnywhere(ret.taskId)?.task;
+    if (task?.status !== 'blocked' || task.blocker?.asked_at !== ret.askedAt) return;
+    if (!ret.extra && !waiting.some((i) => i.key === ret.taskId)) return;
+    waitingStore.openPassive(mountedTabId, ret.taskId, ret.extra ? ret.taskId : null);
+  });
+
+  /** BlockerCard's Run: a run in a new tab leaves this one, so ask to come back open. */
+  function onran(item: WaitingItem, where: 'agent' | 'tab') {
+    if (where !== 'tab' || item.kind !== 'task' || !item.task.blocker) return;
+    waitingStore.reopenOnReturn(mountedTabId, {
+      taskId: item.task.id,
+      askedAt: item.task.blocker.asked_at,
+      extra: item === extra,
+    });
+  }
 
   // Everything answered: show the last receipt for a moment, then go back to nothing.
   $effect(() => {
@@ -142,7 +174,11 @@
             <article data-key={item.key} class:focused={item.key === opened.focus}>
               {#if item.kind === 'task'}
                 <h4>{item.task.title}</h4>
-                <BlockerCard task={item.task} variant="card" onnote={showNote} />
+                {#if item.task.tab_id && item.task.tab_id !== tabId}
+                  <!-- Here because its command is for this tab (docs/tasks.md §3.1.3). -->
+                  <p class="from">Asked by {tabDisplayName(item.task.tab_id)}</p>
+                {/if}
+                <BlockerCard task={item.task} variant="card" onnote={showNote} onran={(where) => onran(item, where)} />
               {:else if item.kind === 'script'}
                 <ScriptApprovalCard tabId={item.approval.tabId} followUp={item.approval.followUp} {listChangedAt} onnote={showNote} />
               {:else if item.kind === 'rules'}
@@ -272,6 +308,12 @@
     margin: 0;
     font-size: 12px;
     font-weight: 600;
+    color: var(--fg-dim);
+    overflow-wrap: anywhere;
+  }
+  .from {
+    margin: 0;
+    font-size: 11px;
     color: var(--fg-dim);
     overflow-wrap: anywhere;
   }

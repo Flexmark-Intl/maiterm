@@ -714,7 +714,8 @@ fn an_op_through_a_subscription_shows_up_on_the_channel() {
         }
     }
     // Declared first, so it outlives (and watches) every drop below.
-    let dog = Watchdog::start("an_op_through_a_subscription_shows_up_on_the_channel", Duration::from_secs(30));
+    // Above the waits' own deadline (one HANG, shared), so only a real hang reaches it.
+    let dog = Watchdog::start("an_op_through_a_subscription_shows_up_on_the_channel", super::super::test_support::HANG * 3);
     let fx = Fx::new("sub");
     let ft = super::super::FileTreeState::with(Duration::from_millis(50), super::super::watch::RAW_CAPACITY, None);
     ft.set_trash_backend(Box::new(FakeTrash { bin: fx.tmp.join("bin"), refuse: false, restores: true, held: Arc::default() }));
@@ -730,7 +731,7 @@ fn an_op_through_a_subscription_shows_up_on_the_channel() {
             _ => false,
         })
     };
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + super::super::test_support::HANG;
     dog.at("waiting for the root's listing");
     while !rec.0.lock().iter().any(|e| matches!(&e.ev, TreeEvent::Dir { rel, last: true, .. } if rel.is_empty())) {
         assert!(std::time::Instant::now() < deadline, "the root lists");

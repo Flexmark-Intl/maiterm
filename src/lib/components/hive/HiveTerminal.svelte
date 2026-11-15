@@ -18,8 +18,10 @@
   interface Props {
     tabId: string;
     onhide: () => void;
+    /** A line for the bar, e.g. a Done queen's: typing here doesn't wake the Hive (§11.4). */
+    note?: string;
   }
-  let { tabId, onhide }: Props = $props();
+  let { tabId, onhide, note }: Props = $props();
 
   function savedHeight(): number {
     try {
@@ -92,7 +94,7 @@
   ></div>
   <div class="bar">
     <Icon name="terminal" size={12} />
-    <span class="label">Terminal</span>
+    <span class="label">Terminal{#if note}<span class="note">{note}</span>{/if}</span>
     <IconButton tooltip="Hide the terminal" onclick={onhide}><Icon name="close" size={11} /></IconButton>
   </div>
   <div class="slot" data-terminal-slot={tabId} data-hive-terminal>
@@ -108,7 +110,8 @@
   .split { flex: none; height: 4px; cursor: row-resize; background: var(--bg-light); opacity: 0.5; }
   .split:hover, .ht.dragging .split, .split:focus-visible { opacity: 1; background: var(--accent); outline: none; }
   .bar { flex: none; display: flex; align-items: center; gap: 6px; padding: 2px 8px 2px 12px; font-size: 11px; color: var(--fg-dim); background: var(--bg-medium); }
-  .label { flex: 1; }
+  .label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .note { margin-left: 10px; color: var(--yellow); }
   /* Block, not flex: the fixed-size pane is as big as its grid, and this scrolls around it. */
   .slot { flex: 1; min-height: 0; position: relative; overflow: auto; }
   .none { margin: 12px; font-size: 12px; color: var(--fg-dim); }
