@@ -56,8 +56,9 @@ pub const HUB_GRACE: Duration = Duration::from_secs(30);
 /// Listings running at once across the app. A hung `stat` on a dead mount pins at most its
 /// hub's own share of these, never the blocking pool or the main thread.
 pub const GLOBAL_IO_SLOTS: usize = 32;
-/// After this long unfocused, regaining focus revalidates the window's folders: FSEvents can
-/// coalesce changes away across a sleep.
+/// After this long unfocused, regaining focus re-lists a remote root's open folders whole: its
+/// host's watcher may have missed something meanwhile. A local root reconciles on every return
+/// instead (§6.1).
 pub const FOCUS_REVALIDATE_AFTER: Duration = Duration::from_secs(60);
 /// git processes running at once across the app (§7.2): seventy tabs on ten repos can't pile
 /// up status runs.
@@ -566,8 +567,10 @@ impl FileTreeState {
         self.focus.forget(label);
     }
 
-    /// `WindowEvent::Focused`. Back after a long absence: revalidate what the window shows.
-    /// A network root revalidates on every return, having no watcher.
+    /// `WindowEvent::Focused`. Every return is an edge (§6.1): a local root re-lists the open
+    /// folders whose mtime moved, since FSEvents can lose a change under load without saying
+    /// so. A network root revalidates whole on every return, having no watcher; a remote one
+    /// after a long absence.
     pub fn window_focus(&self, label: &str, focused: bool) {
         let away = self.focus.set(label, focused);
         let Some(away) = away else { return };
@@ -576,8 +579,10 @@ impl FileTreeState {
             // A remote root whose helper can't watch everything open (polled folders, no
             // python3) is looked at again on every return, like a network mount.
             let unwatched = h.remote.as_ref().is_some_and(|r| r.health().0 != "live");
-            if away >= FOCUS_REVALIDATE_AFTER || h.is_network() || unwatched {
+            if h.is_network() || unwatched || (h.remote.is_some() && away >= FOCUS_REVALIDATE_AFTER) {
                 h.revalidate_window(label);
+            } else if h.has_window(label) {
+                h.reconcile("");
             }
             // Regaining focus is a git edge (§7.2): a commit made in another app shows.
             if h.has_window(label) {
@@ -603,11 +608,10 @@ impl FileTreeState {
 
     /// A command finished in a terminal (OSC 133 D), whose shell is `shell_pid`. Called on the
     /// PTY reader's thread, so it only hands the pid on: a thread looks up the shell's folder
-    /// and signals the repository hubs it is in, so a `git commit` typed in a terminal
-    /// decorates without waiting for the watcher's trailing delay. Nothing at all happens
-    /// while no tree is open.
+    /// and tells the hubs it is in (`note_command_in`). Nothing at all happens while no tree is
+    /// open.
     pub fn command_done(&self, shell_pid: u32) {
-        if self.hubs.lock().values().all(|h| h.git.is_none()) {
+        if self.hubs.lock().is_empty() {
             return;
         }
         let tx = self.commands.get_or_init(|| {
@@ -629,14 +633,28 @@ impl FileTreeState {
         let _ = tx.send(shell_pid);
     }
 
-    /// A command finished with its shell in `cwd`.
+    /// A command finished with its shell in `cwd`: an edge (§6.1). Every tree showing that
+    /// folder re-lists its open folders under it whose mtime moved, and a repository's hubs
+    /// run git, so a `git commit` typed in a terminal decorates without waiting for the
+    /// watcher's trailing delay.
     pub fn note_command_in(&self, cwd: &Path) {
+        self.edge_at(cwd);
         let cwd = crate::share::canon(cwd);
         let hubs: Vec<Arc<RootHub>> = self.hubs.lock().values().filter(|h| h.git.is_some()).cloned().collect();
         for h in hubs {
             if h.covers(&cwd) {
                 h.git_signal(Trigger::Command);
             }
+        }
+    }
+
+    /// Something may have changed at or under `path` (a command or an agent's call ended
+    /// there): every local tree showing it reconciles the open folders under it (§6.1).
+    pub fn edge_at(&self, path: &Path) {
+        let path = crate::share::canon(path);
+        let hubs: Vec<Arc<RootHub>> = self.hubs.lock().values().cloned().collect();
+        for h in hubs {
+            h.reconcile_at(&path);
         }
     }
 

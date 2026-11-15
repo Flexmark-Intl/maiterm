@@ -1409,6 +1409,37 @@ All backends feed one **coalescer thread per hub**:
 - **One `FsEventWatcher` per hub, `RecursiveMode::Recursive` on the root, created once.** notify 7
   stops and restarts the stream on every `watch()` call, so the watched path set never changes
   per expand. Recursion is free in fds (about 1 per root), and the coalescer filters the volume.
+- **FSEvents loses changes under load without saying so** (proven 2026-11-15). Under heavy disk
+  load (the Files tests at 32 threads, plus threads writing elsewhere on the disk), fseventsd:
+  - delivers changes late, up to 20 s, and AFTER changes made later. Event ids follow delivery,
+    not the order the changes happened in, so "write a sentinel and wait for its event" is not a
+    barrier on macOS;
+  - sometimes never records a change at all: creates, removes and renames were missing from
+    live delivery AND from fseventsd's own persistent history (replayed from an id taken before
+    the change), and no stream in the process got MustScanSubDirs, UserDropped or KernelDropped.
+  notify loses nothing: a tap on its FSEvents callback, before its filter, saw no event
+  filtered out, none flag-less, and no drop notice. Every path the callback got reached the hub.
+  `FSEventStreamFlushSync` returns in under 1 ms and recovers none of it, so a backend of our
+  own would not help either. (Measured under hiveRun's Seatbelt sandbox; nothing implicates it.)
+- **So the hub reconciles on edges** (`RootHub::reconcile`). Each snapshot keeps its folder's
+  mtime, read just BEFORE the listing that made it (`listed`), so a change made during the read
+  moves it. On an edge, the open folders under the edge's path are stat'd, and only those whose
+  mtime moved are re-listed through the usual diff path: an unchanged listing sends nothing.
+  Every change a listing shows (an entry appearing, going or renamed) moves its folder's mtime;
+  a file's content doesn't show in a listing. A whole-second mtime (HFS+, FAT) is trusted only
+  once the clock is past its tick, since a second change within that tick wouldn't move it.
+  Events still patch snapshots as before; a patched folder's mtime no longer matches, so the
+  next edge re-lists it once. The edges, all events that already exist, never a timer:
+  - the window regaining focus (every time, for a local root);
+  - a command finishing in a terminal (OSC 133 D), for the trees showing its shell's folder;
+  - an agent's shell call (Bash) ending, for its folder, and an agent's completed write, for
+    the folder holding the file (`agent_files`);
+  - the repository's index or a ref moving (a checkout, pull or stash);
+  - expanding a folder: a snapshot is served only while its mtime is the listed one;
+  - Files' own operations, which re-list their parents (`touched`).
+  A pass runs on a thread of its own, and edges arriving meanwhile join the next pass, so a
+  burst costs one more pass, not one per edge. A remote root has no local disk, and a network
+  mount is revalidated whole, so neither reconciles. Idle, nothing runs.
 
 ### 6.2 Linux
 
@@ -1471,9 +1502,10 @@ In shallow mode:
 - A hub dies **30 s** after its last subscriber closes, dropping its watcher, snapshots, git worker and index.
 - A root that is deleted or renamed away sends `RootGone`. The banner reads "This folder no longer
   exists · Follow the tab / pick another", and there is no automatic re-root to home.
-- **Refresh on regaining focus:** when a window regains focus after more than 60 s unfocused, its
-  subs revalidate subscribed folders by `known_gen`. This catches anything FSEvents coalesced away
-  while the machine slept.
+- **Refresh on regaining focus:** every time a window regains focus, a local root reconciles its
+  open folders (§6.1): those whose mtime moved are re-listed. This catches what FSEvents lost
+  under load or coalesced away while the machine slept. A network root revalidates every open
+  folder on every return; a remote root does after more than 60 s away (its host's watcher).
 - There is no periodic local re-list. The only timers anywhere are the Linux over-budget poll, the
   network poll (visible and focused only), and the remote helper ping.
 

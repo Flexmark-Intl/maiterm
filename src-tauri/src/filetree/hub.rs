@@ -360,6 +360,18 @@ pub enum HubReport {
     Batch { paths: Vec<PathBuf>, lost: bool },
     /// The last queued or running listing finished and was sent.
     ListingsIdle,
+    /// A reconcile pass ran (an edge, `RootHub::reconcile`): the open folders it re-listed
+    /// because their mtime moved since they were listed. Their listings may still be running
+    /// (`ListingsIdle` says when they are done).
+    Reconciled { relisted: Vec<String> },
+}
+
+/// Edges waiting for a reconcile pass, and whether one is running (`RootHub::reconcile`).
+#[derive(Default)]
+struct Reconcile {
+    /// Folders whose open descendants (and themselves) are to be checked.
+    bases: BTreeSet<String>,
+    running: bool,
 }
 
 pub struct HubInit {
@@ -418,6 +430,13 @@ pub struct RootHub {
     pub wakeups: Arc<AtomicU64>,
     /// Bumped by every subscribe and every reap scheduled; a reap only happens if unchanged.
     pub grace_token: AtomicU64,
+    /// Each snapshot's folder mtime, read just before the listing that made it (§6.1): what a
+    /// reconcile compares against. Absent means not trusted (the mtime was too recent to tell a
+    /// later change in the same tick apart, or couldn't be read), so the next edge re-lists it.
+    /// Events patch a snapshot without touching this: the folder's mtime then differs, and the
+    /// next edge re-lists it once.
+    listed: Mutex<HashMap<String, SystemTime>>,
+    reconcile: Mutex<Reconcile>,
     #[cfg(test)]
     probe: Option<Mutex<std::sync::mpsc::Sender<HubReport>>>,
 }
@@ -535,6 +554,8 @@ impl RootHub {
             retired: AtomicBool::new(false),
             wakeups: Arc::new(AtomicU64::new(0)),
             grace_token: AtomicU64::new(0),
+            listed: Mutex::new(HashMap::new()),
+            reconcile: Mutex::new(Reconcile::default()),
             #[cfg(test)]
             probe: init.probe.map(Mutex::new),
         });
@@ -786,7 +807,9 @@ impl RootHub {
             if self.add_interest(sub, &rel) {
                 self.watch_dir(&rel);
             }
-            let trusted = self.snapshot_trusted(&rel);
+            // Served from the snapshot only while the folder's mtime is the one it was listed at:
+            // FSEvents can lose a change under load without saying so (§6.1).
+            let trusted = self.snapshot_trusted(&rel) && !self.moved_since_listed(&rel);
             let answered = {
                 let dirs = self.dirs.lock();
                 match dirs.get(&rel) {
@@ -829,6 +852,7 @@ impl RootHub {
 
     fn drop_dir(&self, rel: &str) {
         self.dirs.lock().remove(rel);
+        self.listed.lock().remove(rel);
         self.unwatch_dir(rel);
     }
 
@@ -975,6 +999,82 @@ impl RootHub {
         }
     }
 
+    // ── Reconciling on edges (§6.1) ───────────────────────────────────────────────────────
+
+    /// Has `rel`'s folder changed since its snapshot was listed? True when its mtime differs
+    /// from the one recorded, when none was (`listed`), or when it can't be read now.
+    fn moved_since_listed(&self, rel: &str) -> bool {
+        let Some(was) = self.listed.lock().get(rel).copied() else { return true };
+        let Ok(abs) = rel_to_native(&self.root, rel) else { return true };
+        dir_mtime(&abs) != Some(was)
+    }
+
+    /// An edge: something may have changed under `base` (a command or an agent's call ended
+    /// there, the window came back, the repository's index moved). FSEvents can lose a change
+    /// under load without saying so (§6.1), so the open folders at or under `base` whose mtime
+    /// moved since they were listed are listed again; an unchanged listing sends nothing.
+    ///
+    /// Runs on a thread of its own, never the caller's. Edges that arrive while a pass runs
+    /// join the next pass, so a burst costs one pass more, not one per edge. A local root only:
+    /// a remote one has no disk here, and a network mount is revalidated whole instead.
+    pub fn reconcile(&self, base: &str) {
+        if self.remote.is_some() || self.is_network() || self.is_gone() {
+            return;
+        }
+        let start = {
+            let mut r = self.reconcile.lock();
+            r.bases.insert(base.to_string());
+            !std::mem::replace(&mut r.running, true)
+        };
+        if !start {
+            return;
+        }
+        let me = self.me.clone();
+        let spawned = std::thread::Builder::new().name("ft-reconcile".into()).spawn(move || loop {
+            let Some(h) = me.upgrade() else { return };
+            let bases = {
+                let mut r = h.reconcile.lock();
+                if r.bases.is_empty() {
+                    r.running = false;
+                    return;
+                }
+                std::mem::take(&mut r.bases)
+            };
+            let relisted = h.reconcile_pass(&bases);
+            h.report(|| HubReport::Reconciled { relisted });
+        });
+        if let Err(e) = spawned {
+            log::warn!("filetree: couldn't start a reconcile pass: {e}");
+            let mut r = self.reconcile.lock();
+            r.running = false;
+            r.bases.clear();
+        }
+    }
+
+    /// One pass: stat each open folder under `bases`, re-list those that moved. Returns them.
+    fn reconcile_pass(&self, bases: &BTreeSet<String>) -> Vec<String> {
+        let under = |rel: &str| bases.iter().any(|b| paths::is_at_or_under(rel, b));
+        let open: Vec<String> = self.dirs.lock().keys().filter(|r| under(r)).cloned().collect();
+        let mut relisted = Vec::new();
+        for rel in open {
+            if self.moved_since_listed(&rel) {
+                self.request(&rel, None);
+                relisted.push(rel);
+            }
+        }
+        relisted
+    }
+
+    /// `reconcile` for an absolute path: the open folders under it, or the whole root when the
+    /// path holds the root (a command run in a repository whose subfolder is the root).
+    pub fn reconcile_at(&self, abs: &Path) {
+        if paths::strip_root(&self.root, abs, self.fold).is_some() {
+            self.reconcile("");
+        } else if let Some(rel) = self.locate_one(&abs.to_string_lossy()) {
+            self.reconcile(&rel);
+        }
+    }
+
     pub fn set_user_excludes(&self, excludes: &[String]) {
         match &self.remote {
             Some(r) => r.set_excludes(excludes),
@@ -1103,9 +1203,9 @@ impl RootHub {
 
     /// A listing finished: publish it, then list again if the disk moved meanwhile or someone
     /// asked while it was being published.
-    fn complete(&self, rel: &str, result: Result<Listing, ListError>, early: Option<(u64, HashSet<u64>)>) {
+    fn complete(&self, rel: &str, result: Result<Listing, ListError>, early: Option<(u64, HashSet<u64>)>, mtime: Option<SystemTime>) {
         let waiters = self.jobs.lock().inflight.get_mut(rel).map(|f| std::mem::take(&mut f.waiters)).unwrap_or_default();
-        self.publish(rel, result, waiters, early);
+        self.publish_listed(rel, result, waiters, early, mtime);
         let mut jobs = self.jobs.lock();
         let again = match jobs.inflight.get_mut(rel) {
             Some(f) if f.rerun || !f.waiters.is_empty() => {
@@ -1132,13 +1232,20 @@ impl RootHub {
         }
     }
 
+    #[cfg(test)]
     fn publish(&self, rel: &str, result: Result<Listing, ListError>, waiters: Vec<Waiter>, early: Option<(u64, HashSet<u64>)>) {
+        self.publish_listed(rel, result, waiters, early, None);
+    }
+
+    /// `mtime`: the folder's, read just before the listing (`listing_mtime`), for reconciling.
+    fn publish_listed(&self, rel: &str, result: Result<Listing, ListError>, waiters: Vec<Waiter>, early: Option<(u64, HashSet<u64>)>, mtime: Option<SystemTime>) {
         let asked: HashMap<u64, Waiter> = waiters.into_iter().map(|w| (w.sub(), w)).collect();
         match result {
             Err(ListError::Gone) if rel.is_empty() => self.root_gone(),
             Err(e) => {
                 let mut dirs = self.dirs.lock();
                 dirs.remove(rel);
+                self.listed.lock().remove(rel);
                 let mut subs = self.subs.lock();
                 for s in subs.values_mut() {
                     if asked.contains_key(&s.id) || s.interest.contains(rel) {
@@ -1163,6 +1270,7 @@ impl RootHub {
                 // the grace period, when there are no subscribers at all and it already had one.
                 if !wanted && !(subs.is_empty() && old.is_some()) {
                     dirs.remove(rel);
+                    self.listed.lock().remove(rel);
                     return;
                 }
                 let snap = DirSnap::from(listing, gen);
@@ -1191,6 +1299,11 @@ impl RootHub {
                     }
                 }
                 dirs.insert(rel.to_string(), snap);
+                let mut listed = self.listed.lock();
+                match mtime {
+                    Some(m) => listed.insert(rel.to_string(), m),
+                    None => listed.remove(rel),
+                };
             }
         }
     }
@@ -1200,6 +1313,7 @@ impl RootHub {
         self.gone.store(true, Ordering::SeqCst);
         let mut dirs = self.dirs.lock();
         dirs.clear();
+        self.listed.lock().clear();
         let mut subs = self.subs.lock();
         for s in subs.values_mut() {
             s.deliver(TreeEvent::RootGone);
@@ -1790,7 +1904,7 @@ impl RootHub {
     #[cfg(test)]
     pub(crate) fn test_idle(&self) -> bool {
         let jobs = self.jobs.lock();
-        jobs.inflight.is_empty() && jobs.queue.is_empty() && !self.watch.lock().pending
+        jobs.inflight.is_empty() && jobs.queue.is_empty() && !self.watch.lock().pending && !self.reconcile.lock().running
     }
 
     #[cfg(test)]
@@ -1812,6 +1926,28 @@ impl Drop for RootHub {
 
 fn dir_mtime(abs: &Path) -> Option<SystemTime> {
     std::fs::metadata(abs).and_then(|m| m.modified()).ok()
+}
+
+/// The mtime a listing of `abs` read at `now` can be checked against later, or None when it
+/// can't be trusted. A coarse timestamp (1 s on HFS+, 2 s on FAT) doesn't move for a second
+/// change made within the same tick, so an mtime that recent proves nothing: the folder is
+/// re-listed on the next edge instead. This only ever adds a re-list; it never skips one.
+fn listing_mtime(abs: &Path, now: SystemTime) -> Option<SystemTime> {
+    let m = dir_mtime(abs)?;
+    trusted_mtime(m, now).then_some(m)
+}
+
+/// Whether a change after `m` (read at `now`) is sure to move it. An mtime with a fraction of
+/// a second comes from a volume that keeps nanoseconds (APFS), where any later change moves it.
+/// A whole-second one may come from a coarse volume, so it is trusted only once the clock has
+/// passed the coarsest tick (FAT's 2 s) that could still hold it.
+fn trusted_mtime(m: SystemTime, now: SystemTime) -> bool {
+    let Ok(d) = m.duration_since(UNIX_EPOCH) else { return false };
+    if d.subsec_nanos() != 0 {
+        return true;
+    }
+    let now = now.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    d.as_secs() + 2 <= now
 }
 
 /// (added, deleted names, changed) from `old` to `new`, both sorted.
@@ -1873,6 +2009,12 @@ fn worker(me: Weak<RootHub>) {
             });
         }
         let mut early = None;
+        // Read before the folder is: a change made while it is being read moves the mtime past
+        // the one recorded, and the next edge re-lists it (§6.1).
+        let mtime = match &hub.remote {
+            Some(_) => None,
+            None => rel_to_native(&hub.root, &rel).ok().and_then(|abs| listing_mtime(&abs, SystemTime::now())),
+        };
         let result = match &hub.remote {
             // A round trip, not local IO: no global IO slot held while it waits.
             Some(r) => r.list(&rel),
@@ -1883,7 +2025,7 @@ fn worker(me: Weak<RootHub>) {
                 })
             }
         };
-        hub.complete(&rel, result, early);
+        hub.complete(&rel, result, early, mtime);
     }
 }
 

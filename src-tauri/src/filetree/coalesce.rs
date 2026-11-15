@@ -413,6 +413,12 @@ impl RootHub {
         for rel in revalidate {
             self.request(&rel, None);
         }
+        // The index or a ref moved: a checkout, pull or stash rewrites many folders at once,
+        // the load under which FSEvents loses changes unannounced (§6.1). Edge: re-list the
+        // open folders whose mtime moved.
+        if git_signal {
+            self.reconcile("");
+        }
         lost
     }
 }

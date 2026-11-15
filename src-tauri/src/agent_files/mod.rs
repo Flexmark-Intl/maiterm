@@ -489,6 +489,8 @@ impl AgentFiles {
         let mut out: Vec<(AgentMarkAbs, bool)> = Vec::new();
         let mut forgot: Option<String> = None;
         let mut fresh_from: Option<(String, u64)> = None;
+        // Folders a local shell call (Bash) just ended in: edges for the trees (§6.1).
+        let mut ended_in: Vec<PathBuf> = Vec::new();
         let recorded = {
             let mut inner = self.inner.lock();
             let inner = &mut *inner;
@@ -668,6 +670,7 @@ impl AgentFiles {
                         }
                         for s in inner.shells.iter_mut().filter(|s| s.tool_use_id == id && s.ended.is_none()) {
                             s.ended = Some(at);
+                            ended_in.push(s.cwd.clone());
                         }
                     }
                     // The Pre never reached us (maiTerm started mid-call, or it had no id): the
@@ -709,6 +712,15 @@ impl AgentFiles {
             self.baselines.came_back(&rec.tab_id, &s, turn - 1);
         }
         self.route(out);
+        // A shell call can change anything under its folder, and FSEvents can lose some of it
+        // under load without saying so: the trees showing it look again (§6.1).
+        if !ended_in.is_empty() {
+            if let Some(tree) = self.tree.upgrade() {
+                for cwd in ended_in {
+                    tree.edge_at(&cwd);
+                }
+            }
+        }
         Some(recorded)
     }
 
@@ -1101,6 +1113,8 @@ fn place(hubs: &[Arc<RootHub>], r: Routed, co: &mut Coalescer<Weak<RootHub>>) {
         let Some(rel) = h.locate_agent_path(&r.mark.path) else { continue };
         if r.git {
             h.git_signal(Trigger::Agent);
+            // A completed write is an edge for the folder holding it (§6.1).
+            h.reconcile(crate::filetree::paths::split_parent(&rel).0);
         }
         if h.agents_routing() {
             co.push(&h.place, &Arc::downgrade(h), r.mark.with_rel(rel));
