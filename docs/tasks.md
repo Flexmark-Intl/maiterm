@@ -492,13 +492,19 @@ agent aim a command, run by the human's click, at a session it has nothing to do
   <tab>'s agent saw the output, you did not" (`answerBlocker`, same stale guard). The `tab`
   path leaves the question open for "I've done it", as before.
 - **The phone** gets `blocker.runIn` (maiLink 0.28): `run` there describes that tab.
-- **It stays on the tab that asked.** The row's carrier is the agent told after Run, and
-  `run_in` names a peer of the agent that FILED it, so the two must be one tab: `run_in` is
-  refused on an unassigned task and on another tab's task, and a hand-off of a row carrying one
-  is refused until its blocker is cleared. The card's receipt says whether the asker was told.
-- **It follows the tab's id.** `tasksStore.remapTab` (reload) rewrites `run_in` with `tab_id`.
-  A Workspace Share import maps it through the import's tab map; a peer outside the shared
-  workspace gets an id no tab has, so Run refuses rather than running anywhere else.
+- **It is judged when used, not only when filed** (`src/lib/tasks/runIn.ts`, `runInTarget`).
+  The agent told after Run is the row's CURRENT carrier, and rows change hands (a claim, a
+  release and reclaim, a duplicate, an import) while tab ids are re-minted by reloads. Keeping
+  `run_in` right along every such path was tried, and each review found another path. So Run,
+  the card's "For …" line and the second corner all ask one question: is that tab still a peer
+  of whoever carries the task now? If not, the card says so, offers no Run, and Run refuses.
+  At filing, `run_in` is accepted only on a row the caller carries (or takes in that update).
+- **It follows the tab's id where that is known**, so the common cases stay usable:
+  `tasksStore.remapTab` (reload) and a workspace duplicate (`clone_workspace_with_id_mapping`)
+  map it to the tab's new id. A Workspace Share import maps it through the import's tab map, and
+  a peer outside the shared workspace gets an id no tab has.
+- **The receipt is true about who heard**: told in the asking tab, passed to the Overlord to
+  relay (no agent in that tab could take it), or nobody.
 
 ## 4. Workstreams
 

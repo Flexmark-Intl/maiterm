@@ -38,6 +38,7 @@ import { coordinatorHolds, engineSkips, HIVE_COORDINATOR_HOLDS, HIVE_SUPERVISED_
 import { recordHumanBlockerAnswer } from '$lib/hive/prompts';
 import { hivePrompts } from '$lib/stores/hivePrompts.svelte';
 import { summarizeBatch, type TabBatchRow, type TabBatchResult } from '$lib/stores/tabBatch';
+import { runInTarget } from '$lib/tasks/runIn';
 import { answerBlocker as answerBlockerText, dismissBlocker as dismissBlockerCheck, runPlace, RAN_IN_AGENT_NOTE, appendNote, findImportedDuplicate, isInFlight, isParked, isRetired, makeTask, normalizeTitle, statusFromAgent, type BlockerAnswer, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 import { listen } from '@tauri-apps/api/event';
@@ -3773,7 +3774,7 @@ function createOverlordStore() {
       id: string,
       askedAt: string,
       from: 'desktop' | 'phone' = 'desktop',
-    ): Promise<{ ran: true; where: 'agent' | 'tab'; askerTold?: boolean } | { ran: false; detail: string }> {
+    ): Promise<{ ran: true; where: 'agent' | 'tab'; askerTold?: 'tab' | 'agent' | 'nobody' } | { ran: false; detail: string }> {
       const hit = tasksStore.findAnywhere(id);
       if (!hit) return { ran: false, detail: 'No such task.' };
       const { workspaceId, task } = hit;
@@ -3788,7 +3789,18 @@ function createOverlordStore() {
       if (coordinatorHolds(hivePrompts.blockerOwner(id, askedAt))) return { ran: false, detail: HIVE_COORDINATOR_HOLDS };
       // The tab the command is FOR (docs/tasks.md §3.1.3): another agent's when the asker named
       // one, else the asker's own. "Carrier" below means that tab.
-      const forOther = b.run_in && b.run_in !== task.tab_id ? b.run_in : null;
+      // Judged now, against whoever carries the task now (`runInTarget`): it must still be a
+      // peer of the agent this run will tell. Never fall back to another tab.
+      const runIn = runInTarget(task);
+      if (runIn && !runIn.ok) {
+        return {
+          ran: false,
+          detail: task.tab_id
+            ? `${tabDisplayName(runIn.tabId)}, the tab this command is for, is no longer one of ${tabDisplayName(task.tab_id)}'s peers, so it isn't run there. Ask the agent where it should run now.`
+            : 'Nobody carries this task now, so there is no agent to tell once it runs in the tab it is for. Ask an agent to take it first.',
+        };
+      }
+      const forOther = runIn?.tabId ?? null;
       const carrierId = forOther ?? task.tab_id ?? null;
       let carrier: { ws: Workspace; paneId: string; tab: Tab } | null = null;
       for (const ws of workspacesStore.workspaces) {
@@ -3826,7 +3838,7 @@ function createOverlordStore() {
             text: `Ran it from the card in ${name}'s tab: ${run.line}\n${name}'s agent saw the output, you did not. Check with it how it went.`,
           });
           logInfo(`overlord: blocker command for ${id.slice(0, 8)} typed into the tab it is for, ${forOther.slice(0, 8)} (${from}); asker told: ${told.answered ? told.told : told.reason}`);
-          return { ran: true, where: 'agent', askerTold: told.answered && told.told !== 'nobody' };
+          return { ran: true, where: 'agent', askerTold: !told.answered ? 'nobody' : told.told };
         }
         // Re-read: the await let the agent re-ask, and its new question must not be closed.
         const now = tasksStore.findAnywhere(id)?.task;

@@ -16,6 +16,7 @@ import { followUpsStore, type PendingApproval } from '$lib/stores/followUps.svel
 import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
 import { overlordStore, type PendingRuleChangeBatch } from '$lib/stores/overlord.svelte';
 import { decisionsQueue } from '$lib/loom/model';
+import { runInTarget } from '$lib/tasks/runIn';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { SvelteMap } from 'svelte/reactivity';
 import type { AgentRequest, Task } from '$lib/tauri/types';
@@ -53,8 +54,8 @@ function byTab(): Map<string, WaitingItem[]> {
       add(task.tab_id, item);
       // A command FOR another agent's tab (docs/tasks.md §3.1.3) shows there too: that is the
       // terminal the human is looking at when it matters.
-      const runIn = task.blocker!.run_in;
-      if (runIn && runIn !== task.tab_id) add(runIn, item);
+      const runIn = runInTarget(task);
+      if (runIn?.ok) add(runIn.tabId, item);
     }
   }
   for (const approval of followUpsStore.pendingApprovals) {

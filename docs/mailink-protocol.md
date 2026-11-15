@@ -11,7 +11,9 @@
 >   is FOR that tab: show "Runs in <tabTitle>" beside Run (`tabTitle` is `null` when that tab
 >   isn't designated; say "another agent's tab" then). `run` describes THAT tab: `agent` types
 >   the line into that agent, and the asking agent is told the human ran it there, which closes
->   the question; `tab` opens beside that agent. `POST /tasks/{id}/run` is unchanged.
+>   the question; `tab` opens beside that agent. `POST /tasks/{id}/run` is unchanged, and the
+>   desktop may refuse it with a sentence when that tab is no longer a peer of the agent that
+>   carries the task (the desktop judges this when Run is pressed; show `reason` verbatim).
 >
 > **v0.27 changelog** (2026-11-06). Additive: **Run on an action card** (maiTerm docs/tasks.md
 > §3.1.2). The desktop's "Needs you" card runs its command with one click; the phone gets the same.

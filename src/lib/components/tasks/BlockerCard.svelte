@@ -15,6 +15,7 @@
   import { BLOCKER_LABEL, picksMany, runPlace } from '$lib/tasks/model';
   import { workspacesStore, tabDisplayName } from '$lib/stores/workspaces.svelte';
   import { parseSshHost } from '$lib/stores/sshDisconnect.svelte';
+  import { runInTarget } from '$lib/tasks/runIn';
   import { fmtAge } from '$lib/overlord/format';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import TaskMarkdown from './TaskMarkdown.svelte';
@@ -170,8 +171,9 @@
 
   /** The tab the command is FOR (docs/tasks.md §3.1.3): another agent's, when the asker named
    *  one, else the asker's own. */
-  const runTabId = $derived(b?.run_in ?? task.tab_id ?? null);
-  const runInName = $derived(b?.run_in ? tabDisplayName(b.run_in) : null);
+  const runIn = $derived(b ? runInTarget(task) : null);
+  const runTabId = $derived(runIn ? runIn.tabId : (task.tab_id ?? null));
+  const runInName = $derived(runIn ? tabDisplayName(runIn.tabId) : null);
   /** That tab's ssh host, when it has one: the card says where the command will run. */
   let runInHost = $state<string | null>(null);
   $effect(() => {
@@ -196,7 +198,8 @@
     }
     return false;
   });
-  const run = $derived(b?.kind === 'action' ? runPlace(b.command, carrierIsClaude) : null);
+  // No Run for a tab that is no longer the asker's peer: Run would refuse it anyway.
+  const run = $derived(b?.kind === 'action' && runIn?.ok !== false ? runPlace(b.command, carrierIsClaude) : null);
 
   /** Run the command shown on the card. It runs what is showing, so it takes the same two guards
    *  as a click answer: a command that just appeared may have replaced the one being read. */
@@ -215,9 +218,11 @@
           ? r.detail
           : r.where === 'agent'
             ? runInName
-              ? r.askerTold
+              ? r.askerTold === 'tab'
                 ? `Typed into ${runInName}. That agent sees the output, and the agent that asked was told.`
-                : `Typed into ${runInName}. That agent sees the output, but the agent that asked could not be told.`
+                : r.askerTold === 'agent'
+                  ? `Typed into ${runInName}. That agent sees the output. No agent in the asking tab could take the news, so Overlord will pass it on.`
+                  : `Typed into ${runInName}. That agent sees the output, but the agent that asked could not be told.`
               : 'Typed into the agent’s tab. It sees the output, so the question is closed.'
             : 'Running in a new tab. Click I’ve done it once it has finished.',
       );
@@ -280,9 +285,11 @@
       </div>
     {/if}
     {#if b.command}
-      {#if runInName}
+      {#if runIn?.ok}
         <!-- maiTerm's words, from the tab itself: the agent only named it. -->
         <div class="runin">For <b>{runInName}</b>{#if runInHost} on <b>{runInHost}</b>{/if}: Run runs it in that tab, not the asking agent’s</div>
+      {:else if runIn}
+        <div class="runin stale">For <b>{runInName}</b>, which is no longer a tab the asking agent can reach, so there is no Run. Ask the agent where it should run now.</div>
       {/if}
       <div class="cmdrow">
         <code class="cmd">{b.command}</code>
@@ -426,6 +433,7 @@
     padding: 1px 0 1px 6px;
     overflow-wrap: anywhere;
   }
+  .runin.stale { color: var(--fg-dim); border-left-color: var(--bg-light); }
   .cmdrow { display: flex; gap: 4px; align-items: flex-start; }
   .cmdrow .cmd { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .cmdrow :global(.tooltip-wrapper) { flex-shrink: 0; }

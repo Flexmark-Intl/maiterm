@@ -2301,20 +2301,16 @@ function createClaudeCodeStore() {
           }
           blocker = parsed.blocker;
         }
-        // A command for another tab names a peer of the CALLER, and the asker told after Run is
-        // the row's carrier: the two must be the same tab, or a third tab is told it ran
-        // something it never asked for (docs/tasks.md §3.1.3).
-        if (blocker !== undefined || assignTo !== undefined) {
-          const finalBlocker = blocker !== undefined ? blocker : list[idx].blocker;
-          const finalTab = assignTo !== undefined ? assignTo : list[idx].tab_id;
-          if (finalBlocker?.run_in && finalTab !== loc.tab.id) {
-            refused.push({
-              id: u.id!,
-              reason: 'bad_blocker',
-              detail: 'A card whose command is for another tab (blocker.run_in) stays on the tab that asked: put it on a task you carry, or clear the blocker before handing the task on. Nothing in this update was applied.',
-            });
-            continue;
-          }
+        // A new run_in is resolved against the caller, the agent that will be told: only on a
+        // row it carries (or takes in this update). Later moves of the row are judged at use
+        // (`runInTarget`, docs/tasks.md §3.1.3).
+        if (blocker?.run_in && (assignTo !== undefined ? assignTo : list[idx].tab_id) !== loc.tab.id) {
+          refused.push({
+            id: u.id!,
+            reason: 'bad_blocker',
+            detail: 'blocker.run_in names one of YOUR peers, so it goes only on a task you carry (or take with assign_to "me" in the same update). Nothing in this update was applied.',
+          });
+          continue;
         }
         const patch: Partial<Task> = { updated_at: new Date().toISOString() };
         if (assignTo !== undefined) patch.tab_id = assignTo;
