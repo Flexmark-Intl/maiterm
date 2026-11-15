@@ -750,6 +750,21 @@
     // running to receive them — ring the operator (dispatch scopes to the
     // window owning the tab; clicking the toast deep-links to it).
     let unlistenCommsPending: (() => void) | undefined;
+    let unlistenPromptUnconfirmed: (() => void) | undefined;
+    // A prompt maiTerm handed to an agent's mod, whose run can't be confirmed: prompts ran in that
+    // tab meanwhile and none was identifiably it (claude_code/mod_inbox.rs `Settled::Unconfirmed`).
+    // Not retyped, which could run it twice, so the human looks.
+    appWindow.listen<{ tab_id: string; preview: string }>('agent-prompt-unconfirmed', async (event) => {
+      const { dispatch } = await import('$lib/stores/notificationDispatch');
+      const p = event.payload;
+      dispatch(
+        'Message may not have reached the agent',
+        `maiTerm handed "${p.preview}" to the agent, but can't confirm it ran: another prompt ran in that tab meanwhile. Check the conversation, and send it again if it isn't there.`,
+        'info',
+        { tabId: p.tab_id },
+      );
+    }).then(unlisten => { unlistenPromptUnconfirmed = unlisten; });
+
     appWindow.listen<{ tab_id: string; count: number; preview: string; reason?: string }>('comms-reply-pending', async (event) => {
       const { dispatch } = await import('$lib/stores/notificationDispatch');
       const p = event.payload;
@@ -1549,6 +1564,7 @@
       unlistenClaudeTool?.();
       unlistenClaudeConnection?.();
       unlistenCommsPending?.();
+      unlistenPromptUnconfirmed?.();
       unlistenCommsSummon?.();
       unlistenCommsBindings?.();
       unlistenMailinkTasks?.();

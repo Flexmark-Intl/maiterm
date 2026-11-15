@@ -428,7 +428,7 @@ async fn an_undo_under_way_or_a_waiting_card_refuses() {
 #[tokio::test]
 async fn an_open_question_to_the_human_refuses() {
     let rig = Rig::new("blocker");
-    let blocker = TaskBlocker { kind: "decision".into(), question: "Ship it?".into(), context: None, options: Vec::new(), command: None, pick: None, asked_at: "now".into(), asked_by: "agent".into() };
+    let blocker = TaskBlocker { kind: "decision".into(), question: "Ship it?".into(), context: None, options: Vec::new(), command: None, pick: None, run_in: None, asked_at: "now".into(), asked_by: "agent".into() };
     {
         let mut d = rig.data.write();
         let ws = &mut d.windows[0].workspaces[0];
@@ -860,7 +860,8 @@ async fn an_accepted_finish_records_the_report_and_leaves_the_hive_costing_nothi
     rig.worker(1, "api", worker::PHASE_LANDED, 0);
     let out = rig.finish(report(by_file(&rig))).await.unwrap();
     assert_eq!(out["done"], true);
-    assert!(out["note"].as_str().unwrap().contains("wakes this Hive"));
+    let note = out["note"].as_str().unwrap();
+    assert!(note.contains("wakes this Hive") && note.contains("typed in your terminal doesn't"), "{note}");
     assert_eq!(out["stack"]["ok"], true);
 
     let rec = last_finish(&rig.caller.paths).unwrap();
@@ -1142,14 +1143,6 @@ async fn a_wake_from_the_phone_tells_the_coordinator_where_it_came_from() {
     let text = wake_text(w.done_since, &w.by, &w.text);
     assert!(text.contains("Their message (from their phone):\n\nAdd a dark mode too.\n\nAnd a logo."), "{text}");
     assert!(done_coordinator(&rig.data.read(), "coord").is_none(), "active again");
-}
-
-#[test]
-fn a_prompt_wakes_a_done_hive_only_when_the_human_typed_it() {
-    let now = 1_000_000;
-    assert!(wake::typed_by_human(now - 5_000, now), "typed in her terminal a moment ago");
-    assert!(!wake::typed_by_human(now - 60_000, now), "a key a minute ago isn't this prompt's");
-    assert!(!wake::typed_by_human(0, now), "never typed: a peer's or maiTerm's message");
 }
 
 #[test]

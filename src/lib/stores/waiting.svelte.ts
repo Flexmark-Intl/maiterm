@@ -16,6 +16,7 @@ import { followUpsStore, type PendingApproval } from '$lib/stores/followUps.svel
 import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
 import { overlordStore, type PendingRuleChangeBatch } from '$lib/stores/overlord.svelte';
 import { decisionsQueue } from '$lib/loom/model';
+import { runInTarget } from '$lib/tasks/runIn';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { SvelteMap } from 'svelte/reactivity';
 import type { AgentRequest, Task } from '$lib/tauri/types';
@@ -49,7 +50,12 @@ function byTab(): Map<string, WaitingItem[]> {
   };
   for (const ws of tasksStore.workspaceIds) {
     for (const task of decisionsQueue(tasksStore.forWorkspace(ws))) {
-      add(task.tab_id, { kind: 'task', key: task.id, at: Date.parse(task.blocker!.asked_at), task });
+      const item: WaitingItem = { kind: 'task', key: task.id, at: Date.parse(task.blocker!.asked_at), task };
+      add(task.tab_id, item);
+      // A command FOR another agent's tab (docs/tasks.md §3.1.3) shows there too: that is the
+      // terminal the human is looking at when it matters.
+      const runIn = runInTarget(task);
+      if (runIn?.ok) add(runIn.tabId, item);
     }
   }
   for (const approval of followUpsStore.pendingApprovals) {
@@ -74,6 +80,15 @@ export interface OpenCorner {
   extraTaskId: string | null;
   /** Bumped on every open, so a second open of a card already open still scrolls to it. */
   seq: number;
+  /** Shown again without a click (see `reopenOnReturn`): it must not take the keyboard. */
+  passive?: boolean;
+}
+
+/** A corner card to show again when its tab is next shown (`reopenOnReturn`). */
+export interface CornerReturn {
+  taskId: string;
+  askedAt: string;
+  extra: boolean;
 }
 
 /** What the human has typed under a question, by task id, with the `asked_at` it was typed
@@ -107,6 +122,10 @@ function createWaitingStore() {
    *  would take the keyboard without a click. */
   let open = $state<Record<string, OpenCorner>>({});
   let seq = 0;
+  /** Cards to show again, passively, the next time their tab is shown, by tab id: the task,
+   *  the question it was asking (a new question on the same task does not come back), and
+   *  whether it was the card's "extra" task. Not reactive: only a corner's mount reads it. */
+  const returns = new Map<string, CornerReturn>();
 
   return {
     byTab,
@@ -147,6 +166,27 @@ function createWaitingStore() {
       }
       await navigateToTab(tabId);
       this.open(tabId, focus);
+    },
+    /** The card's Run opened a new tab, which took the human away from this one mid-question
+     *  (the question stays open for "I've done it"). Show the card again when they come back,
+     *  without focus: they came back to the terminal, not to the card. One-shot. */
+    reopenOnReturn(tabId: string, ret: CornerReturn) {
+      returns.set(tabId, ret);
+    },
+    /** A corner mounting: the card to show again passively, if any (consumed). */
+    takeReturn(tabId: string): CornerReturn | null {
+      const ret = returns.get(tabId) ?? null;
+      returns.delete(tabId);
+      return ret;
+    },
+    openPassive(tabId: string, focus: string, extraTaskId: string | null) {
+      open = { ...open, [tabId]: { focus, extraTaskId, seq: ++seq, passive: true } };
+    },
+    /** The human's Hide: also forgets a pending passive return. Leaving the tab (`close`) does
+     *  not, since that is exactly what the return is for. */
+    hide(tabId: string) {
+      returns.delete(tabId);
+      this.close(tabId);
     },
     close(tabId: string) {
       if (!(tabId in open)) return;

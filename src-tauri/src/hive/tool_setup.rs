@@ -278,7 +278,7 @@ pub(crate) async fn request_in<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller,
     let (cap, why) = parse_args(args)?;
     let hive = super::autonomy::current_hive(ctx, caller).ok_or("This Hive is gone.")?;
     if hive.status == STATUS_DONE {
-        return Err("This Hive is done: a message from your human wakes it first.".to_string());
+        return Err(format!("This Hive is done. {}", super::tools::DONE_WAKE_HINT));
     }
     let row = rows.iter().find(|r| r.capability == cap).ok_or_else(|| format!("maiTerm couldn\u{2019}t read this Mac\u{2019}s setup for {cap}."))?;
     if let Some(e) = ready_refusal(&cap, row, &hive) {

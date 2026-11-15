@@ -511,11 +511,16 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
 /// Everything else would change what the report proved (an undo, a land, a delivery) or cost.
 pub const DONE_TOOLS: [&str; 4] = ["hiveListWorkers", "hivePrecedents", "hiveSetCriteria", "hiveFinish"];
 
+/// What a Done Hive's queen is told wakes it. Her terminal is not a wake (docs/hive.md §11.4): the
+/// human typing there is told nothing else, so she has to send them to the message box.
+pub const DONE_WAKE_HINT: &str = "Your human wakes it from the Hive's message box or their phone; a message typed in \
+                                  your terminal doesn't, so if they wrote to you there, ask them to send it from the message box.";
+
 /// Why `tool` is refused in `hive` now, if it is: a Done Hive does nothing until a message from
 /// the human wakes it. The human's own commands don't come through here.
 pub fn done_refusal(hive: &Hive, tool: &str) -> Option<String> {
     (hive.status == super::record::STATUS_DONE && !DONE_TOOLS.contains(&tool))
-        .then(|| format!("This Hive is done: {tool} changes nothing in it now. A message from your human wakes it."))
+        .then(|| format!("This Hive is done: {tool} changes nothing in it now. {DONE_WAKE_HINT}"))
 }
 
 /// Production's state, fuses, window and checks, for a Hive in `caller.label`'s window.

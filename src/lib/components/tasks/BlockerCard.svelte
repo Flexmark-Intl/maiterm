@@ -13,7 +13,9 @@
   import { coordinatorHolds, withCoordinatorText } from '$lib/hive/model';
   import { blockerDrafts } from '$lib/stores/waiting.svelte';
   import { BLOCKER_LABEL, picksMany, runPlace } from '$lib/tasks/model';
-  import { workspacesStore } from '$lib/stores/workspaces.svelte';
+  import { workspacesStore, tabDisplayName } from '$lib/stores/workspaces.svelte';
+  import { parseSshHost } from '$lib/stores/sshDisconnect.svelte';
+  import { runInTarget } from '$lib/tasks/runIn';
   import { fmtAge } from '$lib/overlord/format';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import TaskMarkdown from './TaskMarkdown.svelte';
@@ -26,9 +28,12 @@
     onnote?: (text: string) => void;
     /** 'inline' sits under a task row; 'card' is the larger decisions-queue layout. */
     variant?: 'inline' | 'card';
+    /** Run ran the card's command: in the agent's tab, or in a new tab (which the human is
+     *  now looking at instead of this card). */
+    onran?: (where: 'agent' | 'tab') => void;
   }
 
-  let { task, onnote, variant = 'inline' }: Props = $props();
+  let { task, onnote, onran, variant = 'inline' }: Props = $props();
 
   const b = $derived(task.status === 'blocked' ? task.blocker : null);
 
@@ -164,10 +169,28 @@
     }
   }
 
-  /** Where Run would run the card's command (docs/tasks.md §3.1.2): a `! …` line into the
-   *  agent's own Claude tab, anything else in a new tab beside it. */
+  /** The tab the command is FOR (docs/tasks.md §3.1.3): another agent's, when the asker named
+   *  one, else the asker's own. */
+  const runIn = $derived(b ? runInTarget(task) : null);
+  const runTabId = $derived(runIn ? runIn.tabId : (task.tab_id ?? null));
+  const runInName = $derived(runIn ? tabDisplayName(runIn.tabId) : null);
+  /** That tab's ssh host, when it has one: the card says where the command will run. */
+  let runInHost = $state<string | null>(null);
+  $effect(() => {
+    const id = b?.run_in;
+    runInHost = null;
+    if (!id) return;
+    let live = true;
+    void workspacesStore.placeOfTab(id).then((p) => {
+      if (live) runInHost = p?.sshCommand ? parseSshHost(p.sshCommand) : null;
+    });
+    return () => { live = false; };
+  });
+
+  /** Where Run would run the card's command (docs/tasks.md §3.1.2): a `! …` line into that
+   *  tab's Claude agent, anything else in a new tab beside it. */
   const carrierIsClaude = $derived.by(() => {
-    const id = task.tab_id;
+    const id = runTabId;
     if (!id) return false;
     for (const ws of workspacesStore.workspaces) for (const p of ws.panes) {
       const t = p.tabs.find((x) => x.id === id);
@@ -175,7 +198,8 @@
     }
     return false;
   });
-  const run = $derived(b?.kind === 'action' ? runPlace(b.command, carrierIsClaude) : null);
+  // No Run for a tab that is no longer the asker's peer: Run would refuse it anyway.
+  const run = $derived(b?.kind === 'action' && runIn?.ok !== false ? runPlace(b.command, carrierIsClaude) : null);
 
   /** Run the command shown on the card. It runs what is showing, so it takes the same two guards
    *  as a click answer: a command that just appeared may have replaced the one being read. */
@@ -188,11 +212,18 @@
     sending = true;
     try {
       const r = await overlordStore.runBlockerCommand(task.id, b.asked_at);
+      if (r.ran) onran?.(r.where);
       onnote?.(
         !r.ran
           ? r.detail
           : r.where === 'agent'
-            ? 'Typed into the agent’s tab. It sees the output, so the question is closed.'
+            ? runInName
+              ? r.askerTold === 'tab'
+                ? `Typed into ${runInName}. That agent sees the output, and the agent that asked was told.`
+                : r.askerTold === 'agent'
+                  ? `Typed into ${runInName}. That agent sees the output. No agent in the asking tab could take the news, so Overlord will pass it on.`
+                  : `Typed into ${runInName}. That agent sees the output, but the agent that asked could not be told.`
+              : 'Typed into the agent’s tab. It sees the output, so the question is closed.'
             : 'Running in a new tab. Click I’ve done it once it has finished.',
       );
     } finally {
@@ -254,12 +285,22 @@
       </div>
     {/if}
     {#if b.command}
+      {#if runIn?.ok}
+        <!-- maiTerm's words, from the tab itself: the agent only named it. -->
+        <div class="runin">For <b>{runInName}</b>{#if runInHost} on <b>{runInHost}</b>{/if}: Run runs it in that tab, not the asking agent’s</div>
+      {:else if runIn}
+        <div class="runin stale">For <b>{runInName}</b>, which is no longer a tab the asking agent can reach, so there is no Run. Ask the agent where it should run now.</div>
+      {/if}
       <div class="cmdrow">
         <code class="cmd">{b.command}</code>
         {#if run && !held}
           <Tooltip text={run.place === 'agent'
-            ? 'Type it into the agent’s tab: it runs there and the agent sees the output'
-            : 'Open a new tab beside the agent and run it there, where it can ask you for a password'}>
+            ? runInName
+              ? `Type it into ${runInName}: it runs there and that agent sees the output`
+              : 'Type it into the agent’s tab: it runs there and the agent sees the output'
+            : runInName
+              ? `Open a new tab beside ${runInName} and run it there, where it can ask you for a password`
+              : 'Open a new tab beside the agent and run it there, where it can ask you for a password'}>
             <button class="send run" disabled={sending} onclick={runCommand}>Run</button>
           </Tooltip>
         {/if}
@@ -385,6 +426,14 @@
     padding: 3px 5px;
     border-radius: 3px;
   }
+  .runin {
+    font-size: 11px;
+    color: var(--fg);
+    border-left: 2px solid var(--accent);
+    padding: 1px 0 1px 6px;
+    overflow-wrap: anywhere;
+  }
+  .runin.stale { color: var(--fg-dim); border-left-color: var(--bg-light); }
   .cmdrow { display: flex; gap: 4px; align-items: flex-start; }
   .cmdrow .cmd { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .cmdrow :global(.tooltip-wrapper) { flex-shrink: 0; }

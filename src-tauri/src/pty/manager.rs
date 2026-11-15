@@ -734,6 +734,8 @@ pub fn spawn_pty(
                                 data,
                             );
                             handle.selection = handle.term.selection.take();
+                            // The screen changed: wake anyone waiting to read it.
+                            handle.screen_seq.send_modify(|n| *n = n.wrapping_add(1));
                             detect_resume_menu(handle, data, total_read)
                         } else {
                             false

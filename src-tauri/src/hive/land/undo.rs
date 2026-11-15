@@ -375,7 +375,7 @@ pub(crate) async fn start<W: HiveWindow>(
     // its late check and takes Done back, or saved Done before this read. The human's own undo
     // stays theirs in a Done Hive.
     if by == landlog::BY_COORDINATOR && crate::hive::autonomy::current_hive(ctx, caller).is_some_and(|h| h.status == crate::hive::record::STATUS_DONE) {
-        let out = refuse(ctx, caller, u.clone(), "This Hive is done: its coordinator undoes nothing. A message from your human wakes it.".to_string()).await;
+        let out = refuse(ctx, caller, u.clone(), format!("This Hive is done: its coordinator undoes nothing. {}", crate::hive::tools::DONE_WAKE_HINT)).await;
         return (Some(u), out);
     }
     log::info!("hive {}: undo {} of {} started by the {by}", caller.hive.id, u.id, u.undoes);
@@ -927,7 +927,8 @@ async fn tell<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, u: &UndoState, s
         Some(c) => {
             let sent = ctx.window.deliver(&c, text.clone(), "Hive undo").await;
             log::info!("hive {}: undo result for {}: {}", caller.hive.id, u.undoes, sent.describe());
-            // The human's Undo in a Done Hive finds no agent there: it hears once it is woken.
+            // A Done Hive's queen stays running and hears it now; if she isn't running, it is owed
+            // to her next session, once the human wakes the Hive.
             crate::hive::owed::owe_if_refused(caller, &sent, "Hive undo", text).await;
         }
         None => log::info!("hive {}: undo result for {} not delivered: no coordinator tab", caller.hive.id, u.undoes),

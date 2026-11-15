@@ -101,18 +101,20 @@ async fn cm_master_alive(host_key: &str, ssh_args: &str) -> bool {
         for arg in ssh_args.split_whitespace() {
             args.push(arg.to_string());
         }
+        let Ok(child) = tokio::process::Command::new("ssh")
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+        else {
+            return false;
+        };
+        // Killed and reaped at the deadline, not left behind on a socket that stopped answering.
         matches!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                tokio::process::Command::new("ssh")
-                    .args(&args)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status(),
-            )
-            .await,
-            Ok(Ok(status)) if status.success()
+            crate::util::proc::wait_output_timeout(child, std::time::Duration::from_secs(3)).await,
+            Ok(out) if out.status.success()
         )
     }
     #[cfg(not(unix))]
@@ -222,7 +224,14 @@ fn note_tunnel_dropped(host_key: &str, remote_port: u16, tab_count: usize) {
 /// week here, so it is the common case, not the corner. It is cleared on SUCCESS instead.
 fn peek_dropped_tunnel(host_key: &str) -> Option<DroppedTunnel> {
     let dropped = dropped_tunnels().lock().get(host_key).copied()?;
-    (dropped.at.elapsed() < RECLAIM_BREADCRUMB_TTL).then_some(dropped)
+    breadcrumb_live(dropped.at.elapsed()).then_some(dropped)
+}
+
+/// Is a breadcrumb this old still worth acting on? Apart from `peek_dropped_tunnel` so a test
+/// can ask about an age without fabricating an old `Instant`, which panics on Windows when the
+/// machine has been up for less than that age.
+fn breadcrumb_live(age: std::time::Duration) -> bool {
+    age < RECLAIM_BREADCRUMB_TTL
 }
 
 /// Cleared once a tunnel is actually up for this host — on the reclaimed port or, having lost
@@ -331,14 +340,15 @@ async fn ssh_capture(prefix: Vec<String>, ssh_args: &str, tail: &[&str], secs: u
     let mut args = prefix;
     args.extend(ssh_args.split_whitespace().map(str::to_string));
     args.extend(tail.iter().map(|s| s.to_string()));
-    let run = tokio::process::Command::new("ssh")
+    let child = tokio::process::Command::new("ssh")
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(std::time::Duration::from_secs(secs), run).await.ok()?.ok()?;
+        .spawn()
+        .ok()?;
+    let output = crate::util::proc::wait_output_timeout(child, std::time::Duration::from_secs(secs)).await.ok()?;
     Some((output.status.success(), String::from_utf8_lossy(&output.stdout).into_owned()))
 }
 
@@ -1393,17 +1403,18 @@ pub async fn ssh_run_setup(
 
     log::info!("SSH setup: ssh {} <script>", ssh_args);
 
-    let output = tokio::time::timeout(
-        tokio::time::Duration::from_secs(30),
-        tokio::process::Command::new("ssh")
-            .args(&cmd_args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-    ).await
-        .map_err(|_| "SSH setup timed out (30s)".to_string())?
-        .map_err(|e| format!("Failed to spawn SSH setup: {}", e))?;
+    // Killed and reaped at the deadline: a setup ssh left running on a hung host is one more
+    // connection per retry.
+    use crate::util::proc::{self, RunError};
+    let output = proc::output_timeout_async(
+        tokio::process::Command::new("ssh").args(&cmd_args),
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .map_err(|e| match e {
+        RunError::TimedOut => "SSH setup timed out (30s)".to_string(),
+        RunError::Spawn(e) | RunError::Io(e) => format!("Failed to spawn SSH setup: {}", e),
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1441,16 +1452,19 @@ pub async fn probe_ssh_host(ssh_args: String) -> bool {
         .collect();
     cmd_args.extend(ssh_args.split_whitespace().map(str::to_string));
     cmd_args.push("true".to_string());
-    let run = tokio::process::Command::new("ssh")
+    let Ok(child) = tokio::process::Command::new("ssh")
         .args(&cmd_args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
-        .status();
-    match tokio::time::timeout(tokio::time::Duration::from_secs(25), run).await {
-        Ok(Ok(status)) => matches!(status.code(), Some(code) if code != 255),
-        _ => false,
+        .spawn()
+    else {
+        return false;
+    };
+    match crate::util::proc::wait_output_timeout(child, std::time::Duration::from_secs(25)).await {
+        Ok(out) => matches!(out.status.code(), Some(code) if code != 255),
+        Err(_) => false,
     }
 }
 
@@ -1822,27 +1836,21 @@ mod tests {
     #[test]
     fn a_breadcrumb_no_reconnect_claimed_expires() {
         let host = "-x -C ews@nova-breadcrumb-ttl-test";
-        dropped_tunnels().lock().insert(
-            host.to_string(),
-            DroppedTunnel {
-                remote_port: 28623,
-                tab_count: 5,
-                at: std::time::Instant::now() - (RECLAIM_BREADCRUMB_TTL + std::time::Duration::from_secs(1)),
-            },
+        assert!(
+            !breadcrumb_live(RECLAIM_BREADCRUMB_TTL + std::time::Duration::from_secs(1)),
+            "past the TTL, it is not acted on"
         );
-        assert!(peek_dropped_tunnel(host).is_none(), "past the TTL, it is not acted on");
 
         // Just inside the window is still live — the outage it describes can outlast several
         // frontend backoff rounds, and its agents outlive it by hours.
-        dropped_tunnels().lock().insert(
-            host.to_string(),
-            DroppedTunnel {
-                remote_port: 28623,
-                tab_count: 5,
-                at: std::time::Instant::now() - (RECLAIM_BREADCRUMB_TTL - std::time::Duration::from_secs(60)),
-            },
+        assert!(
+            breadcrumb_live(RECLAIM_BREADCRUMB_TTL - std::time::Duration::from_secs(60)),
+            "a long outage still earns its reclaim"
         );
-        assert!(peek_dropped_tunnel(host).is_some(), "a long outage still earns its reclaim");
+
+        // And the peek asks it about the breadcrumb's real age.
+        note_tunnel_dropped(host, 28623, 5);
+        assert!(peek_dropped_tunnel(host).is_some(), "a fresh breadcrumb is acted on");
         clear_dropped_tunnel(host);
     }
 

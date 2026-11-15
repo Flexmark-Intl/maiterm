@@ -7,9 +7,10 @@
 //! - on Windows, `CREATE_NO_WINDOW`, or every spawn flashes a console window;
 //! - for git, an environment that can never prompt or take an optional lock (an agent's own
 //!   `git commit` in the same repo must never meet our `index.lock`);
-//! - a deadline, after which the child is killed rather than left to pin a blocking thread.
+//! - a deadline, after which the child is killed and reaped rather than left running.
 //!
-//! Everything here blocks. Callers run it under `spawn_blocking`.
+//! The std functions block, and callers run them under `spawn_blocking`. `output_timeout_async`
+//! and `wait_output_timeout` are the same deadline for tokio children.
 
 use std::ffi::OsStr;
 use std::io::Read;
@@ -127,6 +128,72 @@ pub fn output_timeout(cmd: &mut Command, timeout: Duration) -> Result<Output, Ru
     Ok(Output { status, stdout, stderr })
 }
 
+// ── The same deadline for tokio children ─────────────────────────────────────────────────
+//
+// `tokio::time::timeout(d, cmd.output())` looks like a bounded run and is not one: when the
+// deadline fires the `output()` future is dropped, and tokio does not kill on drop unless
+// asked, so the child goes on running with nobody holding it (an ssh to a hung host stayed up
+// for its whole session). These two kill the child at the deadline and wait for it, so it is
+// gone — reaped, not a zombie — by the time the caller sees `TimedOut`.
+
+/// Run `cmd` with stdin closed and stdout and stderr captured, killing it at `timeout`.
+pub async fn output_timeout_async(cmd: &mut tokio::process::Command, timeout: Duration) -> Result<Output, RunError> {
+    wait_output_timeout(spawn_captured(cmd)?, timeout).await
+}
+
+/// `cmd` spawned the way `output_timeout_async` runs it.
+fn spawn_captured(cmd: &mut tokio::process::Command) -> Result<tokio::process::Child, RunError> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // `wait_output_timeout` kills at the deadline; this covers the caller's future being
+        // dropped (a cancelled command) before the deadline.
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(RunError::Spawn)
+}
+
+/// Wait for a child the caller already spawned (one it had to write to first), collecting
+/// whatever of stdout and stderr it piped, and kill and reap it at `timeout`.
+///
+/// The pipes are read while the child runs: waiting first and reading after deadlocks as soon
+/// as the output outgrows the pipe buffer. A grandchild holding a pipe open past the child's
+/// exit is bounded by the same deadline.
+pub async fn wait_output_timeout(mut child: tokio::process::Child, timeout: Duration) -> Result<Output, RunError> {
+    use tokio::io::AsyncReadExt;
+
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let result = tokio::time::timeout(timeout, async {
+        let read_out = async {
+            let mut buf = Vec::new();
+            if let Some(pipe) = stdout.as_mut() {
+                pipe.read_to_end(&mut buf).await?;
+            }
+            Ok::<_, std::io::Error>(buf)
+        };
+        let read_err = async {
+            let mut buf = Vec::new();
+            if let Some(pipe) = stderr.as_mut() {
+                pipe.read_to_end(&mut buf).await?;
+            }
+            Ok::<_, std::io::Error>(buf)
+        };
+        let (status, stdout, stderr) = tokio::try_join!(child.wait(), read_out, read_err)?;
+        Ok::<_, std::io::Error>(Output { status, stdout, stderr })
+    })
+    .await;
+    match result {
+        Ok(output) => output.map_err(RunError::Io),
+        Err(_) => {
+            // `kill` is start_kill + wait: when it returns the child is reaped. An error here
+            // means it had already exited and been waited on (a grandchild held the pipes).
+            let _ = child.kill().await;
+            Err(RunError::TimedOut)
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -154,6 +221,58 @@ mod tests {
         let r = output_timeout(command("sleep").arg("30"), Duration::from_millis(200));
         assert!(matches!(r, Err(RunError::TimedOut)));
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    /// Is `pid` still a child of this process, running or a zombie? `waitpid(WNOHANG)` answers
+    /// about our own children only, so another process that reuses the pid can't make it yes.
+    fn still_our_child(pid: u32) -> bool {
+        let mut status = 0;
+        let r = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        // 0: still running. >0 would mean WE just reaped it, i.e. it was a zombie.
+        r >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ECHILD)
+    }
+
+    /// A stub that never exits on its own: it waits on a stdin nobody writes or closes.
+    fn never_exits() -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "read never"]).stdin(Stdio::piped());
+        cmd
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_tokio_child_is_killed_and_reaped() {
+        let mut cmd = never_exits();
+        let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let pid = child.id().unwrap();
+        // Held, never written or closed: nothing but the kill can end the child.
+        let _stdin = child.stdin.take();
+        assert!(still_our_child(pid));
+
+        let r = wait_output_timeout(child, Duration::from_millis(50)).await;
+        assert!(matches!(r, Err(RunError::TimedOut)), "{r:?}");
+        assert!(!still_our_child(pid), "the timed-out child {pid} is still running or unreaped");
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_command_is_killed_and_reaped() {
+        // `spawn_captured` closes stdin, so this stub is one that doesn't read it.
+        let mut cmd = tokio::process::Command::new("sleep");
+        cmd.arg("100000");
+        let child = spawn_captured(&mut cmd).unwrap();
+        let pid = child.id().unwrap();
+        let r = wait_output_timeout(child, Duration::from_millis(50)).await;
+        assert!(matches!(r, Err(RunError::TimedOut)), "{r:?}");
+        assert!(!still_our_child(pid), "the timed-out child {pid} is still running or unreaped");
+    }
+
+    #[tokio::test]
+    async fn a_tokio_child_that_finishes_gives_its_output() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "printf hi; printf err >&2; exit 3"]);
+        let out = output_timeout_async(&mut cmd, Duration::from_secs(30)).await.unwrap();
+        assert_eq!(out.status.code(), Some(3));
+        assert_eq!(out.stdout, b"hi");
+        assert_eq!(out.stderr, b"err");
     }
 
     #[test]

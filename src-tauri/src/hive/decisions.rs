@@ -875,6 +875,7 @@ mod tests {
             options: options.iter().map(|(l, r)| BlockerOption { label: l.to_string(), detail: None, recommended: *r }).collect(),
             command: None,
             pick: None,
+            run_in: None,
             asked_at: asked_at.into(),
             asked_by: "agent".into(),
         }

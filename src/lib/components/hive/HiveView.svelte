@@ -1230,7 +1230,11 @@
         {/snippet}
       </ChatColumn>
       {#if coordTerminal}
-        <HiveTerminal tabId={coordId!} onhide={() => hiveView.setTerminalShown(workspaceId, 'coordinator', false)} />
+        <HiveTerminal
+          tabId={coordId!}
+          note={hive?.status === 'done' ? "This Hive is done. Typing here doesn't wake it: use the message box above." : undefined}
+          onhide={() => hiveView.setTerminalShown(workspaceId, 'coordinator', false)}
+        />
       {/if}
     </section>
     {#if fit.coord === 'full'}

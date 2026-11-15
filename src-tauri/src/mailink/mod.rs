@@ -42,6 +42,7 @@ pub(crate) mod subagents;
 pub(crate) mod trust;
 pub(crate) mod permission;
 pub(crate) mod input_box;
+mod question_keys;
 pub(crate) mod tasks;
 pub(crate) mod board;
 pub(crate) mod follow_ups;
@@ -534,7 +535,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.27";
+const PROTOCOL_VERSION: &str = "0.28";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -1390,6 +1391,11 @@ async fn post_message(
             return hold(&s);
         }
         return match submit_prompt(&s.app, &tab_id, &pty, &body.text).await {
+            // `Delivered::AgentPending` is answered `delivered` too, though it isn't confirmed:
+            // the wire has no word for "with the agent's mod, not yet run" without a protocol
+            // bump, and nothing is lost by it — maiTerm, not the phone, settles a pending prompt
+            // (a drop is typed through the hold queue, an unconfirmed one is put to the human on
+            // the desktop), and a resend from the phone could make it run twice.
             Ok(_) => Ok(Json(json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()), "woke": woke }))),
             // The mod was asked and didn't take it, and the box holds a draft.
             Err(_) if draft_hold::draft_in_box(&s.app, &tab_id) => hold(&s),
@@ -2159,7 +2165,11 @@ pub(crate) async fn respond_to_prompt(
                 return json!({ "ok": false, "reason": "selector_dirty",
                     "detail": "this ask was already injected once; its selector position is now unknown, so send the answer as a message instead" });
             }
-            if let Err(e) = drive_question_answers(app, &pty, &tool_input, answers).await {
+            let driven = match PtySelector::new(app, &pty) {
+                Ok(mut term) => question_keys::drive_question_answers(&mut term, &tool_input, answers).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = driven {
                 log::warn!("[maiLink] AskUserQuestion answer injection failed: {e}");
                 return json!({ "ok": false, "reason": "inject_failed", "detail": e });
             }
@@ -2434,9 +2444,7 @@ async fn post_queue_cancel(
         }
     };
 
-    send_key(&s.app, &pty, QUEUE_RECALL, 0)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    crate::pty::write_pty(&s.app, &pty, QUEUE_RECALL).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // The recall is observable: emptying the queue writes a `popAll` op, which the replay reads.
     let deadline =
@@ -4177,8 +4185,14 @@ pub(crate) async fn inject_text(
 /// How a prompt reached the agent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Delivered {
-    /// Handed to the tab's maiterm-tab mod, which submits it (claude_code/mod_inbox.rs).
+    /// Handed to the tab's maiterm-tab mod, which submitted it, and Claude ran it
+    /// (claude_code/mod_inbox.rs).
     Agent,
+    /// Handed to the tab's maiterm-tab mod, with no confirmation that Claude ran it: no report
+    /// yet (a turn began first, or it was sent mid-turn), or one that can't say (`Unconfirmed`).
+    /// Unknown, not delivered. It must not be typed — it may run, or have run — and the inbox
+    /// settles it: a drop is typed then, and an unconfirmed one is put to the human.
+    AgentPending,
     /// Typed into the terminal and submitted with a CR.
     Keys,
 }
@@ -4195,12 +4209,19 @@ pub(crate) async fn submit_prompt(
     text: &str,
 ) -> Result<Delivered, String> {
     use crate::claude_code::mod_inbox;
-    if mod_inbox::offerable(text)
-        && mod_inbox::takes_now(app, tab_id)
-        && app.mod_inbox.deliver(tab_id, text, mod_inbox::agent_between_turns(app, tab_id)).await
-    {
-        log::info!("[maiLink] prompt for tab {tab_id} → the agent ({} chars)", text.chars().count());
-        return Ok(Delivered::Agent);
+    if mod_inbox::offerable(text) && mod_inbox::takes_now(app, tab_id) {
+        match app.mod_inbox.deliver(tab_id, text, mod_inbox::agent_between_turns(app, tab_id)).await {
+            mod_inbox::Handover::Ran => {
+                log::info!("[maiLink] prompt for tab {tab_id} → the agent ({} chars)", text.chars().count());
+                return Ok(Delivered::Agent);
+            }
+            mod_inbox::Handover::Pending | mod_inbox::Handover::Unconfirmed => {
+                log::info!("[maiLink] prompt for tab {tab_id} → the agent, not confirmed run ({} chars)", text.chars().count());
+                return Ok(Delivered::AgentPending);
+            }
+            // Nothing was submitted, or nothing ran: typed below.
+            mod_inbox::Handover::NotTaken | mod_inbox::Handover::Dropped => {}
+        }
     }
     if app.mod_inbox.is_live(tab_id) && draft_hold::draft_in_box(app, tab_id) {
         return Err("the human has a draft in the agent's input box, and the prompt can't go around it".into());
@@ -4380,6 +4401,9 @@ async fn stage_images_remote(
     Ok(paths)
 }
 
+/// The most an image copy to or from an ssh host may take before it is stopped and reported.
+const REMOTE_COPY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Write `bytes` to `remote_path` on an SSH bridge host via `cat > path` with the bytes on
 /// stdin. ~tens of ms over the mux socket; BatchMode direct fallback when the socket is dead.
 /// pub(crate): the comms attachment staging (screenshots → SSH tabs) reuses it.
@@ -4396,29 +4420,32 @@ pub(crate) async fn push_bytes_remote(
     }
     cmd_args.push(format!("cat > {quoted}"));
 
+    // kill_on_drop: a timeout below drops the child, and without it the ssh (and the remote
+    // `cat` it holds open) would keep running long after the caller was told it failed.
     let mut child = tokio::process::Command::new("ssh")
         .args(&cmd_args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("ssh spawn failed: {e}"))?;
 
     let mut stdin = child.stdin.take().ok_or("no ssh stdin")?;
     use tokio::io::AsyncWriteExt;
-    stdin
-        .write_all(bytes)
+    // The write is under the same cap as the wait: a host that stops reading would otherwise
+    // block `write_all` for ever, before the timeout below ever started.
+    let transfer = async move {
+        stdin
+            .write_all(bytes)
+            .await
+            .map_err(|e| format!("streaming image bytes failed: {e}"))?;
+        drop(stdin); // EOF ends the remote `cat`
+        child.wait_with_output().await.map_err(|e| format!("ssh wait failed: {e}"))
+    };
+    let output = tokio::time::timeout(REMOTE_COPY_DEADLINE, transfer)
         .await
-        .map_err(|e| format!("streaming image bytes failed: {e}"))?;
-    drop(stdin); // EOF ends the remote `cat`
-
-    let output = tokio::time::timeout(
-        tokio::time::Duration::from_secs(30),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| "image transfer timed out (30s)".to_string())?
-    .map_err(|e| format!("ssh wait failed: {e}"))?;
+        .map_err(|_| format!("image transfer to {host_key} timed out after {} s; the ssh was stopped", REMOTE_COPY_DEADLINE.as_secs()))??;
 
     if !output.status.success() {
         return Err(format!(
@@ -4445,17 +4472,20 @@ pub(crate) async fn fetch_bytes_remote(
     }
     cmd_args.push(format!("cat < {quoted}"));
 
+    // kill_on_drop: on a timeout the `output()` future is dropped, and with it the child — which
+    // without this flag kept running, an ssh per stuck read.
     let output = tokio::time::timeout(
-        tokio::time::Duration::from_secs(30),
+        REMOTE_COPY_DEADLINE,
         tokio::process::Command::new("ssh")
             .args(&cmd_args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .output(),
     )
     .await
-    .map_err(|_| "remote read timed out (30s)".to_string())?
+    .map_err(|_| format!("remote read from {host_key} timed out after {} s; the ssh was stopped", REMOTE_COPY_DEADLINE.as_secs()))?
     .map_err(|e| format!("ssh spawn failed: {e}"))?;
 
     if !output.status.success() {
@@ -4468,38 +4498,55 @@ pub(crate) async fn fetch_bytes_remote(
     Ok(output.stdout)
 }
 
-/// Settle delays so the TUI redraws between keystrokes (mirrors inject_text's paste settle).
-const NAV_SETTLE_MS: u64 = 130;
-const ADVANCE_SETTLE_MS: u64 = 280;
+/// How long one key may take to show on the selector's screen. Not a pause: each key waits for
+/// the terminal's own signal that output reached the grid (`TerminalHandle::screen_seq`), and this
+/// only turns a screen that never shows the key's result into a clear failure.
+const KEY_SHOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Inject one keystroke, then wait `settle_ms` so the selector repaints before the next.
-async fn send_key(app: &Arc<AppState>, pty_id: &str, bytes: &[u8], settle_ms: u64) -> Result<(), String> {
-    crate::pty::write_pty(app, pty_id, bytes)?;
-    tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
-    Ok(())
+/// A tab's PTY and grid, as `question_keys` drives them: keys go in through `write_pty`, the
+/// screen is read off the live grid, and a repaint is the grid's change counter moving.
+struct PtySelector<'a> {
+    app: &'a Arc<AppState>,
+    pty: String,
+    seq: tokio::sync::watch::Receiver<u64>,
+    deadline: tokio::time::Instant,
 }
 
-/// Type free-text into the selector's highlighted "Other" inline input (a live field). Collapsed
-/// to a single line so a stray newline can't submit early; settles like a keystroke.
-async fn send_text(app: &Arc<AppState>, pty_id: &str, text: &str) -> Result<(), String> {
-    let one_line: String = text.split(['\n', '\r']).collect::<Vec<_>>().join(" ");
-    crate::pty::write_pty(app, pty_id, one_line.as_bytes())?;
-    tokio::time::sleep(std::time::Duration::from_millis(ADVANCE_SETTLE_MS)).await;
-    Ok(())
+impl<'a> PtySelector<'a> {
+    fn new(app: &'a Arc<AppState>, pty: &str) -> Result<Self, String> {
+        let seq = app
+            .terminal_registry
+            .read()
+            .get(pty)
+            .map(|h| h.screen_seq.subscribe())
+            .ok_or("the tab has no terminal")?;
+        Ok(PtySelector { app, pty: pty.to_string(), seq, deadline: tokio::time::Instant::now() + KEY_SHOWN_DEADLINE })
+    }
 }
 
-/// Move the selector highlight from row `from` to row `to` with arrow keys. Returns `to`.
-async fn nav_to(app: &Arc<AppState>, pty_id: &str, from: usize, to: usize) -> Result<usize, String> {
-    if to > from {
-        for _ in 0..(to - from) {
-            send_key(app, pty_id, b"\x1b[B", NAV_SETTLE_MS).await?; // Down
-        }
-    } else {
-        for _ in 0..(from - to) {
-            send_key(app, pty_id, b"\x1b[A", NAV_SETTLE_MS).await?; // Up
+impl question_keys::SelectorTerm for PtySelector<'_> {
+    fn send(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.deadline = tokio::time::Instant::now() + KEY_SHOWN_DEADLINE;
+        crate::pty::write_pty(self.app, &self.pty, bytes)
+    }
+
+    fn screen(&mut self) -> String {
+        // Seen BEFORE reading: output that lands after the read moves the counter past it, so
+        // `repainted` can't sleep through the change that matters.
+        self.seq.borrow_and_update();
+        let registry = self.app.terminal_registry.read();
+        registry.get(&self.pty).map(|h| crate::terminal::render::screen_text(&h.term)).unwrap_or_default()
+    }
+
+    fn repainted(&mut self) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        async move {
+            match tokio::time::timeout_at(self.deadline, self.seq.changed()).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(_)) => Err("the terminal closed".to_string()),
+                Err(_) => Err(format!("the screen never showed it within {} s", KEY_SHOWN_DEADLINE.as_secs())),
+            }
         }
     }
-    Ok(to)
 }
 
 /// Claim the one permitted keystroke injection into a given open ask. `true` for the first call
@@ -4520,196 +4567,6 @@ fn claim_question_inject(tab_id: &str, prompt_id: &str) -> bool {
             true
         }
     }
-}
-
-/// Replay the phone's per-question answers into Claude Code's open AskUserQuestion selector by
-/// injecting keystrokes, in question order.
-///
-/// RUNTIME-FRAGILE — the selector is a TUI, not a stable API. Mechanics pinned live against
-/// Claude Code 2.1.x (docs §12.3). The form is a row of tabs [Q1..Qn][Submit]:
-///   (a) each question's highlight starts at row 0;                                      [VERIFIED]
-///   (b) the selector is arrow-only — the shown 1..n are labels, NOT digit-select keys;  [VERIFIED]
-///   (c) single-select: ↑/↓ to the row, Enter selects AND advances to the next tab;      [VERIFIED e2e]
-///   (d) multiSelect: Space toggles each row (live, no Enter), then → advances the tab;   [VERIFIED e2e]
-///   (e) a lone single-select question submits on its own Enter; every other form lands on the
-///       "Submit" tab and takes one final Enter.                                          [VERIFIED]
-///   (f) the free-text "Other" row (labelled "Type something", at index option_count) is a live
-///       inline input — navigate to it and TYPE directly (no Enter-to-open). For a single-select
-///       question, Enter then selects+advances just like a listed pick.                    [VERIFIED e2e]
-///
-/// TYPING INTO THE WRONG ROW IS DESTRUCTIVE, which is why (a) is load-bearing rather than
-/// cosmetic. Read from the 2.1.224 bundle:
-///   * The container's own onKeyDown calls `onRespondToClaude()` — which DISMISSES the ask and
-///     routes the turn to chat, discarding every answer — when the key is the digit
-///     `options.length + 2` ("Chat about this"). It is gated on NOT being focused in the Other
-///     input. So if the highlight is off by one row when the free text is typed, any digit in the
-///     operator's own text that happens to equal `option_count + 2` silently throws the ask away.
-///     That is the reported "it acted like I said Chat about this", and its intermittency is
-///     explained by needing that one particular digit.
-///   * There IS also a literal `{value:"__chat__"}` ROW below Other, but only under
-///     `tlt = useContext(InternalAccessibilityContext)` — i.e. `isScreenReaderEnabled`, which
-///     defaults false. Do not plan around that row for ordinary terminals; do not assume it is
-///     absent for a screen-reader user either.
-///   * `select:next`/`select:previous` are unbound while an input row holds focus, so once the
-///     highlight reaches Other it CANNOT be moved by arrows. A wrong position is therefore not
-///     recoverable by navigating — see `claim_question_inject` for the consequence.
-///   (g) multiSelect + Other free-text leaves via the form's OWN Submit/Next button: Down from
-///       the last row focuses it, Enter activates it. NOT Enter-then-→.        [UNVERIFIED — see below]
-///
-/// (g) was carried for months as a best guess (Enter to "commit", then → to advance) and never
-/// worked. What a device actually shows: both answers land — the box ticked, the Other row CHECKED
-/// with the typed text — and the form just never submits, the highlight still on the Other row.
-/// Typing already selects that row, so there was nothing for the Enter to commit; and both the
-/// Enter and the → were swallowed by the active text input, so the injector never left it. Nothing
-/// was corrupted; the answer was simply complete and unsubmitted, reported as `inject_failed`.
-///
-/// The exit is the form's own button. Down over Tab: both survive the input-focus filter, but Tab
-/// is ALSO the form-level question switcher and the selector does not stop its propagation.
-///
-/// (g) IS ITSELF STILL UNVERIFIED ON A DEVICE — source-derived from 2.1.240, not guessed, but the
-/// swallowed Enter proves the text input can eat a whitelisted key before the select sees it. The
-/// [VERIFIED e2e] tag above is aspirational until a real multiSelect+Other answer arrives from a
-/// phone. Marking a keystroke verified on reasoning alone is exactly how (g) went wrong the first
-/// time.
-///
-/// All mapping is resolved BEFORE any keystroke is sent, so a bad answer rejects the whole batch
-/// rather than half-answering.
-async fn drive_question_answers(
-    app: &Arc<AppState>,
-    pty_id: &str,
-    tool_input: &Value,
-    answers: &[Answer],
-) -> Result<(), String> {
-    let questions = tool_input
-        .get("questions")
-        .and_then(|v| v.as_array())
-        .ok_or("pending ask has no questions[]")?;
-    if answers.len() != questions.len() {
-        return Err(format!(
-            "answer count {} != question count {}",
-            answers.len(),
-            questions.len()
-        ));
-    }
-
-    struct Plan {
-        multi: bool,
-        option_count: usize,   // # of listed options; the "Type something" (Other) row is at this index
-        indices: Vec<usize>,   // listed-option rows to select/toggle
-        other: Option<String>, // free-text for the "Other" row, if the phone chose it
-    }
-
-    // Resolve every answer to concrete selector actions up front (fail-closed on any bad map).
-    let mut plans: Vec<Plan> = Vec::with_capacity(questions.len());
-    for (qi, (q, ans)) in questions.iter().zip(answers).enumerate() {
-        let labels: Vec<&str> = q
-            .get("options")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|o| o.get("label").and_then(|v| v.as_str()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let multi = q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false);
-
-        let mut indices = Vec::new();
-        for sel in &ans.selected {
-            match labels.iter().position(|l| l == sel) {
-                Some(idx) => indices.push(idx),
-                None => return Err(format!("question {qi}: label {sel:?} not among options")),
-            }
-        }
-        let other = ans.other.clone().filter(|s| !s.trim().is_empty());
-        if indices.is_empty() && other.is_none() {
-            return Err(format!("question {qi}: no option selected and no Other text"));
-        }
-        // single-select accepts exactly one pick total (one listed option XOR Other text).
-        if !multi && indices.len() + other.is_some() as usize > 1 {
-            return Err(format!("question {qi}: single-select received multiple picks"));
-        }
-        indices.sort_unstable();
-        indices.dedup();
-        plans.push(Plan { multi, option_count: labels.len(), indices, other });
-    }
-
-    // Inject, question by question. The form is a row of tabs [Q1..Qn][Submit]; ↑/↓ moves within
-    // a question, and the single-select Enter / a multiSelect → moves to the next tab.
-    let single_q_single_select = plans.len() == 1 && !plans[0].multi;
-    // Set when the FINAL question was committed by pressing the form's own Submit/Next button
-    // (the multiSelect+Other exit), which already submits — so the trailing Enter below must not
-    // fire a second time into whatever the form became.
-    let mut submitted_by_button = false;
-    let last_qi = plans.len() - 1;
-    for (qi, plan) in plans.iter().enumerate() {
-        let mut cur = 0usize; // highlight starts at row 0 (a)
-        if plan.multi {
-            for &idx in &plan.indices {
-                cur = nav_to(app, pty_id, cur, idx).await?;
-                send_key(app, pty_id, b" ", NAV_SETTLE_MS).await?; // Space toggles the row (live)
-            }
-            if let Some(text) = &plan.other {
-                // The "Type something" row (at option_count) is a live inline input — typing into
-                // it fills it AND selects it (updateInputValue adds `__other__` to the selected
-                // set on any non-empty value). So there is nothing to "commit".
-                cur = nav_to(app, pty_id, cur, plan.option_count).await?;
-                send_text(app, pty_id, text).await?;
-                // Leave via the form's own Submit/Next button rather than the tab arrow.
-                //
-                // OBSERVED on a device (2.1.240), from a screenshot of the stuck form: both
-                // answers land correctly — the ticked box is ticked and the Other row is CHECKED
-                // and holds the typed text — and the form simply never submits, with the
-                // highlight still on the Other row. So the old trailing `Enter, →` corrupted
-                // nothing; both keys were swallowed by the active text input and we never left
-                // it. The answer was complete, and unsubmitted.
-                //
-                // The select whitelists exactly up/down/escape/tab/return while an input row has
-                // focus, and Down from the LAST row focuses Submit/Next, after which Enter calls
-                // onSubmit. `__other__` IS last: the row array is [...options, otherInput], and
-                // the "Chat about this" line below it is a numeric-shortcut hint (options+2), not
-                // a focusable row — so Down cannot land on the dismiss-the-ask affordance. Down
-                // over Tab because Tab is also the form-level question switcher and the selector
-                // does not stop its propagation.
-                //
-                // UNVERIFIED ON A DEVICE. The whitelist says these keys reach the select, but the
-                // swallowed Enter above is evidence that the text input can consume a whitelisted
-                // key first — so this may still fail to release. It is source-derived rather than
-                // guessed, and a failure is now non-destructive (one attempt per ask, and the
-                // phone keeps the text). Do NOT mark it verified without a real multiSelect+Other
-                // answer sent from a phone.
-                send_key(app, pty_id, b"\x1b[B", NAV_SETTLE_MS).await?; // Down → focus Submit/Next
-                send_key(app, pty_id, b"\r", ADVANCE_SETTLE_MS).await?; // activate it
-                // That button IS this question's advance ("Next") or the form's submit ("Submit"
-                // on the last one), so the tab arrow below must not also fire.
-                if qi == last_qi {
-                    submitted_by_button = true;
-                }
-                continue;
-            }
-            // multiSelect toggles are live and are NOT confirmed with Enter; → advances to the
-            // next tab (the next question, or Submit after the last one). Only reachable when the
-            // highlight is on a listed row — an input row would swallow it.
-            send_key(app, pty_id, b"\x1b[C", ADVANCE_SETTLE_MS).await?;
-        } else if let Some(text) = &plan.other {
-            // single-select via the Other row: navigate to it, type the text, then Enter — which
-            // selects it and advances exactly like picking a listed option.
-            cur = nav_to(app, pty_id, cur, plan.option_count).await?;
-            send_text(app, pty_id, text).await?;
-            send_key(app, pty_id, b"\r", ADVANCE_SETTLE_MS).await?;
-        } else {
-            cur = nav_to(app, pty_id, cur, plan.indices[0]).await?;
-            send_key(app, pty_id, b"\r", ADVANCE_SETTLE_MS).await?; // Enter selects AND advances
-        }
-        let _ = cur;
-    }
-
-    // Submit. A lone single-select question submits on its own Enter above (there is no Submit
-    // tab). Every other form — multi-question, or any multiSelect — lands on the "Submit" tab,
-    // which takes one Enter. (Pinned live — docs §12.3.)
-    if !single_q_single_select && !submitted_by_button {
-        send_key(app, pty_id, b"\r", ADVANCE_SETTLE_MS).await?;
-    }
-    Ok(())
 }
 
 /// The tab's currently-open prompt, as (kind, prompt_id, runtime). Mirrors what
