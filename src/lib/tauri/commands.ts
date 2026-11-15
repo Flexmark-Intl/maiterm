@@ -67,26 +67,50 @@ const SSH_ARG_FLAGS = 'bceilmopBDEFIJLOPQRSwW';
  * after `--`. `values.length` when there is none.
  */
 export function remoteCommandIndex(values: string[]): number {
+  return sshWalk(values).remote;
+}
+
+/** `remoteCommandIndex`'s walk, which also notes the tty switches (`-t`, `-tt`) it passes: the
+ *  indexes of words that are options, never an option's argument nor the remote command. */
+function sshWalk(values: string[]): { remote: number; tty: number[] } {
+  const tty: number[] = [];
   let dest = false;
   for (let i = 0; i < values.length; i++) {
     const w = values[i];
-    if (w === '--') return dest ? i + 1 : Math.min(i + 2, values.length);
+    if (w === '--') return { remote: dest ? i + 1 : Math.min(i + 2, values.length), tty };
     if (!w.startsWith('-') || w === '-') {
       // The first plain word is the destination; one after it starts the remote command.
-      if (dest) return i;
+      if (dest) return { remote: i, tty };
       dest = true;
       continue;
     }
     // A cluster (`-xCp2222`): its argument is the rest of the word, or else the next word.
     const flags = w.slice(1);
-    if (/^t+$/.test(flags)) continue;
+    if (/^t+$/.test(flags)) {
+      tty.push(i);
+      continue;
+    }
     for (let j = 0; j < flags.length; j++) {
       if (!SSH_ARG_FLAGS.includes(flags[j])) continue;
       if (j === flags.length - 1) i++;
       break;
     }
   }
-  return values.length;
+  return { remote: values.length, tty };
+}
+
+/**
+ * `args` without its tty switches (`-t`, `-t -t`, `-tt`), and nothing else: only options, never
+ * an option's argument or the remote command. The user's `-t` belongs in the command they retype
+ * (`cleanSshCommand` keeps it), but not in maiTerm's own ssh. Those pass `-T`, and ssh reads
+ * options left to right, so a later `-t` asks for a tty (`-t -t` forces one). A tty on
+ * `cat > path` or `sh -s` turns bytes into keystrokes: 0x03 becomes SIGINT, LF becomes CRLF,
+ * and no EOF ever arrives.
+ */
+function withoutTty(args: string): string {
+  const words = wordSpansOf(args);
+  const { tty } = sshWalk(words.map(w => w.value));
+  return tty.length ? rawOf(args, words.filter((_, i) => !tty.includes(i))) : args;
 }
 
 /** The index of the first word of maiTerm's injected remote command, or `words.length`. */
@@ -122,13 +146,16 @@ function sshProgramOf(cmd: string): string | null {
  * everything that reads a host out of it or hands it to maiTerm's own `ssh` (the MCP bridge's
  * tunnel, remote files, a share file). A stored command keeps the user's ssh program in front
  * when it isn't plain `ssh` (`cleanSshCommand`); this drops it, and autossh's own options with
- * it — ssh reads `-M` as master mode, so `-M 0` would make `0` the host.
+ * it — ssh reads `-M` as master mode, so `-M 0` would make `0` the host. It drops the user's
+ * tty switches too (`withoutTty`): every caller is maiTerm's own, non-interactive ssh (the
+ * tunnel and its bridge env, the account token push, host parsing and reconnect keys, the
+ * editor's scp, a share file), never the line a human's session is typed from.
  */
 export function sshArgsOf(cmd: string): string {
   const program = cmd.match(SSH_PROGRAM)?.[0];
-  if (!program) return cmd.trim();
+  if (!program) return withoutTty(cmd.trim());
   const rest = cmd.slice(program.length).trim();
-  if (!/(?:^|\/)autossh$/.test(program)) return rest;
+  if (!/(?:^|\/)autossh$/.test(program)) return withoutTty(rest);
   // By word, never by regex over the line: `-M` inside a quoted path is not autossh's.
   const words = wordSpansOf(rest);
   const kept: WordSpan[] = [];
@@ -137,7 +164,7 @@ export function sshArgsOf(cmd: string): string {
     if (v === '-M') i++;
     else if (v !== '-f' && !v.startsWith('-M')) kept.push(words[i]);
   }
-  return rawOf(rest, kept);
+  return withoutTty(rawOf(rest, kept));
 }
 
 /** A stored (cleaned) ssh command as the human would type it: `ssh ews@nova`, or with the

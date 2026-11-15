@@ -336,7 +336,8 @@ where
     S: Into<String>,
 {
     let mut args = prefix;
-    args.extend(crate::util::ssh_words::split(ssh_args));
+    // Never the user's tty switch: these are maiTerm's own ssh (`watch::without_tty`).
+    args.extend(crate::watch::without_tty(crate::util::ssh_words::split(ssh_args)));
     args.extend(tail.into_iter().map(Into::into));
     args
 }
@@ -1601,6 +1602,36 @@ mod tests {
     /// `needle` appears in `hay` as consecutive args.
     fn has_run(hay: &[String], needle: &[&str]) -> bool {
         hay.windows(needle.len()).any(|w| w.iter().map(String::as_str).eq(needle.iter().copied()))
+    }
+
+    /// A user's tty switch is kept in the command they retype, but never reaches maiTerm's own
+    /// ssh: those pass `-T`, ssh reads options left to right, and a later `-t` would ask for a
+    /// tty (`-t -t` forces one) on `cat > path` or `sh -s`. Checked against ssh itself (`-G`
+    /// prints the options it resolved, without connecting).
+    #[test]
+    fn a_users_tty_switch_never_reaches_maiterms_own_ssh() {
+        let is_tty = |a: &String| a.len() > 1 && a.starts_with('-') && a[1..].chars().all(|c| c == 't');
+        for args in ["-t -t nova", "-t nova", "-tt nova", "-x -t -p 22 nova"] {
+            let built = [
+                ("ssh_argv", ssh_argv(independent_ssh_args(), args, ["true"])),
+                ("mux_argv", mux_argv("nova", args, "sh -s")),
+            ];
+            for (who, argv) in &built {
+                assert!(!argv.iter().any(is_tty), "{who} {args}: {argv:?}");
+                assert!(argv.iter().any(|a| a == "-T"), "{who} {args}: {argv:?}");
+                assert!(argv.iter().any(|a| a == "nova"), "{who} {args}: {argv:?}");
+                let Ok(out) = Command::new("ssh").arg("-G").arg("-F").arg("/dev/null").args(argv).stdin(Stdio::null()).output() else {
+                    continue;
+                };
+                if out.status.success() {
+                    let config = String::from_utf8_lossy(&out.stdout);
+                    assert!(config.lines().any(|l| l == "requesttty false"), "{who} {args}: {config}");
+                }
+            }
+        }
+        // Only options: an option's argument and the remote command are the user's.
+        let argv = ssh_argv(Vec::new(), "-o 'X=-t' -t nova tmux attach -t main", std::iter::empty::<String>());
+        assert_eq!(argv, ["-o", "X=-t", "nova", "tmux", "attach", "-t", "main"]);
     }
 
     /// A tab's ssh with words a whitespace split mangles, from its argv to the argv of every ssh

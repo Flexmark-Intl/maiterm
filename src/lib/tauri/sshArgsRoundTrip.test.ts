@@ -169,6 +169,19 @@ describe('ssh args keep their words from the stored command back to the stored c
     for (const [args, at] of REMOTE_AT) expect(remoteCommandIndex(splitWords(args)), args).toBe(at);
   });
 
+  // The user's tty switch stays in the command they retype, but never reaches maiTerm's own
+  // ssh, which passes -T: ssh reads options left to right, and a later -t would win.
+  it('keeps the tty switch for retyping and drops it for maiTerm\'s own ssh', () => {
+    for (const [typed, stored] of [['ssh -t nova', '-t nova'], ['ssh -t -t nova', '-t -t nova'], ['ssh -tt nova', '-tt nova']]) {
+      expect(cleanSshCommand(typed)).toBe(stored);
+      expect(sshArgsOf(cleanSshCommand(typed))).toBe('nova');
+    }
+    // Only options: an option's argument and the remote command are the user's.
+    expect(sshArgsOf("-t -o 'X=-t' -p 22 nova tmux attach -t main")).toBe("-o 'X=-t' -p 22 nova tmux attach -t main");
+    expect(sshArgsOf('/usr/bin/ssh -tt -x nova')).toBe('-x nova');
+    expect(sshArgsOf('autossh -M 0 -t nova')).toBe('nova');
+  });
+
   it('still cleans a lossy ps line, an apostrophe included', () => {
     const ps = `ssh -t -o ControlMaster=no -i /Users/me/Bob's/id ews@nova export MAITERM_TAB_ID=${TAB} MAITERM_AUTH=tok; cd /srv && exec $SHELL -l`;
     expect(cleanSshCommand(ps)).toBe("-i /Users/me/Bob's/id ews@nova");

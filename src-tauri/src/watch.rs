@@ -265,6 +265,42 @@ fn parse_ssh(cmd: &str) -> SshParse {
     p
 }
 
+/// `words` (an ssh's args, no program) without its tty switches (`-t`, `-t -t`, `-tt`): only
+/// options, read as `parse_ssh` reads them, never an option's argument nor anything at or after
+/// the remote command. maiTerm's own ssh passes `-T`, and ssh reads options left to right, so a
+/// user's `-t` after it asks for a tty (`-t -t` forces one): on `cat > path` or `sh -s` that
+/// turns bytes into keystrokes (0x03 becomes SIGINT, LF becomes CRLF, no EOF). The frontend's
+/// `sshArgsOf` drops them too; this covers args saved before it did.
+pub(crate) fn without_tty(words: Vec<String>) -> Vec<String> {
+    let mut drop = Vec::new();
+    let mut dest = false;
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i].as_str();
+        if w == "--" {
+            break;
+        }
+        let Some(flags) = w.strip_prefix('-').filter(|f| !f.is_empty()) else {
+            if dest {
+                break;
+            }
+            dest = true;
+            i += 1;
+            continue;
+        };
+        if flags.chars().all(|c| c == 't') {
+            drop.push(i);
+        } else if let Some(j) = flags.find(|c| SSH_ARG_FLAGS.contains(c)) {
+            // Its argument is the rest of the word, or else the next word.
+            if j + 1 == flags.len() {
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+    words.into_iter().enumerate().filter(|(i, _)| !drop.contains(i)).map(|(_, w)| w).collect()
+}
+
 /// Where to connect, and nothing else: a tunnel's `host_key` can be an ssh command line read
 /// back from the process table, which for a session maiTerm started ends in maiTerm's own remote
 /// command — `export … MAITERM_AUTH=…; cd … && exec $SHELL -l`. That must never be stored with a
