@@ -927,7 +927,8 @@ async fn tell<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, u: &UndoState, s
         Some(c) => {
             let sent = ctx.window.deliver(&c, text.clone(), "Hive undo").await;
             log::info!("hive {}: undo result for {}: {}", caller.hive.id, u.undoes, sent.describe());
-            // The human's Undo in a Done Hive finds no agent there: it hears once it is woken.
+            // A Done Hive's queen stays running and hears it now; if she isn't running, it is owed
+            // to her next session, once the human wakes the Hive.
             crate::hive::owed::owe_if_refused(caller, &sent, "Hive undo", text).await;
         }
         None => log::info!("hive {}: undo result for {} not delivered: no coordinator tab", caller.hive.id, u.undoes),

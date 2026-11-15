@@ -1,9 +1,11 @@
 //! Waking a Done Hive (docs/hive.md §11.4): a message from the human to its coordinator sets the
 //! Hive back to `active`. The coordinator stays running after Done (2026-11-15), so the message
-//! is normally typed into her now (`wake_running`); a prompt the human types in her own terminal
-//! wakes it too (`woken_in_terminal`). Only when she isn't running (a maiTerm restart, a crash)
-//! is she relaunched through the launch builder, resuming her session, with the message owed to
-//! that session's start (`owed.wake`), so a refusal or a restart mid-wake doesn't lose it (D11).
+//! is normally typed into her now (`wake_running`). A prompt typed in her own terminal does NOT
+//! wake it (Darryl, 2026-11-15): her tab also takes maiTerm's own notices (an undo's result, a
+//! decision's override, anything `draft_hold` held), and no timing tells those from the human's
+//! keys, so the column's composer and the phone are the only wakes. Only when she isn't running
+//! (a maiTerm restart, a crash) is she relaunched through the launch builder, resuming her
+//! session, with the message owed to that session's start (`owed.wake`), so a refusal or a restart mid-wake doesn't lose it (D11).
 //!
 //! Only the human's own send paths call this: the desktop composer (`mailink::send_tab_message`)
 //! and, from 9d, the phone's `POST /message`. No agent, mesh message, Overlord directive or
@@ -24,8 +26,6 @@ use crate::state::AppData;
 
 pub const BY_DESKTOP: &str = "desktop";
 pub const BY_PHONE: &str = "phone";
-/// The human typed to the queen in her own terminal (`woken_in_terminal`).
-pub const BY_TERMINAL: &str = "terminal";
 /// `logs/finishes.jsonl` lines beside the finishes: the history `done_at` no longer holds.
 pub const KIND_WAKE: &str = "wake";
 pub const KIND_WAKE_FAILED: &str = "wake_failed";
@@ -383,45 +383,6 @@ async fn restore_wake(caller: &Caller, prev: Option<OwedWake>) {
     if let Err(e) = res {
         log::warn!("hive {}: a failed wake's message is still owed: {e}", caller.hive.id);
     }
-}
-
-/// How recent the human's last key in the queen's terminal must be for a prompt she takes to be
-/// theirs (`typed_by_human`).
-const TYPED_WITHIN_MS: u64 = 30_000;
-
-/// Whether a prompt submitted now was typed by the human: they pressed a key in the tab's
-/// terminal within `TYPED_WITHIN_MS`. Pure, for the test.
-pub(crate) fn typed_by_human(last_key_ms: u64, now_ms: u64) -> bool {
-    last_key_ms != 0 && now_ms.saturating_sub(last_key_ms) <= TYPED_WITHIN_MS
-}
-
-/// A Done Hive's queen stays running (2026-11-15), so the human can also write to her straight in
-/// her terminal (HiveView's Show terminal), past the composer's wake. That prompt wakes the Hive
-/// the same way, without typing anything: she already has the message. Only on the human's own
-/// keys: nothing else is typed into a Done queen (follow-ups were cancelled at Done, the Overlord
-/// leaves Hives alone), and a peer's message must not wake what only the human may.
-pub(crate) fn woken_in_terminal(state: &std::sync::Arc<crate::state::AppState>, handle: &tauri::AppHandle, tab_id: &str) {
-    let Some(caller) = done_coordinator(&state.app_data.read(), tab_id) else { return };
-    let Some(pty) = crate::mailink::pty_for_tab(state, tab_id) else { return };
-    let last = state.pty_stats.read().get(&pty).map_or(0, |s| s.last_human_key_ms.load(std::sync::atomic::Ordering::Relaxed));
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-    if !typed_by_human(last, now) {
-        return;
-    }
-    let (state, handle) = (state.clone(), handle.clone());
-    tauri::async_runtime::spawn(async move {
-        let ctx = super::super::tools::app_ctx(&state, &handle, &caller);
-        let Some(_held) = Waking::wait(&Waking::key(&caller), TURN_WAIT).await else { return };
-        match save_status(&ctx, &caller, &[STATUS_DONE], Some(STATUS_ACTIVE), |h| h.done_at = None) {
-            Ok(change) => {
-                ctx.window.hive_changed(&change.workspace_id, &change.hive);
-                log_line(&caller, KIND_WAKE, BY_TERMINAL, None).await;
-                log::info!("hive {}: woken by the human typing to the queen in her terminal", caller.hive.id);
-            }
-            // Woken meanwhile by the composer, or no longer done: nothing to do.
-            Err(e) => log::info!("hive {}: a prompt typed to the queen didn't wake the Hive: {e}", caller.hive.id),
-        }
-    });
 }
 
 async fn log_line(caller: &Caller, kind: &str, by: &str, why: Option<&str>) {

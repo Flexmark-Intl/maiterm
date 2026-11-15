@@ -187,8 +187,6 @@ when the machine is slow.
 - `hive/change.rs:393`, `:435`: a DNS lookup that runs out (3 s, 2 s) counts as "doesn't point
   home", the same as a name that doesn't resolve. For the human's own grant and at a worker's
   launch that passes, as documented; a slow resolver and an absent name are told apart by nothing.
-- `hive/finish/wake.rs:160`: `Waking::wait` polls for up to 30 s; on expiry `woken_in_terminal`
-  drops the wake silently.
 - `hive/queue.rs:1272`: a job ends once its exit mark is 5 s old, on the assumption the shell's
   signal was lost; under load the real exit code arrives after that.
 - `agent_files/mod.rs:302`: a watcher batch is credited to a shell call when it lands within
@@ -283,7 +281,6 @@ when the machine is slow.
 | `hive/feed.rs:114` | prod | The debounce waiter sleeps until the key is due (meta 2 s, diffstat 5 s), reading the monotonic `clock_ms`. | C (the `Debounce` state machine takes `now`, and its tests feed values with no real wait. The spawned loop's clock is not injected) |  |
 | `hive/finish.rs:597` | prod | The git ancestry walk from a receipt is capped at 120 s (`WALK_TIMEOUT` → `git::verified_ancestry`). | D |  |
 | `hive/finish/wake.rs:160` | prod | `Waking::wait` polls a mutex'd list every 50 ms for up to 30 s (`TURN_WAIT`) for the Hive's turn. | A (`Waking::drop` could notify a `Notify`) | ⚠ on expiry the caller says "try again", but `woken_in_terminal` (line 414) silently drops the wake |
-| `hive/finish/wake.rs:407` | prod | A prompt to a Done queen counts as the human's if a human key was pressed in her tab within 30 s (`TYPED_WITHIN_MS`). | A (authorship comes from a time window. maiTerm knows what it typed itself) | ⚠ wrong either way: a peer prompt 29 s after a keypress wakes the Hive, a slow human doesn't. `typed_by_human` is pure and tested with values |
 | `hive/fuses.rs:108` | prod | A spawn reservation that isn't confirmed within 120 s (`RESERVATION_TTL`) is pruned, and is refused in `is_live` / `commit` (lines 408, 416). | C (TTL. Every function takes `now`, and tests feed values) |  |
 | `hive/gallery/thumbs.rs:35` | prod | Each thumbnailer call (QuickLook, ffmpeg) is capped at 20 s (`STEP_TIMEOUT` → `output_timeout`, lines 397 and 405). | D |  |
 | `hive/git.rs:15` | prod | Caps on `git::run` (`util::proc::output_timeout`): `QUERY_TIMEOUT` 15 s, `WORKTREE_TIMEOUT` 600 s. Expiry is an error. | D |  |

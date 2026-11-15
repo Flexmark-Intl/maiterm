@@ -16,7 +16,7 @@
 
 mod wake;
 pub use wake::{wake_text, WakeOutcome, BY_DESKTOP, BY_PHONE, NOT_DONE};
-pub(crate) use wake::{done_coordinator, route_send, wake, wake_with_notice, woken_in_terminal, Route, Waking, TURN_WAIT};
+pub(crate) use wake::{done_coordinator, route_send, wake, wake_with_notice, Route, Waking, TURN_WAIT};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -177,8 +177,9 @@ pub fn report_relies_on(rec: &FinishRecord, land: &str) -> bool {
 }
 
 /// A land a Done Hive's report relied on was undone (the human's Undo; a Done coordinator's own
-/// is refused): Done stands, but the header says it is stale. Nothing wakes the coordinator: the
-/// undo's result waits for its next session (`owed::owe_if_refused`), when the human wakes it.
+/// is refused): Done stands, but the header says it is stale. Nothing wakes the Hive: the undo's
+/// result is typed into the coordinator, who stays running after Done, or, if she isn't running,
+/// waits for her next session (`owed::owe_if_refused`), when the human wakes it.
 pub(crate) async fn undone_after_done<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, land: &str) {
     let done = hive_in(&ctx.data.read(), &caller.hive.id).is_some_and(|h| h.status == STATUS_DONE);
     if !done {
@@ -1134,7 +1135,8 @@ pub fn finish_tool_definition(tab_id: &Value) -> Value {
              file on its landing target, named by its path in the folder, not your read copy; in a plain folder or the \
              gallery's stored assets, a file on disk; never under .git) and gallery assets. A worker's own report is no receipt. maiTerm adds what landed, the final assets, the spend and \
              what you decided alone, shows your human the report, stops the stack services this Hive started, cancels every \
-             Hive tab's follow-ups and ends your session once you are idle. A message from your human wakes the Hive. \
+             Hive tab's follow-ups and keeps your session open. Your human wakes the Hive from its message box or their \
+             phone; a message typed in your terminal doesn't. \
              summary at most {MAX_SUMMARY} characters, how {MAX_HOW}, {MAX_RECEIPTS} receipts per criterion."
         ),
         "inputSchema": {
@@ -1248,7 +1250,7 @@ pub(crate) async fn finish_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         "done": true,
         "finish": record.id,
         "stack": stack,
-        "note": "Your session stays open. Until your human writes to you, the Hive tools that change anything refuse, and nothing you do here is part of this Hive's record: their message wakes this Hive.",
+        "note": "Your session stays open. Until your human wakes this Hive, the Hive tools that change anything refuse, and nothing you do here is part of its record. A message from the Hive's message box or their phone wakes this Hive; one typed in your terminal doesn't, so if they write to you there, ask them to send it from the message box.",
     }))
 }
 
