@@ -133,7 +133,24 @@ fn run_covering(rx: &std::sync::mpsc::Receiver<Decision>, what: &str, covers: u6
 fn settle_git(core: &GitCore, rx: &std::sync::mpsc::Receiver<Decision>) {
     let signalled = core.test_signals();
     run_covering(rx, "every run signalled so far", signalled);
-    assert_eq!(decision(rx, "the worker to go idle", |_| false), Decision::Idle);
+    idle_without_repeats(rx, signalled);
+}
+
+/// The worker's decisions up to its next Idle, after a run that covered `covered` signals.
+/// A real watcher may still add a signal (an OS rescan under load reruns git, as it should),
+/// so more runs may follow; but each must answer a newer signal than the one before it. A run
+/// that answers nothing new is a redundant rerun, and fails.
+fn idle_without_repeats(rx: &std::sync::mpsc::Receiver<Decision>, mut covered: u64) {
+    loop {
+        match decision(rx, "the worker to go idle", |d| matches!(d, Decision::Skipped(..) | Decision::Deferred)) {
+            Decision::Idle => return,
+            Decision::Ran { covers, .. } => {
+                assert!(covers > covered, "a rerun answered no new signal (covers {covers}, already {covered})");
+                covered = covers;
+            }
+            d => panic!("before going idle: {d:?}"),
+        }
+    }
 }
 
 fn fast_timing() -> GitTiming {
@@ -308,7 +325,8 @@ fn slow_mode_trips_on_two_slow_runs_skips_worktree_edges_and_recovers() {
     // Slow: worktree changes, finished commands and agent edits no longer run git.
     for t in [Trigger::Worktree, Trigger::Command, Trigger::Agent] {
         hub.git_signal(t);
-        assert_eq!(decision(&rx, "the slow-mode skip", |d| !matches!(d, Decision::Skipped(..))), Decision::Skipped(t, SkipWhy::Slow));
+        // Waits for this edge's own report: one the watcher's edges add is the same skip.
+        decision(&rx, &format!("{t:?} skipped as slow"), |d| *d != Decision::Skipped(t, SkipWhy::Slow));
     }
 
     // A fast run (on a manual refresh) ends it.
@@ -400,22 +418,24 @@ fn signals_during_a_run_collapse_into_one_rerun() {
     settle_git(&core, &rx);
 
     let n = stub.runs();
+    // Returns once a run is inside the stub (the FIFO opened): at least one more run started.
     let gate = stub.hold_next(|| hub.git_signal(Trigger::Manual));
-    assert_eq!(stub.runs(), n + 1);
+    assert!(stub.runs() > n);
     for _ in 0..20 {
         hub.git_signal(Trigger::Manual);
         hub.git_signal(Trigger::Index);
     }
     let all = core.test_signals();
     drop(gate);
-    // The held run (it answers only the signal that started it), exactly one more that
-    // answers all forty, then nothing due.
-    let after: Vec<Decision> = (0..3).map(|_| decision(&rx, "the held run, the rerun, then idle", |_| false)).collect();
-    assert!(
-        matches!(after[..], [Decision::Ran { covers: held, .. }, Decision::Ran { covers: rerun, .. }, Decision::Idle] if held < all && rerun == all),
-        "{after:?} (signals: {all})"
-    );
-    assert_eq!(stub.runs(), n + 2, "twenty signals during one run make exactly one more run");
+    // The held run answers only the signal that started it; the very next run answers all
+    // forty that came in meanwhile. Nothing after that repeats it: a later run is there only
+    // for a newer signal (the real watcher may add one under load).
+    let held = decision(&rx, "the held run", |_| false);
+    assert!(matches!(held, Decision::Ran { covers, .. } if covers < all), "{held:?} (signals: {all})");
+    let rerun = decision(&rx, "the rerun", |_| false);
+    let Decision::Ran { covers: rerun, .. } = rerun else { panic!("not a run: {rerun:?}") };
+    assert!(rerun >= all, "the rerun answered {rerun} of {all} signals: twenty signals during one run make one more run");
+    idle_without_repeats(&rx, rerun);
     ft.close(ack.sub_id);
     let _ = std::fs::remove_dir_all(&r);
     let _ = std::fs::remove_dir_all(&bin);
