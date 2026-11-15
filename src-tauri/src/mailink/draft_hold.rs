@@ -314,8 +314,9 @@ fn hold_reason(app: &AppState, tab_id: &str, text: &str) -> Option<&'static str>
 /// Why a shell-mode command (`! …`, a blocker card's Run — docs/tasks.md §3.1.2) can't be typed
 /// into this tab's agent NOW, or `None` when it can. Stricter than a message, and never held: it
 /// is a click the human is looking at, so it is refused with the reason instead of typed later.
-/// Mid-turn is a refusal too, as for a slash command: whether Claude queues a shell-mode line
-/// typed while it works is untested.
+/// Mid-turn is NOT a refusal: Claude queues a shell-mode line typed while it works and runs it
+/// when the turn ends, like any message (2026-11-15, Claude Code 2.1.325, seen by Darryl and on
+/// a scratch session: `! echo SHELL$((40+2))MARK` typed during a `sleep 25` printed SHELL42MARK).
 pub(crate) fn shell_line_refusal(app: &AppState, tab_id: &str, line: &str) -> Option<&'static str> {
     if super::runtime_for_tab(app, tab_id) != Some(AgentRuntime::Claude) {
         return Some("not_claude");
@@ -323,13 +324,7 @@ pub(crate) fn shell_line_refusal(app: &AppState, tab_id: &str, line: &str) -> Op
     if has_held(tab_id) {
         return Some("queued_behind");
     }
-    if let Some(why) = hold_reason(app, tab_id, line) {
-        return Some(why);
-    }
-    if !crate::claude_code::mod_inbox::agent_between_turns(app, tab_id) {
-        return Some("busy");
-    }
-    None
+    hold_reason(app, tab_id, line)
 }
 
 /// Queue a message for this tab; starts the tab's worker if none is running.
