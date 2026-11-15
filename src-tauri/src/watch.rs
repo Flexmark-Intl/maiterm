@@ -192,8 +192,9 @@ struct SshParse {
 }
 
 /// Where the remote command starts among `cmd`'s words (`parse_ssh`). The frontend's
-/// `remoteCommandIndex` is the same walk; the two are checked against one table.
-#[cfg(test)]
+/// `remoteCommandIndex` is the same walk; the two are checked against one table (in `tests`,
+/// which is unix-only).
+#[cfg(all(test, unix))]
 pub(crate) fn remote_command_index(cmd: &str) -> usize {
     parse_ssh(cmd).remote_at
 }
