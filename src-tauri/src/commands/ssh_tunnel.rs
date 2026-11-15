@@ -224,7 +224,14 @@ fn note_tunnel_dropped(host_key: &str, remote_port: u16, tab_count: usize) {
 /// week here, so it is the common case, not the corner. It is cleared on SUCCESS instead.
 fn peek_dropped_tunnel(host_key: &str) -> Option<DroppedTunnel> {
     let dropped = dropped_tunnels().lock().get(host_key).copied()?;
-    (dropped.at.elapsed() < RECLAIM_BREADCRUMB_TTL).then_some(dropped)
+    breadcrumb_live(dropped.at.elapsed()).then_some(dropped)
+}
+
+/// Is a breadcrumb this old still worth acting on? Apart from `peek_dropped_tunnel` so a test
+/// can ask about an age without fabricating an old `Instant`, which panics on Windows when the
+/// machine has been up for less than that age.
+fn breadcrumb_live(age: std::time::Duration) -> bool {
+    age < RECLAIM_BREADCRUMB_TTL
 }
 
 /// Cleared once a tunnel is actually up for this host — on the reclaimed port or, having lost
@@ -1829,27 +1836,21 @@ mod tests {
     #[test]
     fn a_breadcrumb_no_reconnect_claimed_expires() {
         let host = "-x -C ews@nova-breadcrumb-ttl-test";
-        dropped_tunnels().lock().insert(
-            host.to_string(),
-            DroppedTunnel {
-                remote_port: 28623,
-                tab_count: 5,
-                at: std::time::Instant::now() - (RECLAIM_BREADCRUMB_TTL + std::time::Duration::from_secs(1)),
-            },
+        assert!(
+            !breadcrumb_live(RECLAIM_BREADCRUMB_TTL + std::time::Duration::from_secs(1)),
+            "past the TTL, it is not acted on"
         );
-        assert!(peek_dropped_tunnel(host).is_none(), "past the TTL, it is not acted on");
 
         // Just inside the window is still live — the outage it describes can outlast several
         // frontend backoff rounds, and its agents outlive it by hours.
-        dropped_tunnels().lock().insert(
-            host.to_string(),
-            DroppedTunnel {
-                remote_port: 28623,
-                tab_count: 5,
-                at: std::time::Instant::now() - (RECLAIM_BREADCRUMB_TTL - std::time::Duration::from_secs(60)),
-            },
+        assert!(
+            breadcrumb_live(RECLAIM_BREADCRUMB_TTL - std::time::Duration::from_secs(60)),
+            "a long outage still earns its reclaim"
         );
-        assert!(peek_dropped_tunnel(host).is_some(), "a long outage still earns its reclaim");
+
+        // And the peek asks it about the breadcrumb's real age.
+        note_tunnel_dropped(host, 28623, 5);
+        assert!(peek_dropped_tunnel(host).is_some(), "a fresh breadcrumb is acted on");
         clear_dropped_tunnel(host);
     }
 

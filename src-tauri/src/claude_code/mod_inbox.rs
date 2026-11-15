@@ -101,15 +101,16 @@ impl Inbox {
 }
 
 struct PollGuard<'a> {
-    tabs: &'a Mutex<HashMap<String, Inbox>>,
+    inbox: &'a ModInbox,
     tab_id: &'a str,
 }
 
 impl Drop for PollGuard<'_> {
     fn drop(&mut self) {
-        if let Some(inbox) = self.tabs.lock().get_mut(self.tab_id) {
+        let now = self.inbox.now();
+        if let Some(inbox) = self.inbox.tabs.lock().get_mut(self.tab_id) {
             inbox.polling = inbox.polling.saturating_sub(1);
-            inbox.last_poll = Instant::now();
+            inbox.last_poll = now;
         }
     }
 }
@@ -127,12 +128,30 @@ pub enum Polled {
 pub struct ModInbox {
     tabs: Mutex<HashMap<String, Inbox>>,
     seq: std::sync::atomic::AtomicU64,
+    /// How far tests have moved this inbox's clock forward (`advance_clock`).
+    #[cfg(test)]
+    skew: Mutex<Duration>,
 }
 
 impl ModInbox {
+    /// The clock liveness and the unstarted record are judged by. A test moves it FORWARD
+    /// rather than back-dating a poll: an `Instant` before the machine booted panics on Windows.
+    /// Delivery's own deadlines stay on the real clock: they are waits, not judgements.
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        return Instant::now() + *self.skew.lock();
+        #[cfg(not(test))]
+        Instant::now()
+    }
+
+    #[cfg(test)]
+    fn advance_clock(&self, by: Duration) {
+        *self.skew.lock() += by;
+    }
+
     /// A mod is polling for this tab.
     pub fn is_live(&self, tab_id: &str) -> bool {
-        let now = Instant::now();
+        let now = self.now();
         self.tabs.lock().get(tab_id).is_some_and(|i| i.is_live(now))
     }
 
@@ -140,7 +159,7 @@ impl ModInbox {
     /// for one.
     pub async fn poll(&self, tab_id: &str, wait: Duration) -> Polled {
         let wake = {
-            let now = Instant::now();
+            let now = self.now();
             let mut tabs = self.tabs.lock();
             tabs.retain(|_, i| i.polling > 0 || now.duration_since(i.last_poll) < FORGET_AFTER);
             let inbox = tabs.entry(tab_id.to_string()).or_insert_with(|| Inbox::new(now));
@@ -158,7 +177,7 @@ impl ModInbox {
             inbox.polling += 1;
             inbox.wake.clone()
         };
-        let guard = PollGuard { tabs: &self.tabs, tab_id };
+        let guard = PollGuard { inbox: self, tab_id };
         // `notify_one` leaves a permit when nothing waits yet, so an offer queued between the
         // lock above and this wait is not missed.
         let _ = tokio::time::timeout(wait.min(MAX_WAIT), wake.notified()).await;
@@ -180,7 +199,7 @@ impl ModInbox {
         o.stage = Stage::Acked;
         let inbox = tabs.get_mut(tab_id).expect("found above");
         let seen = inbox.prompts;
-        inbox.unstarted.push((id.to_string(), Instant::now(), seen));
+        inbox.unstarted.push((id.to_string(), self.now(), seen));
         true
     }
 
@@ -215,7 +234,7 @@ impl ModInbox {
 
     /// A prompt the mod submitted for this tab is still waiting in Claude for its turn.
     pub fn has_unstarted(&self, tab_id: &str) -> bool {
-        let now = Instant::now();
+        let now = self.now();
         let mut tabs = self.tabs.lock();
         let Some(inbox) = tabs.get_mut(tab_id) else { return false };
         // A report lost on the way only keeps prompts on the mod a while longer.
@@ -236,7 +255,7 @@ impl ModInbox {
     pub async fn deliver(&self, tab_id: &str, text: &str, between_turns: bool) -> bool {
         let id = format!("i{}", self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         {
-            let now = Instant::now();
+            let now = self.now();
             let mut tabs = self.tabs.lock();
             let Some(inbox) = tabs.get_mut(tab_id).filter(|i| i.is_live(now)) else { return false };
             inbox.offers.push_back(Offer { id: id.clone(), text: text.to_string(), stage: Stage::Queued });
@@ -440,7 +459,7 @@ mod tests {
         assert!(inbox.ack("tab", &id));
         assert!(delivering.await.unwrap());
         // The agent exits with the prompt still queued; no `started` ever comes.
-        inbox.tabs.lock().get_mut("tab").unwrap().last_poll = Instant::now() - STALE_AFTER;
+        inbox.advance_clock(STALE_AFTER);
         assert!(!inbox.has_unstarted("tab"));
         // Its replacement polls: mid-turn prompts must not be routed to it on the old one's account.
         let _ = inbox.poll("tab", Duration::from_millis(1)).await;
@@ -513,7 +532,7 @@ mod tests {
         assert_eq!(inbox.tabs.lock().get("tab").map(|i| i.polling), Some(0));
         // Still live for STALE_AFTER: the mod re-polls between rounds.
         assert!(inbox.is_live("tab"));
-        inbox.tabs.lock().get_mut("tab").unwrap().last_poll = Instant::now() - STALE_AFTER;
+        inbox.advance_clock(STALE_AFTER);
         assert!(!inbox.is_live("tab"));
     }
 }

@@ -3900,8 +3900,9 @@ async fn process_message(
                         // hooks only get_mut an existing entry.
                         let pending_claim = {
                             let mut pending = state.pending_agent_sessions.write();
-                            let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(30);
-                            pending.retain(|(_, _, ts)| *ts > cutoff);
+                            // Age by `elapsed`, never `now - 30s`: that subtraction panics on
+                            // Windows in a machine's first 30 s of uptime.
+                            pending.retain(|(_, _, ts)| ts.elapsed() < std::time::Duration::from_secs(30));
                             if !session_id.is_empty() {
                                 // The entry was already inserted above from the passed sessionId;
                                 // its buffered twin (if the SessionStart hook raced us here) is
@@ -5349,8 +5350,9 @@ async fn hooks_handler(
                         // happens before either agent ends, which makes the guard
                         // order-independent.
                         let mut contested = srv.state.contested_agent_sessions.write();
-                        let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(24 * 3600);
-                        contested.retain(|_, ts| *ts > cutoff);
+                        // Age by `elapsed`, never `now - 24h`: that subtraction panics on a
+                        // Windows machine that has been up for less than a day.
+                        contested.retain(|_, ts| ts.elapsed() < std::time::Duration::from_secs(24 * 3600));
                         contested.insert(session_id.clone(), std::time::Instant::now());
                     }
                 }
@@ -5399,9 +5401,9 @@ async fn hooks_handler(
                     if matches!(started, AgentSessionState::Active) { "active" } else { "idle" });
             } else if !session_id.is_empty() {
                 let mut pending = srv.state.pending_agent_sessions.write();
-                // Clean entries older than 30s
-                let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(30);
-                pending.retain(|(_, _, ts)| *ts > cutoff);
+                // Clean entries older than 30s (by `elapsed`: `now - 30s` panics on Windows in
+                // a machine's first 30 s of uptime)
+                pending.retain(|(_, _, ts)| ts.elapsed() < std::time::Duration::from_secs(30));
 
                 // Both checks happen HERE, under the pending write lock, because both races
                 // are live: two SessionStarts now arrive per Claude session (ours carrying
