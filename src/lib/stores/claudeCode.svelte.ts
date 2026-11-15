@@ -2152,6 +2152,9 @@ function createClaudeCodeStore() {
     for (const [i, t] of inputs.entries()) {
       if (!t.blocker) continue;
       const parsed = agentBlocker(t.blocker, loc.tab.id);
+      if (parsed.ok && parsed.blocker.run_in && t.assign_to_me === false) {
+        return { error: `tasks[${i}] "${t.title!.trim()}": a card whose command is for another tab (blocker.run_in) stays on the tab that asked, so it can't go on an unassigned task. Nothing was created.` };
+      }
       if (!parsed.ok) return { error: `tasks[${i}] "${t.title!.trim()}": ${parsed.detail} Nothing was created.` };
       blockers.set(i, parsed.blocker);
     }
@@ -2297,6 +2300,21 @@ function createClaudeCodeStore() {
             continue;
           }
           blocker = parsed.blocker;
+        }
+        // A command for another tab names a peer of the CALLER, and the asker told after Run is
+        // the row's carrier: the two must be the same tab, or a third tab is told it ran
+        // something it never asked for (docs/tasks.md §3.1.3).
+        if (blocker !== undefined || assignTo !== undefined) {
+          const finalBlocker = blocker !== undefined ? blocker : list[idx].blocker;
+          const finalTab = assignTo !== undefined ? assignTo : list[idx].tab_id;
+          if (finalBlocker?.run_in && finalTab !== loc.tab.id) {
+            refused.push({
+              id: u.id!,
+              reason: 'bad_blocker',
+              detail: 'A card whose command is for another tab (blocker.run_in) stays on the tab that asked: put it on a task you carry, or clear the blocker before handing the task on. Nothing in this update was applied.',
+            });
+            continue;
+          }
         }
         const patch: Partial<Task> = { updated_at: new Date().toISOString() };
         if (assignTo !== undefined) patch.tab_id = assignTo;

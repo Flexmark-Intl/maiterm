@@ -492,6 +492,13 @@ agent aim a command, run by the human's click, at a session it has nothing to do
   <tab>'s agent saw the output, you did not" (`answerBlocker`, same stale guard). The `tab`
   path leaves the question open for "I've done it", as before.
 - **The phone** gets `blocker.runIn` (maiLink 0.28): `run` there describes that tab.
+- **It stays on the tab that asked.** The row's carrier is the agent told after Run, and
+  `run_in` names a peer of the agent that FILED it, so the two must be one tab: `run_in` is
+  refused on an unassigned task and on another tab's task, and a hand-off of a row carrying one
+  is refused until its blocker is cleared. The card's receipt says whether the asker was told.
+- **It follows the tab's id.** `tasksStore.remapTab` (reload) rewrites `run_in` with `tab_id`.
+  A Workspace Share import maps it through the import's tab map; a peer outside the shared
+  workspace gets an id no tab has, so Run refuses rather than running anywhere else.
 
 ## 4. Workstreams
 

@@ -314,11 +314,19 @@ function createTasksStore() {
      *  another tab that happens to use the same title. Mirrors agentBridge/agentMesh
      *  `remapTab`, which exist for the same reason. */
     remapTab(oldTabId: string, newTabId: string) {
+      // A card's command FOR this tab (`blocker.run_in`, docs/tasks.md §3.1.3) follows it too:
+      // left on the old id, the card would name a hex id and its Run refuse a tab still open.
+      const moves = (t: Task) => t.tab_id === oldTabId || t.blocker?.run_in === oldTabId;
       for (const [workspaceId, list] of [...byWorkspace]) {
-        if (!list.some((t) => t.tab_id === oldTabId)) continue;
+        if (!list.some(moves)) continue;
         commit(
           workspaceId,
-          list.map((t) => (t.tab_id === oldTabId ? { ...t, tab_id: newTabId } : t)),
+          list.map((t) => {
+            if (!moves(t)) return t;
+            const next = t.tab_id === oldTabId ? { ...t, tab_id: newTabId } : { ...t };
+            if (next.blocker?.run_in === oldTabId) next.blocker = { ...next.blocker, run_in: newTabId };
+            return next;
+          }),
         );
       }
     },

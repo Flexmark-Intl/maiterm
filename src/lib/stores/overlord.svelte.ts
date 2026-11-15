@@ -3773,7 +3773,7 @@ function createOverlordStore() {
       id: string,
       askedAt: string,
       from: 'desktop' | 'phone' = 'desktop',
-    ): Promise<{ ran: true; where: 'agent' | 'tab' } | { ran: false; detail: string }> {
+    ): Promise<{ ran: true; where: 'agent' | 'tab'; askerTold?: boolean } | { ran: false; detail: string }> {
       const hit = tasksStore.findAnywhere(id);
       if (!hit) return { ran: false, detail: 'No such task.' };
       const { workspaceId, task } = hit;
@@ -3821,12 +3821,12 @@ function createOverlordStore() {
           // The output went to THAT agent, not the asker, so the asker is told as an answer
           // (which closes the question, re-checking asked_at after the await like below).
           const name = tabDisplayName(forOther);
-          await this.answerBlocker(id, {
+          const told = await this.answerBlocker(id, {
             asked_at: askedAt,
             text: `Ran it from the card in ${name}'s tab: ${run.line}\n${name}'s agent saw the output, you did not. Check with it how it went.`,
           });
-          logInfo(`overlord: blocker command for ${id.slice(0, 8)} typed into the tab it is for, ${forOther.slice(0, 8)} (${from})`);
-          return { ran: true, where: 'agent' };
+          logInfo(`overlord: blocker command for ${id.slice(0, 8)} typed into the tab it is for, ${forOther.slice(0, 8)} (${from}); asker told: ${told.answered ? told.told : told.reason}`);
+          return { ran: true, where: 'agent', askerTold: told.answered && told.told !== 'nobody' };
         }
         // Re-read: the await let the agent re-ask, and its new question must not be closed.
         const now = tasksStore.findAnywhere(id)?.task;

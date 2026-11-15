@@ -215,7 +215,9 @@
           ? r.detail
           : r.where === 'agent'
             ? runInName
-              ? `Typed into ${runInName}. That agent sees the output, and the agent that asked was told.`
+              ? r.askerTold
+                ? `Typed into ${runInName}. That agent sees the output, and the agent that asked was told.`
+                : `Typed into ${runInName}. That agent sees the output, but the agent that asked could not be told.`
               : 'Typed into the agent’s tab. It sees the output, so the question is closed.'
             : 'Running in a new tab. Click I’ve done it once it has finished.',
       );
