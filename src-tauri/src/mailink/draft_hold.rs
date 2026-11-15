@@ -357,8 +357,18 @@ fn why_text(why: &str) -> &'static str {
         "ordering" => "an earlier prompt is still waiting for its turn",
         "queued_behind" => "an earlier message is still waiting",
         "usage_limit" => "the agent is waiting out a usage limit",
+        "returned" => "Claude dropped it after the agent's mod submitted it",
         _ => "waiting",
     }
+}
+
+/// A prompt the tab's mod submitted and Claude dropped, reported after its sender had stopped
+/// waiting (`ModInbox::started`, `Handover::Pending`): it never ran, so it is typed like any held
+/// message, behind whatever already waits. Not the sender's msg_id: that sender was answered
+/// already, so the outcome is only logged.
+pub(crate) fn hand_back(app: Arc<AppState>, tab_id: &str, text: String) {
+    let h = Held { msg_id: new_msg_id(), paths: Vec::new(), text, what: "prompt Claude dropped", desktop: true };
+    hold(app, tab_id, h, "returned");
 }
 
 /// What `deliver_or_hold` did with a message.

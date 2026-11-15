@@ -277,6 +277,16 @@ pub fn run() {
     let fd_limit_raise = raise_fd_limit();
 
     let app_state = Arc::new(AppState::new());
+    // A prompt the agent's mod held that Claude dropped late is typed through the hold queue
+    // (claude_code/mod_inbox.rs). Weak: the inbox lives inside the state it hands back to.
+    {
+        let state = Arc::downgrade(&app_state);
+        app_state.mod_inbox.set_hand_back(move |tab_id, text| {
+            if let Some(app) = state.upgrade() {
+                crate::mailink::draft_hold::hand_back(app, tab_id, text);
+            }
+        });
+    }
 
     // Load persisted state and run migration
     {

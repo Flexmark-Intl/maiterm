@@ -4177,8 +4177,13 @@ pub(crate) async fn inject_text(
 /// How a prompt reached the agent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Delivered {
-    /// Handed to the tab's maiterm-tab mod, which submits it (claude_code/mod_inbox.rs).
+    /// Handed to the tab's maiterm-tab mod, which submitted it, and Claude ran it
+    /// (claude_code/mod_inbox.rs).
     Agent,
+    /// Handed to the tab's maiterm-tab mod, which is submitting it, with no report yet whether
+    /// Claude ran it (a turn began first, or it was sent mid-turn): unknown, not delivered. It
+    /// must not be typed — it may still run — and the inbox settles it: a drop is typed then.
+    AgentPending,
     /// Typed into the terminal and submitted with a CR.
     Keys,
 }
@@ -4195,12 +4200,19 @@ pub(crate) async fn submit_prompt(
     text: &str,
 ) -> Result<Delivered, String> {
     use crate::claude_code::mod_inbox;
-    if mod_inbox::offerable(text)
-        && mod_inbox::takes_now(app, tab_id)
-        && app.mod_inbox.deliver(tab_id, text, mod_inbox::agent_between_turns(app, tab_id)).await
-    {
-        log::info!("[maiLink] prompt for tab {tab_id} → the agent ({} chars)", text.chars().count());
-        return Ok(Delivered::Agent);
+    if mod_inbox::offerable(text) && mod_inbox::takes_now(app, tab_id) {
+        match app.mod_inbox.deliver(tab_id, text, mod_inbox::agent_between_turns(app, tab_id)).await {
+            mod_inbox::Handover::Ran => {
+                log::info!("[maiLink] prompt for tab {tab_id} → the agent ({} chars)", text.chars().count());
+                return Ok(Delivered::Agent);
+            }
+            mod_inbox::Handover::Pending => {
+                log::info!("[maiLink] prompt for tab {tab_id} → the agent, not reported run yet ({} chars)", text.chars().count());
+                return Ok(Delivered::AgentPending);
+            }
+            // Nothing was submitted, or nothing ran: typed below.
+            mod_inbox::Handover::NotTaken | mod_inbox::Handover::Dropped => {}
+        }
     }
     if app.mod_inbox.is_live(tab_id) && draft_hold::draft_in_box(app, tab_id) {
         return Err("the human has a draft in the agent's input box, and the prompt can't go around it".into());

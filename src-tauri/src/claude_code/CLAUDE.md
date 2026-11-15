@@ -583,7 +583,21 @@ interactive session's mod keeps one long-poll open on `GET /hooks/inbox?tab_id=`
 `session.start` (only when `isInteractive`: a `claude -p` an agent runs inherits the tab's env). It
 acks each offer (`&ack=<id>`: 204 go, 410 retracted) and then calls `$.prompt.submit({ text,
 asUser: true })`. Delivery is take-or-retract with that ack, so a prompt is submitted exactly when
-`deliver` reported it delivered.
+`deliver` reported the mod has it.
+
+**Whether it RAN is the mod's `&started=<id>` report, never a clock** (2026-11-15). Claude drops
+every submit after an Esc interrupt (2.1.316), so `deliver` answers a `Handover`: `Ran` (the
+report came, with a `UserPromptSubmit` since the ack), `Dropped` (the report came without one;
+the caller types it), `NotTaken` (no ack: retracted), or `Pending` (acked, no report yet). Between
+turns it waits up to 3 s for the report, on the report's own wakeup; mid-turn it answers `Pending`
+at the ack. **`Pending` is not delivered and must not be typed**: it may still run. The inbox
+settles it when its report comes, matched by id however late: a drop is handed back to the
+draft-hold queue to be typed (`set_hand_back` → `draft_hold::hand_back`), once. A mod that goes
+away before reporting takes the prompt's fate with it: logged, never retyped (at-most-once). Until
+2026-11-15 a report past the 3 s counted as delivered, so a late drop was lost silently.
+`submit_prompt` answers `Delivered::AgentPending`, `deliver_to_agent` `pending: true`, and
+`submit_prompt_to_agent` `true` (so the frontend doesn't type it). The phone's `POST /message`
+still answers `delivered` for one: no wire change.
 
 The one rule is `mod_inbox::takes_now`: a mod is polling AND the agent is between turns. There a
 draft no longer holds anything: the mod submits around it.
