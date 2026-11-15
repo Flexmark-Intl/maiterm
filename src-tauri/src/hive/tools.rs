@@ -498,15 +498,9 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
             super::waiters::poll_soon(state.clone(), handle.clone(), caller.workspace_id.clone());
         });
     }
-    // Likewise the coordinator after Done: its last words reach it, then it is ended once idle.
-    if res.is_ok() && tool == "hiveFinish" {
-        let (state, handle, caller) = (state.clone(), handle.clone(), caller.clone());
-        tauri::async_runtime::spawn(async move {
-            let ctx = app_ctx(&state, &handle, &caller);
-            use super::finish::{EXIT_MAX_WAIT, EXIT_MIN_WAIT, EXIT_POLL};
-            super::finish::exit_coordinator(&ctx, &caller, EXIT_MIN_WAIT, EXIT_POLL, EXIT_MAX_WAIT).await;
-        });
-    }
+    // The coordinator is NOT ended after Done (Darryl, 2026-11-15): an idle agent costs no tokens,
+    // and a relaunch to take the human's next message raced its session start (Claude, still
+    // loading, took the CR after the typed wake as a newline). A wake types into her as she is.
     res.unwrap_or_else(|e| {
         log::info!("hive {}: {tool} refused: {e}", caller.hive.id);
         json!({ "error": e })

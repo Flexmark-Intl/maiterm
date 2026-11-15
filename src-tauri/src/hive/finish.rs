@@ -1255,7 +1255,7 @@ pub(crate) async fn finish_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         "done": true,
         "finish": record.id,
         "stack": stack,
-        "note": "maiTerm ends your session in a moment. A message from your human wakes this Hive.",
+        "note": "Your session stays open, and only the tools that read work until your human writes to you: their message wakes this Hive.",
     }))
 }
 

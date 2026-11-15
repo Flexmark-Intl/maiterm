@@ -2898,11 +2898,17 @@ Rust **refuses** `hiveFinish` while:
 On accept, maiTerm posts the report in the coordinator's column, records `done_at`, sets the
 Hive's `status` to `done`, stops the stack services **the Hive started** (never one it only
 references through `shared_from`, §6.8), cancels the Hive tabs' follow-ups and watch scripts,
-and exits the coordinator. A Done Hive has no running agents, no watchers and costs nothing.
+and leaves the coordinator running (2026-11-15; it used to be ended, `exit_coordinator`). A Done
+Hive has no workers, no watchers and spends nothing: an idle agent costs no tokens, and its tools
+are limited to reads until a wake.
 
-**Waking it.** A message from the human to a Done Hive's coordinator column relaunches the
-coordinator through the launch builder (§11.1), resuming its session, and delivers the message
-through `deliver_to_agent` once its first prompt is up. The Hive's status goes back to `active`.
+**Waking it.** A message from the human to a Done Hive's coordinator column sets the Hive back to
+`active` and types the message into her through `deliver_to_agent`, as into any agent tab. Only
+when she isn't running (after a maiTerm restart, which launches nothing in a Done Hive, or a
+crash) is she relaunched through the launch builder (§11.1), resuming her session, with the
+message owed to that session's start. Ending her at Done was dropped because that relaunch
+raced: the message was typed in the second her session started, and Claude, still loading, took
+the CR as a newline, leaving it unsent in her box.
 
 ### 11.5 New goal (Darryl's direction, 2026-10-31)
 
