@@ -15,23 +15,78 @@
 //!
 //! Every path handed to a matcher is relative to that matcher's own folder, built from rels, so
 //! no matcher ever has to guess a prefix.
+//!
+//! Each matcher remembers the file it was built from as it was then (`Stamp`), so an edge can
+//! find a `.gitignore` or `info/exclude` whose watcher event was lost (§6.1, `IgnoreStack::stamps`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::Match;
 
 use super::paths::{join_rel, split_parent};
 
+/// A rules file as it was when a matcher was read from it, taken just before the read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Stamp {
+    Absent,
+    At(SystemTime, u64),
+    /// Its mtime is too recent to tell a later edit apart on a coarse volume: always re-read.
+    Unsure,
+}
+
+fn stamp(path: &Path, now: SystemTime) -> Stamp {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => match m.modified() {
+            Ok(t) if super::hub::trusted_mtime(t, now) => Stamp::At(t, m.len()),
+            _ => Stamp::Unsure,
+        },
+        _ => Stamp::Absent,
+    }
+}
+
 /// What one folder contributes to the stack.
 struct Folder {
     /// Its `.gitignore`, when it has one.
     gi: Option<Gitignore>,
+    gi_stamp: Stamp,
     /// It holds `.git`: a repository starts here.
     repo_root: bool,
     /// That repository's `info/exclude`, when `repo_root`.
     info_exclude: Option<Gitignore>,
+    /// The `info/exclude` file read and its stamp, when one was looked for.
+    info_exclude_file: Option<(PathBuf, Stamp)>,
+}
+
+/// The rules files the stack was read from, with their stamps, to compare against the disk with
+/// no lock held (`IgnoreStack::stamps`, then `moved`).
+pub struct Stamps {
+    /// (folder rel, its `.gitignore` and stamp, its `.git` and whether it was there (below the
+    /// root only: the root's own repository is the hub's), its repository's `info/exclude` and
+    /// stamp when one was looked for).
+    folders: Vec<(String, (PathBuf, Stamp), Option<(PathBuf, bool)>, Option<(PathBuf, Stamp)>)>,
+    root_exclude: Option<(PathBuf, Stamp)>,
+}
+
+impl Stamps {
+    /// Reads the disk. The folders whose rules changed since they were read, and whether the
+    /// root repository's `info/exclude` did.
+    pub fn moved(&self) -> (Vec<String>, bool) {
+        let now = SystemTime::now();
+        let changed = |p: &Path, was: Stamp| was == Stamp::Unsure || stamp(p, now) != was;
+        let folders = self
+            .folders
+            .iter()
+            .filter(|(_, (gi, gs), git, ex)| {
+                changed(gi, *gs) || git.as_ref().is_some_and(|(p, was)| std::fs::symlink_metadata(p).is_ok() != *was) || ex.as_ref().is_some_and(|(p, s)| changed(p, *s))
+            })
+            .map(|f| f.0.clone())
+            .collect();
+        let root = self.root_exclude.as_ref().is_some_and(|(p, s)| changed(p, *s));
+        (folders, root)
+    }
 }
 
 /// One folder's matchers, borrowed from the stack.
@@ -77,6 +132,8 @@ pub struct IgnoreStack {
     root_in_repo: bool,
     /// `info/exclude` of the repository the root is in, rooted at the root.
     root_exclude: Option<Gitignore>,
+    /// That file and its stamp, when the root is in a repository.
+    root_exclude_file: Option<(PathBuf, Stamp)>,
     /// `core.excludesFile`, read once per hub, rooted at the root.
     global: Option<Gitignore>,
     /// The user's `file_tree_exclude`.
@@ -107,6 +164,15 @@ fn build_lines(root: &Path, lines: &[String]) -> Option<Gitignore> {
     b.build().ok().filter(|g| !g.is_empty())
 }
 
+/// The root repository's `info/exclude`: the file and its stamp, and its rules.
+fn read_root_exclude(root: &Path, git_dir: Option<&Path>) -> (Option<(PathBuf, Stamp)>, Option<Gitignore>) {
+    let Some(g) = git_dir else { return (None, None) };
+    let file = g.join("info").join("exclude");
+    let st = stamp(&file, SystemTime::now());
+    let rules = build_file(root, &file);
+    (Some((file, st)), rules)
+}
+
 /// A match as a verdict: Ignore = true, Whitelist (`!pattern`) = false, None = undecided.
 fn decide<T>(m: Match<T>) -> Option<bool> {
     match m {
@@ -134,10 +200,12 @@ impl IgnoreStack {
     }
 
     fn with(root: &Path, git_dir: Option<&Path>, global: Option<Gitignore>, user_excludes: &[String]) -> Self {
+        let (root_exclude_file, root_exclude) = read_root_exclude(root, git_dir);
         IgnoreStack {
             root: root.to_path_buf(),
             root_in_repo: git_dir.is_some(),
-            root_exclude: git_dir.and_then(|g| build_file(root, &g.join("info").join("exclude"))),
+            root_exclude,
+            root_exclude_file,
             global,
             user: build_lines(root, user_excludes),
             folders: HashMap::new(),
@@ -166,9 +234,19 @@ impl IgnoreStack {
             // by `root_exclude`; `.git` as a FILE is a linked worktree or submodule, whose
             // info/exclude lives elsewhere and is skipped.
             let repo_root = !rel.is_empty() && std::fs::symlink_metadata(&dot_git).is_ok();
-            let info_exclude = if repo_root && dot_git.is_dir() { build_file(&abs, &dot_git.join("info").join("exclude")) } else { None };
-            let gi = build_file(&abs, &abs.join(".gitignore"));
-            self.folders.insert(rel.to_string(), Folder { gi, repo_root, info_exclude });
+            // Stamped before each read: an edit during the read leaves a stamp that differs.
+            let now = SystemTime::now();
+            let (info_exclude, info_exclude_file) = if repo_root && dot_git.is_dir() {
+                let file = dot_git.join("info").join("exclude");
+                let st = stamp(&file, now);
+                (build_file(&abs, &file), Some((file, st)))
+            } else {
+                (None, None)
+            };
+            let gi_file = abs.join(".gitignore");
+            let gi_stamp = stamp(&gi_file, now);
+            let gi = build_file(&abs, &gi_file);
+            self.folders.insert(rel.to_string(), Folder { gi, gi_stamp, repo_root, info_exclude, info_exclude_file });
         }
         &self.folders[rel]
     }
@@ -244,11 +322,28 @@ impl IgnoreStack {
         self.dir_ignored.clear();
     }
 
+    /// Every rules file the stack has read, with its stamp, for `Stamps::moved` (no lock held
+    /// while it reads the disk).
+    pub fn stamps(&self) -> Stamps {
+        let folders = self
+            .folders
+            .iter()
+            .filter_map(|(rel, f)| {
+                let abs = super::paths::rel_to_native(&self.root, rel).ok()?;
+                let git = (!rel.is_empty()).then(|| (abs.join(".git"), f.repo_root));
+                Some((rel.clone(), (abs.join(".gitignore"), f.gi_stamp), git, f.info_exclude_file.clone()))
+            })
+            .collect();
+        Stamps { folders, root_exclude: self.root_exclude_file.clone() }
+    }
+
     /// An `info/exclude` changed, or the user's excludes did: start over.
     pub fn invalidate_all(&mut self, git_dir: Option<&Path>, user_excludes: Option<&[String]>) {
         self.folders.clear();
         self.dir_ignored.clear();
-        self.root_exclude = git_dir.and_then(|g| build_file(&self.root, &g.join("info").join("exclude")));
+        let (file, rules) = read_root_exclude(&self.root, git_dir);
+        self.root_exclude_file = file;
+        self.root_exclude = rules;
         if let Some(u) = user_excludes {
             self.user = build_lines(&self.root, u);
         }

@@ -1426,12 +1426,20 @@ All backends feed one **coalescer thread per hub**:
   mtime, read just BEFORE the listing that made it (`listed`), so a change made during the read
   moves it. On an edge, the open folders under the edge's path are stat'd, and only those whose
   mtime moved are re-listed through the usual diff path: an unchanged listing sends nothing.
-  Every change a listing shows (an entry appearing, going or renamed) moves its folder's mtime;
-  a file's content doesn't show in a listing. A whole-second mtime (HFS+, FAT) is trusted only
-  once the clock is past its tick, since a second change within that tick wouldn't move it.
-  Events still patch snapshots as before; a patched folder's mtime no longer matches, so the
-  next edge re-lists it once. A pass first checks the root's repository: a `.git` that
-  appeared or went (a `git init` whose event was lost) reopens the views, as the event would. The edges, all events that already exist, never a timer:
+  An entry appearing, going or renamed moves its folder's mtime; a file's content doesn't show
+  in a listing (its git decoration does: the command and shell-call edges run git). The
+  ignored flag a listing shows follows the `.gitignore` and `info/exclude` files, and an edit
+  to one in place moves no folder's mtime, so each pass also compares every rules file the
+  ignore stack read with the disk (its mtime and length, or its absence, taken just before it
+  was read, `ignore_cache::Stamps`). One that changed is handled as its event would have been:
+  that folder's matcher is dropped (all of them for the root's `info/exclude`), every open
+  folder under it is re-listed whatever its mtime, git runs and Find's index is rebuilt.
+  A whole-second mtime (HFS+, FAT) is trusted only once the clock is past its tick, since a
+  second change within that tick wouldn't move it. Events still patch snapshots as before; a
+  patched folder's mtime no longer matches, so the next edge re-lists it once. A pass first
+  checks the root's repository: a `.git` that appeared or went (a `git init` whose event was
+  lost) reopens the views, as the event would. The edges, all events that already exist,
+  never a timer:
   - the window regaining focus (every time, for a local root);
   - a command finishing in a terminal (OSC 133 D), for the trees showing its shell's folder;
   - an agent's shell call (Bash) ending, for its folder, and an agent's completed write, for

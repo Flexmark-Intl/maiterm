@@ -699,6 +699,46 @@ fn a_hub_is_reaped_after_its_grace() {
     assert!(ft.hub_of(ack.sub_id).is_err());
     std::fs::remove_dir_all(&root).unwrap();
 }
+/// Which rows are flagged ignored follows `.gitignore` and `info/exclude`. A change to one whose
+/// event was lost shows after an edge, even an edit in place, which moves no folder's mtime
+/// (docs/file-tree.md §6.1).
+#[test]
+fn a_lost_ignore_rule_change_shows_after_an_edge() {
+    let root = temp_root("ignedge");
+    std::fs::create_dir_all(root.join("dist")).unwrap();
+    std::fs::write(root.join("dist/bundle.js"), "").unwrap();
+    git_init(&root);
+    std::fs::create_dir_all(root.join(".git/info")).unwrap();
+    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let probe = Probe::new(&ft);
+    let rec = Arc::new(Recorder::default());
+    let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    probe.watching(&hub);
+    probe.idle(&hub);
+    hub.go_deaf();
+    let ignored = || hub.dirs.lock().get("").and_then(|d| d.entries.iter().find(|e| e.n == "dist").map(|e| e.f & super::types::FLAG_IGNORED != 0));
+    let edge = || {
+        let asked = hub.reconcile_asked();
+        ft.note_command_in(&root);
+        probe.reconciled(&hub, asked)
+    };
+    assert_eq!(ignored(), Some(false));
+    std::fs::write(root.join(".gitignore"), "dist/\n").unwrap();
+    let relisted = edge();
+    assert_eq!(ignored(), Some(true), "a new .gitignore (re-listed {relisted:?})");
+    std::fs::write(root.join(".gitignore"), "other/\n").unwrap();
+    let relisted = edge();
+    assert_eq!(ignored(), Some(false), "a .gitignore edited in place (re-listed {relisted:?})");
+    std::fs::write(root.join(".git/info/exclude"), "dist/\n").unwrap();
+    let relisted = edge();
+    assert_eq!(ignored(), Some(true), "the repository's info/exclude (re-listed {relisted:?})");
+    let flipped = rec.msgs.lock().iter().filter(|m| matches!(&m.ev, TreeEvent::Delta { rel, chg, .. } if rel.is_empty() && chg.iter().any(|e| e.n == "dist"))).count();
+    assert_eq!(flipped, 3, "the client saw each flip as a Delta");
+    ft.close(ack.sub_id);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 
 #[test]
 fn locate_spells_names_as_the_disk_does() {

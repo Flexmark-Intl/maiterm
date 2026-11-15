@@ -1076,17 +1076,44 @@ impl RootHub {
 
     /// One pass: stat each open folder under `bases`, re-list those that moved. Returns them.
     /// The root's repository is looked at first: a `.git` that appeared or went is a change of
-    /// the root's shape the watcher may also have lost, and the views reopen for it.
+    /// the root's shape the watcher may also have lost, and the views reopen for it. Then the
+    /// ignore rules: a `.gitignore` or `info/exclude` that changed re-lists what it covers.
     fn reconcile_pass(&self, bases: &BTreeSet<String>) -> Vec<String> {
         if !self.repo_current() {
             self.repo_moved();
             return Vec::new();
         }
-        let under = |rel: &str| bases.iter().any(|b| paths::is_at_or_under(rel, b));
-        let open: Vec<String> = self.dirs.lock().keys().filter(|r| under(r)).cloned().collect();
+        // Which rows are flagged ignored follows the `.gitignore` and `info/exclude` files, and an
+        // edit in place moves no folder's mtime: each rules file the stack read is compared with
+        // the disk (no lock held while it reads), and one that changed is handled as its event
+        // would have been. Every open folder under it is listed again, inside the edge's path
+        // or not, since the rules reach that far.
+        let (rules, exclude) = { self.ignore.lock().stamps() }.moved();
+        let mut forced: Vec<String> = Vec::new();
+        if exclude || !rules.is_empty() {
+            {
+                let mut ig = self.ignore.lock();
+                if exclude {
+                    ig.invalidate_all(self.git_dir(), None);
+                    forced.push(String::new());
+                }
+                for d in rules {
+                    ig.invalidate_folder(&d);
+                    forced.push(d);
+                }
+            }
+            // What git reports as untracked may have changed, and so has what Find indexes.
+            self.git_signal(Trigger::Worktree);
+            if self.search.wanted() {
+                self.search.note(vec![super::search::Change::Folder]);
+            }
+        }
+        let under = |rel: &str, of: &[String]| of.iter().any(|b| paths::is_at_or_under(rel, b));
+        let bases: Vec<String> = bases.iter().cloned().collect();
+        let open: Vec<String> = self.dirs.lock().keys().filter(|r| under(r, &bases) || under(r, &forced)).cloned().collect();
         let mut relisted = Vec::new();
         for rel in open {
-            if self.moved_since_listed(&rel) {
+            if under(&rel, &forced) || self.moved_since_listed(&rel) {
                 self.request(&rel, None);
                 relisted.push(rel);
             }
@@ -1989,7 +2016,7 @@ fn listing_mtime(abs: &Path, now: SystemTime) -> Option<SystemTime> {
 /// a second comes from a volume that keeps nanoseconds (APFS), where any later change moves it.
 /// A whole-second one may come from a coarse volume, so it is trusted only once the clock has
 /// passed the coarsest tick (FAT's 2 s) that could still hold it.
-fn trusted_mtime(m: SystemTime, now: SystemTime) -> bool {
+pub(super) fn trusted_mtime(m: SystemTime, now: SystemTime) -> bool {
     let Ok(d) = m.duration_since(UNIX_EPOCH) else { return false };
     if d.subsec_nanos() != 0 {
         return true;
