@@ -1418,10 +1418,7 @@ pub fn add_tab_follow_up(
             return Err(format!("A watch script can be at most {} KB.", crate::watch::MAX_SCRIPT_BYTES / 1024));
         }
         let app_data = state.app_data.read();
-        follow_up.due.approved = match (crate::watch::place_of(&follow_up), &follow_up.due.script) {
-            (Some(place), Some(script)) => crate::watch::is_approved(&app_data, &place, script),
-            _ => false,
-        };
+        follow_up.due.approved = crate::watch::follow_up_approved(&app_data, &follow_up);
     }
     // A Hive's queen mid New goal (docs/hive.md §11.5): her follow-ups are about to be cleared with
     // the old goal, and one made now would reach the fresh session as the old goal's.

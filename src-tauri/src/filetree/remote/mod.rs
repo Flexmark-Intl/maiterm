@@ -126,7 +126,7 @@ pub fn tunnel_lookup(state: &Arc<crate::state::AppState>) -> Lookup {
             .ssh_tunnels
             .read()
             .values()
-            .find(|t| crate::watch::connect_args(&t.host_key) == host)
+            .find(|t| crate::watch::same_host(&t.host_key, host))
             .map(|t| Target { tunnel_key: t.host_key.clone(), ssh_args: crate::watch::connect_args(&t.ssh_args) })
             .unwrap_or_else(|| Target { tunnel_key: host.to_string(), ssh_args: host.to_string() })
     })

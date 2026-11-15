@@ -111,8 +111,14 @@ fn is_bare(c: char) -> bool {
 }
 
 /// One word, quoted only if it needs it: `'…'`, with a `'` inside written `'\''`.
+///
+/// A backslash goes bare too, unless it ends the word: `parse` reads one before anything but
+/// whitespace or a quote as itself, and a bare word holds neither, so only a trailing one would
+/// escape the space `join` puts after it. That keeps a Windows path (`C:\Users\me\.ssh\id`) in
+/// the spelling it always had, which cmd.exe — where `'` is not a quote — needs when a clone
+/// types it back.
 pub fn quote(w: &str) -> Cow<'_, str> {
-    if !w.is_empty() && w.chars().all(is_bare) {
+    if !w.is_empty() && !w.ends_with('\\') && w.chars().all(|c| is_bare(c) || c == '\\') {
         return Cow::Borrowed(w);
     }
     Cow::Owned(format!("'{}'", w.replace('\'', r"'\''")))
@@ -165,7 +171,7 @@ mod tests {
             (&["/Users/me/Bob's \"Keys\"/id"], r#"'/Users/me/Bob'\''s "Keys"/id'"#),
             (&["-o", "Port=2222", "-i", "~/.ssh/k", "ews@nova"], "-o Port=2222 -i ~/.ssh/k ews@nova"),
             (&["/Users/me/Clés/id", "-W", "%h:%p"], "/Users/me/Clés/id -W %h:%p"),
-            (&["C:\\Users\\me\\id", ""], r"'C:\Users\me\id' ''"),
+            (&["C:\\Users\\me\\id", "", "C:\\dir\\"], r"C:\Users\me\id '' 'C:\dir\'"),
             (&["a#b", "$x", "ews@[::1]"], "'a#b' '$x' 'ews@[::1]'"),
         ];
         for (words, joined) in table {

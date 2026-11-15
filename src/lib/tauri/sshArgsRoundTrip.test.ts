@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { buildSshCommand, cleanSshCommand, sshArgsOf } from './commands';
-import { connectArgs } from '$lib/filetree/remote';
+import { connectArgs, sameSshHost } from '$lib/filetree/remote';
 import { hostLabel } from '$lib/followUps/model';
 import { joinWords, splitWords } from '$lib/utils/shellWords';
 import { HARD_WORDS } from '$lib/utils/shellWords.test';
@@ -52,6 +52,48 @@ describe('ssh args keep their words from the stored command back to the stored c
     // A `-t` or ControlMaster inside a quoted word is part of that word.
     expect(cleanSshCommand("ssh -i '/a -t b' -o 'SetEnv=X=-o ControlMaster=no' h")).toBe("-i '/a -t b' -o 'SetEnv=X=-o ControlMaster=no' h");
     expect(sshArgsOf("autossh -M 0 -f -i '/a -M b' h")).toBe("-i '/a -M b' h");
+  });
+
+  // maiTerm's remote command can reach ssh as several words: a wrapper such as
+  // `ssh(){ command ssh $@; }` re-splits it with its unquoted `$@` (the session still works:
+  // ssh joins its args again), and cmd.exe on Windows doesn't treat `'` as quoting at all.
+  // Joined as shell words, each piece is quoted on its own; none of it may be stored.
+  describe('strips the remote command however ssh received it', () => {
+    const bridge = { port: 28123, auth: 'tok-123' };
+    const wrapped = (line: string) =>
+      execFileSync('/bin/bash', ['-c', `set -f; f(){ printf '%s\\0' $@; }; f ${line}`], { encoding: 'utf8' }).split('\0').slice(0, -1);
+    for (const cwd of ['/srv', '/srv/my app', null]) {
+      it(`through an unquoted $@, cwd ${cwd}`, () => {
+        const argv = wrapped(buildSshCommand('-x ews@nova', cwd, TAB, bridge));
+        expect(argv.length).toBeGreaterThan(8);
+        expect(cleanSshCommand(joinWords(argv))).toBe('-x ews@nova');
+        expect(cleanSshCommand(argv.join(' '))).toBe('-x ews@nova');
+      });
+      it(`through cmd.exe, cwd ${cwd}`, () => {
+        const argv = buildSshCommand('-x ews@nova', cwd, TAB, bridge).split(/\s+/);
+        const cleaned = cleanSshCommand(joinWords(argv));
+        expect(cleaned).not.toContain('MAITERM');
+        expect(cleaned).toBe('-x ews@nova');
+      });
+    }
+    it('with the account fragment and no bridge', () => {
+      const acct = `[ -r ~/.maiterm/tokens/tok-${TAB} ] && . ~/.maiterm/tokens/tok-${TAB}; rm -f ~/.maiterm/tokens/tok-${TAB}`;
+      const argv = wrapped(buildSshCommand('ews@nova', '/srv', TAB, null, acct));
+      expect(cleanSshCommand(joinWords(argv))).toBe('ews@nova');
+    });
+    it('never keeps a word naming maiTerm env, whatever else it looks like', () => {
+      expect(cleanSshCommand("ssh ews@nova 'MAITERM_AUTH=tok-123 tmux'")).toBe('ews@nova');
+      expect(cleanSshCommand('ssh ews@nova export MAITERM_PORT=1 MAITERM_AUTH=x; tmux')).toBe('ews@nova');
+    });
+  });
+
+  // A key persisted before quoting is the same host as its quoted spelling: compared by words.
+  it('finds a host stored before quoting', () => {
+    for (const old of ['-i C:\\Users\\me\\.ssh\\id ews@nova', '-J ews@[fe80::1]:22 nova', '-L [::1]:5432:db:5432 nova', '-o SendEnv=LC_* nova', '-o HostKeyAlgorithms=^ssh-ed25519 nova']) {
+      expect(sameSshHost(old, connectArgs(old)), old).toBe(true);
+      expect(sameSshHost(old, 'ews@nova')).toBe(false);
+    }
+    expect(connectArgs('-i C:\\Users\\me\\.ssh\\id ews@nova')).toBe('-i C:\\Users\\me\\.ssh\\id ews@nova');
   });
 
   it('still cleans a lossy ps line, an apostrophe included', () => {

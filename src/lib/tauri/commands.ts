@@ -46,6 +46,23 @@ function wordSpansOf(s: string): WordSpan[] {
   return parseWordSpans(s) ?? Array.from(s.matchAll(/\S+/g), m => ({ value: m[0], start: m.index!, end: m.index! + m[0].length }));
 }
 
+/**
+ * maiTerm's own remote command (what `buildSshCommand` appends), matched against WORD VALUES
+ * joined with single spaces, from some word to the end. However ssh received it — one quoted
+ * word (the usual capture), several words (a wrapper whose unquoted `$@` re-splits it, or a
+ * `ps` line), or several words with the quotes left in (cmd.exe, which doesn't quote with `'`)
+ * — its values read the same, and this finds where it starts.
+ */
+const INJECTED_TAIL = /^'?(?:export\s+MAITERM_TAB_ID=|\[ -r ~\/\.maiterm\/|cd\s).*exec\s+'?\$?SHELL'?\s+-l'?$/s;
+
+/** The index of the first word of maiTerm's injected remote command, or `words.length`. */
+function injectedFrom(words: WordSpan[]): number {
+  for (let i = 1; i < words.length; i++) {
+    if (INJECTED_TAIL.test(words.slice(i).map(w => w.value).join(' '))) return i;
+  }
+  return words.length;
+}
+
 /** Kept words, in the spelling they had (the user's own quoting, `~` and all). */
 function rawOf(s: string, words: WordSpan[]): string {
   return words.map(w => s.slice(w.start, w.end)).join(' ');
@@ -149,7 +166,8 @@ export function cleanSshCommand(cmd: string): string {
   // The rest by WORD (shell words, as Rust reads it — `utils/shellWords`), never by regex over
   // the line: `-i '/Users/me/My Keys/id'` is two words, and a `-t` inside a quoted path is not
   // a flag. Kept words keep the spelling they came with.
-  const words = wordSpansOf(cleaned);
+  const all = wordSpansOf(cleaned);
+  const words = all.slice(0, injectedFrom(all));
   const kept: WordSpan[] = [];
   const seen = new Set<string>();
   for (let i = 0; i < words.length; i++) {
@@ -170,6 +188,14 @@ export function cleanSshCommand(cmd: string): string {
       seen.add(v);
     }
     kept.push(words[i]);
+  }
+  // Last resort: whatever spelling slipped past the above, a stored command never carries
+  // maiTerm's env — it is written to disk, retyped into clones and shown on fork cards, and
+  // MAITERM_AUTH is a credential. Cut at the first word that names one, with an `export` before it.
+  let cut = kept.findIndex(w => w.value.includes('MAITERM_'));
+  if (cut >= 0) {
+    if (cut > 0 && /^'?export$/.test(kept[cut - 1].value)) cut--;
+    kept.length = cut;
   }
   return rawOf(cleaned, kept);
 }

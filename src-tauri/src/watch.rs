@@ -41,7 +41,7 @@ fn tunnel_args(state: &AppState, host: &str) -> Option<(String, String)> {
         .ssh_tunnels
         .read()
         .values()
-        .find(|t| connect_args(&t.host_key) == host)
+        .find(|t| same_host(&t.host_key, host))
         .map(|t| (t.host_key.clone(), connect_args(&t.ssh_args)))
 }
 
@@ -263,14 +263,36 @@ pub fn connect_args(key: &str) -> String {
     crate::util::ssh_words::join(parse_ssh(key).connect)
 }
 
+/// Two ssh spellings reach the same host: their `connect_args` are equal, so both sides are
+/// read as words and spelled anew. Compare a host with this, never with `==` against a stored
+/// string: a `due.host` or a Files root persisted before ssh args were shell words (2026-11-15)
+/// holds `-i C:\Users\me\.ssh\id ews@nova`, which `connect_args` now spells
+/// `-i 'C:\Users\me\.ssh\id' ews@nova` — the same words.
+pub fn same_host(a: &str, b: &str) -> bool {
+    connect_args(a) == connect_args(b)
+}
+
 /// A place for a human: `place` with the host's label.
 pub fn place_label(f: &FollowUp) -> Option<String> {
     f.due.cwd.as_deref().map(|cwd| place(f.due.host.as_deref().map(host_label).as_deref(), cwd))
 }
 
-/// A script follow-up's place (`place`); None without a folder.
+/// A script follow-up's place (`place`); None without a folder. The host in its `connect_args`
+/// spelling, so one host is one place however its `due.host` was stored.
 pub fn place_of(f: &FollowUp) -> Option<String> {
-    f.due.cwd.as_deref().map(|cwd| place(f.due.host.as_deref(), cwd))
+    f.due.cwd.as_deref().map(|cwd| place(f.due.host.as_deref().map(connect_args).as_deref(), cwd))
+}
+
+/// Has a HUMAN approved this follow-up's script where it runs (`is_approved` at `place_of`)?
+/// Also under the spellings its host had before ssh args were shell words (2026-11-15): the
+/// stored `due.host` itself, and its words joined with single spaces, as `connect_args` spelled
+/// every host then. Without them an approval of `-i C:\Users\me\.ssh\id ews@nova` would stop
+/// matching the same host now spelled `-i 'C:\Users\me\.ssh\id' ews@nova`.
+pub fn follow_up_approved(app_data: &AppData, f: &FollowUp) -> bool {
+    let (Some(cwd), Some(script)) = (f.due.cwd.as_deref(), f.due.script.as_deref()) else { return false };
+    let Some(host) = f.due.host.as_deref() else { return is_approved(app_data, cwd, script) };
+    let legacy = crate::util::ssh_words::split(host).join(" ");
+    [connect_args(host), host.to_string(), legacy].iter().any(|h| is_approved(app_data, &place(Some(h), cwd), script))
 }
 
 /// The approval key: the script and the place it runs. The same script somewhere else is a
@@ -899,6 +921,58 @@ mod tests {
         assert_eq!(clean(b"\x1b[201~hi\r\n", 100, false), "[201~hi");
         assert_eq!(clean(b"abcdef", 3, false), "abc…");
         assert_eq!(clean(b"abcdef", 3, true), "…def");
+    }
+
+    /// A `due.host` (or a Files root) persisted before ssh args were shell words keeps its old
+    /// spelling; the tunnel to that host is keyed in the new one. Same words, same host.
+    #[test]
+    fn a_host_stored_before_quoting_still_finds_its_tunnel_and_its_approval() {
+        let olds = [
+            // Spelled as before (a backslash goes bare), so the tunnel matches by spelling too.
+            "-i C:\\Users\\me\\.ssh\\id ews@nova",
+            "-J ews@[fe80::1]:22 nova",
+            "-L [::1]:5432:db:5432 nova",
+            "-o SendEnv=LC_* nova",
+            "-o HostKeyAlgorithms=^ssh-ed25519 nova",
+        ];
+        for old in olds {
+            let new = connect_args(old);
+            assert!(same_host(old, &new) && same_host(&new, old), "{old}");
+            assert!(!same_host(old, "ews@nova"));
+
+            let state = AppState::new();
+            state.ssh_tunnels.write().insert(
+                new.clone(),
+                crate::state::app_state::SshTunnel { pid: 1, remote_port: 1, host_key: new.clone(), tab_ids: Default::default(), ssh_args: new.clone() },
+            );
+            assert_eq!(tunnel_args(&state, old).map(|(k, _)| k), Some(new.clone()), "{old}");
+
+            // Approved before the upgrade, keyed by the stored spelling.
+            let mut d = AppData::default();
+            remember_approval(&mut d, &place(Some(old), "/srv"), "test -f done");
+            let mut f = FollowUp {
+                id: "f".into(),
+                text: "t".into(),
+                due: crate::state::workspace::FollowUpDue {
+                    kind: REMOTE_KIND.into(),
+                    host: Some(old.into()),
+                    cwd: Some("/srv".into()),
+                    script: Some("test -f done".into()),
+                    ..Default::default()
+                },
+                author: "agent".into(),
+                created_at: "2026-11-15T00:00:00Z".into(),
+                expires_at: None,
+            };
+            assert!(follow_up_approved(&d, &f), "the stored follow-up: {old}");
+            f.due.host = Some(new.clone());
+            assert!(follow_up_approved(&d, &f), "a new follow-up to the same host: {new}");
+            f.due.script = Some("rm -rf /".into());
+            assert!(!follow_up_approved(&d, &f), "another script is still another approval");
+            f.due.script = Some("test -f done".into());
+            f.due.host = Some("ews@nova".into());
+            assert!(!follow_up_approved(&d, &f), "another host is still another place");
+        }
     }
 
     #[test]
