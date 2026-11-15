@@ -466,6 +466,9 @@ export interface TaskBlocker {
   command?: string | null;
   /** 'many': the human ticks any of `options` and one Send answers them all. Absent: pick one. */
   pick?: 'many' | null;
+  /** For an action: the tab the command is FOR when it isn't the asker's own — one of its mesh
+   *  peers or its bridge partner, resolved by maiTerm (docs/tasks.md §3.1.3). Run runs it there. */
+  run_in?: string | null;
   asked_at: string;
   asked_by: TaskNote['by'];
 }

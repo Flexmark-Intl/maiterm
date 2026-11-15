@@ -13,7 +13,8 @@
   import { coordinatorHolds, withCoordinatorText } from '$lib/hive/model';
   import { blockerDrafts } from '$lib/stores/waiting.svelte';
   import { BLOCKER_LABEL, picksMany, runPlace } from '$lib/tasks/model';
-  import { workspacesStore } from '$lib/stores/workspaces.svelte';
+  import { workspacesStore, tabDisplayName } from '$lib/stores/workspaces.svelte';
+  import { parseSshHost } from '$lib/stores/sshDisconnect.svelte';
   import { fmtAge } from '$lib/overlord/format';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import TaskMarkdown from './TaskMarkdown.svelte';
@@ -167,10 +168,27 @@
     }
   }
 
-  /** Where Run would run the card's command (docs/tasks.md §3.1.2): a `! …` line into the
-   *  agent's own Claude tab, anything else in a new tab beside it. */
+  /** The tab the command is FOR (docs/tasks.md §3.1.3): another agent's, when the asker named
+   *  one, else the asker's own. */
+  const runTabId = $derived(b?.run_in ?? task.tab_id ?? null);
+  const runInName = $derived(b?.run_in ? tabDisplayName(b.run_in) : null);
+  /** That tab's ssh host, when it has one: the card says where the command will run. */
+  let runInHost = $state<string | null>(null);
+  $effect(() => {
+    const id = b?.run_in;
+    runInHost = null;
+    if (!id) return;
+    let live = true;
+    void workspacesStore.placeOfTab(id).then((p) => {
+      if (live) runInHost = p?.sshCommand ? parseSshHost(p.sshCommand) : null;
+    });
+    return () => { live = false; };
+  });
+
+  /** Where Run would run the card's command (docs/tasks.md §3.1.2): a `! …` line into that
+   *  tab's Claude agent, anything else in a new tab beside it. */
   const carrierIsClaude = $derived.by(() => {
-    const id = task.tab_id;
+    const id = runTabId;
     if (!id) return false;
     for (const ws of workspacesStore.workspaces) for (const p of ws.panes) {
       const t = p.tabs.find((x) => x.id === id);
@@ -196,7 +214,9 @@
         !r.ran
           ? r.detail
           : r.where === 'agent'
-            ? 'Typed into the agent’s tab. It sees the output, so the question is closed.'
+            ? runInName
+              ? `Typed into ${runInName}. That agent sees the output, and the agent that asked was told.`
+              : 'Typed into the agent’s tab. It sees the output, so the question is closed.'
             : 'Running in a new tab. Click I’ve done it once it has finished.',
       );
     } finally {
@@ -258,12 +278,20 @@
       </div>
     {/if}
     {#if b.command}
+      {#if runInName}
+        <!-- maiTerm's words, from the tab itself: the agent only named it. -->
+        <div class="runin">For <b>{runInName}</b>{#if runInHost} on <b>{runInHost}</b>{/if}: Run runs it in that tab, not the asking agent’s</div>
+      {/if}
       <div class="cmdrow">
         <code class="cmd">{b.command}</code>
         {#if run && !held}
           <Tooltip text={run.place === 'agent'
-            ? 'Type it into the agent’s tab: it runs there and the agent sees the output'
-            : 'Open a new tab beside the agent and run it there, where it can ask you for a password'}>
+            ? runInName
+              ? `Type it into ${runInName}: it runs there and that agent sees the output`
+              : 'Type it into the agent’s tab: it runs there and the agent sees the output'
+            : runInName
+              ? `Open a new tab beside ${runInName} and run it there, where it can ask you for a password`
+              : 'Open a new tab beside the agent and run it there, where it can ask you for a password'}>
             <button class="send run" disabled={sending} onclick={runCommand}>Run</button>
           </Tooltip>
         {/if}
@@ -388,6 +416,13 @@
     background: var(--bg-dark);
     padding: 3px 5px;
     border-radius: 3px;
+  }
+  .runin {
+    font-size: 11px;
+    color: var(--fg);
+    border-left: 2px solid var(--accent);
+    padding: 1px 0 1px 6px;
+    overflow-wrap: anywhere;
   }
   .cmdrow { display: flex; gap: 4px; align-items: flex-start; }
   .cmdrow .cmd { flex: 1; min-width: 0; overflow-wrap: anywhere; }

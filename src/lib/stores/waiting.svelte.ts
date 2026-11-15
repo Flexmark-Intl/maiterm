@@ -49,7 +49,12 @@ function byTab(): Map<string, WaitingItem[]> {
   };
   for (const ws of tasksStore.workspaceIds) {
     for (const task of decisionsQueue(tasksStore.forWorkspace(ws))) {
-      add(task.tab_id, { kind: 'task', key: task.id, at: Date.parse(task.blocker!.asked_at), task });
+      const item: WaitingItem = { kind: 'task', key: task.id, at: Date.parse(task.blocker!.asked_at), task };
+      add(task.tab_id, item);
+      // A command FOR another agent's tab (docs/tasks.md §3.1.3) shows there too: that is the
+      // terminal the human is looking at when it matters.
+      const runIn = task.blocker!.run_in;
+      if (runIn && runIn !== task.tab_id) add(runIn, item);
     }
   }
   for (const approval of followUpsStore.pendingApprovals) {

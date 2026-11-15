@@ -110,8 +110,22 @@ fn effective_status<'a>(t: &'a Task, ws: &Workspace, parked: &HashSet<&str>) -> 
 ///
 /// Agent-written text (notes, the blocker) goes out through `name_task_ids`, so a task the agent
 /// named by its id reaches the phone by its title.
-fn task_view(t: &Task, ws: &Workspace, effective: &str, tab_title: Option<&str>, workstream: Option<&str>) -> Value {
+fn task_view(
+    t: &Task,
+    ws: &Workspace,
+    data: &AppData,
+    titles: &HashMap<&str, &str>,
+    effective: &str,
+    tab_title: Option<&str>,
+    workstream: Option<&str>,
+) -> Value {
     let named = |s: &str| name_task_ids(s, &ws.tasks);
+    // Where Run runs: the tab the command is FOR (docs/tasks.md §3.1.3), else the carrier. Its
+    // name only when that tab is designated, like every tab name the phone sees.
+    let run_in = t.blocker.as_ref().and_then(|b| b.run_in.as_deref());
+    let run_tab = run_in.or(t.tab_id.as_deref());
+    let claude = run_tab.is_some_and(|id| tab_is_claude(data, id));
+    let run_in_title = run_in.and_then(|id| titles.get(id).copied());
     json!({
         "id": t.id,
         "title": t.title,
@@ -133,14 +147,19 @@ fn task_view(t: &Task, ws: &Workspace, effective: &str, tab_title: Option<&str>,
         // there is none, per the stated-absence rule. Only ever present while `status` is
         // "blocked" (`Task::settle_blocker`). `decision` and `action` are the human's to
         // answer, through `POST /tasks/{id}/answer` with `askedAt` as the stale guard.
-        "blocker": t.blocker.as_ref().map(|b| blocker_view(b, &named, carrier_is_claude(t, ws))),
+        "blocker": t.blocker.as_ref().map(|b| blocker_view(b, &named, claude, run_in_title)),
     })
 }
 
-/// The task's carrying tab runs Claude: where a blocker's `! …` command would run (`run_place`).
-fn carrier_is_claude(t: &Task, ws: &Workspace) -> bool {
-    let Some(tab_id) = t.tab_id.as_deref() else { return false };
-    ws.panes.iter().flat_map(|p| &p.tabs).any(|tab| tab.id == tab_id && tab.runtime == Some(crate::state::AgentRuntime::Claude))
+/// The tab (in any window: a `run_in` peer may sit on a linked mesh or a bridge elsewhere) runs
+/// Claude: where a blocker's `! …` command would run (`run_place`).
+fn tab_is_claude(data: &AppData, tab_id: &str) -> bool {
+    data.windows
+        .iter()
+        .flat_map(|w| &w.workspaces)
+        .flat_map(|ws| &ws.panes)
+        .flat_map(|p| &p.tabs)
+        .any(|tab| tab.id == tab_id && tab.runtime == Some(crate::state::AgentRuntime::Claude))
 }
 
 /// Where an action blocker's Run button runs its command (docs/tasks.md §3.1.2). Mirror of
@@ -177,7 +196,7 @@ pub(crate) fn run_place(command: &str, carrier_is_claude: bool) -> Option<(RunPl
 /// With `options` empty it offers a free-text answer instead, and `context` carries the choices
 /// as a list so it can still be answered in words. A 0.26 phone renders `pickContext` (the
 /// agent's own context) and `picks` as checkboxes, and answers with `options: [i, …]`.
-fn blocker_view(b: &crate::state::workspace::TaskBlocker, named: &dyn Fn(&str) -> String, claude: bool) -> Value {
+fn blocker_view(b: &crate::state::workspace::TaskBlocker, named: &dyn Fn(&str) -> String, claude: bool, run_in_title: Option<&str>) -> Value {
     let options: Vec<Value> = b
         .options
         .iter()
@@ -204,6 +223,11 @@ fn blocker_view(b: &crate::state::workspace::TaskBlocker, named: &dyn Fn(&str) -
         // tab as a shell-mode line; the question closes) or "tab" (a new terminal tab beside the
         // agent on the desktop; the question stays open for "I've done it"). null: no Run.
         "run": if b.kind == "action" { b.command.as_deref().and_then(|c| run_place(c, claude)).map(|(p, _)| if p == RunPlace::Agent { "agent" } else { "tab" }) } else { None },
+        // v0.28: the command is FOR another agent's tab (docs/tasks.md §3.1.3): `run` above is
+        // about that tab, and "agent" means typed into THAT agent, whose output closes the
+        // question. `tabTitle` is null when that tab isn't one the phone may see. null: the
+        // command is for the asking agent's own tab, as before.
+        "runIn": b.run_in.as_deref().map(|id| json!({ "tabId": id, "tabTitle": run_in_title })),
         "askedAt": b.asked_at,
         "askedBy": b.asked_by,
     })
@@ -340,6 +364,8 @@ pub(crate) fn tasks_for_tab(app: &AppState, tab_id: &str) -> Vec<Value> {
                 out.push(task_view(
                     t,
                     ws,
+                    &data,
+                    &titles,
                     effective_status(t, ws, &parked),
                     titles.get(tab_id).copied(),
                     workstream_name(ws, t.workstream_id.as_deref()),
@@ -383,6 +409,8 @@ pub(crate) fn tab_change_keys(app: &AppState) -> HashMap<String, u64> {
                 titles.get(tab).copied().hash(h);
                 // A re-ask stamps a new asked_at; that is what the phone has to hear about.
                 t.blocker.as_ref().map(|b| (&b.kind, &b.asked_at)).hash(h);
+                // `runIn`'s tab name, which a rename of THAT tab changes.
+                t.blocker.as_ref().and_then(|b| b.run_in.as_deref()).map(|id| (id, titles.get(id).copied())).hash(h);
                 // The text as sent: it names OTHER tasks by their titles (`name_task_ids`), so
                 // renaming or deleting one changes this row on the phone with nothing of the
                 // row's own touched.
@@ -450,6 +478,8 @@ pub(crate) fn board(app: &AppState) -> Value {
                 "tasks": ws.tasks.iter().filter(visible).map(|t| task_view(
                     t,
                     ws,
+                    &data,
+                    &titles,
                     effective_status(t, ws, &parked),
                     t.tab_id.as_deref().and_then(|id| titles.get(id).copied()),
                     workstream_name(ws, t.workstream_id.as_deref()),
@@ -561,6 +591,8 @@ fn views_for(data: &AppData, win: &WindowData, ws: &Workspace, ids: &[String], d
             task_view(
                 t,
                 ws,
+                data,
+                &titles,
                 effective_status(t, ws, &parked),
                 t.tab_id.as_deref().and_then(|id| titles.get(id).copied()),
                 workstream_name(ws, t.workstream_id.as_deref()),
@@ -734,6 +766,8 @@ pub(crate) fn task_row(app: &AppState, task_id: &str) -> Option<Value> {
                 task_view(
                     t,
                     ws,
+                    &data,
+                    &titles,
                     effective_status(t, ws, &parked),
                     t.tab_id.as_deref().and_then(|id| titles.get(id).copied()),
                     workstream_name(ws, t.workstream_id.as_deref()),
@@ -861,11 +895,12 @@ mod tests {
             options: vec![opt("Reword", true), opt("Lazy-load", false)],
             command: None,
             pick: Some("many".into()),
+            run_in: None,
             asked_at: "t".into(),
             asked_by: "agent".into(),
         };
         let same = |s: &str| s.to_string();
-        let v = blocker_view(&b, &same, true);
+        let v = blocker_view(&b, &same, true, None);
         assert_eq!(v["options"], json!([]), "no taps for a phone that can't tick");
         assert_eq!(v["pick"], "many");
         assert_eq!(v["picks"][1]["label"], "Lazy-load");
@@ -876,7 +911,7 @@ mod tests {
         assert!(ctx.contains("- **Lazy-load** — Lazy-load costs"), "{ctx}");
 
         b.pick = None;
-        let v = blocker_view(&b, &same, true);
+        let v = blocker_view(&b, &same, true, None);
         assert_eq!(v["pick"], "one");
         assert_eq!(v["options"].as_array().unwrap().len(), 2);
         assert_eq!(v["picks"], json!([]));
@@ -906,12 +941,17 @@ mod tests {
             options: vec![],
             command: Some("! bash setup.sh".into()),
             pick: None,
+            run_in: None,
             asked_at: "t".into(),
             asked_by: "agent".into(),
         };
         let same = |s: &str| s.to_string();
-        assert_eq!(blocker_view(&b, &same, true)["run"], "agent");
-        assert_eq!(blocker_view(&b, &same, false)["run"], "tab");
+        assert_eq!(blocker_view(&b, &same, true, None)["run"], "agent");
+        assert_eq!(blocker_view(&b, &same, false, None)["run"], "tab");
+        assert_eq!(blocker_view(&b, &same, true, None)["runIn"], Value::Null, "for the asking agent's own tab");
+        let b = TaskBlocker { run_in: Some("peer".into()), ..b };
+        assert_eq!(blocker_view(&b, &same, true, Some("Live OPS"))["runIn"], json!({ "tabId": "peer", "tabTitle": "Live OPS" }));
+        assert_eq!(blocker_view(&b, &same, true, None)["runIn"]["tabTitle"], Value::Null, "a tab the phone may not see stays unnamed");
     }
 
     fn task(id: &str, title: &str, tab: Option<&str>, stream: Option<&str>) -> Task {
@@ -940,6 +980,7 @@ mod tests {
             options: vec![crate::state::workspace::BlockerOption { label: "Yes".into(), detail: None, recommended: true }],
             command: None,
             pick: None,
+            run_in: None,
             asked_at: asked_at.into(),
             asked_by: "agent".into(),
         }

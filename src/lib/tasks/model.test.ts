@@ -58,6 +58,13 @@ describe('a blocker says what a Blocked task is waiting for', () => {
     });
   });
 
+  it('takes run_in only on an action with a command, and leaves resolving it to the caller', () => {
+    expect(refused({ kind: 'decision', question: 'Which?', run_in: 'Live OPS' })).toMatch(/run_in/);
+    expect(refused({ kind: 'action', question: 'Do it', run_in: 'Live OPS' })).toMatch(/run_in/);
+    // The name is the caller's to turn into a tab id: parseBlocker never stores it.
+    expect(ok({ kind: 'action', question: 'Run it', command: '! make', run_in: 'Live OPS' }).run_in).toBeUndefined();
+  });
+
   it('refuses a dependency with a pointer to block_on', () => {
     expect(refused({ kind: 'dependency', question: 'x' })).toMatch(/block_on/);
   });

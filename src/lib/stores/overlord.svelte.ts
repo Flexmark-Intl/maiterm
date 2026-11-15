@@ -3786,13 +3786,20 @@ function createOverlordStore() {
       }
       if (b.kind !== 'action') return { ran: false, detail: 'Only a card asking you to do something has a command to run.' };
       if (coordinatorHolds(hivePrompts.blockerOwner(id, askedAt))) return { ran: false, detail: HIVE_COORDINATOR_HOLDS };
-      const carrierId = task.tab_id ?? null;
+      // The tab the command is FOR (docs/tasks.md §3.1.3): another agent's when the asker named
+      // one, else the asker's own. "Carrier" below means that tab.
+      const forOther = b.run_in && b.run_in !== task.tab_id ? b.run_in : null;
+      const carrierId = forOther ?? task.tab_id ?? null;
       let carrier: { ws: Workspace; paneId: string; tab: Tab } | null = null;
       for (const ws of workspacesStore.workspaces) {
         for (const p of ws.panes) {
           const t = p.tabs.find((x) => x.id === carrierId);
           if (t) carrier = { ws, paneId: p.id, tab: t };
         }
+      }
+      // Never fall back to somewhere else: the command was written for that session.
+      if (forOther && !carrier) {
+        return { ran: false, detail: `${tabDisplayName(forOther)}, the tab this command is for, is no longer open. Ask the agent where it should run now.` };
       }
       const run = runPlace(b.command, carrier?.tab.runtime === 'claude');
       if (!run) return { ran: false, detail: 'The card has no command to run.' };
@@ -3810,6 +3817,17 @@ function createOverlordStore() {
           .catch((e): { status: 'refused'; reason: string } => ({ status: 'refused', reason: String(e) }))
           .finally(() => agentRunsInFlight.delete(agentKey));
         if (r.status !== 'typed') return { ran: false, detail: runRefusalText(r.reason) };
+        if (forOther) {
+          // The output went to THAT agent, not the asker, so the asker is told as an answer
+          // (which closes the question, re-checking asked_at after the await like below).
+          const name = tabDisplayName(forOther);
+          await this.answerBlocker(id, {
+            asked_at: askedAt,
+            text: `Ran it from the card in ${name}'s tab: ${run.line}\n${name}'s agent saw the output, you did not. Check with it how it went.`,
+          });
+          logInfo(`overlord: blocker command for ${id.slice(0, 8)} typed into the tab it is for, ${forOther.slice(0, 8)} (${from})`);
+          return { ran: true, where: 'agent' };
+        }
         // Re-read: the await let the agent re-ask, and its new question must not be closed.
         const now = tasksStore.findAnywhere(id)?.task;
         if (now?.status === 'blocked' && now.blocker?.asked_at === askedAt) {

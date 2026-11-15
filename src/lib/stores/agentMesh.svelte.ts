@@ -938,6 +938,16 @@ function createAgentMeshStore() {
       return !!ws && localMembersOf(ws).some((m) => m.tabId === tabId);
     },
 
+    /** Resolve a peer the way sendToBridgedAgent does (handle, role, bare tab name on a linked
+     *  mesh, former name; ambiguity is an error). Null when the tab is on no mesh. */
+    resolvePeer(tabId: string, name: string): { ok: true; tabId: string; role: string } | { ok: false; error: string } | null {
+      const ws = meshWorkspaceForTab(tabId);
+      const router = ws ? routerFor(ws.id) : null;
+      if (!router) return null;
+      const r = router.resolveRecipient(tabId, name);
+      return r.ok ? { ok: true, tabId: r.tabId, role: r.role } : r;
+    },
+
     // ─── MCP tool: listBridgedPeers ───────────────────────────────────────────
     listPeers(tabId: string) {
       const ws = meshWorkspaceForTab(tabId);

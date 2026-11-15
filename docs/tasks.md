@@ -467,6 +467,32 @@ human-only like an answer: no MCP tool reaches it. The phone runs it through
 `POST /tasks/{id}/run` (docs/mailink-protocol.md, 0.27), served `blocker.run` so its button can
 say where; a tab it opens opens in the background.
 
+### 3.1.3 A command for another agent's tab (2026-11-15)
+
+A coordinator on a mesh asked the human to run a command meant for its peer (the peer's own
+permission check had refused it). Run used the card's own tab, so the line was aimed at the
+coordinator's session, and nothing on the card said which tab it was for.
+
+An action blocker may now name that tab: `blocker.run_in`, the peer's name or handle exactly as
+`sendToBridgedAgent` takes it. maiTerm resolves it at filing (`resolveRunIn` in
+`claudeCode.svelte.ts`) and stores the TAB ID (`TaskBlocker.run_in`). **Only a tab the agent
+can already message**: a mesh peer (the mesh's own resolver, ambiguity refused) or its live
+bridge partner. Anything else is refused, and so is the agent's own tab. Any wider would let an
+agent aim a command, run by the human's click, at a session it has nothing to do with.
+
+- **The card says where, in maiTerm's words**: "For <tab> on <host>: Run runs it in that tab,
+  not the asking agent's" (`BlockerCard`), from the tab itself, never the agent's text.
+- **The card shows on that tab's corner too** (`waitingStore.byTab` files it under both tabs;
+  the corner adds "Asked by <asker>" there), and that tab's strip badge counts it.
+- **Run runs it there** (`runBlockerCommand`), by §3.1.2's rules applied to THAT tab: a
+  one-line `! …` is typed into its Claude agent, anything else opens a new tab beside it, in its
+  folder and on its host. If that tab is gone, Run refuses; it never falls back to another tab.
+- **The asking agent is told.** On the `agent` path the output reached the peer, not the
+  asker, so Run answers the question for the human: "Ran it from the card in <tab>'s tab: …
+  <tab>'s agent saw the output, you did not" (`answerBlocker`, same stale guard). The `tab`
+  path leaves the question open for "I've done it", as before.
+- **The phone** gets `blocker.runIn` (maiLink 0.28): `run` there describes that tab.
+
 ## 4. Workstreams
 
 One agent tab is routinely asked to do two unrelated things. A **workstream** is a named

@@ -14,6 +14,7 @@
   import { waitingStore, waitingTone, blockerDrafts, type WaitingItem } from '$lib/stores/waiting.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
+  import { tabDisplayName } from '$lib/stores/workspaces.svelte';
   import { BLOCKER_LABEL } from '$lib/tasks/model';
   import BlockerCard from './BlockerCard.svelte';
   import ScriptApprovalCard from '$lib/components/followUps/ScriptApprovalCard.svelte';
@@ -173,6 +174,10 @@
             <article data-key={item.key} class:focused={item.key === opened.focus}>
               {#if item.kind === 'task'}
                 <h4>{item.task.title}</h4>
+                {#if item.task.tab_id && item.task.tab_id !== tabId}
+                  <!-- Here because its command is for this tab (docs/tasks.md §3.1.3). -->
+                  <p class="from">Asked by {tabDisplayName(item.task.tab_id)}</p>
+                {/if}
                 <BlockerCard task={item.task} variant="card" onnote={showNote} onran={(where) => onran(item, where)} />
               {:else if item.kind === 'script'}
                 <ScriptApprovalCard tabId={item.approval.tabId} followUp={item.approval.followUp} {listChangedAt} onnote={showNote} />
@@ -303,6 +308,12 @@
     margin: 0;
     font-size: 12px;
     font-weight: 600;
+    color: var(--fg-dim);
+    overflow-wrap: anywhere;
+  }
+  .from {
+    margin: 0;
+    font-size: 11px;
     color: var(--fg-dim);
     overflow-wrap: anywhere;
   }
