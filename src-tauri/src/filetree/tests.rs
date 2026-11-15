@@ -303,11 +303,14 @@ fn converge(variant: Variant, seed: u64) {
         assert!(max_seq_unacked <= STALL_MESSAGES + 1, "a stalled subscription is sent nothing ({max_seq_unacked})");
     }
 
-    // Quiesce: every change has reached the hub (the barrier) and been listed and sent (idle);
-    // then the client takes what was sent and asks for what it lacks until the hub has
-    // nothing more to send. Nothing here waits on the clock.
+    // Quiesce. The OS may still be delivering any of the changes above, late and out of order,
+    // or may never deliver some (FSEvents under load, docs/file-tree.md §6.1), so nothing here
+    // waits for an event. An edge does what the app does on one: every open folder whose mtime
+    // moved since it was listed is listed again. Then the client takes what was sent and asks
+    // for what it lacks until the hub has nothing more to send. Events still on their way can
+    // only re-read what is on the disk now. Nothing here waits on the clock.
     probe.watching(&hub);
-    probe.settle(&hub, &root);
+    probe.reconcile(&hub, "");
     let mut rounds = 0;
     loop {
         rounds += 1;
@@ -334,13 +337,13 @@ fn converge(variant: Variant, seed: u64) {
             let (m, f) = (names(&mine), names(&fresh.entries));
             let hub_snap = hub.dirs.lock().get(rel).map(|d| (d.gen, d.entries == fresh.entries));
             let lost = probe.lost();
-            // A hub that is merely behind catches up after one more barrier; one that never
-            // heard of a change (a watcher that dropped it unflagged) stays wrong.
-            probe.settle(&hub, &root);
+            // A hub that is merely behind catches up after one more edge; one that stays wrong
+            // missed a change its folder's mtime didn't show.
+            let again = probe.reconcile(&hub, "");
             let fresh2 = list::list_dir(&root, rel, &fresh_ignore).unwrap();
             let caught_up = hub.dirs.lock().get(rel).map(|d| (d.gen, d.entries == fresh2.entries));
             panic!(
-                "{variant:?} seed {seed}: {rel:?} drifted from the disk. Lost batches seen: {lost}. After another barrier, hub (gen, matches disk): {caught_up:?}. Client holds gen {}, {} entries; disk {}. Missing: {:?}. Extra: {:?}. Same names, other order or flags: {}. Hub snapshot (gen, matches disk): {hub_snap:?}. Client still building: {:?}",
+                "{variant:?} seed {seed}: {rel:?} drifted from the disk. Lost batches seen: {lost}. After another edge (re-listed {again:?}), hub (gen, matches disk): {caught_up:?}. Client holds gen {}, {} entries; disk {}. Missing: {:?}. Extra: {:?}. Same names, other order or flags: {}. Hub snapshot (gen, matches disk): {hub_snap:?}. Client still building: {:?}",
                 held.0,
                 mine.len(),
                 fresh.entries.len(),
@@ -390,6 +393,9 @@ fn converges_across_many_seeds() {
 }
 
 
+/// A delivered event is applied: the hub patches the folder and sends a Delta from the
+/// generation the client holds. The event is handed over by the test (`Probe::deliver`), so the
+/// test holds however late, out of order or lost FSEvents is (docs/file-tree.md §6.1).
 #[test]
 fn a_change_arrives_as_a_delta_from_the_held_generation() {
     let root = temp_root("delta");
@@ -399,28 +405,21 @@ fn a_change_arrives_as_a_delta_from_the_held_generation() {
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
     probe.watching(&hub);
-    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Dir { rel, .. } if rel.is_empty())).is_some());
-    let held = rec.msgs.lock().iter().find_map(|m| match &m.ev {
-        TreeEvent::Dir { rel, gen, .. } if rel.is_empty() => Some(*gen),
-        _ => None,
-    });
+    probe.idle(&hub);
+    let held = hub.dirs.lock().get("").map(|d| d.gen).expect("the root is listed");
     std::fs::write(root.join("x.txt"), "").unwrap();
-    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Delta { rel, from, add, .. }
-        if rel.is_empty() && Some(*from) == held && add.iter().any(|a| a.n == "x.txt"))).is_some());
-    // Saving a file changes nothing the tree shows: no message about it. The barrier after it
-    // proves the save reached the hub and was processed; all that may follow is the barrier's
-    // own new row.
-    probe.settle(&hub, &root);
+    probe.deliver(&hub, &[root.join("x.txt")]);
+    assert!(
+        rec.msgs.lock().iter().any(|m| matches!(&m.ev, TreeEvent::Delta { rel, from, add, .. }
+            if rel.is_empty() && *from == held && add.iter().any(|a| a.n == "x.txt"))),
+        "x.txt arrives as a Delta from the held generation"
+    );
+    // Saving a file changes nothing the tree shows: no message about it.
     let before = rec.msgs.lock().len();
     std::fs::write(root.join("x.txt"), "more").unwrap();
-    let barriers = probe.settle(&hub, &root);
+    probe.deliver(&hub, &[root.join("x.txt")]);
     let after: Vec<TreeEvent> = rec.msgs.lock()[before..].iter().map(|m| m.ev.clone()).collect();
-    for ev in &after {
-        assert!(
-            matches!(ev, TreeEvent::Delta { rel, add, chg, del, .. } if rel.is_empty() && chg.is_empty() && del.is_empty() && add.iter().all(|a| barriers.contains(&a.n))),
-            "the save sent {ev:?}"
-        );
-    }
+    assert!(after.is_empty(), "the save sent {after:?}");
     ft.close(ack.sub_id);
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -484,12 +483,15 @@ fn a_deleted_root_says_root_gone() {
     let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
-    // The watcher must be what notices: deleted before it runs, the root is only found gone
-    // when it starts, which under a loaded fseventsd is later than this test waits.
-    probe.watching(&ft.hub_of(ack.sub_id).unwrap());
-    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Dir { .. })).is_some());
+    // The watcher's report of the deletion is what is tested, handed over by the test: FSEvents
+    // may report it late or not at all (§6.1). Deleted before the watcher runs, the root would
+    // be found gone by the start's own re-list instead.
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    probe.watching(&hub);
+    probe.idle(&hub);
     std::fs::remove_dir_all(&root).unwrap();
-    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::RootGone)).is_some());
+    probe.deliver(&hub, &[root.clone()]);
+    assert!(rec.msgs.lock().iter().any(|m| m.ev == TreeEvent::RootGone));
 }
 
 fn git_init(dir: &std::path::Path) {
@@ -512,7 +514,10 @@ fn git_init_in_an_open_root_reopens_it_with_its_repository() {
     let old = ft.hub_of(ack.sub_id).unwrap();
     probe.watching(&old);
     git_init(&root);
-    assert!(wait_for(&rec, HANG, |e| matches!(e, TreeEvent::Reopen)).is_some(), "the view is told to reopen");
+    // The watcher's report of the new `.git`, handed over by the test (FSEvents may be late or
+    // lose it, §6.1).
+    probe.deliver(&old, &[root.join(".git")]);
+    assert!(rec.msgs.lock().iter().any(|m| m.ev == TreeEvent::Reopen), "the view is told to reopen");
     // What the client does: close, open the same place again.
     let rec2 = Arc::new(Recorder::default());
     let again = ft.open("w", &root.to_string_lossy(), vec![], rec2, vec![]).unwrap();
@@ -533,6 +538,124 @@ fn git_init_in_an_open_root_reopens_it_with_its_repository() {
     assert!(plain.repo.is_none(), "a hub in its grace is not reused for another repository");
     ft.close(plain.sub_id);
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// A hook record as Claude sends it, for the agent edges.
+fn hook(event: serde_json::Value, tab: &str) -> crate::agent_files::HookRecord {
+    let name = event["hook_event_name"].as_str().unwrap().to_string();
+    let tool = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    crate::agent_files::HookRecord {
+        phase: crate::agent_files::Phase::of(&name, &event).unwrap(),
+        tab_id: tab.into(),
+        session_id: "s1".into(),
+        runtime: "claude".into(),
+        cwd: event.get("cwd").and_then(|v| v.as_str()).map(String::from),
+        host: None,
+        tool: tool.clone(),
+        tool_use_id: event.get("tool_use_id").and_then(|v| v.as_str()).map(String::from),
+        agent: crate::claude_code::gate::agent_key(&event),
+        extracted: event.get("tool_input").map(|i| crate::agent_files::extract::extract(&tool, i)).unwrap_or(crate::agent_files::extract::Extracted::Nothing),
+        existed: None,
+    }
+}
+
+fn tool_event(phase: &str, tool: &str, input: serde_json::Value, id: &str, cwd: &Path) -> serde_json::Value {
+    serde_json::json!({ "hook_event_name": phase, "session_id": "s1", "cwd": cwd.to_string_lossy(), "tool_name": tool, "tool_input": input, "tool_use_id": id, "tool_response": {} })
+}
+
+/// FSEvents under load loses changes without saying so (docs/file-tree.md §6.1). A hub that
+/// heard nothing at all (`go_deaf`) still shows the disk after each kind of edge: the open
+/// folders whose mtime moved are listed again, and one that didn't move sends nothing.
+#[test]
+fn an_edge_relists_what_the_watcher_never_reported() {
+    let root = temp_root("edge");
+    for d in ["a", "b"] {
+        std::fs::create_dir_all(root.join(d)).unwrap();
+        std::fs::write(root.join(d).join("one.txt"), "").unwrap();
+    }
+    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let probe = Probe::new(&ft);
+    let rec = Arc::new(Recorder::default());
+    let open = vec![DirReq { rel: "a".into(), known_gen: None }, DirReq { rel: "b".into(), known_gen: None }];
+    let ack = ft.open("w", &root.to_string_lossy(), open, rec.clone(), vec![]).unwrap();
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    probe.watching(&hub);
+    probe.idle(&hub);
+    hub.go_deaf();
+    let ignore = Mutex::new(IgnoreStack::for_test(&root, None, None, &[]));
+    let disk = |rel: &str| list::list_dir(&root, rel, &ignore).unwrap().entries;
+    let held = |rel: &str| hub.dirs.lock().get(rel).map(|d| d.entries.clone()).unwrap();
+    let about = |rel: &str, from: usize| -> Vec<TreeEvent> {
+        rec.msgs.lock()[from..]
+            .iter()
+            .filter(|m| matches!(&m.ev, TreeEvent::Dir { rel: r, .. } | TreeEvent::Delta { rel: r, .. } | TreeEvent::NotModified { rel: r, .. } if r == rel))
+            .map(|m| m.ev.clone())
+            .collect()
+    };
+    let a = root.join("a");
+    type Edge<'e> = (&'e str, Box<dyn Fn(u32) + 'e>, Box<dyn Fn() + 'e>);
+    let edges: Vec<Edge> = vec![
+        // A command finished in a terminal whose shell is in a/ (OSC 133 D).
+        ("a command", Box::new(|n| std::fs::write(a.join(format!("cmd{n}.txt")), "").unwrap()), Box::new(|| ft.note_command_in(&a))),
+        // The window came back.
+        ("focus", Box::new(|n| std::fs::rename(a.join("one.txt"), a.join(format!("moved{n}.txt"))).unwrap()), Box::new(|| {
+            ft.window_focus("w", false);
+            ft.window_focus("w", true);
+        })),
+        // An agent's shell call in a/ ended.
+        ("an agent's Bash", Box::new(|n| std::fs::create_dir(a.join(format!("dir{n}"))).unwrap()), Box::new(|| {
+            ft.agents.record(hook(tool_event("PostToolUse", "Bash", serde_json::json!({ "command": "make" }), "b1", &a), "t1"));
+        })),
+        // An agent wrote a file in a/ (its own write lands through the ledger's dispatcher).
+        ("an agent's Write", Box::new(|n| std::fs::write(a.join(format!("w{n}.txt")), "x").unwrap()), Box::new(|| {
+            let input = serde_json::json!({ "file_path": a.join("w3.txt"), "content": "x" });
+            ft.agents.record(hook(tool_event("PostToolUse", "Write", input, "w1", &a), "t1"));
+        })),
+    ];
+    // The Bash call's start, so its end is a call that ran (the ledger keeps local calls only).
+    ft.agents.record(hook(serde_json::json!({ "hook_event_name": "UserPromptSubmit", "session_id": "s1", "cwd": a.to_string_lossy(), "prompt": "go" }), "t1"));
+    ft.agents.record(hook(tool_event("PreToolUse", "Bash", serde_json::json!({ "command": "make" }), "b1", &a), "t1"));
+    for (n, (what, change, fire)) in edges.iter().enumerate() {
+        let before = rec.msgs.lock().len();
+        change(n as u32);
+        assert_ne!(held("a"), disk("a"), "{what}: the deaf hub can't have heard of the change");
+        let asked = hub.reconcile_asked();
+        fire();
+        let relisted = probe.reconciled(&hub, asked);
+        assert!(relisted.contains("a") && !relisted.contains("b"), "{what}: re-listed {relisted:?}");
+        assert_eq!(held("a"), disk("a"), "{what}: the hub shows the disk");
+        assert!(about("a", before).iter().any(|e| matches!(e, TreeEvent::Delta { .. })), "{what}: the client got a Delta");
+        assert!(about("b", before).is_empty(), "{what}: nothing about an unchanged folder");
+    }
+
+    // Expanding a folder whose mtime moved lists it again rather than answering from the
+    // snapshot; one that didn't is answered from the snapshot.
+    std::fs::write(a.join("late.txt"), "").unwrap();
+    let gen = |rel: &str| hub.dirs.lock().get(rel).map(|d| d.gen).unwrap();
+    let rec2 = Arc::new(Recorder::default());
+    let reqs = vec![DirReq { rel: "a".into(), known_gen: Some(gen("a")) }, DirReq { rel: "b".into(), known_gen: Some(gen("b")) }];
+    let second = ft.open("w2", &root.to_string_lossy(), reqs, rec2.clone(), vec![]).unwrap();
+    probe.idle(&hub);
+    let got: Vec<TreeEvent> = rec2.msgs.lock().iter().map(|m| m.ev.clone()).collect();
+    assert!(got.iter().any(|e| matches!(e, TreeEvent::Dir { rel, entries, .. } if rel == "a" && entries.iter().any(|x| x.n == "late.txt"))), "{got:?}");
+    assert!(got.iter().any(|e| matches!(e, TreeEvent::NotModified { rel, .. } if rel == "b")), "{got:?}");
+    ft.close(second.sub_id);
+
+    // Nothing changed: an edge re-lists nothing and sends nothing.
+    let before = rec.msgs.lock().len();
+    let asked = hub.reconcile_asked();
+    ft.note_command_in(&root);
+    assert!(probe.reconciled(&hub, asked).is_empty());
+    assert!(about("a", before).is_empty() && about("b", before).is_empty() && about("", before).is_empty());
+
+    // The root deleted unseen is found gone on the next edge.
+    std::fs::remove_dir_all(&root).unwrap();
+    let asked = hub.reconcile_asked();
+    ft.window_focus("w", false);
+    ft.window_focus("w", true);
+    probe.reconciled(&hub, asked);
+    assert!(rec.msgs.lock().iter().any(|m| m.ev == TreeEvent::RootGone));
+    ft.close(ack.sub_id);
 }
 
 #[test]

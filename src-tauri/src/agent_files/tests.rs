@@ -19,7 +19,8 @@ use serde_json::json;
 
 use super::extract::extract;
 use super::*;
-use crate::filetree::hub::Sink;
+use crate::filetree::hub::{RootHub, Sink};
+use crate::filetree::test_support::{Probe, HANG};
 use crate::filetree::types::{Envelope, TreeEvent};
 
 fn ledger() -> Arc<AgentFiles> {
@@ -440,22 +441,26 @@ fn wait_for(what: &str, timeout: Duration, mut f: impl FnMut() -> bool) {
     }
 }
 
-/// A tree on `root` whose watcher is running and whose root listing has arrived.
-fn open_tree(root: &Path, excludes: Vec<String>) -> (Arc<FileTreeState>, Arc<Recorder>, u64) {
+/// A tree on `root` whose watcher is running and whose open folders are listed: the hub's own
+/// account, never a sleep. FSEvents may still report the setup's writes at any time, late or
+/// never (docs/file-tree.md §6.1); nothing below depends on whether it does.
+fn open_tree(root: &Path, excludes: Vec<String>) -> (Arc<FileTreeState>, Arc<Recorder>, u64, Probe, Arc<RootHub>) {
     let ft = FileTreeState::with(Duration::from_secs(30), crate::filetree::watch::RAW_CAPACITY, None);
+    let probe = Probe::new(&ft);
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), excludes).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
-    wait_for("the watcher", Duration::from_secs(30), || !hub.watch_pending());
-    wait_for("the root listing", Duration::from_secs(10), || rec.msgs.lock().iter().any(|m| matches!(&m.ev, TreeEvent::Dir { rel, last: true, .. } if rel.is_empty())));
-    // FSEvents may report what happened just before the stream started: let that settle.
-    std::thread::sleep(Duration::from_millis(400));
-    (ft, rec, ack.sub_id)
+    probe.watching(&hub);
+    probe.idle(&hub);
+    (ft, rec, ack.sub_id, probe, hub)
 }
 
 /// One tree for every end-to-end check: each FSEvents stream start is queued behind the
-/// process's others (about 2 s apiece on a busy machine), and the suite's other watcher tests
-/// wait at most 30 s for theirs.
+/// process's others (about 2 s apiece on a busy machine).
+///
+/// What the watcher reports is handed over by the test (`Probe::deliver`): this is about what
+/// the ledger and the tree do with a report, and FSEvents under load reports late, out of
+/// order or not at all (§6.1). Every wait is on a condition, with `HANG` only as a hang net.
 #[test]
 fn end_to_end_through_one_tree() {
     let root = temp_root("e2e");
@@ -465,11 +470,11 @@ fn end_to_end_through_one_tree() {
     std::fs::write(root.join("src/a.ts"), "a").unwrap();
     git(&root, &["add", "src"]);
     git(&root, &["commit", "-q", "--no-verify", "-m", "init"]);
-    let (ft, rec, sub) = open_tree(&root, vec!["build/".into()]);
+    let (ft, rec, sub, probe, hub) = open_tree(&root, vec!["build/".into()]);
     let cwd = root.to_string_lossy().into_owned();
     a_tool_call_lights_its_row(&ft, &rec, &root, &cwd);
-    one_shell_call_is_credited_two_are_not_and_ignored_paths_never(&ft, &root, &cwd);
-    a_commit_during_the_sole_open_turn_is_credited_to_it(&ft, &rec, &root, &cwd);
+    one_shell_call_is_credited_two_are_not_and_ignored_paths_never(&ft, &probe, &hub, &root, &cwd);
+    a_commit_during_the_sole_open_turn_is_credited_to_it(&ft, &rec, &probe, &hub, &root, &cwd);
     ft.close(sub);
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -477,26 +482,28 @@ fn end_to_end_through_one_tree() {
 fn a_tool_call_lights_its_row(ft: &Arc<FileTreeState>, rec: &Recorder, root: &Path, cwd: &str) {
     let cwd = cwd.to_string();
     let input = json!({ "file_path": root.join("src/a.ts"), "old_string": "a", "new_string": "b" });
-    let t0 = Instant::now();
+    // The first mark after a quiet spell goes out at once: that is the dispatcher's decision,
+    // tested with a fed clock (`coalescing_sends_at_most_one_batch_per_tree_per_window`), not
+    // timed here.
     ft.agents.record(rec_for(&pre("Edit", input.clone(), "e1", &cwd), "t1"));
-    wait_for("the pending mark", Duration::from_secs(2), || rec.marks().iter().any(|m| m.rel == "src/a.ts" && m.phase == "pending"));
-    let took = t0.elapsed();
+    wait_for("the pending mark", HANG, || rec.marks().iter().any(|m| m.rel == "src/a.ts" && m.phase == "pending"));
     ft.agents.record(rec_for(&post("Edit", input, "e1", &cwd), "t1"));
-    wait_for("the ok mark", Duration::from_secs(2), || rec.marks().iter().any(|m| m.rel == "src/a.ts" && m.phase == "ok"));
-    // The budget is a pulse within 150 ms of the hook (§17); allow a loaded test machine.
-    assert!(took < Duration::from_millis(500), "the first mark took {took:?}");
+    wait_for("the ok mark", HANG, || rec.marks().iter().any(|m| m.rel == "src/a.ts" && m.phase == "ok"));
     let m = rec.marks().into_iter().find(|m| m.phase == "ok").unwrap();
     assert_eq!((m.tab_id.as_str(), m.evidence.as_str(), m.op.as_str()), ("t1", "tool", "edit"));
-    // A path outside the root reaches nobody.
-    let before = rec.marks().len();
-    ft.agents.record(rec_for(&pre("Read", json!({ "file_path": std::env::temp_dir().join("af-elsewhere").join("x.ts") }), "r1", &cwd), "t1"));
-    std::thread::sleep(Duration::from_millis(250));
-    assert_eq!(rec.marks().len(), before);
+    // A path outside the root reaches nobody. The dispatcher takes calls in order, so once a
+    // later call inside the root has its mark, the one before it was placed, or wasn't.
+    let outside = std::env::temp_dir().join("af-elsewhere").join("x.ts");
+    ft.agents.record(rec_for(&pre("Read", json!({ "file_path": outside }), "r1", &cwd), "t1"));
+    ft.agents.record(rec_for(&pre("Read", json!({ "file_path": root.join("src/a.ts") }), "r2", &cwd), "t1"));
+    wait_for("the later call's mark", HANG, || rec.marks().iter().any(|m| m.rel == "src/a.ts" && m.op == "read"));
+    assert!(!rec.marks().iter().any(|m| m.rel.contains("x.ts")), "a path outside the root reached the tree");
     // A subscriber that arrives later is primed with what still stands.
     let late = Arc::new(Recorder::default());
     let ack = ft.open("w2", &root.to_string_lossy(), vec![], late.clone(), vec![]).unwrap();
     assert!(late.marks().iter().any(|m| m.rel == "src/a.ts" && m.phase == "ok"));
     ft.close(ack.sub_id);
+    ft.agents.record(rec_for(&post("Read", json!({ "file_path": root.join("src/a.ts") }), "r2", &cwd), "t1"));
     ft.agents.record(rec_for(&stop(&cwd), "t1"));
 }
 
@@ -516,28 +523,28 @@ fn changed(ft: &FileTreeState, tab: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn one_shell_call_is_credited_two_are_not_and_ignored_paths_never(ft: &Arc<FileTreeState>, root: &Path, cwd: &str) {
+fn one_shell_call_is_credited_two_are_not_and_ignored_paths_never(ft: &Arc<FileTreeState>, probe: &Probe, hub: &RootHub, root: &Path, cwd: &str) {
     let cwd = cwd.to_string();
-    // One tab's Bash running: a new file and a write under an ignored folder.
+    // One tab's Bash running: a new file and a write under an ignored folder, reported by the
+    // watcher while the call runs.
     ft.agents.record(rec_for(&prompt(&cwd), "t1"));
     ft.agents.record(rec_for(&bash("b1", &cwd), "t1"));
     std::fs::write(root.join("out.txt"), "x").unwrap();
     std::fs::write(root.join("build/obj.o"), "x").unwrap();
+    probe.deliver(hub, &[root.join("out.txt"), root.join("build/obj.o")]);
     let want = paths::norm(&root.join("out.txt").to_string_lossy()).into_owned();
-    wait_for("the attribution", Duration::from_secs(5), || changed(&ft, "t1").contains(&want));
-    std::thread::sleep(Duration::from_millis(500));
-    let got = changed(&ft, "t1");
+    let got = changed(ft, "t1");
+    assert!(got.contains(&want), "the call's write is credited to it: {got:?}");
     assert!(!got.iter().any(|p| p.contains("build")), "an ignored path is never attributed: {got:?}");
     assert_eq!(ft.agents.activity("t1", "session", false).unwrap().entries.iter().find(|e| e.path == want).unwrap().op, "changed");
     ft.agents.record(rec_for(&post("Bash", json!({ "command": "make" }), "b1", &cwd), "t1"));
 
     // Two tabs' shell calls at once: nobody is credited.
-    std::thread::sleep(Duration::from_millis(500));
     ft.agents.record(rec_for(&prompt(&cwd), "t2"));
     ft.agents.record(rec_for(&bash("b2", &cwd), "t1"));
     ft.agents.record(rec_for(&bash("b3", &cwd), "t2"));
     std::fs::write(root.join("both.txt"), "x").unwrap();
-    std::thread::sleep(Duration::from_millis(1200));
+    probe.deliver(hub, &[root.join("both.txt")]);
     let both = paths::norm(&root.join("both.txt").to_string_lossy()).into_owned();
     assert!(!changed(ft, "t1").contains(&both) && !changed(ft, "t2").contains(&both), "two shells: unattributed");
     ft.agents.record(rec_for(&post("Bash", json!({ "command": "make" }), "b2", &cwd), "t1"));
@@ -558,25 +565,43 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
 }
 
-fn a_commit_during_the_sole_open_turn_is_credited_to_it(ft: &Arc<FileTreeState>, rec: &Recorder, root: &Path, cwd: &str) {
+/// HEAD's commit, as git names it.
+fn head(dir: &Path) -> String {
+    let o = Command::new("git").current_dir(dir).args(["rev-parse", "HEAD"]).output().unwrap();
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+/// A commit moves the index and the branch's ref; the watcher's report of that (handed over,
+/// §6.1) runs git, and the run that sees HEAD move credits the commit. Its update to the tree
+/// carries the new HEAD and is sent after the credit is decided, so waiting for it is waiting
+/// for the decision: credited or not.
+fn commit_seen(rec: &Recorder, probe: &Probe, hub: &RootHub, root: &Path) {
+    probe.deliver(hub, &[root.join(".git/index"), root.join(".git/refs/heads/main"), root.join(".git/HEAD")]);
+    let oid = head(root);
+    wait_for("the run that sees the commit", HANG, || {
+        rec.msgs.lock().iter().any(|m| matches!(&m.ev, TreeEvent::Git(u) if u.branch.as_ref().is_some_and(|b| b.oid == oid)))
+    });
+}
+
+fn a_commit_during_the_sole_open_turn_is_credited_to_it(ft: &Arc<FileTreeState>, rec: &Recorder, probe: &Probe, hub: &RootHub, root: &Path, cwd: &str) {
     let cwd = cwd.to_string();
-    wait_for("the first status run", Duration::from_secs(10), || rec.msgs.lock().iter().any(|m| matches!(m.ev, TreeEvent::Git(_))));
+    wait_for("the first status run", HANG, || rec.msgs.lock().iter().any(|m| matches!(m.ev, TreeEvent::Git(_))));
     ft.agents.record(rec_for(&prompt(&cwd), "t1"));
     std::fs::write(root.join("b.txt"), "b\n").unwrap();
     git(root, &["add", "b.txt"]);
     git(root, &["commit", "-q", "--no-verify", "-m", "two"]);
+    commit_seen(rec, probe, hub, root);
     let want = paths::norm(&root.join("b.txt").to_string_lossy()).into_owned();
     let commits = || ft.agents.activity("t1", "turn", false).unwrap().entries.into_iter().filter(|e| e.evidence == "commit").map(|e| e.path).collect::<Vec<_>>();
-    wait_for("the commit credit", Duration::from_secs(10), || commits().contains(&want));
     assert_eq!(commits(), vec![want], "only what the commit changed");
-    wait_for("the commit mark", Duration::from_secs(2), || rec.marks().iter().any(|m| m.rel == "b.txt" && m.op == "commit"));
+    wait_for("the commit mark", HANG, || rec.marks().iter().any(|m| m.rel == "b.txt" && m.op == "commit"));
 
     // With two turns open nobody is credited.
     ft.agents.record(rec_for(&prompt(&cwd), "t2"));
     std::fs::write(root.join("c.txt"), "c\n").unwrap();
     git(root, &["add", "c.txt"]);
     git(root, &["commit", "-q", "--no-verify", "-m", "three"]);
-    std::thread::sleep(Duration::from_millis(1500));
+    commit_seen(rec, probe, hub, root);
     let c = paths::norm(&root.join("c.txt").to_string_lossy()).into_owned();
     assert!(!commits().contains(&c));
 }

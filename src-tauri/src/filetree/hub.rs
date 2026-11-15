@@ -363,7 +363,9 @@ pub enum HubReport {
     /// A reconcile pass ran (an edge, `RootHub::reconcile`): the open folders it re-listed
     /// because their mtime moved since they were listed. Their listings may still be running
     /// (`ListingsIdle` says when they are done).
-    Reconciled { relisted: Vec<String> },
+    /// `upto`: every edge counted up to this one (`RootHub::reconcile_asked`) was in this pass
+    /// or an earlier one.
+    Reconciled { relisted: Vec<String>, upto: u64 },
 }
 
 /// Edges waiting for a reconcile pass, and whether one is running (`RootHub::reconcile`).
@@ -372,6 +374,8 @@ struct Reconcile {
     /// Folders whose open descendants (and themselves) are to be checked.
     bases: BTreeSet<String>,
     running: bool,
+    /// Edges counted so far: a pass covers every one counted when it took its bases.
+    asked: u64,
 }
 
 pub struct HubInit {
@@ -437,6 +441,9 @@ pub struct RootHub {
     /// next edge re-lists it once.
     listed: Mutex<HashMap<String, SystemTime>>,
     reconcile: Mutex<Reconcile>,
+    /// Tests: the coalescer drops every batch, as when FSEvents never delivers (§6.1).
+    #[cfg(test)]
+    deaf: AtomicBool,
     #[cfg(test)]
     probe: Option<Mutex<std::sync::mpsc::Sender<HubReport>>>,
 }
@@ -556,6 +563,8 @@ impl RootHub {
             grace_token: AtomicU64::new(0),
             listed: Mutex::new(HashMap::new()),
             reconcile: Mutex::new(Reconcile::default()),
+            #[cfg(test)]
+            deaf: AtomicBool::new(false),
             #[cfg(test)]
             probe: init.probe.map(Mutex::new),
         });
@@ -1024,24 +1033,38 @@ impl RootHub {
         let start = {
             let mut r = self.reconcile.lock();
             r.bases.insert(base.to_string());
+            r.asked += 1;
             !std::mem::replace(&mut r.running, true)
         };
         if !start {
             return;
         }
         let me = self.me.clone();
-        let spawned = std::thread::Builder::new().name("ft-reconcile".into()).spawn(move || loop {
+        let spawned = std::thread::Builder::new().name("ft-reconcile".into()).spawn(move || {
             let Some(h) = me.upgrade() else { return };
-            let bases = {
+            let (mut bases, mut upto) = {
                 let mut r = h.reconcile.lock();
-                if r.bases.is_empty() {
-                    r.running = false;
+                (std::mem::take(&mut r.bases), r.asked)
+            };
+            loop {
+                let relisted = h.reconcile_pass(&bases);
+                let covered = upto;
+                let done = {
+                    let mut r = h.reconcile.lock();
+                    bases = std::mem::take(&mut r.bases);
+                    upto = r.asked;
+                    if bases.is_empty() {
+                        r.running = false;
+                    }
+                    bases.is_empty()
+                };
+                // After `running` is cleared on the last pass: a test that saw this report
+                // and then finds the hub idle is right to.
+                h.report(|| HubReport::Reconciled { relisted, upto: covered });
+                if done {
                     return;
                 }
-                std::mem::take(&mut r.bases)
-            };
-            let relisted = h.reconcile_pass(&bases);
-            h.report(|| HubReport::Reconciled { relisted });
+            }
         });
         if let Err(e) = spawned {
             log::warn!("filetree: couldn't start a reconcile pass: {e}");
@@ -1907,6 +1930,25 @@ impl RootHub {
         jobs.inflight.is_empty() && jobs.queue.is_empty() && !self.watch.lock().pending && !self.reconcile.lock().running
     }
 
+    /// Edges counted so far (`HubReport::Reconciled::upto`). Read it before firing an edge,
+    /// then wait for a pass that covers a later one.
+    #[cfg(test)]
+    pub(crate) fn reconcile_asked(&self) -> u64 {
+        self.reconcile.lock().asked
+    }
+
+    /// From now on no disk event reaches this hub: what FSEvents does under load when it loses
+    /// changes without saying so (§6.1). Batches are still reported to the probe.
+    #[cfg(test)]
+    pub(crate) fn go_deaf(&self) {
+        self.deaf.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_deaf(&self) -> bool {
+        self.deaf.load(Ordering::SeqCst)
+    }
+
     #[cfg(test)]
     pub(crate) fn watch_pending(&self) -> bool {
         self.watch.lock().pending
@@ -2154,5 +2196,25 @@ mod stall_tests {
         assert!(s.stalled);
         assert!(s.ack(1));
         assert!(!s.stalled);
+    }
+}
+
+#[cfg(test)]
+mod mtime_tests {
+    use super::*;
+
+    /// A reconcile skips a folder only when a change after its listing must have moved its
+    /// mtime (docs/file-tree.md §6.1).
+    #[test]
+    fn a_listing_mtime_is_trusted_only_when_a_later_change_must_move_it() {
+        let t = |s: u64, n: u32| UNIX_EPOCH + Duration::new(s, n);
+        // Nanoseconds kept (APFS): any later change moves it, however recent.
+        assert!(trusted_mtime(t(100, 1), t(100, 2)));
+        // Whole seconds: a second change within the same tick (FAT's is 2 s) may not move it.
+        assert!(!trusted_mtime(t(100, 0), t(100, 500_000_000)));
+        assert!(!trusted_mtime(t(100, 0), t(101, 999_999_999)));
+        assert!(trusted_mtime(t(100, 0), t(102, 0)));
+        // Before the epoch: nothing to compare, so re-listed.
+        assert!(!trusted_mtime(UNIX_EPOCH - Duration::from_secs(1), t(200, 0)));
     }
 }

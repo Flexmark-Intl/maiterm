@@ -36,7 +36,7 @@ mod tests;
 #[cfg(test)]
 mod git_tests;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

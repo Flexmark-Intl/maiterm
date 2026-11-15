@@ -242,6 +242,10 @@ impl RootHub {
         if self.is_gone() {
             return false;
         }
+        #[cfg(test)]
+        if self.is_deaf() {
+            return false;
+        }
         let mut revalidate = BTreeSet::new();
         let mut rescan: Vec<String> = Vec::new();
         let mut names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();

@@ -11,12 +11,14 @@
 //! never, with no flag saying so (worker #116, shared memory macos-files-watcher-silent-loss).
 //! A test that isn't about the watcher must not wait for an OS event (`barrier`).
 
-use std::cell::Cell;
-use std::path::Path;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use super::hub::{HubReport, RootHub};
+use super::watch::RawEvent;
 use super::FileTreeState;
 
 /// How long any one wait may take before it is a hang.
@@ -28,22 +30,20 @@ pub struct Probe {
     started: Cell<usize>,
     /// Batches seen so far that said events were lost.
     lost: Cell<usize>,
+    /// Reconcile passes reported and not yet taken by `reconciled`: (`upto`, re-listed).
+    passes: RefCell<Vec<(u64, Vec<String>)>>,
 }
 
 impl Probe {
     /// Call before opening anything: only hubs made after this report here.
     pub fn new(ft: &FileTreeState) -> Probe {
-        Probe { rx: ft.probe_hubs(), started: Cell::new(0), lost: Cell::new(0) }
+        Probe { rx: ft.probe_hubs(), started: Cell::new(0), lost: Cell::new(0), passes: RefCell::new(Vec::new()) }
     }
 
     fn next(&self, what: &str) -> HubReport {
         match self.rx.recv_timeout(HANG) {
             Ok(r) => {
-                match &r {
-                    HubReport::WatchStarted => self.started.set(self.started.get() + 1),
-                    HubReport::Batch { lost: true, .. } => self.lost.set(self.lost.get() + 1),
-                    _ => {}
-                }
+                self.note(&r);
                 r
             }
             Err(e) => panic!("the hub reported nothing while waiting for {what} ({e})"),
@@ -55,13 +55,62 @@ impl Probe {
     /// Counts what has arrived since the last wait too.
     pub fn lost(&self) -> usize {
         while let Ok(r) = self.rx.try_recv() {
-            match r {
-                HubReport::WatchStarted => self.started.set(self.started.get() + 1),
-                HubReport::Batch { lost: true, .. } => self.lost.set(self.lost.get() + 1),
-                _ => {}
-            }
+            self.note(&r);
         }
         self.lost.get()
+    }
+
+    fn note(&self, r: &HubReport) {
+        match r {
+            HubReport::WatchStarted => self.started.set(self.started.get() + 1),
+            HubReport::Batch { lost: true, .. } => self.lost.set(self.lost.get() + 1),
+            HubReport::Reconciled { relisted, upto } => self.passes.borrow_mut().push((*upto, relisted.clone())),
+            _ => {}
+        }
+    }
+
+    /// Hand the hub `paths` as if its watcher had reported them, and return once it has
+    /// processed them and listed and sent what they asked for. This is how a test says "the
+    /// OS delivered this event" without depending on when, or whether, it does (§6.1): the
+    /// real watcher may report the same change too, before or after, which changes nothing.
+    /// A marker path that doesn't exist rides along, so the batch that carries it is known.
+    pub fn deliver(&self, hub: &RootHub, paths: &[PathBuf]) {
+        let marker = hub.root.join(format!("ft-deliver-{}", uuid::Uuid::new_v4()));
+        let mut all = paths.to_vec();
+        all.push(marker.clone());
+        hub.raw_sender().push(RawEvent { paths: all, rescan: false, content_only: false });
+        loop {
+            if let HubReport::Batch { paths, .. } = self.next("a delivered event to be processed") {
+                if paths.contains(&marker) {
+                    break;
+                }
+            }
+        }
+        self.idle(hub);
+    }
+
+    /// An edge at `base` (`RootHub::reconcile`), then `reconciled`.
+    pub fn reconcile(&self, hub: &RootHub, base: &str) -> BTreeSet<String> {
+        let before = hub.reconcile_asked();
+        hub.reconcile(base);
+        self.reconciled(hub, before)
+    }
+
+    /// An edge fired after `hub.reconcile_asked()` returned `before` (a command, focus, an
+    /// agent's hook, `reconcile`) has been reconciled: a pass that covers it is done, and so is
+    /// everything the hub had to list. The folders that pass and any after it re-listed. An
+    /// edge that reaches the hub from another thread (an agent's write goes through the
+    /// ledger's dispatcher) is waited for too.
+    pub fn reconciled(&self, hub: &RootHub, before: u64) -> BTreeSet<String> {
+        while !self.passes.borrow().iter().any(|(upto, _)| *upto > before) {
+            self.next("a reconcile pass covering the edge");
+        }
+        self.idle(hub);
+        self.lost();
+        let mut passes = self.passes.borrow_mut();
+        let out = passes.iter().filter(|(upto, _)| *upto > before).flat_map(|(_, r)| r.iter().cloned()).collect();
+        passes.clear();
+        out
     }
 
     /// The hub's watcher has started: it is watching, has asked every open folder to list

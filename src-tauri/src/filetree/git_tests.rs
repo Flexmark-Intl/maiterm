@@ -94,15 +94,6 @@ fn applied(updates: &[GitUpdate]) -> (std::collections::BTreeMap<String, String>
     (files, dirs)
 }
 
-/// The watcher starts in the background (FSEvents can take seconds); a change made before it
-/// runs is never reported. Once it has started, a barrier file's event coming through proves
-/// it is delivering: the file goes in the repository's own `.git`, where the tree, git and
-/// find all take it for noise.
-fn wait_for_watcher(probe: &Probe, ft: &FileTreeState, sub: u64, repo: &Path) {
-    let hub = ft.hub_of(sub).unwrap();
-    probe.watching(&hub);
-    probe.barrier(&repo.join(".git"));
-}
 
 /// The git worker's next decision after the ones `skip` passes over. The deadline only turns
 /// a hang into a failure.
@@ -180,11 +171,14 @@ fn decorations_follow_the_disk_and_a_commit_clears_them() {
     let (files, _) = applied(&rec.git_updates());
     assert!(files.is_empty(), "a clean repo has no decorations: {files:?}");
     assert_eq!(rec.git_updates()[0].branch.as_ref().map(|b| b.head.as_str()), Some("main"));
-    wait_for_watcher(&probe, &ft, ack.sub_id, &r);
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    probe.watching(&hub);
 
-    // An edit and a new file: the watcher schedules a run (no manual refresh here).
+    // An edit and a new file, reported by the watcher (handed over by the test: FSEvents may be
+    // late or lose them, docs/file-tree.md §6.1), schedule a run; no manual refresh here.
     std::fs::write(r.join("src/lib/a.ts"), "changed\n").unwrap();
     std::fs::write(r.join("src/new.ts"), "n\n").unwrap();
+    probe.deliver(&hub, &[r.join("src/lib/a.ts"), r.join("src/new.ts")]);
     wait_for("the edit to decorate", HANG, || applied(&rec.git_updates()).0.len() == 2);
     let (files, dirs) = applied(&rec.git_updates());
     assert_eq!(files.get("src/lib/a.ts").map(String::as_str), Some("M"));
@@ -194,17 +188,18 @@ fn decorations_follow_the_disk_and_a_commit_clears_them() {
     let last = rec.git_updates().last().cloned().unwrap();
     assert!(!last.full, "a change after the first is sent as changed keys only");
 
-    // A commit made outside the tree (as in a terminal) moves the index and HEAD.
+    // A commit made outside the tree, in a terminal: the command finishing there is the edge
+    // (OSC 133 D), whatever the watcher makes of the index and HEAD moving.
     let n = rec.git_updates().len();
     git(&r, &["add", "-A"]);
     git(&r, &["commit", "-q", "--no-verify", "-m", "two"]);
+    ft.note_command_in(&r);
     wait_for("the commit to clear the decorations", HANG, || rec.git_updates().len() > n && applied(&rec.git_updates()).0.is_empty());
     let (files, dirs) = applied(&rec.git_updates());
     assert!(files.is_empty() && dirs.is_empty(), "{files:?} {dirs:?}");
 
     // Hover line counts for a modified file.
     std::fs::write(r.join("README.md"), "r\nmore\nlines\n").unwrap();
-    let hub = ft.hub_of(ack.sub_id).unwrap();
     hub.git_signal(Trigger::Manual);
     wait_for("README to decorate", HANG, || applied(&rec.git_updates()).0.contains_key("README.md"));
     assert_eq!(hub.stat("README.md").unwrap().numstat, Some((2, 0)));
@@ -654,15 +649,17 @@ fn find_builds_its_index_on_the_first_query_and_follows_the_disk() {
     seq += 1;
     assert!(hub.search(ack.sub_id, "bundle", 500, seq, false).items.is_empty(), "ignored files are not");
 
-    // A new file is found once the watcher reports it; a deleted one disappears. This half is
-    // about delivery: the watcher must be running and delivering before the change is made.
-    wait_for_watcher(&probe, &ft, ack.sub_id, &r);
+    // A new file is found once the watcher reports it; a deleted one disappears. The reports
+    // are handed over by the test (FSEvents may be late or lose them, docs/file-tree.md §6.1).
+    probe.watching(&hub);
     std::fs::write(r.join("src/lib/brand_new_widget.ts"), "").unwrap();
+    probe.deliver(&hub, &[r.join("src/lib/brand_new_widget.ts")]);
     wait_for("the new file in the index", HANG, || {
         seq += 1;
         hub.search(ack.sub_id, "brand_new_widget", 500, seq, false).items.iter().any(|h| h.rel == "src/lib/brand_new_widget.ts")
     });
     std::fs::remove_file(r.join("src/untracked_helper.ts")).unwrap();
+    probe.deliver(&hub, &[r.join("src/untracked_helper.ts")]);
     wait_for("the deleted file gone from the index", HANG, || {
         seq += 1;
         !hub.search(ack.sub_id, "untracked_helper", 500, seq, false).items.iter().any(|h| h.rel == "src/untracked_helper.ts")
