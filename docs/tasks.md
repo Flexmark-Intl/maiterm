@@ -447,8 +447,9 @@ agent's tab by hand; **Run** runs it. Where depends on the command (`runPlace` i
   (tested on Claude Code 2.1.319, which enters shell mode on a pasted `! …`). So the question
   closes with the note "Ran the command in the agent's tab from the card", and nothing else is
   typed. It is typed now or refused with the reason, **never held** (`shell_line_refusal`):
-  refused mid-turn (whether Claude queues a shell-mode line typed while it works is untested),
-  over a dialog, a draft, the human's typing, or a message still waiting for the tab.
+  refused over a dialog, a draft, the human's typing, or a message still waiting for the tab.
+  **A busy agent is not a refusal** (2026-11-15): Claude queues a `! …` line typed mid-turn
+  and runs it when the turn ends, like any message (seen on Claude Code 2.1.325).
 - **Anything else**: a new terminal tab beside the agent, in its folder and on its ssh host
   (`placeOfTerminalTab`, what Cmd+T inherits), types the line once the shell (or the ssh hop and
   its bridge) is up. Agents often leave the `!` off, even for commands that need no terminal; a
