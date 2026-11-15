@@ -408,14 +408,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = dir.join("config");
         std::fs::write(&cfg, "Host *\n  RemoteCommand tmux new -A -s main\n").unwrap();
-        let connect = format!("-F {} nohost.invalid", cfg.display());
+        // Connect args are whitespace-separated words everywhere (`Target::ssh_args`), so the
+        // config is named relative to the folder ssh runs in: the temp folder's path may hold a
+        // space (a worker sandbox's does), and no word list can carry one.
+        let connect = "-F config nohost.invalid";
         let run = |args: Vec<String>| {
-            let out = std::process::Command::new("ssh").args(args).stdin(std::process::Stdio::null()).output().unwrap();
+            let out = std::process::Command::new("ssh").args(args).current_dir(&dir).stdin(std::process::Stdio::null()).output().unwrap();
             String::from_utf8_lossy(&out.stderr).to_lowercase()
         };
-        let ours = run(ssh_args("nohost.invalid", &connect, "true"));
+        let ours = run(ssh_args("nohost.invalid", connect, "true"));
         // Without the override this OpenSSH (7.6 or later) says exactly that and exits 255.
-        let plain = run(vec!["-F".into(), cfg.display().to_string(), "-o".into(), "BatchMode=yes".into(), "nohost.invalid".into(), "true".into()]);
+        let plain = run(["-F", "config", "-o", "BatchMode=yes", "nohost.invalid", "true"].map(String::from).to_vec());
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!ours.contains("cannot execute command-line and remote command"), "{ours}");
         if plain.contains("cannot execute command-line and remote command") {

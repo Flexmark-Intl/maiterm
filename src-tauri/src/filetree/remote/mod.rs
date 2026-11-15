@@ -95,6 +95,11 @@ impl Default for Timing {
 
 /// Where to connect: the tunnel's own key (it names the ControlMaster socket) and the connect
 /// args (`watch::connect_args` form, never a whole command line).
+///
+/// `ssh_args` is a list of whitespace-separated words, as it is everywhere maiTerm keeps an
+/// ssh command (the tunnels, the mirror, watch scripts): the command is read back from the
+/// process table, where argv's quoting is already gone. A word holding a space (`-F "/a b/c"`)
+/// can't be carried; `proto::ssh_args` splits it into argv words itself, never through a shell.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Target {
     pub tunnel_key: String,
