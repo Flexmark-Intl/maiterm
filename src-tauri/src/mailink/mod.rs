@@ -4170,37 +4170,8 @@ pub(crate) async fn inject_text(
         let settle = 120 + (text.len() as u64 / 8).min(800);
         tokio::time::sleep(std::time::Duration::from_millis(settle)).await;
         crate::pty::write_pty(app, pty_id, b"\r")?;
-        confirm_submitted(app, pty_id, text).await;
     }
     Ok(())
-}
-
-/// A CR that didn't submit: an agent still starting (a wake typed in the second its session
-/// started, 2026-11-15) takes it as a newline inside the paste, and the message sits in its box
-/// unsent. Looked for on the screen, and pressed again, a few times. Only for Claude's box, the
-/// one that parses; never once the human has touched the terminal since the paste.
-async fn confirm_submitted(app: &Arc<AppState>, pty_id: &str, text: &str) {
-    let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().to_string();
-    let typed_at = now_ms();
-    for wait_ms in [700u64, 1500, 3000] {
-        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-        let human_since = app.pty_stats.read().get(pty_id).map_or(0, |s| s.last_human_key_ms.load(std::sync::atomic::Ordering::Relaxed)) >= typed_at;
-        if human_since {
-            return;
-        }
-        let stuck = {
-            let registry = app.terminal_registry.read();
-            let Some(h) = registry.get(pty_id) else { return };
-            input_box::holds_message(&crate::terminal::render::screen_text_undimmed(&h.term), &first)
-        };
-        if !stuck {
-            return;
-        }
-        log::warn!("[inbox] a message typed into pty {pty_id} is still in the agent's box: pressing Enter again");
-        if crate::pty::write_pty(app, pty_id, b"\r").is_err() {
-            return;
-        }
-    }
 }
 
 /// How a prompt reached the agent.

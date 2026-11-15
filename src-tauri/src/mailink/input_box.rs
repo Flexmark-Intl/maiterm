@@ -60,19 +60,6 @@ fn box_lines(screen: &str) -> Option<Vec<&str>> {
     Some(out)
 }
 
-/// Whether the box still holds a message whose first line is `first`: a paste whose CR didn't
-/// submit it. Spaces collapsed and only the start compared, since the box wraps and clips.
-pub fn holds_message(screen: &str, first: &str) -> bool {
-    let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let want: String = squash(first).chars().take(40).collect();
-    if want.chars().count() < 8 {
-        return false;
-    }
-    let Some(lines) = box_lines(screen) else { return false };
-    let have = squash(&lines.join(" "));
-    have.starts_with(&want) || (have.chars().count() >= 20 && want.starts_with(&have))
-}
-
 pub fn parse(screen: &str) -> InputBox {
     let Some(lines) = box_lines(screen) else { return InputBox::Unknown };
     // Claude's own hints in an EMPTY box, should one arrive undimmed. Whole-line match only: a
@@ -111,31 +98,6 @@ mod tests {
 
     fn screen(body: &[&str]) -> String {
         body.join("\n")
-    }
-
-    /// 2026-11-15: a wake typed as the Queen's session started; the CR became a newline in the
-    /// box and the message sat there.
-    #[test]
-    fn a_message_left_in_the_box_is_found_and_only_that_message() {
-        let msg = "[maiTerm] Your human has woken this Hive, which was Done since 2026-11-14 18:00. Their message:\n\nwhat open items are there?";
-        let first = msg.lines().next().unwrap();
-        let stuck = screen(&[
-            "● Earlier answer.",
-            RULE,
-            "❯ [maiTerm] Your human has woken this Hive, which was Done since 2026-11-14",
-            "  18:00. Their message:",
-            "",
-            "  what open items are there?",
-            "",
-            RULE,
-            "  ⏵⏵ auto mode on (shift+tab to cycle)",
-        ]);
-        assert!(holds_message(&stuck, first));
-        let submitted = screen(&["❯ [maiTerm] Your human has woken this Hive, which was Done", "● Working…", RULE, "❯ ", RULE]);
-        assert!(!holds_message(&submitted, first), "the history's copy is not the box");
-        let draft = screen(&[RULE, "❯ something the human is writing", RULE]);
-        assert!(!holds_message(&draft, first));
-        assert!(!holds_message(&stuck, "ok"), "too short to tell");
     }
 
     #[test]
