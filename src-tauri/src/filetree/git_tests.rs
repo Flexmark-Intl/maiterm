@@ -126,8 +126,10 @@ fn run_covering(rx: &std::sync::mpsc::Receiver<Decision>, what: &str, covers: u6
     }
 }
 
-/// Every run signalled so far (the open's, and the watcher's `Open` once it has started) has
-/// finished, and the worker has nothing due: a test measures or holds runs from here.
+/// Every run signalled so far has finished, and the worker has nothing due: a test measures
+/// or holds runs from here. Call it after `wait_for_watcher`, whose barrier means the watcher
+/// has started (its `Open`) and has reported everything the setup wrote, so no signal is still
+/// on its way.
 fn settle_git(core: &GitCore, rx: &std::sync::mpsc::Receiver<Decision>) {
     let signalled = core.test_signals();
     run_covering(rx, "every run signalled so far", signalled);
@@ -286,9 +288,10 @@ fn slow_mode_trips_on_two_slow_runs_skips_worktree_edges_and_recovers() {
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
     let core = hub.git.clone().unwrap();
-    // The watcher's start signals one more run (`Open`): it is waited for here, so it can't
-    // land among the runs the test counts.
-    probe.watching(&hub);
+    // The watcher's start signals one more run (`Open`), and it may still report the setup's
+    // own writes: both are waited for here (the barrier), so neither lands among the runs the
+    // test counts.
+    wait_for_watcher(&probe, &ft, ack.sub_id, &r);
     settle_git(&core, &rx);
     assert_ne!(rec.healths().last().map(String::as_str), Some("slow"));
 
@@ -390,9 +393,10 @@ fn signals_during_a_run_collapse_into_one_rerun() {
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
     let core = hub.git.clone().unwrap();
-    // The watcher's start signals one more run (`Open`): waited for here, so it can't land
-    // inside the held run or the rerun counted below.
-    probe.watching(&hub);
+    // The watcher's start signals one more run (`Open`), and it may still report the setup's
+    // own writes: both are waited for here (the barrier), so neither lands inside the held run
+    // or the rerun counted below.
+    wait_for_watcher(&probe, &ft, ack.sub_id, &r);
     settle_git(&core, &rx);
 
     let n = stub.runs();
