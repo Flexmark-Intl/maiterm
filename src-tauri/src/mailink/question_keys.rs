@@ -399,7 +399,10 @@ pub(crate) async fn drive_question_answers<T: SelectorTerm>(
                 None => return Err(format!("question {qi}: label {sel:?} not among options")),
             }
         }
-        let other = ans.other.as_ref().map(|s| s.split(['\n', '\r']).collect::<Vec<_>>().join(" "));
+        // Text only: every control character becomes a space. In the Other input a newline or
+        // CR submits early, ESC cancels the whole ask, and Tab moves focus to the Next button;
+        // all of it goes in one write, after the last screen check.
+        let other = ans.other.as_ref().map(|s| s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>());
         let other = other.filter(|s| !s.trim().is_empty());
         if rows.is_empty() && other.is_none() {
             return Err(format!("question {qi}: no option selected and no Other text"));
@@ -832,6 +835,22 @@ mod tests {
         let r = block_on(drive_question_answers(&mut fake, &input(&qs), &[pick(&["Redis"]), pick(&["Redis"])]));
         assert!(r.unwrap_err().contains("read the same"));
         assert!(fake.sent.is_empty());
+    }
+
+    #[test]
+    fn other_text_goes_in_as_text_with_no_control_keys() {
+        // A Tab would move a multiSelect's focus to the Next button, an ESC would cancel the ask.
+        let answers = [Answer { selected: vec![], other: Some("Carts\tand\u{1b}more\u{7f}\n".into()) }];
+        let (r, fake) = run(&[CACHE], &answers, &[]);
+        assert_eq!(r, Ok(()));
+        for key in &fake.sent {
+            if key.len() > 1 && key != DOWN && key != UP && key != RIGHT {
+                assert!(!key.iter().any(|b| b.is_ascii_control()), "control byte in typed text: {key:?}");
+            }
+        }
+        assert!(!fake.sent.iter().flatten().any(|&b| b == b'\t'));
+        assert_eq!(fake.model.other[0], "Carts and more  ");
+        assert!(fake.model.submitted);
     }
 
     #[test]
