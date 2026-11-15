@@ -69,11 +69,15 @@ impl Transport for Local {
     }
 }
 
+/// Short where a test waits on the interval (backoff, grace, polls); the timeouts that decide a
+/// helper is dead or not ready are HANG, so a slow but healthy helper on a loaded machine is
+/// never taken for a dead one. A test about one of those timeouts sets its own value (the slow
+/// upload's 300 ms ping wait).
 fn fast() -> Timing {
     Timing {
         ping_every: Duration::from_secs(5),
-        ping_timeout: Duration::from_secs(5),
-        ready_timeout: Duration::from_secs(20),
+        ping_timeout: crate::filetree::test_support::HANG,
+        ready_timeout: crate::filetree::test_support::HANG,
         backoff_first: Duration::from_millis(100),
         backoff_cap: Duration::from_millis(500),
         grace: Duration::from_millis(500),
@@ -112,7 +116,8 @@ fn git(dir: &Path, home: &Path, args: &[&str]) {
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
-const T: Duration = Duration::from_secs(20);
+/// A helper call's own deadline: only a hang reaches it.
+const T: Duration = crate::filetree::test_support::HANG;
 
 fn shortname(h: &str) -> String {
     h.split('.').next().unwrap_or(h).to_ascii_lowercase()
