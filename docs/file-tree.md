@@ -1429,9 +1429,14 @@ All backends feed one **coalescer thread per hub**:
   An entry appearing, going or renamed moves its folder's mtime; a file's content doesn't show
   in a listing (its git decoration does: the command and shell-call edges run git). The
   ignored flag a listing shows follows the `.gitignore` and `info/exclude` files, and an edit
-  to one in place moves no folder's mtime, so each pass also compares every rules file the
-  ignore stack read with the disk (its mtime and length, or its absence, taken just before it
-  was read, `ignore_cache::Stamps`). One that changed is handled as its event would have been:
+  to one in place moves no folder's mtime, so each pass also compares the rules files that
+  decide what the open folders show (each open folder's and its ancestors' `.gitignore` and
+  nested `.git`/`info/exclude`, and the root's `info/exclude`: open folders × depth, not every
+  folder the stack ever read) with the disk: its mtime and length, or its absence, taken just
+  before it was read (`ignore_cache::Stamps`). A whole-second mtime that can't tell a later edit
+  apart (recent, or in the future, as from a zip made in a later timezone) is decided by a hash
+  of the bytes instead, so it is re-read on each pass but never taken as changed for that alone.
+  One that changed is handled as its event would have been:
   that folder's matcher is dropped (all of them for the root's `info/exclude`), every open
   folder under it is re-listed whatever its mtime, git runs and Find's index is rebuilt.
   A whole-second mtime (HFS+, FAT) is trusted only once the clock is past its tick, since a

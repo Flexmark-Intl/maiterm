@@ -19,7 +19,8 @@
 //! Each matcher remembers the file it was built from as it was then (`Stamp`), so an edge can
 //! find a `.gitignore` or `info/exclude` whose watcher event was lost (§6.1, `IgnoreStack::stamps`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -33,17 +34,37 @@ use super::paths::{join_rel, split_parent};
 enum Stamp {
     Absent,
     At(SystemTime, u64),
-    /// Its mtime is too recent to tell a later edit apart on a coarse volume: always re-read.
-    Unsure,
+    /// Its mtime can't tell a later edit apart (a whole second, within or after the clock's
+    /// tick: a file unzipped from a later timezone is hours ahead), so its bytes are kept too,
+    /// as a hash: (mtime, length, content hash).
+    Unsure(Option<SystemTime>, u64, u64),
+}
+
+fn content_hash(path: &Path) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::fs::read(path).ok().hash(&mut h);
+    h.finish()
 }
 
 fn stamp(path: &Path, now: SystemTime) -> Stamp {
     match std::fs::metadata(path) {
         Ok(m) if m.is_file() => match m.modified() {
             Ok(t) if super::hub::trusted_mtime(t, now) => Stamp::At(t, m.len()),
-            _ => Stamp::Unsure,
+            t => Stamp::Unsure(t.ok(), m.len(), content_hash(path)),
         },
         _ => Stamp::Absent,
+    }
+}
+
+/// Is the file at `path` no longer what `was` describes? An `Unsure` stamp is decided by the
+/// bytes when the mtime and length still match: re-read, never taken as changed for being unsure.
+fn changed(path: &Path, was: Stamp, now: SystemTime) -> bool {
+    match was {
+        Stamp::Unsure(t, len, hash) => match std::fs::metadata(path) {
+            Ok(m) if m.is_file() => m.modified().ok() != t || m.len() != len || content_hash(path) != hash,
+            _ => true,
+        },
+        _ => stamp(path, now) != was,
     }
 }
 
@@ -60,13 +81,13 @@ struct Folder {
     info_exclude_file: Option<(PathBuf, Stamp)>,
 }
 
-/// The rules files the stack was read from, with their stamps, to compare against the disk with
-/// no lock held (`IgnoreStack::stamps`, then `moved`).
+/// The rules files that decide what the open folders show, with their stamps, to compare
+/// against the disk with no lock held (`IgnoreStack::stamps`, then `moved`).
 pub struct Stamps {
-    /// (folder rel, its `.gitignore` and stamp, its `.git` and whether it was there (below the
-    /// root only: the root's own repository is the hub's), its repository's `info/exclude` and
-    /// stamp when one was looked for).
-    folders: Vec<(String, (PathBuf, Stamp), Option<(PathBuf, bool)>, Option<(PathBuf, Stamp)>)>,
+    root: PathBuf,
+    /// (folder rel, its `.gitignore`'s stamp, whether it held `.git`, its repository's
+    /// `info/exclude` and stamp when one was looked for).
+    folders: Vec<(String, Stamp, bool, Option<(PathBuf, Stamp)>)>,
     root_exclude: Option<(PathBuf, Stamp)>,
 }
 
@@ -75,17 +96,25 @@ impl Stamps {
     /// root repository's `info/exclude` did.
     pub fn moved(&self) -> (Vec<String>, bool) {
         let now = SystemTime::now();
-        let changed = |p: &Path, was: Stamp| was == Stamp::Unsure || stamp(p, now) != was;
         let folders = self
             .folders
             .iter()
-            .filter(|(_, (gi, gs), git, ex)| {
-                changed(gi, *gs) || git.as_ref().is_some_and(|(p, was)| std::fs::symlink_metadata(p).is_ok() != *was) || ex.as_ref().is_some_and(|(p, s)| changed(p, *s))
+            .filter(|(rel, gs, repo_root, ex)| {
+                let Ok(abs) = super::paths::rel_to_native(&self.root, rel) else { return false };
+                // The root's own `.git` is the hub's to watch (`repo_current`), not the stack's.
+                let git_moved = !rel.is_empty() && std::fs::symlink_metadata(abs.join(".git")).is_ok() != *repo_root;
+                changed(&abs.join(".gitignore"), *gs, now) || git_moved || ex.as_ref().is_some_and(|(p, s)| changed(p, *s, now))
             })
             .map(|f| f.0.clone())
             .collect();
-        let root = self.root_exclude.as_ref().is_some_and(|(p, s)| changed(p, *s));
+        let root = self.root_exclude.as_ref().is_some_and(|(p, s)| changed(p, *s, now));
         (folders, root)
+    }
+
+    /// Folders whose rules files are checked.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.folders.len()
     }
 }
 
@@ -322,19 +351,28 @@ impl IgnoreStack {
         self.dir_ignored.clear();
     }
 
-    /// Every rules file the stack has read, with its stamp, for `Stamps::moved` (no lock held
-    /// while it reads the disk).
-    pub fn stamps(&self) -> Stamps {
-        let folders = self
-            .folders
-            .iter()
-            .filter_map(|(rel, f)| {
-                let abs = super::paths::rel_to_native(&self.root, rel).ok()?;
-                let git = (!rel.is_empty()).then(|| (abs.join(".git"), f.repo_root));
-                Some((rel.clone(), (abs.join(".gitignore"), f.gi_stamp), git, f.info_exclude_file.clone()))
-            })
+    /// The rules files to check on an edge, with their stamps, for `Stamps::moved` (no lock
+    /// held while it reads the disk).
+    ///
+    /// Only the rules that decide what `open` folders show: each open folder's and each of its
+    /// ancestors' (a folder's rows are matched from it up to its repository, and whether it is
+    /// itself ignored from its parents), plus the root's `info/exclude`. A folder the stack read
+    /// for another reason (a worktree event checked for git or Find) is left out, so an edge
+    /// costs open folders × depth, whatever else the stack holds. Nothing is built from paths
+    /// here, under the lock: `moved` does that.
+    pub fn stamps<'a>(&self, open: impl IntoIterator<Item = &'a String>) -> Stamps {
+        let mut chain: BTreeSet<&str> = BTreeSet::new();
+        for rel in open {
+            let mut cur = rel.as_str();
+            while chain.insert(cur) && !cur.is_empty() {
+                cur = split_parent(cur).0;
+            }
+        }
+        let folders = chain
+            .into_iter()
+            .filter_map(|rel| self.folders.get(rel).map(|f| (rel.to_string(), f.gi_stamp, f.repo_root, f.info_exclude_file.clone())))
             .collect();
-        Stamps { folders, root_exclude: self.root_exclude_file.clone() }
+        Stamps { root: self.root.clone(), folders, root_exclude: self.root_exclude_file.clone() }
     }
 
     /// An `info/exclude` changed, or the user's excludes did: start over.
@@ -420,6 +458,54 @@ mod tests {
         assert!(!s.is_ignored("", "fresh.txt", false), "cached until told");
         s.invalidate_folder("");
         assert!(s.is_ignored("", "fresh.txt", false));
+        fs::remove_dir_all(&t).unwrap();
+    }
+
+    /// An edge checks only the rules that decide what is open: a folder the stack read for
+    /// another reason (a worktree event checked for git or Find) costs it nothing.
+    #[test]
+    fn an_edge_stamps_only_the_open_chain() {
+        let t = tree();
+        let mut s = IgnoreStack::for_test(&t, Some(&t.join(".git")), None, &[]);
+        for i in 0..300 {
+            let d = format!("many/d{i}");
+            fs::create_dir_all(t.join(&d)).unwrap();
+            s.is_ignored(&d, "x.txt", false);
+        }
+        assert!(s.folders.len() > 300, "the stack read every folder an event named");
+        s.is_ignored("src/gen", "x.txt", false);
+        let open = ["src/gen".to_string()];
+        let stamps = s.stamps(&open);
+        assert_eq!(stamps.len(), 3, "\"\", src and src/gen, and nothing else");
+        // A rules change outside the open chain is not looked at; one inside it is.
+        fs::write(t.join("many/d7/.gitignore"), "x.txt\n").unwrap();
+        assert_eq!(stamps.moved(), (vec![], false));
+        fs::write(t.join("src/.gitignore"), "other/\n").unwrap();
+        assert_eq!(s.stamps(&open).moved(), (vec!["src".to_string()], false));
+        fs::remove_dir_all(&t).unwrap();
+    }
+
+    /// A whole-second mtime in the future (a zip made in a later timezone) can't tell a later
+    /// edit apart by itself. Re-read on every pass, it is taken as changed only when its bytes
+    /// are.
+    #[test]
+    fn a_future_whole_second_rules_file_is_decided_by_its_bytes() {
+        let t = tree();
+        let future = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_900_000_000);
+        let set = |text: &str| {
+            fs::write(t.join(".gitignore"), text).unwrap();
+            fs::File::options().write(true).open(t.join(".gitignore")).unwrap().set_modified(future).unwrap();
+        };
+        set("node_modules/\n");
+        let mut s = IgnoreStack::for_test(&t, Some(&t.join(".git")), None, &[]);
+        assert!(s.is_ignored("", "node_modules", true));
+        let open = [String::new()];
+        for _ in 0..3 {
+            assert_eq!(s.stamps(&open).moved(), (vec![], false), "unchanged: nothing to do");
+        }
+        // Same length, same mtime, other rules: only the bytes tell.
+        set("node_modulez/\n");
+        assert_eq!(s.stamps(&open).moved(), (vec![String::new()], false));
         fs::remove_dir_all(&t).unwrap();
     }
 }

@@ -1085,11 +1085,12 @@ impl RootHub {
             return Vec::new();
         }
         // Which rows are flagged ignored follows the `.gitignore` and `info/exclude` files, and an
-        // edit in place moves no folder's mtime: each rules file the stack read is compared with
-        // the disk (no lock held while it reads), and one that changed is handled as its event
-        // would have been. Every open folder under it is listed again, inside the edge's path
+        // edit in place moves no folder's mtime: the rules files that decide what the open
+        // folders show are compared with the disk (no lock held while it reads), and one that
+        // changed is handled as its event would have been. Every open folder under it is listed again, inside the edge's path
         // or not, since the rules reach that far.
-        let (rules, exclude) = { self.ignore.lock().stamps() }.moved();
+        let open: Vec<String> = self.dirs.lock().keys().cloned().collect();
+        let (rules, exclude) = { self.ignore.lock().stamps(&open) }.moved();
         let mut forced: Vec<String> = Vec::new();
         if exclude || !rules.is_empty() {
             {

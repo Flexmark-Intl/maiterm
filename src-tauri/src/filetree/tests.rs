@@ -739,6 +739,37 @@ fn a_lost_ignore_rule_change_shows_after_an_edge() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// A `.gitignore` whose whole-second mtime is in the future (a zip made in a later timezone)
+/// can't be told unchanged by its mtime. Idle edges re-read it and do nothing else: no re-list,
+/// no git run (docs/file-tree.md §6.1).
+#[test]
+fn idle_edges_over_a_future_dated_gitignore_do_nothing() {
+    let root = temp_root("futureignore");
+    std::fs::create_dir_all(root.join("a/b")).unwrap();
+    git_init(&root);
+    std::fs::write(root.join(".gitignore"), "dist/\n").unwrap();
+    let future = std::time::UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+    std::fs::File::options().write(true).open(root.join(".gitignore")).unwrap().set_modified(future).unwrap();
+    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let probe = Probe::new(&ft);
+    let rec = Arc::new(Recorder::default());
+    let open = vec![DirReq { rel: "a".into(), known_gen: None }, DirReq { rel: "a/b".into(), known_gen: None }];
+    let ack = ft.open("w", &root.to_string_lossy(), open, rec.clone(), vec![]).unwrap();
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    probe.watching(&hub);
+    probe.idle(&hub);
+    hub.go_deaf();
+    let core = hub.git.clone().expect("a repository");
+    let signals = core.test_signals();
+    for i in 0..3 {
+        let relisted = probe.reconcile(&hub, "a/b");
+        assert!(relisted.is_empty(), "idle edge {i} re-listed {relisted:?}");
+    }
+    assert_eq!(core.test_signals(), signals, "idle edges asked git for nothing");
+    ft.close(ack.sub_id);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 #[test]
 fn a_hub_is_reaped_after_its_grace() {
     let root = temp_root("reap");
