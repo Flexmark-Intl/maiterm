@@ -101,18 +101,20 @@ async fn cm_master_alive(host_key: &str, ssh_args: &str) -> bool {
         for arg in ssh_args.split_whitespace() {
             args.push(arg.to_string());
         }
+        let Ok(child) = tokio::process::Command::new("ssh")
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+        else {
+            return false;
+        };
+        // Killed and reaped at the deadline, not left behind on a socket that stopped answering.
         matches!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                tokio::process::Command::new("ssh")
-                    .args(&args)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status(),
-            )
-            .await,
-            Ok(Ok(status)) if status.success()
+            crate::util::proc::wait_output_timeout(child, std::time::Duration::from_secs(3)).await,
+            Ok(out) if out.status.success()
         )
     }
     #[cfg(not(unix))]
@@ -331,14 +333,15 @@ async fn ssh_capture(prefix: Vec<String>, ssh_args: &str, tail: &[&str], secs: u
     let mut args = prefix;
     args.extend(ssh_args.split_whitespace().map(str::to_string));
     args.extend(tail.iter().map(|s| s.to_string()));
-    let run = tokio::process::Command::new("ssh")
+    let child = tokio::process::Command::new("ssh")
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(std::time::Duration::from_secs(secs), run).await.ok()?.ok()?;
+        .spawn()
+        .ok()?;
+    let output = crate::util::proc::wait_output_timeout(child, std::time::Duration::from_secs(secs)).await.ok()?;
     Some((output.status.success(), String::from_utf8_lossy(&output.stdout).into_owned()))
 }
 
@@ -1393,17 +1396,18 @@ pub async fn ssh_run_setup(
 
     log::info!("SSH setup: ssh {} <script>", ssh_args);
 
-    let output = tokio::time::timeout(
-        tokio::time::Duration::from_secs(30),
-        tokio::process::Command::new("ssh")
-            .args(&cmd_args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-    ).await
-        .map_err(|_| "SSH setup timed out (30s)".to_string())?
-        .map_err(|e| format!("Failed to spawn SSH setup: {}", e))?;
+    // Killed and reaped at the deadline: a setup ssh left running on a hung host is one more
+    // connection per retry.
+    use crate::util::proc::{self, RunError};
+    let output = proc::output_timeout_async(
+        tokio::process::Command::new("ssh").args(&cmd_args),
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .map_err(|e| match e {
+        RunError::TimedOut => "SSH setup timed out (30s)".to_string(),
+        RunError::Spawn(e) | RunError::Io(e) => format!("Failed to spawn SSH setup: {}", e),
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1441,16 +1445,19 @@ pub async fn probe_ssh_host(ssh_args: String) -> bool {
         .collect();
     cmd_args.extend(ssh_args.split_whitespace().map(str::to_string));
     cmd_args.push("true".to_string());
-    let run = tokio::process::Command::new("ssh")
+    let Ok(child) = tokio::process::Command::new("ssh")
         .args(&cmd_args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
-        .status();
-    match tokio::time::timeout(tokio::time::Duration::from_secs(25), run).await {
-        Ok(Ok(status)) => matches!(status.code(), Some(code) if code != 255),
-        _ => false,
+        .spawn()
+    else {
+        return false;
+    };
+    match crate::util::proc::wait_output_timeout(child, std::time::Duration::from_secs(25)).await {
+        Ok(out) => matches!(out.status.code(), Some(code) if code != 255),
+        Err(_) => false,
     }
 }
 
