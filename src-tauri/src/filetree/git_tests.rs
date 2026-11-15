@@ -630,22 +630,34 @@ fn find_builds_its_index_on_the_first_query_and_follows_the_disk() {
     let rec = Arc::new(Recorder::default());
     let ack = ft.open("w", &r.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
     let hub = ft.hub_of(ack.sub_id).unwrap();
-    // The watcher first. One that starts after a build began marks that build stale (what
-    // changed before it ran was never reported), so the query after `search_ready` would be
-    // a rebuild: on Windows the watcher is up within the first build, elsewhere after it.
-    wait_for_watcher(&probe, &ft, ack.sub_id, &r);
 
     let first = hub.search(ack.sub_id, "helper", 500, 1, false);
     assert!(first.indexing, "the first query starts the build");
-    wait_for("search_ready", HANG, || rec.msgs.lock().iter().any(|m| m.ev == TreeEvent::SearchReady));
-    let hits = hub.search(ack.sub_id, "helper", 500, 2, false);
-    assert!(!hits.indexing, "rebuilt after search_ready; lost-event batches seen: {}", probe.lost());
+    // The first build need not be the last. A setup write the watcher reports during or after
+    // it (FSEvents can be late), or the watcher starting after it began, marks the index
+    // dirty, correctly, and the next query rebuilds. So: after each search_ready, ask again
+    // until an answer comes from a built index. Only a build that never settles fails, at HANG.
+    let ready = || rec.msgs.lock().iter().filter(|m| m.ev == TreeEvent::SearchReady).count();
+    let (mut seq, mut seen) = (1, 0);
+    let deadline = Instant::now() + HANG;
+    let hits = loop {
+        wait_for("search_ready", HANG, || ready() > seen);
+        seen = ready();
+        seq += 1;
+        let r = hub.search(ack.sub_id, "helper", 500, seq, false);
+        if !r.indexing {
+            break r;
+        }
+        assert!(Instant::now() < deadline, "the index never settled; lost-event batches seen: {}", probe.lost());
+    };
     assert_eq!(hits.items.first().map(|h| h.rel.as_str()), Some("src/untracked_helper.ts"), "untracked files are indexed");
-    assert!(hub.search(ack.sub_id, "bundle", 500, 3, false).items.is_empty(), "ignored files are not");
+    seq += 1;
+    assert!(hub.search(ack.sub_id, "bundle", 500, seq, false).items.is_empty(), "ignored files are not");
 
-    // A new file is found once the watcher reports it; a deleted one disappears.
+    // A new file is found once the watcher reports it; a deleted one disappears. This half is
+    // about delivery: the watcher must be running and delivering before the change is made.
+    wait_for_watcher(&probe, &ft, ack.sub_id, &r);
     std::fs::write(r.join("src/lib/brand_new_widget.ts"), "").unwrap();
-    let mut seq = 10;
     wait_for("the new file in the index", HANG, || {
         seq += 1;
         hub.search(ack.sub_id, "brand_new_widget", 500, seq, false).items.iter().any(|h| h.rel == "src/lib/brand_new_widget.ts")
