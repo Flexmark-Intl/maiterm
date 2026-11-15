@@ -4380,6 +4380,9 @@ async fn stage_images_remote(
     Ok(paths)
 }
 
+/// The most an image copy to or from an ssh host may take before it is stopped and reported.
+const REMOTE_COPY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Write `bytes` to `remote_path` on an SSH bridge host via `cat > path` with the bytes on
 /// stdin. ~tens of ms over the mux socket; BatchMode direct fallback when the socket is dead.
 /// pub(crate): the comms attachment staging (screenshots → SSH tabs) reuses it.
@@ -4396,29 +4399,32 @@ pub(crate) async fn push_bytes_remote(
     }
     cmd_args.push(format!("cat > {quoted}"));
 
+    // kill_on_drop: a timeout below drops the child, and without it the ssh (and the remote
+    // `cat` it holds open) would keep running long after the caller was told it failed.
     let mut child = tokio::process::Command::new("ssh")
         .args(&cmd_args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("ssh spawn failed: {e}"))?;
 
     let mut stdin = child.stdin.take().ok_or("no ssh stdin")?;
     use tokio::io::AsyncWriteExt;
-    stdin
-        .write_all(bytes)
+    // The write is under the same cap as the wait: a host that stops reading would otherwise
+    // block `write_all` for ever, before the timeout below ever started.
+    let transfer = async move {
+        stdin
+            .write_all(bytes)
+            .await
+            .map_err(|e| format!("streaming image bytes failed: {e}"))?;
+        drop(stdin); // EOF ends the remote `cat`
+        child.wait_with_output().await.map_err(|e| format!("ssh wait failed: {e}"))
+    };
+    let output = tokio::time::timeout(REMOTE_COPY_DEADLINE, transfer)
         .await
-        .map_err(|e| format!("streaming image bytes failed: {e}"))?;
-    drop(stdin); // EOF ends the remote `cat`
-
-    let output = tokio::time::timeout(
-        tokio::time::Duration::from_secs(30),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| "image transfer timed out (30s)".to_string())?
-    .map_err(|e| format!("ssh wait failed: {e}"))?;
+        .map_err(|_| format!("image transfer to {host_key} timed out after {} s; the ssh was stopped", REMOTE_COPY_DEADLINE.as_secs()))??;
 
     if !output.status.success() {
         return Err(format!(
@@ -4445,17 +4451,20 @@ pub(crate) async fn fetch_bytes_remote(
     }
     cmd_args.push(format!("cat < {quoted}"));
 
+    // kill_on_drop: on a timeout the `output()` future is dropped, and with it the child — which
+    // without this flag kept running, an ssh per stuck read.
     let output = tokio::time::timeout(
-        tokio::time::Duration::from_secs(30),
+        REMOTE_COPY_DEADLINE,
         tokio::process::Command::new("ssh")
             .args(&cmd_args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .output(),
     )
     .await
-    .map_err(|_| "remote read timed out (30s)".to_string())?
+    .map_err(|_| format!("remote read from {host_key} timed out after {} s; the ssh was stopped", REMOTE_COPY_DEADLINE.as_secs()))?
     .map_err(|e| format!("ssh spawn failed: {e}"))?;
 
     if !output.status.success() {
