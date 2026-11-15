@@ -24,7 +24,7 @@ import type {
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
-import { parseWordSpans, type WordSpan } from '$lib/utils/shellWords';
+import { parseWordSpans, quoteWord, type WordSpan } from '$lib/utils/shellWords';
 import type { AgentBridge, AgentRequest, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, FollowUp, ClaudeSetupReport, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WatchStatus, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
@@ -57,6 +57,7 @@ const INJECTED_TAIL = /^'?(?:export\s+MAITERM_TAB_ID=|\[ -r ~\/\.maiterm\/|cd\s)
 
 /** ssh's options that take an argument (OpenSSH's getopt string, as `watch.rs` has them). */
 const SSH_ARG_FLAGS = 'bceilmopBDEFIJLOPQRSwW';
+const SSH_ARG_FLAG = new RegExp(`[${SSH_ARG_FLAGS}]`);
 
 /**
  * Where the remote command starts among ssh args (no program), read as ssh's getopt reads them —
@@ -70,10 +71,15 @@ export function remoteCommandIndex(values: string[]): number {
   return sshWalk(values).remote;
 }
 
-/** `remoteCommandIndex`'s walk, which also notes the tty switches (`-t`, `-tt`) it passes: the
- *  indexes of words that are options, never an option's argument nor the remote command. */
-function sshWalk(values: string[]): { remote: number; tty: number[] } {
-  const tty: number[] = [];
+/**
+ * `remoteCommandIndex`'s walk, which also notes the tty switches it passes, as edits: word index
+ * to the word without its `t`s, or null when nothing is left. Only options are read, never an
+ * option's argument nor the remote command. ssh reads a cluster flag by flag (`-xtt` is
+ * `-x -t -t`) up to the first flag that takes an argument, which takes the rest: so `-xtt`
+ * becomes `-x` and `-tp22` becomes `-p22`, while `-Et` is untouched (its `t` is `-E`'s argument).
+ */
+function sshWalk(values: string[]): { remote: number; tty: Map<number, string | null> } {
+  const tty = new Map<number, string | null>();
   let dest = false;
   for (let i = 0; i < values.length; i++) {
     const w = values[i];
@@ -86,15 +92,12 @@ function sshWalk(values: string[]): { remote: number; tty: number[] } {
     }
     // A cluster (`-xCp2222`): its argument is the rest of the word, or else the next word.
     const flags = w.slice(1);
-    if (/^t+$/.test(flags)) {
-      tty.push(i);
-      continue;
-    }
-    for (let j = 0; j < flags.length; j++) {
-      if (!SSH_ARG_FLAGS.includes(flags[j])) continue;
-      if (j === flags.length - 1) i++;
-      break;
-    }
+    const arg = flags.search(SSH_ARG_FLAG);
+    const head = arg < 0 ? flags : flags.slice(0, arg);
+    const rest = arg < 0 ? '' : flags.slice(arg);
+    const kept = head.replace(/t/g, '');
+    if (kept !== head) tty.set(i, kept || rest ? `-${kept}${rest}` : null);
+    if (arg === flags.length - 1) i++;
   }
   return { remote: values.length, tty };
 }
@@ -110,7 +113,14 @@ function sshWalk(values: string[]): { remote: number; tty: number[] } {
 function withoutTty(args: string): string {
   const words = wordSpansOf(args);
   const { tty } = sshWalk(words.map(w => w.value));
-  return tty.length ? rawOf(args, words.filter((_, i) => !tty.includes(i))) : args;
+  if (!tty.size) return args;
+  // Words left alone keep the spelling they came with; a trimmed cluster is spelled anew.
+  const out: string[] = [];
+  words.forEach((w, i) => {
+    if (!tty.has(i)) out.push(args.slice(w.start, w.end));
+    else if (tty.get(i) !== null) out.push(quoteWord(tty.get(i)!));
+  });
+  return out.join(' ');
 }
 
 /** The index of the first word of maiTerm's injected remote command, or `words.length`. */

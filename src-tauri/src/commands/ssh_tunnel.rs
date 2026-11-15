@@ -520,8 +520,11 @@ const SSH_FLAGS_WITH_ARG: &[&str] = &[
 /// Keyed on the raw string, a host that had to move off the instance port would be looked up
 /// under one spelling and recorded under the other, so the ssh command would predict the
 /// wrong port on that host forever.
+///
+/// Shell words (`util::ssh_words`): `-i '/Users/me/My Keys/id' ews@nova` is keyed `ews@nova`.
 pub(crate) fn port_book_key(host_key: &str) -> String {
-    let mut tokens = host_key.split_whitespace().peekable();
+    let words = crate::util::ssh_words::split(host_key);
+    let mut tokens = words.iter().map(String::as_str);
     while let Some(token) = tokens.next() {
         if token.starts_with('-') {
             // `-p 2222` consumes its value; `-p2222` and `-oKey=Val` carry it inline.
@@ -1610,14 +1613,30 @@ mod tests {
     /// prints the options it resolved, without connecting).
     #[test]
     fn a_users_tty_switch_never_reaches_maiterms_own_ssh() {
-        let is_tty = |a: &String| a.len() > 1 && a.starts_with('-') && a[1..].chars().all(|c| c == 't');
-        for args in ["-t -t nova", "-t nova", "-tt nova", "-x -t -p 22 nova"] {
+        // A tty switch anywhere in a cluster, up to the flag that takes the rest as its argument.
+        let is_tty = |a: &String| {
+            a.len() > 1 && a.starts_with('-') && !a.starts_with("--") && {
+                let flags = &a[1..];
+                let head = flags.find(|c| crate::watch::SSH_ARG_FLAGS.contains(c)).map_or(flags, |j| &flags[..j]);
+                head.contains('t')
+            }
+        };
+        for (args, own) in [
+            ("-t -t nova", None),
+            ("-t nova", None),
+            ("-tt nova", None),
+            ("-x -t -p 22 nova", None),
+            ("-xtt nova", Some("-x")),
+            ("-Att nova", Some("-A")),
+            ("-tp22 nova", Some("-p22")),
+        ] {
             let built = [
                 ("ssh_argv", ssh_argv(independent_ssh_args(), args, ["true"])),
                 ("mux_argv", mux_argv("nova", args, "sh -s")),
             ];
             for (who, argv) in &built {
                 assert!(!argv.iter().any(is_tty), "{who} {args}: {argv:?}");
+                assert!(own.is_none_or(|o| argv.iter().any(|a| a == o)), "{who} {args} keeps {own:?}: {argv:?}");
                 assert!(argv.iter().any(|a| a == "-T"), "{who} {args}: {argv:?}");
                 assert!(argv.iter().any(|a| a == "nova"), "{who} {args}: {argv:?}");
                 let Ok(out) = Command::new("ssh").arg("-G").arg("-F").arg("/dev/null").args(argv).stdin(Stdio::null()).output() else {
@@ -1629,9 +1648,12 @@ mod tests {
                 }
             }
         }
-        // Only options: an option's argument and the remote command are the user's.
-        let argv = ssh_argv(Vec::new(), "-o 'X=-t' -t nova tmux attach -t main", std::iter::empty::<String>());
-        assert_eq!(argv, ["-o", "X=-t", "nova", "tmux", "attach", "-t", "main"]);
+        // Only options: an option's argument and the remote command are the user's, and a `t`
+        // that is an argument (`-Et` logs to the file `t`) is not a tty switch.
+        let argv = ssh_argv(Vec::new(), "-o 'X=-t' -t -Et nova tmux attach -t main", std::iter::empty::<String>());
+        assert_eq!(argv, ["-o", "X=-t", "-Et", "nova", "tmux", "attach", "-t", "main"]);
+        // The Files helper's own filter reads clusters the same way.
+        assert_eq!(crate::filetree::remote::proto::clean_connect_args("-xtt -tp22 nova"), ["-x", "-p22", "nova"]);
     }
 
     /// A tab's ssh with words a whitespace split mangles, from its argv to the argv of every ssh
@@ -1670,6 +1692,9 @@ mod tests {
             );
             let clean = crate::util::ssh_target::without_control_master(&connect);
             assert_eq!(crate::filetree::place::host_of_command(&captured).as_deref(), Some(clean.as_str()));
+            // The port book and the §6 account lookup key the host, not a piece of the key path.
+            assert_eq!(port_book_key(&clean), "ews@nova", "{hard:?}");
+            assert_eq!(port_book_key(&format!("ssh {clean}").trim_start_matches("ssh ")), "ews@nova");
 
             let want: [&str; 2] = ["-i", hard];
             let wcert: [&str; 2] = ["-o", &cert];

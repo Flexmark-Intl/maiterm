@@ -55,7 +55,9 @@ const DROPPED: [&str; 6] = ["-N", "-f", "-M", "-n", "-t", "-T"];
 /// session flags. `ssh_args` is shell words (`util::ssh_words`): `-i '/Users/me/My Keys/id'`
 /// is two args, never four.
 pub fn clean_connect_args(ssh_args: &str) -> Vec<String> {
-    let words = crate::util::ssh_words::split(ssh_args);
+    // Tty switches inside a cluster too (`-xtt` → `-x`): after mux_client_args' `-T`, a `-t`
+    // here would ask for a tty on the helper's binary stdin and stdout.
+    let words = crate::watch::without_tty(crate::util::ssh_words::split(ssh_args));
     let mut out = Vec::new();
     let mut i = 0;
     while i < words.len() {

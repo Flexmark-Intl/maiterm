@@ -177,7 +177,7 @@ pub fn host_label(host: &str) -> String {
 }
 
 /// ssh's options that take an argument (OpenSSH's getopt string).
-const SSH_ARG_FLAGS: &str = "bceilmopBDEFIJLOPQRSwW";
+pub(crate) const SSH_ARG_FLAGS: &str = "bceilmopBDEFIJLOPQRSwW";
 
 /// An ssh command line, read as ssh's getopt reads it.
 struct SshParse {
@@ -267,12 +267,15 @@ fn parse_ssh(cmd: &str) -> SshParse {
 
 /// `words` (an ssh's args, no program) without its tty switches (`-t`, `-t -t`, `-tt`): only
 /// options, read as `parse_ssh` reads them, never an option's argument nor anything at or after
-/// the remote command. maiTerm's own ssh passes `-T`, and ssh reads options left to right, so a
+/// the remote command. ssh reads a cluster flag by flag (`-xtt` is `-x -t -t`) up to the first
+/// flag that takes an argument, which takes the rest: `-xtt` becomes `-x`, `-tp22` becomes
+/// `-p22`, and `-Et` is untouched (its `t` is `-E`'s argument). maiTerm's own ssh passes `-T`, and ssh reads options left to right, so a
 /// user's `-t` after it asks for a tty (`-t -t` forces one): on `cat > path` or `sh -s` that
 /// turns bytes into keystrokes (0x03 becomes SIGINT, LF becomes CRLF, no EOF). The frontend's
 /// `sshArgsOf` drops them too; this covers args saved before it did.
 pub(crate) fn without_tty(words: Vec<String>) -> Vec<String> {
-    let mut drop = Vec::new();
+    // Word index → the word without its t's, or None when nothing is left.
+    let mut edits: Vec<(usize, Option<String>)> = Vec::new();
     let mut dest = false;
     let mut i = 0;
     while i < words.len() {
@@ -288,17 +291,26 @@ pub(crate) fn without_tty(words: Vec<String>) -> Vec<String> {
             i += 1;
             continue;
         };
-        if flags.chars().all(|c| c == 't') {
-            drop.push(i);
-        } else if let Some(j) = flags.find(|c| SSH_ARG_FLAGS.contains(c)) {
-            // Its argument is the rest of the word, or else the next word.
-            if j + 1 == flags.len() {
-                i += 1;
-            }
+        let arg = flags.find(|c| SSH_ARG_FLAGS.contains(c));
+        let (head, rest) = flags.split_at(arg.unwrap_or(flags.len()));
+        let kept: String = head.chars().filter(|c| *c != 't').collect();
+        if kept.len() != head.len() {
+            edits.push((i, (!kept.is_empty() || !rest.is_empty()).then(|| format!("-{kept}{rest}"))));
+        }
+        // Its argument is the rest of the word, or else the next word.
+        if arg.is_some_and(|j| j + 1 == flags.len()) {
+            i += 1;
         }
         i += 1;
     }
-    words.into_iter().enumerate().filter(|(i, _)| !drop.contains(i)).map(|(_, w)| w).collect()
+    words
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, w)| match edits.iter().find(|(e, _)| *e == i) {
+            Some((_, edited)) => edited.clone(),
+            None => Some(w),
+        })
+        .collect()
 }
 
 /// Where to connect, and nothing else: a tunnel's `host_key` can be an ssh command line read

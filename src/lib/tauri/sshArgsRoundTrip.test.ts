@@ -180,6 +180,12 @@ describe('ssh args keep their words from the stored command back to the stored c
     expect(sshArgsOf("-t -o 'X=-t' -p 22 nova tmux attach -t main")).toBe("-o 'X=-t' -p 22 nova tmux attach -t main");
     expect(sshArgsOf('/usr/bin/ssh -tt -x nova')).toBe('-x nova');
     expect(sshArgsOf('autossh -M 0 -t nova')).toBe('nova');
+    // ssh reads a cluster flag by flag: the t's before a flag that takes an argument go, the rest
+    // stays; a `t` that IS an argument (`-Et` logs to the file `t`) is not a tty switch.
+    for (const [typed, own] of [['ssh -xtt nova', '-x nova'], ['ssh -Att nova', '-A nova'], ['ssh -tp22 nova', '-p22 nova'], ['ssh -Ctt -p 22 nova', '-C -p 22 nova'], ['ssh -Et nova', '-Et nova'], ['ssh -xt -o X=1 nova', '-x -o X=1 nova']]) {
+      expect(cleanSshCommand(typed)).toBe(typed.slice(4));
+      expect(sshArgsOf(cleanSshCommand(typed)), typed).toBe(own);
+    }
   });
 
   it('still cleans a lossy ps line, an apostrophe included', () => {
