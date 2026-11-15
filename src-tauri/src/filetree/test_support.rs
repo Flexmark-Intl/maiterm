@@ -21,24 +21,42 @@ pub struct Probe {
     rx: Receiver<HubReport>,
     /// `WatchStarted` reports seen so far, by any wait.
     started: Cell<usize>,
+    /// Batches seen so far that said events were lost.
+    lost: Cell<usize>,
 }
 
 impl Probe {
     /// Call before opening anything: only hubs made after this report here.
     pub fn new(ft: &FileTreeState) -> Probe {
-        Probe { rx: ft.probe_hubs(), started: Cell::new(0) }
+        Probe { rx: ft.probe_hubs(), started: Cell::new(0), lost: Cell::new(0) }
     }
 
     fn next(&self, what: &str) -> HubReport {
         match self.rx.recv_timeout(HANG) {
             Ok(r) => {
-                if matches!(r, HubReport::WatchStarted) {
-                    self.started.set(self.started.get() + 1);
+                match &r {
+                    HubReport::WatchStarted => self.started.set(self.started.get() + 1),
+                    HubReport::Batch { lost: true, .. } => self.lost.set(self.lost.get() + 1),
+                    _ => {}
                 }
                 r
             }
             Err(e) => panic!("the hub reported nothing while waiting for {what} ({e})"),
         }
+    }
+
+    /// Batches the hub processed, among those this probe has seen, that said events were lost
+    /// (an overflow, or the OS dropping events): each one re-listed what they could touch.
+    /// Counts what has arrived since the last wait too.
+    pub fn lost(&self) -> usize {
+        while let Ok(r) = self.rx.try_recv() {
+            match r {
+                HubReport::WatchStarted => self.started.set(self.started.get() + 1),
+                HubReport::Batch { lost: true, .. } => self.lost.set(self.lost.get() + 1),
+                _ => {}
+            }
+        }
+        self.lost.get()
     }
 
     /// The hub's watcher has started: it is watching, has asked every open folder to list

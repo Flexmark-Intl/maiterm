@@ -577,7 +577,7 @@ fn find_builds_its_index_on_the_first_query_and_follows_the_disk() {
     assert!(first.indexing, "the first query starts the build");
     wait_for("search_ready", Duration::from_secs(10), || rec.msgs.lock().iter().any(|m| m.ev == TreeEvent::SearchReady));
     let hits = hub.search(ack.sub_id, "helper", 500, 2, false);
-    assert!(!hits.indexing);
+    assert!(!hits.indexing, "rebuilt after search_ready; lost-event batches seen: {}", probe.lost());
     assert_eq!(hits.items.first().map(|h| h.rel.as_str()), Some("src/untracked_helper.ts"), "untracked files are indexed");
     assert!(hub.search(ack.sub_id, "bundle", 500, 3, false).items.is_empty(), "ignored files are not");
 

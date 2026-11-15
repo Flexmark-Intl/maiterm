@@ -328,7 +328,28 @@ fn converge(variant: Variant, seed: u64) {
         let held = client.dirs.get(rel).unwrap_or_else(|| panic!("{variant:?}: open folder {rel:?} is not held"));
         let mine = held.1.clone();
         let fresh = list::list_dir(&root, rel, &fresh_ignore).unwrap();
-        assert_eq!(mine, fresh.entries, "{variant:?} seed {seed}: {rel:?} drifted from the disk");
+        if mine != fresh.entries {
+            // Which side is wrong, last in the message so a cut-off log still shows it.
+            let names = |v: &[Entry]| v.iter().map(|e| e.n.clone()).collect::<BTreeSet<_>>();
+            let (m, f) = (names(&mine), names(&fresh.entries));
+            let hub_snap = hub.dirs.lock().get(rel).map(|d| (d.gen, d.entries == fresh.entries));
+            let lost = probe.lost();
+            // A hub that is merely behind catches up after one more barrier; one that never
+            // heard of a change (a watcher that dropped it unflagged) stays wrong.
+            probe.settle(&hub, &root);
+            let fresh2 = list::list_dir(&root, rel, &fresh_ignore).unwrap();
+            let caught_up = hub.dirs.lock().get(rel).map(|d| (d.gen, d.entries == fresh2.entries));
+            panic!(
+                "{variant:?} seed {seed}: {rel:?} drifted from the disk. Lost batches seen: {lost}. After another barrier, hub (gen, matches disk): {caught_up:?}. Client holds gen {}, {} entries; disk {}. Missing: {:?}. Extra: {:?}. Same names, other order or flags: {}. Hub snapshot (gen, matches disk): {hub_snap:?}. Client still building: {:?}",
+                held.0,
+                mine.len(),
+                fresh.entries.len(),
+                f.difference(&m).collect::<Vec<_>>(),
+                m.difference(&f).collect::<Vec<_>>(),
+                m == f,
+                client.building.get(rel).map(|b| (b.0, b.1, b.2.len())),
+            );
+        }
     }
     for rel in client.dirs.keys() {
         let abs = if rel.is_empty() { root.clone() } else { root.join(rel) };
@@ -713,4 +734,3 @@ fn watches_stay_within_budget_after_expanding_20k_folders() {
     ft.close(ack.sub_id);
     std::fs::remove_dir_all(&root).unwrap();
 }
-
