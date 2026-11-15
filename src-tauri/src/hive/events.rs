@@ -92,6 +92,10 @@ pub fn observed(state: &Arc<AppState>, handle: &AppHandle, tab_id: &str, event_n
     }
     // A worker whose turn ended and stays quiet with nothing on its way: its coordinator is told.
     super::quiet::seen(state, handle, tab_id, event_name, event);
+    // The human wrote to a Done Hive's queen in her own terminal: the Hive wakes.
+    if event_name == "UserPromptSubmit" {
+        super::finish::woken_in_terminal(state, handle, tab_id);
+    }
     let actions = feed_actions(event_name, event.get("tool_name").and_then(Value::as_str));
     if actions.is_empty() {
         return;

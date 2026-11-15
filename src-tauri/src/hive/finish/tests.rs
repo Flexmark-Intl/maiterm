@@ -1145,6 +1145,14 @@ async fn a_wake_from_the_phone_tells_the_coordinator_where_it_came_from() {
 }
 
 #[test]
+fn a_prompt_wakes_a_done_hive_only_when_the_human_typed_it() {
+    let now = 1_000_000;
+    assert!(wake::typed_by_human(now - 5_000, now), "typed in her terminal a moment ago");
+    assert!(!wake::typed_by_human(now - 60_000, now), "a key a minute ago isn't this prompt's");
+    assert!(!wake::typed_by_human(0, now), "never typed: a peer's or maiTerm's message");
+}
+
+#[test]
 fn a_message_to_a_done_coordinator_routes_to_a_wake() {
     let rig = Rig::new("route");
     let route = |tab: &str, files_empty: bool| route_send(&rig.data.read(), tab, files_empty);

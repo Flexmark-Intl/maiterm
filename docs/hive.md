@@ -2899,11 +2899,14 @@ On accept, maiTerm posts the report in the coordinator's column, records `done_a
 Hive's `status` to `done`, stops the stack services **the Hive started** (never one it only
 references through `shared_from`, §6.8), cancels the Hive tabs' follow-ups and watch scripts,
 and leaves the coordinator running (2026-11-15; it used to be ended, `exit_coordinator`). A Done
-Hive has no workers, no watchers and spends nothing: an idle agent costs no tokens, and its tools
-are limited to reads until a wake.
+Hive has no workers, no watchers and spends nothing: an idle agent costs no tokens, and every
+Hive tool that changes anything refuses until a wake (`tools::done_refusal`). Her own Bash and
+edits are not limited: she is a normal agent tab (§7.1), and nothing types into her while Done.
 
 **Waking it.** A message from the human to a Done Hive's coordinator column sets the Hive back to
-`active` and types the message into her through `deliver_to_agent`, as into any agent tab. Only
+`active` and types the message into her through `deliver_to_agent`, as into any agent tab. A
+prompt the human types in her own terminal wakes it too, typing nothing (`woken_in_terminal`: a
+`UserPromptSubmit` from a Done queen within 30 s of the human's last key in that terminal). Only
 when she isn't running (after a maiTerm restart, which launches nothing in a Done Hive, or a
 crash) is she relaunched through the launch builder (§11.1), resuming her session, with the
 message owed to that session's start. Ending her at Done was dropped because that relaunch

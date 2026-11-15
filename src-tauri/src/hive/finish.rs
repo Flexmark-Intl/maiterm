@@ -16,7 +16,7 @@
 
 mod wake;
 pub use wake::{wake_text, WakeOutcome, BY_DESKTOP, BY_PHONE, NOT_DONE};
-pub(crate) use wake::{done_coordinator, route_send, wake, wake_with_notice, Route, Waking, TURN_WAIT};
+pub(crate) use wake::{done_coordinator, route_send, wake, wake_with_notice, woken_in_terminal, Route, Waking, TURN_WAIT};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1248,7 +1248,7 @@ pub(crate) async fn finish_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
         "done": true,
         "finish": record.id,
         "stack": stack,
-        "note": "Your session stays open, and only the tools that read work until your human writes to you: their message wakes this Hive.",
+        "note": "Your session stays open. Until your human writes to you, the Hive tools that change anything refuse, and nothing you do here is part of this Hive's record: their message wakes this Hive.",
     }))
 }
 
