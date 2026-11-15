@@ -222,6 +222,38 @@ fn human_typing(app: &AppState, tab_id: &str) -> bool {
     at != 0 && super::now_ms().saturating_sub(at) < TYPING_GUARD_MS
 }
 
+/// How long a starting agent's screen stays still before it counts as ready (`await_ready`).
+pub(crate) const READY_QUIET_MS: u64 = 1200;
+
+/// Whether a Claude tab that just started is ready to be typed into: its input box reads empty
+/// and its screen has been still for `quiet_ms`. Pure, for the test.
+pub(crate) fn ready(box_state: super::input_box::InputBox, last_output_ms: u64, now: u64, quiet_ms: u64) -> bool {
+    box_state == super::input_box::InputBox::Empty && now.saturating_sub(last_output_ms) >= quiet_ms
+}
+
+/// Waits, up to `within`, until a Claude tab whose session just started is ready (`ready`). A
+/// message typed in the second its session starts can reach a Claude still loading, which takes
+/// the CR after the paste as a newline and leaves the message unsent in its box (a Hive wake,
+/// 2026-11-15). Only for that moment: a running agent's box is ready whenever it reads empty.
+/// Another runtime, or no terminal, returns at once. True once ready, false on the time limit.
+pub(crate) async fn await_ready(app: &AppState, tab_id: &str, within: std::time::Duration) -> bool {
+    if super::runtime_for_tab(app, tab_id) != Some(AgentRuntime::Claude) {
+        return true;
+    }
+    let start = std::time::Instant::now();
+    loop {
+        let Some(pty) = super::pty_for_tab(app, tab_id) else { return true };
+        let last = app.pty_stats.read().get(&pty).map_or(0, |s| s.last_read_ms.load(std::sync::atomic::Ordering::Relaxed));
+        if ready(super::agent_input_box(app, tab_id), last, super::now_ms(), READY_QUIET_MS) {
+            return true;
+        }
+        if start.elapsed() >= within {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
 /// Something is already waiting for this tab: a new message must queue behind it, never jump it.
 pub(crate) fn has_held(tab_id: &str) -> bool {
     QUEUES.lock().get(tab_id).is_some_and(|q| !q.items.is_empty())
@@ -498,6 +530,18 @@ mod tests {
 
     fn held(id: &str, desktop: bool) -> Held {
         Held { msg_id: id.into(), paths: vec![], text: "x".into(), what: "phone message", desktop }
+    }
+
+    /// 2026-11-15: a wake typed in the second the Queen's session started sat unsent. A starting
+    /// agent is ready only once its box reads empty AND its screen has been still a moment.
+    #[test]
+    fn a_starting_agent_is_ready_only_once_its_box_is_empty_and_its_screen_still() {
+        use super::super::input_box::InputBox;
+        let now = 100_000;
+        assert!(ready(InputBox::Empty, now - READY_QUIET_MS, now, READY_QUIET_MS));
+        assert!(!ready(InputBox::Empty, now - 200, now, READY_QUIET_MS), "still drawing");
+        assert!(!ready(InputBox::Unknown, 0, now, READY_QUIET_MS), "no box drawn yet");
+        assert!(!ready(InputBox::HasText, 0, now, READY_QUIET_MS), "something typed ahead");
     }
 
     #[test]

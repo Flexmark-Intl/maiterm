@@ -4852,6 +4852,12 @@ fn hive_session_started(srv: &ServerState, tab_id: &str, session_id: &str, trans
         if let (true, Some((_, ws))) = (is_coordinator, &board) {
             crate::hive::waiters::on_coordinator_start(app.clone(), handle.clone(), ws.clone());
         }
+        // Nothing is typed until Claude has finished starting: a message typed in the second its
+        // session started had its CR taken as a newline, and sat unsent in the box. Past the
+        // limit the delivery gate still reads the box itself.
+        if (!started.owed.is_empty() || is_worker) && !crate::mailink::draft_hold::await_ready(&app, &tab, Duration::from_secs(30)).await {
+            log::warn!("hive: Hive tab {tab} didn't settle within 30 s of its session start; delivering anyway");
+        }
         // One after another, and none past one that didn't go: a digest never lands before the
         // kickoff it follows. What's left stays owed for the next session start.
         for claim in started.owed {

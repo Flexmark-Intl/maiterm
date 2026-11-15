@@ -2908,7 +2908,9 @@ when she isn't running (after a maiTerm restart, which launches nothing in a Don
 crash) is she relaunched through the launch builder (§11.1), resuming her session, with the
 message owed to that session's start. Ending her at Done was dropped because that relaunch
 raced: the message was typed in the second her session started, and Claude, still loading, took
-the CR as a newline, leaving it unsent in her box.
+the CR as a newline, leaving it unsent in her box. So everything owed at a Hive agent's session
+start (kickoff, digest, notices, a wake, a worker's run results) now waits until its box reads
+empty and its screen has been still for 1.2 s (`draft_hold::await_ready`, 30 s at most).
 
 ### 11.5 New goal (Darryl's direction, 2026-10-31)
 
