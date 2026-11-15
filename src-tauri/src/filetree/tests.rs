@@ -174,8 +174,9 @@ fn all_files(root: &Path) -> Vec<String> {
     out
 }
 
-/// One random change: create, delete, rename or move a file or a folder.
-fn mutate(root: &Path, rng: &mut StdRng, n: &mut u64) {
+/// One random change: create, delete, rename or move a file or a folder. Returns the paths a
+/// watcher reports for it: the entry, both sides of a rename, a removed folder itself.
+fn mutate(root: &Path, rng: &mut StdRng, n: &mut u64) -> Vec<PathBuf> {
     *n += 1;
     let dirs = all_dirs(root);
     let files = all_files(root);
@@ -183,34 +184,41 @@ fn mutate(root: &Path, rng: &mut StdRng, n: &mut u64) {
     let at = |rel: &str| if rel.is_empty() { root.to_path_buf() } else { root.join(rel) };
     match rng.gen_range(0..10) {
         0..=3 => {
-            let d = pick_dir(rng);
-            let _ = std::fs::write(at(&d).join(format!("f{n}.txt")), "x");
+            let p = at(&pick_dir(rng)).join(format!("f{n}.txt"));
+            let _ = std::fs::write(&p, "x");
+            vec![p]
         }
         4 => {
-            let d = pick_dir(rng);
-            let _ = std::fs::create_dir(at(&d).join(format!("d{n}")));
+            let p = at(&pick_dir(rng)).join(format!("d{n}"));
+            let _ = std::fs::create_dir(&p);
+            vec![p]
         }
         5 | 6 if !files.is_empty() => {
-            let f = &files[rng.gen_range(0..files.len())];
-            let _ = std::fs::remove_file(at(f));
+            let p = at(&files[rng.gen_range(0..files.len())]);
+            let _ = std::fs::remove_file(&p);
+            vec![p]
         }
         7 if !files.is_empty() => {
-            let f = &files[rng.gen_range(0..files.len())];
-            let to = pick_dir(rng);
-            let _ = std::fs::rename(at(f), at(&to).join(format!("m{n}.txt")));
+            let from = at(&files[rng.gen_range(0..files.len())]);
+            let to = at(&pick_dir(rng)).join(format!("m{n}.txt"));
+            let _ = std::fs::rename(&from, &to);
+            vec![from, to]
         }
         8 if dirs.len() > 1 => {
             let d = &dirs[rng.gen_range(1..dirs.len())];
-            let parent = at(super::paths::split_parent(d).0);
-            let _ = std::fs::rename(at(d), parent.join(format!("r{n}")));
+            let (from, to) = (at(d), at(super::paths::split_parent(d).0).join(format!("r{n}")));
+            let _ = std::fs::rename(&from, &to);
+            vec![from, to]
         }
         9 if dirs.len() > 6 => {
-            let d = &dirs[rng.gen_range(1..dirs.len())];
-            let _ = std::fs::remove_dir_all(at(d));
+            let p = at(&dirs[rng.gen_range(1..dirs.len())]);
+            let _ = std::fs::remove_dir_all(&p);
+            vec![p]
         }
         _ => {
-            let d = pick_dir(rng);
-            let _ = std::fs::write(at(&d).join(format!("g{n}.txt")), "y");
+            let p = at(&pick_dir(rng)).join(format!("g{n}.txt"));
+            let _ = std::fs::write(&p, "y");
+            vec![p]
         }
     }
 }
@@ -264,12 +272,19 @@ fn converge(variant: Variant, seed: u64) {
     }
     client.expanded.extend(open.iter().cloned());
     hub.expand(sub, open.into_iter().map(|rel| DirReq { rel, known_gen: None }).collect());
+    // From here the hub hears only what the test hands it: every change, as a watcher would
+    // report it. What the OS reports is late, out of order or lost under load (docs/file-tree.md
+    // §6.1), so it decides nothing here; this tests what the hub does with what it is told.
+    probe.watching(&hub);
+    probe.idle(&hub);
+    hub.go_deaf();
 
     let mut n = 0u64;
     let mut paused = false;
     let mut max_seq_unacked = 0u64;
     for step in 0..400 {
-        mutate(&root, &mut rng, &mut n);
+        let changed = mutate(&root, &mut rng, &mut n);
+        probe.push(&hub, &changed);
         if step % 10 == 0 {
             // The view moves too: open or close a folder.
             let dirs = all_dirs(&root);
@@ -303,26 +318,51 @@ fn converge(variant: Variant, seed: u64) {
         assert!(max_seq_unacked <= STALL_MESSAGES + 1, "a stalled subscription is sent nothing ({max_seq_unacked})");
     }
 
-    // Quiesce. The OS may still be delivering any of the changes above, late and out of order,
-    // or may never deliver some (FSEvents under load, docs/file-tree.md §6.1), so nothing here
-    // waits for an event. An edge does what the app does on one: every open folder whose mtime
-    // moved since it was listed is listed again. Then the client takes what was sent and asks
-    // for what it lacks until the hub has nothing more to send. Events still on their way can
-    // only re-read what is on the disk now. Nothing here waits on the clock.
-    probe.watching(&hub);
-    probe.reconcile(&hub, "");
-    let mut rounds = 0;
-    loop {
-        rounds += 1;
-        assert!(rounds < 1000, "{variant:?}: never went quiet");
-        let got = client.pump(&rec, &hub, sub, true);
-        probe.idle(&hub);
-        if got == 0 && client.need_refresh.is_empty() && rec.msgs.lock().is_empty() {
-            break;
+    // Quiesce: every change handed over has been processed (the channel and its batches are in
+    // order) and listed and sent; then the client takes what was sent and asks for what it lacks
+    // until the hub has nothing more to send. Nothing here waits on the clock.
+    probe.deliver(&hub, &[]);
+    let quiet = |client: &mut Client| {
+        let mut rounds = 0;
+        loop {
+            rounds += 1;
+            assert!(rounds < 1000, "{variant:?}: never went quiet");
+            let got = client.pump(&rec, &hub, sub, true);
+            probe.idle(&hub);
+            if got == 0 && client.need_refresh.is_empty() && rec.msgs.lock().is_empty() {
+                break;
+            }
         }
-    }
+    };
+    quiet(&mut client);
 
     let fresh_ignore = Mutex::new(IgnoreStack::for_test(&root, None, None, &[]));
+    // The events alone brought the hub to the disk: every open folder it holds is what a fresh
+    // listing says, before any edge could re-list one.
+    for rel in &client.expanded {
+        let abs = if rel.is_empty() { root.clone() } else { root.join(rel) };
+        if !abs.is_dir() {
+            continue;
+        }
+        let fresh = list::list_dir(&root, rel, &fresh_ignore).unwrap();
+        let names = |v: &[Entry]| v.iter().map(|e| e.n.clone()).collect::<BTreeSet<_>>();
+        let held = hub.dirs.lock().get(rel).map(|d| (d.gen, d.entries.clone()));
+        let Some((gen, held)) = held else { panic!("{variant:?} seed {seed}: the hub holds no listing of open folder {rel:?}") };
+        assert!(
+            held == fresh.entries,
+            "{variant:?} seed {seed}: from the events alone the hub's {rel:?} (gen {gen}) drifted from the disk. Lost batches seen: {}. Missing: {:?}. Extra: {:?}",
+            probe.lost(),
+            names(&fresh.entries).difference(&names(&held)).collect::<Vec<_>>(),
+            names(&held).difference(&names(&fresh.entries)).collect::<Vec<_>>(),
+        );
+    }
+    // An edge then re-lists what the events patched (their folders' mtimes moved) and finds
+    // nothing new: nothing is sent.
+    let relisted = probe.reconcile(&hub, "");
+    let after: Vec<TreeEvent> = rec.msgs.lock().iter().map(|m| m.ev.clone()).collect();
+    assert!(after.is_empty(), "{variant:?} seed {seed}: the edge after the events (re-listed {relisted:?}) sent {after:?}");
+    quiet(&mut client);
+
     for rel in &client.expanded {
         let abs = if rel.is_empty() { root.clone() } else { root.join(rel) };
         if !abs.is_dir() {
@@ -659,23 +699,6 @@ fn a_lost_git_init_reopens_on_an_edge() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-#[test]
-fn a_hub_is_reaped_after_its_grace() {
-    let root = temp_root("reap");
-    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
-    ft.hold_graces();
-    let rec = Arc::new(Recorder::default());
-    let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
-    ft.close(ack.sub_id);
-    assert_eq!(ft.hub_count(), 1, "kept through the grace period");
-    ft.end_graces();
-    assert_eq!(ft.hub_count(), 0);
-    // A window closing drops what it held.
-    let ack = ft.open("w2", &root.to_string_lossy(), vec![], rec, vec![]).unwrap();
-    ft.window_destroyed("w2");
-    assert!(ft.hub_of(ack.sub_id).is_err());
-    std::fs::remove_dir_all(&root).unwrap();
-}
 /// Which rows are flagged ignored follows `.gitignore` and `info/exclude`. A change to one whose
 /// event was lost shows after an edge, even an edit in place, which moves no folder's mtime
 /// (docs/file-tree.md §6.1).
@@ -716,6 +739,23 @@ fn a_lost_ignore_rule_change_shows_after_an_edge() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+#[test]
+fn a_hub_is_reaped_after_its_grace() {
+    let root = temp_root("reap");
+    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    ft.hold_graces();
+    let rec = Arc::new(Recorder::default());
+    let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+    ft.close(ack.sub_id);
+    assert_eq!(ft.hub_count(), 1, "kept through the grace period");
+    ft.end_graces();
+    assert_eq!(ft.hub_count(), 0);
+    // A window closing drops what it held.
+    let ack = ft.open("w2", &root.to_string_lossy(), vec![], rec, vec![]).unwrap();
+    ft.window_destroyed("w2");
+    assert!(ft.hub_of(ack.sub_id).is_err());
+    std::fs::remove_dir_all(&root).unwrap();
+}
 
 #[test]
 fn locate_spells_names_as_the_disk_does() {

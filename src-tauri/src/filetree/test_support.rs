@@ -106,20 +106,32 @@ impl Probe {
         }
     }
 
-    /// Hand the hub `paths` as if its watcher had reported them, and return once it has
-    /// processed them and listed and sent what they asked for. This is how a test says "the
-    /// OS delivered this event" without depending on when, or whether, it does (§6.1): the
-    /// real watcher may report the same change too, before or after, which changes nothing.
-    /// A marker path that doesn't exist rides along, so the batch that carries it is known.
-    pub fn deliver(&self, hub: &RootHub, paths: &[PathBuf]) {
-        let marker = hub.root.join(format!("ft-deliver-{}", uuid::Uuid::new_v4()));
+    /// Hand the hub `paths` as if its watcher had reported them, without waiting. A marker path
+    /// that doesn't exist rides in the same event; it is what a deaf hub (`RootHub::go_deaf`)
+    /// lets through, and what `deliver` waits for. Returns the marker.
+    pub fn push(&self, hub: &RootHub, paths: &[PathBuf]) -> PathBuf {
+        let marker = hub.root.join(format!("{DELIVER_MARKER}{}", uuid::Uuid::new_v4()));
         let mut all = paths.to_vec();
         all.push(marker.clone());
         hub.raw_sender().push(RawEvent { paths: all, rescan: false, content_only: false });
+        marker
+    }
+
+    /// `push`, then return once the hub has processed it (and everything pushed before it: the
+    /// channel and the batches are in order) and listed and sent what it asked for. This is how
+    /// a test says "the OS delivered this event" without depending on when, or whether, it does
+    /// (§6.1): the real watcher may report the same change too, before or after, which changes
+    /// nothing. If a full channel dropped the event, the batch that says events were lost has
+    /// re-listed what they could touch, and a fresh one is pushed.
+    pub fn deliver(&self, hub: &RootHub, paths: &[PathBuf]) {
+        let mut marker = self.push(hub, paths);
         loop {
-            if let HubReport::Batch { paths, .. } = self.next("a delivered event to be processed") {
-                if paths.contains(&marker) {
+            if let HubReport::Batch { paths: got, lost } = self.next("a delivered event to be processed") {
+                if got.contains(&marker) {
                     break;
+                }
+                if lost {
+                    marker = self.push(hub, paths);
                 }
             }
         }

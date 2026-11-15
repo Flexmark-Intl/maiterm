@@ -242,10 +242,9 @@ impl RootHub {
         if self.is_gone() {
             return false;
         }
+        // A deaf hub (tests) hears only what the test hands it, as when the OS loses the rest.
         #[cfg(test)]
-        if self.is_deaf() {
-            return false;
-        }
+        let batch: Vec<RawEvent> = if self.is_deaf() { batch.into_iter().filter(super::test_support::delivered).collect() } else { batch };
         let mut revalidate = BTreeSet::new();
         let mut rescan: Vec<String> = Vec::new();
         let mut names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();

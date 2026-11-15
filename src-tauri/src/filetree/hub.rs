@@ -441,7 +441,8 @@ pub struct RootHub {
     /// next edge re-lists it once.
     listed: Mutex<HashMap<String, SystemTime>>,
     reconcile: Mutex<Reconcile>,
-    /// Tests: the coalescer drops every batch, as when FSEvents never delivers (§6.1).
+    /// Tests: the coalescer drops every event the OS reports, as when FSEvents never delivers
+    /// (§6.1), and keeps only what the test hands over.
     #[cfg(test)]
     deaf: AtomicBool,
     #[cfg(test)]
@@ -1970,8 +1971,9 @@ impl RootHub {
         self.reconcile.lock().asked
     }
 
-    /// From now on no disk event reaches this hub: what FSEvents does under load when it loses
-    /// changes without saying so (§6.1). Batches are still reported to the probe.
+    /// From now on no event the OS reports is processed: what FSEvents does under load when it
+    /// loses changes without saying so (§6.1). What a test hands over (`Probe::push`/`deliver`)
+    /// still is. Every batch is still reported to the probe.
     #[cfg(test)]
     pub(crate) fn go_deaf(&self) {
         self.deaf.store(true, Ordering::SeqCst);
