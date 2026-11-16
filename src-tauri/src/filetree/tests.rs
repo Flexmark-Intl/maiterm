@@ -770,6 +770,87 @@ fn idle_edges_over_a_future_dated_gitignore_do_nothing() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// A folder that was open, then closed: its `.gitignore` changes while it is closed and the
+/// event is lost. An edge comes while it is closed (and checks only the open folders' rules),
+/// then the user opens it again: it is listed with the rules on disk (docs/file-tree.md §6.1).
+/// And an open folder whose rules moved with no edge yet is listed again when another folder
+/// is opened.
+#[test]
+fn a_lost_gitignore_in_a_closed_folder_shows_when_reopened() {
+    let root = temp_root("reopenignore");
+    git_init(&root);
+    std::fs::create_dir_all(root.join("pkg/gen")).unwrap();
+    std::fs::create_dir_all(root.join("other")).unwrap();
+    std::fs::write(root.join("pkg/gen/x.js"), "").unwrap();
+    let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+    let probe = Probe::new(&ft);
+    let rec = Arc::new(Recorder::default());
+    let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+    let hub = ft.hub_of(ack.sub_id).unwrap();
+    probe.watching(&hub);
+    probe.idle(&hub);
+    hub.expand(ack.sub_id, vec![DirReq { rel: "pkg".into(), known_gen: None }]);
+    probe.idle(&hub);
+    let flag = |rel: &str, name: &str| hub.dirs.lock().get(rel).and_then(|d| d.entries.iter().find(|e| e.n == name).map(|e| e.f & super::types::FLAG_IGNORED != 0));
+    assert_eq!(flag("pkg", "gen"), Some(false));
+    hub.collapse(ack.sub_id, vec!["pkg".into()]);
+    probe.idle(&hub);
+    hub.go_deaf();
+    std::fs::write(root.join("pkg/.gitignore"), "gen/\n").unwrap();
+    // An edge while pkg is closed (the window regains focus, a command ends).
+    let asked = hub.reconcile_asked();
+    ft.note_command_in(&root);
+    let relisted = probe.reconciled(&hub, asked);
+    assert!(relisted.is_empty(), "nothing open moved: {relisted:?}");
+    hub.expand(ack.sub_id, vec![DirReq { rel: "pkg".into(), known_gen: None }]);
+    probe.idle(&hub);
+    assert_eq!(flag("pkg", "gen"), Some(true), "pkg reopened with the rules on disk");
+    // The root's own rules change, lost, and no edge comes: opening another folder lists the
+    // root again too, since it was listed with the old rules.
+    assert_eq!(flag("", "pkg"), Some(false));
+    std::fs::write(root.join(".gitignore"), "pkg/\n").unwrap();
+    hub.expand(ack.sub_id, vec![DirReq { rel: "other".into(), known_gen: None }]);
+    probe.idle(&hub);
+    assert_eq!(flag("", "pkg"), Some(true), "the open root, listed again with the rules on disk");
+    ft.close(ack.sub_id);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// A folder the ignore stack loaded while it was closed, for a worktree event checked for git
+/// or for Find's index, then opened: its `.gitignore` changed with the event lost, and it is
+/// listed with the rules on disk, not the copy loaded earlier (docs/file-tree.md §6.1).
+#[test]
+fn a_folder_loaded_for_git_or_find_opens_with_the_rules_on_disk() {
+    for find in [false, true] {
+        let root = temp_root(if find { "loadfind" } else { "loadgit" });
+        git_init(&root);
+        std::fs::create_dir_all(root.join("pkg/gen")).unwrap();
+        std::fs::write(root.join("pkg/x.ts"), "").unwrap();
+        let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+        let probe = Probe::new(&ft);
+        let rec = Arc::new(Recorder::default());
+        let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+        let hub = ft.hub_of(ack.sub_id).unwrap();
+        probe.watching(&hub);
+        probe.idle(&hub);
+        hub.go_deaf();
+        if find {
+            let _ = hub.search(ack.sub_id, "x", 10, 1, false);
+        }
+        std::fs::write(root.join("pkg/x.ts"), "y").unwrap();
+        probe.deliver(&hub, &[root.join("pkg/x.ts")]);
+        let pkg = ["pkg".to_string()];
+        assert_eq!(hub.ignore.lock().stamps(&pkg).len(), 2, "find={find}: the stack holds pkg's rules while pkg is closed");
+        std::fs::write(root.join("pkg/.gitignore"), "gen/\n").unwrap();
+        hub.expand(ack.sub_id, vec![DirReq { rel: "pkg".into(), known_gen: None }]);
+        probe.idle(&hub);
+        let gen = hub.dirs.lock().get("pkg").and_then(|d| d.entries.iter().find(|e| e.n == "gen").map(|e| e.f & super::types::FLAG_IGNORED != 0));
+        assert_eq!(gen, Some(true), "find={find}: pkg opened with the rules on disk");
+        ft.close(ack.sub_id);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
 #[test]
 fn a_hub_is_reaped_after_its_grace() {
     let root = temp_root("reap");

@@ -1439,6 +1439,11 @@ All backends feed one **coalescer thread per hub**:
   One that changed is handled as its event would have been:
   that folder's matcher is dropped (all of them for the root's `info/exclude`), every open
   folder under it is re-listed whatever its mtime, git runs and Find's index is rebuilt.
+  Since an edge checks only the open folders' rules, a folder listed with no snapshot to answer
+  from (opened, reopened after a close, refreshed) first has its own and its ancestors' rules
+  files compared the same way (`RootHub::check_rules_before_listing`, depth-many stats): a
+  `.gitignore` whose event was lost while its folder was closed, or was only loaded to check a
+  worktree event for git or Find, is not matched from the stale copy.
   A whole-second mtime (HFS+, FAT) is trusted only once the clock is past its tick, since a
   second change within that tick wouldn't move it. Events still patch snapshots as before; a
   patched folder's mtime no longer matches, so the next edge re-lists it once. A pass first

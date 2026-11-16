@@ -1091,25 +1091,7 @@ impl RootHub {
         // or not, since the rules reach that far.
         let open: Vec<String> = self.dirs.lock().keys().cloned().collect();
         let (rules, exclude) = { self.ignore.lock().stamps(&open) }.moved();
-        let mut forced: Vec<String> = Vec::new();
-        if exclude || !rules.is_empty() {
-            {
-                let mut ig = self.ignore.lock();
-                if exclude {
-                    ig.invalidate_all(self.git_dir(), None);
-                    forced.push(String::new());
-                }
-                for d in rules {
-                    ig.invalidate_folder(&d);
-                    forced.push(d);
-                }
-            }
-            // What git reports as untracked may have changed, and so has what Find indexes.
-            self.git_signal(Trigger::Worktree);
-            if self.search.wanted() {
-                self.search.note(vec![super::search::Change::Folder]);
-            }
-        }
+        let forced = self.rules_moved(rules, exclude);
         let under = |rel: &str, of: &[String]| of.iter().any(|b| paths::is_at_or_under(rel, b));
         let bases: Vec<String> = bases.iter().cloned().collect();
         let open: Vec<String> = self.dirs.lock().keys().filter(|r| under(r, &bases) || under(r, &forced)).cloned().collect();
@@ -1121,6 +1103,61 @@ impl RootHub {
             }
         }
         relisted
+    }
+
+    /// Rules files (`Stamps::moved`) that changed with no event: handled as their events would
+    /// have been. Their matchers are forgotten, git and Find are told, and the folders they
+    /// cover are returned: every open folder at or under one was listed with the old rules.
+    fn rules_moved(&self, rules: Vec<String>, exclude: bool) -> Vec<String> {
+        let mut forced: Vec<String> = Vec::new();
+        if !exclude && rules.is_empty() {
+            return forced;
+        }
+        {
+            let mut ig = self.ignore.lock();
+            if exclude {
+                ig.invalidate_all(self.git_dir(), None);
+                forced.push(String::new());
+            }
+            for d in rules {
+                ig.invalidate_folder(&d);
+                forced.push(d);
+            }
+        }
+        // What git reports as untracked may have changed, and so has what Find indexes.
+        self.git_signal(Trigger::Worktree);
+        if self.search.wanted() {
+            self.search.note(vec![super::search::Change::Folder]);
+        }
+        forced
+    }
+
+    /// Before `rel` is listed with no snapshot to answer from (opened, reopened, refreshed): the
+    /// rules files of it and its ancestors that the stack already holds are compared with the
+    /// disk. Edges check only the open folders' rules (§6.1), so a `.gitignore` whose event was
+    /// lost while its folder was closed, or was only loaded for git or Find, would otherwise be
+    /// matched from the stale copy. Depth-many stats, no lock held while they read; a folder
+    /// with a snapshot is open and left to the edges.
+    fn check_rules_before_listing(&self, rel: &str) {
+        if self.remote.is_some() || self.dirs.lock().contains_key(rel) {
+            return;
+        }
+        let me = [rel.to_string()];
+        let (rules, exclude) = { self.ignore.lock().stamps(&me) }.moved();
+        let forced = self.rules_moved(rules, exclude);
+        if forced.is_empty() {
+            return;
+        }
+        let stale: Vec<String> = self
+            .dirs
+            .lock()
+            .keys()
+            .filter(|r| r.as_str() != rel && forced.iter().any(|b| paths::is_at_or_under(r, b)))
+            .cloned()
+            .collect();
+        for r in stale {
+            self.request(&r, None);
+        }
     }
 
     /// `reconcile` for an absolute path: the open folders under it, or the whole root when the
@@ -2087,6 +2124,7 @@ fn worker(me: Weak<RootHub>) {
             });
         }
         let mut early = None;
+        hub.check_rules_before_listing(&rel);
         // Read before the folder is: a change made while it is being read moves the mtime past
         // the one recorded, and the next edge re-lists it (§6.1).
         let mtime = match &hub.remote {
