@@ -447,7 +447,9 @@
     }
   }
   function onComposerKey(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    // Shift+Enter and Option/Alt+Enter make a new line, as in the agent's own TUI: the
+    // textarea's default action inserts it, so only a bare Enter sends.
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.isComposing) {
       e.preventDefault();
       void send();
     } else if (isModKey(e) && !e.shiftKey && e.key.toLowerCase() === 'v' && openId) {
