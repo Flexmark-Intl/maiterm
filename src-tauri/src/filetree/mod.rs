@@ -478,7 +478,8 @@ impl FileTreeState {
         hub.grace_token.fetch_add(1, Ordering::SeqCst);
         hub.add_sub(sub_id, window, sink);
         if back {
-            hub.reconcile("");
+            // The rules half only: the restore below lists each folder whose mtime moved.
+            hub.reconcile_rules();
         }
         if !restore.iter().any(|r| r.rel.is_empty()) {
             restore.insert(0, DirReq { rel: String::new(), known_gen: None });

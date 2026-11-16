@@ -373,6 +373,8 @@ pub enum HubReport {
 struct Reconcile {
     /// Folders whose open descendants (and themselves) are to be checked.
     bases: BTreeSet<String>,
+    /// Only the rules files asked to be checked (`reconcile_rules`); a pass over `bases` does it too.
+    rules: bool,
     running: bool,
     /// Edges counted so far: a pass covers every one counted when it took its bases.
     asked: u64,
@@ -868,7 +870,6 @@ impl RootHub {
 
     /// `ft_refresh`: a full Dir for `rel`, or for every folder the subscriber has open.
     pub fn refresh(&self, sub: u64, rel: Option<String>) {
-        let base = rel.clone().unwrap_or_default();
         let rels: Vec<String> = match rel {
             Some(r) => {
                 if let Err(msg) = split_rel(&r) {
@@ -890,9 +891,10 @@ impl RootHub {
                 self.subs.lock().get(&sub).map(|s| s.interest.iter().cloned().collect()).unwrap_or_default()
             }
         };
-        // Refresh brings the tree back to the disk, rules files included: an edge first (§6.1).
-        // A listing it overtakes runs again if the rules it matched with turn out to have moved.
-        self.reconcile(&base);
+        // Refresh brings the tree back to the disk, rules files included (§6.1). Only the rules
+        // half of an edge: the folders it lists read their entries off the disk themselves. A
+        // listing it overtakes runs again if the rules it matched with turn out to have moved.
+        self.reconcile_rules();
         for r in rels {
             self.request(&r, Some(Waiter::Refresh { sub }));
         }
@@ -1032,12 +1034,28 @@ impl RootHub {
     /// join the next pass, so a burst costs one pass more, not one per edge. A local root only:
     /// a remote one has no disk here, and a network mount is revalidated whole instead.
     pub fn reconcile(&self, base: &str) {
+        self.ask_reconcile(Some(base));
+    }
+
+    /// Only the rules half of an edge (`rules_pass`), on the same thread and terms as
+    /// `reconcile`: for refresh and a view back from the grace, which list their folders
+    /// themselves and so need nothing from the mtime half (it would list them twice).
+    pub(super) fn reconcile_rules(&self) {
+        self.ask_reconcile(None);
+    }
+
+    fn ask_reconcile(&self, base: Option<&str>) {
         if self.remote.is_some() || self.is_network() || self.is_gone() {
             return;
         }
         let start = {
             let mut r = self.reconcile.lock();
-            r.bases.insert(base.to_string());
+            match base {
+                Some(b) => {
+                    r.bases.insert(b.to_string());
+                }
+                None => r.rules = true,
+            }
             r.asked += 1;
             !std::mem::replace(&mut r.running, true)
         };
@@ -1047,21 +1065,23 @@ impl RootHub {
         let me = self.me.clone();
         let spawned = std::thread::Builder::new().name("ft-reconcile".into()).spawn(move || {
             let Some(h) = me.upgrade() else { return };
-            let (mut bases, mut upto) = {
+            let (mut bases, mut rules, mut upto) = {
                 let mut r = h.reconcile.lock();
-                (std::mem::take(&mut r.bases), r.asked)
+                (std::mem::take(&mut r.bases), std::mem::take(&mut r.rules), r.asked)
             };
             loop {
-                let relisted = h.reconcile_pass(&bases);
+                let relisted = if bases.is_empty() && rules { h.rules_pass() } else { h.reconcile_pass(&bases) };
                 let covered = upto;
                 let done = {
                     let mut r = h.reconcile.lock();
                     bases = std::mem::take(&mut r.bases);
+                    rules = std::mem::take(&mut r.rules);
                     upto = r.asked;
-                    if bases.is_empty() {
+                    let done = bases.is_empty() && !rules;
+                    if done {
                         r.running = false;
                     }
-                    bases.is_empty()
+                    done
                 };
                 // After `running` is cleared on the last pass: a test that saw this report
                 // and then finds the hub idle is right to.
@@ -1076,6 +1096,7 @@ impl RootHub {
             let mut r = self.reconcile.lock();
             r.running = false;
             r.bases.clear();
+            r.rules = false;
         }
     }
 
@@ -1088,25 +1109,37 @@ impl RootHub {
             self.repo_moved();
             return Vec::new();
         }
-        // Which rows are flagged ignored follows the `.gitignore` and `info/exclude` files, and an
-        // edit in place moves no folder's mtime: the rules files that decide what the open
-        // folders show are compared with the disk (no lock held while it reads), and one that
-        // changed is handled as its event would have been. Every open folder under it is listed again, inside the edge's path
-        // or not, since the rules reach that far.
-        let open: Vec<String> = self.dirs.lock().keys().cloned().collect();
-        let (rules, exclude) = { self.ignore.lock().stamps(&open) }.moved();
-        let forced = self.rules_moved(rules, exclude, None);
+        let mut relisted = self.rules_pass();
         let under = |rel: &str, of: &[String]| of.iter().any(|b| paths::is_at_or_under(rel, b));
         let bases: Vec<String> = bases.iter().cloned().collect();
-        let open: Vec<String> = self.dirs.lock().keys().filter(|r| under(r, &bases) || under(r, &forced)).cloned().collect();
-        let mut relisted = Vec::new();
+        let open: Vec<String> = self.dirs.lock().keys().filter(|r| under(r, &bases) && !relisted.contains(r)).cloned().collect();
         for rel in open {
-            if under(&rel, &forced) || self.moved_since_listed(&rel) {
+            if self.moved_since_listed(&rel) {
                 self.request(&rel, None);
                 relisted.push(rel);
             }
         }
         relisted
+    }
+
+    /// The rules half of a pass. Which rows are flagged ignored follows the `.gitignore` and
+    /// `info/exclude` files, and an edit in place moves no folder's mtime: the rules files that
+    /// decide what the open folders show are compared with the disk (no lock held while it
+    /// reads), and one that changed is handled as its event would have been. Every open folder
+    /// under it is listed again, inside the edge's path or not, since the rules reach that far.
+    /// Returns those folders.
+    fn rules_pass(&self) -> Vec<String> {
+        let open: Vec<String> = self.dirs.lock().keys().cloned().collect();
+        let (rules, exclude) = { self.ignore.lock().stamps(&open) }.moved();
+        let forced = self.rules_moved(rules, exclude, None);
+        if forced.is_empty() {
+            return Vec::new();
+        }
+        let stale: Vec<String> = self.dirs.lock().keys().filter(|r| forced.iter().any(|b| paths::is_at_or_under(r, b))).cloned().collect();
+        for rel in &stale {
+            self.request(rel, None);
+        }
+        stale
     }
 
     /// Rules files (`Stamps::moved`) that changed with no event: handled as their events would

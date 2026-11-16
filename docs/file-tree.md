@@ -1445,8 +1445,9 @@ All backends feed one **coalescer thread per hub**:
   `.gitignore` whose event was lost while its folder was closed, or was only loaded to check a
   worktree event for git or Find, is not matched from the stale copy. A listing under a
   moved rules file that had already started runs again (it may have matched with the old
-  rules). Refresh runs an edge before it lists, and so does a kept hub that gets a subscriber
-  again after its grace (nothing reconciled it while nobody watched).
+  rules). Refresh runs the rules half of an edge as it lists, and so does a kept hub that gets
+  a subscriber again after its grace (nothing reconciled it while nobody watched); the folders
+  they list read their entries off the disk themselves, so the mtime half would list them twice.
   A whole-second mtime (HFS+, FAT) is trusted only once the clock is past its tick, since a
   second change within that tick wouldn't move it. Events still patch snapshots as before; a
   patched folder's mtime no longer matches, so the next edge re-lists it once. A pass first
