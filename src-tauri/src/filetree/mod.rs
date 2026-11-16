@@ -471,10 +471,15 @@ impl FileTreeState {
 
     fn subscribe(&self, hub: Arc<RootHub>, window: &str, mut restore: Vec<DirReq>, sink: Arc<dyn Sink>) -> OpenAck {
         let sub_id = self.next_sub.fetch_add(1, Ordering::Relaxed);
+        // A kept hub back from its grace: nothing reconciled it while nobody watched (§6.1).
+        let back = hub.sub_count() == 0 && !hub.dirs.lock().is_empty();
         self.subs.lock().insert(sub_id, hub.clone());
         // A new subscriber cancels any pending reap.
         hub.grace_token.fetch_add(1, Ordering::SeqCst);
         hub.add_sub(sub_id, window, sink);
+        if back {
+            hub.reconcile("");
+        }
         if !restore.iter().any(|r| r.rel.is_empty()) {
             restore.insert(0, DirReq { rel: String::new(), known_gen: None });
         }

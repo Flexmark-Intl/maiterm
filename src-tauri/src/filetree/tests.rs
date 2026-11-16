@@ -851,6 +851,77 @@ fn a_folder_loaded_for_git_or_find_opens_with_the_rules_on_disk() {
     }
 }
 
+/// The Files view is closed and opened again within the hub's grace (switching tabs back to
+/// a root): the kept snapshot of pkg answers the restore. pkg/.gitignore appeared while the
+/// view was closed and its event was lost: pkg reopens with the rules on disk (§6.1).
+#[test]
+fn a_lost_gitignore_shows_when_reopened_within_the_grace() {
+    for in_place in [false, true] {
+        let root = temp_root("rv134grace");
+        git_init(&root);
+        std::fs::create_dir_all(root.join("pkg/gen")).unwrap();
+        std::fs::write(root.join("pkg/gen/x.js"), "").unwrap();
+        if in_place {
+            std::fs::write(root.join("pkg/.gitignore"), "# nothing yet\n").unwrap();
+        }
+        let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+        ft.hold_graces();
+        let probe = Probe::new(&ft);
+        let rec = Arc::new(Recorder::default());
+        let restore = || vec![DirReq { rel: "".into(), known_gen: None }, DirReq { rel: "pkg".into(), known_gen: None }];
+        let ack = ft.open("w", &root.to_string_lossy(), restore(), rec.clone(), vec![]).unwrap();
+        let hub = ft.hub_of(ack.sub_id).unwrap();
+        probe.watching(&hub);
+        probe.idle(&hub);
+        let flag = |rel: &str, name: &str| hub.dirs.lock().get(rel).and_then(|d| d.entries.iter().find(|e| e.n == name).map(|e| e.f & super::types::FLAG_IGNORED != 0));
+        assert_eq!(flag("pkg", "gen"), Some(false));
+        // The view closes (tab switch): the hub keeps its snapshots for the grace.
+        ft.close(ack.sub_id);
+        hub.go_deaf();
+        std::fs::write(root.join("pkg/.gitignore"), "gen/\n").unwrap();
+        // The view comes back with what it had open.
+        let rec2 = Arc::new(Recorder::default());
+        let again = ft.open("w", &root.to_string_lossy(), restore(), rec2.clone(), vec![]).unwrap();
+        let hub2 = ft.hub_of(again.sub_id).unwrap();
+        assert!(Arc::ptr_eq(&hub, &hub2), "the same hub, back from its grace");
+        probe.idle(&hub);
+        assert_eq!(flag("pkg", "gen"), Some(true), "in_place={in_place}: pkg reopened within the grace with the rules on disk");
+        ft.close(again.sub_id);
+        ft.end_graces();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+/// The user presses Refresh (ft_refresh, every open folder) after pkg/.gitignore changed with
+/// its event lost and no edge yet: the refreshed listing uses the rules on disk (§6.1).
+#[test]
+fn refresh_lists_an_open_folder_with_the_rules_on_disk() {
+    for one in [false, true] {
+        let root = temp_root("rv134refresh");
+        git_init(&root);
+        std::fs::create_dir_all(root.join("pkg/gen")).unwrap();
+        std::fs::write(root.join("pkg/gen/x.js"), "").unwrap();
+        let ft = FileTreeState::with(Duration::from_secs(30), super::watch::RAW_CAPACITY, None);
+        let probe = Probe::new(&ft);
+        let rec = Arc::new(Recorder::default());
+        let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+        let hub = ft.hub_of(ack.sub_id).unwrap();
+        probe.watching(&hub);
+        probe.idle(&hub);
+        hub.expand(ack.sub_id, vec![DirReq { rel: "pkg".into(), known_gen: None }]);
+        probe.idle(&hub);
+        let flag = |rel: &str, name: &str| hub.dirs.lock().get(rel).and_then(|d| d.entries.iter().find(|e| e.n == name).map(|e| e.f & super::types::FLAG_IGNORED != 0));
+        assert_eq!(flag("pkg", "gen"), Some(false));
+        hub.go_deaf();
+        std::fs::write(root.join("pkg/.gitignore"), "gen/\n").unwrap();
+        hub.refresh(ack.sub_id, if one { Some("pkg".into()) } else { None });
+        probe.idle(&hub);
+        assert_eq!(flag("pkg", "gen"), Some(true), "refresh one={one}: pkg listed with the rules on disk");
+        ft.close(ack.sub_id);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
 #[test]
 fn a_hub_is_reaped_after_its_grace() {
     let root = temp_root("reap");

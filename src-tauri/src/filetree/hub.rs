@@ -868,6 +868,7 @@ impl RootHub {
 
     /// `ft_refresh`: a full Dir for `rel`, or for every folder the subscriber has open.
     pub fn refresh(&self, sub: u64, rel: Option<String>) {
+        let base = rel.clone().unwrap_or_default();
         let rels: Vec<String> = match rel {
             Some(r) => {
                 if let Err(msg) = split_rel(&r) {
@@ -889,6 +890,9 @@ impl RootHub {
                 self.subs.lock().get(&sub).map(|s| s.interest.iter().cloned().collect()).unwrap_or_default()
             }
         };
+        // Refresh brings the tree back to the disk, rules files included: an edge first (§6.1).
+        // A listing it overtakes runs again if the rules it matched with turn out to have moved.
+        self.reconcile(&base);
         for r in rels {
             self.request(&r, Some(Waiter::Refresh { sub }));
         }
@@ -1091,7 +1095,7 @@ impl RootHub {
         // or not, since the rules reach that far.
         let open: Vec<String> = self.dirs.lock().keys().cloned().collect();
         let (rules, exclude) = { self.ignore.lock().stamps(&open) }.moved();
-        let forced = self.rules_moved(rules, exclude);
+        let forced = self.rules_moved(rules, exclude, None);
         let under = |rel: &str, of: &[String]| of.iter().any(|b| paths::is_at_or_under(rel, b));
         let bases: Vec<String> = bases.iter().cloned().collect();
         let open: Vec<String> = self.dirs.lock().keys().filter(|r| under(r, &bases) || under(r, &forced)).cloned().collect();
@@ -1108,7 +1112,11 @@ impl RootHub {
     /// Rules files (`Stamps::moved`) that changed with no event: handled as their events would
     /// have been. Their matchers are forgotten, git and Find are told, and the folders they
     /// cover are returned: every open folder at or under one was listed with the old rules.
-    fn rules_moved(&self, rules: Vec<String>, exclude: bool) -> Vec<String> {
+    ///
+    /// A listing under one that has already started may have matched its rows with the old
+    /// rules: it runs again, as for any change it may have read too early. `skip` is the folder
+    /// whose own listing is making this check (it hasn't matched anything yet).
+    fn rules_moved(&self, rules: Vec<String>, exclude: bool, skip: Option<&str>) -> Vec<String> {
         let mut forced: Vec<String> = Vec::new();
         if !exclude && rules.is_empty() {
             return forced;
@@ -1124,6 +1132,7 @@ impl RootHub {
                 forced.push(d);
             }
         }
+        self.rerun_inflight_where(|r| Some(r) != skip && forced.iter().any(|b| paths::is_at_or_under(r, b)));
         // What git reports as untracked may have changed, and so has what Find indexes.
         self.git_signal(Trigger::Worktree);
         if self.search.wanted() {
@@ -1144,7 +1153,7 @@ impl RootHub {
         }
         let me = [rel.to_string()];
         let (rules, exclude) = { self.ignore.lock().stamps(&me) }.moved();
-        let forced = self.rules_moved(rules, exclude);
+        let forced = self.rules_moved(rules, exclude, Some(rel));
         if forced.is_empty() {
             return;
         }
@@ -2270,6 +2279,52 @@ mod stall_tests {
         assert!(s.stalled);
         assert!(s.ack(1));
         assert!(!s.stalled);
+    }
+
+    /// pkg/sub's first listing has already matched its rows with pkg's rules as they were (it
+    /// is started, not yet published, so not in `dirs`), when pkg/.gitignore changes with its
+    /// event lost and pkg/other is opened: other's check finds pkg's rules moved, drops the
+    /// matcher, and takes the new stamp. The started listing of pkg/sub runs again,
+    /// as the coalescer does for a rename (`rerun_inflight_where`); otherwise pkg/sub is
+    /// published with the old rules and no edge can see it (pkg's stamp is now current).
+    #[test]
+    fn a_started_first_listing_under_moved_rules_runs_again() {
+        let root = std::env::temp_dir().join(format!("ft-rv134-{}", uuid::Uuid::new_v4()));
+        for d in ["pkg/sub/gen", "pkg/other"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let root = crate::share::canon(&root);
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&root).status().unwrap().success());
+        let ft = super::super::FileTreeState::with(Duration::from_secs(30), super::super::watch::RAW_CAPACITY, None);
+        let probe = super::super::test_support::Probe::new(&ft);
+        let rec = Arc::new(Recorder::default());
+        let ack = ft.open("w", &root.to_string_lossy(), vec![], rec.clone(), vec![]).unwrap();
+        let hub = ft.hub_of(ack.sub_id).unwrap();
+        probe.watching(&hub);
+        probe.idle(&hub);
+        hub.expand(ack.sub_id, vec![DirReq { rel: "pkg".into(), known_gen: None }]);
+        probe.idle(&hub);
+        hub.go_deaf();
+        // pkg/sub's listing: started, its rows matched with pkg's rules as they are now.
+        hub.ignore.lock().is_ignored("pkg/sub", "gen", true);
+        {
+            let mut jobs = hub.jobs.lock();
+            jobs.next_id += 1;
+            let id = jobs.next_id;
+            jobs.inflight.insert("pkg/sub".into(), Inflight { id, waiters: Vec::new(), rerun: false, started: true, timed_out: false });
+        }
+        std::fs::write(root.join("pkg/.gitignore"), "sub/gen/\n").unwrap();
+        hub.check_rules_before_listing("pkg/other");
+        let rerun = hub.jobs.lock().inflight.get("pkg/sub").map(|f| f.rerun);
+        hub.jobs.lock().inflight.remove("pkg/sub");
+        // And no edge would catch it afterwards: pkg's stamp is the new file's.
+        let open = ["pkg/sub".to_string()];
+        let (moved, _) = { hub.ignore.lock().stamps(&open) }.moved();
+        probe.idle(&hub);
+        ft.close(ack.sub_id);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(moved.is_empty(), "an edge would still see pkg's rules moved: {moved:?}");
+        assert_eq!(rerun, Some(true), "the started listing of pkg/sub was not told to run again");
     }
 }
 
