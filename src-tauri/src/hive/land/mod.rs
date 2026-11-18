@@ -533,7 +533,7 @@ pub(crate) async fn land_tool_with<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
         return driver::land_without_repos(ctx, caller, &w, &a, precedent).await;
     }
     let mut land = start_state(&caller.hive, &w, &a, review);
-    // Integration mode and Landing = Ask me put it to the human; otherwise it is the coordinator's
+    // Landing = Ask me (in either mode) puts it to the human; otherwise it is the coordinator's
     // own decision (§7.6), one per land however often a held one resumes.
     let asks = approval::asks_first(&caller.hive).filter(|_| land.approved_by.is_none());
     let decided = asks.is_none() && land.approved_by.is_none() && land.decision.is_none();
@@ -573,7 +573,7 @@ pub(crate) async fn land_tool_with<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Cal
         .await;
         ctx.window.decisions_changed(&caller.workspace_id);
     }
-    // Integration mode and Landing = Ask me: the card comes first, before step 1 (§8.3), pinned.
+    // Landing = Ask me, in either mode: the card comes first, before step 1 (§8.3), pinned.
     if let Some(why) = asks {
         return approval::await_human(ctx, caller, &w, land, why).await.answer();
     }

@@ -2380,13 +2380,13 @@ compare-and-swap, and the land log records the sha.
 
 | | Land to Base (§8.1) | Integration branch |
 |---|---|---|
-| Landing target | Base | `hive/<slug>`, by a `--no-ff` merge of the approved sha |
+| Landing target | Base | `hive/<slug>`, by a `--no-ff` merge of the landed sha |
 | Coordinator's read copy | Moves to Base's new tip | Its worktree on `hive/<slug>`, moved to the new tip |
 | New workers branch from | Base | `hive/<slug>` |
 | Post-land check (§8.6) | At Base's tip | At `hive/<slug>`'s tip |
-| Undo (§8.6) | The coordinator or the human | **The human's**: `git revert -m 1 <merge>` on `hive/<slug>`, from the land log |
+| Undo (§8.6) | The coordinator or the human | `git revert -m 1 <merge>` on `hive/<slug>`, from the land log: the coordinator or the human, the human's alone under Landing = Ask me |
 | Push after land (§8.5) | The setting | Off and hidden: `hive/<slug>` is pushed by the human |
-| Batching (§6.8) | Yes | Never; each land is its own card |
+| Batching (§6.8) | Yes | Never |
 
 ### 8.4 After landing
 
@@ -3643,7 +3643,8 @@ Decided 2026-10-23:
 
 1. **Spawn approval:** spawns within the cap need no card (principle 5).
 2. **Landing:** by default the coordinator lands each worker straight into Base (§8.1). The
-   integration branch with human-approved lands is chosen when the Hive is created (§3, §8.3).
+   integration branch is chosen when the Hive is created (§3, §8.3); its lands were the human's
+   until 2026-11-18, the queen's by default since.
 3. **Runtime scope:** Claude only in v1 (§12).
 4. **The window Overlord** leaves Hive tabs alone (§7.3).
 5. **Folders:** one primary plus any number more, git or plain; plain folders are read-only
@@ -4102,7 +4103,7 @@ several releases a day).
    a branch tip that moved, a dirty worktree (untracked included), an agent mid-turn (its hook state
    `Active`), a review still running or whose last verdict isn't a pass at exactly these shas
    (`accept_review` after `hiveResolve accept`), a detached Base, and, until 6d, anything that needs
-   the human (integration mode, Landing = Ask me, the config rule). `worker.json` `land` holds the
+   the human (Landing = Ask me, in either mode, or the config rule). `worker.json` `land` holds the
    state, persisted before every irreversible step. The lock (`land/lock.rs`) is
    `<common dir>/maiterm-land.lock` by `create_new`, stale when its pid is gone or is ours and not
    held; waits wake on a condvar and re-read every 2 s; `hiveLand` waits 10 s, then the land carries
@@ -4145,7 +4146,7 @@ several releases a day).
    path refuses both kinds), one per land (`args.land_id`; a newer land of the task supersedes the
    card), exempt from the five-per-tab cap, 24 h to answer. Three things file one: the config rule
    in any mode, after every repo's step 1 and check and before any step 2 (one card for the whole
-   land); Landing = Ask me and the integration mode, at `hiveLand`, before step 1. While a card waits
+   land); Landing = Ask me (in either mode), at `hiveLand`, before step 1. While a card waits
    the land is `awaiting_human`: no lock, no temporary worktree, no delivery hold, `tested` and
    `base_before` kept; its worker may be stopped, retired or report again, which withdraws the card.
    Every word on it is maiTerm's ("Land “Title” into main in web", the diff stat from the target to
@@ -4333,7 +4334,7 @@ several releases a day).
    an `outcome` updates just that, newest first by a decision's latest line. Lands are decisions: the
    coordinator's `hiveLand` under its Landing checkpoint is `answered` (`landing`, key `L-…`, one per
    land, kept while a held land resumes on its pins, new on new pins; `LandState.decision`), each
-   card is its own (`card_decision`; category `landing` for Ask me, `config`, `integration`), the
+   card is its own (`card_decision`; category `landing` for Ask me in either mode, `config`; `integration` on lines from before 2026-11-18), the
    human's approval `Land`, a denial `Don't land`, a lapse or a withdrawal `lapsed`, and the land's
    refusal, hold (a restart's included, written by `reconcile`) or landing is the outcome on both; a
    card replaced when its land resumes says "asked again" only if the log shows it approved.

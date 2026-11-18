@@ -2579,7 +2579,7 @@ async fn land_cards_are_decisions_categorized_by_why_and_a_lapse_isnt_a_denial()
     let card = decisions_of(&rig).into_iter().find(|x| x.id == card_id).unwrap();
     assert!(card.answered.is_none() && card.lapsed.as_ref().is_some_and(|l| l.by == "maiterm"), "{card:?}");
 
-    // The integration mode's cards (Landing = Ask me) are `integration`.
+    // The integration mode's cards (Landing = Ask me) are `landing`: they count toward earning it.
     let rig = Rig::with("card-integration", &["web"], |h| {
         h.landing_mode = LANDING_INTEGRATION.into();
         h.checkpoints.insert("landing".into(), "ask".into());
