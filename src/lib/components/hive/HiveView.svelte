@@ -318,6 +318,9 @@
   $effect(() => {
     const keys = queenAskKeys;
     const ws = workspaceId;
+    // At launch the view mounts before the tasks and requests arrive: seeding then would take
+    // what was already waiting for new.
+    if (!tasksStore.loaded || !agentRequestsStore.loaded) return;
     untrack(() => {
       const seen = seenQueenAsks?.ws === ws ? seenQueenAsks.keys : null;
       seenQueenAsks = { ws, keys: new Set(keys) };
