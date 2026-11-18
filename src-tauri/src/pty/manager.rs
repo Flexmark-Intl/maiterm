@@ -1138,6 +1138,22 @@ pub fn get_pty_info(state: &Arc<AppState>, pty_id: &str) -> Result<PtyInfo, Stri
         Some((cmd, lossy)) => (Some(cmd), lossy),
         None => (None, false),
     };
+
+    // The probes above ran without the registry lock, and this runs off the main thread, so a
+    // `kill_pty` can land between reading the pid and the sweep. The sweep then finds no shell
+    // and would answer "at a local prompt, no ssh" for a terminal that was an ssh session a
+    // moment ago; the autosave tick writes that answer over the tab's restore context.
+    // `kill_pty` takes the PTY out of the registry BEFORE it kills the shell, so a PTY still
+    // registered here means the sweep saw the shell alive. Gone means the answer may describe
+    // a dead shell: the caller gets the error it always got for a killed PTY.
+    let still_ours = state
+        .pty_registry
+        .read()
+        .get(pty_id)
+        .is_some_and(|h| h.child_pid == Some(pid));
+    if !still_ours {
+        return Err("PTY not found".to_string());
+    }
     note_live_ssh(state, pty_id, &foreground_command);
 
     Ok(PtyInfo { cwd, foreground_command, foreground_lossy })
