@@ -142,6 +142,17 @@ describe('cleanSshCommand round-trip', () => {
     expect(stored).toBe('-x -C ews@nova');
   });
 
+  it('does not grow behind an alias that adds only -t', () => {
+    for (const [cwd, tab] of [['/srv/app', TAB], [null, TAB], [null, null]] as const) {
+      let stored = 'ews@nova';
+      for (let i = 0; i < 4; i++) {
+        stored = cleanSshCommand(buildSshCommand(stored, cwd, tab).replace(/^ssh /, 'ssh -t '));
+        expect(stored).toBe('ews@nova');
+      }
+    }
+    expect(cleanSshCommand('-t -o ControlMaster=no -t -o ControlMaster=no ews@nova')).toBe('ews@nova');
+  });
+
   it('shrinks the commands an earlier build let grow behind an alias', () => {
     const grown = '-x -C -t -o ControlMaster=no -x -C -t -o ControlMaster=no -x -C -t -o ControlMaster=no -x -C ews@nova';
     expect(cleanSshCommand(grown)).toBe('-x -C ews@nova');

@@ -159,8 +159,9 @@ function withoutAliasedCopies(words: WordSpan[]): WordSpan[] {
       }
     }
     if (at < 0) return words;
+    // Nothing in front (`lead` 0) is the same case with an alias that adds only `-t`: the
+    // caller's one `-t` went to the alias's, and this pair is maiTerm's.
     const lead = values[at - 1] === '-t' ? at - 1 : at;
-    if (lead === 0) return words;
     const aliased = values.slice(0, lead).every((v, k) => values[at + 2 + k] === v);
     words = aliased ? words.slice(at + 2) : [...words.slice(0, lead), ...words.slice(at + 2)];
   }
@@ -222,8 +223,10 @@ export function sshCommandLine(cmd: string): string {
  * Strip previously-injected flags and remote commands from an SSH command
  * retrieved from the process tree, then normalize to just the user@host
  * portion (with any non-standard flags). Strips the `ssh` prefix, the `-t` and
- * `-o ControlMaster=...` buildSshCommand puts right after the program, and maiTerm's own
- * remote command (`… && exec $SHELL -l`). Every other word the user typed is kept as typed.
+ * `-o ControlMaster=...` buildSshCommand puts right after the program (or further in, behind
+ * a shell alias's own options: `withoutAliasedCopies`, which also shrinks a stored command
+ * with no program in front), and maiTerm's own remote command (`… && exec $SHELL -l`). Every
+ * other word the user typed is kept as typed.
  *
  * A program other than plain `ssh` (a full path, autossh) is KEPT in front — `/usr/bin/ssh
  * ews@nova`, `autossh -M 0 ews@nova` — so a clone or reconnect runs the user's program

@@ -448,6 +448,20 @@ function createWorkspacesStore() {
               }
             }
 
+            // Shrink an ssh command an earlier build let grow behind a shell alias
+            // (`withoutAliasedCopies`, tauri/commands.ts). Here rather than where it is read:
+            // the auto-resume command is read raw in a dozen places, wins over the restore
+            // context, and is only rewritten when the human sets it, so it would stay grown.
+            // The restore one is rewritten by the autosave tick; the mirror is enough.
+            if (tab.auto_resume_ssh_command) {
+              const shrunk = commands.cleanSshCommand(tab.auto_resume_ssh_command);
+              if (shrunk !== tab.auto_resume_ssh_command) {
+                tab.auto_resume_ssh_command = shrunk;
+                migrated = true;
+              }
+            }
+            if (tab.restore_ssh_command) tab.restore_ssh_command = commands.cleanSshCommand(tab.restore_ssh_command);
+
             if (migrated) {
               await commands.setTabAutoResumeContext(
                 ws.id, pane.id, tab.id,
