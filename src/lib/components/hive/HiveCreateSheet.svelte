@@ -998,7 +998,7 @@
           <fieldset class="field">
             <legend class="label">How work lands <span class="opt">can't be changed later</span></legend>
             <label class="choice"><input type="radio" name="hive-landing" value="base" bind:group={landing} /><span><b>Straight into Base</b><span class="hint">The queen merges each finished worker into its repo's Base branch.</span></span></label>
-            <label class="choice"><input type="radio" name="hive-landing" value="integration" bind:group={landing} /><span><b>Into a branch of its own</b><span class="hint">The queen lands each finished worker into the Hive's branch. Base stays untouched until you merge that branch yourself.</span></span></label>
+            <label class="choice"><input type="radio" name="hive-landing" value="integration" bind:group={landing} /><span><b>Into a branch of its own</b><span class="hint">The queen lands each finished worker into the Hive's branch. Base stays untouched until you approve landing that branch into it, on a card.</span></span></label>
           </fieldset>
           {#if landing === 'base'}
             <label class="choice">

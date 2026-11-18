@@ -110,6 +110,7 @@ pub const COORDINATOR_MCP_TOOLS: &[&str] = &[
     "hiveMessageWorker",
     "hiveLand",
     "hiveUndoLand",
+    "hiveLandBranch",
     "hiveStopWorker",
     "hiveRestartWorker",
     "hiveRetireWorker",

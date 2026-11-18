@@ -25,7 +25,7 @@ describe('Hive settings, read-only half', () => {
     expect(get('Landing').note).toMatch(/new Hive/);
     expect(rows.find((r) => r.label === 'On the phone'), 'chosen in Workers and access').toBeUndefined();
     const integ = fixedRows(hive({ landing_mode: 'integration', settings: { keep_off_phone: true } }), 'Ship');
-    expect(integ.find((r) => r.label === 'Landing')!.value).toBe('Into the branch hive/ship; you merge it into Base');
+    expect(integ.find((r) => r.label === 'Landing')!.value).toBe('Into the branch hive/ship; you approve its land into Base');
     expect(integ.find((r) => r.label === 'On the phone')!.value).toMatch(/^Kept off/);
   });
 

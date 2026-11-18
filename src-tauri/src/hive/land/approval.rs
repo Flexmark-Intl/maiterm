@@ -277,7 +277,7 @@ pub(crate) struct Decision {
 }
 
 impl Decision {
-    fn where_from(&self) -> &'static str {
+    pub(crate) fn where_from(&self) -> &'static str {
         if self.by == "phone" { " from their phone" } else { "" }
     }
 }
@@ -329,6 +329,10 @@ pub(crate) async fn approved<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, d
     }
     if d.kind != KIND {
         ctx.window.settle_request(&d.id, false, "maiTerm can't carry out this kind of Hive request in this build".to_string());
+        return Outcome::Gone;
+    }
+    if super::branch::is_branch(d) {
+        super::branch::approved(ctx, caller, d).await;
         return Outcome::Gone;
     }
     let task_id = arg(&d.args, "task_id").to_string();
@@ -399,6 +403,10 @@ pub(crate) async fn approved<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, d
 pub(crate) async fn closed<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, d: &Decision, status: &str) -> Option<Outcome> {
     if d.kind == super::undo::KIND {
         return super::undo::closed(ctx, caller, d, status).await;
+    }
+    if super::branch::is_branch(d) {
+        super::branch::closed(ctx, caller, d, status).await;
+        return None;
     }
     let dir = worker::task_dir(&caller.paths, arg(&d.args, "task_id")).ok()?;
     let w = blocking(move || worker::read_worker(&dir)).await.ok()?;
@@ -505,7 +513,7 @@ pub fn refile_pending(state: &Arc<crate::state::AppState>, handle: &tauri::AppHa
         .iter()
         .map(|c| {
             let window = crate::hive::rpc::AppWindow { app: state.clone(), handle: handle.clone(), label: c.label.clone() };
-            refile_in(&window, c) + super::undo::refile_in(&window, c)
+            refile_in(&window, c) + super::undo::refile_in(&window, c) + super::branch::refile_in(&window, c)
         })
         .sum();
     if n > 0 {

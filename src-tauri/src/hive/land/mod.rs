@@ -20,6 +20,7 @@
 pub mod approval;
 pub mod base_check;
 pub mod batch;
+pub mod branch;
 pub mod config_rule;
 pub mod driver;
 pub mod git;

@@ -201,6 +201,14 @@ pub(crate) fn resolve(folded: &landlog::Folded, name: &str) -> Result<LandLogEnt
     match e.entry.kind.as_str() {
         landlog::KIND_UNDO => return Err(format!("{} is an undo itself: to bring that work back, land it again.", e.entry.id)),
         landlog::KIND_BASE_CHECK => return Err(format!("{} is a post-land check, not a land.", e.entry.id)),
+        super::branch::KIND_BRANCH => {
+            return Err(format!(
+                "{} landed this Hive's branch into {} on the human's card: undoing it is theirs, by hand (git revert -m 1 {}).",
+                e.entry.id,
+                e.entry.target,
+                e.entry.merge_commit.as_deref().unwrap_or("<its merge commit>")
+            ))
+        }
         _ if !e.entry.moved_target() => return Err(format!("{} isn't a land maiTerm can undo.", e.entry.id)),
         _ => {}
     }

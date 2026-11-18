@@ -2697,3 +2697,64 @@ async fn a_denied_card_replaced_when_its_held_land_resumes_isnt_said_to_have_bee
     assert_eq!(denied.answered.as_ref().and_then(|l| l.answer.as_deref()), Some("Don\u{2019}t land"));
     assert_eq!(denied.outcome.as_deref(), Some("superseded by a new card when the land resumed"));
 }
+
+/// Darryl, 2026-11-18: in the integration mode the land into Base is the human's card. Approved,
+/// Base gets one --no-ff merge commit whose files are exactly the branch tip's; refused while Base
+/// moved since the branch took it in; denied, nothing moves.
+#[tokio::test]
+async fn the_hives_branch_lands_into_base_on_the_humans_card() {
+    let rig = Rig::with("branch-land", &["web"], |h| h.landing_mode = LANDING_INTEGRATION.into());
+    let repo = rig.repo("web").to_path_buf();
+    let rc = rig.caller.paths.coordinator_worktree("web");
+    fs::create_dir_all(rc.parent().unwrap()).unwrap();
+    git(&repo, &["worktree", "add", "-q", "-b", "hive/ship", rc.to_str().unwrap(), "main"]);
+    let main0 = rig.main_tip("web");
+
+    let nothing = branch::tool(&rig.ctx(), &rig.caller, &json!({ "summary": "all done" })).await.unwrap_err();
+    assert!(nothing.contains("nothing Base doesn't already have"), "{nothing}");
+
+    let w = rig.reported("feat", &["web"], "feat.rs", "f\n");
+    rig.land(&w).await.unwrap();
+    let tip = git(&repo, &["rev-parse", "refs/heads/hive/ship"]);
+    assert_eq!(rig.main_tip("web"), main0, "the queen's land leaves Base alone");
+
+    assert!(branch::tool(&rig.ctx(), &rig.caller, &json!({})).await.unwrap_err().contains("summary is required"));
+    let out = branch::tool(&rig.ctx(), &rig.caller, &json!({ "summary": "Feature done and reviewed." })).await.unwrap();
+    assert_eq!(out["state"], "awaiting_human", "{out}");
+    let (req, d) = rig.last_card();
+    assert_eq!(req.args["branch"], true);
+    assert_eq!(req.summary, "Land hive/ship into main in web");
+    assert!(req.effects.iter().any(|e| e.contains("web has no land check")), "never a check it doesn't have: {:?}", req.effects);
+    assert!(rig.caller.paths.root.join("branch-land.json").is_file(), "kept for a restart");
+
+    approval::approved(&rig.ctx(), &rig.caller, &d, &opts()).await;
+    let head = rig.main_tip("web");
+    let parents: Vec<String> = git(&repo, &["rev-list", "--parents", "-n1", &head]).split_whitespace().map(str::to_string).collect();
+    assert_eq!(parents, vec![head.clone(), main0.clone(), tip.clone()], "one --no-ff merge of exactly the tip the card named");
+    assert_eq!(git(&repo, &["rev-parse", &format!("{head}^{{tree}}")]), git(&repo, &["rev-parse", &format!("{tip}^{{tree}}")]), "the tip's own files");
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head, "Base's checkout moved with it");
+    let e = rig.log().into_iter().find(|e| e.kind == branch::KIND_BRANCH).expect("logged");
+    assert_eq!((e.target.as_str(), e.by.as_str(), e.merge_commit.as_deref()), ("main", "human", Some(head.as_str())));
+    assert!(undo::resolve(&log::folded(&rig.caller.paths), &e.id).is_err(), "not the Hive's to undo");
+    let settled = rig.seen.lock().unwrap().settled.clone();
+    assert!(settled.last().is_some_and(|s| s.1), "{settled:?}");
+    assert!(rig.told().last().is_some_and(|t| t.contains("approved landing hive/ship into Base")), "{:?}", rig.told());
+    assert!(!rig.caller.paths.root.join("branch-land.json").exists(), "settled, not kept");
+
+    // Base moves on its own: the branch must take it in through a land first.
+    let w2 = rig.reported("more", &["web"], "more.rs", "m\n");
+    rig.land(&w2).await.unwrap();
+    commit(&repo, "hotfix.rs", "h\n");
+    let moved = branch::tool(&rig.ctx(), &rig.caller, &json!({ "summary": "more" })).await.unwrap_err();
+    assert!(moved.contains("moved since hive/ship last took it in"), "{moved}");
+
+    // A card denied moves nothing.
+    git(&rc, &["merge", "-q", "--no-edit", "main"]);
+    branch::tool(&rig.ctx(), &rig.caller, &json!({ "summary": "more" })).await.unwrap();
+    let before = rig.main_tip("web");
+    let (_, d) = rig.last_card();
+    approval::closed(&rig.ctx(), &rig.caller, &d, "denied").await;
+    assert_eq!(rig.main_tip("web"), before);
+    assert!(rig.told().last().is_some_and(|t| t.contains("denied")), "{:?}", rig.told());
+    rig.assert_no_leftovers();
+}

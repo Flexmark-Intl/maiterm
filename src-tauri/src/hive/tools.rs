@@ -36,7 +36,7 @@ pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The Hive tools built so far: what `tools/list` offers each role and the handler answers.
 /// The rest of the coordinator's (settings' `COORDINATOR_MCP_TOOLS`) are refused as not yet here.
-pub const COORDINATOR_TOOLS: [&str; 19] = [
+pub const COORDINATOR_TOOLS: [&str; 20] = [
     "hiveSpawnWorker",
     "hiveListWorkers",
     "hiveMessageWorker",
@@ -47,6 +47,7 @@ pub const COORDINATOR_TOOLS: [&str; 19] = [
     "hiveResolve",
     "hiveLand",
     "hiveUndoLand",
+    "hiveLandBranch",
     "hiveAnswerWorker",
     "hivePrecedents",
     "hiveRecordPrecedent",
@@ -308,6 +309,7 @@ fn hive_tool_definitions(role: &str) -> Vec<Value> {
         super::review::resolve_tool_definition(&tab_id),
         super::land::tool_definition(&tab_id),
         super::land::undo::tool_definition(&tab_id),
+        super::land::branch::tool_definition(&tab_id),
         super::prompts::tool_definition(&tab_id),
         super::precedents::list_tool_definition(&tab_id),
         super::precedents::record_tool_definition(&tab_id),
@@ -471,6 +473,7 @@ pub async fn handle(tool: &str, args: &Value, state: &Arc<AppState>, handle: &ta
         "hiveResolve" => super::review::resolve(&ctx, &caller, args).await,
         "hiveLand" => super::land::land_tool(&ctx, &caller, args).await,
         "hiveUndoLand" => super::land::undo::undo_tool(&ctx, &caller, args).await,
+        "hiveLandBranch" => super::land::branch::tool(&ctx, &caller, args).await,
         "hiveAnswerWorker" => super::prompts::answer_worker_tool(&ctx, &caller, args).await,
         "hivePrecedents" => super::precedents::list_tool(&caller, args).await,
         "hiveRecordPrecedent" => super::precedents::record_tool(&ctx, &caller, args).await,

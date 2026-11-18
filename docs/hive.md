@@ -1775,7 +1775,7 @@ exists.
 | Spawn a worker within the cap | None; the Hive is the envelope (decision §14.1) |
 | Raise the cap | The human, in Hive settings |
 | Land a worker into Base (default mode) | None: the coordinator calls `hiveLand`, and maiTerm merges behind its guards (§8). A land that changes agent or execution config is the human's (§8.1) |
-| Land a worker into the Hive's branch (integration mode) | None by default: the coordinator calls `hiveLand` (§8.3). With Landing = Ask me, the human, on a land card. Merging that branch into Base is the human's, outside the Hive |
+| Land a worker into the Hive's branch (integration mode) | None by default: the coordinator calls `hiveLand` (§8.3). With Landing = Ask me, the human, on a land card. Landing that branch into Base is the human's, on its own card (`hiveLandBranch`, §8.3) |
 | Deliver assets into a Hive plain folder | None for new files, within the limits below; overwriting anything, and any other destination, is the human's (Export…, §10.6) |
 | Push | **No agent.** Only maiTerm's land path pushes, and only when the Hive's Push after land setting is on (default off), never forced (§8.5) |
 | Spend past the budget | The human, on a blocker the agent raises first (§10.3). Never delegable (§7.4) |
@@ -2375,6 +2375,21 @@ computed from that sha, and on approval maiTerm merges **exactly that sha** `--n
 "branch moved since you approved" and the newer commits need a land of their own. The merge and
 the land check run in a temporary worktree, as in §8.1; `hive/<slug>` then advances by
 compare-and-swap, and the land log records the sha.
+
+**The land into Base is the human's card** (Darryl, 2026-11-18; `land/branch.rs`). The queen asks
+with `hiveLandBranch {summary}` once the goal's work has landed; the card is a `hive_land` request
+with `branch: true`, so the phone shows and approves it like any land card, with no wire change.
+It's filed only while the branch holds Base's tip in every repo it lands in (Base that moved since is
+merged into the branch first, by a worker, through a normal land and its check), so the land is
+`git commit-tree` of the branch tip's own tree with Base and the tip as parents: exactly the files
+the card names, which it says were, or weren't, a tree the branch's last land check passed (from
+the land log; no new check runs, none could add anything). Approved, each repo goes in order under
+its land lock: Base still at the card's tip, the merge commit, step 2's `advance` (a checkout of
+Base takes it by `merge --ff-only` and holds over uncommitted work), a `branch` line in the land log
+(`by: human`), and the queen told. Nothing is pushed. A waiting card is kept in `branch-land.json`
+and filed again after a restart. Undo is the human's, by hand (`git revert -m 1`, which the land log
+and the refusal name): the Hive's Undo runs its check as a job under a worker's sandbox, and this
+land has no worker.
 
 **What "Base" means in this mode** is `hive/<slug>`, everywhere:
 
