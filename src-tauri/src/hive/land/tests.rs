@@ -1436,7 +1436,10 @@ async fn landing_ask_files_the_card_before_step_1() {
 
 #[tokio::test]
 async fn integration_mode_merges_exactly_the_approved_sha_no_ff_though_the_branch_moved_on() {
-    let rig = Rig::with("integration", &["web"], |h| h.landing_mode = LANDING_INTEGRATION.into());
+    let rig = Rig::with("integration", &["web"], |h| {
+        h.landing_mode = LANDING_INTEGRATION.into();
+        h.checkpoints.insert("landing".into(), "ask".into());
+    });
     let repo = rig.repo("web").to_path_buf();
     // The coordinator's read copy holds hive/ship, as the Hive's layout makes it.
     let rc = rig.caller.paths.coordinator_worktree("web");
@@ -1573,6 +1576,7 @@ async fn a_partly_landed_land_whose_card_goes_with_a_new_report_keeps_what_lande
 async fn integration_mode_logs_no_merge_commit_for_a_pin_the_branch_already_has_and_says_which_repos_go_unchecked() {
     let rig = Rig::with("integration-noop", &["web", "api"], |h| {
         h.landing_mode = LANDING_INTEGRATION.into();
+        h.checkpoints.insert("landing".into(), "ask".into());
         h.folders[0].land_check = Some("true".into());
     });
     for name in ["web", "api"] {
@@ -1798,9 +1802,37 @@ async fn the_coordinators_undo_of_config_files_a_card_and_the_humans_own_undo_go
     rig.assert_no_leftovers();
 }
 
+/// Darryl, 2026-11-18: in the integration mode the queen lands into the Hive's branch on her own
+/// (Landing = Coordinator, the default); Base is untouched, and an undo of her land is hers too.
+#[tokio::test]
+async fn integration_mode_lands_into_the_hives_branch_without_a_card_by_default() {
+    let rig = Rig::with("integration-queen", &["web"], |h| h.landing_mode = LANDING_INTEGRATION.into());
+    let repo = rig.repo("web").to_path_buf();
+    let rc = rig.caller.paths.coordinator_worktree("web");
+    fs::create_dir_all(rc.parent().unwrap()).unwrap();
+    git(&repo, &["worktree", "add", "-q", "-b", "hive/ship", rc.to_str().unwrap(), "main"]);
+    let main0 = rig.main_tip("web");
+    let w = rig.reported("feat", &["web"], "feat.rs", "f\n");
+    let out = rig.land(&w).await.unwrap();
+    assert_ne!(out["state"], STATE_AWAITING_HUMAN, "no card: {out}");
+    assert!(rig.seen.lock().unwrap().filed.is_empty(), "nothing filed for the human");
+    let tip = git(&repo, &["rev-parse", "refs/heads/hive/ship"]);
+    assert_ne!(tip, main0, "hive/ship moved");
+    assert_eq!(rig.main_tip("web"), main0, "Base untouched");
+    let line = rig.log()[0].clone();
+    assert_eq!((line.target.as_str(), line.by.as_str()), ("hive/ship", "coordinator"));
+    rig.undo(&line.id).await.expect("her own land is hers to undo");
+    assert!(git(&repo, &["ls-tree", "--name-only", "refs/heads/hive/ship", "feat.rs"]).is_empty(), "reverted on hive/ship");
+    assert_eq!(rig.main_tip("web"), main0, "Base still untouched");
+    rig.assert_no_leftovers();
+}
+
 #[tokio::test]
 async fn an_integration_land_is_undone_by_the_human_with_revert_m1_and_never_by_the_coordinator() {
-    let rig = Rig::with("undo-integration", &["web"], |h| h.landing_mode = LANDING_INTEGRATION.into());
+    let rig = Rig::with("undo-integration", &["web"], |h| {
+        h.landing_mode = LANDING_INTEGRATION.into();
+        h.checkpoints.insert("landing".into(), "ask".into());
+    });
     let repo = rig.repo("web").to_path_buf();
     let rc = rig.caller.paths.coordinator_worktree("web");
     fs::create_dir_all(rc.parent().unwrap()).unwrap();
@@ -2547,8 +2579,11 @@ async fn land_cards_are_decisions_categorized_by_why_and_a_lapse_isnt_a_denial()
     let card = decisions_of(&rig).into_iter().find(|x| x.id == card_id).unwrap();
     assert!(card.answered.is_none() && card.lapsed.as_ref().is_some_and(|l| l.by == "maiterm"), "{card:?}");
 
-    // The integration mode's cards are `integration`, never earned.
-    let rig = Rig::with("card-integration", &["web"], |h| h.landing_mode = LANDING_INTEGRATION.into());
+    // The integration mode's cards (Landing = Ask me) are `integration`.
+    let rig = Rig::with("card-integration", &["web"], |h| {
+        h.landing_mode = LANDING_INTEGRATION.into();
+        h.checkpoints.insert("landing".into(), "ask".into());
+    });
     let rc = rig.caller.paths.coordinator_worktree("web");
     fs::create_dir_all(rc.parent().unwrap()).unwrap();
     git(rig.repo("web"), &["worktree", "add", "-q", "-b", "hive/ship", rc.to_str().unwrap(), "main"]);

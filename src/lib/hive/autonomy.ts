@@ -47,14 +47,6 @@ export interface AutonomyForm {
 
 type HiveFields = Pick<Hive, 'landing_mode' | 'checkpoints' | 'settings'>;
 
-/** Why a checkpoint can't be changed here, or null. */
-export function lockedReason(hive: Pick<Hive, 'landing_mode'>, key: string): string | null {
-  if (key === 'landing' && hive.landing_mode === 'integration') {
-    return 'This Hive lands to its integration branch with your approval of each land (fixed at creation), so Landing stays Ask me.';
-  }
-  return null;
-}
-
 export function formFor(hive: HiveFields): AutonomyForm {
   const values: Record<string, CheckpointValue> = {};
   for (const r of CHECKPOINT_ROWS) values[r.key] = checkpointAsks(hive, r.key) ? 'ask' : 'coordinator';
@@ -67,7 +59,6 @@ export function validateForm(hive: Pick<Hive, 'landing_mode'>, form: AutonomyFor
   for (const r of CHECKPOINT_ROWS) {
     const v = form.values[r.key];
     if (v !== 'coordinator' && v !== 'ask') return `${r.label}: pick Queen or Ask me.`;
-    if (v === 'coordinator' && lockedReason(hive, r.key)) return lockedReason(hive, r.key);
   }
   if (!Number.isInteger(form.minutes) || form.minutes < TIMEOUT_MIN_MINUTES || form.minutes > TIMEOUT_MAX_MINUTES) {
     return `The prompt timeout is a whole number of minutes, ${TIMEOUT_MIN_MINUTES} to ${TIMEOUT_MAX_MINUTES}.`;

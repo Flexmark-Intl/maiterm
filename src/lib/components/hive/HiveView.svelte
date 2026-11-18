@@ -1112,7 +1112,7 @@
           </div>
           <div class="ro">
             <span class="k">Lands to</span>
-            <Tooltip text={hive.landing_mode === 'integration' ? `Each land goes to hive/${hive.slug}, with your approval` : 'Each land goes straight to the base branch'}>
+            <Tooltip text={hive.landing_mode === 'integration' ? `Each land goes to the Hive's branch, hive/${hive.slug}` : 'Each land goes straight to the base branch'}>
               <span class="v">{hive.landing_mode === 'integration' ? `hive/${hive.slug}` : 'Base'}</span>
             </Tooltip>
           </div>

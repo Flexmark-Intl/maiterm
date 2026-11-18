@@ -37,14 +37,15 @@ pub const WHY_CONFIG: &str = "config";
 pub const WHY_ASK: &str = "ask";
 pub const WHY_INTEGRATION: &str = "integration";
 
-/// The integration mode and Landing = Ask me ask before step 1 (§8.3, §7.4).
+/// Landing = Ask me asks before step 1 (§7.4), in either mode: the integration mode's land into
+/// the Hive's branch is the queen's unless the human set Ask me (Darryl, 2026-11-18, §8.3).
 pub fn asks_first(hive: &Hive) -> Option<&'static str> {
-    if hive.is_integration() {
-        Some(WHY_INTEGRATION)
-    } else if hive.checkpoints.get("landing").is_some_and(|c| c == "ask") {
-        Some(WHY_ASK)
-    } else {
+    if !hive.checkpoints.get("landing").is_some_and(|c| c == "ask") {
         None
+    } else if hive.is_integration() {
+        Some(WHY_INTEGRATION)
+    } else {
+        Some(WHY_ASK)
     }
 }
 

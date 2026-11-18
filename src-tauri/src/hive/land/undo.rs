@@ -1050,7 +1050,9 @@ pub(crate) async fn undo_tool<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, 
 }
 
 pub(crate) async fn undo_tool_with<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, args: &Value, opts: &Opts) -> Result<Value, String> {
-    if caller.hive.is_integration() {
+    // Undo follows who lands: with Landing = Ask me in the integration mode, every land into the
+    // Hive's branch was the human's, and so is undoing one.
+    if caller.hive.is_integration() && super::approval::asks_first(&caller.hive).is_some() {
         return Err(format!(
             "This Hive lands into {} with the human's approval, so Undo is theirs (the land log, or the worker's column menu): \
              ask them if a land should be undone.",
@@ -1163,7 +1165,9 @@ pub fn log_view(hive: &Hive, paths: &HivePaths) -> LandLogView {
             .filter(UndoState::open)
             .map(|u| UndoView { id: u.id, undoes: u.undoes, state: u.state, by: u.by, held_reason: u.held_reason, request: u.request })
             .collect(),
-        integration: hive.is_integration(),
+        // Read as "Undo is the human's alone": an integration Hive whose lands into its branch are
+        // approved one by one (Landing = Ask me, `undo_tool_with`).
+        integration: hive.is_integration() && super::approval::asks_first(hive).is_some(),
     }
 }
 

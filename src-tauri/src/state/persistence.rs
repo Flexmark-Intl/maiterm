@@ -448,6 +448,19 @@ pub fn migrate_app_data(data: &mut AppData) {
         }
     }
 
+    // The integration mode's Landing checkpoint, forced to Ask me until 2026-11-18, is the
+    // queen's like any Hive's (docs/hive.md §8.3): once per Hive, a forced `ask` is handed back.
+    for win in data.windows.iter_mut() {
+        for ws in win.workspaces.iter_mut() {
+            if let Some(h) = ws.hive.as_mut() {
+                let forced = h.is_integration() && h.checkpoints.get("landing").is_some_and(|v| v == "ask");
+                if h.migrate_integration_landing() && forced {
+                    log::info!("Migration: hive {}: landing into its branch is the queen's now", h.id);
+                }
+            }
+        }
+    }
+
     // A "0 monitors" geometry key is a phantom layout, never a configuration: macOS
     // reports every screen gone while the displays sleep, and runs that predate that rule
     // saved the sleep-time rect under "0". Launch would then restore it whenever the app

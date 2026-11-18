@@ -78,7 +78,8 @@ each was made, in the spirit of Higgsfield's library.
    branch (main), with no card (§8). maiTerm carries out the merge, never the agent's own git,
    so it can refuse a merge that would touch anyone's uncommitted work. A land that changes
    agent or execution config always goes to the human (§8.1). Choosing, when the Hive is
-   created, an integration branch instead makes the human approve each land (§8.3).
+   created, a branch of its own instead lands each worker into `hive/<slug>`, the queen's too
+   unless Landing is Ask me, and Base is the human's (§8.3).
 7. **Code lands in git; everything else lands in the gallery.** A file a person would look at
    is an asset, kept immutable, with who made it, for which task, and how. Rust owns the gallery
    store; agents add to it through a tool, never by writing into it (§10).
@@ -1774,7 +1775,7 @@ exists.
 | Spawn a worker within the cap | None; the Hive is the envelope (decision §14.1) |
 | Raise the cap | The human, in Hive settings |
 | Land a worker into Base (default mode) | None: the coordinator calls `hiveLand`, and maiTerm merges behind its guards (§8). A land that changes agent or execution config is the human's (§8.1) |
-| Land a worker (approval mode) | The human, on a land card; merging the integration branch into Base is the human's, outside the Hive |
+| Land a worker into the Hive's branch (integration mode) | None by default: the coordinator calls `hiveLand` (§8.3). With Landing = Ask me, the human, on a land card. Merging that branch into Base is the human's, outside the Hive |
 | Deliver assets into a Hive plain folder | None for new files, within the limits below; overwriting anything, and any other destination, is the human's (Export…, §10.6) |
 | Push | **No agent.** Only maiTerm's land path pushes, and only when the Hive's Push after land setting is on (default off), never forced (§8.5) |
 | Spend past the budget | The human, on a blocker the agent raises first (§10.3). Never delegable (§7.4) |
@@ -1850,7 +1851,7 @@ where a checkpoint says so. The checkpoints are Hive settings, and each one is s
 | Plan: which workers, how many, in what order | Coordinator | "Show me the plan first" is the Ask-me setting |
 | Workers' questions | Coordinator | One asker per question (`docs/overlord.md` §9.1.2), routed as the table below says |
 | Workers' permission prompts | Coordinator | Within the allowlist below |
-| Landing | Coordinator | Gates who calls `hiveLand` within the landing mode, which is fixed at creation (§3). In the approval mode (§8.3) it's always Ask me and can't be earned (§7.6) |
+| Landing | Coordinator | Gates who calls `hiveLand` within the landing mode, which is fixed at creation (§3). In the integration mode it gates lands into the Hive's branch, and is the queen's by default there too (Darryl, 2026-11-18, §8.3) |
 | Picking finals in the gallery | Coordinator | Creative Hives often set this to Ask me |
 | Adding a dependency, changing a public interface | Coordinator | Listed so a Hive can tighten them |
 
@@ -2346,9 +2347,18 @@ What can break is the pair: a web change that needs an api change not yet landed
 coordinator's to order, the same as Projects reporting "which PRs need to merge first". The brief
 says so, and the land answer always names which repos landed.
 
-### 8.3 Mode: integration branch, I approve each land
+### 8.3 Mode: a branch of its own (integration branch)
 
-`hiveLand` files an **Agent request** card ("Land *Session store* into *hive/auth*?", with the
+**Changed 2026-11-18 (Darryl):** this mode was "I approve each land", with Landing forced to Ask
+me. What he wanted was a branch the queen lands into freely, and his approval for the land into
+main. So Landing is an ordinary checkpoint here, the queen's by default (`default_checkpoints`),
+and only Ask me files the card below; an Undo follows who lands (the human's alone only under Ask
+me); earned autonomy may offer it. A Hive made before had Ask me forced on it, never chosen, so a
+load hands it to the queen once (`Hive::migrate_integration_landing`, marked by
+`settings.landing_open`); an Ask me its human picks afterwards stays. What the rest of this section says of "the approval mode" applies
+to Landing = Ask me.
+
+With Landing = Ask me, `hiveLand` files an **Agent request** card ("Land *Session store* into *hive/auth*?", with the
 diff stat and the coordinator's summary quoted as its reason) in the Loom's Decisions, in the
 worker's column and on the phone. It's the existing agent-requests machinery
 (`docs/agent-requests.md`): only a human click or a paired phone approves. At the end,
@@ -2357,7 +2367,7 @@ MRs from it, outside the Hive.
 
 The mode is fixed when the Hive is created (§3), because it's a branch topology, not a
 checkpoint: switching to land-to-Base later would fast-forward integration merges into Base. In
-this mode the Landing checkpoint is always Ask me, and it's excluded from earned autonomy (§7.6).
+this mode the Landing checkpoint decides who lands into `hive/<slug>` (above).
 
 **The card is pinned too.** It stores the sha per repo that `hiveLand` named, its diff stat is
 computed from that sha, and on approval maiTerm merges **exactly that sha** `--no-ff` into

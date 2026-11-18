@@ -53,7 +53,8 @@ pub fn ms(at: &str) -> Option<i64> {
 
 /// Checkpoints maiTerm may offer (§7.6): only what Rust sees decided.
 pub fn earnable(hive: &Hive, key: &str) -> bool {
-    matches!(key, PLAN | QUESTIONS | PERMISSIONS | FINALS) || (key == LANDING && !hive.is_integration())
+    let _ = hive;
+    matches!(key, PLAN | QUESTIONS | PERMISSIONS | FINALS | LANDING)
 }
 
 /// The checkpoint an `offer` line is about.

@@ -142,6 +142,20 @@ impl Hive {
         matches!(self.criteria_confirm.as_str(), CRITERIA_NEEDED | CRITERIA_ASKED)
     }
 
+    /// Once per Hive: an integration Hive from before Landing could be chosen there (§8.3) had
+    /// Ask me forced on it, never chosen, so it becomes the queen's, the default it would have had.
+    /// Answers whether it changed anything.
+    pub fn migrate_integration_landing(&mut self) -> bool {
+        if self.settings.landing_open {
+            return false;
+        }
+        self.settings.landing_open = true;
+        if self.is_integration() && self.checkpoints.get("landing").is_some_and(|v| v == "ask") {
+            self.checkpoints.insert("landing".to_string(), "coordinator".to_string());
+        }
+        true
+    }
+
     pub fn is_integration(&self) -> bool {
         self.landing_mode == LANDING_INTEGRATION
     }
@@ -234,6 +248,10 @@ pub struct HiveSettings {
     /// Local database sockets every builder's shell and jobs may connect to (§6.7): a Postgres,
     /// MySQL or Redis Unix socket, by path. The human's alone; reviewers never get them.
     pub worker_sockets: Vec<String>,
+    /// Set once the integration mode's Landing checkpoint stopped being forced to Ask me
+    /// (2026-11-18, §8.3): until then an `ask` there was maiTerm's, not the human's, and the load
+    /// migration hands it to the queen once (`migrate_integration_landing`). Set at Create since.
+    pub landing_open: bool,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -341,6 +359,25 @@ mod tests {
         v.as_object_mut().unwrap().remove("hive");
         let back: Workspace = serde_json::from_value(v).unwrap();
         assert!(back.hive.is_none());
+    }
+
+    /// The maiShop Hive (2026-11-18): an integration Hive from before had Ask me forced on its
+    /// Landing. Loaded once, it's the queen's; an Ask me the human picks after that stays.
+    #[test]
+    fn an_integration_hives_forced_landing_ask_is_handed_to_the_queen_once() {
+        let mut h: Hive = serde_json::from_str(r#"{"id":"h1","landing_mode":"integration","checkpoints":{"landing":"ask","plan":"ask"}}"#).unwrap();
+        assert!(!h.settings.landing_open);
+        assert!(h.migrate_integration_landing());
+        assert_eq!(h.checkpoints["landing"], "coordinator");
+        assert_eq!(h.checkpoints["plan"], "ask", "only Landing was forced");
+        h.checkpoints.insert("landing".into(), "ask".into());
+        assert!(!h.migrate_integration_landing(), "once");
+        assert_eq!(h.checkpoints["landing"], "ask", "the human's own Ask me stays");
+        let back: Hive = serde_json::from_value(serde_json::to_value(&h).unwrap()).unwrap();
+        assert!(back.settings.landing_open, "the mark is saved");
+        let mut base: Hive = serde_json::from_str(r#"{"id":"h2","checkpoints":{"landing":"ask"}}"#).unwrap();
+        base.migrate_integration_landing();
+        assert_eq!(base.checkpoints["landing"], "ask", "a base Hive's Ask me was always chosen");
     }
 
     #[test]
