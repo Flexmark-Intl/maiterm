@@ -131,6 +131,41 @@ function injectedFrom(words: WordSpan[]): number {
   return words.length;
 }
 
+/**
+ * ssh args (no program) without maiTerm's own `-t -o ControlMaster=no` where a SHELL ALIAS pushed
+ * it away from the front. maiTerm types `ssh -t -o ControlMaster=no <stored>`, and with
+ * `alias ssh='ssh -x -C'` the process table shows `ssh -x -C -t -o ControlMaster=no -x -C host`:
+ * the alias's words, maiTerm's flags, then the stored command, which already begins with the
+ * alias's words from the first connection. Stripping maiTerm's flags only right after the program
+ * stored that whole line, so every restart added another copy, and each spelling is its own
+ * tunnel key: one host got several tunnels on one remote port, which knock each other out (106
+ * bridge failures in one launch, 2026-11-18).
+ *
+ * So for each `-o ControlMaster=no` among the options (never in the remote command), with the
+ * `-t` right before it: when the words in front of it are repeated right after it they are the
+ * alias's copy and go too, otherwise only maiTerm's flags go. Repeated until none is left, which
+ * is also what shrinks the commands already saved that way. Only the exact `ControlMaster=no`
+ * maiTerm writes: a user's own setting is theirs, and so is a `-t` that isn't beside it.
+ */
+function withoutAliasedCopies(words: WordSpan[]): WordSpan[] {
+  for (;;) {
+    const values = words.map(w => w.value);
+    const end = remoteCommandIndex(values);
+    let at = -1;
+    for (let k = 1; k + 1 < end; k++) {
+      if (values[k] === '-o' && values[k + 1] === 'ControlMaster=no') {
+        at = k;
+        break;
+      }
+    }
+    if (at < 0) return words;
+    const lead = values[at - 1] === '-t' ? at - 1 : at;
+    if (lead === 0) return words;
+    const aliased = values.slice(0, lead).every((v, k) => values[at + 2 + k] === v);
+    words = aliased ? words.slice(at + 2) : [...words.slice(0, lead), ...words.slice(at + 2)];
+  }
+}
+
 /** Kept words, in the spelling they had (the user's own quoting, `~` and all). */
 function rawOf(s: string, words: WordSpan[]): string {
   return words.map(w => s.slice(w.start, w.end)).join(' ');
@@ -212,7 +247,15 @@ export function cleanSshCommand(cmd: string): string {
     const cleaned = rest ? cleanSshCommand(`ssh ${rest}`) : '';
     return [program, own, cleaned].filter(Boolean).join(' ');
   }
-  if (!cmd.match(/^ssh\s/)) return cmd;
+  if (!cmd.match(/^ssh\s/)) {
+    // A STORED command (no program) that an earlier build let grow behind a shell alias: see
+    // `withoutAliasedCopies`. Nothing else without a program is touched.
+    if (cmd.startsWith('-') && / -o ControlMaster=no /.test(cmd)) {
+      const words = wordSpansOf(cmd);
+      return rawOf(cmd, withoutAliasedCopies(words));
+    }
+    return cmd;
+  }
   // Remove our injected remote command. The MAITERM_TAB_ID forms MUST be stripped first:
   // the plain patterns below would match from ` cd …` onwards and leave a dangling
   // `'export MAITERM_TAB_ID=…;` behind, which then accumulates on every clone/restore
@@ -270,7 +313,7 @@ export function cleanSshCommand(cmd: string): string {
     else if (at(0)?.startsWith('ControlMaster=')) i += 1;
     else break;
   }
-  const kept = words.slice(i);
+  const kept = withoutAliasedCopies(words.slice(i));
   // Last resort: whatever spelling slipped past the above, a stored command never carries
   // maiTerm's env — it is written to disk, retyped into clones and shown on fork cards, and
   // MAITERM_AUTH is a credential. In the REMOTE COMMAND only, cut at the first word that names

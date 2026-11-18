@@ -126,6 +126,35 @@ describe('cleanSshCommand round-trip', () => {
     expect(stored).toBe('-x -C ews@nova');
   });
 
+  // `alias ssh='ssh -x -C'`: the shell puts the alias's words in front of maiTerm's flags.
+  const aliased = (line: string) => line.replace(/^ssh /, 'ssh -x -C ');
+
+  it('does not grow behind a shell alias that adds options', () => {
+    let stored = '-x -C ews@nova';
+    for (let i = 0; i < 4; i++) {
+      stored = cleanSshCommand(aliased(buildSshCommand(stored, '/srv/app', TAB)));
+      expect(stored).toBe('-x -C ews@nova');
+    }
+    expect(cleanSshCommand(aliased(buildSshCommand('-x -C ews@nova', null)))).toBe('-x -C ews@nova');
+    // A command stored before the alias existed gains the alias's words once, and stops.
+    stored = 'ews@nova';
+    for (let i = 0; i < 3; i++) stored = cleanSshCommand(aliased(buildSshCommand(stored, null, TAB)));
+    expect(stored).toBe('-x -C ews@nova');
+  });
+
+  it('shrinks the commands an earlier build let grow behind an alias', () => {
+    const grown = '-x -C -t -o ControlMaster=no -x -C -t -o ControlMaster=no -x -C -t -o ControlMaster=no -x -C ews@nova';
+    expect(cleanSshCommand(grown)).toBe('-x -C ews@nova');
+    expect(cleanSshCommand(aliased(buildSshCommand(grown, '/srv/app', TAB)))).toBe('-x -C ews@nova');
+    // The tunnel's spelling of one (no tty switch), and a port that must survive.
+    expect(cleanSshCommand('-x -C -o ControlMaster=no -x -C -p 2222 ews@nova')).toBe('-x -C -p 2222 ews@nova');
+    // Options that are not a repeat are the user's: only maiTerm's flags go.
+    expect(cleanSshCommand('ssh -p 2222 -t -o ControlMaster=no -x ews@nova')).toBe('-p 2222 -x ews@nova');
+    // Never in the remote command, and never a setting that isn't the one maiTerm writes.
+    expect(cleanSshCommand('ssh ews@nova ssh -t -o ControlMaster=no inner')).toBe('ews@nova ssh -t -o ControlMaster=no inner');
+    expect(cleanSshCommand('ssh -x -o ControlMaster=auto -x ews@nova')).toBe('-x -o ControlMaster=auto -x ews@nova');
+  });
+
   it('still strips the pre-export forms stored by earlier builds', () => {
     expect(cleanSshCommand("ssh -t -o ControlMaster=no ews@nova 'cd '/srv/app' && exec $SHELL -l'"))
       .toBe('ews@nova');
