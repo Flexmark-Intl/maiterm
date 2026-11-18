@@ -3283,7 +3283,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 94] = [
+const PEER_ADDRESSING_TOOLS: [&str; 95] = [
     // Moves the CALLER's review mark (docs/overlord.md §9.5): on a guessed tab, the next review
     // there would skip commits nobody reviewed.
     "getReviewBrief",
@@ -3390,6 +3390,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 94] = [
     "hiveMessageWorker",
     "hiveLand",
     "hiveUndoLand",
+    "hiveLandBranch",
     "hiveStopWorker",
     "hiveRestartWorker",
     "hiveRetireWorker",
@@ -3423,7 +3424,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 94] = [
 /// The agent-request tools (agent_requests.rs) are here for the same reason from the other side:
 /// a request is shown to the human as "the agent in <tab> asks…", so the tab named must be the
 /// caller, and a request's status is only its own tab's to read.
-const OWN_TAB_ONLY_TOOLS: [&str; 74] = [
+const OWN_TAB_ONLY_TOOLS: [&str; 75] = [
     // The review mark is the caller's own record of what it has had reviewed.
     "getReviewBrief",
     // What a tab's shell runs on its next spawn is that tab's own business: with any `tabId`,
@@ -3472,6 +3473,7 @@ const OWN_TAB_ONLY_TOOLS: [&str; 74] = [
     "hiveMessageWorker",
     "hiveLand",
     "hiveUndoLand",
+    "hiveLandBranch",
     "hiveStopWorker",
     "hiveRestartWorker",
     "hiveRetireWorker",

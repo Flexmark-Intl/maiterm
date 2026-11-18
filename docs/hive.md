@@ -2386,8 +2386,9 @@ the card names, which it says were, or weren't, a tree the branch's last land ch
 the land log; no new check runs, none could add anything). Approved, each repo goes in order under
 its land lock: Base still at the card's tip, the merge commit, step 2's `advance` (a checkout of
 Base takes it by `merge --ff-only` and holds over uncommitted work), a `branch` line in the land log
-(`by: human`), and the queen told. Nothing is pushed. A waiting card is kept in `branch-land.json`
-and filed again after a restart. Undo is the human's, by hand (`git revert -m 1`, which the land log
+(`by: human`), and the queen told. Nothing is pushed. A Base whose tip is maiTerm's own land of this branch (a `branch` log line
+whose branch tip the branch still holds) counts as held, so the second land isn't refused. The
+newest waiting card is kept in `branch-land.json` and filed again after a restart. Undo is the human's, by hand (`git revert -m 1`, which the land log
 and the refusal name): the Hive's Undo runs its check as a job under a worker's sandbox, and this
 land has no worker.
 

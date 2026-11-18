@@ -9,7 +9,7 @@ const short = (sha: string | null | undefined) => (sha ?? '').slice(0, 7);
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /** A line that moved its target: what Undo can take back. */
-export const movedTarget = (e: Pick<HiveLandLogEntry, 'kind'>) => ['land', 'batch_member', 'integration', 'undo'].includes(e.kind);
+export const movedTarget = (e: Pick<HiveLandLogEntry, 'kind'>) => ['land', 'batch_member', 'integration', 'undo', 'branch'].includes(e.kind);
 
 export function kindLabel(e: Pick<HiveLandLogEntry, 'kind' | 'check' | 'by'>): string {
   switch (e.kind) {
@@ -59,7 +59,8 @@ export function undoBlocked(e: Pick<HiveLandLogEntry, 'id' | 'undone_by'>, log: 
   return open.state === 'awaiting_human' ? 'Its undo waits for your approval on a card.' : `Being undone now (${open.state}).`;
 }
 
-export const offersUndo = (e: Pick<HiveLandLogEntry, 'kind'>) => movedTarget(e) && e.kind !== 'undo';
+/** A branch land into Base is undone by hand (`flags` names the revert): never the Hive's Undo. */
+export const offersUndo = (e: Pick<HiveLandLogEntry, 'kind'>) => movedTarget(e) && e.kind !== 'undo' && e.kind !== 'branch';
 
 /** Newest first, a worker's own lines only when `taskId` is given. */
 export function shownEntries(log: Pick<HiveLandLog, 'entries'>, taskId?: string | null): HiveLandLogEntry[] {

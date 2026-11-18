@@ -69,6 +69,19 @@ fn checked_at(paths: &HivePaths, hive: &Hive, folder: &str, branch: &str, tip: &
     }
 }
 
+/// Whether `pinned` already holds everything in Base's tip: Base is in its history, or Base's tip
+/// is a land of this branch maiTerm logged (`KIND_BRANCH`, whose files were exactly the branch tip
+/// it named, built on a Base that branch tip held), and that tip is in `pinned`'s history. The
+/// second case is every land after the first: the merge commit itself is never on the branch.
+fn holds_base(paths: &HivePaths, repo: &Path, folder: &str, base: &str, base_tip: &str, pinned: &str) -> bool {
+    if lg::is_ancestor(repo, base_tip, pinned) {
+        return true;
+    }
+    landlog::read(paths)
+        .into_iter()
+        .any(|e| e.kind == KIND_BRANCH && e.folder == folder && e.target == base && e.base_after == base_tip && lg::is_ancestor(repo, &e.reviewed_sha, pinned))
+}
+
 /// What a land of the Hive's branch into Base would take, repo by repo, or why it can't go now.
 /// Blocks on git.
 pub fn plan(hive: &Hive, paths: &HivePaths) -> Result<Vec<RepoPlan>, String> {
@@ -87,7 +100,7 @@ pub fn plan(hive: &Hive, paths: &HivePaths) -> Result<Vec<RepoPlan>, String> {
         if lg::is_ancestor(&repo, &pinned, &base_tip) {
             continue;
         }
-        if !lg::is_ancestor(&repo, &base_tip, &pinned) {
+        if !holds_base(paths, &repo, &f.name, &base, &base_tip, &pinned) {
             return Err(format!(
                 "{base} in {} moved since {branch} last took it in. Have a worker merge {base} into {branch} first (a land like any \
                  other, through its land check), then ask again: what lands in {base} is then exactly what was checked.",
@@ -107,11 +120,12 @@ pub fn plan(hive: &Hive, paths: &HivePaths) -> Result<Vec<RepoPlan>, String> {
 /// The card: what lands, what was checked, what it changes of the agents' config.
 pub(crate) fn card(hive: &Hive, land_id: &str, plans: &[RepoPlan], summary: &str) -> HiveRequest {
     let branch = hive.integration_branch();
-    let bases: Vec<&str> = {
-        let mut b: Vec<&str> = plans.iter().map(|p| p.base.as_str()).collect();
-        b.dedup();
-        b
-    };
+    let mut bases: Vec<&str> = Vec::new();
+    for p in plans {
+        if !bases.contains(&p.base.as_str()) {
+            bases.push(p.base.as_str());
+        }
+    }
     let folders: Vec<&str> = plans.iter().map(|p| p.folder.as_str()).collect();
     let mut effects = vec![format!(
         "maiTerm merges exactly the tip of {branch} named below into {}, --no-ff, one merge commit per repo. Its files are \
@@ -254,7 +268,7 @@ fn land_locked(hive: &Hive, paths: &HivePaths, repo: &Path, land_id: &str, folde
     if lg::branch_tip(repo, base).as_deref() != Some(base_tip) {
         return RepoOutcome::Stopped(format!("{base} in {folder} moved since the card: ask again"));
     }
-    if !lg::is_ancestor(repo, base_tip, pinned) {
+    if !holds_base(paths, repo, folder, base, base_tip, pinned) {
         return RepoOutcome::Stopped(format!("{} doesn't hold {base}'s tip in {folder}", hive.integration_branch()));
     }
     let Some(tree) = lg::tree_of(repo, pinned) else { return RepoOutcome::Stopped(format!("{} isn't a commit in {folder}", short(pinned))) };

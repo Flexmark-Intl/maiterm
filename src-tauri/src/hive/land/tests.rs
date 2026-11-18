@@ -2741,9 +2741,20 @@ async fn the_hives_branch_lands_into_base_on_the_humans_card() {
     assert!(rig.told().last().is_some_and(|t| t.contains("approved landing hive/ship into Base")), "{:?}", rig.told());
     assert!(!rig.caller.paths.root.join("branch-land.json").exists(), "settled, not kept");
 
-    // Base moves on its own: the branch must take it in through a land first.
+    // A second land into Base, with nothing but maiTerm's own merge on Base since: allowed.
     let w2 = rig.reported("more", &["web"], "more.rs", "m\n");
     rig.land(&w2).await.unwrap();
+    let tip2 = git(&repo, &["rev-parse", "refs/heads/hive/ship"]);
+    branch::tool(&rig.ctx(), &rig.caller, &json!({ "summary": "second" })).await.expect("Base holds only the branch's own land");
+    let (_, d2) = rig.last_card();
+    approval::approved(&rig.ctx(), &rig.caller, &d2, &opts()).await;
+    let head2 = rig.main_tip("web");
+    assert_eq!(git(&repo, &["rev-parse", &format!("{head2}^2")]), tip2, "the second land merges the newer tip");
+    assert_eq!(git(&repo, &["rev-parse", &format!("{head2}^{{tree}}")]), git(&repo, &["rev-parse", &format!("{tip2}^{{tree}}")]));
+
+    // Base moves on its own: the branch must take it in through a land first.
+    let w3 = rig.reported("third", &["web"], "third.rs", "t\n");
+    rig.land(&w3).await.unwrap();
     commit(&repo, "hotfix.rs", "h\n");
     let moved = branch::tool(&rig.ctx(), &rig.caller, &json!({ "summary": "more" })).await.unwrap_err();
     assert!(moved.contains("moved since hive/ship last took it in"), "{moved}");
