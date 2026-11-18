@@ -79,11 +79,18 @@ pub fn spawn_terminal(
 }
 
 #[tauri::command]
-pub fn get_pty_info(
+pub async fn get_pty_info(
     state: State<'_, Arc<AppState>>,
     pty_id: String,
 ) -> Result<pty::PtyInfo, String> {
-    pty::get_pty_info(&*state, &pty_id)
+    // Off the event loop for the same reason as `get_pty_foreground` below: on a cache miss
+    // this waits for a full `ps`, and the snapshot lock is held across that spawn. Every
+    // restored ssh tab polls this twice a second until its ssh is up, so as a sync command
+    // a window of ssh tabs parked the main thread behind one sweep after another at launch.
+    let app_state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || pty::get_pty_info(&app_state, &pty_id))
+        .await
+        .map_err(|e| format!("pty info probe failed to run: {}", e))?
 }
 
 #[tauri::command]
