@@ -7,7 +7,7 @@ import type { HiveWorkerCard, TaskBlocker, TaskStatus } from '$lib/tauri/types';
 
 /** §4.3's states. */
 export type CardStateName =
-  | 'needs_you' | 'blocked' | 'working' | 'starting' | 'idle' | 'reported' | 'landing' | 'failed' | 'stopped' | 'suspended' | 'landed' | 'retired';
+  | 'needs_you' | 'blocked' | 'working' | 'starting' | 'queued' | 'idle' | 'reported' | 'landing' | 'failed' | 'stopped' | 'suspended' | 'landed' | 'retired';
 
 /** §4.3's sort column. */
 export const STATE_ORDER: Record<CardStateName, number> = {
@@ -15,6 +15,8 @@ export const STATE_ORDER: Record<CardStateName, number> = {
   blocked: 2,
   working: 3,
   starting: 4,
+  // Sorted where Starting was: the card it was before it had a state of its own.
+  queued: 4,
   idle: 5,
   reported: 6,
   landing: 7,
@@ -30,6 +32,7 @@ export const STATE_LABEL: Record<CardStateName, string> = {
   blocked: 'Blocked',
   working: 'Working',
   starting: 'Starting',
+  queued: 'Queued',
   idle: 'Idle',
   reported: 'Reported',
   landing: 'Landing',
@@ -191,8 +194,10 @@ export function cardState(worker: WorkerFields, task: TaskFields, agent: AgentFi
     case 'retired':
       return make('retired', worker.retired?.reason?.trim() || null);
     case 'waiting': {
+      // Nothing of it exists yet (no worktree, setup or agent) until what it waits on lands:
+      // Starting would say a launch is under way, and pulse, for a worker that may wait hours.
       const deps = worker.depends_on_labels;
-      return make('starting', worker.wait_reason?.trim() || (deps.length ? `waits on ${deps.join(', ')}` : null));
+      return make('queued', worker.wait_reason?.trim() || (deps.length ? `waits on ${deps.join(', ')}` : null));
     }
   }
   if (suspended) return make('suspended');

@@ -78,11 +78,11 @@ describe('cardState', () => {
     expect(cardState(worker({ phase: 'reported', last_report: report('done', 'Shipped') }), null, idle, null)).toMatchObject({ state: 'reported', sub: 'Shipped' });
   });
 
-  it('starting: launching with no session yet, and a waiter with its reason', () => {
+  it('starting: launching with no session yet; a waiter is queued, with its reason', () => {
     expect(cardState(worker({ phase: 'launching' }), null, null, null).state).toBe('starting');
     expect(cardState(worker(), null, idle, null).state).toBe('idle');
     const w = cardState(worker({ phase: 'waiting', tab_id: null, wait_reason: 'waits on #1 schema' }), null, null, null);
-    expect([w.state, w.sub]).toEqual(['starting', 'waits on #1 schema']);
+    expect([w.state, w.sub, w.label]).toEqual(['queued', 'waits on #1 schema', 'Queued']);
     expect(cardState(worker({ phase: 'waiting', wait_reason: 'blocked: #1 schema failed' }), null, null, null).sub).toBe('blocked: #1 schema failed');
     expect(cardState(worker({ phase: 'waiting', depends_on_labels: ['#1 a', '#2 b'] }), null, null, null).sub).toBe('waits on #1 a, #2 b');
   });

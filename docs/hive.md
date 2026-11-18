@@ -617,7 +617,8 @@ anything.
 | 1 | Needs you | orange; red for an `action` | Permission or question on screen, a task blocker, a watch script waiting. The human or the coordinator may be the one answering (§4.7) |
 | 2 | Blocked | amber | The worker called `hiveReport {status: "blocked"}`: it's waiting on the coordinator, not the human |
 | 3 | Working | green moving | Agent busy (hook state) |
-| 4 | Starting | grey pulse | Worktrees, setup or agent launch in progress. Sub-label **waits on …** while unmet `depends_on` holds it (§3.1), or **blocked: <dep> failed / undone** |
+| 4 | Starting | grey pulse | Worktrees, setup or agent launch in progress |
+| 4 | Queued | grey, still | Unmet `depends_on` holds it (§3.1): nothing of it exists yet. Sub-label **waits on …**, or **blocked: <dep> failed / undone**. Was Starting · waits on … until 2026-11-18, which read as a launch under way for workers that waited hours |
 | 5 | Idle | hollow | Turn ended without a report. Worth a look, never an alarm |
 | 6 | Reported | blue check | The worker called `hiveReport` with `done` |
 | 7 | Landing | blue pulse | Merging, held (§8.1), or waiting for the human in the approval mode |
@@ -1714,7 +1715,7 @@ call whose window isn't loaded is refused, never half-done. Every Hive task writ
 
 | Tool | Who | Executed by | Does |
 |---|---|---|---|
-| `hiveSpawnWorker {title, role, brief, folders?, depends_on?, inputs?, reviews?, model?, effort?}` | coordinator | Rust reserves (§7.8), then window rpc | Creates the task, worktrees, branches and hidden tab, runs setup, and launches the agent with the Hive preamble, its role (§7.7) and the brief. `inputs` names gallery assets the worker starts from (their paths go in its brief). `reviews` makes it the reviewer of another worker's result (§7.7). Refused above the cap or by a fuse (§7.8). A worker with unmet `depends_on` is created in **Starting · waits on …** as a task and card only; its worktrees, setup and agent come at launch, when they land (§3.1) |
+| `hiveSpawnWorker {title, role, brief, folders?, depends_on?, inputs?, reviews?, model?, effort?}` | coordinator | Rust reserves (§7.8), then window rpc | Creates the task, worktrees, branches and hidden tab, runs setup, and launches the agent with the Hive preamble, its role (§7.7) and the brief. `inputs` names gallery assets the worker starts from (their paths go in its brief). `reviews` makes it the reviewer of another worker's result (§7.7). Refused above the cap or by a fuse (§7.8). A worker with unmet `depends_on` is created in **Queued · waits on …** as a task and card only; its worktrees, setup and agent come at launch, when they land (§3.1) |
 | `hiveListWorkers` | coordinator | Rust | Cards as data: state, task, folders, branches, diff stat, assets, last report |
 | `hiveMessageWorker {worker, text, assets?}` | coordinator | Rust (`deliver_to_agent`) | The draft, dialog and typing guards; a busy agent is no reason to hold. `assets` attach gallery files as paths |
 | `hiveLand {worker, summary, commits: {repo: sha}}` | coordinator | Rust | Lands the worker at the reviewed commits (§8). Answers with what happened in each repo, or why it refused |
