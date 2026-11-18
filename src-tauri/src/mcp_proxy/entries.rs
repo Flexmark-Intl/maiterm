@@ -511,6 +511,9 @@ pub fn adopt_native(id: &str, url: &str) -> Result<Vec<String>, String> {
         if path.exists() {
             let mut gone = Vec::new();
             edit_json(&path, |root| {
+                // `edit_json` runs this again on a file that changed meanwhile: only the last
+                // run's removals happened.
+                gone.clear();
                 let mut a = Applied::default();
                 let mut strip = |servers: Option<&mut Value>, label: &str| {
                     let Some(m) = servers.and_then(Value::as_object_mut) else { return };
