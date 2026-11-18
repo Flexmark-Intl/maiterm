@@ -152,17 +152,39 @@ pub struct TrustWrite {
     pub failed: Vec<String>,
 }
 
+/// `path`'s realpath, for a folder maiTerm made in the Hive. A worker can write its `scratch/`,
+/// so it could swap it for a link to a repo its human never trusted: the last component is never
+/// followed (only its parent is resolved, which no worker can write) and must be a plain folder,
+/// and the result must be inside the Hive's root. A link planted after this check is no trust:
+/// Claude resolves it to its target, whose key this never wrote.
+fn own_folder(hive: &HivePaths, path: &Path) -> Result<PathBuf, String> {
+    let refused = || format!("{} isn't a plain folder inside this Hive's own, so maiTerm won't trust it", path.display());
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(refused());
+    }
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(refused());
+    };
+    let real = fs::canonicalize(parent).map_err(|e| format!("{}: {e}", parent.display()))?.join(name);
+    let root = fs::canonicalize(&hive.root).map_err(|e| format!("{}: {e}", hive.root.display()))?;
+    if !real.starts_with(&root) {
+        return Err(refused());
+    }
+    Ok(real)
+}
+
 /// Trust `path` in every root's `.claude.json` that doesn't already. A root whose file doesn't
 /// exist is skipped: no Claude has run under it, and it would make its own on first run — a
 /// launch re-verifies first (§6.6). A file that exists but can't be read is `failed`, never
-/// skipped. Err only when `path` doesn't exist.
+/// skipped. Err when `path` doesn't exist, or isn't a plain folder inside the Hive's own.
 pub fn write_trust(homes: &Homes, hive: &HivePaths, path: &Path) -> Result<TrustWrite, String> {
     // `~/.claude.json` is the other maiTerms' too (crate::instance); the Hive is refused there
     // first, and this is the backstop for any path that reaches a trust write anyway.
     if let Some(why) = crate::instance::global_write_refusal() {
         return Err(why);
     }
-    let real = fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let real = own_folder(hive, path)?;
     let real = crate::share::canon(&real);
     let key = real.to_string_lossy().to_string();
     let candidates = trust_candidates(&real);

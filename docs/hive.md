@@ -1052,7 +1052,10 @@ the gallery didn't, so every builder in a git folder stopped at that dialog on a
 maiShop Hive, eight workers). A trust entry on the added folder clears it. So the launch trusts
 every folder maiTerm made that it adds (`owned_add_dirs`, `check_worker_trust`; the coordinator's
 gallery in `prepare_coordinator`). A plain folder of the human's that isn't trusted would still
-raise it: the human's to trust, as a repo is.
+raise it: the human's to trust, as a repo is. A worker can write its `scratch/`, so it could swap
+it for a link to a repo its human never trusted: `write_trust` never follows a link at the last
+step (only the parent, which no worker writes, is resolved), refuses anything but a plain folder
+inside the Hive's root, and the launch is refused.
 
 - **Trust doesn't keep a worker's branch out.** Since every worktree inherits its repo's trust,
   an unlanded, worker-authored branch is trusted too, a reviewer's included. Trust lets a

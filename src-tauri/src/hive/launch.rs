@@ -768,7 +768,8 @@ fn check_worker_trust(homes: &crate::relocate::agents::Homes, launch_json: &Path
     }
     let cwd = w.cwd(paths);
     for dir in owned_add_dirs(paths, w) {
-        if (in_scratch && dir == cwd) || dir.is_dir() {
+        // Whatever is there, a link a worker swapped in included: `write_trust` refuses one.
+        if (in_scratch && dir == cwd) || fs::symlink_metadata(&dir).is_ok() {
             ensure_trust_in(homes, launch_json, paths, &dir)?;
         }
     }
@@ -1743,6 +1744,16 @@ pub(crate) mod tests {
         assert!(trusted(&scratch_dir) && trusted(&gallery), "its scratch and the gallery");
         let v: serde_json::Value = serde_json::from_slice(&fs::read(&root).unwrap()).unwrap();
         assert_eq!(v["projects"]["/r/web"]["hasTrustDialogAccepted"], true, "the human's entries stay");
+
+        // A worker can write its scratch: swapped for a link to a folder its human never trusted,
+        // the launch is refused and the link's target gets no trust.
+        let elsewhere = base.join("untrusted repo");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::remove_dir_all(&scratch_dir).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &scratch_dir).unwrap();
+        let err = check_worker_trust(&homes, &root, &TrustRoot::Default, &p, &w).unwrap_err();
+        assert!(err.contains("isn't a plain folder"), "{err}");
+        assert!(!trusted(&elsewhere), "the link's target stays untrusted");
         let _ = fs::remove_dir_all(&base);
     }
 
