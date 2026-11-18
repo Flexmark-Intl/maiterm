@@ -897,12 +897,16 @@ function createAgentRequestsStore() {
   /** Rust-filed (Hive) cards already announced in this window. */
   const announced = new Set<string>();
 
-  /** The first read has come back (or failed): until then an empty list says nothing. */
+  /** A read has come back: until then an empty list says nothing (a failed one doesn't count). */
   let loaded = $state(false);
 
   async function refresh() {
-    requests = await commands.listAgentRequests().catch(() => requests);
-    loaded = true;
+    try {
+      requests = await commands.listAgentRequests();
+      loaded = true;
+    } catch {
+      /* the last list stands; the sweep reads again */
+    }
     const me = getCurrentWindow().label;
     for (const r of unannouncedHiveCards(requests.filter((x) => x.window_label === me), announced)) announce(r);
   }
