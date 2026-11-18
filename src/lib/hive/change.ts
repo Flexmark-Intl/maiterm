@@ -65,7 +65,7 @@ export function isDatabaseSocketName(name: string): boolean {
 export function addSocket(sockets: string[], raw: string): { sockets: string[] } | { error: string } {
   const s = raw.trim();
   const parts = s.split('/');
-  if (!s.startsWith('/') || parts.some((p) => p === '..' || p === '.')) return { error: `"${s}" isn't a full path to a socket, such as /tmp/.s.PGSQL.5432.` };
+  if (!s.startsWith('/') || /["\\\u0000-\u001f]/.test(s) || parts.some((p) => p === '..' || p === '.')) return { error: `"${s}" isn't a full path to a socket, such as /tmp/.s.PGSQL.5432.` };
   if (!isDatabaseSocketName(parts[parts.length - 1] ?? '')) {
     return { error: `${s} isn't named like a database's socket (.s.PGSQL.<port>, mysql.sock, redis.sock), so workers can't be given it: other local sockets reach far more than a database.` };
   }

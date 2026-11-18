@@ -107,7 +107,9 @@ pub fn is_database_socket_name(name: &str) -> bool {
 pub fn check_socket(raw: &str) -> Result<String, String> {
     let s = raw.trim();
     let p = std::path::Path::new(s);
-    if !p.is_absolute() || s.chars().any(char::is_control) || p.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir)) {
+    // A quote or backslash can't be named in a job's Seatbelt profile (`job_sandbox::sb_path`),
+    // which would fail every builder job, not only its database's.
+    if !p.is_absolute() || s.chars().any(|c| c.is_control() || c == '"' || c == '\\') || p.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir)) {
         return Err(format!("\u{201c}{}\u{201d} isn\u{2019}t a full path to a socket, such as /tmp/.s.PGSQL.5432.", one_line(s, 80)));
     }
     let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
@@ -121,8 +123,11 @@ pub fn check_socket(raw: &str) -> Result<String, String> {
 
 /// The sockets a builder's launch or job may connect to, each as kept and as its realpath (the
 /// worker sandbox matches either, a Seatbelt profile only the realpath), checked again: the state
-/// file is plain JSON, and a link at the kept path must lead to a database's socket too. One that
-/// doesn't exist now (its server is down) is left out of this launch.
+/// file is plain JSON, and a symbolic link at the kept path must lead to a database's socket too.
+/// A hard link to another socket under a database's name passes: the grant is only as strong as
+/// the socket's folder, which no worker can write (its sandbox, and a job's profile, write only its
+/// own folders) but the queen, with her human's access, could. One that doesn't exist now (its
+/// server is down) is left out of this launch.
 pub fn launch_sockets(hive: &Hive) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for s in &hive.settings.worker_sockets {
@@ -427,7 +432,13 @@ async fn tell_coordinator<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, text
 
 /// Whether a change reaches workers only from their next launch: their model, effort or hosts.
 fn needs_worker_relaunch(c: &SettingsChange) -> bool {
-    c.worker_model.is_some() || c.worker_effort.is_some() || !c.add_hosts.is_empty() || !c.remove_hosts.is_empty()
+    c.worker_model.is_some()
+        || c.worker_effort.is_some()
+        || !c.add_hosts.is_empty()
+        || !c.remove_hosts.is_empty()
+        // A running builder's shell keeps the sockets it launched with, a removed one included.
+        || !c.add_sockets.is_empty()
+        || !c.remove_sockets.is_empty()
 }
 
 /// For a change that reaches workers only at their next launch: which running workers still
@@ -864,6 +875,8 @@ mod tests {
         let cap = SettingsChange { cap: Some(2), ..Default::default() };
         assert!(relaunch_sentence(&cap, &workers).is_none(), "the cap needs no relaunch");
         assert!(relaunch_sentence(&hosts, &workers[1..2]).is_none(), "nothing running, nothing to say");
+        let sockets = SettingsChange { remove_sockets: vec!["/tmp/.s.PGSQL.5432".into()], ..Default::default() };
+        assert!(relaunch_sentence(&sockets, &workers).is_some_and(|s| s.contains("#1 login")), "a removed socket stays in a running shell");
     }
 
     #[test]
@@ -904,6 +917,8 @@ mod tests {
             "tmp/.s.PGSQL.5432",
             "/tmp/../tmp/.s.PGSQL.5432",
             "/tmp/redis/../agent.sock",
+            "/tmp/a\"b/.s.PGSQL.5432",
+            "/tmp/a\\b/.s.PGSQL.5432",
         ] {
             assert!(check_socket(bad).is_err(), "{bad}");
         }

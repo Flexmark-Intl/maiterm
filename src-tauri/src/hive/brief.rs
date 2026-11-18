@@ -745,7 +745,11 @@ pub fn worker_brief_md(hive: &Hive, paths: &HivePaths, w: &WorkerRecord, task_br
          you) and `checks` (`hiveRun` jobs that passed on your committed tip). A done report without receipts is refused.\n",
     );
     if !w.is_reviewer() {
-        b.push_str(&database_sockets_line(&hive.settings.worker_sockets));
+        // What this launch's sandbox actually gets (`launch_sockets`): one whose server is down now
+        // isn't open, so the brief doesn't say it is.
+        let live = super::change::launch_sockets(hive);
+        let open: Vec<String> = hive.settings.worker_sockets.iter().filter(|s| live.contains(s)).cloned().collect();
+        b.push_str(&database_sockets_line(&open));
     }
     b.push_str(&format!(
         "- {} If a `galleryAdd` answer says the budget is over, stop paid generation at once.\n",

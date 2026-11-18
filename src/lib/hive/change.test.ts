@@ -40,7 +40,7 @@ describe('Workers and access', () => {
     expect(addSocket([], ' /tmp/.s.PGSQL.5432 ')).toEqual({ sockets: ['/tmp/.s.PGSQL.5432'] });
     expect(addSocket([], '/opt/homebrew/var/mysql/mysql.sock')).toHaveProperty('sockets');
     expect(addSocket([], '/tmp/redis.sock')).toHaveProperty('sockets');
-    for (const bad of ['/var/run/docker.sock', 'tmp/.s.PGSQL.5432', '/tmp/../x/.s.PGSQL.5432', '/tmp/.s.PGSQL.', '/Users/u/.maiterm/cm/h.sock']) {
+    for (const bad of ['/var/run/docker.sock', 'tmp/.s.PGSQL.5432', '/tmp/../x/.s.PGSQL.5432', '/tmp/.s.PGSQL.', '/Users/u/.maiterm/cm/h.sock', '/tmp/a"b/.s.PGSQL.5432', '/tmp/a\\b/.s.PGSQL.5432']) {
       expect(addSocket([], bad), bad).toHaveProperty('error');
     }
     expect(addSocket(['/tmp/.s.PGSQL.5432'], '/tmp/.s.PGSQL.5432')).toHaveProperty('error');

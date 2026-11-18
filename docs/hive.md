@@ -1231,8 +1231,11 @@ lists sockets in Hive settings → Workers (`settings.worker_sockets`), and only
 `hiveChangeSettings` refuses them, whatever the checkpoint. Only a database's socket name is taken
 (`.s.PGSQL.<port>`, `mysql*.sock`, `mysqld*.sock`, `redis*.sock`, `change::check_socket`): other
 local sockets reach far more (Docker's is root, an ssh agent or a ControlMaster can push, maiTerm's
-reach its tools). At each launch the path's realpath is checked again (a link must lead to a
-database's socket too) and a socket that isn't there is left out (`change::launch_sockets`). A
+reach its tools). At each launch the path's realpath is checked again (a symbolic link must lead
+to a database's socket too) and a socket that isn't there is left out (`change::launch_sockets`).
+A hard link to another socket under a database's name would pass, so the grant is only as strong
+as the socket's folder: no worker can write `/tmp` or any folder outside its own, but the queen,
+with the human's access, could (she could reach that socket herself anyway). A
 builder's sandbox gets `allowUnixSockets` with the kept and the real path; its jobs and land
 checks get a Seatbelt `(remote unix-socket (path-literal <realpath>))` rule (`job_sandbox`).
 Reviewers get none, as with hosts. The worker's brief says how to connect (`host=/tmp`) and to use
