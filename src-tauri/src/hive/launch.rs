@@ -143,6 +143,21 @@ pub fn coordinator_record(hive: &Hive, paths: &HivePaths) -> LaunchRecord {
     }
 }
 
+/// The folders maiTerm made that a worker's launch adds (`--add-dir`), in launch order: a
+/// reviewer's builder's scratch (its brief, its made files; the reviewer's sandbox's denyWrite of
+/// other workers' folders keeps that read-only), its own scratch, the gallery. Each is trusted
+/// before the launch (`check_worker_trust`): Claude 2.1.327 asks "Is this a directory you created
+/// or one you trust?" for every added folder it has no trust for, a dialog nothing may answer.
+fn owned_add_dirs(paths: &HivePaths, w: &WorkerRecord) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(builder) = w.reviews.as_deref().and_then(|id| super::worker::task_dir(paths, id).ok()).and_then(|d| super::worker::read_worker(&d).ok()) {
+        out.push(paths.worker_scratch(&builder.slug));
+    }
+    out.push(paths.worker_scratch(&w.slug));
+    out.push(paths.gallery());
+    out
+}
+
 /// A worker's record, derived from the Hive and its `worker.json` on every launch (§6.3, §6.7):
 /// its first worktree (or `scratch/`) as cwd; its other worktrees, the plain folders it was
 /// given, `scratch/` and the gallery as `--add-dir`; its own temp and, for a Rust worker, its
@@ -171,13 +186,9 @@ pub fn worker_record(hive: &Hive, paths: &HivePaths, w: &WorkerRecord) -> Launch
             }
         }
     }
-    // A reviewer reads the builder's scratch too (its brief, its made files); its sandbox's
-    // denyWrite of other workers' folders keeps that read-only.
-    if let Some(builder) = w.reviews.as_deref().and_then(|id| super::worker::task_dir(paths, id).ok()).and_then(|d| super::worker::read_worker(&d).ok()) {
-        add(s(&paths.worker_scratch(&builder.slug)));
+    for d in owned_add_dirs(paths, w) {
+        add(s(&d));
     }
-    add(s(&paths.worker_scratch(&w.slug)));
-    add(s(&paths.gallery()));
     // Also its cwd, so the sandbox and permission scopes name it the same way (spike 13).
     add_dirs.retain(|d| Path::new(d) != cwd);
     add_dirs.push(s(&cwd));
@@ -735,23 +746,30 @@ fn ensure_trust(launch_json: &Path, paths: &HivePaths, dir: &Path) -> Result<(),
 /// raising the dialog. Checked in the one root the launch reads (`launch_json`), the root the
 /// Create sheet reads too: an entry in another root (`~/.claude.json` under a managed account)
 /// is no trust this launch gets, and a missing one there refuses nothing. `under` names that
-/// root for the refusal.
+/// root for the refusal. Then the folders maiTerm made that the launch adds (`owned_add_dirs`)
+/// are trusted, as the coordinator's home is: the cwd always, the rest once they exist.
 fn check_worker_trust(homes: &crate::relocate::agents::Homes, launch_json: &Path, under: &TrustRoot, paths: &HivePaths, w: &WorkerRecord) -> Result<(), String> {
     // A reviewer's cwd is its scratch, a folder maiTerm made: trusted like a scratch-only worker's.
-    if w.git_folders().next().is_none() || w.is_reviewer() {
-        return ensure_trust_in(homes, launch_json, paths, &paths.worker_scratch(&w.slug));
+    let in_scratch = w.git_folders().next().is_none() || w.is_reviewer();
+    if !in_scratch {
+        if !launch_json.is_file() {
+            return Err(NO_CLAUDE_YET.to_string());
+        }
+        let root = [launch_json.to_path_buf()];
+        for f in w.git_folders() {
+            let wt = f.worktree.as_deref().unwrap_or_default();
+            let common = f.common_dir.as_deref().map(Path::new);
+            let candidates = super::trust::worktree_candidates(Path::new(wt), common);
+            if !super::trust::keys_trusted_in_all(&root, &candidates) {
+                let repo = common.filter(|c| c.file_name().is_some_and(|n| n == ".git")).and_then(Path::parent).map(|p| p.display().to_string());
+                return Err(untrusted_refusal(&f.name, repo.as_deref(), under));
+            }
+        }
     }
-    if !launch_json.is_file() {
-        return Err(NO_CLAUDE_YET.to_string());
-    }
-    let root = [launch_json.to_path_buf()];
-    for f in w.git_folders() {
-        let wt = f.worktree.as_deref().unwrap_or_default();
-        let common = f.common_dir.as_deref().map(Path::new);
-        let candidates = super::trust::worktree_candidates(Path::new(wt), common);
-        if !super::trust::keys_trusted_in_all(&root, &candidates) {
-            let repo = common.filter(|c| c.file_name().is_some_and(|n| n == ".git")).and_then(Path::parent).map(|p| p.display().to_string());
-            return Err(untrusted_refusal(&f.name, repo.as_deref(), under));
+    let cwd = w.cwd(paths);
+    for dir in owned_add_dirs(paths, w) {
+        if (in_scratch && dir == cwd) || dir.is_dir() {
+            ensure_trust_in(homes, launch_json, paths, &dir)?;
         }
     }
     Ok(())
@@ -965,7 +983,12 @@ fn prepare_coordinator(hive: &Hive, paths: &HivePaths, prefs: &crate::state::Pre
     if record != existing {
         write_record(&task, &record)?;
     }
+    // Its home, and the gallery it adds (`--add-dir`): folders maiTerm made, which Claude 2.1.327
+    // would otherwise ask about, one dialog per added folder.
     ensure_trust(&launch_json, paths, &paths.coordinator_home())?;
+    if paths.gallery().is_dir() {
+        ensure_trust(&launch_json, paths, &paths.gallery())?;
+    }
 
     let hooks = super::settings::HookEnv::current()?;
     write_launch_files(hive, paths, &record, &hooks, claude_json.as_ref())?;
@@ -1680,6 +1703,46 @@ pub(crate) mod tests {
         let own = TrustRoot::Dir(PathBuf::from("/Users/u/.claude-work"));
         let err = check_worker_trust(&homes(vec![plain_home.clone()]), &plain_home, &own, &p, &w).unwrap_err();
         assert!(err.contains("the Claude config at /Users/u/.claude-work") && !err.contains("~/.claude)"), "{err}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Claude 2.1.327 asks about every `--add-dir` it has no trust for, a worktree of a trusted
+    /// repo apart: a builder's scratch and the gallery are trusted before it launches, as
+    /// maiTerm's own folders, and an untrusted repo refuses before anything is written.
+    #[cfg(unix)]
+    #[test]
+    fn a_builders_added_folders_that_maiterm_made_are_trusted_before_it_launches() {
+        let base = scratch("added-dirs");
+        let root = base.join(".claude.json");
+        let (_, _, mut w) = sample_worker_hive();
+        let p = HivePaths::new(base.join("hive"));
+        for f in &mut w.folders {
+            if let Some(wt) = f.worktree.as_mut() {
+                *wt = s(&p.worker_worktree("auth", &f.name));
+            }
+        }
+        let homes = crate::relocate::agents::Homes {
+            claude_projects: base.join("projects"),
+            claude_json: vec![root.clone()],
+            claude_history: vec![],
+            codex: base.join("codex"),
+            gemini: base.join("gemini"),
+        };
+        let trusted = |d: &Path| crate::hive::trust::trusted_in_all(&[root.clone()], d);
+        let (scratch_dir, gallery) = (p.worker_scratch("auth"), p.gallery());
+        fs::create_dir_all(&scratch_dir).unwrap();
+        fs::create_dir_all(&gallery).unwrap();
+
+        fs::write(&root, r#"{"projects":{"/r/web":{"hasTrustDialogAccepted":true}}}"#).unwrap();
+        let err = check_worker_trust(&homes, &root, &TrustRoot::Default, &p, &w).unwrap_err();
+        assert!(err.contains("\"api\""), "{err}");
+        assert!(!trusted(&scratch_dir) && !trusted(&gallery), "a refused launch writes nothing");
+
+        fs::write(&root, r#"{"projects":{"/r/web":{"hasTrustDialogAccepted":true},"/r/api":{"hasTrustDialogAccepted":true}}}"#).unwrap();
+        assert_eq!(check_worker_trust(&homes, &root, &TrustRoot::Default, &p, &w), Ok(()));
+        assert!(trusted(&scratch_dir) && trusted(&gallery), "its scratch and the gallery");
+        let v: serde_json::Value = serde_json::from_slice(&fs::read(&root).unwrap()).unwrap();
+        assert_eq!(v["projects"]["/r/web"]["hasTrustDialogAccepted"], true, "the human's entries stay");
         let _ = fs::remove_dir_all(&base);
     }
 

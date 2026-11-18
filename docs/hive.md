@@ -1038,10 +1038,21 @@ the main checkout's entry into the one root the agents launch under (`trust::tru
 Claude's own dialog would, recorded nowhere, so deleting the Hive never takes it back. A worker's
 launch checks that same root alone (third live test fixes, §16).
 
-**maiTerm writes trust only for Hive folders that aren't worktrees**: the coordinator's `home/`
-and a scratch-only worker's `scratch/`, which it creates itself. The human chose the Hive by
-creating it, so **maiTerm itself** (not an agent, which the permission classifier rightly refuses
-as "Security Weaken") writes `projects["<realpath>"].hasTrustDialogAccepted = true` for them.
+**maiTerm writes trust only for Hive folders that aren't worktrees**: the coordinator's `home/`,
+every worker's `scratch/` (a reviewer's builder's too) and the gallery, which it creates itself.
+The human chose the Hive by creating it, so **maiTerm itself** (not an agent, which the permission
+classifier rightly refuses as "Security Weaken") writes `projects["<realpath>"].hasTrustDialogAccepted = true`
+for them, before every launch.
+
+**Every `--add-dir` needs trust too (measured on 2.1.327, 2026-11-18).** Claude now asks "Adding a
+new directory: … Is this a directory you created or one you trust?" for each added folder it has
+no trust for, before the session starts; the answer holds for that session only. A worktree of a
+trusted repo still inherits its trust, as a cwd or an added folder, but a builder's `scratch/` and
+the gallery didn't, so every builder in a git folder stopped at that dialog on a hidden tab (the
+maiShop Hive, eight workers). A trust entry on the added folder clears it. So the launch trusts
+every folder maiTerm made that it adds (`owned_add_dirs`, `check_worker_trust`; the coordinator's
+gallery in `prepare_coordinator`). A plain folder of the human's that isn't trusted would still
+raise it: the human's to trust, as a repo is.
 
 - **Trust doesn't keep a worker's branch out.** Since every worktree inherits its repo's trust,
   an unlanded, worker-authored branch is trusted too, a reviewer's included. Trust lets a
