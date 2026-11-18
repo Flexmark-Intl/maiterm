@@ -136,7 +136,9 @@ pub fn launch_sockets(hive: &Hive) -> Vec<String> {
             continue;
         };
         let Ok(real) = std::fs::canonicalize(&kept) else { continue };
-        let real_ok = real.file_name().and_then(|n| n.to_str()).is_some_and(is_database_socket_name);
+        // The resolved path is what reaches both sandboxes, so it passes the same check as the
+        // kept one (a link's target may hold a quote a Seatbelt profile can't name, say).
+        let real_ok = real.to_str().is_some_and(|r| check_socket(r).is_ok_and(|c| c == r));
         #[cfg(unix)]
         let real_ok = real_ok && std::fs::metadata(&real).is_ok_and(|m| std::os::unix::fs::FileTypeExt::is_socket(&m.file_type()));
         if !real_ok {
@@ -955,14 +957,20 @@ mod tests {
         std::fs::create_dir_all(&link).unwrap();
         std::os::unix::fs::symlink(&other, link.join(".s.PGSQL.6000")).unwrap();
         std::fs::write(base.join("redis.sock"), "not a socket").unwrap();
+        // A link whose target a Seatbelt profile can't name: left out, not passed on to fail a job.
+        let quoted = base.join("q\"x");
+        std::fs::create_dir_all(&quoted).unwrap();
+        let _quoted = std::os::unix::net::UnixListener::bind(quoted.join(".s.PGSQL.6100")).unwrap();
+        std::os::unix::fs::symlink(&quoted, base.join("ql")).unwrap();
         let mut h = hive();
         h.settings.worker_sockets = vec![
             real.to_string_lossy().into(),
             link.join(".s.PGSQL.6000").to_string_lossy().into(),
             base.join("redis.sock").to_string_lossy().into(),
             base.join(".s.PGSQL.7000").to_string_lossy().into(),
+            base.join("ql").join(".s.PGSQL.6100").to_string_lossy().into(),
         ];
-        assert_eq!(launch_sockets(&h), vec![real.to_string_lossy().to_string()], "the real one once; the link, the file and the missing one left out");
+        assert_eq!(launch_sockets(&h), vec![real.to_string_lossy().to_string()], "the real one once; the link, the file, the missing one and the unnameable one left out");
         let _ = std::fs::remove_dir_all(&base);
     }
 

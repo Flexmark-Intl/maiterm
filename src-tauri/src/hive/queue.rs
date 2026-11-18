@@ -1604,7 +1604,12 @@ pub(crate) fn prepare_in(data: &parking_lot::RwLock<AppData>, job: &Job, paths: 
             reach_sockets: if w.is_reviewer() {
                 Vec::new()
             } else {
-                super::change::launch_sockets(&hive).into_iter().map(PathBuf::from).filter(|p| std::fs::canonicalize(p).is_ok_and(|r| r == *p)).collect()
+                // One the profile can't name is dropped alone, never the whole job's profile.
+                super::change::launch_sockets(&hive)
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .filter(|p| std::fs::canonicalize(p).is_ok_and(|r| r == *p) && super::job_sandbox::sb_path(p).is_ok())
+                    .collect()
             },
         })
     })()
