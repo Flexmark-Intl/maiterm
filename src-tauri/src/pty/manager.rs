@@ -1143,9 +1143,11 @@ pub fn get_pty_info(state: &Arc<AppState>, pty_id: &str) -> Result<PtyInfo, Stri
     // `kill_pty` can land between reading the pid and the sweep. The sweep then finds no shell
     // and would answer "at a local prompt, no ssh" for a terminal that was an ssh session a
     // moment ago; the autosave tick writes that answer over the tab's restore context.
-    // `kill_pty` takes the PTY out of the registry BEFORE it kills the shell, so a PTY still
-    // registered here means the sweep saw the shell alive. Gone means the answer may describe
-    // a dead shell: the caller gets the error it always got for a killed PTY.
+    // maiTerm takes a PTY out of the registry BEFORE it kills the shell (`kill_pty`, and the
+    // replace in `spawn_pty`), so a PTY still registered here was not killed by maiTerm when
+    // the sweep ran. Gone means the answer may describe a dead shell: the caller gets the
+    // error it always got for a killed PTY. A shell that exits by itself is not covered: the
+    // writer thread drops its entry up to 100 ms later.
     let still_ours = state
         .pty_registry
         .read()
