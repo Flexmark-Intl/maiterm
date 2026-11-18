@@ -398,32 +398,36 @@ pub struct Collisions {
 
 /// Read, change and write back a JSON config. A file that exists and does not parse is never
 /// written: it may be the `claude` CLI's half-written save, and replacing it would lose the
-/// human's settings.
-fn edit_json(path: &Path, f: impl FnOnce(&mut Value) -> Applied) -> Result<Applied, String> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(r) => Some(r),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(format!("cannot read: {e}")),
-    };
-    let mut root: Value = match &raw {
-        Some(r) => serde_json::from_str(r).map_err(|e| format!("not valid JSON, left alone: {e}"))?,
-        None => json!({}),
-    };
-    let applied = f(&mut root);
-    if applied.changed {
+/// human's settings. Under `json_file::write_lock`, through a temp file of its own, and read again
+/// when the file changed meanwhile: the Hive's trust writes edit `.claude.json` too, and a rename
+/// from a copy read before one of them would drop it.
+fn edit_json(path: &Path, mut f: impl FnMut(&mut Value) -> Applied) -> Result<Applied, String> {
+    let _serial = crate::util::json_file::write_lock();
+    for _ in 0..5 {
+        let before = crate::util::json_file::stamp(path);
+        let raw = match std::fs::read_to_string(path) {
+            Ok(r) => Some(r),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("cannot read: {e}")),
+        };
+        let mut root: Value = match &raw {
+            Some(r) => serde_json::from_str(r).map_err(|e| format!("not valid JSON, left alone: {e}"))?,
+            None => json!({}),
+        };
+        let applied = f(&mut root);
+        if !applied.changed {
+            return Ok(applied);
+        }
         // `mcpServers` emptied by us goes away, as maiTerm's own removal does.
         if root.get("mcpServers").and_then(Value::as_object).is_some_and(|m| m.is_empty()) {
             root.as_object_mut().map(|o| o.remove("mcpServers"));
         }
         let rendered = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-        let tmp = path.with_extension("json.maiterm-proxy-tmp");
-        std::fs::write(&tmp, rendered).map_err(|e| format!("cannot write: {e}"))?;
-        std::fs::rename(&tmp, path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("cannot write: {e}")
-        })?;
+        if crate::util::json_file::replace_if_unchanged(path, before, rendered.as_bytes()).map_err(|e| format!("cannot write: {e}"))? {
+            return Ok(applied);
+        }
     }
-    Ok(applied)
+    Err("it kept changing while being updated".to_string())
 }
 
 /// Atomic write of `config.toml` through a temp file of our own: the Codex registrar writes the

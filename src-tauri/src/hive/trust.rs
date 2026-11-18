@@ -128,13 +128,18 @@ struct Record {
     written: Vec<Written>,
 }
 
+/// Held from a record's load to its save (`write_trust`, `remove_trust`): workers launched at
+/// once each add a row, and a save from a copy loaded before another's would drop that row, so
+/// its entry would never be undone. Always taken before `json_file::write_lock`, never inside it.
+static RECORD: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 fn load_record(hive: &HivePaths) -> Record {
     read_json(&hive.trust_record()).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
 }
 
 fn save_record(hive: &HivePaths, r: &Record) -> Result<(), String> {
     let path = hive.trust_record();
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let tmp = path.with_extension(format!("tmp-{}-{}", std::process::id(), uuid::Uuid::new_v4().simple()));
     let bytes = serde_json::to_vec_pretty(r).map_err(|e| e.to_string())?;
     fs::write(&tmp, bytes).and_then(|_| fs::rename(&tmp, &path)).map_err(|e| {
         let _ = fs::remove_file(&tmp);
@@ -189,6 +194,7 @@ pub fn write_trust(homes: &Homes, hive: &HivePaths, path: &Path) -> Result<Trust
     let key = real.to_string_lossy().to_string();
     let candidates = trust_candidates(&real);
     let mut report = TrustWrite::default();
+    let _record_lock = RECORD.lock();
     let mut record = load_record(hive);
     for file in &homes.claude_json {
         let (mut reached, mut already, mut created, mut malformed) = (false, false, false, false);
@@ -309,6 +315,7 @@ pub fn trust_repo(launch_json: &Path, repo: &Path) -> Result<bool, String> {
 /// already be gone, so the key is matched as recorded. Returns how many roots changed.
 pub fn remove_trust(hive: &HivePaths, path: &Path) -> Result<usize, String> {
     let key = crate::share::canon(path).to_string_lossy().to_string();
+    let _record_lock = RECORD.lock();
     let mut record = load_record(hive);
     let (mine, rest): (Vec<Written>, Vec<Written>) = record.written.into_iter().partition(|w| w.key == key);
     let mut changed = 0;
