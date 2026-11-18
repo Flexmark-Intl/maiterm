@@ -77,9 +77,13 @@ fn holds_base(paths: &HivePaths, repo: &Path, folder: &str, base: &str, base_tip
     if lg::is_ancestor(repo, base_tip, pinned) {
         return true;
     }
-    landlog::read(paths)
-        .into_iter()
-        .any(|e| e.kind == KIND_BRANCH && e.folder == folder && e.target == base && e.base_after == base_tip && lg::is_ancestor(repo, &e.reviewed_sha, pinned))
+    // Checked in git, not taken from the line: Base's tip really is a merge whose second parent is
+    // that land's branch tip, with exactly its files. A line the log shouldn't hold then lets
+    // nothing in that isn't on the branch.
+    let merge_of = |r: &str| lg::rev_parse(repo, &format!("{base_tip}^2")).as_deref() == Some(r) && lg::tree_of(repo, base_tip).is_some_and(|t| lg::tree_of(repo, r).as_deref() == Some(t.as_str()));
+    landlog::read(paths).into_iter().any(|e| {
+        e.kind == KIND_BRANCH && e.folder == folder && e.target == base && e.base_after == base_tip && merge_of(&e.reviewed_sha) && lg::is_ancestor(repo, &e.reviewed_sha, pinned)
+    })
 }
 
 /// What a land of the Hive's branch into Base would take, repo by repo, or why it can't go now.
@@ -129,7 +133,7 @@ pub(crate) fn card(hive: &Hive, land_id: &str, plans: &[RepoPlan], summary: &str
     let folders: Vec<&str> = plans.iter().map(|p| p.folder.as_str()).collect();
     let mut effects = vec![format!(
         "maiTerm merges exactly the tip of {branch} named below into {}, --no-ff, one merge commit per repo. Its files are \
-         the tip\u{2019}s own: {} already holds {}\u{2019}s tip. Nothing is pushed.",
+         the tip\u{2019}s own: {} already holds everything in {}. Nothing is pushed.",
         bases.join(", "),
         branch,
         bases.join(", ")
