@@ -77,11 +77,15 @@
     /** The composer's placeholder in place of "Message <name>…" (a Done Hive's "Send a message to
      *  wake it", docs/hive.md §11.4). */
     composerPlaceholder?: string;
+    /** The agent's decision is answered somewhere else on screen (a Hive queen's, under Needs
+     *  you, docs/hive.md §4.8): the dock shows a line that opens it there instead of the card,
+     *  so a long decision doesn't cover the chat that led to it. `null` hides even the line. */
+    decisionElsewhere?: { label: string; onopen: () => void } | null;
   }
   let {
     source, name, workspace, tasks, active, readOnly: readOnlyProp = false, header, composerActions, actions,
     ontask = (taskId: string) => loomStore.show('weave', taskId), emptyText = 'Pick a chat on the left.', statusText,
-    gallery = null, composerPlaceholder,
+    gallery = null, composerPlaceholder, decisionElsewhere,
   }: Props = $props();
 
   /** A string, so a caller handing a new source object for the same chat switches nothing. */
@@ -734,7 +738,11 @@
              composer below must stay on screen. -->
         <div class="asks">
           <PromptCard tabId={openId} {active} pulse={liveState?.state} />
-          {#if openAsk}
+          {#if openAsk && decisionElsewhere !== undefined}
+            {#if decisionElsewhere}
+              <button type="button" class="elsewhere" onclick={decisionElsewhere.onopen}>{decisionElsewhere.label}</button>
+            {/if}
+          {:else if openAsk}
             {@const chat = openId}
             {#key openAsk.id}
               <BlockerCard task={openAsk} variant="card" onnote={(text) => (outcome = { chat, text })} />
@@ -982,5 +990,10 @@
   .send { background: var(--accent); color: var(--bg-dark); border: 0; border-radius: 8px; padding: 8px 14px; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
   .send:disabled { opacity: 0.45; cursor: default; }
   .hint { margin: 0; font-size: 11.5px; color: var(--fg-dim); }
+  .elsewhere {
+    align-self: flex-start; padding: 4px 10px; border-radius: 4px; font: inherit; font-size: 12px; cursor: pointer;
+    color: var(--yellow); background: transparent; border: 1px solid color-mix(in srgb, var(--yellow) 45%, transparent);
+  }
+  .elsewhere:hover, .elsewhere:focus-visible { background: color-mix(in srgb, var(--yellow) 12%, transparent); outline: none; }
   .pad { padding: 18px; }
 </style>

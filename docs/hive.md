@@ -788,6 +788,16 @@ listed below the rest under "With the coordinator", reads "With coordinator" wit
 is **not counted**. The header shows **Needs you · N** while N > 0, and the view tab carries the
 count, so the human sees from any view that something waits.
 
+**The queen's decisions are answered here, not in her chat** (Darryl, 2026-11-18): in her
+column's dock a long decision covered the messages that led to it, and the chat couldn't be
+scrolled back while answering. Her dock shows a line that opens Needs you instead
+(`ChatColumn`'s `decisionElsewhere`); her permission dialogs and questions stay in the dock. A
+**new** decision or approval from her (`needsYou::queenAsks`, one key per asking) switches the
+view to Needs you beside her chat, unless the human is typing in something that view would hide
+(a worker's column, Memory); what was already waiting when the Hive was opened moves nothing. A
+notification's click on one of hers (`waitingStore.openOnTab`), or opening her while she waits on
+one, focuses her column and shows Needs you.
+
 **Sub-tasks are the worker's** (`worker::worker_for_row`). Workers split their work into rows on
 their own tab and block those. Before 2026-10-26 only the task a worker was given was routed
 (§7.4), so a question on a sub-task never reached the coordinator or the decision log as the
