@@ -231,6 +231,9 @@ pub struct HiveSettings {
     /// Hosts every builder's sandbox may reach beyond the package registries (§3.4): an API's
     /// docs, a service the work talks to. Reviewers never get them.
     pub worker_hosts: Vec<String>,
+    /// Local database sockets every builder's shell and jobs may connect to (§6.7): a Postgres,
+    /// MySQL or Redis Unix socket, by path. The human's alone; reviewers never get them.
+    pub worker_sockets: Vec<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

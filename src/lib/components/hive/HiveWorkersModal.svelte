@@ -1,12 +1,13 @@
 <script lang="ts">
   /** Hive settings → Workers and access (docs/hive.md §3.4): workers at once, the coordinator's
-   *  and the workers' model and effort, the hosts every builder may reach, push after land and
+   *  and the workers' model and effort, the hosts and local database sockets every builder may
+   *  reach, push after land and
    *  who is a chat on the phone. Rust checks and saves it (`hive_set_settings`) and tells the
    *  coordinator. GallerySettingsModal's vocabulary and rAF focus. */
   import type { Hive } from '$lib/tauri/types';
   import { hiveSetSettings } from '$lib/tauri/commands';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
-  import { addHost as addTo, EFFORTS, formFor, MAX_CAP, MODELS, toChange, validateForm, type ChangeForm, type PhoneChoice } from '$lib/hive/change';
+  import { addHost as addTo, addSocket as addSocketTo, EFFORTS, formFor, MAX_CAP, MODELS, toChange, validateForm, type ChangeForm, type PhoneChoice } from '$lib/hive/change';
   import { modLabel } from '$lib/utils/platform';
   import { error as logError } from '@tauri-apps/plugin-log';
 
@@ -26,10 +27,13 @@
   let workerModel = $state(seed.workerModel);
   let workerEffort = $state(seed.workerEffort);
   let hosts = $state<string[]>(seed.hosts);
+  let sockets = $state<string[]>(seed.sockets);
   let pushAfterLand = $state(seed.pushAfterLand);
   let phone = $state<PhoneChoice>(seed.phone);
   let hostDraft = $state('');
   let hostProblem = $state<string | null>(null);
+  let socketDraft = $state('');
+  let socketProblem = $state<string | null>(null);
   let saving = $state(false);
   let refusal = $state<string | null>(null);
   let panelEl = $state<HTMLDivElement | null>(null);
@@ -39,7 +43,7 @@
     return () => cancelAnimationFrame(id);
   });
 
-  const form = $derived<ChangeForm>({ cap: Number(cap), coordinatorModel, coordinatorEffort, workerModel, workerEffort, hosts, pushAfterLand, phone });
+  const form = $derived<ChangeForm>({ cap: Number(cap), coordinatorModel, coordinatorEffort, workerModel, workerEffort, hosts, sockets, pushAfterLand, phone });
   const problem = $derived(validateForm(form));
   const change = $derived(problem ? null : toChange(hive, form));
   const canSave = $derived(!saving && !!change);
@@ -54,6 +58,17 @@
     hostProblem = null;
     hosts = r.hosts;
     hostDraft = '';
+  }
+
+  function addSocket() {
+    const r = addSocketTo(sockets, socketDraft);
+    if ('error' in r) {
+      socketProblem = r.error;
+      return;
+    }
+    socketProblem = null;
+    sockets = r.sockets;
+    socketDraft = '';
   }
 
   async function save() {
@@ -150,6 +165,39 @@
         </div>
         {#if hostProblem}<p class="error">{hostProblem}</p>{/if}
         <span class="note">A host a worker can reach can also receive what it sends. A git remote's host is never allowed.</span>
+      </div>
+
+      <div class="field">
+        <span class="label">Local databases workers may connect to <span class="opt">by socket; reviewers never get them</span></span>
+        {#if sockets.length}
+          <ul class="list">
+            {#each sockets as s (s)}
+              <li>
+                <span class="item mono">{s}</span>
+                <button type="button" class="link" onclick={() => (sockets = sockets.filter((x) => x !== s))}>Remove</button>
+              </li>
+            {/each}
+          </ul>
+        {:else}
+          <span class="note">None: workers can't reach a database on this computer.</span>
+        {/if}
+        <div class="add">
+          <input
+            class="text-input"
+            placeholder="/tmp/.s.PGSQL.5432"
+            aria-label="Add a database socket workers may connect to"
+            bind:value={socketDraft}
+            onkeydown={(e) => {
+              if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
+                e.preventDefault();
+                addSocket();
+              }
+            }}
+          />
+          <button type="button" class="btn" disabled={!socketDraft.trim()} onclick={addSocket}>Add</button>
+        </div>
+        {#if socketProblem}<p class="error">{socketProblem}</p>{/if}
+        <span class="note">A Postgres, MySQL or Redis socket. Workers reach every database that server holds, yours included, so give each worker its own database. Applies from each worker's next launch.</span>
       </div>
 
       <label class="check">

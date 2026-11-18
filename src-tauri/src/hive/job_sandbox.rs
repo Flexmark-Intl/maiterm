@@ -117,6 +117,9 @@ pub struct ProfileSpec {
     /// Its leased copies' ports and its `{port:<service>}` references: it may connect to these
     /// (and to its own).
     pub reach_ports: Vec<u16>,
+    /// Local database sockets it may connect to, as realpaths (`change::launch_sockets`): a
+    /// Seatbelt rule matches the resolved path, so `/tmp/…` must be `/private/tmp/…` here.
+    pub reach_sockets: Vec<PathBuf>,
 }
 
 /// The Seatbelt profile, in the order §6.8 gives: everything allowed, then every write denied,
@@ -155,6 +158,9 @@ pub fn profile(spec: &ProfileSpec) -> Result<String, String> {
     }
     for p in &reach {
         out.push_str(&format!("(allow network-outbound (remote ip \"localhost:{p}\"))\n"));
+    }
+    for s in &spec.reach_sockets {
+        out.push_str(&format!("(allow network-outbound (remote unix-socket (path-literal {})))\n", sb_path(s)?));
     }
     Ok(out)
 }
@@ -307,6 +313,7 @@ mod tests {
             ],
             own_ports: vec![5175, 5174, 5174],
             reach_ports: vec![5432, 5174],
+            reach_sockets: vec![PathBuf::from("/private/tmp/.s.PGSQL.5432")],
         }
     }
 
@@ -334,6 +341,7 @@ mod tests {
 (allow network-outbound (remote ip "localhost:5174"))
 (allow network-outbound (remote ip "localhost:5175"))
 (allow network-outbound (remote ip "localhost:5432"))
+(allow network-outbound (remote unix-socket (path-literal "/private/tmp/.s.PGSQL.5432")))
 "#;
         assert_eq!(got, want);
     }

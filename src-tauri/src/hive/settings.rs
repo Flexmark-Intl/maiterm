@@ -790,6 +790,9 @@ pub fn worker_settings_json(hive: &Hive, record: &LaunchRecord, w: &WorkerRecord
                 "strictAllowlist": true,
                 "allowLocalBinding": false,
                 "allowAllUnixSockets": false,
+                // The local databases the human chose (§6.7), a builder's only: each a socket by
+                // path, the one local grant the sandbox can make narrow.
+                "allowUnixSockets": if w.is_reviewer() { Vec::new() } else { super::change::launch_sockets(hive) },
                 // Blocked even if another source allows them: no remote is reachable, so no
                 // agent pushes (§7.3).
                 // maiTerm's own `?alias` markers (an alias ssh couldn't resolve) are for the refusal
@@ -1361,6 +1364,7 @@ mod tests {
         assert!(domains.contains(&"registry.npmjs.org".to_string()) && domains.contains(&"pypi.org".to_string()));
         assert!(!domains.contains(&"crates.io".to_string()), "a git remote's host is never allowed: {domains:?}");
         assert!(!domains.contains(&"github.com".to_string()));
+        assert_eq!(sb["network"]["allowUnixSockets"], json!([]), "no database socket unless the human gives one");
         let mem = s["autoMemoryDirectory"].as_str().unwrap();
         assert!(Path::new(mem).is_absolute() && mem.ends_with("/memory"));
     }

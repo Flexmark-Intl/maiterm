@@ -628,6 +628,8 @@ export interface HiveSettings {
   workers_on_phone?: boolean;
   /** Hosts every builder's sandbox may reach beyond the package registries (docs/hive.md §3.4). */
   worker_hosts?: string[];
+  /** Local database sockets every builder's shell and jobs may connect to; the human's alone (§6.7). */
+  worker_sockets?: string[];
   [section: string]: unknown;
 }
 
@@ -955,6 +957,8 @@ export interface HiveSettingsChange {
   remove_hosts?: string[];
   push_after_land?: boolean;
   workers_on_phone?: boolean;
+  add_sockets?: string[];
+  remove_sockets?: string[];
   /** A git folder's setup or land check by name; "" clears one (docs/hive.md §3.6). */
   folders?: { name: string; setup?: string; land_check?: string }[];
 }

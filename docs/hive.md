@@ -1220,10 +1220,23 @@ workers skills (a copy under their own settings) is open.
 **every** port, maiTerm's 8765 and the MCP proxy included: `allowLocalBinding: true`, and a bare
 `127.0.0.1` in `allowedDomains` (spike 9). So a worker reaches local services through MCP or
 `hiveRun` jobs (§6.8), and maiTerm's own hooks don't need localhost (they are command hooks,
-§6.8). If a Hive ever needs a local port, it's opened **by port only**, `127.0.0.1:<port>`, as an
-explicit per-Hive widening in Hive settings, never for maiTerm's MCP, proxy or maiLink port.
-Bash can reach that port through the sandbox's proxy, so the service there must not trust a
-local caller.
+§6.8).
+
+**A local database is opened by its Unix socket, never a port** (Darryl's call, 2026-11-18: the
+maiShop Hive's DB-backed specs, migrations and the invoice-number concurrency proof, couldn't run
+in a worker). Measured on 2.1.327 against a real Postgres: `127.0.0.1:5432` in `allowedDomains`
+does **not** open it (the sandbox lets traffic out only through its proxy, which database clients
+don't use), while `allowUnixSockets: ["/tmp/.s.PGSQL.5432"]` does, and nothing else. So the human
+lists sockets in Hive settings → Workers (`settings.worker_sockets`), and only the human:
+`hiveChangeSettings` refuses them, whatever the checkpoint. Only a database's socket name is taken
+(`.s.PGSQL.<port>`, `mysql*.sock`, `mysqld*.sock`, `redis*.sock`, `change::check_socket`): other
+local sockets reach far more (Docker's is root, an ssh agent or a ControlMaster can push, maiTerm's
+reach its tools). At each launch the path's realpath is checked again (a link must lead to a
+database's socket too) and a socket that isn't there is left out (`change::launch_sockets`). A
+builder's sandbox gets `allowUnixSockets` with the kept and the real path; its jobs and land
+checks get a Seatbelt `(remote unix-socket (path-literal <realpath>))` rule (`job_sandbox`).
+Reviewers get none, as with hosts. The worker's brief says how to connect (`host=/tmp`) and to use
+a database of its own: the grant reaches every database that server holds, the human's too.
 
 **Seeing its own app is serve plus fetch or screenshot, never a widening** (built 2026-10-31,
 `hive/serve.rs`). A live worker on a new SvelteKit project ran `PORT=3199 node build`, got

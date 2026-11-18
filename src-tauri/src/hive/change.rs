@@ -59,6 +59,11 @@ pub struct SettingsChange {
     /// The human's alone: which of the Hive's agents are chats on the phone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workers_on_phone: Option<bool>,
+    /// The human's alone: local database sockets the builders may connect to (`check_socket`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub add_sockets: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub remove_sockets: Vec<String>,
     /// A git folder's setup or land check, as the project takes shape (§3.6).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<FolderChange>,
@@ -80,6 +85,67 @@ pub struct FolderChange {
 
 /// A setup or land check, at most: a command line, never a script.
 pub const MAX_FOLDER_COMMAND: usize = 1000;
+pub const MAX_WORKER_SOCKETS: usize = 10;
+
+/// What a socket a worker may reach is called: a Postgres (`.s.PGSQL.<port>`), MySQL
+/// (`mysql*.sock`, `mysqld*.sock`) or Redis (`redis*.sock`) server's. Measured (2026-11-18,
+/// Claude 2.1.327): the worker sandbox can't open one local TCP port, since it reaches the network
+/// only through its proxy, which database clients don't use; `allowUnixSockets` by path works.
+/// Only a database's name is taken: other local sockets hand over far more (Docker's is root, an
+/// ssh agent's or maiTerm's ControlMaster's can push, maiTerm's own reach its tools).
+pub fn is_database_socket_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    if let Some(port) = name.strip_prefix(".s.PGSQL.") {
+        return !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit());
+    }
+    let stem = |prefix: &str| n.starts_with(prefix) && n.ends_with(".sock") && n[prefix.len()..n.len() - 5].bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    stem("mysqld") || stem("mysql") || stem("redis")
+}
+
+/// A database socket path as it's kept, or why not: absolute, plain, named like one
+/// (`is_database_socket_name`). Its realpath is checked again at each launch (`launch_sockets`).
+pub fn check_socket(raw: &str) -> Result<String, String> {
+    let s = raw.trim();
+    let p = std::path::Path::new(s);
+    if !p.is_absolute() || s.chars().any(char::is_control) || p.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir)) {
+        return Err(format!("\u{201c}{}\u{201d} isn\u{2019}t a full path to a socket, such as /tmp/.s.PGSQL.5432.", one_line(s, 80)));
+    }
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    if !is_database_socket_name(name) {
+        return Err(format!(
+            "{s} isn\u{2019}t named like a database\u{2019}s socket (.s.PGSQL.<port>, mysql.sock, redis.sock), so workers can\u{2019}t be given it: other local sockets reach far more than a database."
+        ));
+    }
+    Ok(s.to_string())
+}
+
+/// The sockets a builder's launch or job may connect to, each as kept and as its realpath (the
+/// worker sandbox matches either, a Seatbelt profile only the realpath), checked again: the state
+/// file is plain JSON, and a link at the kept path must lead to a database's socket too. One that
+/// doesn't exist now (its server is down) is left out of this launch.
+pub fn launch_sockets(hive: &Hive) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in &hive.settings.worker_sockets {
+        let Ok(kept) = check_socket(s) else {
+            log::warn!("hive {}: worker socket left out: {s}", hive.id);
+            continue;
+        };
+        let Ok(real) = std::fs::canonicalize(&kept) else { continue };
+        let real_ok = real.file_name().and_then(|n| n.to_str()).is_some_and(is_database_socket_name);
+        #[cfg(unix)]
+        let real_ok = real_ok && std::fs::metadata(&real).is_ok_and(|m| std::os::unix::fs::FileTypeExt::is_socket(&m.file_type()));
+        if !real_ok {
+            log::warn!("hive {}: {kept} doesn\u{2019}t lead to a database socket now; left out", hive.id);
+            continue;
+        }
+        for p in [kept, real.to_string_lossy().to_string()] {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
 
 /// Who a change comes from, which sets its limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +264,37 @@ pub fn check(hive: &Hive, c: &SettingsChange, by: By, remote_hosts: &[String]) -
         }
     }
 
+    if !c.add_sockets.is_empty() || !c.remove_sockets.is_empty() {
+        if by != By::Human {
+            return Err("Only your human chooses which local databases workers may reach.".to_string());
+        }
+        let have = &hive.settings.worker_sockets;
+        let mut removed: Vec<String> = Vec::new();
+        for s in &c.remove_sockets {
+            let s = s.trim().to_string();
+            if have.contains(&s) && !removed.contains(&s) {
+                removed.push(s);
+            }
+        }
+        let mut added: Vec<String> = Vec::new();
+        for s in &c.add_sockets {
+            let s = check_socket(s)?;
+            if !have.contains(&s) && !added.contains(&s) && !removed.contains(&s) {
+                added.push(s);
+            }
+        }
+        if have.len() - removed.len() + added.len() > MAX_WORKER_SOCKETS {
+            return Err(format!("Workers may reach at most {MAX_WORKER_SOCKETS} local database sockets."));
+        }
+        if !added.is_empty() {
+            lines.push(format!("Workers may also connect to (from each one\u{2019}s next launch): {}", added.join(", ")));
+        }
+        if !removed.is_empty() {
+            lines.push(format!("Workers no longer connect to (from each one\u{2019}s next launch): {}", removed.join(", ")));
+        }
+        (out.add_sockets, out.remove_sockets) = (added, removed);
+    }
+
     for fc in &c.folders {
         let Some(f) = hive.git_folders().find(|f| f.name == fc.name.trim()) else {
             let names: Vec<&str> = hive.git_folders().map(|f| f.name.as_str()).collect();
@@ -278,6 +375,9 @@ pub fn apply_to(hive: &mut Hive, c: &SettingsChange) {
     if let Some(v) = c.workers_on_phone {
         hive.settings.workers_on_phone = v;
     }
+    let sockets = &mut hive.settings.worker_sockets;
+    sockets.retain(|s| !c.remove_sockets.contains(s));
+    sockets.extend(c.add_sockets.iter().cloned());
     let none_if_empty = |s: &String| Some(s.clone()).filter(|s| !s.is_empty());
     for fc in &c.folders {
         let Some(f) = hive.folders.iter_mut().find(|f| f.name == fc.name) else { continue };
@@ -443,6 +543,9 @@ pub fn parse_args(args: &Value) -> Result<(SettingsChange, Option<String>), Stri
     }
     if change.workers_on_phone.take().is_some() {
         return Err("Only your human chooses what shows on their phone.".to_string());
+    }
+    if !std::mem::take(&mut change.add_sockets).is_empty() || !std::mem::take(&mut change.remove_sockets).is_empty() {
+        return Err("Only your human chooses which local databases workers may reach: ask them to add its socket in Hive settings.".to_string());
     }
     let reason = args.get("reason").and_then(Value::as_str).map(str::trim).filter(|r| !r.is_empty()).map(|r| one_line(r, MAX_REASON));
     Ok((change, reason))
@@ -783,6 +886,69 @@ mod tests {
         let mut h = hive();
         apply_to(&mut h, &check(&hive(), &phone, By::Human, &[]).unwrap().change);
         assert!(h.settings.workers_on_phone);
+    }
+
+    /// Darryl, 2026-11-18: workers' shells may reach a local database. Only by its socket, only a
+    /// database's, and only the human grants it.
+    #[test]
+    fn database_sockets_are_the_humans_and_only_a_databases() {
+        for ok in ["/tmp/.s.PGSQL.5432", "/opt/homebrew/var/mysql/mysql.sock", "/tmp/mysqld.sock", "/tmp/redis.sock", "/var/run/redis/redis-server.sock"] {
+            assert_eq!(check_socket(ok).as_deref(), Ok(ok), "{ok}");
+        }
+        for bad in [
+            "/var/run/docker.sock",
+            "/private/tmp/com.apple.launchd.x/Listeners",
+            "/Users/u/.maiterm/cm/host.sock",
+            "/tmp/.s.PGSQL.",
+            "/tmp/.s.PGSQL.5432x",
+            "tmp/.s.PGSQL.5432",
+            "/tmp/../tmp/.s.PGSQL.5432",
+            "/tmp/redis/../agent.sock",
+        ] {
+            assert!(check_socket(bad).is_err(), "{bad}");
+        }
+        let add = SettingsChange { add_sockets: vec![" /tmp/.s.PGSQL.5432 ".into(), "/tmp/.s.PGSQL.5432".into()], ..Default::default() };
+        assert!(check(&hive(), &add, By::Coordinator, &[]).unwrap_err().contains("Only your human"));
+        assert!(check(&hive(), &add, By::Approved, &[]).is_err(), "never through the queen's card");
+        assert!(parse_args(&json!({ "add_sockets": ["/tmp/.s.PGSQL.5432"] })).unwrap_err().contains("Only your human"));
+        let ch = check(&hive(), &add, By::Human, &[]).unwrap();
+        assert_eq!(ch.change.add_sockets, vec!["/tmp/.s.PGSQL.5432".to_string()], "trimmed, one copy");
+        let mut h = hive();
+        apply_to(&mut h, &ch.change);
+        assert_eq!(h.settings.worker_sockets, vec!["/tmp/.s.PGSQL.5432".to_string()]);
+        let rm = SettingsChange { remove_sockets: vec!["/tmp/.s.PGSQL.5432".into()], ..Default::default() };
+        let rm = check(&h, &rm, By::Human, &[]).unwrap().change;
+        apply_to(&mut h, &rm);
+        assert!(h.settings.worker_sockets.is_empty());
+        let docker = SettingsChange { add_sockets: vec!["/var/run/docker.sock".into()], ..Default::default() };
+        assert!(check(&hive(), &docker, By::Human, &[]).unwrap_err().contains("isn\u{2019}t named like a database"));
+    }
+
+    /// At launch a kept path must still lead to a database's socket: a link to another socket, or
+    /// a plain file, is left out, and a socket is given as kept and as its realpath.
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_takes_a_socket_only_while_it_leads_to_a_database() {
+        let base = std::env::temp_dir().join(format!("hs-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]));
+        std::fs::create_dir_all(&base).unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let real = base.join(".s.PGSQL.5999");
+        let _listener = std::os::unix::net::UnixListener::bind(&real).unwrap();
+        let other = base.join("agent.sock");
+        let _other = std::os::unix::net::UnixListener::bind(&other).unwrap();
+        let link = base.join("l");
+        std::fs::create_dir_all(&link).unwrap();
+        std::os::unix::fs::symlink(&other, link.join(".s.PGSQL.6000")).unwrap();
+        std::fs::write(base.join("redis.sock"), "not a socket").unwrap();
+        let mut h = hive();
+        h.settings.worker_sockets = vec![
+            real.to_string_lossy().into(),
+            link.join(".s.PGSQL.6000").to_string_lossy().into(),
+            base.join("redis.sock").to_string_lossy().into(),
+            base.join(".s.PGSQL.7000").to_string_lossy().into(),
+        ];
+        assert_eq!(launch_sockets(&h), vec![real.to_string_lossy().to_string()], "the real one once; the link, the file and the missing one left out");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
