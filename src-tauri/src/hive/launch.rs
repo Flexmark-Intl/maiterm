@@ -724,17 +724,22 @@ fn trust_homes(launch_json: &Path) -> Result<crate::relocate::agents::Homes, Str
 /// than the one this was last written for, and nothing may answer the dialog (§6.6). The root the
 /// launch reads (`launch_json`, `launch_claude_json`) must hold it afterwards, whatever the rest do.
 pub(crate) fn ensure_trust_in(homes: &crate::relocate::agents::Homes, launch_json: &Path, paths: &HivePaths, dir: &Path) -> Result<(), String> {
-    let trust = super::trust::write_trust(homes, paths, dir)?;
-    if !trust.failed.is_empty() {
-        return Err(format!("Couldn't record Claude's folder trust: {}", trust.failed.join("; ")));
+    // Read back after writing, and written again if it's gone: a running `claude` rewrites this
+    // file, and one that read it before the write may save over it.
+    for _ in 0..3 {
+        let trust = super::trust::write_trust(homes, paths, dir)?;
+        if !trust.failed.is_empty() {
+            return Err(format!("Couldn't record Claude's folder trust: {}", trust.failed.join("; ")));
+        }
+        if !launch_json.is_file() {
+            return Err(NO_CLAUDE_YET.to_string());
+        }
+        if super::trust::trusted_in_all(&[launch_json.to_path_buf()], dir) {
+            return Ok(());
+        }
+        log::warn!("hive: trust for {} was gone from {} right after it was written; writing it again", dir.display(), launch_json.display());
     }
-    if !launch_json.is_file() {
-        return Err(NO_CLAUDE_YET.to_string());
-    }
-    if !super::trust::trusted_in_all(&[launch_json.to_path_buf()], dir) {
-        return Err(format!("Couldn't record Claude's folder trust in {}", launch_json.display()));
-    }
-    Ok(())
+    Err(format!("Couldn't record Claude's folder trust in {}", launch_json.display()))
 }
 
 fn ensure_trust(launch_json: &Path, paths: &HivePaths, dir: &Path) -> Result<(), String> {

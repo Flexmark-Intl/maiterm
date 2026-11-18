@@ -1057,6 +1057,15 @@ it for a link to a repo its human never trusted: `write_trust` never follows a l
 step (only the parent, which no worker writes, is resolved), refuses anything but a plain folder
 inside the Hive's root, and the launch is refused.
 
+**maiTerm's own writes of `.claude.json` are serialized (2026-11-18).** Eight workers restarted at
+once lost six of their eight scratch entries. The cause wasn't Claude: eight 2.1.327 sessions
+started half a second apart on one root, each just after its entry was written, kept all eight
+through start, 10 s of running and exit. It was maiTerm racing itself: the parallel trust writes
+shared one temp file per process, and the 30 s account-root resync (`accounts::merge_json`)
+replaced the file from a copy read before them. Every maiTerm edit of these files now holds
+`json_file::write_lock`, writes its own temp file and re-reads if the file changed meanwhile, and
+`ensure_trust_in` reads the entry back and writes it again if it's gone.
+
 - **Trust doesn't keep a worker's branch out.** Since every worktree inherits its repo's trust,
   an unlanded, worker-authored branch is trusted too, a reviewer's included. Trust lets a
   folder's project hooks, `.mcp.json` and settings run unseen, outside the Bash sandbox, so the
