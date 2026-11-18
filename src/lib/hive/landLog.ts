@@ -11,14 +11,16 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 /** A line that moved its target: what Undo can take back. */
 export const movedTarget = (e: Pick<HiveLandLogEntry, 'kind'>) => ['land', 'batch_member', 'integration', 'undo'].includes(e.kind);
 
-export function kindLabel(e: Pick<HiveLandLogEntry, 'kind' | 'check'>): string {
+export function kindLabel(e: Pick<HiveLandLogEntry, 'kind' | 'check' | 'by'>): string {
   switch (e.kind) {
     case 'land':
       return 'Landed';
     case 'batch_member':
       return 'Landed in a batch';
     case 'integration':
-      return 'Landed (approved)';
+      // Into the Hive's branch: approved only when a person landed it (Landing = Ask me, or a
+      // config card); the queen's own since 2026-11-18 (docs/hive.md §8.3).
+      return e.by === 'human' ? 'Landed into the branch (approved)' : 'Landed into the branch';
     case 'undo':
       return 'Undo';
     case 'base_check':

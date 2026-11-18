@@ -4,8 +4,8 @@
 //!
 //! - the config rule (§8.1), in any mode: after every repo's step 1 and check, any catch the human
 //!   hasn't approved as it stands means one card for the whole land (`driver::advance_all`);
-//! - Landing = Ask me (base mode), and every land in the integration mode (§8.3): the card is
-//!   filed at `hiveLand`, before step 1, pinned per repo.
+//! - Landing = Ask me, in either mode (§7.4, §8.3): the card is filed at `hiveLand`, before
+//!   step 1, pinned per repo.
 //!
 //! While a card waits the land holds no lock and no temporary worktree (plan D4), and nothing is
 //! held from the worker (plan D5: the pinned shas protect the land). `tested` and `base_before`
@@ -243,7 +243,7 @@ pub(crate) async fn await_human<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller
     .await;
     ctx.window.decisions_changed(&caller.workspace_id);
     let what = match why {
-        WHY_INTEGRATION => "every land in this Hive's integration mode is theirs".to_string(),
+        WHY_INTEGRATION => "the Landing checkpoint is Ask me, so every land into this Hive's branch is theirs".to_string(),
         WHY_ASK => "the Landing checkpoint is Ask me".to_string(),
         _ => {
             let files: Vec<String> = land.repos.iter().filter(|r| r.config_unapproved()).map(|r| format!("{}: {}", r.folder, driver::files_line(&r.config_hits))).collect();

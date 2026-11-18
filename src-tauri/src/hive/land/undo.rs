@@ -10,8 +10,8 @@
 //!
 //! The coordinator's undo whose revert changes agent or execution config files a `hive_undo` card
 //! the human approves; the human's own Undo (the land log, the worker column's menu) is a direct
-//! command whose inline confirmation already named those files (plan D15). In the integration
-//! mode only the human undoes (§8.3). Undo never appears on a card of the board (§4.3). The worker
+//! command whose inline confirmation already named those files (plan D15). In an integration
+//! Hive whose lands the human approves (Landing = Ask me) only the human undoes (§8.3). Undo never appears on a card of the board (§4.3). The worker
 //! isn't reopened: it is marked `undone`, so its waiters block, and the coordinator is told.
 //!
 //! An undo's state is `logs/undos/<U-…>.json` while it runs, waits or holds, persisted before
@@ -1028,7 +1028,7 @@ pub fn tool_definition(tab_id: &Value) -> Value {
              lock, through its land check, by fast-forward), never resetting history. land names a land log line, \"L-…/folder\", \
              or \"L-…\" for a land in one repo (the ids are in hiveLand's answers and ⟦HIVE LAND⟧). Refused if later work on the \
              target builds on it (a revert would conflict: fix forward instead), if it is already undone or being undone, and \
-             in the integration mode, where Undo is the human's. A revert that changes agent or execution config waits for the \
+             in an integration Hive whose lands the human approves (Landing = Ask me), where Undo is the human's. A revert that changes agent or execution config waits for the \
              human's approval on a card. The worker isn't reopened: it is marked undone, workers waiting on it stay blocked, \
              and the work comes back only as a new task. An uncommitted change in Base's checkout holds it, as for a land; \
              undo again once it's gone. The reason (at most {MAX_SUMMARY} characters) goes in the land log."

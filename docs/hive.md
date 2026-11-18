@@ -157,7 +157,7 @@ The fields:
 | Project brief | Optional, up to 32,000 characters, plus up to 10 attached files (5 MB each). **The coordinator's alone** (§3.5): the plan, background, constraints, or where to get them ("Bridge to the API tab for the specs") |
 | Rules for every agent | Optional, up to 16,000 characters (Projects' instructions limit), folded away by default. Every worker gets them too, so only rules for all work: tools, style, places not to touch. Stored as `Hive.instructions` |
 | Workers at once | **Hard cap**, enforced in Rust (default 24, at most 64; §6.8). A ceiling, not a target: the coordinator starts what the plan needs. What it counts is §3.1 |
-| Landing | **Land to Base** (default: the coordinator merges each finished worker into its repos' Base) or **Integration branch, I approve each land** (§8). **Fixed at creation.** It's a branch topology, not a checkpoint: the Landing checkpoint (§7.4) only decides who calls `hiveLand` *within* the mode, and integration mode is always Ask me. Switching later would fast-forward integration commits into Base, so a different mode means a new Hive |
+| Landing | **Land to Base** (default: the coordinator merges each finished worker into its repos' Base) or **A branch of its own** (§8.3: the queen lands each worker into `hive/<slug>`; Base is the human's). **Fixed at creation.** It's a branch topology, not a checkpoint: the Landing checkpoint (§7.4) only decides who calls `hiveLand` *within* the mode, the queen by default in either (2026-11-18). Switching later would fast-forward integration commits into Base, so a different mode means a new Hive |
 | Stack | The services this Hive's work needs, proposed from the repos' own stacks and the human's other workspaces (§6.8). See step 3 below |
 | Land check | Optional command per repo that must pass before a land (e.g. `npm run check`), run on the reviewed commit merged with Base in a temporary worktree (§8.1) |
 | Setup command | Per repo, run in every new worktree before its agent starts (e.g. `npm ci`) |
@@ -4184,8 +4184,8 @@ several releases a day).
    and `info` denied, its own cargo target in the land temp folder, seeded from the checkout's),
    step 2 with the dirty hold and three Base-moved rebuilds; a held undo resumes on the next undo
    of the same line. It logs `kind: undo`, marks the worker `undone` (its waiters block, "…'s land
-   was undone") and never reopens it. `hiveUndoLand {land, reason}` (coordinator; refused in the
-   integration mode; `L-…` alone only for a one-repo land) files a `hive_undo` card when the revert
+   was undone") and never reopens it. `hiveUndoLand {land, reason}` (coordinator; refused in an
+   integration Hive whose lands the human approves; `L-…` alone only for a one-repo land) files a `hive_undo` card when the revert
    changes config; the human's Undo (`hive_land_log`, `hive_undo_preview`, `hive_undo_land`;
    `LandLogModal` from the header and the worker column's menu) is a direct command whose inline
    confirmation names the repo, the branch, the commits and the config files, and is refused if the
@@ -4248,8 +4248,7 @@ several releases a day).
    checkpoint (a missing key is its default for the landing mode) and maps a prompt kind to one
    (permission → permissions; question, blocker, completion and a finished turn →
    questions, plan D14); `hive_set_autonomy` saves the checkpoints and `settings.autonomy`
-   (`prompt_timeout_secs` 60–3,600, default 300; `daily_digest`), keeps Landing at Ask me in the
-   integration mode, tells the coordinator, and moves each prompt it owns under a checkpoint now
+   (`prompt_timeout_secs` 60–3,600, default 300; `daily_digest`), tells the coordinator, and moves each prompt it owns under a checkpoint now
    Ask me to the human, a timed-out one too (`hiveAnswerWorker` also reads the checkpoint at call
    time, so a change racing it records rather than sends). `hive/prompts.rs` routes a worker's permission dialog or AskUserQuestion
    (its PermissionRequest, Notification or AskUserQuestion PreToolUse hook, the screen read 800 ms
@@ -4299,8 +4298,7 @@ several releases a day).
    the layout shows, on a focused window, as visible (`hiveView.tabColumnOpen`, plan D27, over the
    tabs HiveView publishes from `fitColumns` via `tabsOnScreen`): a column given way on a narrow
    window, or a coordinator squeezed to its strip, is not. The header's
-   "Autonomy: N ask you" opens `HiveAutonomyModal` (`hive/autonomy.ts`: six rows, Landing locked
-   at Ask me in the integration mode, the never-delegated list, the timeout in minutes 1–60, the
+   "Autonomy: N ask you" opens `HiveAutonomyModal` (`hive/autonomy.ts`: six rows, the never-delegated list, the timeout in minutes 1–60, the
    digest), saved by `hive_set_autonomy`. Every blocker the human answers in a Hive (a click, the
    Loom, the phone) reaches Rust's log through `hive_blocker_answered`, called by `answerBlocker`
    after its task write and reachable from no MCP call (plan D16): `record_blocker_answer` reuses

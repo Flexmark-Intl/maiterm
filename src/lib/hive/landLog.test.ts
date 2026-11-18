@@ -20,6 +20,8 @@ const log = (over: Partial<HiveLandLog> = {}): HiveLandLog => ({ entries: [], re
 describe('land log', () => {
   it('says what each line did', () => {
     expect(kindLabel(entry())).toBe('Landed');
+    expect(kindLabel(entry({ kind: 'integration', by: 'coordinator' }))).toBe('Landed into the branch');
+    expect(kindLabel(entry({ kind: 'integration', by: 'human' }))).toBe('Landed into the branch (approved)');
     expect(kindLabel(entry({ kind: 'base_check', check: 'failed' }))).toBe('Post-land check failed');
     expect(moveLine(entry())).toBe('main 1111111 → 2222222');
     expect(moveLine(entry({ kind: 'base_check' }))).toBe('main at 2222222');

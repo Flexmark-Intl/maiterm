@@ -1525,7 +1525,7 @@ export interface HiveLandLog {
   repos: HiveRepoStanding[];
   /** Undos that run, wait on the human or hold. */
   undos: { id: string; undoes: string; state: string; by: string; held_reason?: string | null; request?: string | null }[];
-  /** The integration mode: Undo is the human's alone. */
+  /** Undo is the human's alone: an integration Hive whose lands the human approves (Landing = Ask me). */
   integration: boolean;
 }
 

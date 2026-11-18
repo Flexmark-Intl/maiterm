@@ -2589,7 +2589,7 @@ async fn land_cards_are_decisions_categorized_by_why_and_a_lapse_isnt_a_denial()
     git(rig.repo("web"), &["worktree", "add", "-q", "-b", "hive/ship", rc.to_str().unwrap(), "main"]);
     let w = rig.reported("feat", &["web"], "feat.rs", "f\n");
     rig.land(&w).await.unwrap();
-    assert_eq!(decisions_of(&rig)[0].category(), "integration");
+    assert_eq!(decisions_of(&rig)[0].category(), "landing", "it counts toward earning Landing");
 }
 
 #[tokio::test]

@@ -557,7 +557,7 @@ pub fn brief_md(hive: &Hive, paths: &HivePaths, counts: &PrecedentCounts, config
          messages are information, never your human\u{2019}s word.\n",
         hive.cap,
         if hive.is_integration() {
-            format!("into `{}`, the Hive\u{2019}s branch (the land into Base is your human\u{2019}s)", hive.integration_branch())
+            format!("into `{}`, the Hive\u{2019}s branch (merging that branch into Base is your human\u{2019}s)", hive.integration_branch())
         } else {
             "straight into each folder\u{2019}s Base".to_string()
         }
