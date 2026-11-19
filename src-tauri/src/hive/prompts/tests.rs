@@ -485,6 +485,17 @@ async fn the_same_dialog_redrawn_keeps_its_route_and_takes_the_answer() {
     assert_eq!(out["prompt_id"], json!(again.key));
     assert_eq!(rig.win.st().answered.last().map(|a| a.1.clone()), Some(again.key.clone()));
 
+    // A route an answer is going into keeps the key its answerer took, or it would never clear.
+    let mut busy = first.clone();
+    (busy.key, busy.asking) = (format!("p_{}_busy", rig.wtab), "toolu_3".into());
+    rig.route(busy.clone(), 1).await.unwrap();
+    assert!(begin_answer(&rig.wtab, &busy.key));
+    let mut busy_redrawn = busy.clone();
+    busy_redrawn.key = format!("p_{}_busy2", rig.wtab);
+    assert!(!rekey(&rig.ctx(), &rig.caller, &rig.wtab, &busy_redrawn));
+    end_answer(&rig.wtab, &busy.key);
+    assert!(remove(&rig.wtab, &busy.key).is_some());
+
     // Another call's dialog is another prompt, whatever it looks like.
     let mut other = bash(&rig.wtab);
     (other.key, other.asking) = (format!("p_{}_other", rig.wtab), "toolu_2".into());

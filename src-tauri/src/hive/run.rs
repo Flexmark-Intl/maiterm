@@ -632,8 +632,7 @@ pub fn screen_tail(app: &AppState, pty: Option<&str>) -> String {
     lines[end.saturating_sub(TAIL_LINES)..end].join("\n")
 }
 
-/// All a job's terminal still holds (its scrollback and screen), or nothing once it is gone,
-/// and whether the scrollback is full, so its start may have scrolled away.
+/// All a job's terminal still holds (its scrollback and screen), or nothing once it is gone.
 pub fn screen_buffer(app: &AppState, pty: Option<&str>) -> String {
     let Some(pty) = pty else { return String::new() };
     let registry = app.terminal_registry.read();

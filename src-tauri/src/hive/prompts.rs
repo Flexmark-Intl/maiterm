@@ -714,7 +714,8 @@ pub(crate) fn rekey<W: HiveWindow>(ctx: &Ctx<'_, W>, caller: &Caller, tab: &str,
         if list.iter().any(|r| r.key == v.key) {
             return false;
         }
-        let Some(r) = list.iter_mut().find(|r| same_dialog(r, v)) else { return false };
+        // Never one an answer is going into: its answerer ends and removes it by the key it took.
+        let Some(r) = list.iter_mut().find(|r| !r.answering && same_dialog(r, v)) else { return false };
         let old = std::mem::replace(&mut r.key, v.key.clone());
         r.former_keys.push(old.clone());
         (old, r.clone())
