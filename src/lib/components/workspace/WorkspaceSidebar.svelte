@@ -834,7 +834,7 @@
                 <span class="hive-badge">HIVE</span>
               </Tooltip>
             {/if}
-            {#if preferencesStore.overlordEnabled && !workspace.overlord}
+            {#if preferencesStore.overlordEnabled && !workspace.overlord && !workspace.hive}
               <!-- Overlord exemption for the whole workspace (docs/overlord.md §11). Stays
                    visible while exempt, not hover-only: an exemption you can't see is one
                    you forget you set, and then wonder why the fleet is missing a workspace. -->
@@ -1210,7 +1210,8 @@
   .workspace-item {
     display: flex;
     align-items: center;
-    padding: 8px 16px;
+    /* Less on the right: the last button's own 22px box already pads its 10px icon. */
+    padding: 8px 10px 8px 16px;
     cursor: pointer;
     transition: background 0.1s;
     gap: 8px;
