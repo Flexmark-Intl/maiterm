@@ -629,6 +629,35 @@ pub fn screen_tail(app: &AppState, pty: Option<&str>) -> String {
     lines[end.saturating_sub(TAIL_LINES)..end].join("\n")
 }
 
+/// All a job's terminal still holds (its scrollback and screen), or nothing once it is gone.
+pub fn screen_buffer(app: &AppState, pty: Option<&str>) -> String {
+    let Some(pty) = pty else { return String::new() };
+    let registry = app.terminal_registry.read();
+    registry.get(pty).map(|h| crate::terminal::render::buffer_text(&h.term)).unwrap_or_default()
+}
+
+/// The file a job's whole output is kept in, beside its profile and marks.
+pub const OUTPUT_LOG: &str = "output.log";
+
+/// Keeps a finished job's whole output in its run folder, and answers the line its tail ends
+/// with so the reader can find it: the ⟦HIVE RUN⟧ and land messages show only the last lines.
+/// Nothing when there was no output or it couldn't be written (logged). Blocks.
+pub(crate) fn keep_output(paths: &HivePaths, job_id: &str, output: &str) -> Option<String> {
+    if output.trim().is_empty() {
+        return None;
+    }
+    let dir = paths.run(job_id);
+    let file = dir.join(OUTPUT_LOG);
+    let written = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, format!("{output}\n")));
+    match written {
+        Ok(()) => Some(format!("(maiTerm: its whole output is in {})", file.display())),
+        Err(e) => {
+            log::warn!("hive: {job_id}'s output not kept: {e}");
+            None
+        }
+    }
+}
+
 /// Whether a finished job gets a `⟦HIVE RUN⟧` of its own: not one released (told once with the
 /// rest) nor one its worker stopped (told by its own tool's answer).
 pub fn gets_own_result(job: &Job) -> bool {

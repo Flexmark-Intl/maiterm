@@ -446,6 +446,41 @@ pub fn screen_text<T: EventListener>(term: &Term<T>) -> String {
         .join("\n")
 }
 
+/// The whole buffer as plain text: the scrollback it still holds, then the screen, with a row
+/// the terminal wrapped joined to the next, so a long line reads as the program printed it.
+/// Trailing blank rows dropped. For keeping what a job printed (a Hive run's `output.log`).
+pub fn buffer_text<T: EventListener>(term: &Term<T>) -> String {
+    use alacritty_terminal::index::{Column, Line};
+    let grid = term.grid();
+    let cols = grid.columns();
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for l in -(grid.history_size() as i32)..grid.screen_lines() as i32 {
+        let row = &grid[Line(l)];
+        let mut s = String::with_capacity(cols);
+        for c in 0..cols {
+            let cell = &row[Column(c)];
+            if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                s.push(cell.c);
+            }
+        }
+        let wrapped = cols > 0 && row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+        if wrapped {
+            cur.push_str(&s);
+        } else {
+            cur.push_str(s.trim_end());
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur.trim_end().to_string());
+    }
+    while out.last().is_some_and(|l| l.is_empty()) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
 /// `screen_text` with DIM cells blanked. For reading what someone TYPED: an agent's empty input
 /// box can show a dimmed placeholder suggestion, which plain text can't tell from a draft
 /// (`mailink/input_box.rs`).
@@ -523,5 +558,19 @@ mod screen_text_tests {
         term.scroll_display(Scroll::Delta(3));
         assert_eq!(screen_text(&term), live, "scrolling moves the view, not the screen");
         assert!(!viewport_text(&term).ends_with("FOOTER"), "the viewport follows the scroll");
+    }
+
+    /// The buffer is the scrollback and the screen, a wrapped line read whole.
+    #[test]
+    fn buffer_text_holds_the_scrollback_and_joins_wrapped_lines() {
+        let mut term = Term::new(Config { scrolling_history: 100, ..Config::default() }, &Size, VoidListener);
+        let mut vte: alacritty_terminal::vte::ansi::Processor = Default::default();
+        for i in 0..12 {
+            vte.advance(&mut term, format!("line {i}\r\n").as_bytes());
+        }
+        vte.advance(&mut term, b"a long line that wraps past twenty columns\r\nend");
+        let all = buffer_text(&term);
+        assert!(all.starts_with("line 0\nline 1\n"), "{all}");
+        assert!(all.ends_with("line 11\na long line that wraps past twenty columns\nend"), "{all}");
     }
 }

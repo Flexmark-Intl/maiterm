@@ -1840,7 +1840,8 @@ async fn finish(d: &'static Driver, e: Ended) {
     use tauri::Emitter;
     let mut job = e.job.clone();
     // Read before anything closes its tab: the result's tail is the job's own screen.
-    let tail = super::run::screen_tail(&d.app, job.pty_id.as_deref());
+    let mut tail = super::run::screen_tail(&d.app, job.pty_id.as_deref());
+    let output = super::run::screen_buffer(&d.app, job.pty_id.as_deref());
     set_row(&d.app, &job, None);
     crate::stack::ports::release(&job.id);
     super::registry_proxy::close(&job.id);
@@ -1848,6 +1849,7 @@ async fn finish(d: &'static Driver, e: Ended) {
     // A pass is checked against the worktree as it is now before it is logged as one.
     let wrote = tauri::async_runtime::spawn_blocking(move || {
         let mut logged = logged;
+        let mut kept = None;
         let res = match super::paths::hive_root(&logged.hive_id) {
             // A job its Hive's delete released: its line would make the deleted folder again.
             Some(_) if !hive_held(&app, &logged.hive_id) => {
@@ -1857,15 +1859,20 @@ async fn finish(d: &'static Driver, e: Ended) {
             Some(root) => {
                 let paths = HivePaths::new(root);
                 super::run::recheck_tree(&paths, &mut logged);
+                kept = super::run::keep_output(&paths, &logged.id, &output);
                 append_run(&paths, &logged)
             }
             None => Err("no Hive folder".to_string()),
         };
-        (logged, res)
+        (logged, res, kept)
     })
     .await;
     match wrote {
-        Ok((logged, res)) => {
+        Ok((logged, res, kept)) => {
+            // maiTerm's own line, as the land paths already add theirs to a tail.
+            if let Some(line) = kept {
+                tail = format!("{}\n{line}", tail.trim_end());
+            }
             if logged.dirty != job.dirty {
                 queue().set_tree(&logged.id, logged.commit.clone().unwrap_or_default(), logged.dirty);
             }
